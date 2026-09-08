@@ -1,0 +1,23 @@
+{
+  "name": "@zzsh/web",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 3100",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3100",
+    "typecheck": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@zzsh/ui": "0.0.0",
+    "next": "16.3.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7"
+  }
+}

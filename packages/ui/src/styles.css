@@ -1,0 +1,12 @@
+@theme {
+  --color-background: #f8fafc;
+  --color-foreground: #17202e;
+  --color-muted: #546173;
+  --color-border: #dce2e9;
+  --color-primary: #174f45;
+  --font-sans: Arial, "Microsoft YaHei", sans-serif;
+}
+@layer base {
+  body { margin: 0; background: var(--color-background); color: var(--color-foreground); font-family: var(--font-sans); }
+  a:focus-visible, button:focus-visible { outline: 3px solid var(--color-primary); outline-offset: 4px; }
+}

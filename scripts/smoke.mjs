@@ -1,0 +1,70 @@
+import { spawn } from "node:child_process";
+import { strict as assert } from "node:assert";
+import { once } from "node:events";
+import { createServer } from "node:net";
+import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+
+// Build first. Only starts local framework servers; no database or provider calls.
+const root = resolve(import.meta.dirname, "..");
+const children = [];
+async function freePort() {
+  const server = createServer();
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = server.address().port;
+  await new Promise((done, reject) => server.close(error => error ? reject(error) : done()));
+  return port;
+}
+function start(script, args, cwd, env = {}) {
+  const child = spawn(process.execPath, [script, ...args], {
+    cwd, env: { ...process.env, NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1", ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.output = "";
+  child.stdout.on("data", data => { child.output = (child.output + data).slice(-6000); });
+  child.stderr.on("data", data => { child.output = (child.output + data).slice(-6000); });
+  child.on("error", error => { child.failure = error; });
+  children.push(child);
+  return child;
+}
+async function waitFor(child, url) {
+  for (let attempt = 0; attempt < 120; attempt++) {
+    if (child.failure) throw child.failure;
+    if (child.exitCode !== null) throw new Error(child.output || "Server exited");
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
+      if (response.ok) return response;
+    } catch { /* Server is still starting. */ }
+    await delay(250);
+  }
+  throw new Error("Server did not become ready: " + url);
+}
+try {
+  const webPort = await freePort(), adminPort = await freePort(), apiPort = await freePort();
+  const web = start(resolve(root, "node_modules/next/dist/bin/next"), ["start", "-H", "127.0.0.1", "-p", String(webPort)], resolve(root, "apps/web"));
+  const admin = start(resolve(root, "node_modules/vite/bin/vite.js"), ["preview", "--host", "127.0.0.1", "--port", String(adminPort), "--strictPort"], resolve(root, "apps/admin"));
+  const api = start(resolve(root, "apps/api/dist/src/main.js"), [], root, { HOST: "127.0.0.1", PORT: String(apiPort) });
+  const [webResponse, adminResponse, apiResponse] = await Promise.all([
+    waitFor(web, `http://127.0.0.1:${webPort}/`),
+    waitFor(admin, `http://127.0.0.1:${adminPort}/`),
+    waitFor(api, `http://127.0.0.1:${apiPort}/api/health`),
+  ]);
+  assert.match(await webResponse.text(), /用户站框架已就绪/);
+  const adminHtml = await adminResponse.text();
+  assert.match(adminHtml, /洲洲商行/);
+  const asset = adminHtml.match(/src="([^"]+\.js)"/)?.[1];
+  assert.ok(asset, "Admin build must reference a JavaScript bundle");
+  assert.equal((await fetch(new URL(asset, adminResponse.url))).status, 200);
+  assert.deepEqual(await apiResponse.json(), { status: "ok", service: "zzsh-api", scope: "liveness" });
+  assert.equal((await fetch(`http://127.0.0.1:${apiPort}/docs`)).status, 404);
+  console.log("PASS: built web, admin assets, API liveness and production docs boundary");
+} finally {
+  await Promise.all(children.map(async child => {
+    if (child.exitCode !== null) return;
+    const exited = once(child, "exit");
+    child.kill();
+    const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
+    try { await exited; } finally { clearTimeout(timer); }
+  }));
+}
