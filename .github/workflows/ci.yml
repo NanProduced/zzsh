@@ -1,4 +1,4 @@
-name: Framework checks
+name: Framework and database checks
 on:
   push:
   pull_request:
@@ -7,9 +7,45 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       NEXT_TELEMETRY_DISABLED: "1"
+      APP_PROFILE: test
+      PROVIDER_MODE: fake
+      DB_TARGET: local-compose
+      HOST: 127.0.0.1
+      PORT: 3102
+      DB_HOST: 127.0.0.1
+      DB_PORT: 55432
+      DB_NAME: zzsh_test_fnd004
+      DB_USER: zzsh
+      DB_PASSWORD: zzsh-ci-postgres-password
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 56379
+      REDIS_PASSWORD: zzsh-ci-redis-password
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: zzsh_dev
+          POSTGRES_USER: zzsh
+          POSTGRES_PASSWORD: zzsh-ci-postgres-password
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U zzsh -d zzsh_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 56379:6379
+        options: >-
+          --health-cmd "redis-cli --no-auth-warning ping 2>/dev/null | grep -Fxq PONG || redis-cli --no-auth-warning -a zzsh-ci-redis-password ping 2>/dev/null | grep -Fxq PONG"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,4 +53,12 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
+      - name: Configure isolated Redis test authentication
+        env:
+          ZZSH_CI_REDIS_PASSWORD: zzsh-ci-redis-password
+        run: |
+          config_result="$(docker exec "${{ job.services.redis.id }}" redis-cli --no-auth-warning --raw CONFIG SET requirepass "$ZZSH_CI_REDIS_PASSWORD")"
+          test "$config_result" = OK
+          ping_result="$(docker exec -e REDISCLI_AUTH="$ZZSH_CI_REDIS_PASSWORD" "${{ job.services.redis.id }}" redis-cli --no-auth-warning --raw ping)"
+          test "$ping_result" = PONG
       - run: npm run check

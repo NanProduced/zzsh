@@ -5,5 +5,7 @@ import { ApiOperation, ApiTags } from "@nestjs/swagger";
 export class HealthController {
   @Get()
   @ApiOperation({ summary: "Process liveness only; no database or provider readiness assertion" })
-  getHealth() { return { status: "ok", service: "zzsh-api", scope: "liveness" } as const; }
+  getHealth() {
+    return { status: "ok", service: "zzsh-api", scope: "liveness" } as const;
+  }
 }

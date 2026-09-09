@@ -8,14 +8,22 @@
     "start": "node --env-file-if-exists=.env dist/src/main.js",
     "start:prod": "node --env-file-if-exists=.env dist/src/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/api-contract.test.js dist/test/config.test.js dist/test/database-safety.test.js dist/test/health.test.js dist/test/logging.test.js",
+    "test:db": "npm run build && node --env-file-if-exists=.env --test dist/test/database-safety.test.js dist/test/database.test.js dist/test/database-reset.test.js",
+    "test:readiness": "npm run build && node --env-file-if-exists=.env --test dist/test/readiness.real.test.js"
   },
   "dependencies": {
     "@nestjs/common": "11.2.3",
     "@nestjs/core": "11.2.3",
     "@nestjs/platform-express": "11.2.3",
     "@nestjs/swagger": "11.4.7",
+    "drizzle-orm": "0.45.2",
+    "pg": "8.23.0",
+    "redis": "6.2.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
   }
 }

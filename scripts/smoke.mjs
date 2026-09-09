@@ -17,8 +17,17 @@ async function freePort() {
   return port;
 }
 function start(script, args, cwd, env = {}) {
+  const childEnv = {
+    ...process.env,
+    NODE_ENV: "production",
+    NEXT_TELEMETRY_DISABLED: "1",
+    ...env,
+  };
+  for (const [key, value] of Object.entries(childEnv)) {
+    if (value === undefined) delete childEnv[key];
+  }
   const child = spawn(process.execPath, [script, ...args], {
-    cwd, env: { ...process.env, NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1", ...env },
+    cwd, env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.output = "";
@@ -44,11 +53,32 @@ try {
   const webPort = await freePort(), adminPort = await freePort(), apiPort = await freePort();
   const web = start(resolve(root, "node_modules/next/dist/bin/next"), ["start", "-H", "127.0.0.1", "-p", String(webPort)], resolve(root, "apps/web"));
   const admin = start(resolve(root, "node_modules/vite/bin/vite.js"), ["preview", "--host", "127.0.0.1", "--port", String(adminPort), "--strictPort"], resolve(root, "apps/admin"));
-  const api = start(resolve(root, "apps/api/dist/src/main.js"), [], root, { HOST: "127.0.0.1", PORT: String(apiPort) });
-  const [webResponse, adminResponse, apiResponse] = await Promise.all([
+  const api = start(resolve(root, "apps/api/dist/src/main.js"), [], root, {
+    APP_PROFILE: "test",
+    PROVIDER_MODE: "fake",
+    READINESS_MODE: "fake",
+    DB_TARGET: "local-compose",
+    HOST: "127.0.0.1",
+    PORT: String(apiPort),
+    DB_HOST: "127.0.0.1",
+    DB_PORT: "55432",
+    DB_NAME: "zzsh_test",
+    DB_USER: "zzsh",
+    DB_PASSWORD: "smoke-only-fake",
+    REDIS_HOST: "127.0.0.1",
+    REDIS_PORT: "56379",
+    REDIS_PASSWORD: "smoke-only-fake",
+    DB_PASSWORD_FILE: undefined,
+    REDIS_PASSWORD_FILE: undefined,
+    PROVIDER_TEST_SCOPE: undefined,
+    ECS_TEST_TARGET: undefined,
+    ECS_TEST_TARGET_CONFIRMED: undefined,
+  });
+  const [webResponse, adminResponse, apiResponse, apiReadyResponse] = await Promise.all([
     waitFor(web, `http://127.0.0.1:${webPort}/`),
     waitFor(admin, `http://127.0.0.1:${adminPort}/`),
     waitFor(api, `http://127.0.0.1:${apiPort}/api/health`),
+    waitFor(api, `http://127.0.0.1:${apiPort}/api/ready`),
   ]);
   assert.match(await webResponse.text(), /用户站框架已就绪/);
   const adminHtml = await adminResponse.text();
@@ -57,6 +87,7 @@ try {
   assert.ok(asset, "Admin build must reference a JavaScript bundle");
   assert.equal((await fetch(new URL(asset, adminResponse.url))).status, 200);
   assert.deepEqual(await apiResponse.json(), { status: "ok", service: "zzsh-api", scope: "liveness" });
+  assert.deepEqual(await apiReadyResponse.json(), { status: "ok", service: "zzsh-api", scope: "readiness" });
   assert.equal((await fetch(`http://127.0.0.1:${apiPort}/docs`)).status, 404);
   console.log("PASS: built web, admin assets, API liveness and production docs boundary");
 } finally {

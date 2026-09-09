@@ -1,0 +1,173 @@
+import { spawnSync } from "node:child_process";
+import { strict as assert } from "node:assert";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { test } from "node:test";
+import { ConfigurationError, loadConfig } from "../src/config/config";
+
+const secret = "test-only-secret-that-must-not-be-logged";
+
+function validEnv(profile = "dev"): NodeJS.ProcessEnv {
+  return {
+    APP_PROFILE: profile,
+    DB_TARGET: profile === "ecs-test" ? "ecs-test" : "local-compose",
+    HOST: profile === "ecs-test" ? "0.0.0.0" : "127.0.0.1",
+    PORT: "3102",
+    DB_HOST: profile === "ecs-test" ? "db.zzsh-ecs-test.internal" : "127.0.0.1",
+    DB_PORT: profile === "ecs-test" ? "5432" : "55432",
+    DB_NAME: profile === "dev" ? "zzsh_dev" : `zzsh_${profile.replace("-", "_")}`,
+    DB_USER: "zzsh",
+    DB_PASSWORD: secret,
+    REDIS_HOST: profile === "ecs-test" ? "redis.zzsh-ecs-test.internal" : "127.0.0.1",
+    REDIS_PORT: profile === "ecs-test" ? "6379" : "56379",
+    REDIS_PASSWORD: secret,
+    ...(profile === "provider-test" ? { PROVIDER_TEST_SCOPE: "local-fake" } : {}),
+    ...(profile === "ecs-test"
+      ? { ECS_TEST_TARGET: "zzsh-ecs-test", ECS_TEST_TARGET_CONFIRMED: "true" }
+      : {}),
+  };
+}
+
+test("defaults to fake providers with a valid dev target", () => {
+  const config = loadConfig(validEnv());
+  assert.equal(config.provider, "fake");
+  assert.equal(config.database.target, "local-compose");
+});
+
+test("validates profiles available in the current local stage", () => {
+  for (const profile of ["dev", "test", "provider-test", "migration"] as const) {
+    const config = loadConfig(validEnv(profile));
+    assert.equal(config.profile, profile);
+  }
+});
+
+test("rejects invalid profiles, missing fields, and out-of-range ports", () => {
+  assert.throws(
+    () => loadConfig({ ...validEnv(), APP_PROFILE: "prod" }),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE/.test(error.message),
+  );
+
+  const missing = validEnv();
+  delete missing.DB_PASSWORD;
+  assert.throws(
+    () => loadConfig(missing),
+    (error: unknown) => error instanceof ConfigurationError && /DB_PASSWORD/.test(error.message),
+  );
+
+  const missingSecretFile = validEnv();
+  delete missingSecretFile.DB_PASSWORD;
+  missingSecretFile.DB_PASSWORD_FILE = ".secrets/does-not-exist";
+  assert.throws(
+    () => loadConfig(missingSecretFile),
+    (error: unknown) => error instanceof ConfigurationError && /DB_PASSWORD_FILE/.test(error.message),
+  );
+
+  assert.throws(
+    () => loadConfig({ ...validEnv(), DB_PORT: "65536" }),
+    (error: unknown) => error instanceof ConfigurationError && /DB_PORT/.test(error.message),
+  );
+});
+
+test("rejects database targets outside the selected profile boundary", () => {
+  assert.throws(
+    () => loadConfig({ ...validEnv(), DB_PORT: "5432" }),
+    (error: unknown) => error instanceof ConfigurationError && /zzsh boundary/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv(), DB_TARGET: "ecs-test" }),
+    (error: unknown) => error instanceof ConfigurationError && /DB_TARGET/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("ecs-test"), DB_TARGET: "local-compose" }),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
+  );
+});
+
+test("retains ecs-test but fails closed until a real target is registered", () => {
+  const unconfirmed = validEnv("ecs-test");
+  delete unconfirmed.ECS_TEST_TARGET_CONFIRMED;
+  assert.throws(
+    () => loadConfig(unconfirmed),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
+  );
+
+  const exampleTarget = validEnv("ecs-test");
+  assert.equal(exampleTarget.ECS_TEST_TARGET_CONFIRMED, "true");
+  assert.equal(exampleTarget.DB_HOST, "db.zzsh-ecs-test.internal");
+  assert.equal(exampleTarget.REDIS_HOST, "redis.zzsh-ecs-test.internal");
+  assert.throws(
+    () => loadConfig(exampleTarget),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
+  );
+});
+
+test("keeps real providers behind provider-test scope and disables them for test and migration", () => {
+  assert.throws(
+    () => loadConfig({ ...validEnv("test"), PROVIDER_MODE: "real" }),
+    (error: unknown) => error instanceof ConfigurationError && /requires PROVIDER_MODE=fake/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("migration"), PROVIDER_MODE: "real" }),
+    (error: unknown) => error instanceof ConfigurationError && /requires PROVIDER_MODE=fake/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("provider-test"), PROVIDER_TEST_SCOPE: "" }),
+    (error: unknown) => error instanceof ConfigurationError && /PROVIDER_TEST_SCOPE/.test(error.message),
+  );
+  assert.equal(loadConfig({ ...validEnv("provider-test"), PROVIDER_MODE: "real" }).provider, "real");
+});
+
+test("rejects blank secrets and gives file secrets priority over env values", () => {
+  assert.throws(
+    () => loadConfig({ ...validEnv(), DB_PASSWORD: "   " }),
+    (error: unknown) => error instanceof ConfigurationError && /DB_PASSWORD/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv(), REDIS_PASSWORD: "\t\r\n" }),
+    (error: unknown) => error instanceof ConfigurationError && /REDIS_PASSWORD/.test(error.message),
+  );
+
+  const workingDirectory = mkdtempSync(join(tmpdir(), "zzsh-config-"));
+  const secretDirectory = join(workingDirectory, ".secrets");
+  mkdirSync(secretDirectory);
+  const env = {
+    ...validEnv(),
+    DB_PASSWORD: "env-password",
+    REDIS_PASSWORD: "env-redis-password",
+    DB_PASSWORD_FILE: ".secrets/postgres_password",
+    REDIS_PASSWORD_FILE: ".secrets/redis_password",
+  };
+  try {
+    writeFileSync(join(secretDirectory, "postgres_password"), " file-password \r\n");
+    writeFileSync(join(secretDirectory, "redis_password"), " file-redis-password \n");
+    const config = loadConfig(env, workingDirectory);
+    assert.equal(config.database.password, "file-password");
+    assert.equal(config.redis.password, "file-redis-password");
+
+    writeFileSync(join(secretDirectory, "postgres_password"), " \t\r\n");
+    assert.throws(
+      () => loadConfig(env, workingDirectory),
+      (error: unknown) => error instanceof ConfigurationError && /non-empty file/.test(error.message),
+    );
+    assert.throws(
+      () => loadConfig({ ...validEnv(), DB_PASSWORD_FILE: "   " }, workingDirectory),
+      (error: unknown) => error instanceof ConfigurationError && /DB_PASSWORD_FILE/.test(error.message),
+    );
+  } finally {
+    rmSync(workingDirectory, { recursive: true, force: true });
+  }
+});
+
+test("does not leak a secret through startup configuration errors", () => {
+  const result = spawnSync(process.execPath, [resolve(__dirname, "../src/main.js")], {
+    cwd: resolve(__dirname, "../.."),
+    env: { ...validEnv(), DB_PORT: "not-a-port" },
+    encoding: "utf8",
+  });
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 1);
+  assert.match(output, /API configuration rejected/);
+  assert.match(output, /DB_PORT/);
+  assert.doesNotMatch(output, new RegExp(secret));
+});

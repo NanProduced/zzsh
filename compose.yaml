@@ -1,0 +1,59 @@
+name: zzsh-rebuild-local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: zzsh_dev
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+      POSTGRES_PASSWORD_FILE: /run/secrets/zzsh_postgres_password
+      POSTGRES_USER: zzsh
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - zzsh-rebuild-local-postgres-data:/var/lib/postgresql/data
+    secrets:
+      - zzsh_postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/zzsh_postgres_password)\" psql -h 127.0.0.1 -U zzsh -d zzsh_dev -w -c 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - sh
+      - -c
+      - >-
+        exec redis-server --appendonly yes --appendfsync always
+        --requirepass "$$(cat /run/secrets/zzsh_redis_password)"
+    ports:
+      - "127.0.0.1:56379:6379"
+    volumes:
+      - zzsh-rebuild-local-redis-data:/data
+    secrets:
+      - zzsh_redis_password
+    healthcheck:
+      test: ["CMD-SHELL", "response=$$(REDISCLI_AUTH=\"$$(cat /run/secrets/zzsh_redis_password)\" redis-cli --no-auth-warning ping) && test \"$$response\" = PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  zzsh-rebuild-local-postgres-data:
+    name: zzsh-rebuild-local-postgres-data
+  zzsh-rebuild-local-redis-data:
+    name: zzsh-rebuild-local-redis-data
+
+secrets:
+  zzsh_postgres_password:
+    file: ./apps/api/.secrets/postgres_password
+  zzsh_redis_password:
+    file: ./apps/api/.secrets/redis_password
+
+networks:
+  default:
+    name: zzsh-rebuild-local-network
