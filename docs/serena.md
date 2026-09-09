@@ -8,7 +8,7 @@
 | zzsh-api | apps/api | 统一业务后端（NestJS），可包含管理端 BFF 适配模块 |
 | zzsh-web | apps/web | 用户平台前端及 Next.js 服务端 Web BFF |
 
-本机通过 Serena 官方 CLI 创建各自 `.serena/project.yml`，再通过 activate_project 注册到本机配置。三个项目均选择 TypeScript（包含 TSX 支持），UTF-8、LF；仅将各自目录作为索引根，不配置上级/兄弟 workspace。
+每台机器通过 Serena 官方 CLI 在对应子项目创建本地 `.serena/project.yml`，再通过 activate_project 注册。`.serena` 整体由根 `.gitignore` 忽略，不随 Git 分发；创建时选择 TypeScript（包含 TSX 支持）、UTF-8、LF，仅将各自目录作为索引根，不配置上级/兄弟 workspace。
 
 ## 使用方式
 
@@ -28,6 +28,6 @@ activate_project(project="zzsh-web")
 
 ## 验证记录
 
-2026-09-08 已分别激活并成功读取：admin 的 App、API 的 HealthController/getHealth、web 的 Home。注册列表含三个唯一名称；没有创建根 .serena/project.yml。本轮未写 memories 或执行 onboarding；项目提示直接在 project.yml 的 initial_prompt 中维护。
+2026-09-08 已分别激活并成功读取：admin 的 App、API 的 HealthController/getHealth、web 的 Home。注册列表含三个唯一名称；没有创建根 `.serena/project.yml`。本轮未写 memories 或执行 onboarding。
 
-缓存等忽略，project.yml 纳入版本控制。现有其他项目注册不修改；本轮不运行应用、不连接生产、不提交推送。
+项目配置、initial_prompt、缓存、日志和 memories 全部保留本机并忽略；协作约束维护在根 `AGENTS.md` 和本文。现有其他项目注册不修改；本轮不运行应用、不连接生产、不提交推送。
