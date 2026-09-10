@@ -1,12 +1,12 @@
 # API v1 契约基线
 
-日期：2026-09-10。状态 ACCEPTED；FND-005 返修经 Master 复核，完整 check（15/15、构建、smoke）通过。本文不代表业务接口、认证或跨进程幂等已经完成。
+API v1 使用以下稳定约定；具体端点以代码生成的 OpenAPI 为准。
 
 ## 范围与边界
 
 - 第一个真实业务接口使用 `/api/v1/...`；`/api/health` 继续是独立 liveness 探针，不参与业务版本或 readiness 语义。
 - NestJS 业务层只依赖 JSON、HTTP header 和服务端校验，不依赖 Cookie、DOM、Next.js Server Actions 或小程序运行时。
-- 当前没有注册业务 controller，也没有创建订单、资金、认证、数据库幂等表或 provider 调用。
+- 订单业务仍未完整实现，尚未创建订单、资金、认证、数据库幂等表或 provider 调用。
 - OpenAPI 与运行时校验在 `apps/api/test/api-contract.test.ts` 的隔离 Nest app 中验证；该 probe controller 不在生产 `AppModule` 注册，不能作为生产测试写路由。
 - probe 的严格请求 schema 使用显式 ApiBody 声明；DTO 本身不会自动禁止所有未知字段。首个真实业务 controller 必须声明对应约束并验证其实际生成 schema，不得把测试示例通过当成业务文档自动一致。
 

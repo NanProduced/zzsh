@@ -1,0 +1,62 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1788998400000,
+      "tag": "0000_m2_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789010245000,
+      "tag": "0001_m2_account_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789010246000,
+      "tag": "0002_m2_recovery_credential",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789010247000,
+      "tag": "0003_m2_recovery_safety",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789010248000,
+      "tag": "0004_m2_first_activation_evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789010249000,
+      "tag": "0005_m2_first_activation_state_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789010250000,
+      "tag": "0006_m2_disaster_recovery_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789050000000,
+      "tag": "0007_m2_admin_identity_password_gate",
+      "breakpoints": true
+    }
+  ]
+}

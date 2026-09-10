@@ -19,7 +19,7 @@
 
 - 默认使用近黑、深石墨和烟灰层次；侧栏、顶栏、卡片、图表区和表格区通过明度与细边界区分。
 - 采用黑灰底色，不使用大面积高饱和背景、玻璃拟态或持续发光边缘。
-- Logo、品牌名和品牌资产暂未确认；使用中性占位，不伪造品牌标识。
+- 品牌名为洲洲商行；Owner 已提供暂用 Logo，统一从 [品牌物料](../../assets/brand/README.md) 取用，替换中性占位。
 
 ### 数据层
 
@@ -75,7 +75,7 @@
 
 ## Open Decisions
 
-- 品牌 Logo、品牌名细节和最终品牌资产仍待 Owner 提供；当前只使用占位。
+- 品牌 Logo 已由 Owner 提供并暂用，见 [品牌物料](../../assets/brand/README.md)；具体变体按背景/空间适配，字体与完整品牌 token 尚未冻结。
 - 方案 3 已确认方向，但具体颜色 token、对比度数值、字体和密度需在代表页实现/评审时冻结。
 - Bklit 主图表与 EvilCharts 按图表切换的最终依赖组合，待实际图表类型、数据规模和构建验证后确认。
 - 1771 是否有必要、移动端具体断点与表格列优先级，待真实数据范围和代表页验证后确认。
@@ -86,7 +86,7 @@
 - Pace UI 深色 dashboard 参考：[模板页](https://paceui.com/templates/free-dashboard-template) · [在线预览](https://paceui.com/preview/templates/free-dashboard)；借鉴黑灰底与多色数据关系，不复制品牌或页面。
 - 登录/引导构图参考：[Devl login](https://www.devl.dev/c/auth/login) · [Devl onboarding](https://www.devl.dev/c/auth/onboarding)。
 - 局部 shader 参考：[No Code-Shader library](https://www.nocodeshader.com/library)。
-- 业务与技术事实：仓库 `docs/architecture/technology-decisions.md`、`docs/planning/m2-round1-brief.md`、`docs/planning/m2-readiness-assessment.md`、`docs/research/admin-platform-data-analysis-research.md`，均为本轮只读依据。
+- 业务与技术事实以 docs/architecture/ 下的公开架构与认证说明为准。
 
 ## Status
 

@@ -4,9 +4,15 @@ import {
   createFakeHealthDependencies,
   createRealHealthDependencies,
 } from "./health/readiness";
+import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
+import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
 
 export async function bootstrap() {
   const config = loadConfig();
+  const authEnabledValue = process.env.AUTH_ENABLED?.trim() || "false";
+  if (authEnabledValue !== "true" && authEnabledValue !== "false") {
+    throw new ConfigurationError("AUTH_ENABLED must be true or false");
+  }
   const readinessMode = process.env.READINESS_MODE?.trim() || "real";
   if (readinessMode !== "real" && readinessMode !== "fake") {
     throw new ConfigurationError("READINESS_MODE is invalid");
@@ -17,15 +23,23 @@ export async function bootstrap() {
   const dependencies = readinessMode === "fake"
     ? createFakeHealthDependencies()
     : createRealHealthDependencies(config);
+  const businessPool = authEnabledValue === "true" ? createBusinessPool(config) : undefined;
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
-    app = await createApp({ health: { dependencies } });
+    if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
+    app = await createApp({
+      health: { dependencies },
+      ...(businessPool
+        ? { database: { pool: businessPool }, auth: { ...loadAuthRuntimeConfig(), pool: businessPool } }
+        : {}),
+    });
     await app.listen(config.port, config.host);
   } catch (error) {
     if (app) await app.close();
     else await Promise.allSettled([
       dependencies.postgres.close(),
       dependencies.redis.close(),
+      businessPool?.end(),
     ]);
     throw error;
   }

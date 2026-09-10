@@ -4,19 +4,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
 import { ConfigurationError, loadConfig } from "../src/config/config";
 
 const secret = "test-only-secret-that-must-not-be-logged";
 
 function validEnv(profile = "dev"): NodeJS.ProcessEnv {
-  return {
+  const base = {
     APP_PROFILE: profile,
     DB_TARGET: profile === "ecs-test" ? "ecs-test" : "local-compose",
     HOST: profile === "ecs-test" ? "0.0.0.0" : "127.0.0.1",
     PORT: "3102",
     DB_HOST: profile === "ecs-test" ? "db.zzsh-ecs-test.internal" : "127.0.0.1",
     DB_PORT: profile === "ecs-test" ? "5432" : "55432",
-    DB_NAME: profile === "dev" ? "zzsh_dev" : `zzsh_${profile.replace("-", "_")}`,
     DB_USER: "zzsh",
     DB_PASSWORD: secret,
     REDIS_HOST: profile === "ecs-test" ? "redis.zzsh-ecs-test.internal" : "127.0.0.1",
@@ -26,6 +26,21 @@ function validEnv(profile = "dev"): NodeJS.ProcessEnv {
     ...(profile === "ecs-test"
       ? { ECS_TEST_TARGET: "zzsh-ecs-test", ECS_TEST_TARGET_CONFIRMED: "true" }
       : {}),
+  };
+  if (profile === "migration") {
+    return {
+      ...base,
+      DB_NAME: "zzsh_dev",
+      MIGRATION_TARGET_PROFILE: "dev",
+      MIGRATION_TARGET_DB_NAME: "zzsh_dev",
+      MIGRATION_DB_USER: "zzsh_migration",
+      MIGRATION_DB_PASSWORD: secret,
+      MIGRATION_RUNTIME_USER: "zzsh_runtime",
+    };
+  }
+  return {
+    ...base,
+    DB_NAME: profile === "dev" ? "zzsh_dev" : `zzsh_${profile.replace("-", "_")}`,
   };
 }
 
@@ -39,6 +54,7 @@ test("validates profiles available in the current local stage", () => {
   for (const profile of ["dev", "test", "provider-test", "migration"] as const) {
     const config = loadConfig(validEnv(profile));
     assert.equal(config.profile, profile);
+    assert.equal(config.database.targetProfile, profile === "migration" ? "dev" : profile);
   }
 });
 
@@ -72,7 +88,7 @@ test("rejects invalid profiles, missing fields, and out-of-range ports", () => {
 test("rejects database targets outside the selected profile boundary", () => {
   assert.throws(
     () => loadConfig({ ...validEnv(), DB_PORT: "5432" }),
-    (error: unknown) => error instanceof ConfigurationError && /zzsh boundary/.test(error.message),
+    (error: unknown) => error instanceof ConfigurationError && /local-compose ports/.test(error.message),
   );
   assert.throws(
     () => loadConfig({ ...validEnv(), DB_TARGET: "ecs-test" }),
@@ -81,6 +97,14 @@ test("rejects database targets outside the selected profile boundary", () => {
   assert.throws(
     () => loadConfig({ ...validEnv("ecs-test"), DB_TARGET: "local-compose" }),
     (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("migration"), MIGRATION_TARGET_PROFILE: "test", MIGRATION_TARGET_DB_NAME: "zzsh_dev" }),
+    (error: unknown) => error instanceof ConfigurationError && /test target boundary/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("migration"), MIGRATION_RUNTIME_USER: "zzsh_migration" }),
+    (error: unknown) => error instanceof ConfigurationError && /different/.test(error.message),
   );
 });
 
@@ -170,4 +194,30 @@ test("does not leak a secret through startup configuration errors", () => {
   assert.match(output, /API configuration rejected/);
   assert.match(output, /DB_PORT/);
   assert.doesNotMatch(output, new RegExp(secret));
+});
+
+test("requires distinct auth secrets and secure production cookies", () => {
+  const authEnv = {
+    AUTH_USER_SECRET: "u".repeat(32),
+    AUTH_ADMIN_SECRET: "a".repeat(32),
+    AUTH_ADMIN_BOOTSTRAP_SECRET: "b".repeat(32),
+    AUTH_SECURE_COOKIES: "false",
+  };
+  const config = loadAuthRuntimeConfig(authEnv);
+  assert.equal(config.adminBootstrapSecret, authEnv.AUTH_ADMIN_BOOTSTRAP_SECRET);
+  assert.equal(config.secureCookies, false);
+
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...authEnv, AUTH_ADMIN_SECRET: authEnv.AUTH_USER_SECRET }),
+    (error: unknown) => error instanceof ConfigurationError && /must be different/.test(error.message),
+  );
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...authEnv, AUTH_ADMIN_BOOTSTRAP_SECRET: authEnv.AUTH_USER_SECRET }),
+    (error: unknown) => error instanceof ConfigurationError && /must be different/.test(error.message),
+  );
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production" }),
+    (error: unknown) => error instanceof ConfigurationError && /AUTH_SECURE_COOKIES/.test(error.message),
+  );
+  assert.equal(loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true" }).secureCookies, true);
 });

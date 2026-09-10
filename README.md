@@ -1,16 +1,17 @@
-# 洲洲商行 zzsh
+# 洲洲商行
 
-游戏账号业务平台重建项目，采用 npm workspaces monorepo。
+游戏账号业务平台重建项目：NestJS API、React/Vite 管理站和 Next.js 用户站，使用 npm workspaces。生产数据库目标为托管 PostgreSQL，本地使用独立 PostgreSQL/Redis Compose 环境。
 
-已确认：NestJS + TypeScript、模块化单体、托管 PostgreSQL；核心关系模型配合受控 JSONB 属性。
+```sh
+npm ci
+npm run dev
+npm run check
+```
 
-- [技术栈确认记录](docs/architecture/technology-decisions.md)
-- [仓库结构与初始化状态](docs/architecture/repository-layout.md)
+先按 [开发说明](docs/development.md) 配置本地依赖与秘密。Node 版本见 .node-version。
+
 - [文档导航](docs/README.md)
-- [旧代码与报告入口](docs/legacy/README.md)
-- [Figma 看板](docs/design/boards.md)
-- [Agent 协作规范](AGENTS.md) / [RTK 用法](RTK.md)
+- [认证与账号安全](docs/architecture/authentication.md)
+- [协作规范](AGENTS.md)
 
-已建立 Next.js 用户站、React/Vite 管理站与 NestJS API 框架。使用 Node.js 24.20.0 和 npm 11.19.0，在根目录执行 `npm ci`、`npm run dev`；验证执行 `npm run check`。详见 [开发说明](docs/development.md)。ORM、任务组件与部署规格仍待确定。
-
-旧归档和分析材料位于本机父目录，不随仓库发布。不得将生产配置、数据库快照或个人数据加入 Git。
+当前认证与初始化已有实现，交易、权限与生产部署仍在建设中。不要把本地验收视为生产上线结论。生产配置、数据库快照、个人数据与过程资料不得加入 Git。

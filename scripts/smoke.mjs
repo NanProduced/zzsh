@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
 // Build first. Only starts local framework servers; no database or provider calls.
@@ -50,6 +51,11 @@ async function waitFor(child, url) {
   throw new Error("Server did not become ready: " + url);
 }
 try {
+  for (const name of await readdir(resolve(root, "apps/admin/dist/assets"))) {
+    if (!name.endsWith(".js")) continue;
+    const bundle = await readFile(resolve(root, "apps/admin/dist/assets", name), "utf8");
+    assert.doesNotMatch(bundle, /DevAuthPreview|DevlLoginBaseline|DevlOnboardingBaseline|UI 预览沙盒/, "Admin artifacts must not include the removed mock preview");
+  }
   const webPort = await freePort(), adminPort = await freePort(), apiPort = await freePort();
   const web = start(resolve(root, "node_modules/next/dist/bin/next"), ["start", "-H", "127.0.0.1", "-p", String(webPort)], resolve(root, "apps/web"));
   const admin = start(resolve(root, "node_modules/vite/bin/vite.js"), ["preview", "--host", "127.0.0.1", "--port", String(adminPort), "--strictPort"], resolve(root, "apps/admin"));
@@ -80,7 +86,9 @@ try {
     waitFor(api, `http://127.0.0.1:${apiPort}/api/health`),
     waitFor(api, `http://127.0.0.1:${apiPort}/api/ready`),
   ]);
-  assert.match(await webResponse.text(), /用户站框架已就绪/);
+  const webHtml = await webResponse.text();
+  assert.match(webHtml, /洲洲商行/);
+  assert.match(webHtml, /开发环境/);
   const adminHtml = await adminResponse.text();
   assert.match(adminHtml, /洲洲商行/);
   const asset = adminHtml.match(/src="([^"]+\.js)"/)?.[1];

@@ -3,6 +3,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 export const CONFIG_PROFILES = ["dev", "test", "provider-test", "migration", "ecs-test"] as const;
 export type ConfigProfile = (typeof CONFIG_PROFILES)[number];
+export const MIGRATION_TARGET_PROFILES = ["dev", "test", "provider-test"] as const;
+export type MigrationTargetProfile = (typeof MIGRATION_TARGET_PROFILES)[number];
 
 export const PROVIDER_MODES = ["fake", "real"] as const;
 export type ProviderMode = (typeof PROVIDER_MODES)[number];
@@ -16,11 +18,13 @@ export type AppConfig = {
   port: number;
   database: {
     target: DatabaseTarget;
+    targetProfile: MigrationTargetProfile;
     host: string;
     port: number;
     name: string;
     user: string;
     password: string;
+    runtimeUser: string;
   };
   redis: {
     host: string;
@@ -65,7 +69,7 @@ function parsePort(env: NodeJS.ProcessEnv, key: string, fallback?: number): numb
   return port;
 }
 
-function readSecret(
+export function readSecret(
   env: NodeJS.ProcessEnv,
   valueKey: string,
   fileKey: string,
@@ -97,12 +101,20 @@ function assertIdentifier(value: string, key: string): void {
   if (!IDENTIFIER.test(value)) throw new ConfigurationError(`${key} must be a safe identifier`);
 }
 
-function assertDatabaseName(profile: ConfigProfile, name: string): void {
-  assertIdentifier(name, "DB_NAME");
+function assertDatabaseName(profile: ConfigProfile, name: string, key = "DB_NAME"): void {
+  assertIdentifier(name, key);
   const prefix = PROFILE_DATABASE_PREFIX[profile];
   if (name !== prefix && !name.startsWith(`${prefix}_`)) {
-    throw new ConfigurationError(`DB_NAME is outside the ${profile} target boundary`);
+    throw new ConfigurationError(`${key} is outside the ${profile} target boundary`);
   }
+}
+
+function migrationTargetProfile(env: NodeJS.ProcessEnv): MigrationTargetProfile {
+  const value = required(env, "MIGRATION_TARGET_PROFILE");
+  if (!MIGRATION_TARGET_PROFILES.includes(value as MigrationTargetProfile)) {
+    throw new ConfigurationError("MIGRATION_TARGET_PROFILE is invalid");
+  }
+  return value as MigrationTargetProfile;
 }
 
 export function loadConfig(
@@ -141,11 +153,26 @@ export function loadConfig(
 
   const databaseHost = required(env, "DB_HOST").trim();
   const databasePort = parsePort(env, "DB_PORT");
-  const databaseName = required(env, "DB_NAME").trim();
-  const databaseUser = required(env, "DB_USER").trim();
-  assertDatabaseName(profile, databaseName);
-  assertIdentifier(databaseUser, "DB_USER");
-  const databasePassword = readSecret(env, "DB_PASSWORD", "DB_PASSWORD_FILE", workingDirectory);
+  const targetProfile = profile === "migration" ? migrationTargetProfile(env) : profile;
+  const databaseNameKey = profile === "migration" ? "MIGRATION_TARGET_DB_NAME" : "DB_NAME";
+  const databaseName = required(env, databaseNameKey).trim();
+  const databaseUserKey = profile === "migration" ? "MIGRATION_DB_USER" : "DB_USER";
+  const databaseUser = required(env, databaseUserKey).trim();
+  assertDatabaseName(targetProfile, databaseName, databaseNameKey);
+  assertIdentifier(databaseUser, databaseUserKey);
+  const runtimeUser = profile === "migration"
+    ? required(env, "MIGRATION_RUNTIME_USER").trim()
+    : databaseUser;
+  if (profile === "migration" && databaseUser === runtimeUser) {
+    throw new ConfigurationError("migration and runtime database users must be different");
+  }
+  assertIdentifier(runtimeUser, profile === "migration" ? "MIGRATION_RUNTIME_USER" : "DB_USER");
+  const databasePassword = readSecret(
+    env,
+    profile === "migration" ? "MIGRATION_DB_PASSWORD" : "DB_PASSWORD",
+    profile === "migration" ? "MIGRATION_DB_PASSWORD_FILE" : "DB_PASSWORD_FILE",
+    workingDirectory,
+  );
 
   const redisHost = required(env, "REDIS_HOST").trim();
   const redisPort = parsePort(env, "REDIS_PORT");
@@ -178,11 +205,13 @@ export function loadConfig(
     port,
     database: {
       target,
+      targetProfile,
       host: databaseHost,
       port: databasePort,
       name: databaseName,
       user: databaseUser,
       password: databasePassword,
+      runtimeUser,
     },
     redis: { host: redisHost, port: redisPort, password: redisPassword },
     providerTestScope,
