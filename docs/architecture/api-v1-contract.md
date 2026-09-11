@@ -6,9 +6,16 @@ API v1 使用以下稳定约定；具体端点以代码生成的 OpenAPI 为准�
 
 - 第一个真实业务接口使用 `/api/v1/...`；`/api/health` 继续是独立 liveness 探针，不参与业务版本或 readiness 语义。
 - NestJS 业务层只依赖 JSON、HTTP header 和服务端校验，不依赖 Cookie、DOM、Next.js Server Actions 或小程序运行时。
-- 订单业务仍未完整实现，尚未创建订单、资金、认证、数据库幂等表或 provider 调用。
+- 订单业务仍未完整实现，尚未创建订单、资金、数据库幂等表或 provider 调用。认证与管理员操作权限已由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
 - OpenAPI 与运行时校验在 `apps/api/test/api-contract.test.ts` 的隔离 Nest app 中验证；该 probe controller 不在生产 `AppModule` 注册，不能作为生产测试写路由。
 - probe 的严格请求 schema 使用显式 ApiBody 声明；DTO 本身不会自动禁止所有未知字段。首个真实业务 controller 必须声明对应约束并验证其实际生成 schema，不得把测试示例通过当成业务文档自动一致。
+
+## 管理安全入口
+
+- 管理端安全写入使用 `/api/v1/admin/security/...`，Web 只经 Admin BFF `/api/bff/admin/...` 转发；BFF 不暴露 bearer token。恢复用户账号要求有效 `user.account.restore` 动态操作权限，服务端只允许 `DEACTIVATED -> ACTIVE`，不恢复旧会话/验证凭据，也不恢复 `CANCELLED`。
+- `GET /users/restore-candidates` 只返回搜索命中的用户账号、显示名称和 `DEACTIVATED` 状态；`POST /users/restore` 与关键审计同事务。`POST /admins/force-logout` 仅 Boss 可用，撤销目标管理员全部会话及未完成登录挑战，不改变账号状态，并要求现有密码 + TOTP 再认证。
+- 管理员（含 Boss）会话固定 7 天且关闭自动刷新；PIN 锁屏不延长绝对到期时间。审计查询是只读、分页和按授权对象范围过滤的白名单入口，敏感字段由服务端裁剪。
+- 当前管理员个人工作台布局经 Admin BFF `GET/PUT /api/bff/admin/workspace/layout` 读写，归属由会话决定，不接受客户端指定其他管理员。配置只含并发版本、组件 ID、12 列网格坐标 x/y 与宽高 w/h（`layoutVersion: 2`）和白名单时间选项；坐标/尺寸按组件目录的最小尺寸与网格边界校验。历史 `order + sm/md/lg` 配置（`layoutVersion: 1` 或无格式版本）在读写两侧按确定规则转换，并发版本语义不变；旧版本保存返回 `CONFLICT`。锁定会话拒绝读写。这不是通用配置中心。
 
 ## JSON 类型
 

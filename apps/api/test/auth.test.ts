@@ -8,6 +8,7 @@ import { createApp } from "../src/app";
 import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
 import { retryPendingAdminSecurityNotifications, type AdminSecurityNotification } from "../src/auth/auth-security";
 import { issueDisasterRecovery } from "../src/auth/disaster-recovery";
+import { createFakeRealNameProvider, type FakeRealNameScenario, type RealNameProvider, type UserObligationStatus } from "../src/auth/user-identity";
 import { assertBusinessMigrationIdentity, assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { loadConfig, type AppConfig } from "../src/config/config";
@@ -348,6 +349,16 @@ async function prepareMigrationOwnership(pool: Pool, resources: TestDatabaseReso
 async function resetBusinessData(pool: Pool): Promise<void> {
   await pool.query(`
     TRUNCATE
+      "zzsh_iam"."admin_workspace_layout",
+      "zzsh_iam"."approval_execution",
+      "zzsh_iam"."approval_decision",
+      "zzsh_iam"."approval_request_candidate",
+      "zzsh_iam"."approval_request",
+      "zzsh_iam"."approval_template_candidate",
+      "zzsh_iam"."approval_template",
+      "zzsh_iam"."admin_user_permission",
+      "zzsh_iam"."admin_user_role",
+      "zzsh_iam"."admin_role_permission",
       "zzsh_iam"."admin_recovery_request",
       "zzsh_iam"."admin_recovery_notification_target",
       "zzsh_iam"."admin_security_notification_outbox",
@@ -361,9 +372,12 @@ async function resetBusinessData(pool: Pool): Promise<void> {
       "zzsh_auth_user"."session",
       "zzsh_auth_user"."account",
       "zzsh_auth_user"."user",
+      "zzsh_iam"."user_identity_state",
       "zzsh_iam"."admin_security",
       "zzsh_iam"."audit_event"
   `);
+  await pool.query(`DELETE FROM "zzsh_iam"."admin_role" WHERE "code" NOT IN ('ops', 'support')`);
+  await pool.query(`DELETE FROM "zzsh_iam"."admin_role_permission"`);
 }
 
 async function json(response: Response): Promise<Record<string, any> | null> {
@@ -397,6 +411,68 @@ async function request(
 
 function assertNoTokenHeaders(response: Response): void {
   for (const [name] of response.headers) assert.equal(/token|authorization/i.test(name), false, `unexpected authentication header: ${name}`);
+}
+
+async function completeStaffEnrollment(
+  base: string,
+  username: string,
+  temporaryPassword: string,
+): Promise<{ jar: CookieJar; password: string; secret: string }> {
+  const jar = cookieJar();
+  const login = await request(base, "/api/auth/admin/sign-in/username", { username, password: temporaryPassword }, jar, ADMIN_ORIGIN);
+  assert.equal(login.response.status, 200);
+  const password = randomBytes(24).toString("base64url");
+  assert.equal((await request(base, "/api/auth/admin/change-password", {
+    currentPassword: temporaryPassword,
+    newPassword: password,
+    revokeOtherSessions: true,
+  }, jar, ADMIN_ORIGIN)).response.status, 200);
+  const enable = await request(base, "/api/auth/admin/two-factor/enable", { password }, jar, ADMIN_ORIGIN);
+  assert.equal(enable.response.status, 200);
+  const secret = new URL(enable.body?.totpURI as string).searchParams.get("secret");
+  assert.ok(secret);
+  assert.equal((await request(base, "/api/auth/admin/two-factor/verify-totp", { code: totpCode(secret) }, jar, ADMIN_ORIGIN)).response.status, 200);
+  assert.equal((await request(base, "/api/v1/admin/security/enrollment/activate", {}, jar, ADMIN_ORIGIN)).response.status, 200);
+  return { jar, password, secret };
+}
+
+async function waitForRoleLockWait(pool: Pool, timeoutMs = 5_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const waiting = await pool.query<{ waiting: string }>(`
+      SELECT count(*)::text AS waiting
+        FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND wait_event_type = 'Lock'
+         AND pid <> pg_backend_pid()
+    `);
+    if (Number(waiting.rows[0]?.waiting ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("did not observe a backend waiting on Lock");
+}
+
+async function withHeldRoleLock<T>(
+  pool: Pool,
+  roleId: string,
+  blocked: () => Promise<T>,
+  mutate: (client: PoolClient) => Promise<void>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SELECT "id" FROM "zzsh_iam"."admin_role" WHERE "id" = $1 FOR UPDATE`, [roleId]);
+    const pending = blocked();
+    await waitForRoleLockWait(pool);
+    await mutate(client);
+    await client.query("COMMIT");
+    return await pending;
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch { /* preserve the primary error */ }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function base32Decode(value: string): Buffer {
@@ -490,6 +566,13 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const fakeAdminNotificationOutbox: AdminSecurityNotification[] = [];
     const rateLimitState = new Map<string, { failures: number; resetAt: number }>();
     const securityVerificationBudget = { inFlight: 0 };
+    const identityScenarios = new Map<string, FakeRealNameScenario>();
+    const realNameProvider: RealNameProvider = {
+      verify: (input) => createFakeRealNameProvider(identityScenarios.get(input.userId) ?? "UNKNOWN").verify(input),
+    };
+    const obligationStatuses = new Map<string, UserObligationStatus | "INVALID">();
+    const obligationFailures = new Set<string>();
+    const obligationBarriers = new Map<string, { started: () => void; release: Promise<void> }>();
     app = await createApp({
       health: {
         dependencies: {
@@ -512,6 +595,17 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
         fakeAdminNotificationOutbox,
         rateLimitState,
         securityVerificationBudget,
+        realNameProvider,
+        userObligationReader: async (userId, client) => {
+          const barrier = obligationBarriers.get(userId);
+          if (barrier) {
+            barrier.started();
+            await barrier.release;
+          }
+          if (obligationFailures.has(userId)) throw new Error("obligation reader fixture failure");
+          await client.query(`SELECT "id" FROM "zzsh_auth_user"."user" WHERE "id" = $1 FOR SHARE`, [userId]);
+          return (obligationStatuses.get(userId) ?? "UNKNOWN") as UserObligationStatus;
+        },
       },
     });
     await app.listen(0, "127.0.0.1");
@@ -545,6 +639,8 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     }, user, USER_ORIGIN);
     assert.equal(signup.response.status, 200);
     assert.equal(signup.body?.user?.username, "m2_user");
+    const userId = signup.body?.user?.id as string;
+    assert.ok(userId);
     assert.notEqual(user.header(), "");
     const userSession = await request(base, "/api/auth/user/get-session", undefined, user, USER_ORIGIN);
     assert.equal(userSession.response.status, 200);
@@ -554,6 +650,239 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       `SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.account.created'`,
     );
     assert.equal(userAudit.rows[0]?.count, "1");
+
+    const unverifiedEligibility = await request(base, "/api/auth/user/trade-eligibility/check", { action: "protected_trade_eligibility_check", ageStatus: "ADULT" }, user, USER_ORIGIN);
+    assert.equal(unverifiedEligibility.response.status, 403);
+    assert.match(unverifiedEligibility.body?.error?.message, /实名/);
+    identityScenarios.set(userId, "VERIFIED_ADULT");
+    const verifiedIdentity = await request(base, "/api/auth/user/identity/verify", { fullName: "Fixture Adult", documentNumber: "fixture-adult" }, user, USER_ORIGIN);
+    assert.equal(verifiedIdentity.response.status, 200);
+    assert.deepEqual({ status: verifiedIdentity.body?.status, ageStatus: verifiedIdentity.body?.ageStatus }, { status: "VERIFIED", ageStatus: "ADULT" });
+    const forgedIdentityInput = await request(base, "/api/auth/user/identity/verify", { fullName: "Fixture Adult", documentNumber: "fixture-adult", scenario: "VERIFIED_ADULT", ageStatus: "ADULT" }, user, USER_ORIGIN);
+    assert.equal(forgedIdentityInput.response.status, 400);
+    const identityAfterForgedInput = await request(base, "/api/auth/user/identity/status", undefined, user, USER_ORIGIN);
+    assert.deepEqual(
+      { identityStatus: identityAfterForgedInput.body?.identityStatus, ageStatus: identityAfterForgedInput.body?.ageStatus },
+      { identityStatus: "VERIFIED", ageStatus: "ADULT" },
+    );
+    const forgedAge = await request(base, "/api/auth/user/trade-eligibility/check", { action: "protected_trade_eligibility_check", ageStatus: "MINOR" }, user, USER_ORIGIN);
+    assert.equal(forgedAge.response.status, 200);
+    assert.equal(forgedAge.body?.eligible, true);
+    assert.equal(forgedAge.body?.execution, "NOT_PERFORMED");
+
+    obligationStatuses.set(userId, "NONE");
+    const invalidMethodBefore = await runtimePool.query<{ sessions: string; verifications: string; audits: string; accountStatus: string; suspended: boolean }>(`
+      SELECT
+        (SELECT count(*)::text FROM "zzsh_auth_user"."session" WHERE "userId" = $1) AS sessions,
+        (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = 'm2-user@example.invalid') AS verifications,
+        (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "object_id" = $1) AS audits,
+        (SELECT COALESCE("account_status", 'ACTIVE') FROM "zzsh_iam"."user_identity_state" WHERE "user_id" = $1) AS "accountStatus",
+        (SELECT "suspended" FROM "zzsh_auth_user"."user" WHERE "id" = $1) AS suspended
+    `, [userId]);
+    const postStatus = await request(base, "/api/auth/user/identity/status", {}, user, USER_ORIGIN);
+    assert.equal(postStatus.response.status, 404);
+    const getCancel = await fetch(`${base}/api/auth/user/account/cancel`, { headers: { origin: USER_ORIGIN, cookie: user.header() } });
+    assert.equal(getCancel.status, 404);
+    assert.deepEqual(
+      (await runtimePool.query(`
+        SELECT
+          (SELECT count(*)::text FROM "zzsh_auth_user"."session" WHERE "userId" = $1) AS sessions,
+          (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = 'm2-user@example.invalid') AS verifications,
+          (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "object_id" = $1) AS audits,
+          (SELECT COALESCE("account_status", 'ACTIVE') FROM "zzsh_iam"."user_identity_state" WHERE "user_id" = $1) AS "accountStatus",
+          (SELECT "suspended" FROM "zzsh_auth_user"."user" WHERE "id" = $1) AS suspended
+      `, [userId])).rows[0],
+      invalidMethodBefore.rows[0],
+    );
+
+    const minorUser = cookieJar();
+    const minorSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-minor@example.invalid",
+      password: PASSWORD,
+      name: "Fixture Minor",
+      username: "m2_minor",
+    }, minorUser, USER_ORIGIN);
+    assert.equal(minorSignup.response.status, 200);
+    const minorUserId = minorSignup.body?.user?.id as string;
+    identityScenarios.set(minorUserId, "VERIFIED_MINOR");
+    assert.equal((await request(base, "/api/auth/user/identity/verify", { fullName: "Fixture Minor", documentNumber: "fixture-minor" }, minorUser, USER_ORIGIN)).response.status, 200);
+    const minorForgedAdult = await request(base, "/api/auth/user/trade-eligibility/check", { action: "protected_trade_eligibility_check", ageStatus: "ADULT" }, minorUser, USER_ORIGIN);
+    assert.equal(minorForgedAdult.response.status, 403);
+    assert.match(minorForgedAdult.body?.error?.message, /年龄/);
+
+    const auditRollbackUser = cookieJar();
+    const auditRollbackSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-identity-rollback@example.invalid",
+      password: PASSWORD,
+      name: "Identity Rollback",
+      username: "m2_identity_rollback",
+    }, auditRollbackUser, USER_ORIGIN);
+    assert.equal(auditRollbackSignup.response.status, 200);
+    const auditRollbackUserId = auditRollbackSignup.body?.user?.id as string;
+    identityScenarios.set(auditRollbackUserId, "VERIFIED_ADULT");
+    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const failedIdentityAudit = await request(base, "/api/auth/user/identity/verify", { fullName: "Fixture Adult", documentNumber: "fixture-audit-rollback" }, auditRollbackUser, USER_ORIGIN);
+    assert.equal(failedIdentityAudit.response.status, 500);
+    const failedIdentityState = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."user_identity_state" WHERE "user_id" = $1`, [auditRollbackUserId]);
+    assert.equal(failedIdentityState.rows[0]?.count, "0");
+    await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+
+    const pendingCancelUser = cookieJar();
+    const pendingCancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-cancel-pending@example.invalid",
+      password: PASSWORD,
+      name: "Pending Cancellation",
+      username: "m2_cancel_pending",
+    }, pendingCancelUser, USER_ORIGIN);
+    assert.equal(pendingCancelSignup.response.status, 200);
+    const pendingCancelUserId = pendingCancelSignup.body?.user?.id as string;
+    obligationStatuses.set(pendingCancelUserId, "PENDING");
+    const pendingCancel = await request(base, "/api/auth/user/account/cancel", { reason: "need to close" }, pendingCancelUser, USER_ORIGIN);
+    assert.equal(pendingCancel.response.status, 409);
+    assert.match(pendingCancel.body?.error?.message, /未完成/);
+    const pendingStillSession = await request(base, "/api/auth/user/get-session", undefined, pendingCancelUser, USER_ORIGIN);
+    assert.equal(pendingStillSession.response.status, 200);
+    assert.ok(pendingStillSession.body?.user?.id);
+
+    const unknownCancelUser = cookieJar();
+    const unknownCancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-cancel-unknown@example.invalid",
+      password: PASSWORD,
+      name: "Unknown Cancellation",
+      username: "m2_cancel_unknown",
+    }, unknownCancelUser, USER_ORIGIN);
+    assert.equal(unknownCancelSignup.response.status, 200);
+    const unknownCancel = await request(base, "/api/auth/user/account/cancel", { reason: "need to close" }, unknownCancelUser, USER_ORIGIN);
+    assert.equal(unknownCancel.response.status, 503);
+    assert.match(unknownCancel.body?.error?.message, /无法确认/);
+
+    const invalidObligationUser = cookieJar();
+    const invalidObligationSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-cancel-invalid-obligation@example.invalid",
+      password: PASSWORD,
+      name: "Invalid Obligation",
+      username: "m2_cancel_invalid_obligation",
+    }, invalidObligationUser, USER_ORIGIN);
+    assert.equal(invalidObligationSignup.response.status, 200);
+    const invalidObligationUserId = invalidObligationSignup.body?.user?.id as string;
+    obligationStatuses.set(invalidObligationUserId, "INVALID");
+    const invalidObligationCancel = await request(base, "/api/auth/user/account/cancel", { reason: "need to close" }, invalidObligationUser, USER_ORIGIN);
+    assert.equal(invalidObligationCancel.response.status, 503);
+    assert.match(invalidObligationCancel.body?.error?.message, /无法确认/);
+    assert.ok((await request(base, "/api/auth/user/get-session", undefined, invalidObligationUser, USER_ORIGIN)).body?.user?.id);
+
+    const failedObligationUser = cookieJar();
+    const failedObligationSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-cancel-obligation-fault@example.invalid",
+      password: PASSWORD,
+      name: "Obligation Fault",
+      username: "m2_cancel_obligation_fault",
+    }, failedObligationUser, USER_ORIGIN);
+    assert.equal(failedObligationSignup.response.status, 200);
+    const failedObligationUserId = failedObligationSignup.body?.user?.id as string;
+    obligationFailures.add(failedObligationUserId);
+    const failedObligationCancel = await request(base, "/api/auth/user/account/cancel", { reason: "need to close" }, failedObligationUser, USER_ORIGIN);
+    assert.equal(failedObligationCancel.response.status, 503);
+    assert.match(failedObligationCancel.body?.error?.message, /无法确认/);
+    assert.ok((await request(base, "/api/auth/user/get-session", undefined, failedObligationUser, USER_ORIGIN)).body?.user?.id);
+
+    const barrierCancelUser = cookieJar();
+    const barrierCancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-cancel-barrier@example.invalid",
+      password: PASSWORD,
+      name: "Barrier Cancellation",
+      username: "m2_cancel_barrier",
+    }, barrierCancelUser, USER_ORIGIN);
+    assert.equal(barrierCancelSignup.response.status, 200);
+    const barrierCancelUserId = barrierCancelSignup.body?.user?.id as string;
+    obligationStatuses.set(barrierCancelUserId, "NONE");
+    let obligationReaderStarted!: () => void;
+    const obligationReaderStartedPromise = new Promise<void>((resolve) => { obligationReaderStarted = resolve; });
+    let releaseObligationReader!: () => void;
+    const releaseObligationReaderPromise = new Promise<void>((resolve) => { releaseObligationReader = resolve; });
+    obligationBarriers.set(barrierCancelUserId, { started: obligationReaderStarted, release: releaseObligationReaderPromise });
+    const barrierCancelPromise = request(base, "/api/auth/user/account/cancel", { reason: "close after check" }, barrierCancelUser, USER_ORIGIN);
+    let barrierTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    const barrierTimeout = new Promise<never>((_, reject) => {
+      barrierTimeoutId = setTimeout(() => reject(new Error("obligation reader barrier did not open")), 5_000);
+    });
+    try {
+      await Promise.race([obligationReaderStartedPromise, barrierTimeout]);
+    } finally {
+      if (barrierTimeoutId) clearTimeout(barrierTimeoutId);
+    }
+    const competingClient = await migrationPool!.connect();
+    try {
+      await competingClient.query("SET lock_timeout = '100ms'");
+      let competitionError: unknown;
+      try {
+        await competingClient.query(`UPDATE "zzsh_auth_user"."user" SET "updatedAt" = "updatedAt" WHERE "id" = $1`, [barrierCancelUserId]);
+      } catch (error) {
+        competitionError = error;
+      }
+      assert.equal((competitionError as { code?: string } | undefined)?.code, "55P03", "obligation check must share the locked account boundary");
+    } finally {
+      try { await competingClient.query("ROLLBACK"); } catch { /* preserve the primary assertion */ }
+      releaseObligationReader();
+      const barrierCancelled = await barrierCancelPromise;
+      assert.equal(barrierCancelled.response.status, 200);
+      obligationBarriers.delete(barrierCancelUserId);
+      competingClient.release();
+    }
+
+    const deactivateUser = cookieJar();
+    const deactivateSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-deactivate@example.invalid",
+      password: PASSWORD,
+      name: "Deactivate Me",
+      username: "m2_deactivate",
+    }, deactivateUser, USER_ORIGIN);
+    assert.equal(deactivateSignup.response.status, 200);
+    const deactivateUserId = deactivateSignup.body?.user?.id as string;
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."verification" ("id", "identifier", "value", "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, 'fixture', clock_timestamp() + interval '10 minutes', clock_timestamp(), clock_timestamp())`,
+      [`verification_${randomUUID().replaceAll("-", "")}`, "m2-deactivate@example.invalid"],
+    );
+    const deactivated = await request(base, "/api/auth/user/account/deactivate", { reason: "no longer needed" }, deactivateUser, USER_ORIGIN);
+    assert.equal(deactivated.response.status, 200);
+    assert.equal(deactivated.body?.status, "DEACTIVATED");
+    assert.equal((await request(base, "/api/auth/user/get-session", undefined, deactivateUser, USER_ORIGIN)).body, null);
+    const deactivatedRows = await runtimePool.query<{ accountStatus: string; suspended: boolean; verifications: string }>(`
+      SELECT s."account_status" AS "accountStatus", u."suspended",
+        (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = 'm2-deactivate@example.invalid') AS verifications
+      FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id" WHERE s."user_id" = $1`, [deactivateUserId]);
+    assert.deepEqual(deactivatedRows.rows[0], { accountStatus: "DEACTIVATED", suspended: true, verifications: "0" });
+
+    const cancelUser = cookieJar();
+    const cancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+      email: "m2-cancel@example.invalid",
+      password: PASSWORD,
+      name: "Cancel Me",
+      username: "m2_cancel",
+    }, cancelUser, USER_ORIGIN);
+    assert.equal(cancelSignup.response.status, 200);
+    const cancelUserId = cancelSignup.body?.user?.id as string;
+    obligationStatuses.set(cancelUserId, "NONE");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."verification" ("id", "identifier", "value", "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, 'fixture', clock_timestamp() + interval '10 minutes', clock_timestamp(), clock_timestamp())`,
+      [`verification_${randomUUID().replaceAll("-", "")}`, "m2-cancel@example.invalid"],
+    );
+    const cancelled = await request(base, "/api/auth/user/account/cancel", { reason: "close account" }, cancelUser, USER_ORIGIN);
+    assert.equal(cancelled.response.status, 200);
+    assert.equal(cancelled.body?.status, "CANCELLED");
+    assert.equal((await request(base, "/api/auth/user/get-session", undefined, cancelUser, USER_ORIGIN)).body, null);
+    const cancelledRows = await runtimePool.query<{ name: string; email: string; username: string | null; phone: string | null; accountStatus: string; verifications: string; auditCount: string }>(`
+      SELECT u."name", u."email", u."username", u."phoneNumber" AS phone, s."account_status" AS "accountStatus",
+        (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = 'm2-cancel@example.invalid') AS verifications,
+        (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.account.cancelled' AND "object_id" = $1) AS "auditCount"
+      FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id" WHERE s."user_id" = $1`, [cancelUserId]);
+    assert.equal(cancelledRows.rows[0]?.accountStatus, "CANCELLED");
+    assert.match(cancelledRows.rows[0]?.name ?? "", /^已注销用户-/);
+    assert.match(cancelledRows.rows[0]?.email ?? "", /@anonymized\.invalid$/);
+    assert.equal(cancelledRows.rows[0]?.username, null);
+    assert.equal(cancelledRows.rows[0]?.phone, null);
+    assert.equal(cancelledRows.rows[0]?.verifications, "0");
+    assert.equal(cancelledRows.rows[0]?.auditCount, "1");
 
     const auditUpdate = runtimePool.query(`UPDATE "zzsh_iam"."audit_event" SET "reason" = 'tamper'`);
     const auditDelete = runtimePool.query(`DELETE FROM "zzsh_iam"."audit_event"`);
@@ -596,6 +925,12 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const resetDelivery = fakeSmsOutbox.get(`${phone}-request-password-reset`);
     assert.ok(resetDelivery);
     assert.equal(resetDelivery.purpose, "password-reset");
+    const wrongPurposeReset = await request(base, "/api/auth/user/phone-number/reset-password", {
+      phoneNumber: phone,
+      otp: resetDelivery.code === delivery.code ? "000000" : delivery.code,
+      newPassword: PASSWORD,
+    }, cookieJar(), USER_ORIGIN);
+    assert.ok(wrongPurposeReset.response.status >= 400);
     const phoneReset = await request(base, "/api/auth/user/phone-number/reset-password", {
       phoneNumber: phone,
       otp: resetDelivery.code,
@@ -626,7 +961,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       [legacyUserId, "Legacy User", "legacy-user@example.invalid", legacyNow, "legacy_user"],
     );
     await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, $4, $4)`,
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
       [`account_${randomUUID().replaceAll("-", "")}`, legacyUserId, createHash("md5").update(LEGACY_PASSWORD).digest("hex"), legacyNow],
     );
     const legacyWrong = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "legacy_user", password: "wrong-legacy-password" }, cookieJar(), USER_ORIGIN);
@@ -650,6 +985,48 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const legacySession = await request(base, "/api/auth/user/get-session", undefined, cookieJar(), USER_ORIGIN, legacySuccess.body?.token as string);
     assert.equal(legacySession.response.status, 200);
     assert.equal(legacySession.body?.user?.username, "legacy_user");
+
+    const saltedLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const saltedLegacySalt = "aB3dE";
+    const saltedLegacyPassword = randomBytes(24).toString("base64url");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
+      [saltedLegacyUserId, "Salted Legacy User", "salted-legacy@example.invalid", legacyNow, "salted_legacy_user"],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v1', $4, $5, $5)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, saltedLegacyUserId, createHash("md5").update(saltedLegacyPassword + saltedLegacySalt).digest("hex"), saltedLegacySalt, legacyNow],
+    );
+    const saltedWrong = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "salted_legacy_user", password: saltedLegacyPassword + "wrong" }, cookieJar(), USER_ORIGIN);
+    assert.equal(saltedWrong.response.status, 401);
+    const saltedSuccess = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "salted_legacy_user", password: saltedLegacyPassword }, cookieJar(), USER_ORIGIN);
+    assert.equal(saltedSuccess.response.status, 200);
+    const saltedLegacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; salt: string | null; password: string | null }>(
+      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "legacyPasswordSalt" AS salt, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
+      [saltedLegacyUserId],
+    );
+    assert.deepEqual(saltedLegacyAccount.rows[0], { legacy: null, version: null, salt: null, password: saltedLegacyAccount.rows[0]?.password });
+
+    const legacyRollbackUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const legacyRollbackPassword = randomBytes(24).toString("base64url");
+    const legacyRollbackHash = createHash("md5").update(legacyRollbackPassword).digest("hex");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
+      [legacyRollbackUserId, "Legacy Rollback", "legacy-rollback@example.invalid", legacyNow, "legacy_rollback"],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, legacyRollbackUserId, legacyRollbackHash, legacyNow],
+    );
+    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const failedLegacyUpgrade = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "legacy_rollback", password: legacyRollbackPassword }, cookieJar(), USER_ORIGIN);
+    assert.equal(failedLegacyUpgrade.response.status, 500);
+    const rollbackLegacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
+      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
+      [legacyRollbackUserId],
+    );
+    assert.deepEqual(rollbackLegacyAccount.rows[0], { legacy: legacyRollbackHash, version: "legacy-md5-v0", password: null });
+    await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
 
     const firstBootstrap = await request(base, "/api/v1/admin/security/bootstrap", {
       bootstrapSecret: ADMIN_BOOTSTRAP_SECRET,
@@ -905,6 +1282,567 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const adminOneActive = cookieJar();
     assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username: adminUsername, password: BOSS_ONE_PASSWORD }, adminOneActive, ADMIN_ORIGIN)).body?.twoFactorRedirect, true);
     assert.equal((await request(base, "/api/auth/admin/two-factor/verify-totp", { code: totpCode(secret) }, adminOneActive, ADMIN_ORIGIN)).response.status, 200);
+
+    const bossSession = await request(base, "/api/bff/admin/session", undefined, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(bossSession.body?.authenticated, true);
+    assert.equal(bossSession.body?.permissions?.includes("admin.account.create"), true);
+    const roleCatalog = await request(base, "/api/bff/admin/security/roles", undefined, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(roleCatalog.response.status, 200);
+    const opsRole = roleCatalog.body?.roles?.find((role: { code?: string }) => role.code === "ops");
+    const supportRole = roleCatalog.body?.roles?.find((role: { code?: string }) => role.code === "support");
+    assert.ok(opsRole?.id);
+    assert.ok(supportRole?.id);
+    const configuredOps = await request(base, "/api/v1/admin/security/roles/update", {
+      code: "ops",
+      permissionCodes: ["admin.account.read", "admin.account.freeze", "admin.account.unfreeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(configuredOps.response.status, 200);
+    const readerRole = await request(base, "/api/v1/admin/security/roles/create", {
+      code: "directory_reader",
+      name: "目录只读",
+      permissionCodes: ["admin.account.read"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(readerRole.response.status, 200);
+
+    const occupiedSequence = await runtimePool.query<{ value: string }>(`SELECT nextval('"zzsh_iam"."admin_login_number_seq"')::text AS value`);
+    const occupiedUsername = `zz${occupiedSequence.rows[0]!.value.padStart(5, "0")}`;
+    const occupiedNow = new Date();
+    await runtimePool.query(
+      `INSERT INTO "zzsh_auth_admin"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "displayUsername", "twoFactorEnabled", "suspended")
+       VALUES ($1, $2, $3, $4, $4, $5, $6, false, false)`,
+      [`admin_${randomUUID().replaceAll("-", "")}`, "Occupied Login", `${occupiedUsername}@admin.zzsh.invalid`, occupiedNow, occupiedUsername, occupiedUsername.toUpperCase()],
+    );
+    const skippedCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "跳号员工" }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(skippedCreate.response.status, 200);
+    assert.notEqual(skippedCreate.body?.username?.toLowerCase(), occupiedUsername);
+    assert.match(skippedCreate.body?.username ?? "", /^ZZ\d{5,}$/);
+    assert.equal(typeof skippedCreate.body?.temporaryPassword, "string");
+    assert.equal((skippedCreate.body?.temporaryPassword as string).length >= 12, true);
+
+    const beforeCreateCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_auth_admin"."user"`);
+    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const failedCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "审计失败员工" }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(failedCreate.response.status, 500);
+    await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const afterFailedCreate = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_auth_admin"."user"`);
+    assert.equal(afterFailedCreate.rows[0]?.count, beforeCreateCount.rows[0]?.count);
+
+    const concurrentCreates = await Promise.all([
+      request(base, "/api/v1/admin/security/admins/create", { name: "并发员工甲" }, adminOneActive, ADMIN_ORIGIN),
+      request(base, "/api/v1/admin/security/admins/create", { name: "并发员工乙" }, adminOneActive, ADMIN_ORIGIN),
+      request(base, "/api/v1/admin/security/admins/create", { name: "并发员工丙" }, adminOneActive, ADMIN_ORIGIN),
+    ]);
+    assert.deepEqual(concurrentCreates.map((item) => item.response.status), [200, 200, 200]);
+    const concurrentUsernames = concurrentCreates.map((item) => item.body?.username as string);
+    assert.equal(new Set(concurrentUsernames).size, 3);
+
+    const readerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "只读员工",
+      roleIds: [readerRole.body?.id],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(readerCreate.response.status, 200);
+    const freezerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "冻结员工",
+      roleIds: [opsRole.id],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(freezerCreate.response.status, 200);
+    const deniedCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "禁止冻结员工",
+      roleIds: [opsRole.id],
+      denyPermissions: ["admin.account.freeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(deniedCreate.response.status, 200);
+    const targetCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "被冻结目标" }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(targetCreate.response.status, 200);
+    const createdList = await request(base, "/api/bff/admin/security/admins", undefined, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(createdList.body?.admins?.some((entry: Record<string, unknown>) => "temporaryPassword" in entry || "password" in entry || "email" in entry), false);
+    const createdAudit = await runtimePool.query<{ details: Record<string, unknown> }>(
+      `SELECT "details" FROM "zzsh_iam"."audit_event" WHERE "action" = 'admin.account.created' AND "details"->>'username' = $1`,
+      [freezerCreate.body?.username],
+    );
+    assert.equal(JSON.stringify(createdAudit.rows[0]?.details ?? {}).includes(freezerCreate.body?.temporaryPassword as string), false);
+
+    const reader = await completeStaffEnrollment(base, readerCreate.body?.username as string, readerCreate.body?.temporaryPassword as string);
+    const freezer = await completeStaffEnrollment(base, freezerCreate.body?.username as string, freezerCreate.body?.temporaryPassword as string);
+    const denied = await completeStaffEnrollment(base, deniedCreate.body?.username as string, deniedCreate.body?.temporaryPassword as string);
+
+    const restoreOperatorCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "用户恢复操作员",
+      allowPermissions: ["user.account.restore"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(restoreOperatorCreate.response.status, 200);
+    const restoreOperator = await completeStaffEnrollment(base, restoreOperatorCreate.body?.username as string, restoreOperatorCreate.body?.temporaryPassword as string);
+    const restoreOperatorSession = await request(base, "/api/bff/admin/session", undefined, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(restoreOperatorSession.body?.permissions?.includes("user.account.restore"), true);
+
+    const restorePhone = "+8613800000001";
+    await migrationPool.query(
+      `UPDATE "zzsh_auth_user"."user" SET "phoneNumber" = $2, "phoneNumberVerified" = true WHERE "id" = $1`,
+      [userId, restorePhone],
+    );
+    const deactivatedForRestore = await request(base, "/api/auth/user/account/deactivate", { reason: "恢复流程 fixture" }, user, USER_ORIGIN);
+    assert.equal(deactivatedForRestore.response.status, 200);
+    assert.equal((await request(base, "/api/auth/user/get-session", undefined, user, USER_ORIGIN)).body, null);
+    const restoreOtpRequested = await request(base, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: restorePhone }, cookieJar(), USER_ORIGIN);
+    assert.equal(restoreOtpRequested.response.status, 200);
+    const restoreOtp = fakeSmsOutbox.get(`${restorePhone}-request-password-reset`);
+    assert.ok(restoreOtp);
+    assert.equal(restoreOtp.purpose, "password-reset");
+    const restoreOtpBefore = await runtimePool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`,
+      [`${restorePhone}-request-password-reset`],
+    );
+    assert.equal(restoreOtpBefore.rows[0]?.count, "1");
+    const identityBeforeRestore = await runtimePool.query<{ accountStatus: string; identityStatus: string; ageStatus: string; provider: string; version: number; suspended: boolean }>(
+      `SELECT s."account_status" AS "accountStatus", s."identity_status" AS "identityStatus", s."age_status" AS "ageStatus", s."provider", s."version", u."suspended"
+         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
+        WHERE s."user_id" = $1`,
+      [userId],
+    );
+    assert.deepEqual(identityBeforeRestore.rows[0], { accountStatus: "DEACTIVATED", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 2, suspended: true });
+
+    const restoreUnauthenticated = await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, cookieJar(), ADMIN_ORIGIN);
+    assert.equal(restoreUnauthenticated.response.status, 401);
+    const restoreCandidates = await request(base, "/api/bff/admin/security/users/restore-candidates?query=m2_user", undefined, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(restoreCandidates.response.status, 200);
+    assert.equal(restoreCandidates.body?.users?.length, 1);
+    assert.deepEqual(Object.keys(restoreCandidates.body?.users?.[0] ?? {}).sort(), ["accountStatus", "id", "name", "username"]);
+    assert.equal(restoreCandidates.body?.users?.[0]?.accountStatus, "DEACTIVATED");
+
+    const restoreDenied = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: restoreOperatorCreate.body?.username,
+      roleIds: [],
+      allowPermissions: ["user.account.restore"],
+      denyPermissions: ["user.account.restore"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(restoreDenied.response.status, 200);
+    assert.equal((await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, restoreOperator.jar, ADMIN_ORIGIN)).response.status, 403);
+    const restoreReallowed = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: restoreOperatorCreate.body?.username,
+      roleIds: [],
+      allowPermissions: ["user.account.restore"],
+      denyPermissions: [],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(restoreReallowed.response.status, 200);
+    assert.equal((await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, restoreOperator.jar, ADMIN_ORIGIN)).response.status, 200);
+    const restoreRevoked = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: restoreOperatorCreate.body?.username,
+      roleIds: [],
+      allowPermissions: [],
+      denyPermissions: [],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(restoreRevoked.response.status, 200);
+    const restoreAfterRevoke = await request(base, "/api/v1/admin/security/users/restore", {
+      targetUserId: userId,
+      password: restoreOperator.password,
+      totpCode: totpCode(restoreOperator.secret),
+      reason: "撤权后不得恢复",
+    }, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(restoreAfterRevoke.response.status, 403);
+    const restoreReinstated = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: restoreOperatorCreate.body?.username,
+      roleIds: [],
+      allowPermissions: ["user.account.restore"],
+      denyPermissions: [],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(restoreReinstated.response.status, 200);
+
+    const restored = await request(base, "/api/bff/admin/security/users/restore", {
+      targetUserId: userId,
+      password: restoreOperator.password,
+      totpCode: totpCode(restoreOperator.secret),
+      reason: "用户重新使用账号",
+    }, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(restored.response.status, 200);
+    assert.equal(restored.body?.status, "ACTIVE");
+    assert.match(restored.body?.message ?? "", /旧会话和验证凭据不会复活/);
+    const restoredState = await runtimePool.query<{ accountStatus: string; identityStatus: string; ageStatus: string; provider: string; version: number; suspended: boolean }>(
+      `SELECT s."account_status" AS "accountStatus", s."identity_status" AS "identityStatus", s."age_status" AS "ageStatus", s."provider", s."version", u."suspended"
+         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
+        WHERE s."user_id" = $1`,
+      [userId],
+    );
+    assert.deepEqual(restoredState.rows[0], { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 3, suspended: false });
+    const restoreOtpAfter = await runtimePool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`,
+      [`${restorePhone}-request-password-reset`],
+    );
+    assert.equal(restoreOtpAfter.rows[0]?.count, "0");
+    const revokedRestoreOtp = await request(base, "/api/auth/user/phone-number/reset-password", {
+      phoneNumber: restorePhone,
+      otp: restoreOtp.code,
+      newPassword: `${PASSWORD}-old-otp`,
+    }, cookieJar(), USER_ORIGIN);
+    assert.ok(revokedRestoreOtp.response.status >= 400);
+    const repeatRestore = await request(base, "/api/v1/admin/security/users/restore", {
+      targetUserId: userId,
+      password: restoreOperator.password,
+      totpCode: totpCode(restoreOperator.secret),
+      reason: "重复恢复应被拒绝",
+    }, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(repeatRestore.response.status, 409);
+    const cancelledRestore = await request(base, "/api/v1/admin/security/users/restore", {
+      targetUserId: cancelUserId,
+      password: restoreOperator.password,
+      totpCode: totpCode(restoreOperator.secret),
+      reason: "注销主体不得复活",
+    }, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(cancelledRestore.response.status, 409);
+    const cancelledAfterRestoreAttempt = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(
+      `SELECT s."account_status" AS "accountStatus", u."suspended"
+         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
+        WHERE s."user_id" = $1`,
+      [cancelUserId],
+    );
+    assert.deepEqual(cancelledAfterRestoreAttempt.rows[0], { accountStatus: "CANCELLED", suspended: true });
+    const restoredUserLogin = cookieJar();
+    const restoredUserSignIn = await request(base, "/api/auth/user/sign-in/username", { username: "m2_user", password: PASSWORD }, restoredUserLogin, USER_ORIGIN);
+    assert.equal(restoredUserSignIn.response.status, 200);
+    assert.ok((await request(base, "/api/auth/user/get-session", undefined, restoredUserLogin, USER_ORIGIN)).body?.user?.id);
+
+    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const failedRestore = await request(base, "/api/v1/admin/security/users/restore", {
+      targetUserId: deactivateUserId,
+      password: restoreOperator.password,
+      totpCode: totpCode(restoreOperator.secret),
+      reason: "审计失败回滚恢复",
+    }, restoreOperator.jar, ADMIN_ORIGIN);
+    assert.equal(failedRestore.response.status, 500);
+    const failedRestoreState = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(
+      `SELECT s."account_status" AS "accountStatus", u."suspended"
+         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
+        WHERE s."user_id" = $1`,
+      [deactivateUserId],
+    );
+    assert.deepEqual(failedRestoreState.rows[0], { accountStatus: "DEACTIVATED", suspended: true });
+    await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+
+    const forceTargetCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "强制登出目标" }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(forceTargetCreate.response.status, 200);
+    const forceTarget = await completeStaffEnrollment(base, forceTargetCreate.body?.username as string, forceTargetCreate.body?.temporaryPassword as string);
+    const forceTargetSessionBefore = await request(base, "/api/bff/admin/session", undefined, forceTarget.jar, ADMIN_ORIGIN);
+    assert.equal(forceTargetSessionBefore.body?.authenticated, true);
+    const forceTargetLifetime = new Date(forceTargetSessionBefore.body?.session?.expiresAt).getTime() - new Date(forceTargetSessionBefore.body?.session?.createdAt).getTime();
+    assert.ok(Math.abs(forceTargetLifetime - 7 * 24 * 60 * 60 * 1000) < 2_000);
+    const rememberMeFalseLogin = cookieJar();
+    const rememberMeFalseSignIn = await request(base, "/api/auth/admin/sign-in/username", { username: forceTargetCreate.body?.username, password: forceTarget.password, rememberMe: false }, rememberMeFalseLogin, ADMIN_ORIGIN);
+    assert.equal(rememberMeFalseSignIn.body?.twoFactorRedirect, true);
+    assert.equal((await request(base, "/api/auth/admin/two-factor/verify-totp", { code: totpCode(forceTarget.secret) }, rememberMeFalseLogin, ADMIN_ORIGIN)).response.status, 200);
+    const rememberMeFalseSession = await request(base, "/api/bff/admin/session", undefined, rememberMeFalseLogin, ADMIN_ORIGIN);
+    const rememberMeFalseLifetime = new Date(rememberMeFalseSession.body?.session?.expiresAt).getTime() - new Date(rememberMeFalseSession.body?.session?.createdAt).getTime();
+    assert.ok(Math.abs(rememberMeFalseLifetime - 7 * 24 * 60 * 60 * 1000) < 2_000);
+    assert.equal((await request(base, "/api/auth/admin/sign-out", {}, rememberMeFalseLogin, ADMIN_ORIGIN)).response.status, 200);
+    const forceExpiresBeforeLock = forceTargetSessionBefore.body?.session?.expiresAt;
+    assert.equal((await request(base, "/api/bff/admin/security/pin/set", { pin: "135790" }, forceTarget.jar, ADMIN_ORIGIN)).response.status, 200);
+    assert.equal((await request(base, "/api/bff/admin/security/pin/lock", {}, forceTarget.jar, ADMIN_ORIGIN)).response.status, 200);
+    const forceTargetSessionAfterLock = await request(base, "/api/bff/admin/session", undefined, forceTarget.jar, ADMIN_ORIGIN);
+    assert.equal(forceTargetSessionAfterLock.body?.session?.expiresAt, forceExpiresBeforeLock);
+
+    const forceTargetId = forceTargetCreate.body?.id as string;
+    const forceTargetEmail = await runtimePool.query<{ email: string }>(`SELECT "email" FROM "zzsh_auth_admin"."user" WHERE "id" = $1`, [forceTargetId]);
+    const forceIdentifiers = [forceTargetId, forceTargetEmail.rows[0]!.email];
+    const forceOther = cookieJar();
+    const forceOtherLogin = await request(base, "/api/auth/admin/sign-in/username", { username: forceTargetCreate.body?.username, password: forceTarget.password }, forceOther, ADMIN_ORIGIN);
+    assert.equal(forceOtherLogin.body?.twoFactorRedirect, true);
+    const forceOtherVerify = await request(base, "/api/auth/admin/two-factor/verify-totp", { code: totpCode(forceTarget.secret) }, forceOther, ADMIN_ORIGIN);
+    assert.equal(forceOtherVerify.response.status, 200);
+    const forceOtherBearer = forceOtherVerify.body?.token as string;
+    assert.equal(typeof forceOtherBearer, "string");
+    const forceChallenge = cookieJar();
+    assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username: forceTargetCreate.body?.username, password: forceTarget.password }, forceChallenge, ADMIN_ORIGIN)).body?.twoFactorRedirect, true);
+    const forceBefore = await runtimePool.query<{ sessions: string; challenges: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM "zzsh_auth_admin"."session" WHERE "userId" = $1) AS sessions,
+          (SELECT count(*)::text FROM "zzsh_auth_admin"."verification" WHERE "value" = $1 OR "identifier" = ANY($2::text[])) AS challenges`,
+      [forceTargetId, forceIdentifiers],
+    );
+    assert.equal(forceBefore.rows[0]?.sessions, "2");
+    assert.equal(Number(forceBefore.rows[0]?.challenges), 1);
+    assert.equal((await request(base, "/api/v1/admin/security/admins/force-logout", { targetAdminId: forceTargetId, password: freezer.password, totpCode: totpCode(freezer.secret), reason: "普通管理员不得强制登出" }, freezer.jar, ADMIN_ORIGIN)).response.status, 403);
+    assert.equal((await request(base, "/api/v1/admin/security/admins/force-logout", { targetAdminId: adminId, password: freezer.password, totpCode: totpCode(freezer.secret), reason: "普通管理员不得控制 Boss" }, freezer.jar, ADMIN_ORIGIN)).response.status, 403);
+    const forceLogout = await request(base, "/api/bff/admin/security/admins/force-logout", {
+      targetAdminId: forceTargetId,
+      password: BOSS_ONE_PASSWORD,
+      totpCode: totpCode(secret),
+      reason: "撤销遗失设备与未完成登录",
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(forceLogout.response.status, 200);
+    assert.equal(forceLogout.body?.status, "SESSIONS_REVOKED");
+    assert.equal(forceLogout.body?.target?.accountStatus, "ACTIVE");
+    const forceAfter = await runtimePool.query<{ status: string; suspended: boolean; sessions: string; challenges: string; audits: string }>(
+      `SELECT s."status", u."suspended",
+         (SELECT count(*)::text FROM "zzsh_auth_admin"."session" WHERE "userId" = $1) AS sessions,
+          (SELECT count(*)::text FROM "zzsh_auth_admin"."verification" WHERE "value" = $1 OR "identifier" = ANY($2::text[])) AS challenges,
+         (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'admin.session.force_logged_out' AND "object_id" = $1) AS audits
+       FROM "zzsh_iam"."admin_security" s JOIN "zzsh_auth_admin"."user" u ON u."id" = s."admin_user_id"
+      WHERE s."admin_user_id" = $1`,
+      [forceTargetId, forceIdentifiers],
+    );
+    assert.deepEqual(forceAfter.rows[0], { status: "ACTIVE", suspended: false, sessions: "0", challenges: "0", audits: "1" });
+    assert.equal((await request(base, "/api/auth/admin/get-session", undefined, forceTarget.jar, ADMIN_ORIGIN)).body, null);
+    assert.equal((await request(base, "/api/auth/admin/get-session", undefined, cookieJar(), ADMIN_ORIGIN, forceOtherBearer)).body, null);
+    assert.ok((await request(base, "/api/auth/admin/two-factor/verify-totp", { code: totpCode(forceTarget.secret) }, forceChallenge, ADMIN_ORIGIN)).response.status >= 400);
+    const forceNewLogin = cookieJar();
+    assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username: forceTargetCreate.body?.username, password: forceTarget.password }, forceNewLogin, ADMIN_ORIGIN)).body?.twoFactorRedirect, true);
+    assert.equal((await request(base, "/api/auth/admin/two-factor/verify-totp", { code: totpCode(forceTarget.secret) }, forceNewLogin, ADMIN_ORIGIN)).response.status, 200);
+    assert.ok((await request(base, "/api/auth/admin/get-session", undefined, forceNewLogin, ADMIN_ORIGIN)).body?.user?.id);
+
+    const forceRollbackChallenge = cookieJar();
+    assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username: forceTargetCreate.body?.username, password: forceTarget.password }, forceRollbackChallenge, ADMIN_ORIGIN)).body?.twoFactorRedirect, true);
+    const forceRollbackBefore = await runtimePool.query<{ sessions: string; challenges: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM "zzsh_auth_admin"."session" WHERE "userId" = $1) AS sessions,
+          (SELECT count(*)::text FROM "zzsh_auth_admin"."verification" WHERE "value" = $1 OR "identifier" = ANY($2::text[])) AS challenges`,
+      [forceTargetId, forceIdentifiers],
+    );
+    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const failedForceLogout = await request(base, "/api/bff/admin/security/admins/force-logout", {
+      targetAdminId: forceTargetId,
+      password: BOSS_ONE_PASSWORD,
+      totpCode: totpCode(secret),
+      reason: "审计失败时不得半执行登出",
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(failedForceLogout.response.status, 500);
+    await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+    const forceRollbackAfter = await runtimePool.query<{ sessions: string; challenges: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM "zzsh_auth_admin"."session" WHERE "userId" = $1) AS sessions,
+          (SELECT count(*)::text FROM "zzsh_auth_admin"."verification" WHERE "value" = $1 OR "identifier" = ANY($2::text[])) AS challenges`,
+      [forceTargetId, forceIdentifiers],
+    );
+    assert.deepEqual(forceRollbackAfter.rows[0], forceRollbackBefore.rows[0]);
+    assert.ok((await request(base, "/api/auth/admin/get-session", undefined, forceNewLogin, ADMIN_ORIGIN)).body?.user?.id);
+
+    const readerSnapshot = await request(base, "/api/bff/admin/session", undefined, reader.jar, ADMIN_ORIGIN);
+    assert.equal(readerSnapshot.body?.permissions?.includes("admin.account.read"), true);
+    assert.equal(readerSnapshot.body?.permissions?.includes("admin.account.create"), false);
+    const readerCreateDenied = await request(base, "/api/v1/admin/security/admins/create", { name: "越权创建" }, reader.jar, ADMIN_ORIGIN);
+    assert.equal(readerCreateDenied.response.status, 403);
+    const readerUpdateDenied = await request(base, "/api/v1/admin/security/admins/update", {
+      username: targetCreate.body?.username,
+      name: "横向改名",
+    }, reader.jar, ADMIN_ORIGIN);
+    assert.equal(readerUpdateDenied.response.status, 403);
+    const readerGrantDenied = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: targetCreate.body?.username,
+      allowPermissions: ["admin.account.freeze"],
+    }, reader.jar, ADMIN_ORIGIN);
+    assert.equal(readerGrantDenied.response.status, 403);
+    const overGrant = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "越权委派",
+      allowPermissions: ["admin.account.freeze"],
+    }, reader.jar, ADMIN_ORIGIN);
+    assert.equal(overGrant.response.status, 403);
+    const overRole = await request(base, "/api/v1/admin/security/roles/update", {
+      code: "directory_reader",
+      permissionCodes: ["admin.account.read", "admin.account.freeze"],
+    }, reader.jar, ADMIN_ORIGIN);
+    assert.equal(overRole.response.status, 403);
+
+    const deniedFreeze = await request(base, "/api/v1/admin/security/freeze", {
+      targetAdminId: targetCreate.body?.id,
+      password: denied.password,
+      totpCode: totpCode(denied.secret),
+      reason: "个人禁止应优先于角色授权",
+    }, denied.jar, ADMIN_ORIGIN);
+    assert.equal(deniedFreeze.response.status, 403);
+    const staffFreeze = await request(base, "/api/v1/admin/security/freeze", {
+      targetAdminId: targetCreate.body?.id,
+      password: freezer.password,
+      totpCode: totpCode(freezer.secret),
+      reason: "获授权员工冻结普通账号",
+    }, freezer.jar, ADMIN_ORIGIN);
+    assert.equal(staffFreeze.response.status, 200);
+    const staffFreezeBoss = await request(base, "/api/v1/admin/security/freeze", {
+      targetAdminId: adminId,
+      password: freezer.password,
+      totpCode: totpCode(freezer.secret),
+      reason: "普通冻结权限不能控制 Boss",
+    }, freezer.jar, ADMIN_ORIGIN);
+    assert.equal(staffFreezeBoss.response.status, 403);
+    assert.equal((await request(base, "/api/v1/admin/security/unfreeze", {
+      targetAdminId: targetCreate.body?.id,
+      password: freezer.password,
+      totpCode: totpCode(freezer.secret),
+      reason: "获授权员工解冻普通账号",
+    }, freezer.jar, ADMIN_ORIGIN)).response.status, 200);
+
+    const createBossRejected = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "伪 Boss",
+      isBoss: true,
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(createBossRejected.response.status, 400);
+    const assignBossRejected = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: adminUsername,
+      roleIds: [opsRole.id],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(assignBossRejected.response.status, 403);
+
+    const revokedRole = await request(base, "/api/v1/admin/security/roles/update", {
+      code: "ops",
+      permissionCodes: ["admin.account.read"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(revokedRole.response.status, 200);
+    const freezerAfterRevoke = await request(base, "/api/bff/admin/session", undefined, freezer.jar, ADMIN_ORIGIN);
+    assert.equal(freezerAfterRevoke.body?.permissions?.includes("admin.account.freeze"), false);
+    const freezeAfterRevoke = await request(base, "/api/v1/admin/security/freeze", {
+      targetAdminId: targetCreate.body?.id,
+      password: freezer.password,
+      totpCode: totpCode(freezer.secret),
+      reason: "撤权后应立即失效",
+    }, freezer.jar, ADMIN_ORIGIN);
+    assert.equal(freezeAfterRevoke.response.status, 403);
+
+    const renamed = await request(base, "/api/v1/admin/security/admins/update", {
+      username: readerCreate.body?.username,
+      name: "只读员工已改名",
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(renamed.response.status, 200);
+    const detail = await request(base, `/api/bff/admin/security/admins/detail?username=${readerCreate.body?.username}`, undefined, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(detail.response.status, 200);
+    assert.equal(detail.body?.name, "只读员工已改名");
+    assert.equal(detail.body?.id === readerCreate.body?.id, true);
+    assert.equal("temporaryPassword" in (detail.body ?? {}), false);
+
+    const privilegedRole = await request(base, "/api/v1/admin/security/roles/create", {
+      code: "privileged_ops",
+      name: "高权限运营",
+      permissionCodes: ["admin.account.read", "admin.account.freeze", "admin.account.unfreeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(privilegedRole.response.status, 200);
+    assert.equal((await request(base, "/api/v1/admin/security/roles/update", {
+      code: "privileged_ops",
+      status: "DISABLED",
+    }, adminOneActive, ADMIN_ORIGIN)).response.status, 200);
+    const configurerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "角色配置员",
+      allowPermissions: ["admin.account.read", "admin.role.read", "admin.role.configure"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(configurerCreate.response.status, 200);
+    const configurer = await completeStaffEnrollment(base, configurerCreate.body?.username as string, configurerCreate.body?.temporaryPassword as string);
+    const enableStatusOnly = await request(base, "/api/v1/admin/security/roles/update", {
+      code: "privileged_ops",
+      status: "ACTIVE",
+    }, configurer.jar, ADMIN_ORIGIN);
+    assert.equal(enableStatusOnly.response.status, 403);
+    const enableSameCodes = await request(base, "/api/v1/admin/security/roles/update", {
+      code: "privileged_ops",
+      status: "ACTIVE",
+      permissionCodes: ["admin.account.read", "admin.account.freeze", "admin.account.unfreeze"],
+    }, configurer.jar, ADMIN_ORIGIN);
+    assert.equal(enableSameCodes.response.status, 403);
+    const bossEnable = await request(base, "/api/v1/admin/security/roles/update", {
+      code: "privileged_ops",
+      status: "ACTIVE",
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(bossEnable.response.status, 200);
+
+    const deniedReaderCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "目录只读并禁止权限字段",
+      allowPermissions: ["admin.account.read", "admin.role.read", "admin.permission.read"],
+      denyPermissions: ["admin.role.read", "admin.permission.read"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(deniedReaderCreate.response.status, 200);
+    const deniedReader = await completeStaffEnrollment(base, deniedReaderCreate.body?.username as string, deniedReaderCreate.body?.temporaryPassword as string);
+    const deniedRoles = await request(base, "/api/v1/admin/security/roles", undefined, deniedReader.jar, ADMIN_ORIGIN);
+    assert.equal(deniedRoles.response.status, 403);
+    const deniedBffRoles = await request(base, "/api/bff/admin/security/roles", undefined, deniedReader.jar, ADMIN_ORIGIN);
+    assert.equal(deniedBffRoles.response.status, 403);
+    const deniedList = await request(base, "/api/v1/admin/security/admins", undefined, deniedReader.jar, ADMIN_ORIGIN);
+    assert.equal(deniedList.response.status, 200);
+    assert.equal(deniedList.body?.admins?.some((entry: Record<string, unknown>) => "roles" in entry), false);
+    const deniedDetail = await request(base, `/api/v1/admin/security/admins/detail?username=${readerCreate.body?.username}`, undefined, deniedReader.jar, ADMIN_ORIGIN);
+    assert.equal(deniedDetail.response.status, 200);
+    assert.equal("roles" in (deniedDetail.body ?? {}), false);
+    assert.equal("allowPermissions" in (deniedDetail.body ?? {}), false);
+    assert.equal("denyPermissions" in (deniedDetail.body ?? {}), false);
+    assert.equal("effectivePermissions" in (deniedDetail.body ?? {}), false);
+    const deniedBffDetail = await request(base, `/api/bff/admin/security/admins/detail?username=${readerCreate.body?.username}`, undefined, deniedReader.jar, ADMIN_ORIGIN);
+    assert.equal(deniedBffDetail.response.status, 200);
+    assert.equal("roles" in (deniedBffDetail.body ?? {}), false);
+    assert.equal("allowPermissions" in (deniedBffDetail.body ?? {}), false);
+    const permissionOnlyCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "仅权限目录",
+      allowPermissions: ["admin.account.read", "admin.role.read", "admin.permission.read"],
+      denyPermissions: ["admin.role.read"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    const permissionOnly = await completeStaffEnrollment(base, permissionOnlyCreate.body?.username as string, permissionOnlyCreate.body?.temporaryPassword as string);
+    const permissionOnlyRoles = await request(base, "/api/bff/admin/security/roles", undefined, permissionOnly.jar, ADMIN_ORIGIN);
+    assert.equal(permissionOnlyRoles.response.status, 200);
+    assert.equal(permissionOnlyRoles.body?.roles?.length, 0);
+    assert.ok((permissionOnlyRoles.body?.permissions?.length ?? 0) > 0);
+    const roleOnlyCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "仅角色目录",
+      allowPermissions: ["admin.account.read", "admin.role.read", "admin.permission.read"],
+      denyPermissions: ["admin.permission.read"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    const roleOnly = await completeStaffEnrollment(base, roleOnlyCreate.body?.username as string, roleOnlyCreate.body?.temporaryPassword as string);
+    const roleOnlyRoles = await request(base, "/api/v1/admin/security/roles", undefined, roleOnly.jar, ADMIN_ORIGIN);
+    assert.equal(roleOnlyRoles.response.status, 200);
+    assert.ok((roleOnlyRoles.body?.roles?.length ?? 0) > 0);
+    assert.equal(roleOnlyRoles.body?.permissions?.length, 0);
+
+    const raceRole = await request(base, "/api/v1/admin/security/roles/create", {
+      code: "race_ops",
+      name: "并发撤权角色",
+      permissionCodes: ["admin.account.read", "admin.account.freeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(raceRole.response.status, 200);
+    const racerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+      name: "并发写操作员工",
+      roleIds: [raceRole.body?.id],
+      allowPermissions: ["admin.account.create", "admin.permission.grant", "admin.role.configure", "admin.role.read"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    const racer = await completeStaffEnrollment(base, racerCreate.body?.username as string, racerCreate.body?.temporaryPassword as string);
+    const raceCreate = await withHeldRoleLock(
+      runtimePool,
+      raceRole.body?.id as string,
+      () => request(base, "/api/v1/admin/security/admins/create", {
+        name: "并发创建目标",
+        allowPermissions: ["admin.account.freeze"],
+      }, racer.jar, ADMIN_ORIGIN),
+      async (client) => {
+        await client.query(
+          `DELETE FROM "zzsh_iam"."admin_role_permission" WHERE "role_id" = $1 AND "permission_code" = 'admin.account.freeze'`,
+          [raceRole.body?.id],
+        );
+      },
+    );
+    assert.equal(raceCreate.response.status, 403);
+    await request(base, "/api/v1/admin/security/roles/update", {
+      code: "race_ops",
+      permissionCodes: ["admin.account.read", "admin.account.freeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    const raceAssign = await withHeldRoleLock(
+      runtimePool,
+      raceRole.body?.id as string,
+      () => request(base, "/api/v1/admin/security/admins/assign", {
+        username: targetCreate.body?.username,
+        allowPermissions: ["admin.account.freeze"],
+      }, racer.jar, ADMIN_ORIGIN),
+      async (client) => {
+        await client.query(
+          `DELETE FROM "zzsh_iam"."admin_role_permission" WHERE "role_id" = $1 AND "permission_code" = 'admin.account.freeze'`,
+          [raceRole.body?.id],
+        );
+      },
+    );
+    assert.equal(raceAssign.response.status, 403);
+    await request(base, "/api/v1/admin/security/roles/update", {
+      code: "privileged_ops",
+      status: "DISABLED",
+      permissionCodes: ["admin.account.read", "admin.account.freeze", "admin.account.unfreeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    const raceEnable = await withHeldRoleLock(
+      runtimePool,
+      privilegedRole.body?.id as string,
+      () => request(base, "/api/v1/admin/security/roles/update", {
+        code: "privileged_ops",
+        status: "ACTIVE",
+      }, configurer.jar, ADMIN_ORIGIN),
+      async () => undefined,
+    );
+    assert.equal(raceEnable.response.status, 403);
 
     const recoveryTargetChallenge = cookieJar();
     const recoveryTargetLogin = await request(base, "/api/auth/admin/sign-in/username", { username: adminUsername, password: BOSS_ONE_PASSWORD }, recoveryTargetChallenge, ADMIN_ORIGIN);

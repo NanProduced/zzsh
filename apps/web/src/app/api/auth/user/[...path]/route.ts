@@ -3,6 +3,19 @@ import { randomUUID } from "node:crypto";
 const LOCAL_ONLY = process.env.NODE_ENV !== "production";
 const API_ORIGIN = process.env.ZZSH_API_ORIGIN ?? (LOCAL_ONLY ? "http://127.0.0.1:3102" : "");
 const WEB_ORIGIN = process.env.ZZSH_WEB_ORIGIN ?? (LOCAL_ONLY ? "http://127.0.0.1:3100" : "");
+const MAX_BODY_BYTES = 64 * 1024;
+const UPSTREAM_TIMEOUT_MS = 5_000;
+
+function isHttpOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+const ORIGIN_CONFIGURATION_VALID = isHttpOrigin(API_ORIGIN) && isHttpOrigin(WEB_ORIGIN);
 const USER_AUTH_PATHS = new Set([
   "/get-session",
   "/sign-in/username",
@@ -13,6 +26,17 @@ const USER_AUTH_PATHS = new Set([
   "/phone-number/verify",
   "/phone-number/request-password-reset",
   "/phone-number/reset-password",
+  "/identity/status",
+  "/identity/verify",
+  "/trade-eligibility/check",
+  "/account/deactivate",
+  "/account/cancel",
+]);
+const USER_SECURITY_POST_PATHS = new Set([
+  "/identity/verify",
+  "/trade-eligibility/check",
+  "/account/deactivate",
+  "/account/cancel",
 ]);
 const RESPONSE_HEADERS = new Set([
   "cache-control",
@@ -23,6 +47,39 @@ const RESPONSE_HEADERS = new Set([
   "x-ratelimit-reset",
 ]);
 const USER_COOKIE = /^(?:__Secure-|__Host-)?zzsh_user\.(?:session_token(?:\.\d+)?|dont_remember)$/;
+
+class BodyTooLargeError extends Error {}
+class BodyReadError extends Error {}
+
+async function readBoundedBody(request: Request): Promise<ArrayBuffer> {
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) throw new BodyTooLargeError();
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (error instanceof BodyTooLargeError) throw error;
+    throw new BodyReadError();
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
 
 function userCookies(value: string | null): string | undefined {
   const cookies = (value ?? "").split(";").map((part) => part.trim()).filter((part) => USER_COOKIE.test(part.split("=", 1)[0] ?? ""));
@@ -38,7 +95,8 @@ function sanitizeResponse(value: unknown): unknown {
 function copySetCookies(source: Headers): string[] {
   const headers = source as Headers & { getSetCookie?: () => string[] };
   const cookie = source.get("set-cookie");
-  return headers.getSetCookie?.() ?? (cookie ? [cookie] : []);
+  const values = headers.getSetCookie?.() ?? (cookie ? [cookie] : []);
+  return values.filter((value) => USER_COOKIE.test(value.split("=", 1)[0]?.trim() ?? ""));
 }
 
 function errorResponse(status: number, code: string, requestId: string): Response {
@@ -47,10 +105,13 @@ function errorResponse(status: number, code: string, requestId: string): Respons
 
 async function forward(request: Request, { params }: { params: Promise<{ path: string[] }> }): Promise<Response> {
   const requestId = request.headers.get("x-request-id") ?? `req_web_${randomUUID().replaceAll("-", "")}`;
+  if (!ORIGIN_CONFIGURATION_VALID) return errorResponse(503, "INTERNAL_ERROR", requestId);
   const { path } = await params;
   const authPath = `/${path.join("/")}`;
   if (!USER_AUTH_PATHS.has(authPath)) return errorResponse(404, "NOT_FOUND", requestId);
   const method = request.method.toUpperCase();
+  const expectedSecurityMethod = authPath === "/identity/status" ? "GET" : USER_SECURITY_POST_PATHS.has(authPath) ? "POST" : undefined;
+  if (expectedSecurityMethod && method !== expectedSecurityMethod) return errorResponse(404, "NOT_FOUND", requestId);
   if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
   const headers = new Headers({ Origin: WEB_ORIGIN, "X-Request-Id": requestId });
   const cookie = userCookies(request.headers.get("cookie"));
@@ -58,10 +119,21 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   const contentType = request.headers.get("content-type");
   if (contentType?.toLowerCase().startsWith("application/json")) headers.set("Content-Type", "application/json");
   let body: ArrayBuffer | undefined;
-  if (method !== "GET" && method !== "HEAD") body = await request.arrayBuffer();
+  if (method !== "GET" && method !== "HEAD") {
+    const rawLength = request.headers.get("content-length");
+    const contentLength = rawLength === null ? undefined : Number(rawLength);
+    if (contentLength !== undefined && (!Number.isSafeInteger(contentLength) || contentLength < 0 || contentLength > MAX_BODY_BYTES)) {
+      return errorResponse(413, "INVALID_ARGUMENT", requestId);
+    }
+    try {
+      body = await readBoundedBody(request);
+    } catch (error) {
+      return errorResponse(error instanceof BodyTooLargeError ? 413 : 400, "INVALID_ARGUMENT", requestId);
+    }
+  }
   let upstream: Response;
   try {
-    upstream = await fetch(new URL(`/api/auth/user${authPath}`, API_ORIGIN), { method, headers, body, cache: "no-store" });
+    upstream = await fetch(new URL(`/api/auth/user${authPath}`, API_ORIGIN), { method, headers, body, cache: "no-store", signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   } catch {
     return errorResponse(503, "INTERNAL_ERROR", requestId);
   }
@@ -70,7 +142,12 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   for (const cookieValue of copySetCookies(upstream.headers)) responseHeaders.append("Set-Cookie", cookieValue);
   responseHeaders.set("Cache-Control", "no-store");
   responseHeaders.set("X-Request-Id", requestId);
-  const text = method === "HEAD" ? "" : await upstream.text();
+  let text: string;
+  try {
+    text = method === "HEAD" ? "" : await upstream.text();
+  } catch {
+    return errorResponse(502, "INTERNAL_ERROR", requestId);
+  }
   if (!text) return new Response(null, { status: upstream.status, headers: responseHeaders });
   let payload: unknown;
   try { payload = sanitizeResponse(JSON.parse(text)); } catch { return errorResponse(502, "INTERNAL_ERROR", requestId); }

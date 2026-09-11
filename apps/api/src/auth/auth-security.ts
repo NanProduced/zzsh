@@ -3,6 +3,42 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
+import {
+  ADMIN_PERMISSION,
+  fieldAccessFrom,
+  hasPermission,
+  loadEffectiveAdminAccess,
+} from "./admin-authorization";
+import {
+  assignAdministratorAccess,
+  createAdministrator,
+  createRole,
+  listAdministrators,
+  listRolesAndCatalog,
+  lockActor,
+  nextAdminLogin,
+  readAdministratorDetail,
+  requireDirectoryPermission,
+  updateAdministrator,
+  updateRole,
+} from "./admin-directory";
+import {
+  recordAudit,
+  SecurityApiError,
+  setAuditContext,
+  withTransaction,
+} from "./security-core";
+import { handleAdminApprovalRoute } from "./approval-audit";
+import { handleAdminAuditRoute } from "./admin-audit";
+import {
+  handleUserIdentityRoute,
+  listRestorableUsers,
+  restoreDeactivatedUserAccount,
+  type RealNameProvider,
+  type UserObligationReader,
+} from "./user-identity";
+
+export { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 
 export type AuthSecurityNodeRequest = {
   method?: string;
@@ -77,6 +113,9 @@ export type AuthSecurityOptions = {
   verifyPassword: PasswordVerifier;
   rateLimitState: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget: { inFlight: number };
+  realNameProvider: RealNameProvider;
+  userObligationReader: UserObligationReader;
+  testOperationsEnabled: boolean;
 };
 
 type Credentials = {
@@ -85,25 +124,13 @@ type Credentials = {
   malformed: boolean;
 };
 
-type AdminContext = {
+export type AdminContext = {
   userId: string;
   sessionId: string;
   credentials: Credentials;
   security: { status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN"; isBoss: boolean; passwordChangeRequired: boolean };
   sessionLocked: boolean;
 };
-
-type AuditOutcome = "SUCCESS" | "FAILURE";
-
-export class SecurityApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: (typeof API_V1_ERROR_CODES)[keyof typeof API_V1_ERROR_CODES],
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 const SECURITY_ADVISORY_LOCK = 805101;
 const RECOVERY_TTL_MS = 10 * 60 * 1000;
@@ -224,6 +251,15 @@ export async function preflightAuthRealmSecurity(
   if (current?.user?.suspended && path !== "/sign-out") {
     return new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Account unavailable");
   }
+  if (options.realm === "user" && current?.user?.id && path !== "/sign-out") {
+    const state = await options.pool.query<{ accountStatus: string }>(
+      `SELECT "account_status" AS "accountStatus" FROM "zzsh_iam"."user_identity_state" WHERE "user_id" = $1`,
+      [current.user.id],
+    );
+    if (state.rows[0]?.accountStatus && state.rows[0].accountStatus !== "ACTIVE") {
+      return new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Account unavailable");
+    }
+  }
   if (options.realm !== "admin") return null;
   if (current?.user?.id) {
     const security = await readAdminSecurity(options.pool, current.user.id);
@@ -333,7 +369,7 @@ async function readAdminSecurity(pool: Pool | PoolClient, userId: string): Promi
   return result.rows[0] ?? null;
 }
 
-async function readAdminContext(
+export async function readAdminContext(
   request: AuthSecurityNodeRequest,
   options: AuthSecurityOptions,
   mode: { allowPending?: boolean; allowLocked?: boolean } = {},
@@ -375,6 +411,7 @@ export type AdminSessionSnapshot =
       user: { name?: string; email?: string; username?: string; displayUsername?: string; twoFactorEnabled: boolean };
       security: { status: AdminContext["security"]["status"]; isBoss: boolean; passwordChangeRequired: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
+      permissions: string[];
     };
 
 function isoDate(value: unknown): string | null {
@@ -398,6 +435,7 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
     `SELECT "pinHash" IS NOT NULL AS "pinConfigured" FROM "zzsh_auth_admin"."session" WHERE "id" = $1`,
     [sessionId],
   );
+  const access = await loadEffectiveAdminAccess(options.pool, userId);
   return {
     authenticated: true,
     adminUserId: userId,
@@ -416,70 +454,8 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
       createdAt: isoDate(current.session?.createdAt),
       expiresAt: isoDate(current.session?.expiresAt),
     },
+    permissions: access ? [...access.permissions].sort() : [],
   };
-}
-
-export async function withTransaction<T>(pool: Pool, callback: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await callback(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    try { await client.query("ROLLBACK"); } catch { /* preserve the primary error */ }
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-export async function setAuditContext(
-  client: PoolClient,
-  actorType: string,
-  actorId: string | undefined,
-  sessionId: string | undefined,
-  requestId: string,
-): Promise<void> {
-  await client.query(
-    "SELECT set_config('zzsh.actor_type', $1, true), set_config('zzsh.actor_id', $2, true), set_config('zzsh.session_id', $3, true), set_config('zzsh.request_id', $4, true)",
-    [actorType, actorId ?? "", sessionId ?? "", requestId],
-  );
-}
-
-export async function recordAudit(
-  client: PoolClient,
-  values: {
-    actorType: string;
-    actorId?: string;
-    sessionId?: string;
-    action: string;
-    objectType: string;
-    objectId?: string;
-    outcome: AuditOutcome;
-    requestId: string;
-    reason?: string;
-    details?: Record<string, unknown>;
-  },
-): Promise<void> {
-  await client.query(
-    `INSERT INTO "zzsh_iam"."audit_event"
-      ("id", "actor_type", "actor_id", "session_id", "action", "object_type", "object_id", "outcome", "request_id", "reason", "occurred_at", "details")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp(), $11::jsonb)`,
-    [
-      `audit_${randomUUID().replaceAll("-", "")}`,
-      values.actorType,
-      values.actorId ?? null,
-      values.sessionId ?? null,
-      values.action,
-      values.objectType,
-      values.objectId ?? null,
-      values.outcome,
-      values.requestId,
-      values.reason ?? null,
-      JSON.stringify(values.details ?? {}),
-    ],
-  );
 }
 
 export async function queueAdminSecurityNotification(
@@ -671,19 +647,6 @@ async function verifyAdminReauthentication(
   }
 }
 
-async function nextAdminLogin(client: PoolClient): Promise<{ username: string; displayUsername: string }> {
-  for (;;) {
-    const sequence = await client.query<{ value: string }>(
-      `SELECT nextval('"zzsh_iam"."admin_login_number_seq"')::text AS value`,
-    );
-    const value = sequence.rows[0]?.value;
-    if (!value) throw new Error("administrator login sequence is unavailable");
-    const username = `zz${value.padStart(5, "0")}`;
-    const existing = await client.query(`SELECT 1 FROM "zzsh_auth_admin"."user" WHERE "username" = $1`, [username]);
-    if (existing.rows.length === 0) return { username, displayUsername: username.toUpperCase() };
-  }
-}
-
 async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
   if (!options.adminBootstrapSecret) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Controlled bootstrap is unavailable");
   const body = bodyOf(request);
@@ -788,7 +751,12 @@ async function activateEnrollment(request: NodeRequest, response: NodeResponse, 
       throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator bootstrap has expired");
     }
     await client.query(`UPDATE "zzsh_iam"."admin_security"
-       SET "status" = 'ACTIVE', "bootstrap_expires_at" = NULL, "bootstrap_used_at" = clock_timestamp(), "first_activated_at" = COALESCE("first_activated_at", clock_timestamp()), "updated_at" = clock_timestamp()
+       SET "status" = 'ACTIVE',
+           "bootstrap_expires_at" = NULL,
+           "bootstrap_used_at" = clock_timestamp(),
+           "first_activated_at" = COALESCE("first_activated_at", clock_timestamp()),
+           "last_full_authenticated_at" = clock_timestamp(),
+           "updated_at" = clock_timestamp()
        WHERE "admin_user_id" = $1`, [context.userId]);
     await recordAudit(client, {
       actorType: "admin",
@@ -922,7 +890,8 @@ async function unlockPin(request: NodeRequest, response: NodeResponse, requestId
 
 async function changeAdminFreezeState(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions, state: "FROZEN" | "ACTIVE"): Promise<void> {
   const context = await readAdminContext(request, options);
-  await requireBoss(context, options);
+  const requiredPermission = state === "FROZEN" ? ADMIN_PERMISSION.accountFreeze : ADMIN_PERMISSION.accountUnfreeze;
+  await requireDirectoryPermission(options.pool, context.userId, requiredPermission);
   const body = bodyOf(request);
   const targetAdminId = stringField(body, "targetAdminId", 128);
   const reason = reasonField(body);
@@ -930,19 +899,19 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
   if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "A boss cannot change its own availability");
   const result = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
-    // Freeze lock order: actor security -> target security -> target user -> recovery requests -> sessions.
-    const actor = await client.query<{ status: AdminContext["security"]["status"]; isBoss: boolean }>(
-      `SELECT "status", "is_boss" AS "isBoss" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
-      [context.userId],
-    );
-    if (!actor.rows[0]?.isBoss || actor.rows[0].status !== "ACTIVE") {
-      throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss permission required");
+    // Freeze lock order: actor security -> actor roles -> target security -> target user -> recovery requests -> sessions.
+    const actorAccess = await lockActor(client, context.userId);
+    if (!hasPermission(actorAccess, requiredPermission)) {
+      throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Permission required");
     }
-    const target = await client.query<{ status: AdminContext["security"]["status"]; firstActivatedAt: Date | null }>(
-      `SELECT "status", "first_activated_at" AS "firstActivatedAt" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
+    const target = await client.query<{ status: AdminContext["security"]["status"]; isBoss: boolean; firstActivatedAt: Date | null }>(
+      `SELECT "status", "is_boss" AS "isBoss", "first_activated_at" AS "firstActivatedAt" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
       [targetAdminId],
     );
     if (!target.rows[0]) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+    if (target.rows[0].isBoss && !actorAccess.isBoss) {
+      throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be modified by this operation");
+    }
     const targetUser = await client.query<{ twoFactorEnabled: boolean }>(
       `SELECT "twoFactorEnabled" FROM "zzsh_auth_admin"."user" WHERE "id" = $1 FOR UPDATE`,
       [targetAdminId],
@@ -958,11 +927,12 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
     } else {
       if (target.rows[0].status !== "FROZEN") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator is not frozen");
       const nextStatus = targetUser.rows[0].twoFactorEnabled && target.rows[0].firstActivatedAt ? "ACTIVE" : "PENDING_ENROLLMENT";
+      const pendingWindow = target.rows[0].isBoss ? "15 minutes" : "7 days";
       await client.query(`UPDATE "zzsh_iam"."admin_security"
          SET "status" = $1,
-             "bootstrap_expires_at" = CASE WHEN $1 = 'PENDING_ENROLLMENT' AND ("bootstrap_expires_at" IS NULL OR "bootstrap_expires_at" <= clock_timestamp()) THEN clock_timestamp() + interval '15 minutes' ELSE "bootstrap_expires_at" END,
+             "bootstrap_expires_at" = CASE WHEN $1 = 'PENDING_ENROLLMENT' AND ("bootstrap_expires_at" IS NULL OR "bootstrap_expires_at" <= clock_timestamp()) THEN clock_timestamp() + $3::interval ELSE "bootstrap_expires_at" END,
              "updated_at" = clock_timestamp()
-         WHERE "admin_user_id" = $2`, [nextStatus, targetAdminId]);
+         WHERE "admin_user_id" = $2`, [nextStatus, targetAdminId, pendingWindow]);
       resultingStatus = nextStatus;
     }
     const event = state === "FROZEN" ? "admin.frozen" : "admin.unfrozen";
@@ -975,25 +945,165 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
   sendSuccess(response, { status: result.status }, requestId);
 }
 
-async function listAdminDirectory(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+async function listRestorableUserCandidates(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.userAccountRestore);
+  const search = queryValue(request, "query");
+  if (!search) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Search text is required");
+  sendSuccess(response, await listRestorableUsers(options.pool, search), requestId);
+}
+
+async function restoreUserAccount(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const body = bodyOf(request);
+  const targetUserId = stringField(body, "targetUserId", 128);
+  const reason = reasonField(body);
+  await verifyAdminReauthentication(request, context, body, options);
+  const result = await restoreDeactivatedUserAccount(context, targetUserId, reason, requestId, options);
+  sendSuccess(response, {
+    status: result.status,
+    target: { id: result.id, username: result.username, name: result.name },
+    revokedSessions: result.revokedSessions,
+    revokedVerifications: result.revokedVerifications,
+    message: "用户账号已恢复为 ACTIVE；旧会话和验证凭据不会复活，请让用户重新登录。",
+  }, requestId);
+}
+
+async function forceLogoutAdmin(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
   const context = await readAdminContext(request, options);
   await requireBoss(context, options);
-  const result = await options.pool.query<{
-    adminId: string;
-    username: string | null;
-    displayName: string;
-    status: AdminContext["security"]["status"];
-  }>(
-    `SELECT u."id" AS "adminId",
-        COALESCE(NULLIF(u."displayUsername", ''), UPPER(u."username")) AS "username",
-        u."name" AS "displayName", s."status"
-       FROM "zzsh_auth_admin"."user" u
-       JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = u."id"
-      ORDER BY u."name", u."username"`,
-  );
+  const body = bodyOf(request);
+  const targetAdminId = stringField(body, "targetAdminId", 128);
+  const reason = reasonField(body);
+  await verifyAdminReauthentication(request, context, body, options);
+  if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot force-log out its own session");
+  const result = await withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    const actor = await lockActor(client, context.userId);
+    if (!actor.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss permission required");
+    const target = await client.query<{ status: AdminContext["security"]["status"]; isBoss: boolean }>(
+      `SELECT "status", "is_boss" AS "isBoss"
+         FROM "zzsh_iam"."admin_security"
+        WHERE "admin_user_id" = $1
+        FOR UPDATE`,
+      [targetAdminId],
+    );
+    if (!target.rows[0]) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+    if (target.rows[0].isBoss && !actor.isBoss) {
+      throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be controlled by this operation");
+    }
+    const targetUser = await client.query<{ username: string | null; name: string; email: string; phoneNumber: string | null }>(
+      `SELECT "username", "name", "email", "phoneNumber"
+         FROM "zzsh_auth_admin"."user"
+        WHERE "id" = $1
+        FOR UPDATE`,
+      [targetAdminId],
+    );
+    if (!targetUser.rows[0]) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+    const identifiers = [targetAdminId, targetUser.rows[0].email, targetUser.rows[0].phoneNumber].filter((value): value is string => Boolean(value));
+    const sessions = await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [targetAdminId]);
+    const challenges = await client.query(
+      `WITH target_challenges AS (
+         SELECT "identifier" FROM "zzsh_auth_admin"."verification" WHERE "value" = $1
+       )
+       DELETE FROM "zzsh_auth_admin"."verification" AS verification
+        WHERE verification."value" = $1
+           OR verification."identifier" = ANY($2::text[])
+           OR verification."identifier" IN (
+             SELECT '2fa-attempts-' || "identifier" FROM target_challenges
+           )`,
+      [targetAdminId, identifiers],
+    );
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "admin.session.force_logged_out",
+      objectType: "admin_user",
+      objectId: targetAdminId,
+      outcome: "SUCCESS",
+      reason,
+      requestId,
+      details: {
+        revokedSessions: sessions.rowCount,
+        revokedChallenges: challenges.rowCount,
+        accountStatus: target.rows[0].status,
+        accountStatusUnchanged: true,
+      },
+    });
+    return {
+      id: targetAdminId,
+      username: targetUser.rows[0].username ?? targetAdminId,
+      name: targetUser.rows[0].name,
+      status: target.rows[0].status,
+      revokedSessions: sessions.rowCount,
+      revokedChallenges: challenges.rowCount,
+    };
+  });
   sendSuccess(response, {
-    admins: result.rows.map((row) => ({ id: row.adminId, username: row.username ?? "未分配账号", name: row.displayName, status: row.status })),
+    status: "SESSIONS_REVOKED",
+    target: { id: result.id, username: result.username, name: result.name, accountStatus: result.status },
+    revokedSessions: result.revokedSessions,
+    revokedChallenges: result.revokedChallenges,
+    message: "目标管理员的全部设备会话和未完成登录挑战已撤销；账号状态未改变，后续登录仍需密码与 2FA。",
   }, requestId);
+}
+
+async function listAdminDirectory(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const access = await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
+  sendSuccess(response, await listAdministrators(options.pool, fieldAccessFrom(access)), requestId);
+}
+
+async function readAdminDirectoryDetail(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const access = await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
+  const username = queryValue(request, "username");
+  if (!username) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Administrator login is required");
+  sendSuccess(response, await readAdministratorDetail(options.pool, username, fieldAccessFrom(access)), requestId);
+}
+
+async function listAdminRoles(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const access = await loadEffectiveAdminAccess(options.pool, context.userId);
+  const fields = fieldAccessFrom(access);
+  if (!fields.roleRead && !fields.permissionRead) {
+    throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Permission required");
+  }
+  sendSuccess(response, await listRolesAndCatalog(options.pool, fields), requestId);
+}
+
+async function handleCreateAdministrator(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await createAdministrator(context, bodyOf(request), requestId, options), requestId);
+}
+
+async function handleUpdateAdministrator(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await updateAdministrator(context, bodyOf(request), requestId, options), requestId);
+}
+
+async function handleAssignAdministrator(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await assignAdministratorAccess(context, bodyOf(request), requestId, options), requestId);
+}
+
+async function handleCreateRole(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await createRole(context, bodyOf(request), requestId, options), requestId);
+}
+
+async function handleUpdateRole(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await updateRole(context, bodyOf(request), requestId, options), requestId);
+}
+
+function queryValue(request: NodeRequest, name: string): string | undefined {
+  const source = request.originalUrl ?? request.url ?? "";
+  const index = source.indexOf("?");
+  if (index < 0) return undefined;
+  const value = new URLSearchParams(source.slice(index + 1)).get(name);
+  return value && value.length > 0 ? value : undefined;
 }
 
 async function listPendingRecovery(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
@@ -1200,10 +1310,9 @@ async function legacySignIn(request: NodeRequest, response: NodeResponse, reques
   const body = bodyOf(request);
   const username = stringField(body, "username", 64);
   const password = stringField(body, "password", 256);
-  const legacyHash = createHash("md5").update(password, "utf8").digest("hex");
   await withTransaction(options.pool, async (client) => {
-    const account = await client.query<{ id: string; userId: string; legacyPasswordMd5: string | null; suspended: boolean }>(
-      `SELECT a."id", a."userId", a."legacyPasswordMd5", u."suspended"
+    const account = await client.query<{ id: string; userId: string; legacyPasswordMd5: string | null; legacyPasswordVersion: string | null; legacyPasswordSalt: string | null; suspended: boolean }>(
+      `SELECT a."id", a."userId", a."legacyPasswordMd5", a."legacyPasswordVersion", a."legacyPasswordSalt", u."suspended"
        FROM "zzsh_auth_user"."account" a
        JOIN "zzsh_auth_user"."user" u ON u."id" = a."userId"
        WHERE u."username" = $1 AND a."providerId" = 'credential'
@@ -1211,17 +1320,26 @@ async function legacySignIn(request: NodeRequest, response: NodeResponse, reques
       [username],
     );
     const row = account.rows[0];
-    if (!row || !row.legacyPasswordMd5 || row.suspended || !sameSecret(row.legacyPasswordMd5, legacyHash)) {
+    const legacyHash = row?.legacyPasswordVersion === "legacy-md5-v1" && row.legacyPasswordSalt !== null
+      ? createHash("md5").update(password + row.legacyPasswordSalt, "utf8").digest("hex")
+      : row?.legacyPasswordVersion === "legacy-md5-v0"
+        ? createHash("md5").update(password, "utf8").digest("hex")
+        : undefined;
+    if (!row || !row.legacyPasswordMd5 || !legacyHash || row.suspended || !sameSecret(row.legacyPasswordMd5, legacyHash)) {
       throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication failed");
     }
     const passwordHash = await options.hashPassword(password);
     await setAuditContext(client, "user", row.userId, undefined, requestId);
     const updated = await client.query(
-      `UPDATE "zzsh_auth_user"."account" SET "password" = $1, "legacyPasswordMd5" = NULL, "legacyPasswordUpgradedAt" = clock_timestamp(), "updatedAt" = clock_timestamp()
-       WHERE "id" = $2 AND "legacyPasswordMd5" = $3`,
-      [passwordHash, row.id, row.legacyPasswordMd5],
+      `UPDATE "zzsh_auth_user"."account"
+          SET "password" = $1, "legacyPasswordMd5" = NULL, "legacyPasswordVersion" = NULL, "legacyPasswordSalt" = NULL,
+              "legacyPasswordUpgradedAt" = clock_timestamp(), "updatedAt" = clock_timestamp()
+        WHERE "id" = $2 AND "legacyPasswordMd5" = $3 AND "legacyPasswordVersion" = $4
+          AND "legacyPasswordSalt" IS NOT DISTINCT FROM $5`,
+      [passwordHash, row.id, row.legacyPasswordMd5, row.legacyPasswordVersion, row.legacyPasswordSalt],
     );
     if (updated.rowCount !== 1) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Legacy credential was already upgraded");
+    await client.query(`DELETE FROM "zzsh_auth_user"."session" WHERE "userId" = $1`, [row.userId]);
     await recordAudit(client, { actorType: "user", actorId: row.userId, action: "user.legacy_password.upgraded", objectType: "auth_account", objectId: row.id, outcome: "SUCCESS", requestId });
   });
   if (!options.userAuth.api.signInUsername) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Authentication endpoint unavailable");
@@ -1242,9 +1360,14 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
   }
   try {
     const path = routePath(request, "/api/v1/admin/security");
+    if (path.startsWith("/approvals")) return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
+    if (path.startsWith("/audit")) return await handleAdminAuditRoute(request, response, requestId, options, readAdminContext);
     if (request.method === "GET") {
       if (path === "/admins") return await listAdminDirectory(request, response, requestId, options);
+      if (path === "/admins/detail") return await readAdminDirectoryDetail(request, response, requestId, options);
+      if (path === "/roles") return await listAdminRoles(request, response, requestId, options);
       if (path === "/recovery/pending") return await listPendingRecovery(request, response, requestId, options);
+      if (path === "/users/restore-candidates") return await listRestorableUserCandidates(request, response, requestId, options);
       sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
       return;
     }
@@ -1260,6 +1383,13 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     if (path === "/pin/unlock") return await unlockPin(request, response, requestId, options);
     if (path === "/freeze") return await changeAdminFreezeState(request, response, requestId, options, "FROZEN");
     if (path === "/unfreeze") return await changeAdminFreezeState(request, response, requestId, options, "ACTIVE");
+    if (path === "/admins/force-logout") return await forceLogoutAdmin(request, response, requestId, options);
+    if (path === "/users/restore") return await restoreUserAccount(request, response, requestId, options);
+    if (path === "/admins/create") return await handleCreateAdministrator(request, response, requestId, options);
+    if (path === "/admins/update") return await handleUpdateAdministrator(request, response, requestId, options);
+    if (path === "/admins/assign") return await handleAssignAdministrator(request, response, requestId, options);
+    if (path === "/roles/create") return await handleCreateRole(request, response, requestId, options);
+    if (path === "/roles/update") return await handleUpdateRole(request, response, requestId, options);
     if (path === "/recovery/request") return await requestRecovery(request, response, requestId, options);
     if (path === "/recovery/confirm") return await confirmRecovery(request, response, requestId, options);
     if (path === "/recovery/complete") return await completeRecovery(request, response, requestId, options);

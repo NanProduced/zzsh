@@ -33,7 +33,7 @@
 
 - 同一管理壳按登录管理员的权限范围改变首页内容、导航入口、字段可见性和可执行动作。
 - boss 首页强调整体运营与账目数据；运营首页强调审核、供给和运营队列；客服首页强调当前订单、接待、交付和验收上下文。
-- 首页优先显示待处理事项、异常变化和可下钻对象，不把所有数据等量堆成 KPI 卡片。
+- Boss 首页以经营和账目聚合为主，同时突出异常与待办；其他管理员以获授权的处理事项为主。个人布局可以调整，不把所有数据等量堆成 KPI 卡片。
 - 列表、总计、下钻和导出必须使用同一服务端口径与数据范围；前端图表映射不承担资金计算。
 - 审批以可读路径或事件时间线为主，图形为只读预览。候选审批组内任一合格人首个有效批准或拒绝生效；不绘制多人逐级必签，不把批准画成执行或到账。
 
@@ -41,7 +41,7 @@
 
 | 能力 | 本轮决定 | 边界 |
 |---|---|---|
-| 管理壳与基础控件 | shadcn admin dashboard 结构；shadcn/ui 按需采用 | 不为视觉差异引入整套额外 UI 体系 |
+| 管理壳与基础控件 | 引入 PaceUI Free Dashboard 实际源码并适配 React/Vite；shadcn/ui 按需采用 | 保留许可、记录采用范围；不复制 Pro 外链内容，不替换 Better Auth |
 | 常规图表 | Bklit 图表 registry 作为主候选 | 只采用开源图表组件；Bklit Studio 为专有产品，不复制 Studio |
 | 高密度图表 | EvilCharts 按单个图表需要选择 Recharts 或 ECharts | 不同时为同一图表安装两套 engine；先用可读的常规实现，实测需要时再切 Canvas |
 | 普通表格 | shadcn 表格优先 | 先验证筛选、排序、分页、列对齐和行操作，不预装聚合表格 |
@@ -83,12 +83,15 @@
 
 ## References
 
-- Pace UI 深色 dashboard 参考：[模板页](https://paceui.com/templates/free-dashboard-template) · [在线预览](https://paceui.com/preview/templates/free-dashboard)；借鉴黑灰底与多色数据关系，不复制品牌或页面。
+- Pace UI 工作区模板：[源码](https://github.com/paceui/shadcn-nextjs-free-dashboard) · [在线预览](https://paceui.com/preview/templates/free-dashboard)；Owner 已选择直接引入免费模板源码再按业务改造，替换示例品牌与数据。
 - 登录/引导构图参考：[Devl login](https://www.devl.dev/c/auth/login) · [Devl onboarding](https://www.devl.dev/c/auth/onboarding)。
 - 局部 shader 参考：[No Code-Shader library](https://www.nocodeshader.com/library)。
 - 业务与技术事实以 docs/architecture/ 下的公开架构与认证说明为准。
 
 ## Status
 
+- 2026-09-11 确认工作区交互：紧凑多对象标签及刷新恢复；详情按任务使用弹窗、右侧抽屉或独立标签；预设组件支持编辑模式下排序、尺寸、时间配置、保存/取消/恢复默认。个人布局跨设备一致，标签上下文按浏览器保存。
+- 时间默认北京时间今天，组件独立范围明确标注；手动刷新与重新进入更新优先。已实现功能组成权限范围内的默认工作台，经营图表随真实数据接入，不展示假金额。
+- 2026-09-11 首轮工作区壳、多对象标签、M2 正式页和个人布局存储已落地；经营账务图表与 M3–M8 业务仍未实现。这不是里程碑验收。
+
 - Owner 已确认：管理壳、游戏行业科技感但数据优先、深色默认与浅色切换、角色化工作台、桌面完整/移动降级、局部 shader 边界、组件采用边界、代表页范围，以及方案 3 黑灰底＋多色数据方向。
-- 本轮未实现页面、未安装组件、未修改 API/依赖/锁文件、未读取生产数据、未提交或推送。

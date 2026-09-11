@@ -9,6 +9,7 @@ import {
 } from "react";
 import { OTPInput, OTPInputContext } from "input-otp";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { normalizeCodePaste } from "./code-input";
 
 // Animation constants from SmoothUI
 const EASE_OUT_QUINT_X1 = 0.22;
@@ -45,6 +46,8 @@ export interface AnimatedInputOTPProps {
   containerClassName?: string;
   maxLength?: number;
   pattern?: string;
+  pasteTransformer?: (value: string) => string;
+  inputMode?: "numeric" | "text";
   onChange?: (value: string) => void;
   onComplete?: (value: string) => void;
   value?: string;
@@ -72,6 +75,9 @@ export function AnimatedInputOTP({
 
   return (
     <OTPInput
+      autoCapitalize="none"
+      autoCorrect="off"
+      spellCheck={false}
       id={inputId}
       aria-describedby={props["aria-describedby"]}
       aria-label={props["aria-label"] || "动态安全验证码"}
@@ -224,7 +230,7 @@ export function AnimatedInputOTPSlot({
                 ? { opacity: 1, scale: 1 }
                 : { opacity: 1, rotateY: 0, scale: 1 }
             }
-            className="select-none uppercase font-bold"
+            className="select-none font-bold"
             exit={
               shouldReduceMotion
                 ? { opacity: 0, transition: { duration: 0 } }
@@ -341,6 +347,8 @@ export function SmoothTotpInput({
       value={value}
       maxLength={6}
       pattern="^[0-9]+$"
+      pasteTransformer={normalizeCodePaste}
+      inputMode="numeric"
       onChange={handleChange}
       onComplete={onComplete}
       disabled={disabled}
@@ -412,6 +420,8 @@ export function SmoothBackupCodeInput({
       value={rawValue}
       maxLength={10}
       pattern="^[a-zA-Z0-9]+$"
+      pasteTransformer={normalizeCodePaste}
+      inputMode="text"
       onChange={handleChange}
       onComplete={handleComplete}
       disabled={disabled}

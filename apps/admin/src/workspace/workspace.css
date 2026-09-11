@@ -1,0 +1,235 @@
+/* PaceUI sales dashboard spacing and split-panel composition, scoped to the workspace. */
+.workspace-root { --radius: .5rem; font-size: 14px; color-scheme: light; }
+.workspace-root.dark { color-scheme: dark; --sidebar: oklch(.178 0 0); }
+@layer base {
+  .workspace-root *, .workspace-root ::before, .workspace-root ::after { border-color: var(--border); }
+}
+.workspace-root :focus-visible { outline-color: var(--ring); }
+.workspace-root ::selection { background: var(--foreground); color: var(--background); }
+.workspace-root ::-webkit-scrollbar-thumb { background: var(--border); }
+.workspace-root [data-slot="sidebar-inset"] { min-width: 0; }
+.workspace-root [data-slot="sidebar-header"] { min-height: 56px; }
+.workspace-root .brand-logo-horizontal {
+  height: 36px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  object-position: left center;
+}
+.workspace-root .brand-logo-mark {
+  height: 28px;
+  width: 28px;
+  object-fit: contain;
+  object-position: center;
+}
+.workspace-root [data-slot="card"] { box-shadow: none; border: 1px solid var(--border); }
+.workspace-root .workspace-page,
+.workspace-root .workbench-page { width: 100%; max-width: none; margin-inline: 0; min-width: 0; }
+.workspace-root .workbench-heading { min-height: 64px; margin-bottom: 24px; }
+.workspace-root .workbench-grid { margin-inline: -10px; }
+.workspace-root .workbench-grid .grid-stack-item-content { overflow: hidden; }
+.workspace-root .workbench-grid .grid-stack-placeholder > .placeholder-content { background: var(--accent); outline: 2px dashed var(--ring); outline-offset: -2px; border-radius: 8px; }
+.workspace-root .workbench-grid .ui-resizable-se { background-image: none; }
+.workspace-root .workbench-grid .ui-resizable-se::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 10px; height: 10px; border-right: 2px solid var(--muted-foreground); border-bottom: 2px solid var(--muted-foreground); border-bottom-right-radius: 3px; }
+.workspace-root .workbench-card { height: 100%; display: flex; flex-direction: column; min-width: 0; --card-spacing: 20px; position: relative; }
+.workspace-root .workbench-card > [data-slot="card-header"] { flex: none; }
+.workspace-root .workbench-card-body { flex: 1; min-height: 0; overflow-y: auto; }
+.workspace-root .workbench-list { display: grid; gap: 16px; }
+.workspace-root .workbench-list .workbench-card { height: auto; }
+.workspace-root .workbench-list .workbench-card-body { overflow: visible; }
+.workspace-root .workbench-grip { display: none; align-items: center; color: var(--muted-foreground); border-radius: 6px; padding: 4px; }
+.workspace-root .workbench-grid-editing .workbench-grip { display: inline-flex; }
+.workspace-root .workbench-grid-editing .workbench-drag-handle { cursor: grab; user-select: none; }
+.workspace-root .workbench-grid-editing .workbench-drag-handle:active { cursor: grabbing; }
+.workspace-root .workbench-card-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; min-height: 48px; }
+.workspace-root .workbench-card-heading [data-slot="card-title"] { font-weight: 600; }
+.workspace-root .workbench-card-heading [data-slot="card-description"] { margin-top: 5px; }
+.workspace-root .workbench-card-actions { display: flex; flex-shrink: 0; gap: 4px; min-width: 68px; justify-content: end; }
+.workspace-root .workbench-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; }
+.workspace-root .workbench-shortcuts button { justify-content: start; height: 42px; padding-inline: 10px; font-size: 14px; border-radius: 6px; }
+.workspace-root .workbench-status-row { display: flex; align-items: center; gap: 12px; min-height: 32px; }
+.workspace-root .workbench-status-row > svg { width: 18px; height: 18px; color: var(--muted-foreground); }
+.workspace-root .workbench-status-row > [data-slot="badge"] { margin-left: auto; }
+.workspace-root .workbench-empty { display: flex; min-height: 150px; align-items: center; justify-content: center; flex-direction: column; gap: 10px; text-align: center; }
+.workspace-root .workbench-empty strong { font-weight: 500; }
+.workspace-root .workbench-empty p { color: var(--muted-foreground); font-size: 14px; }
+.workspace-root .workbench-card [data-slot="table-cell"] { padding: 12px 8px; }
+.workspace-root .workbench-approval-row { padding-block: 12px; border-bottom: 1px solid var(--border); }
+.workspace-root .workbench-approval-row p { margin-top: 8px; }
+.workspace-root .workbench-add { --card-spacing: 16px; background: transparent; border-style: dashed; }
+.workspace-root .workbench-add [data-slot="card-description"] { display: none; }
+.workspace-root .workbench-grid-host { width: 100%; min-width: 0; }
+@media (max-width: 700px) {
+    .workspace-root .workbench-card { --card-spacing: 16px; }
+  .workspace-root .workbench-card-heading { gap: 8px; }
+  .workspace-root .workbench-card-actions { min-width: 68px; }
+  .workspace-root .workbench-heading { align-items: start; }
+}
+
+.workspace-root .workspace-tabs {
+  display: flex;
+  align-items: stretch;
+  min-height: 34px;
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.workspace-root .workspace-tabs-list {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: stretch;
+  overflow-x: auto;
+  padding-inline: 8px;
+}
+.workspace-root .workspace-tab {
+  display: flex;
+  max-width: 13rem;
+  min-width: 4.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-bottom-color: var(--border);
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+.workspace-root .workspace-tab:hover {
+  background: color-mix(in oklab, var(--background) 55%, transparent);
+  color: var(--foreground);
+}
+.workspace-root .workspace-tab[data-active="true"] {
+  background: var(--background);
+  border-color: var(--border);
+  border-bottom-color: var(--background);
+  color: var(--foreground);
+}
+.workspace-root .workspace-tab-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px 8px 7px 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+.workspace-root .workspace-tab-close {
+  display: inline-flex;
+  margin-right: 4px;
+  padding: 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  opacity: 0;
+}
+.workspace-root .workspace-tab:hover .workspace-tab-close,
+.workspace-root .workspace-tab[data-active="true"] .workspace-tab-close,
+.workspace-root .workspace-tab-close:focus-visible {
+  opacity: 1;
+}
+.workspace-root .workspace-tab-close:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.workspace-root .workspace-tabs-overflow {
+  margin: 2px 8px 0 0;
+  align-self: center;
+}
+
+.workspace-root .section-panel {
+  padding: 20px;
+  margin-bottom: 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: none;
+}
+.workspace-root .panel-heading h3 { color: var(--foreground); }
+.workspace-root .panel-heading p { color: var(--muted-foreground); }
+.workspace-root .facts-grid div {
+  background: var(--secondary);
+  border: 1px solid var(--border);
+}
+.workspace-root .facts-grid span { color: var(--muted-foreground); }
+.workspace-root .facts-grid strong { color: var(--foreground); }
+.workspace-root .table-wrap {
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+.workspace-root .data-table th,
+.workspace-root .data-table td { border-bottom: 1px solid var(--border); color: var(--foreground); }
+.workspace-root .data-table th {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+.workspace-root .data-table tbody tr:hover,
+.workspace-root .data-table tbody tr.selected { background: var(--accent); }
+.workspace-root .permission-chip {
+  border: 1px solid var(--border);
+  background: var(--secondary);
+}
+.workspace-root .permission-chip em { color: var(--muted-foreground); }
+.workspace-root .delivery-card {
+  border: 1px solid var(--border);
+  background: var(--secondary);
+}
+.workspace-root input:not([data-slot]),
+.workspace-root select,
+.workspace-root textarea {
+  background: var(--secondary);
+  color: var(--foreground);
+  border-color: var(--border);
+}
+
+/* Map leftover admin tokens onto PaceUI workspace tokens. Auth pages stay on :root. */
+.workspace-root {
+  --admin-bg: var(--background);
+  --admin-fg: var(--foreground);
+  --admin-surface: var(--card);
+  --admin-surface-soft: var(--muted);
+  --admin-surface-raised: var(--secondary);
+  --admin-border: var(--border);
+  --admin-border-strong: var(--border);
+  --admin-muted: var(--muted);
+  --admin-muted-fg: var(--muted-foreground);
+  --admin-ring: var(--ring);
+  --admin-accent: var(--foreground);
+  --admin-accent-soft: color-mix(in oklab, var(--foreground) 8%, transparent);
+  --admin-accent-ink: var(--background);
+  --admin-shadow: none;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--card);
+  --color-surface-soft: var(--muted);
+  --color-surface-raised: var(--secondary);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-ring: var(--ring);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-input: var(--input);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}

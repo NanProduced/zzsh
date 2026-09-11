@@ -4,27 +4,24 @@ import {
   useEffect,
   useRef,
   useState,
-  type FormEvent,
-  type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 import { AuthLayout } from "./components/auth-layout";
 import { BrandLogo } from "./components/brand-logo";
-import { Icons } from "./components/icons";
-import { ThemeToggle, Button, PasswordInput, StatusMessage } from "./components/ui-elements";
 
 import { LoginView } from "./views/login-view";
 import { ChallengeView } from "./views/challenge-view";
 import { OnboardingView } from "./views/onboarding-view";
 import { RecoveryView } from "./views/recovery-view";
 import { LockScreen } from "./views/lock-screen";
+import { WorkspaceApp } from "./workspace/app-shell";
+import { clearTabs } from "./workspace/tab-model";
 
 import {
   adminRequest,
   friendlyError,
-  formatDate,
   readIdleMinutes,
   signal,
   CHANNEL_NAME,
@@ -36,7 +33,6 @@ import {
   type SessionSnapshot,
   type AuthResponse,
   type EnrollmentResponse,
-  type AdminDirectoryEntry,
 } from "./api";
 
 function useMobileLayout(): boolean {
@@ -102,634 +98,6 @@ function useIdleLock(
   }, [enabled, minutes, sessionId]);
 }
 
-// ----------------------------------------------------
-// WORKBENCH PANELS (Post-Auth Administration)
-// ----------------------------------------------------
-
-function Badge({
-  children,
-  tone = "neutral",
-}: {
-  children: ReactNode;
-  tone?: "neutral" | "success" | "warning" | "danger";
-}) {
-  return (
-    <span className={`status-badge ${tone}`}>
-      <i />
-      {children}
-    </span>
-  );
-}
-
-function PasswordChangePanel({ onRefresh }: { onRefresh: () => Promise<SessionSnapshot> }) {
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState<string>();
-  const [success, setSuccess] = useState<string>();
-  const [loading, setLoading] = useState(false);
-
-  const mismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
-
-  const submit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (mismatch || newPassword.length < 12) return;
-    setError(undefined);
-    setSuccess(undefined);
-    setLoading(true);
-    try {
-      await adminRequest("/auth/change-password", {
-        currentPassword,
-        newPassword,
-        revokeOtherSessions: true,
-      });
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setSuccess("登录密码已更新，其他管理会话已撤销。");
-      await onRefresh();
-    } catch (failure) {
-      setError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <section className="section-panel">
-      <div className="panel-heading">
-        <div>
-          <h3>修改登录密码</h3>
-          <p>日常改密需要当前完整会话验证；保存后自动撤销其他设备会话。</p>
-        </div>
-        <Icons.Key size={20} className="text-muted-foreground" />
-      </div>
-      <form onSubmit={submit} className="max-w-md space-y-3" noValidate>
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-foreground block">当前密码</label>
-          <PasswordInput
-            autoComplete="current-password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            className="h-9 px-3 rounded text-xs border border-border bg-surface-raised"
-            required
-          />
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-foreground block">新密码（至少 12 位）</label>
-          <PasswordInput
-            autoComplete="new-password"
-            minLength={12}
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            className="h-9 px-3 rounded text-xs border border-border bg-surface-raised"
-            required
-          />
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-foreground block">确认新密码</label>
-          <PasswordInput
-            autoComplete="new-password"
-            minLength={12}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            className="h-9 px-3 rounded text-xs border border-border bg-surface-raised"
-            required
-          />
-        </div>
-        {mismatch && <p className="text-xs text-rose-400">两次输入的新密码不一致。</p>}
-        <StatusMessage error={error} success={success} />
-        <Button
-          type="submit"
-          size="sm"
-          loading={loading}
-          disabled={!currentPassword || newPassword.length < 12 || mismatch}
-        >
-          更新登录密码
-        </Button>
-      </form>
-    </section>
-  );
-}
-
-function SecurityPanel({
-  snapshot,
-  idleMinutes,
-  onIdleMinutes,
-  onLock,
-  onRefresh,
-}: {
-  snapshot: Extract<SessionSnapshot, { authenticated: true }>;
-  idleMinutes: number;
-  onIdleMinutes: (value: number) => void;
-  onLock: () => void;
-  onRefresh: () => Promise<SessionSnapshot>;
-}) {
-  const [pinMode, setPinMode] = useState<"set" | "change">(
-    snapshot.session.pinConfigured ? "change" : "set"
-  );
-  const [currentPin, setCurrentPin] = useState("");
-  const [newPin, setNewPin] = useState("");
-  const [pinError, setPinError] = useState<string>();
-  const [pinSuccess, setPinSuccess] = useState<string>();
-  const [loading, setLoading] = useState(false);
-
-  const submitPin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setPinError(undefined);
-    setPinSuccess(undefined);
-    setLoading(true);
-    let saved = false;
-    try {
-      await adminRequest(
-        `/security/pin/${pinMode}`,
-        pinMode === "set" ? { pin: newPin } : { currentPin, newPin }
-      );
-      saved = true;
-      setCurrentPin("");
-      setNewPin("");
-      setPinSuccess(pinMode === "set" ? "会话 PIN 已设置。" : "会话 PIN 已更新。");
-    } catch (error) {
-      setPinError(friendlyError(error));
-    }
-    if (saved) {
-      try {
-        const next = await onRefresh();
-        if (next.authenticated) setPinMode(next.session.pinConfigured ? "change" : "set");
-      } catch {
-        setPinError("PIN 已保存，但状态刷新失败；请刷新页面。");
-      }
-    }
-    setLoading(false);
-  };
-
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold text-foreground">账号安全</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            安全设置作用于当前管理员与当前会话；服务端状态具有最高权威。
-          </p>
-        </div>
-        <Badge tone={snapshot.security.status === "ACTIVE" ? "success" : "warning"}>
-          {snapshot.security.status === "ACTIVE" ? "安全状态正常" : "待完成绑定"}
-        </Badge>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* PIN Configuration */}
-        <div className="section-panel">
-          <div className="panel-heading">
-            <div>
-              <h3>会话快捷 PIN</h3>
-              <p>用于桌面会话快速恢复。连续 5 次错误后须用密码+验证器重设。</p>
-            </div>
-            <Icons.Key size={20} className="text-muted-foreground" />
-          </div>
-
-          <form onSubmit={submitPin} className="space-y-3" noValidate>
-            {pinMode === "change" && (
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-foreground block">当前 PIN</label>
-                <input
-                  type="password"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={6}
-                  value={currentPin}
-                  onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className="w-full h-9 px-3 rounded border border-border bg-surface-raised font-mono text-xs text-foreground"
-                  required
-                />
-              </div>
-            )}
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-foreground block">
-                {pinMode === "set" ? "设置 6 位数字 PIN" : "新的 6 位 PIN"}
-              </label>
-              <input
-                type="password"
-                inputMode="numeric"
-                autoComplete="new-password"
-                maxLength={6}
-                value={newPin}
-                onChange={(e) => setNewPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="••••••"
-                className="w-full h-9 px-3 rounded border border-border bg-surface-raised font-mono text-xs text-foreground"
-                required
-              />
-            </div>
-
-            <StatusMessage error={pinError} success={pinSuccess} />
-
-            <div className="flex items-center gap-2 pt-1">
-              <Button
-                type="submit"
-                size="sm"
-                loading={loading}
-                disabled={newPin.length !== 6 || (pinMode === "change" && currentPin.length !== 6)}
-              >
-                {pinMode === "set" ? "设置 PIN" : "更新 PIN"}
-              </Button>
-              {snapshot.session.pinConfigured && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setPinMode((m) => (m === "set" ? "change" : "set"))}
-                >
-                  {pinMode === "set" ? "改为更新" : "重新设置"}
-                </Button>
-              )}
-            </div>
-          </form>
-        </div>
-
-        {/* Idle lock configuration */}
-        <div className="section-panel">
-          <div className="panel-heading">
-            <div>
-              <h3>闲置锁定</h3>
-              <p>偏好保存在本浏览器，由服务端会话强制生效。</p>
-            </div>
-            <Icons.Lock size={20} className="text-muted-foreground" />
-          </div>
-
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-foreground block">闲置超时时长</label>
-              <select
-                value={idleMinutes}
-                onChange={(e) => onIdleMinutes(Number(e.target.value))}
-                className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs text-foreground"
-              >
-                <option value={5}>5 分钟</option>
-                <option value={15}>15 分钟</option>
-                <option value={30}>30 分钟</option>
-                <option value={60}>60 分钟</option>
-              </select>
-            </div>
-
-            <div className="pt-2 border-t border-border">
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={snapshot.session.locked || !snapshot.session.pinConfigured}
-                onClick={onLock}
-                className="w-full"
-              >
-                <Icons.Lock size={14} />
-                <span>立即锁定当前会话</span>
-              </Button>
-              {!snapshot.session.pinConfigured && (
-                <p className="text-[11px] text-muted-foreground mt-1.5 text-center">
-                  请先在左侧设置 6 位 PIN，设置后方可启用锁定。
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <PasswordChangePanel onRefresh={onRefresh} />
-
-      {/* Session facts */}
-      <section className="section-panel">
-        <div className="panel-heading">
-          <div>
-            <h3>当前会话状态</h3>
-            <p>终端或标签页变化均无法绕过服务端安全检查。</p>
-          </div>
-          <Icons.ShieldCheck size={20} className="text-muted-foreground" />
-        </div>
-        <div className="facts-grid">
-          <div>
-            <span>管理员账号</span>
-            <strong>{snapshot.user.displayUsername || snapshot.user.username || "兼容字段"}</strong>
-          </div>
-          <div>
-            <span>双因素验证 (TOTP)</span>
-            <strong>{snapshot.user.twoFactorEnabled ? "已启用" : "待完成"}</strong>
-          </div>
-          <div>
-            <span>快捷 PIN</span>
-            <strong>{snapshot.session.pinConfigured ? "已配置" : "未配置"}</strong>
-          </div>
-          <div>
-            <span>会话过期时间</span>
-            <strong>{formatDate(snapshot.session.expiresAt)}</strong>
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function FreezePanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authenticated: true }> }) {
-  const [action, setAction] = useState<"freeze" | "unfreeze">("freeze");
-  const [admins, setAdmins] = useState<AdminDirectoryEntry[]>([]);
-  const [targetAdminId, setTargetAdminId] = useState("");
-  const [password, setPassword] = useState("");
-  const [totpCode, setTotpCode] = useState("");
-  const [reason, setReason] = useState("");
-  const [message, setMessage] = useState<string>();
-  const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(false);
-
-  const loadAdmins = useCallback(async () => {
-    try {
-      const result = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
-      setAdmins(result.admins ?? []);
-    } catch (failure) {
-      setError(friendlyError(failure));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (snapshot.security.isBoss) void loadAdmins();
-  }, [loadAdmins, snapshot.security.isBoss]);
-
-  if (!snapshot.security.isBoss) return null;
-
-  const submit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setError(undefined);
-    setMessage(undefined);
-    setLoading(true);
-    try {
-      await adminRequest(`/security/${action}`, {
-        targetAdminId,
-        password,
-        totpCode,
-        reason,
-      });
-      setMessage(action === "freeze" ? "目标账号已冻结。" : "目标账号已解冻，需重新验证登录。");
-      setPassword("");
-      setTotpCode("");
-      setReason("");
-      await loadAdmins();
-    } catch (failure) {
-      setError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <section className="section-panel">
-      <div className="panel-heading">
-        <div>
-          <h3>同级管理员安全协作</h3>
-          <p>冻结或解冻管理员；目标须从列表选择，受服务端审计约束。</p>
-        </div>
-        <Icons.AlertCircle size={20} className="text-muted-foreground" />
-      </div>
-
-      <form onSubmit={submit} className="space-y-4 max-w-xl" noValidate>
-        <div className="flex p-1 rounded bg-surface-raised border border-border w-48">
-          <button
-            type="button"
-            onClick={() => setAction("freeze")}
-            className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${
-              action === "freeze" ? "bg-foreground text-background" : "text-muted-foreground"
-            }`}
-          >
-            冻结账号
-          </button>
-          <button
-            type="button"
-            onClick={() => setAction("unfreeze")}
-            className={`flex-1 py-1 text-xs font-medium rounded transition-colors ${
-              action === "unfreeze" ? "bg-foreground text-background" : "text-muted-foreground"
-            }`}
-          >
-            解除冻结
-          </button>
-        </div>
-
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-foreground block">目标管理员</label>
-          <select
-            value={targetAdminId}
-            onChange={(e) => setTargetAdminId(e.target.value)}
-            className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs text-foreground"
-            required
-          >
-            <option value="">选择管理员账号</option>
-            {admins.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} · {item.username} · {item.status === "ACTIVE" ? "正常" : item.status === "FROZEN" ? "冻结" : "待绑定"}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-foreground block">本人密码</label>
-            <PasswordInput
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="h-9 px-3 rounded border border-border bg-surface-raised text-xs"
-              required
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-foreground block">本人 6 位 TOTP</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={6}
-              value={totpCode}
-              onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono"
-              required
-            />
-          </div>
-        </div>
-
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-foreground block">操作原因（审计存证）</label>
-          <textarea
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            rows={2}
-            className="w-full p-2.5 rounded border border-border bg-surface-raised text-xs text-foreground"
-            placeholder="填写本次安全操作的具体原因"
-            required
-          />
-        </div>
-
-        <StatusMessage error={error} success={message} />
-
-        <Button
-          type="submit"
-          variant={action === "freeze" ? "danger" : "secondary"}
-          size="sm"
-          loading={loading}
-          disabled={!targetAdminId || !password || totpCode.length !== 6 || !reason.trim()}
-        >
-          {action === "freeze" ? "确认冻结账号" : "确认解除冻结"}
-        </Button>
-      </form>
-    </section>
-  );
-}
-
-function OverviewPanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authenticated: true }> }) {
-  return (
-    <div className="space-y-6">
-      <div className="p-8 rounded-xl bg-surface border border-border flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold text-foreground">欢迎进入管理控制台</h2>
-          <p className="text-sm text-muted-foreground mt-2 max-w-lg leading-relaxed">
-            当前身份认证与双因素安全闭环已就绪。业务订单与履约数据接入后，将根据管理员的角色权限呈现对应视角。
-          </p>
-        </div>
-        <div className="hidden sm:flex flex-col items-center justify-center w-20 h-20 rounded-xl bg-surface-raised border border-border">
-          <Icons.ShieldCheck size={28} className="text-emerald-400" />
-          <span className="text-[10px] font-mono mt-1 text-muted-foreground font-semibold">
-            {snapshot.security.isBoss ? "BOSS" : "ADMIN"}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AdminShell({
-  snapshot,
-  theme,
-  onToggleTheme,
-  idleMinutes,
-  onIdleMinutes,
-  onLock,
-  onSignOut,
-  onRefresh,
-  onRecoveryCompleted,
-}: {
-  snapshot: Extract<SessionSnapshot, { authenticated: true }>;
-  theme: Theme;
-  onToggleTheme: () => void;
-  idleMinutes: number;
-  onIdleMinutes: (value: number) => void;
-  onLock: () => void;
-  onSignOut: () => void;
-  onRefresh: () => Promise<SessionSnapshot>;
-  onRecoveryCompleted: () => void;
-}) {
-  const [section, setSection] = useState<"overview" | "security">("security");
-
-  return (
-    <div className="shell-grid">
-      <aside className="sidebar select-none">
-        <div>
-          <BrandLogo variant="horizontal" height={34} />
-          <div className="sidebar-rule" />
-          <nav aria-label="管理平台导航" className="space-y-1">
-            <button
-              type="button"
-              onClick={() => setSection("overview")}
-              className={`nav-item ${section === "overview" ? "active" : ""}`}
-            >
-              <Icons.Menu size={16} />
-              <span>工作台</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setSection("security")}
-              className={`nav-item ${section === "security" ? "active" : ""}`}
-            >
-              <Icons.Shield size={16} />
-              <span>账号安全</span>
-            </button>
-          </nav>
-        </div>
-
-        <div className="pt-4 border-t border-border space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-surface-raised border border-border flex items-center justify-center font-bold text-xs">
-              {(snapshot.user.name || snapshot.user.username || "A").slice(0, 1).toUpperCase()}
-            </div>
-            <div className="min-w-0">
-              <strong className="block text-xs font-semibold text-foreground truncate">
-                {snapshot.user.name || snapshot.user.username || "管理员"}
-              </strong>
-              <span className="text-[11px] text-muted-foreground">
-                {snapshot.security.isBoss ? "同级 Boss" : "管理员"}
-              </span>
-            </div>
-          </div>
-          <div className="text-[10px] font-mono text-muted-foreground flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            <span>LOCAL / FAKE MODE</span>
-          </div>
-        </div>
-      </aside>
-
-      <div className="main-column">
-        <header className="topbar">
-          <div className="breadcrumb">
-            <span>洲洲商行</span>
-            <Icons.ArrowRight size={12} className="text-muted-foreground" />
-            <strong>{section === "security" ? "账号安全" : "工作台"}</strong>
-          </div>
-          <div className="topbar-actions">
-            <span className="topbar-status">
-              <i />
-              会话正常
-            </span>
-            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-            <button
-              type="button"
-              onClick={onSignOut}
-              aria-label="退出当前会话"
-              title="退出登录"
-              className="inline-flex items-center justify-center w-8 h-8 rounded border border-border text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <Icons.LogOut size={15} />
-            </button>
-          </div>
-        </header>
-
-        <main className="workspace">
-          {section === "security" ? (
-            <div className="space-y-6">
-              <SecurityPanel
-                snapshot={snapshot}
-                idleMinutes={idleMinutes}
-                onIdleMinutes={onIdleMinutes}
-                onLock={onLock}
-                onRefresh={onRefresh}
-              />
-              <div className="section-panel">
-                <RecoveryView
-                  snapshot={snapshot}
-                  onCompleted={onRecoveryCompleted}
-                />
-              </div>
-              <FreezePanel snapshot={snapshot} />
-            </div>
-          ) : (
-            <OverviewPanel snapshot={snapshot} />
-          )}
-        </main>
-
-        <footer className="shell-footer">
-          <span>权限、锁屏与操作审计均以服务端为准</span>
-          <span>会话到期：{formatDate(snapshot.session.expiresAt)}</span>
-        </footer>
-      </div>
-    </div>
-  );
-}
-
-// ----------------------------------------------------
-// ROOT APP CONTROLLER
-// ----------------------------------------------------
 
 function App() {
   const [theme, setTheme] = useState<Theme>(() => {
@@ -786,6 +154,7 @@ function App() {
     setSnapshot(next);
     if (!redirect) return;
     if (!next.authenticated) {
+      clearTabs();
       setView("login");
       setPassword("");
       return;
@@ -826,6 +195,7 @@ function App() {
       }
       if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
       if (event.type === "logout") {
+        clearTabs();
         setSnapshot({ authenticated: false });
         setView("login");
         setPassword("");
@@ -921,6 +291,10 @@ function App() {
       // ignore
     }
     signal("logout", sessionId);
+    clearTabs();
+    if (`${window.location.pathname}${window.location.search}` !== "/") {
+      window.history.replaceState(null, "", "/");
+    }
     setSnapshot({ authenticated: false });
     setView("login");
     setPassword("");
@@ -1195,7 +569,7 @@ function App() {
   return (
     <div className="admin-app">
       <div ref={shellRef} className="app-shell">
-        <AdminShell
+        <WorkspaceApp
           snapshot={snapshot}
           theme={theme}
           onToggleTheme={toggleTheme}

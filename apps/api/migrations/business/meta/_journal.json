@@ -57,6 +57,55 @@
       "when": 1789050000000,
       "tag": "0007_m2_admin_identity_password_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789053600000,
+      "tag": "0008_m2_admin_permissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789120800000,
+      "tag": "0009_m2_approval_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789124400000,
+      "tag": "0010_m2_identity_gates",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789124401000,
+      "tag": "0011_m2_identity_legacy_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789124402000,
+      "tag": "0012_m2_admin_audit_query",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789124403000,
+      "tag": "0013_m2_user_account_restore",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789124404000,
+      "tag": "0014_m2_admin_workspace_layout",
+      "breakpoints": true
     }
   ]
 }

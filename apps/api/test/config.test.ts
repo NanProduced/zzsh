@@ -47,7 +47,25 @@ function validEnv(profile = "dev"): NodeJS.ProcessEnv {
 test("defaults to fake providers with a valid dev target", () => {
   const config = loadConfig(validEnv());
   assert.equal(config.provider, "fake");
+  assert.equal(config.testOperationsEnabled, false);
   assert.equal(config.database.target, "local-compose");
+});
+
+test("keeps the non-funding test executor opt-in and isolated to test/fake", () => {
+  assert.equal(loadConfig(validEnv("test")).testOperationsEnabled, false);
+  assert.equal(loadConfig({ ...validEnv("test"), ENABLE_TEST_OPERATIONS: "true" }).testOperationsEnabled, true);
+  assert.throws(
+    () => loadConfig({ ...validEnv(), ENABLE_TEST_OPERATIONS: "true" }),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=test and PROVIDER_MODE=fake/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("provider-test"), ENABLE_TEST_OPERATIONS: "true" }),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=test and PROVIDER_MODE=fake/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("test"), ENABLE_TEST_OPERATIONS: "yes" }),
+    (error: unknown) => error instanceof ConfigurationError && /ENABLE_TEST_OPERATIONS/.test(error.message),
+  );
 });
 
 test("validates profiles available in the current local stage", () => {
@@ -206,6 +224,7 @@ test("requires distinct auth secrets and secure production cookies", () => {
   const config = loadAuthRuntimeConfig(authEnv);
   assert.equal(config.adminBootstrapSecret, authEnv.AUTH_ADMIN_BOOTSTRAP_SECRET);
   assert.equal(config.secureCookies, false);
+  assert.equal(config.testOperationsEnabled, false);
 
   assert.throws(
     () => loadAuthRuntimeConfig({ ...authEnv, AUTH_ADMIN_SECRET: authEnv.AUTH_USER_SECRET }),

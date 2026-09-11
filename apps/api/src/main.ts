@@ -30,7 +30,13 @@ export async function bootstrap() {
     app = await createApp({
       health: { dependencies },
       ...(businessPool
-        ? { database: { pool: businessPool }, auth: { ...loadAuthRuntimeConfig(), pool: businessPool } }
+        ? {
+            database: { pool: businessPool },
+            auth: {
+              ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
+              pool: businessPool,
+            },
+          }
         : {}),
     });
     await app.listen(config.port, config.host);

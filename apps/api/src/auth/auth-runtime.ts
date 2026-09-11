@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 
 import { createAuthSchema } from "./auth-schema";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
+import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
@@ -19,6 +20,11 @@ type AuthRuntimeConfig = {
   adminSecret: string;
   adminBootstrapSecret?: string;
   secureCookies: boolean;
+  testOperationsEnabled: boolean;
+};
+
+export type AuthRuntimeCapabilities = {
+  testOperationsEnabled?: boolean;
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
@@ -27,6 +33,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   fakeAdminNotificationOutbox?: AdminSecurityNotification[];
   rateLimitState?: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget?: { inFlight: number };
+  realNameProvider?: RealNameProvider;
+  userObligationReader?: UserObligationReader;
 };
 
 type NodeRequest = {
@@ -39,7 +47,7 @@ type NodeRequest = {
 
 type NodeResponse = {
   headersSent?: boolean;
-  setHeader: (name: string, value: string) => NodeResponse;
+  setHeader: (name: string, value: string | string[]) => NodeResponse;
   status: (status: number) => NodeResponse;
   json: (body: unknown) => void;
 };
@@ -70,6 +78,14 @@ const USER_ALLOWED_PATHS = new Set([
   "/phone-number/reset-password",
 ]);
 
+const USER_SECURITY_PATHS = new Set([
+  "/identity/status",
+  "/identity/verify",
+  "/trade-eligibility/check",
+  "/account/deactivate",
+  "/account/cancel",
+]);
+
 const ADMIN_ALLOWED_PATHS = new Set([
   "/get-session",
   "/sign-in/email",
@@ -82,6 +98,9 @@ const ADMIN_ALLOWED_PATHS = new Set([
   "/two-factor/verify-backup-code",
   "/two-factor/generate-backup-codes",
 ]);
+
+const USER_SESSION_EXPIRES_IN_SECONDS = 30 * 24 * 60 * 60;
+const ADMIN_SESSION_EXPIRES_IN_SECONDS = 7 * 24 * 60 * 60;
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -212,6 +231,7 @@ function buildFakePhoneNumberPlugin(
 export function loadAuthRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
   workingDirectory = process.cwd(),
+  capabilities: AuthRuntimeCapabilities = {},
 ): Omit<AuthRuntimeOptions, "pool"> {
   const apiOrigin = env.AUTH_API_ORIGIN?.trim() || `http://127.0.0.1:${env.PORT?.trim() || "3102"}`;
   const userOrigin = env.AUTH_USER_ORIGIN?.trim() || "http://127.0.0.1:3100";
@@ -249,7 +269,16 @@ export function loadAuthRuntimeConfig(
   if (env.NODE_ENV === "production" && !secureCookies) {
     throw new ConfigurationError("AUTH_SECURE_COOKIES=true is required in production");
   }
-  return { apiOrigin, userOrigin, adminOrigin, userSecret, adminSecret, adminBootstrapSecret, secureCookies };
+  return {
+    apiOrigin,
+    userOrigin,
+    adminOrigin,
+    userSecret,
+    adminSecret,
+    adminBootstrapSecret,
+    secureCookies,
+    testOperationsEnabled: capabilities.testOperationsEnabled === true,
+  };
 }
 
 export async function mountAuthHandlers(
@@ -300,7 +329,7 @@ export async function mountAuthHandlers(
     basePath: "/api/auth/user",
     secret: options.userSecret,
     database: drizzleAdapter(userDatabase, { provider: "pg", schema: userSchema, transaction: true }),
-    session: { ...common.session, expiresIn: 30 * 24 * 60 * 60 },
+    session: { ...common.session, expiresIn: USER_SESSION_EXPIRES_IN_SECONDS },
     user: common.user,
     plugins: [
       username({ immutableUsername: true }),
@@ -312,11 +341,16 @@ export async function mountAuthHandlers(
       session: {
         create: {
           before: async (data: { userId: string }) => {
-            const result = await options.pool.query<{ suspended: boolean }>(
-              'SELECT "suspended" FROM "zzsh_auth_user"."user" WHERE "id" = $1',
+            const result = await options.pool.query<{ suspended: boolean; accountStatus: string | null }>(
+              `SELECT u."suspended", s."account_status" AS "accountStatus"
+                 FROM "zzsh_auth_user"."user" u
+                 LEFT JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
+                WHERE u."id" = $1`,
               [data.userId],
             );
-            if (result.rows[0]?.suspended) throw new APIError("FORBIDDEN", { message: "Account unavailable" });
+            if (result.rows[0]?.suspended || result.rows[0]?.accountStatus && result.rows[0].accountStatus !== "ACTIVE") {
+              throw new APIError("FORBIDDEN", { message: "Account unavailable" });
+            }
             return { data };
           },
         },
@@ -330,15 +364,18 @@ export async function mountAuthHandlers(
     basePath: "/api/auth/admin",
     secret: options.adminSecret,
     database: drizzleAdapter(adminDatabase, { provider: "pg", schema: adminSchema, transaction: true }),
-    session: { ...common.session, expiresIn: 7 * 24 * 60 * 60 },
+    session: { ...common.session, expiresIn: ADMIN_SESSION_EXPIRES_IN_SECONDS },
     emailAndPassword: { enabled: true, disableSignUp: true },
     plugins: [username({ immutableUsername: true }), bearer(), twoFactor()],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_admin" },
-    hooks: {
-      before: createAuthMiddleware(async (ctx) => {
-        if (ctx.path !== "/change-password") return;
-        if (ctx.body.currentPassword === ctx.body.newPassword) {
-          throw new APIError("BAD_REQUEST", { message: "New password must differ from current password" });
+     hooks: {
+       before: createAuthMiddleware(async (ctx) => {
+         if (ctx.path === "/sign-in/email" || ctx.path === "/sign-in/username") {
+           ctx.body.rememberMe = true;
+         }
+         if (ctx.path !== "/change-password") return;
+         if (ctx.body.currentPassword === ctx.body.newPassword) {
+           throw new APIError("BAD_REQUEST", { message: "New password must differ from current password" });
         }
         ctx.body.revokeOtherSessions = true;
       }),
@@ -355,6 +392,19 @@ export async function mountAuthHandlers(
             await assertAdminSessionCreationAllowed(options.pool, data.userId, APIError);
             return { data };
           },
+          after: async (session: { userId: string }) => {
+            await options.pool.query(
+              `UPDATE "zzsh_iam"."admin_security" AS security
+                  SET "last_full_authenticated_at" = clock_timestamp(),
+                      "updated_at" = clock_timestamp()
+                 FROM "zzsh_auth_admin"."user" AS admin_user
+                WHERE security."admin_user_id" = $1
+                  AND admin_user."id" = security."admin_user_id"
+                  AND security."status" = 'ACTIVE'
+                  AND admin_user."twoFactorEnabled" = true`,
+              [session.userId],
+            );
+          },
         },
       },
     },
@@ -364,9 +414,6 @@ export async function mountAuthHandlers(
   const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;
   const adminNodeHandler = toNodeHandler(adminWebHandler) as unknown as AuthHandler;
-  mountRealm(app, "user", userAuth as unknown as AuthRealm, userNodeHandler, [options.apiOrigin, options.userOrigin], USER_ALLOWED_PATHS, options.pool);
-  mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
-  (app as unknown as { useBodyParser: (parser: "json", rawBody: boolean) => void }).useBodyParser("json", true);
   const securityOptions: AuthSecurityOptions = {
     pool: options.pool,
     adminAuth: adminAuth as unknown as Parameters<typeof mountAuthSecurityHandlers>[1]["adminAuth"],
@@ -383,7 +430,22 @@ export async function mountAuthHandlers(
     // ponytail: process-local failure buckets are the minimum BFF guard; use a shared limiter before multi-instance rollout.
     rateLimitState: options.rateLimitState ?? new Map(),
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },
+    realNameProvider: options.realNameProvider ?? createFakeRealNameProvider("UNKNOWN"),
+    userObligationReader: options.userObligationReader ?? (async () => "UNKNOWN"),
+    testOperationsEnabled: options.testOperationsEnabled,
   };
+  (app as unknown as { useBodyParser: (parser: "json", rawBody: boolean) => void }).useBodyParser("json", true);
+  mountRealm(
+    app,
+    "user",
+    userAuth as unknown as AuthRealm,
+    userNodeHandler,
+    [options.apiOrigin, options.userOrigin],
+    USER_ALLOWED_PATHS,
+    options.pool,
+    async (request, response, path) => USER_SECURITY_PATHS.has(path) && await handleUserIdentityRoute(request, response, securityOptions),
+  );
+  mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
@@ -401,6 +463,7 @@ function mountRealm(
   origins: readonly string[],
   allowedPaths: ReadonlySet<string>,
   pool: Pool,
+  before?: (request: NodeRequest, response: NodeResponse, path: string) => Promise<boolean>,
 ): void {
   const expressApp = app.getHttpAdapter().getInstance() as {
     use: (path: string, middleware: (request: NodeRequest, response: NodeResponse) => Promise<void>) => void;
@@ -409,6 +472,7 @@ function mountRealm(
     const requestId = ensureApiV1RequestId(request);
     response.setHeader("X-Request-Id", requestId);
     const path = pathOf(request);
+    if (before && await before(request, response, path)) return;
     if (!allowedPaths.has(path) || !originAllowed(request, origins)) {
       const status = path === "/" || !originAllowed(request, origins) ? 403 : 404;
       sendApiError(response, status, status === 403 ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, "Request rejected", requestId);

@@ -3,17 +3,29 @@
   "version": "0.0.0",
   "private": true,
   "description": "洲洲商行重建 monorepo",
-  "engines": { "node": ">=24.20.0 <25", "npm": ">=11 <12" },
+  "engines": {
+    "node": ">=24.20.0 <25",
+    "npm": ">=11 <12"
+  },
   "packageManager": "npm@11.19.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "concurrently --kill-others --names api,web,admin \"npm run dev -w @zzsh/api\" \"npm run dev -w @zzsh/web\" \"npm run dev -w @zzsh/admin\"",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test -w @zzsh/api",
     "test:smoke": "node scripts/smoke.mjs",
-    "check:offline": "npm run typecheck && npm test && npm run build && npm run test:smoke",
-    "check": "npm run check:offline && npm run test:db -w @zzsh/api"
+    "check:offline": "npm run typecheck && npm test && npm run test:web && npm run test:admin && npm run build && npm run test:smoke",
+    "test:web": "npm test -w @zzsh/web",
+    "check": "npm run check:offline && npm run test:db -w @zzsh/api",
+    "test:admin": "npm test -w @zzsh/admin"
   },
-  "devDependencies": { "@types/node": "24.5.0", "concurrently": "10.0.5", "typescript": "5.9.3" }
+  "devDependencies": {
+    "@types/node": "24.5.0",
+    "concurrently": "10.0.5",
+    "typescript": "5.9.3"
+  }
 }

@@ -14,6 +14,7 @@ type DatabaseTarget = "local-compose" | "ecs-test";
 export type AppConfig = {
   profile: ConfigProfile;
   provider: ProviderMode;
+  testOperationsEnabled: boolean;
   host: string;
   port: number;
   database: {
@@ -197,10 +198,19 @@ export function loadConfig(
   if (provider === "real" && profile !== "provider-test") {
     throw new ConfigurationError("PROVIDER_MODE=real is only allowed in provider-test");
   }
+  const testOperationsValue = env.ENABLE_TEST_OPERATIONS?.trim() || "false";
+  if (testOperationsValue !== "true" && testOperationsValue !== "false") {
+    throw new ConfigurationError("ENABLE_TEST_OPERATIONS must be true or false");
+  }
+  const testOperationsEnabled = testOperationsValue === "true";
+  if (testOperationsEnabled && (profile !== "test" || provider !== "fake")) {
+    throw new ConfigurationError("ENABLE_TEST_OPERATIONS=true requires APP_PROFILE=test and PROVIDER_MODE=fake");
+  }
 
   return {
     profile,
     provider,
+    testOperationsEnabled,
     host,
     port,
     database: {

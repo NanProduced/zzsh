@@ -59,7 +59,8 @@ button:focus-visible, input:focus-visible { outline: 3px solid color-mix(in srgb
 
 .web-member header { display: flex; align-items: center; justify-content: space-between; }
 .quiet-button { padding: 9px 15px; border: 1px solid var(--web-line); border-radius: 3px; background: transparent; color: var(--web-ink); }
-.member-card { width: min(100%, 760px); margin: clamp(80px, 15vh, 180px) auto; padding: clamp(28px, 5vw, 58px); border: 1px solid var(--web-line); background: var(--web-card); }
+.member-layout { display: grid; width: min(100%, 1100px); grid-template-columns: minmax(0, 1.2fr) minmax(270px, .8fr); gap: 18px; margin: clamp(80px, 15vh, 180px) auto; align-items: start; }
+.member-card { min-height: 500px; padding: clamp(28px, 5vw, 58px); border: 1px solid var(--web-line); background: var(--web-card); }
 .member-card h1 { margin: 17px 0 15px; font-size: clamp(34px, 5vw, 64px); letter-spacing: -.05em; }
 .member-copy { max-width: 540px; color: var(--web-muted); line-height: 1.8; }
 .member-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 45px 0 28px; padding-top: 22px; border-top: 1px solid var(--web-line); }
@@ -67,6 +68,18 @@ button:focus-visible, input:focus-visible { outline: 3px solid color-mix(in srgb
 .member-facts span { margin-bottom: 6px; color: var(--web-muted); font-size: 11px; }
 .member-facts strong { font-size: 14px; }
 .member-note { color: var(--web-muted); font-size: 12px; line-height: 1.7; }
+.member-status-panel { position: relative; margin-top: 32px; padding: 28px 24px 24px; border: 1px solid #cbd7ce; background: #edf1ea; }
+.member-status-panel::before { position: absolute; top: -8px; left: 24px; width: 64px; height: 2px; background: var(--web-accent); content: ""; }
+.member-status-panel h2 { margin: 14px 0 22px; font-size: 25px; letter-spacing: -.03em; }
+.member-status-list { display: grid; gap: 0; margin: 0; border-top: 1px solid #cbd7ce; }
+.member-status-list div { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid #cbd7ce; }
+.member-status-list dt { color: var(--web-muted); font-size: 12px; }
+.member-status-list dd { margin: 0; color: var(--web-ink); font-size: 13px; font-weight: 700; text-align: right; }
+.member-guard { margin: 20px 0 12px; padding: 12px 13px; border-left: 3px solid #b64c42; background: #faece9; color: #87372f; font-size: 13px; line-height: 1.65; }
+.member-guard.is-allowed { border-color: #2d9878; background: #e8f3ee; color: #205d4c; }
+.member-provider-note, .member-state-muted { color: var(--web-muted); font-size: 12px; line-height: 1.7; }
+.member-danger-button { width: 100%; margin-top: 18px; padding: 11px 14px; border: 1px solid #b64c42; background: transparent; color: #87372f; font-weight: 700; }
+.member-danger-button:hover:not(:disabled) { background: #faece9; }
 
 @media (max-width: 760px) {
   .web-shell { display: block; }
@@ -77,4 +90,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid color-mix(in srgb
   .web-auth { padding: 25px 24px 50px; }
   .auth-card { margin-top: 62px; }
   .member-facts { grid-template-columns: 1fr; gap: 18px; margin-top: 32px; }
+  .member-layout { display: block; margin-top: 64px; }
+  .member-card { min-height: auto; }
+  .member-status-panel { margin-top: 18px; }
 }

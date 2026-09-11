@@ -28,7 +28,7 @@ export function BrandLogo({
       alt={alt}
       height={height}
       style={{ height: `${height}px`, width: "auto" }}
-      className={`brand-logo-img object-contain select-none ${className}`}
+      className={`brand-logo-img object-contain object-left select-none ${className}`}
       loading="eager"
       decoding="async"
     />

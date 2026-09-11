@@ -16,13 +16,57 @@ export type SessionSnapshot =
       user: { name?: string; email?: string; username?: string; displayUsername?: string; twoFactorEnabled: boolean };
       security: { status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN"; isBoss: boolean; passwordChangeRequired: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
+      permissions: string[];
     };
+
+export type AdminStatus = "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN";
+export type AdminRoleSummary = { id?: string; code: string; name: string; status?: string };
+export type AdminDirectoryEntry = {
+  id: string;
+  username: string;
+  name: string;
+  status: AdminStatus;
+  isBoss?: boolean;
+  createdAt?: string;
+  lastFullAuthenticatedAt?: string | null;
+  roles?: AdminRoleSummary[];
+};
+export type AdminDirectoryDetail = AdminDirectoryEntry & {
+  allowPermissions?: string[];
+  denyPermissions?: string[];
+  effectivePermissions?: string[];
+};
+export type RestorableUserCandidate = {
+  id: string;
+  username: string;
+  name: string;
+  accountStatus: "DEACTIVATED";
+};
+export type AdminPermissionCatalogEntry = { code: string; name: string; description?: string | null };
+export type AdminRoleRecord = {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  status: "ACTIVE" | "DISABLED";
+  permissionCodes: string[];
+};
+export type CreatedAdministrator = {
+  id: string;
+  username: string;
+  name: string;
+  status: AdminStatus;
+  temporaryPassword: string;
+};
 
 export type AuthResponse = { twoFactorRedirect?: boolean };
 export type EnrollmentResponse = { totpURI?: string; backupCodes?: string[] };
 export type RecoveryResponse = { recoveryRequestId?: string; status?: string; target?: { username?: string; name?: string } };
-export type AdminDirectoryEntry = { id: string; username: string; name: string; status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN" };
 export type PendingRecovery = { id: string; username: string; name: string; status: string; createdAt: string; expiresAt: string };
+
+export function hasPermission(snapshot: Extract<SessionSnapshot, { authenticated: true }>, code: string): boolean {
+  return snapshot.permissions.includes(code);
+}
 
 export class AdminApiError extends Error {
   constructor(readonly status: number, readonly code: string, readonly requestId?: string) {
@@ -31,14 +75,35 @@ export class AdminApiError extends Error {
   }
 }
 
-export async function adminRequest<T>(path: string, body?: Record<string, unknown>): Promise<T> {
+export type WorkspaceTimeRange = "today" | "7d" | "30d";
+/** v2 布局契约：稳定组件 ID + 网格坐标 x/y（12 列）与宽高 w/h。历史 order+size 配置由服务端确定性转换。 */
+export type WorkspaceWidgetPlacement = {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  timeRange?: WorkspaceTimeRange;
+};
+export type WorkspaceLayoutPayload = {
+  layoutKind: "admin.workspace.layout";
+  /** 配置格式版本（当前为 2）；version 是并发更新版本，二者独立。 */
+  layoutVersion: number;
+  version: number;
+  widgets: WorkspaceWidgetPlacement[];
+  filteredWidgetIds: string[];
+  defaults: WorkspaceWidgetPlacement[];
+};
+
+export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT"): Promise<T> {
   let response: Response;
+  const verb = method ?? (body === undefined ? "GET" : "POST");
   try {
     response = await fetch(`${API_ROOT}${path}`, {
-      method: body === undefined ? "GET" : "POST",
+      method: verb,
       credentials: "include",
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: verb === "GET" ? undefined : { "content-type": "application/json" },
+      body: verb === "GET" ? undefined : JSON.stringify(body ?? {}),
     });
   } catch {
     throw new AdminApiError(0, "NETWORK_ERROR");
@@ -59,7 +124,7 @@ export function friendlyError(error: unknown): string {
   if (error.status === 423) return "本次会话已锁定，请使用 PIN 或完整重新认证继续。";
   if (error.code === "RATE_LIMITED") return "尝试次数过多，请稍后再试。";
   if (error.code === "CONFLICT") return "当前安全状态不允许此操作，请刷新状态后重试。";
-  if (error.code === "FORBIDDEN") return "当前账号没有完成此操作所需的安全条件。";
+  if (error.code === "FORBIDDEN") return "当前账号没有完成此操作的权限或安全条件。";
   if (error.code === "UNAUTHENTICATED") return "账号或密码错误，请检查凭据后重试。";
   if (error.code === "INVALID_CREDENTIALS") return "验证码或凭据无效，请重新输入。";
   if (error.code === "INVALID_PASSWORD") return "当前密码错误，请重新输入。";

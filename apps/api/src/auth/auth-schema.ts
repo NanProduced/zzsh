@@ -46,6 +46,8 @@ export function createAuthSchema(namespace: string) {
     scope: text("scope"),
     password: text("password"),
     legacyPasswordMd5: text("legacyPasswordMd5"),
+    legacyPasswordVersion: text("legacyPasswordVersion"),
+    legacyPasswordSalt: text("legacyPasswordSalt"),
     legacyPasswordUpgradedAt: timestamp("legacyPasswordUpgradedAt", { withTimezone: true }),
     createdAt: timestamp("createdAt", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updatedAt", { withTimezone: true }).notNull(),

@@ -10,8 +10,8 @@
     "migrate:business": "npm run build && node --env-file-if-exists=.env dist/src/database/migrate-business-cli.js",
     "security:disaster-recovery": "npm run build && node --env-file-if-exists=.env dist/src/auth/disaster-recovery-cli.js",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/test/api-contract.test.js dist/test/config.test.js dist/test/database-safety.test.js dist/test/health.test.js dist/test/logging.test.js",
-    "test:db": "npm run build && node --env-file-if-exists=.env --test dist/test/database-safety.test.js dist/test/database.test.js dist/test/database-reset.test.js dist/test/auth.test.js",
+    "test": "npm run build && node --test dist/test/api-contract.test.js dist/test/config.test.js dist/test/database-safety.test.js dist/test/health.test.js dist/test/logging.test.js dist/test/user-identity.test.js",
+    "test:db": "npm run build && node --env-file-if-exists=.env --test dist/test/database-safety.test.js dist/test/database.test.js dist/test/database-reset.test.js dist/test/auth.test.js dist/test/approval-audit.test.js dist/test/admin-workspace-layout.test.js",
     "test:auth": "npm run build && node --env-file-if-exists=.env --test dist/test/auth.test.js",
     "test:readiness": "npm run build && node --env-file-if-exists=.env --test dist/test/readiness.real.test.js"
   },

@@ -1,9 +1,11 @@
 import type { INestApplication } from "@nestjs/common";
 
+import { getWorkspaceLayout, saveWorkspaceLayout } from "../auth/admin-workspace-layout";
 import {
   getAdminSessionSnapshot,
   handleAdminSecurity,
   preflightAuthRealmSecurity,
+  readAdminContext,
   SecurityApiError,
   type AuthSecurityNodeRequest,
   type AuthSecurityNodeResponse,
@@ -48,14 +50,47 @@ const SECURITY_PATHS = new Map([
   ["/security/pin/unlock", "/api/v1/admin/security/pin/unlock"],
   ["/security/freeze", "/api/v1/admin/security/freeze"],
   ["/security/unfreeze", "/api/v1/admin/security/unfreeze"],
+  ["/security/admins/force-logout", "/api/v1/admin/security/admins/force-logout"],
   ["/security/admins", "/api/v1/admin/security/admins"],
+  ["/security/admins/detail", "/api/v1/admin/security/admins/detail"],
+  ["/security/admins/create", "/api/v1/admin/security/admins/create"],
+  ["/security/admins/update", "/api/v1/admin/security/admins/update"],
+  ["/security/admins/assign", "/api/v1/admin/security/admins/assign"],
+  ["/security/roles", "/api/v1/admin/security/roles"],
+  ["/security/roles/create", "/api/v1/admin/security/roles/create"],
+  ["/security/roles/update", "/api/v1/admin/security/roles/update"],
   ["/security/recovery/request", "/api/v1/admin/security/recovery/request"],
   ["/security/recovery/confirm", "/api/v1/admin/security/recovery/confirm"],
   ["/security/recovery/complete", "/api/v1/admin/security/recovery/complete"],
   ["/security/recovery/pending", "/api/v1/admin/security/recovery/pending"],
+  ["/security/users/restore-candidates", "/api/v1/admin/security/users/restore-candidates"],
+  ["/security/users/restore", "/api/v1/admin/security/users/restore"],
+  ["/security/approvals/templates", "/api/v1/admin/security/approvals/templates"],
+  ["/security/approvals/templates/update", "/api/v1/admin/security/approvals/templates/update"],
+  ["/security/approvals/requests", "/api/v1/admin/security/approvals/requests"],
+  ["/security/approvals/requests/mine", "/api/v1/admin/security/approvals/requests/mine"],
+  ["/security/approvals/requests/pending", "/api/v1/admin/security/approvals/requests/pending"],
+  ["/security/approvals/requests/detail", "/api/v1/admin/security/approvals/requests/detail"],
+  ["/security/approvals/requests/decision", "/api/v1/admin/security/approvals/requests/decision"],
+  ["/security/approvals/requests/add-candidate", "/api/v1/admin/security/approvals/requests/add-candidate"],
+  ["/security/approvals/requests/execute", "/api/v1/admin/security/approvals/requests/execute"],
+  ["/security/approvals/audit/events", "/api/v1/admin/security/approvals/audit/events"],
+  ["/security/audit/events", "/api/v1/admin/security/audit/events"],
 ]);
 
-const GET_SECURITY_PATHS = new Set(["/security/admins", "/security/recovery/pending"]);
+const GET_SECURITY_PATHS = new Set([
+  "/security/admins",
+  "/security/admins/detail",
+  "/security/roles",
+  "/security/recovery/pending",
+  "/security/users/restore-candidates",
+  "/security/approvals/templates",
+  "/security/approvals/requests/mine",
+  "/security/approvals/requests/pending",
+  "/security/approvals/requests/detail",
+  "/security/approvals/audit/events",
+  "/security/audit/events",
+]);
 
 // The 2FA challenge is cookie-backed after password sign-in; keep the allowlist
 // narrow while forwarding that challenge and the resulting admin session.
@@ -74,6 +109,12 @@ function requestPath(request: NodeRequest): string {
   if (path === prefix) return "/";
   if (path.startsWith(`${prefix}/`)) return path.slice(prefix.length) || "/";
   return path;
+}
+
+function requestQuery(request: NodeRequest): string {
+  const source = request.originalUrl ?? request.url ?? "";
+  const index = source.indexOf("?");
+  return index >= 0 ? source.slice(index) : "";
 }
 
 function originAllowed(request: NodeRequest, adminOrigin: string): boolean {
@@ -241,10 +282,11 @@ async function forwardSecurity(
   if (cookie) forwardedHeaders.cookie = cookie;
   else delete forwardedHeaders.cookie;
   delete forwardedHeaders.authorization;
+  const rewrittenPath = `${targetPath}${requestQuery(request)}`;
   const rewritten: AuthSecurityNodeRequest = {
     ...request,
-    url: targetPath,
-    originalUrl: targetPath,
+    url: rewrittenPath,
+    originalUrl: rewrittenPath,
     headers: forwardedHeaders,
   };
   try {
@@ -283,6 +325,23 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
     try {
       const snapshot = await getAdminSessionSnapshot(requestHeaders(request, requestId, options.adminOrigin), options.adminSecurityOptions);
       sendJson(response, 200, snapshot, requestId);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
+  if (path === "/workspace/layout") {
+    if (method !== "GET" && method !== "PUT") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    try {
+      const context = await readAdminContext(request, options.adminSecurityOptions);
+      const payload = method === "GET"
+        ? await getWorkspaceLayout(options.adminSecurityOptions.pool, context.userId)
+        : await saveWorkspaceLayout(options.adminSecurityOptions.pool, context.userId, request.body);
+      sendJson(response, 200, payload, requestId);
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
