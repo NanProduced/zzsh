@@ -65,7 +65,7 @@ type DatabaseIdentityConfig = {
   };
 };
 
-const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin"] as const;
+const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply"] as const;
 
 export async function assertBusinessRuntimeIdentity(pool: Pool, config: DatabaseIdentityConfig): Promise<void> {
   const identity = await pool.query<{
@@ -81,6 +81,7 @@ export async function assertBusinessRuntimeIdentity(pool: Pool, config: Database
     canCreateIamSchema: boolean;
     canCreateUserSchema: boolean;
     canCreateAdminSchema: boolean;
+    canCreateSupplySchema: boolean;
     canUpdateAudit: boolean;
     canDeleteAudit: boolean;
     canTruncateAudit: boolean;
@@ -94,6 +95,7 @@ export async function assertBusinessRuntimeIdentity(pool: Pool, config: Database
       has_schema_privilege(current_user, 'zzsh_iam', 'CREATE') AS "canCreateIamSchema",
       has_schema_privilege(current_user, 'zzsh_auth_user', 'CREATE') AS "canCreateUserSchema",
       has_schema_privilege(current_user, 'zzsh_auth_admin', 'CREATE') AS "canCreateAdminSchema",
+      has_schema_privilege(current_user, 'zzsh_supply', 'CREATE') AS "canCreateSupplySchema",
       has_table_privilege(current_user, 'zzsh_iam.audit_event', 'UPDATE') AS "canUpdateAudit",
       has_table_privilege(current_user, 'zzsh_iam.audit_event', 'DELETE') AS "canDeleteAudit",
       has_table_privilege(current_user, 'zzsh_iam.audit_event', 'TRUNCATE') AS "canTruncateAudit"
@@ -144,6 +146,7 @@ export async function assertBusinessRuntimeIdentity(pool: Pool, config: Database
     row.canCreateIamSchema ||
     row.canCreateUserSchema ||
     row.canCreateAdminSchema ||
+    row.canCreateSupplySchema ||
     row.canUpdateAudit ||
     row.canDeleteAudit ||
     row.canTruncateAudit ||

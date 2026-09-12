@@ -63,7 +63,7 @@ export function createFakeRealNameProvider(scenario: FakeRealNameScenario): Real
   };
 }
 
-type UserContext = { userId: string; sessionId: string };
+export type UserContext = { userId: string; sessionId: string };
 
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
@@ -136,7 +136,7 @@ function sendInternalError(response: AuthSecurityNodeResponse, requestId: string
   sendJson(response, 500, { error: { code: API_V1_ERROR_CODES.INTERNAL_ERROR, message: "Internal server error", requestId } }, requestId);
 }
 
-async function readUserContext(request: AuthSecurityNodeRequest, options: AuthSecurityOptions): Promise<UserContext> {
+export async function readUserContext(request: AuthSecurityNodeRequest, options: AuthSecurityOptions): Promise<UserContext> {
   const credentials = credentialsOf(request);
   if (credentials.conflict || credentials.malformed) {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Request rejected");

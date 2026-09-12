@@ -71,7 +71,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 ## 幂等键
 
-有副作用的业务请求必须带 `Idempotency-Key`。服务端按“已验证主体 + operation + resourceId（如有）”形成作用域，客户端不能通过 `userId` 或任意 `X-User-*` header 冒充主体。当前只落地纯契约函数，不建立数据库记录，也不宣称已完成跨进程幂等：
+有副作用的业务请求必须带 `Idempotency-Key`。服务端按“已验证主体 + operation + resourceId（如有）”形成作用域，客户端不能通过 `userId` 或任意 `X-User-*` header 冒充主体。供给模块已将幂等记录、业务与审计同事务持久化；作用域含 realm，同 key 先串行化，再核当前权限及对象范围，包含缓存命中与唯一键竞争回读：
 
 | 条件 | 契约结果 |
 |---|---|
@@ -80,7 +80,19 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | 同一作用域、同一 key、fingerprint 不同 | 拒绝并返回 HTTP 409 / `IDEMPOTENCY_KEY_REUSED` |
 | 不同作用域使用同一 key | 视为另一请求，不能互相重放 |
 
-fingerprint 由服务端对规范化请求计算，不由客户端提交。支付、退款等业务接入时仍须将该契约与事务、持久化记录、超时和回调事实联合设计。
+供给 fingerprint 由服务端对 operation、resourceId 和请求 JSON 计算；同 key 的字段表示须一致，内容摘要另按语义规范化。支付、退款等业务接入时仍须将该契约与事务、持久化记录、超时和回调事实联合设计。
+
+## 供给基础（M3-B）
+
+- 管理端入口 `/api/v1/admin/supply/...` 经 Admin BFF `/api/bff/admin/supply/...` 转发；用户材料入口 `/api/v1/supply/...` 使用用户 realm。写操作要求 `Idempotency-Key`，重放返回原结果，异体同 key 返回 409。管理权限：`supply.catalog.manage`、`supply.rules.edit`、`supply.rules.activate`（仅 Boss）、`supply.review.read`、`supply.review.decide`、`supply.quote.internal.read`；除 Boss 外必须存在 `admin_supply_scope` 游戏范围。
+- 目录：`GET /api/v1/supply/games/{gameId}/catalog` 为公共白名单并绑定 `catalogRevision` 游标；管理端目录、游戏、物品/分类/皮肤/稀有度/权益维护均在管理端前缀下。稳定 code 创建后不可改名，词条只停用不物理删除；旧来源字段以受限原文保留，未知值不默认成有效词条。
+- 规则：价格/租期/协议可编辑草稿并封存；明细写入锁定 OLD/NEW 父版本，不能将封存明细移入草稿。版本归属不可更换，已引用物品的单位/数量语义须新建词条。release 不可修改。
+- 生效：`POST /api/v1/admin/supply/releases` 携带 `expectedGeneration`（十进制字符串，未生效为 `"0"`）；Boss 在 game 锁内执行 CAS，过期确认返回409，同 key 重放不增加release。管理端显示确认代次。
+- 计价：`POST /quote-preview` 返回受权管理员内部投影。SPREAD/PERCENT 按精确十进制比例计算，费率范围 `[0,1)`；每行双边金额各舍入一次到分，平台金额为两者差额。HAFF 精确分子/分母随快照保留，展示单位价不能替代精确比例重算。`tenantDepositCents`、`publisherBailRequirementCents` 只接受整数分字符串；缺参为null。日档参与已配置币价条件及租期推算，无每日保底收费。
+- 内容摘要：白名单 payload 先规范化再计算 SHA-256；人类文本 NFC/LF，ID/code原样，整数十进制、比例去尾零、单位价8位/元金额2位、业务时间UTC六位微秒（超精度拒绝），可选值null，集合按业务键排序且拒绝重复/未知字段。带声明的预览回显同一 `contentPayload` 与报价，规则JSON和协议正文先规范化再保存；M3-B尚无申报版本持久化/接受入口。hash不包含自身、审核状态或审计时间。
+- 审计：统一写接点保存稳定对象类型/ID、版本或目录代次、变更前后白名单快照、原因和结果；价目明细、租期选项、媒体绑定变化包含在快照中。协议正文以digest引用，凭证只记录素材引用，不复制上传Token或原图；审计失败回滚业务。
+- 媒体：upload-intents → `PUT /media/uploads/{intentId}`（`x-upload-token`）。Sharp完整解码JPEG/PNG/WebP，限制10MiB、单边8192、4000万像素、单帧、处理超时10秒；公开衍生图重新编码并清理元数据，原始字节单独保留供私有审核/证据读取。公开仅返回审核通过的衍生图，旧资产无衍生图须重新上传。默认本地内容寻址存储 `uploads/`。撤销公开同事务清除目录绑定，旧公共URL返回404，响应 `Cache-Control: public, max-age=0, must-revalidate`。开发OSS目标已配置且只读连通性通过，应用适配器尚未实现，真实OSS/CDN上传、读取及撤权未验收；本地模式不读取云凭据或自动切换云端。
+- 本轮不连接真实云资源；规则真实参数、包赔与押金策略、M4 订单占用与 M6 交付仍为后续范围。
 
 ## 验证入口
 
@@ -89,4 +101,4 @@ npm test -w @zzsh/api
 npm run typecheck
 ```
 
-测试会创建只监听 loopback 临时端口的隔离 Nest app，检查 OpenAPI 的请求/响应示例、header、resourceId pattern/maxLength、integer limit、错误码 enum、`additionalProperties:false` 以及运行时拒绝和安全错误兜底；不会连接数据库或第三方服务。`npm run check` 仍使用默认离线入口。
+测试会创建只监听 loopback 临时端口的隔离 Nest app，检查 OpenAPI 的请求/响应示例、header、resourceId pattern/maxLength、integer limit、错误码 enum、`additionalProperties:false` 以及运行时拒绝和安全错误兜底；不会连接数据库或第三方服务。`npm run check` 还包含明确隔离的本地 PostgreSQL 回归，资源规则见开发说明。

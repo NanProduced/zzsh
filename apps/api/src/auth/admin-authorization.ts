@@ -23,6 +23,12 @@ export const ADMIN_PERMISSION = {
   approvalRequestExecute: "approval.request.execute",
   approvalRequestAddApprover: "approval.request.add_approver",
   approvalAuditRead: "approval.audit.read",
+  supplyCatalogManage: "supply.catalog.manage",
+  supplyRulesEdit: "supply.rules.edit",
+  supplyRulesActivate: "supply.rules.activate",
+  supplyReviewRead: "supply.review.read",
+  supplyReviewDecide: "supply.review.decide",
+  supplyQuoteInternalRead: "supply.quote.internal.read",
 } as const;
 
 export const ADMIN_PERMISSION_CODES = Object.values(ADMIN_PERMISSION);

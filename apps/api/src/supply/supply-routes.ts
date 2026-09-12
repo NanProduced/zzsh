@@ -1,0 +1,931 @@
+import type { INestApplication } from "@nestjs/common";
+import type { PoolClient } from "pg";
+import { auditObjectType, auditSnapshot } from "./supply-audit";
+import { ContentHashError } from "./content-hash";
+import { DecimalError } from "./decimal";
+
+import {
+  ADMIN_PERMISSION,
+  loadEffectiveAdminAccess,
+  requirePermission,
+  type EffectiveAdminAccess,
+} from "../auth/admin-authorization";
+import { readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
+import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
+import { readUserContext } from "../auth/user-identity";
+import { API_V1_ERROR_CODES, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
+import {
+  bindGameCover,
+  createCatalogEntry,
+  createGame,
+  listGames,
+  readAdminCatalog,
+  readPublicCatalog,
+  updateCatalogEntry,
+  updateGame,
+} from "./catalog";
+import {
+  activateRelease,
+  createAgreementDraft,
+  createPriceDraft,
+  createTermDraft,
+  listRules,
+  quotePreview,
+  sealVersion,
+  updateAgreementDraft,
+  updatePriceDraft,
+  updateTermDraft,
+} from "./rules";
+import {
+  changeMediaVisibility,
+  consumeMediaUpload,
+  createMediaUploadIntent,
+  loadMediaAsset,
+  reviewMediaAsset,
+  type MediaStorage,
+} from "./media";
+import {
+  assertGameScope,
+  bodyOf,
+  conflict,
+  ensureOnlyFields,
+  fingerprintRequest,
+  headerValue,
+  invalid,
+  newSupplyId,
+  notFound,
+  optionalInteger,
+  optionalString,
+  optionalTrimmedString,
+  parseExpectedRevision,
+  requiredString,
+  sendError,
+  sendInternalError,
+  sendJson,
+  withIdempotency,
+  type SupplyNodeRequest,
+  type SupplyNodeResponse,
+} from "./supply-util";
+
+export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage };
+
+type SupplyResponse = SupplyNodeResponse & {
+  send?: (body: Buffer | string) => void;
+};
+
+const TOKEN = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
+
+function decodeId(value: string): string {
+  const decoded = decodeURIComponent(value);
+  if (!new RegExp(`^${TOKEN}$`).test(decoded)) throw notFound();
+  return decoded;
+}
+
+function requestPath(request: SupplyNodeRequest, prefix: string): { path: string; query: URLSearchParams } {
+  const raw = request.url ?? request.originalUrl ?? "/";
+  const index = raw.indexOf("?");
+  let path = index >= 0 ? raw.slice(0, index) : raw;
+  if (path === prefix) path = "/";
+  else if (path.startsWith(`${prefix}/`)) path = path.slice(prefix.length);
+  return { path: path || "/", query: new URLSearchParams(index >= 0 ? raw.slice(index + 1) : "") };
+}
+
+function originAllowed(request: SupplyNodeRequest, origins: readonly string[]): boolean {
+  const origin = headerValue(request.headers.origin);
+  if (!origin) return request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS";
+  return origins.includes(origin);
+}
+
+function requireOrigin(request: SupplyNodeRequest, response: SupplyResponse, options: SupplyRuntimeOptions, requestId: string): boolean {
+  if (originAllowed(request, [options.apiOrigin, options.userOrigin, options.adminOrigin])) return true;
+  sendJson(response, 403, { error: { code: API_V1_ERROR_CODES.FORBIDDEN, message: "Request rejected", requestId } }, requestId);
+  return false;
+}
+
+function mapDatabaseError(error: unknown): SecurityApiError | null {
+  const code = (error as { code?: string }).code;
+  if (code === "40001" || code === "40P01") return conflict("Supply state changed; reload and retry");
+  if (code === "23505") return new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Request conflicts with current state");
+  if (code === "23503" || code === "23514" || code === "22P02" || code === "22003" || code === "P0001") {
+    return new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Request violates a supply constraint");
+  }
+  return null;
+}
+
+async function safely(response: SupplyResponse, requestId: string, action: () => Promise<void>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    if (error instanceof ContentHashError || error instanceof DecimalError) { sendError(response, invalid(error.message), requestId); return; }
+    if (error instanceof SecurityApiError) {
+      sendError(response, error, requestId);
+      return;
+    }
+    const mapped = mapDatabaseError(error);
+    if (mapped) {
+      sendError(response, mapped, requestId);
+      return;
+    }
+    sendInternalError(response, requestId);
+  }
+}
+
+async function readRawBody(request: SupplyNodeRequest, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of request as unknown as AsyncIterable<Buffer | string>) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.length;
+      if (total > maxBytes) throw invalid("Upload exceeds the allowed size");
+      chunks.push(buffer);
+    }
+  } catch (error) {
+    if (error instanceof SecurityApiError) throw error;
+    throw invalid("Upload body could not be read");
+  }
+  return Buffer.concat(chunks);
+}
+
+async function sendStoredMedia(
+  response: SupplyResponse,
+  requestId: string,
+  storage: MediaStorage,
+  asset: { storageKey: string; mime: string; contentHash: string },
+  cacheControl: string,
+): Promise<void> {
+  if (!storage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
+  let bytes: Buffer;
+  try {
+    bytes = await storage.read(asset.storageKey);
+  } catch {
+    throw notFound();
+  }
+  if (response.headersSent) return;
+  response.status(200);
+  response.setHeader("X-Request-Id", requestId);
+  response.setHeader("Content-Type", asset.mime);
+  response.setHeader("Content-Length", String(bytes.length));
+  response.setHeader("ETag", `"sha256-${asset.contentHash}"`);
+  response.setHeader("Cache-Control", cacheControl);
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.send?.(bytes);
+}
+
+type WriteActor = { realm: "admin" | "user"; id: string; sessionId: string };
+
+async function runIdempotentWrite(
+  options: SupplyRuntimeOptions,
+  request: SupplyNodeRequest,
+  response: SupplyResponse,
+  requestId: string,
+  scope: { principalId: string; operation: string; resourceId?: string },
+  actor: WriteActor,
+  fingerprintBody: unknown,
+  authorize: (client: PoolClient) => Promise<void>,
+  action: (client: PoolClient) => Promise<{ status: number; body: unknown }>,
+): Promise<void> {
+  const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
+  const fingerprint = fingerprintRequest(scope.operation, scope.resourceId, fingerprintBody ?? null);
+  try {
+    const result = await withTransaction(options.pool, async (client) => {
+      await setAuditContext(client, actor.realm, actor.id, actor.sessionId, requestId);
+      return withIdempotency(client, { ...scope, realm: actor.realm }, key, fingerprint, () => authorize(client), () => action(client));
+    });
+    sendJson(response, result.status, result.body, requestId);
+  } catch (error) {
+    const uniqueViolation = (error as { code?: string }).code === "23505";
+    if (uniqueViolation) {
+      const committed = await withTransaction(options.pool, async (client) => {
+        await authorize(client);
+        return client.query<{ requestFingerprint: string; responseStatus: number; responseBody: unknown }>(
+        `SELECT "request_fingerprint" AS "requestFingerprint", "response_status" AS "responseStatus", "response_body" AS "responseBody"
+           FROM "zzsh_supply"."idempotency_record" WHERE "scope_key" = $1 AND "key" = $2`,
+        [JSON.stringify([actor.realm, scope.principalId, scope.operation, scope.resourceId ?? null]), key],
+      );
+      });
+      const row = committed.rows[0];
+      if (row) {
+        if (row.requestFingerprint !== fingerprint) {
+          sendError(response, new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Idempotency key was reused with a different request"), requestId);
+          return;
+        }
+        sendJson(response, row.responseStatus, row.responseBody, requestId);
+        return;
+      }
+    }
+    throw error;
+  }
+}
+
+async function requireAdminAccess(client: PoolClient, adminUserId: string): Promise<EffectiveAdminAccess> {
+  const access = await loadEffectiveAdminAccess(client, adminUserId);
+  if (!access || access.status !== "ACTIVE") throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Access denied");
+  return access;
+}
+
+async function authorizeUpload(client: PoolClient, actor: WriteActor, intentId: string): Promise<void> {
+  const row = (await client.query<{ game_id: string; account_id: string | null; uploaded_by_realm: string; uploaded_by_user_id: string | null; uploaded_by_admin_id: string | null }>(
+    `SELECT game_id, account_id, uploaded_by_realm, uploaded_by_user_id, uploaded_by_admin_id FROM zzsh_supply.media_upload_intent WHERE id = $1`, [intentId],
+  )).rows[0];
+  if (!row || row.uploaded_by_realm !== actor.realm || (actor.realm === "admin" ? row.uploaded_by_admin_id : row.uploaded_by_user_id) !== actor.id) throw notFound();
+  if (actor.realm === "admin") {
+    const access = await requireAdminAccess(client, actor.id);
+    requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+    await assertGameScope(client, actor.id, access.isBoss, row.game_id);
+  } else if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND owner_user_id = $2 AND game_id = $3`, [row.account_id, actor.id, row.game_id])).rowCount) throw notFound();
+}
+
+const CATALOG_KINDS = new Set(["items", "rarities", "categories", "skins", "entitlements"]);
+
+function catalogKind(value: string): "items" | "rarities" | "categories" | "skins" | "entitlements" {
+  if (!CATALOG_KINDS.has(value)) throw notFound();
+  return value as "items" | "rarities" | "categories" | "skins" | "entitlements";
+}
+
+export async function handleSupplyUserRoute(
+  request: SupplyNodeRequest,
+  response: SupplyResponse,
+  options: SupplyRuntimeOptions,
+): Promise<void> {
+  const requestId = ensureApiV1RequestId(request);
+  response.setHeader("X-Request-Id", requestId);
+  const { path, query } = requestPath(request, "/api/v1/supply");
+  const method = (request.method ?? "GET").toUpperCase();
+
+  await safely(response, requestId, async () => {
+    if (method === "GET") {
+      const catalogMatch = /^\/games\/([^/]+)\/catalog$/.exec(path);
+      if (catalogMatch) {
+        const gameId = decodeId(catalogMatch[1]!);
+        const limitRaw = query.get("limit");
+        const limit = limitRaw === null ? 20 : Number(limitRaw);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
+        const result = await readPublicCatalog(
+          options.pool,
+          gameId,
+          {
+            ...(query.get("q") ? { q: query.get("q")! } : {}),
+            ...(query.get("categoryId") ? { categoryId: query.get("categoryId")! } : {}),
+            ...(query.get("rarityCode") ? { rarityCode: query.get("rarityCode")! } : {}),
+          },
+          limit,
+          query.get("cursor") ?? undefined,
+        );
+        sendJson(response, 200, result, requestId, "public, max-age=30");
+        return;
+      }
+      const contentMatch = /^\/media\/([^/]+)\/content$/.exec(path);
+      if (contentMatch) {
+        const assetId = decodeId(contentMatch[1]!);
+        const asset = await loadMediaAsset(options.pool, assetId);
+        if (!asset || asset.reviewState !== "APPROVED" || asset.accessClass !== "PUBLIC_DISPLAY") throw notFound();
+        if (!asset.publicStorageKey) throw notFound();
+        await sendStoredMedia(response, requestId, options.mediaStorage, { ...asset, storageKey: asset.publicStorageKey, contentHash: asset.publicStorageKey }, "public, max-age=0, must-revalidate");
+        return;
+      }
+    }
+
+    if (!requireOrigin(request, response, options, requestId)) return;
+
+    if (path === "/accounts" && method === "POST") {
+      const context = await readUserContext(request, options);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["gameId"]);
+      const gameId = decodeId(requiredString(body, "gameId", 128));
+      const accountId = newSupplyId("account");
+      await runIdempotentWrite(
+        options,
+        request,
+        response,
+        requestId,
+        { principalId: context.userId, operation: "supply.account.create" },
+        { realm: "user", id: context.userId, sessionId: context.sessionId },
+        { gameId },
+        async (client) => {
+          await readUserContext(request, options);
+          if (!(await client.query(`SELECT 1 FROM zzsh_supply.game WHERE id = $1 AND enabled`, [gameId])).rowCount) throw notFound();
+        },
+        async (client) => {
+          const stillEnabled = await client.query(`SELECT 1 FROM "zzsh_supply"."game" WHERE "id" = $1 AND "enabled" = true`, [gameId]);
+          if (stillEnabled.rows.length === 0) throw notFound();
+          await client.query(
+            `INSERT INTO "zzsh_supply"."rental_account" ("id", "owner_user_id", "game_id") VALUES ($1, $2, $3)`,
+            [accountId, context.userId, gameId],
+          );
+          await recordAudit(client, {
+            actorType: "user",
+            actorId: context.userId,
+            sessionId: context.sessionId,
+            action: "supply.account.created",
+            objectType: "rental_account",
+            objectId: accountId,
+            outcome: "SUCCESS",
+            requestId,
+            reason: "supply.account.create",
+            details: { gameId, before: null, after: { accountId, gameId, revision: "1" }, result: "CREATED" },
+          });
+          return { status: 200, body: { accountId, gameId } };
+        },
+      );
+      return;
+    }
+
+    const userIntentMatch = path === "/media/upload-intents" && method === "POST";
+    if (userIntentMatch) {
+      const context = await readUserContext(request, options);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["gameId", "accountId", "mime", "size"]);
+      const gameId = decodeId(requiredString(body, "gameId", 128));
+      const accountId = decodeId(requiredString(body, "accountId", 128));
+      const mime = requiredString(body, "mime", 64);
+      const size = optionalInteger(body, "size", 1, 10 * 1024 * 1024);
+      if (size === undefined) throw invalid("Size is required");
+      if (!options.mediaStorage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
+      await runIdempotentWrite(
+        options,
+        request,
+        response,
+        requestId,
+        { principalId: context.userId, operation: "supply.media.upload_intent.create" },
+        { realm: "user", id: context.userId, sessionId: context.sessionId },
+        { gameId, accountId, mime, size },
+        async (client) => {
+          await readUserContext(request, options);
+          if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND game_id = $2 AND owner_user_id = $3`, [accountId, gameId, context.userId])).rowCount) throw notFound();
+        },
+        async (client) => {
+          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose: "ACCOUNT_EVIDENCE", mime, size });
+          await recordAudit(client, {
+            actorType: "user",
+            actorId: context.userId,
+            sessionId: context.sessionId,
+            action: "supply.media.upload_intent_created",
+            objectType: "media_upload_intent",
+            objectId: intent.intentId,
+            outcome: "SUCCESS",
+            requestId,
+            reason: "supply.media.upload_intent.create",
+            details: { gameId, before: null, after: { intentId: intent.intentId, accountId, purpose: "ACCOUNT_EVIDENCE" }, result: "CREATED" },
+          });
+          return { status: 200, body: { intentId: intent.intentId, uploadToken: intent.uploadToken, expiresAt: intent.expiresAt } };
+        },
+      );
+      return;
+    }
+
+    const userUploadMatch = /^\/media\/uploads\/([^/]+)$/.exec(path);
+    if (userUploadMatch && method === "PUT") {
+      const context = await readUserContext(request, options);
+      const intentId = decodeId(userUploadMatch[1]!);
+      const uploadToken = headerValue(request.headers["x-upload-token"]);
+      if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
+      const bytes = await readRawBody(request, 10 * 1024 * 1024);
+      await runIdempotentWrite(
+        options,
+        request,
+        response,
+        requestId,
+        { principalId: context.userId, operation: "supply.media.upload", resourceId: intentId },
+        { realm: "user", id: context.userId, sessionId: context.sessionId },
+        { intentId, token: uploadToken, contentHash: fingerprintRequest("bytes", intentId, bytes.toString("base64")) },
+        async (client) => {
+          await readUserContext(request, options);
+          await authorizeUpload(client, { realm: "user", id: context.userId, sessionId: context.sessionId }, intentId);
+        },
+        async (client) => {
+          const asset = await consumeMediaUpload(client, options.mediaStorage, { realm: "user", userId: context.userId }, intentId, uploadToken, bytes);
+          await recordAudit(client, {
+            actorType: "user",
+            actorId: context.userId,
+            sessionId: context.sessionId,
+            action: "supply.media.uploaded",
+            objectType: "media_asset",
+            objectId: asset.assetId,
+            outcome: "SUCCESS",
+            requestId,
+            reason: "supply.media.upload",
+            details: { gameId: asset.gameId, before: null, after: { ...asset, revision: "1" }, result: "CREATED" },
+          });
+          return { status: 200, body: asset };
+        },
+      );
+      return;
+    }
+
+    const accessMatch = /^\/media\/([^/]+)\/access$/.exec(path);
+    if (accessMatch && method === "GET") {
+      const context = await readUserContext(request, options);
+      const assetId = decodeId(accessMatch[1]!);
+      const asset = await loadMediaAsset(options.pool, assetId);
+      if (!asset || asset.ownerUserId !== context.userId) throw notFound();
+      await sendStoredMedia(response, requestId, options.mediaStorage, asset, "private, no-store");
+      return;
+    }
+
+    throw notFound();
+  });
+}
+
+export async function handleSupplyAdminRoute(
+  request: SupplyNodeRequest,
+  response: SupplyResponse,
+  options: SupplyRuntimeOptions,
+): Promise<void> {
+  const requestId = ensureApiV1RequestId(request);
+  response.setHeader("X-Request-Id", requestId);
+  const { path, query } = requestPath(request, "/api/v1/admin/supply");
+  const method = (request.method ?? "GET").toUpperCase();
+
+  await safely(response, requestId, async () => {
+    if (!requireOrigin(request, response, options, requestId)) return;
+    const context = await readAdminContext(request, options);
+    const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
+
+    if (method === "GET") {
+      await handleAdminRead(response, options, requestId, path, query, context.userId);
+      return;
+    }
+    if (method !== "POST" && method !== "PUT") throw notFound();
+    await handleAdminWrite(request, response, options, requestId, method, path, actor);
+  });
+}
+
+async function handleAdminRead(
+  response: SupplyResponse,
+  options: SupplyRuntimeOptions,
+  requestId: string,
+  path: string,
+  query: URLSearchParams,
+  adminUserId: string,
+): Promise<void> {
+  if (path === "/games") {
+    const games = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+      return listGames(client, adminUserId, access.isBoss);
+    });
+    sendJson(response, 200, games, requestId);
+    return;
+  }
+  const catalogMatch = /^\/games\/([^/]+)\/catalog$/.exec(path);
+  if (catalogMatch) {
+    const gameId = decodeId(catalogMatch[1]!);
+    const result = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+      return readAdminCatalog(client, adminUserId, access.isBoss, gameId);
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const rulesMatch = /^\/games\/([^/]+)\/rules$/.exec(path);
+  if (rulesMatch) {
+    const gameId = decodeId(rulesMatch[1]!);
+    const result = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
+      return listRules(client, adminUserId, access.isBoss, gameId);
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  if (path === "/media/reviews") {
+    const state = query.get("state") ?? "PENDING";
+    const ownershipKind = query.get("ownershipKind") ?? null;
+    if (!["PENDING", "APPROVED", "REJECTED", "QUARANTINED"].includes(state)) throw invalid("State is invalid");
+    if (ownershipKind !== null && ownershipKind !== "PLATFORM_CATALOG" && ownershipKind !== "USER_SUPPLY") throw invalid("Ownership kind is invalid");
+    const limitRaw = query.get("limit");
+    const limit = limitRaw === null ? 20 : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
+    const cursor = query.get("cursor");
+    const result = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyReviewRead);
+      let cursorRow: { createdAt: string; id: string } | undefined;
+      if (cursor) {
+        let decoded: { v?: unknown; state?: unknown; ownershipKind?: unknown; createdAt?: unknown; id?: unknown };
+        try {
+          decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as typeof decoded;
+        } catch {
+          throw invalid("Cursor is invalid");
+        }
+        if (decoded.v !== 1 || decoded.state !== state || (decoded.ownershipKind ?? null) !== ownershipKind || typeof decoded.createdAt !== "string" || typeof decoded.id !== "string") {
+          throw conflict("Cursor does not match the current filters; refresh and retry");
+        }
+        cursorRow = { createdAt: decoded.createdAt, id: decoded.id };
+      }
+      const parameters: unknown[] = [state];
+      const conditions = [`a."review_state" = $1`];
+      if (ownershipKind) {
+        parameters.push(ownershipKind);
+        conditions.push(`a."ownership_kind" = $${parameters.length}`);
+      }
+      if (!access.isBoss) {
+        parameters.push(adminUserId);
+        conditions.push(`EXISTS (SELECT 1 FROM "zzsh_supply"."admin_supply_scope" s WHERE s."game_id" = a."game_id" AND s."admin_user_id" = $${parameters.length})`);
+      }
+      if (cursorRow) {
+        parameters.push(cursorRow.createdAt);
+        conditions.push(`(a."created_at", a."id") < ($${parameters.length}::timestamptz, $${parameters.length + 1})`);
+        parameters.push(cursorRow.id);
+      }
+      parameters.push(limit + 1);
+      const rows = await client.query(
+        `SELECT a."id", a."game_id" AS "gameId", a."purpose", a."ownership_kind" AS "ownershipKind", a."owner_user_id" AS "ownerUserId",
+                a."uploaded_by_realm" AS "uploadedByRealm", a."uploaded_by_user_id" AS "uploadedByUserId", a."uploaded_by_admin_id" AS "uploadedByAdminId",
+                a."content_hash" AS "contentHash", a."mime", a."byte_size"::text AS "byteSize", a."width", a."height",
+                a."access_class" AS "accessClass", a."review_state" AS "reviewState", a."review_reason" AS "reviewReason", a."created_at" AS "createdAt"
+           FROM "zzsh_supply"."media_asset" a
+          WHERE ${conditions.join(" AND ")}
+          ORDER BY a."created_at" DESC, a."id" DESC
+          LIMIT $${parameters.length}`,
+        parameters,
+      );
+      const hasMore = rows.rows.length > limit;
+      const items = hasMore ? rows.rows.slice(0, limit) : rows.rows;
+      const last = items[items.length - 1] as { createdAt: string; id: string } | undefined;
+      const nextCursor = hasMore && last ? Buffer.from(JSON.stringify({ v: 1, state, ownershipKind, createdAt: last.createdAt, id: last.id })).toString("base64url") : null;
+      return { items, nextCursor, limit };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const contentMatch = /^\/media\/([^/]+)\/content$/.exec(path);
+  if (contentMatch) {
+    const assetId = decodeId(contentMatch[1]!);
+    const asset = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyReviewRead);
+      const row = await loadMediaAsset(client, assetId);
+      if (!row) throw notFound();
+      await assertGameScope(client, adminUserId, access.isBoss, row.gameId);
+      return row;
+    });
+    await sendStoredMedia(response, requestId, options.mediaStorage, asset, "private, no-store");
+    return;
+  }
+  throw notFound();
+}
+
+async function handleAdminWrite(
+  request: SupplyNodeRequest,
+  response: SupplyResponse,
+  options: SupplyRuntimeOptions,
+  requestId: string,
+  method: "POST" | "PUT",
+  path: string,
+  actor: WriteActor,
+): Promise<void> {
+  const fail = (): never => {
+    throw notFound();
+  };
+  const write = async (
+    operation: string,
+    resourceId: string | undefined,
+    permission: string,
+    gameIdResolver: (client: PoolClient) => Promise<string | undefined>,
+    action: (client: PoolClient, access: EffectiveAdminAccess, gameId: string) => Promise<{ status: number; body: unknown; details?: Record<string, unknown> }>,
+    auditAction?: string,
+  ): Promise<void> => {
+    const fingerprintBody = request.body;
+    await runIdempotentWrite(
+      options,
+      request,
+      response,
+      requestId,
+      { principalId: actor.id, operation, ...(resourceId ? { resourceId } : {}) },
+      actor,
+      fingerprintBody,
+      async (client) => {
+        await readAdminContext(request, options);
+        const access = await requireAdminAccess(client, actor.id);
+        requirePermission(access, permission);
+        const gameId = await gameIdResolver(client);
+        if (gameId) await assertGameScope(client, actor.id, access.isBoss, gameId);
+      },
+      async (client) => {
+        const access = await requireAdminAccess(client, actor.id);
+        requirePermission(access, permission);
+        const gameId = await gameIdResolver(client);
+        const objectType = auditObjectType(operation);
+        const before = resourceId && !operation.endsWith(".create")
+          ? await auditSnapshot(client, objectType === "rule_release" ? "game" : objectType, resourceId) : null;
+        const result = await action(client, access, gameId ?? "");
+        if (auditAction) {
+          const body = result.body as Record<string, unknown>;
+          const objectId = String(body.id ?? body.releaseId ?? body.intentId ?? (body.game as { id?: string } | undefined)?.id ?? resourceId);
+          const after = await auditSnapshot(client, objectType, objectId);
+          await recordAudit(client, {
+            actorType: "admin",
+            actorId: actor.id,
+            sessionId: actor.sessionId,
+            action: auditAction,
+            objectType,
+            objectId,
+            outcome: "SUCCESS",
+            requestId,
+            reason: typeof (request.body as Record<string, unknown>)?.reason === "string" ? (request.body as Record<string, string>).reason! : operation,
+            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED" },
+          });
+        }
+        return { status: result.status, body: result.body };
+      },
+    );
+  };
+
+  if (path === "/games" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["code", "name", "description"]);
+    await write(
+      "supply.game.create",
+      undefined,
+      ADMIN_PERMISSION.supplyCatalogManage,
+      async () => undefined,
+      async (client, access) => {
+        const game = await createGame(client, access.isBoss, body);
+        return { status: 200, body: { game }, details: { code: game.code } };
+      },
+      "supply.game.created",
+    );
+    return;
+  }
+  const gameMatch = /^\/games\/([^/]+)$/.exec(path);
+  if (gameMatch && method === "PUT") {
+    const gameId = decodeId(gameMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "name", "description", "enabled"]);
+    parseExpectedRevision(body);
+    await write("supply.game.update", gameId, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client, access) => {
+      await updateGame(client, actor.id, access.isBoss, gameId, body);
+      return { status: 200, body: { gameId } };
+    }, "supply.game.updated");
+    return;
+  }
+  const coverMatch = /^\/games\/([^/]+)\/cover$/.exec(path);
+  if (coverMatch && method === "PUT") {
+    const gameId = decodeId(coverMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["mediaId"]);
+    await write("supply.game.cover", gameId, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client, access) => {
+      await bindGameCover(client, actor.id, access.isBoss, gameId, body);
+      return { status: 200, body: { gameId } };
+    }, "supply.catalog.cover_bound");
+    return;
+  }
+  const createEntryMatch = /^\/games\/([^/]+)\/(items|rarities|categories|skins|entitlements)$/.exec(path);
+  if (createEntryMatch && method === "POST") {
+    const gameId = decodeId(createEntryMatch[1]!);
+    const kind = catalogKind(createEntryMatch[2]!);
+    const body = bodyOf(request);
+    await write(`supply.catalog.${kind}.create`, gameId, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client, access) => {
+      const entry = await createCatalogEntry(client, actor.id, access.isBoss, kind, gameId, body);
+      return { status: 200, body: entry, details: { kind } };
+    }, "supply.catalog.entry_created");
+    return;
+  }
+  const updateEntryMatch = /^\/(items|rarities|categories|skins|entitlements)\/([^/]+)$/.exec(path);
+  if (updateEntryMatch && method === "PUT") {
+    const kind = catalogKind(updateEntryMatch[1]!);
+    const entryId = decodeId(updateEntryMatch[2]!);
+    const body = bodyOf(request);
+    await write(`supply.catalog.${kind}.update`, entryId, ADMIN_PERMISSION.supplyCatalogManage, async (client) => {
+      const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."${TABLE_BY_KIND[kind]}" WHERE "id" = $1`, [entryId]);
+      if (!found.rows[0]) throw notFound();
+      return found.rows[0].gameId;
+    }, async (client, access) => {
+      const result = await updateCatalogEntry(client, actor.id, access.isBoss, kind, entryId, body);
+      return { status: 200, body: { id: entryId }, details: { kind, gameId: result.gameId } };
+    }, "supply.catalog.entry_updated");
+    return;
+  }
+  if (path === "/price-drafts" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["gameId", "mode"]);
+    const gameId = decodeId(requiredString(body, "gameId", 128));
+    await write("supply.rules.price_draft.create", undefined, ADMIN_PERMISSION.supplyRulesEdit, async () => gameId, async (client, access) => {
+      const draft = await createPriceDraft(client, actor.id, access.isBoss, gameId, body.mode);
+      return { status: 200, body: draft };
+    }, "supply.rules.price_draft_created");
+    return;
+  }
+  const priceUpdateMatch = /^\/price-drafts\/([^/]+)$/.exec(path);
+  if (priceUpdateMatch && method === "PUT") {
+    const versionId = decodeId(priceUpdateMatch[1]!);
+    const body = bodyOf(request);
+    await write("supply.rules.price_draft.update", versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
+      const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [versionId]);
+      if (!found.rows[0]) throw notFound();
+      return found.rows[0].gameId;
+    }, async (client, access) => {
+      await updatePriceDraft(client, actor.id, access.isBoss, versionId, body);
+      return { status: 200, body: { id: versionId } };
+    }, "supply.rules.price_draft_updated");
+    return;
+  }
+  const sealMatch = /^\/(price|term|agreement)-drafts\/([^/]+)\/seal$/.exec(path);
+  if (sealMatch && method === "POST") {
+    const versionId = decodeId(sealMatch[2]!);
+    const table = sealMatch[1] === "price" ? "price_version" : sealMatch[1] === "term" ? "term_version" : "agreement_version";
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision"]);
+    await write(`supply.rules.${sealMatch[1]}_draft.seal`, versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
+      const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."${table}" WHERE "id" = $1`, [versionId]);
+      if (!found.rows[0]) throw notFound();
+      return found.rows[0].gameId;
+    }, async (client, access) => {
+      await sealVersion(client, actor.id, access.isBoss, table, versionId, body.expectedRevision);
+      return { status: 200, body: { id: versionId, status: "SEALED" } };
+    }, `supply.rules.${sealMatch[1]}_draft_sealed`);
+    return;
+  }
+  if (path === "/term-drafts" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["gameId"]);
+    const gameId = decodeId(requiredString(body, "gameId", 128));
+    await write("supply.rules.term_draft.create", undefined, ADMIN_PERMISSION.supplyRulesEdit, async () => gameId, async (client, access) => {
+      const draft = await createTermDraft(client, actor.id, access.isBoss, gameId);
+      return { status: 200, body: draft };
+    }, "supply.rules.term_draft_created");
+    return;
+  }
+  const termUpdateMatch = /^\/term-drafts\/([^/]+)$/.exec(path);
+  if (termUpdateMatch && method === "PUT") {
+    const versionId = decodeId(termUpdateMatch[1]!);
+    const body = bodyOf(request);
+    await write("supply.rules.term_draft.update", versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
+      const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."term_version" WHERE "id" = $1`, [versionId]);
+      if (!found.rows[0]) throw notFound();
+      return found.rows[0].gameId;
+    }, async (client, access) => {
+      await updateTermDraft(client, actor.id, access.isBoss, versionId, body);
+      return { status: 200, body: { id: versionId } };
+    }, "supply.rules.term_draft_updated");
+    return;
+  }
+  if (path === "/agreement-drafts" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["gameId", "title", "body"]);
+    const gameId = decodeId(requiredString(body, "gameId", 128));
+    const title = requiredString(body, "title", 120);
+    const agreementBody = requiredString(body, "body", 20_001);
+    await write("supply.rules.agreement_draft.create", undefined, ADMIN_PERMISSION.supplyRulesEdit, async () => gameId, async (client, access) => {
+      const draft = await createAgreementDraft(client, actor.id, access.isBoss, gameId, title, agreementBody);
+      return { status: 200, body: draft };
+    }, "supply.rules.agreement_draft_created");
+    return;
+  }
+  const agreementUpdateMatch = /^\/agreement-drafts\/([^/]+)$/.exec(path);
+  if (agreementUpdateMatch && method === "PUT") {
+    const versionId = decodeId(agreementUpdateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "title", "body"]);
+    await write("supply.rules.agreement_draft.update", versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
+      const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."agreement_version" WHERE "id" = $1`, [versionId]);
+      if (!found.rows[0]) throw notFound();
+      return found.rows[0].gameId;
+    }, async (client, access) => {
+      await updateAgreementDraft(client, actor.id, access.isBoss, versionId, body);
+      return { status: 200, body: { id: versionId } };
+    }, "supply.rules.agreement_draft_updated");
+    return;
+  }
+  if (path === "/quote-preview" && method === "POST") {
+    const body = bodyOf(request);
+    const result = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
+      requirePermission(access, ADMIN_PERMISSION.supplyQuoteInternalRead);
+      return quotePreview(client, actor.id, access.isBoss, body);
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  if (path === "/releases" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["gameId", "priceVersionId", "termVersionId", "agreementVersionId", "expectedGeneration"]);
+    const gameId = decodeId(requiredString(body, "gameId", 128));
+    const priceVersionId = decodeId(requiredString(body, "priceVersionId", 128));
+    const termVersionId = decodeId(requiredString(body, "termVersionId", 128));
+    const agreementVersionId = decodeId(requiredString(body, "agreementVersionId", 128));
+    await write(
+      "supply.rules.release.activate",
+      gameId,
+      ADMIN_PERMISSION.supplyRulesActivate,
+      async () => gameId,
+      async (client, access) => {
+        const result = await activateRelease(client, actor.id, access.isBoss, gameId, priceVersionId, termVersionId, agreementVersionId, requiredString(body, "expectedGeneration", 20));
+        return { status: 200, body: result, details: { releaseId: result.releaseId, generation: result.generation, affectedCount: result.affectedCount } };
+      },
+      "supply.rules.release_activated",
+    );
+    return;
+  }
+  if (path === "/media/upload-intents" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["gameId", "purpose", "mime", "size"]);
+    const gameId = decodeId(requiredString(body, "gameId", 128));
+    const purpose = requiredString(body, "purpose", 64);
+    const mime = requiredString(body, "mime", 64);
+    const size = optionalInteger(body, "size", 1, 10 * 1024 * 1024);
+    if (size === undefined) throw invalid("Size is required");
+    if (!options.mediaStorage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
+    await write("supply.media.upload_intent.create", undefined, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client) => {
+      const intent = await createMediaUploadIntent(client, { realm: "admin", adminUserId: actor.id }, { gameId, purpose, mime, size });
+      return { status: 200, body: { intentId: intent.intentId, uploadToken: intent.uploadToken, expiresAt: intent.expiresAt }, details: { gameId, purpose } };
+    }, "supply.media.upload_intent_created");
+    return;
+  }
+  const adminUploadMatch = /^\/media\/uploads\/([^/]+)$/.exec(path);
+  if (adminUploadMatch && method === "PUT") {
+    const intentId = decodeId(adminUploadMatch[1]!);
+    const uploadToken = headerValue(request.headers["x-upload-token"]);
+    if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
+    const bytes = await readRawBody(request, 10 * 1024 * 1024);
+    await runIdempotentWrite(
+      options,
+      request,
+      response,
+      requestId,
+      { principalId: actor.id, operation: "supply.media.upload", resourceId: intentId },
+      actor,
+      { intentId, token: uploadToken, contentHash: fingerprintRequest("bytes", intentId, bytes.toString("base64")) },
+      async (client) => { await readAdminContext(request, options); await authorizeUpload(client, actor, intentId); },
+      async (client) => {
+        const access = await requireAdminAccess(client, actor.id);
+        requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+        const asset = await consumeMediaUpload(client, options.mediaStorage, { realm: "admin", adminUserId: actor.id }, intentId, uploadToken, bytes);
+        await recordAudit(client, {
+          actorType: "admin",
+          actorId: actor.id,
+          sessionId: actor.sessionId,
+          action: "supply.media.uploaded",
+          objectType: "media_asset",
+          objectId: asset.assetId,
+          outcome: "SUCCESS",
+          requestId,
+          reason: "supply.media.upload",
+            details: { gameId: asset.gameId, before: null, after: { ...asset, revision: "1" }, result: "CREATED" },
+        });
+        return { status: 200, body: asset };
+      },
+    );
+    return;
+  }
+  const reviewMatch = /^\/media\/([^/]+)\/review$/.exec(path);
+  if (reviewMatch && method === "POST") {
+    const assetId = decodeId(reviewMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["decision", "reason", "visibility"]);
+    const decision = requiredString(body, "decision", 16);
+    const reason = optionalTrimmedString(body, "reason", 500);
+    const visibility = optionalString(body, "visibility", 32);
+    await write("supply.media.review", assetId, ADMIN_PERMISSION.supplyReviewDecide, async (client) => {
+      const row = await loadMediaAsset(client, assetId);
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => {
+      const asset = await reviewMediaAsset(client, actor.id, access.isBoss, assetId, {
+        decision,
+        ...(reason ? { reason } : {}),
+        ...(visibility ? { visibility } : {}),
+      });
+      return { status: 200, body: asset, details: { reviewState: asset.reviewState, accessClass: asset.accessClass } };
+    }, "supply.media.reviewed");
+    return;
+  }
+  const visibilityMatch = /^\/media\/([^/]+)\/visibility$/.exec(path);
+  if (visibilityMatch && method === "POST") {
+    const assetId = decodeId(visibilityMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["visibility", "reason"]);
+    const visibility = requiredString(body, "visibility", 32);
+    const reason = optionalTrimmedString(body, "reason", 500);
+    await write("supply.media.visibility", assetId, ADMIN_PERMISSION.supplyReviewDecide, async (client) => {
+      const row = await loadMediaAsset(client, assetId);
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => {
+      const asset = await changeMediaVisibility(client, actor.id, access.isBoss, assetId, { visibility, ...(reason ? { reason } : {}) });
+      return { status: 200, body: asset, details: { accessClass: asset.accessClass } };
+    }, "supply.media.visibility_changed");
+    return;
+  }
+  fail();
+}
+
+const TABLE_BY_KIND = {
+  items: "billable_item",
+  rarities: "skin_rarity",
+  categories: "skin_category",
+  skins: "skin",
+  entitlements: "entitlement",
+} as const;
+
+export function mountSupplyHandlers(app: INestApplication, options: SupplyRuntimeOptions): void {
+  const expressApp = app.getHttpAdapter().getInstance() as {
+    use: (path: string, middleware: (request: SupplyNodeRequest, response: SupplyResponse) => Promise<void>) => void;
+  };
+  expressApp.use("/api/v1/supply", (request, response) => handleSupplyUserRoute(request, response, options));
+  expressApp.use("/api/v1/admin/supply", (request, response) => handleSupplyAdminRoute(request, response, options));
+}

@@ -31,7 +31,6 @@ import {
 import { handleAdminApprovalRoute } from "./approval-audit";
 import { handleAdminAuditRoute } from "./admin-audit";
 import {
-  handleUserIdentityRoute,
   listRestorableUsers,
   restoreDeactivatedUserAccount,
   type RealNameProvider,

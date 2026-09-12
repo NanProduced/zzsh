@@ -1,5 +1,6 @@
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 
@@ -7,6 +8,8 @@ import { createAuthSchema } from "./auth-schema";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
+import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
+import { mountSupplyHandlers } from "../supply/supply-routes";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 
@@ -35,6 +38,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   securityVerificationBudget?: { inFlight: number };
   realNameProvider?: RealNameProvider;
   userObligationReader?: UserObligationReader;
+  mediaStorage?: MediaStorage;
 };
 
 type NodeRequest = {
@@ -447,11 +451,17 @@ export async function mountAuthHandlers(
   );
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
+  const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
+    supply: { ...securityOptions, mediaStorage },
+  });
+  mountSupplyHandlers(app, {
+    ...securityOptions,
+    mediaStorage,
   });
 }
 
