@@ -1,3 +1,4 @@
+import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -354,53 +355,7 @@ async function prepareMigrationOwnership(pool: Pool, resources: TestDatabaseReso
 }
 
 async function resetBusinessData(pool: Pool): Promise<void> {
-  await pool.query(`
-    TRUNCATE
-      "zzsh_supply"."game",
-      "zzsh_supply"."billable_item",
-      "zzsh_supply"."skin_rarity",
-      "zzsh_supply"."skin_category",
-      "zzsh_supply"."skin",
-      "zzsh_supply"."entitlement",
-      "zzsh_supply"."rental_account",
-      "zzsh_supply"."price_version",
-      "zzsh_supply"."price_line",
-      "zzsh_supply"."term_version",
-      "zzsh_supply"."term_option",
-      "zzsh_supply"."agreement_version",
-      "zzsh_supply"."rule_release",
-      "zzsh_supply"."rule_acceptance",
-      "zzsh_supply"."media_upload_intent",
-      "zzsh_supply"."media_asset",
-      "zzsh_supply"."idempotency_record",
-      "zzsh_supply"."admin_supply_scope",
-      "zzsh_iam"."admin_workspace_layout",
-      "zzsh_iam"."approval_execution",
-      "zzsh_iam"."approval_decision",
-      "zzsh_iam"."approval_request_candidate",
-      "zzsh_iam"."approval_request",
-      "zzsh_iam"."approval_template_candidate",
-      "zzsh_iam"."approval_template",
-      "zzsh_iam"."admin_user_permission",
-      "zzsh_iam"."admin_user_role",
-      "zzsh_iam"."admin_role_permission",
-      "zzsh_iam"."admin_recovery_request",
-      "zzsh_iam"."admin_recovery_notification_target",
-      "zzsh_iam"."admin_security_notification_outbox",
-      "zzsh_auth_admin"."twoFactor",
-      "zzsh_auth_admin"."verification",
-      "zzsh_auth_admin"."session",
-      "zzsh_auth_admin"."account",
-      "zzsh_auth_admin"."user",
-      "zzsh_auth_user"."twoFactor",
-      "zzsh_auth_user"."verification",
-      "zzsh_auth_user"."session",
-      "zzsh_auth_user"."account",
-      "zzsh_auth_user"."user",
-      "zzsh_iam"."user_identity_state",
-      "zzsh_iam"."admin_security",
-      "zzsh_iam"."audit_event"
-  `);
+  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
   await pool.query(`DELETE FROM "zzsh_iam"."admin_role" WHERE "code" NOT IN ('ops', 'support')`);
   await pool.query(`DELETE FROM "zzsh_iam"."admin_role_permission"`);
 }

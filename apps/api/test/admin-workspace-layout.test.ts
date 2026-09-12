@@ -1,3 +1,4 @@
+import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHmac, randomBytes } from "node:crypto";
 import { test } from "node:test";
@@ -17,7 +18,7 @@ const LOCK_KEY = "805014";
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
-const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin"] as const;
+const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply"] as const;
 
 type CookieJar = { values: Map<string, string>; update: (response: Response) => void; header: () => string };
 type Resources = {
@@ -196,23 +197,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  await pool.query(`
-    TRUNCATE
-      "zzsh_iam"."admin_workspace_layout",
-      "zzsh_iam"."admin_user_permission",
-      "zzsh_iam"."admin_user_role",
-      "zzsh_iam"."admin_recovery_request",
-      "zzsh_iam"."admin_security_notification_outbox",
-      "zzsh_iam"."admin_recovery_notification_target",
-      "zzsh_auth_admin"."twoFactor",
-      "zzsh_auth_admin"."verification",
-      "zzsh_auth_admin"."session",
-      "zzsh_auth_admin"."account",
-      "zzsh_auth_admin"."user",
-      "zzsh_iam"."admin_security",
-      "zzsh_iam"."audit_event"
-    CASCADE
-  `);
+  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
 }
 
 function base32Decode(value: string): Buffer {

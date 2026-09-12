@@ -1,3 +1,5 @@
+import { handlePublishingRoute } from "./publishing-routes";
+import type { SupplyGateReader } from "./publishing";
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import { auditObjectType, auditSnapshot } from "./supply-audit";
@@ -67,7 +69,7 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 
-export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage };
+export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader };
 
 type SupplyResponse = SupplyNodeResponse & {
   send?: (body: Buffer | string) => void;
@@ -254,6 +256,7 @@ export async function handleSupplyUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handlePublishingRoute(request,response,options,requestId,path,query,false)) return;
     if (method === "GET") {
       const catalogMatch = /^\/games\/([^/]+)\/catalog$/.exec(path);
       if (catalogMatch) {
@@ -279,7 +282,7 @@ export async function handleSupplyUserRoute(
       if (contentMatch) {
         const assetId = decodeId(contentMatch[1]!);
         const asset = await loadMediaAsset(options.pool, assetId);
-        if (!asset || asset.reviewState !== "APPROVED" || asset.accessClass !== "PUBLIC_DISPLAY") throw notFound();
+        if (!asset || asset.ownershipKind !== "PLATFORM_CATALOG" || asset.reviewState !== "APPROVED" || asset.accessClass !== "PUBLIC_DISPLAY") throw notFound();
         if (!asset.publicStorageKey) throw notFound();
         await sendStoredMedia(response, requestId, options.mediaStorage, { ...asset, storageKey: asset.publicStorageKey, contentHash: asset.publicStorageKey }, "public, max-age=0, must-revalidate");
         return;
@@ -335,7 +338,7 @@ export async function handleSupplyUserRoute(
     if (userIntentMatch) {
       const context = await readUserContext(request, options);
       const body = bodyOf(request);
-      ensureOnlyFields(body, ["gameId", "accountId", "mime", "size"]);
+      ensureOnlyFields(body, ["gameId", "accountId", "mime", "size", "purpose"]);
       const gameId = decodeId(requiredString(body, "gameId", 128));
       const accountId = decodeId(requiredString(body, "accountId", 128));
       const mime = requiredString(body, "mime", 64);
@@ -349,13 +352,13 @@ export async function handleSupplyUserRoute(
         requestId,
         { principalId: context.userId, operation: "supply.media.upload_intent.create" },
         { realm: "user", id: context.userId, sessionId: context.sessionId },
-        { gameId, accountId, mime, size },
+        { gameId, accountId, mime, size, ...(body.purpose === undefined ? {} : { purpose: body.purpose }) },
         async (client) => {
           await readUserContext(request, options);
           if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND game_id = $2 AND owner_user_id = $3`, [accountId, gameId, context.userId])).rowCount) throw notFound();
         },
         async (client) => {
-          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose: "ACCOUNT_EVIDENCE", mime, size });
+          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose: String(body.purpose ?? "ACCOUNT_EVIDENCE"), mime, size });
           await recordAudit(client, {
             actorType: "user",
             actorId: context.userId,
@@ -439,6 +442,7 @@ export async function handleSupplyAdminRoute(
 
   await safely(response, requestId, async () => {
     if (!requireOrigin(request, response, options, requestId)) return;
+    if (await handlePublishingRoute(request,response,options,requestId,path,query,true)) return;
     const context = await readAdminContext(request, options);
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
 

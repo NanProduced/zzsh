@@ -49,6 +49,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     supply.push({ label: "规则与价目", icon: ListChecksIcon, path: "/supply/rules", kind: "rules" });
   }
   if (has("supply.review.read") || nav.isBoss) {
+    supply.push({ label: "供给审核", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
     supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
   }
   if (supply.length > 0) {
@@ -89,6 +90,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/users/restore") return "用户账号恢复";
   if (pathname === "/supply/catalog") return "目录维护";
   if (pathname === "/supply/rules") return "规则与价目";
+  if (pathname === "/supply/reviews") return "供给审核";
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/account") return "账号安全";
   return "工作台";

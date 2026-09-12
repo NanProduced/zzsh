@@ -78,7 +78,7 @@ export function normalizeTime(value: string | null): string | null {
 
 function normalizeAttributes(value: Record<string, unknown>): Record<string, unknown> {
   const levels = ["vitLevel", "bearLevel", "vit_level", "bear_level", "dive_level", "character_level", "awm_weapon_count", "service_window_start_minute", "service_window_end_minute"];
-  const texts = ["grading_code", "login_method_code", "legacy_helmet_code", "legacy_armor_code", "legacy_insure_code", "service_window_timezone", "region_province", "region_city", "info_source"];
+  const texts = ["safe_box_code", "grading_code", "login_method_code", "legacy_helmet_code", "legacy_armor_code", "legacy_insure_code", "service_window_timezone", "region_province", "region_city", "info_source"];
   const booleans = ["ban_record", "face_is_self", "service_window_cross_midnight"];
   fields(value, [...levels, ...texts, ...booleans, "secret_kd"]);
   return Object.fromEntries([...levels, ...texts, ...booleans, "secret_kd"].map((key) => {

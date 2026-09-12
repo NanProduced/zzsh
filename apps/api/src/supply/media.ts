@@ -149,7 +149,7 @@ export async function createMediaUploadIntent(
     throw invalid("Platform catalog uploads cannot target a rental account");
   }
   const purpose = input.purpose;
-  const allowedPurposes = actor.realm === "admin" ? ["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"] : ["ACCOUNT_EVIDENCE"];
+  const allowedPurposes = actor.realm === "admin" ? ["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"] : ["ACCOUNT_EVIDENCE", "ACCOUNT_DISPLAY"];
   if (!allowedPurposes.includes(purpose)) throw invalid("Purpose is not allowed");
 
   const intentId = newSupplyId("upload");
@@ -203,6 +203,7 @@ export async function consumeMediaUpload(
 ): Promise<UploadedAsset> {
   const intentResult = await client.query<{
     tokenHash: string;
+    accountId: string | null;
     gameId: string;
     purpose: string;
     ownershipKind: string;
@@ -215,7 +216,7 @@ export async function consumeMediaUpload(
     expiresAt: Date;
     consumedAt: Date | null;
   }>(
-    `SELECT "token_hash" AS "tokenHash", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind",
+    `SELECT "account_id" AS "accountId", "token_hash" AS "tokenHash", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind",
             "owner_user_id" AS "ownerUserId", "uploaded_by_realm" AS "uploadedByRealm",
             "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
             "declared_mime" AS "declaredMime", "declared_size"::text AS "declaredSize", "expires_at" AS "expiresAt", "consumed_at" AS "consumedAt"
@@ -252,8 +253,8 @@ export async function consumeMediaUpload(
   await client.query(
     `INSERT INTO "zzsh_supply"."media_asset"
       ("id", "game_id", "purpose", "ownership_kind", "owner_user_id", "uploaded_by_realm", "uploaded_by_user_id", "uploaded_by_admin_id",
-       "storage_key", "content_hash", "mime", "byte_size", "width", "height", "public_storage_key")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+       "storage_key", "content_hash", "mime", "byte_size", "width", "height", "public_storage_key", "account_id")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
     [
       assetId,
       intent.gameId,
@@ -270,6 +271,7 @@ export async function consumeMediaUpload(
       image.width,
       image.height,
       publicHash,
+      intent.accountId,
     ],
   );
   await client.query(
@@ -352,7 +354,7 @@ export async function reviewMediaAsset(
   if (visibility !== "PUBLIC_DISPLAY" && visibility !== "PRIVATE_REVIEW") throw invalid("Visibility is invalid");
   if (visibility === "PUBLIC_DISPLAY") {
     if (nextState !== "APPROVED") throw invalid("Only approved media can be public");
-    if (asset.ownershipKind !== "PLATFORM_CATALOG") throw invalid("Only platform catalog media can be public");
+    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
   }
   await client.query(
@@ -387,7 +389,7 @@ export async function changeMediaVisibility(
   if (input.visibility !== "PUBLIC_DISPLAY" && input.visibility !== "PRIVATE_REVIEW") throw invalid("Visibility is invalid");
   if (input.visibility === "PUBLIC_DISPLAY") {
     if (asset.reviewState !== "APPROVED") throw conflict("Media must be approved before public display");
-    if (asset.ownershipKind !== "PLATFORM_CATALOG") throw invalid("Only platform catalog media can be public");
+    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
   }
   await client.query(

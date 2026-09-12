@@ -37,7 +37,7 @@ test("the workspace menu exposes supply entries only with matching permissions",
 
   const reviewer = workspaceMenuItems({ isBoss: false, permissions: ["supply.review.read"] });
   assert.ok(reviewer.some((item) => item.label === "供给与目录"));
-  assert.deepEqual(reviewer.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/media"]);
+  assert.deepEqual(reviewer.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/reviews", "/supply/media"]);
 
   const editor = workspaceMenuItems({ isBoss: false, permissions: ["supply.catalog.manage", "supply.rules.edit"] });
   assert.deepEqual(editor.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/catalog", "/supply/rules"]);

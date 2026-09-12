@@ -1,3 +1,4 @@
+import { SupplyListingReviewView } from "../views/supply-listing-review-view";
 import type { SessionSnapshot } from "../api";
 import { AdminAuditView } from "../views/admin-audit-view";
 import { AdminDirectoryView, UserRestorePanel } from "../views/admin-directory-view";
@@ -104,6 +105,7 @@ export function WorkspacePageContent({
   if (tab.kind === "rules") {
     return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
+  if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {
     return <SupplyMediaReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} />;
   }

@@ -14,6 +14,7 @@ test("page search only lists implemented pages in the current permission set", (
     "/roles",
     "/supply/catalog",
     "/supply/rules",
+    "/supply/reviews",
     "/supply/media",
     "/users/restore",
     "/approvals",

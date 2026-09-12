@@ -127,6 +127,34 @@
       "when": 1789124407000,
       "tag": "0017_m3b_idempotency_realm",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789124408000,
+      "tag": "0018_m3c_listing_publication",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789124409000,
+      "tag": "0019_m3c_identity_commitments",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1789124410000,
+      "tag": "0020_m3c_actor_shape",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1789124411000,
+      "tag": "0021_m3c_content_schema",
+      "breakpoints": true
     }
   ]
 }

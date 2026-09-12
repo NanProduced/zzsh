@@ -227,6 +227,7 @@ test("timed entitlements without a known expiry are refused, permanent ones disc
 test("quote projections are exhaustive whitelists without internal profit or owner fields", () => {
   const quote = quoteOf(accountQuote("SPREAD", "A", { deposits: { tenantDepositCents: "500", publisherBailRequirementCents: "3000" } }));
   const publicView = JSON.stringify(projectQuote(quote, "public"));
+  assert.deepEqual(projectQuote(projectQuote(quote, "admin"), "public"), projectQuote(quote, "public"), "cached projected quotes can be safely narrowed again");
   for (const forbidden of ["ownerUnitAmount", "ownerAmount", "ownerTotal", "platformAmount", "platformFullProfit", "publisherBailRequirement", "pricingInputs", "contentHash", "storage_key"]) {
     assert.equal(publicView.includes(forbidden), false, `public quote leaked ${forbidden}`);
   }

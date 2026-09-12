@@ -1,7 +1,10 @@
+import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { runPublishingChecks } from "./supply-publishing-checks";
+import type { SupplyGate } from "../src/supply/publishing";
 import sharp from "sharp";
 import { fingerprintRequest } from "../src/supply/supply-util";
 import { strict as assert } from "node:assert";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,9 +19,11 @@ import { runBusinessMigrations } from "../src/database/business-migrations";
 import { createLocalMediaStorage } from "../src/supply/media";
 import { loadConfig, type AppConfig } from "../src/config/config";
 
-const DEFAULT_DATABASE = "zzsh_test_m3b_supply";
+const RESOURCE_SET = process.env.SUPPLY_TEST_RESOURCE_SET?.trim() || "";
+if(RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid supply test resource set");
+const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_supply_"+RESOURCE_SET : "zzsh_test_m3b_supply";
 const RESOURCE_MARKER = "zzsh:m3b-supply-test:v1";
-const LOCK_KEY = "805015";
+const LOCK_KEY = RESOURCE_SET ? (BigInt("0x"+createHash("sha256").update("supply-test:"+RESOURCE_SET).digest("hex").slice(0,15))+2000000n).toString() : "805015";
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -26,8 +31,8 @@ const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "z
 const HAFF_RULE = {
   schema: "haff-ratio-v1",
   baseBySafeBox: { "box-a": "50", "box-b": "60" },
-  vitalityDeltaByLevel: { "6": "0", "7": "-5" },
-  bearDeltaByLevel: { "6": "0", "7": "-5" },
+  vitalityDeltaByLevel: { "0": "0", "6": "0", "7": "-5" },
+  bearDeltaByLevel: { "0": "0", "6": "0", "7": "-5" },
   dailyDeltaByTermOption: { "daily-10m": "0", "daily-20m": "10" },
   options: { standard: { delta: "0", enabled: true } },
   spreadDelta: "10",
@@ -86,9 +91,10 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 function makeResources(): Resources {
   const databaseName = process.env.M3B_SUPPLY_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
   assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.M3B_SUPPLY_TEST_MIGRATION_USER?.trim() || "zzsh_m3b_migration", "migration user");
-  const runtimeUser = safeIdentifier(process.env.M3B_SUPPLY_TEST_RUNTIME_USER?.trim() || "zzsh_m3b_runtime", "runtime user");
+  const migrationUser = safeIdentifier(process.env.M3B_SUPPLY_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET?"zzsh_m3b_"+RESOURCE_SET+"_m":"zzsh_m3b_migration"), "migration user");
+  const runtimeUser = safeIdentifier(process.env.M3B_SUPPLY_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET?"zzsh_m3b_"+RESOURCE_SET+"_r":"zzsh_m3b_runtime"), "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
+  if(RESOURCE_SET){assert.equal(databaseName,DEFAULT_DATABASE);assert.equal(migrationUser,"zzsh_m3b_"+RESOURCE_SET+"_m");assert.equal(runtimeUser,"zzsh_m3b_"+RESOURCE_SET+"_r");}
   if (!migrationUser.startsWith("zzsh_m3b_") || !runtimeUser.startsWith("zzsh_m3b_")) throw new Error("supply test roles must use the isolated zzsh_m3b_ prefix");
   const maintenanceUser = process.env.M3B_SUPPLY_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
@@ -210,54 +216,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  await pool.query(`
-    TRUNCATE
-      "zzsh_supply"."idempotency_record",
-      "zzsh_supply"."media_upload_intent",
-      "zzsh_supply"."media_asset",
-      "zzsh_supply"."admin_supply_scope",
-      "zzsh_supply"."rule_acceptance",
-      "zzsh_supply"."rule_release",
-      "zzsh_supply"."price_line",
-      "zzsh_supply"."price_version",
-      "zzsh_supply"."term_option",
-      "zzsh_supply"."term_version",
-      "zzsh_supply"."agreement_version",
-      "zzsh_supply"."rental_account",
-      "zzsh_supply"."skin",
-      "zzsh_supply"."skin_category",
-      "zzsh_supply"."skin_rarity",
-      "zzsh_supply"."entitlement",
-      "zzsh_supply"."billable_item",
-      "zzsh_supply"."game",
-      "zzsh_iam"."admin_workspace_layout",
-      "zzsh_iam"."approval_execution",
-      "zzsh_iam"."approval_decision",
-      "zzsh_iam"."approval_request_candidate",
-      "zzsh_iam"."approval_request",
-      "zzsh_iam"."approval_template_candidate",
-      "zzsh_iam"."approval_template",
-      "zzsh_iam"."admin_user_permission",
-      "zzsh_iam"."admin_user_role",
-      "zzsh_iam"."admin_role_permission",
-      "zzsh_iam"."admin_recovery_request",
-      "zzsh_iam"."admin_recovery_notification_target",
-      "zzsh_iam"."admin_security_notification_outbox",
-      "zzsh_auth_admin"."twoFactor",
-      "zzsh_auth_admin"."verification",
-      "zzsh_auth_admin"."session",
-      "zzsh_auth_admin"."account",
-      "zzsh_auth_admin"."user",
-      "zzsh_auth_user"."twoFactor",
-      "zzsh_auth_user"."verification",
-      "zzsh_auth_user"."session",
-      "zzsh_auth_user"."account",
-      "zzsh_auth_user"."user",
-      "zzsh_iam"."user_identity_state",
-      "zzsh_iam"."admin_security",
-      "zzsh_iam"."audit_event"
-    CASCADE
-  `);
+  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
 }
 
 function base32Decode(value: string): Buffer {
@@ -351,7 +310,7 @@ async function uploadBytes(base: string, path: string, jar: CookieJar, origin: s
   return { status: response.status, body: await readJson(response) };
 }
 
-test("M3-B catalog, rule versions, quoting, projections and media behave under real PostgreSQL", async () => {
+test("M3-B foundations and M3-C publication, authorization and review behave under real PostgreSQL", async (testContext) => {
   let resources: Resources | undefined;
   let maintenancePool: Pool | undefined;
   let maintenanceDataPool: Pool | undefined;
@@ -362,6 +321,8 @@ test("M3-B catalog, rule versions, quoting, projections and media behave under r
   let runtimeClosedByApp = false;
   const mediaDir = await mkdtemp(join(tmpdir(), "zzsh-m3b-media-"));
   const baseStorage = createLocalMediaStorage(mediaDir);
+  const publicationGates=new Map<string,SupplyGate>();
+  const readProbe:{run?:(client:PoolClient,account:{id:string})=>Promise<void>}={};
   let storageAvailable = true;
   const mediaStorage = {
     get available() { return storageAvailable; },
@@ -406,6 +367,7 @@ test("M3-B catalog, rule versions, quoting, projections and media behave under r
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
       mediaStorage,
+      testSupplyGateReader: async (client:PoolClient,a:{id:string}) => {await readProbe.run?.(client,a);return publicationGates.get(a.id) ?? {publisherBail:"UNKNOWN" as const,occupancy:"UNKNOWN" as const,reference:null};},
     };
     app = await createApp({
       health: {
@@ -848,7 +810,9 @@ test("M3-B catalog, rule versions, quoting, projections and media behave under r
     const foreignAccount = await request(base, "/api/v1/supply/media/upload-intents", { gameId, accountId, mime: "image/png", size: pngBytes().length }, userTwo, USER_ORIGIN, "POST", supplyKey());
     assert.equal(foreignAccount.response.status, 404, "users must not upload against another user's account");
 
-    const userIntent = await request(base, "/api/v1/supply/media/upload-intents", { gameId, accountId, mime: "image/png", size: pngBytes().length }, userOne, USER_ORIGIN, "POST", supplyKey());
+    const legacyIntentKey=supplyKey();
+    const userIntent = await request(base, "/api/v1/supply/media/upload-intents", { gameId, accountId, mime: "image/png", size: pngBytes().length }, userOne, USER_ORIGIN, "POST", legacyIntentKey);
+    assert.equal((await runtimePool.query(`SELECT request_fingerprint FROM zzsh_supply.idempotency_record WHERE key=$1`,[legacyIntentKey["idempotency-key"]])).rows[0].request_fingerprint,fingerprintRequest("supply.media.upload_intent.create",undefined,{gameId,accountId,mime:"image/png",size:pngBytes().length}),"default evidence intent preserves the M3-B fingerprint");
     assert.equal(userIntent.response.status, 200, JSON.stringify(userIntent.body));
     const userAsset = await uploadBytes(base, `/api/v1/supply/media/uploads/${userIntent.body?.intentId}`, userOne, USER_ORIGIN, userIntent.body?.uploadToken as string);
     assert.equal(userAsset.status, 200, JSON.stringify(userAsset.body));
@@ -885,6 +849,7 @@ test("M3-B catalog, rule versions, quoting, projections and media behave under r
     const staleRead = await request(base, `/api/v1/supply/games/${gameId}/catalog?cursor=${encodeURIComponent(staleCursor)}&limit=1`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(staleRead.response.status, 409, "cursors must be invalidated when the catalog revision changes");
 
+    await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
     const auditCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" LIKE 'supply.%'`);
     assert.ok(Number(auditCount.rows[0]?.count ?? "0") >= 20, "supply writes must be audited");
     const audits = (await runtimePool.query(`SELECT object_type, object_id, action, reason, details FROM zzsh_iam.audit_event WHERE action LIKE 'supply.%'`)).rows;

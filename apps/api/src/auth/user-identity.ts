@@ -275,7 +275,7 @@ export async function restoreDeactivatedUserAccount(
   });
 }
 
-async function assertActiveInTransaction(client: PoolClient, userId: string): Promise<void> {
+export async function assertActiveInTransaction(client: PoolClient, userId: string): Promise<void> {
   const user = await client.query<{ suspended: boolean }>(
     `SELECT "suspended" FROM "zzsh_auth_user"."user" WHERE "id" = $1 FOR UPDATE`,
     [userId],

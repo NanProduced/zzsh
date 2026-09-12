@@ -456,7 +456,7 @@ export type ProjectedQuote = {
   roundingPolicy?: string;
 };
 
-export function projectQuote(quote: InternalQuote, viewer: QuoteViewer): ProjectedQuote {
+export function projectQuote(quote: InternalQuote | ProjectedQuote, viewer: QuoteViewer): ProjectedQuote {
   const lines: ProjectedLine[] = quote.lines.map((line) => {
     const projected: ProjectedLine = {
       itemId: line.itemId,

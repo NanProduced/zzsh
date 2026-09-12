@@ -1,3 +1,5 @@
+import { mountUserSupplyBff } from "../bff/user-supply-bff";
+import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -39,6 +41,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   realNameProvider?: RealNameProvider;
   userObligationReader?: UserObligationReader;
   mediaStorage?: MediaStorage;
+  testSupplyGateReader?: SupplyGateReader;
 };
 
 type NodeRequest = {
@@ -435,7 +438,11 @@ export async function mountAuthHandlers(
     rateLimitState: options.rateLimitState ?? new Map(),
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },
     realNameProvider: options.realNameProvider ?? createFakeRealNameProvider("UNKNOWN"),
-    userObligationReader: options.userObligationReader ?? (async () => "UNKNOWN"),
+    userObligationReader: async (userId,client) => {
+      const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED') LIMIT 1",[userId]);
+      if(pending.rowCount) return "PENDING";
+      return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
+    },
     testOperationsEnabled: options.testOperationsEnabled,
   };
   (app as unknown as { useBodyParser: (parser: "json", rawBody: boolean) => void }).useBodyParser("json", true);
@@ -451,17 +458,21 @@ export async function mountAuthHandlers(
   );
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
+  if(options.testSupplyGateReader && !options.testOperationsEnabled) throw new Error("Supply fixtures require test operations capability");
+  const supplyGateReader=options.testSupplyGateReader ?? unknownSupplyGate;
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
-    supply: { ...securityOptions, mediaStorage },
+    supply: { ...securityOptions, mediaStorage, supplyGateReader },
   });
+  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader});
   mountSupplyHandlers(app, {
     ...securityOptions,
     mediaStorage,
+    supplyGateReader,
   });
 }
 

@@ -69,3 +69,11 @@ test:readiness 会受控停止/恢复本项目依赖，不属于日常前端检�
 API 请求日志只记录方法、路由模板、状态、requestId和耗时，不记录请求体、Cookie、密码、OTP及密钥。认证细节见 [认证说明](architecture/authentication.md)。
 
 Admin 免账号 mock 预览已移除。真实初始化使用独立测试账号，不重置他人正在使用的账号。tmp/ 保存本地过程资料，.impeccable/ 保存工具状态，二者不进入 Git。
+
+## 供给发布验证
+
+发布模型需前向应用0018–0021；不修改0015–0017或M1/M2迁移。先在隔离目标检查旧接受记录/媒体归属是否满足新增外键，冲突时停止核对，不造版本或清共享表绕过。现有保留API未自动迁移或重启，不能据新的前端菜单认为旧API已支持发布。
+
+供给完整PG入口为 `npm run test:supply -w @zzsh/api`，已纳入根check。可设置 `SUPPLY_TEST_RESOURCE_SET=<小写标识>` 一起派生独立库、迁移/runtime角色和锁；不得混用旧资源。auth仍使用 `M2_AUTH_TEST_RESOURCE_SET`。相关测试复用明确的业务表TRUNCATE清单并核schema所有权，不使用CASCADE扩大清理。
+
+默认保证金和占用均UNKNOWN；正向发布只在已启用test/fake能力的受控测试fixture中验证。管理审核页面为 `/supply/reviews`；用户端本阶段只交付API/BFF，无正式发布页面验收。OSS/CDN及真实身份、资金、云信仍未接入本阶段验证。
