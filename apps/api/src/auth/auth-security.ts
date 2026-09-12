@@ -402,6 +402,17 @@ export async function readAdminContext(
   };
 }
 
+/** Strict supply-context recheck; the session ID comes from prior SDK authentication. */
+export async function assertAdminContextInTransaction(client: PoolClient, context: {userId:string;sessionId:string}): Promise<void> {
+  const session = (await client.query<{locked:boolean;twoFactorEnabled:boolean}>(`SELECT s."locked",u."twoFactorEnabled" FROM "zzsh_auth_admin"."session" s JOIN "zzsh_auth_admin"."user" u ON u."id"=s."userId" WHERE s."id"=$1 AND s."userId"=$2 AND s."expiresAt">clock_timestamp()`, [context.sessionId,context.userId])).rows[0];
+  if (!session) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
+  const security = await readAdminSecurity(client, context.userId);
+  if (!security) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Account unavailable");
+  if (security.status === "FROZEN") throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Account unavailable");
+  if (security.status !== "ACTIVE" || session.twoFactorEnabled !== true) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Additional verification required");
+  if (session.locked) throw new SecurityApiError(423, API_V1_ERROR_CODES.FORBIDDEN, "Account locked");
+}
+
 export type AdminSessionSnapshot =
   | { authenticated: false }
   | {

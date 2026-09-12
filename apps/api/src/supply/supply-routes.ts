@@ -1,3 +1,5 @@
+import { withPublicListingSnapshot } from "./publishing";
+import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
 import type { SupplyGateReader } from "./publishing";
 import type { INestApplication } from "@nestjs/common";
@@ -12,9 +14,9 @@ import {
   requirePermission,
   type EffectiveAdminAccess,
 } from "../auth/admin-authorization";
-import { readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
+import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
-import { readUserContext } from "../auth/user-identity";
+import { readUserContext, assertUserContextInTransaction } from "../auth/user-identity";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
 import {
   bindGameCover,
@@ -256,16 +258,18 @@ export async function handleSupplyUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleFavorites(request,response,options,requestId,path,query)) return;
     if (await handlePublishingRoute(request,response,options,requestId,path,query,false)) return;
     if (method === "GET") {
-      const catalogMatch = /^\/games\/([^/]+)\/catalog$/.exec(path);
+      if (path === "/games") { const games=(await options.pool.query(`SELECT id,code,name,description FROM zzsh_supply.game WHERE enabled AND current_release_id IS NOT NULL ORDER BY code,id`)).rows;sendJson(response,200,{games},requestId);return; }
+      const catalogMatch = /^\/games\/([^/]+)\/(catalog|publishing-catalog)$/.exec(path);
       if (catalogMatch) {
         const gameId = decodeId(catalogMatch[1]!);
         const limitRaw = query.get("limit");
         const limit = limitRaw === null ? 20 : Number(limitRaw);
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
-        const result = await readPublicCatalog(
-          options.pool,
+        const result = await withPublicListingSnapshot(options.pool, (client) => readPublicCatalog(
+          client,
           gameId,
           {
             ...(query.get("q") ? { q: query.get("q")! } : {}),
@@ -274,8 +278,9 @@ export async function handleSupplyUserRoute(
           },
           limit,
           query.get("cursor") ?? undefined,
-        );
-        sendJson(response, 200, result, requestId, "public, max-age=30");
+          catalogMatch[2] === "publishing-catalog" ? "publishing" : "browse",
+        ));
+        sendJson(response, 200, result, requestId, catalogMatch[2] === "publishing-catalog" ? "no-store" : "public, max-age=30");
         return;
       }
       const contentMatch = /^\/media\/([^/]+)\/content$/.exec(path);
@@ -306,7 +311,7 @@ export async function handleSupplyUserRoute(
         { realm: "user", id: context.userId, sessionId: context.sessionId },
         { gameId },
         async (client) => {
-          await readUserContext(request, options);
+          await assertUserContextInTransaction(client, context);
           if (!(await client.query(`SELECT 1 FROM zzsh_supply.game WHERE id = $1 AND enabled`, [gameId])).rowCount) throw notFound();
         },
         async (client) => {
@@ -354,7 +359,7 @@ export async function handleSupplyUserRoute(
         { realm: "user", id: context.userId, sessionId: context.sessionId },
         { gameId, accountId, mime, size, ...(body.purpose === undefined ? {} : { purpose: body.purpose }) },
         async (client) => {
-          await readUserContext(request, options);
+          await assertUserContextInTransaction(client, context);
           if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND game_id = $2 AND owner_user_id = $3`, [accountId, gameId, context.userId])).rowCount) throw notFound();
         },
         async (client) => {
@@ -393,7 +398,7 @@ export async function handleSupplyUserRoute(
         { realm: "user", id: context.userId, sessionId: context.sessionId },
         { intentId, token: uploadToken, contentHash: fingerprintRequest("bytes", intentId, bytes.toString("base64")) },
         async (client) => {
-          await readUserContext(request, options);
+          await assertUserContextInTransaction(client, context);
           await authorizeUpload(client, { realm: "user", id: context.userId, sessionId: context.sessionId }, intentId);
         },
         async (client) => {
@@ -602,7 +607,7 @@ async function handleAdminWrite(
       actor,
       fingerprintBody,
       async (client) => {
-        await readAdminContext(request, options);
+        await assertAdminContextInTransaction(client, {userId:actor.id,sessionId:actor.sessionId});
         const access = await requireAdminAccess(client, actor.id);
         requirePermission(access, permission);
         const gameId = await gameIdResolver(client);
@@ -854,7 +859,7 @@ async function handleAdminWrite(
       { principalId: actor.id, operation: "supply.media.upload", resourceId: intentId },
       actor,
       { intentId, token: uploadToken, contentHash: fingerprintRequest("bytes", intentId, bytes.toString("base64")) },
-      async (client) => { await readAdminContext(request, options); await authorizeUpload(client, actor, intentId); },
+      async (client) => { await assertAdminContextInTransaction(client, {userId:actor.id,sessionId:actor.sessionId}); await authorizeUpload(client, actor, intentId); },
       async (client) => {
         const access = await requireAdminAccess(client, actor.id);
         requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);

@@ -6,6 +6,7 @@
 - [仓库结构](architecture/repository-layout.md)
 - [多端与 BFF](architecture/multi-client-bff.md)
 - [API v1 契约](architecture/api-v1-contract.md)
+- [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [认证与账号安全](architecture/authentication.md)
 - [开发与验证](development.md)
 - [本地环境协作规则](local-environments.md)

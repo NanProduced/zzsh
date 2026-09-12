@@ -1,3 +1,4 @@
+import { runMarketChecks } from "./supply-market-checks";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
@@ -622,7 +623,8 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     const waitBlocked = async (count: number) => {
       let n = 0,
         deadline = Date.now() + 5000;
-      while (n < count && Date.now() < deadline)
+      while (n < count && Date.now() < deadline) {
+        await identityGate.query("SELECT pg_stat_clear_snapshot()");
         n = Number(
           (
             await identityGate.query(
@@ -631,6 +633,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
             )
           ).rows[0].n,
         );
+      }
       assert.equal(n, count);
     };
     const deactivation = call("/api/auth/user/account/deactivate", {
@@ -1126,4 +1129,5 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       }
     },
   );
+  await runMarketChecks(o);
 }

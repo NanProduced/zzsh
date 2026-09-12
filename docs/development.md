@@ -77,3 +77,5 @@ Admin 免账号 mock 预览已移除。真实初始化使用独立测试账号�
 供给完整PG入口为 `npm run test:supply -w @zzsh/api`，已纳入根check。可设置 `SUPPLY_TEST_RESOURCE_SET=<小写标识>` 一起派生独立库、迁移/runtime角色和锁；不得混用旧资源。auth仍使用 `M2_AUTH_TEST_RESOURCE_SET`。相关测试复用明确的业务表TRUNCATE清单并核schema所有权，不使用CASCADE扩大清理。
 
 默认保证金和占用均UNKNOWN；正向发布只在已启用test/fake能力的受控测试fixture中验证。管理审核页面为 `/supply/reviews`；用户端本阶段只交付API/BFF，无正式发布页面验收。OSS/CDN及真实身份、资金、云信仍未接入本阶段验证。
+
+M3-D数据层新增0022_m3d_favorites，需在隔离目标先验证并纳入既有测试表清理清单。Web数据代理复用ZZSH_API_ORIGIN/ZZSH_WEB_ORIGIN；生产缺少有效Origin配置即503，不使用本地假数据。当前仅接口/调用层完成，用户UI工作树整合后再连接正式页面。测试仍用独立SUPPLY_TEST_RESOURCE_SET及M2_AUTH_TEST_RESOURCE_SET，根check包含收藏/失效及M3-C R1–R3回归。

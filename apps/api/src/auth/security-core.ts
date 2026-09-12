@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
-import { API_V1_ERROR_CODES } from "../contracts/api-v1";
+import { API_V1_ERROR_CODES, type ApiV1ErrorDetail } from "../contracts/api-v1";
 
 export type AuditOutcome = "SUCCESS" | "FAILURE";
 
@@ -10,6 +10,7 @@ export class SecurityApiError extends Error {
     readonly status: number,
     readonly code: (typeof API_V1_ERROR_CODES)[keyof typeof API_V1_ERROR_CODES],
     message: string,
+    readonly details?: readonly ApiV1ErrorDetail[],
   ) {
     super(message);
   }

@@ -158,6 +158,13 @@ export async function readUserContext(request: AuthSecurityNodeRequest, options:
   return { userId, sessionId };
 }
 
+/** Revalidate SDK-authenticated identity using the already-owned transaction connection. */
+export async function assertUserContextInTransaction(client: PoolClient, context: UserContext): Promise<void> {
+  await assertActiveInTransaction(client, context.userId);
+  const session = await client.query(`SELECT 1 FROM "zzsh_auth_user"."session" WHERE "id"=$1 AND "userId"=$2 AND "expiresAt">clock_timestamp()`, [context.sessionId, context.userId]);
+  if (!session.rowCount) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
+}
+
 async function readState(pool: Pool | PoolClient, userId: string): Promise<UserIdentityState | null> {
   const result = await pool.query<UserIdentityState>(
     `SELECT "account_status" AS "accountStatus", "identity_status" AS "identityStatus", "age_status" AS "ageStatus", "provider", "version"

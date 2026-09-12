@@ -326,18 +326,22 @@ export async function createListingDraft(
   a.current_version_id = id;
   await bumpAccount(client, a);
 }
-const list = (v: unknown, label: string): Record<string, unknown>[] => {
+const list = (
+  v: unknown,
+  label: string,
+  path: string,
+): Record<string, unknown>[] => {
   if (
     !Array.isArray(v) ||
     v.length > 100 ||
     v.some((x) => !x || typeof x !== "object" || Array.isArray(x))
   )
-    throw invalid(label);
+    throw invalid(label, path);
   return v;
 };
-const idText = (v: unknown): string => {
+const idText = (v: unknown, path: string): string => {
   if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v))
-    throw invalid("Invalid identifier");
+    throw invalid("Invalid identifier", path);
   return v;
 };
 export async function saveListingDraft(
@@ -364,53 +368,65 @@ export async function saveListingDraft(
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("这份资料不可修改，请创建新草稿");
   if (body.title !== undefined && typeof body.title !== "string")
-    throw invalid("标题格式错误");
+    throw invalid("标题格式错误", "title");
   for (const field of ["termOptionCode", "pricingOptionCode"])
     if (
       body[field] !== undefined &&
       (typeof body[field] !== "string" ||
         !/^$|^[a-z][a-z0-9_:-]{1,63}$/.test(body[field] as string))
     )
-      throw invalid("选项代码格式错误");
+      throw invalid("选项代码格式错误", field);
   const title = humanText(typeof body.title === "string" ? body.title : "");
-  if (title.length > 120) throw invalid("标题过长");
+  if (title.length > 120) throw invalid("标题过长", "title");
+  if (body.description != null && typeof body.description !== "string")
+    throw invalid("说明格式错误", "description");
   const description =
     body.description == null ? null : humanText(body.description as string);
-  if (description && description.length > 4000) throw invalid("说明过长");
-  const normalized = normalizeDeclaration({
-    title,
-    description,
-    attributes: (body.attributes ?? {}) as Record<string, unknown>,
-    inventory: [],
-    skins: [],
-    entitlements: [],
-    mediaBindings: [],
-    termOptionCode: String(body.termOptionCode ?? ""),
-    pricingOptionCode: String(body.pricingOptionCode ?? ""),
-  });
-  const inventory = list(body.inventory ?? [], "库存格式错误");
+  if (description && description.length > 4000)
+    throw invalid("说明过长", "description");
+  let normalized: ContentDeclaration;
+  try {
+    normalized = normalizeDeclaration({
+      title,
+      description,
+      attributes: (body.attributes ?? {}) as Record<string, unknown>,
+      inventory: [],
+      skins: [],
+      entitlements: [],
+      mediaBindings: [],
+      termOptionCode: String(body.termOptionCode ?? ""),
+      pricingOptionCode: String(body.pricingOptionCode ?? ""),
+    });
+  } catch {
+    throw invalid("属性格式或范围错误", "attributes");
+  }
+  const inventory = list(body.inventory ?? [], "库存格式错误", "inventory");
   const seen = new Set<string>();
   for (const item of inventory) {
     ensureOnlyFields(item, ["itemId", "quantity"]);
-    idText(item.itemId);
-    if (seen.has(item.itemId as string)) throw invalid("库存重复");
+    idText(item.itemId, "inventory");
+    if (seen.has(item.itemId as string)) throw invalid("库存重复", "inventory");
     seen.add(item.itemId as string);
     if (
       item.quantity !== null &&
       (typeof item.quantity !== "string" ||
         !/^(0|[1-9]\d{0,23})$/.test(item.quantity))
     )
-      throw invalid("数量须为整数文本或未知null");
+      throw invalid("数量须为整数文本或未知null", "inventory");
   }
   if (
     !Array.isArray(body.skins ?? []) ||
     ((body.skins as unknown[]) ?? []).some((id) => typeof id !== "string")
   )
-    throw invalid("皮肤格式错误");
+    throw invalid("皮肤格式错误", "skins");
   const skins = (body.skins ?? []) as string[];
-  if (new Set(skins).size !== skins.length) throw invalid("皮肤重复");
-  const entitlements = list(body.entitlements ?? [], "权益格式错误"),
-    media = list(body.mediaBindings ?? [], "图片格式错误");
+  if (new Set(skins).size !== skins.length) throw invalid("皮肤重复", "skins");
+  const entitlements = list(
+      body.entitlements ?? [],
+      "权益格式错误",
+      "entitlements",
+    ),
+    media = list(body.mediaBindings ?? [], "图片格式错误", "mediaBindings");
   for (const t of [
     "inventory_line",
     "listing_skin",
@@ -428,7 +444,7 @@ export async function saveListingDraft(
   for (const id of skins)
     await client.query(
       `INSERT INTO zzsh_supply.listing_skin(version_id,skin_id) VALUES($1,$2)`,
-      [v.id, idText(id)],
+      [v.id, idText(id, "skins")],
     );
   for (const ent of entitlements) {
     ensureOnlyFields(ent, [
@@ -441,12 +457,12 @@ export async function saveListingDraft(
       ent.expiresAt == null ? null : (ent.expiresAt as string),
     );
     if (!["KNOWN", "UNKNOWN"].includes(String(ent.expiryKnowledge)))
-      throw invalid("权益有效期状态错误");
+      throw invalid("权益有效期状态错误", "entitlements");
     await client.query(
       `INSERT INTO zzsh_supply.listing_entitlement(version_id,entitlement_id,value,expires_at,expiry_knowledge) VALUES($1,$2,$3,$4,$5)`,
       [
         v.id,
-        idText(ent.entitlementId),
+        idText(ent.entitlementId, "entitlements"),
         JSON.stringify(ent.value ?? null),
         expiry,
         ent.expiryKnowledge,
@@ -460,10 +476,10 @@ export async function saveListingDraft(
       Number(binding.position) < 0 ||
       Number(binding.position) > 99
     )
-      throw invalid("图片顺序错误");
+      throw invalid("图片顺序错误", "mediaBindings");
     await client.query(
       `INSERT INTO zzsh_supply.listing_media(version_id,asset_id,position) VALUES($1,$2,$3)`,
-      [v.id, idText(binding.assetId), binding.position],
+      [v.id, idText(binding.assetId, "mediaBindings"), binding.position],
     );
   }
   await client.query(
@@ -490,12 +506,13 @@ export async function quoteListing(
     throw conflict("仅可为新申报草稿报价");
   const d = await readDeclaration(client, v);
   if (!d.title.trim() || d.inventory.some((i) => i.quantity === null))
-    throw invalid("请补齐标题及库存，未知数量不能当作零");
+    throw invalid("请补齐标题及库存，未知数量不能当作零", "inventory");
   const missing = await client.query(
     `SELECT 1 FROM zzsh_supply.billable_item i WHERE game_id=$1 AND enabled AND required AND NOT EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=$2 AND l.item_id=i.id AND l.quantity IS NOT NULL)`,
     [a.game_id, v.id],
   );
-  if (missing.rowCount) throw invalid("必填物品须明确填写数量或零");
+  if (missing.rowCount)
+    throw invalid("必填物品须明确填写数量或零", "inventory");
   const release = (
     await client.query(
       `SELECT r.*,p.mode,p.commission_rate::text,p.haff_rule,p.rounding_policy,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,
@@ -509,7 +526,7 @@ export async function quoteListing(
       [release.term_version_id, d.termOptionCode],
     )
   ).rows[0];
-  if (!term) throw invalid("请选择当前租期选项");
+  if (!term) throw invalid("请选择当前租期选项", "termOptionCode");
   const rows = (
     await client.query(
       `SELECT l.item_id AS "itemId", l.quantity::text,i.unit,i.name,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
@@ -517,7 +534,7 @@ export async function quoteListing(
     )
   ).rows;
   if (!rows.length || rows.some((r) => !r.enabled || !r.pricingKind))
-    throw invalid("申报物品不在当前可用价目中");
+    throw invalid("申报物品不在当前可用价目中", "inventory");
   const ents = (
     await client.query(
       `SELECT e.id AS "entitlementId",e.expiry_kind AS "expiryKind",e.value_kind,e.name,e.enabled,l.value,l.expiry_knowledge,CASE WHEN l.expires_at IS NULL THEN NULL ELSE to_char(l.expires_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "expiresAt" FROM zzsh_supply.listing_entitlement l JOIN zzsh_supply.entitlement e ON e.id=l.entitlement_id WHERE version_id=$1`,
@@ -533,7 +550,7 @@ export async function quoteListing(
           : !Number.isSafeInteger(e.value) || e.value < 0),
     )
   )
-    throw invalid("权益值与目录类型不符");
+    throw invalid("权益值与目录类型不符", "entitlements");
   const skins = (
     await client.query(
       `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id WHERE version_id=$1`,
@@ -541,11 +558,11 @@ export async function quoteListing(
     )
   ).rows;
   if (skins.some((s) => !s.enabled || !s.form_visible || !s.category_visible))
-    throw invalid("皮肤已停止申报");
+    throw invalid("皮肤已停止申报", "skins");
   if (
     ents.some((e) => e.expiryKind === "TIMED" && e.expiry_knowledge !== "KNOWN")
   )
-    throw invalid("请先确认限时权益的到期时间");
+    throw invalid("请先确认限时权益的到期时间", "entitlements");
   const attrs = d.attributes;
   const vitality = attrs.vit_level ?? attrs.vitLevel;
   const bear = attrs.bear_level ?? attrs.bearLevel;
@@ -585,7 +602,10 @@ export async function quoteListing(
     })),
   } as QuoteInput);
   if (!result.quotable)
-    throw invalid(`当前条件无法报价：${result.reasonCodes.join(",")}`);
+    throw invalid(
+      `当前条件无法报价：${result.reasonCodes.join(",")}`,
+      "attributes",
+    );
   result.quote.ruleReleaseId = release.id;
   const payload = normalizeContentPayload({
     schemaVersion: 1,
@@ -694,7 +714,7 @@ async function assertMediaReady(
     )
   ).rows;
   if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY"))
-    throw invalid("至少需要一张展示图");
+    throw invalid("至少需要一张展示图", "mediaBindings");
   if (
     media.some(
       (m) =>

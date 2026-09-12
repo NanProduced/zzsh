@@ -1,13 +1,13 @@
 import { projectQuote, type ProjectedQuote } from "./pricing";
 import type { PoolClient } from "pg";
-import { readAdminContext } from "../auth/auth-security";
+import { readAdminContext, assertAdminContextInTransaction } from "../auth/auth-security";
 import {
   loadEffectiveAdminAccess,
   requirePermission,
 } from "../auth/admin-authorization";
 import {
   readUserContext,
-  assertActiveInTransaction,
+  assertUserContextInTransaction,
 } from "../auth/user-identity";
 import {
   recordAudit,
@@ -110,6 +110,8 @@ export async function handlePublishingRoute(
     const rule = release.haff_rule as {
       baseBySafeBox?: Record<string, string>;
       options?: Record<string, { enabled: boolean }>;
+      vitalityDeltaByLevel?: Record<string,string>;
+      bearDeltaByLevel?: Record<string,string>;
     } | null;
     sendJson(
       response,
@@ -118,6 +120,8 @@ export async function handlePublishingRoute(
         releaseId: release.id,
         generation: release.generation,
         termOptions: terms,
+        vitalityLevels:Object.keys(rule?.vitalityDeltaByLevel??{}).map(Number).filter(n=>Number.isSafeInteger(n)&&n>=0&&n<=2147483647).sort((a,b)=>a-b),
+        bearLevels:Object.keys(rule?.bearDeltaByLevel??{}).map(Number).filter(n=>Number.isSafeInteger(n)&&n>=0&&n<=2147483647).sort((a,b)=>a-b),
         safeBoxCodes: Object.keys(rule?.baseBySafeBox ?? {}).sort(),
         pricingOptionCodes: Object.entries(rule?.options ?? {})
           .filter(([, v]) => v.enabled)
@@ -319,15 +323,14 @@ export async function handlePublishingRoute(
           : "supply.review.read";
   const authorize = async (client: PoolClient, a?: PublishingAccount) => {
     if (admin) {
-      await readAdminContext(request, options);
+      await assertAdminContextInTransaction(client, context);
       const access = await loadEffectiveAdminAccess(client, actorId);
       requirePermission(access, "supply.review.read");
       requirePermission(access, permission);
       if (a) await assertGameScope(client, actorId, access!.isBoss, a.game_id);
       return access;
     }
-    await readUserContext(request, options);
-    await assertActiveInTransaction(client, actorId);
+    await assertUserContextInTransaction(client, context);
     if (a && a.owner_user_id !== actorId) throw notFound();
     return null;
   };

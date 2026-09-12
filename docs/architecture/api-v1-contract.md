@@ -130,3 +130,12 @@ npm run typecheck
 ```
 
 测试会创建只监听 loopback 临时端口的隔离 Nest app，检查 OpenAPI 的请求/响应示例、header、resourceId pattern/maxLength、integer limit、错误码 enum、`additionalProperties:false` 以及运行时拒绝和安全错误兜底；不会连接数据库或第三方服务。`npm run check` 还包含明确隔离的本地 PostgreSQL 回归，资源规则见开发说明。
+
+## M3-D 用户数据接入
+
+- `GET /api/v1/supply/games` 返回已启用且有生效规则的游戏；`GET /games/{id}/publishing-catalog` 为号主选择投影。只列当前STANDARD价目覆盖的启用物品，搜索仅筛皮肤，不隐藏数量输入；分类祖先不可见时皮肤不返回。`inputScale=0`表示当前只接整数基础单位，`ready/blockers`明确未生效规则或必填物品未定价，不能填假价格补齐。目录不返回收价、抽成、来源原文或私有媒体引用。
+- `publishing-options`补充允许的vitalityLevels/bearLevels，沿用服务器封存协议和选项代码；不公布内部比例映射。
+- `PUT /api/v1/supply/favorites/{accountId}`：已认证本人、`Idempotency-Key`、`{saved:boolean}`，稳定供给ID，不使用版本ID。首次添加只接受当前公开供给；取消及既有收藏保持本人隔离。缓存只存`accountId/saved`原操作回执，重放不改动当前状态、不重复成功审计。
+- `GET /api/v1/supply/me/favorites?limit=&cursor=`：本人分页；AVAILABLE只含当前PublicListing，UNAVAILABLE为通用“暂不可用、收藏已保留”及null listing，不泄漏原价格、私有原因或资料。游标绑定本人及精确保存时间/ID。
+- Nest用户BFF仍为`/api/bff/user/supply`。Next用户BFF新增`/api/supply/*`，仅允许已实现用户接口、筛选用户Cookie，保留幂等键/受限上传Token；JSON输入64KiB、图片10MiB，输出及读取时间有界。媒体URL仅作本地路径适配，金额原样传输；认证代理共用既有Cookie及有界读取工具，认证规则不变。
+- 用户调用DTO和错误恢复位于apps/web/src/lib/supply-types.ts、supply-client.ts；分组接入见[供给表单契约](supply-form-contract.md)。这部分是数据接口，正式市场/详情/发布页面及游客收藏合并仍待UI基线整合。

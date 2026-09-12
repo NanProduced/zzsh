@@ -14,15 +14,15 @@ export function sendJson(response: SupplyNodeResponse, status: number, body: unk
 }
 
 export function sendError(response: SupplyNodeResponse, error: SecurityApiError, requestId: string): void {
-  sendJson(response, error.status, { error: { code: error.code, message: error.message, requestId } }, requestId);
+  sendJson(response, error.status, { error: { code: error.code, message: error.message, requestId, ...(error.details ? { details: error.details } : {}) } }, requestId);
 }
 
 export function sendInternalError(response: SupplyNodeResponse, requestId: string): void {
   sendJson(response, 500, { error: { code: API_V1_ERROR_CODES.INTERNAL_ERROR, message: "Internal server error", requestId } }, requestId);
 }
 
-export function invalid(message = "Request body is invalid"): SecurityApiError {
-  return new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, message);
+export function invalid(message = "Request body is invalid", path?: string): SecurityApiError {
+  return new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, message, path ? [{path,code:"INVALID_FIELD"}] : undefined);
 }
 
 export function notFound(): SecurityApiError {
@@ -58,7 +58,7 @@ export function bodyOf(request: SupplyNodeRequest): Record<string, unknown> {
 export function ensureOnlyFields(body: Record<string, unknown>, allowed: readonly string[]): void {
   const allowedSet = new Set(allowed);
   for (const key of Object.keys(body)) {
-    if (!allowedSet.has(key)) throw invalid("Request contains unsupported fields");
+    if (!allowedSet.has(key)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Request contains unsupported fields", [{path:key,code:"UNKNOWN_FIELD"}]);
   }
 }
 

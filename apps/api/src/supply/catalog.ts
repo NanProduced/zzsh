@@ -425,6 +425,7 @@ export async function readPublicCatalog(
   filters: CatalogFilters,
   limit: number,
   cursor?: string,
+  scope: "browse" | "publishing" = "browse",
 ): Promise<Record<string, unknown>> {
   const game = await client.query<{
     id: string;
@@ -445,12 +446,13 @@ export async function readPublicCatalog(
   let lastSkinId: string | undefined;
   if (cursor !== undefined) lastSkinId = parseCursor(cursor, { gameId, revision: gameRow.catalogRevision, filters });
 
+  const itemSearch = scope === "browse" ? filters.q : undefined;
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder"
        FROM "zzsh_supply"."billable_item"
-      WHERE "game_id" = $1 AND "enabled" = true${filters.q ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
+      WHERE "game_id" = $1 AND "enabled" = true${scope === "publishing" ? ` AND EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=zzsh_supply.billable_item.id AND p.customer_tier='STANDARD')` : ""}${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
       ORDER BY "sort_order", "code", "id"`,
-    filters.q ? [gameId, `%${escapeLike(filters.q)}%`] : [gameId],
+    itemSearch ? [gameId, `%${escapeLike(itemSearch)}%`] : [gameId],
   );
 
   const categories = await client.query(
@@ -483,6 +485,8 @@ export async function readPublicCatalog(
 
   const parameters: unknown[] = [gameId];
   const conditions: string[] = [`s."game_id" = $1`, `s."enabled" = true`, `s."form_visible" = true`];
+  parameters.push(categories.rows.map(c=>c.id));
+  conditions.push(`s."category_id" = ANY($${parameters.length}::text[])`);
   if (filters.categoryId) {
     parameters.push(filters.categoryId);
     conditions.push(`s."category_id" IN (
@@ -509,7 +513,7 @@ export async function readPublicCatalog(
   parameters.push(limit + 1);
   const skins = await client.query(
     `SELECT s."id", s."code", s."name", s."category_id" AS "categoryId", s."rarity_code" AS "rarityCode",
-            s."media_id" AS "mediaId", s."sort_order" AS "sortOrder"
+            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=s.media_id AND a.game_id=s.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN s."media_id" ELSE NULL END AS "mediaId", s."sort_order" AS "sortOrder"
        FROM "zzsh_supply"."skin" s
       WHERE ${conditions.join(" AND ")}
       ORDER BY s."id"
@@ -520,7 +524,9 @@ export async function readPublicCatalog(
   const page = hasMore ? skins.rows.slice(0, limit) : skins.rows;
   const nextCursor = hasMore ? encodeCursor({ gameId, revision: gameRow.catalogRevision, filters }, page[page.length - 1]!.id) : null;
 
+  const missing = scope === "publishing" ? (await client.query(`SELECT id,name FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled AND required AND NOT (id=ANY($2::text[]))`,[gameId,items.rows.map(i=>i.id)])).rows : [];
   return {
+    ...(scope === "publishing" ? {ready: Boolean(gameRow.currentReleaseId) && missing.length===0, blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}] : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
     game: gameRow,
     items: items.rows,
     categories: categories.rows,

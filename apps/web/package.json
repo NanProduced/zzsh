@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3100",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "node --experimental-strip-types --test test/auth-user-route.test.mjs test/user-account-status.test.mjs"
+    "test": "node --experimental-strip-types --test test/auth-user-route.test.mjs test/user-account-status.test.mjs test/supply-route.test.mjs test/supply-client.test.mjs"
   },
   "dependencies": {
     "@zzsh/ui": "0.0.0",

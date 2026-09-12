@@ -1,3 +1,4 @@
+import { runSupplyPoolChecks } from "./supply-pool-checks";
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import type { SupplyGate } from "../src/supply/publishing";
@@ -624,7 +625,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       const gatePid = (await gate.query(`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
       const pending = request(base, `/api/bff/admin/supply/games/${gameId}/items`, recoveryBody, operator.jar, ADMIN_ORIGIN, "POST", { "idempotency-key": recoveryKey });
       let blocked = false; const deadline = Date.now() + 5000;
-      while (!blocked && Date.now() < deadline) blocked = (await gate.query(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked`, [gatePid])).rows[0].blocked;
+      while (!blocked && Date.now() < deadline) { await gate.query("SELECT pg_stat_clear_snapshot()"); blocked = (await gate.query(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked`, [gatePid])).rows[0].blocked; }
       assert.equal(blocked, true);
       await maintenanceDataPool.query(`INSERT INTO zzsh_supply.idempotency_record (scope_key,key,request_fingerprint,response_status,response_body) VALUES ($1,$2,$3,200,$4)`, [JSON.stringify(["admin", operator.id, "supply.catalog.items.create", gameId]), recoveryKey, fingerprintRequest("supply.catalog.items.create", gameId, recoveryBody), {id:"restricted-race-result"}]);
       await maintenanceDataPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id = $1 AND game_id = $2`, [operator.id, gameId]);
@@ -850,6 +851,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(staleRead.response.status, 409, "cursors must be invalidated when the catalog revision changes");
 
     await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
+    await runSupplyPoolChecks({testContext,pool:runtimePool,maintenance:maintenanceDataPool,auth:authOptions,user:userOne,boss:boss.jar,bossId:boss.id,accountId,gameId,bytes:pngBytes()});
     const auditCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" LIKE 'supply.%'`);
     assert.ok(Number(auditCount.rows[0]?.count ?? "0") >= 20, "supply writes must be audited");
     const audits = (await runtimePool.query(`SELECT object_type, object_id, action, reason, details FROM zzsh_iam.audit_event WHERE action LIKE 'supply.%'`)).rows;
