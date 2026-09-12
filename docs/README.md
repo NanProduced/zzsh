@@ -8,6 +8,7 @@
 - [API v1 契约](architecture/api-v1-contract.md)
 - [认证与账号安全](architecture/authentication.md)
 - [开发与验证](development.md)
+- [本地环境协作规则](local-environments.md)
 - [第三方前端来源](third-party-ui.md)
 - [Serena 范围](serena.md)
 - [Logo 物料](../assets/brand/README.md)
