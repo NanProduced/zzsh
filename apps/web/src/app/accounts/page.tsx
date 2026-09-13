@@ -1,2 +1,4 @@
-import { AccountMarket } from "@/components/service-pages";
-export default async function Page({searchParams}:{searchParams:Promise<{q?:string}>}){const p=await searchParams;return <AccountMarket query={typeof p.q==='string'?p.q.slice(0,120):''}/>;}
+import { AccountMarket } from "@/components/market/account-market";
+export default async function Page({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  return <AccountMarket searchParams={await searchParams} />;
+}

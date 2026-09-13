@@ -15,3 +15,15 @@ test('user calls carry explicit replay keys, no price calculation or automatic r
   const old=globalThis.fetch;let count=0;globalThis.fetch=async(url,init)=>{count++;assert.equal(url,'/api/supply/favorites/a');assert.equal(init.headers['idempotency-key'],'stable-key');assert.deepEqual(JSON.parse(init.body),{saved:true});return Response.json({accountId:'a',saved:true});};
   try{assert.deepEqual(await supplyApi.setFavorite('a',true,'stable-key'),{accountId:'a',saved:true});assert.equal(count,1);globalThis.fetch=async()=>{count++;throw Error('network');};await assert.rejects(()=>supplyRequest('/favorites/a',{method:'PUT',body:{saved:true},idempotencyKey:'stable-key'}),e=>e.idempotencyKey==='stable-key'&&e.status===0);assert.equal(count,2);}finally{globalThis.fetch=old;}
 });
+test('public browse calls keep contract paths and forward abort signals',async()=>{
+  const old=globalThis.fetch;const calls=[];
+  globalThis.fetch=async(url,init)=>{calls.push({url,signal:init?.signal});return Response.json({items:[],games:[],skins:[]});};
+  const controller=new AbortController();
+  try{
+    await supplyApi.browseCatalog('game_1',new URLSearchParams({limit:'100'}),controller.signal);
+    await supplyApi.market(new URLSearchParams({gameId:'game_1'}),controller.signal);
+    await supplyApi.listing('account_1',controller.signal);
+    assert.deepEqual(calls.map(call=>call.url),['/api/supply/games/game_1/catalog?limit=100','/api/supply/listings?gameId=game_1','/api/supply/listings/account_1']);
+    assert.ok(calls.every(call=>call.signal===controller.signal));
+  }finally{globalThis.fetch=old;}
+});

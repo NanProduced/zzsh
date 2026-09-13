@@ -19,8 +19,9 @@ test('production UI excludes fixture identities, controls and rejected claims', 
     for (const marker of forbidden) assert.ok(!content.includes(marker), `${marker} leaked into ${file}`);
   }
   const html = readFileSync(resolve(web, '.next/server/app/index.html'), 'utf8');
-  assert.ok(html.includes('暂时无法展示账号列表'));
+  assert.ok(html.includes('account-skeleton'));
   assert.ok(!html.includes('account-card'));
+  assert.ok(!html.includes('repair-fixture'));
   const routes = readFileSync(resolve(web, '.next/server/app-paths-manifest.json'), 'utf8');
   assert.ok(!routes.includes('showcase'));
 });

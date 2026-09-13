@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { safeReturnTo } from "@/lib/safe-return";
 import {
   accountStatusLabel,
   ageStatusLabel,
@@ -76,6 +78,8 @@ function Status({ error, success }: { error?: string; success?: string }) {
 }
 
 export default function LoginPage() {
+  const router = useRouter();
+  const returnRef = useRef<string | undefined>(undefined);
   const [mode, setMode] = useState<Mode>("login");
   const [account, setAccount] = useState<Account | null>(null);
   const [expiresAt, setExpiresAt] = useState<string>();
@@ -101,6 +105,10 @@ export default function LoginPage() {
       setAccount(session?.user ?? null);
       setExpiresAt(session?.session?.expiresAt);
     }).catch(() => undefined).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    returnRef.current = safeReturnTo(new URLSearchParams(window.location.search).get("next"));
   }, []);
 
   useEffect(() => {
@@ -134,6 +142,7 @@ export default function LoginPage() {
     setAccountClosed(false);
     setPassword("");
     setSuccess("登录成功，服务端会话已建立。");
+    if (returnRef.current) router.replace(returnRef.current);
   };
 
   const submitRegister = async () => {
@@ -143,6 +152,7 @@ export default function LoginPage() {
     setAccountClosed(false);
     setPassword("");
     setSuccess("账号已创建并登录。");
+    if (returnRef.current) router.replace(returnRef.current);
   };
 
   const requestRecoveryCode = async () => {
