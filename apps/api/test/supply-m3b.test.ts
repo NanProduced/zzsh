@@ -875,7 +875,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
     await runSupplyPoolChecks({testContext,pool:runtimePool,maintenance:maintenanceDataPool,auth:authOptions,user:userOne,boss:boss.jar,bossId:boss.id,accountId,gameId,bytes:pngBytes()});
-    await runMediaOssChecks({base,pool:runtimePool,maintenance:maintenanceDataPool,operator:{jar:operator.jar,id:operator.id},boss:{jar:boss.jar,id:boss.id},gameId,itemId:haffItem,mediaDir,faults:storageFaults});
+    await runMediaOssChecks({base,pool:runtimePool,maintenance:maintenanceDataPool,operator:{jar:operator.jar,id:operator.id},boss:{jar:boss.jar,id:boss.id},catalogOnly:{jar:unscoped.jar,id:unscoped.id},gameId,itemId:haffItem,mediaDir,faults:storageFaults});
     const auditCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" LIKE 'supply.%'`);
     assert.ok(Number(auditCount.rows[0]?.count ?? "0") >= 20, "supply writes must be audited");
     const audits = (await runtimePool.query(`SELECT object_type, object_id, action, reason, details FROM zzsh_iam.audit_event WHERE action LIKE 'supply.%'`)).rows;

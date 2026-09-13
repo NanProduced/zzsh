@@ -34,6 +34,10 @@ export type MediaOssChecksContext = {
   maintenance: Pool;
   operator: { jar: MediaCookieJar; id: string };
   boss: { jar: MediaCookieJar; id: string };
+  // Catalog-only administrator (supply.catalog.manage + game scope, no
+  // supply.review.read) used to prove the binding picker preview and save work
+  // without ever reaching the private evidence endpoint.
+  catalogOnly: { jar: MediaCookieJar; id: string };
   gameId: string;
   itemId: string;
   mediaDir: string;
@@ -68,6 +72,13 @@ async function jsonRequest(
     headers: { origin: ADMIN_ORIGIN, "content-type": "application/json", cookie: jar.header(), ...idempotencyKey },
     body: JSON.stringify(body),
   });
+  jar.update(response);
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : null };
+}
+
+async function getJson(base: string, path: string, jar: MediaCookieJar): Promise<{ status: number; body: Record<string, any> | null }> {
+  const response = await fetch(base + path, { headers: { origin: ADMIN_ORIGIN, cookie: jar.header() } });
   jar.update(response);
   const text = await response.text();
   return { status: response.status, body: text ? JSON.parse(text) : null };
@@ -138,7 +149,7 @@ async function withOrphanLog<T>(run: () => Promise<T>): Promise<{ result: T; lin
 }
 
 export async function runMediaOssChecks(context: MediaOssChecksContext): Promise<void> {
-  const { base, pool, maintenance, operator, boss, gameId, itemId, mediaDir, faults } = context;
+  const { base, pool, maintenance, operator, boss, catalogOnly, gameId, itemId, mediaDir, faults } = context;
   const createIntent = (size: number) =>
     jsonRequest(base, "/api/bff/admin/supply/media/upload-intents", operator.jar, { gameId, purpose: "ITEM_MEDIA", mime: "image/png", size }, key("intent"));
   const review = (assetId: string, body: Record<string, unknown>) =>
@@ -155,14 +166,43 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   assert.equal(itemUpload.body?.purpose, "ITEM_MEDIA");
   const itemAssetId = itemUpload.body?.assetId as string;
 
+  // The binding-option feed is server-filtered; pending approval media must not
+  // appear, and the endpoint itself requires catalog.manage + game scope.
+  const mediaOptions = (targetGameId: string, purpose = "ITEM_MEDIA") => getJson(base, `/api/bff/admin/supply/games/${targetGameId}/media-options?purpose=${purpose}`, operator.jar);
+  const optionIds = (result: { status: number; body: Record<string, any> | null }): string[] => (result.body?.items ?? []).map((option: { id: string }) => option.id);
+  assert.equal((await mediaOptions(gameId)).status, 200);
+  assert.equal(optionIds(await mediaOptions(gameId)).includes(itemAssetId), false, "pending media must not be offered for binding");
+
   const bindPending = await bindItemMedia(operator.jar, itemId, itemAssetId);
   assert.equal(bindPending.status, 400, "unreviewed media must not bind to an item");
   const approvedPrivate = await review(itemAssetId, { decision: "APPROVE" });
   assert.equal(approvedPrivate.status, 200);
+  assert.equal(optionIds(await mediaOptions(gameId)).includes(itemAssetId), false, "approved-but-private media must not be offered for binding");
   const bindPrivate = await bindItemMedia(operator.jar, itemId, itemAssetId);
   assert.equal(bindPrivate.status, 400, "private media must not bind to an item");
   const approvedPublic = await review(itemAssetId, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" });
   assert.equal(approvedPublic.status, 200);
+  assert.equal(optionIds(await mediaOptions(gameId)).includes(itemAssetId), true, "approved public ITEM_MEDIA must be offered for binding");
+  assert.equal(optionIds(await mediaOptions(gameId, "GAME_COVER")).includes(itemAssetId), false, "the option feed must filter by purpose");
+
+  // R1: a catalog-only operator (catalog.manage + scope, no review.read) must
+  // be able to browse candidates, preview the approved public derivative and
+  // bind it — while the private evidence endpoint stays out of reach.
+  await maintenance.query(
+    `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [catalogOnly.id, gameId, boss.id],
+  );
+  const catalogOnlyOptions = await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA`, catalogOnly.jar);
+  assert.equal(catalogOnlyOptions.status, 200, "catalog-only operators must be able to list candidates");
+  assert.equal(optionIds(catalogOnlyOptions).includes(itemAssetId), true, "catalog-only operators must see the eligible candidate");
+  const publicDerivativeForPicker = await (await fetch(`${base}/api/v1/supply/media/${itemAssetId}/content`)).arrayBuffer();
+  assert.equal((await sharp(Buffer.from(publicDerivativeForPicker)).metadata()).exif, undefined, "picker preview uses the public derivative (no EXIF)");
+  const privateEvidenceDenied = await getJson(base, `/api/bff/admin/supply/media/${itemAssetId}/content`, catalogOnly.jar);
+  assert.equal(privateEvidenceDenied.status, 403, "private evidence endpoint must stay denied without review.read");
+  const catalogOnlyBind = await bindItemMedia(catalogOnly.jar, itemId, itemAssetId);
+  assert.equal(catalogOnlyBind.status, 200, "catalog-only operators can bind a candidate they can preview");
+  await bindItemMedia(operator.jar, itemId, null);
+
   const bindOk = await bindItemMedia(operator.jar, itemId, itemAssetId);
   assert.equal(bindOk.status, 200, JSON.stringify(bindOk.body));
   const itemRow = await pool.query<{ mediaId: string | null }>(`SELECT "media_id" AS "mediaId" FROM "zzsh_supply"."billable_item" WHERE "id" = $1`, [itemId]);
@@ -195,6 +235,10 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   assert.equal(bindCrossGame.status, 400, "media from another game must not bind");
   const operatorCrossGame = await bindItemMedia(operator.jar, secondItem.body?.id as string, itemAssetId);
   assert.equal(operatorCrossGame.status, 404, "unscoped operators must not touch another game's items");
+  assert.equal((await mediaOptions(secondGameId)).status, 404, "unscoped operators must not read another game's binding options");
+  const bossCrossOptions = await getJson(base, `/api/bff/admin/supply/games/${secondGameId}/media-options?purpose=ITEM_MEDIA`, boss.jar);
+  assert.equal(bossCrossOptions.status, 200);
+  assert.equal((bossCrossOptions.body?.items ?? []).length, 0, "a game without eligible media must offer none");
 
   // Revoking visibility clears the binding in the same transaction and hides the projection.
   const revoked = await jsonRequest(base, `/api/bff/admin/supply/media/${itemAssetId}/visibility`, operator.jar, { visibility: "PRIVATE_REVIEW", reason: "撤销物品图" }, key("visibility"));
@@ -204,8 +248,77 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   const catalogAfterRevoke = await (await fetch(`${base}/api/v1/supply/games/${gameId}/catalog`)).json();
   const publicItemAfterRevoke = catalogAfterRevoke.items.find((entry: { id: string }) => entry.id === itemId);
   assert.equal(publicItemAfterRevoke?.mediaId, null, "revoked item media must not be projected");
+  assert.equal(optionIds(await mediaOptions(gameId)).includes(itemAssetId), false, "revoked-visible media must disappear from the binding options");
   const unbindNull = await bindItemMedia(operator.jar, itemId, null);
   assert.equal(unbindNull.status, 200, "explicit null must clear the binding");
+
+  // R1 收尾：撤权后 catalog-only 操作者的公共预览同步失效，私有原图仍被拒。
+  const pickerAfterRevoke = await fetch(`${base}/api/v1/supply/media/${itemAssetId}/content`);
+  assert.equal(pickerAfterRevoke.status, 404, "revoked asset must not serve the public derivative to the picker");
+  const catalogOptionsAfterRevoke = await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA`, catalogOnly.jar);
+  assert.equal(optionIds(catalogOptionsAfterRevoke).includes(itemAssetId), false, "catalog-only option feed must drop the revoked asset");
+  const privateAfterRevoke = await getJson(base, `/api/bff/admin/supply/media/${itemAssetId}/content`, catalogOnly.jar);
+  assert.ok([403, 404].includes(privateAfterRevoke.status), "private evidence must stay denied after revoke (status=" + privateAfterRevoke.status + ")");
+
+  // ---------- R3：候选查询分页、稳定排序与过滤不串页 ----------
+  const extraAssets: string[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const extraBytes = await distinctBytes();
+    const extraIntent = await createIntent(extraBytes.length);
+    const extraUpload = await uploadBytes(base, `/api/bff/admin/supply/media/uploads/${extraIntent.body?.intentId}`, operator.jar, extraIntent.body?.uploadToken as string, extraBytes, key("upload"));
+    assert.equal(extraUpload.status, 200, JSON.stringify(extraUpload.body));
+    await review(extraUpload.body?.assetId as string, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" });
+    extraAssets.push(extraUpload.body?.assetId as string);
+  }
+  const pageOne = await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=2`, operator.jar);
+  assert.equal(pageOne.status, 200);
+  assert.equal(pageOne.body?.items.length, 2, "limit must bound the first page");
+  const pageOneIds = optionIds(pageOne);
+  assert.ok(pageOne.body?.nextCursor, "a second page must be offered when more remain");
+  const pageTwo = await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=2&cursor=${encodeURIComponent(pageOne.body.nextCursor)}`, operator.jar);
+  assert.equal(pageTwo.status, 200);
+  const pageTwoIds = optionIds(pageTwo);
+  assert.equal(pageTwoIds.length, 1, "the second page contains the remaining item");
+  const merged = [...pageOneIds, ...pageTwoIds];
+  assert.equal(new Set(merged).size, merged.length, "pages must not overlap");
+  assert.equal(new Set([...merged, ...extraAssets]).size, 3, "the three seeded assets are exactly the eligible candidates");
+  // updated_at DESC is the stable order shared by the cursor; the newest three
+  // just uploaded must appear in creation order reversed (extraAssets created
+  // [0..2], so the feed order is [2],[1],[0]).
+  assert.deepEqual(merged, [...extraAssets].reverse(), "the merged pages follow the stable updated_at DESC order");
+  const crossFilter = await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=GAME_COVER&limit=2&cursor=${encodeURIComponent(pageOne.body.nextCursor)}`, operator.jar);
+  assert.equal(crossFilter.status, 409, "a cursor minted for ITEM_MEDIA must not be reused across filters");
+  assert.equal((await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=0`, operator.jar)).status, 400, "limit below 1 must be rejected");
+
+  // 微秒精度：相同微秒时间与同毫秒不同微秒不得因 JSON 游标截断而漏行。
+  await maintenance.query(`UPDATE "zzsh_supply"."media_asset" SET "updated_at" = '2026-09-13 00:00:00.123456+00' WHERE "id" = $1`, [extraAssets[0]]);
+  await maintenance.query(`UPDATE "zzsh_supply"."media_asset" SET "updated_at" = '2026-09-13 00:00:00.123456+00' WHERE "id" = $1`, [extraAssets[1]]);
+  await maintenance.query(`UPDATE "zzsh_supply"."media_asset" SET "updated_at" = '2026-09-13 00:00:00.123500+00' WHERE "id" = $1`, [extraAssets[2]]);
+  const microOrdered = (await pool.query<{ id: string }>(`SELECT "id" FROM "zzsh_supply"."media_asset" WHERE "id" = ANY($1::text[]) ORDER BY "updated_at" DESC, "id" DESC`, [extraAssets])).rows.map((row) => row.id);
+  const microCollected: string[] = [];
+  let microCursor: string | null = null;
+  for (let guard = 0; guard < 8; guard += 1) {
+    const microPage = await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=1${microCursor ? `&cursor=${encodeURIComponent(microCursor)}` : ""}`, operator.jar);
+    assert.equal(microPage.status, 200);
+    microCollected.push(...optionIds(microPage));
+    microCursor = microPage.body?.nextCursor ?? null;
+    if (!microCursor) break;
+  }
+  assert.equal(microCursor, null);
+  assert.deepEqual(microCollected, microOrdered, "limit=1 walks every candidate with microsecond timestamps without loss");
+  assert.equal(microCollected.length, extraAssets.length, "page walk must not skip same-microsecond rows");
+
+  // 游标结构与时间校验必须受控（400/409），不能因 null/数组/非法时间触发 500。
+  const nullCursor = Buffer.from(JSON.stringify(null)).toString("base64url");
+  assert.equal((await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=1&cursor=${nullCursor}`, operator.jar)).status, 400, "a JSON null cursor must be a controlled 400");
+  const badTimeCursor = Buffer.from(JSON.stringify({ v: 1, gameId, purpose: "ITEM_MEDIA", limit: 1, updatedAt: "2026-13-99T99:99:99.999Z", id: "x" })).toString("base64url");
+  assert.equal((await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=1&cursor=${badTimeCursor}`, operator.jar)).status, 400, "a malformed timestamp cursor must be a controlled 400");
+  const wrongLimitCursor = Buffer.from(JSON.stringify({ v: 1, gameId, purpose: "ITEM_MEDIA", limit: 5, updatedAt: "2026-09-13T00:00:00.123456Z", id: "x" })).toString("base64url");
+  for (const updatedAt of ["2026-02-30T00:00:00.123456Z", "0000-01-01T00:00:00Z", "2026-09-13T24:00:00Z"]) {
+    const normalizedDateCursor = Buffer.from(JSON.stringify({ v: 1, gameId, purpose: "ITEM_MEDIA", limit: 1, updatedAt, id: "x" })).toString("base64url");
+    assert.equal((await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=1&cursor=${normalizedDateCursor}`, operator.jar)).status, 400, "normalized or unsupported calendar fields must return 400");
+  }
+  assert.equal((await getJson(base, `/api/bff/admin/supply/games/${gameId}/media-options?purpose=ITEM_MEDIA&limit=1&cursor=${wrongLimitCursor}`, operator.jar)).status, 409, "a limit mismatch must stay a controlled 409");
 
   // ---------- 存储写失败：部分成功、超时与重试 ----------
   const partialBytes = await distinctBytes();

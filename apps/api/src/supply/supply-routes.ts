@@ -574,6 +574,89 @@ async function handleAdminRead(
     sendJson(response, 200, result, requestId);
     return;
   }
+  // Approved public catalog media usable as a binding option. Scoped to
+  // catalog maintenance rather than media review: choosing an image must not
+  // require access to the private review queue. The server filters purpose,
+  // game, review state and public visibility; clients cannot promote hidden
+  // or unapproved media by passing an id. Pagination mirrors /media/reviews;
+  // cursors carry the full-precision updated_at rendered in PostgreSQL so the
+  // client-side JSON never truncates microseconds.
+  const mediaOptionsMatch = /^\/games\/([^/]+)\/media-options$/.exec(path);
+  if (mediaOptionsMatch) {
+    const mediaGameId = decodeId(mediaOptionsMatch[1]!);
+    const purpose = query.get("purpose") ?? null;
+    if (purpose !== null && !["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"].includes(purpose)) throw invalid("Purpose is invalid");
+    const limitRaw = query.get("limit");
+    const limit = limitRaw === null ? 20 : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
+    const cursorParam = query.get("cursor");
+    const result = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+      await assertGameScope(client, adminUserId, access.isBoss, mediaGameId);
+      let cursorRow: { updatedAt: string; id: string } | undefined;
+      if (cursorParam !== null) {
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(Buffer.from(cursorParam, "base64url").toString("utf8"));
+        } catch {
+          throw invalid("Cursor is invalid");
+        }
+        // Guard structure before touching fields: a JSON null or array must
+        // not reach property access (would otherwise surface as a 500).
+        if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw invalid("Cursor is invalid");
+        const record = decoded as Record<string, unknown>;
+        const { v, gameId: cursorGameId, purpose: cursorPurpose, limit: cursorLimit, updatedAt, id } = record;
+        if (v !== 1 || cursorGameId !== mediaGameId || (cursorPurpose ?? null) !== purpose || cursorLimit !== limit ||
+            typeof updatedAt !== "string" || typeof id !== "string") {
+          throw conflict("Cursor does not match the current filters; refresh and retry");
+        }
+        // Full-precision RFC3339 text from PostgreSQL; anything else must be a
+        // controlled client error rather than a cast failure inside the query.
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(updatedAt) || Number.isNaN(Date.parse(updatedAt))) {
+          throw invalid("Cursor is invalid");
+        }
+        // Date.parse normalizes impossible dates (e.g. February 30); PostgreSQL
+        // rejects them. Compare calendar fields without truncating the cursor.
+        if (updatedAt.startsWith("0000-") || new Date(updatedAt).toISOString().slice(0, 19) !== updatedAt.slice(0, 19)) throw invalid("Cursor is invalid");
+        cursorRow = { updatedAt, id };
+      }
+      const parameters: unknown[] = [mediaGameId, purpose];
+      const conditions = [
+        `a."game_id" = $1 AND a."ownership_kind" = 'PLATFORM_CATALOG'`,
+        `($2::text IS NULL OR a."purpose" = $2)`,
+        `a."review_state" = 'APPROVED' AND a."access_class" = 'PUBLIC_DISPLAY' AND a."public_storage_key" IS NOT NULL`,
+      ];
+      if (cursorRow) {
+        parameters.push(cursorRow.updatedAt);
+        conditions.push(`(a."updated_at", a."id") < ($${parameters.length}::timestamptz, $${parameters.length + 1})`);
+        parameters.push(cursorRow.id);
+      }
+      parameters.push(limit + 1);
+      const rows = (
+        await client.query(
+          // to_char keeps the PostgreSQL microsecond precision as text; the
+          // JSON cursor must never round it to JavaScript Date milliseconds.
+          `SELECT a."id", a."game_id" AS "gameId", a."mime", a."width", a."height", a."byte_size"::text AS "byteSize",
+                  to_char(a."updated_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt"
+             FROM "zzsh_supply"."media_asset" a
+            WHERE ${conditions.join(" AND ")}
+            ORDER BY a."updated_at" DESC, a."id" DESC
+            LIMIT $${parameters.length}`,
+          parameters,
+        )
+      ).rows;
+      const hasMore = rows.length > limit;
+      const items = hasMore ? rows.slice(0, limit) : rows;
+      const last = items[items.length - 1] as { updatedAt: string; id: string } | undefined;
+      const nextCursor = hasMore && last
+        ? Buffer.from(JSON.stringify({ v: 1, gameId: mediaGameId, purpose, limit, updatedAt: last.updatedAt, id: last.id })).toString("base64url")
+        : null;
+      return { items, nextCursor, limit };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
   if (path === "/media/reviews") {
     const state = query.get("state") ?? "PENDING";
     const ownershipKind = query.get("ownershipKind") ?? null;

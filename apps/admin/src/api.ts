@@ -211,6 +211,16 @@ export type MediaAssetReview = {
 
 export type MediaReviewPage = { items: MediaAssetReview[]; nextCursor: string | null; limit: number };
 
+export type CatalogMediaOption = {
+  id: string;
+  gameId: string;
+  mime: string;
+  width: number;
+  height: number;
+  byteSize: string;
+};
+export type MediaOptionsResponse = { items: CatalogMediaOption[]; nextCursor: string | null; limit: number };
+
 export type UploadIntentResponse = { intentId: string; uploadToken: string; expiresAt: string };
 export type UploadedAssetResponse = { assetId: string; gameId: string; purpose: string; ownershipKind: string; reviewState: string; accessClass: string; mime: string; byteSize: number; width: number; height: number; contentHash: string };
 

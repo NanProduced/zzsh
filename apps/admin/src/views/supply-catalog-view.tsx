@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
-import { adminRequest, friendlyError, hasPermission, type AdminCatalogResponse, type CatalogEntitlement, type CatalogItem, type CatalogRarity, type CatalogSkin, type CatalogSkinCategory, type SessionSnapshot, type SupplyGame } from "../api";
+import { adminRequest, friendlyError, hasPermission, type AdminCatalogResponse, type CatalogEntitlement, type CatalogItem, type CatalogMediaOption, type CatalogRarity, type CatalogSkin, type CatalogSkinCategory, type MediaOptionsResponse, type SessionSnapshot, type SupplyGame } from "../api";
 import { Button, StatusMessage } from "../components/ui-elements";
 
 type CatalogKind = "items" | "categories" | "skins" | "rarities" | "entitlements";
@@ -66,6 +66,11 @@ function toPayload(kind: CatalogKind, values: Record<string, string>, editing: b
     put("sourceField", "sourceField");
     put("sourceToken", "sourceToken");
     put("sourceNote", "sourceNote");
+    // Editing only: mediaId binds an approved public ITEM_MEDIA asset; an empty
+    // value unbinds. New items are created without an image.
+    if (editing && values.mediaId !== undefined) {
+      payload.mediaId = values.mediaId === "" ? null : values.mediaId;
+    }
   } else if (kind === "categories") {
     payload.parentId = values.parentId === "" ? null : values.parentId;
     put("sortOrder", "sortOrder", Number);
@@ -121,6 +126,20 @@ export function SupplyCatalogView({
   const [success, setSuccess] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [gameDraft, setGameDraft] = useState({ code: "", name: "", description: "" });
+  const [mediaOptions, setMediaOptions] = useState<CatalogMediaOption[]>([]);
+  const [mediaOptionsLoading, setMediaOptionsLoading] = useState(false);
+  const [mediaOptionsError, setMediaOptionsError] = useState<string>();
+  const [mediaPickerOpen, setMediaPickerOpen] = useState(false);
+  const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
+  // Monotonic sequence guards against late responses: any fetch only commits
+  // its result when the sequence still matches. The media picker lifecycle is
+  // bound to the editor identity (kind+id) and the selected game, NOT to every
+  // draft keystroke, so typing in ordinary fields must not reset the picker.
+  const mediaPickSeq = useRef(0);
+  const editorIdentity = editor ? `${editor.kind}:${editor.id ?? ""}` : null;
+  // Cursor of the most recent request; kept when the request fails so the "重试"
+  // button reloads exactly the failed page (null = first page).
+  const [mediaRetryCursor, setMediaRetryCursor] = useState<string | null>(null);
 
   const loadGames = useCallback(async () => {
     const result = await adminRequest<{ games: SupplyGame[] }>("/supply/games");
@@ -234,6 +253,93 @@ export function SupplyCatalogView({
     } catch (failure) {
       setError(friendlyError(failure));
     }
+  };
+
+  useEffect(() => {
+    // Editor identity or game changed (not draft values): dismiss the picker,
+    // invalidate any in-flight request and clear every transient state so a
+    // late response can never reach the current editor's picker.
+    mediaPickSeq.current += 1;
+    setMediaPickerOpen(false);
+    setMediaOptions([]);
+    setMediaNextCursor(null);
+    setMediaOptionsLoading(false);
+    setMediaOptionsError(undefined);
+    setMediaRetryCursor(null);
+  }, [editorIdentity, gameId]);
+
+  const dismissMediaPicker = () => {
+    mediaPickSeq.current += 1;
+    setMediaPickerOpen(false);
+    setMediaOptions([]);
+    setMediaNextCursor(null);
+    setMediaOptionsLoading(false);
+    setMediaOptionsError(undefined);
+    setMediaRetryCursor(null);
+  };
+
+  const loadMediaOptionsPage = async (cursor: string | null) => {
+    if (!editor || editor.kind !== "items" || !editor.id || !gameId) return;
+    if (!cursor) {
+      // A fresh open clears stale candidates before the request starts.
+      setMediaOptions([]);
+      setMediaNextCursor(null);
+    }
+    setMediaOptionsError(undefined);
+    setMediaOptionsLoading(true);
+    setMediaRetryCursor(cursor);
+    const seq = ++mediaPickSeq.current;
+    try {
+      const params = new URLSearchParams({ purpose: "ITEM_MEDIA", limit: "20" });
+      if (cursor) params.set("cursor", cursor);
+      const result = await adminRequest<MediaOptionsResponse>(`/supply/games/${gameId}/media-options?${params.toString()}`);
+      if (seq !== mediaPickSeq.current) return;
+      setMediaOptions((current) => (cursor ? [...current, ...result.items] : result.items));
+      setMediaNextCursor(result.nextCursor);
+      setMediaRetryCursor(null);
+    } catch (failure) {
+      if (seq !== mediaPickSeq.current) return;
+      setMediaOptionsError(friendlyError(failure));
+      if (!cursor) {
+        // No stale candidates may remain clickable when the first load fails.
+        setMediaOptions([]);
+        setMediaNextCursor(null);
+      }
+      // mediaRetryCursor stays at the failed cursor so the retry reloads it.
+    } finally {
+      if (seq === mediaPickSeq.current) setMediaOptionsLoading(false);
+    }
+  };
+
+  const openMediaPicker = () => {
+    if (!editor || editor.kind !== "items" || !editor.id) return;
+    setMediaPickerOpen(true);
+    void loadMediaOptionsPage(null);
+  };
+
+  const pickMedia = (mediaId: string) => {
+    if (!editor) return;
+    mediaPickSeq.current += 1;
+    setEditor({ ...editor, values: { ...editor.values, mediaId } });
+    setMediaPickerOpen(false);
+    setMediaOptions([]);
+    setMediaNextCursor(null);
+    setMediaOptionsLoading(false);
+    setMediaOptionsError(undefined);
+    setMediaRetryCursor(null);
+  };
+
+  const unbindMedia = () => {
+    if (!editor) return;
+    mediaPickSeq.current += 1;
+    setEditor({ ...editor, values: { ...editor.values, mediaId: "" } });
+    setMediaPickerOpen(false);
+    setMediaOptions([]);
+    setMediaNextCursor(null);
+    setMediaOptionsLoading(false);
+    setMediaOptionsError(undefined);
+    setMediaRetryCursor(null);
+    setSuccess("已解除绑定；保存成功后目录将不再投影该图片。");
   };
 
   const categories = catalog?.categories ?? [];
@@ -387,6 +493,79 @@ export function SupplyCatalogView({
                   </>
                 ) : null}
               </div>
+              {editor.kind === "items" && editor.id ? (
+                <div className="mt-4 border border-border rounded-md p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold">物品图片</h4>
+                    {editor.values.mediaId ? (
+                      <Button type="button" size="sm" variant="secondary" onClick={unbindMedia}>解除绑定</Button>
+                    ) : null}
+                  </div>
+                  {editor.values.mediaId ? (
+                    <div className="flex items-center gap-3">
+                      <span className="relative">
+                        {/* Approved-public derivative only; never the private
+                            evidence endpoint. A revoked asset renders 404 here. */}
+                        <img
+                          src={`/api/v1/supply/media/${editor.values.mediaId}/content`}
+                          alt="当前绑定物品图"
+                          className="w-20 h-20 object-cover rounded border border-border"
+                          loading="lazy"
+                          onLoad={(event) => {
+                            event.currentTarget.style.display = "";
+                            event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden");
+                          }}
+                          onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden"); }}
+                        />
+                        <span data-fallback className="hidden text-[11px] text-muted-foreground">图片加载失败或已不可公开展示（临时网络问题也可能触发本提示）。保存后如需更换，可重新选择或解除绑定。</span>
+                      </span>
+                      <span className="text-[11px] text-muted-foreground font-mono truncate">{editor.values.mediaId}</span>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">当前未绑定物品图；公开目录将不投影任何图片。</p>
+                  )}
+                  {mediaPickerOpen ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-muted-foreground">服务端已按游戏与用途过滤：ITEM_MEDIA、已审核且允许公开（候选以公共衍生图预览，无需审核读取权限）。</span>
+                        <Button type="button" size="sm" variant="ghost" onClick={dismissMediaPicker}>关闭</Button>
+                      </div>
+                      <StatusMessage error={mediaOptionsError} className="mt-1" />
+                      {mediaOptionsLoading && mediaOptions.length === 0 ? <p className="text-xs text-muted-foreground">加载候选图片…</p> : null}
+                      {!mediaOptionsLoading && !mediaOptionsError && mediaOptions.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">没有可绑定图片；请先在“平台素材审核”上传并审核公开 ITEM_MEDIA 素材。</p>
+                      ) : null}
+                      {mediaOptions.length > 0 ? (
+                        <>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            {mediaOptions.map((option) => (
+                              <button type="button" key={option.id} className="rounded border border-border overflow-hidden text-left hover:border-foreground/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/70" onClick={() => pickMedia(option.id)}>
+                                <span className="relative block">
+                                  <img src={`/api/v1/supply/media/${option.id}/content`} alt={`候选 ${option.id}`} className="w-full h-16 object-cover" loading="lazy"
+                                    onLoad={(event) => { event.currentTarget.style.display = ""; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden"); }}
+                                    onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden"); }} />
+                                  <span data-fallback className="hidden absolute inset-0 grid place-items-center text-[10px] text-muted-foreground bg-surface">预览不可用</span>
+                                </span>
+                                <span className="block px-1.5 py-1 text-[10px] text-muted-foreground font-mono truncate">{option.id.slice(0, 18)}… · {option.width}×{option.height} · {option.mime}</span>
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex justify-end">
+                            {mediaNextCursor && !mediaOptionsError ? (
+                              <Button type="button" size="sm" variant="secondary" loading={mediaOptionsLoading} onClick={() => void loadMediaOptionsPage(mediaNextCursor)}>加载更多</Button>
+                            ) : null}
+                            {mediaOptionsError ? (
+                              <Button type="button" size="sm" variant="secondary" loading={mediaOptionsLoading} onClick={() => void loadMediaOptionsPage(mediaRetryCursor)}>重试</Button>
+                            ) : null}
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <Button type="button" size="sm" variant="secondary" onClick={openMediaPicker}>选择图片</Button>
+                  )}
+                </div>
+              ) : null}
               <div className="flex gap-2">
                 <Button type="submit" size="sm" loading={loading}>保存</Button>
                 <Button type="button" size="sm" variant="secondary" onClick={() => setEditor(null)}>取消</Button>
