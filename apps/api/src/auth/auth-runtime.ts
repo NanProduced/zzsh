@@ -13,6 +13,7 @@ import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
 import { mountSupplyHandlers } from "../supply/supply-routes";
+import { mountContentHandlers } from "../content/content-routes";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 
@@ -474,6 +475,11 @@ export async function mountAuthHandlers(
   });
   mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader});
   mountSupplyHandlers(app, {
+    ...securityOptions,
+    mediaStorage,
+    supplyGateReader,
+  });
+  mountContentHandlers(app, {
     ...securityOptions,
     mediaStorage,
     supplyGateReader,

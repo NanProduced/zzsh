@@ -5,6 +5,7 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
+  NewspaperIcon,
   ScrollTextIcon,
   ShieldIcon,
   UserRoundCogIcon,
@@ -56,6 +57,14 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "供给与目录", isTitle: true }, ...supply);
   }
 
+  const content: WorkspaceMenuItem[] = [];
+  if (has("content.platform.read") || has("content.read") || nav.isBoss) {
+    content.push({ label: "内容管理", icon: NewspaperIcon, path: "/content", kind: "content" });
+  }
+  if (content.length > 0) {
+    items.push({ label: "运营内容", isTitle: true }, ...content);
+  }
+
   const users: WorkspaceMenuItem[] = [];
   if (has("user.account.restore")) {
     users.push({ label: "账号恢复", icon: UserRoundSearchIcon, path: "/users/restore", kind: "user-restore" });
@@ -92,6 +101,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/rules") return "规则与价目";
   if (pathname === "/supply/reviews") return "供给审核";
   if (pathname === "/supply/media") return "平台素材审核";
+  if (pathname === "/content") return "内容管理";
   if (pathname === "/account") return "账号安全";
   return "工作台";
 }

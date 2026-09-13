@@ -7,6 +7,7 @@ import { RoleConfigView } from "../views/role-config-view";
 import { SupplyCatalogView } from "../views/supply-catalog-view";
 import { SupplyMediaReviewView } from "../views/supply-media-review-view";
 import { SupplyRulesView } from "../views/supply-rules-view";
+import { ContentView } from "../views/content-view";
 
 import { AccountSecurityPage } from "./account-security-page";
 import type { WorkspaceTab } from "./tab-model";
@@ -108,6 +109,9 @@ export function WorkspacePageContent({
   if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {
     return <SupplyMediaReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} />;
+  }
+  if (tab.kind === "content") {
+    return <ContentView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "user-restore") return <UserRestorePanel key={tab.id} />;
   return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;

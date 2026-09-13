@@ -71,25 +71,26 @@ import {
   sendInternalError,
   sendJson,
   withIdempotency,
+  type IdempotencyReplay,
   type SupplyNodeRequest,
   type SupplyNodeResponse,
 } from "./supply-util";
 
 export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader };
 
-type SupplyResponse = SupplyNodeResponse & {
+export type SupplyResponse = SupplyNodeResponse & {
   send?: (body: Buffer | string) => void;
 };
 
 const TOKEN = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 
-function decodeId(value: string): string {
+export function decodeId(value: string): string {
   const decoded = decodeURIComponent(value);
   if (!new RegExp(`^${TOKEN}$`).test(decoded)) throw notFound();
   return decoded;
 }
 
-function requestPath(request: SupplyNodeRequest, prefix: string): { path: string; query: URLSearchParams } {
+export function requestPath(request: SupplyNodeRequest, prefix: string): { path: string; query: URLSearchParams } {
   const raw = request.url ?? request.originalUrl ?? "/";
   const index = raw.indexOf("?");
   let path = index >= 0 ? raw.slice(0, index) : raw;
@@ -104,13 +105,13 @@ function originAllowed(request: SupplyNodeRequest, origins: readonly string[]): 
   return origins.includes(origin);
 }
 
-function requireOrigin(request: SupplyNodeRequest, response: SupplyResponse, options: SupplyRuntimeOptions, requestId: string): boolean {
+export function requireOrigin(request: SupplyNodeRequest, response: SupplyResponse, options: SupplyRuntimeOptions, requestId: string): boolean {
   if (originAllowed(request, [options.apiOrigin, options.userOrigin, options.adminOrigin])) return true;
   sendJson(response, 403, { error: { code: API_V1_ERROR_CODES.FORBIDDEN, message: "Request rejected", requestId } }, requestId);
   return false;
 }
 
-function mapDatabaseError(error: unknown): SecurityApiError | null {
+export function mapDatabaseError(error: unknown): SecurityApiError | null {
   const code = (error as { code?: string }).code;
   if (code === "40001" || code === "40P01") return conflict("Supply state changed; reload and retry");
   if (code === "23505") return new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Request conflicts with current state");
@@ -138,7 +139,7 @@ async function safely(response: SupplyResponse, requestId: string, action: () =>
   }
 }
 
-async function readRawBody(request: SupplyNodeRequest, maxBytes: number): Promise<Buffer> {
+export async function readRawBody(request: SupplyNodeRequest, maxBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
   try {
@@ -155,7 +156,7 @@ async function readRawBody(request: SupplyNodeRequest, maxBytes: number): Promis
   return Buffer.concat(chunks);
 }
 
-async function sendStoredMedia(
+export async function sendStoredMedia(
   response: SupplyResponse,
   requestId: string,
   storage: MediaStorage,
@@ -180,9 +181,9 @@ async function sendStoredMedia(
   response.send?.(bytes);
 }
 
-type WriteActor = { realm: "admin" | "user"; id: string; sessionId: string };
+export type WriteActor = { realm: "admin" | "user"; id: string; sessionId: string };
 
-async function runIdempotentWrite(
+export async function runIdempotentWrite(
   options: SupplyRuntimeOptions,
   request: SupplyNodeRequest,
   response: SupplyResponse,
@@ -190,7 +191,7 @@ async function runIdempotentWrite(
   scope: { principalId: string; operation: string; resourceId?: string },
   actor: WriteActor,
   fingerprintBody: unknown,
-  authorize: (client: PoolClient) => Promise<void>,
+  authorize: (client: PoolClient, replay: IdempotencyReplay) => Promise<boolean | void>,
   action: (client: PoolClient) => Promise<{ status: number; body: unknown }>,
 ): Promise<void> {
   const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
@@ -198,21 +199,25 @@ async function runIdempotentWrite(
   try {
     const result = await withTransaction(options.pool, async (client) => {
       await setAuditContext(client, actor.realm, actor.id, actor.sessionId, requestId);
-      return withIdempotency(client, { ...scope, realm: actor.realm }, key, fingerprint, () => authorize(client), () => action(client));
+      return withIdempotency(client, { ...scope, realm: actor.realm }, key, fingerprint, (replay) => authorize(client, replay), () => action(client));
     });
     sendJson(response, result.status, result.body, requestId);
   } catch (error) {
     const uniqueViolation = (error as { code?: string }).code === "23505";
     if (uniqueViolation) {
       const committed = await withTransaction(options.pool, async (client) => {
-        await authorize(client);
-        return client.query<{ requestFingerprint: string; responseStatus: number; responseBody: unknown }>(
-        `SELECT "request_fingerprint" AS "requestFingerprint", "response_status" AS "responseStatus", "response_body" AS "responseBody"
+        // Read the winner's record first so the re-authorization can also apply
+        // the original operation's publish requirement.
+        const row = (await client.query<{ requestFingerprint: string; responseStatus: number; responseBody: unknown; publishRequired: boolean }>(
+        `SELECT "request_fingerprint" AS "requestFingerprint", "response_status" AS "responseStatus", "response_body" AS "responseBody",
+                "publish_required" AS "publishRequired"
            FROM "zzsh_supply"."idempotency_record" WHERE "scope_key" = $1 AND "key" = $2`,
         [JSON.stringify([actor.realm, scope.principalId, scope.operation, scope.resourceId ?? null]), key],
-      );
+      )).rows[0];
+        if (row) await authorize(client, { publishRequired: row.publishRequired === true });
+        return { row };
       });
-      const row = committed.rows[0];
+      const row = committed.row;
       if (row) {
         if (row.requestFingerprint !== fingerprint) {
           sendError(response, new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Idempotency key was reused with a different request"), requestId);
@@ -226,21 +231,28 @@ async function runIdempotentWrite(
   }
 }
 
-async function requireAdminAccess(client: PoolClient, adminUserId: string): Promise<EffectiveAdminAccess> {
+export async function requireAdminAccess(client: PoolClient, adminUserId: string): Promise<EffectiveAdminAccess> {
   const access = await loadEffectiveAdminAccess(client, adminUserId);
   if (!access || access.status !== "ACTIVE") throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Access denied");
   return access;
 }
 
 async function authorizeUpload(client: PoolClient, actor: WriteActor, intentId: string): Promise<void> {
-  const row = (await client.query<{ game_id: string; account_id: string | null; uploaded_by_realm: string; uploaded_by_user_id: string | null; uploaded_by_admin_id: string | null }>(
-    `SELECT game_id, account_id, uploaded_by_realm, uploaded_by_user_id, uploaded_by_admin_id FROM zzsh_supply.media_upload_intent WHERE id = $1`, [intentId],
+  const row = (await client.query<{ game_id: string | null; purpose: string; account_id: string | null; uploaded_by_realm: string; uploaded_by_user_id: string | null; uploaded_by_admin_id: string | null }>(
+    `SELECT game_id, purpose, account_id, uploaded_by_realm, uploaded_by_user_id, uploaded_by_admin_id FROM zzsh_supply.media_upload_intent WHERE id = $1`, [intentId],
   )).rows[0];
   if (!row || row.uploaded_by_realm !== actor.realm || (actor.realm === "admin" ? row.uploaded_by_admin_id : row.uploaded_by_user_id) !== actor.id) throw notFound();
   if (actor.realm === "admin") {
     const access = await requireAdminAccess(client, actor.id);
-    requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
-    await assertGameScope(client, actor.id, access.isBoss, row.game_id);
+    if (row.game_id === null) {
+      // Platform-level content media is gated by the content management
+      // permission instead of a game scope.
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
+      if (row.purpose !== "CONTENT_MEDIA") throw notFound();
+    } else {
+      requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+      await assertGameScope(client, actor.id, access.isBoss, row.game_id);
+    }
   } else if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND owner_user_id = $2 AND game_id = $3`, [row.account_id, actor.id, row.game_id])).rowCount) throw notFound();
 }
 
@@ -259,7 +271,7 @@ async function hasIdempotencyRecord(pool: SupplyRuntimeOptions["pool"], scope: {
 // Replay lookups skip the object writes entirely; if a concurrent request with
 // the same key commits between the pre-check and preparation, the recorded
 // result is still returned instead of a spurious conflict.
-async function runMediaUpload(
+export async function runMediaUpload(
   options: SupplyRuntimeOptions,
   request: SupplyNodeRequest,
   response: SupplyResponse,
@@ -725,7 +737,7 @@ async function handleAdminRead(
       const access = await requireAdminAccess(client, adminUserId);
       requirePermission(access, ADMIN_PERMISSION.supplyReviewRead);
       const row = await loadMediaAsset(client, assetId);
-      if (!row) throw notFound();
+      if (!row || row.gameId === null) throw notFound();
       await assertGameScope(client, adminUserId, access.isBoss, row.gameId);
       return row;
     });
@@ -1036,7 +1048,7 @@ async function handleAdminWrite(
     const visibility = optionalString(body, "visibility", 32);
     await write("supply.media.review", assetId, ADMIN_PERMISSION.supplyReviewDecide, async (client) => {
       const row = await loadMediaAsset(client, assetId);
-      if (!row) throw notFound();
+      if (!row || row.gameId === null) throw notFound();
       return row.gameId;
     }, async (client, access) => {
       const asset = await reviewMediaAsset(client, actor.id, access.isBoss, assetId, {
@@ -1057,7 +1069,7 @@ async function handleAdminWrite(
     const reason = optionalTrimmedString(body, "reason", 500);
     await write("supply.media.visibility", assetId, ADMIN_PERMISSION.supplyReviewDecide, async (client) => {
       const row = await loadMediaAsset(client, assetId);
-      if (!row) throw notFound();
+      if (!row || row.gameId === null) throw notFound();
       return row.gameId;
     }, async (client, access) => {
       const asset = await changeMediaVisibility(client, actor.id, access.isBoss, assetId, { visibility, ...(reason ? { reason } : {}) });

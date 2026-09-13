@@ -143,16 +143,29 @@ function tokensMatch(expectedHash: string, provided: string): boolean {
 export async function createMediaUploadIntent(
   client: PoolClient,
   actor: MediaActor,
-  input: { gameId: string; accountId?: string; purpose: string; mime: string; size: number },
+  input: { gameId?: string; accountId?: string; purpose: string; mime: string; size: number },
 ): Promise<{ intentId: string; uploadToken: string; expiresAt: string }> {
-  const gameExists = await client.query(`SELECT 1 FROM "zzsh_supply"."game" WHERE "id" = $1`, [input.gameId]);
-  if (gameExists.rows.length === 0) throw notFound();
   if (!ALLOWED_IMAGE_MIMES.includes(input.mime as ImageMime)) throw invalid("MIME type is not allowed");
   if (!Number.isInteger(input.size) || input.size <= 0 || input.size > MAX_MEDIA_BYTES) throw invalid("Declared size is outside the allowed range");
 
   let accountId: string | null = null;
   let ownerUserId: string | null = null;
-  if (actor.realm === "user") {
+  let purpose: string;
+  if (actor.realm === "admin") {
+    purpose = input.purpose;
+    if (input.accountId !== undefined) throw invalid("Platform uploads cannot target a rental account");
+    if (purpose === "CONTENT_MEDIA") {
+      // Platform-level content media has no game affiliation.
+      if (input.gameId !== undefined) throw invalid("Content media cannot target a game");
+    } else if (["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"].includes(purpose)) {
+      if (!input.gameId) throw invalid("Game is required for catalog media");
+      const gameExists = await client.query(`SELECT 1 FROM "zzsh_supply"."game" WHERE "id" = $1`, [input.gameId]);
+      if (gameExists.rows.length === 0) throw notFound();
+    } else {
+      throw invalid("Purpose is not allowed");
+    }
+  } else {
+    if (!input.gameId) throw invalid("Game is required for user uploads");
     if (!input.accountId) throw invalid("Account is required for user uploads");
     const account = await client.query<{ ownerUserId: string; gameId: string }>(
       `SELECT "owner_user_id" AS "ownerUserId", "game_id" AS "gameId" FROM "zzsh_supply"."rental_account" WHERE "id" = $1`,
@@ -160,14 +173,11 @@ export async function createMediaUploadIntent(
     );
     const row = account.rows[0];
     if (!row || row.gameId !== input.gameId || row.ownerUserId !== actor.userId) throw notFound();
+    purpose = input.purpose;
+    if (!["ACCOUNT_EVIDENCE", "ACCOUNT_DISPLAY"].includes(purpose)) throw invalid("Purpose is not allowed");
     accountId = input.accountId;
     ownerUserId = actor.userId!;
-  } else if (input.accountId !== undefined) {
-    throw invalid("Platform catalog uploads cannot target a rental account");
   }
-  const purpose = input.purpose;
-  const allowedPurposes = actor.realm === "admin" ? ["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"] : ["ACCOUNT_EVIDENCE", "ACCOUNT_DISPLAY"];
-  if (!allowedPurposes.includes(purpose)) throw invalid("Purpose is not allowed");
 
   const intentId = newSupplyId("upload");
   const uploadToken = randomBytes(32).toString("base64url");
@@ -180,10 +190,10 @@ export async function createMediaUploadIntent(
     [
       intentId,
       tokenHash(uploadToken),
-      input.gameId,
+      input.gameId ?? null,
       accountId,
       purpose,
-      actor.realm === "admin" ? "PLATFORM_CATALOG" : "USER_SUPPLY",
+      actor.realm === "admin" ? (purpose === "CONTENT_MEDIA" ? "PLATFORM_CONTENT" : "PLATFORM_CATALOG") : "USER_SUPPLY",
       ownerUserId,
       actor.realm,
       actor.realm === "user" ? actor.userId : null,
@@ -198,7 +208,7 @@ export async function createMediaUploadIntent(
 
 export type UploadedAsset = {
   assetId: string;
-  gameId: string;
+  gameId: string | null;
   purpose: string;
   ownershipKind: string;
   reviewState: string;
@@ -362,7 +372,7 @@ export async function finalizeMediaUpload(
 
 type MediaAssetRow = {
   id: string;
-  gameId: string;
+  gameId: string | null;
   purpose: string;
   ownershipKind: string;
   ownerUserId: string | null;
@@ -411,7 +421,13 @@ export async function reviewMediaAsset(
   );
   const asset = current.rows[0];
   if (!asset) throw notFound();
-  await assertGameScope(client, adminUserId, isBoss, asset.gameId);
+  // Platform content media has no game scope; its authorization is the content
+  // permission checked by the route. Catalog/user media keeps the game scope check.
+  if (asset.gameId === null) {
+    if (asset.ownershipKind !== "PLATFORM_CONTENT" || asset.purpose !== "CONTENT_MEDIA") throw notFound();
+  } else {
+    await assertGameScope(client, adminUserId, isBoss, asset.gameId);
+  }
   if (input.decision !== "APPROVE" && input.decision !== "REJECT" && input.decision !== "QUARANTINE") throw invalid("Review decision is invalid");
   if (input.decision !== "APPROVE" && (!input.reason || input.reason.trim().length < 2 || input.reason.length > 500)) {
     throw invalid("A reason is required for this review decision");
@@ -421,7 +437,7 @@ export async function reviewMediaAsset(
   if (visibility !== "PUBLIC_DISPLAY" && visibility !== "PRIVATE_REVIEW") throw invalid("Visibility is invalid");
   if (visibility === "PUBLIC_DISPLAY") {
     if (nextState !== "APPROVED") throw invalid("Only approved media can be public");
-    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
+    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.ownershipKind !== "PLATFORM_CONTENT" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
   }
   await client.query(
@@ -452,11 +468,15 @@ export async function changeMediaVisibility(
   );
   const asset = current.rows[0];
   if (!asset) throw notFound();
-  await assertGameScope(client, adminUserId, isBoss, asset.gameId);
+  if (asset.gameId === null) {
+    if (asset.ownershipKind !== "PLATFORM_CONTENT" || asset.purpose !== "CONTENT_MEDIA") throw notFound();
+  } else {
+    await assertGameScope(client, adminUserId, isBoss, asset.gameId);
+  }
   if (input.visibility !== "PUBLIC_DISPLAY" && input.visibility !== "PRIVATE_REVIEW") throw invalid("Visibility is invalid");
   if (input.visibility === "PUBLIC_DISPLAY") {
     if (asset.reviewState !== "APPROVED") throw conflict("Media must be approved before public display");
-    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
+    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.ownershipKind !== "PLATFORM_CONTENT" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
   }
   await client.query(

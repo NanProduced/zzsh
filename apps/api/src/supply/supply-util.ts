@@ -144,23 +144,29 @@ export function fingerprintRequest(operation: string, resourceId: string | undef
 
 export type IdempotentResult = { replayed: boolean; status: number; body: unknown };
 
+// Replay authorization must not be derived only from the mutable current state:
+// the permission requirement of the original operation is persisted with the
+// record and re-applied on replay, together with the fresh current-state check.
+export type IdempotencyReplay = { publishRequired: boolean } | null;
+
 export async function withIdempotency(
   client: PoolClient,
   scope: { realm: "admin" | "user"; principalId: string; operation: string; resourceId?: string },
   key: string,
   fingerprint: string,
-  authorize: () => Promise<void>,
+  authorize: (replay: IdempotencyReplay) => Promise<boolean | void>,
   action: () => Promise<{ status: number; body: unknown }>,
 ): Promise<IdempotentResult> {
   const scopeKey = JSON.stringify([scope.realm, scope.principalId, scope.operation, scope.resourceId ?? null]);
   await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [JSON.stringify(["supply-idempotency", scopeKey, key])]);
-  await authorize();
-  const existing = await client.query<{ requestFingerprint: string; responseStatus: number; responseBody: unknown }>(
-    `SELECT "request_fingerprint" AS "requestFingerprint", "response_status" AS "responseStatus", "response_body" AS "responseBody"
+  const existing = await client.query<{ requestFingerprint: string; responseStatus: number; responseBody: unknown; publishRequired: boolean }>(
+    `SELECT "request_fingerprint" AS "requestFingerprint", "response_status" AS "responseStatus", "response_body" AS "responseBody",
+            "publish_required" AS "publishRequired"
        FROM "zzsh_supply"."idempotency_record" WHERE "scope_key" = $1 AND "key" = $2 FOR UPDATE`,
     [scopeKey, key],
   );
   const row = existing.rows[0];
+  const decision = await authorize(row ? { publishRequired: row.publishRequired === true } : null);
   if (row) {
     if (row.requestFingerprint !== fingerprint) {
       throw new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Idempotency key was reused with a different request");
@@ -169,9 +175,9 @@ export async function withIdempotency(
   }
   const result = await action();
   await client.query(
-    `INSERT INTO "zzsh_supply"."idempotency_record" ("scope_key", "key", "request_fingerprint", "response_status", "response_body")
-     VALUES ($1, $2, $3, $4, $5::jsonb)`,
-    [scopeKey, key, fingerprint, result.status, JSON.stringify(result.body)],
+    `INSERT INTO "zzsh_supply"."idempotency_record" ("scope_key", "key", "request_fingerprint", "response_status", "response_body", "publish_required")
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+    [scopeKey, key, fingerprint, result.status, JSON.stringify(result.body), decision === true],
   );
   return { replayed: false, status: result.status, body: result.body };
 }
