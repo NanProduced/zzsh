@@ -12,6 +12,7 @@ import {
   type AuthSecurityOptions,
 } from "../auth/auth-security";
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
+import { handleContentAdminRoute } from "../content/content-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 
 type NodeRequest = AuthSecurityNodeRequest & {
@@ -361,6 +362,23 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
     request.headers = { ...request.headers, "x-request-id": requestId };
     try {
       await handleSupplyAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
+  if (path === "/content" || path.startsWith("/content/")) {
+    if (method !== "GET" && method !== "POST" && method !== "PUT") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/content${path.slice("/content".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleContentAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);

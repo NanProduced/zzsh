@@ -222,7 +222,75 @@ export type CatalogMediaOption = {
 export type MediaOptionsResponse = { items: CatalogMediaOption[]; nextCursor: string | null; limit: number };
 
 export type UploadIntentResponse = { intentId: string; uploadToken: string; expiresAt: string };
-export type UploadedAssetResponse = { assetId: string; gameId: string; purpose: string; ownershipKind: string; reviewState: string; accessClass: string; mime: string; byteSize: number; width: number; height: number; contentHash: string };
+export type UploadedAssetResponse = { assetId: string; gameId: string | null; purpose: string; ownershipKind: string; reviewState: string; accessClass: string; mime: string; byteSize: number; width: number; height: number; contentHash: string };
+
+export type ContentType = "ANNOUNCEMENT" | "NEWS";
+export type ContentDraftSummary = {
+  id: string;
+  sequence: number;
+  state: "DRAFT" | "PUBLISHED" | "SUPERSEDED" | "WITHDRAWN";
+  revision: string;
+  title: string;
+  summary: string;
+  body: string;
+  coverMediaId: string | null;
+  publishedAt: string | null;
+  updatedAt: string;
+};
+
+export type ContentItemRow = {
+  id: string;
+  type: ContentType;
+  gameId: string | null;
+  gameName: string | null;
+  sortOrder: number;
+  revision: string;
+  createdAt: string;
+  updatedAt: string;
+  draft: ContentDraftSummary | null;
+  published: ContentDraftSummary | null;
+  latest: ContentDraftSummary | null;
+};
+
+export type ContentVersionRow = ContentDraftSummary & { itemId: string; createdAt: string };
+export type ContentItemDetail = { item: ContentItemRow; versions: ContentVersionRow[] };
+export type ContentItemsPage = { items: ContentItemRow[]; nextCursor: string | null; limit: number };
+export type ContentGame = { id: string; code: string; name: string };
+
+export type ContentMediaOption = { id: string; mime: string; width: number; height: number; byteSize: string };
+export type ContentMediaOptionsPage = { items: ContentMediaOption[]; nextCursor: string | null; limit: number };
+export type ContentMediaRow = {
+  id: string;
+  mime: string;
+  byteSize: string;
+  width: number;
+  height: number;
+  reviewState: "PENDING" | "APPROVED" | "REJECTED" | "QUARANTINED";
+  accessClass: "PUBLIC_DISPLAY" | "PRIVATE_REVIEW";
+  reviewReason: string | null;
+  updatedAt: string;
+};
+export type ContentMediaPage = { items: ContentMediaRow[]; nextCursor: string | null; limit: number };
+
+export type CarouselRow = {
+  id: string;
+  slotCode: "HOME_HERO";
+  mediaId: string;
+  imageAlt: string;
+  title: string;
+  description: string;
+  linkUrl: string | null;
+  enabled: boolean;
+  sortOrder: number;
+  startsAt: string | null;
+  endsAt: string | null;
+  revision: string;
+  createdAt: string;
+  updatedAt: string;
+  mediaReviewState?: string | null;
+  mediaAccessClass?: string | null;
+};
+export type CarouselPage = { items: CarouselRow[]; nextCursor: string | null; limit: number };
 
 export type AuthResponse = { twoFactorRedirect?: boolean };
 export type EnrollmentResponse = { totpURI?: string; backupCodes?: string[] };

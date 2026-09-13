@@ -31,6 +31,12 @@ export const ADMIN_PERMISSION = {
   supplyQuoteInternalRead: "supply.quote.internal.read",
   supplyRestrict: "supply.restrict",
   supplyDuplicateReview: "supply.duplicate.review",
+  contentRead: "content.read",
+  contentEdit: "content.edit",
+  contentPublish: "content.publish",
+  contentPlatformRead: "content.platform.read",
+  contentPlatformEdit: "content.platform.edit",
+  contentPlatformPublish: "content.platform.publish",
 } as const;
 
 export const ADMIN_PERMISSION_CODES = Object.values(ADMIN_PERMISSION);
