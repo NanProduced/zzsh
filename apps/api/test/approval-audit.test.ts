@@ -1,3 +1,4 @@
+import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -16,7 +17,7 @@ const LOCK_KEY = "805003";
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
-const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin"] as const;
+const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply"] as const;
 
 type CookieJar = {
   values: Map<string, string>;
@@ -216,7 +217,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetBusinessData(pool: Pool): Promise<void> {
-  await pool.query("TRUNCATE \"zzsh_iam\".\"approval_execution\", \"zzsh_iam\".\"approval_decision\", \"zzsh_iam\".\"approval_request_candidate\", \"zzsh_iam\".\"approval_request\", \"zzsh_iam\".\"approval_template_candidate\", \"zzsh_iam\".\"approval_template\", \"zzsh_iam\".\"admin_user_permission\", \"zzsh_iam\".\"admin_user_role\", \"zzsh_iam\".\"admin_role_permission\", \"zzsh_iam\".\"admin_recovery_request\", \"zzsh_iam\".\"admin_recovery_notification_target\", \"zzsh_iam\".\"admin_security_notification_outbox\", \"zzsh_auth_admin\".\"twoFactor\", \"zzsh_auth_admin\".\"verification\", \"zzsh_auth_admin\".\"session\", \"zzsh_auth_admin\".\"account\", \"zzsh_auth_admin\".\"user\", \"zzsh_auth_user\".\"twoFactor\", \"zzsh_auth_user\".\"verification\", \"zzsh_auth_user\".\"session\", \"zzsh_auth_user\".\"account\", \"zzsh_auth_user\".\"user\", \"zzsh_iam\".\"admin_security\", \"zzsh_iam\".\"audit_event\" CASCADE");
+  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
   await pool.query("DELETE FROM \"zzsh_iam\".\"admin_role\" WHERE \"code\" NOT IN ('ops', 'support')");
   await pool.query("DELETE FROM \"zzsh_iam\".\"admin_role_permission\"");
 }

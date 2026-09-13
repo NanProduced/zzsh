@@ -1,7 +1,10 @@
 import {
+  BoxesIcon,
   ClipboardCheckIcon,
+  ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  ListChecksIcon,
   ScrollTextIcon,
   ShieldIcon,
   UserRoundCogIcon,
@@ -38,6 +41,21 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "系统管理", isTitle: true }, ...system);
   }
 
+  const supply: WorkspaceMenuItem[] = [];
+  if (has("supply.catalog.manage") || nav.isBoss) {
+    supply.push({ label: "目录维护", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
+  }
+  if (has("supply.rules.edit") || nav.isBoss) {
+    supply.push({ label: "规则与价目", icon: ListChecksIcon, path: "/supply/rules", kind: "rules" });
+  }
+  if (has("supply.review.read") || nav.isBoss) {
+    supply.push({ label: "供给审核", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
+    supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
+  }
+  if (supply.length > 0) {
+    items.push({ label: "供给与目录", isTitle: true }, ...supply);
+  }
+
   const users: WorkspaceMenuItem[] = [];
   if (has("user.account.restore")) {
     users.push({ label: "账号恢复", icon: UserRoundSearchIcon, path: "/users/restore", kind: "user-restore" });
@@ -70,6 +88,10 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/approvals") return "审批与审计";
   if (pathname === "/audit") return "账号与权限审计";
   if (pathname === "/users/restore") return "用户账号恢复";
+  if (pathname === "/supply/catalog") return "目录维护";
+  if (pathname === "/supply/rules") return "规则与价目";
+  if (pathname === "/supply/reviews") return "供给审核";
+  if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/account") return "账号安全";
   return "工作台";
 }

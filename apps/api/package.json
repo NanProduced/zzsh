@@ -10,10 +10,11 @@
     "migrate:business": "npm run build && node --env-file-if-exists=.env dist/src/database/migrate-business-cli.js",
     "security:disaster-recovery": "npm run build && node --env-file-if-exists=.env dist/src/auth/disaster-recovery-cli.js",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/test/api-contract.test.js dist/test/config.test.js dist/test/database-safety.test.js dist/test/health.test.js dist/test/logging.test.js dist/test/user-identity.test.js",
-    "test:db": "npm run build && node --env-file-if-exists=.env --test dist/test/database-safety.test.js dist/test/database.test.js dist/test/database-reset.test.js dist/test/auth.test.js dist/test/approval-audit.test.js dist/test/admin-workspace-layout.test.js",
+    "test": "npm run build && node --test dist/test/api-contract.test.js dist/test/config.test.js dist/test/database-safety.test.js dist/test/health.test.js dist/test/logging.test.js dist/test/user-identity.test.js dist/test/supply-pricing.test.js dist/test/supply-content-hash.test.js dist/test/supply-media.test.js",
+    "test:db": "npm run build && node --env-file-if-exists=.env --test dist/test/database-safety.test.js dist/test/database.test.js dist/test/database-reset.test.js dist/test/auth.test.js dist/test/approval-audit.test.js dist/test/admin-workspace-layout.test.js dist/test/supply-m3b.test.js",
     "test:auth": "npm run build && node --env-file-if-exists=.env --test dist/test/auth.test.js",
-    "test:readiness": "npm run build && node --env-file-if-exists=.env --test dist/test/readiness.real.test.js"
+    "test:readiness": "npm run build && node --env-file-if-exists=.env --test dist/test/readiness.real.test.js",
+    "test:supply": "npm run build && node --env-file-if-exists=.env --test dist/test/supply-m3b.test.js"
   },
   "dependencies": {
     "@better-auth/drizzle-adapter": "1.7.3",
@@ -21,12 +22,14 @@
     "@nestjs/core": "11.2.3",
     "@nestjs/platform-express": "11.2.3",
     "@nestjs/swagger": "11.4.7",
+    "ali-oss": "6.23.0",
     "better-auth": "1.7.3",
     "drizzle-orm": "0.45.2",
     "pg": "8.23.0",
     "redis": "6.2.1",
     "reflect-metadata": "0.2.2",
-    "rxjs": "7.8.2"
+    "rxjs": "7.8.2",
+    "sharp": "0.35.4"
   },
   "devDependencies": {
     "@types/pg": "8.23.1"

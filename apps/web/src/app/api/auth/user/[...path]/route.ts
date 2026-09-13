@@ -1,3 +1,4 @@
+import { isHttpOrigin, userCookies, copySetCookies, sanitizeResponse, readBoundedBody, BodyTooLargeError } from "../../../../../lib/user-proxy.ts";
 import { randomUUID } from "node:crypto";
 
 const LOCAL_ONLY = process.env.NODE_ENV !== "production";
@@ -5,15 +6,6 @@ const API_ORIGIN = process.env.ZZSH_API_ORIGIN ?? (LOCAL_ONLY ? "http://127.0.0.
 const WEB_ORIGIN = process.env.ZZSH_WEB_ORIGIN ?? (LOCAL_ONLY ? "http://127.0.0.1:3100" : "");
 const MAX_BODY_BYTES = 64 * 1024;
 const UPSTREAM_TIMEOUT_MS = 5_000;
-
-function isHttpOrigin(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash;
-  } catch {
-    return false;
-  }
-}
 
 const ORIGIN_CONFIGURATION_VALID = isHttpOrigin(API_ORIGIN) && isHttpOrigin(WEB_ORIGIN);
 const USER_AUTH_PATHS = new Set([
@@ -46,59 +38,6 @@ const RESPONSE_HEADERS = new Set([
   "x-ratelimit-remaining",
   "x-ratelimit-reset",
 ]);
-const USER_COOKIE = /^(?:__Secure-|__Host-)?zzsh_user\.(?:session_token(?:\.\d+)?|dont_remember)$/;
-
-class BodyTooLargeError extends Error {}
-class BodyReadError extends Error {}
-
-async function readBoundedBody(request: Request): Promise<ArrayBuffer> {
-  if (!request.body) return new ArrayBuffer(0);
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      if (total > MAX_BODY_BYTES) throw new BodyTooLargeError();
-      chunks.push(value);
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    if (error instanceof BodyTooLargeError) throw error;
-    throw new BodyReadError();
-  } finally {
-    reader.releaseLock();
-  }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return body.buffer;
-}
-
-function userCookies(value: string | null): string | undefined {
-  const cookies = (value ?? "").split(";").map((part) => part.trim()).filter((part) => USER_COOKIE.test(part.split("=", 1)[0] ?? ""));
-  return cookies.length > 0 ? cookies.join("; ") : undefined;
-}
-
-function sanitizeResponse(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeResponse);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !/^(?:token|sessionToken|accessToken|refreshToken)$/i.test(key)).map(([key, nested]) => [key, sanitizeResponse(nested)]));
-}
-
-function copySetCookies(source: Headers): string[] {
-  const headers = source as Headers & { getSetCookie?: () => string[] };
-  const cookie = source.get("set-cookie");
-  const values = headers.getSetCookie?.() ?? (cookie ? [cookie] : []);
-  return values.filter((value) => USER_COOKIE.test(value.split("=", 1)[0]?.trim() ?? ""));
-}
-
 function errorResponse(status: number, code: string, requestId: string): Response {
   return Response.json({ error: { code, message: "Authentication request rejected", requestId } }, { status, headers: { "Cache-Control": "no-store", "X-Request-Id": requestId } });
 }

@@ -29,6 +29,7 @@ playwright-report/
 /reports/
 /legacy-local/
 /uploads/
+/apps/api/uploads/
 /backups/
 *.jar
 *.class

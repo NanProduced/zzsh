@@ -2,12 +2,15 @@
 
 ## 环境
 
+启动、停止、重启和测试隔离先遵守[本地环境使用规则](local-environments.md)。主环境由Master或指定维护者管理；已有服务先检查并复用，不默认每个agent启动三端。
+
 Node.js 24.20.0 / npm 11.19.0，版本见 `.node-version` 和根 package.json。使用根目录的单一 package-lock.json。
 
 `.agents/`、`skills-lock.json` 和 `.claude/skills/` 均为本机技能及安装器状态，保留本地并由根 `.gitignore` 忽略，不随业务仓库提交。其他机器按需自行安装技能；项目协作要求以仓库 AGENTS.md 和正式文档为准。
 
 ```powershell
 npm ci
+# 以下仅供负责整套主环境的维护者；其他任务按需启动单个应用。
 npm run dev
 ```
 
@@ -42,11 +45,15 @@ PostgreSQL 主机 TCP 使用 SCRAM，Redis 使用密码认证；容器内 socket
 | NestJS API readiness | http://127.0.0.1:3102/api/ready | npm run dev -w @zzsh/api |
 | OpenAPI 文档 | http://127.0.0.1:3102/docs | 随 API 启动，仅非 production 环境 |
 
-API 启动前校验 `APP_PROFILE`、数据库/Redis 目标和 provider 模式；缺失 `.env`、凭据文件或越界目标会在连接前失败。默认 provider 为 fake，`test`/`migration` 禁止 real；`provider-test` 必须提供显式范围，但范围配置不等于 Owner 的真实渠道授权。默认绑定本机。PORT 被占用时应处理自己的进程或修改配置，不结束身份不明进程。非资金测试执行器默认关闭，只有显式 `ENABLE_TEST_OPERATIONS=true` 且同时为 `APP_PROFILE=test`、`PROVIDER_MODE=fake` 时才会把能力传入核心；请求体不能覆盖该能力。
+API 启动前校验 `APP_PROFILE`、数据库/Redis 目标和 provider 模式；缺失 `.env`、凭据文件或越界目标会在连接前失败。默认 provider 为 fake，`test`/`migration` 禁止 real；`provider-test` 必须提供显式范围，但范围配置不等于 Owner 的真实渠道授权。默认绑定本机。主环境端口被占用时核对归属，不自行换号；分支环境按登记分配端口，Vite须使用--strictPort，不结束身份不明进程。非资金测试执行器默认关闭，只有显式 `ENABLE_TEST_OPERATIONS=true` 且同时为 `APP_PROFILE=test`、`PROVIDER_MODE=fake` 时才会把能力传入核心；请求体不能覆盖该能力。
 
 凭据来源有明确优先级：设置 `DB_PASSWORD_FILE`/`REDIS_PASSWORD_FILE` 时，文件路径优先于对应环境变量；路径必须位于 `.secrets/` 内，文件内容会去除首尾空白且不能全空白，路径缺失、文件不可读或内容为空都会失败，不能回退到环境变量。未设置 file 变量时才读取环境变量，同样拒绝全空白并去除首尾空白。不要把两类凭据写进仓库。`ecs-test` profile 保留用于未来测试 ECS，但当前没有已确认并登记的真实目标，启动始终失败关闭；示例域名、确认标记或本地环境变量不能绕过这一限制。待提供真实目标后，须另行设计和审核接入，不自动创建云资源或目标注册服务。
 
 ## 检查与迁移
+
+M3-B 的 `0016_m3b_review_guards` 与 `0017_m3b_idempotency_realm` 是前向返修迁移，不改写已应用0015；0017按原操作/上传actor迁移旧幂等键，无法确定realm或发生键冲突时停止，需核对后处理，不丢弃原成功结果。先在隔离库验证，再由环境维护者迁移目标；历史媒体缺少已验证衍生图时保持公共读取拒绝，重新上传后再审核公开。媒体阶段新增 `0023_m3_media_item_binding`（billable_item.media_id 外键），同样只前向应用，不改写历史迁移。
+
+auth 默认资源锁805002被占用时不得抢占。需要并行隔离时设置 `M2_AUTH_TEST_RESOURCE_SET=<小写标识>`（1–21位字母数字/下划线、字母开头），库、迁移/runtime角色及资源锁一起派生；不得同时覆盖为旧库/旧角色。该套件在标记、归属与独占锁核验后，将供给外键涉及表纳入明确的同次TRUNCATE清单，不使用CASCADE；未知资源拒绝修改。测试账号在隔离库内生成，首次及重复运行均需回归。
 
 ```powershell
 npm run check:offline
@@ -62,3 +69,15 @@ test:readiness 会受控停止/恢复本项目依赖，不属于日常前端检�
 API 请求日志只记录方法、路由模板、状态、requestId和耗时，不记录请求体、Cookie、密码、OTP及密钥。认证细节见 [认证说明](architecture/authentication.md)。
 
 Admin 免账号 mock 预览已移除。真实初始化使用独立测试账号，不重置他人正在使用的账号。tmp/ 保存本地过程资料，.impeccable/ 保存工具状态，二者不进入 Git。
+
+## 供给发布验证
+
+发布模型需前向应用0018–0021；不修改0015–0017或M1/M2迁移。先在隔离目标检查旧接受记录/媒体归属是否满足新增外键，冲突时停止核对，不造版本或清共享表绕过。现有保留API未自动迁移或重启，不能据新的前端菜单认为旧API已支持发布。
+
+供给完整PG入口为 `npm run test:supply -w @zzsh/api`，已纳入根check。可设置 `SUPPLY_TEST_RESOURCE_SET=<小写标识>` 一起派生独立库、迁移/runtime角色和锁；不得混用旧资源。auth仍使用 `M2_AUTH_TEST_RESOURCE_SET`。相关测试复用明确的业务表TRUNCATE清单并核schema所有权，不使用CASCADE扩大清理。
+
+默认保证金和占用均UNKNOWN；正向发布只在已启用test/fake能力的受控测试fixture中验证。管理审核页面为 `/supply/reviews`；用户端本阶段只交付API/BFF，无正式发布页面验收。生产CDN及真实身份、资金、云信仍未接入本阶段验证。
+
+媒体存储通过 `MEDIA_STORAGE` 显式选择（默认 `local`，内容寻址文件在 `uploads/`）；设为 `oss` 时要求 `OSS_BUCKET/OSS_REGION/OSS_ENDPOINT/OSS_OBJECT_PREFIX` 及服务端进程环境的 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`（可选 `ALIBABA_CLOUD_SECURITY_TOKEN`），缺失即启动失败，不自动回退。该选择独立于 `PROVIDER_MODE`，只为媒体启用OSS，不会同时打开短信、身份或支付真实渠道；凭据不写入 `.env`、源码或前端。上传在对象写入前用短事务复核当前权限与归属，已撤权请求零对象写入，最终事务内再次复核。切换存储后端不迁移历史对象：数据库只存内容哈希，没有逐对象后端定位，改变 `MEDIA_STORAGE` 会把全部历史读取指向新后端；已有本地对象未复制时会缺图。切换前提为保留 `local`，或先把历史原始/衍生对象复制到新后端并逐键（或按哈希清单）核验后再切换；本阶段不建设双写系统或对象迁移框架。已授权开发目标为 zzsh-dev Bucket 的 `zzsh-rebuild/dev/` 前缀，适配器已在开发Bucket完成合成图片上传/读取/匿名拒绝/衍生图/清理的直连验证；这不等于整条 HTTP API→OSS 的权限/撤权端到端浏览器验收，生产CDN与公开域名另验。
+
+M3-D数据层新增0022_m3d_favorites，需在隔离目标先验证并纳入既有测试表清理清单。Web数据代理复用ZZSH_API_ORIGIN/ZZSH_WEB_ORIGIN；生产缺少有效Origin配置即503，不使用本地假数据。当前仅接口/调用层完成，用户UI工作树整合后再连接正式页面。测试仍用独立SUPPLY_TEST_RESOURCE_SET及M2_AUTH_TEST_RESOURCE_SET，根check包含收藏/失效及M3-C R1–R3回归。

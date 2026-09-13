@@ -88,7 +88,10 @@ try {
   ]);
   const webHtml = await webResponse.text();
   assert.match(webHtml, /洲洲商行/);
-  assert.match(webHtml, /开发环境/);
+  assert.match(webHtml, /id="main-content"/);
+  assert.match(webHtml, /三角洲行动/);
+  const loginResponse = await fetch(`http://127.0.0.1:${webPort}/login`);
+  assert.equal(loginResponse.status, 200, "The separate login route must remain available");
   const adminHtml = await adminResponse.text();
   assert.match(adminHtml, /洲洲商行/);
   const asset = adminHtml.match(/src="([^"]+\.js)"/)?.[1];

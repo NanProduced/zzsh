@@ -59,6 +59,161 @@ export type CreatedAdministrator = {
   temporaryPassword: string;
 };
 
+export type SupplyGame = {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  catalogRevision: string;
+  currentReleaseId: string | null;
+  coverMediaId: string | null;
+};
+
+export type CatalogItem = {
+  id: string;
+  code: string;
+  name: string;
+  unit: "HAFF_BASE" | "ROUND" | "PIECE";
+  quantityScale: number;
+  required: boolean;
+  enabled: boolean;
+  sortOrder: number;
+  mediaId: string | null;
+  sourceField?: string | null;
+  sourceToken?: string | null;
+  sourceNote?: string | null;
+};
+
+export type CatalogSkinCategory = {
+  id: string;
+  code: string;
+  name: string;
+  parentId: string | null;
+  sortOrder: number;
+  enabled: boolean;
+  formVisible: boolean;
+};
+
+export type CatalogSkin = {
+  id: string;
+  code: string;
+  name: string;
+  categoryId: string;
+  rarityCode: string | null;
+  enabled: boolean;
+  formVisible: boolean;
+  mediaId: string | null;
+  sortOrder: number;
+  sourceField?: string | null;
+  sourceToken?: string | null;
+};
+
+export type CatalogRarity = { id: string; code: string; name: string; sortOrder: number; enabled: boolean };
+export type CatalogEntitlement = {
+  id: string;
+  code: string;
+  name: string;
+  valueKind: "FLAG" | "LEVEL" | "CAPACITY";
+  expiryKind: "PERMANENT" | "TIMED";
+  enabled: boolean;
+  sortOrder: number;
+  sourceField?: string | null;
+  sourceToken?: string | null;
+};
+
+export type AdminCatalogResponse = {
+  game: SupplyGame;
+  items: CatalogItem[];
+  rarities: CatalogRarity[];
+  categories: CatalogSkinCategory[];
+  skins: CatalogSkin[];
+  entitlements: CatalogEntitlement[];
+};
+
+export type PriceLineRecord = {
+  priceVersionId: string;
+  itemId: string;
+  pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
+  unitQuantity: string | null;
+  buyerUnitAmount: string | null;
+  ownerUnitAmount: string | null;
+};
+
+export type PriceVersionRecord = {
+  id: string;
+  gameId: string;
+  mode: "SPREAD" | "PERCENT";
+  status: "DRAFT" | "SEALED";
+  commissionRate: string | null;
+  haffRule: Record<string, unknown> | null;
+  roundingPolicy: string;
+  compensationPolicyRef: string | null;
+  revision: string;
+  createdAt: string;
+  sealedAt: string | null;
+};
+
+export type TermVersionRecord = { id: string; gameId: string; status: "DRAFT" | "SEALED"; revision: string; createdAt: string; sealedAt: string | null };
+export type TermOptionRecord = { versionId: string; code: string; name: string; dailyConsumption: string; durationRounding: "CEIL_DAY" };
+export type AgreementVersionRecord = {
+  id: string;
+  gameId: string;
+  title: string;
+  body: string;
+  digest: string;
+  status: "DRAFT" | "SEALED";
+  revision: string;
+  createdAt: string;
+  sealedAt: string | null;
+};
+
+export type RuleReleaseRecord = {
+  id: string;
+  gameId: string;
+  priceVersionId: string;
+  termVersionId: string;
+  agreementVersionId: string;
+  generation: string;
+  activatedAt: string;
+};
+
+export type RulesResponse = {
+  game: SupplyGame;
+  release: RuleReleaseRecord | null;
+  priceVersions: PriceVersionRecord[];
+  priceLines: PriceLineRecord[];
+  termVersions: TermVersionRecord[];
+  termOptions: TermOptionRecord[];
+  agreementVersions: AgreementVersionRecord[];
+  items: CatalogItem[];
+};
+
+export type MediaAssetReview = {
+  id: string;
+  gameId: string;
+  purpose: "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "ACCOUNT_EVIDENCE";
+  ownershipKind: "PLATFORM_CATALOG" | "USER_SUPPLY";
+  ownerUserId: string | null;
+  uploadedByRealm: "admin" | "user";
+  uploadedByUserId: string | null;
+  uploadedByAdminId: string | null;
+  contentHash: string;
+  mime: string;
+  byteSize: string;
+  width: number;
+  height: number;
+  accessClass: "PUBLIC_DISPLAY" | "PRIVATE_REVIEW";
+  reviewState: "PENDING" | "APPROVED" | "REJECTED" | "QUARANTINED";
+  reviewReason: string | null;
+  createdAt: string;
+};
+
+export type MediaReviewPage = { items: MediaAssetReview[]; nextCursor: string | null; limit: number };
+
+export type UploadIntentResponse = { intentId: string; uploadToken: string; expiresAt: string };
+export type UploadedAssetResponse = { assetId: string; gameId: string; purpose: string; ownershipKind: string; reviewState: string; accessClass: string; mime: string; byteSize: number; width: number; height: number; contentHash: string };
+
 export type AuthResponse = { twoFactorRedirect?: boolean };
 export type EnrollmentResponse = { totpURI?: string; backupCodes?: string[] };
 export type RecoveryResponse = { recoveryRequestId?: string; status?: string; target?: { username?: string; name?: string } };
@@ -95,14 +250,17 @@ export type WorkspaceLayoutPayload = {
   defaults: WorkspaceWidgetPlacement[];
 };
 
-export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT"): Promise<T> {
+export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT", extraHeaders: Record<string, string> = {}): Promise<T> {
   let response: Response;
   const verb = method ?? (body === undefined ? "GET" : "POST");
+  const idempotencyKey = verb === "GET" ? undefined : `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`;
   try {
     response = await fetch(`${API_ROOT}${path}`, {
       method: verb,
       credentials: "include",
-      headers: verb === "GET" ? undefined : { "content-type": "application/json" },
+      headers: verb === "GET"
+        ? undefined
+        : { "content-type": "application/json", ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}), ...extraHeaders },
       body: verb === "GET" ? undefined : JSON.stringify(body ?? {}),
     });
   } catch {

@@ -1,8 +1,12 @@
+import { SupplyListingReviewView } from "../views/supply-listing-review-view";
 import type { SessionSnapshot } from "../api";
 import { AdminAuditView } from "../views/admin-audit-view";
 import { AdminDirectoryView, UserRestorePanel } from "../views/admin-directory-view";
 import { ApprovalAuditView } from "../views/approval-audit-view";
 import { RoleConfigView } from "../views/role-config-view";
+import { SupplyCatalogView } from "../views/supply-catalog-view";
+import { SupplyMediaReviewView } from "../views/supply-media-review-view";
+import { SupplyRulesView } from "../views/supply-rules-view";
 
 import { AccountSecurityPage } from "./account-security-page";
 import type { WorkspaceTab } from "./tab-model";
@@ -94,6 +98,16 @@ export function WorkspacePageContent({
   }
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
+  }
+  if (tab.kind === "catalog") {
+    return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+  }
+  if (tab.kind === "rules") {
+    return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+  }
+  if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
+  if (tab.kind === "media-review") {
+    return <SupplyMediaReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "user-restore") return <UserRestorePanel key={tab.id} />;
   return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;

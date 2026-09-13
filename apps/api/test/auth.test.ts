@@ -1,3 +1,4 @@
+import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -13,9 +14,11 @@ import { assertBusinessMigrationIdentity, assertBusinessRuntimeIdentity, createB
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { loadConfig, type AppConfig } from "../src/config/config";
 
-const DEFAULT_TEST_DATABASE = "zzsh_test_m2_auth";
+const RESOURCE_SET = process.env.M2_AUTH_TEST_RESOURCE_SET?.trim() || "";
+if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid isolated resource set");
+const DEFAULT_TEST_DATABASE = RESOURCE_SET ? "zzsh_test_m2_auth_" + RESOURCE_SET : "zzsh_test_m2_auth";
 const RESOURCE_MARKER = "zzsh:m2-auth-test:v1";
-const RESOURCE_LOCK_KEY = "805002";
+const RESOURCE_LOCK_KEY = RESOURCE_SET ? (BigInt("0x" + createHash("sha256").update("zzsh:m2-auth:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 1000000n).toString() : "805002";
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -27,7 +30,7 @@ const BOSS_ONE_TEMP_PASSWORD = randomBytes(24).toString("base64url");
 const BOSS_TWO_TEMP_PASSWORD = randomBytes(24).toString("base64url");
 const RECOVERY_PASSWORD = randomBytes(24).toString("base64url");
 const LEGACY_PASSWORD = randomBytes(24).toString("base64url");
-const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin"] as const;
+const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply"] as const;
 
 type CookieJar = {
   values: Map<string, string>;
@@ -106,8 +109,13 @@ function baseTestEnv(databaseName: string): NodeJS.ProcessEnv {
 
 function makeResources(): TestDatabaseResources {
   const databaseName = process.env.M2_AUTH_TEST_DB_NAME?.trim() || DEFAULT_TEST_DATABASE;
-  const migrationUser = dedicatedRoleName(process.env.M2_AUTH_TEST_MIGRATION_USER?.trim() || "zzsh_m2_migration", "M2_AUTH_TEST_MIGRATION_USER");
-  const runtimeUser = dedicatedRoleName(process.env.M2_AUTH_TEST_RUNTIME_USER?.trim() || "zzsh_m2_runtime", "M2_AUTH_TEST_RUNTIME_USER");
+  const migrationUser = dedicatedRoleName(process.env.M2_AUTH_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? "zzsh_m2_" + RESOURCE_SET + "_m" : "zzsh_m2_migration"), "M2_AUTH_TEST_MIGRATION_USER");
+  const runtimeUser = dedicatedRoleName(process.env.M2_AUTH_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? "zzsh_m2_" + RESOURCE_SET + "_r" : "zzsh_m2_runtime"), "M2_AUTH_TEST_RUNTIME_USER");
+  if (RESOURCE_SET) {
+    assert.equal(databaseName, DEFAULT_TEST_DATABASE);
+    assert.equal(migrationUser, "zzsh_m2_" + RESOURCE_SET + "_m");
+    assert.equal(runtimeUser, "zzsh_m2_" + RESOURCE_SET + "_r");
+  }
   if (migrationUser === runtimeUser) throw new Error("M2 auth migration/runtime users must be different");
   const maintenanceEnv = baseTestEnv(databaseName);
   const maintenance = loadConfig(maintenanceEnv);
@@ -347,35 +355,7 @@ async function prepareMigrationOwnership(pool: Pool, resources: TestDatabaseReso
 }
 
 async function resetBusinessData(pool: Pool): Promise<void> {
-  await pool.query(`
-    TRUNCATE
-      "zzsh_iam"."admin_workspace_layout",
-      "zzsh_iam"."approval_execution",
-      "zzsh_iam"."approval_decision",
-      "zzsh_iam"."approval_request_candidate",
-      "zzsh_iam"."approval_request",
-      "zzsh_iam"."approval_template_candidate",
-      "zzsh_iam"."approval_template",
-      "zzsh_iam"."admin_user_permission",
-      "zzsh_iam"."admin_user_role",
-      "zzsh_iam"."admin_role_permission",
-      "zzsh_iam"."admin_recovery_request",
-      "zzsh_iam"."admin_recovery_notification_target",
-      "zzsh_iam"."admin_security_notification_outbox",
-      "zzsh_auth_admin"."twoFactor",
-      "zzsh_auth_admin"."verification",
-      "zzsh_auth_admin"."session",
-      "zzsh_auth_admin"."account",
-      "zzsh_auth_admin"."user",
-      "zzsh_auth_user"."twoFactor",
-      "zzsh_auth_user"."verification",
-      "zzsh_auth_user"."session",
-      "zzsh_auth_user"."account",
-      "zzsh_auth_user"."user",
-      "zzsh_iam"."user_identity_state",
-      "zzsh_iam"."admin_security",
-      "zzsh_iam"."audit_event"
-  `);
+  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
   await pool.query(`DELETE FROM "zzsh_iam"."admin_role" WHERE "code" NOT IN ('ops', 'support')`);
   await pool.query(`DELETE FROM "zzsh_iam"."admin_role_permission"`);
 }
