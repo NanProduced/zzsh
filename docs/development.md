@@ -4,6 +4,8 @@
 
 启动、停止、重启和测试隔离先遵守[本地环境使用规则](local-environments.md)。主环境由Master或指定维护者管理；已有服务先检查并复用，不默认每个agent启动三端。
 
+本地测试库按[PostgreSQL使用规范](local-postgresql.md)登记、复用及清理。新任务先查主检出tmp/postgresql-resources.md；已结束测试不按返修轮次保留成批随机数据库。
+
 Node.js 24.20.0 / npm 11.19.0，版本见 `.node-version` 和根 package.json。使用根目录的单一 package-lock.json。
 
 `.agents/`、`skills-lock.json` 和 `.claude/skills/` 均为本机技能及安装器状态，保留本地并由根 `.gitignore` 忽略，不随业务仓库提交。其他机器按需自行安装技能；项目协作要求以仓库 AGENTS.md 和正式文档为准。

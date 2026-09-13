@@ -9,6 +9,7 @@
 - 先读 `docs/architecture/technology-decisions.md` 和 `docs/README.md`；按任务需要读旧资料，不遍历或输出生产配置。
 - 本地过程资料先查 `tmp/README.md`；当前进度只看 `tmp/docs/planning/rebuild-development-tracker.md` 与对应Master评审，执行brief不等于通过。已完成阶段放 `tmp/archive/`，不把历史prompt/快照当当前授权；正在执行的任务输入保持路径稳定，不遍历整个tmp或复制多份“最新状态”。
 - 本地服务遵守 `docs/local-environments.md`：主环境固定用户站3100、管理站3101、API3102，由Master/指定维护者管理；先查主检出 `tmp/local-environments.md` 和监听归属，按需复用，不擅自启动三端、抢端口、停他人服务或重置数据。分支预览独立worktree并登记端口/数据资源。
+- PostgreSQL资源遵守 `docs/local-postgresql.md`；建库或测试前查主检出 `tmp/postgresql-resources.md`。同任务返修复用资源集，不逐轮新建随机库；完成整合后清理专用库与角色，保留资源必须登记用途与下一步。
 - 仓库根目录是本文件所在目录。上级 `../analysis`、`../reports`、`../.archive` 是受控旧平台证据，不是新代码工作区。
 - 默认中文沟通。区分已确认事实、代码推断、未知项和设计建议，结论附文件/方法或官方来源。
 - 修改前检查 Git 状态，保留用户及其他 agent 的改动；不要未经任务授权提交、推送或重写 Git 历史。

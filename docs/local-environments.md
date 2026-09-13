@@ -2,6 +2,8 @@
 
 适用于 API、用户站、管理站及其测试进程。所有 agent 启动、停止、重启、迁移或重置前必须遵守；具体启动方式见[开发说明](development.md)。
 
+数据库命名、资源集复用、登记和任务结束清理遵守[本地 PostgreSQL 使用规范](local-postgresql.md)。同一任务返修不逐轮创建新库，当前数据库清单统一维护于主检出tmp/postgresql-resources.md。
+
 ## 固定端口与环境归属
 
 | 用途 | 用户站 | 管理站 | API | 维护者 |

@@ -10,6 +10,7 @@
 - [认证与账号安全](architecture/authentication.md)
 - [开发与验证](development.md)
 - [本地环境协作规则](local-environments.md)
+- [本地 PostgreSQL 使用规范](local-postgresql.md)
 - [第三方前端来源](third-party-ui.md)
 - [Serena 范围](serena.md)
 - [Logo 物料](../assets/brand/README.md)
