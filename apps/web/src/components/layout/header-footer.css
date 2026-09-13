@@ -1,0 +1,78 @@
+/* Aceternity-inspired shrinking shell; no global Hero or activity styles. */
+.site-header { position:sticky; top:0; z-index:60; height:88px; pointer-events:none; }
+.site-header-bar { pointer-events:auto; position:relative; margin-inline:auto; width:calc(100% - 64px); min-height:88px; padding:12px 16px; display:flex; align-items:center; gap:24px; background:var(--color-bg-surface); color:var(--color-text-primary); }
+.site-brand { display:flex; flex-shrink:0; }
+.site-desktop-nav { display:flex; align-items:center; gap:22px; font-size:13px; font-weight:600; white-space:nowrap; }
+.site-desktop-nav a { display:flex; align-items:center; min-height:44px; position:relative; color:var(--color-text-secondary); }
+.site-desktop-nav a:hover { color:var(--color-text-primary); }
+.site-desktop-nav a[aria-current] { color:var(--color-text-primary); }
+.site-desktop-nav a[aria-current]::after { content:""; position:absolute; bottom:2px; left:0; right:0; height:3px; border-radius:2px; background:#987cff; }
+.site-search { display:flex; align-items:center; flex:1; min-width:160px; min-height:44px; gap:8px; padding-left:12px; border:1px solid var(--color-border-strong); border-radius:10px; background:var(--color-bg-canvas); }
+.site-search > svg { color:var(--color-text-secondary); }
+.site-search:focus-within { outline:2px solid var(--color-accent-brand); outline-offset:2px; }
+.site-search input { width:100%; min-width:0; flex:1; background:transparent; border:0; outline:none; padding-block:10px; color:var(--color-text-primary); font-size:14px; caret-color:var(--color-text-primary); }
+.site-search input::placeholder { color:var(--color-text-secondary); opacity:1; }
+.site-search input::-webkit-search-cancel-button { display:none; }
+.site-header .site-search input:focus-visible { outline:none; box-shadow:none; }
+.site-search-submit,.site-search-clear { min-height:44px; flex-shrink:0; }
+.site-search-submit { padding-inline:14px; font-size:13px; font-weight:600; border-radius:0 9px 9px 0; color:var(--color-text-primary); background:var(--color-bg-elevated); }
+.site-search-submit:hover { background:var(--color-accent-brand); color:var(--color-accent-brand-text); }
+.site-search-clear { display:grid; place-items:center; width:32px; color:var(--color-text-secondary); }
+.site-header-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+.site-header .site-login { display:flex; align-items:center; gap:6px; min-height:44px; font-size:13px; white-space:nowrap; }
+.site-header .site-publish { min-height:44px; padding-inline:14px; white-space:nowrap; }
+.site-header .mobile-menu { display:none; width:44px; height:44px; }
+.site-header[data-compact="true"] .site-header-bar { min-height:64px; padding-block:8px; box-shadow:0 10px 35px #0003; }
+.site-header[data-compact="true"] .site-desktop-nav { display:none; }
+.site-header[data-compact="true"] .mobile-menu { display:inline-flex; }
+.site-menu-login { margin-top:18px; }
+.site-nav-sheet { padding-bottom:max(22px,env(safe-area-inset-bottom)); }
+.site-nav-sheet .icon-button { width:44px; height:44px; }
+.site-search-summary { display:flex; gap:12px; justify-content:space-between; align-items:center; padding:12px 0; font-size:14px; overflow-wrap:anywhere; }
+.site-search-summary span { min-width:0; }
+.site-search-summary small { display:block; color:var(--color-text-secondary); font-size:12px; margin-top:4px; }
+.site-search-summary button { flex-shrink:0; min-height:44px; text-decoration:underline; }
+#account-list,#delta-section,#help,#rental-guide,#billing-guide,#publish-guide { scroll-margin-top:40px; }
+
+/* SmoothUI footer-1: two brand columns, three link columns, separated copyright. */
+.site-footer { position:relative; margin-top:48px; border-top:1px solid var(--color-border-default); background:var(--color-bg-surface); color:var(--color-text-primary); }
+.site-footer-inner { padding-block:48px 28px; }
+.site-footer-grid { display:grid; grid-template-columns:2fr 3fr; gap:48px; }
+.site-footer-brand > a { display:inline-flex; }
+.site-footer .site-footer-brand p { margin-top:20px; color:var(--color-text-secondary); font-size:14px; }
+.site-footer-brand > span { display:block; margin-top:12px; color:var(--color-text-secondary); font-size:12px; }
+.site-footer-links { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:32px; }
+.site-footer .site-footer-links h2 { font-size:14px; font-weight:600; margin:0 0 14px; }
+.site-footer-links ul { list-style:none; padding:0; margin:0; }
+.site-footer-links a { display:inline-flex; align-items:center; min-height:44px; color:var(--color-text-secondary); font-size:14px; }
+.site-footer-links a:hover { color:var(--color-text-primary); text-decoration:underline; }
+.site-footer-bottom { margin-top:40px; padding-top:24px; border-top:1px solid var(--color-border-default); text-align:center; color:var(--color-text-secondary); font-size:12px; }
+
+@media(min-width:1100px) and (hover:hover) and (pointer:fine) {
+  .site-header[data-scrolled="false"] .site-header-bar { background:transparent; box-shadow:none; }
+  .site-header-bar { transition:min-height 250ms ease-out, padding 250ms ease-out, box-shadow 250ms ease-out; }
+}
+@media(max-width:1250px) { .site-header-bar { gap:16px; } .site-desktop-nav { gap:14px; } .site-header-actions { gap:6px; } .site-header .site-publish { padding-inline:10px; } }
+@media(max-width:1099px),(hover:none),(pointer:coarse) {
+  .site-header { height:120px; background:var(--color-bg-surface); border-bottom:1px solid var(--color-border-default); }
+  .site-header-bar { display:grid; grid-template-columns:auto 1fr; gap:8px 16px; min-height:120px; padding:8px 0; width:calc(100% - 40px); max-width:none!important; transform:none!important; border-radius:0!important; box-shadow:none!important; }
+  .site-desktop-nav { display:none; }
+  .site-search { grid-column:1/-1; grid-row:2; width:100%; }
+  .site-header-actions { justify-self:end; gap:8px; }
+  .site-header .mobile-menu { display:inline-flex; }
+  .site-footer-grid { grid-template-columns:1fr; gap:36px; }
+  #account-list,#delta-section,#help,#rental-guide,#billing-guide,#publish-guide { scroll-margin-top:56px; }
+}
+@media(max-width:599px) {
+  .site-header-bar { width:calc(100% - 28px); }
+  .site-header .brand-logo { width:114px!important; height:38px!important; }
+  .site-header .site-publish,.site-header .site-login { display:none; }
+  .site-search input { font-size:16px; }
+  .site-search-clear { width:44px; }
+  .site-footer { margin-top:32px; }
+  .site-footer-inner { padding-block:32px 24px; }
+  .site-footer-links { grid-template-columns:1fr; gap:24px; }
+  .site-footer .site-footer-links h2 { margin-bottom:8px; }
+  .site-footer-links ul { display:flex; flex-wrap:wrap; column-gap:24px; }
+}
+@media(prefers-reduced-motion:reduce) { .site-header-bar { transition:none; } }

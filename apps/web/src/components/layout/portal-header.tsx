@@ -1,0 +1,60 @@
+"use client";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { motion, useMotionValueEvent, useScroll } from "motion/react";
+import { Search, UserRound, X } from "lucide-react";
+import { BrandLogo } from "@/components/brand/brand-logo";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { MobileNav } from "./mobile-nav";
+import "./header-footer.css";
+
+// Adapted from Aceternity Resizable Navbar; keep the search mounted across states.
+export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean }) {
+  const { scrollY } = useScroll();
+  const [reducedMotion,setReducedMotion]=useState(true);
+  const [scrolled, setScrolled] = useState(false);
+  const [desktop, setDesktop] = useState(false);
+  const [navFocused, setNavFocused] = useState(false);
+  useEffect(() => {
+    const preference=matchMedia("(prefers-reduced-motion: reduce)");
+    const motionChange=()=>setReducedMotion(preference.matches);
+    motionChange();preference.addEventListener("change",motionChange);
+    const media = matchMedia("(min-width: 1100px) and (hover: hover) and (pointer: fine)");
+    const update = () => setDesktop(media.matches);
+    update();
+    setScrolled(window.scrollY > 100);
+    media.addEventListener("change", update);
+    return () => {media.removeEventListener("change", update);preference.removeEventListener("change",motionChange);};
+  }, []);
+  useMotionValueEvent(scrollY, "change", (value) => setScrolled(value > 100));
+  const compact = desktop && scrolled && !navFocused;
+  return <header className="site-header" data-compact={compact} data-scrolled={scrolled}>
+    <motion.div className="site-header-bar" initial={false}
+      animate={{ maxWidth: compact ? 1060 : 1320, y: compact ? 10 : 0, borderRadius: compact ? 20 : 0 }}
+      transition={reducedMotion || !desktop ? { duration: 0 } : { type: "spring", stiffness: 200, damping: 50 }}>
+      <Link className="site-brand" href="/" aria-label="洲洲商行首页"><BrandLogo height={42} /></Link>
+      <nav className="site-desktop-nav" aria-label="全局主导航"
+        onFocusCapture={() => setNavFocused(true)} onBlurCapture={() => setNavFocused(false)}>
+        <Link href="/" aria-current={home?"page":undefined}>首页</Link>
+        <Link href="/#delta-section">游戏专区</Link><Link href="/help">帮助中心</Link>
+      </nav>
+      <form className="site-search" role="search" aria-label="搜索当前账号" onSubmit={(event) => {
+        event.preventDefault();
+        if(onSearch){onSearch(query);return;}
+        const results = document.getElementById("account-list");
+        results?.focus({ preventScroll: true });
+        results?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+      }}>
+        <Search size={18} aria-hidden="true" />
+        <input type="search" aria-label="搜索账号编号或名称" placeholder="搜索当前展示账号" maxLength={120}
+          value={query} onChange={(event) => onQueryChange(event.target.value)} />
+        {query && <button className="site-search-clear" type="button" aria-label="清空搜索" onClick={() => onQueryChange("")}><X size={16} /></button>}
+        <button className="site-search-submit" type="submit">搜索</button>
+      </form>
+      <div className="site-header-actions">
+        <Link className="site-login" href="/login"><UserRound size={18} /><span>登录</span></Link>
+        <ThemeToggle /><MobileNav />
+      </div>
+    </motion.div>
+  </header>;
+}

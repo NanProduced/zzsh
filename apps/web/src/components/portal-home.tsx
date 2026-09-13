@@ -1,0 +1,34 @@
+"use client";
+import { useState } from "react";
+import { PortalHeader } from "./layout/portal-header";
+import { HeroSection } from "./hero/hero-section";
+import { PlatformStats, type PlatformStatsData, type PublicDeal } from "./notice/platform-stats";
+import { DeltaSection, type SupplyState } from "./delta/delta-section";
+import type { AccountCardData } from "./delta/account-card";
+import { PortalFooter } from "./layout/portal-footer";
+import { ActionFeedbackDialog } from "./ui/action-feedback-dialog";
+import { searchAccounts } from "@/lib/account-search";
+import { UpcomingGames } from "./delta/game-identity";
+import { SupportRail } from "./support/support-rail";
+export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=false }: { accounts?: AccountCardData[]; supplyState?: SupplyState; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean }) {
+  const [notice, setNotice] = useState({ isOpen: false, title: "", message: "" });
+  const [query, setQuery] = useState("");
+  const onActionNotice = (title: string, message: string) => setNotice({ isOpen: true, title, message });
+  return <div className="portal-home">
+    <div className="brand-backdrop" aria-hidden="true"><div className="brand-landscape"/></div>
+    <a href="#main-content" className="skip-link">跳到主要内容</a>
+    <PortalHeader query={query} onQueryChange={setQuery} />
+    <main id="main-content">
+      <h1 className="sr-only">洲洲商行游戏服务与账号租赁</h1>
+      <HeroSection />
+      <div className="portal-width activity-shell"><PlatformStats data={stats} deals={deals} isDemo={statsAreDemo}/></div>
+
+      <DeltaSection accounts={searchAccounts(accounts ?? [], query)} supplyState={supplyState} onActionNotice={onActionNotice} searchQuery={query} onResetSearch={() => setQuery("")} />
+      <UpcomingGames />
+    </main>
+    <PortalFooter />
+    <SupportRail />
+    <ActionFeedbackDialog {...notice} onClose={() => setNotice((value) => ({ ...value, isOpen: false }))} />
+  </div>;
+}
+

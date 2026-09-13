@@ -7,18 +7,31 @@
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3100",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "node --experimental-strip-types --test test/auth-user-route.test.mjs test/user-account-status.test.mjs"
+    "test": "node --experimental-strip-types --test test/auth-user-route.test.mjs test/user-account-status.test.mjs",
+    "test:ui": "node --experimental-strip-types --test test/account-search.test.mjs test/portal-draft.test.mjs test/service-navigation.test.mjs",
+    "test:production": "node --test test/production-isolation.test.mjs",
+    "dev:showcase": "vite --config dev-showcase/vite.config.mts"
   },
   "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-popover": "1.1.23",
     "@zzsh/ui": "0.0.0",
+    "clsx": "2.1.1",
+    "embla-carousel-react": "8.6.0",
+    "lucide-react": "0.544.0",
+    "motion": "13.2.0",
     "next": "16.3.4",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "tailwind-merge": "3.3.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",
-    "tailwindcss": "4.3.3",
+    "@tailwindcss/vite": "4.3.3",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.7"
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "tailwindcss": "4.3.3",
+    "vite": "8.2.2"
   }
 }
