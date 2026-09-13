@@ -1,24 +1,12 @@
 "use client";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
-import { ArrowLeft, LockKeyhole } from "lucide-react";
-import { PortalHeader } from "./layout/portal-header";
-import { PortalFooter } from "./layout/portal-footer";
-import { SupportRail } from "./support/support-rail";
-import { DeltaSection } from "./delta/delta-section";
-import { ActionFeedbackDialog } from "./ui/action-feedback-dialog";
+import { useEffect, useState } from "react";
+import { LockKeyhole } from "lucide-react";
+import { ServiceShell } from "./layout/service-shell";
+import { FavoritesPanel } from "./favorites/favorites-panel";
+import { FavoritesProvider } from "./favorites/favorites-context";
 import type { PublishMode } from "../lib/service-navigation";
 
-function ServiceShell({children,title,description,initialQuery=""}:{children:ReactNode;title:string;description:string;initialQuery?:string}) {
-  const router=useRouter();const [query,setQuery]=useState(initialQuery);
-  useEffect(()=>setQuery(initialQuery),[initialQuery]);
-  return <div className="portal-home portal-subpage"><PortalHeader home={false} query={query} onQueryChange={setQuery} onSearch={q=>router.push(`/accounts?q=${encodeURIComponent(q)}`)}/><main className="portal-width subpage-main"><div className="subpage-heading"><Link href="/"><ArrowLeft size={16}/>返回首页</Link><h1>{title}</h1><p>{description}</p></div>{children}</main><PortalFooter/><SupportRail/></div>;
-}
-export function AccountMarket({query}:{query:string}) {
-  const router=useRouter();const [notice,setNotice]=useState({isOpen:false,title:"",message:""});
-  return <ServiceShell title="租账号" description="选择游戏，查看资源与出租条件。" initialQuery={query}><div className="market-content"><DeltaSection searchQuery={query} onResetSearch={()=>router.push('/accounts')} onActionNotice={(title,message)=>setNotice({isOpen:true,title,message})}/></div><ActionFeedbackDialog {...notice} onClose={()=>setNotice(v=>({...v,isOpen:false}))}/></ServiceShell>;
-}
 const blankDraft={title:"",resources:"",fee:"",deposit:"",daily:""};
 type Draft=typeof blankDraft;
 const draftKey="zzsh-publish-draft:v1";
@@ -44,7 +32,7 @@ export function PublishForm({mode}:{mode:PublishMode}) {
 const accountViews={rentals:'租入订单',leased:'出租订单',accounts:'账号管理',favorites:'我的收藏',invite:'我的邀请码'};
 export function AccountWorkspace({view}:{view:string}) {
   const active=Object.hasOwn(accountViews,view)?view as keyof typeof accountViews:'rentals';
-  return <ServiceShell title={accountViews[active]} description="在这里继续处理你的租赁事务。"><nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key,label])=><Link key={key} href={`/account?view=${key}`} aria-current={active===key?'page':undefined}>{label}</Link>)}</nav><section className="account-guest"><LockKeyhole size={30}/><h2>登录后查看{accountViews[active]}</h2><p>当前未取得个人信息。</p><Link href="/login" className="button primary">登录 / 注册</Link></section></ServiceShell>;
+  return <ServiceShell title={accountViews[active]} description="在这里继续处理你的租赁事务。"><nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key,label])=><Link key={key} href={`/account?view=${key}`} aria-current={active===key?'page':undefined}>{label}</Link>)}</nav>{active==='favorites'?<FavoritesProvider><FavoritesPanel/></FavoritesProvider>:<section className="account-guest"><LockKeyhole size={30}/><h2>登录后查看{accountViews[active]}</h2><p>当前未取得个人信息。</p><Link href="/login" className="button primary">登录 / 注册</Link></section>}</ServiceShell>;
 }
 
 export function HelpPage() {

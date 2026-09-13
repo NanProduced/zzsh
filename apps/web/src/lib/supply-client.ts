@@ -3,11 +3,13 @@ import type {
   Favorite,
   MySupply,
   Page,
+  PublicCatalog,
   PublicListing,
   PublishingCatalog,
   PublishingOptions,
   SupplyErrorBody,
   SupplyFieldError,
+  SupplyGame,
   VersionToken,
   SavedDeclaration,
 } from "./supply-types.ts";
@@ -182,29 +184,29 @@ export async function supplyRequest<T>(
 }
 const id = (value: string) => encodeURIComponent(value);
 export const supplyApi = {
-  games: () =>
-    supplyRequest<{
-      games: Array<{
-        id: string;
-        code: string;
-        name: string;
-        description: string | null;
-      }>;
-    }>("/games"),
-  market: (query: URLSearchParams = new URLSearchParams()) =>
-    supplyRequest<Page<PublicListing>>("/listings?" + query),
-  listing: (accountId: string) =>
-    supplyRequest<PublicListing>("/listings/" + id(accountId)),
+  games: (signal?: AbortSignal) =>
+    supplyRequest<{ games: SupplyGame[] }>("/games", { signal }),
+  market: (query: URLSearchParams = new URLSearchParams(), signal?: AbortSignal) =>
+    supplyRequest<Page<PublicListing>>("/listings?" + query, { signal }),
+  listing: (accountId: string, signal?: AbortSignal) =>
+    supplyRequest<PublicListing>("/listings/" + id(accountId), { signal }),
   catalog: (gameId: string, query: URLSearchParams = new URLSearchParams()) =>
     supplyRequest<PublishingCatalog>(
       "/games/" + id(gameId) + "/publishing-catalog?" + query,
     ),
-  options: (gameId: string) =>
-    supplyRequest<PublishingOptions>(
-      "/games/" + id(gameId) + "/publishing-options",
+  browseCatalog: (
+    gameId: string,
+    query: URLSearchParams = new URLSearchParams(),
+    signal?: AbortSignal,
+  ) =>
+    supplyRequest<PublicCatalog>(
+      "/games/" + id(gameId) + "/catalog?" + query,
+      { signal },
     ),
-  favorites: (query: URLSearchParams = new URLSearchParams()) =>
-    supplyRequest<Page<Favorite>>("/me/favorites?" + query),
+  favorites: (
+    query: URLSearchParams = new URLSearchParams(),
+    signal?: AbortSignal,
+  ) => supplyRequest<Page<Favorite>>("/me/favorites?" + query, { signal }),
   setFavorite: (accountId: string, saved: boolean, key: string) =>
     supplyRequest<{ accountId: string; saved: boolean }>(
       "/favorites/" + id(accountId),

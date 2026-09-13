@@ -61,6 +61,41 @@ export type Favorite = {
   listing: PublicListing | null;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null };
+export type SupplyGame = {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+};
+export type PublicCatalog = {
+  game: SupplyGame & { catalogRevision: string; currentReleaseId: string | null };
+  items: Array<{
+    id: string;
+    code: string;
+    name: string;
+    unit: "HAFF_BASE" | "ROUND" | "PIECE";
+    quantityScale: number;
+    required: boolean;
+    sortOrder: number;
+  }>;
+  categories: Array<{
+    id: string;
+    code: string;
+    name: string;
+    parentId: string | null;
+  }>;
+  rarities: Array<{ code: string; name: string }>;
+  skins: Array<{
+    id: string;
+    code: string;
+    name: string;
+    categoryId: string;
+    rarityCode: string | null;
+    mediaId: string | null;
+  }>;
+  nextCursor: string | null;
+  limit: number;
+};
 export type PublishingCatalog = {
   game: {
     id: string;
