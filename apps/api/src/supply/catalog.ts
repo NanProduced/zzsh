@@ -247,15 +247,18 @@ export async function updateCatalogEntry(
     const enabled = optionalBoolean(body, "enabled");
     const sortOrder = optionalInteger(body, "sortOrder", -100000, 100000);
     const quantityScale = optionalInteger(body, "quantityScale", 0, 6);
-    if ([name, unit, required, enabled, sortOrder, quantityScale].every((value) => value === undefined)) throw invalid();
+    const mediaId = optionalNullableString(body, "mediaId", 128);
+    if ([name, unit, required, enabled, sortOrder, quantityScale, mediaId].every((value) => value === undefined)) throw invalid();
+    if (mediaId !== undefined && mediaId !== null) await assertPlatformMediaBinding(client, gameId, mediaId, "ITEM_MEDIA");
     await client.query(
       `UPDATE "zzsh_supply"."billable_item"
           SET "name" = COALESCE($1, "name"), "unit" = COALESCE($2, "unit"),
               "required" = COALESCE($3, "required"), "enabled" = COALESCE($4, "enabled"),
               "sort_order" = COALESCE($5, "sort_order"), "quantity_scale" = COALESCE($6, "quantity_scale"),
+              "media_id" = CASE WHEN $7::boolean THEN $8::text ELSE "media_id" END,
               "updated_at" = clock_timestamp()
-        WHERE "id" = $7`,
-      [name ?? null, unit ?? null, required ?? null, enabled ?? null, sortOrder ?? null, quantityScale ?? null, entryId],
+        WHERE "id" = $9`,
+      [name ?? null, unit ?? null, required ?? null, enabled ?? null, sortOrder ?? null, quantityScale ?? null, mediaId !== undefined, mediaId ?? null, entryId],
     );
   } else if (kind === "rarities") {
     const name = optionalString(body, "name", 120);
@@ -448,9 +451,10 @@ export async function readPublicCatalog(
 
   const itemSearch = scope === "browse" ? filters.q : undefined;
   const items = await client.query(
-    `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder"
-       FROM "zzsh_supply"."billable_item"
-      WHERE "game_id" = $1 AND "enabled" = true${scope === "publishing" ? ` AND EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=zzsh_supply.billable_item.id AND p.customer_tier='STANDARD')` : ""}${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
+    `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder",
+            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=i.media_id AND a.game_id=i.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='ITEM_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN i."media_id" ELSE NULL END AS "mediaId"
+       FROM "zzsh_supply"."billable_item" i
+      WHERE "game_id" = $1 AND "enabled" = true${scope === "publishing" ? ` AND EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD')` : ""}${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
       ORDER BY "sort_order", "code", "id"`,
     itemSearch ? [gameId, `%${escapeLike(itemSearch)}%`] : [gameId],
   );
@@ -555,7 +559,7 @@ export async function readAdminCatalog(
   const [items, rarities, categories, skins, entitlements] = await Promise.all([
     client.query(
       `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "enabled",
-              "sort_order" AS "sortOrder", "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_note" AS "sourceNote"
+              "sort_order" AS "sortOrder", "media_id" AS "mediaId", "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_note" AS "sourceNote"
          FROM "zzsh_supply"."billable_item" WHERE "game_id" = $1 ORDER BY "sort_order", "code"`,
       [gameId],
     ),

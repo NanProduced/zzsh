@@ -50,14 +50,31 @@ export function assertImageWithinBounds(info: ImageInfo, byteSize: number): void
   if (info.width * info.height > MAX_MEDIA_PIXELS) throw new MediaValidationError("Image pixel count is outside the allowed range");
 }
 
-const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
+export const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 
 export type MediaStorage = {
   available: boolean;
-  kind: "local" | "unavailable";
+  kind: "local" | "oss" | "unavailable";
   write: (bytes: Buffer, contentHash: string) => Promise<{ storageKey: string }>;
   read: (storageKey: string) => Promise<Buffer>;
 };
+
+// Content-addressed objects written before the database transaction commits can
+// outlive a failed request. They are never deleted automatically: a concurrent
+// upload (even with the same intent/token/key but different bytes) may reference
+// equal-hash or distinct keys, and the mere existence of an idempotency record
+// cannot prove these objects are referenced. Logged entries are PENDING
+// candidates, not confirmed orphans: a cleanup sweep must verify actual
+// references before deleting anything.
+export function logOrphanedMediaObjects(input: { intentId: string; storageKeys: readonly string[]; phase: "write" | "commit" }): void {
+  if (input.storageKeys.length === 0) return;
+  console.error(JSON.stringify({
+    event: "zzsh_supply_media_orphan_candidate",
+    intentId: input.intentId,
+    storageKeys: [...input.storageKeys],
+    phase: input.phase,
+  }));
+}
 
 export function createLocalMediaStorage(root: string): MediaStorage {
   return {
@@ -193,44 +210,66 @@ export type UploadedAsset = {
   contentHash: string;
 };
 
-export async function consumeMediaUpload(
-  client: PoolClient,
+export type PreparedMediaUpload = {
+  intentId: string;
+  uploadToken: string;
+  image: ImageInfo;
+  byteSize: number;
+  contentHash: string;
+  publicHash: string;
+  writtenStorageKeys: string[];
+};
+
+type UploadIntentRow = {
+  tokenHash: string;
+  accountId: string | null;
+  gameId: string;
+  purpose: string;
+  ownershipKind: string;
+  ownerUserId: string | null;
+  uploadedByRealm: string;
+  uploadedByUserId: string | null;
+  uploadedByAdminId: string | null;
+  declaredMime: ImageMime;
+  declaredSize: string;
+  expiresAt: Date;
+  consumedAt: Date | null;
+};
+
+async function loadUploadIntent(client: Pool | PoolClient, intentId: string, forUpdate = false): Promise<UploadIntentRow | null> {
+  const result = await client.query<UploadIntentRow>(
+    `SELECT "account_id" AS "accountId", "token_hash" AS "tokenHash", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind",
+            "owner_user_id" AS "ownerUserId", "uploaded_by_realm" AS "uploadedByRealm",
+            "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
+            "declared_mime" AS "declaredMime", "declared_size"::text AS "declaredSize", "expires_at" AS "expiresAt", "consumed_at" AS "consumedAt"
+       FROM "zzsh_supply"."media_upload_intent" WHERE "id" = $1${forUpdate ? " FOR UPDATE" : ""}`,
+    [intentId],
+  );
+  return result.rows[0] ?? null;
+}
+
+function intentActorMatches(intent: { uploadedByRealm: string; uploadedByUserId: string | null; uploadedByAdminId: string | null }, actor: MediaActor): boolean {
+  return intent.uploadedByRealm === actor.realm &&
+    (actor.realm === "admin" ? intent.uploadedByAdminId === actor.adminUserId : intent.uploadedByUserId === actor.userId);
+}
+
+// Phase one runs outside any database transaction: object storage writes must
+// not hold a pooled connection while network calls are in flight. The intent row
+// is immutable apart from consumption; expiry and consumption are checked again
+// during finalization because they can change while storage writes are running.
+export async function prepareMediaUpload(
+  pool: Pool,
   storage: MediaStorage,
   actor: MediaActor,
   intentId: string,
   uploadToken: string,
   bytes: Buffer,
-): Promise<UploadedAsset> {
-  const intentResult = await client.query<{
-    tokenHash: string;
-    accountId: string | null;
-    gameId: string;
-    purpose: string;
-    ownershipKind: string;
-    ownerUserId: string | null;
-    uploadedByRealm: string;
-    uploadedByUserId: string | null;
-    uploadedByAdminId: string | null;
-    declaredMime: ImageMime;
-    declaredSize: string;
-    expiresAt: Date;
-    consumedAt: Date | null;
-  }>(
-    `SELECT "account_id" AS "accountId", "token_hash" AS "tokenHash", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind",
-            "owner_user_id" AS "ownerUserId", "uploaded_by_realm" AS "uploadedByRealm",
-            "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
-            "declared_mime" AS "declaredMime", "declared_size"::text AS "declaredSize", "expires_at" AS "expiresAt", "consumed_at" AS "consumedAt"
-       FROM "zzsh_supply"."media_upload_intent" WHERE "id" = $1 FOR UPDATE`,
-    [intentId],
-  );
-  const intent = intentResult.rows[0];
+): Promise<PreparedMediaUpload> {
+  const intent = await loadUploadIntent(pool, intentId);
   if (!intent) throw notFound();
   if (intent.consumedAt) throw conflict("Upload intent was already used");
   if (intent.expiresAt.getTime() < Date.now()) throw conflict("Upload intent has expired");
-  const actorMatches =
-    intent.uploadedByRealm === actor.realm &&
-    (actor.realm === "admin" ? intent.uploadedByAdminId === actor.adminUserId : intent.uploadedByUserId === actor.userId);
-  if (!actorMatches) throw notFound();
+  if (!intentActorMatches(intent, actor)) throw notFound();
   if (!tokensMatch(intent.tokenHash, uploadToken)) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
   if (bytes.length !== Number(intent.declaredSize)) throw invalid("Uploaded size does not match the declared size");
   let image: ImageInfo;
@@ -245,9 +284,37 @@ export async function consumeMediaUpload(
   }
   if (image.mime !== intent.declaredMime) throw invalid("Uploaded bytes do not match the declared image type");
   const contentHash = createHash("sha256").update(bytes).digest("hex");
-  await storage.write(bytes, contentHash);
   const publicHash = createHash("sha256").update(publicBytes).digest("hex");
-  await storage.write(publicBytes, publicHash);
+  // Keys are recorded before each write attempt: a transport failure after the
+  // remote object landed (e.g. a timeout) leaves the outcome unknown, so the
+  // attempted key must stay traceable as an orphan candidate.
+  const writtenStorageKeys: string[] = [];
+  try {
+    writtenStorageKeys.push(contentHash);
+    await storage.write(bytes, contentHash);
+    writtenStorageKeys.push(publicHash);
+    await storage.write(publicBytes, publicHash);
+  } catch (error) {
+    logOrphanedMediaObjects({ intentId, storageKeys: [...new Set(writtenStorageKeys)], phase: "write" });
+    throw error;
+  }
+  return { intentId, uploadToken, image, byteSize: bytes.length, contentHash, publicHash, writtenStorageKeys };
+}
+
+// Phase two runs inside the idempotent write transaction: the intent row is
+// locked, the single-consumption invariants are re-asserted under that lock and
+// the asset row, consumption marker and audit commit atomically.
+export async function finalizeMediaUpload(
+  client: PoolClient,
+  actor: MediaActor,
+  prepared: PreparedMediaUpload,
+): Promise<UploadedAsset> {
+  const intent = await loadUploadIntent(client, prepared.intentId, true);
+  if (!intent) throw notFound();
+  if (intent.consumedAt) throw conflict("Upload intent was already used");
+  if (intent.expiresAt.getTime() < Date.now()) throw conflict("Upload intent has expired");
+  if (!intentActorMatches(intent, actor)) throw notFound();
+  if (!tokensMatch(intent.tokenHash, prepared.uploadToken)) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
 
   const assetId = newSupplyId("asset");
   await client.query(
@@ -264,19 +331,19 @@ export async function consumeMediaUpload(
       intent.uploadedByRealm,
       intent.uploadedByUserId,
       intent.uploadedByAdminId,
-      contentHash,
-      contentHash,
-      image.mime,
-      bytes.length,
-      image.width,
-      image.height,
-      publicHash,
+      prepared.contentHash,
+      prepared.contentHash,
+      prepared.image.mime,
+      prepared.byteSize,
+      prepared.image.width,
+      prepared.image.height,
+      prepared.publicHash,
       intent.accountId,
     ],
   );
   await client.query(
     `UPDATE "zzsh_supply"."media_upload_intent" SET "consumed_at" = clock_timestamp(), "consumed_asset_id" = $1 WHERE "id" = $2`,
-    [assetId, intentId],
+    [assetId, prepared.intentId],
   );
   return {
     assetId,
@@ -285,11 +352,11 @@ export async function consumeMediaUpload(
     ownershipKind: intent.ownershipKind,
     reviewState: "PENDING",
     accessClass: "PRIVATE_REVIEW",
-    mime: image.mime,
-    byteSize: bytes.length,
-    width: image.width,
-    height: image.height,
-    contentHash,
+    mime: prepared.image.mime,
+    byteSize: prepared.byteSize,
+    width: prepared.image.width,
+    height: prepared.image.height,
+    contentHash: prepared.contentHash,
   };
 }
 
@@ -405,4 +472,5 @@ export async function changeMediaVisibility(
 async function clearMediaBindings(client: PoolClient, assetId: string): Promise<void> {
   await client.query(`UPDATE "zzsh_supply"."game" SET "cover_media_id" = NULL, "catalog_revision" = "catalog_revision" + 1, "updated_at" = clock_timestamp() WHERE "cover_media_id" = $1`, [assetId]);
   await client.query(`UPDATE "zzsh_supply"."skin" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
+  await client.query(`UPDATE "zzsh_supply"."billable_item" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
 }

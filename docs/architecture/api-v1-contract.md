@@ -85,13 +85,13 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 ## 供给基础（M3-B）
 
 - 管理端入口 `/api/v1/admin/supply/...` 经 Admin BFF `/api/bff/admin/supply/...` 转发；用户材料入口 `/api/v1/supply/...` 使用用户 realm。写操作要求 `Idempotency-Key`，重放返回原结果，异体同 key 返回 409。管理权限：`supply.catalog.manage`、`supply.rules.edit`、`supply.rules.activate`（仅 Boss）、`supply.review.read`、`supply.review.decide`、`supply.quote.internal.read`；除 Boss 外必须存在 `admin_supply_scope` 游戏范围。
-- 目录：`GET /api/v1/supply/games/{gameId}/catalog` 为公共白名单并绑定 `catalogRevision` 游标；管理端目录、游戏、物品/分类/皮肤/稀有度/权益维护均在管理端前缀下。稳定 code 创建后不可改名，词条只停用不物理删除；旧来源字段以受限原文保留，未知值不默认成有效词条。
+- 目录：`GET /api/v1/supply/games/{gameId}/catalog` 为公共白名单并绑定 `catalogRevision` 游标；管理端目录、游戏、物品/分类/皮肤/稀有度/权益维护均在管理端前缀下。稳定 code 创建后不可改名，词条只停用不物理删除；旧来源字段以受限原文保留，未知值不默认成有效词条。计费物品（items）更新接受 `mediaId` 绑定经审核公开的 ITEM_MEDIA 资产，撤销公开同事务清除绑定；公开目录 items 仅在资产 APPROVED+PUBLIC_DISPLAY 时投影 `mediaId`，与皮肤 mediaId 投影规则一致。
 - 规则：价格/租期/协议可编辑草稿并封存；明细写入锁定 OLD/NEW 父版本，不能将封存明细移入草稿。版本归属不可更换，已引用物品的单位/数量语义须新建词条。release 不可修改。
 - 生效：`POST /api/v1/admin/supply/releases` 携带 `expectedGeneration`（十进制字符串，未生效为 `"0"`）；Boss 在 game 锁内执行 CAS，过期确认返回409，同 key 重放不增加release。管理端显示确认代次。
 - 计价：`POST /quote-preview` 返回受权管理员内部投影。SPREAD/PERCENT 按精确十进制比例计算，费率范围 `[0,1)`；每行双边金额各舍入一次到分，平台金额为两者差额。HAFF 精确分子/分母随快照保留，展示单位价不能替代精确比例重算。`tenantDepositCents`、`publisherBailRequirementCents` 只接受整数分字符串；缺参为null。日档参与已配置币价条件及租期推算，无每日保底收费。
 - 内容摘要：白名单 payload 先规范化再计算 SHA-256；人类文本 NFC/LF，ID/code原样，整数十进制、比例去尾零、单位价8位/元金额2位、业务时间UTC六位微秒（超精度拒绝），可选值null，集合按业务键排序且拒绝重复/未知字段。带声明的预览回显同一 `contentPayload` 与报价，规则JSON和协议正文先规范化再保存；申报版本持久化与接受见下方发布契约。hash不包含自身、审核状态或审计时间。
 - 审计：统一写接点保存稳定对象类型/ID、版本或目录代次、变更前后白名单快照、原因和结果；价目明细、租期选项、媒体绑定变化包含在快照中。协议正文以digest引用，凭证只记录素材引用，不复制上传Token或原图；审计失败回滚业务。
-- 媒体：upload-intents → `PUT /media/uploads/{intentId}`（`x-upload-token`）。Sharp完整解码JPEG/PNG/WebP，限制10MiB、单边8192、4000万像素、单帧、处理超时10秒；公开衍生图重新编码并清理元数据，原始字节单独保留供私有审核/证据读取。公开仅返回审核通过的衍生图，旧资产无衍生图须重新上传。默认本地内容寻址存储 `uploads/`。撤销公开同事务清除目录绑定，旧公共URL返回404，响应 `Cache-Control: public, max-age=0, must-revalidate`。开发OSS目标已配置且只读连通性通过，应用适配器尚未实现，真实OSS/CDN上传、读取及撤权未验收；本地模式不读取云凭据或自动切换云端。
+- 媒体：upload-intents → `PUT /media/uploads/{intentId}`（`x-upload-token`）。Sharp完整解码JPEG/PNG/WebP，限制10MiB、单边8192、4000万像素、单帧、处理超时10秒；公开衍生图重新编码并清理元数据，原始字节单独保留供私有审核/证据读取。公开仅返回审核通过的衍生图，旧资产无衍生图须重新上传。对象写入在数据库事务外分两阶段执行：先用短事务复核当前权限与归属（已撤权请求零对象写入）并把原始/衍生对象写入内容寻址存储（每次写入前登记候选键，结果未知也可追溯），再在幂等事务内锁定意图、复核单次消费与权限并原子落库；对象写入成功但事务失败时保留对象并记录孤儿候选日志，不在请求路径自动删除，重复内容按哈希去重。存储默认本地 `uploads/`，可用 `MEDIA_STORAGE=oss` 显式切换到已授权开发OSS（zzsh-dev / `zzsh-rebuild/dev/` 前缀，服务端凭据来自进程环境，独立于PROVIDER_MODE；适配器已通过开发Bucket合成图片直连验证）。切换后端不迁移历史对象，无逐对象后端定位：需先复制并逐键核验或保持 `local`。撤销公开同事务清除目录绑定，旧公共URL返回404，响应 `Cache-Control: public, max-age=0, must-revalidate`；生产CDN、公开域名与浏览器直传未启用，不把永久公开URL当权限控制。
 - 本轮不连接真实云资源；规则真实参数、包赔与押金策略、M4 订单占用与 M6 交付仍为后续范围。
 
 ## 供给发布与审核（M3-C）

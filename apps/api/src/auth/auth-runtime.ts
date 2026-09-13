@@ -11,6 +11,7 @@ import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecuri
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
+import { resolveMediaStorage } from "../supply/media-oss";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
@@ -285,6 +286,9 @@ export function loadAuthRuntimeConfig(
     adminBootstrapSecret,
     secureCookies,
     testOperationsEnabled: capabilities.testOperationsEnabled === true,
+    // Independent of PROVIDER_MODE: selecting OSS media storage never turns SMS,
+    // identity or payment providers into real mode.
+    mediaStorage: resolveMediaStorage(env, workingDirectory),
   };
 }
 

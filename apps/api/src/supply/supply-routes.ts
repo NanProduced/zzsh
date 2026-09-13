@@ -42,11 +42,15 @@ import {
 } from "./rules";
 import {
   changeMediaVisibility,
-  consumeMediaUpload,
+  finalizeMediaUpload,
   createMediaUploadIntent,
   loadMediaAsset,
+  logOrphanedMediaObjects,
+  prepareMediaUpload,
   reviewMediaAsset,
+  type MediaActor,
   type MediaStorage,
+  type PreparedMediaUpload,
 } from "./media";
 import {
   assertGameScope,
@@ -240,6 +244,95 @@ async function authorizeUpload(client: PoolClient, actor: WriteActor, intentId: 
   } else if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND owner_user_id = $2 AND game_id = $3`, [row.account_id, actor.id, row.game_id])).rowCount) throw notFound();
 }
 
+async function hasIdempotencyRecord(pool: SupplyRuntimeOptions["pool"], scope: { realm: "admin" | "user"; principalId: string; operation: string; resourceId?: string }, key: string): Promise<boolean> {
+  const scopeKey = JSON.stringify([scope.realm, scope.principalId, scope.operation, scope.resourceId ?? null]);
+  const result = await pool.query(`SELECT 1 FROM zzsh_supply.idempotency_record WHERE scope_key = $1 AND key = $2`, [scopeKey, key]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+// Media uploads write content-addressed objects to storage before the database
+// transaction runs, so no pooled connection is held across storage network
+// calls. Current permissions and object ownership are re-checked in a short
+// transaction before any storage write, so an already-revoked request performs
+// zero object writes; the check is repeated inside the final transaction. This
+// narrows but does not eliminate the revocation race between the two checks.
+// Replay lookups skip the object writes entirely; if a concurrent request with
+// the same key commits between the pre-check and preparation, the recorded
+// result is still returned instead of a spurious conflict.
+async function runMediaUpload(
+  options: SupplyRuntimeOptions,
+  request: SupplyNodeRequest,
+  response: SupplyResponse,
+  requestId: string,
+  input: {
+    actor: WriteActor;
+    mediaActor: MediaActor;
+    intentId: string;
+    uploadToken: string;
+    bytes: Buffer;
+    authorize: (client: PoolClient) => Promise<void>;
+    beforeFinalize?: (client: PoolClient) => Promise<void>;
+  },
+): Promise<void> {
+  const scope = { principalId: input.actor.id, operation: "supply.media.upload", resourceId: input.intentId };
+  const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
+  const idempotentScope = { ...scope, realm: input.actor.realm };
+  let prepared: PreparedMediaUpload | undefined;
+  if (!(await hasIdempotencyRecord(options.pool, idempotentScope, key))) {
+    // Short transaction: verify current permissions/ownership and release the
+    // connection before any storage network call is made.
+    await withTransaction(options.pool, async (client) => {
+      await input.authorize(client);
+    });
+    try {
+      prepared = await prepareMediaUpload(options.pool, options.mediaStorage, input.mediaActor, input.intentId, input.uploadToken, input.bytes);
+    } catch (error) {
+      if (!(error instanceof SecurityApiError) || error.status !== 409 || !(await hasIdempotencyRecord(options.pool, idempotentScope, key))) throw error;
+    }
+  }
+  try {
+    await runIdempotentWrite(
+      options,
+      request,
+      response,
+      requestId,
+      scope,
+      input.actor,
+      { intentId: input.intentId, token: input.uploadToken, contentHash: fingerprintRequest("bytes", input.intentId, input.bytes.toString("base64")) },
+      input.authorize,
+      async (client) => {
+        await input.beforeFinalize?.(client);
+        if (!prepared) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media upload was not prepared");
+        const asset = await finalizeMediaUpload(client, input.mediaActor, prepared);
+        await recordAudit(client, {
+          actorType: input.actor.realm,
+          actorId: input.actor.id,
+          sessionId: input.actor.sessionId,
+          action: "supply.media.uploaded",
+          objectType: "media_asset",
+          objectId: asset.assetId,
+          outcome: "SUCCESS",
+          requestId,
+          reason: "supply.media.upload",
+          details: { gameId: asset.gameId, before: null, after: { ...asset, revision: "1" }, result: "CREATED" },
+        });
+        return { status: 200, body: asset };
+      },
+    );
+  } catch (error) {
+    // A prepared result whose transaction failed always logs pending candidates.
+    // An idempotency record for this key may belong to a DIFFERENT concurrent
+    // request (same intent/token/key, different bytes), so its mere presence
+    // cannot prove this request's objects are referenced. Candidates are not
+    // confirmed orphans: a cleanup sweep must verify actual references, and the
+    // request path never deletes objects.
+    if (prepared) {
+      logOrphanedMediaObjects({ intentId: input.intentId, storageKeys: prepared.writtenStorageKeys, phase: "commit" });
+    }
+    throw error;
+  }
+}
+
 const CATALOG_KINDS = new Set(["items", "rarities", "categories", "skins", "entitlements"]);
 
 function catalogKind(value: string): "items" | "rarities" | "categories" | "skins" | "entitlements" {
@@ -389,35 +482,17 @@ export async function handleSupplyUserRoute(
       const uploadToken = headerValue(request.headers["x-upload-token"]);
       if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
       const bytes = await readRawBody(request, 10 * 1024 * 1024);
-      await runIdempotentWrite(
-        options,
-        request,
-        response,
-        requestId,
-        { principalId: context.userId, operation: "supply.media.upload", resourceId: intentId },
-        { realm: "user", id: context.userId, sessionId: context.sessionId },
-        { intentId, token: uploadToken, contentHash: fingerprintRequest("bytes", intentId, bytes.toString("base64")) },
-        async (client) => {
+      await runMediaUpload(options, request, response, requestId, {
+        actor: { realm: "user", id: context.userId, sessionId: context.sessionId },
+        mediaActor: { realm: "user", userId: context.userId },
+        intentId,
+        uploadToken,
+        bytes,
+        authorize: async (client) => {
           await assertUserContextInTransaction(client, context);
           await authorizeUpload(client, { realm: "user", id: context.userId, sessionId: context.sessionId }, intentId);
         },
-        async (client) => {
-          const asset = await consumeMediaUpload(client, options.mediaStorage, { realm: "user", userId: context.userId }, intentId, uploadToken, bytes);
-          await recordAudit(client, {
-            actorType: "user",
-            actorId: context.userId,
-            sessionId: context.sessionId,
-            action: "supply.media.uploaded",
-            objectType: "media_asset",
-            objectId: asset.assetId,
-            outcome: "SUCCESS",
-            requestId,
-            reason: "supply.media.upload",
-            details: { gameId: asset.gameId, before: null, after: { ...asset, revision: "1" }, result: "CREATED" },
-          });
-          return { status: 200, body: asset };
-        },
-      );
+      });
       return;
     }
 
@@ -851,34 +926,21 @@ async function handleAdminWrite(
     const uploadToken = headerValue(request.headers["x-upload-token"]);
     if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
     const bytes = await readRawBody(request, 10 * 1024 * 1024);
-    await runIdempotentWrite(
-      options,
-      request,
-      response,
-      requestId,
-      { principalId: actor.id, operation: "supply.media.upload", resourceId: intentId },
+    await runMediaUpload(options, request, response, requestId, {
       actor,
-      { intentId, token: uploadToken, contentHash: fingerprintRequest("bytes", intentId, bytes.toString("base64")) },
-      async (client) => { await assertAdminContextInTransaction(client, {userId:actor.id,sessionId:actor.sessionId}); await authorizeUpload(client, actor, intentId); },
-      async (client) => {
+      mediaActor: { realm: "admin", adminUserId: actor.id },
+      intentId,
+      uploadToken,
+      bytes,
+      authorize: async (client) => {
+        await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+        await authorizeUpload(client, actor, intentId);
+      },
+      beforeFinalize: async (client) => {
         const access = await requireAdminAccess(client, actor.id);
         requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
-        const asset = await consumeMediaUpload(client, options.mediaStorage, { realm: "admin", adminUserId: actor.id }, intentId, uploadToken, bytes);
-        await recordAudit(client, {
-          actorType: "admin",
-          actorId: actor.id,
-          sessionId: actor.sessionId,
-          action: "supply.media.uploaded",
-          objectType: "media_asset",
-          objectId: asset.assetId,
-          outcome: "SUCCESS",
-          requestId,
-          reason: "supply.media.upload",
-            details: { gameId: asset.gameId, before: null, after: { ...asset, revision: "1" }, result: "CREATED" },
-        });
-        return { status: 200, body: asset };
       },
-    );
+    });
     return;
   }
   const reviewMatch = /^\/media\/([^/]+)\/review$/.exec(path);

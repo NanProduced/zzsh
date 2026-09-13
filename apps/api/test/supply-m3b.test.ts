@@ -1,6 +1,7 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
+import { runMediaOssChecks, type MediaStorageFaults } from "./supply-media-oss-checks";
 import type { SupplyGate } from "../src/supply/publishing";
 import sharp from "sharp";
 import { fingerprintRequest } from "../src/supply/supply-util";
@@ -17,7 +18,7 @@ import { createApp } from "../src/app";
 import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
-import { createLocalMediaStorage } from "../src/supply/media";
+import { createLocalMediaStorage, MediaStorageError } from "../src/supply/media";
 import { loadConfig, type AppConfig } from "../src/config/config";
 
 const RESOURCE_SET = process.env.SUPPLY_TEST_RESOURCE_SET?.trim() || "";
@@ -325,10 +326,32 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
   const publicationGates=new Map<string,SupplyGate>();
   const readProbe:{run?:(client:PoolClient,account:{id:string})=>Promise<void>}={};
   let storageAvailable = true;
+  const storageFaults: MediaStorageFaults = { writeOutcomes: [], writeCalls: 0 };
   const mediaStorage = {
     get available() { return storageAvailable; },
     get kind() { return baseStorage.kind; },
-    write: (bytes: Buffer, hash: string) => baseStorage.write(bytes, hash),
+    async write(bytes: Buffer, contentHash: string) {
+      storageFaults.writeCalls += 1;
+      // Capture the sequence number at increment time: reading it later would
+      // let two concurrent writes observe the same value and break barriers.
+      const call = storageFaults.writeCalls;
+      const outcome = storageFaults.writeOutcomes.shift();
+      if (outcome === "fail") throw new MediaStorageError("media storage operation failed");
+      if (outcome === "slow-fail") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        throw new MediaStorageError("media storage operation failed");
+      }
+      if (outcome === "land-then-timeout") {
+        // The object lands in storage, then the transport reports a timeout:
+        // the outcome of this write is unknown to the caller.
+        await baseStorage.write(bytes, contentHash);
+        await storageFaults.afterWrite?.(call);
+        throw new MediaStorageError("media storage operation failed");
+      }
+      const result = await baseStorage.write(bytes, contentHash);
+      await storageFaults.afterWrite?.(call);
+      return result;
+    },
     read: (key: string) => baseStorage.read(key),
   };
   try {
@@ -852,6 +875,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
     await runSupplyPoolChecks({testContext,pool:runtimePool,maintenance:maintenanceDataPool,auth:authOptions,user:userOne,boss:boss.jar,bossId:boss.id,accountId,gameId,bytes:pngBytes()});
+    await runMediaOssChecks({base,pool:runtimePool,maintenance:maintenanceDataPool,operator:{jar:operator.jar,id:operator.id},boss:{jar:boss.jar,id:boss.id},gameId,itemId:haffItem,mediaDir,faults:storageFaults});
     const auditCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" LIKE 'supply.%'`);
     assert.ok(Number(auditCount.rows[0]?.count ?? "0") >= 20, "supply writes must be audited");
     const audits = (await runtimePool.query(`SELECT object_type, object_id, action, reason, details FROM zzsh_iam.audit_event WHERE action LIKE 'supply.%'`)).rows;

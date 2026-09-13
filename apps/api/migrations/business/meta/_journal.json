@@ -162,6 +162,13 @@
       "when": 1789124412000,
       "tag": "0022_m3d_favorites",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1789210813000,
+      "tag": "0023_m3_media_item_binding",
+      "breakpoints": true
     }
   ]
 }

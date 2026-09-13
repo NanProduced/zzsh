@@ -79,6 +79,7 @@ export type CatalogItem = {
   required: boolean;
   enabled: boolean;
   sortOrder: number;
+  mediaId: string | null;
   sourceField?: string | null;
   sourceToken?: string | null;
   sourceNote?: string | null;

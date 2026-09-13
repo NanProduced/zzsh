@@ -51,7 +51,7 @@ API 启动前校验 `APP_PROFILE`、数据库/Redis 目标和 provider 模式；
 
 ## 检查与迁移
 
-M3-B 的 `0016_m3b_review_guards` 与 `0017_m3b_idempotency_realm` 是前向返修迁移，不改写已应用0015；0017按原操作/上传actor迁移旧幂等键，无法确定realm或发生键冲突时停止，需核对后处理，不丢弃原成功结果。先在隔离库验证，再由环境维护者迁移目标；历史媒体缺少已验证衍生图时保持公共读取拒绝，重新上传后再审核公开。
+M3-B 的 `0016_m3b_review_guards` 与 `0017_m3b_idempotency_realm` 是前向返修迁移，不改写已应用0015；0017按原操作/上传actor迁移旧幂等键，无法确定realm或发生键冲突时停止，需核对后处理，不丢弃原成功结果。先在隔离库验证，再由环境维护者迁移目标；历史媒体缺少已验证衍生图时保持公共读取拒绝，重新上传后再审核公开。媒体阶段新增 `0023_m3_media_item_binding`（billable_item.media_id 外键），同样只前向应用，不改写历史迁移。
 
 auth 默认资源锁805002被占用时不得抢占。需要并行隔离时设置 `M2_AUTH_TEST_RESOURCE_SET=<小写标识>`（1–21位字母数字/下划线、字母开头），库、迁移/runtime角色及资源锁一起派生；不得同时覆盖为旧库/旧角色。该套件在标记、归属与独占锁核验后，将供给外键涉及表纳入明确的同次TRUNCATE清单，不使用CASCADE；未知资源拒绝修改。测试账号在隔离库内生成，首次及重复运行均需回归。
 
@@ -76,6 +76,8 @@ Admin 免账号 mock 预览已移除。真实初始化使用独立测试账号�
 
 供给完整PG入口为 `npm run test:supply -w @zzsh/api`，已纳入根check。可设置 `SUPPLY_TEST_RESOURCE_SET=<小写标识>` 一起派生独立库、迁移/runtime角色和锁；不得混用旧资源。auth仍使用 `M2_AUTH_TEST_RESOURCE_SET`。相关测试复用明确的业务表TRUNCATE清单并核schema所有权，不使用CASCADE扩大清理。
 
-默认保证金和占用均UNKNOWN；正向发布只在已启用test/fake能力的受控测试fixture中验证。管理审核页面为 `/supply/reviews`；用户端本阶段只交付API/BFF，无正式发布页面验收。OSS/CDN及真实身份、资金、云信仍未接入本阶段验证。
+默认保证金和占用均UNKNOWN；正向发布只在已启用test/fake能力的受控测试fixture中验证。管理审核页面为 `/supply/reviews`；用户端本阶段只交付API/BFF，无正式发布页面验收。生产CDN及真实身份、资金、云信仍未接入本阶段验证。
+
+媒体存储通过 `MEDIA_STORAGE` 显式选择（默认 `local`，内容寻址文件在 `uploads/`）；设为 `oss` 时要求 `OSS_BUCKET/OSS_REGION/OSS_ENDPOINT/OSS_OBJECT_PREFIX` 及服务端进程环境的 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`（可选 `ALIBABA_CLOUD_SECURITY_TOKEN`），缺失即启动失败，不自动回退。该选择独立于 `PROVIDER_MODE`，只为媒体启用OSS，不会同时打开短信、身份或支付真实渠道；凭据不写入 `.env`、源码或前端。上传在对象写入前用短事务复核当前权限与归属，已撤权请求零对象写入，最终事务内再次复核。切换存储后端不迁移历史对象：数据库只存内容哈希，没有逐对象后端定位，改变 `MEDIA_STORAGE` 会把全部历史读取指向新后端；已有本地对象未复制时会缺图。切换前提为保留 `local`，或先把历史原始/衍生对象复制到新后端并逐键（或按哈希清单）核验后再切换；本阶段不建设双写系统或对象迁移框架。已授权开发目标为 zzsh-dev Bucket 的 `zzsh-rebuild/dev/` 前缀，适配器已在开发Bucket完成合成图片上传/读取/匿名拒绝/衍生图/清理的直连验证；这不等于整条 HTTP API→OSS 的权限/撤权端到端浏览器验收，生产CDN与公开域名另验。
 
 M3-D数据层新增0022_m3d_favorites，需在隔离目标先验证并纳入既有测试表清理清单。Web数据代理复用ZZSH_API_ORIGIN/ZZSH_WEB_ORIGIN；生产缺少有效Origin配置即503，不使用本地假数据。当前仅接口/调用层完成，用户UI工作树整合后再连接正式页面。测试仍用独立SUPPLY_TEST_RESOURCE_SET及M2_AUTH_TEST_RESOURCE_SET，根check包含收藏/失效及M3-C R1–R3回归。
