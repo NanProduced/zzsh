@@ -27,3 +27,16 @@ test('public browse calls keep contract paths and forward abort signals',async()
     assert.ok(calls.every(call=>call.signal===controller.signal));
   }finally{globalThis.fetch=old;}
 });
+test('publish reads use the current catalog and rule-release endpoints with cancellation',async()=>{
+  const old=globalThis.fetch;const calls=[];
+  globalThis.fetch=async(url,init)=>{calls.push({url,signal:init?.signal});return Response.json({});};
+  const controller=new AbortController();
+  try{
+    await supplyApi.publishingOptions('game_1',controller.signal);
+    await supplyApi.catalog('game_1',new URLSearchParams({limit:'30',q:'skin'}),controller.signal);
+    await supplyApi.mine('account_1',controller.signal);
+    await supplyApi.myAccounts(new URLSearchParams({limit:'20'}),controller.signal);
+    assert.deepEqual(calls.map(call=>call.url),['/api/supply/games/game_1/publishing-options','/api/supply/games/game_1/publishing-catalog?limit=30&q=skin','/api/supply/accounts/account_1','/api/supply/me/accounts?limit=20']);
+    assert.ok(calls.every(call=>call.signal===controller.signal));
+  }finally{globalThis.fetch=old;}
+});
