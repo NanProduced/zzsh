@@ -69,32 +69,56 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { qu
   useMotionValueEvent(scrollY, "change", (value) => setScrolled(value > 100));
   const compact = desktop && scrolled && !navFocused;
   return <header className="site-header" data-compact={compact} data-scrolled={scrolled}>
-    <motion.div className="site-header-bar" initial={false}
+    <motion.div
+      className="site-header-bar"
+      initial={false}
       animate={{ maxWidth: compact ? 1060 : 1320, y: compact ? 10 : 0, borderRadius: compact ? 20 : 0 }}
-      transition={reducedMotion || !desktop ? { duration: 0 } : { type: "spring", stiffness: 200, damping: 50 }}>
+      transition={reducedMotion || !desktop ? { duration: 0 } : { type: "spring", stiffness: 200, damping: 50 }}
+    >
       <Link className="site-brand" href="/" aria-label="洲洲商行首页"><BrandLogo height={42} /></Link>
-      <nav className="site-desktop-nav" aria-label="全局主导航"
-        onFocusCapture={() => setNavFocused(true)} onBlurCapture={() => setNavFocused(false)}>
-        <Link href="/" aria-current={home?"page":undefined}>首页</Link>
-        <Link href="/#delta-section">游戏专区</Link><Link href="/help">帮助中心</Link>
+      <nav className="site-desktop-nav" aria-label="全局主导航" onFocusCapture={() => setNavFocused(true)} onBlurCapture={() => setNavFocused(false)}>
+        {!compact && <Link href="/" aria-current={home ? "page" : undefined}>首页</Link>}
+        <Link href="/#delta-section">游戏专区</Link>
+        <Link href="/help">帮助中心</Link>
       </nav>
-      <form className="site-search" role="search" aria-label="搜索当前账号" onSubmit={(event) => {
-        event.preventDefault();
-        if(onSearch){onSearch(query);return;}
-        const results = document.getElementById("account-list");
-        results?.focus({ preventScroll: true });
-        results?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
-      }}>
-        <Search size={18} aria-hidden="true" />
-        <input type="search" aria-label="搜索账号编号或名称" placeholder="搜索当前展示账号" maxLength={120}
-          value={query} onChange={(event) => onQueryChange(event.target.value)} />
-        {query && <button className="site-search-clear" type="button" aria-label="清空搜索" onClick={() => onQueryChange("")}><X size={16} /></button>}
-        <button className="site-search-submit" type="submit">搜索</button>
+
+      <form
+        className="site-search"
+        role="search"
+        aria-label="搜索当前账号"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (onSearch) { onSearch(query); return; }
+          const results = document.getElementById("account-list");
+          results?.focus({ preventScroll: true });
+          results?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+        }}
+      >
+        <Search size={16} style={{ color: "var(--color-accent-brand)", opacity: 0.9, flexShrink: 0 }} aria-hidden="true" />
+        <input
+          type="search"
+          aria-label="搜索账号编号或名称"
+          placeholder={compact ? "搜索账号或关键字..." : "搜索三角洲账号编号、干员、皮肤或改枪码..."}
+          maxLength={120}
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+        />
+        {query && (
+          <button className="site-search-clear" type="button" aria-label="清空搜索" onClick={() => onQueryChange("")}>
+            <X size={14} />
+          </button>
+        )}
+        <button className="site-search-submit" type="submit">
+          <Search size={13} strokeWidth={2.5} />
+          <span>搜索</span>
+        </button>
       </form>
+
       <div className="site-header-actions">
         <SessionEntry />
         <ThemeToggle /><MobileNav />
       </div>
     </motion.div>
   </header>;
+
 }
