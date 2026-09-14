@@ -7,7 +7,7 @@ import type { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 
 import { createAuthSchema } from "./auth-schema";
-import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
+import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, attemptLegacyCredentialUpgrade, type AdminSecurityNotification, type AuthSecurityOptions, type LegacyCredentialLookup } from "./auth-security";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
@@ -44,6 +44,12 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   userObligationReader?: UserObligationReader;
   mediaStorage?: MediaStorage;
   testSupplyGateReader?: SupplyGateReader;
+  /**
+   * Explicit Better Auth rate-limit settings for the user realm. Unset keeps the library default
+   * (enabled in production); the isolated auth tests pass their own settings to assert that the
+   * limiter runs before any legacy credential upgrade.
+   */
+  userRateLimit?: Parameters<typeof import("better-auth").betterAuth>[0]["rateLimit"];
 };
 
 type NodeRequest = {
@@ -204,6 +210,68 @@ async function safeWebAuthHandler(
 
 type AdminSecurityStatus = "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN";
 
+const LEGACY_RETRY_HEADER = "x-zzsh-legacy-retry";
+
+type UserSignInHookContext = {
+  path: string;
+  body: unknown;
+  headers: Headers;
+  context: { returned?: unknown };
+};
+
+type LegacyAfterHookDeps = {
+  pool: Pool;
+  hashPassword: (password: string) => Promise<string>;
+  verifyPassword: (password: string, hash: string) => Promise<boolean>;
+  isAPIError: (value: unknown) => value is { status: string };
+  retrySignIn: (signIn: "username" | "phone-number", body: Record<string, unknown>, headers: Headers) => Promise<Response>;
+};
+
+function legacyLookupOf(path: string, body: Record<string, unknown>): LegacyCredentialLookup | null {
+  if (path === "/sign-in/username") {
+    const username = body.username;
+    if (typeof username !== "string" || username.length === 0) return null;
+    // The username plugin looks the account up with the same lowercased identifier.
+    return { username: username.toLowerCase() };
+  }
+  const phoneNumber = body.phoneNumber;
+  if (typeof phoneNumber !== "string" || phoneNumber.length === 0) return null;
+  // The phone-number plugin uses the validated value unchanged.
+  return { phoneNumber };
+}
+
+/**
+ * Better Auth after hook: runs only once the sign-in endpoint finished, which means the installed
+ * rate limiter and the endpoint body schema already accepted the request. When the endpoint
+ * rejected the credentials, stored credential state decides whether a legacy upgrade applies;
+ * only then is the standard sign-in endpoint executed once more (marked so the hook does not
+ * recurse) and its response replaces the rejection. Invalid bodies never reach this branch
+ * because the endpoint returns a 400, and rate-limited requests never reach the endpoint at all.
+ */
+async function handleUserLegacyAfterHook(
+  ctx: UserSignInHookContext,
+  deps: LegacyAfterHookDeps,
+): Promise<Response | undefined> {
+  if (ctx.path !== "/sign-in/username" && ctx.path !== "/sign-in/phone-number") return undefined;
+  if (ctx.headers?.get?.(LEGACY_RETRY_HEADER) === "1") return undefined;
+  const returned = ctx.context?.returned;
+  if (!deps.isAPIError(returned) || returned.status !== "UNAUTHORIZED") return undefined;
+  if (!ctx.body || typeof ctx.body !== "object" || Array.isArray(ctx.body)) return undefined;
+  const body = ctx.body as Record<string, unknown>;
+  const password = body.password;
+  if (typeof password !== "string" || password.length === 0) return undefined;
+  const lookup = legacyLookupOf(ctx.path, body);
+  if (!lookup) return undefined;
+  const requestId = ctx.headers?.get?.("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
+  const outcome = await attemptLegacyCredentialUpgrade(deps.pool, deps.verifyPassword, deps.hashPassword, lookup, password, requestId);
+  if (outcome !== "retry") return undefined;
+  const headers = new Headers(ctx.headers);
+  headers.set(LEGACY_RETRY_HEADER, "1");
+  const signIn = ctx.path === "/sign-in/username" ? "username" : "phone-number";
+  // The Response replaces the endpoint rejection; its own status and Set-Cookie are preserved.
+  return await deps.retrySignIn(signIn, body, headers);
+}
+
 async function readAdminSecurity(pool: Pool, userId: string): Promise<{ status: AdminSecurityStatus; passwordChangeRequired: boolean } | null> {
   const result = await pool.query<{ status: AdminSecurityStatus; passwordChangeRequired: boolean }>(
     `SELECT "status", "password_change_required" AS "passwordChangeRequired" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1`,
@@ -297,7 +365,7 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<void> {
-  const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthMiddleware }, { hashPassword, verifyPassword }] = await Promise.all([
+  const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthMiddleware, isAPIError }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
     import("@better-auth/drizzle-adapter"),
     import("better-auth/node"),
@@ -312,6 +380,18 @@ export async function mountAuthHandlers(
   const adminDatabase = drizzle(options.pool);
   const fakeSmsOutbox = options.fakeSmsOutbox ?? new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" }>();
   const trustedOrigins = [options.apiOrigin, options.userOrigin, options.adminOrigin];
+  // Filled right after the user auth instance exists; the after hook only runs at request time.
+  const userSignInApi: { retry?: (signIn: "username" | "phone-number", body: Record<string, unknown>, headers: Headers) => Promise<Response> } = {};
+  const legacyHook = (ctx: unknown) => handleUserLegacyAfterHook(ctx as UserSignInHookContext, {
+    pool: options.pool,
+    hashPassword,
+    verifyPassword: (password, hash) => verifyPassword({ password, hash }),
+    isAPIError,
+    retrySignIn: (signIn, body, headers) => {
+      if (!userSignInApi.retry) throw new Error("user sign-in API is unavailable");
+      return userSignInApi.retry(signIn, body, headers);
+    },
+  });
   const common = {
     baseURL: options.apiOrigin,
     trustedOrigins,
@@ -349,6 +429,10 @@ export async function mountAuthHandlers(
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox),
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
+    ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : {}),
+    hooks: {
+      after: createAuthMiddleware(legacyHook),
+    },
     databaseHooks: {
       session: {
         create: {
@@ -421,6 +505,15 @@ export async function mountAuthHandlers(
       },
     },
   });
+
+  userSignInApi.retry = async (signIn, body, headers) => {
+    // The hook body was already validated by the same endpoint; the cast only bridges the
+    // per-endpoint generated body types.
+    const response = signIn === "username"
+      ? await userAuth.api.signInUsername({ body: body as never, headers, asResponse: true })
+      : await userAuth.api.signInPhoneNumber({ body: body as never, headers, asResponse: true });
+    return response as unknown as Response;
+  };
 
   const userWebHandler = (request: Request) => safeWebAuthHandler(userAuth.handler, request);
   const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request);
