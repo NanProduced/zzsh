@@ -41,7 +41,7 @@ function SessionEntry() {
 export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean }) {
   const { scrollY } = useScroll();
   const [reducedMotion,setReducedMotion]=useState(true);
-  const [scrolled, setScrolled] = useState(false);
+  const [scrollPosition, setScrollPosition] = useState(0);
   const [desktop, setDesktop] = useState(false);
   const [navFocused, setNavFocused] = useState(false);
   useEffect(() => {
@@ -51,13 +51,13 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { qu
     const media = matchMedia("(min-width: 1100px) and (hover: hover) and (pointer: fine)");
     const update = () => setDesktop(media.matches);
     update();
-    setScrolled(window.scrollY > 100);
+    setScrollPosition(window.scrollY > 100 ? 101 : window.scrollY > 0 ? 1 : 0);
     media.addEventListener("change", update);
     return () => {media.removeEventListener("change", update);preference.removeEventListener("change",motionChange);};
   }, []);
-  useMotionValueEvent(scrollY, "change", (value) => setScrolled(value > 100));
-  const compact = desktop && scrolled && !navFocused;
-  return <header className="site-header" data-compact={compact} data-scrolled={scrolled}>
+  useMotionValueEvent(scrollY, "change", (value) => setScrollPosition(value > 100 ? 101 : value > 0 ? 1 : 0));
+  const compact = desktop && scrollPosition > 100 && !navFocused;
+  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || !home || navFocused}>
     <motion.div
       className="site-header-bar"
       initial={false}
