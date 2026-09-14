@@ -190,9 +190,19 @@ export const supplyApi = {
     supplyRequest<Page<PublicListing>>("/listings?" + query, { signal }),
   listing: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<PublicListing>("/listings/" + id(accountId), { signal }),
-  catalog: (gameId: string, query: URLSearchParams = new URLSearchParams()) =>
+  catalog: (
+    gameId: string,
+    query: URLSearchParams = new URLSearchParams(),
+    signal?: AbortSignal,
+  ) =>
     supplyRequest<PublishingCatalog>(
       "/games/" + id(gameId) + "/publishing-catalog?" + query,
+      { signal },
+    ),
+  publishingOptions: (gameId: string, signal?: AbortSignal) =>
+    supplyRequest<PublishingOptions>(
+      "/games/" + id(gameId) + "/publishing-options",
+      { signal },
     ),
   browseCatalog: (
     gameId: string,
@@ -212,9 +222,12 @@ export const supplyApi = {
       "/favorites/" + id(accountId),
       { method: "PUT", body: { saved }, idempotencyKey: key },
     ),
-  mine: (accountId: string) =>
-    supplyRequest<MySupply>("/accounts/" + id(accountId)),
-  myAccounts: (query: URLSearchParams = new URLSearchParams()) =>
+  mine: (accountId: string, signal?: AbortSignal) =>
+    supplyRequest<MySupply>("/accounts/" + id(accountId), { signal }),
+  myAccounts: (
+    query: URLSearchParams = new URLSearchParams(),
+    signal?: AbortSignal,
+  ) =>
     supplyRequest<
       Page<{
         id: string;
@@ -225,66 +238,83 @@ export const supplyApi = {
         owner_paused: boolean;
         staff_restricted: boolean;
       }>
-    >("/me/accounts?" + query),
-  createAccount: (gameId: string, key: string) =>
+    >("/me/accounts?" + query, { signal }),
+  createAccount: (gameId: string, key: string, signal?: AbortSignal) =>
     supplyRequest<{ accountId: string; gameId: string }>("/accounts", {
       method: "POST",
       body: { gameId },
       idempotencyKey: key,
+      signal,
     }),
-  createDraft: (accountId: string, expectedRevision: string, key: string) =>
+  createDraft: (accountId: string, expectedRevision: string, key: string, signal?: AbortSignal) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId) + "/drafts", {
       method: "POST",
       body: { expectedRevision },
       idempotencyKey: key,
+      signal,
     }),
-  quote: (accountId: string, expectedRevision: string, key: string) =>
+  quote: (accountId: string, expectedRevision: string, key: string, signal?: AbortSignal) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId) + "/quote", {
       method: "POST",
       body: { expectedRevision },
       idempotencyKey: key,
+      signal,
     }),
   withdraw: (
     accountId: string,
     expectedRevision: string,
     versionId: string,
     key: string,
+    reason?: string,
+    signal?: AbortSignal,
   ) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId) + "/withdraw", {
       method: "POST",
-      body: { expectedRevision, versionId },
+      body: { expectedRevision, versionId, ...(reason ? { reason } : {}) },
       idempotencyKey: key,
+      signal,
     }),
   setPaused: (
     accountId: string,
     paused: boolean,
     expectedRevision: string,
     key: string,
+    reason?: string,
+    signal?: AbortSignal,
   ) =>
     supplyRequest<MySupply>(
       "/accounts/" + id(accountId) + (paused ? "/pause" : "/resume"),
-      { method: "POST", body: { expectedRevision }, idempotencyKey: key },
+      {
+        method: "POST",
+        body: { expectedRevision, ...(reason ? { reason } : {}) },
+        idempotencyKey: key,
+        signal,
+      },
     ),
   saveDraft: (
     accountId: string,
     body: DraftInput & { expectedRevision: string },
     key: string,
+    signal?: AbortSignal,
   ) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId) + "/draft", {
       method: "PUT",
       body,
       idempotencyKey: key,
+      signal,
     }),
   confirm: (
     accountId: string,
     action: "accept-rules" | "submit",
     body: VersionToken,
     key: string,
+    signal?: AbortSignal,
   ) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId) + "/" + action, {
       method: "POST",
       body,
       idempotencyKey: key,
+      signal,
     }),
 };
 
@@ -295,7 +325,9 @@ export async function uploadSupplyMedia(input: {
   file: Blob;
   intentKey: string;
   uploadKey: string;
-}): Promise<{ assetId: string; purpose: string; reviewState: string }> {
+  signal?: AbortSignal;
+  beforeBytesUpload?: () => Promise<boolean>;
+}): Promise<{ assetId: string; purpose: string; reviewState: string } | null> {
   const intent = await supplyRequest<{ intentId: string; uploadToken: string }>(
     "/media/upload-intents",
     {
@@ -308,8 +340,10 @@ export async function uploadSupplyMedia(input: {
         size: input.file.size,
       },
       idempotencyKey: input.intentKey,
+      signal: input.signal,
     },
   );
+  if (input.beforeBytesUpload && !(await input.beforeBytesUpload())) return null;
   let response: Response;
   try {
     response = await fetch("/api/supply/media/uploads/" + id(intent.intentId), {
@@ -321,8 +355,10 @@ export async function uploadSupplyMedia(input: {
         "idempotency-key": input.uploadKey,
       },
       body: input.file,
+      signal: input.signal,
     });
-  } catch {
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
     throw new SupplyRequestError(0, null, input.uploadKey);
   }
   const body = await response.json().catch(() => null);

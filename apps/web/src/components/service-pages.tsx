@@ -1,39 +1,6 @@
 "use client";
-import Link from "next/link";
-import { useEffect, useState } from "react";
-import { LockKeyhole } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
-import { FavoritesPanel } from "./favorites/favorites-panel";
-import { FavoritesProvider } from "./favorites/favorites-context";
-import type { PublishMode } from "../lib/service-navigation";
-
-const blankDraft={title:"",resources:"",fee:"",deposit:"",daily:""};
-type Draft=typeof blankDraft;
-const draftKey="zzsh-publish-draft:v1";
-export function PublishForm({mode}:{mode:PublishMode}) {
-  const [draft,setDraft]=useState<Draft>(blankDraft);const [saved,setSaved]=useState("");
-  useEffect(()=>{try{const raw=JSON.parse(sessionStorage.getItem(draftKey)||'{}');const next={...blankDraft};for(const k of Object.keys(next) as (keyof Draft)[])if(typeof raw?.[k]==='string')next[k]=raw[k].slice(0,1500);setDraft(next);}catch{setSaved("未能读取本地草稿");}},[]);
-  const save=(next:Draft)=>{try{sessionStorage.setItem(draftKey,JSON.stringify(next));setSaved("已保存到当前标签页");}catch{setSaved("当前浏览器无法保存草稿，请保留本页");}};
-  const change=(key:keyof Draft,value:string)=>{const next={...draft,[key]:value};setDraft(next);save(next);};
-  return <ServiceShell title={mode==='fast'?'上架出租 · 极速模式':'上架出租'} description="填写公开的账号资源与出租条件，不要填写账号密码。"><form className="publish-form" onSubmit={e=>e.preventDefault()}>
-    <div className="publish-mode"><Link href="/publish" aria-current={mode==='standard'?'page':undefined}>普通出租</Link><Link href="/publish?mode=fast" aria-current={mode==='fast'?'page':undefined}>极速出租</Link></div>
-    <div className="publish-fields"><label>游戏<select disabled value="delta"><option value="delta">三角洲行动</option></select></label><label>{mode==='fast'?'极速比例 · 已锁定':'出租比例'}<input readOnly value="待平台配置"/><small>{mode==='fast'?'极速模式使用固定比例，当前配置尚未取得。':'可用比例以平台配置为准。'}</small></label>
-      <label className="full-field">账号名称<input maxLength={80} value={draft.title} onChange={e=>change('title',e.target.value)} placeholder="概括账号的主要资源"/></label>
-      <label className="full-field">资源说明<textarea rows={5} maxLength={1500} value={draft.resources} onChange={e=>change('resources',e.target.value)} placeholder="填写哈夫币、安全箱及可提供的资源"/></label>
-      <label>资源费用（元）<input inputMode="decimal" value={draft.fee} maxLength={20} onChange={e=>change('fee',e.target.value)} placeholder="填写期望资源费用"/></label>
-      <label>押金（元）<input inputMode="decimal" value={draft.deposit} maxLength={20} onChange={e=>change('deposit',e.target.value)} placeholder="与资源费用分别填写"/></label>
-      <label>每日消耗档位（M）<input inputMode="numeric" value={draft.daily} maxLength={20} onChange={e=>change('daily',e.target.value)} placeholder="填写每日消耗档位"/></label>
-      <label>账号图片<input disabled value="图片提交入口待开放" readOnly/></label>
-    </div>
-    <div className="publish-actions"><button type="button" className="button secondary" onClick={()=>save(draft)}>保存草稿</button><button className="button primary" disabled>提交上架</button><span role="status">{saved}</span></div>
-    <p>上架配置暂未就绪，当前可填写草稿，暂不可提交。费用与可用条件以平台确认为准。</p>
-  </form></ServiceShell>;
-}
-const accountViews={rentals:'租入订单',leased:'出租订单',accounts:'账号管理',favorites:'我的收藏',invite:'我的邀请码'};
-export function AccountWorkspace({view}:{view:string}) {
-  const active=Object.hasOwn(accountViews,view)?view as keyof typeof accountViews:'rentals';
-  return <ServiceShell title={accountViews[active]} description="在这里继续处理你的租赁事务。"><nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key,label])=><Link key={key} href={`/account?view=${key}`} aria-current={active===key?'page':undefined}>{label}</Link>)}</nav>{active==='favorites'?<FavoritesProvider><FavoritesPanel/></FavoritesProvider>:<section className="account-guest"><LockKeyhole size={30}/><h2>登录后查看{accountViews[active]}</h2><p>当前未取得个人信息。</p><Link href="/login" className="button primary">登录 / 注册</Link></section>}</ServiceShell>;
-}
+export { AccountWorkspace, PublishForm } from "./supply-workspaces";
 
 export function HelpPage() {
   return <ServiceShell title="帮助中心" description="了解租号、费用与上架要求。"><div className="help-page-content">
