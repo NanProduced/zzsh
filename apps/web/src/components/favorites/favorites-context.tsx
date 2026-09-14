@@ -1,4 +1,5 @@
 "use client";
+import { useUserSessionStore } from "../session/user-session-provider";
 import {
   createContext,
   useCallback,
@@ -41,16 +42,7 @@ export function useFavorites(): FavoritesApi | null {
 
 function createBrowserStore(): FavoritesStore {
   return new FavoritesStore({
-    session: async (signal) => {
-      const response = await fetch("/api/auth/user/get-session", {
-        credentials: "same-origin",
-        cache: "no-store",
-        signal,
-      });
-      if (!response.ok) throw new Error("session-unavailable");
-      const data = (await response.json().catch(() => null)) as { user?: { id?: unknown } } | null;
-      return { userId: typeof data?.user?.id === "string" ? data.user.id : null };
-    },
+    session: async () => { throw new Error("Shared identity confirmation required"); },
     favoritesPage: async (cursor, signal) => {
       const query = new URLSearchParams({ limit: "100" });
       if (cursor) query.set("cursor", cursor);
@@ -63,6 +55,7 @@ function createBrowserStore(): FavoritesStore {
 }
 
 export function FavoritesProvider({ children }: { children: ReactNode }) {
+  const sharedSession = useUserSessionStore();
   const storeRef = useRef<FavoritesStore | null>(null);
   if (!storeRef.current) storeRef.current = createBrowserStore();
   const store = storeRef.current;
@@ -72,16 +65,18 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
   const loginReturnFocus = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    void store.confirmIdentity();
     const refresh = () => {
-      if (document.visibilityState === "visible") void store.confirmIdentity();
+      const identity = sharedSession.getSnapshot();
+      if (identity.status === "loading" || identity.status === "error") {
+        store.suspendIdentity(identity.status);
+      } else {
+        void store.confirmIdentity({ userId: identity.userId });
+      }
     };
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      document.removeEventListener("visibilitychange", refresh);
-      store.dispose();
-    };
-  }, [store]);
+    const unsubscribe = sharedSession.subscribe(refresh);
+    refresh();
+    return () => { unsubscribe(); store.dispose(); };
+  }, [store, sharedSession]);
 
   const openLogin = useCallback(() => {
     const current = window.location.pathname + window.location.search;
@@ -107,13 +102,13 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
       statusOf: (accountId) => store.statusOf(accountId),
       toggle,
       retry: () => void store.retry(),
-      reload: () => void store.confirmIdentity(),
+      reload: () => void sharedSession.confirm(),
       refresh: () => void store.reloadFavorites(),
       registerSavedRecords: (accountIds) => store.registerSavedRecords(accountIds),
       notice: snapshot.notice,
       dismissNotice: () => store.dismissNotice(),
     }),
-    [snapshot, store, toggle],
+    [snapshot, store, toggle, sharedSession],
   );
 
   return (

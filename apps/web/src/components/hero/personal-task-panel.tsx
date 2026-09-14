@@ -1,7 +1,11 @@
+"use client";
+import { useUserSession } from "../session/user-session-provider";
 import Link from "next/link";
 import { UserRound, Package, Upload, Heart, LayoutGrid, ArrowUpRight } from "lucide-react";
 
 export function PersonalTaskPanel() {
+  const session = useUserSession();
+  const authenticated = session.status === "authenticated";
   return (
     <aside className="personal-panel personal-workspace b1-panel" aria-label="个人事务">
       <div className="b1-visitor">
@@ -10,8 +14,8 @@ export function PersonalTaskPanel() {
           
         </div>
         <div className="b1-visitor-text">
-          <strong className="b1-visitor-title">你好，欢迎来到洲洲</strong>
-          <small className="b1-visitor-desc">登录后查看租赁任务</small>
+          <strong className="b1-visitor-title">{authenticated ? `你好，${session.displayName ?? "洲洲用户"}` : "你好，欢迎来到洲洲"}</strong>
+          <small className="b1-visitor-desc">{authenticated ? "查看你的账号与收藏" : "查看租赁任务与账号收藏"}</small>
         </div>
       </div>
       <div className="b1-shortcuts">
@@ -32,10 +36,10 @@ export function PersonalTaskPanel() {
           <span>我的收藏</span>
         </Link>
       </div>
-      <Link className="b1-signin" href="/login">
-        <span>登录 / 注册</span>
+      {<Link className="b1-signin" href={authenticated ? "/account?view=accounts" : "/login"}>
+        <span>{authenticated ? "进入个人中心" : session.status === "guest" ? "登录 / 注册" : "账户"}</span>
         <ArrowUpRight size={16} />
-      </Link>
+      </Link>}
       <div className="b1-guides">
         <Link href="/help#rental-guide" className="b1-guide-link">租号指南</Link>
         <Link href="/help#publish-guide" className="b1-guide-link">上架指南</Link>

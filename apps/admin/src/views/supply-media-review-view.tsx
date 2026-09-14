@@ -17,6 +17,7 @@ const PURPOSE_LABELS: Record<MediaAssetReview["purpose"], string> = {
   GAME_COVER: "游戏封面",
   SKIN_MEDIA: "皮肤图",
   ITEM_MEDIA: "物品图",
+  ACCOUNT_DISPLAY: "账号展示图",
   ACCOUNT_EVIDENCE: "账号凭证",
 };
 
@@ -194,7 +195,7 @@ export function SupplyMediaReviewView({
           <label className="space-y-1 text-xs"><span className="text-muted-foreground">归属</span>
             <select value={ownershipKind} onChange={(event) => setOwnershipKind(event.target.value as "PLATFORM_CATALOG" | "USER_SUPPLY")} className={selectClass}>
               <option value="PLATFORM_CATALOG">平台目录素材</option>
-              <option value="USER_SUPPLY">用户供给材料（私有）</option>
+              <option value="USER_SUPPLY">用户供给图片与凭证</option>
             </select>
           </label>
         </div>
@@ -281,7 +282,7 @@ export function SupplyMediaReviewView({
               <label className="space-y-1 text-xs block"><span className="text-muted-foreground">原因（驳回 / 隔离必填）</span><input value={reason} onChange={(event) => setReason(event.target.value)} className={inputClass} /></label>
               {canDecide ? (
                 <div className="flex flex-wrap gap-2">
-                  <Button type="button" size="sm" loading={loading} onClick={() => void decide("APPROVE", selected.ownershipKind === "PLATFORM_CATALOG" ? "PUBLIC_DISPLAY" : "PRIVATE_REVIEW")}>通过{selected.ownershipKind === "PLATFORM_CATALOG" ? "并公开" : "（保持私有）"}</Button>
+                  <Button type="button" size="sm" loading={loading} onClick={() => void decide("APPROVE", selected.ownershipKind === "PLATFORM_CATALOG" || selected.purpose === "ACCOUNT_DISPLAY" ? "PUBLIC_DISPLAY" : "PRIVATE_REVIEW")}>通过{selected.ownershipKind === "PLATFORM_CATALOG" || selected.purpose === "ACCOUNT_DISPLAY" ? "并公开" : "（保持私有）"}</Button>
                   <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void decide("APPROVE", "PRIVATE_REVIEW")}>通过但保持私有</Button>
                   <Button type="button" size="sm" variant="danger" loading={loading} onClick={() => void decide("REJECT", "PRIVATE_REVIEW")}>驳回</Button>
                   <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void decide("QUARANTINE", "PRIVATE_REVIEW")}>隔离</Button>
@@ -289,7 +290,7 @@ export function SupplyMediaReviewView({
               ) : <StatusMessage error="当前账号可以查看但不能决定审核。" />}
               {canDecide && selected.reviewState === "APPROVED" ? (
                 <div className="flex flex-wrap gap-2">
-                  {selected.accessClass === "PRIVATE_REVIEW" ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void changeVisibility("PUBLIC_DISPLAY")}>恢复公开展示</Button> : null}
+                  {selected.accessClass === "PRIVATE_REVIEW" && (selected.ownershipKind === "PLATFORM_CATALOG" || selected.purpose === "ACCOUNT_DISPLAY") ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void changeVisibility("PUBLIC_DISPLAY")}>恢复公开展示</Button> : null}
                   {selected.accessClass === "PUBLIC_DISPLAY" ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void changeVisibility("PRIVATE_REVIEW")}>撤销公开</Button> : null}
                   {selected.ownershipKind === "PLATFORM_CATALOG" && selected.purpose === "GAME_COVER" && selected.accessClass === "PUBLIC_DISPLAY" ? (
                     <Button type="button" size="sm" loading={loading} onClick={() => void bindCover()}>设为游戏封面</Button>

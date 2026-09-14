@@ -40,6 +40,8 @@ export type OwnerQuote = PublicQuote & {
   >;
 };
 export type PublicListing = {
+  safeBox?: { code: string; displayName: string | null } | null;
+  termOption?: { code: string; displayName: string | null; dailyConsumption: { quantity: string; unit: "HAFF_BASE" } | null } | null;
   id: string;
   versionId: string;
   title: string;
@@ -188,7 +190,10 @@ export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
     assetId: string;
     position: number;
     purpose: "ACCOUNT_EVIDENCE" | "ACCOUNT_DISPLAY";
-    byteHash: string;
+    byteHash: string | null;
+    reviewState?: "PENDING" | "APPROVED" | "REJECTED" | "UNAVAILABLE";
+    publicDisplayEligible?: boolean;
+    publiclyReadable?: boolean;
   }>;
 };
 export type MySupply = {

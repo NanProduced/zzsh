@@ -102,7 +102,16 @@ export class FavoritesStore {
   // A confirmation refresh never discards same-identity in-flight writes: private state is
   // hidden while the session is unconfirmed, and the identity/version pair is only replaced
   // when the session actually resolves to a different user.
-  async confirmIdentity(): Promise<void> {
+  suspendIdentity(status: "loading" | "error"): void {
+    this.#generation += 1;
+    this.#readSeq += 1;
+    this.#readAbort?.abort();
+    this.#status = status;
+    this.#notice = null;
+    this.#emit();
+  }
+
+  async confirmIdentity(confirmed?: FavoritesSessionResult): Promise<void> {
     const generation = ++this.#generation;
     this.#readAbort?.abort();
     const controller = new AbortController();
@@ -114,7 +123,7 @@ export class FavoritesStore {
     this.#emit();
     let session: FavoritesSessionResult;
     try {
-      session = await this.#transport.session(controller.signal);
+      session = confirmed ?? await this.#transport.session(controller.signal);
     } catch {
       if (generation !== this.#generation) return;
       this.#status = "error";

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { AlertCircle, Check, FileImage, LockKeyhole, Pause, Play, RefreshCw, Send, Trash2, Undo2, Upload } from "lucide-react";
@@ -26,6 +27,8 @@ type MediaEntry = {
   file?: File;
   assetId?: string;
   reviewState?: string;
+  publicDisplayEligible?: boolean;
+  publiclyReadable?: boolean;
   bindingSaved: boolean;
   status: "uploading" | "bound" | "failed";
   intentKey: string;
@@ -180,18 +183,6 @@ function mergeInventory(draft: DraftInput, catalog: PublishingCatalog | null): D
   ];
 }
 
-async function readSessionId(signal?: AbortSignal): Promise<SessionId> {
-  let response: Response;
-  try {
-    response = await fetch("/api/auth/user/get-session", { credentials: "include", cache: "no-store", signal });
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    return undefined;
-  }
-  if (!response.ok) return undefined;
-  const body = (await response.json().catch(() => null)) as { user?: { id?: string } } | null;
-  return typeof body?.user?.id === "string" ? body.user.id : null;
-}
 
 function FieldError({ text }: { text?: string }) {
   return text ? <span className="supply-field-error" role="alert">{text}</span> : null;
@@ -218,11 +209,10 @@ function GroupNav({ errors }: { errors: string[] }) {
 
 export function PublishForm({ mode, accountId: accountIdProp, editRequested = false }: PublishFormProps) {
   const router = useRouter();
+  const sharedSession = useUserSessionStore();
   const mounted = useRef(true);
   const identityRef = useRef<SessionId>(undefined);
   const identityStatusRef = useRef<IdentityState>("checking");
-  const identityRequestRef = useRef(0);
-  const identityControllerRef = useRef<AbortController | null>(null);
   const identityPauseGate = useRef(new IdentityPauseGate());
   const epochRef = useRef(0);
   const controllers = useRef(new Set<AbortController>());
@@ -343,6 +333,9 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       setMedia(bindings.map((binding, index) => ({
         id: `bound-${binding.assetId}-${index}`,
         purpose: binding.purpose,
+        reviewState: binding.reviewState,
+        publicDisplayEligible: binding.publicDisplayEligible,
+        publiclyReadable: binding.publiclyReadable,
         assetId: binding.assetId,
         bindingSaved: true,
         context: { epoch: epochRef.current, identity: identityRef.current, accountId: next.account.id, gameId: next.account.game_id },
@@ -407,56 +400,33 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   }, [currentContext, refreshLatest]);
 
   const syncIdentity = useCallback(async (): Promise<boolean> => {
-    const requestId = ++identityRequestRef.current;
-    identityControllerRef.current?.abort();
-    const controller = new AbortController();
-    identityControllerRef.current = controller;
-    identityPauseGate.current.startCheck();
-    setIdentityPhase("checking");
-    try {
-      const next = await readSessionId(controller.signal);
-      if (!mounted.current || requestId !== identityRequestRef.current || controller.signal.aborted) return false;
-      if (next === undefined) {
-        identityPauseGate.current.markFailed();
-        setAuthRequired(true);
-        setNotice("暂时无法确认登录身份，当前资料仍保留在本页；请重试身份确认。确认期间不会继续发送保存或上传请求。");
-        setIdentityPhase("failed");
-        return false;
-      }
-      const previous = identityRef.current;
-      identityRef.current = next;
-      if (previous !== undefined && previous !== next) {
-        invalidateContext("登录身份已变化，上一位用户的发布资料已从本页清除。", !next);
-        identityPauseGate.current.markConfirmed();
-        router.replace(mode === "fast" ? "/publish?mode=fast" : "/publish");
-      } else {
-        identityPauseGate.current.markConfirmed();
-      }
-      setAuthRequired(!next);
-      setIdentityPhase("confirmed");
-      return true;
-    } catch (failure) {
-      if (isAbort(failure) || !mounted.current || requestId !== identityRequestRef.current) return false;
-      identityPauseGate.current.markFailed();
-      setAuthRequired(true);
-      setNotice("暂时无法确认登录身份，当前资料仍保留在本页；请重试身份确认。确认期间不会继续发送保存或上传请求。");
-      setIdentityPhase("failed");
+    const snapshot = sharedSession.getSnapshot();
+    if (snapshot.status === "loading" || snapshot.status === "error") {
+      if (snapshot.status === "error") identityPauseGate.current.markFailed();
+      else identityPauseGate.current.startCheck();
+      setIdentityPhase(snapshot.status === "loading" ? "checking" : "failed");
       return false;
-    } finally {
-      if (identityControllerRef.current === controller) identityControllerRef.current = null;
     }
-  }, [invalidateContext]);
+    const next = snapshot.userId;
+    const previous = identityRef.current;
+    identityRef.current = next;
+    if (previous !== undefined && previous !== next) {
+      invalidateContext("登录身份已变化，旧账号资料已清除。", !next);
+      router.replace(mode === "fast" ? "/publish?mode=fast" : "/publish");
+    }
+    identityPauseGate.current.markConfirmed();
+    setAuthRequired(!next);
+    setIdentityPhase("confirmed");
+    return true;
+  }, [sharedSession, invalidateContext, router, mode]);
 
   useEffect(() => {
     mounted.current = true;
     void syncIdentity();
     const onFocus = () => { void syncIdentity(); };
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("visibilitychange", onFocus);
+    const unsubscribeIdentity = sharedSession.subscribe(onFocus);
     return () => {
       mounted.current = false;
-      identityRequestRef.current += 1;
-      identityControllerRef.current?.abort();
       for (const controller of controllers.current) controller.abort();
       controllers.current.clear();
       pendingKeys.current.clear();
@@ -464,10 +434,9 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       uploadQueue.current = Promise.resolve();
       cancelledMedia.current.clear();
       identityPauseGate.current.cancel();
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("visibilitychange", onFocus);
+      unsubscribeIdentity();
     };
-  }, [syncIdentity]);
+  }, [syncIdentity, sharedSession]);
 
   useEffect(() => {
     if (!draftDirty || !editing || identityState !== "confirmed") return;
@@ -543,6 +512,9 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
           setMedia((loaded.version?.declaration.mediaBindings ?? []).map((binding, index) => ({
             id: `bound-${binding.assetId}-${index}`,
             purpose: binding.purpose,
+        reviewState: binding.reviewState,
+        publicDisplayEligible: binding.publicDisplayEligible,
+        publiclyReadable: binding.publiclyReadable,
              assetId: binding.assetId,
              bindingSaved: true,
              context: { epoch: epochRef.current, identity: identityRef.current, accountId: loaded.account.id, gameId: loaded.account.game_id },
@@ -1111,7 +1083,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   };
 
   if (identityState === "checking") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在确认登录身份</h2><p>确认期间暂不展示私人发布资料，也不会继续发送保存、报价或上传请求。</p></section></ServiceShell>;
-  if (identityState === "failed") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、报价或上传请求。</p><button type="button" className="button secondary" onClick={() => void syncIdentity()}>重试身份确认</button></section></ServiceShell>;
+  if (identityState === "failed") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、报价或上传请求。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重试身份确认</button></section></ServiceShell>;
 
   const fieldErrors = error?.details ?? [];
   const fieldError = (path: string) => {
@@ -1133,7 +1105,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     : item.status === "failed"
       ? item.error ?? "上传未完成"
       : item.reviewState
-        ? `${item.bindingSaved ? "已保存" : "已上传，待保存"} · ${mediaReviewLabel(item.reviewState)}`
+        ? `${item.bindingSaved ? "已保存" : "已上传，待保存"} · ${mediaReviewLabel(item.reviewState)}${item.publiclyReadable ? " · 当前公开展示" : item.publicDisplayEligible ? " · 图片可展示，账号尚未公开" : ""}`
         : item.bindingSaved ? "已保存，审核状态待核" : "已上传，待保存；审核状态待核";
 
   return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。">
@@ -1227,6 +1199,7 @@ export function AccountWorkspace({ view, accountId }: { view: string; accountId?
 
 function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
   const router = useRouter();
+  const sharedSession = useUserSessionStore();
   const [rows, setRows] = useState<AccountRow[]>([]);
   const [detail, setDetail] = useState<MySupply | null>(null);
   const [latest, setLatest] = useState<MySupply | null>(null);
@@ -1242,8 +1215,6 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
   const epoch = useRef(0);
   const identity = useRef<SessionId>(undefined);
   const identityStatusRef = useRef<IdentityState>("checking");
-  const identityRequestRef = useRef(0);
-  const identityControllerRef = useRef<AbortController | null>(null);
   const identityPauseGate = useRef(new IdentityPauseGate());
   const controllers = useRef(new Set<AbortController>());
   const pendingKeys = useRef(new Map<string, { fingerprint: string; key: string }>());
@@ -1304,45 +1275,25 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     setAuthRequired(requireAuth);
   }, []);
   const syncIdentity = useCallback(async (): Promise<boolean> => {
-    const requestId = ++identityRequestRef.current;
-    identityControllerRef.current?.abort();
-    const controller = new AbortController();
-    identityControllerRef.current = controller;
-    identityPauseGate.current.startCheck();
-    setIdentityPhase("checking");
-    try {
-      const next = await readSessionId(controller.signal);
-      if (!mounted.current || requestId !== identityRequestRef.current || controller.signal.aborted) return false;
-      if (next === undefined) {
-        identityPauseGate.current.markFailed();
-        setAuthRequired(true);
-        setNotice("暂时无法确认登录身份，当前账号状态仍保留；请重试身份确认。确认期间不会继续读取或修改账号。");
-        setIdentityPhase("failed");
-        return false;
-      }
-      const previous = identity.current;
-      identity.current = next;
-      if (previous !== undefined && previous !== next) {
-        invalidateContext("登录身份已变化，上一位用户的账号状态已从本页清除。", !next);
-        identityPauseGate.current.markConfirmed();
-        if (accountIdProp) router.replace("/account?view=accounts");
-      } else {
-        identityPauseGate.current.markConfirmed();
-      }
-      setAuthRequired(!next);
-      setIdentityPhase("confirmed");
-      return true;
-    } catch (failure) {
-      if (isAbort(failure) || !mounted.current || requestId !== identityRequestRef.current) return false;
-      identityPauseGate.current.markFailed();
-      setAuthRequired(true);
-      setNotice("暂时无法确认登录身份，当前账号状态仍保留；请重试身份确认。确认期间不会继续读取或修改账号。");
-      setIdentityPhase("failed");
+    const snapshot = sharedSession.getSnapshot();
+    if (snapshot.status === "loading" || snapshot.status === "error") {
+      if (snapshot.status === "error") identityPauseGate.current.markFailed();
+      else identityPauseGate.current.startCheck();
+      setIdentityPhase(snapshot.status === "loading" ? "checking" : "failed");
       return false;
-    } finally {
-      if (identityControllerRef.current === controller) identityControllerRef.current = null;
     }
-  }, [accountIdProp, invalidateContext, router]);
+    const next = snapshot.userId;
+    const previous = identity.current;
+    identity.current = next;
+    if (previous !== undefined && previous !== next) {
+      invalidateContext("登录身份已变化，旧账号资料已清除。", !next);
+      if (accountIdProp) router.replace("/account?view=accounts");
+    }
+    identityPauseGate.current.markConfirmed();
+    setAuthRequired(!next);
+    setIdentityPhase("confirmed");
+    return !(previous !== undefined && previous !== next && accountIdProp);
+  }, [sharedSession, invalidateContext, router, accountIdProp]);
   const load = useCallback(async (requestedId?: string, append = false, cursor?: string) => {
     if (identityStatusRef.current !== "confirmed") return;
     if (!identity.current) {
@@ -1409,24 +1360,20 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       accountRef.current = accountIdProp;
     }
     const onFocus = () => { void syncIdentity().then((confirmed) => { if (confirmed && mounted.current) void load(accountIdProp); }); };
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("visibilitychange", onFocus);
+    const unsubscribeIdentity = sharedSession.subscribe(onFocus);
     void syncIdentity().then((confirmed) => { if (confirmed && mounted.current) void load(accountIdProp); });
     return () => {
       mounted.current = false;
       epoch.current += 1;
-      identityRequestRef.current += 1;
-      identityControllerRef.current?.abort();
       for (const controller of controllers.current) controller.abort();
       controllers.current.clear();
       pendingKeys.current.clear();
       lastRetry.current = null;
       lastActionRetry.current = null;
       identityPauseGate.current.cancel();
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("visibilitychange", onFocus);
+      unsubscribeIdentity();
     };
-  }, [accountIdProp, invalidateContext, load, syncIdentity]);
+  }, [accountIdProp, invalidateContext, load, syncIdentity, sharedSession]);
 
   const reloadDetail = async (replace = false) => {
     const id = accountRef.current;

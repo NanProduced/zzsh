@@ -11,11 +11,8 @@ const navigationLinks:readonly (readonly [string,string])[] = [["首页", "/"], 
 
 function MobileSessionEntry() {
   const session = useUserSession();
-  if (session.status === "loading") {
-    return <p className="sheet-session" role="status">正在确认登录身份…</p>;
-  }
-  if (session.status === "error") {
-    return <button className="button secondary sheet-session" type="button" onClick={session.revalidate}>身份未确认，点此重试</button>;
+  if (session.status === "loading" || session.status === "error") {
+    return <Dialog.Close asChild><Link className="button secondary sheet-session" href="/login">账户</Link></Dialog.Close>;
   }
   if (session.status === "guest") {
     return <Dialog.Close asChild><Link className="button primary site-menu-login" href="/login">登录 / 注册</Link></Dialog.Close>;

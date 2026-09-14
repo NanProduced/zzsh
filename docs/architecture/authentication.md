@@ -21,3 +21,5 @@
 用户会话固定 30 天，Web 只通过 BFF 的 HttpOnly Cookie 持有会话；响应正文不包含原始 token。用户端共享会话模块对 loading、authenticated、guest、error 四态分别呈现，只接受契约的 null 或合法会话；重新确认期间不展示未确认的私人内容，只有确认到不同 userId 才视为身份切换；跨标签事件只触发重新确认，不能代替服务端会话事实。
 
 关键代码位于 apps/api/src/auth/ 与 apps/api/src/bff/。迁移位于 apps/api/migrations/business/；配置及命令见 [开发说明](../development.md)。Admin 的免账号 UI mock 预览已移除，后续使用独立测试账号验收。
+
+用户顶栏、个人快捷面板、发布/我的账号和收藏共享一个会话来源；各业务组件保留独立的对象/请求代次。退出仅在重新确认无会话后完成，跨标签信号只触发服务端重确认。

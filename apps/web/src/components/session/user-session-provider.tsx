@@ -26,6 +26,14 @@ export type UserSessionApi = UserSessionSnapshot & {
   signOut: () => Promise<void>;
 };
 
+const UserSessionStoreContext = createContext<UserSessionStore | null>(null);
+
+export function useUserSessionStore(): UserSessionStore {
+  const store = useContext(UserSessionStoreContext);
+  if (!store) throw new Error("UserSessionProvider is required");
+  return store;
+}
+
 const UserSessionContext = createContext<UserSessionApi | null>(null);
 
 export function useUserSession(): UserSessionApi {
@@ -67,5 +75,5 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
     signOut,
   }), [snapshot, signOut]);
 
-  return <UserSessionContext.Provider value={api}>{children}</UserSessionContext.Provider>;
+  return <UserSessionStoreContext.Provider value={store}><UserSessionContext.Provider value={api}>{children}</UserSessionContext.Provider></UserSessionStoreContext.Provider>;
 }

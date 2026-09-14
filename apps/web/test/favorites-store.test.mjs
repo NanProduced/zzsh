@@ -452,3 +452,25 @@ test('a stale reload cannot overwrite a newer reload result', async () => {
   assert.equal(store.statusOf('account-late'), 'unsaved');
   store.dispose();
 });
+
+
+test("shared identity pause hides state and preserves same-user pending mutation", async () => {
+  let finishWrite;
+  const write = new Promise(resolve => { finishWrite = resolve; });
+  const store = new FavoritesStore({
+    session: async () => { throw new Error("must use shared identity"); },
+    favoritesPage: async () => ({accountIds: [], nextCursor: null}),
+    setFavorite: async () => write,
+  });
+  await store.confirmIdentity({userId:"shared-a"});
+  const pending = store.toggle("account-x", true);
+  store.suspendIdentity("loading");
+  assert.equal(store.getSnapshot().saved.size, 0);
+  store.suspendIdentity("error");
+  await store.confirmIdentity({userId:"shared-a"});
+  finishWrite(); await pending;
+  assert.equal(store.statusOf("account-x"), "saved");
+  store.suspendIdentity("loading");
+  await store.confirmIdentity({userId:"shared-b"});
+  assert.equal(store.statusOf("account-x"), "unsaved");
+});

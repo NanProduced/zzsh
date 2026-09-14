@@ -192,7 +192,7 @@ export type RulesResponse = {
 export type MediaAssetReview = {
   id: string;
   gameId: string;
-  purpose: "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "ACCOUNT_EVIDENCE";
+  purpose: "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE";
   ownershipKind: "PLATFORM_CATALOG" | "USER_SUPPLY";
   ownerUserId: string | null;
   uploadedByRealm: "admin" | "user";

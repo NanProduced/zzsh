@@ -11,21 +11,8 @@ import "./header-footer.css";
 
 function SessionEntry() {
   const session = useUserSession();
-  if (session.status === "loading") {
-    return (
-      <span className="site-login" role="status">
-        <UserRound size={18} aria-hidden="true" />
-        <span>身份确认中</span>
-      </span>
-    );
-  }
-  if (session.status === "error") {
-    return (
-      <button type="button" className="site-login site-session-action" onClick={session.revalidate}>
-        <UserRound size={18} aria-hidden="true" />
-        <span>身份未确认，重试</span>
-      </button>
-    );
+  if (session.status === "loading" || session.status === "error") {
+    return <Link className="site-login" href="/login" aria-label="账户"><UserRound size={18} aria-hidden="true" /><span>账户</span></Link>;
   }
   if (session.status === "guest") {
     return (

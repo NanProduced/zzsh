@@ -5,7 +5,7 @@ import { test } from 'node:test';
 const source = await readFile(new URL('../src/components/supply-workspaces.tsx', import.meta.url), 'utf8');
 
 test('publish writes and queued media stay bound to identity, object and request context', () => {
-  assert.match(source, /identityRequestRef\.current/);
+  assert.match(source, /sharedSession\.subscribe/);
   assert.match(source, /new IdentityPauseGate\(\)/);
   assert.match(source, /waitForIdentity = useCallback/);
   assert.match(source, /identityPauseGate\.current\.cancelWaiters\(\)/);
