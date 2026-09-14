@@ -102,14 +102,14 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | 核心接口 | 输入/结果 |
 |---|---|
 | GET /games/{gameId}/publishing-options | 生效release/generation、租期选项、允许的安全箱/计价选项代码、封存协议正文及digest；不含收价和抽成参数 |
-| GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本 |
+| GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本。号主读取的`declaration.mediaBindings`在既有`assetId/position/purpose/byteHash`上增加只读`reviewState`（`PENDING\|APPROVED\|REJECTED\|UNAVAILABLE`）、`publicDisplayEligible`与`publiclyReadable`。前者只表示素材当前具备 ACCOUNT_DISPLAY+APPROVED+PUBLIC_DISPLAY+公开衍生键；`publiclyReadable`表示`GET /listings/{accountId}/media/{assetId}`此刻会放行：须账号当前可公开（未暂停/未受限/规则有效/当前版本已审核且媒体就绪）且该图绑定在当前公开版本 payload 中。私有凭证、草稿独有图、撤权或暂停后均为 false。不由账号版本 APPROVED 推断。写入草稿仍只接受`assetId/position`，多带只读字段返回400。裁剪回`DraftInput`时只保留`assetId/position`。缺失或不可解析的绑定返回`UNAVAILABLE`且不让整份详情500。 |
 | POST /accounts/{id}/drafts | expectedRevision；首次草稿或从已处理版本复制新草稿。审核中先撤回，切换为草稿立即阻止旧版接单，不改写owner_paused |
 | PUT /accounts/{id}/draft | expectedRevision及title/description/attributes/termOptionCode/pricingOptionCode/inventory/skins/entitlements/mediaBindings；库存为整数基础单位文本或null，媒体只提交assetId/position，不接收价格/号主ID/digest/byteHash |
 | POST /accounts/{id}/quote | expectedRevision；从持久化草稿、当前封存规则、目录和媒体记录生成并保存唯一规范化payload/hash；未知数量、条件、有效期不补零 |
 | POST /accounts/{id}/accept-rules、/submit | expectedRevision、versionId、releaseId、contentHash；接受和提交必须匹配已保存报价及当前release |
 | POST /accounts/{id}/withdraw | expectedRevision、versionId、可选reason；只撤回确切待审版本 |
 | POST /accounts/{id}/pause、/resume | expectedRevision及可选reason；恢复另核审核、规则、身份、保证金资格、占用和媒体，不能解除客服限制 |
-| GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；list支持gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor；不可公开统一404 |
+| GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；list支持可选`q`（NFC+trim，空白视为未传，最长120，NUL拒绝；服务端参数化`ILIKE`且`%/_/\\`按字面量）、gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor。游标绑定规范化后的`q`及其他过滤，更换条件后旧游标400，不混页。`q`只匹配当前可公开版本标题；`rental_account.display_no`从未写入，本轮不搜索编号，也不搜索内部用户ID、登录资料或私人说明。详情在既有quote/attributes上增加`attributes.safe_box_code`、`safeBox{code,displayName}`（现无安全箱名称目录，`displayName`为null）和`termOption{code,displayName,dailyConsumption{quantity,unit=HAFF_BASE}}`，数据取自该公开版本绑定的封存release/term_option，不用当前运营草稿改写；缺字段为null，不默认0。`quote.termSeconds`仍为权威租期；每日消耗只用于租期推算，不是每日保底。不可公开统一404。 |
 | GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定、已审核ACCOUNT_DISPLAY的衍生图，no-store；下架、暂停、限制或规则过期后404 |
 | 管理 GET /listing-reviews、/{accountId} | 按state/after/limit读取显式scope队列，nextCursor接后续after；详情含前版对比与审核/重复线索，不用内部ID作为主要人工入口 |
 | 管理 POST /listing-reviews/{accountId}/decide | expectedRevision、versionId、releaseId、contentHash、APPROVE/REJECT、具体reason；审核/撤回竞争只接受一次有效处理 |
@@ -138,7 +138,7 @@ npm run typecheck
 - `publishing-options`补充允许的vitalityLevels/bearLevels，沿用服务器封存协议和选项代码；不公布内部比例映射。
 - `PUT /api/v1/supply/favorites/{accountId}`：已认证本人、`Idempotency-Key`、`{saved:boolean}`，稳定供给ID，不使用版本ID。首次添加只接受当前公开供给；取消及既有收藏保持本人隔离。缓存只存`accountId/saved`原操作回执，重放不改动当前状态、不重复成功审计。
 - `GET /api/v1/supply/me/favorites?limit=&cursor=`：本人分页；AVAILABLE只含当前PublicListing，UNAVAILABLE为通用“暂不可用、收藏已保留”及null listing，不泄漏原价格、私有原因或资料。游标绑定本人及精确保存时间/ID。
-- Nest用户BFF仍为`/api/bff/user/supply`。Next用户BFF新增`/api/supply/*`，仅允许已实现用户接口、筛选用户Cookie，保留幂等键/受限上传Token；JSON输入64KiB、图片10MiB，输出及读取时间有界。媒体URL仅作本地路径适配，金额原样传输；认证代理共用既有Cookie及有界读取工具，认证规则不变。
+- Nest用户BFF仍为`/api/bff/user/supply`，透传查询串（含`q`、既有gameId/item/skin/cursor）和只读新字段，不自行搜索、重算租期或推断媒体审核状态。Next用户BFF新增`/api/supply/*`，仅允许已实现用户接口、筛选用户Cookie，保留幂等键/受限上传Token；JSON输入64KiB、图片10MiB，输出及读取时间有界。媒体URL仅作本地路径适配，金额原样传输；认证代理共用既有Cookie及有界读取工具，认证规则不变。`GET /listings` 的`q`走查询串，路径白名单无需为搜索新增段。
 - 用户调用DTO和错误恢复位于apps/web/src/lib/supply-types.ts、supply-client.ts；分组接入见[供给表单契约](supply-form-contract.md)。这部分是数据接口，正式市场/详情/发布页面及游客收藏合并仍待UI基线整合。
 
 ## 内容后台：公告、资讯与固定槽位轮播（M3 内容分片）

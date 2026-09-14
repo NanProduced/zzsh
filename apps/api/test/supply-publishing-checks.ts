@@ -1,4 +1,5 @@
 import { runMarketChecks } from "./supply-market-checks";
+import { runQueryContractChecks } from "./supply-query-contract-checks";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
@@ -1130,4 +1131,5 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     },
   );
   await runMarketChecks(o);
+  await runQueryContractChecks(o);
 }

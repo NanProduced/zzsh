@@ -18,6 +18,12 @@ import {
   type QuoteViewer,
 } from "./pricing";
 import {
+  projectOwnerMediaBinding,
+  projectPublicOffer,
+  type BoundTermOption,
+  type PublicMediaRoute,
+} from "./listing-query";
+import {
   conflict,
   ensureOnlyFields,
   invalid,
@@ -846,22 +852,12 @@ export async function restrictListing(
   a.restriction_reason = body.reason;
   await bumpAccount(client, a);
 }
-export async function listingDetail(
+async function evaluatePublication(
   client: PoolClient,
   a: PublishingAccount,
-  viewer: QuoteViewer,
+  v: ListingVersion,
   gate: SupplyGateReader,
-  quoteViewer: QuoteViewer = viewer,
-): Promise<Record<string, unknown>> {
-  const v = a.current_version_id
-    ? await (viewer === "public"
-        ? readCurrentVersion(client, a)
-        : currentVersion(client, a))
-    : null;
-  if (!v) {
-    if (viewer === "public") throw notFound();
-    return { account: a, version: null };
-  }
+): Promise<string[]> {
   const blockers = await publicationBlockers(client, a, v, gate);
   if (v.review_state !== "APPROVED") blockers.push("REVIEW_REQUIRED");
   if (a.owner_paused) blockers.push("OWNER_PAUSED");
@@ -872,6 +868,104 @@ export async function listingDetail(
   } catch {
     blockers.push("CONFIRMATION_OR_MEDIA_REQUIRED");
   }
+  return blockers;
+}
+
+function publicDisplayAssetIds(v: ListingVersion): Set<string> {
+  return new Set(
+    (v.payload?.declaration.mediaBindings ?? [])
+      .filter((m) => m.purpose === "ACCOUNT_DISPLAY")
+      .map((m) => m.assetId),
+  );
+}
+
+async function resolvePublicMediaRoute(
+  client: PoolClient,
+  publicAccount: PublishingAccount,
+  viewed: ListingVersion,
+  viewedBlockers: string[],
+  gate: SupplyGateReader,
+): Promise<PublicMediaRoute> {
+  let listingPublic = false;
+  let live: ListingVersion | null = null;
+  if (publicAccount.current_version_id === viewed.id) {
+    listingPublic = viewedBlockers.length === 0;
+    live = listingPublic ? viewed : null;
+  } else if (publicAccount.current_version_id) {
+    live = await readCurrentVersion(client, publicAccount);
+    listingPublic =
+      (await evaluatePublication(client, publicAccount, live, gate)).length ===
+      0;
+    if (!listingPublic) live = null;
+  }
+  return {
+    listingPublic,
+    displayAssetIds: live ? publicDisplayAssetIds(live) : new Set(),
+    ownerUserId: publicAccount.owner_user_id,
+  };
+}
+
+async function readBoundTermOption(
+  client: PoolClient,
+  v: ListingVersion,
+): Promise<BoundTermOption | null> {
+  if (!v.rule_release_id || !v.term_option_code) return null;
+  const row = (
+    await client.query<BoundTermOption>(
+      `SELECT o.code,o.name,o.daily_consumption::text AS "dailyConsumption" FROM zzsh_supply.rule_release r JOIN zzsh_supply.term_option o ON o.version_id=r.term_version_id WHERE r.id=$1 AND o.code=$2`,
+      [v.rule_release_id, v.term_option_code],
+    )
+  ).rows[0];
+  return row ?? null;
+}
+
+async function readOwnerDeclaration(
+  client: PoolClient,
+  v: ListingVersion,
+  publicRoute: PublicMediaRoute,
+): Promise<Record<string, unknown>> {
+  const declaration = await readDeclaration(client, v);
+  const media = (
+    await client.query<{
+      assetId: string;
+      position: number;
+      purpose: string | null;
+      byteHash: string | null;
+      reviewState: string | null;
+      accessClass: string | null;
+      publicStorageKey: string | null;
+      ownerUserId: string | null;
+    }>(
+      `SELECT m.asset_id AS "assetId",m.position,a.purpose,a.content_hash AS "byteHash",a.review_state AS "reviewState",a.access_class AS "accessClass",a.public_storage_key AS "publicStorageKey",a.owner_user_id AS "ownerUserId" FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position,m.asset_id`,
+      [v.id],
+    )
+  ).rows;
+  return {
+    ...declaration,
+    mediaBindings: media.map((row) =>
+      projectOwnerMediaBinding(row, publicRoute),
+    ),
+  };
+}
+
+export async function listingDetail(
+  client: PoolClient,
+  a: PublishingAccount,
+  viewer: QuoteViewer,
+  gate: SupplyGateReader,
+  quoteViewer: QuoteViewer = viewer,
+  publicAccount: PublishingAccount = a,
+): Promise<Record<string, unknown>> {
+  const v = a.current_version_id
+    ? await (viewer === "public"
+        ? readCurrentVersion(client, a)
+        : currentVersion(client, a))
+    : null;
+  if (!v) {
+    if (viewer === "public") throw notFound();
+    return { account: a, version: null };
+  }
+  const blockers = await evaluatePublication(client, a, v, gate);
   const quote = v.payload
     ? projectQuote(
         {
@@ -884,6 +978,11 @@ export async function listingDetail(
   if (viewer === "public") {
     if (blockers.length) throw notFound();
     const attrs = v.payload!.declaration.attributes;
+    const offer = projectPublicOffer({
+      attributes: attrs,
+      termOptionCode: v.term_option_code,
+      boundTerm: await readBoundTermOption(client, v),
+    });
     const publicAttrs = Object.fromEntries(
       [
         "vit_level",
@@ -894,6 +993,7 @@ export async function listingDetail(
         "login_method_code",
         "region_province",
         "region_city",
+        "safe_box_code",
       ].map((k) => [k, attrs[k] ?? null]),
     );
     return {
@@ -902,6 +1002,8 @@ export async function listingDetail(
       title: v.title,
       description: v.description,
       attributes: publicAttrs,
+      safeBox: offer.safeBox,
+      termOption: offer.termOption,
       presentation: v.presentation,
       quote,
       media: v
@@ -915,6 +1017,13 @@ export async function listingDetail(
         })),
     };
   }
+  const publicRoute = await resolvePublicMediaRoute(
+    client,
+    publicAccount,
+    v,
+    blockers,
+    gate,
+  );
   const decisions = (
     await client.query(
       `SELECT d.id,d.version_id,d.decision,d.reason,d.decided_at,u.name AS reviewer_name FROM zzsh_supply.review_decision d JOIN zzsh_auth_admin."user" u ON u.id=d.reviewer_admin_id JOIN zzsh_supply.listing_version v ON v.id=d.version_id WHERE v.account_id=$1 ORDER BY d.decided_at`,
@@ -948,7 +1057,7 @@ export async function listingDetail(
       revision: v.revision,
       releaseId: v.rule_release_id,
       contentHash: v.content_hash,
-      declaration: await readDeclaration(client, v),
+      declaration: await readOwnerDeclaration(client, v, publicRoute),
       presentation: v.presentation,
       quote,
     },
