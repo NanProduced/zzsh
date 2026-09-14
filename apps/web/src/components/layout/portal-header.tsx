@@ -85,7 +85,7 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { qu
         <input
           type="search"
           aria-label="搜索账号编号或名称"
-          placeholder={compact ? "搜索账号或关键字..." : "搜索三角洲账号编号、干员、皮肤或改枪码..."}
+          placeholder={compact ? "搜索账号或关键字..." : "搜索当前展示账号"}
           maxLength={120}
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
