@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import useEmblaCarousel from "embla-carousel-react";
-import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 export function HeroCarousel() {
   const [reduced, setReduced] = useState(true);
   const [playing, setPlaying] = useState(true);
@@ -47,7 +47,7 @@ export function HeroCarousel() {
   return <div className="hero-carousel" role="region" aria-roledescription="轮播" aria-label="平台指南轮播"
     tabIndex={0} data-current-slide={current + 1} data-autoplay={autoPlaying}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
-    onFocusCapture={(event) => { setFocused(true); if (!(event.target instanceof Element) || !event.target.closest("[data-autoplay-control]")) setPlaying(false); }}
+    onFocusCapture={() => { setFocused(true); setPlaying(false); }}
     onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}
     onKeyDown={(event) => {
       if (event.target !== event.currentTarget) return;
@@ -70,14 +70,12 @@ export function HeroCarousel() {
         {imageFailed && <span className="art-failed">装饰图片加载失败</span>}
       </div>)}
     </div></div>
-    <button className="carousel-arrow carousel-prev" aria-label="上一张幻灯片" onClick={()=>move(-1)}><ChevronLeft size={22}/></button>
-    <button className="carousel-arrow carousel-next" aria-label="下一张幻灯片" onClick={()=>move(1)}><ChevronRight size={22}/></button>
+    <button className="carousel-arrow carousel-prev" aria-label="上一张幻灯片" onClick={()=>move(-1)}><ChevronLeft size={18} aria-hidden="true"/></button>
+    <button className="carousel-arrow carousel-next" aria-label="下一张幻灯片" onClick={()=>move(1)}><ChevronRight size={18} aria-hidden="true"/></button>
     <div className="carousel-controls" aria-label="轮播控制">
       {slides.map((_, index) => <button key={index} className="slide-index" aria-label={`切换到幻灯片 ${index + 1}`}
         aria-current={index === current ? "true" : undefined}
         onClick={() => { setPlaying(false); api?.scrollTo(index, reduced); }}><span /></button>)}
-      <button className="icon-button" data-autoplay-control disabled={reduced} aria-label={reduced ? "减少动态：自动播放已关闭" : playing ? "暂停自动播放" : "开始自动播放"}
-        onClick={() => setPlaying((value) => !value)}>{playing && !reduced ? <Pause size={16} /> : <Play size={16} />}</button>
     </div>
   </div>;
 }
