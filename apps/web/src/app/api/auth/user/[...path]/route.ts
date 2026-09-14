@@ -10,6 +10,7 @@ const UPSTREAM_TIMEOUT_MS = 5_000;
 const ORIGIN_CONFIGURATION_VALID = isHttpOrigin(API_ORIGIN) && isHttpOrigin(WEB_ORIGIN);
 const USER_AUTH_PATHS = new Set([
   "/get-session",
+  "/sign-in/identifier",
   "/sign-in/username",
   "/sign-in/phone-number",
   "/sign-out",
@@ -18,6 +19,8 @@ const USER_AUTH_PATHS = new Set([
   "/phone-number/verify",
   "/phone-number/request-password-reset",
   "/phone-number/reset-password",
+  "/phone-registration/send-otp",
+  "/phone-registration/complete",
   "/identity/status",
   "/identity/verify",
   "/trade-eligibility/check",

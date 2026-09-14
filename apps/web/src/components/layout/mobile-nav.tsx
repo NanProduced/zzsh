@@ -6,16 +6,18 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Menu, X } from "lucide-react";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { useUserSession } from "@/components/session/user-session-provider";
+import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 // Sheet composition using the same modal primitive as shadcn's Radix Sheet.
 const navigationLinks:readonly (readonly [string,string])[] = [["首页", "/"], ["游戏专区", "/#delta-section"], ...serviceLinks.map(s=>[s.title,s.href] as const), ["帮助中心", "/help"]];
 
 function MobileSessionEntry() {
   const session = useUserSession();
+  const authOverlay = useAuthOverlay();
   if (session.status === "loading" || session.status === "error") {
     return <Dialog.Close asChild><Link className="button secondary sheet-session" href="/login">账户</Link></Dialog.Close>;
   }
   if (session.status === "guest") {
-    return <Dialog.Close asChild><Link className="button primary site-menu-login" href="/login">登录 / 注册</Link></Dialog.Close>;
+    return <Dialog.Close asChild><button type="button" className="button primary site-menu-login" onClick={() => authOverlay.open()}>登录 / 注册</button></Dialog.Close>;
   }
   return <div className="sheet-session-account">
     <p className="sheet-session">已登录：{session.displayName ?? "当前用户"}</p>

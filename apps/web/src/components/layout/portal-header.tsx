@@ -6,20 +6,22 @@ import { Search, UserRound, X } from "lucide-react";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useUserSession } from "@/components/session/user-session-provider";
+import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { MobileNav } from "./mobile-nav";
 import "./header-footer.css";
 
 function SessionEntry() {
   const session = useUserSession();
+  const authOverlay = useAuthOverlay();
   if (session.status === "loading" || session.status === "error") {
     return <Link className="site-login" href="/login" aria-label="账户"><UserRound size={18} aria-hidden="true" /><span>账户</span></Link>;
   }
   if (session.status === "guest") {
     return (
-      <Link className="site-login" href="/login">
+      <button type="button" className="site-login" onClick={() => authOverlay.open()} aria-label="登录">
         <UserRound size={18} aria-hidden="true" />
         <span>登录</span>
-      </Link>
+      </button>
     );
   }
   return (

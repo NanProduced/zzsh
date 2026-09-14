@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useUserSessionStore } from "./session/user-session-provider";
+import { useUserSession, useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { AlertCircle, Check, FileImage, LockKeyhole, Pause, Play, RefreshCw, Send, Trash2, Undo2, Upload } from "lucide-react";
@@ -218,6 +218,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   const controllers = useRef(new Set<AbortController>());
   const pendingKeys = useRef(new Map<string, { fingerprint: string; key: string }>());
   const lastRetry = useRef<RetryTask | null>(null);
+  const redirectedGuest = useRef(false);
   const accountRef = useRef<string | undefined>(accountIdProp);
   const loadedAccountRef = useRef<string | undefined>(undefined);
   const routeAccountRef = useRef<string | undefined>(accountIdProp);
@@ -407,6 +408,16 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       setIdentityPhase(snapshot.status === "loading" ? "checking" : "failed");
       return false;
     }
+    if (!snapshot.userId) {
+      setIdentityPhase("checking");
+      if (!redirectedGuest.current) {
+        redirectedGuest.current = true;
+        const target = window.location.pathname + window.location.search;
+        router.replace(`/login?next=${encodeURIComponent(target)}`);
+      }
+      return false;
+    }
+    redirectedGuest.current = false;
     const next = snapshot.userId;
     const previous = identityRef.current;
     identityRef.current = next;
@@ -1190,7 +1201,17 @@ function AccountActionError({ error, onRetry }: { error: SupplyRequestError | nu
 }
 
 export function AccountWorkspace({ view, accountId }: { view: string; accountId?: string }) {
+  const router = useRouter();
+  const session = useUserSession();
   const active = Object.hasOwn(accountViews, view) ? view as keyof typeof accountViews : "rentals";
+  useEffect(() => {
+    if (session.status !== "guest") return;
+    const target = window.location.pathname + window.location.search;
+    router.replace(`/login?next=${encodeURIComponent(target)}`);
+  }, [router, session.status]);
+  if (session.status === "loading") return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。"><section className="account-guest" aria-busy="true"><h2>正在确认登录身份…</h2><p>确认完成前不会读取个人事务。</p></section></ServiceShell>;
+  if (session.status === "error") return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>个人事务仍保持隐藏，不会按游客处理。</p><button type="button" className="button secondary" onClick={session.revalidate}>重试身份确认</button></section></ServiceShell>;
+  if (session.status === "guest") return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在转到登录</h2></section></ServiceShell>;
   return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。">
     <nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key, label]) => <Link key={key} href={`/account?view=${key}${key === "accounts" && accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""}`} aria-current={active === key ? "page" : undefined}>{label}</Link>)}</nav>
     {active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : <section className="account-guest"><LockKeyhole size={30} /><h2>登录后查看{accountViews[active]}</h2><p>登录后即可使用此事务入口。</p><Link href="/login" className="button primary">登录 / 注册</Link></section>}

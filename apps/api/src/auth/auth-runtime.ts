@@ -1,7 +1,7 @@
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import type { INestApplication } from "@nestjs/common";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -16,6 +16,7 @@ import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
+import { setAuditContext, withTransaction } from "./security-core";
 
 type AuthRealmName = "user" | "admin";
 
@@ -36,7 +37,7 @@ export type AuthRuntimeCapabilities = {
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   pool: Pool;
-  fakeSmsOutbox?: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" }>;
+  fakeSmsOutbox?: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>;
   fakeAdminNotificationOutbox?: AdminSecurityNotification[];
   rateLimitState?: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget?: { inFlight: number };
@@ -83,6 +84,7 @@ type AuthHandler = (request: NodeRequest, response: NodeResponse) => Promise<voi
 
 const USER_ALLOWED_PATHS = new Set([
   "/get-session",
+  "/sign-in/identifier",
   "/sign-in/username",
   "/sign-in/phone-number",
   "/sign-out",
@@ -91,6 +93,8 @@ const USER_ALLOWED_PATHS = new Set([
   "/phone-number/verify",
   "/phone-number/request-password-reset",
   "/phone-number/reset-password",
+  "/phone-registration/send-otp",
+  "/phone-registration/complete",
 ]);
 
 const USER_SECURITY_PATHS = new Set([
@@ -116,6 +120,47 @@ const ADMIN_ALLOWED_PATHS = new Set([
 
 const USER_SESSION_EXPIRES_IN_SECONDS = 30 * 24 * 60 * 60;
 const ADMIN_SESSION_EXPIRES_IN_SECONDS = 7 * 24 * 60 * 60;
+const PHONE_REGISTRATION_OTP_TTL_MS = 5 * 60 * 1000;
+const PHONE_REGISTRATION_OTP_COOLDOWN_MS = 60 * 1000;
+const PHONE_REGISTRATION_OTP_MAX_ATTEMPTS = 3;
+const PHONE_REGISTRATION_IDENTIFIER_PREFIX = "phone-registration:";
+
+/** Canonical form used by every phone auth operation: +86 followed by 11 digits. */
+export function normalizeMainlandPhone(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 32) return null;
+  const compact = value.trim().replace(/[\s-]/g, "");
+  const digits = compact.startsWith("+86") ? compact.slice(3) : compact.startsWith("0086") ? compact.slice(4) : compact;
+  return /^1[3-9]\d{9}$/.test(digits) ? `+86${digits}` : null;
+}
+
+function phoneRegistrationIdentifier(phoneNumber: string): string {
+  return `${PHONE_REGISTRATION_IDENTIFIER_PREFIX}${phoneNumber}`;
+}
+
+type IdentifierResolution = "phone-number" | "username" | "ambiguous";
+
+async function resolveSignInIdentifier(pool: Pool, identifier: string): Promise<IdentifierResolution> {
+  const phoneNumber = normalizeMainlandPhone(identifier);
+  const loweredIdentifier = identifier.toLowerCase();
+  const result = await pool.query<{ id: string; username: string | null; phoneNumber: string | null }>(
+    `SELECT "id", "username", "phoneNumber"
+       FROM "zzsh_auth_user"."user"
+      WHERE ("phoneNumber" IS NOT NULL AND "phoneNumber" = $1)
+         OR ("username" IS NOT NULL AND LOWER("username") = $2)`,
+    [phoneNumber, loweredIdentifier],
+  );
+  const phoneMatch = phoneNumber ? result.rows.find((row) => row.phoneNumber === phoneNumber) : undefined;
+  const usernameMatch = result.rows.find((row) => row.username?.toLowerCase() === loweredIdentifier);
+  if (phoneMatch && usernameMatch && phoneMatch.id !== usernameMatch.id) return "ambiguous";
+  if (phoneMatch) return "phone-number";
+  if (usernameMatch) return "username";
+  // Unknown phone-shaped identifiers retain the phone error path without guessing a second account.
+  return phoneNumber ? "phone-number" : "username";
+}
+
+function registrationOtp(): string {
+  return String(randomInt(0, 1_000_000)).padStart(6, "0");
+}
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -289,20 +334,176 @@ async function assertAdminSessionCreationAllowed(pool: Pool, userId: string, API
 
 function buildFakePhoneNumberPlugin(
   phoneNumber: typeof import("better-auth/plugins").phoneNumber,
-  outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" }>,
+  outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
 ) {
   return phoneNumber({
+    phoneNumberValidator: (value) => Boolean(normalizeMainlandPhone(value)),
     sendOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
       outbox.set(target, { code, sentAt: new Date().toISOString(), purpose: "phone-verification" });
     },
     sendPasswordResetOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
       outbox.set(`${target}-request-password-reset`, { code, sentAt: new Date().toISOString(), purpose: "password-reset" });
     },
-    signUpOnVerification: {
-      getTempEmail: (phone: string) => `phone-${createHash("sha256").update(phone).digest("hex")}@phone.zzsh.invalid`,
-      getTempName: () => "洲洲用户",
-    },
   });
+}
+
+function buildPhoneRegistrationPlugin(
+  createAuthEndpoint: typeof import("better-auth/api").createAuthEndpoint,
+  APIError: typeof import("better-auth/api").APIError,
+  setSessionCookie: typeof import("better-auth/cookies").setSessionCookie,
+  pool: Pool,
+  outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
+  fakeSmsEnabled: boolean,
+  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
+) {
+  const bodyOf = (value: unknown): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
+    }
+    return value as Record<string, unknown>;
+  };
+  const phoneFrom = (body: Record<string, unknown>): string => {
+    const phone = normalizeMainlandPhone(body.phoneNumber);
+    if (!phone) throw new APIError("BAD_REQUEST", { message: "Invalid phone number" });
+    return phone;
+  };
+  const passwordFrom = (body: Record<string, unknown>): string => {
+    if (typeof body.password !== "string" || body.password.length === 0) {
+      throw new APIError("BAD_REQUEST", { message: "Invalid password" });
+    }
+    return body.password;
+  };
+  const codeFrom = (body: Record<string, unknown>): string => {
+    if (typeof body.code !== "string" || !/^\d{6}$/.test(body.code)) {
+      throw new APIError("BAD_REQUEST", { message: "Invalid verification code" });
+    }
+    return body.code;
+  };
+  const noStore = { noStore: true } as const;
+
+  return {
+    id: "phone-registration",
+    version: "1.0.0",
+    endpoints: {
+      signInIdentifier: createAuthEndpoint("/sign-in/identifier", { method: "POST", metadata: noStore }, async (ctx) => {
+        const body = bodyOf(ctx.body);
+        const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
+        const password = passwordFrom(body);
+        if (!identifier || identifier.length > 128 || !signInIdentifier.dispatch) {
+          throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
+        }
+        const kind = body.kind === undefined ? undefined : body.kind === "phone" || body.kind === "username" ? body.kind : null;
+        if (kind === null) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
+        return signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind);
+      }),
+      sendPhoneRegistrationOTP: createAuthEndpoint("/phone-registration/send-otp", { method: "POST", metadata: noStore }, async (ctx) => {
+        if (!fakeSmsEnabled) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
+        const phoneNumber = phoneFrom(bodyOf(ctx.body));
+        const identifier = phoneRegistrationIdentifier(phoneNumber);
+        const code = registrationOtp();
+        const now = new Date();
+        await withTransaction(pool, async (client) => {
+          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
+          const previous = await client.query<{ createdAt: Date }>(
+            `SELECT "createdAt" FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1 ORDER BY "createdAt" DESC LIMIT 1 FOR UPDATE`,
+            [identifier],
+          );
+          if (previous.rows[0] && now.getTime() - new Date(previous.rows[0].createdAt).getTime() < PHONE_REGISTRATION_OTP_COOLDOWN_MS) {
+            throw new APIError("TOO_MANY_REQUESTS", { message: "Verification code rate limited" });
+          }
+          await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+          await client.query(
+            `INSERT INTO "zzsh_auth_user"."verification" ("id", "identifier", "value", "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $5)`,
+            [`verification_${randomUUID().replaceAll("-", "")}`, identifier, `${code}:0`, new Date(now.getTime() + PHONE_REGISTRATION_OTP_TTL_MS), now],
+          );
+        });
+        outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
+        return ctx.json({ status: true });
+      }),
+      completePhoneRegistration: createAuthEndpoint("/phone-registration/complete", { method: "POST", metadata: noStore }, async (ctx) => {
+        const body = bodyOf(ctx.body);
+        const phoneNumber = phoneFrom(body);
+        const code = codeFrom(body);
+        const password = passwordFrom(body);
+        if (body.acceptedTerms !== true) throw new APIError("BAD_REQUEST", { message: "Terms must be accepted" });
+        const minPasswordLength = ctx.context.password.config.minPasswordLength;
+        const maxPasswordLength = ctx.context.password.config.maxPasswordLength;
+        if (password.length < minPasswordLength || password.length > maxPasswordLength) {
+          throw new APIError("BAD_REQUEST", { message: "Invalid password" });
+        }
+        const passwordHash = await ctx.context.password.hash(password);
+        const userId = ctx.context.generateId({ model: "user" }) || `user_${randomUUID().replaceAll("-", "")}`;
+        const accountId = ctx.context.generateId({ model: "account" }) || `account_${randomUUID().replaceAll("-", "")}`;
+        const identifier = phoneRegistrationIdentifier(phoneNumber);
+        const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
+        try {
+          const invalidVerification = await withTransaction(pool, async (client) => {
+            await setAuditContext(client, "system", undefined, undefined, requestId);
+            await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
+            const verification = await client.query<{ id: string; value: string; expiresAt: Date }>(
+              `SELECT "id", "value", "expiresAt" FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1 ORDER BY "createdAt" DESC LIMIT 1 FOR UPDATE`,
+              [identifier],
+            );
+            const row = verification.rows[0];
+            if (!row) {
+              return true;
+            }
+            const [storedCode, attemptsText] = row.value.split(":");
+            const attempts = Number.parseInt(attemptsText ?? "0", 10);
+            if (Number.isSafeInteger(attempts) && attempts >= PHONE_REGISTRATION_OTP_MAX_ATTEMPTS) {
+              return true;
+            }
+            if (new Date(row.expiresAt).getTime() <= Date.now()) {
+              await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+              return true;
+            }
+            if (!/^\d{6}$/.test(storedCode ?? "") || !Number.isSafeInteger(attempts)) {
+              await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+              return true;
+            }
+            if (storedCode !== code) {
+              await client.query(`UPDATE "zzsh_auth_user"."verification" SET "value" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id, `${storedCode}:${attempts + 1}`]);
+              return true;
+            }
+            const existing = await client.query(`SELECT 1 FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1 FOR UPDATE`, [phoneNumber]);
+            if (existing.rowCount) throw new APIError("CONFLICT", { message: "Phone number is already registered" });
+            await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+            const now = new Date();
+            const email = `phone-${createHash("sha256").update(phoneNumber).digest("hex")}@phone.zzsh.invalid`;
+            await client.query(
+              `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "emailVerified", "createdAt", "updatedAt", "phoneNumber", "phoneNumberVerified", "suspended") VALUES ($1, $2, $3, false, $4, $4, $5, true, false)`,
+              [userId, "洲洲用户", email, now, phoneNumber],
+            );
+            await client.query(
+              `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, $3, $4, $4)`,
+              [accountId, userId, passwordHash, now],
+            );
+            await client.query(
+              `INSERT INTO "zzsh_iam"."user_identity_state" ("user_id", "account_status", "identity_status", "age_status", "provider", "version", "updated_at") VALUES ($1, 'ACTIVE', 'UNVERIFIED', 'UNKNOWN', 'none', 1, $2)`,
+              [userId, now],
+            );
+            return false;
+          });
+          if (invalidVerification) throw new APIError("BAD_REQUEST", { message: "Invalid verification code" });
+        } catch (error) {
+          if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+            throw new APIError("CONFLICT", { message: "Phone number is already registered" });
+          }
+          throw error;
+        }
+        const user = await ctx.context.internalAdapter.findUserById(userId);
+        if (!user) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create user" });
+        const session = await ctx.context.internalAdapter.createSession(userId);
+        if (!session) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create session" });
+        await setSessionCookie(ctx, { session, user });
+        return ctx.json({ status: true });
+      }),
+    },
+    rateLimit: [
+      { window: 10, max: 3, pathMatcher: (path: string) => path === "/sign-in/identifier" },
+      { window: 60, max: 5, pathMatcher: (path: string) => path.startsWith("/phone-registration/") },
+    ],
+  };
 }
 
 export function loadAuthRuntimeConfig(
@@ -365,12 +566,13 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<void> {
-  const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthMiddleware, isAPIError }, { hashPassword, verifyPassword }] = await Promise.all([
+  const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
     import("@better-auth/drizzle-adapter"),
     import("better-auth/node"),
     import("better-auth/plugins"),
     import("better-auth/api"),
+    import("better-auth/cookies"),
     import("better-auth/crypto"),
   ]);
 
@@ -378,10 +580,11 @@ export async function mountAuthHandlers(
   const adminSchema = createAuthSchema("zzsh_auth_admin");
   const userDatabase = drizzle(options.pool);
   const adminDatabase = drizzle(options.pool);
-  const fakeSmsOutbox = options.fakeSmsOutbox ?? new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" }>();
+  const fakeSmsOutbox = options.fakeSmsOutbox ?? new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>();
   const trustedOrigins = [options.apiOrigin, options.userOrigin, options.adminOrigin];
   // Filled right after the user auth instance exists; the after hook only runs at request time.
   const userSignInApi: { retry?: (signIn: "username" | "phone-number", body: Record<string, unknown>, headers: Headers) => Promise<Response> } = {};
+  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> } = {};
   const legacyHook = (ctx: unknown) => handleUserLegacyAfterHook(ctx as UserSignInHookContext, {
     pool: options.pool,
     hashPassword,
@@ -427,10 +630,18 @@ export async function mountAuthHandlers(
       username({ immutableUsername: true }),
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined, signInIdentifier),
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
     ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : {}),
     hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (!["/sign-in/phone-number", "/phone-number/send-otp", "/phone-number/verify", "/phone-number/request-password-reset", "/phone-number/reset-password"].includes(ctx.path)) return;
+        if (!ctx.body || typeof ctx.body !== "object" || Array.isArray(ctx.body)) return;
+        const phoneNumber = normalizeMainlandPhone((ctx.body as Record<string, unknown>).phoneNumber);
+        if (!phoneNumber) throw new APIError("BAD_REQUEST", { message: "Invalid phone number" });
+        (ctx.body as Record<string, unknown>).phoneNumber = phoneNumber;
+      }),
       after: createAuthMiddleware(legacyHook),
     },
     databaseHooks: {
@@ -453,6 +664,16 @@ export async function mountAuthHandlers(
       },
     },
   });
+
+  signInIdentifier.dispatch = async (identifier, password, headers, kind) => {
+    const phoneNumber = normalizeMainlandPhone(identifier);
+    const resolution = kind === "phone" ? "phone-number" : kind === "username" ? "username" : await resolveSignInIdentifier(options.pool, identifier);
+    if (resolution === "ambiguous") throw new APIError("BAD_REQUEST", { message: "Ambiguous authentication identifier" });
+    const response = resolution === "phone-number"
+      ? await userAuth.api.signInPhoneNumber({ body: { phoneNumber: phoneNumber ?? identifier, password }, headers, asResponse: true })
+      : await userAuth.api.signInUsername({ body: { username: identifier.toLowerCase(), password }, headers, asResponse: true });
+    return response as Response;
+  };
 
   const adminAuth = betterAuth({
     ...common,
