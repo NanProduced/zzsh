@@ -82,7 +82,6 @@ type AuthApi = {
   getSession: (options: { headers: Headers }) => Promise<SessionState>;
   verifyPassword?: (options: { body: { password: string }; headers: Headers }) => Promise<unknown>;
   verifyTOTP?: (options: { body: { code: string }; headers: Headers }) => Promise<unknown>;
-  signInUsername?: (options: { body: { username: string; password: string }; headers: Headers }) => Promise<Record<string, unknown>>;
 };
 
 type AuthLike = { api: AuthApi };
@@ -1316,29 +1315,64 @@ async function completeRecovery(request: NodeRequest, response: NodeResponse, re
   sendSuccess(response, result.response, requestId);
 }
 
-async function legacySignIn(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
-  const body = bodyOf(request);
-  const username = stringField(body, "username", 64);
-  const password = stringField(body, "password", 256);
-  await withTransaction(options.pool, async (client) => {
-    const account = await client.query<{ id: string; userId: string; legacyPasswordMd5: string | null; legacyPasswordVersion: string | null; legacyPasswordSalt: string | null; suspended: boolean }>(
-      `SELECT a."id", a."userId", a."legacyPasswordMd5", a."legacyPasswordVersion", a."legacyPasswordSalt", u."suspended"
-       FROM "zzsh_auth_user"."account" a
-       JOIN "zzsh_auth_user"."user" u ON u."id" = a."userId"
-       WHERE u."username" = $1 AND a."providerId" = 'credential'
-       FOR UPDATE`,
-      [username],
+export type LegacyCredentialOutcome = "retry" | "none";
+
+export type LegacyCredentialLookup = { username: string } | { phoneNumber: string };
+
+/**
+ * Server-side legacy password compatibility, invoked only after the standard sign-in endpoint
+ * has already rejected the credentials. That position guarantees Better Auth's rate limiter and
+ * body validation ran first, so an invalid body or a rate-limited request can never reach this
+ * function. It returns "retry" when the standard sign-in should be executed once more:
+ * - the account still carries a recognized legacy MD5 credential and the supplied password
+ *   verifies: the current hash is written, the legacy columns are cleared and the audit row is
+ *   committed in one transaction, serialized on the account row; or
+ * - the account no longer carries a legacy credential but the supplied password verifies
+ *   against the current hash, which recovers a concurrent first login that lost the upgrade
+ *   race. Every other rejection (wrong password, suspended/inactive account, unknown legacy
+ *   version) stays a rejection and never touches the credential.
+ */
+export async function attemptLegacyCredentialUpgrade(
+  pool: Pool,
+  verifyPassword: PasswordVerifier,
+  hashPassword: PasswordHasher,
+  lookup: LegacyCredentialLookup,
+  password: string,
+  requestId: string,
+): Promise<LegacyCredentialOutcome> {
+  return withTransaction(pool, async (client) => {
+    const account = await client.query<{
+      id: string;
+      userId: string;
+      password: string | null;
+      legacyPasswordMd5: string | null;
+      legacyPasswordVersion: string | null;
+      legacyPasswordSalt: string | null;
+      suspended: boolean;
+      accountStatus: string;
+    }>(
+      `SELECT a."id", a."userId", a."password", a."legacyPasswordMd5", a."legacyPasswordVersion", a."legacyPasswordSalt",
+              u."suspended", COALESCE(s."account_status", 'ACTIVE') AS "accountStatus"
+         FROM "zzsh_auth_user"."account" a
+         JOIN "zzsh_auth_user"."user" u ON u."id" = a."userId"
+         LEFT JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
+        WHERE ${"username" in lookup ? 'u."username" = $1' : 'u."phoneNumber" = $1'} AND a."providerId" = 'credential'
+        FOR UPDATE OF a`,
+      ["username" in lookup ? lookup.username : lookup.phoneNumber],
     );
     const row = account.rows[0];
-    const legacyHash = row?.legacyPasswordVersion === "legacy-md5-v1" && row.legacyPasswordSalt !== null
+    if (!row || row.suspended || row.accountStatus !== "ACTIVE") return "none";
+    if (!row.legacyPasswordMd5) {
+      if (!row.password) return "none";
+      return await verifyPassword(password, row.password) ? "retry" : "none";
+    }
+    const legacyHash = row.legacyPasswordVersion === "legacy-md5-v1" && row.legacyPasswordSalt !== null
       ? createHash("md5").update(password + row.legacyPasswordSalt, "utf8").digest("hex")
-      : row?.legacyPasswordVersion === "legacy-md5-v0"
+      : row.legacyPasswordVersion === "legacy-md5-v0"
         ? createHash("md5").update(password, "utf8").digest("hex")
         : undefined;
-    if (!row || !row.legacyPasswordMd5 || !legacyHash || row.suspended || !sameSecret(row.legacyPasswordMd5, legacyHash)) {
-      throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication failed");
-    }
-    const passwordHash = await options.hashPassword(password);
+    if (!legacyHash || !sameSecret(row.legacyPasswordMd5, legacyHash)) return "none";
+    const passwordHash = await hashPassword(password);
     await setAuditContext(client, "user", row.userId, undefined, requestId);
     const updated = await client.query(
       `UPDATE "zzsh_auth_user"."account"
@@ -1348,17 +1382,10 @@ async function legacySignIn(request: NodeRequest, response: NodeResponse, reques
           AND "legacyPasswordSalt" IS NOT DISTINCT FROM $5`,
       [passwordHash, row.id, row.legacyPasswordMd5, row.legacyPasswordVersion, row.legacyPasswordSalt],
     );
-    if (updated.rowCount !== 1) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Legacy credential was already upgraded");
-    await client.query(`DELETE FROM "zzsh_auth_user"."session" WHERE "userId" = $1`, [row.userId]);
+    if (updated.rowCount !== 1) throw new Error("legacy credential upgrade did not apply");
     await recordAudit(client, { actorType: "user", actorId: row.userId, action: "user.legacy_password.upgraded", objectType: "auth_account", objectId: row.id, outcome: "SUCCESS", requestId });
+    return "retry";
   });
-  if (!options.userAuth.api.signInUsername) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Authentication endpoint unavailable");
-  try {
-    const signIn = await options.userAuth.api.signInUsername({ body: { username, password }, headers: new Headers({ origin: options.userOrigin }) });
-    sendSuccess(response, { ...signIn, legacyUpgraded: true }, requestId);
-  } catch {
-    throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication failed");
-  }
 }
 
 export async function handleAdminSecurity(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {
@@ -1410,29 +1437,9 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
   }
 }
 
-async function handleLegacyUserSignIn(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {
-  const requestId = ensureApiV1RequestId(request);
-  response.setHeader("X-Request-Id", requestId);
-  if (!originAllowed(request, [options.apiOrigin, options.userOrigin])) {
-    sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
-    return;
-  }
-  if (request.method !== "POST") {
-    sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
-    return;
-  }
-  try {
-    await legacySignIn(request, response, requestId, options);
-  } catch (error) {
-    if (error instanceof SecurityApiError) sendError(response, error, requestId);
-    else sendInternalError(response, requestId);
-  }
-}
-
 export function mountAuthSecurityHandlers(app: INestApplication, options: AuthSecurityOptions): void {
   const expressApp = app.getHttpAdapter().getInstance() as {
     use: (path: string, middleware: (request: NodeRequest, response: NodeResponse) => Promise<void>) => void;
   };
   expressApp.use("/api/v1/admin/security", (request, response) => handleAdminSecurity(request, response, options));
-  expressApp.use("/api/v1/auth/user/legacy-sign-in", (request, response) => handleLegacyUserSignIn(request, response, options));
 }

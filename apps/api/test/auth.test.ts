@@ -936,35 +936,50 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
 
     const legacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
     const legacyNow = new Date();
+    const legacyMd5 = createHash("md5").update(LEGACY_PASSWORD).digest("hex");
     await migrationPool.query(
       `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
       [legacyUserId, "Legacy User", "legacy-user@example.invalid", legacyNow, "legacy_user"],
     );
     await migrationPool.query(
       `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, legacyUserId, createHash("md5").update(LEGACY_PASSWORD).digest("hex"), legacyNow],
+      [`account_${randomUUID().replaceAll("-", "")}`, legacyUserId, legacyMd5, legacyNow],
     );
-    const legacyWrong = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "legacy_user", password: "wrong-legacy-password" }, cookieJar(), USER_ORIGIN);
+    const legacyWrong = await request(base, "/api/auth/user/sign-in/username", { username: "legacy_user", password: "wrong-legacy-password" }, cookieJar(), USER_ORIGIN);
     assert.equal(legacyWrong.response.status, 401);
-    const legacyAttempts = await Promise.all([
-      request(base, "/api/v1/auth/user/legacy-sign-in", { username: "legacy_user", password: LEGACY_PASSWORD }, cookieJar(), USER_ORIGIN),
-      request(base, "/api/v1/auth/user/legacy-sign-in", { username: "legacy_user", password: LEGACY_PASSWORD }, cookieJar(), USER_ORIGIN),
-    ]);
-    assert.equal(legacyAttempts.filter((attempt) => attempt.response.status === 200).length, 1);
-    assert.equal(legacyAttempts.filter((attempt) => attempt.response.status >= 400).length, 1);
-    const legacyAccount = await runtimePool.query<{ legacy: string | null; password: string | null }>(
-      `SELECT "legacyPasswordMd5" AS legacy, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
+    const legacyUntouched = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null; upgrades: string }>(
+      `SELECT a."legacyPasswordMd5" AS legacy, a."legacyPasswordVersion" AS version, a."password",
+              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades
+         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
       [legacyUserId],
     );
-    assert.equal(legacyAccount.rows[0]?.legacy, null);
-    assert.notEqual(legacyAccount.rows[0]?.password, null);
-    const legacyAudit = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded'`);
-    assert.equal(legacyAudit.rows[0]?.count, "1");
-    const legacySuccess = legacyAttempts.find((attempt) => attempt.response.status === 200)!;
-    assert.equal(typeof legacySuccess.body?.token, "string");
-    const legacySession = await request(base, "/api/auth/user/get-session", undefined, cookieJar(), USER_ORIGIN, legacySuccess.body?.token as string);
-    assert.equal(legacySession.response.status, 200);
-    assert.equal(legacySession.body?.user?.username, "legacy_user");
+    assert.deepEqual(legacyUntouched.rows[0], { legacy: legacyMd5, version: "legacy-md5-v0", password: null, upgrades: "0" });
+    // Concurrent first logins serialize on the account row; each request still gets a session.
+    const legacyJarA = cookieJar();
+    const legacyJarB = cookieJar();
+    const legacyAttempts = await Promise.all([
+      request(base, "/api/auth/user/sign-in/username", { username: "legacy_user", password: LEGACY_PASSWORD }, legacyJarA, USER_ORIGIN),
+      request(base, "/api/auth/user/sign-in/username", { username: "LEGACY_USER", password: LEGACY_PASSWORD }, legacyJarB, USER_ORIGIN),
+    ]);
+    assert.deepEqual(legacyAttempts.map((attempt) => attempt.response.status), [200, 200]);
+    const legacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; salt: string | null; password: string | null; upgrades: string }>(
+      `SELECT a."legacyPasswordMd5" AS legacy, a."legacyPasswordVersion" AS version, a."legacyPasswordSalt" AS salt, a."password",
+              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades
+         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
+      [legacyUserId],
+    );
+    assert.deepEqual(legacyAccount.rows[0], { legacy: null, version: null, salt: null, password: legacyAccount.rows[0]?.password, upgrades: "1" });
+    assert.equal(typeof legacyAccount.rows[0]?.password, "string");
+    const legacySessionA = await request(base, "/api/auth/user/get-session", undefined, legacyJarA, USER_ORIGIN);
+    assert.equal(legacySessionA.body?.user?.id, legacyUserId);
+    assert.equal(legacySessionA.body?.user?.username, "legacy_user");
+    const legacySessionB = await request(base, "/api/auth/user/get-session", undefined, legacyJarB, USER_ORIGIN);
+    assert.equal(legacySessionB.body?.user?.id, legacyUserId);
+    // A retry after a lost upgrade response uses the now-current password path (case-normalized identifier).
+    const legacyRetryJar = cookieJar();
+    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "Legacy_User", password: LEGACY_PASSWORD }, legacyRetryJar, USER_ORIGIN)).response.status, 200);
+    assert.equal((await request(base, "/api/auth/user/get-session", undefined, legacyRetryJar, USER_ORIGIN)).body?.user?.id, legacyUserId);
+    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "legacy_user", password: "wrong-legacy-password" }, cookieJar(), USER_ORIGIN)).response.status, 401);
 
     const saltedLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
     const saltedLegacySalt = "aB3dE";
@@ -977,15 +992,143 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v1', $4, $5, $5)`,
       [`account_${randomUUID().replaceAll("-", "")}`, saltedLegacyUserId, createHash("md5").update(saltedLegacyPassword + saltedLegacySalt).digest("hex"), saltedLegacySalt, legacyNow],
     );
-    const saltedWrong = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "salted_legacy_user", password: saltedLegacyPassword + "wrong" }, cookieJar(), USER_ORIGIN);
+    const saltedWrong = await request(base, "/api/auth/user/sign-in/username", { username: "salted_legacy_user", password: saltedLegacyPassword + "wrong" }, cookieJar(), USER_ORIGIN);
     assert.equal(saltedWrong.response.status, 401);
-    const saltedSuccess = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "salted_legacy_user", password: saltedLegacyPassword }, cookieJar(), USER_ORIGIN);
+    const saltedSuccess = await request(base, "/api/auth/user/sign-in/username", { username: "salted_legacy_user", password: saltedLegacyPassword }, cookieJar(), USER_ORIGIN);
     assert.equal(saltedSuccess.response.status, 200);
     const saltedLegacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; salt: string | null; password: string | null }>(
       `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "legacyPasswordSalt" AS salt, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
       [saltedLegacyUserId],
     );
     assert.deepEqual(saltedLegacyAccount.rows[0], { legacy: null, version: null, salt: null, password: saltedLegacyAccount.rows[0]?.password });
+    const legacyScope = await runtimePool.query<{ upgraded: string; legacyRemaining: string }>(
+      `SELECT
+        (SELECT count(*)::text FROM "zzsh_auth_user"."account" WHERE "legacyPasswordUpgradedAt" IS NOT NULL AND "userId" = ANY($1::text[])) AS upgraded,
+        (SELECT count(*)::text FROM "zzsh_auth_user"."account" WHERE "legacyPasswordMd5" IS NOT NULL) AS "legacyRemaining"`,
+      [[legacyUserId, saltedLegacyUserId]],
+    );
+    assert.deepEqual(legacyScope.rows[0], { upgraded: "2", legacyRemaining: "0" });
+
+    const unknownLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const unknownLegacyPassword = randomBytes(24).toString("base64url");
+    const unknownLegacyMd5 = createHash("md5").update(unknownLegacyPassword).digest("hex");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
+      [unknownLegacyUserId, "Unknown Legacy", "unknown-legacy@example.invalid", legacyNow, "unknown_legacy"],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v9', NULL, $4, $4)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, unknownLegacyUserId, unknownLegacyMd5, legacyNow],
+    );
+    const unknownLegacyAttempt = await request(base, "/api/auth/user/sign-in/username", { username: "unknown_legacy", password: unknownLegacyPassword }, cookieJar(), USER_ORIGIN);
+    assert.equal(unknownLegacyAttempt.response.status, 401);
+    const unknownLegacyRow = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null; upgrades: string }>(
+      `SELECT a."legacyPasswordMd5" AS legacy, a."legacyPasswordVersion" AS version, a."password",
+              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades
+         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
+      [unknownLegacyUserId],
+    );
+    assert.deepEqual(unknownLegacyRow.rows[0], { legacy: unknownLegacyMd5, version: "legacy-md5-v9", password: null, upgrades: "0" });
+
+    // A body the endpoint schema rejects must never reach the legacy upgrade (the standard
+    // endpoint returns 400 before the compatibility path runs).
+    const invalidLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const invalidLegacyPassword = randomBytes(24).toString("base64url");
+    const invalidLegacyMd5 = createHash("md5").update(invalidLegacyPassword).digest("hex");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
+      [invalidLegacyUserId, "Invalid Legacy", "invalid-legacy@example.invalid", legacyNow, "invalid_legacy"],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, invalidLegacyUserId, invalidLegacyMd5, legacyNow],
+    );
+    const invalidLegacyBody = await request(base, "/api/auth/user/sign-in/username", {
+      username: "invalid_legacy",
+      password: invalidLegacyPassword,
+      rememberMe: "not-a-boolean",
+    }, cookieJar(), USER_ORIGIN);
+    assert.equal(invalidLegacyBody.response.status, 400);
+    const invalidLegacyRow = await runtimePool.query<{ legacy: string | null; password: string | null; upgrades: string; sessions: string }>(
+      `SELECT a."legacyPasswordMd5" AS legacy, a."password",
+              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades,
+              (SELECT count(*)::text FROM "zzsh_auth_user"."session" WHERE "userId" = a."userId") AS sessions
+         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
+      [invalidLegacyUserId],
+    );
+    assert.deepEqual(invalidLegacyRow.rows[0], { legacy: invalidLegacyMd5, password: null, upgrades: "0", sessions: "0" });
+
+    const disabledLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const disabledLegacyPassword = randomBytes(24).toString("base64url");
+    const disabledLegacyMd5 = createHash("md5").update(disabledLegacyPassword).digest("hex");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "suspended") VALUES ($1, $2, $3, $4, $4, $5, true)`,
+      [disabledLegacyUserId, "Disabled Legacy", "disabled-legacy@example.invalid", legacyNow, "disabled_legacy"],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, disabledLegacyUserId, disabledLegacyMd5, legacyNow],
+    );
+    const disabledLegacyJar = cookieJar();
+    const disabledLegacyAttempt = await request(base, "/api/auth/user/sign-in/username", { username: "disabled_legacy", password: disabledLegacyPassword }, disabledLegacyJar, USER_ORIGIN);
+    assert.equal(disabledLegacyAttempt.response.status, 401);
+    assert.equal((await request(base, "/api/auth/user/get-session", undefined, disabledLegacyJar, USER_ORIGIN)).body, null);
+    const disabledLegacyRow = await runtimePool.query<{ legacy: string | null; password: string | null }>(
+      `SELECT "legacyPasswordMd5" AS legacy, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
+      [disabledLegacyUserId],
+    );
+    assert.deepEqual(disabledLegacyRow.rows[0], { legacy: disabledLegacyMd5, password: null });
+
+    const resetLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const resetLegacyPhone = "+8613900000001";
+    const resetLegacyPassword = randomBytes(24).toString("base64url");
+    const resetNextPassword = randomBytes(24).toString("base64url");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "phoneNumber", "phoneNumberVerified") VALUES ($1, $2, $3, $4, $4, $5, $6, true)`,
+      [resetLegacyUserId, "Reset Legacy", "reset-legacy@example.invalid", legacyNow, "reset_legacy", resetLegacyPhone],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, resetLegacyUserId, createHash("md5").update(resetLegacyPassword).digest("hex"), legacyNow],
+    );
+    const legacyResetRequested = await request(base, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: resetLegacyPhone }, cookieJar(), USER_ORIGIN);
+    assert.equal(legacyResetRequested.response.status, 200);
+    const legacyResetDelivery = fakeSmsOutbox.get(`${resetLegacyPhone}-request-password-reset`);
+    assert.ok(legacyResetDelivery);
+    assert.equal((await request(base, "/api/auth/user/phone-number/reset-password", {
+      phoneNumber: resetLegacyPhone,
+      otp: legacyResetDelivery.code,
+      newPassword: resetNextPassword,
+    }, cookieJar(), USER_ORIGIN)).response.status, 200);
+    const resetLegacyRow = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
+      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
+      [resetLegacyUserId],
+    );
+    assert.deepEqual(resetLegacyRow.rows[0], { legacy: null, version: null, password: resetLegacyRow.rows[0]?.password });
+    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "reset_legacy", password: resetLegacyPassword }, cookieJar(), USER_ORIGIN)).response.status, 401);
+    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "reset_legacy", password: resetNextPassword }, cookieJar(), USER_ORIGIN)).response.status, 200);
+
+    const phoneLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const phoneLegacyNumber = "+8613900000002";
+    const phoneLegacySalt = "z9Yw2";
+    const phoneLegacyPassword = randomBytes(24).toString("base64url");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "phoneNumber", "phoneNumberVerified") VALUES ($1, $2, $3, $4, $4, $5, $6, true)`,
+      [phoneLegacyUserId, "Phone Legacy", "phone-legacy@example.invalid", legacyNow, "phone_legacy", phoneLegacyNumber],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v1', $4, $5, $5)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, phoneLegacyUserId, createHash("md5").update(phoneLegacyPassword + phoneLegacySalt).digest("hex"), phoneLegacySalt, legacyNow],
+    );
+    assert.equal((await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: phoneLegacyNumber, password: phoneLegacyPassword + "wrong" }, cookieJar(), USER_ORIGIN)).response.status, 401);
+    const phoneLegacyJar = cookieJar();
+    assert.equal((await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: phoneLegacyNumber, password: phoneLegacyPassword }, phoneLegacyJar, USER_ORIGIN)).response.status, 200);
+    assert.equal((await request(base, "/api/auth/user/get-session", undefined, phoneLegacyJar, USER_ORIGIN)).body?.user?.id, phoneLegacyUserId);
+    const phoneLegacyRow = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
+      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
+      [phoneLegacyUserId],
+    );
+    assert.deepEqual(phoneLegacyRow.rows[0], { legacy: null, version: null, password: phoneLegacyRow.rows[0]?.password });
 
     const legacyRollbackUserId = `user_${randomUUID().replaceAll("-", "")}`;
     const legacyRollbackPassword = randomBytes(24).toString("base64url");
@@ -999,7 +1142,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       [`account_${randomUUID().replaceAll("-", "")}`, legacyRollbackUserId, legacyRollbackHash, legacyNow],
     );
     await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    const failedLegacyUpgrade = await request(base, "/api/v1/auth/user/legacy-sign-in", { username: "legacy_rollback", password: legacyRollbackPassword }, cookieJar(), USER_ORIGIN);
+    const failedLegacyUpgrade = await request(base, "/api/auth/user/sign-in/username", { username: "legacy_rollback", password: legacyRollbackPassword }, cookieJar(), USER_ORIGIN);
     assert.equal(failedLegacyUpgrade.response.status, 500);
     const rollbackLegacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
       `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
@@ -1007,6 +1150,63 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     );
     assert.deepEqual(rollbackLegacyAccount.rows[0], { legacy: legacyRollbackHash, version: "legacy-md5-v0", password: null });
     await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
+
+    // Rate limiting runs before the sign-in endpoint, so a rate-limited request can never reach
+    // the legacy upgrade. The isolated app opts into the installed Better Auth limiter; the main
+    // app keeps the library default (disabled outside production) for the remaining cases.
+    const rateLimitLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
+    const rateLimitLegacyPassword = randomBytes(24).toString("base64url");
+    const rateLimitLegacyMd5 = createHash("md5").update(rateLimitLegacyPassword).digest("hex");
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
+      [rateLimitLegacyUserId, "Rate Limited Legacy", "rate-limited-legacy@example.invalid", legacyNow, "rate_limit_legacy"],
+    );
+    await migrationPool.query(
+      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
+      [`account_${randomUUID().replaceAll("-", "")}`, rateLimitLegacyUserId, rateLimitLegacyMd5, legacyNow],
+    );
+    const rateLimitPool = poolFor(resources.runtime, resources.databaseName, "zzsh-m3-auth-rate-limit", 2);
+    const rateLimitApp = await createApp({
+      health: {
+        dependencies: {
+          postgres: { check: async () => undefined, close: async () => undefined },
+          redis: { check: async () => undefined, close: async () => undefined },
+        },
+      },
+      database: { pool: rateLimitPool },
+      auth: {
+        ...loadAuthRuntimeConfig({
+          AUTH_API_ORIGIN: API_ORIGIN,
+          AUTH_USER_ORIGIN: USER_ORIGIN,
+          AUTH_ADMIN_ORIGIN: ADMIN_ORIGIN,
+          AUTH_USER_SECRET: randomBytes(32).toString("hex"),
+          AUTH_ADMIN_SECRET: randomBytes(32).toString("hex"),
+        }),
+        pool: rateLimitPool,
+        userRateLimit: { enabled: true },
+      },
+    });
+    await rateLimitApp.listen(0, "127.0.0.1");
+    const rateLimitBase = await rateLimitApp.getUrl();
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const burn = await request(rateLimitBase, "/api/auth/user/sign-in/username", { username: "rate_limit_burn", password: "wrong-password" }, cookieJar(), USER_ORIGIN);
+        assert.equal(burn.response.status, 401);
+      }
+      const limited = await request(rateLimitBase, "/api/auth/user/sign-in/username", { username: "rate_limit_legacy", password: rateLimitLegacyPassword }, cookieJar(), USER_ORIGIN);
+      assert.equal(limited.response.status, 429);
+    } finally {
+      await rateLimitApp.close();
+      await rateLimitPool.end().catch(() => undefined);
+    }
+    const rateLimitRow = await runtimePool.query<{ legacy: string | null; password: string | null; upgrades: string; sessions: string }>(
+      `SELECT a."legacyPasswordMd5" AS legacy, a."password",
+              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades,
+              (SELECT count(*)::text FROM "zzsh_auth_user"."session" WHERE "userId" = a."userId") AS sessions
+         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
+      [rateLimitLegacyUserId],
+    );
+    assert.deepEqual(rateLimitRow.rows[0], { legacy: rateLimitLegacyMd5, password: null, upgrades: "0", sessions: "0" });
 
     const firstBootstrap = await request(base, "/api/v1/admin/security/bootstrap", {
       bootstrapSecret: ADMIN_BOOTSTRAP_SECRET,

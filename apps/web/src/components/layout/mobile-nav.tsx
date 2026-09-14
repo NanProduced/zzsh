@@ -5,8 +5,30 @@ import { serviceLinks } from "../../lib/service-navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Menu, X } from "lucide-react";
 import { BrandLogo } from "@/components/brand/brand-logo";
+import { useUserSession } from "@/components/session/user-session-provider";
 // Sheet composition using the same modal primitive as shadcn's Radix Sheet.
 const navigationLinks:readonly (readonly [string,string])[] = [["首页", "/"], ["游戏专区", "/#delta-section"], ...serviceLinks.map(s=>[s.title,s.href] as const), ["帮助中心", "/help"]];
+
+function MobileSessionEntry() {
+  const session = useUserSession();
+  if (session.status === "loading") {
+    return <p className="sheet-session" role="status">正在确认登录身份…</p>;
+  }
+  if (session.status === "error") {
+    return <button className="button secondary sheet-session" type="button" onClick={session.revalidate}>身份未确认，点此重试</button>;
+  }
+  if (session.status === "guest") {
+    return <Dialog.Close asChild><Link className="button primary site-menu-login" href="/login">登录 / 注册</Link></Dialog.Close>;
+  }
+  return <div className="sheet-session-account">
+    <p className="sheet-session">已登录：{session.displayName ?? "当前用户"}</p>
+    <div className="sheet-session-actions">
+      <Dialog.Close asChild><Link className="button secondary" href="/account">个人中心</Link></Dialog.Close>
+      <button className="button secondary" type="button" onClick={() => { void session.signOut().catch(() => undefined); }}>退出登录</button>
+    </div>
+  </div>;
+}
+
 export function MobileNav() {
   const [open, setOpen] = useState(false);
   return <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -16,8 +38,8 @@ export function MobileNav() {
       <Dialog.Content className="nav-sheet site-nav-sheet">
         <div className="sheet-heading"><BrandLogo height={38} /><Dialog.Close className="icon-button" aria-label="关闭菜单"><X size={22} /></Dialog.Close></div>
         <Dialog.Title className="sr-only">移动端菜单</Dialog.Title>
-        <Dialog.Description>访客 · 公开浏览无需登录</Dialog.Description>
-        <Dialog.Close asChild><Link className="button primary site-menu-login" href="/login">登录 / 注册</Link></Dialog.Close>
+        <Dialog.Description>公开浏览无需登录，交易操作需要登录。</Dialog.Description>
+        <MobileSessionEntry />
         <nav aria-label="移动端主导航">
           {navigationLinks.map(([label, href]) =>
             <Dialog.Close key={label} asChild><Link href={href}>{label}</Link></Dialog.Close>)}

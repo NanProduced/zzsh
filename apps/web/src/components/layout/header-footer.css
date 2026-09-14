@@ -20,6 +20,15 @@
 .site-search-clear { display:grid; place-items:center; width:32px; color:var(--color-text-secondary); }
 .site-header-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }
 .site-header .site-login { display:flex; align-items:center; gap:6px; min-height:44px; font-size:13px; white-space:nowrap; }
+.site-session { display:flex; align-items:center; gap:8px; min-width:0; }
+.site-session .site-session-name { max-width:120px; overflow:hidden; text-overflow:ellipsis; }
+.site-session-action { background:none; border:0; padding:0; color:inherit; font:inherit; cursor:pointer; }
+.site-signout { min-height:44px; padding-inline:6px; font-size:12px; color:var(--color-text-secondary); background:none; border:0; cursor:pointer; }
+.site-signout:hover { color:var(--color-text-primary); text-decoration:underline; }
+.sheet-session { margin:12px 0 0; font-size:13px; color:var(--color-text-secondary); }
+.sheet-session-account { margin-top:12px; display:flex; flex-direction:column; gap:10px; }
+.sheet-session-actions { display:flex; flex-wrap:wrap; gap:10px; }
+.sheet-session-actions .button { flex:1 1 auto; }
 .site-header .site-publish { min-height:44px; padding-inline:14px; white-space:nowrap; }
 .site-header .mobile-menu { display:none; width:44px; height:44px; }
 .site-header[data-compact="true"] .site-header-bar { min-height:64px; padding-block:8px; box-shadow:0 10px 35px #0003; }

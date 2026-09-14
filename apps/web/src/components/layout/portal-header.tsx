@@ -5,8 +5,48 @@ import { motion, useMotionValueEvent, useScroll } from "motion/react";
 import { Search, UserRound, X } from "lucide-react";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { useUserSession } from "@/components/session/user-session-provider";
 import { MobileNav } from "./mobile-nav";
 import "./header-footer.css";
+
+function SessionEntry() {
+  const session = useUserSession();
+  if (session.status === "loading") {
+    return (
+      <span className="site-login" role="status">
+        <UserRound size={18} aria-hidden="true" />
+        <span>身份确认中</span>
+      </span>
+    );
+  }
+  if (session.status === "error") {
+    return (
+      <button type="button" className="site-login site-session-action" onClick={session.revalidate}>
+        <UserRound size={18} aria-hidden="true" />
+        <span>身份未确认，重试</span>
+      </button>
+    );
+  }
+  if (session.status === "guest") {
+    return (
+      <Link className="site-login" href="/login">
+        <UserRound size={18} aria-hidden="true" />
+        <span>登录</span>
+      </Link>
+    );
+  }
+  return (
+    <span className="site-session">
+      <Link className="site-login" href="/account" title={session.displayName ?? "个人中心"}>
+        <UserRound size={18} aria-hidden="true" />
+        <span className="site-session-name">{session.displayName ?? "个人中心"}</span>
+      </Link>
+      <button type="button" className="site-signout" onClick={() => { void session.signOut().catch(() => undefined); }}>
+        退出
+      </button>
+    </span>
+  );
+}
 
 // Adapted from Aceternity Resizable Navbar; keep the search mounted across states.
 export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean }) {
@@ -52,7 +92,7 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { qu
         <button className="site-search-submit" type="submit">搜索</button>
       </form>
       <div className="site-header-actions">
-        <Link className="site-login" href="/login"><UserRound size={18} /><span>登录</span></Link>
+        <SessionEntry />
         <ThemeToggle /><MobileNav />
       </div>
     </motion.div>

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { ThemeProvider } from "@/components/theme-provider";
+import { UserSessionProvider } from "@/components/session/user-session-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -53,7 +54,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body className="min-h-screen bg-[var(--color-bg-canvas)] text-[var(--color-text-primary)] antialiased selection:bg-[var(--color-accent-brand)] selection:text-black">
         <ThemeProvider>
-          {children}
+          <UserSessionProvider>{children}</UserSessionProvider>
         </ThemeProvider>
       </body>
     </html>

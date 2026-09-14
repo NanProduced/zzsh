@@ -4,20 +4,26 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { safeReturnTo } from "@/lib/safe-return";
 import {
+  publishUserSessionChange,
+  useUserSession,
+} from "@/components/session/user-session-provider";
+import {
   accountStatusLabel,
-  ageStatusLabel,
   cancellationFailureMessage,
-  identityStatusLabel,
-  protectedActionReason,
-  providerAvailability,
   type UserIdentitySnapshot,
 } from "../user-account-status";
 import { BrandLogo } from "@/components/brand/brand-logo";
 
 type Mode = "login" | "register" | "recover";
-type Account = { name?: string; email?: string; username?: string };
+type Account = { id?: string; name?: string; email?: string; username?: string };
 type SessionResponse = { user?: Account; session?: { expiresAt?: string } } | null;
 type CancellationResponse = { status: UserIdentitySnapshot["accountStatus"] };
+type AccountDetails = {
+  userId: string;
+  account: Account;
+  expiresAt?: string;
+  identity: UserIdentitySnapshot;
+};
 
 class WebAuthError extends Error {
   constructor(readonly status: number, readonly code: string) {
@@ -25,7 +31,7 @@ class WebAuthError extends Error {
   }
 }
 
-async function webAuthRequest<T>(path: string, body?: Record<string, unknown>): Promise<T> {
+async function webAuthRequest<T>(path: string, body?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`/api/auth/user${path}`, {
@@ -33,6 +39,7 @@ async function webAuthRequest<T>(path: string, body?: Record<string, unknown>): 
       credentials: "include",
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
   } catch {
     throw new WebAuthError(0, "NETWORK_ERROR");
@@ -79,11 +86,17 @@ function Status({ error, success }: { error?: string; success?: string }) {
 
 export default function LoginPage() {
   const router = useRouter();
+  const session = useUserSession();
   const returnRef = useRef<string | undefined>(undefined);
+  // Tracks the identity the page is bound to, so late responses and private actions never
+  // cross an identity switch.
+  const currentUserIdRef = useRef<string | null>(null);
+  currentUserIdRef.current = session.status === "authenticated" ? session.userId : null;
   const [mode, setMode] = useState<Mode>("login");
-  const [account, setAccount] = useState<Account | null>(null);
-  const [expiresAt, setExpiresAt] = useState<string>();
-  const [loading, setLoading] = useState(true);
+  const [details, setDetails] = useState<AccountDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
   const [identifier, setIdentifier] = useState("");
@@ -91,85 +104,93 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
-  const [phone, setPhone] = useState("");
-  const [otp, setOtp] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [recoveryReady, setRecoveryReady] = useState(false);
-  const [identity, setIdentity] = useState<UserIdentitySnapshot>();
-  const [identityLoading, setIdentityLoading] = useState(false);
   const [cancelLoading, setCancelLoading] = useState(false);
-  const [accountClosed, setAccountClosed] = useState(false);
 
+  // Private details are read only for the identity the shared session already confirmed. The
+  // local read is aborted on identity switch, and a response for a different user is discarded.
   useEffect(() => {
-    void webAuthRequest<SessionResponse>("/get-session").then((session) => {
-      setAccount(session?.user ?? null);
-      setExpiresAt(session?.session?.expiresAt);
-    }).catch(() => undefined).finally(() => setLoading(false));
-  }, []);
+    if (session.status !== "authenticated" || !session.userId) {
+      setDetails(null);
+      setDetailsLoading(false);
+      setDetailsError(false);
+      return;
+    }
+    const userId = session.userId;
+    let active = true;
+    const controller = new AbortController();
+    setDetails(null);
+    setDetailsLoading(true);
+    setDetailsError(false);
+    void (async () => {
+      try {
+        const current = await webAuthRequest<SessionResponse>("/get-session", undefined, controller.signal);
+        const identityState = await webAuthRequest<UserIdentitySnapshot>("/identity/status", undefined, controller.signal);
+        if (!active || controller.signal.aborted) return;
+        if (current?.user?.id !== userId) return;
+        setDetails({
+          userId,
+          account: current.user,
+          expiresAt: current.session?.expiresAt,
+          identity: identityState,
+        });
+      } catch (failure) {
+        if (!active || controller.signal.aborted) return;
+        if (failure instanceof WebAuthError && failure.status === 401) {
+          session.revalidate();
+          return;
+        }
+        setDetailsError(true);
+      } finally {
+        if (active && !controller.signal.aborted) setDetailsLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [session.status, session.userId, session.identityVersion]);
 
   useEffect(() => {
     returnRef.current = safeReturnTo(new URLSearchParams(window.location.search).get("next"));
   }, []);
 
+  // Notices from the previous identity must not follow a real identity switch on this page.
+  const previousUserIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!account || accountClosed) {
-      setIdentity(undefined);
-      setIdentityLoading(false);
-      return;
+    const currentUserId = session.status === "authenticated" ? session.userId : null;
+    if (!currentUserId) return;
+    const previousUserId = previousUserIdRef.current;
+    previousUserIdRef.current = currentUserId;
+    if (previousUserId !== null && previousUserId !== currentUserId) {
+      setError(undefined);
+      setSuccess(undefined);
     }
-    let active = true;
-    setIdentityLoading(true);
-    void webAuthRequest<UserIdentitySnapshot>("/identity/status").then((state) => {
-      if (active) setIdentity(state);
-    }).catch(() => {
-      if (active) setIdentity(undefined);
-    }).finally(() => {
-      if (active) setIdentityLoading(false);
-    });
-    return () => { active = false; };
-  }, [account, accountClosed]);
+  }, [session.status, session.userId]);
 
   const resetNotice = () => { setError(undefined); setSuccess(undefined); };
-  const chooseMode = (next: Mode) => { resetNotice(); setMode(next); if (next !== "recover") setRecoveryReady(false); };
+  const chooseMode = (next: Mode) => { resetNotice(); setMode(next); };
 
   const submitLogin = async () => {
     const value = identifier.trim();
     const result = value.startsWith("+")
-      ? await webAuthRequest<{ user?: Account; session?: { expiresAt?: string } }>("/sign-in/phone-number", { phoneNumber: value, password })
-      : await webAuthRequest<{ user?: Account; session?: { expiresAt?: string } }>("/sign-in/username", { username: value, password });
-    setAccount(result.user ?? null);
-    setExpiresAt(result.session?.expiresAt);
-    setAccountClosed(false);
+      ? await webAuthRequest<{ user?: Account }>("/sign-in/phone-number", { phoneNumber: value, password })
+      : await webAuthRequest<{ user?: Account }>("/sign-in/username", { username: value, password });
+    if (!result.user) throw new WebAuthError(500, "INTERNAL_ERROR");
     setPassword("");
     setSuccess("登录成功，服务端会话已建立。");
+    session.revalidate();
+    publishUserSessionChange();
     if (returnRef.current) router.replace(returnRef.current);
   };
 
   const submitRegister = async () => {
-    const result = await webAuthRequest<{ user?: Account; session?: { expiresAt?: string } }>("/sign-up/email", { email: email.trim(), name: name.trim(), username: username.trim(), password });
-    setAccount(result.user ?? null);
-    setExpiresAt(result.session?.expiresAt);
-    setAccountClosed(false);
+    const result = await webAuthRequest<{ user?: Account }>("/sign-up/email", { email: email.trim(), name: name.trim(), username: username.trim(), password });
+    if (!result.user) throw new WebAuthError(500, "INTERNAL_ERROR");
     setPassword("");
     setSuccess("账号已创建并登录。");
+    session.revalidate();
+    publishUserSessionChange();
     if (returnRef.current) router.replace(returnRef.current);
-  };
-
-  const requestRecoveryCode = async () => {
-    await webAuthRequest("/phone-number/request-password-reset", { phoneNumber: phone.trim() });
-    setRecoveryReady(true);
-    setSuccess("验证码请求已提交。当前页面不展示 fake outbox 中的验证码，请使用受控测试接缝完成本地验收。");
-  };
-
-  const completeRecovery = async () => {
-    await webAuthRequest("/phone-number/reset-password", { phoneNumber: phone.trim(), otp: otp.trim(), newPassword });
-    setMode("login");
-    setIdentifier(phone.trim());
-    setPhone("");
-    setOtp("");
-    setNewPassword("");
-    setRecoveryReady(false);
-    setSuccess("密码已更新，请使用账号名或手机号重新登录。");
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -178,9 +199,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       if (mode === "login") await submitLogin();
-      else if (mode === "register") await submitRegister();
-      else if (recoveryReady) await completeRecovery();
-      else await requestRecoveryCode();
+      else await submitRegister();
     } catch (failure) {
       setError(authMessage(failure));
     } finally {
@@ -189,40 +208,37 @@ export default function LoginPage() {
   };
 
   const signOut = async () => {
-    setLoading(true);
-    try { await webAuthRequest("/sign-out", {}); } catch { /* ignore */ }
-    setAccount(null);
-    setExpiresAt(undefined);
-    setIdentity(undefined);
-    setAccountClosed(false);
-    setLoading(false);
-    setSuccess("已退出当前会话。");
+    resetNotice();
+    try {
+      await session.signOut();
+      setSuccess("已退出当前会话。");
+    } catch {
+      setError("退出尚未确认：服务端仍返回登录状态，请重试。");
+    }
   };
 
   const cancelAccount = async () => {
+    if (!details || details.userId !== currentUserIdRef.current) return;
     if (!window.confirm("注销会撤销当前会话并匿名化普通资料。仍有未完成事项时，服务端会阻止本次操作。继续吗？")) return;
     resetNotice();
+    const actingUserId = details.userId;
     setCancelLoading(true);
     try {
-      const result = await webAuthRequest<CancellationResponse>("/account/cancel", { reason: "用户在账户页提交注销" });
-      setAccount({ name: "账号已注销" });
-      setExpiresAt(undefined);
-      setAccountClosed(true);
-      setIdentity({
-        accountStatus: result.status,
-        identityStatus: "UNVERIFIED",
-        ageStatus: "UNKNOWN",
-        provider: "none",
-        eligibleForProtectedTrade: false,
-      });
+      await webAuthRequest<CancellationResponse>("/account/cancel", { reason: "用户在账户页提交注销" });
+      if (currentUserIdRef.current !== actingUserId) return;
       setSuccess("账号已注销，必要历史关联保留；当前会话已撤销。");
+      session.revalidate();
+      publishUserSessionChange();
     } catch (failure) {
+      if (currentUserIdRef.current !== actingUserId) return;
       if (failure instanceof WebAuthError) setError(cancellationFailureMessage(failure.status, failure.code));
       else setError("注销未完成，请稍后重试。");
     } finally {
       setCancelLoading(false);
     }
   };
+
+  const accountView = session.status === "authenticated" && session.userId;
 
   return (
     <div className="min-h-screen bg-[var(--color-bg-canvas)] text-[var(--color-text-primary)] flex flex-col justify-between p-4 sm:p-8">
@@ -236,7 +252,30 @@ export default function LoginPage() {
       </header>
 
       <main className="max-w-md mx-auto w-full my-8 bg-[var(--color-bg-card)] p-6 sm:p-8 rounded-2xl border border-[var(--color-border-default)] shadow-xl">
-        {account ? (
+        {session.status === "loading" ? (
+          <div className="space-y-3" role="status">
+            <span className="text-[10px] font-bold tracking-widest text-[var(--color-accent-brand)] uppercase">
+              MEMBER SESSION
+            </span>
+            <h1 className="text-xl font-bold">正在确认登录身份…</h1>
+            <p className="text-xs text-[var(--color-text-secondary)]">确认完成前不会展示或操作任何账号资料。</p>
+          </div>
+        ) : session.status === "error" ? (
+          <div className="space-y-3" role="alert">
+            <span className="text-[10px] font-bold tracking-widest text-[var(--color-accent-brand)] uppercase">
+              MEMBER SESSION
+            </span>
+            <h1 className="text-xl font-bold">暂时无法确认登录身份</h1>
+            <p className="text-xs text-[var(--color-text-secondary)]">账号资料与操作已隐藏，不会按未登录处理。</p>
+            <button
+              type="button"
+              onClick={session.revalidate}
+              className="rounded-lg border border-[var(--color-border-default)] px-3 py-2 text-xs font-medium hover:bg-[var(--color-bg-elevated)] transition-colors"
+            >
+              重试身份确认
+            </button>
+          </div>
+        ) : accountView ? (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <div>
@@ -244,52 +283,67 @@ export default function LoginPage() {
                   MEMBER SESSION
                 </span>
                 <h1 className="text-xl font-bold mt-1">
-                  {accountClosed ? "账号已注销" : `欢迎回来，${account.name || account.username || "用户"}`}
+                  {`欢迎回来，${authoritativeName(session.displayName, details?.account)}`}
                 </h1>
               </div>
               <button
                 type="button"
                 onClick={() => void signOut()}
-                disabled={loading || cancelLoading}
+                disabled={cancelLoading}
                 className="rounded-lg border border-[var(--color-border-default)] px-3 py-1 text-xs font-medium hover:bg-[var(--color-bg-elevated)] transition-colors"
               >
                 退出
               </button>
             </div>
 
-            <div className="rounded-xl bg-[var(--color-bg-elevated)] p-4 space-y-2 text-xs">
-              <div className="flex justify-between">
-                <span className="text-[var(--color-text-muted)]">账号名</span>
-                <span className="font-semibold">{account.username || "未提供"}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-[var(--color-text-muted)]">邮箱</span>
-                <span className="font-semibold">{account.email || "未提供"}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-[var(--color-text-muted)]">状态</span>
-                <span className="font-semibold">
-                  {identity ? accountStatusLabel(identity.accountStatus) : "读取中…"}
-                </span>
-              </div>
-            </div>
+            {details ? (
+              <>
+                <div className="rounded-xl bg-[var(--color-bg-elevated)] p-4 space-y-2 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-muted)]">账号名</span>
+                    <span className="font-semibold">{details.account.username || "未提供"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-muted)]">邮箱</span>
+                    <span className="font-semibold">{details.account.email || "未提供"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--color-text-muted)]">状态</span>
+                    <span className="font-semibold">{accountStatusLabel(details.identity.accountStatus)}</span>
+                  </div>
+                </div>
 
-            <p className="text-[11px] text-[var(--color-text-muted)]">
-              {expiryText(expiresAt)}
-            </p>
+                <p className="text-[11px] text-[var(--color-text-muted)]">
+                  {expiryText(details.expiresAt)}；登录状态不代表实名、年龄或发布资格通过。
+                </p>
+              </>
+            ) : detailsError ? (
+              <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 space-y-2 text-xs text-red-400" role="alert">
+                <p>账号资料读取失败，已停止展示与操作。</p>
+                <button
+                  type="button"
+                  onClick={session.revalidate}
+                  className="rounded-lg border border-[var(--color-border-default)] px-3 py-1 font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-elevated)] transition-colors"
+                >
+                  重新读取
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-[var(--color-text-secondary)]" role="status">
+                {detailsLoading ? "正在读取账号资料…" : "账号资料未确认。"}
+              </p>
+            )}
 
             <Status error={error} success={success} />
 
-            {!accountClosed && (
-              <button
-                type="button"
-                onClick={() => void cancelAccount()}
-                disabled={cancelLoading}
-                className="w-full rounded-xl border border-red-500/40 py-2.5 text-xs font-bold text-red-400 hover:bg-red-500/10 transition-colors"
-              >
-                {cancelLoading ? "正在提交…" : "注销账号"}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => void cancelAccount()}
+              disabled={cancelLoading || !details || details.userId !== session.userId}
+              className="w-full rounded-xl border border-red-500/40 py-2.5 text-xs font-bold text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            >
+              {cancelLoading ? "正在提交…" : "注销账号"}
+            </button>
           </div>
         ) : (
           <div className="space-y-5">
@@ -413,76 +467,52 @@ export default function LoginPage() {
                       className="w-full rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2 text-xs focus:border-[var(--color-accent-brand)] focus-visible:outline-none"
                     />
                   </div>
+                  <p className="text-[11px] text-[var(--color-text-muted)]">
+                    注册并登录不代表已完成实名、年龄或发布资格审核。
+                  </p>
                 </>
               )}
 
               {mode === "recover" && (
-                <>
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-[var(--color-text-secondary)]">已验证手机号</label>
-                    <input
-                      type="tel"
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
-                      placeholder="+8613800000000"
-                      required
-                      className="w-full rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2 text-xs focus:border-[var(--color-accent-brand)] focus-visible:outline-none"
-                    />
-                  </div>
-                  {recoveryReady && (
-                    <>
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium text-[var(--color-text-secondary)]">短信验证码</label>
-                        <input
-                          inputMode="numeric"
-                          value={otp}
-                          onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                          required
-                          className="w-full rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2 text-xs focus:border-[var(--color-accent-brand)] focus-visible:outline-none"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium text-[var(--color-text-secondary)]">新密码</label>
-                        <input
-                          type="password"
-                          autoComplete="new-password"
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                          minLength={12}
-                          required
-                          className="w-full rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2 text-xs focus:border-[var(--color-accent-brand)] focus-visible:outline-none"
-                        />
-                      </div>
-                    </>
-                  )}
-                </>
+                <p
+                  className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] p-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)]"
+                  role="status"
+                >
+                  当前环境尚未接入真实短信服务，暂不能通过手机号在线找回密码；接入后再开放该入口，需要协助可联系平台客服。
+                </p>
               )}
 
-              <Status error={error} success={success} />
+              {mode !== "recover" && <Status error={error} success={success} />}
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-xl bg-[var(--color-accent-brand)] py-2.5 text-xs font-bold text-[var(--color-accent-brand-text)] hover:bg-[var(--color-accent-brand-hover)] transition-colors shadow-sm"
-              >
-                {loading
-                  ? "处理中…"
-                  : mode === "login"
-                  ? "继续登录"
-                  : mode === "register"
-                  ? "创建账号"
-                  : recoveryReady
-                  ? "更新密码"
-                  : "发送验证码"}
-              </button>
+              {mode === "recover" ? (
+                <button
+                  type="button"
+                  disabled
+                  className="w-full rounded-xl bg-[var(--color-accent-brand)] py-2.5 text-xs font-bold text-[var(--color-accent-brand-text)] opacity-50"
+                >
+                  短信找回暂不可用
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full rounded-xl bg-[var(--color-accent-brand)] py-2.5 text-xs font-bold text-[var(--color-accent-brand-text)] hover:bg-[var(--color-accent-brand-hover)] transition-colors shadow-sm"
+                >
+                  {loading ? "处理中…" : mode === "login" ? "继续登录" : "创建账号"}
+                </button>
+              )}
             </form>
           </div>
         )}
       </main>
 
       <footer className="text-center text-xs text-[var(--color-text-muted)] py-4">
-        洲洲商行 · 认证与会话服务端统一保护 · 本地开发环境
+        洲洲商行 · 认证与会话由服务端统一保护
       </footer>
     </div>
   );
+}
+
+function authoritativeName(displayName: string | null, account: Account | undefined): string {
+  return account?.name || account?.username || displayName || "用户";
 }
