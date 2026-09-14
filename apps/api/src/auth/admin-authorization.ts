@@ -31,6 +31,7 @@ export const ADMIN_PERMISSION = {
   supplyQuoteInternalRead: "supply.quote.internal.read",
   supplyRestrict: "supply.restrict",
   supplyDuplicateReview: "supply.duplicate.review",
+  supplyGunsmithManage: "supply.gunsmith.manage",
   contentRead: "content.read",
   contentEdit: "content.edit",
   contentPublish: "content.publish",

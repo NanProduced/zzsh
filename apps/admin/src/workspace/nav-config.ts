@@ -1,5 +1,6 @@
 import {
   BoxesIcon,
+  CrosshairIcon,
   ClipboardCheckIcon,
   ImageIcon,
   KeyRoundIcon,
@@ -45,6 +46,9 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   const supply: WorkspaceMenuItem[] = [];
   if (has("supply.catalog.manage") || nav.isBoss) {
     supply.push({ label: "目录维护", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
+  }
+  if (has("supply.gunsmith.manage") || nav.isBoss) {
+    supply.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
   }
   if (has("supply.rules.edit") || nav.isBoss) {
     supply.push({ label: "规则与价目", icon: ListChecksIcon, path: "/supply/rules", kind: "rules" });
@@ -98,6 +102,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/audit") return "账号与权限审计";
   if (pathname === "/users/restore") return "用户账号恢复";
   if (pathname === "/supply/catalog") return "目录维护";
+  if (pathname === "/supply/gunsmith") return "改枪码目录";
   if (pathname === "/supply/rules") return "规则与价目";
   if (pathname === "/supply/reviews") return "供给审核";
   if (pathname === "/supply/media") return "平台素材审核";

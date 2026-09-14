@@ -1,4 +1,4 @@
-import { projectQuote, type ProjectedQuote } from "./pricing";
+import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import type { PoolClient } from "pg";
 import { readAdminContext, assertAdminContextInTransaction } from "../auth/auth-security";
 import {
@@ -16,6 +16,7 @@ import {
 } from "../auth/security-core";
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import type { SupplyRuntimeOptions } from "./supply-routes";
+import { GAME_SERVICE, requirePublicGameService } from "./game-services";
 import { loadMediaAsset } from "./media";
 import {
   assertGameScope,
@@ -98,6 +99,7 @@ export async function handlePublishingRoute(
     path,
   );
   if (!admin && method === "GET" && optionsMatch) {
+    await requirePublicGameService(options.pool, optionsMatch[1]!, GAME_SERVICE.ACCOUNT_RENTAL);
     const release = (
       await options.pool.query(
         `SELECT r.id,r.generation::text,r.term_version_id,p.haff_rule,ag.id AS agreement_id,ag.title,ag.body,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,
@@ -226,6 +228,9 @@ export async function handlePublishingRoute(
     const data = await withPublicListingSnapshot(
       options.pool,
       async (client) => {
+        if (filter.gameId) {
+          await requirePublicGameService(client, filter.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
+        }
         const rows = (
           await client.query<{
             id: string;
@@ -626,7 +631,7 @@ export async function handlePublishingRoute(
           ...cached,
           version: {
             ...cached.version,
-            quote: projectQuote(cached.version.quote, "public"),
+            quote: projectDeltaQuote(cached.version.quote, "public"),
           },
         },
       };

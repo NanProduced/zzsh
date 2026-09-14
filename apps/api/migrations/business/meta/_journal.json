@@ -183,6 +183,34 @@
       "when": 1789386400000,
       "tag": "0025_m3_content_idempotency_publish_flag",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789472800000,
+      "tag": "0026_m3e_game_gunsmith",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1789476400000,
+      "tag": "0027_m3e_gunsmith_source_note",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1789478200000,
+      "tag": "0028_m3e_gunsmith_code_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1789481800000,
+      "tag": "0029_m3e_source_identity_unique",
+      "breakpoints": true
     }
   ]
 }

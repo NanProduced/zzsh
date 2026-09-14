@@ -11,8 +11,8 @@ import {
   type ContentPayloadInput,
 } from "./content-hash";
 import {
-  computeQuote,
-  projectQuote,
+  computeDeltaQuote,
+  projectDeltaQuote,
   type InternalQuote,
   type QuoteInput,
   type QuoteViewer,
@@ -30,6 +30,7 @@ import {
   newSupplyId,
   notFound,
 } from "./supply-util";
+import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -200,6 +201,8 @@ export async function publicationBlockers(
     )
   ).rows[0];
   if (!game?.enabled) reasons.push("GAME_UNAVAILABLE");
+  const rentalService = await readGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
+  if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
   if (!v.rule_release_id || game?.current_release_id !== v.rule_release_id)
     reasons.push("RULE_CHANGED");
   if (
@@ -231,6 +234,7 @@ async function assertEditable(
   gate: SupplyGateReader,
 ): Promise<void> {
   await assertActiveInTransaction(client, a.owner_user_id);
+  await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   if (a.lifecycle !== "ACTIVE" || a.legacy_hold !== "NONE")
     throw conflict("历史异常或归档账号不能发布");
   const external = await gate(client, a);
@@ -507,6 +511,7 @@ export async function quoteListing(
   expected: unknown,
 ): Promise<void> {
   checkAccountRevision(a, expected);
+  await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   const v = await currentVersion(client, a);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可为新申报草稿报价");
@@ -572,7 +577,7 @@ export async function quoteListing(
   const attrs = d.attributes;
   const vitality = attrs.vit_level ?? attrs.vitLevel;
   const bear = attrs.bear_level ?? attrs.bearLevel;
-  const result = computeQuote({
+  const result = computeDeltaQuote({
     priceVersionId: release.price_version_id,
     mode: release.mode,
     roundingPolicy: release.rounding_policy,
@@ -676,6 +681,7 @@ export async function acceptListingRules(
   body: Record<string, unknown>,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
+  await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   const v = await currentVersion(client, a);
   requireVersionToken(v, body);
   await assertCurrentRelease(client, a, v);
@@ -967,7 +973,7 @@ export async function listingDetail(
   }
   const blockers = await evaluatePublication(client, a, v, gate);
   const quote = v.payload
-    ? projectQuote(
+    ? projectDeltaQuote(
         {
           ...v.payload.quoteValues,
           contentHash: v.content_hash,

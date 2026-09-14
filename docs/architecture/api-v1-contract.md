@@ -123,6 +123,32 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - ACCOUNT_EVIDENCE始终为私有证据；ACCOUNT_DISPLAY单独申报、审核，绑定需同号主/档案/游戏。用户素材不能经无条件的/media/{id}/content公开；原始证据保持私有。未传purpose时仍兼容M3-B私有凭证及原幂等指纹。
 - 业务、接受、审核与审计同事务。审计保存版本/release/hash、前后状态、库存值和声明摘要/证据引用，不复制原始凭证。legacy_supply_map仅提供受控观察兼容入口，无生产导入命令；旧状态/未知单位不生成报价或审核通过。
 
+## 游戏服务支持与改枪码（M3E）
+
+游戏元数据、目录数据和已实现业务不是同一层。**game_service_operation** 只记录
+代码已知的业务组合当前是否启用；代码中的支持清单仍是准入真值。当前唯一支持
+组合是 **delta + ACCOUNT_RENTAL** 和 **delta + GUNSMITH**。创建一条 game、启用 game、
+存在规则或存在目录条目，都不能使未知组合进入交易或公开服务。
+
+- GET /api/v1/supply/games 只返回已启用且可公开的账号租赁游戏；
+  GET /api/v1/supply/games/{gameId}/publishing-options、目录、列表和详情均
+  要求 ACCOUNT_RENTAL 的代码支持、游戏启用和服务启用。
+- GET /api/v1/supply/gunsmith/games、GET /gunsmith/games/{gameId}/firearms
+  和 GET /gunsmith/firearms/{firearmId}/codes 要求 GUNSMITH 三项门禁；
+  公共 DTO 不返回来源、revision 或内部状态，改枪码是原始不透明文本，复制不
+  代表游戏内导入成功。
+- 管理端使用 supply.gunsmith.manage 维护固定类型 firearm 下的分类、枪械、别名、
+  已审核 FIREARM_MEDIA 绑定和一枪多码关系。code 创建后不可改名；写操作带
+  Idempotency-Key，实体更新带 expectedRevision，均写审计。GUNSMITH 关闭时仍
+  允许已支持 Delta 的目录准备和历史维护，公共入口保持不可见；未知游戏即使有
+  目录也不能创建枪械/改枪码，启用服务返回 UNSUPPORTED_GAME_SERVICE。
+- firearm 只引用同游戏 firearm_classification、已审核公开的 FIREARM_MEDIA 和
+  同游戏 gunsmith_code。分类是受控目录数据，不是可由后台创建新实体类型或任意
+  JSON 字段的配置系统。枪械、皮肤、计费物品的关系不可通过名称、皮肤分类或稀
+  有度推断；本轮不把枪械加入 skin 或 billable_item。
+- 未来客户端使用同一稳定 ID/分页/错误契约。Web 页面只是 BFF 消费者，不能把
+  DOM、Cookie 或 Server Action 变成改枪码或游戏业务模型。
+
 ## 验证入口
 
 ```powershell

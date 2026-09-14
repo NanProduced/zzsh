@@ -15,7 +15,7 @@ const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const getPath = new RegExp(
-  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options)|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}|media/${id}/(?:access|content))$`,
+  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
   `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents)$`,

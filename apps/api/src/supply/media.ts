@@ -157,7 +157,7 @@ export async function createMediaUploadIntent(
     if (purpose === "CONTENT_MEDIA") {
       // Platform-level content media has no game affiliation.
       if (input.gameId !== undefined) throw invalid("Content media cannot target a game");
-    } else if (["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"].includes(purpose)) {
+    } else if (["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA", "FIREARM_MEDIA"].includes(purpose)) {
       if (!input.gameId) throw invalid("Game is required for catalog media");
       const gameExists = await client.query(`SELECT 1 FROM "zzsh_supply"."game" WHERE "id" = $1`, [input.gameId]);
       if (gameExists.rows.length === 0) throw notFound();
@@ -493,4 +493,5 @@ async function clearMediaBindings(client: PoolClient, assetId: string): Promise<
   await client.query(`UPDATE "zzsh_supply"."game" SET "cover_media_id" = NULL, "catalog_revision" = "catalog_revision" + 1, "updated_at" = clock_timestamp() WHERE "cover_media_id" = $1`, [assetId]);
   await client.query(`UPDATE "zzsh_supply"."skin" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
   await client.query(`UPDATE "zzsh_supply"."billable_item" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
+  await client.query(`UPDATE "zzsh_supply"."firearm" SET "media_id" = NULL, "revision" = "revision" + 1, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
 }

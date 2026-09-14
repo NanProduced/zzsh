@@ -1,122 +1,20 @@
-import { formatDecimalExact, parseSignedDecimal } from "./decimal";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
-import { computeQuote, projectQuote, ROUNDING_POLICY, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
+import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
+import { DELTA_ROUNDING_POLICY, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
-const SIGNED_DECIMAL_PATTERN = /^-?(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
 
-export type HaffRuleInput = {
-  schema: string;
-  baseBySafeBox: Record<string, string>;
-  vitalityDeltaByLevel: Record<string, string>;
-  bearDeltaByLevel: Record<string, string>;
-  dailyDeltaByTermOption: Record<string, string>;
-  options: Record<string, { delta: string; enabled: boolean }>;
-  spreadDelta?: string;
-};
-
-function parsePositiveDecimalMap(value: unknown, label: string, allowZero: boolean): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid(`${label} is invalid`);
-  const result: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (!CODE_PATTERN.test(key) || typeof entry !== "string" || !DECIMAL_PATTERN.test(entry)) throw invalid(`${label} is invalid`);
-    if (!allowZero && /^0(?:\.0+)?$/.test(entry)) throw invalid(`${label} must be positive`);
-    result[key] = formatDecimalExact(parseSignedDecimal(entry, 8, label));
-  }
-  if (Object.keys(result).length === 0) throw invalid(`${label} must not be empty`);
-  return result;
-}
-
-function parseSignedDecimalMap(value: unknown, label: string, integerKeys: boolean): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid(`${label} is invalid`);
-  const result: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (integerKeys ? !/^(0|[1-9]\d*)$/.test(key) : !CODE_PATTERN.test(key)) throw invalid(`${label} is invalid`);
-    if (typeof entry !== "string" || !SIGNED_DECIMAL_PATTERN.test(entry)) throw invalid(`${label} is invalid`);
-    result[key] = formatDecimalExact(parseSignedDecimal(entry, 8, label));
-  }
-  if (Object.keys(result).length === 0) throw invalid(`${label} must not be empty`);
-  return result;
-}
-
-export function validateHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"): HaffRuleInput {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Haff rule is invalid");
-  const rule = value as Record<string, unknown>;
-  ensureOnlyFields(rule, ["schema", "baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel", "dailyDeltaByTermOption", "options", "spreadDelta"]);
-  if (rule.schema !== "haff-ratio-v1") throw invalid("Haff rule schema is unsupported");
-  const baseBySafeBox = parsePositiveDecimalMap(rule.baseBySafeBox, "Haff base ratios", false);
-  const vitalityDeltaByLevel = parseSignedDecimalMap(rule.vitalityDeltaByLevel, "Haff vitality deltas", true);
-  const bearDeltaByLevel = parseSignedDecimalMap(rule.bearDeltaByLevel, "Haff bear deltas", true);
-  const dailyDeltaByTermOption = parseSignedDecimalMap(rule.dailyDeltaByTermOption, "Haff daily deltas", false);
-  if (!rule.options || typeof rule.options !== "object" || Array.isArray(rule.options)) throw invalid("Haff options are invalid");
-  const options: Record<string, { delta: string; enabled: boolean }> = {};
-  let enabledOptions = 0;
-  for (const [key, entry] of Object.entries(rule.options as Record<string, unknown>)) {
-    if (!CODE_PATTERN.test(key) || !entry || typeof entry !== "object" || Array.isArray(entry)) throw invalid("Haff options are invalid");
-    const option = entry as Record<string, unknown>;
-    ensureOnlyFields(option, ["delta", "enabled"]);
-    if (typeof option.delta !== "string" || !SIGNED_DECIMAL_PATTERN.test(option.delta) || typeof option.enabled !== "boolean") throw invalid("Haff options are invalid");
-    if (option.enabled) enabledOptions += 1;
-    options[key] = { delta: formatDecimalExact(parseSignedDecimal(option.delta, 8, "option delta")), enabled: option.enabled };
-  }
-  if (Object.keys(options).length === 0 || enabledOptions === 0) throw invalid("Haff rule requires at least one enabled option");
-  if (mode === "SPREAD") {
-    if (typeof rule.spreadDelta !== "string" || !DECIMAL_PATTERN.test(rule.spreadDelta)) throw invalid("Spread delta is required for SPREAD mode");
-    return { schema: "haff-ratio-v1", baseBySafeBox, vitalityDeltaByLevel, bearDeltaByLevel, dailyDeltaByTermOption, options, spreadDelta: formatDecimalExact(parseSignedDecimal(rule.spreadDelta, 8, "spread delta")) };
-  }
-  if (rule.spreadDelta !== undefined) throw invalid("Spread delta is only valid for SPREAD mode");
-  return { schema: "haff-ratio-v1", baseBySafeBox, vitalityDeltaByLevel, bearDeltaByLevel, dailyDeltaByTermOption, options };
-}
-
-export type PriceLineInputBody = {
-  itemId: string;
-  pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
-  unitQuantity?: string;
-  buyerUnitAmount?: string;
-  ownerUnitAmount?: string;
-};
-
-export function parsePriceLines(value: unknown, mode: "SPREAD" | "PERCENT"): PriceLineInputBody[] {
-  if (!Array.isArray(value)) throw invalid("Price lines must be an array");
-  const seen = new Set<string>();
-  return value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw invalid("Price line is invalid");
-    const line = entry as Record<string, unknown>;
-    const itemId = line.itemId;
-    const pricingKind = line.pricingKind;
-    if (typeof itemId !== "string" || itemId.length === 0 || itemId.length > 128) throw invalid("Price line item is invalid");
-    if (pricingKind !== "FIXED_UNIT" && pricingKind !== "HAFF_RATIO") throw invalid("Price line kind is invalid");
-    if (seen.has(itemId)) throw invalid("Price lines must not repeat an item");
-    seen.add(itemId);
-    const parsed: PriceLineInputBody = { itemId, pricingKind };
-    const unitQuantity = line.unitQuantity;
-    if (unitQuantity !== undefined) {
-      if (typeof unitQuantity !== "string" || !/^[1-9]\d{0,23}$/.test(unitQuantity)) throw invalid("Unit quantity is invalid");
-      parsed.unitQuantity = unitQuantity;
-    }
-    for (const field of ["buyerUnitAmount", "ownerUnitAmount"] as const) {
-      const entryValue = line[field];
-      if (entryValue === undefined) continue;
-      if (typeof entryValue !== "string" || !DECIMAL_PATTERN.test(entryValue)) throw invalid("Unit amount is invalid");
-      parsed[field] = entryValue;
-    }
-    if (pricingKind === "FIXED_UNIT") {
-      if (parsed.unitQuantity === undefined || parsed.buyerUnitAmount === undefined) throw invalid("Fixed lines require a buyer unit amount");
-      if (mode === "SPREAD" && parsed.ownerUnitAmount === undefined) throw invalid("SPREAD fixed lines require an owner unit amount");
-      if (mode === "PERCENT" && parsed.ownerUnitAmount !== undefined) throw invalid("PERCENT fixed lines derive the owner amount");
-    } else if ([parsed.unitQuantity, parsed.buyerUnitAmount, parsed.ownerUnitAmount].some((entryValue) => entryValue !== undefined)) {
-      throw invalid("Haff ratio lines cannot define unit amounts");
-    }
-    return parsed;
-  });
-}
+export type HaffRuleInput = DeltaHaffRule;
+export type PriceLineInputBody = DeltaPriceLineInputBody;
+export const validateHaffRule = validateDeltaHaffRule;
+export const parsePriceLines = parseDeltaPriceLines;
 
 type VersionRow = Record<string, unknown>;
 
@@ -252,10 +150,10 @@ export async function updatePriceDraft(
   }
   let haffRule: HaffRuleInput | null | undefined;
   if (body.haffRule !== undefined) {
-    haffRule = body.haffRule === null ? null : validateHaffRule(body.haffRule, mode);
+    haffRule = body.haffRule === null ? null : validateDeltaHaffRule(body.haffRule, mode);
   }
   const roundingPolicy = body.roundingPolicy === undefined ? undefined : body.roundingPolicy;
-  if (roundingPolicy !== undefined && roundingPolicy !== ROUNDING_POLICY) throw invalid("Rounding policy is unsupported");
+  if (roundingPolicy !== undefined && roundingPolicy !== DELTA_ROUNDING_POLICY) throw invalid("Rounding policy is unsupported");
   await client.query(
     `UPDATE "zzsh_supply"."price_version"
         SET "mode" = $1,
@@ -276,7 +174,7 @@ export async function updatePriceDraft(
     ],
   );
   if (body.lines !== undefined) {
-    const lines = parsePriceLines(body.lines, mode);
+    const lines = parseDeltaPriceLines(body.lines, mode);
     const items = await client.query<{ id: string; unit: string; gameId: string }>(
       `SELECT "id", "unit", "game_id" AS "gameId" FROM "zzsh_supply"."billable_item" WHERE "id" = ANY($1::text[])`,
       [lines.map((line) => line.itemId)],
@@ -589,7 +487,7 @@ export async function quotePreview(
     }
   }
 
-  const result: QuoteResult = computeQuote({
+  const result: QuoteResult = computeDeltaQuote({
     priceVersionId,
     mode: priceRow.mode,
     roundingPolicy: priceRow.roundingPolicy,
@@ -663,6 +561,6 @@ export async function quotePreview(
     contentHash = computeContentHash(contentPayload);
   }
 
-  const projected = projectQuote({ ...result.quote, ...(contentHash ? { contentHash } : {}) }, "admin");
+  const projected = projectDeltaQuote({ ...result.quote, ...(contentHash ? { contentHash } : {}) }, "admin");
   return { gameId: priceRow.gameId, quotable: true, quote: projected, ...(contentPayload ? { contentPayload } : {}), ...(contentHash ? { contentHash } : {}) };
 }

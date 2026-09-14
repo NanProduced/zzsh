@@ -7,6 +7,7 @@ import { RoleConfigView } from "../views/role-config-view";
 import { SupplyCatalogView } from "../views/supply-catalog-view";
 import { SupplyMediaReviewView } from "../views/supply-media-review-view";
 import { SupplyRulesView } from "../views/supply-rules-view";
+import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
 
 import { AccountSecurityPage } from "./account-security-page";
@@ -102,6 +103,9 @@ export function WorkspacePageContent({
   }
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+  }
+  if (tab.kind === "gunsmith") {
+    return <SupplyGunsmithView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "rules") {
     return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;

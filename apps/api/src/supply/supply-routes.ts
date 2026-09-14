@@ -10,6 +10,7 @@ import { DecimalError } from "./decimal";
 
 import {
   ADMIN_PERMISSION,
+  hasPermission,
   loadEffectiveAdminAccess,
   requirePermission,
   type EffectiveAdminAccess,
@@ -28,6 +29,23 @@ import {
   updateCatalogEntry,
   updateGame,
 } from "./catalog";
+import {
+  createAlias,
+  createClassification,
+  createFirearm,
+  createGunsmithCode,
+  listAdminFirearms,
+  listPublicFirearmCodes,
+  listPublicFirearms,
+  parsePublicLimit,
+  parsePublicMode,
+  setGunsmithCodeStatus,
+  updateAlias,
+  updateClassification,
+  updateFirearm,
+  updateGunsmithCode,
+} from "./gunsmith";
+import { GAME_SERVICE, isSupportedGameService, requirePublicGameService, requireWritableGameService, unsupportedGameService, ensureGameServiceRows, type GameServiceCode } from "./game-services";
 import {
   activateRelease,
   createAgreementDraft,
@@ -54,6 +72,7 @@ import {
 } from "./media";
 import {
   assertGameScope,
+  assertGameExists,
   bodyOf,
   conflict,
   ensureOnlyFields,
@@ -352,6 +371,53 @@ function catalogKind(value: string): "items" | "rarities" | "categories" | "skin
   return value as "items" | "rarities" | "categories" | "skins" | "entitlements";
 }
 
+async function handlePublicGunsmithRoute(
+  response: SupplyResponse,
+  options: SupplyRuntimeOptions,
+  requestId: string,
+  method: string,
+  path: string,
+  query: URLSearchParams,
+): Promise<boolean> {
+  if (method !== "GET") return false;
+  if (path === "/gunsmith/games") {
+    const games = (await options.pool.query<{ id: string; code: string; name: string; description: string | null }>(
+      `SELECT g.id,g.code,g.name,g.description
+         FROM zzsh_supply.game g JOIN zzsh_supply.game_service_operation s ON s.game_id=g.id AND s.service_code='GUNSMITH'
+        WHERE g.enabled AND s.enabled ORDER BY g.code,g.id`,
+    )).rows.filter((game) => isSupportedGameService(game.code, GAME_SERVICE.GUNSMITH));
+    sendJson(response, 200, { games }, requestId, "public, max-age=30");
+    return true;
+  }
+  const firearmsMatch = /^\/gunsmith\/games\/([^/]+)\/firearms$/.exec(path);
+  if (firearmsMatch) {
+    const gameId = decodeId(firearmsMatch[1]!);
+    const q = query.get("q");
+    const classificationId = query.get("classificationId") ?? query.get("class");
+    if (classificationId && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(classificationId)) throw invalid("Classification is invalid");
+    const result = await withTransaction(options.pool, (client) => listPublicFirearms(client, gameId, {
+      q,
+      classificationId,
+      limit: parsePublicLimit(query.get("limit")),
+      cursor: query.get("cursor") ?? undefined,
+    }));
+    sendJson(response, 200, result, requestId, "public, max-age=30");
+    return true;
+  }
+  const codesMatch = /^\/gunsmith\/firearms\/([^/]+)\/codes$/.exec(path);
+  if (codesMatch) {
+    const firearmId = decodeId(codesMatch[1]!);
+    const result = await withTransaction(options.pool, (client) => listPublicFirearmCodes(client, firearmId, {
+      mode: parsePublicMode(query.get("mode")),
+      limit: parsePublicLimit(query.get("limit")),
+      cursor: query.get("cursor") ?? undefined,
+    }));
+    sendJson(response, 200, result, requestId, "public, max-age=30");
+    return true;
+  }
+  return false;
+}
+
 export async function handleSupplyUserRoute(
   request: SupplyNodeRequest,
   response: SupplyResponse,
@@ -363,28 +429,40 @@ export async function handleSupplyUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handlePublicGunsmithRoute(response, options, requestId, method, path, query)) return;
     if (await handleFavorites(request,response,options,requestId,path,query)) return;
     if (await handlePublishingRoute(request,response,options,requestId,path,query,false)) return;
     if (method === "GET") {
-      if (path === "/games") { const games=(await options.pool.query(`SELECT id,code,name,description FROM zzsh_supply.game WHERE enabled AND current_release_id IS NOT NULL ORDER BY code,id`)).rows;sendJson(response,200,{games},requestId);return; }
+      if (path === "/games") {
+        const rows = (await options.pool.query<{ id: string; code: string; name: string; description: string | null }>(
+          `SELECT g.id,g.code,g.name,g.description
+             FROM zzsh_supply.game g JOIN zzsh_supply.game_service_operation s ON s.game_id=g.id AND s.service_code='ACCOUNT_RENTAL'
+            WHERE g.enabled AND g.current_release_id IS NOT NULL AND s.enabled ORDER BY g.code,g.id`,
+        )).rows.filter((game) => isSupportedGameService(game.code, GAME_SERVICE.ACCOUNT_RENTAL));
+        sendJson(response,200,{games: rows},requestId);
+        return;
+      }
       const catalogMatch = /^\/games\/([^/]+)\/(catalog|publishing-catalog)$/.exec(path);
       if (catalogMatch) {
         const gameId = decodeId(catalogMatch[1]!);
         const limitRaw = query.get("limit");
         const limit = limitRaw === null ? 20 : Number(limitRaw);
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
-        const result = await withPublicListingSnapshot(options.pool, (client) => readPublicCatalog(
-          client,
-          gameId,
-          {
-            ...(query.get("q") ? { q: query.get("q")! } : {}),
-            ...(query.get("categoryId") ? { categoryId: query.get("categoryId")! } : {}),
-            ...(query.get("rarityCode") ? { rarityCode: query.get("rarityCode")! } : {}),
-          },
-          limit,
-          query.get("cursor") ?? undefined,
-          catalogMatch[2] === "publishing-catalog" ? "publishing" : "browse",
-        ));
+        const result = await withPublicListingSnapshot(options.pool, async (client) => {
+          await requirePublicGameService(client, gameId, GAME_SERVICE.ACCOUNT_RENTAL);
+          return readPublicCatalog(
+            client,
+            gameId,
+            {
+              ...(query.get("q") ? { q: query.get("q")! } : {}),
+              ...(query.get("categoryId") ? { categoryId: query.get("categoryId")! } : {}),
+              ...(query.get("rarityCode") ? { rarityCode: query.get("rarityCode")! } : {}),
+            },
+            limit,
+            query.get("cursor") ?? undefined,
+            catalogMatch[2] === "publishing-catalog" ? "publishing" : "browse",
+          );
+        });
         sendJson(response, 200, result, requestId, catalogMatch[2] === "publishing-catalog" ? "no-store" : "public, max-age=30");
         return;
       }
@@ -417,11 +495,10 @@ export async function handleSupplyUserRoute(
         { gameId },
         async (client) => {
           await assertUserContextInTransaction(client, context);
-          if (!(await client.query(`SELECT 1 FROM zzsh_supply.game WHERE id = $1 AND enabled`, [gameId])).rowCount) throw notFound();
+          await requireWritableGameService(client, gameId, GAME_SERVICE.ACCOUNT_RENTAL);
         },
         async (client) => {
-          const stillEnabled = await client.query(`SELECT 1 FROM "zzsh_supply"."game" WHERE "id" = $1 AND "enabled" = true`, [gameId]);
-          if (stillEnabled.rows.length === 0) throw notFound();
+          await requireWritableGameService(client, gameId, GAME_SERVICE.ACCOUNT_RENTAL);
           await client.query(
             `INSERT INTO "zzsh_supply"."rental_account" ("id", "owner_user_id", "game_id") VALUES ($1, $2, $3)`,
             [accountId, context.userId, gameId],
@@ -558,10 +635,22 @@ async function handleAdminRead(
   if (path === "/games") {
     const games = await withTransaction(options.pool, async (client) => {
       const access = await requireAdminAccess(client, adminUserId);
-      requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+      if (!hasPermission(access, ADMIN_PERMISSION.supplyCatalogManage)) requirePermission(access, ADMIN_PERMISSION.supplyGunsmithManage);
       return listGames(client, adminUserId, access.isBoss);
     });
     sendJson(response, 200, games, requestId);
+    return;
+  }
+  const gunsmithReadMatch = /^\/games\/([^/]+)\/(firearms|firearm-classifications)$/.exec(path);
+  if (gunsmithReadMatch) {
+    const gameId = decodeId(gunsmithReadMatch[1]!);
+    const data = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyGunsmithManage);
+      const result = await listAdminFirearms(client, adminUserId, access.isBoss, gameId);
+      return gunsmithReadMatch[2] === "firearms" ? result : { classifications: result.classifications };
+    });
+    sendJson(response, 200, data, requestId);
     return;
   }
   const catalogMatch = /^\/games\/([^/]+)\/catalog$/.exec(path);
@@ -597,14 +686,15 @@ async function handleAdminRead(
   if (mediaOptionsMatch) {
     const mediaGameId = decodeId(mediaOptionsMatch[1]!);
     const purpose = query.get("purpose") ?? null;
-    if (purpose !== null && !["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA"].includes(purpose)) throw invalid("Purpose is invalid");
+    if (purpose !== null && !["GAME_COVER", "SKIN_MEDIA", "ITEM_MEDIA", "FIREARM_MEDIA"].includes(purpose)) throw invalid("Purpose is invalid");
     const limitRaw = query.get("limit");
     const limit = limitRaw === null ? 20 : Number(limitRaw);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
     const cursorParam = query.get("cursor");
     const result = await withTransaction(options.pool, async (client) => {
       const access = await requireAdminAccess(client, adminUserId);
-      requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
+      if (purpose === "FIREARM_MEDIA" && !hasPermission(access, ADMIN_PERMISSION.supplyCatalogManage)) requirePermission(access, ADMIN_PERMISSION.supplyGunsmithManage);
+      else requirePermission(access, ADMIN_PERMISSION.supplyCatalogManage);
       await assertGameScope(client, adminUserId, access.isBoss, mediaGameId);
       let cursorRow: { updatedAt: string; id: string } | undefined;
       if (cursorParam !== null) {
@@ -812,6 +902,144 @@ async function handleAdminWrite(
       },
     );
   };
+
+  const serviceMatch = /^\/games\/([^/]+)\/services\/(ACCOUNT_RENTAL|GUNSMITH)$/.exec(path);
+  if (serviceMatch && method === "PUT") {
+    const gameId = decodeId(serviceMatch[1]!);
+    const serviceCode = serviceMatch[2] as GameServiceCode;
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "enabled"]);
+    const enabled = body.enabled;
+    if (typeof enabled !== "boolean") throw invalid("Enabled is required");
+    parseExpectedRevision(body);
+    const serviceId = `${gameId}:service:${serviceCode}`;
+    await write(
+      "supply.game_service.update",
+      serviceId,
+      serviceCode === GAME_SERVICE.ACCOUNT_RENTAL ? ADMIN_PERMISSION.supplyRulesActivate : ADMIN_PERMISSION.supplyGunsmithManage,
+      async (client) => {
+        await assertGameExists(client, gameId);
+        await ensureGameServiceRows(client, gameId);
+        return gameId;
+      },
+      async (client) => {
+        const game = (await client.query<{ code: string }>(`SELECT "code" FROM "zzsh_supply"."game" WHERE "id"=$1`, [gameId])).rows[0];
+        if (!game) throw notFound();
+        if (enabled && !isSupportedGameService(game.code, serviceCode)) throw unsupportedGameService();
+        const result = await client.query<{ id: string; gameId: string; serviceCode: GameServiceCode; enabled: boolean; revision: string }>(
+          `UPDATE "zzsh_supply"."game_service_operation" SET "enabled"=$1,"revision"="revision"+1,"updated_at"=clock_timestamp() WHERE "id"=$2 AND "revision"::text=$3 RETURNING "id","game_id" AS "gameId","service_code" AS "serviceCode","enabled","revision"::text AS "revision"`,
+          [enabled, serviceId, body.expectedRevision],
+        );
+        if (result.rowCount !== 1) throw conflict("Service status changed; refresh and retry");
+        return { status: 200, body: { service: { ...result.rows[0], supported: isSupportedGameService(game.code, serviceCode) } } };
+      },
+      "supply.game_service.updated",
+    );
+    return;
+  }
+
+  const classificationCreateMatch = /^\/games\/([^/]+)\/firearm-classifications$/.exec(path);
+  if (classificationCreateMatch && method === "POST") {
+    const gameId = decodeId(classificationCreateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["code", "name", "enabled", "sortOrder", "sourceNamespace", "sourceToken", "sourceNote"]);
+    await write("supply.gunsmith.classification.create", undefined, ADMIN_PERMISSION.supplyGunsmithManage, async () => gameId, async (client, access) => ({ status: 200, body: await createClassification(client, actor.id, access.isBoss, gameId, body) }), "supply.gunsmith.classification.created");
+    return;
+  }
+  const classificationUpdateMatch = /^\/firearm-classifications\/([^/]+)$/.exec(path);
+  if (classificationUpdateMatch && method === "PUT") {
+    const id = decodeId(classificationUpdateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "name", "enabled", "sortOrder"]);
+    parseExpectedRevision(body);
+    await write("supply.gunsmith.classification.update", id, ADMIN_PERMISSION.supplyGunsmithManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."firearm_classification" WHERE "id"=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await updateClassification(client, actor.id, access.isBoss, id, body) }), "supply.gunsmith.classification.updated");
+    return;
+  }
+
+  const firearmCreateMatch = /^\/games\/([^/]+)\/firearms$/.exec(path);
+  if (firearmCreateMatch && method === "POST") {
+    const gameId = decodeId(firearmCreateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["code", "name", "classificationId", "enabled", "sortOrder", "mediaId", "sourceNamespace", "sourceToken", "sourceNote"]);
+    await write("supply.gunsmith.firearm.create", undefined, ADMIN_PERMISSION.supplyGunsmithManage, async () => gameId, async (client, access) => ({ status: 200, body: await createFirearm(client, actor.id, access.isBoss, gameId, body) }), "supply.gunsmith.firearm.created");
+    return;
+  }
+  const firearmUpdateMatch = /^\/firearms\/([^/]+)$/.exec(path);
+  if (firearmUpdateMatch && method === "PUT") {
+    const id = decodeId(firearmUpdateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "name", "classificationId", "enabled", "sortOrder", "mediaId"]);
+    parseExpectedRevision(body);
+    await write("supply.gunsmith.firearm.update", id, ADMIN_PERMISSION.supplyGunsmithManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."firearm" WHERE "id"=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await updateFirearm(client, actor.id, access.isBoss, id, body) }), "supply.gunsmith.firearm.updated");
+    return;
+  }
+
+  const aliasCreateMatch = /^\/games\/([^/]+)\/firearms\/([^/]+)\/aliases$/.exec(path);
+  if (aliasCreateMatch && method === "POST") {
+    const gameId = decodeId(aliasCreateMatch[1]!);
+    const firearmId = decodeId(aliasCreateMatch[2]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["locale", "name", "enabled", "sortOrder", "sourceNamespace", "sourceToken", "sourceNote"]);
+    await write("supply.gunsmith.alias.create", undefined, ADMIN_PERMISSION.supplyGunsmithManage, async () => gameId, async (client, access) => ({ status: 200, body: await createAlias(client, actor.id, access.isBoss, gameId, firearmId, body) }), "supply.gunsmith.alias.created");
+    return;
+  }
+  const aliasUpdateMatch = /^\/firearm-aliases\/([^/]+)$/.exec(path);
+  if (aliasUpdateMatch && method === "PUT") {
+    const id = decodeId(aliasUpdateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "name", "enabled", "sortOrder"]);
+    parseExpectedRevision(body);
+    await write("supply.gunsmith.alias.update", id, ADMIN_PERMISSION.supplyGunsmithManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."firearm_alias" WHERE "id"=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await updateAlias(client, actor.id, access.isBoss, id, body) }), "supply.gunsmith.alias.updated");
+    return;
+  }
+
+  if (path === "/gunsmith/codes" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["gameId", "firearmId", "code", "note", "modeCode", "lastReviewedAt", "sourceNamespace", "sourceToken", "sourceNote"]);
+    const gameId = decodeId(requiredString(body, "gameId", 128));
+    const firearmId = decodeId(requiredString(body, "firearmId", 128));
+    await write("supply.gunsmith.code.create", undefined, ADMIN_PERMISSION.supplyGunsmithManage, async () => gameId, async (client, access) => ({ status: 200, body: await createGunsmithCode(client, actor.id, access.isBoss, { ...body, gameId, firearmId }) }), "supply.gunsmith.code.created");
+    return;
+  }
+  const codeUpdateMatch = /^\/gunsmith\/codes\/([^/]+)$/.exec(path);
+  if (codeUpdateMatch && method === "PUT") {
+    const id = decodeId(codeUpdateMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "code", "note", "modeCode", "lastReviewedAt"]);
+    parseExpectedRevision(body);
+    await write("supply.gunsmith.code.update", id, ADMIN_PERMISSION.supplyGunsmithManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."gunsmith_code" WHERE "id"=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await updateGunsmithCode(client, actor.id, access.isBoss, id, body) }), "supply.gunsmith.code.updated");
+    return;
+  }
+  const codeStatusMatch = /^\/gunsmith\/codes\/([^/]+)\/(withdraw|restore)$/.exec(path);
+  if (codeStatusMatch && method === "POST") {
+    const id = decodeId(codeStatusMatch[1]!);
+    const status = codeStatusMatch[2] === "restore" ? "ACTIVE" : "WITHDRAWN";
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision"]);
+    parseExpectedRevision(body);
+    await write(`supply.gunsmith.code.${codeStatusMatch[2]}`, id, ADMIN_PERMISSION.supplyGunsmithManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."gunsmith_code" WHERE "id"=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await setGunsmithCodeStatus(client, actor.id, access.isBoss, id, status, body) }), status === "ACTIVE" ? "supply.gunsmith.code.restored" : "supply.gunsmith.code.withdrawn");
+    return;
+  }
 
   if (path === "/games" && method === "POST") {
     const body = bodyOf(request);

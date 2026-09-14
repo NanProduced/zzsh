@@ -14,6 +14,7 @@ export type WorkspaceRouteKind =
   | "audit"
   | "user-restore"
   | "catalog"
+  | "gunsmith"
   | "rules"
   | "listing-review"
   | "media-review"
@@ -51,6 +52,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   audit: { id: "audit", title: "账号与权限审计", path: "/audit", closable: true, kind: "audit" },
   "user-restore": { id: "user-restore", title: "用户账号恢复", path: "/users/restore", closable: true, kind: "user-restore" },
   catalog: { id: "catalog", title: "目录维护", path: "/supply/catalog", closable: true, kind: "catalog" },
+  gunsmith: { id: "gunsmith", title: "改枪码目录", path: "/supply/gunsmith", closable: true, kind: "gunsmith" },
   rules: { id: "rules", title: "规则与价目", path: "/supply/rules", closable: true, kind: "rules" },
   "listing-review": { id: "listing-review", title: "供给审核", path: "/supply/reviews", closable: true, kind: "listing-review" },
   "media-review": { id: "media-review", title: "平台素材审核", path: "/supply/media", closable: true, kind: "media-review" },
@@ -93,6 +95,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/audit") return { kind: "audit", tabId: "audit", path: "/audit", title: "账号与权限审计" };
   if (path === "/users/restore") return { kind: "user-restore", tabId: "user-restore", path: "/users/restore", title: "用户账号恢复" };
   if (path === "/supply/catalog") return { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" };
+  if (path === "/supply/gunsmith") return { kind: "gunsmith", tabId: "gunsmith", path: "/supply/gunsmith", title: "改枪码目录" };
   if (path === "/supply/rules") return { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" };
   if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "供给审核" };
   if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" };
@@ -134,6 +137,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "audit") return has("admin.audit.read");
   if (kind === "user-restore") return has("user.account.restore");
   if (kind === "catalog") return has("supply.catalog.manage") || nav.isBoss;
+  if (kind === "gunsmith") return has("supply.gunsmith.manage") || nav.isBoss;
   if (kind === "rules") return has("supply.rules.edit") || nav.isBoss;
   if (kind === "listing-review") return has("supply.review.read") || nav.isBoss;
   if (kind === "media-review") return has("supply.review.read") || nav.isBoss;
@@ -142,7 +146,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "catalog" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

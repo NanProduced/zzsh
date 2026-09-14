@@ -13,6 +13,7 @@ test("page search only lists implemented pages in the current permission set", (
     "/admins",
     "/roles",
     "/supply/catalog",
+    "/supply/gunsmith",
     "/supply/rules",
     "/supply/reviews",
     "/supply/media",

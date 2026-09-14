@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { parseSignedDecimal, formatDecimalAtScale, formatScaledInteger } from "./decimal";
+import { DeltaDeclarationError, normalizeDeltaAttributes } from "./delta-rental";
 import type { InternalQuote } from "./pricing";
 
 export class ContentHashError extends Error {}
@@ -76,20 +77,6 @@ export function normalizeTime(value: string | null): string | null {
   return utc.toISOString().slice(0, 19) + "." + (match[2] ?? "").padEnd(6, "0") + "Z";
 }
 
-function normalizeAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const levels = ["vitLevel", "bearLevel", "vit_level", "bear_level", "dive_level", "character_level", "awm_weapon_count", "service_window_start_minute", "service_window_end_minute"];
-  const texts = ["safe_box_code", "grading_code", "login_method_code", "legacy_helmet_code", "legacy_armor_code", "legacy_insure_code", "service_window_timezone", "region_province", "region_city", "info_source"];
-  const booleans = ["ban_record", "face_is_self", "service_window_cross_midnight"];
-  fields(value, [...levels, ...texts, ...booleans, "secret_kd"]);
-  return Object.fromEntries([...levels, ...texts, ...booleans, "secret_kd"].map((key) => {
-    const child = value[key] ?? null;
-    if (child === null) return [key, null];
-    if (levels.includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new ContentHashError("Invalid level");
-    if (booleans.includes(key) && typeof child !== "boolean") throw new ContentHashError("Invalid flag");
-    return [key, key === "secret_kd" ? decimalText(child as string) : texts.includes(key) ? humanText(child as string) : child];
-  }));
-}
-
 export function normalizeQuote(value: Record<string, unknown> | InternalQuote): InternalQuote {
   fields(value, ["schemaVersion", "currency", "priceVersionId", "ruleReleaseId", "mode", "lines", "resourceTotal", "ownerTotal", "platformFullProfit", "tenantDeposit", "publisherBailRequirement", "termSeconds", "expiryDisclosures", "unitAmountsInformational", "roundingPolicy", "pricingInputs"]);
   const q = value as InternalQuote;
@@ -144,10 +131,17 @@ export function normalizeDeclaration(declaration: ContentDeclaration): ContentDe
   ensureUnique(declaration.entitlements.map((item) => item.entitlementId), "entitlements");
   ensureUnique(declaration.skins, "skins");
   ensureUnique(declaration.mediaBindings.map((item) => `${item.purpose}:${item.position}:${item.assetId}`), "mediaBindings");
+  let attributes: Record<string, unknown>;
+  try {
+    attributes = normalizeDeltaAttributes(declaration.attributes);
+  } catch (error) {
+    if (error instanceof DeltaDeclarationError) throw new ContentHashError(error.message);
+    throw error;
+  }
   return {
     title: humanText(declaration.title),
     description: declaration.description == null ? null : humanText(declaration.description),
-    attributes: normalizeAttributes(declaration.attributes),
+    attributes,
     inventory: sortByKeys(declaration.inventory.map((item) => { fields(item, ["itemId", "quantity"]); return { itemId: item.itemId, quantity: integerText(item.quantity) }; }), (item) => item.itemId),
     skins: [...declaration.skins].sort(),
     entitlements: sortByKeys(declaration.entitlements.map((item) => {
