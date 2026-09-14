@@ -34,6 +34,10 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 import {
+  listingSearchPattern,
+  parsePublicListingSearch,
+} from "./listing-query";
+import {
   acceptListingRules,
   checkAccountRevision,
   createListingDraft,
@@ -195,6 +199,7 @@ export async function handlePublishingRoute(
       minQuantity: query.get("minQuantity") ?? null,
       skins: query.getAll("skinId").sort(),
       skinMatch: query.get("skinMatch") ?? "ANY",
+      q: parsePublicListingSearch(query.get("q")),
     };
     if (
       !["ANY", "ALL"].includes(filter.skinMatch) ||
@@ -226,7 +231,7 @@ export async function handlePublishingRoute(
             id: string;
             version_id: string;
           }>(
-            `SELECT a.id,v.id AS version_id FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND v.review_state='APPROVED' AND v.rule_release_id=g.current_release_id AND ($2::text IS NULL OR a.game_id=$2) AND ($3::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=$3 AND l.quantity>=COALESCE($4::numeric,0))) AND (cardinality($5::text[])=0 OR CASE WHEN $6='ALL' THEN (SELECT count(*) FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY($5))=cardinality($5::text[]) ELSE EXISTS(SELECT 1 FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY($5)) END) ORDER BY a.id LIMIT 200`,
+            `SELECT a.id,v.id AS version_id FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND v.review_state='APPROVED' AND v.rule_release_id=g.current_release_id AND ($2::text IS NULL OR a.game_id=$2) AND ($3::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=$3 AND l.quantity>=COALESCE($4::numeric,0))) AND (cardinality($5::text[])=0 OR CASE WHEN $6='ALL' THEN (SELECT count(*) FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY($5))=cardinality($5::text[]) ELSE EXISTS(SELECT 1 FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY($5)) END) AND ($7::text IS NULL OR v.title ILIKE $7 ESCAPE '\\') ORDER BY a.id LIMIT 200`,
             [
               cursor,
               filter.gameId,
@@ -234,6 +239,7 @@ export async function handlePublishingRoute(
               filter.minQuantity,
               filter.skins,
               filter.skinMatch,
+              filter.q === null ? null : listingSearchPattern(filter.q),
             ],
           )
         ).rows;
@@ -362,6 +368,7 @@ export async function handlePublishingRoute(
           admin && !access!.permissions.has("supply.quote.internal.read")
             ? "public"
             : undefined,
+          a,
         );
         if (historical) {
           detail.account = a;

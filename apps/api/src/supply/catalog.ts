@@ -391,7 +391,7 @@ export async function assertPlatformMediaBinding(
 
 export type CatalogFilters = { q?: string; categoryId?: string; rarityCode?: string };
 
-function escapeLike(value: string): string {
+export function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
 
