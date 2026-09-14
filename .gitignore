@@ -55,6 +55,7 @@ __pycache__/
 
 # Local planning, research, review artifacts and UI tool state
 /tmp/
+.playwright-cli/
 .impeccable/
 .impeccable-live/
 .impeccable-live.json
