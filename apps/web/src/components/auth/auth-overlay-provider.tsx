@@ -23,6 +23,13 @@ function protectedPath(pathname: string): boolean {
   return pathname === "/publish" || pathname.startsWith("/publish/") || pathname === "/account" || pathname.startsWith("/account/");
 }
 
+function intentLabel(target?: string): string | undefined {
+  const pathname = target?.split(/[?#]/, 1)[0];
+  if (pathname === "/publish" || pathname?.startsWith("/publish/")) return "登录后继续上架出租";
+  if (pathname === "/account" || pathname?.startsWith("/account/")) return "登录后继续查看个人中心";
+  return undefined;
+}
+
 function currentPath(): string {
   return window.location.pathname + window.location.search;
 }
@@ -156,11 +163,11 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
   return <AuthOverlayContext.Provider value={{ open: openAuth }}>
     {children}
     {sessionReadFailed ? <div className="auth-session-pending" role="alert">
-      <span>暂时无法确认登录身份，页面保持不动。</span>
+      <span>暂时无法打开该入口，请重试。</span>
       <button type="button" className="button quiet" onClick={() => {
         setSessionReadFailed(false);
         session.revalidate();
-      }}>重试身份确认</button>
+      }}>重试</button>
     </div> : null}
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -171,9 +178,10 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
             triggerRef.current.focus();
           }
         }}>
-          <div className="auth-dialog-heading"><Dialog.Title>账户登录</Dialog.Title><Dialog.Close className="icon-button" aria-label="关闭认证窗口"><X size={20} /></Dialog.Close></div>
-          <Dialog.Description id="auth-overlay-description">登录后继续当前操作；关闭窗口会留在当前页面。</Dialog.Description>
-          <AuthForm next={next} onSuccess={finish} />
+          <Dialog.Title className="sr-only">登录或注册</Dialog.Title>
+          <Dialog.Description id="auth-overlay-description" className="sr-only">{intentLabel(next) ?? "登录或注册后继续当前操作。关闭窗口会留在当前页面。"}</Dialog.Description>
+          <div className="auth-dialog-heading"><Dialog.Close className="icon-button" aria-label="关闭认证窗口"><X size={20} /></Dialog.Close></div>
+          <AuthForm next={next} contextLabel={intentLabel(next)} onSuccess={finish} />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

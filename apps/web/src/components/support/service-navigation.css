@@ -55,6 +55,22 @@
 .account-tabs { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px; }
 .account-tabs a { padding:10px 15px; background:var(--color-bg-card); border-radius:5px; }
 .account-tabs a[aria-current] { color:var(--color-accent-brand); }
+.account-security { max-width:740px; padding:24px; background:var(--color-bg-surface); border:1px solid var(--color-border-default); border-radius:8px; }
+.account-security-heading { display:flex; justify-content:space-between; gap:20px; margin-bottom:22px; }
+.account-security-heading h2 { margin:0 0 8px; font-size:24px; }
+.account-security-heading p { max-width:52ch; margin:0; color:var(--color-text-secondary); font-size:13px; line-height:1.7; }
+.account-security-kicker { margin-bottom:6px !important; color:var(--color-accent-brand) !important; font-size:11px !important; letter-spacing:.08em; text-transform:uppercase; }
+.account-security-loading { color:var(--color-text-secondary); font-size:13px; }
+.account-security-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:0 0 22px; }
+.account-security-facts > div { min-width:0; padding:13px; background:var(--color-bg-card); border:1px solid var(--color-border-subtle); border-radius:6px; }
+.account-security-facts dt { color:var(--color-text-muted); font-size:11px; }
+.account-security-facts dd { margin:7px 0 0; overflow-wrap:anywhere; color:var(--color-text-primary); font-size:13px; font-weight:700; }
+.account-security-danger { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:16px 0; border-top:1px solid var(--color-border-subtle); }
+.account-security-danger h3 { margin:0 0 6px; font-size:15px; }
+.account-security-danger p { margin:0; color:var(--color-text-secondary); font-size:12px; line-height:1.65; }
+.account-security-danger { margin-top:4px; }
+.account-security-danger .button { color:var(--color-status-danger); border-color:color-mix(in srgb,var(--color-status-danger) 55%,var(--color-border-default)); }
+.account-security-danger .button:hover,.account-security-danger .button:focus-visible { background:color-mix(in srgb,var(--color-status-danger) 10%,transparent); }
 @media(min-width:1100px) and (hover:hover) and (pointer:fine) {
  .portal-width { width:min(1320px,calc(100% - 176px)); }
  .site-header-bar { width:calc(100% - 176px); }
@@ -83,6 +99,10 @@
  .publish-form { padding:18px; }
  .subpage-heading h1 { font-size:28px; }
  .account-guest { padding:24px; }
+ .account-security { padding:20px; }
+ .account-security-facts { grid-template-columns:1fr; }
+ .account-security-danger { align-items:flex-start; flex-direction:column; }
+ .account-security-danger .button { width:100%; }
 }
 
 .market-content .delta-section { width:100%; margin:0; }

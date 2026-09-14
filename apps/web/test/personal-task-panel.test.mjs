@@ -13,6 +13,7 @@ function render(session) {
   const exports = {};
   new Function('require', 'exports', compiled)(name => {
     if (name === '../session/user-session-provider') return { useUserSession: () => session };
+    if (name === '@/components/auth/auth-overlay-provider') return { useAuthOverlay: () => ({ open() {} }) };
     if (name === 'next/link') return { default: props => React.createElement('a', props) };
     return require(name);
   }, exports);
@@ -23,7 +24,7 @@ test('personal panel offers login without disclosing unconfirmed identity and pr
   for (const status of ['guest', 'loading', 'error']) {
     const html = render({ status, displayName: '不得泄露的旧身份' });
     assert.ok(html.includes('Hi~欢迎来到洲洲'));
-    assert.match(html, /href="\/login"[^>]*>登录\/注册/);
+    assert.match(html, /<button[^>]*class="b1-account-link"[^>]*>登录\/注册/);
     assert.ok(!html.includes('不得泄露的旧身份'));
     assert.ok(html.includes('我要租')); assert.ok(html.includes('我要上架')); assert.ok(!html.includes('b1-action-primary')); assert.ok(html.includes('rent-pass.webp')); assert.ok(html.includes('publish-stand.webp'));
     assert.ok(!html.includes('查看租赁任务与账号收藏'));

@@ -53,7 +53,7 @@ export function FavoritesPanel() {
     void load(null, false, generation);
   }, [identity, userId, generation, attempt, load]);
 
-  if (identity === "loading") return <section className="account-guest" aria-busy="true"><h2>正在读取登录状态…</h2><p>不会展示未确认身份的个人收藏。</p></section>;
+  if (identity === "loading") return <section className="account-guest" aria-busy="true"><h2>正在读取登录状态…</h2><p>请稍候，个人收藏准备中。</p></section>;
   if (identity === "guest")
     return <section className="account-guest">
       <HeartOff size={30} />

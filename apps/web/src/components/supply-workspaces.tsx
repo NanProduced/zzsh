@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useUserSession, useUserSessionStore } from "./session/user-session-provider";
+import { publishUserSessionChange, useUserSession, useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { AlertCircle, Check, FileImage, LockKeyhole, Pause, Play, RefreshCw, Send, Trash2, Undo2, Upload } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
+import { AuthForm, WebAuthError, maskPhone, webAuthRequest } from "./auth/auth-form";
+import { accountStatusLabel, cancellationFailureMessage, type UserIdentitySnapshot } from "@/app/user-account-status";
 import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { groupForField, editableDeclaration, supplyApi, supplyBlockerMessages, supplyGroups, SupplyRequestError, uploadSupplyMedia } from "../lib/supply-client";
@@ -1193,29 +1195,119 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
 }
 
 type AccountRow = { id: string; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean };
-const accountViews = { rentals: "租入订单", leased: "出租订单", accounts: "账号管理", favorites: "我的收藏", invite: "我的邀请码" } as const;
+const accountViews = { rentals: "租入订单", leased: "出租订单", accounts: "账号管理", security: "账户安全", favorites: "我的收藏", invite: "我的邀请码" } as const;
 
 function AccountActionError({ error, onRetry }: { error: SupplyRequestError | null; onRetry?: () => void }) {
   if (!error) return null;
   return <div className="supply-notice is-error" role="alert"><AlertCircle size={17} /><span>{error.message}</span>{error.status === 0 && onRetry ? <button type="button" className="button quiet" onClick={onRetry}>重试</button> : null}</div>;
 }
 
+function AccountUnavailable({ label }: { label: string }) {
+  return <section className="account-guest"><AlertCircle size={30} aria-hidden="true" /><h2>{label}暂未开放</h2><p>这项功能正在准备中，其他个人中心入口仍可使用。</p></section>;
+}
+
 export function AccountWorkspace({ view, accountId }: { view: string; accountId?: string }) {
   const router = useRouter();
   const session = useUserSession();
   const active = Object.hasOwn(accountViews, view) ? view as keyof typeof accountViews : "rentals";
+  const description = active === "security" ? "查看账号状态并提交注销申请。" : "查看个人供给状态，并按允许的状态流程处理出租账号。";
   useEffect(() => {
     if (session.status !== "guest") return;
     const target = window.location.pathname + window.location.search;
     router.replace(`/login?next=${encodeURIComponent(target)}`);
   }, [router, session.status]);
-  if (session.status === "loading") return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。"><section className="account-guest" aria-busy="true"><h2>正在确认登录身份…</h2><p>确认完成前不会读取个人事务。</p></section></ServiceShell>;
-  if (session.status === "error") return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>个人事务仍保持隐藏，不会按游客处理。</p><button type="button" className="button secondary" onClick={session.revalidate}>重试身份确认</button></section></ServiceShell>;
-  if (session.status === "guest") return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在转到登录</h2></section></ServiceShell>;
-  return <ServiceShell title={accountViews[active]} description="查看个人供给状态，并按允许的状态流程处理出租账号。">
+  if (session.status === "loading") return <ServiceShell title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><h2>正在准备个人中心…</h2><p>请稍候。</p></section></ServiceShell>;
+  if (session.status === "error") return <ServiceShell title={accountViews[active]} description={description}><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>登录状态暂未确认</h2><p>暂未确认登录结果，请重试后继续。</p><button type="button" className="button secondary" onClick={session.revalidate}>重试</button></section></ServiceShell>;
+  if (session.status === "guest") return <ServiceShell title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在转到登录</h2></section></ServiceShell>;
+  return <ServiceShell title={accountViews[active]} description={description}>
     <nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key, label]) => <Link key={key} href={`/account?view=${key}${key === "accounts" && accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""}`} aria-current={active === key ? "page" : undefined}>{label}</Link>)}</nav>
-    {active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : <section className="account-guest"><LockKeyhole size={30} /><h2>登录后查看{accountViews[active]}</h2><p>登录后即可使用此事务入口。</p><Link href="/login" className="button primary">登录 / 注册</Link></section>}
+    {active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : <AccountUnavailable label={accountViews[active]} />}
   </ServiceShell>;
+}
+
+type AccountProfile = { id: string; name?: string | null; username?: string | null; phoneNumber?: string | null };
+type AccountSessionResponse = { user?: AccountProfile } | null;
+
+function AccountSecurityPanel() {
+  const session = useUserSession();
+  const [profile, setProfile] = useState<AccountProfile | null>(null);
+  const [identity, setIdentity] = useState<UserIdentitySnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const requestRef = useRef<AbortController | null>(null);
+  const currentUserIdRef = useRef(session.userId);
+  currentUserIdRef.current = session.userId;
+
+  const load = useCallback(async () => {
+    const actingUserId = session.userId;
+    if (!actingUserId) return;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      const current = await webAuthRequest<AccountSessionResponse>("/get-session", undefined, controller.signal);
+      const currentIdentity = await webAuthRequest<UserIdentitySnapshot>("/identity/status", undefined, controller.signal);
+      if (controller.signal.aborted || currentUserIdRef.current !== actingUserId || current?.user?.id !== actingUserId) return;
+      setProfile(current?.user ?? null);
+      setIdentity(currentIdentity);
+    } catch (failure) {
+      if (controller.signal.aborted) return;
+      if (failure instanceof WebAuthError && failure.status === 401) {
+        session.revalidate();
+        return;
+      }
+      setError("账号安全信息暂时无法读取，请重试。");
+    } finally {
+      if (!controller.signal.aborted && requestRef.current === controller) {
+        requestRef.current = null;
+        setLoading(false);
+      }
+    }
+  }, [session.revalidate, session.userId]);
+
+  useEffect(() => {
+    void load();
+    return () => {
+      requestRef.current?.abort();
+      requestRef.current = null;
+    };
+  }, [load]);
+
+  const cancelAccount = async () => {
+    if (busy || !profile || profile.id !== currentUserIdRef.current) return;
+    if (!window.confirm("注销会撤销当前会话，并匿名化普通资料。请先处理未完成订单等事项，再继续。确认注销吗？")) return;
+    const actingUserId = profile.id;
+    setBusy("cancel");
+    setError("");
+    setNotice("");
+    try {
+      await webAuthRequest<{ status: UserIdentitySnapshot["accountStatus"] }>("/account/cancel", { reason: "用户在账户安全页提交注销" });
+      if (currentUserIdRef.current !== actingUserId) return;
+      setNotice("账号已注销，必要历史关联保留；当前会话已撤销。");
+      session.revalidate();
+      publishUserSessionChange();
+    } catch (failure) {
+      if (currentUserIdRef.current !== actingUserId) return;
+      setError(failure instanceof WebAuthError ? cancellationFailureMessage(failure.status, failure.code) : "注销未完成，请稍后重试。");
+    } finally {
+      if (currentUserIdRef.current === actingUserId) setBusy("");
+    }
+  };
+
+  if (loading) return <section className="account-security" aria-busy="true"><div className="account-security-heading"><div><p className="account-security-kicker">账户安全</p><h2>账户与登录安全</h2><p>正在读取当前账号的安全信息。</p></div></div><p className="account-security-loading" role="status">正在读取…</p></section>;
+  if (error && !profile) return <section className="account-security" role="alert"><div className="account-security-heading"><div><p className="account-security-kicker">账户安全</p><h2>暂时无法读取</h2><p>{error}</p></div></div><button type="button" className="button secondary" onClick={() => void load()}>重试</button></section>;
+  return <section className="account-security" aria-labelledby="account-security-heading">
+    <div className="account-security-heading"><div><p className="account-security-kicker">账户安全</p><h2 id="account-security-heading">账户与登录安全</h2><p>查看当前账号信息，或提交注销申请。</p></div></div>
+    {error ? <p className="supply-notice is-error" role="alert">{error}</p> : null}
+    {notice ? <p className="supply-notice is-success" role="status">{notice}</p> : null}
+    <dl className="account-security-facts"><div><dt>账号名</dt><dd>{profile?.username || "未设置"}</dd></div><div><dt>手机号</dt><dd>{profile?.phoneNumber ? maskPhone(profile.phoneNumber) : "未绑定"}</dd></div><div><dt>账号状态</dt><dd>{identity ? accountStatusLabel(identity.accountStatus) : "暂无法确认"}</dd></div></dl>
+    <div className="account-security-danger"><div><h3>注销账号</h3><p>注销会撤销会话并匿名化普通资料；未完成订单等事项需先处理。</p></div><button type="button" className="button secondary" disabled={Boolean(busy) || !profile} onClick={() => void cancelAccount()}>{busy === "cancel" ? "提交中…" : "注销账号"}</button></div>
+  </section>;
 }
 
 function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {

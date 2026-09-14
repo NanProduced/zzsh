@@ -15,6 +15,7 @@ function render(stage,home=true){
   if(name==='motion/react')return {useScroll:()=>({scrollY:{}}),useMotionValueEvent:(_,__,fn)=>{listener=fn;},motion:{div:({initial,animate,transition,...props})=>React.createElement('div',props)}};
   if(name==='next/link')return {default:props=>React.createElement('a',props)};
   if(name.includes('user-session-provider'))return {useUserSession:()=>({status:'guest'})};
+  if(name.includes('auth-overlay-provider'))return {useAuthOverlay:()=>({open(){}})};
   if(name.includes('brand-logo'))return {BrandLogo:()=>null};
   if(name.includes('theme-toggle'))return {ThemeToggle:()=>null};
   if(name==='./mobile-nav')return {MobileNav:()=>null};
