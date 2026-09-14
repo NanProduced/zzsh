@@ -69,6 +69,41 @@ export type SupplyGame = {
   name: string;
   description: string | null;
 };
+export type PublicGunsmithGame = SupplyGame;
+export type PublicFirearm = {
+  id: string;
+  gameId: string;
+  code: string;
+  name: string;
+  classificationId: string | null;
+  classificationCode: string | null;
+  classificationName: string | null;
+  enabled: boolean;
+  sortOrder: number;
+  mediaId: string | null;
+  codeCount: number;
+  updatedAt: string;
+};
+export type PublicGunsmithCode = {
+  id: string;
+  firearmId: string;
+  code: string;
+  note: string;
+  modeCode: "HAZARD" | "BATTLEFIELD" | "GENERAL" | null;
+  updatedAt: string;
+};
+export type PublicGunsmithPage = {
+  items: PublicFirearm[];
+  classifications: Array<{ id: string; code: string; name: string; sortOrder: number }>;
+  nextCursor: string | null;
+  limit: number;
+};
+export type PublicGunsmithCodesPage = {
+  firearm: PublicFirearm;
+  items: PublicGunsmithCode[];
+  nextCursor: string | null;
+  limit: number;
+};
 export type PublicCatalog = {
   game: SupplyGame & { catalogRevision: string; currentReleaseId: string | null };
   items: Array<{

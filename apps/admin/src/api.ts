@@ -68,6 +68,13 @@ export type SupplyGame = {
   catalogRevision: string;
   currentReleaseId: string | null;
   coverMediaId: string | null;
+  services?: Array<{
+    id: string;
+    serviceCode: "ACCOUNT_RENTAL" | "GUNSMITH";
+    enabled: boolean;
+    revision: string;
+    supported: boolean;
+  }>;
 };
 
 export type CatalogItem = {
@@ -131,6 +138,71 @@ export type AdminCatalogResponse = {
   entitlements: CatalogEntitlement[];
 };
 
+export type AdminGunsmithClassification = {
+  id: string;
+  gameId: string;
+  code: string;
+  name: string;
+  enabled: boolean;
+  sortOrder: number;
+  revision: string;
+  sourceNamespace: string | null;
+  sourceToken: string | null;
+  sourceNote: string | null;
+};
+export type AdminGunsmithFirearm = {
+  id: string;
+  gameId: string;
+  code: string;
+  name: string;
+  classificationId: string | null;
+  classificationCode?: string | null;
+  classificationName?: string | null;
+  enabled: boolean;
+  sortOrder: number;
+  mediaId: string | null;
+  codeCount?: number;
+  revision: string;
+  updatedAt: string;
+  sourceNamespace: string | null;
+  sourceToken: string | null;
+  sourceNote: string | null;
+};
+export type AdminGunsmithAlias = {
+  id: string;
+  gameId: string;
+  firearmId: string;
+  locale: string;
+  name: string;
+  enabled: boolean;
+  sortOrder: number;
+  revision: string;
+  sourceNamespace: string | null;
+  sourceToken: string | null;
+  sourceNote: string | null;
+};
+export type AdminGunsmithCode = {
+  id: string;
+  gameId: string;
+  firearmId: string;
+  code: string;
+  note: string;
+  modeCode: "HAZARD" | "BATTLEFIELD" | "GENERAL" | null;
+  status: "ACTIVE" | "WITHDRAWN";
+  lastReviewedAt: string | null;
+  revision: string;
+  updatedAt: string;
+  sourceNamespace: string | null;
+  sourceToken: string | null;
+  sourceNote: string | null;
+};
+export type AdminGunsmithResponse = {
+  classifications: AdminGunsmithClassification[];
+  firearms: AdminGunsmithFirearm[];
+  aliases: AdminGunsmithAlias[];
+  codes: AdminGunsmithCode[];
+};
+
 export type PriceLineRecord = {
   priceVersionId: string;
   itemId: string;
@@ -192,7 +264,7 @@ export type RulesResponse = {
 export type MediaAssetReview = {
   id: string;
   gameId: string;
-  purpose: "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE";
+  purpose: "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "FIREARM_MEDIA" | "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE";
   ownershipKind: "PLATFORM_CATALOG" | "USER_SUPPLY";
   ownerUserId: string | null;
   uploadedByRealm: "admin" | "user";
@@ -328,7 +400,7 @@ export type WorkspaceLayoutPayload = {
   defaults: WorkspaceWidgetPlacement[];
 };
 
-export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT", extraHeaders: Record<string, string> = {}): Promise<T> {
+export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT", extraHeaders: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
   const verb = method ?? (body === undefined ? "GET" : "POST");
   const idempotencyKey = verb === "GET" ? undefined : `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`;
@@ -340,8 +412,10 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
         ? undefined
         : { "content-type": "application/json", ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}), ...extraHeaders },
       body: verb === "GET" ? undefined : JSON.stringify(body ?? {}),
+      signal,
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     throw new AdminApiError(0, "NETWORK_ERROR");
   }
   let payload: unknown = null;

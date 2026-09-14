@@ -17,6 +17,7 @@ import {
   optionalTrimmedString,
   requiredString,
 } from "./supply-util";
+import { ensureGameServiceRows, isSupportedGameService, type GameServiceCode } from "./game-services";
 
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
 const UNITS = new Set(["HAFF_BASE", "ROUND", "PIECE"]);
@@ -38,6 +39,7 @@ type GameRow = {
   coverMediaId: string | null;
   createdAt: string;
   updatedAt: string;
+  services: Array<{ id: string; serviceCode: GameServiceCode; enabled: boolean; revision: string; supported: boolean }>;
 };
 
 export async function listGames(client: PoolClient, adminUserId: string, isBoss: boolean): Promise<{ games: GameRow[] }> {
@@ -53,7 +55,29 @@ export async function listGames(client: PoolClient, adminUserId: string, isBoss:
       ORDER BY g."code"`,
     isBoss ? [] : [adminUserId],
   );
-  return { games: result.rows };
+  const serviceRows = await client.query<{
+    id: string;
+    gameId: string;
+    gameCode: string;
+    serviceCode: GameServiceCode;
+    enabled: boolean;
+    revision: string;
+  }>(
+    `SELECT s."id", s."game_id" AS "gameId", g."code" AS "gameCode",
+            s."service_code" AS "serviceCode", s."enabled", s."revision"::text AS "revision"
+       FROM "zzsh_supply"."game_service_operation" s
+       JOIN "zzsh_supply"."game" g ON g."id" = s."game_id"
+      WHERE s."game_id" = ANY($1::text[])
+      ORDER BY s."game_id", s."service_code"`,
+    [result.rows.map((game) => game.id)],
+  );
+  const byGame = new Map<string, GameRow["services"]>();
+  for (const row of serviceRows.rows) {
+    const services = byGame.get(row.gameId) ?? [];
+    services.push({ id: row.id, serviceCode: row.serviceCode, enabled: row.enabled, revision: row.revision, supported: isSupportedGameService(row.gameCode, row.serviceCode) });
+    byGame.set(row.gameId, services);
+  }
+  return { games: result.rows.map((game) => ({ ...game, services: byGame.get(game.id) ?? [] })) };
 }
 
 export async function createGame(
@@ -76,7 +100,16 @@ export async function createGame(
        "cover_media_id" AS "coverMediaId", "created_at" AS "createdAt", "updated_at" AS "updatedAt"`,
     [id, code, name, description],
   );
-  return result.rows[0]!;
+  await ensureGameServiceRows(client, id);
+  const serviceRows = await client.query<{ id: string; serviceCode: GameServiceCode; enabled: boolean; revision: string }>(
+    `SELECT "id", "service_code" AS "serviceCode", "enabled", "revision"::text AS "revision"
+       FROM "zzsh_supply"."game_service_operation" WHERE "game_id" = $1 ORDER BY "service_code"`,
+    [id],
+  );
+  return {
+    ...result.rows[0]!,
+    services: serviceRows.rows.map((service) => ({ ...service, supported: isSupportedGameService(code, service.serviceCode) })),
+  };
 }
 
 export async function updateGame(

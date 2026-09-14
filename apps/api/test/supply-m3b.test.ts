@@ -2,6 +2,7 @@ import { runSupplyPoolChecks } from "./supply-pool-checks";
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runMediaOssChecks, type MediaStorageFaults } from "./supply-media-oss-checks";
+import { runGunsmithChecks } from "./supply-gunsmith-checks";
 import type { SupplyGate } from "../src/supply/publishing";
 import sharp from "sharp";
 import { fingerprintRequest } from "../src/supply/supply-util";
@@ -417,6 +418,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       return activate(base, created.body?.username as string, created.body?.temporaryPassword as string);
     };
     const unscoped = await createStaff("无范围目录员", ["supply.catalog.manage"]);
+    const gunsmithOnly = await createStaff("改枪码目录员", ["supply.gunsmith.manage"]);
     const operator = await createStaff("供给运营", [
       "supply.catalog.manage",
       "supply.rules.edit",
@@ -424,6 +426,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       "supply.quote.internal.read",
       "supply.review.read",
       "supply.review.decide",
+      "supply.gunsmith.manage",
     ]);
 
     // ---------- 目录 ----------
@@ -441,6 +444,10 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     await runtimePool.query(
       `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`,
       [operator.id, gameId, boss.id],
+    );
+    await runtimePool.query(
+      `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`,
+      [gunsmithOnly.id, gameId, boss.id],
     );
 
     const createEntry = async (kind: string, body: Record<string, unknown>): Promise<string> => {
@@ -873,6 +880,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const staleRead = await request(base, `/api/v1/supply/games/${gameId}/catalog?cursor=${encodeURIComponent(staleCursor)}&limit=1`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(staleRead.response.status, 409, "cursors must be invalidated when the catalog revision changes");
 
+    await runGunsmithChecks({base,gameId,boss:boss.jar,bossId:boss.id,user:userOne,operator:operator.jar,gunsmithOnly:gunsmithOnly.jar,catalogOnly:unscoped.jar,request,key:supplyKey,adminOrigin:ADMIN_ORIGIN,apiOrigin:API_ORIGIN,userOrigin:USER_ORIGIN,pool:runtimePool,uploadBytes,mediaBytes:pngBytes});
     await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
     await runSupplyPoolChecks({testContext,pool:runtimePool,maintenance:maintenanceDataPool,auth:authOptions,user:userOne,boss:boss.jar,bossId:boss.id,accountId,gameId,bytes:pngBytes()});
     await runMediaOssChecks({base,pool:runtimePool,maintenance:maintenanceDataPool,operator:{jar:operator.jar,id:operator.id},boss:{jar:boss.jar,id:boss.id},catalogOnly:{jar:unscoped.jar,id:unscoped.id},gameId,itemId:haffItem,mediaDir,faults:storageFaults});

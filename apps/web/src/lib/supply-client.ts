@@ -10,6 +10,9 @@ import type {
   SupplyErrorBody,
   SupplyFieldError,
   SupplyGame,
+  PublicGunsmithCodesPage,
+  PublicGunsmithGame,
+  PublicGunsmithPage,
   VersionToken,
   SavedDeclaration,
 } from "./supply-types.ts";
@@ -186,6 +189,18 @@ const id = (value: string) => encodeURIComponent(value);
 export const supplyApi = {
   games: (signal?: AbortSignal) =>
     supplyRequest<{ games: SupplyGame[] }>("/games", { signal }),
+  gunsmithGames: (signal?: AbortSignal) =>
+    supplyRequest<{ games: PublicGunsmithGame[] }>("/gunsmith/games", { signal }),
+  gunsmithFirearms: (
+    gameId: string,
+    query: URLSearchParams = new URLSearchParams(),
+    signal?: AbortSignal,
+  ) => supplyRequest<PublicGunsmithPage>("/gunsmith/games/" + id(gameId) + "/firearms?" + query, { signal }),
+  gunsmithCodes: (
+    firearmId: string,
+    query: URLSearchParams = new URLSearchParams(),
+    signal?: AbortSignal,
+  ) => supplyRequest<PublicGunsmithCodesPage>("/gunsmith/firearms/" + id(firearmId) + "/codes?" + query, { signal }),
   market: (query: URLSearchParams = new URLSearchParams(), signal?: AbortSignal) =>
     supplyRequest<Page<PublicListing>>("/listings?" + query, { signal }),
   listing: (accountId: string, signal?: AbortSignal) =>

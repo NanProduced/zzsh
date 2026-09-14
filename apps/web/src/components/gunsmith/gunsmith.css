@@ -1,0 +1,49 @@
+.gunsmith-toolbar { display:grid; gap:20px; padding:20px; border:1px solid var(--color-delta-border); border-radius:8px; background:linear-gradient(135deg,var(--color-delta-surface),var(--color-bg-card)); }
+.gunsmith-tool-title { display:flex; align-items:flex-start; gap:12px; color:var(--color-delta-accent); }
+.gunsmith-tool-title h2 { color:var(--color-text-primary); font-size:18px; }
+.gunsmith-tool-title p { margin-top:5px; color:var(--color-text-secondary); font-size:12px; line-height:1.7; }
+.gunsmith-filters { display:grid; grid-template-columns:minmax(150px,.7fr) minmax(220px,1.4fr) minmax(150px,.7fr) auto; gap:12px; align-items:end; }
+.gunsmith-filters label { display:grid; gap:6px; color:var(--color-text-secondary); font-size:12px; }
+.gunsmith-filters input,.gunsmith-filters select { min-height:40px; padding:8px 10px; border:1px solid var(--color-border-default); border-radius:5px; background:var(--color-bg-card); color:var(--color-text-primary); font-size:13px; }
+.gunsmith-layout { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr); gap:20px; align-items:start; margin-top:20px; }
+.gunsmith-firearms,.gunsmith-detail { min-width:0; padding:18px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-card); }
+.gunsmith-firearm-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.gunsmith-firearm-card { display:flex; min-width:0; gap:10px; padding:10px; text-align:left; border:1px solid var(--color-border-subtle); border-radius:6px; background:var(--color-bg-surface); color:var(--color-text-primary); }
+.gunsmith-firearm-card:hover,.gunsmith-firearm-card.is-selected { border-color:var(--color-delta-accent); background:var(--color-delta-card); }
+.gunsmith-card-image,.gunsmith-detail-image { display:grid; flex:0 0 68px; place-items:center; overflow:hidden; border-radius:5px; background:var(--color-bg-elevated); }
+.gunsmith-card-image { width:68px; height:68px; }
+.gunsmith-card-image img,.gunsmith-detail-image img { width:100%; height:100%; object-fit:cover; }
+.gunsmith-image-fallback { display:grid; place-items:center; gap:4px; width:100%; height:100%; color:var(--color-text-muted); font-size:10px; text-align:center; }
+.gunsmith-card-copy { display:grid; min-width:0; align-content:center; gap:4px; }
+.gunsmith-card-copy strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.gunsmith-card-copy small { color:var(--color-text-secondary); font-size:11px; }
+.gunsmith-more { width:100%; margin-top:14px; }
+.gunsmith-inline-error { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:14px; padding:10px 12px; border:1px solid color-mix(in srgb,var(--color-danger) 45%,var(--color-border-default)); border-radius:6px; color:var(--color-danger); font-size:12px; }
+.gunsmith-detail { position:sticky; top:92px; }
+.gunsmith-detail-heading { display:flex; gap:14px; align-items:center; padding-bottom:16px; border-bottom:1px solid var(--color-border-subtle); }
+.gunsmith-detail-image { flex-basis:92px; width:92px; height:92px; }
+.gunsmith-detail-heading h2 { font-size:20px; }
+.eyebrow { margin-bottom:4px !important; color:var(--color-delta-accent); font-size:11px; }
+.gunsmith-detail-code { margin-top:5px !important; color:var(--color-text-muted); font:11px ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
+.gunsmith-code-list { display:grid; gap:12px; padding-top:16px; }
+.gunsmith-code-card { display:grid; gap:10px; padding:12px; border:1px solid var(--color-border-subtle); border-radius:6px; background:var(--color-bg-surface); }
+.gunsmith-code-meta { display:flex; gap:8px; align-items:center; color:var(--color-text-secondary); font-size:11px; }
+.gunsmith-mode { padding:3px 7px; border:1px solid var(--color-delta-border); border-radius:999px; color:var(--color-delta-accent); white-space:nowrap; }
+.gunsmith-code-value { max-height:220px; overflow:auto; margin:0; padding:10px; border-radius:4px; background:var(--color-bg-canvas); color:var(--color-text-primary); font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+.gunsmith-copy { justify-self:start; min-height:36px; padding:7px 12px; }
+.gunsmith-copy-error { margin:0; color:var(--color-danger); font-size:11px; line-height:1.6; }
+.gunsmith-disclaimer { margin-top:16px !important; color:var(--color-text-muted); font-size:11px; line-height:1.7; }
+.gunsmith-state { display:grid; justify-items:center; gap:8px; padding:42px 18px; color:var(--color-text-secondary); text-align:center; }
+.gunsmith-state h2 { color:var(--color-text-primary); font-size:16px; }
+.gunsmith-state p { font-size:12px; }
+.gunsmith-state .button { margin-top:5px; }
+@media (max-width:899px) {
+  .gunsmith-layout { grid-template-columns:minmax(0,1fr); }
+  .gunsmith-detail { position:static; }
+}
+@media (max-width:599px) {
+  .gunsmith-toolbar { padding:15px; }
+  .gunsmith-filters { grid-template-columns:minmax(0,1fr); }
+  .gunsmith-filters .button { width:100%; }
+  .gunsmith-firearm-grid { grid-template-columns:minmax(0,1fr); }
+}

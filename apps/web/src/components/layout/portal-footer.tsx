@@ -5,7 +5,7 @@ import "./header-footer.css";
 
 // Adapted from SmoothUI footer-1 (MIT); see docs/third-party-ui.md.
 const groups: {title:string;links:[string,string][]}[] = [
-  { title: "账号服务", links: [["租账号", "/accounts"], ["上架出租", "/publish"]] },
+  { title: "账号服务", links: [["租账号", "/accounts"], ["上架出租", "/publish"], ["三角洲改枪码", "/gunsmith"]] },
   { title: "租赁指南", links: [["租号流程", "/help#rental-guide"], ["费用与租期", "/help#billing-guide"], ["发布须知", "/help#publish-guide"]] },
   { title: "规则与支持", links: [["帮助与规则", "/help"], ["登录 / 注册", "/login"]] },
 ];

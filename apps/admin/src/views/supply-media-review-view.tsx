@@ -17,6 +17,7 @@ const PURPOSE_LABELS: Record<MediaAssetReview["purpose"], string> = {
   GAME_COVER: "游戏封面",
   SKIN_MEDIA: "皮肤图",
   ITEM_MEDIA: "物品图",
+  FIREARM_MEDIA: "枪械图",
   ACCOUNT_DISPLAY: "账号展示图",
   ACCOUNT_EVIDENCE: "账号凭证",
 };
@@ -41,7 +42,7 @@ export function SupplyMediaReviewView({
   const [success, setSuccess] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [uploadGameId, setUploadGameId] = useState("");
-  const [uploadPurpose, setUploadPurpose] = useState<"GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA">("GAME_COVER");
+  const [uploadPurpose, setUploadPurpose] = useState<"GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "FIREARM_MEDIA">("GAME_COVER");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
 
   const gameNames = useMemo(() => new Map(games.map((game) => [game.id, game.name])), [games]);
@@ -213,10 +214,11 @@ export function SupplyMediaReviewView({
               </select>
             </label>
             <label className="space-y-1 text-xs"><span className="text-muted-foreground">用途</span>
-              <select value={uploadPurpose} onChange={(event) => setUploadPurpose(event.target.value as "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA")} className={selectClass}>
+              <select value={uploadPurpose} onChange={(event) => setUploadPurpose(event.target.value as "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "FIREARM_MEDIA")} className={selectClass}>
                 <option value="GAME_COVER">游戏封面</option>
                 <option value="SKIN_MEDIA">皮肤图</option>
                 <option value="ITEM_MEDIA">物品图</option>
+                <option value="FIREARM_MEDIA">枪械图</option>
               </select>
             </label>
             <label className="space-y-1 text-xs"><span className="text-muted-foreground">图片（JPEG/PNG/WebP，≤10 MiB）</span>

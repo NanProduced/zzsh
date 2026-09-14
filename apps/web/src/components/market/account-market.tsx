@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Crosshair, SlidersHorizontal, X } from "lucide-react";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
@@ -161,7 +162,7 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
   return <ServiceShell title="租账号" description="选择游戏，查看资源与出租条件。" initialQuery={filters.q ?? ""} onSearch={(value) => navigate(withFilterChange(filters, { q: normalizeListingQuery(value) }))}>
     <section className="game-section" aria-label="公开账号市场">
       <div className={`game-row${showDeltaIdentity ? "" : " game-row--wide"}`}>
-        {showDeltaIdentity && <GameIdentity game="delta"><button className="button delta-tool" onClick={() => setNotice({ isOpen: true, title: "三角洲改枪码", message: "当前没有可展示的改枪码。请稍后再来。" })}><Crosshair size={16} />改枪码</button></GameIdentity>}
+        {showDeltaIdentity && <GameIdentity game="delta"><Link className="button delta-tool" href="/gunsmith"><Crosshair size={16} />改枪码</Link></GameIdentity>}
         <div className="delta-supply market-panel" id="account-list" tabIndex={-1}>
           <div className="supply-heading"><h3>资源账号</h3><span className="market-count" aria-live="polite">{feed.status === "ready" ? `已加载 ${items.length} 个账号` : feed.status === "error" ? "读取失败" : "正在读取"}</span></div>
           <form className="market-filters" aria-label="账号筛选" onSubmit={applyMinQty}>
@@ -234,4 +235,3 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
     <ActionFeedbackDialog {...notice} onClose={() => setNotice((value) => ({ ...value, isOpen: false }))} />
   </ServiceShell>;
 }
-
