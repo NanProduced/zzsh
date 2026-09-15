@@ -7,7 +7,7 @@ const benefits = [
 export function ServiceBenefits() {
   return <nav className="portal-width service-benefits" aria-label="租赁服务介绍">
     {benefits.map(item => <Link className="service-benefit" href={item.href} key={item.art}>
-      <span className="benefit-word" aria-hidden="true">{item.word}</span>
+      <span className="benefit-word" aria-hidden="true">{[...item.word].map((letter, index) => <span key={index}>{letter}</span>)}</span>
       <img className="benefit-art" src={`/art/zhouzhou/cta-${item.art}.webp`} alt="" width={140} height={140} aria-hidden="true" />
       <span className="benefit-copy"><strong>{item.title}</strong><span>{item.lines[0]}<br/>{item.lines[1]}</span></span>
     </Link>)}

@@ -783,25 +783,28 @@ html[data-theme="light"] .auth-code-row .button,html[data-theme="light"] .auth-p
 
 /* Service CTAs: visible keywords, separate scene art, stable card geometry. */
 .service-benefits { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-bottom:24px; }
-.service-benefit { --benefit-word:#a47c40; --benefit-word-active:#866127; --benefit-hover:#fff8ed; position:relative; display:flex; align-items:center; min-height:132px; padding:22px 24px; overflow:hidden; border-radius:12px; background:var(--color-bg-surface); outline:1px solid transparent; outline-offset:-1px; transition:background-color 220ms,outline-color 220ms; isolation:isolate; }
-html.dark .service-benefit { --benefit-word:#ab925f; --benefit-word-active:#d8b66f; --benefit-hover:#25231f; }
+.service-benefit { --benefit-word:rgb(164 124 64 / 22%); --benefit-word-active:rgb(164 124 64 / 34%); --benefit-hover:#fff8ed; position:relative; display:flex; align-items:center; min-height:132px; padding:22px 24px; overflow:hidden; border-radius:12px; background:var(--color-bg-surface); outline:1px solid transparent; outline-offset:-1px; transition:background-color 220ms,outline-color 220ms; isolation:isolate; }
+html.dark .service-benefit { --benefit-word:rgb(171 146 95 / 32%); --benefit-word-active:rgb(216 182 111 / 42%); --benefit-hover:#25231f; }
 .benefit-copy { position:relative; z-index:2; display:grid; gap:8px; max-width:calc(100% - 132px); }
 .benefit-copy strong { font-size:17px; line-height:24px; }
 .benefit-copy>span { color:var(--color-text-secondary); font-size:12px; line-height:20px; }
-.benefit-word { position:absolute; right:20px; top:36px; transform-origin:right top; font-size:62px; font-weight:800; line-height:1; color:var(--benefit-word); pointer-events:none; transition:transform 240ms cubic-bezier(.22,1,.36,1),color 220ms; }
-.benefit-art { position:absolute; bottom:-6px; right:-8px; width:144px; height:144px; object-fit:contain; opacity:0; transform:translate(28px,12px); transition:opacity 220ms,transform 240ms cubic-bezier(.22,1,.36,1); pointer-events:none; z-index:1; }
+.benefit-word { position:absolute; right:28px; top:36px; display:flex; font-size:62px; font-weight:800; line-height:1; color:var(--benefit-word); pointer-events:none; transition:color 220ms; }
+.benefit-word>span { display:block; transition:transform 240ms cubic-bezier(.22,1,.36,1); }
+.benefit-art { position:absolute; bottom:-6px; right:18px; width:144px; height:144px; object-fit:contain; opacity:0; transform:translateY(16px); transition:opacity 220ms,transform 240ms cubic-bezier(.22,1,.36,1); pointer-events:none; z-index:1; }
 .service-benefit:nth-child(2) .benefit-art { bottom:-13px; }
 .service-benefit:hover,.service-benefit:focus-visible { background:var(--benefit-hover); outline-color:var(--color-accent-brand); }
 .service-benefit:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:2px; }
-.service-benefit:hover .benefit-word,.service-benefit:focus-visible .benefit-word { color:var(--benefit-word-active); transform:translate(-26px,-24px) scale(.78); }
+.service-benefit:hover .benefit-word,.service-benefit:focus-visible .benefit-word { color:var(--benefit-word-active); }
+.service-benefit:is(:hover,:focus-visible) .benefit-word>span:first-child { transform:translateX(-22px); }
+.service-benefit:is(:hover,:focus-visible) .benefit-word>span:last-child { transform:translateX(22px); }
 .service-benefit:hover .benefit-art,.service-benefit:focus-visible .benefit-art { opacity:1; transform:translate(0,0); }
 .b1-avatar-wrap { position:relative; width:40px; height:40px; border:0; }
 .b1-avatar-wrap img { position:absolute; inset:0; border-radius:50%; width:100%; height:100%; object-fit:cover; }
 .b1-visitor { grid-template-columns:40px minmax(0,1fr); }
 .deal-ticker { position:relative; padding-right:112px; min-height:40px; }
 .deal-companion { position:absolute; right:-8px; bottom:-14px; width:96px; height:90px; object-fit:contain; pointer-events:none; }
-@media(max-width:1199px) { .benefit-art { width:116px; height:116px; right:-10px; } .service-benefit:nth-child(2) .benefit-art { bottom:-11px; } .benefit-word { font-size:46px; right:14px; } .benefit-copy { max-width:calc(100% - 94px); } .service-benefit { padding:18px 16px; } .deal-companion { display:none; } .deal-ticker { padding-right:0; } }
+@media(max-width:1199px) { .benefit-art { width:116px; height:116px; right:12px; } .service-benefit:nth-child(2) .benefit-art { bottom:-11px; } .benefit-word { font-size:46px; right:24px; } .benefit-copy { max-width:calc(100% - 94px); } .service-benefit { padding:18px 16px; } .deal-companion { display:none; } .deal-ticker { padding-right:0; } }
 @media(max-width:999px) { .b1-visitor { grid-template-columns:40px minmax(0,1fr) auto; } }
-@media(max-width:899px) { .service-benefits { grid-template-columns:1fr; gap:10px; margin-bottom:18px; } .service-benefit { min-height:126px; padding:20px; } .benefit-word { top:38px; right:20px; font-size:56px; } .benefit-copy { max-width:calc(100% - 120px); } .benefit-art { width:132px; height:132px; right:-6px; } .service-benefit:nth-child(2) .benefit-art { bottom:-12px; } }
-@media(hover:none) { .benefit-art { opacity:1; transform:none; width:100px; height:100px; } .service-benefit:nth-child(2) .benefit-art { bottom:-10px; } .benefit-word { top:14px; right:20px; font-size:40px; } .benefit-copy { max-width:calc(100% - 100px); } }
-@media(prefers-reduced-motion:reduce) { .service-benefit,.benefit-art,.benefit-word { transition:none; } }
+@media(max-width:899px) { .service-benefits { grid-template-columns:1fr; gap:10px; margin-bottom:18px; } .service-benefit { min-height:126px; padding:20px; } .benefit-word { top:38px; right:28px; font-size:56px; } .benefit-copy { max-width:calc(100% - 120px); } .benefit-art { width:132px; height:132px; right:18px; } .service-benefit:nth-child(2) .benefit-art { bottom:-12px; } }
+@media(hover:none) { .benefit-art { opacity:1; transform:none; width:100px; height:100px; right:16px; } .service-benefit:nth-child(2) .benefit-art { bottom:-10px; } .benefit-word { top:14px; right:20px; font-size:40px; } .benefit-copy { max-width:calc(100% - 100px); } }
+@media(prefers-reduced-motion:reduce) { .service-benefit,.benefit-art,.benefit-word,.benefit-word>span { transition:none; } }
