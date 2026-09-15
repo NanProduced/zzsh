@@ -21,3 +21,5 @@ test('activity ribbon preserves zero/missing values, uses listing label and expo
  const missing=render({});assert.ok(!missing.includes('统计数据说明'));assert.equal((missing.match(/数据暂未提供/g)||[]).length,3);
  const deal=render({deals:[{id:'1',game:'三角洲行动',title:'示例资源',priceLabel:'¥120'}]});assert.ok(deal.includes('示例资源'));assert.ok(deal.includes('¥120'));assert.ok(!deal.includes('暂无可展示的成交信息'));
 });
+
+test('transaction announcer has its own illustration rather than the assistance CTA asset',()=>{ const markup=render({}); assert.ok(markup.includes('/art/zhouzhou/deal-announcer.webp')); assert.ok(!markup.includes('/art/zhouzhou/cta-service.webp')); });
