@@ -12,12 +12,11 @@ export interface DeltaSectionProps {
   searchQuery?: string;
   onResetSearch?: () => void;
   onRetry?: () => void;
-  onToolNotice?: (title: string, message: string) => void;
 }
-export function DeltaSection({ accounts = [], supplyState = "unavailable", searchQuery = "", onResetSearch, onRetry, onToolNotice }: DeltaSectionProps) {
+export function DeltaSection({ accounts = [], supplyState = "unavailable", searchQuery = "", onResetSearch, onRetry }: DeltaSectionProps) {
   return <section id="delta-section" className="portal-width delta-section game-section" aria-label="三角洲行动专区">
     <div className="game-row">
-      <GameIdentity game="delta"><button className="button delta-tool" onClick={() => onToolNotice?.("三角洲改枪码", "当前没有可展示的改枪码。请稍后再来。")}><Crosshair size={16} />改枪码</button></GameIdentity>
+      <GameIdentity game="delta"><Link className="button delta-tool" href="/gunsmith"><Crosshair size={16} />改枪码</Link></GameIdentity>
       <div className="delta-supply" id="account-list" tabIndex={-1}>
         <div className="supply-heading"><h3>资源账号</h3><Link href="/accounts">全部账号<ArrowUpRight size={14} /></Link></div>
         {searchQuery.trim() && <div className="site-search-summary" role="status">

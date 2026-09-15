@@ -6,15 +6,12 @@ import { PlatformStats, type PlatformStatsData, type PublicDeal } from "./notice
 import { DeltaSection, type SupplyState } from "./delta/delta-section";
 import type { AccountCardData } from "./delta/account-card";
 import { PortalFooter } from "./layout/portal-footer";
-import { ActionFeedbackDialog } from "./ui/action-feedback-dialog";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { searchAccounts } from "@/lib/account-search";
 import { UpcomingGames } from "./delta/game-identity";
 import { SupportRail } from "./support/support-rail";
 export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=false, onRetrySupply }: { accounts?: AccountCardData[]; supplyState?: SupplyState; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean; onRetrySupply?:()=>void }) {
-  const [notice, setNotice] = useState({ isOpen: false, title: "", message: "" });
   const [query, setQuery] = useState("");
-  const onActionNotice = (title: string, message: string) => setNotice({ isOpen: true, title, message });
   return <FavoritesProvider><div className="portal-home">
     <div className="brand-backdrop" aria-hidden="true"><div className="brand-landscape"/></div>
     <a href="#main-content" className="skip-link">跳到主要内容</a>
@@ -24,11 +21,10 @@ export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=f
       <HeroSection />
       <div className="portal-width activity-shell"><PlatformStats data={stats} deals={deals} isDemo={statsAreDemo}/></div>
 
-      <DeltaSection accounts={searchAccounts(accounts ?? [], query)} supplyState={supplyState} searchQuery={query} onResetSearch={() => setQuery("")} onRetry={onRetrySupply} onToolNotice={onActionNotice} />
+      <DeltaSection accounts={searchAccounts(accounts ?? [], query)} supplyState={supplyState} searchQuery={query} onResetSearch={() => setQuery("")} onRetry={onRetrySupply} />
       <UpcomingGames />
     </main>
     <PortalFooter />
     <SupportRail />
-    <ActionFeedbackDialog {...notice} onClose={() => setNotice((value) => ({ ...value, isOpen: false }))} />
   </div></FavoritesProvider>;
 }

@@ -233,6 +233,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   const cancelledMedia = useRef(new Set<string>());
 
   const [games, setGames] = useState<SupplyGame[]>([]);
+  const [gamesLoaded, setGamesLoaded] = useState(false);
   const [gameId, setGameId] = useState("");
   const [identityState, setIdentityState] = useState<IdentityState>("checking");
   const [accountId, setAccountId] = useState<string | undefined>(accountIdProp);
@@ -493,12 +494,14 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     const loadContext = captureContext(accountIdProp, gameRef.current);
     const controller = beginRequest();
     setLoadingAccount(Boolean(accountIdProp));
+    setGamesLoaded(false);
     void (async () => {
       try {
         if (!(await waitForIdentity(loadContext))) return;
         const result = await supplyApi.games(controller.signal);
         if (!current(epoch, controller.signal)) return;
         setGames(result.games);
+        setGamesLoaded(true);
         let selected = result.games[0]?.id ?? "";
         if (accountIdProp) {
           if (!identityRef.current) {
@@ -1097,6 +1100,8 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
 
   if (identityState === "checking") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在确认登录身份</h2><p>确认期间暂不展示私人发布资料，也不会继续发送保存、报价或上传请求。</p></section></ServiceShell>;
   if (identityState === "failed") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、报价或上传请求。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重试身份确认</button></section></ServiceShell>;
+
+  if (!accountIdProp && gamesLoaded && games.length === 0) return <ServiceShell title="上架出租" description="填写账号资料并提交审核。"><section className="account-guest"><h2>暂未开放上架</h2><p>目前没有开放出租的游戏，请稍后再来。</p><Link className="button secondary" href="/">返回首页</Link></section></ServiceShell>;
 
   const fieldErrors = error?.details ?? [];
   const fieldError = (path: string) => {

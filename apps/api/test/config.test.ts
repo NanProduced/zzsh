@@ -240,3 +240,17 @@ test("requires distinct auth secrets and secure production cookies", () => {
   );
   assert.equal(loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true" }).secureCookies, true);
 });
+
+
+test("fixed SMS mock is explicit and rejects non-local/production targets", () => {
+  const env = { ...validEnv(), PROVIDER_MODE: "fake", AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32) };
+  assert.equal(loadAuthRuntimeConfig(env).localSmsMock, false);
+  assert.equal(loadAuthRuntimeConfig({ ...env, AUTH_LOCAL_SMS_MOCK: "true" }).localSmsMock, true);
+  for (const override of [
+    { NODE_ENV: "production", AUTH_SECURE_COOKIES: "true" },
+    { APP_PROFILE: "provider-test" }, { PROVIDER_MODE: "real" },
+    { HOST: "0.0.0.0" }, { DB_HOST: "remote.invalid" }, { DB_NAME: "production" },
+    { DB_TARGET: "ecs-test" }, { AUTH_USER_ORIGIN: "https://example.com" },
+    { AUTH_LOCAL_SMS_MOCK: "yes" },
+  ]) assert.throws(() => loadAuthRuntimeConfig({ ...env, AUTH_LOCAL_SMS_MOCK: "true", ...override }), ConfigurationError);
+});

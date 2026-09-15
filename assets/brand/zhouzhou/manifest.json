@@ -1,0 +1,46 @@
+[
+  {
+    "sha256": "E25F6E52940AAF3648E7A342B2FE9BE11B5C0959B68CB94AD0C43C49A48A1730",
+    "bytes": 1907013,
+    "providedBy": "Owner",
+    "sourceFilename": "ChatGPT Image 2026年9月15日 07_29_10 (1).png",
+    "file": "zhouzhou-character-sheet.png",
+    "receivedAt": "2026-09-15",
+    "usage": "brand reference; not production UI export",
+    "width": 1122,
+    "height": 1402
+  },
+  {
+    "sha256": "90BDDE80B22B976FBFB767EC598F88C813F51DC3F7AC3F4199306DC2DBB3EEEA",
+    "bytes": 1884973,
+    "providedBy": "Owner",
+    "sourceFilename": "ChatGPT Image 2026年9月15日 07_29_11 (2).png",
+    "file": "zhouzhou-expression-sheet.png",
+    "receivedAt": "2026-09-15",
+    "usage": "brand reference; not production UI export",
+    "width": 1122,
+    "height": 1402
+  },
+  {
+    "sha256": "14827D3BF09A2D9440098CC46081E824A7346E7CA56300F737A86E081B6F19B1",
+    "bytes": 1799268,
+    "providedBy": "Owner",
+    "sourceFilename": "ChatGPT Image 2026年9月15日 07_29_11 (3).png",
+    "file": "zhouzhou-action-sheet.png",
+    "receivedAt": "2026-09-15",
+    "usage": "brand reference; not production UI export",
+    "width": 1122,
+    "height": 1402
+  },
+  {
+    "sha256": "11760700A360B1D3A9B4F994FFB270F6F0DDD45573D15AD25E4BF6A73992503A",
+    "bytes": 1916472,
+    "providedBy": "Owner",
+    "sourceFilename": "ChatGPT Image 2026年9月15日 07_29_13 (4).png",
+    "file": "zhouzhou-application-examples.png",
+    "receivedAt": "2026-09-15",
+    "usage": "brand reference; not production UI export",
+    "width": 1122,
+    "height": 1402
+  }
+]

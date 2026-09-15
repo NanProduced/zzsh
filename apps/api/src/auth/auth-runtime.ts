@@ -29,6 +29,7 @@ type AuthRuntimeConfig = {
   adminBootstrapSecret?: string;
   secureCookies: boolean;
   testOperationsEnabled: boolean;
+  localSmsMock?: boolean;
 };
 
 export type AuthRuntimeCapabilities = {
@@ -335,14 +336,15 @@ async function assertAdminSessionCreationAllowed(pool: Pool, userId: string, API
 function buildFakePhoneNumberPlugin(
   phoneNumber: typeof import("better-auth/plugins").phoneNumber,
   outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
+  localSmsMock = false,
 ) {
   return phoneNumber({
     phoneNumberValidator: (value) => Boolean(normalizeMainlandPhone(value)),
     sendOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
-      outbox.set(target, { code, sentAt: new Date().toISOString(), purpose: "phone-verification" });
+      outbox.set(target, { code: localSmsMock ? "888888" : code, sentAt: new Date().toISOString(), purpose: "phone-verification" });
     },
     sendPasswordResetOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
-      outbox.set(`${target}-request-password-reset`, { code, sentAt: new Date().toISOString(), purpose: "password-reset" });
+      outbox.set(`${target}-request-password-reset`, { code: localSmsMock ? "888888" : code, sentAt: new Date().toISOString(), purpose: "password-reset" });
     },
   });
 }
@@ -354,6 +356,7 @@ function buildPhoneRegistrationPlugin(
   pool: Pool,
   outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
   fakeSmsEnabled: boolean,
+  localSmsMock: boolean,
   signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
 ) {
   const bodyOf = (value: unknown): Record<string, unknown> => {
@@ -400,7 +403,7 @@ function buildPhoneRegistrationPlugin(
         if (!fakeSmsEnabled) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
         const phoneNumber = phoneFrom(bodyOf(ctx.body));
         const identifier = phoneRegistrationIdentifier(phoneNumber);
-        const code = registrationOtp();
+        const code = localSmsMock ? "888888" : registrationOtp();
         const now = new Date();
         await withTransaction(pool, async (client) => {
           await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
@@ -543,6 +546,16 @@ export function loadAuthRuntimeConfig(
   if (adminBootstrapSecret !== undefined && (adminBootstrapSecret === userSecret || adminBootstrapSecret === adminSecret)) {
     throw new ConfigurationError("AUTH_ADMIN_BOOTSTRAP_SECRET must be different from Better Auth secrets");
   }
+  const mockSetting = env.AUTH_LOCAL_SMS_MOCK ?? "false";
+  if (mockSetting !== "true" && mockSetting !== "false") throw new ConfigurationError("AUTH_LOCAL_SMS_MOCK must be true or false");
+  const localSmsMock = mockSetting === "true";
+  if (localSmsMock && (
+    !["dev", "test"].includes(env.APP_PROFILE ?? "") || env.NODE_ENV === "production" ||
+    env.PROVIDER_MODE !== "fake" || env.DB_TARGET !== "local-compose" ||
+    env.HOST !== "127.0.0.1" || env.DB_HOST !== "127.0.0.1" ||
+    !/^zzsh_(dev|test)(_|$)/.test(env.DB_NAME ?? "") ||
+    ![apiOrigin, userOrigin, adminOrigin].every((origin) => new URL(origin).hostname === "127.0.0.1")
+  )) throw new ConfigurationError("AUTH_LOCAL_SMS_MOCK requires local dev/test, fake providers and loopback origins/database; forbidden in production");
   const secureCookies = env.AUTH_SECURE_COOKIES === "true";
   if (env.NODE_ENV === "production" && !secureCookies) {
     throw new ConfigurationError("AUTH_SECURE_COOKIES=true is required in production");
@@ -555,6 +568,7 @@ export function loadAuthRuntimeConfig(
     adminSecret,
     adminBootstrapSecret,
     secureCookies,
+    localSmsMock,
     testOperationsEnabled: capabilities.testOperationsEnabled === true,
     // Independent of PROVIDER_MODE: selecting OSS media storage never turns SMS,
     // identity or payment providers into real mode.
@@ -629,8 +643,8 @@ export async function mountAuthHandlers(
     plugins: [
       username({ immutableUsername: true }),
       bearer(),
-      buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined, signInIdentifier),
+      buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier),
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
     ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : {}),
@@ -645,6 +659,17 @@ export async function mountAuthHandlers(
       after: createAuthMiddleware(legacyHook),
     },
     databaseHooks: {
+      verification: {
+        create: {
+          before: async (data) => {
+            // Only user phone challenges; admin TOTP and other verification records are untouched.
+            if (options.localSmsMock && /^\+86\d{11}(?:-request-password-reset)?$/.test(data.identifier)) {
+              return { data: { ...data, value: "888888:0" } };
+            }
+            return { data };
+          },
+        },
+      },
       session: {
         create: {
           before: async (data: { userId: string }) => {

@@ -90,6 +90,12 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
       void completeIntent(intent);
       return;
     }
+    // Explicit sign-in opens the form even when session discovery is unavailable.
+    // Protected navigation/callbacks still wait for confirmed identity below.
+    if (target === undefined && onSuccess === undefined) {
+      activateIntent(intent);
+      return;
+    }
     if (session.status !== "guest") {
       pendingRef.current = intent;
       setSessionReadFailed(session.status === "error");

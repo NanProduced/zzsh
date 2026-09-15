@@ -8,7 +8,7 @@
     "start": "next start --hostname 127.0.0.1 --port 3100",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "node --experimental-strip-types --test test/auth-user-route.test.mjs test/user-account-status.test.mjs test/supply-route.test.mjs test/supply-client.test.mjs",
-    "test:ui": "node --experimental-strip-types --test test/account-search.test.mjs test/portal-draft.test.mjs test/service-navigation.test.mjs test/listing-filters.test.mjs test/listing-view.test.mjs test/favorites-lib.test.mjs test/favorites-store.test.mjs test/user-session-store.test.mjs test/user-session-client.test.mjs test/safe-return.test.mjs test/supply-games.test.mjs test/supply-workspaces-contract.test.mjs test/supply-workspaces-behavior.test.mjs test/header-scroll.test.mjs test/hero-carousel.test.mjs test/personal-task-panel.test.mjs test/platform-stats.test.mjs test/gunsmith-mode.test.mjs",
+    "test:ui": "node --experimental-strip-types --test test/account-search.test.mjs test/portal-draft.test.mjs test/service-navigation.test.mjs test/listing-filters.test.mjs test/listing-view.test.mjs test/favorites-lib.test.mjs test/favorites-store.test.mjs test/user-session-store.test.mjs test/user-session-client.test.mjs test/safe-return.test.mjs test/supply-games.test.mjs test/supply-workspaces-contract.test.mjs test/supply-workspaces-behavior.test.mjs test/header-scroll.test.mjs test/hero-carousel.test.mjs test/personal-task-panel.test.mjs test/platform-stats.test.mjs test/gunsmith-mode.test.mjs test/auth-entry-behavior.test.mjs",
     "test:production": "node --test test/production-isolation.test.mjs",
     "dev:showcase": "vite --config dev-showcase/vite.config.mts"
   },

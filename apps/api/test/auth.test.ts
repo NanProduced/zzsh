@@ -2980,6 +2980,39 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(notificationOutbox.rows.length, 1);
     assert.equal(notificationOutbox.rows[0]?.status, "DELIVERED");
     assert.ok(Number(notificationOutbox.rows[0]?.count) > 0);
+    // Same PostgreSQL fixture, separate runtime: fixed codes still use real OTP storage/consumption.
+    const mockPool = new Pool(runtimePool.options);
+    const mockApp = await createApp({
+      health: { dependencies: { postgres: { check: async () => undefined, close: async () => undefined }, redis: { check: async () => undefined, close: async () => undefined } } },
+      database: { pool: mockPool },
+      auth: { ...loadAuthRuntimeConfig({
+        APP_PROFILE: "test", PROVIDER_MODE: "fake", DB_TARGET: "local-compose", HOST: "127.0.0.1", DB_HOST: "127.0.0.1", DB_NAME: DEFAULT_TEST_DATABASE,
+        AUTH_LOCAL_SMS_MOCK: "true", AUTH_USER_SECRET: "m".repeat(32), AUTH_ADMIN_SECRET: "n".repeat(32),
+      }), pool: mockPool },
+    });
+    try {
+      await mockApp.listen(0, "127.0.0.1");
+      const mockBase = await mockApp.getUrl();
+      const mockPhone = "+8613900008888";
+      const complete = (code: string) => request(mockBase, "/api/auth/user/phone-registration/complete", { phoneNumber: mockPhone, code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
+      assert.notEqual((await complete("888888")).response.status, 200);
+      assert.equal((await request(mockBase, "/api/auth/user/phone-registration/send-otp", { phoneNumber: mockPhone }, cookieJar(), USER_ORIGIN)).response.status, 200);
+      assert.equal((await request(mockBase, "/api/auth/user/phone-registration/send-otp", { phoneNumber: mockPhone }, cookieJar(), USER_ORIGIN)).response.status, 429);
+      assert.notEqual((await complete("123456")).response.status, 200);
+      assert.equal((await complete("888888")).response.status, 200);
+      assert.notEqual((await complete("888888")).response.status, 200);
+      const newPassword = randomBytes(24).toString("base64url");
+      const reset = () => request(mockBase, "/api/auth/user/phone-number/reset-password", { phoneNumber: mockPhone, otp: "888888", newPassword }, cookieJar(), USER_ORIGIN);
+      assert.notEqual((await reset()).response.status, 200);
+      assert.equal((await request(mockBase, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: mockPhone }, cookieJar(), USER_ORIGIN)).response.status, 200);
+      const stored = await runtimePool.query('SELECT "value" FROM "zzsh_auth_user"."verification" WHERE "identifier"=$1', [mockPhone + "-request-password-reset"]);
+      assert.equal(stored.rows[0]?.value, "888888:0");
+      assert.equal((await reset()).response.status, 200);
+      assert.notEqual((await reset()).response.status, 200);
+      assert.equal((await request(mockBase, "/api/auth/user/sign-in/phone-number", { phoneNumber: mockPhone, password: newPassword }, cookieJar(), USER_ORIGIN)).response.status, 200);
+      assert.notEqual((await request(mockBase, "/api/auth/user/sign-in/phone-number", { phoneNumber: mockPhone, password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 200);
+    } finally { await mockApp.close(); }
+
   } finally {
     const cleanupErrors: unknown[] = [];
     if (app) {
