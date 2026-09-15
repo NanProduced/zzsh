@@ -14,7 +14,7 @@ function SessionEntry() {
   const session = useUserSession();
   const authOverlay = useAuthOverlay();
   if (session.status === "loading" || session.status === "error") {
-    return <Link className="site-login" href="/login" aria-label="账户"><UserRound size={18} aria-hidden="true" /><span>账户</span></Link>;
+    return <button type="button" className="site-login" onClick={() => authOverlay.open()} aria-label="账户"><UserRound size={18} aria-hidden="true" /><span>账户</span></button>;
   }
   if (session.status === "guest") {
     return (

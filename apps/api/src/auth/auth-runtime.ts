@@ -424,15 +424,18 @@ function buildPhoneRegistrationPlugin(
         const body = bodyOf(ctx.body);
         const phoneNumber = phoneFrom(body);
         const code = codeFrom(body);
-        const password = passwordFrom(body);
+        const unified = body.loginOrRegister === true;
+        const password = unified && body.password === undefined ? undefined : passwordFrom(body);
         if (body.acceptedTerms !== true) throw new APIError("BAD_REQUEST", { message: "Terms must be accepted" });
         const minPasswordLength = ctx.context.password.config.minPasswordLength;
         const maxPasswordLength = ctx.context.password.config.maxPasswordLength;
-        if (password.length < minPasswordLength || password.length > maxPasswordLength) {
+        if (password !== undefined && (password.length < minPasswordLength || password.length > maxPasswordLength)) {
           throw new APIError("BAD_REQUEST", { message: "Invalid password" });
         }
-        const passwordHash = await ctx.context.password.hash(password);
+        const passwordHash = password === undefined ? undefined : await ctx.context.password.hash(password);
         const userId = ctx.context.generateId({ model: "user" }) || `user_${randomUUID().replaceAll("-", "")}`;
+        let resolvedUserId = userId;
+        let requiresPassword = false;
         const accountId = ctx.context.generateId({ model: "account" }) || `account_${randomUUID().replaceAll("-", "")}`;
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
@@ -465,8 +468,18 @@ function buildPhoneRegistrationPlugin(
               await client.query(`UPDATE "zzsh_auth_user"."verification" SET "value" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id, `${storedCode}:${attempts + 1}`]);
               return true;
             }
-            const existing = await client.query(`SELECT 1 FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1 FOR UPDATE`, [phoneNumber]);
-            if (existing.rowCount) throw new APIError("CONFLICT", { message: "Phone number is already registered" });
+            const existing = await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1 FOR UPDATE`, [phoneNumber]);
+            if (existing.rowCount) {
+              if (!unified) throw new APIError("CONFLICT", { message: "Phone number is already registered" });
+              resolvedUserId = existing.rows[0]!.id;
+              await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+              return false;
+            }
+            if (passwordHash === undefined) {
+              // Keep the verified code until password completion; the same expiry and attempt budget still apply.
+              requiresPassword = true;
+              return false;
+            }
             await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
             const now = new Date();
             const email = `phone-${createHash("sha256").update(phoneNumber).digest("hex")}@phone.zzsh.invalid`;
@@ -491,9 +504,10 @@ function buildPhoneRegistrationPlugin(
           }
           throw error;
         }
-        const user = await ctx.context.internalAdapter.findUserById(userId);
+        if (requiresPassword) return ctx.json({ status: true, requiresPassword: true });
+        const user = await ctx.context.internalAdapter.findUserById(resolvedUserId);
         if (!user) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create user" });
-        const session = await ctx.context.internalAdapter.createSession(userId);
+        const session = await ctx.context.internalAdapter.createSession(resolvedUserId);
         if (!session) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create session" });
         await setSessionCookie(ctx, { session, user });
         return ctx.json({ status: true });

@@ -39,10 +39,11 @@ export function HeroCarousel() {
     if (direction < 0) api?.scrollPrev(reduced); else api?.scrollNext(reduced);
   };
   const slides = [
-    { title: <>未成年人<br/><span>禁止消费</span></>, text: "理性游戏 · 守护成长", button: "了解平台规则", href: "/help#protection", art:"sage.png", poster:"protection", agent:"sage", label:"未成年人保护" },
-    { title: <>海量账号<br/><span>真实可靠</span></>, text: "洲洲商行 · 游戏账号服务", button: "浏览资源账号", href: "#delta-section", art:"d-wolf.jpg", poster:"accounts", agent:"d-wolf", label:"洲洲商行" },
-    { title: <>账号交易<br/><span>即将上线</span></>, text: "打造属于您的游戏专属集市", button: "了解交易服务", href: "", art:"jett.png", poster:"market", agent:"jett", label:"账号交易预告" },
-    { title: <>邀好友注册<br/><span>交易返现5%</span></>, text: "2元即可提现", button: "查看邀请活动", href: "", art:"ahri.png", poster:"invite", agent:"ahri", label:"邀请好友活动" },
+    { title: <>三角洲行动<br/><span>资源账号租赁</span></>, text: "按消耗计费 · 真人客服协助履约", button: "浏览三角洲资源账号", href: "#delta-section", poster:"delta", label:"三角洲资源账号租赁" },
+    { title: <>未成年人<br/><span>禁止消费</span></>, text: "理性游戏 · 守护成长", button: "了解平台规则", href: "/help#protection", poster:"protection", label:"未成年人保护" },
+    { title: <>海量账号<br/><span>真实可靠</span></>, text: "洲洲商行 · 游戏账号服务", button: "浏览资源账号", href: "#delta-section", poster:"accounts", subtitle:"洲洲商行 · 游戏账号服务", label:"洲洲商行" },
+    { title: <>账号交易<br/><span>即将上线</span></>, text: "打造属于您的游戏专属集市", button: "了解交易服务", href: "", poster:"market", label:"账号交易预告" },
+    { title: <>邀好友注册<br/><span>交易返现5%</span></>, text: "2元即可提现", button: "查看邀请活动", href: "", poster:"invite", label:"邀请好友活动" },
   ];
   return <div className="hero-carousel" role="region" aria-roledescription="轮播" aria-label="平台指南轮播"
     tabIndex={0} data-current-slide={current + 1} data-autoplay={autoPlaying}
@@ -57,14 +58,10 @@ export function HeroCarousel() {
     }}>
     <div className="hero-viewport" ref={viewport}><div className="hero-track">
       {slides.map((slide, index) => <div key={index} className={`hero-slide hero-slide-${index}`}
-        role="group" aria-roledescription="幻灯片" aria-label={`${slide.label}，${index + 1} / 4`}
+        role="group" aria-roledescription="幻灯片" aria-label={`${slide.label}，${index + 1} / ${slides.length}`}
         aria-hidden={index !== current} inert={index !== current}>
-        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={`/art/poster-${slide.poster}.png`} alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
-        <div className={`hero-character-shell agent-${slide.agent}`} aria-hidden="true">
-          <img className="hero-character" src={`/art/agents/${slide.art}`} alt=""
-            ref={(image) => { if (image?.complete && image.naturalWidth === 0) { image.style.visibility = "hidden"; if (!imageFailed) setImageFailed(true); } }}
-            onError={(event) => { event.currentTarget.style.visibility = "hidden"; setImageFailed(true); }} />
-        </div>
+        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={`/art/zhouzhou/poster-${slide.poster}.webp`} alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
+        {slide.subtitle && <p className="poster-subtitle" aria-hidden="true">{slide.subtitle}</p>}
         <p className="sr-only">{slide.title}</p><p className="sr-only">{slide.text}</p>
         {slide.href && <a className="hero-poster-link" href={slide.href} aria-label={slide.button}/>}
         {imageFailed && <span className="art-failed">装饰图片加载失败</span>}

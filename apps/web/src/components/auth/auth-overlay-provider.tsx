@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { safeReturnTo } from "@/lib/safe-return";
 import { useUserSession } from "@/components/session/user-session-provider";
+import { BrandLogo } from "@/components/brand/brand-logo";
 import { AuthForm } from "./auth-form";
 
 type AuthCallback = () => void | Promise<void>;
@@ -88,6 +89,12 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
     setSessionReadFailed(false);
     if (session.status === "authenticated") {
       void completeIntent(intent);
+      return;
+    }
+    // Explicit sign-in opens the form even when session discovery is unavailable.
+    // Protected navigation/callbacks still wait for confirmed identity below.
+    if (target === undefined && onSuccess === undefined) {
+      activateIntent(intent);
       return;
     }
     if (session.status !== "guest") {
@@ -181,7 +188,10 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
           <Dialog.Title className="sr-only">登录或注册</Dialog.Title>
           <Dialog.Description id="auth-overlay-description" className="sr-only">{intentLabel(next) ?? "登录或注册后继续当前操作。关闭窗口会留在当前页面。"}</Dialog.Description>
           <div className="auth-dialog-heading"><Dialog.Close className="icon-button" aria-label="关闭认证窗口"><X size={20} /></Dialog.Close></div>
-          <AuthForm next={next} contextLabel={intentLabel(next)} onSuccess={finish} />
+          <div className="auth-dialog-layout">
+            <aside className="auth-brand-panel" aria-label="洲洲品牌"><img className="auth-brand-scene auth-art-light" src="/art/zhouzhou/auth-light.webp" alt="洲洲陪你一起游戏"/><img className="auth-brand-scene auth-art-dark" src="/art/zhouzhou/auth-dark.webp" alt="洲洲在这里等你"/><div className="auth-brand-copy"><BrandLogo height={32}/><p>玩得更远，<br/>一直有洲洲</p></div></aside>
+            <div className="auth-dialog-form"><AuthForm next={next} contextLabel={intentLabel(next)} onSuccess={finish} /></div>
+          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

@@ -14,7 +14,7 @@ function MobileSessionEntry() {
   const session = useUserSession();
   const authOverlay = useAuthOverlay();
   if (session.status === "loading" || session.status === "error") {
-    return <Dialog.Close asChild><Link className="button secondary sheet-session" href="/login">账户</Link></Dialog.Close>;
+    return <Dialog.Close asChild><button type="button" className="button secondary sheet-session" onClick={() => authOverlay.open()}>账户</button></Dialog.Close>;
   }
   if (session.status === "guest") {
     return <Dialog.Close asChild><button type="button" className="button primary site-menu-login" onClick={() => authOverlay.open()}>登录 / 注册</button></Dialog.Close>;

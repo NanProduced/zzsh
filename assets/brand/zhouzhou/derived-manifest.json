@@ -1,0 +1,57 @@
+[
+  {
+    "file": "apps/web/public/art/zhouzhou/auth-dark.webp",
+    "bytes": 133888,
+    "sha256": "c8f045cbc29814f1b180b3586032d419b49363c5445fdb45a065796fb7bd9b92"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/auth-light.webp",
+    "bytes": 86582,
+    "sha256": "c6700d4a082978908b0b43530b89fe2713feb079baed9d852fb011733522f55a"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/avatar.webp",
+    "bytes": 8496,
+    "sha256": "2d219ce853735ee57b3a633ad6d63eb2e8704bf46d6af389f44e2e3cd52e56c6"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/cta-billing.webp",
+    "bytes": 33860,
+    "sha256": "14c981b4daa5ade123a50b489a44463b9059b7e261f349a689c2d33df71c9222"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/cta-select.webp",
+    "bytes": 36186,
+    "sha256": "bd9cd10c3e61d10810587a13e7fb354cc677dd0136370576827fee7c978bf58c"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/cta-service.webp",
+    "bytes": 38548,
+    "sha256": "9f774b2c98c84b0d403e46149327a29e65c22e46e4fd3d38945c6aff6bcb6c78"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/poster-accounts.webp",
+    "bytes": 235698,
+    "sha256": "29ef6a9e81eb40d843e1afe72d8b780f1f30093a0224cbb484f35eee86386a81"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/poster-delta.webp",
+    "bytes": 292474,
+    "sha256": "fdfa723a609286458226e356fcb8d19c387924b72087f9332120aa1c48b6a885"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/poster-invite.webp",
+    "bytes": 228904,
+    "sha256": "d6966a3bea39043b114f4492ec3fc77d7406c7048645044a6be575933822eb7c"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/poster-market.webp",
+    "bytes": 271078,
+    "sha256": "d84e15817fe243a7112d2c8876a28add4ffcaca955952e04e61e4efc313123b4"
+  },
+  {
+    "file": "apps/web/public/art/zhouzhou/poster-protection.webp",
+    "bytes": 318626,
+    "sha256": "3d26aa0dbd98adde1cb0f704cbc8a0b18f8f652d3eb4e12337b90e9647ea542b"
+  }
+]
