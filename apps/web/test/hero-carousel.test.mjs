@@ -19,7 +19,7 @@ function setup(overrides={}){
  const tree=exports.HeroCarousel();return {tree,effects,updates,calls,timers};
 }
 test('carousel keeps automatic rotation and manual controls without play/pause button',()=>{
- const p=setup();const html=renderToStaticMarkup(p.tree);assert.ok(!html.includes('data-autoplay-control'));assert.ok(html.includes('data-autoplay="true"'));assert.equal((html.match(/class="slide-index"/g)||[]).length,4);
+ const p=setup();const html=renderToStaticMarkup(p.tree);assert.ok(!html.includes('data-autoplay-control'));assert.ok(html.includes('data-autoplay="true"'));assert.equal((html.match(/class="slide-index"/g)||[]).length,5);
  p.effects.forEach(fn=>fn());assert.equal(p.timers.length,1);assert.equal(p.timers[0].delay,5500);p.timers[0].fn();assert.deepEqual(p.calls,['next']);
  p.tree.props.onFocusCapture({});assert.ok(p.updates.some(([slot,v])=>slot===1&&v===false));
  const buttons=[];function walk(node){if(!node||typeof node!=='object')return;if(node.type==='button')buttons.push(node);React.Children.forEach(node.props?.children,walk);}walk(p.tree);
@@ -27,3 +27,5 @@ test('carousel keeps automatic rotation and manual controls without play/pause b
  buttons.find(b=>b.props['aria-label']==='切换到幻灯片 3').props.onClick();assert.equal(p.calls.at(-1),2);
  for(const state of [{0:true},{4:true},{5:true},{6:false},{1:false}]){const q=setup(state);q.effects.forEach(fn=>fn());assert.equal(q.timers.length,0);}
 });
+
+test("five complete posters keep correct copy and remove legacy foregrounds",()=>{ const html=renderToStaticMarkup(setup().tree); assert.equal((html.match(/class="poster-sheet"/g)||[]).length,5); assert.ok(!html.includes("hero-character")); assert.ok(html.includes("洲洲商行 · 游戏账号服务")); assert.ok(html.includes("5 / 5")); });

@@ -11,7 +11,7 @@ export function PersonalTaskPanel() {
   return (
     <aside className="personal-panel personal-workspace b1-panel" aria-label="个人事务">
       <div className="b1-visitor">
-        <div className="b1-avatar-wrap" aria-hidden="true"><UserRound size={20} /></div>
+        <div className="b1-avatar-wrap" aria-hidden="true"><UserRound size={20} /><img src="/art/zhouzhou/avatar.webp" alt="" width={40} height={40} onError={event => { event.currentTarget.style.display = "none"; }} /></div>
         <strong className="b1-visitor-title">{authenticated ? `你好，${session.displayName ?? "洲洲用户"}` : "Hi~欢迎来到洲洲"}</strong>
         {authenticated ? <Link className="b1-account-link" href="/account?view=accounts">账户<ArrowUpRight size={14} aria-hidden="true" /></Link> : <button type="button" className="b1-account-link" onClick={() => authOverlay.open()}>登录/注册<ArrowUpRight size={14} aria-hidden="true" /></button>}
       </div>

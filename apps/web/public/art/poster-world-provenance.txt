@@ -1,8 +1,0 @@
-Original imagery generated with built-in ImageGen, 2026-09-13, for the local design draft.
-Backgrounds: brand-world-dark.png / brand-world-light.png. Reference: Owner-provided monolithic mountain emblem banner. Prompt: physically rendered angular emblem embedded in mountain clouds at far right, independent dark graphite and natural light alpine lighting, no watermarks or text. Generated originals: exec-e8712617-b815-4ab7-b652-d73432d4ee19.png and exec-65c9a00a-d739-4ead-bd27-8d3d46b24fd2.png.
-Independent poster bases, all visible copy generated into raster art:
-poster-protection.png — guardian notice, blue/ivory shield, 未成年人/禁止消费/理性游戏，守护成长; reserved right foreground for Sage. Source exec-763fc11f-c45f-407e-a275-46290276d290.png.
-poster-accounts.png — tactical warehouse, right physical service sign, 洲洲商行/海量账号·真实可靠/游戏账号服务; left foreground for D-Wolf. Source exec-e2141e07-1409-4d94-9543-73a690905dd0.png.
-poster-market.png — futuristic market gateway with architectural 账号交易/即将上线/打造属于您的游戏专属集市; left foreground for Jett. Source exec-4cb5254e-49e0-45e6-8801-631e00fea61b.png.
-poster-invite.png — coral-red Ionia-inspired gift envelope and large golden ticket, 邀好友注册/交易返现5%/2元即可提现; right foreground for Ahri. Source exec-714ffb95-8dfb-4558-a9e3-f4d082c69e35.png.
-These are promotional/environmental artwork, not official game screenshots, stock proof or inventory. Separate character sources are in agents/SOURCES.md. Earlier atlas experiments remain unreferenced; current page consumes these four individual poster files.

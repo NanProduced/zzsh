@@ -10,15 +10,9 @@ async (page) => {
      await page.reload(); await page.evaluate(() => document.fonts.ready);
      
      check('viewport-'+width+'-'+theme, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), await page.locator('.hero-grid').evaluate(el=>getComputedStyle(el).gridTemplateColumns));
-     check('hero-portrait-popout-'+width+'-'+theme, await page.locator('.hero-carousel').evaluate(hero=>{
-       const slide=hero.querySelector('.hero-slide[aria-hidden="false"]');
-       const portrait=slide.querySelector('.hero-character-shell').getBoundingClientRect();
-       const scene=slide.querySelector('.hero-scene').getBoundingClientRect();
-       const viewport=hero.querySelector('.hero-viewport').getBoundingClientRect();
-       const header=document.querySelector('.portal-header').getBoundingClientRect();
-       return scene.top-portrait.top>=20 && portrait.top>=header.bottom+6 && portrait.top>=viewport.top+6
-         && getComputedStyle(slide).overflow==='visible' && getComputedStyle(hero.querySelector('.hero-viewport')).overflow==='clip'
-         && hero.querySelector('.hero-viewport').scrollTop===0;
+     check('complete-poster-'+width+'-'+theme, await page.locator('.hero-carousel').evaluate(hero=>{
+       const image=hero.querySelector('.hero-slide[aria-hidden="false"] .poster-sheet');
+       return image.complete && image.naturalWidth>0 && getComputedStyle(image).objectFit==='contain' && !hero.querySelector('.hero-character-shell');
      }));
      check('readable-help-'+width+'-'+theme, await page.locator('.help-grid p').first().evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=14));
      check('touch-controls-'+width+'-'+theme, await page.locator('.carousel-controls button, .supply-heading a').evaluateAll(els=>els.every(el=>{const r=el.getBoundingClientRect();return r.width>=44 && r.height>=44;})));

@@ -13,6 +13,7 @@ function probe(status,target){
   if(name==='next/navigation')return {useRouter:()=>({push(){throw Error('Must not navigate without confirmed authentication');}})};
   if(name.includes('session/user-session-provider'))return {useUserSession:()=>({status,revalidate(){}})};
   if(name==='@/lib/safe-return')return {safeReturnTo:value=>value};
+  if(name==='@/components/brand/brand-logo')return {BrandLogo:()=>null};
   if(name==='./auth-form')return {AuthForm:()=>null};
   return require(name);
  },exports,{location:{pathname:'/',search:''}},{activeElement:null},class HTMLElement {});

@@ -56,8 +56,9 @@ test('retained static and dynamic homepage artwork resolves after cleanup', () =
     }
   }
   const carousel = readFileSync(resolve(web, 'src/components/hero/hero-carousel.tsx'), 'utf8');
-  for (const [, poster] of carousel.matchAll(/poster:"([\w-]+)"/g)) assert.ok(existsSync(resolve(web, `public/art/poster-${poster}.png`)));
-  for (const [, art] of carousel.matchAll(/art:"([\w.-]+)"/g)) assert.ok(existsSync(resolve(web, `public/art/agents/${art}`)));
+  for (const [, poster] of carousel.matchAll(/poster:"([\w-]+)"/g)) assert.ok(existsSync(resolve(web, `public/art/zhouzhou/poster-${poster}.webp`)));
+  const benefits = readFileSync(resolve(web,'src/components/hero/service-benefits.tsx'),'utf8');
+  for(const [,art] of benefits.matchAll(/art: "([a-z]+)"/g)) assert.ok(existsSync(resolve(web,'public/art/zhouzhou/cta-'+art+'.webp')));
   const games = readFileSync(resolve(web, 'src/components/delta/game-identity.tsx'), 'utf8');
   for (const [, art] of games.matchAll(/art: "([\w.-]+)"/g)) assert.ok(existsSync(resolve(web, `public/art/games/${art}`)));
 });
@@ -76,6 +77,6 @@ test('production campaigns retain approved content and labeled demo statistics',
   assert.ok(html.includes('brand-backdrop'));
   assert.ok(!html.includes('class="brand-monument"'));
   assert.ok(!html.includes('class="hero-copy"'));
-  assert.equal((html.match(/class="hero-poster-link"/g)||[]).length,2);
-  for(const poster of ['protection','accounts','market','invite']) assert.ok(html.includes(`poster-${poster}.png`));
+  assert.equal((html.match(/class="hero-poster-link"/g)||[]).length,3);
+  for(const poster of ['delta','protection','accounts','market','invite']) assert.ok(html.includes(`poster-${poster}.webp`));
 });
