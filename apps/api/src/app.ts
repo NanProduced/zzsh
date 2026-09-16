@@ -13,16 +13,18 @@ import {
 } from "./logging/request-logger";
 import { mountAuthHandlers, type AuthRuntimeOptions } from "./auth/auth-runtime";
 import type { BusinessDatabaseOptions } from "./database/business";
+import type { OrderSweepModuleOptions } from "./order/order-sweep.module";
 
 export type ApiAppOptions = ApiAppInfrastructureOptions & {
   health: ReadinessModuleOptions;
   database?: BusinessDatabaseOptions;
   auth?: AuthRuntimeOptions;
+  orderSweep?: OrderSweepModuleOptions;
 };
 
 export async function createApp(options: ApiAppOptions) {
   const app = await NestFactory.create(
-    AppModule.register(options.health, options.database),
+    AppModule.register(options.health, options.database, options.orderSweep),
     { logger: ["error", "warn"], bodyParser: !options.auth, rawBody: true },
   );
   installApiInfrastructure(app, options);

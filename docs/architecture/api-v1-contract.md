@@ -149,6 +149,25 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - 未来客户端使用同一稳定 ID/分页/错误契约。Web 页面只是 BFF 消费者，不能把
   DOM、Cookie 或 Server Action 变成改枪码或游戏业务模型。
 
+## M4-A 订单与账号占用基础
+
+核心前缀 `/api/v1/orders`（用户 Cookie BFF `/api/bff/user/orders`，Web Next BFF `/api/orders` 白名单代理，均只适配传输）；管理查询 `/api/v1/admin/orders`（Admin BFF `/api/bff/admin/orders`）。订单事实存于 `zzsh_order.rental_order`（迁移 `0030_m4_order_reservation`），金额以 numeric 分存真值，接口仍按 CNY/yuan/scale=2 十进制字符串。
+
+| 核心接口 | 输入/结果 |
+|---|---|
+| POST /api/v1/orders | `Idempotency-Key` + `{accountId, versionId, releaseId}`（确认令牌，仅三字段）。服务端按序锁双方 user（单条 `ORDER BY id ... FOR UPDATE`）→ game → account，复核当前版本/release、全量可租 blocker、租客 VERIFIED+ADULT、非号主本人、押金 CONFIGURED，同一事务内原子占用（部分唯一索引兜底）并写审计与幂等记录。返回 RenterOrder（PENDING_PAYMENT、holdUntil、PublicQuote 投影） |
+| POST /api/v1/orders/{id}/cancel | `Idempotency-Key` + 可选 `{reason}`（自由文本仅入审计，订单列只存枚举）。本人待支付单可取消（含已过期未清扫），CAS 单次转换 |
+| GET /api/v1/orders | `party=renter|owner`（默认 renter）、status/accountId/limit/cursor；按 party 投影，游标绑定主体与筛选，不一致 409 |
+| GET /api/v1/orders/{id} | 按归属投影（renter/owner 否则 404）；会话与活性在事务内复核 |
+| GET /api/v1/admin/orders(/+id) | 要求 `order.read` 动态权限 + 该游戏 `admin_supply_scope`（Boss 豁免 scope）；平台金额仅另有 `supply.quote.internal.read` 时投影 |
+
+- 状态仅 `PENDING_PAYMENT`/`CANCELLED`（占用由状态派生，非独立字段）；触发器限制 INSERT 初态、仅允许 PENDING→CANCELLED、快照与 hold_until 不可变、金额列与快照一致。未来状态随 M5/M6 迁移连同转换定义进入。
+- 金额四要素分开：租金（快照 resourceTotal）、押金（快照 tenantDeposit）、总应付（派生）。`depositPolicy=UNCONFIGURED` 一律拒绝 409 `DEPOSIT_UNCONFIGURED`；未配置不是免押金，权威零押金必须是显式配置值。新增稳定码 `OCCUPIED`/`RULE_CHANGED`/`VERSION_CHANGED`/`DEPOSIT_UNCONFIGURED`（均 409）。
+- 创建与重放分开授权：首次创建要求交易资格；命中幂等记录只复核请求人会话/活性/归属，不因号主停用、供给占用/下架、规则变化而重复执行创建条件，也不泄露他人幂等响应。读/取消要求会话+活性+归属，不要求交易资格。
+- 占用时间只认数据库时钟，`hold_until` 创建即冻结不可续期。到期不改变事实状态（DTO 派生 `expiredAwaitingCancel`、`paymentOpen=false`，文案“已过期，取消处理中”）；清扫器按 (hold_until,id) 升序、批上限逐单事务取消（CAS 同 id+status+hold_until），lock_timeout 跳过不占批预算使持续被锁的队首不饥饿后续，行级失败经 onResult 可观察；worker 由显式校验过的配置对象启动（无环境变量兜底），先于业务连接池结束而停止并等待在途批次。
+- 占用事实只由订单表派生（无订单即 FREE），保证金资格仍走既有 SupplyGateReader seam（UNKNOWN 不放行）；占用中禁止建/存草稿、恢复上架、提交/通过新版本，暂停不受占用限制，取消后重新评估。占用账号公共列表/详情 404（既有行为延伸，订单卡后续接入须走受权订单接口）。注销义务检查纳入占用订单（双方视角）。
+- 本阶段不提供支付端点或模拟支付；迟到支付不复活已取消订单、不抢新占用（支付边界为 M5 契约，渠道收款事实由 M5 记录并进入异常处置）。正式押金配置来源与保证金权威来源未就绪前，生产建单不可用，本地以隔离 fixture 验证。
+
 ## 验证入口
 
 ```powershell

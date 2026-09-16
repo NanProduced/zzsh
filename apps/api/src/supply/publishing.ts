@@ -859,7 +859,7 @@ export async function restrictListing(
   a.restriction_reason = body.reason;
   await bumpAccount(client, a);
 }
-async function evaluatePublication(
+export async function evaluatePublication(
   client: PoolClient,
   a: PublishingAccount,
   v: ListingVersion,

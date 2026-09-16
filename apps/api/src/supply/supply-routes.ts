@@ -3,7 +3,7 @@ import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
 import type { SupplyGateReader } from "./publishing";
 import type { INestApplication } from "@nestjs/common";
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { auditObjectType, auditSnapshot } from "./supply-audit";
 import { ContentHashError } from "./content-hash";
 import { DecimalError } from "./decimal";
@@ -18,7 +18,7 @@ import {
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
 import { readUserContext, assertUserContextInTransaction } from "../auth/user-identity";
-import { API_V1_ERROR_CODES, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
+import { API_V1_ERROR_CODES, ApiV1HttpException, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
 import {
   bindGameCover,
   createCatalogEntry,
@@ -125,7 +125,7 @@ function originAllowed(request: SupplyNodeRequest, origins: readonly string[]): 
   return origins.includes(origin);
 }
 
-export function requireOrigin(request: SupplyNodeRequest, response: SupplyResponse, options: SupplyRuntimeOptions, requestId: string): boolean {
+export function requireOrigin(request: SupplyNodeRequest, response: SupplyResponse, options: { apiOrigin: string; userOrigin: string; adminOrigin: string }, requestId: string): boolean {
   if (originAllowed(request, [options.apiOrigin, options.userOrigin, options.adminOrigin])) return true;
   sendJson(response, 403, { error: { code: API_V1_ERROR_CODES.FORBIDDEN, message: "Request rejected", requestId } }, requestId);
   return false;
@@ -141,11 +141,15 @@ export function mapDatabaseError(error: unknown): SecurityApiError | null {
   return null;
 }
 
-async function safely(response: SupplyResponse, requestId: string, action: () => Promise<void>): Promise<void> {
+export async function safely(response: SupplyResponse, requestId: string, action: () => Promise<void>): Promise<void> {
   try {
     await action();
   } catch (error) {
     if (error instanceof ContentHashError || error instanceof DecimalError) { sendError(response, invalid(error.message), requestId); return; }
+    if (error instanceof ApiV1HttpException) {
+      sendJson(response, error.getStatus(), { error: { code: error.code, message: error.safeMessage, requestId, ...(error.details ? { details: error.details } : {}) } }, requestId);
+      return;
+    }
     if (error instanceof SecurityApiError) {
       sendError(response, error, requestId);
       return;
@@ -204,7 +208,7 @@ export async function sendStoredMedia(
 export type WriteActor = { realm: "admin" | "user"; id: string; sessionId: string };
 
 export async function runIdempotentWrite(
-  options: SupplyRuntimeOptions,
+  options: { pool: Pool },
   request: SupplyNodeRequest,
   response: SupplyResponse,
   requestId: string,

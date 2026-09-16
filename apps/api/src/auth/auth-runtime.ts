@@ -14,6 +14,8 @@ import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
+import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
+import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { setAuditContext, withTransaction } from "./security-core";
@@ -46,6 +48,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   userObligationReader?: UserObligationReader;
   mediaStorage?: MediaStorage;
   testSupplyGateReader?: SupplyGateReader;
+  /** Seconds a pending-payment order holds the account. Creation refuses to run when unset. */
+  orderHoldSeconds?: number;
   /**
    * Explicit Better Auth rate-limit settings for the user realm. Unset keeps the library default
    * (enabled in production); the isolated auth tests pass their own settings to assert that the
@@ -799,6 +803,8 @@ export async function mountAuthHandlers(
     userObligationReader: async (userId,client) => {
       const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED') LIMIT 1",[userId]);
       if(pending.rowCount) return "PENDING";
+      const orderPending=await client.query("SELECT 1 FROM zzsh_order.rental_order WHERE status='PENDING_PAYMENT' AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1",[userId]);
+      if(orderPending.rowCount) return "PENDING";
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
     },
     testOperationsEnabled: options.testOperationsEnabled,
@@ -817,14 +823,24 @@ export async function mountAuthHandlers(
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
   if(options.testSupplyGateReader && !options.testOperationsEnabled) throw new Error("Supply fixtures require test operations capability");
-  const supplyGateReader=options.testSupplyGateReader ?? unknownSupplyGate;
+  // Occupancy truth comes from the order table; the base reader keeps the
+  // publisher-bail seam semantics (UNKNOWN fails closed until M5).
+  const supplyGateReader=composeSupplyGateWithOrderOccupancy(options.testSupplyGateReader ?? unknownSupplyGate);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
+  const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
+    const raw = process.env.ORDER_HOLD_SECONDS?.trim();
+    if (!raw) return undefined;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  })();
+  const orderOptions: OrderRuntimeOptions = { ...securityOptions, orderHoldSeconds, supplyGateReader };
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
     supply: { ...securityOptions, mediaStorage, supplyGateReader },
+    order: orderOptions,
   });
   mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader});
   mountSupplyHandlers(app, {
@@ -837,6 +853,8 @@ export async function mountAuthHandlers(
     mediaStorage,
     supplyGateReader,
   });
+  mountOrderHandlers(app, orderOptions);
+  mountUserOrderBff(app, orderOptions);
 }
 
 function mountRealm(
