@@ -160,6 +160,60 @@ test("keeps real providers behind provider-test scope and disables them for test
   assert.equal(loadConfig({ ...validEnv("provider-test"), PROVIDER_MODE: "real" }).provider, "real");
 });
 
+test("fails closed for incomplete or misplaced Yunxin configuration", () => {
+  assert.equal(loadConfig(validEnv()).yunxin.enabled, false);
+  assert.throws(
+    () => loadConfig({ ...validEnv(), YUNXIN_APP_KEY: "app-key" }),
+    (error: unknown) => error instanceof ConfigurationError && /credentials require YUNXIN_ENABLED=true/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv(), YUNXIN_ENABLED: "true", YUNXIN_APP_KEY: "app-key", YUNXIN_APP_SECRET: "secret" }),
+    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=provider-test/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("provider-test"), YUNXIN_ENABLED: "true" }),
+    (error: unknown) => error instanceof ConfigurationError && /YUNXIN_APP_KEY/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("provider-test"), YUNXIN_ENABLED: "true", YUNXIN_APP_KEY: "app-key" }),
+    (error: unknown) => error instanceof ConfigurationError && /YUNXIN_APP_SECRET/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("provider-test"), YUNXIN_ENABLED: "true", YUNXIN_APP_KEY: "app key", YUNXIN_APP_SECRET: "secret" }),
+    (error: unknown) => error instanceof ConfigurationError && /single-line/.test(error.message),
+  );
+  assert.throws(
+    () => loadConfig({ ...validEnv("provider-test"), YUNXIN_ENABLED: "yes" }),
+    (error: unknown) => error instanceof ConfigurationError && /YUNXIN_ENABLED/.test(error.message),
+  );
+});
+
+test("loads Yunxin credentials without enabling other real providers", () => {
+  const workingDirectory = mkdtempSync(join(tmpdir(), "zzsh-yunxin-config-"));
+  const secretDirectory = join(workingDirectory, ".secrets");
+  mkdirSync(secretDirectory);
+  try {
+    writeFileSync(join(secretDirectory, "yunxin_secret"), "yunxin-test-secret\n");
+    const config = loadConfig(
+      {
+        ...validEnv("provider-test"),
+        YUNXIN_ENABLED: "true",
+        YUNXIN_APP_KEY: " app-key ",
+        YUNXIN_APP_SECRET_FILE: ".secrets/yunxin_secret",
+      },
+      workingDirectory,
+    );
+    assert.equal(config.provider, "fake");
+    assert.deepEqual(config.yunxin, {
+      enabled: true,
+      appKey: "app-key",
+      appSecret: "yunxin-test-secret",
+    });
+  } finally {
+    rmSync(workingDirectory, { recursive: true, force: true });
+  }
+});
+
 test("rejects blank secrets and gives file secrets priority over env values", () => {
   assert.throws(
     () => loadConfig({ ...validEnv(), DB_PASSWORD: "   " }),

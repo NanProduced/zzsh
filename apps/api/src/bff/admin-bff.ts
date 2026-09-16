@@ -15,6 +15,7 @@ import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/sup
 import { handleContentAdminRoute } from "../content/content-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
+import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
 
 type NodeRequest = AuthSecurityNodeRequest & {
   ip?: string;
@@ -34,6 +35,7 @@ export type AdminBffOptions = {
   adminSecurityOptions: AuthSecurityOptions;
   supply: SupplyRuntimeOptions;
   order: OrderRuntimeOptions;
+  yunxin?: YunxinRouteOptions;
 };
 
 const AUTH_PATHS = new Map([
@@ -309,6 +311,27 @@ async function forwardSecurity(
   response.status(captured.statusCode).json(sanitizeResponse(captured.body));
 }
 
+async function forwardYunxin(
+  request: NodeRequest,
+  response: NodeResponse,
+  targetPath: string,
+  requestId: string,
+  options: AdminBffOptions,
+): Promise<void> {
+  const captured = captureResponse();
+  const forwardedHeaders: Record<string, string | string[] | undefined> = { ...request.headers, "x-request-id": requestId };
+  const cookie = adminSessionCookie(request);
+  if (cookie) forwardedHeaders.cookie = cookie;
+  else delete forwardedHeaders.cookie;
+  delete forwardedHeaders.authorization;
+  // The only sensitive value from this fixed route is the intended short-lived IM token;
+  // AppSecret and static provider tokens never enter the response.
+  await handleYunxinRoute({ ...request, url: targetPath, originalUrl: targetPath, headers: forwardedHeaders }, captured, options.yunxin!);
+  for (const [name, value] of captured.headers) response.setHeader(name, value);
+  response.setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store");
+  response.status(captured.statusCode).json(captured.body);
+}
+
 async function handleAdminBff(request: NodeRequest, response: NodeResponse, options: AdminBffOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
@@ -402,6 +425,19 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
+  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/presence" || Boolean(imAction);
+  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/presence"
+    ? (method === "GET" || ((path === "/im/consultations" || path === "/im/messages") && method === "POST") || (path === "/im/presence" && method === "PUT"))
+    : method === "POST";
+  if (imPathAllowed) {
+    if (!options.yunxin || !imMethodAllowed) {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    await forwardYunxin(request, response, `/api/v1/im/admin${path.slice("/im".length)}${requestQuery(request)}`, requestId, options);
     return;
   }
   const targetPath = AUTH_PATHS.get(path) ?? SECURITY_PATHS.get(path);

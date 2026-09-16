@@ -6,6 +6,7 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
+  MessagesSquareIcon,
   NewspaperIcon,
   ScrollTextIcon,
   ShieldIcon,
@@ -31,6 +32,10 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     { label: "工作区", isTitle: true },
     { label: "工作台", icon: LayoutDashboardIcon, path: "/workbench", kind: "workbench" },
   ];
+
+  if (has("im.support.read") || nav.isBoss) {
+    items.push({ label: "客户服务", isTitle: true }, { label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
+  }
 
   const system: WorkspaceMenuItem[] = [];
   if (has("admin.account.read") || nav.isBoss) {
@@ -108,6 +113,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
   if (pathname === "/account") return "账号安全";
+  if (pathname === "/support") return "客服工作台";
   return "工作台";
 }
 

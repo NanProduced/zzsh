@@ -9,6 +9,7 @@ import { SupplyMediaReviewView } from "../views/supply-media-review-view";
 import { SupplyRulesView } from "../views/supply-rules-view";
 import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
+import { ImSupportView } from "../views/im-support-view";
 
 import { AccountSecurityPage } from "./account-security-page";
 import type { WorkspaceTab } from "./tab-model";
@@ -56,6 +57,7 @@ export function WorkspacePageContent({
       />
     );
   }
+  if (tab.kind === "support") return <ImSupportView key={tab.id} snapshot={snapshot} preview={tab.query.preview === "1"} />;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (
       <AdminDirectoryView

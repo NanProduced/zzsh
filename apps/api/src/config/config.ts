@@ -11,6 +11,12 @@ export type ProviderMode = (typeof PROVIDER_MODES)[number];
 
 type DatabaseTarget = "local-compose" | "ecs-test";
 
+export type YunxinConfig = {
+  enabled: boolean;
+  appKey?: string;
+  appSecret?: string;
+};
+
 export type AppConfig = {
   profile: ConfigProfile;
   provider: ProviderMode;
@@ -33,6 +39,7 @@ export type AppConfig = {
     password: string;
   };
   providerTestScope?: string;
+  yunxin: YunxinConfig;
 };
 
 export class ConfigurationError extends Error {
@@ -116,6 +123,56 @@ function migrationTargetProfile(env: NodeJS.ProcessEnv): MigrationTargetProfile 
     throw new ConfigurationError("MIGRATION_TARGET_PROFILE is invalid");
   }
   return value as MigrationTargetProfile;
+}
+
+function optionalSecret(
+  env: NodeJS.ProcessEnv,
+  valueKey: string,
+  fileKey: string,
+  workingDirectory: string,
+): string | undefined {
+  if (env[valueKey] === undefined && env[fileKey] === undefined) return undefined;
+  return readSecret(env, valueKey, fileKey, workingDirectory);
+}
+
+function yunxinAppKey(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.YUNXIN_APP_KEY === undefined) return undefined;
+  const value = env.YUNXIN_APP_KEY.trim();
+  if (value === "") throw new ConfigurationError("YUNXIN_APP_KEY must not be blank");
+  if (value.length > 128 || /[\u0000-\u001f\u007f\s]/.test(value)) {
+    throw new ConfigurationError("YUNXIN_APP_KEY must be a single-line value of at most 128 characters");
+  }
+  return value;
+}
+
+function loadYunxinConfig(
+  env: NodeJS.ProcessEnv,
+  workingDirectory: string,
+  profile: ConfigProfile,
+): YunxinConfig {
+  const enabledValue = env.YUNXIN_ENABLED === undefined ? "false" : env.YUNXIN_ENABLED.trim();
+  if (enabledValue !== "true" && enabledValue !== "false") {
+    throw new ConfigurationError("YUNXIN_ENABLED must be true or false");
+  }
+  const enabled = enabledValue === "true";
+  const hasCredentials =
+    env.YUNXIN_APP_KEY !== undefined ||
+    env.YUNXIN_APP_SECRET !== undefined ||
+    env.YUNXIN_APP_SECRET_FILE !== undefined;
+
+  if (!enabled) {
+    if (hasCredentials) throw new ConfigurationError("YUNXIN credentials require YUNXIN_ENABLED=true");
+    return { enabled: false };
+  }
+  if (profile !== "provider-test") {
+    throw new ConfigurationError("YUNXIN_ENABLED=true is only allowed in APP_PROFILE=provider-test");
+  }
+
+  const appKey = yunxinAppKey(env);
+  if (!appKey) throw new ConfigurationError("YUNXIN_APP_KEY is required when YUNXIN_ENABLED=true");
+  const appSecret = optionalSecret(env, "YUNXIN_APP_SECRET", "YUNXIN_APP_SECRET_FILE", workingDirectory);
+  if (!appSecret) throw new ConfigurationError("YUNXIN_APP_SECRET or YUNXIN_APP_SECRET_FILE is required");
+  return { enabled: true, appKey, appSecret };
 }
 
 export function loadConfig(
@@ -206,6 +263,7 @@ export function loadConfig(
   if (testOperationsEnabled && (profile !== "test" || provider !== "fake")) {
     throw new ConfigurationError("ENABLE_TEST_OPERATIONS=true requires APP_PROFILE=test and PROVIDER_MODE=fake");
   }
+  const yunxin = loadYunxinConfig(env, workingDirectory, profile);
 
   return {
     profile,
@@ -225,5 +283,6 @@ export function loadConfig(
     },
     redis: { host: redisHost, port: redisPort, password: redisPassword },
     providerTestScope,
+    yunxin,
   };
 }

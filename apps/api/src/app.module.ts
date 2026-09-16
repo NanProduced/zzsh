@@ -3,6 +3,7 @@ import { HealthModule } from "./health/health.module";
 import type { ReadinessModuleOptions } from "./health/readiness";
 import { BusinessDatabaseModule, type BusinessDatabaseOptions } from "./database/business";
 import { OrderSweepModule, type OrderSweepModuleOptions } from "./order/order-sweep.module";
+import { MessageScopeRecoveryLifecycle } from "./im/consultation";
 
 @Module({})
 export class AppModule {
@@ -16,6 +17,7 @@ export class AppModule {
         // the sweeper and awaiting the in-flight batch) fires before the pool ends.
         ...(orderSweep ? [OrderSweepModule.register(orderSweep)] : []),
       ],
+      providers: [MessageScopeRecoveryLifecycle],
     };
   }
 }

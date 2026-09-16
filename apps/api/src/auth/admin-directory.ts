@@ -17,6 +17,14 @@ import {
 } from "./admin-authorization";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
 import type { AuthSecurityOptions } from "./auth-security";
+import {
+  buildYunxinIdentityMarker,
+  deriveYunxinAccountId,
+  type ImIdentityIntent,
+  type ImIdentityIntentRepository,
+  type ImIdentityProvisioner,
+  type ImIdentityQueryExecutor,
+} from "../im/identity-lifecycle";
 
 const STAFF_ENROLLMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ROLE_CODE_PATTERN = /^[a-z][a-z0-9_]{1,62}$/;
@@ -26,7 +34,11 @@ type AdminContext = {
   sessionId: string;
 };
 
-type DirectoryOptions = Pick<AuthSecurityOptions, "pool" | "hashPassword">;
+type DirectoryOptions = Pick<AuthSecurityOptions, "pool" | "hashPassword"> & {
+  imProvisioner?: ImIdentityProvisioner;
+  imIdentityRepository?: ImIdentityIntentRepository;
+  imAppId?: string;
+};
 
 export async function nextAdminLogin(client: PoolClient): Promise<{ username: string; displayUsername: string }> {
   for (;;) {
@@ -183,9 +195,16 @@ export async function createAdministrator(
   }
   const name = requiredName(body);
   const grants = grantsFromBody(body);
+  const imAppId = options.imAppId;
+  const imProvisioner = options.imProvisioner;
+  const imIdentityRepository = options.imIdentityRepository;
+  const imConfigured = imAppId !== undefined || imProvisioner !== undefined || imIdentityRepository !== undefined;
+  if (imConfigured && (!imAppId || !imProvisioner || !imIdentityRepository)) {
+    throw new Error("IM identity binding is incompletely configured");
+  }
   const temporaryPassword = randomBytes(18).toString("base64url");
   const passwordHash = await options.hashPassword(temporaryPassword);
-  const result = await withTransaction(options.pool, async (client) => {
+  const { result, imIntent, imMapping } = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId, grants.roleIds);
     requirePermission(actor, ADMIN_PERMISSION.accountCreate);
@@ -198,6 +217,12 @@ export async function createAdministrator(
     const login = await nextAdminLogin(client);
     const loginEmail = `${login.username}@admin.zzsh.invalid`;
     const id = `admin_${randomUUID().replaceAll("-", "")}`;
+    const imKey = imAppId
+      ? { provider: "yunxin" as const, appId: imAppId, realm: "admin", kind: "ADMIN" as const, platformSubjectId: id }
+      : undefined;
+    const imIntent: ImIdentityIntent | undefined = imKey
+      ? { key: imKey, accountId: deriveYunxinAccountId(imKey), identityMarker: buildYunxinIdentityMarker(imKey) }
+      : undefined;
     await client.query(
       `INSERT INTO "zzsh_auth_admin"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "displayUsername", "twoFactorEnabled", "suspended")
        VALUES ($1, $2, $3, $4, $4, $5, $6, false, false)`,
@@ -214,6 +239,11 @@ export async function createAdministrator(
       [id, new Date(now.getTime() + STAFF_ENROLLMENT_TTL_MS)],
     );
     await replaceGrants(client, id, grants);
+    const imMapping = imIntent && imIdentityRepository
+      ? await imIdentityRepository.ensureIntentInTransaction({
+          query: <T extends Record<string, any> = Record<string, any>>(text: string, values?: unknown[]) => client.query<T>(text, values),
+        } satisfies ImIdentityQueryExecutor, imIntent)
+      : null;
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,
@@ -233,15 +263,27 @@ export async function createAdministrator(
         effectivePermissions: [...proposed].sort(),
       },
     });
-    return {
+    const result = {
       id,
       username: login.displayUsername,
       name,
       status: "PENDING_ENROLLMENT",
       isBoss: false,
     };
+    return { result, imIntent, imMapping };
   });
-  return { ...result, temporaryPassword };
+  if (!imProvisioner || !imIntent || !imMapping) return { ...result, temporaryPassword };
+  let imIdentity = imMapping;
+  try {
+    imIdentity = (await imProvisioner.ensure({ key: imIntent.key, displayName: result.name })).mapping;
+  } catch {
+    // The PENDING intent is committed already; keep administrator creation successful and let recovery retry IM.
+  }
+  return {
+    ...result,
+    temporaryPassword,
+    imIdentity: { accountId: imIdentity.accountId, status: imIdentity.status },
+  };
 }
 
 export async function updateAdministrator(

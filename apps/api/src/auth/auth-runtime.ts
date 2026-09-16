@@ -19,6 +19,12 @@ import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, readSecret } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { setAuditContext, withTransaction } from "./security-core";
+import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
+import { MessageScopeRecoveryLifecycle, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
+import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
+import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi } from "../im/yunxin-provider";
+import type { ImMessageTransport } from "../im/im-contract";
+import { mountYunxinHandlers } from "../im/yunxin-routes";
 
 type AuthRealmName = "user" | "admin";
 
@@ -40,6 +46,11 @@ export type AuthRuntimeCapabilities = {
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   pool: Pool;
+  yunxin?: { appId: string; appKey: string; appSecret: string };
+  /** Test-only local provider seam; production construction must leave this unset. */
+  testYunxinProvider?: YunxinServerApi & YunxinSupportScopeApi;
+  /** Test-only local message seam; production construction must leave this unset. */
+  testImMessageTransport?: ImMessageTransport;
   fakeSmsOutbox?: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>;
   fakeAdminNotificationOutbox?: AdminSecurityNotification[];
   rateLimitState?: Map<string, { failures: number; resetAt: number }>;
@@ -612,8 +623,37 @@ export async function mountAuthHandlers(
   const adminSchema = createAuthSchema("zzsh_auth_admin");
   const userDatabase = drizzle(options.pool);
   const adminDatabase = drizzle(options.pool);
+  if ((options.testYunxinProvider || options.testImMessageTransport) && !options.testOperationsEnabled) {
+    throw new ConfigurationError("Test IM providers require test operations capability");
+  }
   const fakeSmsOutbox = options.fakeSmsOutbox ?? new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>();
   const trustedOrigins = [options.apiOrigin, options.userOrigin, options.adminOrigin];
+  const yunxinRuntime = options.yunxin
+      ? (() => {
+        const repository = new YunxinIdentityRepository(options.pool);
+        const provider = options.testYunxinProvider ?? new YunxinServerApiClient({
+          appKey: options.yunxin!.appKey,
+          appSecret: options.yunxin!.appSecret,
+        });
+        const provisioner = new ImIdentityProvisioner(repository, provider);
+        return {
+          repository,
+          provider,
+          provisioner,
+          tokenService: new YunxinDynamicTokenService(repository, options.yunxin!),
+        };
+      })()
+    : undefined;
+  const yunxinConsultation: ConsultationRouteOptions | undefined = yunxinRuntime ? {
+    pool: options.pool,
+    appId: options.yunxin!.appId,
+    provider: yunxinRuntime.provider,
+    ...(options.testImMessageTransport ? { messageTransport: options.testImMessageTransport } : {}),
+    supportManager: {
+      key: supportManagerIdentityKey(options.yunxin!.appId),
+      provisioner: yunxinRuntime.provisioner,
+    },
+  } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
   const userSignInApi: { retry?: (signIn: "username" | "phone-number", body: Record<string, unknown>, headers: Headers) => Promise<Response> } = {};
   const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> } = {};
@@ -808,6 +848,11 @@ export async function mountAuthHandlers(
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
     },
     testOperationsEnabled: options.testOperationsEnabled,
+    ...(yunxinRuntime ? {
+      imProvisioner: yunxinRuntime.provisioner,
+      imIdentityRepository: yunxinRuntime.repository,
+      imAppId: options.yunxin!.appId,
+    } : {}),
   };
   (app as unknown as { useBodyParser: (parser: "json", rawBody: boolean) => void }).useBodyParser("json", true);
   mountRealm(
@@ -822,6 +867,17 @@ export async function mountAuthHandlers(
   );
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
+  if (yunxinRuntime) {
+    mountYunxinHandlers(app, {
+      security: securityOptions,
+      appId: options.yunxin!.appId,
+      repository: yunxinRuntime.repository,
+      provisioner: yunxinRuntime.provisioner,
+      tokenService: yunxinRuntime.tokenService,
+      consultation: yunxinConsultation,
+    });
+    app.get(MessageScopeRecoveryLifecycle).start(yunxinConsultation!);
+  }
   if(options.testSupplyGateReader && !options.testOperationsEnabled) throw new Error("Supply fixtures require test operations capability");
   // Occupancy truth comes from the order table; the base reader keeps the
   // publisher-bail seam semantics (UNKNOWN fails closed until M5).
@@ -841,6 +897,16 @@ export async function mountAuthHandlers(
     adminSecurityOptions: securityOptions,
     supply: { ...securityOptions, mediaStorage, supplyGateReader },
     order: orderOptions,
+    ...(yunxinRuntime ? {
+      yunxin: {
+        security: securityOptions,
+        appId: options.yunxin!.appId,
+        repository: yunxinRuntime.repository,
+        provisioner: yunxinRuntime.provisioner,
+        tokenService: yunxinRuntime.tokenService,
+        consultation: yunxinConsultation,
+      },
+    } : {}),
   });
   mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader});
   mountSupplyHandlers(app, {

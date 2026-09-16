@@ -36,6 +36,7 @@ import {
   type RealNameProvider,
   type UserObligationReader,
 } from "./user-identity";
+import type { ImIdentityIntentRepository, ImIdentityProvisioner } from "../im/identity-lifecycle";
 
 export { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 
@@ -114,6 +115,9 @@ export type AuthSecurityOptions = {
   realNameProvider: RealNameProvider;
   userObligationReader: UserObligationReader;
   testOperationsEnabled: boolean;
+  imProvisioner?: ImIdentityProvisioner;
+  imIdentityRepository?: ImIdentityIntentRepository;
+  imAppId?: string;
 };
 
 type Credentials = {
