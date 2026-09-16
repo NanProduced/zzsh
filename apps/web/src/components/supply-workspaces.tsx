@@ -4,6 +4,7 @@ import Link from "next/link";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { Chip } from "@heroui/react";
 import { AlertCircle, Check, FileImage, LockKeyhole, Pause, Play, RefreshCw, Send, Trash2, Undo2, Upload } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
 import { AuthForm, WebAuthError, maskPhone, webAuthRequest } from "./auth/auth-form";
@@ -12,6 +13,7 @@ import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { groupForField, editableDeclaration, supplyApi, supplyBlockerMessages, supplyGroups, SupplyRequestError, uploadSupplyMedia } from "../lib/supply-client";
 import { freezeRequest, IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
+import { MEDIA_ACCEPT_ATTRIBUTE, MEDIA_UPLOAD_HINT, mediaUploadFailureHint } from "../lib/media-upload";
 import type { SupplyGroup } from "../lib/supply-client";
 import type { DraftInput, MySupply, OwnerQuote, PublishingCatalog, PublishingOptions, SupplyGame } from "../lib/supply-types";
 import type { PublishMode } from "../lib/service-navigation";
@@ -212,6 +214,16 @@ function GroupNav({ errors }: { errors: string[] }) {
 export function PublishForm({ mode, accountId: accountIdProp, editRequested = false }: PublishFormProps) {
   const router = useRouter();
   const sharedSession = useUserSessionStore();
+  const publishTitle = mode === "fast" ? "上架出租 · 极速模式" : "上架出租";
+  const publishShell = {
+    surface: "editor" as const,
+    contextLabel: mode === "fast" ? "极速出租" : null,
+    breadcrumbs: accountIdProp ? [{ label: "首页", href: "/" }, { label: "个人中心" }, { label: "我的出租账号" }, { label: "编辑出租账号" }] : [{ label: "首页", href: "/" }, { label: "上架出租" }],
+    backHref: accountIdProp ? `/account?view=accounts&accountId=${encodeURIComponent(accountIdProp)}` : "/accounts",
+    backLabel: accountIdProp ? "返回账号管理" : "返回账号列表",
+    searchLabel: "在公开账号目录中搜索",
+    searchPlaceholder: "搜索账号编号或名称",
+  };
   const mounted = useRef(true);
   const identityRef = useRef<SessionId>(undefined);
   const identityStatusRef = useRef<IdentityState>("checking");
@@ -257,6 +269,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   const [draftDirty, setDraftDirty] = useState(false);
   const [agreementChecked, setAgreementChecked] = useState(false);
   const [rulesAccepted, setRulesAccepted] = useState(false);
+  const [quoteStale, setQuoteStale] = useState(false);
 
   useEffect(() => { accountRef.current = accountId; }, [accountId]);
   useEffect(() => { gameRef.current = gameId; }, [gameId]);
@@ -307,6 +320,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     setDraftDirty(false);
     setAgreementChecked(false);
     setRulesAccepted(false);
+    setQuoteStale(false);
     setBusy("");
     setAuthRequired(requireAuth);
     setError(null);
@@ -326,6 +340,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   const applySupply = useCallback((next: MySupply, loadDraft: boolean, replaceMedia = false) => {
     supplyRef.current = next;
     setSupply(next);
+    if (next.version?.quote) setQuoteStale(false);
     if (loadDraft && next.version) {
       const nextDraft = editableDeclaration(next.version.declaration);
       draftRef.current = nextDraft;
@@ -633,6 +648,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   }, [gameId, identityState, loadCatalog]);
 
   const setDraft = (next: DraftInput | ((previous: DraftInput) => DraftInput)) => {
+    if (supplyRef.current?.version?.quote) setQuoteStale(true);
     setDraftState((previous) => {
       const value = typeof next === "function" ? next(previous) : next;
       draftRef.current = value;
@@ -1036,8 +1052,13 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     for (const file of files) {
       const entryId = newKey();
       cancelledMedia.current.delete(entryId);
-      const entry: MediaEntry = { id: entryId, purpose, file, status: "failed", intentKey: newKey(), uploadKey: newKey(), bindingSaved: false, context };
+      const hint = mediaUploadFailureHint(file);
+      const entry: MediaEntry = { id: entryId, purpose, file, status: "failed", error: hint ?? undefined, intentKey: newKey(), uploadKey: newKey(), bindingSaved: false, context };
       setMedia((previous) => [...previous, entry]);
+      if (hint) {
+        setNotice("");
+        continue;
+      }
       uploadQueue.current = uploadQueue.current.catch(() => undefined).then(() => {
         if (!currentContext(context)) return;
         return waitForIdentity(context).then((ready) => ready ? upload(entry, context) : undefined);
@@ -1098,10 +1119,10 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     }
   };
 
-  if (identityState === "checking") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在确认登录身份</h2><p>确认期间暂不展示私人发布资料，也不会继续发送保存、报价或上传请求。</p></section></ServiceShell>;
-  if (identityState === "failed") return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、报价或上传请求。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重试身份确认</button></section></ServiceShell>;
+  if (identityState === "checking") return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在确认登录身份</h2><p>确认期间暂不展示私人发布资料，也不会继续发送保存、报价或上传请求。</p></section></ServiceShell>;
+  if (identityState === "failed") return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、报价或上传请求。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重试身份确认</button></section></ServiceShell>;
 
-  if (!accountIdProp && gamesLoaded && games.length === 0) return <ServiceShell title="上架出租" description="填写账号资料并提交审核。"><section className="account-guest"><h2>暂未开放上架</h2><p>目前没有开放出租的游戏，请稍后再来。</p><Link className="button secondary" href="/">返回首页</Link></section></ServiceShell>;
+  if (!accountIdProp && gamesLoaded && games.length === 0) return <ServiceShell {...publishShell} title={publishTitle} description="填写账号资料并提交审核。"><section className="account-guest"><h2>暂未开放上架</h2><p>目前没有开放出租的游戏，请稍后再来。</p><Link className="button secondary" href="/">返回首页</Link></section></ServiceShell>;
 
   const fieldErrors = error?.details ?? [];
   const fieldError = (path: string) => {
@@ -1126,7 +1147,8 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
         ? `${item.bindingSaved ? "已保存" : "已上传，待保存"} · ${mediaReviewLabel(item.reviewState)}${item.publiclyReadable ? " · 当前公开展示" : item.publicDisplayEligible ? " · 图片可展示，账号尚未公开" : ""}`
         : item.bindingSaved ? "已保存，审核状态待核" : "已上传，待保存；审核状态待核";
 
-  return <ServiceShell title={mode === "fast" ? "上架出租 · 极速模式" : "上架出租"} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。">
+  return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。">
+    <div className="publish-page-layout">
     <form className="publish-form supply-workspace" onSubmit={submit}>
       <div className="publish-mode"><Link href="/publish" aria-current={mode === "standard" ? "page" : undefined}>普通出租</Link><Link href="/publish?mode=fast" aria-current={mode === "fast" ? "page" : undefined}>极速出租</Link></div>
       <div className="supply-toolbar"><span>{accountId ? `资料状态：${reviewState ? stateLabel(reviewState) : "未创建草稿"}` : "尚未保存草稿"}</span><span>{options ? "当前规则已读取" : "正在读取规则…"}</span></div>
@@ -1181,7 +1203,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       <section id="media" className="supply-section" aria-labelledby="media-heading">
         <div className="supply-section-heading"><div><h2 id="media-heading">图片与凭证</h2><p>公开展示图和私有凭证分开上传。私有凭证只用于审核，不进入公开图片组件。</p></div></div>
          <div className="supply-media-columns">
-          {(["ACCOUNT_DISPLAY", "ACCOUNT_EVIDENCE"] as const).map((purpose) => { const rows = purpose === "ACCOUNT_DISPLAY" ? boundDisplay : boundEvidence; return <div className="supply-media-panel" key={purpose}><div className="supply-media-heading"><FileImage size={18} /><div><h3>{purpose === "ACCOUNT_DISPLAY" ? "公开展示图" : "私有审核凭证"}</h3><p>{purpose === "ACCOUNT_DISPLAY" ? "审核通过后可出现在公开详情。" : "不生成公开 URL，不对租客展示。"}</p></div></div><label className="supply-upload"><Upload size={17} />选择图片<input type="file" accept="image/*" multiple disabled={formDisabled || !gameId} onChange={(event) => selectFiles(purpose, event)} /></label><div className="supply-media-list">{rows.map((item) => <div key={item.id} className="supply-media-row"><span>{item.file?.name ?? "已上传图片"}</span><small>{mediaStatusText(item)}</small><div className="supply-inline-actions">{item.status === "failed" && item.file ? <button type="button" className="button quiet" onClick={() => void upload(item)}>重试上传</button> : null}<button type="button" className="button quiet" disabled={formDisabled || item.status === "uploading"} onClick={() => removeMedia(item.id)}><Trash2 size={15} />移除</button></div></div>)}{rows.length === 0 ? <p className="supply-muted">尚未上传。</p> : null}</div></div>; })}
+          {(["ACCOUNT_DISPLAY", "ACCOUNT_EVIDENCE"] as const).map((purpose) => { const rows = purpose === "ACCOUNT_DISPLAY" ? boundDisplay : boundEvidence; return <div className="supply-media-panel" key={purpose}><div className="supply-media-heading"><FileImage size={18} /><div><h3>{purpose === "ACCOUNT_DISPLAY" ? "公开展示图" : "私有审核凭证"}</h3><p>{purpose === "ACCOUNT_DISPLAY" ? "审核通过后可出现在公开详情。" : "不生成公开 URL，不对租客展示。"}{MEDIA_UPLOAD_HINT}</p></div></div><label className="supply-upload"><Upload size={17} />选择图片<input type="file" accept={MEDIA_ACCEPT_ATTRIBUTE} multiple disabled={formDisabled || !gameId} onChange={(event) => selectFiles(purpose, event)} /></label><div className="supply-media-list">{rows.map((item) => <div key={item.id} className="supply-media-row"><span>{item.file?.name ?? "已上传图片"}</span><small>{mediaStatusText(item)}</small><div className="supply-inline-actions">{item.status === "failed" && item.file ? <button type="button" className="button quiet" onClick={() => void upload(item)}>重试上传</button> : null}<button type="button" className="button quiet" disabled={formDisabled || item.status === "uploading"} onClick={() => removeMedia(item.id)}><Trash2 size={15} />移除</button></div></div>)}{rows.length === 0 ? <p className="supply-muted">尚未上传。</p> : null}</div></div>; })}
         </div>
         <FieldError text={fieldError("mediaBindings")} />
       </section>
@@ -1196,7 +1218,45 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
 
       <div className="publish-actions supply-actions"><button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button><button type="button" className="button secondary" disabled={formDisabled} onClick={() => void quote()}>{busy === "quote" ? "获取报价中…" : "获取报价"}</button><button className="button primary" disabled={formDisabled || !rulesAccepted}>{busy === "submit" ? "提交中…" : "提交审核"}<Send size={16} /></button><span>草稿保存在账号下；提交后按审核状态继续处理。</span></div>
     </form>
+    <PublishSummary gameId={gameId} draft={draft} catalog={catalog} media={media} quote={quoteData} rulesAccepted={rulesAccepted} blockers={blockers} readOnly={readOnly} busy={busy} quoteStale={quoteStale} />
+    </div>
   </ServiceShell>;
+}
+
+function PublishSummary({ gameId, draft, catalog, media, quote, rulesAccepted, blockers, readOnly, busy, quoteStale }: { gameId: string; draft: DraftInput; catalog: PublishingCatalog | null; media: MediaEntry[]; quote: OwnerQuote | null | undefined; rulesAccepted: boolean; blockers: string[]; readOnly: boolean; busy: string; quoteStale: boolean }) {
+  const requiredItems = catalog?.items.filter((item) => item.required) ?? [];
+  const filledInventory = requiredItems.filter((item) => {
+    const quantity = draft.inventory.find((entry) => entry.itemId === item.id)?.quantity;
+    return typeof quantity === "string" && quantity.trim() !== "";
+  }).length;
+  const inventoryReady = requiredItems.length > 0 && filledInventory === requiredItems.length;
+  const displayItems = media.filter((item) => item.purpose === "ACCOUNT_DISPLAY");
+  const displayUploading = displayItems.some((item) => item.status === "uploading");
+  const displayFailed = displayItems.some((item) => item.status === "failed");
+  const displayUploaded = displayItems.some((item) => item.status === "bound");
+  const displayReady = displayItems.some((item) => item.status === "bound" && item.bindingSaved);
+  const displayDetail = displayUploading
+    ? "公开展示图上传中"
+    : displayFailed && !displayUploaded
+      ? "公开展示图上传失败"
+      : displayReady
+        ? "公开展示图已保存"
+        : displayUploaded
+          ? "公开展示图已上传，待保存"
+          : "公开展示图待补";
+  const steps = [
+    { label: "基本资料", detail: gameId && draft.title.trim() ? "账号名称已填写" : "待填写游戏与账号名称", ready: Boolean(gameId && draft.title.trim()) },
+    { label: "资源数量", detail: requiredItems.length ? `已填写 ${filledInventory}/${requiredItems.length} 项必填数量` : "暂未读取必填资源项", ready: inventoryReady },
+    { label: "图片凭证", detail: displayDetail, ready: displayReady },
+    { label: "租期与协议", detail: rulesAccepted ? "协议已按当前版本确认" : quoteStale ? "资料已变更，报价需要重新获取" : quote ? "已取得当前报价，待协议确认" : "先保存草稿后获取报价", ready: rulesAccepted },
+  ];
+  const busyText = busy === "save" ? "保存草稿" : busy === "quote" ? "获取报价" : busy === "accept" ? "确认协议" : busy === "submit" ? "提交审核" : busy === "edit" ? "准备草稿" : "处理当前操作";
+  return <aside className="publish-summary" aria-label="发布核对摘要">
+    <div className="publish-summary-heading"><div><span>发布核对</span><h2>填写状态</h2></div><Chip color={rulesAccepted ? "success" : "warning"} variant="soft">{rulesAccepted ? "协议已确认" : "协议待确认"}</Chip></div>
+    <ol className="publish-summary-steps">{steps.map((step, index) => <li key={step.label} className={step.ready ? "is-ready" : "is-pending"}><span className="publish-summary-index">{step.ready ? <Check size={14} aria-hidden="true" /> : index + 1}</span><span><strong>{step.label}</strong><small>{step.detail}</small></span></li>)}</ol>
+    <div className="publish-summary-quote"><div><span>号主侧报价</span><strong>{quote ? moneyText(quote.ownerTotal) : "尚未取得"}</strong></div><p>{quoteStale ? "资料已变更，原报价已失效；保存后请重新获取报价。" : quote ? `预计租期 ${durationText(quote.termSeconds)}；金额来自本次服务端报价。` : "保存草稿后获取报价，页面不计算租金、押金或保证金。"}</p></div>
+    {blockers.length ? <p className="publish-summary-warning" role="status">{rulesAccepted ? "协议已确认，但" : "当前"}有 {new Set(blockers).size} 项规则限制，需按上方提示处理。</p> : quoteStale ? <p className="publish-summary-warning" role="status">资料已变更，当前不能沿用原报价。</p> : readOnly ? <p className="publish-summary-note" role="status">当前版本处于只读审核状态，不能直接编辑。</p> : busy ? <p className="publish-summary-note" role="status">正在{busyText}，此处只展示已观察到的资料状态。</p> : <p className="publish-summary-note">公开展示图与私有审核凭证分开保存；未上传或未确认的内容不会被默认补齐。</p>}
+  </aside>;
 }
 
 type AccountRow = { id: string; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean };
@@ -1216,15 +1276,22 @@ export function AccountWorkspace({ view, accountId }: { view: string; accountId?
   const session = useUserSession();
   const active = Object.hasOwn(accountViews, view) ? view as keyof typeof accountViews : "rentals";
   const description = active === "security" ? "查看账号状态并提交注销申请。" : "查看个人供给状态，并按允许的状态流程处理出租账号。";
+  const accountShell = {
+    surface: "account" as const,
+    contextLabel: null,
+    breadcrumbs: [{ label: "首页", href: "/" }, { label: "个人中心" }, { label: accountViews[active] }],
+    searchLabel: "在公开账号目录中搜索",
+    searchPlaceholder: "搜索账号编号或名称",
+  };
   useEffect(() => {
     if (session.status !== "guest") return;
     const target = window.location.pathname + window.location.search;
     router.replace(`/login?next=${encodeURIComponent(target)}`);
   }, [router, session.status]);
-  if (session.status === "loading") return <ServiceShell title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><h2>正在准备个人中心…</h2><p>请稍候。</p></section></ServiceShell>;
-  if (session.status === "error") return <ServiceShell title={accountViews[active]} description={description}><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>登录状态暂未确认</h2><p>暂未确认登录结果，请重试后继续。</p><button type="button" className="button secondary" onClick={session.revalidate}>重试</button></section></ServiceShell>;
-  if (session.status === "guest") return <ServiceShell title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在转到登录</h2></section></ServiceShell>;
-  return <ServiceShell title={accountViews[active]} description={description}>
+  if (session.status === "loading") return <ServiceShell {...accountShell} title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><h2>正在准备个人中心…</h2><p>请稍候。</p></section></ServiceShell>;
+  if (session.status === "error") return <ServiceShell {...accountShell} title={accountViews[active]} description={description}><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>登录状态暂未确认</h2><p>暂未确认登录结果，请重试后继续。</p><button type="button" className="button secondary" onClick={session.revalidate}>重试</button></section></ServiceShell>;
+  if (session.status === "guest") return <ServiceShell {...accountShell} title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在转到登录</h2></section></ServiceShell>;
+  return <ServiceShell {...accountShell} title={accountViews[active]} description={description}>
     <nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key, label]) => <Link key={key} href={`/account?view=${key}${key === "accounts" && accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""}`} aria-current={active === key ? "page" : undefined}>{label}</Link>)}</nav>
     {active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : <AccountUnavailable label={accountViews[active]} />}
   </ServiceShell>;

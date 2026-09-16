@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   conditionLines,
+  detailBreadcrumbs,
   formatMoneyLabel,
   haffMillionsLabel,
   termLabel,
@@ -67,6 +68,25 @@ test('card view uses presentation names, public conditions and server totals', (
   const detail = toListingDetail(listing);
   assert.deepEqual(detail.media.map((media) => media.assetId), ['asset_a', 'asset_b']);
   assert.equal(detail.description, '合成公开说明');
+  assert.equal(detail.gameName, null);
+  const withGame = toListingDetail({ ...listing, game: { id: 'game_1', code: 'delta', name: '三角洲行动' } });
+  assert.equal(withGame.gameName, '三角洲行动');
+  assert.deepEqual(detailBreadcrumbs(withGame.gameName), [
+    { label: '首页', href: '/' },
+    { label: '三角洲行动' },
+    { label: '租账号', href: '/accounts' },
+    { label: '账号详情' },
+  ]);
+});
+
+test('detail breadcrumb stays generic without a server-confirmed game', () => {
+  for (const value of [null, undefined, '']) {
+    assert.deepEqual(detailBreadcrumbs(value), [
+      { label: '首页', href: '/' },
+      { label: '租账号', href: '/accounts' },
+      { label: '账号详情' },
+    ]);
+  }
 });
 
 test('condition lines skip absent fields and keep unknown keys out', () => {

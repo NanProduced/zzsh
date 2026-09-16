@@ -2,11 +2,11 @@
 import { useCallback, useEffect, useRef, useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { Button, Drawer } from "@heroui/react";
 import { Crosshair, SlidersHorizontal, X } from "lucide-react";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
 import { AccountCardEmpty } from "@/components/delta/account-card-empty";
-import { GameIdentity } from "@/components/delta/game-identity";
 import { ActionFeedbackDialog } from "@/components/ui/action-feedback-dialog";
 import { FavoriteNotice } from "@/components/favorites/favorite-button";
 import { FavoritesProvider } from "@/components/favorites/favorites-context";
@@ -49,6 +49,8 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
   const [skinsLoading, setSkinsLoading] = useState(false);
   const [notice, setNotice] = useState({ isOpen: false, title: "", message: "" });
   const [cursorTrail, setCursorTrail] = useState<(string | null)[]>([filters.cursor]);
+  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const filterKeyRef = useRef(filterKey);
   const gameRef = useRef(filters.game);
   const skinsBusy = useRef(false);
@@ -72,6 +74,11 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
       return index >= 0 ? prev.slice(0, index + 1) : [...prev, filters.cursor];
     });
   }, [filterKey, filters.cursor]);
+
+  useEffect(() => {
+    if (!feed.cursorInvalid || !filters.cursor) return;
+    startTransition(() => router.replace(listingFiltersUrl(withFilterChange(filters, {}))));
+  }, [feed.cursorInvalid, filters.cursor, router, startTransition]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -126,7 +133,6 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
   }, [catalog.data]);
 
   const game = games.data?.find((entry) => entry.id === filters.game) ?? null;
-  const showDeltaIdentity = game?.code === "delta";
   const items = feed.status === "ready" ? feed.items : [];
   const visible = searchAccounts(items, filters.q ?? "");
   const filterCount = activeListingFilterCount(filters);
@@ -134,21 +140,42 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
   const canPrev = trailIndex > 0;
   const canNext = Boolean(feed.nextCursor) && feed.status === "ready";
   const busy = pending || feed.status === "loading";
+  const itemOptions = catalog.data?.items ?? [];
+  const mobileFilterFormId = "market-mobile-filters";
+  const activeFilterSummary = [
+    filters.item ? itemOptions.find((item) => item.id === filters.item)?.name ?? "资源项目" : null,
+    filters.minQty ? `最低 ${filters.minQty}` : null,
+    filters.skinIds.length ? `${filters.skinIds.length} 款皮肤` : null,
+    filters.q ? `搜索“${filters.q}”` : null,
+  ].filter((value): value is string => Boolean(value));
 
-  const applyMinQty = (event: FormEvent<HTMLFormElement>) => {
+  const applyMinQty = (event: FormEvent<HTMLFormElement>): boolean => {
     event.preventDefault();
     const value = minQtyDraft.normalize("NFKC").replace(/[\s,]/g, "");
     if (!value) {
       setMinQtyError(null);
       if (filters.minQty) navigate(withFilterChange(filters, { minQty: null }));
-      return;
+      return true;
     }
     if (!/^\d{1,24}$/.test(value)) {
       setMinQtyError("请填写不超过24位的整数数量（基础单位）。");
-      return;
+      return false;
     }
     setMinQtyError(null);
     if (value !== filters.minQty) navigate(withFilterChange(filters, { minQty: value }));
+    return true;
+  };
+  const applyMobileFilters = (event: FormEvent<HTMLFormElement>) => {
+    if (feed.status === "loading" || pending) {
+      event.preventDefault();
+      return;
+    }
+    if (feed.status === "error") {
+      event.preventDefault();
+      feed.reload();
+      return;
+    }
+    if (applyMinQty(event)) setMobileFiltersOpen(false);
   };
 
   const resetFilters = () => {
@@ -156,60 +183,85 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
     navigate(withFilterChange(filters, { item: null, minQty: null, skinIds: [], match: "ANY" }));
   };
   const skinOptions = catalog.data?.skins ?? [];
-  const itemOptions = catalog.data?.items ?? [];
   const catalogUnavailable = Boolean(filters.game) && catalog.status === "error";
+  const breadcrumbs = game ? [{ label: "首页", href: "/" }, { label: game.name }, { label: "租账号" }] : [{ label: "首页", href: "/" }, { label: "租账号" }];
+  const renderFilterFields = (idSuffix: "desktop" | "mobile") => {
+    const minQtyErrorId = `market-min-qty-error-${idSuffix}`;
+    return <>
+    <fieldset>
+      <legend className="sr-only">筛选条件</legend>
+      <label className="filter-field">游戏
+        <select value={filters.game ?? ""} disabled={games.status !== "ready" || (games.data?.length ?? 0) < 2} onChange={(event) => navigate(withFilterChange(filters, { game: event.target.value || null, item: null, minQty: null, skinIds: [], match: "ANY" }))}>
+          {!filters.game && <option value="">全部游戏</option>}
+          {(games.data ?? []).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+          {filters.game && !game && <option value={filters.game}>当前游戏</option>}
+        </select>
+      </label>
+      <label className="filter-field">资源项目
+        <select value={filters.item ?? ""} disabled={!filters.game || catalog.status === "loading" || catalogUnavailable} onChange={(event) => navigate(withFilterChange(filters, { item: event.target.value || null, minQty: event.target.value ? filters.minQty : null }))}>
+          <option value="">全部项目</option>
+          {itemOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          {filters.item && !itemOptions.some((item) => item.id === filters.item) && <option value={filters.item}>当前项目</option>}
+        </select>
+      </label>
+      <label className="filter-field">最低数量（基础单位）
+        <span className="filter-inline">
+          <input inputMode="numeric" value={minQtyDraft} maxLength={24} disabled={!filters.item} placeholder={filters.item ? "如 20000000" : "先选择资源项目"} onChange={(event) => setMinQtyDraft(event.target.value)} aria-describedby={minQtyError ? minQtyErrorId : undefined} />
+          <button type="submit" className="button secondary" disabled={!filters.item}>应用数量</button>
+        </span>
+        {minQtyError && <small id={minQtyErrorId} role="alert" className="filter-error">{minQtyError}</small>}
+      </label>
+    </fieldset>
+    <div className="filter-block">
+      <span className="filter-block-heading">展示皮肤{skinOptions.length > 0 ? `（已加载 ${skinOptions.length} 款）` : ""}</span>
+      {catalogUnavailable ? <div className="filter-error-row"><p className="filter-error" role="status">皮肤与项目目录暂时不可用，可稍后重试或先按其他条件浏览。</p><button type="button" className="button secondary filter-retry" onClick={() => setCatalogAttempt((value) => value + 1)}>重试资源目录</button></div> : null}
+      <div className="skin-chips" role="group" aria-label="按展示皮肤筛选">
+        {catalog.status === "loading" && <span className="filter-hint" role="status">正在读取皮肤目录…</span>}
+        {skinOptions.map((skin) => {
+          const selected = filters.skinIds.includes(skin.id);
+          return <button key={skin.id} type="button" className="skin-chip" aria-pressed={selected} onClick={() => navigate(toggleSkinId(filters, skin.id))}>{skin.name}</button>;
+        })}
+        {catalog.status === "ready" && skinOptions.length === 0 && <span className="filter-hint">当前没有可筛选的皮肤。</span>}
+        {catalog.data?.nextCursor && <button type="button" className="skin-chip skin-chip--more" onClick={() => void loadMoreSkins()} disabled={skinsLoading}>{skinsLoading ? "加载中…" : "加载更多皮肤"}</button>}
+      </div>
+      {filters.skinIds.length > 1 && <div className="skin-match" role="radiogroup" aria-label="皮肤匹配方式">
+        {(["ANY", "ALL"] as const).map((value) => <label key={value}><input type="radio" name="skin-match" checked={filters.match === value} onChange={() => navigate(withFilterChange(filters, { match: value }))} />{value === "ANY" ? "任一皮肤" : "全部皮肤"}</label>)}
+      </div>}
+    </div>
+    </>;
+  };
 
-  return <ServiceShell title="租账号" description="选择游戏，查看资源与出租条件。" initialQuery={filters.q ?? ""} onSearch={(value) => navigate(withFilterChange(filters, { q: normalizeListingQuery(value) }))}>
-    <section className="game-section" aria-label="公开账号市场">
-      <div className={`game-row${showDeltaIdentity ? "" : " game-row--wide"}`}>
-        {showDeltaIdentity && <GameIdentity game="delta"><Link className="button delta-tool" href="/gunsmith"><Crosshair size={16} />改枪码</Link></GameIdentity>}
-        <div className="delta-supply market-panel" id="account-list" tabIndex={-1}>
-          <div className="supply-heading"><h3>资源账号</h3><span className="market-count" aria-live="polite">{feed.status === "ready" ? `已加载 ${items.length} 个账号` : feed.status === "error" ? "读取失败" : "正在读取"}</span></div>
-          <form className="market-filters" aria-label="账号筛选" onSubmit={applyMinQty}>
-            <fieldset>
-              <legend className="sr-only">筛选条件</legend>
-              <label className="filter-field">游戏
-                <select value={filters.game ?? ""} disabled={games.status !== "ready" || (games.data?.length ?? 0) < 2} onChange={(event) => navigate(withFilterChange(filters, { game: event.target.value || null, item: null, minQty: null, skinIds: [], match: "ANY" }))}>
-                  {!filters.game && <option value="">全部游戏</option>}
-                  {(games.data ?? []).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
-                  {filters.game && !game && <option value={filters.game}>当前游戏</option>}
-                </select>
-              </label>
-              <label className="filter-field">资源项目
-                <select value={filters.item ?? ""} disabled={!filters.game || catalog.status === "loading" || catalogUnavailable} onChange={(event) => navigate(withFilterChange(filters, { item: event.target.value || null, minQty: event.target.value ? filters.minQty : null }))}>
-                  <option value="">全部项目</option>
-                  {itemOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                  {filters.item && !itemOptions.some((item) => item.id === filters.item) && <option value={filters.item}>当前项目</option>}
-                </select>
-              </label>
-              <label className="filter-field">最低数量（基础单位）
-                <span className="filter-inline">
-                  <input inputMode="numeric" value={minQtyDraft} maxLength={24} disabled={!filters.item} placeholder={filters.item ? "如 20000000" : "先选择资源项目"} onChange={(event) => setMinQtyDraft(event.target.value)} aria-describedby={minQtyError ? "market-min-qty-error" : undefined} />
-                  <button type="submit" className="button secondary" disabled={!filters.item}>应用数量</button>
-                </span>
-                {minQtyError && <small id="market-min-qty-error" role="alert" className="filter-error">{minQtyError}</small>}
-              </label>
-            </fieldset>
-            <div className="filter-block">
-              <span className="filter-block-heading">展示皮肤{skinOptions.length > 0 ? `（已加载 ${skinOptions.length} 款）` : ""}</span>
-              {catalogUnavailable ? <p className="filter-error" role="status">皮肤与项目目录暂时不可用，可稍后重试或先按其他条件浏览。</p> : null}
-              <div className="skin-chips" role="group" aria-label="按展示皮肤筛选">
-                {catalog.status === "loading" && <span className="filter-hint" role="status">正在读取皮肤目录…</span>}
-                {skinOptions.map((skin) => {
-                  const selected = filters.skinIds.includes(skin.id);
-                  return <button key={skin.id} type="button" className="skin-chip" aria-pressed={selected} onClick={() => navigate(toggleSkinId(filters, skin.id))}>{skin.name}</button>;
-                })}
-                {catalog.status === "ready" && skinOptions.length === 0 && <span className="filter-hint">当前没有可筛选的皮肤。</span>}
-                {catalog.data?.nextCursor && <button type="button" className="skin-chip skin-chip--more" onClick={() => void loadMoreSkins()} disabled={skinsLoading}>{skinsLoading ? "加载中…" : "加载更多皮肤"}</button>}
-              </div>
-              {filters.skinIds.length > 1 && <div className="skin-match" role="radiogroup" aria-label="皮肤匹配方式">
-                {(["ANY", "ALL"] as const).map((value) => <label key={value}><input type="radio" name="skin-match" checked={filters.match === value} onChange={() => navigate(withFilterChange(filters, { match: value }))} />{value === "ANY" ? "任一皮肤" : "全部皮肤"}</label>)}
-              </div>}
-            </div>
+  return <ServiceShell surface="browse" contextLabel={null} breadcrumbs={breadcrumbs} title="租账号" description="先看资源配置与租用条件，费用和租期以服务端报价为准。" initialQuery={filters.q ?? ""} onSearch={(value) => navigate(withFilterChange(filters, { q: normalizeListingQuery(value) }))} searchLabel="在公开账号目录中搜索" searchPlaceholder="搜索账号编号或名称">
+    <section className="game-section market-section" aria-label="公开账号市场">
+      {game && <div className="market-context" aria-label={`${game.name}游戏上下文`}>
+        <div className="market-context-mark" aria-hidden="true">{game.code === "delta" ? "D" : "G"}</div>
+        <div className="market-context-copy"><span>游戏专区</span><h2>{game.name}</h2><p>资源账号 · 按平台报价租用</p></div>
+        {game.code === "delta" && <Link className="button delta-tool" href="/gunsmith"><Crosshair size={16} />改枪码</Link>}
+      </div>}
+      <div className="market-directory" id="account-list" tabIndex={-1}>
+        <div className="market-directory-heading"><div><span className="market-kicker">公开租号</span><h2>可租账号</h2></div><span className="market-count" aria-live="polite">{feed.status === "ready" ? `本页 ${visible.length} 个账号` : feed.status === "error" ? "暂时无法读取" : "正在读取"}</span></div>
+        <div className="market-filter-mobile-row">
+          <span>{activeFilterSummary.length > 0 ? activeFilterSummary.join(" · ") : "按资源与展示皮肤筛选"}</span>
+          <Drawer isOpen={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
+            <Drawer.Trigger className="market-mobile-filter-trigger"><SlidersHorizontal size={16} aria-hidden="true" />筛选{filterCount > 0 ? ` · ${filterCount}` : ""}</Drawer.Trigger>
+            <Drawer.Backdrop variant="opaque">
+              <Drawer.Content placement="bottom">
+                <Drawer.Dialog className="market-filter-drawer-dialog">
+                  <Drawer.Handle />
+                  <Drawer.CloseTrigger className="market-filter-drawer-close" aria-label="关闭筛选"><X size={18} aria-hidden="true" /></Drawer.CloseTrigger>
+                  <Drawer.Header><Drawer.Heading>筛选账号</Drawer.Heading></Drawer.Header>
+                  <Drawer.Body><form id={mobileFilterFormId} className="market-filters market-filters--drawer" aria-label="移动端账号筛选" onSubmit={applyMobileFilters}>{renderFilterFields("mobile")}</form></Drawer.Body>
+                  <Drawer.Footer className="market-filter-drawer-footer"><Button fullWidth type={feed.status === "error" ? "button" : "submit"} form={feed.status === "error" ? undefined : mobileFilterFormId} variant="primary" isDisabled={feed.status === "loading" || pending} onPress={feed.status === "error" ? feed.reload : undefined}>{feed.status === "error" ? "重试账号目录" : feed.status === "loading" ? "正在读取…" : "应用筛选"}</Button></Drawer.Footer>
+                </Drawer.Dialog>
+              </Drawer.Content>
+            </Drawer.Backdrop>
+          </Drawer>
+        </div>
+        <form className="market-filters market-filters--desktop" aria-label="账号筛选" onSubmit={applyMinQty}>
+            {renderFilterFields("desktop")}
             <div className="market-filter-actions">
               <span className="filter-count"><SlidersHorizontal size={14} aria-hidden="true" />{filterCount > 0 ? `已启用 ${filterCount} 项筛选` : "未启用筛选"}</span>
               {filterCount > 0 && <button type="button" className="button secondary" onClick={resetFilters}><X size={14} />清空筛选</button>}
-              {catalogUnavailable && <button type="button" className="button secondary" onClick={() => setCatalogAttempt((value) => value + 1)}>重试目录</button>}
             </div>
           </form>
           {filters.q && <div className="site-search-summary" role="status">
@@ -217,10 +269,21 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
             <button type="button" onClick={() => navigate(withFilterChange(filters, { q: null }))}>清空搜索</button>
           </div>}
           <FavoriteNotice />
+          <p className="market-trust-note" role="note">公开浏览无需登录 · 费用、押金和租期以服务端报价为准 · 下单后由真人客服协助履约</p>
+          <div className="market-results-toolbar">
+            <div><span className="market-kicker">结果目录</span><strong>{feed.status === "ready" ? `${visible.length} 个账号` : feed.status === "error" ? "读取失败" : "读取中"}</strong></div>
+            <div className="market-results-controls">
+              <span className="market-result-note">列表只展示比较所需信息</span>
+              <div className="market-view-toggle" role="group" aria-label="账号展示方式">
+                <button type="button" aria-pressed={viewMode === "list"} onClick={() => setViewMode("list")}>列表</button>
+                <button type="button" aria-pressed={viewMode === "grid"} onClick={() => setViewMode("grid")}>卡片</button>
+              </div>
+            </div>
+          </div>
           <div className="market-results" aria-busy={busy}>
-            {feed.status === "loading" ? <div className="account-grid">{Array.from({ length: 6 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> :
+            {feed.status === "loading" ? <div className={`account-grid account-grid--${viewMode}`}>{Array.from({ length: 6 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> :
               feed.status === "error" ? <AccountCardEmpty message="账号列表加载失败" description="请检查网络后重试。" onRetry={feed.reload} /> :
-              visible.length > 0 ? <div className="account-grid">{visible.map((listing) => <AccountCard key={listing.id} data={toListingCard(listing)} />)}</div> :
+              visible.length > 0 ? <div className={`account-grid account-grid--${viewMode}`}>{visible.map((listing) => <AccountCard key={listing.id} data={toListingCard(listing)} />)}</div> :
               filterCount > 0 ? <AccountCardEmpty message="没有符合条件的账号" description="可以清空筛选条件，查看全部可租账号。" onReset={resetFilters} /> :
               <AccountCardEmpty message="暂无可选账号" description="当前没有可展示的号源，请稍后再来。" onRetry={feed.reload} />}
           </div>
@@ -230,7 +293,6 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
           </nav>}
           {filters.cursor && <p className="market-cursor-note">当前为该筛选结果的后继批次；刷新或前进后退会回到这一批。</p>}
         </div>
-      </div>
     </section>
     <ActionFeedbackDialog {...notice} onClose={() => setNotice((value) => ({ ...value, isOpen: false }))} />
   </ServiceShell>;

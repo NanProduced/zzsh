@@ -178,3 +178,8 @@ npm run typecheck
 - 公共：`GET /items`（只返回当前 PUBLISHED；排序 `sort_order DESC, published_at DESC, id DESC`；游标保留数据库微秒精度并绑定 type/gameId/limit，过滤不一致 409）、`GET /items/{id}`、`GET /carousel?slot=HOME_HERO`（enabled、服务端 UTC 时间窗内：开始包含、结束不包含、素材已审核公开）、`GET /media/{id}/content`（仅 CONTENT_MEDIA 的 APPROVED+PUBLIC_DISPLAY 公开衍生图）。公共 DTO 不包含 revision、操作人员身份、私有存储键或内部备注；封面素材撤权后 `coverMediaId` 返回 null 而正文保留，轮播素材撤权后条目整体不返回。公共内容响应 `no-store`，内容媒体响应 `public, max-age=0, must-revalidate`。
 - 轮播 `linkUrl` 只允许站内相对路径：必须以 `/` 开头，首段为 `accounts|publish|account|help` 或路径就是 `/`，拒绝 `//`、反斜杠、`..`、控制字符与任何 scheme（`javascript:` 等）；数据库仅兜底校验以 `/` 开头。未实现的订单、支付、客服动作不能作为轮播落点。
 - 平台内容素材复用既有媒体两阶段上传、审核与公开衍生图机制，不复制上传系统：`media_asset/media_upload_intent` 的 `game_id` 可空，新增 `ownership_kind=PLATFORM_CONTENT` 与 `purpose=CONTENT_MEDIA`；目录/用户媒体的游戏 scope 校验与私有凭证语义不变。运行时角色对内容表只有 SELECT/INSERT/UPDATE，没有 DELETE/TRUNCATE。
+
+## 公共目录与上传反馈补充
+
+- 公开账号详情的 `game` 为服务器确认的 `{id, code, name}`，缺少可靠数据时为 `null`；客户端不得按来源 URL 推断游戏。旧客户端可忽略这一新增字段。
+- 用户与管理端上传意图共用 10 MiB（10485760 字节）上限，仅接收 PNG、JPEG、WebP。声明大小或格式错误返回 `400 INVALID_ARGUMENT`，`details[].path` 为 `size` 或 `mime`；超限信息包含声明字节数和上限。实际上传仍执行服务端字节、格式与图片安全检查，客户端前置提示不构成授权或校验替代。

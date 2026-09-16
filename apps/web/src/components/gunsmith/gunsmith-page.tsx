@@ -242,8 +242,9 @@ export function GunsmithPage({ initialQuery = "" }: { initialQuery?: string }) {
   const classifications = firearms.data?.classifications ?? [];
   const selectedCodeItems = codes.data?.items ?? [];
   const gameUnavailable = games.status === "error" || (games.status === "ready" && !game);
+  const breadcrumbs = game ? [{ label: "首页", href: "/" }, { label: game.name }, { label: "改枪码" }] : [{ label: "首页", href: "/" }, { label: "改枪码" }];
 
-  return <ServiceShell title="三角洲改枪码" description="按枪械检索已人工整理的改枪码；复制后请在游戏内自行确认导入结果。" initialQuery={query} onSearch={submitSearch} backHref="/accounts" backLabel="返回账号列表">
+  return <ServiceShell surface="browse" contextLabel={null} breadcrumbs={breadcrumbs} title="三角洲改枪码" description="按枪械检索已人工整理的改枪码；复制后请在游戏内自行确认导入结果。" initialQuery={query} onSearch={submitSearch} backHref="/accounts" backLabel="返回账号列表" searchLabel="在改枪码目录中搜索" searchInputLabel="搜索枪械名称或改枪码" searchPlaceholder="搜索枪械名称或改枪码">
     <section className="gunsmith-toolbar" aria-label="改枪码筛选">
       <div className="gunsmith-tool-title"><Crosshair size={20} aria-hidden="true" /><div><h2>枪械目录</h2><p>按枪械名称、分类或别名查找可用改枪码。</p></div></div>
       <div className="gunsmith-filters">

@@ -19,6 +19,7 @@ import {
 } from "./pricing";
 import {
   projectOwnerMediaBinding,
+  projectPublicListingGame,
   projectPublicOffer,
   type BoundTermOption,
   type PublicMediaRoute,
@@ -1002,11 +1003,18 @@ export async function listingDetail(
         "safe_box_code",
       ].map((k) => [k, attrs[k] ?? null]),
     );
+    const game = (
+      await client.query<{ id: string; code: string; name: string }>(
+        `SELECT id, code, name FROM zzsh_supply.game WHERE id=$1`,
+        [a.game_id],
+      )
+    ).rows[0];
     return {
       id: a.id,
       versionId: v.id,
       title: v.title,
       description: v.description,
+      game: projectPublicListingGame(game),
       attributes: publicAttrs,
       safeBox: offer.safeBox,
       termOption: offer.termOption,

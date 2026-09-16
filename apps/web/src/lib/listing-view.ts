@@ -15,6 +15,7 @@ export type ListingCardData = {
 };
 export type ListingDetailData = ListingCardData & {
   description: string | null;
+  gameName: string | null;
   media: Array<{ assetId: string; url: string }>;
 };
 
@@ -94,8 +95,19 @@ export function toListingDetail(listing: PublicListing): ListingDetailData {
   return {
     ...toListingCard(listing),
     description: listing.description,
+    gameName: listing.game?.name ?? null,
     media: [...listing.media].sort((a, b) => a.position - b.position).map(({ assetId, url }) => ({ assetId, url })),
   };
+}
+// Detail breadcrumb stays generic until the server-confirmed object game is
+// known; a missing game never falls back to guessing Delta.
+export function detailBreadcrumbs(gameName: string | null | undefined): Array<{ label: string; href?: string }> {
+  return [
+    { label: "首页", href: "/" },
+    ...(gameName ? [{ label: gameName }] : []),
+    { label: "租账号", href: "/accounts" },
+    { label: "账号详情" },
+  ];
 }
 export function listingResourceLinesLabel(data: Pick<ListingCardData, "resourceLines">): string {
   return data.resourceLines.map((line) => `${line.quantityLabel} ${line.unitLabel}`).join(" / ");

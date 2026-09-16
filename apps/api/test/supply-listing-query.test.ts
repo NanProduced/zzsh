@@ -5,6 +5,7 @@ import {
   listingSearchPattern,
   parsePublicListingSearch,
   projectOwnerMediaBinding,
+  projectPublicListingGame,
   projectPublicOffer,
 } from "../src/supply/listing-query";
 
@@ -176,4 +177,14 @@ test("owner media status does not infer public readability from approval alone",
     ).reviewState,
     "PENDING",
   );
+});
+
+test("public listing game projection keeps identity and falls back to null", () => {
+  assert.deepEqual(
+    projectPublicListingGame({ id: "game_1", code: "delta", name: "三角洲行动" }),
+    { id: "game_1", code: "delta", name: "三角洲行动" },
+  );
+  for (const row of [null, undefined, {}, { id: "game_1" }, { id: "game_1", code: "delta" }, { id: "game_1", name: "x" }, { code: "delta", name: "x" }, { id: "", code: "delta", name: "x" }]) {
+    assert.equal(projectPublicListingGame(row as never), null);
+  }
 });

@@ -38,7 +38,7 @@ function SessionEntry() {
 }
 
 // Adapted from Aceternity Resizable Navbar; keep the search mounted across states.
-export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean }) {
+export function PortalHeader({ query, onQueryChange, onSearch, home=true, searchLabel = "搜索当前账号", searchInputLabel = "搜索账号编号或名称", searchPlaceholder = "搜索当前展示账号", searchCompactPlaceholder = "搜索账号或关键字..." }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean; searchLabel?: string; searchInputLabel?: string; searchPlaceholder?: string; searchCompactPlaceholder?: string }) {
   const { scrollY } = useScroll();
   const [reducedMotion,setReducedMotion]=useState(true);
   const [scrollPosition, setScrollPosition] = useState(0);
@@ -74,7 +74,7 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { qu
       <form
         className="site-search"
         role="search"
-        aria-label="搜索当前账号"
+        aria-label={searchLabel}
         onSubmit={(event) => {
           event.preventDefault();
           if (onSearch) { onSearch(query); return; }
@@ -86,8 +86,8 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true }: { qu
         <Search size={16} style={{ color: "var(--color-accent-brand)", opacity: 0.9, flexShrink: 0 }} aria-hidden="true" />
         <input
           type="search"
-          aria-label="搜索账号编号或名称"
-          placeholder={compact ? "搜索账号或关键字..." : "搜索当前展示账号"}
+          aria-label={searchInputLabel}
+          placeholder={compact ? searchCompactPlaceholder : searchPlaceholder}
           maxLength={120}
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}

@@ -50,6 +50,15 @@ export function assertImageWithinBounds(info: ImageInfo, byteSize: number): void
   if (info.width * info.height > MAX_MEDIA_PIXELS) throw new MediaValidationError("Image pixel count is outside the allowed range");
 }
 
+// Upload intents declare the byte size before any bytes move. Rejecting the
+// declared size with the concrete limit (and a stable `size` field path) keeps
+// both the user publish form and the admin uploader on the same shared limit.
+export function assertDeclaredMediaSize(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw invalid("Declared image size is invalid", "size");
+  if (value > MAX_MEDIA_BYTES) throw invalid(`Declared image size ${value} exceeds the ${MAX_MEDIA_BYTES}-byte limit`, "size");
+  return value;
+}
+
 export const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 
 export type MediaStorage = {
@@ -145,7 +154,7 @@ export async function createMediaUploadIntent(
   actor: MediaActor,
   input: { gameId?: string; accountId?: string; purpose: string; mime: string; size: number },
 ): Promise<{ intentId: string; uploadToken: string; expiresAt: string }> {
-  if (!ALLOWED_IMAGE_MIMES.includes(input.mime as ImageMime)) throw invalid("MIME type is not allowed");
+  if (!ALLOWED_IMAGE_MIMES.includes(input.mime as ImageMime)) throw invalid("MIME type is not allowed", "mime");
   if (!Number.isInteger(input.size) || input.size <= 0 || input.size > MAX_MEDIA_BYTES) throw invalid("Declared size is outside the allowed range");
 
   let accountId: string | null = null;

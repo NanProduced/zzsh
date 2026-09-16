@@ -7,7 +7,7 @@ import { FavoriteButton, FavoriteNotice } from "@/components/favorites/favorite-
 import { FavoritesProvider } from "@/components/favorites/favorites-context";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
 import { accountReturnTarget, readAccountReturn } from "@/lib/account-return";
-import { toListingDetail, type ListingDetailData } from "@/lib/listing-view";
+import { detailBreadcrumbs, toListingDetail, type ListingDetailData } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 
 type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetailData } | { status: "unavailable" } | { status: "error" };
@@ -27,8 +27,8 @@ function DetailView({ accountId }: { accountId: string }) {
   const [attempt, setAttempt] = useState(0);
   const [back, setBack] = useState<{ href: string; label: string }>({ href: "/accounts", label: "返回账号列表" });
   useEffect(() => {
-    setBack(accountReturnTarget(readAccountReturn()));
-  }, []);
+    setBack(accountReturnTarget(readAccountReturn(accountId)));
+  }, [accountId]);
   useEffect(() => {
     const controller = new AbortController();
     setState({ status: "loading" });
@@ -48,7 +48,8 @@ function DetailView({ accountId }: { accountId: string }) {
 
   const title = state.status === "ready" ? state.data.title : state.status === "unavailable" ? "账号暂不可用" : "账号详情";
   const description = state.status === "ready" ? `账号编号 ${state.data.id}` : "账号详情";
-  return <ServiceShell title={title} description={description} backHref={back.href} backLabel={back.label}>
+  const breadcrumbs = detailBreadcrumbs(state.status === "ready" ? state.data.gameName : null);
+  return <ServiceShell surface="detail" contextLabel={null} breadcrumbs={breadcrumbs} title={title} description={description} backHref={back.href} backLabel={back.label} searchLabel="在公开账号目录中搜索" searchPlaceholder="搜索其他账号">
     {state.status === "loading" ? <div className="account-grid listing-detail-loading" aria-busy="true" aria-label="正在加载账号详情"><AccountCardSkeleton /><AccountCardSkeleton /><AccountCardSkeleton /></div> :
       state.status === "unavailable" ? <section className="account-empty listing-unavailable" role="status">
         <h3>该账号暂不可用或已下架</h3>

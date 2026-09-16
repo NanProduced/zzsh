@@ -10,27 +10,35 @@ export type ListingFeed = {
   items: PublicListing[];
   nextCursor: string | null;
   errorCode: string | null;
+  cursorInvalid: boolean;
   reload: () => void;
 };
+type ListingFeedState = Omit<ListingFeed, "reload">;
 export function useListingFeed(filters: ListingFilters): ListingFeed {
   const filterKey = listingFilterKey(filters);
   const cursor = filters.cursor;
-  const [state, setState] = useState<{ status: FeedStatus; items: PublicListing[]; nextCursor: string | null; errorCode: string | null }>({ status: "loading", items: [], nextCursor: null, errorCode: null });
+  const [state, setState] = useState<ListingFeedState>({ status: "loading", items: [], nextCursor: null, errorCode: null, cursorInvalid: false });
   const seq = useRef(0);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const mine = ++seq.current;
     const controller = new AbortController();
-    setState({ status: "loading", items: [], nextCursor: null, errorCode: null });
+    setState({ status: "loading", items: [], nextCursor: null, errorCode: null, cursorInvalid: false });
     supplyApi
       .market(listingQuery({ ...filters, cursor }), controller.signal)
       .then((page) => {
         if (mine !== seq.current) return;
-        setState({ status: "ready", items: page.items, nextCursor: page.nextCursor, errorCode: null });
+        setState({ status: "ready", items: page.items, nextCursor: page.nextCursor, errorCode: null, cursorInvalid: false });
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || mine !== seq.current) return;
-        setState({ status: "error", items: [], nextCursor: null, errorCode: error instanceof SupplyRequestError ? error.code : "NETWORK_ERROR" });
+        const cursorInvalid = Boolean(
+          cursor &&
+          error instanceof SupplyRequestError &&
+          (error.status === 400 || error.status === 409) &&
+          /cursor/i.test(error.message),
+        );
+        setState({ status: "error", items: [], nextCursor: null, errorCode: error instanceof SupplyRequestError ? error.code : "NETWORK_ERROR", cursorInvalid });
       });
     return () => controller.abort();
   }, [filterKey, cursor, attempt]);

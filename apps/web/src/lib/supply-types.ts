@@ -46,6 +46,7 @@ export type PublicListing = {
   versionId: string;
   title: string;
   description: string | null;
+  game?: { id: string; code: string; name: string } | null;
   attributes: Record<string, string | number | boolean | null>;
   presentation: {
     items: Array<{ id: string; name: string; unit: string }>;

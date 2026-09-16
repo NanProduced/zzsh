@@ -17,6 +17,18 @@ export function listingSearchPattern(q: string): string {
   return `%${escapeLike(q)}%`;
 }
 
+export type PublicListingGame = { id: string; code: string; name: string };
+
+// Public listing context only carries the rented account's own game identity.
+// Missing or partial rows project to null so clients fall back to a generic
+// trail instead of guessing a game.
+export function projectPublicListingGame(
+  row: { id?: string | null; code?: string | null; name?: string | null } | null | undefined,
+): PublicListingGame | null {
+  if (!row?.id || !row.code || !row.name) return null;
+  return { id: row.id, code: row.code, name: row.name };
+}
+
 export type PublicSafeBox = { code: string; displayName: string | null };
 export type PublicTermOption = {
   code: string;

@@ -1,0 +1,1095 @@
+/* Functional pages inherit the approved portal world, then add a quieter task surface. */
+.functional-shell {
+  --functional-radius: 16px;
+  --functional-radius-sm: 11px;
+  overflow-x: clip;
+  background:
+    radial-gradient(circle at 86% 4%, color-mix(in srgb, var(--color-accent-brand) 7%, transparent), transparent 30rem),
+    linear-gradient(180deg, color-mix(in srgb, var(--color-bg-canvas) 92%, var(--color-bg-surface)), var(--color-bg-canvas));
+}
+
+.functional-shell .site-header {
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-default) 62%, transparent);
+  background: transparent;
+}
+
+.functional-shell .site-header-bar {
+  background: transparent;
+  box-shadow: none;
+}
+
+.functional-shell .functional-main {
+  padding-block: 22px 116px;
+}
+
+.functional-shell .functional-main::before { display: none; }
+
+.functional-breadcrumb {
+  min-width: 0;
+  margin-bottom: 6px;
+}
+
+.functional-breadcrumb-list {
+  display: flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  list-style: none;
+}
+
+.functional-breadcrumb-list--mobile { display: none; }
+
+.functional-breadcrumb-list li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.functional-breadcrumb-list a,
+.functional-breadcrumb-list li > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.functional-breadcrumb-list a { color: var(--color-text-secondary); text-decoration: none; }
+.functional-breadcrumb-list a:hover { color: var(--color-text-primary); text-decoration: underline; text-underline-offset: 3px; }
+.functional-breadcrumb-list li[aria-current="page"] > span { color: var(--color-text-primary); font-weight: 650; }
+.functional-breadcrumb-separator { flex: 0 0 auto; padding-inline: 9px; color: var(--color-text-muted); font-size: 15px; line-height: 1; }
+
+.functional-page-heading {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 12px 0 20px;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.functional-heading-copy,
+.functional-title-block,
+.functional-context { position: relative; z-index: 1; }
+
+.functional-heading-copy {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 20px;
+  min-width: 0;
+}
+
+.functional-back {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 36px;
+  margin-top: 6px;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.functional-back:hover { color: var(--color-text-primary); }
+
+.functional-title-block { display: grid; gap: 6px; }
+
+.functional-title-block h1 {
+  color: var(--color-text-primary);
+  font: 400 40px/1.12 "Smiley Sans", sans-serif;
+  letter-spacing: .01em;
+}
+
+.functional-title-block p {
+  max-width: 70ch;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.functional-context {
+  display: grid;
+  max-width: 250px;
+  justify-items: end;
+  gap: 8px;
+  padding-bottom: 3px;
+  text-align: right;
+}
+
+.functional-context-chip {
+  max-width: 100%;
+  color: var(--color-text-primary) !important;
+  border: 1px solid color-mix(in srgb, var(--color-accent-brand) 42%, var(--color-border-default)) !important;
+  background: color-mix(in srgb, var(--color-accent-brand) 13%, var(--color-bg-surface)) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+.functional-shell--browse .functional-context-chip {
+  border-color: color-mix(in srgb, var(--color-delta-accent) 48%, var(--color-border-default)) !important;
+  background: color-mix(in srgb, var(--color-delta-accent) 12%, var(--color-bg-surface)) !important;
+}
+
+.functional-context > span {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.functional-shell .button {
+  border-radius: 10px;
+  font-weight: 650;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.functional-shell .button.primary {
+  border: 1px solid color-mix(in srgb, var(--color-accent-brand) 72%, white);
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--color-accent-brand) 18%, transparent);
+}
+
+.functional-shell .button.secondary {
+  border: 1px solid var(--color-border-default);
+}
+
+.functional-shell .button.secondary:hover,
+.functional-shell .button.secondary:focus-visible {
+  border-color: var(--color-accent-brand);
+  background: var(--color-bg-card-hover);
+}
+
+.functional-shell .button:active { transform: translateY(1px); }
+
+.functional-shell .game-section { margin-top: 24px; }
+
+.functional-shell .game-row {
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--functional-radius);
+  background: linear-gradient(118deg, color-mix(in srgb, var(--color-delta-surface) 72%, var(--color-bg-surface)), var(--color-bg-surface) 38%);
+  box-shadow: var(--shadow-md);
+}
+
+.functional-shell .game-identity {
+  min-height: 430px;
+  border-right: 1px solid var(--color-delta-border);
+}
+
+.functional-shell .game-identity-heading { padding: 28px 22px; }
+
+.functional-shell .game-identity-heading h2 {
+  font-size: 32px;
+  letter-spacing: .015em;
+}
+
+.functional-shell .game-identity-heading p { max-width: 15ch; line-height: 1.7; }
+
+.functional-shell .game-identity-actions { left: 20px; right: 20px; bottom: 20px; }
+
+.functional-shell .game-identity-actions .button {
+  border-color: color-mix(in srgb, var(--color-delta-accent) 50%, var(--color-border-default));
+  background: color-mix(in srgb, var(--color-bg-surface) 90%, var(--color-delta-surface));
+}
+
+.functional-shell .game-section .delta-supply { padding: 18px 22px 24px; }
+
+.functional-shell .game-section .supply-heading {
+  min-height: 42px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+}
+
+.functional-shell .game-section .supply-heading h3 { font-size: 20px; letter-spacing: -.02em; }
+
+.functional-shell .market-count {
+  padding: 5px 9px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 999px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+.functional-shell .market-filters {
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--functional-radius-sm);
+  background: color-mix(in srgb, var(--color-bg-card) 88%, var(--color-delta-surface));
+}
+
+.functional-shell .filter-field { gap: 7px; color: var(--color-text-secondary); font-size: 12px; }
+
+.functional-shell .filter-field select,
+.functional-shell .filter-field input,
+.functional-shell .gunsmith-filters input,
+.functional-shell .gunsmith-filters select {
+  min-height: 44px;
+  border-color: var(--color-border-default);
+  border-radius: 9px;
+  background: var(--color-bg-canvas);
+}
+
+.functional-shell .filter-field select:focus-visible,
+.functional-shell .filter-field input:focus-visible,
+.functional-shell .gunsmith-filters input:focus-visible,
+.functional-shell .gunsmith-filters select:focus-visible {
+  border-color: var(--color-accent-brand);
+  outline: 2px solid color-mix(in srgb, var(--color-accent-brand) 52%, transparent);
+  outline-offset: 1px;
+}
+
+.functional-shell .filter-block { gap: 9px; padding-top: 2px; }
+.functional-shell .filter-block-heading { color: var(--color-text-primary); font-weight: 650; }
+
+.functional-shell .skin-chips { max-height: 132px; gap: 7px; }
+
+.functional-shell .skin-chip {
+  min-height: 36px;
+  border-radius: 9px;
+  background: var(--color-bg-canvas);
+}
+
+.functional-shell .skin-chip[aria-pressed="true"] {
+  color: var(--color-text-primary);
+  background: color-mix(in srgb, var(--color-delta-accent) 14%, var(--color-bg-card));
+  border-color: var(--color-delta-accent);
+}
+
+.functional-shell .market-filter-actions {
+  padding-top: 2px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.functional-shell .filter-count { color: var(--color-text-secondary); }
+.functional-shell .market-results { padding-top: 18px; }
+.functional-shell .market-results[aria-busy="true"] { opacity: .72; }
+
+.functional-shell .account-grid { gap: 16px; }
+
+.functional-shell .account-card {
+  min-height: 100%;
+  border-color: var(--color-border-default);
+  border-radius: 14px;
+  background: var(--color-bg-card);
+  box-shadow: 0 8px 22px color-mix(in srgb, #000 13%, transparent);
+  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.functional-shell .account-card:hover {
+  border-color: color-mix(in srgb, var(--color-delta-accent) 52%, var(--color-border-default));
+  box-shadow: 0 12px 28px color-mix(in srgb, #000 20%, transparent);
+  transform: translateY(-2px);
+}
+
+.functional-shell .account-image { height: 142px; background: var(--color-bg-elevated); }
+.functional-shell .favorite { top: 8px; right: 8px; border: 1px solid var(--color-border-default); border-radius: 10px; }
+.functional-shell .account-content { padding: 16px; }
+.functional-shell .account-content h3 { font-size: 16px; line-height: 1.45; }
+.functional-shell .account-resources { margin-top: 7px !important; line-height: 1.7; }
+.functional-shell .account-conditions { line-height: 1.65; }
+.functional-shell .account-fees { margin-top: 16px; }
+.functional-shell .account-fees dd { font-size: 18px; color: var(--color-accent-brand); }
+.functional-shell .account-terms { margin-block: 12px 16px; }
+
+.functional-shell .account-detail {
+  min-height: 42px;
+  border-color: var(--color-delta-border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--color-delta-accent) 12%, var(--color-bg-card));
+}
+
+.functional-shell .account-detail:hover { border-color: var(--color-delta-accent); background: color-mix(in srgb, var(--color-delta-accent) 20%, var(--color-bg-card)); }
+
+.functional-shell .account-empty {
+  min-height: 220px;
+  border: 1px dashed var(--color-border-default);
+  border-radius: var(--functional-radius-sm);
+  background: color-mix(in srgb, var(--color-bg-card) 72%, transparent);
+}
+
+.functional-shell .market-pagination { gap: 10px; margin-top: 22px; }
+
+.functional-shell .listing-detail {
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.functional-shell .detail-gallery { gap: 12px; }
+
+.functional-shell .detail-gallery img,
+.functional-shell .detail-image-fallback {
+  min-height: 190px;
+  border-radius: var(--functional-radius);
+}
+
+.functional-shell .detail-gallery img { box-shadow: var(--shadow-sm); }
+
+.functional-shell .detail-sections { gap: 12px; }
+
+.functional-shell .detail-sections > section,
+.functional-shell .detail-actions {
+  padding: 18px 20px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--functional-radius-sm);
+  background: color-mix(in srgb, var(--color-bg-surface) 90%, var(--color-bg-card));
+}
+
+.functional-shell .detail-sections h2 { margin-bottom: 14px; font-size: 17px; }
+.functional-shell .detail-facts { gap: 0; }
+.functional-shell .detail-facts > div { padding-block: 10px; border-bottom-color: var(--color-border-subtle); }
+.functional-shell .detail-price { font-size: 20px; }
+.functional-shell .detail-skins li { border-radius: 9px; }
+.functional-shell .detail-actions { display: grid; gap: 10px; }
+.functional-shell .detail-actions .favorite-inline { justify-content: center; }
+
+.functional-shell .gunsmith-toolbar {
+  margin-top: 24px;
+  padding: 20px;
+  border-color: var(--color-delta-border);
+  border-radius: var(--functional-radius);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--color-delta-surface) 92%, var(--color-bg-surface)), var(--color-bg-card));
+  box-shadow: var(--shadow-sm);
+}
+
+.functional-shell .gunsmith-tool-title h2 { font-size: 21px; }
+.functional-shell .gunsmith-filters { gap: 14px; }
+.functional-shell .gunsmith-layout { gap: 16px; margin-top: 16px; }
+
+.functional-shell .gunsmith-firearms,
+.functional-shell .gunsmith-detail {
+  padding: 18px;
+  border-color: var(--color-border-default);
+  border-radius: var(--functional-radius);
+  background: var(--color-bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.functional-shell .gunsmith-firearm-grid { gap: 12px; }
+
+.functional-shell .gunsmith-firearm-card {
+  padding: 11px;
+  border-radius: var(--functional-radius-sm);
+  background: var(--color-bg-card);
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+
+.functional-shell .gunsmith-firearm-card:hover,
+.functional-shell .gunsmith-firearm-card.is-selected { border-color: var(--color-delta-accent); background: var(--color-delta-card); transform: translateY(-1px); }
+.functional-shell .gunsmith-card-image { border-radius: 8px; }
+.functional-shell .gunsmith-detail { top: 108px; }
+.functional-shell .gunsmith-detail-heading { padding-bottom: 18px; }
+.functional-shell .gunsmith-code-card { padding: 14px; border-radius: var(--functional-radius-sm); }
+.functional-shell .gunsmith-code-value { border-radius: 8px; }
+
+.functional-shell .publish-page-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 310px);
+  align-items: start;
+  gap: 20px;
+  margin-top: 24px;
+}
+
+.functional-shell .publish-form {
+  max-width: none;
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--functional-radius);
+  background: var(--color-bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.functional-shell .publish-mode {
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 11px;
+  background: var(--color-bg-canvas);
+}
+
+.functional-shell .publish-mode a {
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.functional-shell .publish-mode a[aria-current] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.functional-shell .supply-toolbar {
+  min-height: 44px;
+  align-items: center;
+  padding-block: 10px;
+  border-bottom-color: var(--color-border-subtle);
+}
+
+.functional-shell .supply-group-nav {
+  top: 96px;
+  z-index: 3;
+  gap: 6px;
+  padding: 12px 0 8px;
+  background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.functional-shell .supply-group-nav a {
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  background: var(--color-bg-canvas);
+}
+
+.functional-shell .supply-group-nav a:hover,
+.functional-shell .supply-group-nav a:focus-visible { border-color: var(--color-accent-brand); }
+
+.functional-shell .supply-section { padding-block: 32px; }
+.functional-shell .supply-section-heading { margin-bottom: 22px; }
+.functional-shell .supply-section-heading h2 { font-size: 22px; }
+.functional-shell .supply-grid { gap: 16px; }
+.functional-shell .supply-grid input,
+.functional-shell .supply-grid textarea,
+.functional-shell .supply-grid select,
+.functional-shell .supply-filter-row input,
+.functional-shell .supply-filter-row select,
+.functional-shell .supply-entitlement input,
+.functional-shell .supply-quantity {
+  border-radius: 9px;
+  background: var(--color-bg-canvas);
+}
+
+.functional-shell .supply-table-wrap,
+.functional-shell .supply-media-panel,
+.functional-shell .supply-entitlement,
+.functional-shell .supply-quote,
+.functional-shell .supply-agreement {
+  border-radius: var(--functional-radius-sm);
+}
+
+.functional-shell .supply-table-wrap { border-color: var(--color-border-default); }
+.functional-shell .supply-table thead th { background: var(--color-bg-elevated); }
+.functional-shell .supply-choice { border-radius: 9px; }
+.functional-shell .supply-upload { border-radius: 9px; }
+
+.functional-shell .supply-actions {
+  position: sticky;
+  bottom: 12px;
+  z-index: 4;
+  margin-inline: -24px;
+  padding: 14px 24px 0;
+  border-top: 1px solid var(--color-border-default);
+  background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.functional-shell .publish-summary {
+  position: sticky;
+  top: 108px;
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--functional-radius);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--color-accent-brand) 8%, var(--color-bg-surface)), var(--color-bg-surface) 46%);
+  box-shadow: var(--shadow-sm);
+}
+
+.publish-summary-heading,
+.publish-summary-heading > div,
+.publish-summary-quote > div { display: grid; gap: 5px; }
+.publish-summary-heading { grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.publish-summary-heading > div > span { color: var(--color-accent-brand); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.publish-summary-heading h2 { font-size: 20px; }
+.publish-summary-heading .chip { white-space: nowrap; }
+
+.publish-summary-steps { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.publish-summary-steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 9px; align-items: center; min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--color-border-subtle); }
+.publish-summary-steps li:last-child { border-bottom: 0; }
+.publish-summary-index { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--color-border-default); border-radius: 50%; color: var(--color-text-secondary); font-size: 12px; }
+.publish-summary-steps .is-ready .publish-summary-index { color: var(--color-status-success); border-color: color-mix(in srgb, var(--color-status-success) 58%, var(--color-border-default)); background: color-mix(in srgb, var(--color-status-success) 11%, transparent); }
+.publish-summary-steps li > span:last-child { display: grid; gap: 3px; min-width: 0; }
+.publish-summary-steps strong { font-size: 13px; }
+.publish-summary-steps small { overflow-wrap: anywhere; color: var(--color-text-secondary); font-size: 11px; line-height: 1.5; }
+.publish-summary-quote { padding: 14px; border: 1px solid var(--color-border-subtle); border-radius: 12px; background: var(--color-bg-card); }
+.publish-summary-quote span { color: var(--color-text-secondary); font-size: 11px; }
+.publish-summary-quote strong { color: var(--color-accent-brand); font-size: 20px; font-variant-numeric: tabular-nums; }
+.publish-summary-quote p,
+.publish-summary-note,
+.publish-summary-warning { color: var(--color-text-secondary); font-size: 11px; line-height: 1.7; }
+.publish-summary-note,
+.publish-summary-warning { margin: 0; }
+.publish-summary-warning { color: var(--color-status-warning); }
+
+.functional-shell--account .account-tabs {
+  gap: 4px;
+  margin: 24px 0 20px;
+  padding: 4px;
+  border-bottom: 1px solid var(--color-border-default);
+  background: color-mix(in srgb, var(--color-bg-surface) 80%, transparent);
+}
+
+.functional-shell--account .account-tabs a {
+  min-height: 42px;
+  padding: 10px 13px;
+  border-radius: 9px 9px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.functional-shell--account .account-tabs a:hover,
+.functional-shell--account .account-tabs a[aria-current] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}
+
+.functional-shell--account .account-tabs a[aria-current] { box-shadow: inset 0 -2px var(--color-accent-brand); }
+.functional-shell--account .my-accounts-panel { max-width: none; }
+.functional-shell--account .supply-account-list,
+.functional-shell--account .supply-account-detail { border-radius: var(--functional-radius); box-shadow: var(--shadow-sm); }
+.functional-shell--account .supply-list-heading h2,
+.functional-shell--account .supply-detail-heading h2 { font-size: 19px; }
+.functional-shell--account .supply-account-row { min-height: 68px; align-items: center; padding-block: 14px; }
+.functional-shell--account .supply-account-row:hover { color: var(--color-accent-brand); }
+.functional-shell--account .account-security,
+.functional-shell--account .account-guest { max-width: none; border-radius: var(--functional-radius); box-shadow: var(--shadow-sm); }
+
+.functional-shell--utility .help-page-content {
+  max-width: 880px;
+  gap: 0;
+  margin-top: 24px;
+  padding: 4px 0;
+}
+
+.functional-shell--utility .help-page-content article { padding-block: 28px; }
+.functional-shell--utility .help-page-content article:first-child { padding-top: 0; }
+.functional-shell--utility .help-page-content h2 { font-size: 21px; }
+.functional-shell--utility .help-page-content p { max-width: 70ch; font-size: 14px; }
+
+@media (max-width: 1023px) {
+  .functional-shell .game-identity { min-height: 280px; border-right: 0; border-bottom: 1px solid var(--color-delta-border); }
+  .functional-shell .game-row { grid-template-columns: 1fr; }
+  .functional-shell .listing-detail { grid-template-columns: 1fr; }
+  .functional-shell .gunsmith-detail { position: static; }
+  .functional-shell .publish-page-layout { grid-template-columns: minmax(0, 1fr) 270px; }
+}
+
+@media (max-width: 799px) {
+  .functional-breadcrumb-list--desktop { display: none; }
+  .functional-breadcrumb-list--mobile { display: flex; }
+  .functional-shell .functional-main { padding-top: 12px; }
+  .functional-page-heading { min-height: 0; align-items: stretch; flex-direction: column; gap: 14px; padding-block: 12px 18px; }
+  .functional-heading-copy { grid-template-columns: 1fr; gap: 10px; }
+  .functional-back { margin-top: 0; }
+  .functional-title-block h1 { font-size: 34px; }
+  .functional-context { max-width: none; justify-items: start; padding: 0; text-align: left; }
+  .functional-shell .game-section { margin-top: 18px; }
+  .functional-shell .game-section .delta-supply { padding: 16px 16px 20px; }
+  .functional-shell .publish-page-layout { grid-template-columns: 1fr; gap: 14px; }
+  .functional-shell .publish-summary { position: static; order: 2; }
+  .functional-shell .publish-form { padding: 18px; }
+  .functional-shell .supply-group-nav { top: 120px; }
+  .functional-shell .supply-actions { margin-inline: -18px; padding-inline: 18px; }
+  .functional-shell .gunsmith-toolbar { padding: 16px; }
+}
+
+@media (max-width: 599px) {
+  .functional-shell .functional-main { padding-bottom: 116px; }
+  .functional-title-block h1 { font-size: 30px; }
+  .functional-title-block p { font-size: 13px; }
+  .functional-shell .game-identity { min-height: 196px; }
+  .functional-shell .game-identity-heading { padding: 22px 20px; }
+  .functional-shell .game-identity-heading h2 { font-size: 28px; }
+  .functional-shell .game-identity-actions { left: 20px; right: auto; bottom: 16px; }
+  .functional-shell .game-section .supply-heading h3 { font-size: 18px; }
+  .functional-shell .market-filters { padding: 13px; }
+  .functional-shell .market-filters fieldset { gap: 12px; }
+  .functional-shell .filter-field { flex: 0 1 auto; }
+  .functional-shell .account-grid { gap: 12px; }
+  .functional-shell .account-image { height: 128px; }
+  .functional-shell .account-content { padding: 15px; }
+  .functional-shell .detail-sections > section,
+  .functional-shell .detail-actions { padding: 16px; }
+  .functional-shell .detail-gallery img,
+  .functional-shell .detail-image-fallback { min-height: 150px; }
+  .functional-shell .gunsmith-firearms,
+  .functional-shell .gunsmith-detail { padding: 14px; }
+  .functional-shell .publish-form { padding: 14px; }
+  .functional-shell .supply-group-nav { top: 120px; margin-inline: -14px; padding-inline: 14px; }
+  .functional-shell .supply-section { padding-block: 26px; }
+  .functional-shell .supply-section-heading h2 { font-size: 20px; }
+  .functional-shell .supply-actions { bottom: 78px; margin-inline: -14px; padding: 12px 14px 0; }
+  .functional-shell .supply-actions .button { min-width: 0; flex: 1 1 30%; padding-inline: 9px; font-size: 12px; }
+  .functional-shell .supply-actions > span { flex-basis: 100%; order: 3; }
+  .functional-shell--account .account-tabs { overflow-x: auto; flex-wrap: nowrap; margin-top: 18px; }
+  .functional-shell--account .account-tabs a { flex: none; }
+  .functional-shell--account .my-accounts-layout { gap: 12px; }
+  .functional-shell--account .supply-account-list,
+  .functional-shell--account .supply-account-detail { padding: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .functional-shell .account-card,
+  .functional-shell .gunsmith-firearm-card,
+  .functional-shell .button { transition: none; }
+}
+
+/* Marketplace directory: keep the browse surface flat and information-led. */
+.functional-shell.functional-shell--browse .site-header,
+.functional-shell.functional-shell--browse .site-header-bar {
+  background: transparent;
+  box-shadow: none;
+}
+
+.functional-shell.functional-shell--browse .functional-page-heading {
+  display: block;
+  padding-block: 8px 18px;
+}
+
+.functional-shell.functional-shell--browse .functional-heading-copy { display: block; }
+.functional-shell.functional-shell--browse .functional-title-block { gap: 4px; }
+.functional-shell.functional-shell--browse .functional-title-block h1 { font-size: clamp(32px, 3.1vw, 42px); }
+
+.functional-shell.functional-shell--browse .market-section { margin-top: 18px; }
+
+.functional-shell.functional-shell--browse .market-context {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.functional-shell.functional-shell--browse .market-context-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--color-delta-accent) 62%, var(--color-border-default));
+  border-radius: 10px;
+  color: var(--color-delta-accent);
+  background: color-mix(in srgb, var(--color-delta-surface) 70%, var(--color-bg-surface));
+  font: 700 16px/1 "Smiley Sans", sans-serif;
+}
+
+.functional-shell.functional-shell--browse .market-context-copy { min-width: 0; }
+.functional-shell.functional-shell--browse .market-context-copy > span,
+.functional-shell.functional-shell--browse .market-kicker {
+  display: block;
+  color: var(--color-accent-brand);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.functional-shell.functional-shell--browse .market-context-copy h2 {
+  margin-top: 2px;
+  color: var(--color-text-primary);
+  font-size: 21px;
+  letter-spacing: -.02em;
+}
+
+.functional-shell.functional-shell--browse .market-context-copy p {
+  margin-top: 3px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.functional-shell.functional-shell--browse .market-context > .button {
+  min-height: 36px;
+  margin-left: auto;
+  padding-inline: 12px;
+  border-color: var(--color-delta-border);
+  background: transparent;
+  box-shadow: none;
+}
+
+.functional-shell.functional-shell--browse .market-context > .button:hover,
+.functional-shell.functional-shell--browse .market-context > .button:focus-visible {
+  border-color: var(--color-delta-accent);
+  background: color-mix(in srgb, var(--color-delta-accent) 10%, transparent);
+}
+
+.functional-shell.functional-shell--browse .market-directory {
+  min-width: 0;
+  margin-top: 18px;
+}
+
+.functional-shell.functional-shell--browse .market-directory-heading,
+.functional-shell.functional-shell--browse .market-results-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.functional-shell.functional-shell--browse .market-directory-heading {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.functional-shell.functional-shell--browse .market-directory-heading h2 {
+  margin-top: 3px;
+  font-size: 23px;
+  letter-spacing: -.025em;
+}
+
+.functional-shell.functional-shell--browse .market-count {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.functional-shell.functional-shell--browse .market-trust-note {
+  margin: 14px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.functional-shell.functional-shell--browse .filter-error-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+}
+
+.functional-shell.functional-shell--browse .filter-error-row .filter-error {
+  min-width: 0;
+  flex: 1 1 260px;
+  margin: 0;
+}
+
+.functional-shell.functional-shell--browse .filter-error-row .filter-retry {
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding-inline: 12px;
+}
+
+.functional-shell.functional-shell--browse .market-filters--desktop {
+  display: grid;
+  gap: 16px;
+  padding: 18px 0 17px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-default);
+  border-radius: 0;
+  background: transparent;
+}
+
+.functional-shell.functional-shell--browse .market-filters--desktop fieldset {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.functional-shell.functional-shell--browse .market-filters .filter-field {
+  min-width: 0;
+  flex: none;
+}
+
+.functional-shell.functional-shell--browse .market-filters .filter-field select,
+.functional-shell.functional-shell--browse .market-filters .filter-field input {
+  background: var(--color-bg-surface);
+}
+
+.functional-shell.functional-shell--browse .market-filter-actions {
+  min-height: 36px;
+  padding-top: 13px;
+}
+
+.functional-shell.functional-shell--browse .market-results-toolbar {
+  align-items: center;
+  padding: 18px 0 11px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.functional-shell.functional-shell--browse .market-results-toolbar strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--color-text-primary);
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.functional-shell.functional-shell--browse .market-results-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.functional-shell.functional-shell--browse .market-result-note {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.functional-shell.functional-shell--browse .market-view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+}
+
+.functional-shell.functional-shell--browse .market-view-toggle button {
+  min-height: 31px;
+  padding: 6px 11px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  background: transparent;
+  font-size: 12px;
+}
+
+.functional-shell.functional-shell--browse .market-view-toggle button:hover,
+.functional-shell.functional-shell--browse .market-view-toggle button:focus-visible {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}
+
+.functional-shell.functional-shell--browse .market-view-toggle button[aria-pressed="true"] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.functional-shell.functional-shell--browse .market-results { padding-top: 0; }
+
+.functional-shell.functional-shell--browse .account-grid--list {
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-card {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 210px;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-card:hover {
+  border-color: var(--color-border-default);
+  background: color-mix(in srgb, var(--color-bg-surface) 62%, transparent);
+  box-shadow: none;
+  transform: none;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-image {
+  height: auto;
+  min-height: 178px;
+  margin: 16px 18px 16px 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-content {
+  min-width: 0;
+  padding: 18px 0;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-fees {
+  justify-content: flex-start;
+  gap: 30px;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-detail {
+  width: fit-content;
+  padding-inline: 18px;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-skeleton {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 210px;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-skeleton div {
+  height: auto;
+  min-height: 178px;
+  margin: 16px 18px 16px 0;
+  border-radius: 8px;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-skeleton span { margin: 18px 0 0; }
+.functional-shell.functional-shell--browse .account-empty {
+  min-height: 190px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-default);
+  border-radius: 0;
+  background: transparent;
+}
+
+.functional-shell.functional-shell--browse .market-pagination { margin-top: 18px; }
+.functional-shell.functional-shell--browse .market-filter-mobile-row { display: none; }
+
+@media (max-width: 1023px) {
+  .functional-shell.functional-shell--browse .market-filters--desktop fieldset { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 799px) {
+  .functional-shell.functional-shell--browse .site-header { background: var(--color-bg-canvas); }
+  .functional-shell.functional-shell--browse .market-filters--desktop { display: none; }
+  .functional-shell.functional-shell--browse .market-filter-mobile-row {
+    display: flex;
+    min-height: 54px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--color-border-default);
+    color: var(--color-text-secondary);
+    font-size: 12px;
+  }
+  .functional-shell.functional-shell--browse .market-filter-mobile-row > span { min-width: 0; overflow-wrap: anywhere; }
+  .functional-shell.functional-shell--browse .market-mobile-filter-trigger {
+     display: inline-flex;
+     min-height: 44px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 11px;
+    border: 1px solid var(--color-border-default);
+    border-radius: 8px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-surface);
+    font-size: 12px;
+  }
+  .functional-shell.functional-shell--browse .market-mobile-filter-trigger:hover,
+  .functional-shell.functional-shell--browse .market-mobile-filter-trigger:focus-visible { border-color: var(--color-accent-brand); }
+  .functional-shell.functional-shell--browse .market-view-toggle button { min-height: 44px; }
+  .functional-shell.functional-shell--browse .market-results-toolbar { align-items: flex-start; }
+  .functional-shell.functional-shell--browse .market-result-note { display: none; }
+}
+
+@media (max-width: 599px) {
+  .functional-shell.functional-shell--browse .functional-title-block h1 { font-size: 30px; }
+  .functional-shell.functional-shell--browse .market-context { padding-block: 12px; }
+  .functional-shell.functional-shell--browse .market-context > .button { padding-inline: 9px; font-size: 11px; }
+  .functional-shell.functional-shell--browse .market-directory { margin-top: 14px; }
+  .functional-shell.functional-shell--browse .market-directory-heading h2 { font-size: 20px; }
+  .functional-shell.functional-shell--browse .market-results-toolbar { gap: 10px; padding-top: 16px; }
+  .functional-shell.functional-shell--browse .market-view-toggle button { padding-inline: 9px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-card {
+    grid-template-columns: 104px minmax(0, 1fr);
+    min-height: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-image {
+    min-height: 112px;
+    margin: 14px 12px 14px 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-content { padding-block: 14px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-content h3 { font-size: 14px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-fees { gap: 14px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-fees dd { font-size: 15px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-detail { min-height: 38px; padding-inline: 12px; font-size: 12px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-skeleton { grid-template-columns: 104px minmax(0, 1fr); min-height: 150px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-skeleton div { min-height: 112px; margin: 14px 12px 14px 0; }
+}
+
+/* HeroUI Drawer is portalled outside .functional-shell; keep its mobile cascade and brand tokens global but scoped. */
+@media (max-width: 799px) {
+  form.market-filters--drawer {
+    min-height: 0;
+    gap: 14px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  form.market-filters--drawer fieldset {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    min-height: 0;
+  }
+
+  form.market-filters--drawer .filter-field {
+    min-width: 0;
+    min-height: 0;
+    flex: 0 0 auto;
+  }
+
+  form.market-filters--drawer .filter-field select,
+  form.market-filters--drawer .filter-field input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  form.market-filters--drawer .filter-inline .button,
+  form.market-filters--drawer .filter-retry,
+  form.market-filters--drawer .skin-chip,
+  form.market-filters--drawer .skin-match label {
+    min-height: 44px;
+  }
+
+  form.market-filters--drawer .skin-chip { padding-block: 9px; }
+  form.market-filters--drawer .skin-match { flex-wrap: wrap; gap: 8px 12px; }
+  .market-filter-drawer-footer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+}
+
+.market-filter-drawer-dialog {
+  --background: var(--color-bg-canvas);
+  --foreground: var(--color-text-primary);
+  --surface: var(--color-bg-surface);
+  --surface-foreground: var(--color-text-primary);
+  --surface-secondary: var(--color-bg-elevated);
+  --overlay: var(--color-bg-surface);
+  --overlay-foreground: var(--color-text-primary);
+  --muted: var(--color-text-secondary);
+  --separator: var(--color-border-subtle);
+  --border: var(--color-border-default);
+  --accent: var(--color-accent-brand);
+  --accent-hover: var(--color-accent-brand-hover);
+  --accent-foreground: var(--color-accent-brand-text);
+  --focus: var(--color-accent-brand);
+  color: var(--color-text-primary);
+  background: var(--color-bg-surface);
+  border-color: var(--color-border-default);
+}
+
+.market-filter-drawer-dialog .button--primary {
+  --button-bg: var(--color-accent-brand);
+  --button-bg-hover: var(--color-accent-brand-hover);
+  --button-bg-pressed: var(--color-accent-brand-active);
+  --button-fg: var(--color-accent-brand-text);
+  min-height: 44px;
+}
+
+.market-filter-drawer-dialog .market-filter-drawer-close {
+  color: var(--color-text-secondary);
+}
+
+.market-filter-drawer-dialog .market-filter-drawer-close:hover,
+.market-filter-drawer-dialog .market-filter-drawer-close:focus-visible {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}

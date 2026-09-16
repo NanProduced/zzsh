@@ -40,6 +40,19 @@ test('publish retries replay the frozen step and preserve input/media review bou
   assert.match(source, /remaining\.map\(\(binding, position\) => \(\{ \.\.\.binding, position \}\)\)/);
 });
 
+test('publish summary reports observed state without claiming submission readiness', () => {
+  assert.match(source, /协议已确认/);
+  assert.doesNotMatch(source, /可继续提交/);
+  assert.match(source, /status === "uploading"/);
+  assert.match(source, /status === "failed"/);
+  assert.match(source, /bindingSaved/);
+  assert.match(source, /quoteStale/);
+  assert.match(source, /readOnly/);
+  assert.match(source, /busyText/);
+  assert.match(source, /有 \{new Set\(blockers\)\.size\} 项规则限制/);
+  assert.match(source, /金额来自本次服务端报价/);
+});
+
 test('my accounts rejects stale detail and supports cursor pagination', () => {
   assert.match(source, /nextCursorRef/);
   assert.match(source, /isCurrentQuery\(request, listRequestRef\.current, request\.key\)/);

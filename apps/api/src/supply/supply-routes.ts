@@ -59,6 +59,8 @@ import {
   updateTermDraft,
 } from "./rules";
 import {
+  MAX_MEDIA_BYTES,
+  assertDeclaredMediaSize,
   changeMediaVisibility,
   finalizeMediaUpload,
   createMediaUploadIntent,
@@ -81,7 +83,6 @@ import {
   invalid,
   newSupplyId,
   notFound,
-  optionalInteger,
   optionalString,
   optionalTrimmedString,
   parseExpectedRevision,
@@ -529,8 +530,7 @@ export async function handleSupplyUserRoute(
       const gameId = decodeId(requiredString(body, "gameId", 128));
       const accountId = decodeId(requiredString(body, "accountId", 128));
       const mime = requiredString(body, "mime", 64);
-      const size = optionalInteger(body, "size", 1, 10 * 1024 * 1024);
-      if (size === undefined) throw invalid("Size is required");
+      const size = assertDeclaredMediaSize(body.size);
       if (!options.mediaStorage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
       await runIdempotentWrite(
         options,
@@ -570,7 +570,7 @@ export async function handleSupplyUserRoute(
       const intentId = decodeId(userUploadMatch[1]!);
       const uploadToken = headerValue(request.headers["x-upload-token"]);
       if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
-      const bytes = await readRawBody(request, 10 * 1024 * 1024);
+      const bytes = await readRawBody(request, MAX_MEDIA_BYTES);
       await runMediaUpload(options, request, response, requestId, {
         actor: { realm: "user", id: context.userId, sessionId: context.sessionId },
         mediaActor: { realm: "user", userId: context.userId },
@@ -1234,8 +1234,7 @@ async function handleAdminWrite(
     const gameId = decodeId(requiredString(body, "gameId", 128));
     const purpose = requiredString(body, "purpose", 64);
     const mime = requiredString(body, "mime", 64);
-    const size = optionalInteger(body, "size", 1, 10 * 1024 * 1024);
-    if (size === undefined) throw invalid("Size is required");
+    const size = assertDeclaredMediaSize(body.size);
     if (!options.mediaStorage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
     await write("supply.media.upload_intent.create", undefined, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client) => {
       const intent = await createMediaUploadIntent(client, { realm: "admin", adminUserId: actor.id }, { gameId, purpose, mime, size });
@@ -1248,7 +1247,7 @@ async function handleAdminWrite(
     const intentId = decodeId(adminUploadMatch[1]!);
     const uploadToken = headerValue(request.headers["x-upload-token"]);
     if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
-    const bytes = await readRawBody(request, 10 * 1024 * 1024);
+    const bytes = await readRawBody(request, MAX_MEDIA_BYTES);
     await runMediaUpload(options, request, response, requestId, {
       actor,
       mediaActor: { realm: "admin", adminUserId: actor.id },

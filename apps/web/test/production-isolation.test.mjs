@@ -4,6 +4,8 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const web = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const buildDir = process.env.NEXT_BUILD_DIR ?? '.next';
+const build = (...parts) => resolve(web, buildDir, ...parts);
 function files(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const path = resolve(directory, entry.name);
@@ -12,23 +14,33 @@ function files(directory) {
 }
 test('production UI excludes fixture identities, controls and rejected claims', () => {
   const forbidden = ['activity-fixture-', '演示成交', 'repair-fixture-', '样例账号 A', '样例账号 B', '样例账号 C', '长内容样例', '展示状态', '资源样例', '独立开发展示', 'pricePerDay', '70%保底', '70% 保底', '收益保障', '认证中', 'WEB-UI-01', 'WEB-UI-02', 'WEB-UI-03'];
-  const artifacts = ['.next/server', '.next/static', 'public'].flatMap(path => files(resolve(web, path))).filter(path => /\.(js|json|html|css|txt|md)$/.test(path));
+  const artifacts = [buildDir + '/server', buildDir + '/static', 'public'].flatMap(path => files(resolve(web, path))).filter(path => /\.(js|json|html|css|txt|md)$/.test(path));
   assert.ok(artifacts.length > 0);
   for (const file of artifacts) {
     const content = readFileSync(file, 'utf8');
     for (const marker of forbidden) assert.ok(!content.includes(marker), `${marker} leaked into ${file}`);
   }
-  const html = readFileSync(resolve(web, '.next/server/app/index.html'), 'utf8');
+  const html = readFileSync(build('server/app/index.html'), 'utf8');
   assert.ok(html.includes('account-skeleton'));
   assert.ok(!html.includes('account-card'));
   assert.ok(!html.includes('repair-fixture'));
-  const routes = readFileSync(resolve(web, '.next/server/app-paths-manifest.json'), 'utf8');
+  const routes = readFileSync(build('server/app-paths-manifest.json'), 'utf8');
   assert.ok(!routes.includes('showcase'));
 });
 
+test('temporary component experiments are outside the production route tree', () => {
+  for (const sourcePath of ['src/app/poc', 'src/app/prototype', 'src/components/prototype']) {
+    assert.equal(existsSync(resolve(web, sourcePath)), false, `${sourcePath} must not ship`);
+  }
+  const appPaths = JSON.parse(readFileSync(build('server/app-paths-manifest.json'), 'utf8'));
+  for (const route of ['/poc/component-library/heroui', '/poc/component-library/shadcn', '/prototype/functional-shell']) {
+    assert.equal(Object.keys(appPaths).some((entry) => entry.includes(route)), false, `${route} must not be in the production build`);
+  }
+});
+
 test('game framework keeps tools scoped and migrated guide links resolve', () => {
-  const html = readFileSync(resolve(web, '.next/server/app/index.html'), 'utf8');
-  const help = readFileSync(resolve(web, '.next/server/app/help.html'), 'utf8');
+  const html = readFileSync(build('server/app/index.html'), 'utf8');
+  const help = readFileSync(build('server/app/help.html'), 'utf8');
   assert.ok(!html.includes('出发前，先了解'));
   for (const name of ['三角洲行动专区', '无畏契约专区', '英雄联盟专区']) assert.ok(html.includes(name));
   assert.equal((html.match(/COMING SOON/g) || []).length >= 2, true);
@@ -64,7 +76,7 @@ test('retained static and dynamic homepage artwork resolves after cleanup', () =
 });
 
 test('production campaigns retain approved content and labeled demo statistics',()=>{
-  const html=readFileSync(new URL('../.next/server/app/index.html',import.meta.url),'utf8');
+  const html=readFileSync(build('server/app/index.html'),'utf8');
   for(const content of ['未成年人','禁止消费','账号交易','即将上线','交易返现5%','2元即可提现']) assert.ok(html.includes(content),content);
   assert.ok(html.includes('class="platform-activity"'));
   assert.equal((html.match(/class="stat-unknown"/g)||[]).length,0);
