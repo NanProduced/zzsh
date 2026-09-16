@@ -38,6 +38,7 @@ export const ADMIN_PERMISSION = {
   contentPlatformRead: "content.platform.read",
   contentPlatformEdit: "content.platform.edit",
   contentPlatformPublish: "content.platform.publish",
+  orderRead: "order.read",
 } as const;
 
 export const ADMIN_PERMISSION_CODES = Object.values(ADMIN_PERMISSION);

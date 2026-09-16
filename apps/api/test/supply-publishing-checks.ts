@@ -79,11 +79,8 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     contentHash: d.version.contentHash,
   });
   assert.equal((await call(userPrefix, undefined, o.stranger)).status, 404);
-  // No default positive money/occupancy fixture.
-  assert.equal(
-    (await call(userPrefix + "/drafts", { expectedRevision: "1" })).status,
-    409,
-  );
+  // M4-A: occupancy is order-derived, so an account with no orders is FREE for
+  // drafts; the publisher-bail seam (UNKNOWN) does not block draft creation.
   o.gates.set(o.accountId, {
     publisherBail: "UNKNOWN",
     occupancy: "FREE",
@@ -586,12 +583,49 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   d = await ok(userPrefix + "/quote", { expectedRevision: d.account.revision });
   assert.notEqual(d.version.contentHash, priceHash);
   d = await ok(userPrefix + "/accept-rules", token(d));
-  o.gates.set(o.accountId, {
-    publisherBail: "SATISFIED",
-    occupancy: "UNKNOWN",
-    reference: "fixture:unknown",
-  });
-  assert.equal((await call(userPrefix + "/submit", token(d))).status, 409);
+  // Occupancy is order-derived (M4-A): a real occupying order must block submit,
+  // and cancelling it re-enables the existing gates. No fixture occupancy source.
+  const occupying = (
+    await o.pool.query(
+      `SELECT v.rule_release_id, v.content_hash, v.term_option_code,
+              v.payload -> 'quoteValues' AS quote_values, u.id AS stranger_id
+         FROM zzsh_supply.listing_version v, zzsh_auth_user."user" u
+        WHERE v.id = $1 AND u.email = 'm3b-user-2@example.invalid'`,
+      [d.version.id],
+    )
+  ).rows[0];
+  assert.ok(occupying?.stranger_id, "stranger user fixture exists");
+  const occupyingQuote = occupying.quote_values as any;
+  const occupyingSnapshot = {
+    ...occupyingQuote,
+    tenantDeposit: { currency: "CNY", unit: "yuan", amount: "0.00", scale: 2 },
+    pricingInputs: { ...occupyingQuote.pricingInputs, depositPolicy: "CONFIGURED" },
+  };
+  const occupyingOrderId = `order_${randomUUID().replaceAll("-", "")}`;
+  await o.pool.query(
+    `INSERT INTO zzsh_order.rental_order (id, display_no, account_id, listing_version_id, owner_user_id, renter_user_id, game_id, rule_release_id, content_hash, term_option_code, status, rental_amount_cents, deposit_amount_cents, currency, term_seconds, quote_snapshot, title, hold_until)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING_PAYMENT', $11, 0, 'CNY', $12, $13::jsonb, '占用夹具', clock_timestamp() + interval '1 hour')`,
+    [
+      occupyingOrderId,
+      "ZZFIXTURE-" + randomUUID().replaceAll("-", "").slice(0, 12),
+      o.accountId,
+      d.version.id,
+      owner,
+      occupying.stranger_id,
+      o.gameId,
+      occupying.rule_release_id,
+      occupying.content_hash,
+      occupying.term_option_code,
+      String(occupyingQuote.resourceTotal.amount).replace(".", ""),
+      occupyingQuote.termSeconds,
+      JSON.stringify(occupyingSnapshot),
+    ],
+  );
+  assert.equal((await call(userPrefix + "/submit", token(d))).status, 409, "an occupying order must block submit");
+  await o.pool.query(
+    `UPDATE zzsh_order.rental_order SET status='CANCELLED', cancel_reason='USER', cancelled_at=clock_timestamp(), updated_at=clock_timestamp(), revision=revision+1 WHERE id=$1`,
+    [occupyingOrderId],
+  );
   o.gates.set(o.accountId, {
     publisherBail: "PENDING",
     occupancy: "FREE",
