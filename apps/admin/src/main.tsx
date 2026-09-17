@@ -36,6 +36,7 @@ import {
   type AuthResponse,
   type EnrollmentResponse,
 } from "./api";
+import { createSessionRefreshCoordinator, type SessionRefreshCoordinator } from "./session-refresh";
 
 function useMobileLayout(): boolean {
   const [mobile, setMobile] = useState(
@@ -126,6 +127,8 @@ function App() {
 
   const mobile = useMobileLayout();
   const sessionIdRef = useRef<string | undefined>(undefined);
+  const lastSignalKeyRef = useRef<string | undefined>(undefined);
+  const sessionRefreshRef = useRef<SessionRefreshCoordinator<SessionSnapshot> | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -170,17 +173,33 @@ function App() {
     }
   }, []);
 
-  const refreshSession = useCallback(
-    async (redirect = false): Promise<SessionSnapshot> => {
-      const next = await adminRequest<SessionSnapshot>("/session");
-      applySession(next, redirect);
-      return next;
-    },
-    [applySession]
-  );
+  if (sessionRefreshRef.current === null) {
+    sessionRefreshRef.current = createSessionRefreshCoordinator(
+      () => adminRequest<SessionSnapshot>("/session"),
+      applySession,
+    );
+  }
+
+  const refreshSession = useCallback((redirect = false): Promise<SessionSnapshot> => {
+    return sessionRefreshRef.current!.refresh(redirect);
+  }, []);
+  const invalidateSessionRefresh = useCallback((cancelQueued = false) => {
+    sessionRefreshRef.current?.invalidate(cancelQueued);
+  }, []);
+  const beginSessionMutation = useCallback(() => {
+    sessionRefreshRef.current?.beginMutation();
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      sessionRefreshRef.current?.endMutation();
+    };
+  }, []);
 
   useEffect(() => {
+    const epoch = sessionRefreshRef.current!.getEpoch();
     void refreshSession(true).catch(() => {
+      if (sessionRefreshRef.current?.getEpoch() !== epoch) return;
       setSnapshot({ authenticated: false });
       setView("login");
     });
@@ -197,12 +216,14 @@ function App() {
       }
       if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
       if (event.type === "logout") {
+        invalidateSessionRefresh(true);
         clearTabs();
         setSnapshot({ authenticated: false });
         setView("login");
         setPassword("");
         return;
       }
+      invalidateSessionRefresh();
       void refreshSession(true).catch(() => undefined);
     };
 
@@ -211,10 +232,18 @@ function App() {
       const data = value as Partial<SignalEvent>;
       const type = data.type;
       if (type !== "locked" && type !== "unlocked" && type !== "logout" && type !== "activity") return;
+      const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
+      const at = typeof data.at === "number" ? data.at : 0;
+      if (sessionId && sessionId !== sessionIdRef.current) return;
+      if (type !== "activity") {
+        const key = `${type}:${sessionId ?? ""}:${at}`;
+        if (lastSignalKeyRef.current === key) return;
+        lastSignalKeyRef.current = key;
+      }
       receive({
         type,
-        sessionId: typeof data.sessionId === "string" ? data.sessionId : undefined,
-        at: typeof data.at === "number" ? data.at : 0,
+        sessionId,
+        at,
       });
     };
 
@@ -250,17 +279,18 @@ function App() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [refreshSession, view]);
+  }, [invalidateSessionRefresh, refreshSession, view]);
 
   useEffect(() => {
     const onAuthFailure = (event: Event) => {
       const status = (event as CustomEvent<{ status?: unknown }>).detail?.status;
       if (!snapshot?.authenticated || (status !== 401 && status !== 423)) return;
+      invalidateSessionRefresh();
       void refreshSession(status === 401).catch(() => undefined);
     };
     window.addEventListener(ADMIN_AUTH_FAILURE_EVENT, onAuthFailure);
     return () => window.removeEventListener(ADMIN_AUTH_FAILURE_EVENT, onAuthFailure);
-  }, [refreshSession, snapshot?.authenticated]);
+  }, [invalidateSessionRefresh, refreshSession, snapshot?.authenticated]);
 
   const lockSession = useCallback(async () => {
     if (
@@ -270,15 +300,18 @@ function App() {
       snapshot.session.locked
     )
       return;
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest("/security/pin/lock", {});
+      endMutation();
       signal("locked", snapshot.session.id);
       await refreshSession(false);
     } catch {
+      endMutation();
       const next = await refreshSession(false).catch(() => null);
       if (next?.authenticated && next.session.locked) signal("locked", next.session.id);
     }
-  }, [refreshSession, snapshot]);
+  }, [beginSessionMutation, refreshSession, snapshot]);
 
   useIdleLock(
     Boolean(
@@ -297,9 +330,12 @@ function App() {
 
   const signOut = useCallback(async () => {
     const sessionId = sessionIdRef.current;
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest("/auth/sign-out", {});
+      endMutation();
     } catch (failure) {
+      endMutation();
       const next = await refreshSession(false).catch(() => null);
       if (!next || next.authenticated) {
         setError(failure instanceof AdminApiError && failure.code === "NETWORK_ERROR" ? "网络暂时不可用，当前会话未退出。" : friendlyError(failure));
@@ -317,7 +353,7 @@ function App() {
     setTotpURI(undefined);
     setBackupCodes([]);
     setRecoveryNotice(undefined);
-  }, [refreshSession]);
+  }, [beginSessionMutation, refreshSession]);
 
   const login = async (idValue: string, pwValue: string) => {
     setError(undefined);
@@ -325,6 +361,7 @@ function App() {
     setTotpURI(undefined);
     setBackupCodes([]);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       const isEmail = idValue.includes("@");
       const result = await adminRequest<AuthResponse>(
@@ -335,11 +372,13 @@ function App() {
       if (result.twoFactorRedirect) {
         setView("challenge");
       } else {
+        endMutation();
         await refreshSession(true);
       }
     } catch (failure) {
       setError(friendlyError(failure));
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -347,15 +386,18 @@ function App() {
   const verifyChallenge = async (method: "totp" | "backup", code: string) => {
     setError(undefined);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest(`/auth/two-factor/verify-${method === "totp" ? "totp" : "backup-code"}`, {
         code,
       });
       setPassword("");
+      endMutation();
       await refreshSession(true);
     } catch (failure) {
       setError(friendlyError(failure));
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -363,6 +405,7 @@ function App() {
   const changePassword = async (current: string, next: string) => {
     setError(undefined);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest("/auth/change-password", {
         currentPassword: current,
@@ -370,11 +413,13 @@ function App() {
         revokeOtherSessions: true,
       });
       setPassword(next);
+      endMutation();
       await refreshSession(false);
     } catch (failure) {
       setError(friendlyError(failure));
       throw failure;
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -382,6 +427,7 @@ function App() {
   const enable2FA = async (pw: string) => {
     setError(undefined);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       const result = await adminRequest<EnrollmentResponse>("/auth/two-factor/enable", {
         password: pw || password,
@@ -392,6 +438,7 @@ function App() {
       setError(friendlyError(failure));
       throw failure;
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -399,12 +446,14 @@ function App() {
   const verify2FA = async (code: string) => {
     setError(undefined);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest("/auth/two-factor/verify-totp", { code });
     } catch (failure) {
       setError(friendlyError(failure));
       throw failure;
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -412,13 +461,16 @@ function App() {
   const activateEnrollment = async () => {
     setError(undefined);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest("/security/enrollment/activate", {});
+      endMutation();
       await refreshSession(false);
     } catch (failure) {
       setError(friendlyError(failure));
       throw failure;
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -426,13 +478,16 @@ function App() {
   const unlock = async (body: Record<string, unknown>) => {
     setLockError(undefined);
     setLoading(true);
+    const endMutation = beginSessionMutation();
     try {
       await adminRequest("/security/pin/unlock", body);
+      endMutation();
       signal("unlocked", sessionIdRef.current);
       await refreshSession(false);
     } catch (failure) {
       setLockError(friendlyError(failure));
     } finally {
+      endMutation();
       setLoading(false);
     }
   };
@@ -557,6 +612,7 @@ function App() {
             setView("login");
           }}
           onCompleted={() => {
+            invalidateSessionRefresh();
             if (sessionIdRef.current) signal("logout", sessionIdRef.current);
             setSnapshot({ authenticated: false });
             setRecoveryNotice("恢复已完成。请使用新密码登录并绑定身份验证器。");
@@ -593,7 +649,7 @@ function App() {
           onIdleMinutes={setIdle}
           onLock={() => void lockSession()}
           onSignOut={() => void signOut()}
-          onRefresh={() => refreshSession(false)}
+          onRefresh={refreshSession}
           onRecoveryCompleted={() => {
             void refreshSession(true);
           }}

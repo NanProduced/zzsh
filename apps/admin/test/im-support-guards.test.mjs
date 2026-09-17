@@ -25,6 +25,8 @@ test("a forbidden response blocks only the current consultation after permission
     permissionConfirmedAbsent: false,
   }), false);
   assert.equal(isCurrentImRequest(request, { ...request, generation: 5 }), false);
+  assert.equal(isCurrentImRequest({ ...request, sendCapability: "blocked" }, { ...request, sendCapability: "allowed" }), false);
+  assert.equal(isCurrentImRequest({ ...request, sendCapability: "allowed" }, { ...request, sendCapability: "allowed" }), true);
 });
 
 test("forbidden recheck calls the BFF with the current NIM conversation id", async () => {

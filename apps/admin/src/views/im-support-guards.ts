@@ -1,5 +1,5 @@
 export type ImMessageOperation = "read" | "send";
-export type ImRequestKey = { generation: number; operator: string; consultationId: string; conversationId: string | null };
+export type ImRequestKey = { generation: number; operator: string; consultationId: string; conversationId: string | null; sendCapability?: string };
 
 export function messageAccessPath(conversationId: string, operation: ImMessageOperation): string {
   return `/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}`;
@@ -9,7 +9,8 @@ export function isCurrentImRequest(expected: ImRequestKey, current: ImRequestKey
   return expected.generation === current.generation
     && expected.operator === current.operator
     && expected.consultationId === current.consultationId
-    && expected.conversationId === current.conversationId;
+    && expected.conversationId === current.conversationId
+    && (expected.sendCapability === undefined || expected.sendCapability === current.sendCapability);
 }
 
 export function shouldBlockCurrentForbidden(input: {

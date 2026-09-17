@@ -57,7 +57,7 @@ export function WorkspacePageContent({
       />
     );
   }
-  if (tab.kind === "support") return <ImSupportView key={tab.id} snapshot={snapshot} preview={tab.query.preview === "1"} />;
+  if (tab.kind === "support") return <ImSupportView key={tab.id} snapshot={snapshot} preview={tab.query.preview === "1"} onRefresh={onRefresh} />;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (
       <AdminDirectoryView

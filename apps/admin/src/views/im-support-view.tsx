@@ -8,6 +8,7 @@ import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, type Nim
 import { mergeImMessages } from "@zzsh/im-client/message-state";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, type ImRequestKey } from "./im-support-guards";
+import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
 
 type SupportType = "SERVICE" | "COMPLAINT";
 type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
@@ -47,6 +48,8 @@ const PREVIEW_MESSAGES: Record<string, SupportMessage[]> = {
   "preview-transfer": [],
 };
 const PRESENCE_SYNC_ERROR = "在线状态同步失败，请稍后重试。";
+const SESSION_REFRESH_ERROR = "会话权限刷新失败，已保持当前安全状态。";
+const QUEUE_REFRESH_ERROR = "咨询队列刷新失败，请稍后重试。";
 
 function typeLabel(type: SupportType): string { return type === "COMPLAINT" ? "投诉反馈" : "在线客服"; }
 function stateLabel(state: ConsultationState): QueueItem["state"] { return state === "ACTIVE" ? "处理中" : state === "WAITING" ? "待接入" : "已结束"; }
@@ -98,9 +101,13 @@ function AdminMessage({ message }: { message: SupportMessage }) {
   </article>;
 }
 
-export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; preview?: boolean }) {
-  const canPresence = hasPermission(snapshot, "im.support.presence");
+export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; preview?: boolean; onRefresh: () => Promise<SessionSnapshot> }) {
+  const canRead = hasPermission(snapshot, "im.support.read");
+  const canComplaint = hasPermission(snapshot, "im.support.complaint");
   const canAccept = hasPermission(snapshot, "im.support.accept");
+  const canPresence = canRead && hasPermission(snapshot, "im.support.presence");
+  const readClientKey = createReadClientKey({ adminUserId: snapshot.adminUserId, sessionId: snapshot.session.id, locked: snapshot.session.locked, canRead });
+  const sendCapabilityKey = createSendCapabilityKey({ canAccept, canComplaint });
   const [queue, setQueue] = useState<Consultation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => preview ? PREVIEW_QUEUE[0]!.id : null);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>(() => preview ? PREVIEW_MESSAGES : {});
@@ -115,15 +122,19 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
   const availabilityRef = useRef<Presence["availability"]>("OFF_DUTY");
   const presenceVersionRef = useRef<number | null>(null);
   const presenceWriteRef = useRef(Promise.resolve());
+  const busyOwnerRef = useRef(0);
+  const sendCapabilityRef = useRef(sendCapabilityKey);
+  const canPresenceRef = useRef(canPresence);
   const operatorRef = useRef("");
   const operatorGenerationRef = useRef(0);
   const readyOperatorRef = useRef<string | null>(null);
   const selectedIdRef = useRef(selectedId);
   const queueRef = useRef(queue);
   const operatorName = snapshot.user.displayUsername || snapshot.user.username || snapshot.user.name || "当前管理员";
-  const operatorKey = `${snapshot.adminUserId}:${snapshot.session.id}:${snapshot.session.locked ? "locked" : "open"}:${[...snapshot.permissions].sort().join("\u0000")}`;
-  if (operatorRef.current !== operatorKey) {
-    operatorRef.current = operatorKey;
+  sendCapabilityRef.current = sendCapabilityKey;
+  canPresenceRef.current = canPresence;
+  if (operatorRef.current !== readClientKey) {
+    operatorRef.current = readClientKey;
     operatorGenerationRef.current += 1;
   }
   selectedIdRef.current = selectedId;
@@ -132,17 +143,27 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDrafts((current) => ({ ...current, [draftKey]: value }));
   const setDraftFor = (key: string, value: string) => setDrafts((current) => ({ ...current, [key]: value }));
+  const beginBusy = () => {
+    const owner = busyOwnerRef.current + 1;
+    busyOwnerRef.current = owner;
+    setBusy(true);
+    return owner;
+  };
+  const endBusy = (owner: number) => {
+    if (busyOwnerRef.current === owner) setBusy(false);
+  };
 
   const writePresence = useCallback((availability: Presence["availability"], state: ReturnType<typeof connectionForPresence>) => {
-    const key = operatorKey;
+    const key = readClientKey;
     const generation = operatorGenerationRef.current;
     availabilityRef.current = availability;
-    if (!canPresence) return Promise.resolve<Presence | undefined>(undefined);
+    if (!canPresence || !canPresenceRef.current) return Promise.resolve<Presence | undefined>(undefined);
     const operation = presenceWriteRef.current.then(async () => {
+      if (!canPresenceRef.current) return undefined;
       if (operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
       const version = presenceVersionRef.current;
       const value = await adminRequest<Presence>("/im/presence", { availability, connectionState: state, ...(version === null ? {} : { version }) }, "PUT");
-      if (operatorRef.current === key && operatorGenerationRef.current === generation) {
+      if (canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation) {
         presenceVersionRef.current = value.version;
         setPresence(value);
       }
@@ -150,8 +171,7 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
     });
     presenceWriteRef.current = operation.then(() => undefined, () => undefined);
     return operation;
-  }, [canPresence, operatorKey]);
-
+  }, [canPresence, readClientKey]);
   useEffect(() => {
     if (preview) {
       setQueue([]);
@@ -174,15 +194,37 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
     setConnection("idle");
     setNotice(undefined);
     setBlockedConsultations({});
+    busyOwnerRef.current += 1;
     setBusy(false);
     presenceWriteRef.current = Promise.resolve();
-  }, [operatorKey, preview, snapshot.adminUserId]);
+  }, [readClientKey, preview, snapshot.adminUserId]);
 
   useEffect(() => {
-    if (preview || snapshot.session.locked) return;
+    if (preview) return;
+    let cancelled = false;
+    let refreshing = false;
+    const refresh = () => {
+      if (cancelled || refreshing) return;
+      refreshing = true;
+      void onRefresh().then(() => {
+        if (!cancelled) setNotice((current) => current === SESSION_REFRESH_ERROR ? undefined : current);
+      }).catch(() => {
+        if (!cancelled) setNotice((current) => current ?? SESSION_REFRESH_ERROR);
+      }).finally(() => { refreshing = false; });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [onRefresh, preview]);
+
+  useEffect(() => {
+    if (preview || !canRead || snapshot.session.locked) return;
     let cancelled = false;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     const lifecycle = new ImClientLifecycle<NimWebClientLike>(async (context) => {
       const token = await readImToken();
       if (token.transport === "local-fake") return createLocalFakeNimWebClientFactory({ endpoint: "/api/bff/admin/im/messages", accountId: token.accountId })(context);
@@ -254,29 +296,45 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
       void lifecycle.close();
       if (canPresence && generation === operatorGenerationRef.current && operatorRef.current === operator) void writePresence("OFF_DUTY", "DISCONNECTED").catch(() => undefined);
     };
-  }, [canPresence, operatorKey, preview, snapshot.adminUserId, writePresence]);
+  }, [canPresence, canRead, readClientKey, preview, snapshot.adminUserId, writePresence]);
 
   useEffect(() => {
-    if (preview || readyOperatorRef.current !== operatorKey) return;
+    if (preview || !canRead || readyOperatorRef.current !== readClientKey) return;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
-    const timer = window.setInterval(() => { void readConsultations().then((next) => {
-      if (generation === operatorGenerationRef.current && operatorRef.current === operator) setQueue(next);
-    }).catch(() => undefined); }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [connection, operatorKey, preview]);
+    const operator = readClientKey;
+    let cancelled = false;
+    let loading = false;
+    const refreshQueue = () => {
+      if (cancelled || loading) return;
+      loading = true;
+      void readConsultations().then((next) => {
+        if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator) return;
+        setQueue(next);
+        setNotice((current) => current === QUEUE_REFRESH_ERROR ? undefined : current);
+      }).catch(() => {
+        if (!cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator) {
+          setNotice((current) => current ?? QUEUE_REFRESH_ERROR);
+        }
+      }).finally(() => { loading = false; });
+    };
+    const timer = window.setInterval(refreshQueue, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [canRead, connection, readClientKey, preview]);
 
   useEffect(() => {
-    if (preview || !canPresence || readyOperatorRef.current !== operatorKey || connection !== "CONNECTED") return;
+    if (preview || !canPresence || readyOperatorRef.current !== readClientKey || connection !== "CONNECTED") return;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     const timer = window.setInterval(() => {
       if (generation === operatorGenerationRef.current && operatorRef.current === operator) {
         void writePresence(availabilityRef.current, connectionForPresence(connection)).catch(() => undefined);
       }
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [canPresence, connection, operatorKey, preview, writePresence]);
+  }, [canPresence, connection, readClientKey, preview, writePresence]);
 
   useEffect(() => {
     const items = preview ? PREVIEW_QUEUE : queue;
@@ -298,7 +356,8 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
     consultation: item,
   })), [preview, queue]);
   const displaySelected = displayQueue.find((item) => item.id === selectedId) ?? null;
-  const canSend = preview || Boolean(selected?.state === "ACTIVE" && selected.conversationId && selected.messageScopeState === "READY" && !blockedConsultations[selected.id] && clientRef.current && connection === "CONNECTED");
+  const canOperateSelected = selected ? canOperateSupportType(selected.type, canAccept, canComplaint) : false;
+  const canSend = preview || Boolean(canRead && canOperateSelected && selected?.state === "ACTIVE" && selected.conversationId && selected.messageScopeState === "READY" && !blockedConsultations[selected.id] && clientRef.current && connection === "CONNECTED");
   const currentRequestKey = (): ImRequestKey | null => {
     const consultationId = selectedIdRef.current;
     const consultation = consultationId ? queueRef.current.find((item) => item.id === consultationId) : undefined;
@@ -307,6 +366,7 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
       operator: operatorRef.current,
       consultationId: consultation.id,
       conversationId: consultation.conversationId,
+      sendCapability: sendCapabilityRef.current,
     } : null;
   };
   const blockCurrentConsultationOnForbidden = useCallback(async (cause: unknown, expected: ImRequestKey): Promise<void> => {
@@ -320,14 +380,15 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
     if (shouldBlock) {
       setBlockedConsultations((value) => ({ ...value, [expected.consultationId]: true }));
     }
-  }, [operatorKey]);
+  }, [readClientKey, sendCapabilityKey]);
 
   const refreshConsultationAccess = async () => {
     const expected = currentRequestKey();
     if (!expected?.conversationId || !blockedConsultations[expected.consultationId]) return;
     const generation = expected.generation;
     const operator = expected.operator;
-    setBusy(true); setNotice(undefined);
+    const busyOwner = beginBusy();
+    setNotice(undefined);
     try {
       const value = await adminRequest<{ authorized?: unknown }>(messageAccessPath(expected.conversationId, "send"));
       const current = currentRequestKey();
@@ -346,17 +407,17 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
       const current = currentRequestKey();
       if (current && isCurrentImRequest(expected, current)) setNotice(friendlyError(cause));
     } finally {
-      if (operatorRef.current === operator && operatorGenerationRef.current === generation) setBusy(false);
+      endBusy(busyOwner);
     }
   };
 
   useEffect(() => {
-    if (preview || !selected?.conversationId || connection !== "CONNECTED") return;
+    if (preview || !canRead || !selected?.conversationId || connection !== "CONNECTED") return;
     const client = clientRef.current;
     if (!client) return;
     const consultation = selected;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     let cancelled = false;
     void client.getMessageHistory(consultation.conversationId!, 50).then((history) => {
       if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client || selectedIdRef.current !== consultation.id) return;
@@ -364,35 +425,40 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
       setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], rows) }));
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [connection, operatorKey, preview, selected?.conversationId, selected?.id]);
+  }, [canRead, connection, readClientKey, preview, selected?.conversationId, selected?.id]);
 
   const claim = async () => {
-    if (!selected || selected.state !== "WAITING" || !canAccept) return;
+    if (!selected || selected.state !== "WAITING" || !canOperateSupportType(selected.type, canAccept, canComplaint)) return;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     const consultationId = selected.id;
-    setBusy(true); setNotice(undefined);
+    const requestKey: ImRequestKey = { generation, operator, consultationId, conversationId: selected.conversationId, sendCapability: sendCapabilityKey };
+    const busyOwner = beginBusy();
+    setNotice(undefined);
     try {
       const result = await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/claim`, {}, "POST");
-      if (generation !== operatorGenerationRef.current || operatorRef.current !== operator || selectedIdRef.current !== consultationId) return;
+      const current = currentRequestKey();
+      if (!current || !isCurrentImRequest(requestKey, current) || selectedIdRef.current !== consultationId) return;
       setQueue((current) => current.map((item) => item.id === result.consultation.id ? result.consultation : item));
       setNotice("已接入这条咨询，云信会话正在恢复。");
-    } catch (cause) { if (generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); } finally { if (generation === operatorGenerationRef.current && operatorRef.current === operator) setBusy(false); }
+    } catch (cause) { const current = currentRequestKey(); if (current && isCurrentImRequest(requestKey, current)) setNotice(friendlyError(cause)); } finally { endBusy(busyOwner); }
   };
   const close = async () => {
-    if (!selected || selected.state !== "ACTIVE" || selected.assignedAdmin?.id !== snapshot.adminUserId || blockedConsultations[selected.id]) return;
+    if (!selected || selected.state !== "ACTIVE" || selected.assignedAdmin?.id !== snapshot.adminUserId || blockedConsultations[selected.id] || !canOperateSelected) return;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     const consultationId = selected.id;
-    const requestKey: ImRequestKey = { generation, operator, consultationId, conversationId: selected.conversationId };
-    setBusy(true); setNotice(undefined);
+    const requestKey: ImRequestKey = { generation, operator, consultationId, conversationId: selected.conversationId, sendCapability: sendCapabilityKey };
+    const busyOwner = beginBusy();
+    setNotice(undefined);
     try {
       await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/close`, {}, "POST");
-      if (generation !== operatorGenerationRef.current || operatorRef.current !== operator) return;
+      const current = currentRequestKey();
+      if (!current || !isCurrentImRequest(requestKey, current)) return;
       setQueue((current) => current.filter((item) => item.id !== consultationId));
       if (selectedIdRef.current === consultationId) setSelectedId(null);
       setNotice("咨询已结束，审计记录已保存。");
-    } catch (cause) { await blockCurrentConsultationOnForbidden(cause, requestKey); if (generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); } finally { if (generation === operatorGenerationRef.current && operatorRef.current === operator) setBusy(false); }
+    } catch (cause) { await blockCurrentConsultationOnForbidden(cause, requestKey); const current = currentRequestKey(); if (current && isCurrentImRequest(requestKey, current)) setNotice(friendlyError(cause)); } finally { endBusy(busyOwner); }
   };
   const send = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -400,11 +466,11 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
     if (!text || !canSend) return;
     const conversationKey = selectedConversationKey;
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     const consultationId = selected?.id;
     const conversationId = selected?.conversationId;
     const client = clientRef.current;
-    const requestKey: ImRequestKey | undefined = consultationId && conversationId ? { generation, operator, consultationId, conversationId } : undefined;
+    const requestKey: ImRequestKey | undefined = consultationId && conversationId ? { generation, operator, consultationId, conversationId, sendCapability: sendCapabilityKey } : undefined;
     if (preview) {
       const next: SupportMessage = { id: `local-${Date.now()}`, from: "agent", text, time: "现在", self: true };
       setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
@@ -412,24 +478,26 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
       return;
     }
     if (!client || !conversationId || !consultationId) return;
-    setBusy(true); setNotice(undefined);
+    const busyOwner = beginBusy();
+    setNotice(undefined);
     try {
       const sent = await client.sendText(conversationId, text);
       const next = messageFromNim(sent, client.accountId);
-      if (next && generation === operatorGenerationRef.current && operatorRef.current === operator && selectedIdRef.current === consultationId && clientRef.current === client) {
+      if (next && generation === operatorGenerationRef.current && operatorRef.current === operator && sendCapabilityRef.current === sendCapabilityKey && selectedIdRef.current === consultationId && clientRef.current === client) {
         setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
         setDraftFor(conversationKey, "");
       }
-    } catch (cause) { if (requestKey) await blockCurrentConsultationOnForbidden(cause, requestKey); if (generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(cause instanceof Error ? cause.message : "消息发送失败，请重试。"); } finally { if (generation === operatorGenerationRef.current && operatorRef.current === operator) setBusy(false); }
+     } catch (cause) { if (requestKey) await blockCurrentConsultationOnForbidden(cause, requestKey); if (generation === operatorGenerationRef.current && operatorRef.current === operator && sendCapabilityRef.current === sendCapabilityKey) setNotice(cause instanceof Error ? cause.message : "消息发送失败，请重试。"); } finally { endBusy(busyOwner); }
   };
   const togglePresence = async () => {
     if (!canPresence || connection !== "CONNECTED") return;
-    setBusy(true); setNotice(undefined);
+    const busyOwner = beginBusy();
+    setNotice(undefined);
     const generation = operatorGenerationRef.current;
-    const operator = operatorKey;
+    const operator = readClientKey;
     try { await writePresence(presence.availability === "AVAILABLE" ? "OFF_DUTY" : "AVAILABLE", connectionForPresence(connection)); }
-    catch (cause) { if (generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); }
-    finally { if (generation === operatorGenerationRef.current && operatorRef.current === operator) setBusy(false); }
+    catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); }
+    finally { endBusy(busyOwner); }
   };
 
   if (snapshot.session.locked) return <section className="im-support-view" aria-hidden="true" />;
@@ -461,7 +529,7 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
       <aside className="im-support-inspector" aria-label="用户与咨询上下文">
         <div className="im-support-section-heading"><div><strong>当前上下文</strong><span>{preview ? "演示快照" : "服务端授权范围"}</span></div><ShieldCheck size={15} /></div>
         {preview ? <><section className="im-support-fact-block"><span>用户</span><strong>演示用户 · 待云信确认</strong><small>本地演示数据，正式模式不会使用固定用户或消息。</small></section><section className="im-support-product"><div><span>商品卡 · zzsh.im-card</span><b>v1</b></div><h3>三角洲行动 · 资源账号</h3><p>公开商品摘要 · 仅用于检查商品卡布局</p><small>商品 ID · preview_listing_01</small></section></> : selected ? <><section className="im-support-fact-block"><span>用户</span><strong>{selected.user?.name || selected.user?.username || "平台用户"}</strong><small>咨询类型 · {typeLabel(selected.type)}<br />平台账号与 IM 身份由服务端绑定。</small></section><section className="im-support-product"><div><span>咨询对象</span><b>{selected.subjectRef ? "已带入" : "未关联"}</b></div><h3>{selected.subjectRef || "暂无公开对象"}</h3><p>{selected.subjectRef ? "对象引用已随咨询保存，展示详情前仍需服务端重新校验。" : "此咨询未携带公开商品上下文。"}</p></section></> : <section className="im-support-fact-block"><span>用户</span><strong>尚未选择咨询</strong><small>选择队列中的会话后显示服务端返回的授权上下文。</small></section>}
-        <div className="im-support-actions">{!preview && selected && blockedConsultations[selected.id] ? <button type="button" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button> : null}{!preview && selected?.state === "WAITING" && !selected.assignedAdmin && canAccept ? <button type="button" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接入会话</button> : null}{!preview && selected?.state === "ACTIVE" && selected?.messageScopeState !== "FAILED" && selected.assignedAdmin?.id === snapshot.adminUserId ? <button type="button" onClick={() => void close()} disabled={busy || Boolean(blockedConsultations[selected.id])}>结束会话</button> : null}<button type="button" disabled title="转交目标列表和权限策略尚未在本轮开放">转交会话</button><p>接入、结束和转交均由服务端检查权限并记录审计事件。</p></div>
+        <div className="im-support-actions">{!preview && selected && blockedConsultations[selected.id] ? <button type="button" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button> : null}{!preview && selected?.state === "WAITING" && !selected.assignedAdmin && canOperateSelected ? <button type="button" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接入会话</button> : null}{!preview && selected?.state === "ACTIVE" && selected?.messageScopeState !== "FAILED" && selected.assignedAdmin?.id === snapshot.adminUserId && canOperateSelected ? <button type="button" onClick={() => void close()} disabled={busy || Boolean(blockedConsultations[selected.id])}>结束会话</button> : null}<button type="button" disabled title="转交目标列表和权限策略尚未在本轮开放">转交会话</button><p>接入、结束和转交均由服务端检查权限并记录审计事件。</p></div>
       </aside>
     </div>
   </section>;
