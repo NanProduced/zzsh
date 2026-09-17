@@ -160,6 +160,7 @@ test("normalizes profiles, account state, online status and the sensitive token 
     failed: [],
   });
   assert.equal(calls.length, 5);
+  assert.ok(calls.every(({ url }) => new URL(url).hostname === "open.yunxinapi.com"));
 });
 
 test("updates account enablement with an explicit kick option", async () => {
@@ -198,6 +199,10 @@ test("fails closed for invalid endpoints, batches and provider failures", async 
       /not allowlisted/,
     );
   }
+  assert.throws(
+    () => new YunxinServerApiClient({ appKey: APP_KEY, appSecret: APP_SECRET, v2Endpoint: "https://api.yunxinapi.com" }),
+    /not allowlisted/,
+  );
   const api = new YunxinServerApiClient({ appKey: APP_KEY, appSecret: APP_SECRET, fetch: async () => jsonResponse({ code: 102449 }, 200) });
   await assert.rejects(api.getProfiles([]), /batch size/);
   await assert.rejects(
@@ -294,22 +299,22 @@ test("keeps malformed JSON, HTTP failures, transport failures and timeouts gener
 });
 
 test("uses the advanced-team server API for one consultation scope", async () => {
-  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const calls: Array<{ url: string; method: string; body: unknown; headers?: HeadersInit }> = [];
   const serverExtension = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" });
   const api = new YunxinServerApiClient({
     appKey: APP_KEY,
     appSecret: APP_SECRET,
     fetch: async (input, init) => {
       const url = String(input);
-      calls.push({ url, method: String(init?.method), body: init?.body });
+      calls.push({ url, method: String(init?.method), body: init?.body, headers: init?.headers });
       if (url.endsWith("/im/v2.1/teams")) {
         return jsonResponse({ code: 200, data: { failed_list: [], team_info: { team_id: 2366886326, owner_account_id: "system-1" } } });
       }
       if (url.endsWith("/im/v2/team_members")) return jsonResponse({ code: 200, data: { success_list: ["staff-1"], failed_list: [] } });
       if (url.includes("/im/v2/team_members/actions/kick_member")) return jsonResponse({ code: 200, data: {} });
       if (url.includes("/im/v2.1/teams/2366886326?")) return jsonResponse({ code: 200, data: {} });
-      if (url.endsWith("/nimserver/team/query.action")) return jsonResponse({ code: 200, tinfos: [{ tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: serverExtension }] });
-      if (url.endsWith("/nimserver/team/joinTeams.action")) return jsonResponse({ code: 200, tinfos: [{ tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: serverExtension }] });
+      if (url.endsWith("/nimserver/team/query.action")) return jsonResponse({ code: 200, tinfos: [{ tid: 2366886326, owner: "system-1", members: ["user-1", "staff-1"], clientCustom: serverExtension }] });
+      if (url.endsWith("/nimserver/team/joinTeams.action")) return jsonResponse({ code: 200, count: 1, infos: [{ tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: serverExtension }] });
       throw new Error(`unexpected URL ${url}`);
     },
   });
@@ -321,13 +326,13 @@ test("uses the advanced-team server API for one consultation scope", async () =>
   await api.removeSupportTeamMember("2366886326", "system-1", "staff-1");
   await api.dismissSupportTeam("2366886326", "system-1");
   assert.deepEqual(calls.map(({ url, method }) => ({ url, method })), [
-    { url: "https://api.yunxinapi.com/im/v2.1/teams", method: "POST" },
+    { url: "https://open.yunxinapi.com/im/v2.1/teams", method: "POST" },
     { url: "https://api.yunxinapi.com/nimserver/team/query.action", method: "POST" },
     { url: "https://api.yunxinapi.com/nimserver/team/joinTeams.action", method: "POST" },
     { url: "https://api.yunxinapi.com/nimserver/team/query.action", method: "POST" },
-    { url: "https://api.yunxinapi.com/im/v2/team_members", method: "POST" },
-    { url: "https://api.yunxinapi.com/im/v2/team_members/actions/kick_member", method: "DELETE" },
-    { url: "https://api.yunxinapi.com/im/v2.1/teams/2366886326?team_type=1&operator_id=system-1", method: "DELETE" },
+    { url: "https://open.yunxinapi.com/im/v2/team_members", method: "POST" },
+    { url: "https://open.yunxinapi.com/im/v2/team_members/actions/kick_member?operator_id=system-1&team_id=2366886326&team_type=1&kick_account_ids=staff-1", method: "DELETE" },
+    { url: "https://open.yunxinapi.com/im/v2.1/teams/2366886326?team_type=1&operator_id=system-1", method: "DELETE" },
   ]);
   assert.deepEqual(JSON.parse(String(calls[0]!.body)), {
     owner_account_id: "system-1",
@@ -342,6 +347,39 @@ test("uses the advanced-team server API for one consultation scope", async () =>
   });
   assert.deepEqual(Object.fromEntries(new URLSearchParams(String(calls[1]!.body))), { tids: JSON.stringify(["2366886326"]), ope: "1" });
   assert.deepEqual(Object.fromEntries(new URLSearchParams(String(calls[2]!.body))), { accid: "system-1" });
+  assert.equal(calls[5]!.body, undefined);
+  assert.deepEqual(Object.fromEntries(new URL(calls[5]!.url).searchParams), {
+    operator_id: "system-1",
+    team_id: "2366886326",
+    team_type: "1",
+    kick_account_ids: "staff-1",
+  });
+  assert.equal(new Headers(calls[5]!.headers).get("Content-Type"), null);
+});
+
+test("parses the observed standard-team clientCustom and implicit-owner shape", async () => {
+  const serverExtension = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "client-custom-1" });
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/nimserver/team/query.action")) {
+        return jsonResponse({
+          code: 200,
+          tinfos: [{ tid: 2366886328, owner: "system-1", members: ["user-1", "staff-1"], clientCustom: serverExtension }],
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  assert.deepEqual(await api.getSupportTeam("2366886328"), {
+    teamId: "2366886328",
+    ownerAccountId: "system-1",
+    memberAccountIds: ["system-1", "user-1", "staff-1"],
+    serverExtension,
+  });
 });
 
 test("does not guess a support team when an owner-scoped candidate lacks a marker", async () => {
@@ -351,7 +389,7 @@ test("does not guess a support team when an owner-scoped candidate lacks a marke
     fetch: async (input) => {
       const url = String(input);
       if (url.endsWith("/nimserver/team/joinTeams.action")) {
-        return jsonResponse({ code: 200, tinfos: [
+        return jsonResponse({ code: 200, count: 2, infos: [
           { tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" }) },
           { tid: 2366886327, owner: "system-1", members: ["system-1", "user-2"], custom: null },
         ] });
@@ -361,6 +399,129 @@ test("does not guess a support team when an owner-scoped candidate lacks a marke
   });
 
   assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), { status: "AMBIGUOUS" });
+});
+
+test("accepts an advanced-team empty result with the observed omitted infos field", async () => {
+  for (const payload of [{ code: 200, count: 0 }, { code: 200, count: 0, infos: [] }]) {
+    const api = new YunxinServerApiClient({
+      appKey: APP_KEY,
+      appSecret: APP_SECRET,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/nimserver/team/joinTeams.action")) return jsonResponse(payload);
+        throw new Error(`unexpected URL ${url}`);
+      },
+    });
+
+    assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), { status: "ABSENT" });
+  }
+});
+
+test("rejects an advanced-team response with missing infos or inconsistent count", async () => {
+  for (const payload of [
+    { code: 200, count: 2, infos: [] },
+    { code: 200, count: 1 },
+    { code: 200, infos: [] },
+  ]) {
+    const api = new YunxinServerApiClient({
+      appKey: APP_KEY,
+      appSecret: APP_SECRET,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/nimserver/team/joinTeams.action")) return jsonResponse(payload);
+        throw new Error(`unexpected URL ${url}`);
+      },
+    });
+
+    await assert.rejects(
+      api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }),
+      (error: unknown) => error instanceof YunxinApiError && error.operation === "find-support-team" && error.providerCode === null && !error.retryable,
+    );
+  }
+});
+
+test("does not select duplicated clientCustom markers", async () => {
+  const marker = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" });
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/nimserver/team/joinTeams.action")) return jsonResponse({ code: 200, count: 2, infos: [
+        { tid: 2366886326, owner: "system-1", members: ["user-1"], clientCustom: marker },
+        { tid: 2366886327, owner: "system-1", members: ["user-1"], clientCustom: marker },
+      ] });
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), { status: "AMBIGUOUS" });
+});
+
+test("does not match a clientCustom marker with the wrong owner or consultation", async () => {
+  const cases = [
+    { tid: 2366886330, owner: "other-owner", clientCustom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" }) },
+    { tid: 2366886331, owner: "system-1", clientCustom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "other-app", consultationId: "consult-1" }) },
+    { tid: 2366886332, owner: "system-1", clientCustom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "other-consultation" }) },
+  ];
+  for (const candidate of cases) {
+    const api = new YunxinServerApiClient({
+      appKey: APP_KEY,
+      appSecret: APP_SECRET,
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/nimserver/team/joinTeams.action")) {
+          return jsonResponse({ code: 200, count: 1, infos: [{ ...candidate, members: ["user-1"] }] });
+        }
+        throw new Error(`unexpected URL ${url}`);
+      },
+    });
+
+    assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), { status: "ABSENT" });
+  }
+});
+
+test("fails closed when distinct team extension fields conflict", async () => {
+  const marker = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" });
+  const otherMarker = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "other-app", consultationId: "consult-1" });
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/nimserver/team/query.action")) {
+        return jsonResponse({
+          code: 200,
+          tinfos: [{ tid: 2366886333, owner: "system-1", members: ["user-1"], custom: otherMarker, clientCustom: marker }],
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await assert.rejects(
+    api.getSupportTeam("2366886333"),
+    (error: unknown) => error instanceof YunxinApiError && error.operation === "team-response" && !error.retryable,
+  );
+});
+
+test("rejects a duplicated owner in the returned member list", async () => {
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/nimserver/team/query.action")) {
+        return jsonResponse({ code: 200, tinfos: [{ tid: 2366886334, owner: "system-1", members: ["system-1", "system-1"], clientCustom: null }] });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await assert.rejects(
+    api.getSupportTeam("2366886334"),
+    (error: unknown) => error instanceof YunxinApiError && error.operation === "team-response" && !error.retryable,
+  );
 });
 
 test("does not treat a different team response as the requested team being absent", async () => {

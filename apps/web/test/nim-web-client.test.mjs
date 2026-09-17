@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   createLocalFakeNimWebClientFactory,
   createNimWebClientFactory,
+  resolveNimSdkModule,
 } from "../src/lib/nim-web-client.ts";
 import { ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
 
@@ -163,6 +164,14 @@ test("initializes the V2 SDK, logs in, maps connection states, and cleans up lis
   assert.equal(calls.destroyed, 1);
   loginService.emit("onConnectStatus", 1);
   assert.deepEqual(states, ["RECONNECTING", "KICKED", "AUTH_FAILED", "DISCONNECTED"]);
+});
+
+test("unwraps the browser package's nested default export", () => {
+  const sdk = { getInstance: () => ({ }) };
+  const sdkFunction = Object.assign(() => undefined, sdk);
+  assert.equal(resolveNimSdkModule({ default: sdk }), sdk);
+  assert.equal(resolveNimSdkModule({ default: { default: sdkFunction } }), sdkFunction);
+  assert.equal(resolveNimSdkModule({ default: { default: {} } }), undefined);
 });
 
 test("guards dynamic token refresh against a superseded identity", async () => {

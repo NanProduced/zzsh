@@ -89,8 +89,17 @@ function mapConnectStatus(status: unknown): NimWebConnectionState | undefined { 
 async function loadNimSdk(): Promise<NimSdkLike> {
   if (typeof window === "undefined") throw new Error("NIM Web SDK can only load in a browser");
   const module = (await import("nim-web-sdk-ng")) as unknown as { default?: NimSdkLike };
-  if (!module.default || typeof module.default.getInstance !== "function") throw new Error("NIM Web SDK is unavailable");
-  return module.default;
+  const sdk = resolveNimSdkModule(module);
+  if (!sdk) throw new Error("NIM Web SDK is unavailable");
+  return sdk;
+}
+
+export function resolveNimSdkModule(module: { default?: unknown }): NimSdkLike | undefined {
+  const hasGetInstance = (value: unknown): value is NimSdkLike => Boolean(value && (typeof value === "object" || typeof value === "function") && typeof (value as { getInstance?: unknown }).getInstance === "function");
+  const candidate = module.default;
+  if (hasGetInstance(candidate)) return candidate;
+  const nested = candidate && typeof candidate === "object" ? (candidate as { default?: unknown }).default : undefined;
+  return hasGetInstance(nested) ? nested : undefined;
 }
 
 export class NimWebClient implements NimWebClientLike {

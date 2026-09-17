@@ -45,6 +45,7 @@ const PREVIEW_MESSAGES: Record<string, SupportMessage[]> = {
   "preview-general": [],
   "preview-transfer": [],
 };
+const PRESENCE_SYNC_ERROR = "在线状态同步失败，请稍后重试。";
 
 function typeLabel(type: SupportType): string { return type === "COMPLAINT" ? "投诉反馈" : "在线客服"; }
 function stateLabel(state: ConsultationState): QueueItem["state"] { return state === "ACTIVE" ? "处理中" : state === "WAITING" ? "待接入" : "已结束"; }
@@ -202,7 +203,15 @@ export function ImSupportView({ snapshot, preview = false }: { snapshot: Extract
         client.onConnectionStateChange((state) => {
           if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
           setConnection(state);
-          if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(state)).catch(() => setNotice("在线状态同步失败，请稍后重试。"));
+          if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(state))
+            .then(() => {
+              if (generation === operatorGenerationRef.current && operatorRef.current === operator) {
+                setNotice((current) => current === PRESENCE_SYNC_ERROR ? undefined : current);
+              }
+            })
+            .catch(() => {
+              if (generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(PRESENCE_SYNC_ERROR);
+            });
         });
         client.onMessages((incoming) => {
           if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;

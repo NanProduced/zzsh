@@ -1,11 +1,18 @@
 import { createHash, randomBytes } from "node:crypto";
 
-const DEFAULT_ENDPOINT = "https://api.yunxinapi.com";
-const ALLOWED_ENDPOINTS = new Set([
+const DEFAULT_V1_ENDPOINT = "https://api.yunxinapi.com";
+const DEFAULT_V2_ENDPOINT = "https://open.yunxinapi.com";
+const ALLOWED_V1_ENDPOINTS = new Set([
   "api.yunxinapi.com",
   "api-cn-bak.yunxinapi.com",
   "api-sg.yunxinapi.com",
   "api-sg-bak.yunxinapi.com",
+]);
+const ALLOWED_V2_ENDPOINTS = new Set([
+  "open.yunxinapi.com",
+  "open-bak.yunxinapi.com",
+  "open-sg.yunxinapi.com",
+  "open-sg-bak.yunxinapi.com",
 ]);
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_@.-]{0,31}$/;
 const TEAM_ID_PATTERN = /^[0-9]{1,19}$/;
@@ -122,7 +129,10 @@ export type YunxinCreateAccountInput = {
 export type YunxinServerApiOptions = {
   appKey: string;
   appSecret: string;
+  /** Legacy alias for the V1 endpoint; V2 always uses its versioned endpoint. */
   endpoint?: string;
+  v1Endpoint?: string;
+  v2Endpoint?: string;
   fetch?: FetchLike;
   now?: () => number;
   nonce?: () => string;
@@ -193,8 +203,8 @@ function field(record: JsonRecord, ...names: string[]): unknown {
   return undefined;
 }
 
-function normalizeEndpoint(value: string | undefined): string {
-  const raw = (value ?? DEFAULT_ENDPOINT).trim().replace(/\/+$/, "");
+function normalizeEndpoint(value: string | undefined, fallback: string, allowed: Set<string>): string {
+  const raw = (value ?? fallback).trim().replace(/\/+$/, "");
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -203,7 +213,7 @@ function normalizeEndpoint(value: string | undefined): string {
   }
   if (
     parsed.protocol !== "https:" ||
-    !ALLOWED_ENDPOINTS.has(parsed.hostname) ||
+    !allowed.has(parsed.hostname) ||
     parsed.port !== "" ||
     parsed.username !== "" ||
     parsed.password !== "" ||
@@ -293,9 +303,20 @@ function teamNotFound(providerCode: number | null): boolean {
 }
 
 function teamServerExtension(value: JsonRecord): string | null {
-  const extension = field(value, "custom", "server_extension", "serverExtension");
-  if (extension === undefined || extension === null) return null;
-  return typeof extension === "string" ? extension : null;
+  // V1 exposes `custom` and `clientCustom` as distinct wire fields. The
+  // confirmed App returned this support marker in `clientCustom`; keep the
+  // field aliases for wire compatibility, but reject conflicting values
+  // instead of treating clientCustom as a server-private field.
+  const fields = ["custom", "clientCustom", "server_extension", "serverExtension"];
+  const values: string[] = [];
+  for (const name of fields) {
+    if (!Object.prototype.hasOwnProperty.call(value, name) || value[name] === null || value[name] === undefined) continue;
+    if (typeof value[name] !== "string") throw new YunxinApiError("team-response", null, false);
+    values.push(value[name]);
+  }
+  const distinct = [...new Set(values)];
+  if (distinct.length > 1) throw new YunxinApiError("team-response", null, false);
+  return distinct[0] ?? null;
 }
 
 function teamSummary(value: unknown): { teamId: string; ownerAccountId: string; serverExtension: string | null } {
@@ -315,9 +336,11 @@ function supportTeamState(value: unknown): YunxinSupportTeamState {
     if (typeof member !== "string") throw new YunxinApiError("team-response", null, false);
     return normalizeAccountId(member);
   });
-  if (new Set(memberAccountIds).size !== memberAccountIds.length || !memberAccountIds.includes(summary.ownerAccountId)) {
+  if (new Set(memberAccountIds).size !== memberAccountIds.length) {
     throw new YunxinApiError("team-response", null, false);
   }
+  // V1 query.action returns invited members while the owner is implicit.
+  if (!memberAccountIds.includes(summary.ownerAccountId)) memberAccountIds.unshift(summary.ownerAccountId);
   return { ...summary, memberAccountIds };
 }
 
@@ -444,7 +467,8 @@ export function createYunxinDynamicToken(input: YunxinDynamicTokenInput): Yunxin
 }
 
 export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScopeApi {
-  private readonly endpoint: string;
+  private readonly v1Endpoint: string;
+  private readonly v2Endpoint: string;
   private readonly fetchImpl: FetchLike;
   private readonly now: () => number;
   private readonly nonce: () => string;
@@ -453,7 +477,8 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
   constructor(private readonly options: YunxinServerApiOptions) {
     assertCredential(options.appKey, "app key");
     assertCredential(options.appSecret, "app secret");
-    this.endpoint = normalizeEndpoint(options.endpoint);
+    this.v1Endpoint = normalizeEndpoint(options.v1Endpoint ?? options.endpoint, DEFAULT_V1_ENDPOINT, ALLOWED_V1_ENDPOINTS);
+    this.v2Endpoint = normalizeEndpoint(options.v2Endpoint, DEFAULT_V2_ENDPOINT, ALLOWED_V2_ENDPOINTS);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.now = options.now ?? (() => Date.now());
     this.nonce = options.nonce ?? (() => randomBytes(18).toString("base64url"));
@@ -479,7 +504,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
 
   async getProfile(accountId: string): Promise<YunxinProfile> {
     const normalized = normalizeAccountId(accountId);
-    const response = await this.request("get-profile", "GET", `/im/v2/users/${encodeURIComponent(normalized)}`);
+    const response = await this.request("get-profile", "GET", `/im/v2/users/${encodeURIComponent(normalized)}`, undefined, "", "v2");
     const profile = profileFrom(responseData(response), normalized);
     assertReturnedAccount(normalized, profile.accountId, "get-profile");
     return profile;
@@ -488,7 +513,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
   async getProfiles(accountIds: string[]): Promise<{ profiles: YunxinProfile[]; failed: YunxinAccountLookupFailure[] }> {
     const normalized = normalizeAccountIds(accountIds);
     const query = new URLSearchParams({ account_ids: normalized.join(",") });
-    const response = await this.request("get-profiles", "GET", `/im/v2/users?${query.toString()}`);
+    const response = await this.request("get-profiles", "GET", `/im/v2/users?${query.toString()}`, undefined, "", "v2");
     const data = responseData(response);
     if (!Array.isArray(data.success_list) || !Array.isArray(data.failed_list)) {
       throw new YunxinApiError("get-profiles", null, false);
@@ -508,7 +533,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
 
   async getAccount(accountId: string): Promise<YunxinAccountState> {
     const normalized = normalizeAccountId(accountId);
-    const response = await this.request("get-account", "GET", `/im/v2/accounts/${encodeURIComponent(normalized)}`);
+    const response = await this.request("get-account", "GET", `/im/v2/accounts/${encodeURIComponent(normalized)}`, undefined, "", "v2");
     const state = accountStateFrom(responseData(response), normalized);
     assertReturnedAccount(normalized, state.accountId, "get-account");
     return state;
@@ -519,7 +544,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const response = await this.request("set-account-enabled", "PATCH", `/im/v2/accounts/${encodeURIComponent(normalized)}`, {
       configuration: { enabled },
       ...(needKick ? { need_kick: true } : {}),
-    });
+    }, "", "v2");
     const state = accountStateFrom(responseData(response), normalized);
     assertReturnedAccount(normalized, state.accountId, "set-account-enabled");
     return state;
@@ -527,7 +552,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
 
   async refreshAccountToken(accountId: string): Promise<{ accountId: string; token: string }> {
     const normalized = normalizeAccountId(accountId);
-    const response = await this.request("refresh-token", "PATCH", `/im/v2/accounts/${encodeURIComponent(normalized)}`, undefined, "/actions/refresh_token");
+    const response = await this.request("refresh-token", "PATCH", `/im/v2/accounts/${encodeURIComponent(normalized)}`, undefined, "/actions/refresh_token", "v2");
     const data = responseData(response);
     const returnedAccountId = asString(field(data, "account_id", "accid"));
     if (returnedAccountId !== undefined) assertReturnedAccount(normalized, normalizeAccountId(returnedAccountId), "refresh-token");
@@ -540,7 +565,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const normalized = normalizeAccountIds(accountIds);
     const response = await this.request("get-online-status", "POST", "/im/v2/users/actions/online_status", {
       account_ids: normalized,
-    });
+    }, "", "v2");
     const data = responseData(response);
     if (!Array.isArray(data.success_list) || !Array.isArray(data.failed_list)) {
       throw new YunxinApiError("get-online-status", null, false);
@@ -582,7 +607,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
         update_team_info_mode: 0,
         update_extension_mode: 0,
       },
-    });
+    }, "", "v2");
     const data = responseData(response);
     const failed = field(data, "failed_list");
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("create-support-team", null, false);
@@ -605,7 +630,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       team_type: 1,
       invite_account_ids: [member],
       msg: "洲洲商行客服咨询转交",
-    });
+    }, "", "v2");
     const data = responseData(response);
     const failed = field(data, "failed_list");
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("add-support-team-member", null, false);
@@ -613,12 +638,13 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
 
   async removeSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void> {
     const normalizedTeamId = normalizeTeamId(teamId);
-    const response = await this.request("remove-support-team-member", "DELETE", "/im/v2/team_members/actions/kick_member", {
+    const query = new URLSearchParams({
       operator_id: normalizeAccountId(operatorAccountId),
-      team_id: teamIdBodyValue(normalizedTeamId),
-      team_type: 1,
-      kick_account_ids: [normalizeAccountId(memberAccountId)],
+      team_id: String(teamIdBodyValue(normalizedTeamId)),
+      team_type: "1",
+      kick_account_ids: normalizeAccountId(memberAccountId),
     });
+    const response = await this.request("remove-support-team-member", "DELETE", `/im/v2/team_members/actions/kick_member?${query.toString()}`, undefined, "", "v2");
     responseData(response);
   }
 
@@ -626,7 +652,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const normalizedTeamId = normalizeTeamId(teamId);
     const owner = normalizeAccountId(ownerAccountId);
     const query = new URLSearchParams({ team_type: "1", operator_id: owner });
-    const response = await this.request("dismiss-support-team", "DELETE", `/im/v2.1/teams/${encodeURIComponent(normalizedTeamId)}?${query.toString()}`);
+    const response = await this.request("dismiss-support-team", "DELETE", `/im/v2.1/teams/${encodeURIComponent(normalizedTeamId)}?${query.toString()}`, undefined, "", "v2");
     responseData(response);
   }
 
@@ -660,8 +686,16 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const body = new URLSearchParams({ accid: ownerAccountId });
     const response = await this.request("find-support-team", "POST", "/nimserver/team/joinTeams.action", body);
     const payload = responseBody(response);
-    const teams = field(payload, "tinfos", "team_infos", "teamInfos");
-    if (!Array.isArray(teams)) throw new YunxinApiError("find-support-team", null, false);
+    const teamsValue = payload.infos;
+    const count = asNumber(payload.count);
+    if (count === undefined || !Number.isInteger(count) || count < 0) {
+      throw new YunxinApiError("find-support-team", null, false);
+    }
+    if (count === 0 && teamsValue === undefined) return { status: "ABSENT" };
+    if (!Array.isArray(teamsValue) || count !== teamsValue.length) {
+      throw new YunxinApiError("find-support-team", null, false);
+    }
+    const teams = teamsValue;
     if (teams.length === 0) return { status: "ABSENT" };
     const matches: string[] = [];
     let unidentifiable = false;
@@ -688,6 +722,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     path: string,
     body?: URLSearchParams | JsonRecord,
     suffix = "",
+    version: "v1" | "v2" = "v1",
   ): Promise<unknown> {
     const nonce = this.nonce();
     const curTime = String(Math.floor(this.now() / 1000));
@@ -709,7 +744,8 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     }
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.endpoint}${path}${suffix}`, {
+      const endpoint = version === "v2" ? this.v2Endpoint : this.v1Endpoint;
+      response = await this.fetchImpl(`${endpoint}${path}${suffix}`, {
         method,
         headers,
         body: requestBody,
