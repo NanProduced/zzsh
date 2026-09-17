@@ -428,8 +428,8 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
     return;
   }
   const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
-  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/presence" || Boolean(imAction);
-  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/presence"
+  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || Boolean(imAction);
+  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence"
     ? (method === "GET" || ((path === "/im/consultations" || path === "/im/messages") && method === "POST") || (path === "/im/presence" && method === "PUT"))
     : method === "POST";
   if (imPathAllowed) {

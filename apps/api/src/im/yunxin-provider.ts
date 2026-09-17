@@ -103,6 +103,18 @@ export type YunxinSupportTeamLookup =
   | { status: "ABSENT" }
   | { status: "AMBIGUOUS" };
 
+export type YunxinSupportTeamIdentity = {
+  teamId: string;
+  teamType: number;
+  ownerAccountId: string;
+  serverExtension: string;
+};
+
+export type YunxinSupportTeamExistenceLookup =
+  | { status: "FOUND"; team: YunxinSupportTeamIdentity }
+  | { status: "ABSENT" }
+  | { status: "AMBIGUOUS" };
+
 /** The small server-only surface used to isolate one consultation from another. */
 export type YunxinSupportScopeApi = {
   createSupportTeam(input: YunxinSupportTeamCreateInput): Promise<{ teamId: string }>;
@@ -111,6 +123,7 @@ export type YunxinSupportScopeApi = {
   dismissSupportTeam(teamId: string, ownerAccountId: string): Promise<void>;
   getSupportTeam(teamId: string): Promise<YunxinSupportTeamState | null>;
   findSupportTeam(input: { appId: string; consultationId: string; ownerAccountId: string }): Promise<YunxinSupportTeamLookup>;
+  readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup>;
 };
 
 export type YunxinCreateAccountInput = {
@@ -159,6 +172,7 @@ export class YunxinApiError extends Error {
     readonly operation: string,
     readonly providerCode: number | null,
     readonly retryable: boolean,
+    readonly httpStatus: number | null = null,
   ) {
     super(`Yunxin ${operation} failed`);
     this.name = "YunxinApiError";
@@ -299,7 +313,8 @@ function responseBody(body: unknown): JsonRecord {
 }
 
 function teamNotFound(providerCode: number | null): boolean {
-  return providerCode === 108404 || providerCode === 109404;
+  // 109404 means a team member is missing, not that the Team is absent.
+  return providerCode === 108404;
 }
 
 function teamServerExtension(value: JsonRecord): string | null {
@@ -716,6 +731,60 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     return { status: "FOUND", team };
   }
 
+  async readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup> {
+    const ownerAccountId = normalizeAccountId(input.ownerAccountId);
+    const teamId = normalizeTeamId(input.teamId);
+    const appId = input.appId.trim();
+    const consultationId = input.consultationId.trim();
+    if (!appId || appId.length > 128 || CONTROL_PATTERN.test(appId) || !consultationId || consultationId.length > 128 || CONTROL_PATTERN.test(consultationId)) {
+      throw new Error("Yunxin support scope metadata is invalid");
+    }
+    try {
+      const response = await this.request(
+        "read-support-team-existence",
+        "GET",
+        `/im/v2.1/teams/${encodeURIComponent(teamId)}?team_type=1`,
+        undefined,
+        "",
+        "v2",
+      );
+      const data = responseData(response);
+      if (!isRecord(data.team_info)) throw new YunxinApiError("read-support-team-existence", null, false);
+      const summary = teamSummary(data.team_info);
+      const teamType = asNumber(field(data.team_info, "team_type", "teamType"));
+      const serverExtension = summary.serverExtension;
+      if (teamType === undefined) throw new YunxinApiError("read-support-team-existence", null, false);
+      if (
+        summary.teamId !== teamId
+        || summary.ownerAccountId !== ownerAccountId
+        || teamType !== 1
+        || serverExtension === null
+        || supportMarkerMatches(serverExtension, appId, consultationId) !== true
+      ) {
+        return { status: "AMBIGUOUS" };
+      }
+      return {
+        status: "FOUND",
+        team: {
+          teamId: summary.teamId,
+          teamType,
+          ownerAccountId: summary.ownerAccountId,
+          serverExtension,
+        },
+      };
+    } catch (error) {
+      if (
+        error instanceof YunxinApiError
+        && error.operation === "read-support-team-existence"
+        && error.httpStatus === 200
+        && teamNotFound(error.providerCode)
+      ) {
+        return { status: "ABSENT" };
+      }
+      throw error;
+    }
+  }
+
   private async request(
     operation: string,
     method: string,
@@ -759,16 +828,17 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     try {
       payload = await response.json();
     } catch {
-      throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429);
+      throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429, response.status);
     }
-    if (!isRecord(payload)) throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429);
+    if (!isRecord(payload)) throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429, response.status);
     const providerCode = asNumber(payload.code);
-    if (providerCode === undefined) throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429);
+    if (providerCode === undefined) throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429, response.status);
     if (!response.ok || providerCode !== 200) {
       throw new YunxinApiError(
         operation,
         providerCode,
         response.status >= 500 || response.status === 429 || providerCode === 102449,
+        response.status,
       );
     }
     return payload;

@@ -24,7 +24,7 @@ import {
   transferConsultation,
   updateOwnPresence,
 } from "../src/im/consultation";
-import { YunxinApiError, YunxinTransportError, type YunxinSupportScopeApi, type YunxinSupportTeamCreateInput, type YunxinSupportTeamLookup, type YunxinSupportTeamState } from "../src/im/yunxin-provider";
+import { YunxinApiError, YunxinTransportError, type YunxinSupportScopeApi, type YunxinSupportTeamCreateInput, type YunxinSupportTeamExistenceLookup, type YunxinSupportTeamLookup, type YunxinSupportTeamState } from "../src/im/yunxin-provider";
 import type { ImProvisionResult } from "../src/im/identity-lifecycle";
 import { loadEffectiveAdminAccess } from "../src/auth/admin-authorization";
 import type { AdminContext } from "../src/auth/auth-security";
@@ -174,6 +174,8 @@ class FakeSupportScopeProvider implements YunxinSupportScopeApi {
   readonly pendingCreates = new Map<string, YunxinSupportTeamCreateInput>();
   readonly pendingLateAdds: Array<{ teamId: string; memberAccountId: string }> = [];
   findCalls = 0;
+  existenceReads = 0;
+  existenceFailure: unknown;
   failCreateAfterPersist = false;
   failCreateBeforePersist = false;
   failAddAfterPersist = false;
@@ -260,6 +262,23 @@ class FakeSupportScopeProvider implements YunxinSupportScopeApi {
       ownerAccountId: input.ownerAccountId,
       memberAccountIds: [...members],
       serverExtension: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: input.appId, consultationId: input.consultationId }),
+    };
+  }
+
+  async readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup> {
+    this.existenceReads += 1;
+    if (this.existenceFailure) throw this.existenceFailure;
+    const team = await this.getSupportTeam(input.teamId);
+    if (!team) return { status: "ABSENT" };
+    if (
+      team.ownerAccountId !== input.ownerAccountId
+      || team.serverExtension !== JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: input.appId, consultationId: input.consultationId })
+    ) {
+      return { status: "AMBIGUOUS" };
+    }
+    return {
+      status: "FOUND",
+      team: { teamId: team.teamId, teamType: 1, ownerAccountId: team.ownerAccountId, serverExtension: team.serverExtension! },
     };
   }
 
@@ -384,14 +403,17 @@ test(
     const adminId = `${prefix}admin`;
     const targetAdminId = `${prefix}target_admin`;
     const identityAdminId = `${prefix}identity_admin`;
+    const presenceRaceAdminId = `${prefix}presence_race_admin`;
     const userSessionId = `${prefix}user_session`;
     const boundaryUserSessionId = `${prefix}boundary_user_session`;
     const identityPendingUserSessionId = `${prefix}identity_pending_user_session`;
     const adminSessionId = `${prefix}admin_session`;
     const targetAdminSessionId = `${prefix}target_admin_session`;
     const identityAdminSessionId = `${prefix}identity_admin_session`;
+    const presenceRaceOldSessionId = `${prefix}presence_race_old_session`;
+    const presenceRaceNewSessionId = `${prefix}presence_race_new_session`;
     const syntheticUserIds = [userId, boundaryUserId, identityPendingUserId];
-    const syntheticAdminIds = [adminId, targetAdminId, identityAdminId];
+    const syntheticAdminIds = [adminId, targetAdminId, identityAdminId, presenceRaceAdminId];
     const allSyntheticIds = [...syntheticUserIds, ...syntheticAdminIds];
     const maintenance = pool("postgres", MAINTENANCE_USER, MAINTENANCE_PASSWORD!, "zzsh-yunxin-consultation-maintenance", 2);
     let guard: (PoolClient & { migrationPassword?: string; runtimePassword?: string }) | undefined;
@@ -440,6 +462,7 @@ test(
       await seedAdmin(runtime, adminId, adminSessionId, runId);
       await seedAdmin(runtime, targetAdminId, targetAdminSessionId, runId);
       await seedAdmin(runtime, identityAdminId, identityAdminSessionId, runId);
+      await seedAdmin(runtime, presenceRaceAdminId, presenceRaceOldSessionId, runId);
       await seedIdentity(runtime, identityKey("USER", userId), runId);
       await seedIdentity(runtime, identityKey("USER", boundaryUserId), runId);
       await seedIdentity(runtime, identityKey("USER", identityPendingUserId), runId);
@@ -479,16 +502,95 @@ test(
       const admin = adminContext(adminId, adminSessionId);
       const targetAdmin = adminContext(targetAdminId, targetAdminSessionId);
       const identityAdmin = adminContext(identityAdminId, identityAdminSessionId);
+      const presenceRaceOldAdmin = adminContext(presenceRaceAdminId, presenceRaceOldSessionId);
+      const presenceRaceNewAdmin = adminContext(presenceRaceAdminId, presenceRaceNewSessionId);
       const userAccountId = deriveYunxinAccountId(identityKey("USER", userId));
       const boundaryUserAccountId = deriveYunxinAccountId(identityKey("USER", boundaryUserId));
       const adminAccountId = deriveYunxinAccountId(identityKey("ADMIN", adminId));
       const targetAdminAccountId = deriveYunxinAccountId(identityKey("ADMIN", targetAdminId));
+      const writePresence = async (
+        presenceOptions: typeof options,
+        context: AdminContext,
+        input: Parameters<typeof updateOwnPresence>[2],
+        requestId: string,
+        expectedVersion?: number,
+      ) => {
+        const version = expectedVersion ?? (await readOwnPresence(presenceOptions, context)).version;
+        return updateOwnPresence(presenceOptions, context, { ...input, version }, requestId);
+      };
 
-      const online = await updateOwnPresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-online`);
+      const online = await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-online`);
       assert.equal(online.availability, "AVAILABLE");
       assert.equal(online.connectionState, "CONNECTED");
       assert.ok(online.lastConnectedAt);
       assert.equal(online.activeLoad, 0);
+
+      const raceOldOnline = await writePresence(options, presenceRaceOldAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-race-old-online`);
+      const newerSessionAt = new Date(Date.now() + 1_000);
+      await runtime.query(
+        `INSERT INTO "zzsh_auth_admin"."session"
+          ("id", "expiresAt", "token", "createdAt", "updatedAt", "userId")
+         VALUES ($1, $2, $3, $4, $4, $5)`,
+        [presenceRaceNewSessionId, new Date(newerSessionAt.getTime() + 3_600_000), `im_cpg_admin_token_${runId}_${presenceRaceNewSessionId}`, newerSessionAt, presenceRaceAdminId],
+      );
+      await runtime.query(`UPDATE "zzsh_auth_admin"."session" SET "locked" = true WHERE "id" = $1`, [presenceRaceNewSessionId]);
+      const presenceAfterLoginAndLock = await runtime.query<{ availability: string; connectionState: string; version: string | number }>(
+        `SELECT "availability", "connection_state" AS "connectionState", "version"
+           FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
+        [APP_ID, presenceRaceAdminId],
+      );
+      assert.deepEqual(presenceAfterLoginAndLock.rows[0], { availability: "AVAILABLE", connectionState: "CONNECTED", version: String(raceOldOnline.version) });
+      await runtime.query(`UPDATE "zzsh_auth_admin"."session" SET "locked" = false WHERE "id" = $1`, [presenceRaceNewSessionId]);
+
+      let barrierEntered = false;
+      let releaseBarrier!: () => void;
+      const barrierRelease = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+      let barrierArmed = true;
+      const barrierOptions = {
+        ...options,
+        testPresenceBarrier: async (context: AdminContext) => {
+          if (!barrierArmed || context.sessionId !== presenceRaceOldSessionId) return;
+          barrierArmed = false;
+          barrierEntered = true;
+          await barrierRelease;
+        },
+      };
+      const oldLateWrite = writePresence(
+        barrierOptions,
+        presenceRaceOldAdmin,
+        { availability: "OFF_DUTY", connectionState: "DISCONNECTED" },
+        `${prefix}presence-race-old-late-offline`,
+        raceOldOnline.version,
+      );
+      const oldLateOutcome = oldLateWrite.then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+      await waitFor("presence CAS pre-write", async () => barrierEntered);
+      const presenceBeforeNewWrite = await runtime.query<{ availability: string; connectionState: string; version: string | number }>(
+        `SELECT "availability", "connection_state" AS "connectionState", "version"
+           FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
+        [APP_ID, presenceRaceAdminId],
+      );
+      assert.deepEqual(presenceBeforeNewWrite.rows[0], { availability: "AVAILABLE", connectionState: "CONNECTED", version: String(raceOldOnline.version) });
+      const raceNewOnline = await writePresence(
+        options,
+        presenceRaceNewAdmin,
+        { availability: "AVAILABLE", connectionState: "CONNECTED" },
+        `${prefix}presence-race-new-online`,
+        raceOldOnline.version,
+      );
+      assert.equal(raceNewOnline.connectionState, "CONNECTED");
+      releaseBarrier();
+      const oldLateResult = await oldLateOutcome;
+      assert.equal(oldLateResult.ok, false);
+      if (oldLateResult.ok) throw new Error("stale presence write unexpectedly succeeded");
+      assert.equal(oldLateResult.error?.status, 409);
+      assert.match(oldLateResult.error?.message ?? "", /presence version is stale/i);
+      const racePresenceAfterLateWrite = await readOwnPresence(options, presenceRaceNewAdmin);
+      assert.equal(racePresenceAfterLateWrite.availability, "AVAILABLE");
+      assert.equal(racePresenceAfterLateWrite.connectionState, "CONNECTED");
+      assert.equal(racePresenceAfterLateWrite.version, raceNewOnline.version);
 
       const service = await createOrResumeUserConsultation(options, user, "SERVICE", "listing_demo_01", `${prefix}service-create`);
       assert.equal(service.consultation.state, "ACTIVE");
@@ -503,6 +605,18 @@ test(
       assert.equal(provider.members.get("900001")?.has(userAccountId), true);
       assert.equal(provider.members.get("900001")?.has(adminAccountId), true);
       await assert.rejects(provider.addSupportTeamMember("900001", userAccountId, targetAdminAccountId), /owner is required/);
+
+      // Capacity changes must not invalidate a connected client's presence version.
+      const cachedPresenceVersionAfterClaim = online.version;
+      const heartbeatAfterClaim = await writePresence(
+        options,
+        admin,
+        { availability: "AVAILABLE", connectionState: "CONNECTED" },
+        `${prefix}presence-after-claim`,
+        cachedPresenceVersionAfterClaim,
+      );
+      assert.equal(heartbeatAfterClaim.activeLoad, 1);
+      assert.equal(heartbeatAfterClaim.version, cachedPresenceVersionAfterClaim + 1);
 
       const resumed = await createOrResumeUserConsultation(options, user, "SERVICE", "listing_other", `${prefix}service-resume`);
       assert.equal(resumed.consultation.id, service.consultation.id);
@@ -539,6 +653,25 @@ test(
         /Permission required/,
       );
       assert.deepEqual(await readAdminMessageAccess(options, admin, `${adminAccountId}|2|900001`), serviceMessageAccess);
+      await assert.rejects(
+        closeConsultation(options, admin, service.consultation.id, `${prefix}service-close-revoked`),
+        /Permission required/,
+      );
+      const serviceAfterDeniedClose = (await runtime.query<{ state: string; messageScopeState: string; operationCount: string }>(
+        `SELECT c."state", c."message_scope_state" AS "messageScopeState", count(o.*)::text AS "operationCount"
+           FROM "zzsh_iam"."im_consultation" c
+           LEFT JOIN "zzsh_iam"."im_consultation_scope_operation" o
+             ON o."app_id" = c."app_id" AND o."consultation_id" = c."id"
+          WHERE c."app_id" = $1 AND c."id" = $2
+          GROUP BY c."state", c."message_scope_state"`,
+        [APP_ID, service.consultation.id],
+      )).rows[0];
+      assert.deepEqual(serviceAfterDeniedClose, { state: "ACTIVE", messageScopeState: "READY", operationCount: "1" });
+      await migration.query(
+        `UPDATE "zzsh_iam"."admin_user_permission" SET "effect" = 'ALLOW'
+          WHERE "admin_user_id" = $1 AND "permission_code" = 'im.support.accept'`,
+        [adminId],
+      );
       await migration.query(`DELETE FROM "zzsh_iam"."admin_user_permission" WHERE "admin_user_id" = $1`, [adminId]);
       await migration.query(`UPDATE "zzsh_iam"."admin_security" SET "is_boss" = true WHERE "admin_user_id" = $1`, [adminId]);
 
@@ -550,6 +683,16 @@ test(
       assert.equal(provider.members.has("900001"), false);
       const closedServiceInUserList = (await listUserConsultations(options, user, 10)).consultations.find(({ id }) => id === service.consultation.id);
       assert.equal(closedServiceInUserList?.conversationId, null);
+
+      const heartbeatAfterClose = await writePresence(
+        options,
+        admin,
+        { availability: "AVAILABLE", connectionState: "CONNECTED" },
+        `${prefix}presence-after-close`,
+        heartbeatAfterClaim.version,
+      );
+      assert.equal(heartbeatAfterClose.activeLoad, 0);
+      assert.equal(heartbeatAfterClose.version, heartbeatAfterClaim.version + 1);
 
       await runtime.query(
         `UPDATE "zzsh_iam"."im_support_presence"
@@ -564,7 +707,7 @@ test(
       assert.equal(expiredBoundary.consultation.messageScopeState, "PENDING");
       assert.equal(provider.created.length, 1);
 
-      const refreshed = await updateOwnPresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-refresh`);
+      const refreshed = await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-refresh`);
       assert.equal(refreshed.connectionState, "CONNECTED");
       const freshPresence = await runtime.query<{ fresh: boolean }>(
         `SELECT "last_connected_at" > clock_timestamp() - interval '2 minutes' AS fresh
@@ -595,18 +738,37 @@ test(
         /Permission required/,
       );
       assert.deepEqual(await readAdminMessageAccess(options, admin, `${adminAccountId}|2|900002`), complaintMessageAccess);
+      await assert.rejects(
+        closeConsultation(options, admin, boundaryComplaint.consultation.id, `${prefix}complaint-close-revoked`),
+        /Permission required/,
+      );
+      const complaintAfterDeniedClose = (await runtime.query<{ state: string; messageScopeState: string; operationCount: string }>(
+        `SELECT c."state", c."message_scope_state" AS "messageScopeState", count(o.*)::text AS "operationCount"
+           FROM "zzsh_iam"."im_consultation" c
+           LEFT JOIN "zzsh_iam"."im_consultation_scope_operation" o
+             ON o."app_id" = c."app_id" AND o."consultation_id" = c."id"
+          WHERE c."app_id" = $1 AND c."id" = $2
+          GROUP BY c."state", c."message_scope_state"`,
+        [APP_ID, boundaryComplaint.consultation.id],
+      )).rows[0];
+      assert.deepEqual(complaintAfterDeniedClose, { state: "ACTIVE", messageScopeState: "READY", operationCount: "1" });
+      await migration.query(
+        `UPDATE "zzsh_iam"."admin_user_permission" SET "effect" = 'ALLOW'
+          WHERE "admin_user_id" = $1 AND "permission_code" = 'im.support.complaint'`,
+        [adminId],
+      );
       await migration.query(`DELETE FROM "zzsh_iam"."admin_user_permission" WHERE "admin_user_id" = $1`, [adminId]);
       await migration.query(`UPDATE "zzsh_iam"."admin_security" SET "is_boss" = true WHERE "admin_user_id" = $1`, [adminId]);
       await closeConsultation(options, admin, boundaryComplaint.consultation.id, `${prefix}boundary-complaint-close`);
       assert.equal(provider.dismissed.includes("900002"), true);
 
-      await updateOwnPresence(options, admin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}presence-offline`);
+      await writePresence(options, admin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}presence-offline`);
       const complaint = await createOrResumeUserConsultation(options, user, "COMPLAINT", null, `${prefix}complaint-create`);
       assert.equal(complaint.consultation.state, "WAITING");
       assert.equal(complaint.consultation.assignedAdmin, null);
       assert.equal(complaint.consultation.peerAccountId, null);
 
-      await updateOwnPresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-reopen`);
+      await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-reopen`);
       const waitingQueue = await listAdminConsultations(options, admin, access, 10);
       assert.equal(waitingQueue.consultations.some(({ id }) => id === complaint.consultation.id), true);
       const claimed = await claimConsultation(options, admin, complaint.consultation.id, `${prefix}complaint-claim`);
@@ -628,7 +790,7 @@ test(
       const transferable = await createOrResumeUserConsultation(options, user, "SERVICE", "listing_transfer", `${prefix}transfer-create`);
       assert.equal(transferable.consultation.assignedAdmin?.id, adminId);
       assert.equal(transferable.consultation.conversationId, `${userAccountId}|2|900004`);
-      await updateOwnPresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-online`);
+      await writePresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-online`);
       const targetAccess = await loadEffectiveAdminAccess(runtime, targetAdminId);
       assert.ok(targetAccess);
       let addEnteredResolve!: () => void;
@@ -675,10 +837,10 @@ test(
       assert.equal(closedTransfer.consultation.conversationId, null);
       assert.equal(provider.members.has("900004"), false);
 
-      await updateOwnPresence(options, targetAdmin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}target-off-duty`);
+      await writePresence(options, targetAdmin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}target-off-duty`);
       const fencedTransfer = await createOrResumeUserConsultation(options, user, "SERVICE", "listing_fenced_transfer", `${prefix}fenced-transfer-create`);
       assert.equal(fencedTransfer.consultation.assignedAdmin?.id, adminId);
-      await updateOwnPresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-online-again`);
+      await writePresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-online-again`);
       let expiredGetEntered!: () => void;
       const expiredGet = new Promise<void>((resolve) => { releaseExpiredGet = resolve; });
       const expiredGetStarted = new Promise<void>((resolve) => { expiredGetEntered = resolve; });
@@ -727,11 +889,11 @@ test(
         /远端结果未知/,
       );
 
-      await updateOwnPresence(options, admin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}recovery-create-offline`);
+      await writePresence(options, admin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}recovery-create-offline`);
       provider.failCreateBeforePersist = true;
       const recoveryQueue = await createOrResumeUserConsultation(options, boundaryUser, "SERVICE", "listing_recovery_create", `${prefix}recovery-create`);
       assert.equal(recoveryQueue.consultation.state, "WAITING");
-      await updateOwnPresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}recovery-create-online`);
+      await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}recovery-create-online`);
       await assert.rejects(
         claimConsultation(options, admin, recoveryQueue.consultation.id, `${prefix}recovery-create-claim`),
         /being recovered/,
@@ -771,11 +933,11 @@ test(
         /远端结果未知/,
       );
 
-      await updateOwnPresence(options, targetAdmin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}target-offline-for-recovery-transfer`);
+      await writePresence(options, targetAdmin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}target-offline-for-recovery-transfer`);
       const recoveryTransfer = await createOrResumeUserConsultation(options, user, "COMPLAINT", "listing_recovery_transfer", `${prefix}recovery-transfer-create`);
       assert.equal(recoveryTransfer.consultation.assignedAdmin?.id, adminId);
       assert.equal(recoveryTransfer.consultation.messageScopeState, "READY");
-      await updateOwnPresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-refresh`);
+      await writePresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-refresh`);
       provider.failAddBeforePersist = true;
       await assert.rejects(
         transferConsultation(options, admin, recoveryTransfer.consultation.id, targetAdminId, `${prefix}recovery-transfer`),
@@ -799,6 +961,8 @@ test(
 
       const recoveryClose = await createOrResumeUserConsultation(options, boundaryUser, "COMPLAINT", "listing_recovery_close", `${prefix}recovery-close-create`);
       const recoveryCloseAdmin = recoveryClose.consultation.assignedAdmin?.id === targetAdminId ? targetAdmin : admin;
+      const dismissedBeforeRecovery = provider.dismissed.length;
+      const existenceReadsBeforeRecovery = provider.existenceReads;
       provider.failDismissAfterPersist = true;
       await assert.rejects(
         closeConsultation(options, recoveryCloseAdmin, recoveryClose.consultation.id, `${prefix}recovery-close`),
@@ -809,12 +973,146 @@ test(
       assert.equal(quarantinedClose?.state, "ACTIVE");
       assert.equal(quarantinedClose?.messageScopeState, "FAILED");
       assert.equal(provider.members.has("900008"), false);
-      await assert.rejects(
-        retryMessageScopeOperation(options, recoveryCloseAdmin, recoveryClose.consultation.id, `${prefix}recovery-close-retry`),
-        /远端结果未知/,
-      );
+      const reconciledClose = await retryMessageScopeOperation(options, recoveryCloseAdmin, recoveryClose.consultation.id, `${prefix}recovery-close-reconcile`);
+      assert.equal(reconciledClose.consultation.state, "CLOSED");
+      assert.equal(reconciledClose.consultation.messageScopeState, "REVOKED");
+      assert.equal(reconciledClose.consultation.conversationId, null);
+      assert.equal(provider.dismissed.length, dismissedBeforeRecovery + 1, "reconciliation does not dismiss a second time");
+      assert.equal(provider.existenceReads, existenceReadsBeforeRecovery + 1, "reconciliation performs one exact existence read");
+      const repeatedClose = await retryMessageScopeOperation(options, recoveryCloseAdmin, recoveryClose.consultation.id, `${prefix}recovery-close-repeat`);
+      assert.equal(repeatedClose.consultation.state, "CLOSED");
+      assert.equal(provider.dismissed.length, dismissedBeforeRecovery + 1, "repeated reconciliation remains idempotent");
+      assert.equal(provider.existenceReads, existenceReadsBeforeRecovery + 1, "repeated reconciliation does not read the provider again");
 
-      const identityAdminOnline = await updateOwnPresence(options, identityAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}identity-admin-online`);
+      const recoveryTransferRow = (await runtime.query<{ userAccountId: string; messageScopeVersion: string }>(
+        `SELECT "user_account_id" AS "userAccountId", "message_scope_version" AS "messageScopeVersion"
+           FROM "zzsh_iam"."im_consultation"
+          WHERE "app_id" = $1 AND "id" = $2`,
+        [APP_ID, recoveryTransfer.consultation.id],
+      )).rows[0];
+      assert.ok(recoveryTransferRow);
+      const insertCloseFixture = async (input: {
+        teamId: string;
+        scopeVersion: number;
+        state?: "NEEDS_REVIEW" | "RUNNING";
+        leaseUntil?: Date | null;
+        leaseTokenHash?: string | null;
+        failureClass?: string | null;
+        failureDetail?: string | null;
+      }): Promise<string> => {
+        const operationId = `im_scope_op_${randomBytes(16).toString("hex")}`;
+        await migration!.query(
+          `INSERT INTO "zzsh_iam"."im_consultation_scope_operation"
+            ("id", "app_id", "consultation_id", "operation_type", "state", "scope_version", "owner_account_id", "user_account_id",
+             "provider_team_id", "attempt_count", "lease_until", "lease_token_hash", "last_failure_class", "last_failure_detail")
+           VALUES ($1,$2,$3,'CLOSE',$4,$5,$6,$7,$8,1,$9,$10,$11,$12)`,
+          [
+            operationId,
+            APP_ID,
+            recoveryTransfer.consultation.id,
+            input.state ?? "NEEDS_REVIEW",
+            input.scopeVersion,
+            managerAccountId,
+            recoveryTransferRow.userAccountId,
+            input.teamId,
+            input.leaseUntil ?? null,
+            input.leaseTokenHash ?? null,
+            input.failureClass ?? "REQUIRES_MANUAL_REVIEW",
+            input.failureDetail ?? "yunxin:get-support-team",
+          ],
+        );
+        return operationId;
+      };
+      const removeCloseFixture = async (operationId: string): Promise<void> => {
+        await migration!.query(`DELETE FROM "zzsh_iam"."im_consultation_scope_operation" WHERE "app_id" = $1 AND "id" = $2`, [APP_ID, operationId]);
+      };
+      const currentScopeVersion = Number(recoveryTransferRow.messageScopeVersion);
+      const readsBeforeBindingRejects = provider.existenceReads;
+      const wrongTeamOperation = await insertCloseFixture({ teamId: "999999999", scopeVersion: currentScopeVersion - 1 });
+      await assert.rejects(
+        retryMessageScopeOperation(options, admin, recoveryTransfer.consultation.id, `${prefix}close-reconcile-wrong-team`),
+        /binding or version changed/,
+      );
+      assert.equal(provider.existenceReads, readsBeforeBindingRejects, "wrong Team binding is rejected before provider read");
+      await removeCloseFixture(wrongTeamOperation);
+
+      const wrongVersionOperation = await insertCloseFixture({ teamId: "900007", scopeVersion: currentScopeVersion });
+      await assert.rejects(
+        retryMessageScopeOperation(options, admin, recoveryTransfer.consultation.id, `${prefix}close-reconcile-wrong-version`),
+        /binding or version changed/,
+      );
+      assert.equal(provider.existenceReads, readsBeforeBindingRejects, "changed scope version is rejected before provider read");
+      await removeCloseFixture(wrongVersionOperation);
+
+      const activeLeaseOperation = await insertCloseFixture({
+        teamId: "900007",
+        scopeVersion: currentScopeVersion - 1,
+        state: "RUNNING",
+        leaseUntil: new Date(Date.now() + 60_000),
+        leaseTokenHash: "close-fixture-lease-hash",
+        failureClass: null,
+        failureDetail: null,
+      });
+      await assert.rejects(
+        retryMessageScopeOperation(options, admin, recoveryTransfer.consultation.id, `${prefix}close-reconcile-active-lease`),
+        /still running/,
+      );
+      assert.equal(provider.existenceReads, readsBeforeBindingRejects, "a valid operation lease blocks reconciliation before provider read");
+      await removeCloseFixture(activeLeaseOperation);
+
+      const unknownReadOperation = await insertCloseFixture({ teamId: "900007", scopeVersion: currentScopeVersion - 1 });
+      const loadBeforeUnknownRead = (await readOwnPresence(options, admin)).activeLoad;
+      const readsBeforeUnknownRead = provider.existenceReads;
+      provider.existenceFailure = new YunxinTransportError("read-support-team-existence");
+      await assert.rejects(
+        retryMessageScopeOperation(options, admin, recoveryTransfer.consultation.id, `${prefix}close-reconcile-unknown-read`),
+        /remote team state is confirmed/,
+      );
+      provider.existenceFailure = undefined;
+      const unknownReadState = (await runtime.query<{ state: string; attemptCount: string; failureClass: string | null; messageScopeState: string }>(
+        `SELECT o."state", o."attempt_count" AS "attemptCount", o."last_failure_class" AS "failureClass",
+                c."message_scope_state" AS "messageScopeState"
+           FROM "zzsh_iam"."im_consultation_scope_operation" o
+           JOIN "zzsh_iam"."im_consultation" c ON c."app_id" = o."app_id" AND c."id" = o."consultation_id"
+          WHERE o."app_id" = $1 AND o."id" = $2`,
+        [APP_ID, unknownReadOperation],
+      )).rows[0];
+      assert.deepEqual(unknownReadState, { state: "NEEDS_REVIEW", attemptCount: 2, failureClass: "PROVIDER_UNKNOWN", messageScopeState: "FAILED" });
+      assert.equal((await readOwnPresence(options, admin)).activeLoad, loadBeforeUnknownRead, "unknown read does not release capacity");
+      assert.equal(provider.existenceReads, readsBeforeUnknownRead + 1, "unknown reconciliation query is attempted once");
+      await removeCloseFixture(unknownReadOperation);
+
+      const memberNotFoundOperation = await insertCloseFixture({ teamId: "900007", scopeVersion: currentScopeVersion - 1 });
+      const dismissedBeforeMemberNotFound = provider.dismissed.length;
+      const loadBeforeMemberNotFound = (await readOwnPresence(options, admin)).activeLoad;
+      const readsBeforeMemberNotFound = provider.existenceReads;
+      provider.existenceFailure = new YunxinApiError("read-support-team-existence", 109404, false, 200);
+      await assert.rejects(
+        retryMessageScopeOperation(options, admin, recoveryTransfer.consultation.id, `${prefix}close-reconcile-member-not-found`),
+        /remote team state is confirmed/,
+      );
+      provider.existenceFailure = undefined;
+      const memberNotFoundState = (await runtime.query<{ state: string; attemptCount: string; failureClass: string | null; consultationState: string; messageScopeState: string }>(
+        `SELECT o."state", o."attempt_count" AS "attemptCount", o."last_failure_class" AS "failureClass",
+                c."state" AS "consultationState", c."message_scope_state" AS "messageScopeState"
+           FROM "zzsh_iam"."im_consultation_scope_operation" o
+           JOIN "zzsh_iam"."im_consultation" c ON c."app_id" = o."app_id" AND c."id" = o."consultation_id"
+          WHERE o."app_id" = $1 AND o."id" = $2`,
+        [APP_ID, memberNotFoundOperation],
+      )).rows[0];
+      assert.deepEqual(memberNotFoundState, {
+        state: "NEEDS_REVIEW",
+        attemptCount: 2,
+        failureClass: "REQUIRES_MANUAL_REVIEW",
+        consultationState: "ACTIVE",
+        messageScopeState: "FAILED",
+      }, "member-not-found is not Team absence");
+      assert.equal((await readOwnPresence(options, admin)).activeLoad, loadBeforeMemberNotFound, "member-not-found does not release capacity");
+      assert.equal(provider.dismissed.length, dismissedBeforeMemberNotFound, "member-not-found does not dismiss again");
+      assert.equal(provider.existenceReads, readsBeforeMemberNotFound + 1, "member-not-found is attempted once and remains unknown");
+      await removeCloseFixture(memberNotFoundOperation);
+
+      const identityAdminOnline = await writePresence(options, identityAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}identity-admin-online`);
       assert.equal(identityAdminOnline.activeLoad, 0);
       supportManagerReady = false;
       await assert.rejects(
@@ -911,8 +1209,8 @@ test(
 
       const primaryPresence = await readOwnPresence(options, admin);
       const targetPresence = await readOwnPresence(options, targetAdmin);
-      assert.equal(primaryPresence.activeLoad, 3, "quarantined consultations retain the reserved local capacity until manual reconciliation");
-      assert.equal(targetPresence.activeLoad, 3, "quarantined consultations retain the reserved local capacity until manual reconciliation");
+      assert.equal(primaryPresence.activeLoad, recoveryCloseAdmin === admin ? 2 : 3, "only the reconciled close releases its reserved local capacity");
+      assert.equal(targetPresence.activeLoad, recoveryCloseAdmin === targetAdmin ? 2 : 3, "only the reconciled close releases its reserved local capacity");
       assert.equal((await readOwnPresence(options, identityAdmin)).activeLoad, 1);
       const eventCount = await runtime.query<{ consultationId: string; count: string }>(
         `SELECT "consultation_id" AS "consultationId", count(*)::text AS count
@@ -929,7 +1227,7 @@ test(
         [transferable.consultation.id, "5"],
         [fencedTransfer.consultation.id, "2"],
         [recoveryTransfer.consultation.id, "2"],
-        [recoveryClose.consultation.id, "2"],
+        [recoveryClose.consultation.id, "3"],
         [identityPendingConsultation.id, "2"],
       ]));
     } catch (error) {

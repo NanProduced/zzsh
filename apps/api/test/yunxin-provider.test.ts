@@ -357,6 +357,76 @@ test("uses the advanced-team server API for one consultation scope", async () =>
   assert.equal(new Headers(calls[5]!.headers).get("Content-Type"), null);
 });
 
+test("uses the exact V2 team read for close absence and fails closed on non-absence results", async () => {
+  const marker = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "close-1" });
+  let requestUrl = "";
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      requestUrl = String(input);
+      return jsonResponse({ code: 200, data: { team_info: {
+        team_id: 2366886340,
+        team_type: 1,
+        owner_account_id: "system-1",
+        server_extension: marker,
+      } } });
+    },
+  });
+  assert.deepEqual(await api.readSupportTeamExistence({ appId: "provider-test", consultationId: "close-1", ownerAccountId: "system-1", teamId: "2366886340" }), {
+    status: "FOUND",
+    team: { teamId: "2366886340", teamType: 1, ownerAccountId: "system-1", serverExtension: marker },
+  });
+  assert.equal(requestUrl, "https://open.yunxinapi.com/im/v2.1/teams/2366886340?team_type=1");
+
+  for (const [body, status] of [
+    [{ code: 108404 }, 200],
+    [{ code: 109404 }, 200],
+    [{ code: 108404 }, 404],
+    [{ code: 414, data: {} }, 200],
+  ] as const) {
+    const candidate = new YunxinServerApiClient({ appKey: APP_KEY, appSecret: APP_SECRET, fetch: async () => jsonResponse(body, status) });
+    if (status === 200 && body.code === 108404) {
+      assert.deepEqual(await candidate.readSupportTeamExistence({ appId: "provider-test", consultationId: "close-1", ownerAccountId: "system-1", teamId: "2366886340" }), { status: "ABSENT" });
+    } else {
+      await assert.rejects(
+        candidate.readSupportTeamExistence({ appId: "provider-test", consultationId: "close-1", ownerAccountId: "system-1", teamId: "2366886340" }),
+        (error: unknown) => error instanceof YunxinApiError && error.httpStatus === status && error.providerCode === body.code,
+      );
+    }
+  }
+
+  const ambiguous = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({ code: 200, data: { team_info: {
+      team_id: 2366886340,
+      team_type: 1,
+      owner_account_id: "system-1",
+      server_extension: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "other-app", consultationId: "close-1" }),
+    } } }),
+  });
+  assert.deepEqual(await ambiguous.readSupportTeamExistence({ appId: "provider-test", consultationId: "close-1", ownerAccountId: "system-1", teamId: "2366886340" }), { status: "AMBIGUOUS" });
+
+  const malformed = new YunxinServerApiClient({ appKey: APP_KEY, appSecret: APP_SECRET, fetch: async () => new Response("{", { status: 200 }) });
+  await assert.rejects(
+    malformed.readSupportTeamExistence({ appId: "provider-test", consultationId: "close-1", ownerAccountId: "system-1", teamId: "2366886340" }),
+    (error: unknown) => error instanceof YunxinApiError && error.httpStatus === 200 && error.providerCode === null,
+  );
+
+  const wrongTeam = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({ code: 200, data: { team_info: {
+      team_id: 2366886341,
+      team_type: 1,
+      owner_account_id: "system-1",
+      server_extension: marker,
+    } } }),
+  });
+  assert.deepEqual(await wrongTeam.readSupportTeamExistence({ appId: "provider-test", consultationId: "close-1", ownerAccountId: "system-1", teamId: "2366886340" }), { status: "AMBIGUOUS" });
+});
+
 test("parses the observed standard-team clientCustom and implicit-owner shape", async () => {
   const serverExtension = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "client-custom-1" });
   const api = new YunxinServerApiClient({

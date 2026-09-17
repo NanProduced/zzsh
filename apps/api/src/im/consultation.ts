@@ -24,6 +24,7 @@ import {
   YunxinApiError,
   YunxinTransportError,
   type YunxinSupportScopeApi,
+  type YunxinSupportTeamExistenceLookup,
   type YunxinSupportTeamLookup,
   type YunxinSupportTeamState,
 } from "./yunxin-provider";
@@ -43,6 +44,8 @@ export type ConsultationRouteOptions = {
     key: ImIdentityKey;
     provisioner: Pick<ImIdentityProvisioner, "ensure">;
   };
+  /** Test-only barrier; runtime assembly never wires arbitrary callbacks. */
+  testPresenceBarrier?: (context: AdminContext) => Promise<void>;
 };
 
 export const SUPPORT_MANAGER_SUBJECT_ID = "support-manager";
@@ -98,6 +101,7 @@ type ScopeOperationRow = {
   providerTeamId: string | null;
   attemptCount: string | number;
   leaseTokenHash: string | null;
+  leaseUntil: Date | string | null;
   nextRetryAt: Date | string;
   lastFailureClass: string | null;
   lastFailureDetail: string | null;
@@ -201,14 +205,16 @@ export function parseConsultationBody(value: unknown): { type: SupportType; subj
   return { type: parseSupportType(value.type), subjectRef: parseSubjectRef(value.subjectRef) };
 }
 
-export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState } {
+export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number } {
   if (!isRecord(value)) throw invalid("Request body is invalid");
-  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState")) throw invalid("Request body contains an unknown field");
+  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version")) throw invalid("Request body contains an unknown field");
   if (typeof value.availability !== "string" || !AVAILABILITY.has(value.availability as SupportAvailability)) throw invalid("Availability is invalid");
   if (typeof value.connectionState !== "string" || !CONNECTION_STATES.has(value.connectionState as SupportConnectionState)) throw invalid("Connection state is invalid");
+  if (value.version !== undefined && (!Number.isSafeInteger(value.version) || (value.version as number) < 0)) throw invalid("Presence version is invalid");
   return {
     availability: value.availability as SupportAvailability,
     connectionState: value.connectionState as SupportConnectionState,
+    ...(value.version === undefined ? {} : { version: value.version as number }),
   };
 }
 
@@ -372,7 +378,7 @@ async function reserveEligibleAdmin(client: PoolClient, appId: string, type: Sup
     if (lockedAccountId !== candidate.accountId) continue;
     const updated = (await client.query(
       `UPDATE "zzsh_iam"."im_support_presence"
-          SET "active_load" = "active_load" + 1, "version" = "version" + 1, "updated_at" = clock_timestamp()
+          SET "active_load" = "active_load" + 1, "updated_at" = clock_timestamp()
         WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "active_load" < "capacity"
         RETURNING "admin_user_id"`,
       [appId, candidate.adminUserId],
@@ -386,7 +392,7 @@ async function decrementPresence(client: PoolClient, appId: string, adminUserId:
   if (!adminUserId) return;
   await client.query(
     `UPDATE "zzsh_iam"."im_support_presence"
-        SET "active_load" = GREATEST("active_load" - 1, 0), "version" = "version" + 1, "updated_at" = clock_timestamp()
+        SET "active_load" = GREATEST("active_load" - 1, 0), "updated_at" = clock_timestamp()
       WHERE "app_id" = $1 AND "admin_user_id" = $2`,
     [appId, adminUserId],
   );
@@ -414,7 +420,8 @@ const SCOPE_OPERATION_SELECT = `
          "user_account_id" AS "userAccountId", "previous_admin_id" AS "previousAdminId",
          "target_admin_id" AS "targetAdminId", "previous_admin_account_id" AS "previousAdminAccountId",
          "target_admin_account_id" AS "targetAdminAccountId", "provider_team_id" AS "providerTeamId",
-         "attempt_count" AS "attemptCount", "lease_token_hash" AS "leaseTokenHash", "next_retry_at" AS "nextRetryAt",
+          "attempt_count" AS "attemptCount", "lease_token_hash" AS "leaseTokenHash", "lease_until" AS "leaseUntil",
+         "next_retry_at" AS "nextRetryAt",
          "last_failure_class" AS "lastFailureClass", "last_failure_detail" AS "lastFailureDetail"
     FROM "zzsh_iam"."im_consultation_scope_operation"`;
 
@@ -700,7 +707,8 @@ async function claimScopeOperation(options: ConsultationRouteOptions, operationI
                 "user_account_id" AS "userAccountId", "previous_admin_id" AS "previousAdminId",
                 "target_admin_id" AS "targetAdminId", "previous_admin_account_id" AS "previousAdminAccountId",
                 "target_admin_account_id" AS "targetAdminAccountId", "provider_team_id" AS "providerTeamId",
-                "attempt_count" AS "attemptCount", "lease_token_hash" AS "leaseTokenHash", "next_retry_at" AS "nextRetryAt",
+                "attempt_count" AS "attemptCount", "lease_token_hash" AS "leaseTokenHash", "lease_until" AS "leaseUntil",
+                "next_retry_at" AS "nextRetryAt",
                 "last_failure_class" AS "lastFailureClass", "last_failure_detail" AS "lastFailureDetail"`,
     [options.appId, operationId, SCOPE_LEASE_MS, scopeLeaseHash(leaseToken)],
   );
@@ -1048,7 +1056,15 @@ async function reconcileTransfer(options: ConsultationRouteOptions, claim: Scope
   await completeTransferRecovery(options, claim, team.teamId);
 }
 
-async function completeCloseRecovery(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string): Promise<void> {
+async function completeCloseRecovery(
+  options: ConsultationRouteOptions,
+  claim: ScopeOperationClaim,
+  teamId: string,
+  expectedScopeState: "REVOKING" | "FAILED" = "REVOKING",
+): Promise<void> {
+  if (claim.appId !== options.appId || claim.operationType !== "CLOSE" || claim.providerTeamId !== teamId) {
+    throw new ScopeOperationFailure("STALE_OPERATION", "close operation is not bound to this team", true);
+  }
   await withTransaction(options.pool, async (client) => {
     const row = await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
@@ -1066,15 +1082,21 @@ async function completeCloseRecovery(options: ConsultationRouteOptions, claim: S
       if (settled.rowCount !== 1) throw new ScopeOperationFailure("STALE_OPERATION", "close lease changed before completion", true);
       return;
     }
-    if (row.state !== "ACTIVE" || row.messageScopeState !== "REVOKING" || row.messageScopeId !== teamId) {
+    const expectedScopeVersion = numberValue(claim.scopeVersion) + (expectedScopeState === "FAILED" ? 1 : 0);
+    if (
+      row.state !== "ACTIVE"
+      || row.messageScopeState !== expectedScopeState
+      || row.messageScopeId !== teamId
+      || numberValue(row.messageScopeVersion) !== expectedScopeVersion
+    ) {
       throw new ScopeOperationFailure("STALE_OPERATION", "close consultation version changed", true);
     }
     const updated = await client.query(
       `UPDATE "zzsh_iam"."im_consultation"
           SET "state" = 'CLOSED', "message_scope_state" = 'REVOKED',
               "message_scope_version" = "message_scope_version" + 1, "version" = "version" + 1, "updated_at" = clock_timestamp()
-        WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "message_scope_state" = 'REVOKING'`,
-      [options.appId, claim.consultationId],
+        WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "message_scope_state" = $3`,
+      [options.appId, claim.consultationId, expectedScopeState],
     );
     if (updated.rowCount !== 1) throw new ScopeOperationFailure("DB_WRITEBACK_UNKNOWN", "close writeback is unknown");
     await decrementPresence(client, options.appId, row.assignedAdminId);
@@ -1088,8 +1110,31 @@ async function completeCloseRecovery(options: ConsultationRouteOptions, claim: S
       [options.appId, claim.id, scopeLeaseHash(claim.leaseToken)],
     );
     if (settled.rowCount !== 1) throw new ScopeOperationFailure("STALE_OPERATION", "close lease changed before completion", true);
-    await recordAudit(client, { actorType: "system", actorId: claim.ownerAccountId, action: "im.scope.close.recovered", objectType: "im_consultation_scope_operation", objectId: claim.id, outcome: "SUCCESS", requestId: `im_scope_${claim.id}` });
+    await recordAudit(client, {
+      actorType: "system",
+      actorId: claim.ownerAccountId,
+      action: expectedScopeState === "FAILED" ? "im.scope.close.reconciled" : "im.scope.close.recovered",
+      objectType: "im_consultation_scope_operation",
+      objectId: claim.id,
+      outcome: "SUCCESS",
+      requestId: `im_scope_${claim.id}`,
+      ...(expectedScopeState === "FAILED" ? { details: { providerAbsenceConfirmed: true } } : {}),
+    });
   });
+}
+
+async function readSupportTeamExistenceWithLease(
+  options: ConsultationRouteOptions,
+  lease: ScopeLease,
+  claim: ScopeOperationClaim,
+): Promise<YunxinSupportTeamExistenceLookup> {
+  if (!claim.providerTeamId) throw new ScopeOperationFailure("REMOTE_MISMATCH", "close operation has no provider team", true);
+  return lease.mutate(`team:${claim.providerTeamId}`, () => options.provider!.readSupportTeamExistence({
+    appId: options.appId,
+    consultationId: claim.consultationId,
+    ownerAccountId: claim.ownerAccountId,
+    teamId: claim.providerTeamId!,
+  }));
 }
 
 async function reconcileClose(options: ConsultationRouteOptions, claim: ScopeOperationClaim, lease: ScopeLease): Promise<void> {
@@ -1098,23 +1143,167 @@ async function reconcileClose(options: ConsultationRouteOptions, claim: ScopeOpe
   if (owner !== claim.ownerAccountId || !claim.providerTeamId) throw new ScopeOperationFailure("REMOTE_MISMATCH", "close identity is inconsistent", true);
   const team = await readTeamWithLease(options, lease, claim.providerTeamId);
   if (!team) {
+    const existence = await readSupportTeamExistenceWithLease(options, lease, claim);
+    if (existence.status !== "ABSENT") {
+      throw new ScopeOperationFailure(
+        existence.status === "FOUND" ? "PROVIDER_UNKNOWN" : "REMOTE_MISMATCH",
+        "support team absence could not be confirmed",
+        true,
+      );
+    }
     await completeCloseRecovery(options, claim, claim.providerTeamId);
     return;
   }
   if (team.ownerAccountId !== owner) throw new ScopeOperationFailure("REMOTE_MISMATCH", "close team owner changed", true);
   const afterDismiss = await lease.mutate(`team:${claim.providerTeamId}`, async () => {
     await options.provider!.dismissSupportTeam(claim.providerTeamId!, owner);
-    return options.provider!.getSupportTeam(claim.providerTeamId!);
+    return options.provider!.readSupportTeamExistence({
+      appId: options.appId,
+      consultationId: claim.consultationId,
+      ownerAccountId: owner,
+      teamId: claim.providerTeamId!,
+    });
   });
-  if (afterDismiss) throw new ScopeOperationFailure("PROVIDER_UNKNOWN", "support team still exists after dismiss");
+  if (afterDismiss.status !== "ABSENT") {
+    throw new ScopeOperationFailure(
+      afterDismiss.status === "FOUND" ? "PROVIDER_UNKNOWN" : "REMOTE_MISMATCH",
+      "support team still exists or has the wrong identity after dismiss",
+      true,
+    );
+  }
   await completeCloseRecovery(options, claim, claim.providerTeamId);
 }
 
-async function executeScopeOperation(options: ConsultationRouteOptions, claim: ScopeOperationClaim): Promise<"SUCCEEDED" | "RETRYING" | "NEEDS_REVIEW"> {
+async function reconcileCloseAfterKnownAbsence(options: ConsultationRouteOptions, claim: ScopeOperationClaim, lease: ScopeLease): Promise<void> {
+  if (claim.operationType !== "CLOSE" || !claim.providerTeamId) {
+    throw new ScopeOperationFailure("STALE_OPERATION", "close reconciliation operation is invalid", true);
+  }
+  const owner = supportManagerAccount(options).accountId;
+  if (owner !== claim.ownerAccountId) throw new ScopeOperationFailure("REMOTE_MISMATCH", "close reconciliation owner changed", true);
+  const existence = await readSupportTeamExistenceWithLease(options, lease, claim);
+  if (existence.status === "AMBIGUOUS") {
+    throw new ScopeOperationFailure("REMOTE_MISMATCH", "close reconciliation team identity is ambiguous", true);
+  }
+  if (existence.status === "FOUND") {
+    throw new ScopeOperationFailure("PROVIDER_UNKNOWN", "support team still exists after close reconciliation", true);
+  }
+  await completeCloseRecovery(options, claim, claim.providerTeamId, "FAILED");
+}
+
+function activeLease(value: Date | string | null): boolean {
+  if (value === null) return false;
+  const timestamp = value instanceof Date ? value.getTime() : Date.parse(value);
+  return !Number.isFinite(timestamp) || timestamp > Date.now();
+}
+
+async function claimCloseReconciliation(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+  requestId: string,
+): Promise<ScopeOperationClaim | "SUCCEEDED" | null> {
+  if (!options.provider) throw unavailable("IM message scope provider is not configured");
+  return withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    await assertAdminContextInTransaction(client, context);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportTransfer)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    const row = await readConsultation(client, options.appId, consultationId, true);
+    if (row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
+    requireSupportAccess(access, row.kind);
+    const latest = (await client.query<{ id: string }>(
+      `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
+         WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
+      [options.appId, consultationId],
+    )).rows[0];
+    if (!latest) return null;
+    const detail = await readScopeOperation(client, options.appId, latest.id, true);
+    if (detail.operationType !== "CLOSE") return null;
+    if (detail.state === "SUCCEEDED") return "SUCCEEDED";
+    if (detail.state !== "NEEDS_REVIEW") return null;
+    if (row.state !== "ACTIVE") throw new ScopeOperationFailure("STALE_OPERATION", "close reconciliation consultation is no longer active", true);
+    if (detail.leaseTokenHash !== null || activeLease(detail.leaseUntil)) {
+      throw unavailable("IM close reconciliation lease is still active");
+    }
+    const closeReadEligibleFailure =
+      (detail.lastFailureClass === "REQUIRES_MANUAL_REVIEW" && detail.lastFailureDetail === "yunxin:get-support-team")
+      || (detail.lastFailureClass === "PROVIDER_UNKNOWN" && detail.lastFailureDetail === "yunxin:dismiss-support-team");
+    if (numberValue(detail.attemptCount) !== 1 || !closeReadEligibleFailure) {
+      throw unavailable("IM close reconciliation is not eligible for the single read");
+    }
+    if (
+      !detail.providerTeamId
+      || row.messageScopeId !== detail.providerTeamId
+      || row.userAccountId !== detail.userAccountId
+      || row.messageScopeState !== "FAILED"
+      || numberValue(row.messageScopeVersion) !== numberValue(detail.scopeVersion) + 1
+    ) {
+      throw new ScopeOperationFailure("STALE_OPERATION", "close reconciliation binding or version changed", true);
+    }
+    if (supportManagerAccount(options).accountId !== detail.ownerAccountId) {
+      throw new ScopeOperationFailure("REMOTE_MISMATCH", "close reconciliation manager changed", true);
+    }
+    const leaseToken = randomBytes(32).toString("base64url");
+    const requeued = await client.query<{ id: string }>(
+      `UPDATE "zzsh_iam"."im_consultation_scope_operation"
+          SET "state" = 'PENDING', "next_retry_at" = clock_timestamp(), "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "id" = $2 AND "operation_type" = 'CLOSE'
+          AND "state" = 'NEEDS_REVIEW' AND "attempt_count" = 1
+          AND "scope_version" = $3 AND "provider_team_id" = $4
+          AND "lease_token_hash" IS NULL
+          AND ("lease_until" IS NULL OR "lease_until" <= clock_timestamp())
+        RETURNING "id"`,
+      [options.appId, detail.id, detail.scopeVersion, detail.providerTeamId],
+    );
+    if (requeued.rowCount !== 1) throw new ScopeOperationFailure("STALE_OPERATION", "close reconciliation state changed", true);
+    const claimed = await client.query<{ id: string }>(
+      `UPDATE "zzsh_iam"."im_consultation_scope_operation"
+          SET "state" = 'RUNNING', "attempt_count" = "attempt_count" + 1,
+              "lease_until" = clock_timestamp() + ($3::bigint * interval '1 millisecond'),
+              "lease_token_hash" = $4, "last_failure_class" = NULL,
+              "last_failure_detail" = NULL, "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "id" = $2 AND "operation_type" = 'CLOSE'
+          AND "state" = 'PENDING' AND "attempt_count" = 1
+          AND "scope_version" = $5 AND "provider_team_id" = $6
+          AND "lease_token_hash" IS NULL
+          AND ("lease_until" IS NULL OR "lease_until" <= clock_timestamp())
+        RETURNING "id"`,
+      [options.appId, detail.id, SCOPE_LEASE_MS, scopeLeaseHash(leaseToken), detail.scopeVersion, detail.providerTeamId],
+    );
+    if (claimed.rowCount !== 1) throw new ScopeOperationFailure("STALE_OPERATION", "close reconciliation lease changed", true);
+    const claimRow = await readScopeOperation(client, options.appId, detail.id, true);
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "im.scope.close.reconciliation.started",
+      objectType: "im_consultation_scope_operation",
+      objectId: detail.id,
+      outcome: "SUCCESS",
+      requestId,
+      details: {
+        providerTeamId: detail.providerTeamId,
+        priorAttemptCount: 1,
+        expectedScopeVersion: numberValue(row.messageScopeVersion),
+        readLimit: 1,
+      },
+    });
+    return { ...claimRow, leaseToken, attemptCount: numberValue(claimRow.attemptCount) };
+  });
+}
+
+type ScopeOperationExecutionMode = "NORMAL" | "CLOSE_ABSENCE";
+
+async function executeScopeOperation(
+  options: ConsultationRouteOptions,
+  claim: ScopeOperationClaim,
+  mode: ScopeOperationExecutionMode = "NORMAL",
+): Promise<"SUCCEEDED" | "RETRYING" | "NEEDS_REVIEW"> {
   const lease = createScopeLease(options, claim);
   try {
     if (claim.operationType === "CREATE") await reconcileCreate(options, claim, lease);
     else if (claim.operationType === "TRANSFER") await reconcileTransfer(options, claim, lease);
+    else if (mode === "CLOSE_ABSENCE") await reconcileCloseAfterKnownAbsence(options, claim, lease);
     else await reconcileClose(options, claim, lease);
     await lease.stop();
     return "SUCCEEDED";
@@ -1381,7 +1570,7 @@ function presenceView(row: PresenceRow): SupportPresence {
 export async function updateOwnPresence(
   options: ConsultationRouteOptions,
   context: AdminContext,
-  input: { availability: SupportAvailability; connectionState: SupportConnectionState },
+  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number },
   requestId: string,
 ): Promise<SupportPresence> {
   return withTransaction(options.pool, async (client) => {
@@ -1391,18 +1580,49 @@ export async function updateOwnPresence(
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportPresence)) {
       throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     }
-    await client.query(
-      `INSERT INTO "zzsh_iam"."im_support_presence"
-        ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at")
-       VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END)
-       ON CONFLICT ("app_id", "admin_user_id") DO UPDATE SET
-         "availability" = EXCLUDED."availability",
-         "connection_state" = EXCLUDED."connection_state",
-         "last_connected_at" = EXCLUDED."last_connected_at",
-         "version" = "zzsh_iam"."im_support_presence"."version" + 1,
-         "updated_at" = clock_timestamp()`,
-      [options.appId, context.userId, input.availability, input.connectionState],
-    );
+    const current = (await client.query<PresenceRow>(
+      `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"
+         FROM "zzsh_iam"."im_support_presence"
+        WHERE "app_id" = $1 AND "admin_user_id" = $2`,
+      [options.appId, context.userId],
+    )).rows[0];
+    const currentVersion = current ? numberValue(current.version) : 0;
+    if (current && (input.version === undefined || input.version !== currentVersion)) {
+      throw conflict("Presence version is stale");
+    }
+    if (!current && input.version !== undefined && input.version !== 0) {
+      throw conflict("Presence version is stale");
+    }
+    await options.testPresenceBarrier?.(context);
+    let persisted: PresenceRow | undefined;
+    if (!current) {
+      const inserted = await client.query<PresenceRow>(
+        `INSERT INTO "zzsh_iam"."im_support_presence"
+          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at")
+         VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END)
+         ON CONFLICT ("app_id", "admin_user_id") DO NOTHING
+         RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
+                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"`,
+        [options.appId, context.userId, input.availability, input.connectionState],
+      );
+      persisted = inserted.rows[0];
+    } else {
+      const updated = await client.query<PresenceRow>(
+        `UPDATE "zzsh_iam"."im_support_presence"
+            SET "availability" = $3,
+                "connection_state" = $4,
+                "last_connected_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+                "version" = "version" + 1,
+                "updated_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "version" = $5
+          RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
+                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"`,
+        [options.appId, context.userId, input.availability, input.connectionState, currentVersion],
+      );
+      persisted = updated.rows[0];
+    }
+    if (!persisted) throw conflict("Presence version is stale");
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,
@@ -1412,16 +1632,9 @@ export async function updateOwnPresence(
       objectId: context.userId,
       outcome: "SUCCESS",
       requestId,
-      details: input,
+      details: { availability: input.availability, connectionState: input.connectionState, appId: options.appId },
     });
-    const row = (await client.query<PresenceRow>(
-      `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"
-         FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
-      [options.appId, context.userId],
-    )).rows[0];
-    if (!row) throw new Error("IM presence write was not persisted");
-    return presenceView(row);
+    return presenceView(persisted);
   });
 }
 
@@ -1519,6 +1732,7 @@ async function beginClose(options: ConsultationRouteOptions, context: AdminConte
     if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId, true);
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
+    requireSupportAccess(access, row.kind);
     const latestOperation = (await client.query<{ state: MessageScopeOperationState }>(
       `SELECT "state" FROM "zzsh_iam"."im_consultation_scope_operation"
         WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
@@ -1600,6 +1814,13 @@ export async function retryMessageScopeOperation(
   consultationId: string,
   requestId: string,
 ): Promise<{ consultation: ConsultationView }> {
+  const closeReconciliationClaim = await claimCloseReconciliation(options, context, consultationId, requestId);
+  if (closeReconciliationClaim === "SUCCEEDED") return readAdminConsultationView(options, context, consultationId);
+  if (closeReconciliationClaim) {
+    const result = await executeScopeOperation(options, closeReconciliationClaim, "CLOSE_ABSENCE");
+    if (result !== "SUCCEEDED") throw unavailable("IM close remains blocked until the remote team state is confirmed");
+    return readAdminConsultationView(options, context, consultationId);
+  }
   const operationId = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);

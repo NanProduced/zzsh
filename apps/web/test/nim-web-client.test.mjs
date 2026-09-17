@@ -209,6 +209,7 @@ test("destroys an SDK instance after login failure", async () => {
 test("routes authorized P2P messages through the SDK and removes the receive listener", async () => {
   const messageListeners = new Map();
   const sent = [];
+  const authorizations = [];
   const history = [{ messageClientId: "history-1", conversationId: "customer-4|1|agent-1", senderId: "agent-1", receiverId: "customer-4", createTime: 1, messageType: 0, text: "历史消息" }];
   const messageService = {
     on(eventName, listener) { messageListeners.set(eventName, listener); },
@@ -221,7 +222,11 @@ test("routes authorized P2P messages through the SDK and removes the receive lis
     messageCreator: { createTextMessage: (text) => ({ text, messageType: 0 }) },
     conversationUtil: { p2pConversationId: (peer) => `customer-4|1|${peer}`, teamConversationId: (teamId) => `customer-4|2|${teamId}` },
   });
-  const factory = createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk);
+  const factory = createNimWebClientFactory({
+    appKey: "test-app-key",
+    token: "test-token",
+    messageAuthorization: async (input) => { authorizations.push(input); },
+  }, async () => sdk);
   const handle = await factory(testContext("customer-4").context);
   assert.equal(handle.client.conversationIdForPeer("agent-1"), "customer-4|1|agent-1");
   assert.equal(handle.client.conversationIdForTeam("9001"), "customer-4|2|9001");
@@ -234,9 +239,65 @@ test("routes authorized P2P messages through the SDK and removes the receive lis
   const reply = await handle.client.sendText("customer-4|1|agent-1", "收到");
   assert.equal(reply.text, "收到");
   assert.deepEqual(sent, [{ message: { text: "收到", messageType: 0 }, conversationId: "customer-4|1|agent-1" }]);
+  assert.deepEqual(authorizations, [
+    { conversationId: "customer-4|1|agent-1", operation: "read" },
+    { conversationId: "customer-4|1|agent-1", operation: "send" },
+  ]);
   unsubscribe();
   await handle.dispose();
   assert.equal(messageListeners.size, 0);
+});
+
+test("does not call the SDK when the server message authorization is rejected", async () => {
+  let historyCalls = 0;
+  let sendCalls = 0;
+  const messageService = {
+    on() {},
+    off() {},
+    async getMessageList() { historyCalls += 1; return []; },
+    async sendMessage() { sendCalls += 1; return { message: {} }; },
+  };
+  const { sdk } = fakeSdk({
+    messageService,
+    messageCreator: { createTextMessage: (text) => ({ text }) },
+  });
+  const factory = createNimWebClientFactory({
+    appKey: "test-app-key",
+    token: "test-token",
+    messageAuthorization: async ({ operation }) => {
+      const error = new Error(`denied:${operation}`);
+      error.status = 403;
+      throw error;
+    },
+  }, async () => sdk);
+  const handle = await factory(testContext("customer-denied").context);
+  await assert.rejects(handle.client.getMessageHistory("customer-denied|2|9001"), (error) => error?.status === 403);
+  await assert.rejects(handle.client.sendText("customer-denied|2|9001", "hello"), (error) => error?.status === 403);
+  assert.equal(historyCalls, 0);
+  assert.equal(sendCalls, 0);
+  await handle.dispose();
+});
+
+test("disposed NIM client blocks protected SDK calls and keeps counters at zero", async () => {
+  let historyCalls = 0;
+  let sendCalls = 0;
+  const messageService = {
+    on() {},
+    off() {},
+    async getMessageList() { historyCalls += 1; return []; },
+    async sendMessage() { sendCalls += 1; return { message: {} }; },
+  };
+  const { sdk, loginService } = fakeSdk({
+    messageService,
+    messageCreator: { createTextMessage: (text) => ({ text }) },
+  });
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("disposed-client").context);
+  await handle.dispose();
+  await assert.rejects(handle.client.getMessageHistory("disposed-client|2|9001"), /disposed/);
+  await assert.rejects(handle.client.sendText("disposed-client|2|9001", "hello"), /disposed/);
+  assert.equal(historyCalls, 0);
+  assert.equal(sendCalls, 0);
+  assert.equal(loginService.logoutCalls, 1);
 });
 
 test("rejects incomplete credentials before loading the SDK", () => {
@@ -279,6 +340,22 @@ test("local fake transport never accepts a caller-selected sender identity", asy
     assert.equal(message.senderId, "server-authorized-account");
     assert.equal(request.url, "/api/im/messages");
     assert.deepEqual(JSON.parse(request.init.body), { conversationId: "customer-local|2|9001", text: "hello" });
+    await handle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local fake transport preserves protected HTTP status for the caller", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, { status: 403 });
+  try {
+    const state = testContext("customer-status");
+    const handle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-status" })(state.context);
+    await assert.rejects(
+      handle.client.sendText("customer-status|2|9002", "hello"),
+      (error) => error?.status === 403,
+    );
     await handle.dispose();
   } finally {
     globalThis.fetch = originalFetch;

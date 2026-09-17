@@ -20,6 +20,8 @@ import { WorkspaceApp } from "./workspace/app-shell";
 import { clearTabs } from "./workspace/tab-model";
 
 import {
+  ADMIN_AUTH_FAILURE_EVENT,
+  AdminApiError,
   adminRequest,
   friendlyError,
   readIdleMinutes,
@@ -250,6 +252,16 @@ function App() {
     };
   }, [refreshSession, view]);
 
+  useEffect(() => {
+    const onAuthFailure = (event: Event) => {
+      const status = (event as CustomEvent<{ status?: unknown }>).detail?.status;
+      if (!snapshot?.authenticated || (status !== 401 && status !== 423)) return;
+      void refreshSession(status === 401).catch(() => undefined);
+    };
+    window.addEventListener(ADMIN_AUTH_FAILURE_EVENT, onAuthFailure);
+    return () => window.removeEventListener(ADMIN_AUTH_FAILURE_EVENT, onAuthFailure);
+  }, [refreshSession, snapshot?.authenticated]);
+
   const lockSession = useCallback(async () => {
     if (
       !snapshot?.authenticated ||
@@ -287,8 +299,12 @@ function App() {
     const sessionId = sessionIdRef.current;
     try {
       await adminRequest("/auth/sign-out", {});
-    } catch {
-      // ignore
+    } catch (failure) {
+      const next = await refreshSession(false).catch(() => null);
+      if (!next || next.authenticated) {
+        setError(failure instanceof AdminApiError && failure.code === "NETWORK_ERROR" ? "网络暂时不可用，当前会话未退出。" : friendlyError(failure));
+        return;
+      }
     }
     signal("logout", sessionId);
     clearTabs();
@@ -301,7 +317,7 @@ function App() {
     setTotpURI(undefined);
     setBackupCodes([]);
     setRecoveryNotice(undefined);
-  }, []);
+  }, [refreshSession]);
 
   const login = async (idValue: string, pwValue: string) => {
     setError(undefined);

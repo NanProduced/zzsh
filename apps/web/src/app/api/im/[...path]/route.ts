@@ -5,7 +5,7 @@ import { isHttpOrigin, userCookies } from "../../../../lib/user-proxy.ts";
 const local = process.env.NODE_ENV !== "production";
 const apiOrigin = process.env.ZZSH_API_ORIGIN ?? (local ? "http://127.0.0.1:3102" : "");
 const webOrigin = process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
-const pathPattern = /^(?:\/token|\/consultations|\/messages)$/;
+const pathPattern = /^(?:\/token|\/consultations|\/messages|\/message-access)$/;
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function errorResponse(status: number, code: string, requestId: string): Response {
@@ -28,6 +28,7 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   const method = request.method.toUpperCase();
   if (path === "/token" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   if ((path === "/consultations" || path === "/messages") && method !== "GET" && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
+  if (path === "/message-access" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId });
   headers.set("accept", "application/json");
   const cookie = userCookies(request.headers.get("cookie"));
@@ -45,13 +46,15 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
     }
     headers.set("content-type", "application/json");
   }
-  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : "/api/v1/im/user/consultations";
+  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : "/api/v1/im/user/consultations";
   const upstreamUrl = new URL(upstreamPath, apiOrigin);
-  if (method === "GET" && (path === "/consultations" || path === "/messages")) {
+  if (method === "GET" && (path === "/consultations" || path === "/messages" || path === "/message-access")) {
     const limit = new URL(request.url).searchParams.get("limit");
     if (limit !== null) upstreamUrl.searchParams.set("limit", limit);
     const conversationId = new URL(request.url).searchParams.get("conversationId");
     if (conversationId !== null) upstreamUrl.searchParams.set("conversationId", conversationId);
+    const operation = new URL(request.url).searchParams.get("operation");
+    if (operation !== null) upstreamUrl.searchParams.set("operation", operation);
   }
   let upstream: Response;
   try {

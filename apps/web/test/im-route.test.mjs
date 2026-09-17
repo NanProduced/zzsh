@@ -70,3 +70,23 @@ test("user IM proxy forwards only the consultation intent body", async () => {
     globalThis.fetch = oldFetch;
   }
 });
+
+test("user IM message authorization forwards only the scoped query and cookie", async () => {
+  const oldFetch = globalThis.fetch;
+  let seen;
+  globalThis.fetch = async (url, options) => {
+    seen = { url: String(url), options };
+    return Response.json({ authorized: true });
+  };
+  try {
+    const response = await GET(new Request("http://127.0.0.1:3100/api/im/message-access?conversationId=customer%7C2%7C9001&operation=send", {
+      headers: { origin: "http://127.0.0.1:3100", cookie: "zzsh_user.session_token=user; zzsh_admin.session_token=admin" },
+    }), context(["message-access"]));
+    assert.equal(response.status, 200);
+    assert.equal(seen.url, "http://127.0.0.1:3102/api/v1/im/user/message-access?conversationId=customer%7C2%7C9001&operation=send");
+    assert.equal(seen.options.headers.get("cookie"), "zzsh_user.session_token=user");
+    assert.equal(seen.options.headers.get("authorization"), null);
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});

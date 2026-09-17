@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ArrowDown, Check, CircleAlert, Clock3, FileUp, Headphones, Paperclip, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
@@ -86,7 +86,15 @@ function messageFromNim(message: NimMessageLike, accountId: string): SupportMess
 }
 
 function responseError(response: Response, fallback: string): Error {
-  return new Error(response.status === 503 ? "客服服务正在准备中，请稍后重试。" : fallback);
+  const error = new Error(response.status === 503 ? "客服服务正在准备中，请稍后重试。" : fallback) as Error & { status: number };
+  error.status = response.status;
+  return error;
+}
+
+function httpStatus(error: unknown): number | undefined {
+  return error && typeof error === "object" && "status" in error && typeof (error as { status?: unknown }).status === "number"
+    ? (error as { status: number }).status
+    : undefined;
 }
 
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
@@ -160,6 +168,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const session = useUserSession();
   const auth = useAuthOverlay();
   const [selectedType, setSelectedType] = useState<SupportType>("SERVICE");
+  const [isStartingNew, setIsStartingNew] = useState(false);
   const [consultations, setConsultations] = useState<Consultation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(() => preview ? PREVIEW_CONVERSATIONS[0].id : null);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>(() => preview ? PREVIEW_MESSAGES : {});
@@ -186,6 +195,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     : session.status === "authenticated" && session.userId
       ? `${session.userId}:${session.identityVersion}`
       : `session:${session.status}`;
+  const revalidateAfterUnauthorized = useCallback((cause: unknown): boolean => {
+    if (httpStatus(cause) !== 401) return false;
+    void session.confirm();
+    return true;
+  }, [session.confirm]);
   if (identityRef.current !== currentIdentity) {
     identityRef.current = currentIdentity;
     identityGenerationRef.current += 1;
@@ -216,8 +230,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       if (generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
       if (consultation.state === "WAITING" || consultation.conversationId) clearSupportIntent(intent);
       setConsultations((current) => [consultation, ...current.filter((item) => item.id !== consultation.id)]);
+      setIsStartingNew(false);
       setActiveId(consultation.id);
     }).catch((cause) => {
+      revalidateAfterUnauthorized(cause);
       if (generation === identityGenerationRef.current && identityRef.current === currentIdentity) {
         intentInFlightRef.current = null;
         setError(cause instanceof Error ? cause.message : "暂时无法恢复这次咨询。原咨询意图仍会保留，可稍后重试。");
@@ -225,7 +241,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     }).finally(() => {
       if (generation === identityGenerationRef.current && identityRef.current === currentIdentity) setBusy(false);
     });
-  }, [currentIdentity, imReady, preview, session.status, session.userId, subjectRef]);
+  }, [currentIdentity, imReady, preview, revalidateAfterUnauthorized, session.status, session.userId, subjectRef]);
 
   useEffect(() => {
     if (preview) {
@@ -234,6 +250,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       setDrafts({});
       setAttachments({});
       setActiveId(PREVIEW_CONVERSATIONS[0].id);
+      setIsStartingNew(false);
       setConnection("idle");
       setImReady(true);
       readyIdentityRef.current = "preview";
@@ -244,6 +261,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     setDrafts({});
     setAttachments({});
     setActiveId(null);
+    setIsStartingNew(false);
     setConnection("idle");
     setError(undefined);
     setBusy(false);
@@ -263,6 +281,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
         accountId: token.accountId,
+        messageAuthorization: async ({ conversationId, operation }) => {
+          const response = await fetch(`/api/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}`, { credentials: "same-origin", cache: "no-store" });
+          const value = await readJson<{ authorized?: unknown }>(response, "当前咨询授权已变化，请刷新后重试。");
+          if (value.authorized !== true) throw new Error("当前咨询未获授权");
+        },
         tokenProvider: async (accountId) => {
           if (accountId !== token.accountId) throw new Error("云信账号不匹配");
           return (await fetchImToken()).token;
@@ -284,6 +307,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
         void fetchConsultations().then((list) => {
           if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) setConsultations(list);
         }).catch((cause) => {
+          revalidateAfterUnauthorized(cause);
           if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) setError(cause instanceof Error ? cause.message : "暂时无法读取咨询记录。");
         });
         client.onConnectionStateChange((state) => { if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) { setConnection(state); if (state === "AUTH_FAILED" || state === "KICKED") setError("云信连接需要重新授权，请刷新后重试。"); } });
@@ -297,6 +321,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
           }
         });
       } catch (cause) {
+        revalidateAfterUnauthorized(cause);
         if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) { setConnection("error"); setImReady(false); setError(cause instanceof Error ? cause.message : "暂时无法打开客服窗口。"); }
       }
     };
@@ -311,7 +336,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
       void lifecycle.close();
     };
-  }, [currentIdentity, preview, session.status, session.userId]);
+  }, [currentIdentity, preview, revalidateAfterUnauthorized, session.status, session.userId]);
 
   useEffect(() => {
     if (preview || !imReady || readyIdentityRef.current !== currentIdentity || session.status !== "authenticated" || !session.userId) return;
@@ -320,16 +345,16 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     const timer = window.setInterval(() => {
       void fetchConsultations().then((list) => {
         if (generation === identityGenerationRef.current && identityRef.current === identity) setConsultations(list);
-      }).catch(() => undefined);
+      }).catch((cause) => { revalidateAfterUnauthorized(cause); });
     }, 5_000);
     return () => window.clearInterval(timer);
-  }, [currentIdentity, imReady, preview, session.status, session.userId]);
+  }, [currentIdentity, imReady, preview, revalidateAfterUnauthorized, session.status, session.userId]);
 
   useEffect(() => {
-    if (preview || activeId || consultations.length === 0) return;
+    if (preview || isStartingNew || activeId || consultations.length === 0) return;
     setActiveId(consultations[0]!.id);
     setSelectedType(consultations[0]!.type);
-  }, [activeId, consultations, preview]);
+  }, [activeId, consultations, isStartingNew, preview]);
 
   const activeConversation = preview
     ? null
@@ -350,9 +375,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== conversation.id) return;
       const rows = history.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
       setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
-    }).catch(() => undefined);
+    }).catch((cause) => { revalidateAfterUnauthorized(cause); });
     return () => { cancelled = true; };
-  }, [activeConversation?.conversationId, activeConversation?.id, connection, currentIdentity, preview]);
+  }, [activeConversation?.conversationId, activeConversation?.id, connection, currentIdentity, preview, revalidateAfterUnauthorized]);
 
   const startConsultation = async () => {
     if (session.status !== "authenticated") {
@@ -374,8 +399,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       const pendingIntent = readSupportIntent();
       if (pendingIntent) clearSupportIntent(pendingIntent);
       setConsultations((current) => [consultation, ...current.filter((item) => item.id !== consultation.id)]);
+      setIsStartingNew(false);
       setActiveId(consultation.id);
     } catch (cause) {
+      revalidateAfterUnauthorized(cause);
       if (generation === identityGenerationRef.current && identityRef.current === currentIdentity) setError(cause instanceof Error ? cause.message : "暂时无法创建咨询。");
     } finally {
       if (generation === identityGenerationRef.current && identityRef.current === currentIdentity) setBusy(false);
@@ -407,6 +434,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
         setAttachmentFor(conversationKey, null);
       }
     } catch (cause) {
+      revalidateAfterUnauthorized(cause);
       if (generation === identityGenerationRef.current && identityRef.current === identity) setError(cause instanceof Error ? cause.message : "消息发送失败，请重试。");
     } finally {
       if (generation === identityGenerationRef.current && identityRef.current === identity) setBusy(false);
@@ -414,6 +442,13 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   };
 
   const chooseQuickReply = (value: string) => { setDraft(value); requestAnimationFrame(() => draftRef.current?.focus()); };
+  const beginNewConsultation = () => {
+    if (!activeConversation || activeConversation.state !== "CLOSED") return;
+    setSelectedType(activeConversation.type);
+    setIsStartingNew(true);
+    setActiveId(null);
+    setError(undefined);
+  };
 
   if (!preview && session.status !== "authenticated") {
     const sessionError = session.status === "error";
@@ -425,8 +460,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     </section>;
   }
 
-  const currentTitle = preview ? previewConversation?.title ?? "客服演示" : activeConversation ? `${typeLabel(activeConversation.type)}${activeConversation.assignedAdmin ? ` · ${activeConversation.assignedAdmin.name}` : ""}` : "开始新的咨询";
-  const currentSubtitle = preview ? "商品咨询会话" : activeConversation ? activeConversation.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可发送" : activeConversation.state === "WAITING" ? "已记录，等待合格客服接待" : activeConversation.state === "ACTIVE" ? "平台已授权当前接待关系" : "咨询已结束" : "选择类型后创建独立咨询";
+  const currentTitle = preview ? previewConversation?.title ?? "客服演示" : isStartingNew ? "发起新的咨询" : activeConversation ? `${typeLabel(activeConversation.type)}${activeConversation.assignedAdmin ? ` · ${activeConversation.assignedAdmin.name}` : ""}` : "开始新的咨询";
+  const currentSubtitle = preview ? "商品咨询会话" : isStartingNew ? "选择类型后创建独立咨询" : activeConversation ? activeConversation.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可发送" : activeConversation.state === "WAITING" ? "已记录，等待合格客服接待" : activeConversation.state === "ACTIVE" ? "平台已授权当前接待关系" : "咨询已结束" : "选择类型后创建独立咨询";
 
   return <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
     <div className="support-workspace-heading">
@@ -437,12 +472,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     <div className="support-workspace-grid">
       <nav className="support-conversation-list" aria-label="咨询会话">
         <div className="support-list-heading"><div><strong>咨询记录</strong><span>{preview ? "演示" : "平台记录"}</span></div><span className="support-list-count">{preview ? PREVIEW_CONVERSATIONS.length : consultations.length}</span></div>
-        {preview ? PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => setActiveId(conversation.id)} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>) : consultations.length > 0 ? consultations.map((consultation) => <button key={consultation.id} type="button" className="support-conversation-item" data-active={consultation.id === activeId} onClick={() => { setActiveId(consultation.id); setSelectedType(consultation.type); }} aria-current={consultation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{typeLabel(consultation.type)}</strong><span>{consultation.messageScopeState === "FAILED" ? "云信会话待人工核验" : consultation.assignedAdmin?.name ? `客服 ${consultation.assignedAdmin.name}` : consultation.state === "WAITING" ? "等待客服接待" : "咨询已结束"}</span></span><span className="support-conversation-meta"><time>{consultation.messageScopeState === "FAILED" ? "待核验" : consultation.state === "WAITING" ? "等待中" : consultation.state === "ACTIVE" ? "进行中" : "已结束"}</time></span></button>) : <div className="support-list-empty"><Headphones size={22} /><strong>还没有咨询记录</strong><span>选择类型后开始一次站内咨询，登录账号会自动保留记录。</span></div>}
+        {preview ? PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(conversation.id); }} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>) : consultations.length > 0 ? consultations.map((consultation) => <button key={consultation.id} type="button" className="support-conversation-item" data-active={consultation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(consultation.id); setSelectedType(consultation.type); }} aria-current={consultation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{typeLabel(consultation.type)}</strong><span>{consultation.messageScopeState === "FAILED" ? "云信会话待人工核验" : consultation.assignedAdmin?.name ? `客服 ${consultation.assignedAdmin.name}` : consultation.state === "WAITING" ? "等待客服接待" : "咨询已结束"}</span></span><span className="support-conversation-meta"><time>{consultation.messageScopeState === "FAILED" ? "待核验" : consultation.state === "WAITING" ? "等待中" : consultation.state === "ACTIVE" ? "进行中" : "已结束"}</time></span></button>) : <div className="support-list-empty"><Headphones size={22} /><strong>还没有咨询记录</strong><span>选择类型后开始一次站内咨询，登录账号会自动保留记录。</span></div>}
       </nav>
       <main className="support-conversation-panel">
-        <header className="support-conversation-heading"><div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3><span>{currentSubtitle}</span></div></div><button type="button" className="support-icon-button" aria-label="更多会话操作" disabled><span aria-hidden="true">•••</span></button></header>
+        <header className="support-conversation-heading"><div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3><span>{currentSubtitle}</span></div></div>{!preview && activeConversation?.state === "CLOSED" ? <button type="button" className="button secondary" data-action="start-new-consultation" onClick={beginNewConsultation}>再次咨询</button> : <button type="button" className="support-icon-button" aria-label="更多会话操作" disabled><span aria-hidden="true">•••</span></button>}</header>
         <div className="support-message-area">
-           {!preview && !activeConversation ? <div className="support-start-panel"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找当前在线且有接待容量的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? activeMessages.map((message) => <MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"}><MessageRow message={message} /></MessageScrollerPrimitive.Item>) : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>等待第一条消息</strong><span>{preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state={isStartingNew ? "new" : "initial"}><Headphones size={27} /><strong>{isStartingNew ? "发起新的咨询" : "从这里开始你的咨询"}</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" data-action={isStartingNew ? "submit-new-consultation" : "start-consultation"} onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找当前在线且有接待容量的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? activeMessages.map((message) => <MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"}><MessageRow message={message} /></MessageScrollerPrimitive.Item>) : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>等待第一条消息</strong><span>{preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}

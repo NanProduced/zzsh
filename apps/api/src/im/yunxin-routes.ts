@@ -236,6 +236,36 @@ function parseMessageBody(value: unknown): { conversationId: string; text: strin
   return { conversationId: messageConversationId(body.conversationId), text };
 }
 
+function parseMessageOperation(value: string | null): "read" | "send" {
+  if (value !== "read" && value !== "send") throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message operation is invalid");
+  return value;
+}
+
+async function handleUserMessageAccess(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readUserContext(request, options.security);
+  const query = routeQuery(request);
+  parseMessageOperation(query.get("operation"));
+  await readUserMessageAccess(options.consultation, context, messageConversationId(query.get("conversationId")));
+  sendJson(response, 200, { authorized: true }, requestId);
+}
+
+async function handleAdminMessageAccess(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readAdminContext(request, options.security);
+  await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+  const query = routeQuery(request);
+  const operation = parseMessageOperation(query.get("operation"));
+  await readAdminMessageAccess(options.consultation, context, messageConversationId(query.get("conversationId")), operation === "send");
+  sendJson(response, 200, { authorized: true }, requestId);
+}
+
 async function handleUserMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const transport = options.consultation?.messageTransport;
   if (!options.consultation || !transport) {
@@ -379,6 +409,14 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       await handleUserMessages(request, response, requestId, options);
       return;
     }
+    if (path === "/user/message-access") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleUserMessageAccess(request, response, requestId, options);
+      return;
+    }
     if (path === "/admin/consultations") {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
         sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
@@ -397,6 +435,14 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleAdminMessages(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/message-access") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminMessageAccess(request, response, requestId, options);
       return;
     }
     const actionMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
