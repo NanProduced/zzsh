@@ -13,12 +13,15 @@
     "packages/*"
   ],
   "scripts": {
+    "local:auth": "node scripts/local-auth.mjs",
+    "local:admin": "node scripts/local-auth.mjs",
+    "test:local-auth": "node --test scripts/local-auth.test.mjs",
     "dev": "concurrently --kill-others --names api,web,admin \"npm run dev -w @zzsh/api\" \"npm run dev -w @zzsh/web\" \"npm run dev -w @zzsh/admin\"",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test -w @zzsh/api",
     "test:smoke": "node scripts/smoke.mjs",
-    "check:offline": "npm run typecheck && npm test && npm run test:web && npm run test:ui -w @zzsh/web && npm run test:admin && npm run build && npm run test:production -w @zzsh/web && npm run test:smoke",
+    "check:offline": "npm run test:local-auth && npm run typecheck && npm test && npm run test:web && npm run test:ui -w @zzsh/web && npm run test:admin && npm run build && npm run test:production -w @zzsh/web && npm run test:smoke",
     "test:web": "npm test -w @zzsh/web",
     "check": "npm run check:offline && npm run test:db -w @zzsh/api",
     "test:admin": "npm test -w @zzsh/admin"
