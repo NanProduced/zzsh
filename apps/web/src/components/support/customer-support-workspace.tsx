@@ -9,6 +9,12 @@ import { ImClientLifecycle } from "@/lib/im-client-lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImMessages, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
 import { clearSupportIntent, readSupportIntent, saveSupportIntent, type SupportType } from "@/lib/support-intent";
 import "./customer-support-workspace.css";
+import { OrderTeamPanel } from "@zzsh/ui/order-team-panel";
+import "@zzsh/ui/order-team.css";
+
+async function orderRequest<T>(path:string):Promise<T>{
+  const response=await fetch(path,{credentials:"same-origin",cache:"no-store"});return readJson<T>(response,"订单请求未完成");
+}
 
 type Consultation = {
   id: string;
@@ -164,7 +170,9 @@ function ConnectionState({ preview, state, error }: { preview: boolean; state: N
   </span>;
 }
 
-export function CustomerSupportWorkspace({ preview = false, embedded = false, initialType = "SERVICE", onClose }: { preview?: boolean; embedded?: boolean; initialType?: SupportType; onClose?: () => void }) {
+export function CustomerSupportWorkspace({ preview = false, embedded = false, initialType = "SERVICE", initialOrderParty, requestSerial=0, onClose }: { preview?: boolean; embedded?: boolean; initialType?: SupportType; initialOrderParty?:"renter"|"owner";requestSerial?:number;onClose?: () => void }) {
+  const [section,setSection]=useState<"consultation"|"orders">("consultation");
+  useEffect(()=>{setSection(initialOrderParty?"orders":"consultation");},[initialOrderParty,requestSerial]);
   const session = useUserSession();
   const auth = useAuthOverlay();
   const [selectedType, setSelectedType] = useState<SupportType>("SERVICE");
@@ -463,7 +471,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const currentTitle = preview ? previewConversation?.title ?? "客服演示" : isStartingNew ? "发起新的咨询" : activeConversation ? `${typeLabel(activeConversation.type)}${activeConversation.assignedAdmin ? ` · ${activeConversation.assignedAdmin.name}` : ""}` : "开始新的咨询";
   const currentSubtitle = preview ? "商品咨询会话" : isStartingNew ? "选择类型后创建独立咨询" : activeConversation ? activeConversation.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可发送" : activeConversation.state === "WAITING" ? "已记录，等待合格客服接待" : activeConversation.state === "ACTIVE" ? "平台已授权当前接待关系" : "咨询已结束" : "选择类型后创建独立咨询";
 
-  return <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
+  const consultationView = <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
     <div className="support-workspace-heading">
       <div><h2>咨询窗口</h2><p>{preview ? "用一条清晰的咨询链路承接商品问题，后续由云信恢复真实会话。" : `你好，${session.displayName ?? "用户"}。咨询记录和实际接待人由平台服务端恢复。`}</p></div>
       <div className="support-heading-actions"><ConnectionState preview={preview} state={connection} error={error} />{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}</div>
@@ -488,4 +496,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品上下文</strong><span>{preview ? "演示快照" : "服务端授权快照"}</span></div><span className="support-context-dot" aria-hidden="true" /></div>{preview ? <article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article> : <div className="support-context-empty"><Headphones size={20} /><strong>{subjectRef ? "已带入公开对象" : "暂无商品上下文"}</strong><span>{subjectRef ? `对象 ${subjectRef} 会在服务端重新校验后展示。` : "从公开商品页发起咨询后，会在这里显示经过授权的快照。"}</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>商品卡只展示服务端确认的公开快照；接入后点击商品仍需重新校验当前权限。</p></div></aside>
     </div>
   </section>;
+  return <>
+    {!preview?<nav className="order-team-toolbar" aria-label="沟通类型"><button type="button" aria-pressed={section==="consultation"} onClick={()=>setSection("consultation")}>平台咨询</button><button type="button" aria-pressed={section==="orders"} onClick={()=>setSection("orders")}>我的订单群</button>{section==="orders"&&onClose?<button type="button" onClick={onClose}>关闭订单群窗口</button>:null}</nav>:null}
+    <div hidden={section!=="consultation"}>{consultationView}</div>
+    {!preview?<OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} initialParty={initialOrderParty}
+      request={orderRequest} onAuthError={()=>{void session.confirm();}}/>:null}
+  </>;
 }

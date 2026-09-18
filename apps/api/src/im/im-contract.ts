@@ -23,7 +23,7 @@ export type ImTransportMessage = {
 
 /** Server-authorized seam for the explicit local IM substitute. */
 export type ImMessageTransport = {
-  history(input: { conversationId: string; viewerAccountId: string; limit: number }): Promise<ImTransportMessage[]>;
+  history(input: { conversationId: string; viewerAccountId: string; limit: number; before?: string }): Promise<ImTransportMessage[]>;
   sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string }): Promise<ImTransportMessage>;
 };
 

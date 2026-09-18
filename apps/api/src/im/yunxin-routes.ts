@@ -1,4 +1,6 @@
 import type { INestApplication } from "@nestjs/common";
+import { withTransaction } from "../auth/security-core";
+import { readOrderTeamAccess } from "./order-team-access";
 
 import { ADMIN_PERMISSION, requireDirectoryPermission } from "../auth/admin-directory";
 import {
@@ -266,6 +268,26 @@ async function handleAdminMessageAccess(request: NodeRequest, response: NodeResp
   sendJson(response, 200, { authorized: true }, requestId);
 }
 
+async function readMessageAccess(options:YunxinRouteOptions,actor:({realm:"user"}&Awaited<ReturnType<typeof readUserContext>>)|({realm:"admin"}&Awaited<ReturnType<typeof readAdminContext>>),conversationId:string,send=false):Promise<{viewerAccountId:string;peerAccountId:string}>{
+  const teamId=/^[^|]+\|2\|([0-9]{1,19})$/.exec(conversationId)?.[1];
+  if(teamId){
+    const access=await withTransaction(options.security.pool,async c=>{
+      const row=(await c.query(`SELECT order_id FROM zzsh_order.im_order_group WHERE app_id=$1 AND team_id=$2`,[options.appId,teamId])).rows[0];
+      if(!row)return null;
+      const result=await readOrderTeamAccess(c,actor,row.order_id,send?"send":"read");
+      if(result.canRead!==true||result.conversationId!==conversationId)throw new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
+      return {viewerAccountId:result.viewerAccountId as string,peerAccountId:teamId};
+    });
+    if(access)return access;
+  }
+  return actor.realm==="user"?readUserMessageAccess(options.consultation!,actor,conversationId):readAdminMessageAccess(options.consultation!,actor,conversationId,send);
+}
+
+function messageBefore(request:NodeRequest):string|undefined{
+  const raw=routeQuery(request).get("before");if(raw===null)return undefined;
+  if(!/^[A-Za-z0-9._:-]{1,128}$/.test(raw))throw new SecurityApiError(400,"INVALID_ARGUMENT","Invalid history cursor");return raw;
+}
+
 async function handleUserMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const transport = options.consultation?.messageTransport;
   if (!options.consultation || !transport) {
@@ -275,12 +297,12 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
   const context = await readUserContext(request, options.security);
   if (request.method?.toUpperCase() === "GET") {
     const conversationId = messageConversationId(routeQuery(request).get("conversationId"));
-    const access = await readUserMessageAccess(options.consultation, context, conversationId);
-    sendJson(response, 200, { messages: await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")) }) }, requestId);
+    const access = await readMessageAccess(options, {...context,realm:"user"}, conversationId);
+    sendJson(response, 200, { messages: await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) }) }, requestId);
     return;
   }
   const input = parseMessageBody(request.body);
-  const access = await readUserMessageAccess(options.consultation, context, input.conversationId);
+  const access = await readMessageAccess(options, {...context,realm:"user"}, input.conversationId,true);
   sendJson(response, 200, { message: await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }) }, requestId);
 }
 
@@ -294,12 +316,12 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
   await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
   if (request.method?.toUpperCase() === "GET") {
     const conversationId = messageConversationId(routeQuery(request).get("conversationId"));
-    const access = await readAdminMessageAccess(options.consultation, context, conversationId);
-    sendJson(response, 200, { messages: await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")) }) }, requestId);
+    const access = await readMessageAccess(options, {...context,realm:"admin"}, conversationId);
+    sendJson(response, 200, { messages: await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) }) }, requestId);
     return;
   }
   const input = parseMessageBody(request.body);
-  const access = await readAdminMessageAccess(options.consultation, context, input.conversationId, true);
+  const access = await readMessageAccess(options, {...context,realm:"admin"}, input.conversationId, true);
   sendJson(response, 200, { message: await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }) }, requestId);
 }
 

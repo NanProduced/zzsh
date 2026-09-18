@@ -9,6 +9,8 @@ import { mergeImMessages } from "@zzsh/im-client/message-state";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, type ImRequestKey } from "./im-support-guards";
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
+import { OrderTeamPanel } from "@zzsh/ui/order-team-panel";
+import "@zzsh/ui/order-team.css";
 
 type SupportType = "SERVICE" | "COMPLAINT";
 type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
@@ -102,6 +104,7 @@ function AdminMessage({ message }: { message: SupportMessage }) {
 }
 
 export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; preview?: boolean; onRefresh: () => Promise<SessionSnapshot> }) {
+  const [section,setSection]=useState<"consultation"|"orders">("consultation");
   const canRead = hasPermission(snapshot, "im.support.read");
   const canComplaint = hasPermission(snapshot, "im.support.complaint");
   const canAccept = hasPermission(snapshot, "im.support.accept");
@@ -502,7 +505,7 @@ export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapsh
 
   if (snapshot.session.locked) return <section className="im-support-view" aria-hidden="true" />;
   const statusText = preview ? "云信连接等待启动" : connection === "CONNECTED" ? "云信已连接" : connection === "RECONNECTING" ? "云信正在重连" : connection === "AUTH_FAILED" || connection === "error" ? "云信授权失败" : "云信连接等待启动";
-  return <section className="im-support-view" data-preview={preview} aria-label="客服工作台">
+  const consultationView = <section className="im-support-view" data-preview={preview} aria-label="客服工作台">
     <header className="im-support-header">
       <div><h1>客服工作台</h1><p>把咨询队列、用户会话和授权后的云信消息放在同一工作面，减少客服来回切换。</p></div>
       <div className="im-support-header-status"><span>{preview || connection === "idle" || connection === "error" ? <WifiOff size={14} /> : <Wifi size={14} />}{statusText}</span><small>{preview ? "本地演示 · 不读取真实会话" : canPresence ? `接待状态 · ${presence.availability === "AVAILABLE" ? "接待中" : "未接待"}` : "当前账号没有在线状态权限"}</small>{!preview && canPresence ? <button type="button" className="im-support-presence-toggle" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button> : null}</div>
@@ -533,4 +536,10 @@ export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapsh
       </aside>
     </div>
   </section>;
+  return <>
+    {!preview?<nav className="order-team-toolbar" aria-label="沟通类型"><button type="button" aria-pressed={section==="consultation"} onClick={()=>setSection("consultation")}>平台咨询</button><button type="button" aria-pressed={section==="orders"} onClick={()=>setSection("orders")}>我参与的订单群</button></nav>:null}
+    <div hidden={section!=="consultation"}>{consultationView}</div>
+    {!preview&&canRead?<OrderTeamPanel key={readClientKey} identity={readClientKey} realm="admin" client={clientRef.current} connection={connection} active={section==="orders"} sendAllowed={canAccept}
+      request={adminRequest} onAuthError={()=>{void onRefresh();}}/>:null}
+  </>;
 }

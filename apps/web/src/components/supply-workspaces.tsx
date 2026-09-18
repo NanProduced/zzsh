@@ -1298,7 +1298,7 @@ export function AccountWorkspace({ view, accountId }: { view: string; accountId?
   if (session.status === "guest") return <ServiceShell {...accountShell} title={accountViews[active]} description={description}><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在转到登录</h2></section></ServiceShell>;
   return <ServiceShell {...accountShell} title={accountViews[active]} description={description}>
     <nav className="account-tabs" aria-label="个人事务分类">{Object.entries(accountViews).map(([key, label]) => <Link key={key} href={`/account?view=${key}${key === "accounts" && accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""}`} aria-current={active === key ? "page" : undefined}>{label}</Link>)}</nav>
-    {active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : <AccountUnavailable label={accountViews[active]} />}
+    {active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <section className="account-empty"><h2>{accountViews[active]}</h2><p>查看本人订单状态，与本单买家、号主和客服沟通。</p><button type="button" className="button primary" data-support-trigger onClick={()=>window.dispatchEvent(new CustomEvent("zzsh:order-groups",{detail:{party:active==="rentals"?"renter":"owner"}}))}>打开订单群</button></section> : <AccountUnavailable label={accountViews[active]} />}
   </ServiceShell>;
 }
 
