@@ -37,6 +37,9 @@ import {
 import {
   listingSearchPattern,
   parsePublicListingSearch,
+  publicGradingOptions,
+  publicLoginMethodOptions,
+  publicSafeBoxOptions,
 } from "./listing-query";
 import {
   acceptListingRules,
@@ -129,6 +132,9 @@ export async function handlePublishingRoute(
         vitalityLevels:Object.keys(rule?.vitalityDeltaByLevel??{}).map(Number).filter(n=>Number.isSafeInteger(n)&&n>=0&&n<=2147483647).sort((a,b)=>a-b),
         bearLevels:Object.keys(rule?.bearDeltaByLevel??{}).map(Number).filter(n=>Number.isSafeInteger(n)&&n>=0&&n<=2147483647).sort((a,b)=>a-b),
         safeBoxCodes: Object.keys(rule?.baseBySafeBox ?? {}).sort(),
+        safeBoxOptions: publicSafeBoxOptions(Object.keys(rule?.baseBySafeBox ?? {}).sort()),
+        gradingOptions: publicGradingOptions(),
+        loginMethodOptions: publicLoginMethodOptions(),
         pricingOptionCodes: Object.entries(rule?.options ?? {})
           .filter(([, v]) => v.enabled)
           .map(([key]) => key)

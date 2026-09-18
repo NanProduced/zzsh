@@ -82,7 +82,7 @@ export type CatalogItem = {
   id: string;
   code: string;
   name: string;
-  unit: "HAFF_BASE" | "ROUND" | "PIECE";
+  unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
   quantityScale: number;
   required: boolean;
   enabled: boolean;

@@ -1,5 +1,6 @@
 "use client";
 import { Heart } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useFavorites } from "./favorites-context";
 
 export function FavoriteButton({ accountId, title, variant = "card" }: { accountId: string; title: string; variant?: "card" | "inline" }) {
@@ -11,14 +12,13 @@ export function FavoriteButton({ accountId, title, variant = "card" }: { account
   const needsConfirmation = identity === "authenticated" && status === "unknown";
   const className = variant === "card" ? "icon-button favorite" : "button secondary favorite-inline";
   const label = pressed ? `取消收藏${title}` : needsConfirmation ? `刷新收藏状态${title}` : `收藏${title}`;
-  return <button
+  const button = <button
     type="button"
     className={className}
     data-favorite-state={status}
     aria-pressed={pressed}
     aria-busy={busy || undefined}
     aria-label={label}
-    title={needsConfirmation ? "收藏状态待确认，点击刷新" : undefined}
     disabled={!favorites || identity === "loading" || identity === "error" || busy}
     onClick={() => {
       if (needsConfirmation) {
@@ -30,6 +30,12 @@ export function FavoriteButton({ accountId, title, variant = "card" }: { account
     <Heart size={17} fill={pressed ? "currentColor" : "none"} aria-hidden="true" />
     {variant === "inline" && <span>{busy ? "处理中…" : pressed ? "已收藏" : needsConfirmation ? "确认收藏状态" : "收藏"}</span>}
   </button>;
+  return needsConfirmation ? (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="top">收藏状态待确认，点击刷新</TooltipContent>
+    </Tooltip>
+  ) : button;
 }
 
 export function FavoriteNotice() {

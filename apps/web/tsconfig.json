@@ -34,7 +34,6 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules",
-    "dev-showcase"
+    "node_modules"
   ]
 }

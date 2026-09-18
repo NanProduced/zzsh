@@ -5,7 +5,7 @@
 | 分组 | 数据/写入 | 校验与恢复 |
 |---|---|---|
 | basics | title、description、受控attributes；safe_box_code及允许等级来自publishing-options | 错误path为title/description/attributes；未知保留null，不默认0 |
-| inventory | publishing-catalog.items的稳定itemId、基础币/颗/件整数数量文本 | inputScale=0；必填填数量或0，空值留草稿且不发送为库存行；未定价blockers阻止提交，不补价格 |
+| inventory | publishing-catalog.items的稳定itemId及HAFF_BASE/ROUND/PIECE/DAY数量文本 | inputScale=0；必填填数量或0，空值留草稿且不发送为库存行；未定价blockers阻止提交，不补价格 |
 | skins | 可见分类树、q/categoryId/rarityCode、分页多选skinId | 搜索仅筛皮肤；未选择为未申报，不自动加价 |
 | entitlements | 目录valueKind/expiryKind、声明值及已知到期时间 | 限时未知不形成承诺；报价失败定位entitlements |
 | media | 明确ACCOUNT_DISPLAY与ACCOUNT_EVIDENCE；上传意图→原始字节上传→assetId绑定 | 写入只带assetId/position；SavedDeclaration额外purpose/byteHash以及只读`reviewState`/`publicDisplayEligible`/`publiclyReadable`；editableDeclaration只裁`assetId/position`。`publicDisplayEligible`是素材公开展示资格；`publiclyReadable`是当前公开路由会放行（含账号未暂停、当前公开版本绑定）。暂停、撤权、草稿独有图或私有凭证为false。不要用版本APPROVED推断已公开 |
@@ -16,6 +16,10 @@
 错误按稳定HTTP/code处理，不匹配服务端中文：400/413保留输入并按error.details[].path定位分组；401接登录并保留任务上下文；404显示不可用；403不绕过权限；409必须读取最新状态并重新确认，不能换key自动覆盖。网络结果未知的重试复用原key/body；supply-client不自动重试。未定位到字段的错误落在form层。
 
 客户端只显示服务器金额，不据单位展示价重算，也不增加小时费、皮肤收费或收益保底。登录后的游客收藏合并使用逐项幂等收藏接口作为基础；游客存储、失效本地项提示、返回原页面和最终表单交互留在页面接入阶段，不向正式API填入假用户或商品。
+
+公开资源按稳定code及quote.lines的unit/unitQuantity解释数量：6级子弹存ROUND，按60发计价；旧数据的组数只在导入时乘60一次，展示可同时标组与发。顶级保险体验卡使用DAY、unitQuantity=1，不乘账号租期、不由数量推断激活或到期。目录回填只补展示快照缺失字段，不覆盖已有名称、单位或分类。
+
+tenantPayableTotal由服务端将当前resourceTotal与tenantDeposit精确相加；押金未配置时为null，界面显示待确认，不当免押。公开报价不是会员个性化订单最终确认金额。Haff比例仅用于展示，取该行原始数量和金额作整数精确舍入；缺行价不使用全部资源费替代。
 
 发布页不使用无身份区分的sessionStorage草稿：首次保存先创建账号/草稿，刷新通过accountId读取服务端资料；身份切换或迟到响应会丢弃旧上下文。SavedDeclaration提供逐素材reviewState/publicDisplayEligible/publiclyReadable；前端分别展示审核结果、展示资格和当前公开状态，保存只裁剪assetId/position。
 

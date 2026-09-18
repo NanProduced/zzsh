@@ -28,9 +28,6 @@
 .market-pagination { display:flex; gap:10px; margin-top:16px; }
 .market-pagination .button { min-height:40px; }
 .market-cursor-note { margin-top:10px; font-size:12px; color:var(--color-text-muted); }
-.account-conditions { margin-top:6px !important; font-size:12px; line-height:1.7; color:var(--color-text-muted); overflow-wrap:anywhere; }
-.account-card .account-content h3 a { color:inherit; text-decoration:none; }
-.account-card .account-content h3 a:hover { text-decoration:underline; }
 .favorite-notice { display:flex; align-items:center; gap:10px; margin-top:10px; padding:8px 12px; border:1px solid var(--color-status-error); border-radius:5px; font-size:12px; color:var(--color-text-secondary); }
 .favorite-notice span { min-width:0; }
 .favorite-notice button { min-height:32px; }
@@ -47,9 +44,18 @@
 .account-unavailable-body .favorite-inline { margin-top:6px; }
 
 .listing-detail { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:26px; align-items:start; }
-.detail-gallery { display:grid; gap:10px; grid-template-columns:repeat(2,minmax(0,1fr)); }
-.detail-gallery img { width:100%; height:100%; min-height:160px; max-height:320px; object-fit:cover; border:1px solid var(--color-border-default); border-radius:6px; background:var(--color-bg-card); }
-.detail-gallery > :first-child { grid-column:1/-1; }
+.detail-gallery { display:grid; gap:10px; }
+.detail-gallery-main { position:relative; display:flex; min-width:0; min-height:220px; aspect-ratio:16/9; align-items:center; justify-content:center; overflow:hidden; border:1px solid var(--color-border-default); border-radius:6px; background:var(--color-bg-card); }
+.detail-gallery-main img { width:100%; height:100%; object-fit:contain; border:0; border-radius:0; background:transparent; }
+.detail-gallery-main .detail-image-fallback { width:100%; height:100%; min-height:0; border:0; border-radius:0; }
+.detail-gallery-count { position:absolute; right:10px; bottom:10px; padding:4px 8px; border-radius:999px; background:rgb(15 23 42 / 78%); color:#fff; font-size:11px; line-height:1.4; }
+.detail-gallery-thumbs { display:grid; grid-template-columns:repeat(auto-fill,minmax(76px,1fr)); gap:8px; }
+.detail-gallery-thumb { position:relative; min-width:0; aspect-ratio:4/3; padding:0; overflow:hidden; border:1px solid var(--color-border-default); border-radius:6px; background:var(--color-bg-card); cursor:pointer; }
+.detail-gallery-thumb img { width:100%; height:100%; object-fit:cover; border:0; border-radius:0; background:transparent; }
+.detail-gallery-thumb .detail-image-fallback { width:100%; height:100%; min-height:0; border:0; border-radius:0; font-size:10px; }
+.detail-gallery-thumb[aria-pressed="true"] { border-color:var(--color-delta-accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--color-delta-accent) 30%, transparent); }
+.detail-gallery-thumb:focus-visible { outline:2px solid var(--color-delta-accent); outline-offset:2px; }
+.detail-gallery-thumb-index { position:absolute; left:5px; bottom:5px; min-width:18px; padding:2px 4px; border-radius:999px; background:rgb(15 23 42 / 78%); color:#fff; font-size:10px; line-height:1.2; text-align:center; }
 .detail-image-fallback { display:flex; min-height:160px; align-items:center; justify-content:center; gap:8px; border:1px dashed var(--color-border-default); border-radius:6px; color:var(--color-text-secondary); font-size:12px; background:var(--color-bg-surface); }
 .detail-sections { display:grid; gap:22px; }
 .detail-sections h2 { font-size:16px; margin-bottom:10px; }
@@ -57,6 +63,7 @@
 .detail-facts > div { display:flex; justify-content:space-between; gap:14px; padding-bottom:8px; border-bottom:1px solid var(--color-border-subtle); font-size:13px; }
 .detail-facts dt { color:var(--color-text-secondary); flex-shrink:0; }
 .detail-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.detail-fact-note { display:block; margin-top:3px; color:var(--color-text-muted); font-size:11px; line-height:1.5; font-weight:400; }
 .detail-price { font-size:17px; font-weight:700; color:var(--color-accent-brand); }
 .detail-hint { font-size:12px; color:var(--color-text-muted); line-height:1.8; }
 .detail-skins { display:flex; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
@@ -71,6 +78,5 @@
 @media (max-width:599px) {
   .market-filters fieldset { flex-direction:column; }
   .filter-field { min-width:0; }
-  .detail-gallery { grid-template-columns:minmax(0,1fr); }
-  .detail-gallery > :first-child { grid-column:auto; }
+  .detail-gallery-main { min-height:180px; }
 }

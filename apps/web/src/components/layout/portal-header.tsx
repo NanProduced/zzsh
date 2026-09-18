@@ -5,6 +5,7 @@ import { motion, useMotionValueEvent, useScroll } from "motion/react";
 import { Search, UserRound, X } from "lucide-react";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { MobileNav } from "./mobile-nav";
@@ -26,10 +27,15 @@ function SessionEntry() {
   }
   return (
     <span className="site-session">
-      <Link className="site-login" href="/account" title={session.displayName ?? "个人中心"}>
-        <UserRound size={18} aria-hidden="true" />
-        <span className="site-session-name">{session.displayName ?? "个人中心"}</span>
-      </Link>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Link className="site-login" href="/account">
+            <UserRound size={18} aria-hidden="true" />
+            <span className="site-session-name">{session.displayName ?? "个人中心"}</span>
+          </Link>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{session.displayName ?? "个人中心"}</TooltipContent>
+      </Tooltip>
       <button type="button" className="site-signout" onClick={() => { void session.signOut().catch(() => undefined); }}>
         退出
       </button>

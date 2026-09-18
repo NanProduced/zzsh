@@ -7,6 +7,7 @@ import {
   parseNonNegativeDecimal,
   parseSignedDecimal,
   subtractDecimal,
+  yuanAmountObject,
   type Decimal,
 } from "./decimal";
 import { ensureOnlyFields, invalid } from "./supply-util";
@@ -296,6 +297,7 @@ export type DeltaProjectedQuote = {
   expiryDisclosures: ExpiryDisclosure[];
   unitAmountsInformational: boolean;
   tenantDeposit?: QuoteAmount | null;
+  tenantPayableTotal: QuoteAmount | null;
   ownerTotal?: QuoteAmount;
   publisherBailRequirement?: QuoteAmount | null;
   contentHash?: string;
@@ -303,6 +305,13 @@ export type DeltaProjectedQuote = {
   pricingInputs?: InternalQuote["pricingInputs"];
   roundingPolicy?: string;
 };
+
+function tenantPayableTotal(resourceTotal: QuoteAmount, tenantDeposit: QuoteAmount | null | undefined): QuoteAmount | null {
+  if (tenantDeposit == null) return null;
+  const resourceCents = parseNonNegativeDecimal(resourceTotal.amount, 2, "resource total").value;
+  const depositCents = parseNonNegativeDecimal(tenantDeposit.amount, 2, "tenant deposit").value;
+  return yuanAmountObject(resourceCents + depositCents);
+}
 
 export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, viewer: DeltaQuoteViewer): DeltaProjectedQuote {
   const lines: DeltaProjectedLine[] = quote.lines.map((line) => {
@@ -328,6 +337,7 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
     lines,
     resourceTotal: quote.resourceTotal,
     tenantDeposit: quote.tenantDeposit,
+    tenantPayableTotal: tenantPayableTotal(quote.resourceTotal, quote.tenantDeposit),
     termSeconds: quote.termSeconds,
     expiryDisclosures: quote.expiryDisclosures,
     unitAmountsInformational: quote.unitAmountsInformational,

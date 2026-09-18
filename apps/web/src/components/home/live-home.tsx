@@ -28,7 +28,7 @@ export function LiveHome() {
         setSupply({ state: "ready", accounts: [] });
         return;
       }
-      const page = await supplyApi.market(new URLSearchParams({ gameId: delta.id, limit: "3" }));
+      const page = await supplyApi.market(new URLSearchParams({ gameId: delta.id, limit: "8" }));
       setSupply({ state: "ready", accounts: page.items.map(toListingCard) });
     } catch {
       setSupply({ state: "error", accounts: [] });

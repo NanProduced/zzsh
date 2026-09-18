@@ -39,7 +39,7 @@ export type PricingLineInput = {
   unitQuantity?: string;
   buyerUnitAmount?: string;
   ownerUnitAmount?: string;
-  unit?: "HAFF_BASE" | "ROUND" | "PIECE";
+  unit?: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
 };
 
 export type EntitlementInput = {
@@ -76,7 +76,7 @@ export type QuoteUnitAmount = { currency: "CNY"; unit: "yuan"; amount: string; s
 export type QuoteLine = {
   itemId: string;
   quantity: string;
-  unit: "HAFF_BASE" | "ROUND" | "PIECE";
+  unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
   unitQuantity: string;
   pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
   buyerUnitAmount: QuoteUnitAmount;

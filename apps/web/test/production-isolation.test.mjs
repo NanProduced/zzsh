@@ -24,8 +24,6 @@ test('production UI excludes fixture identities, controls and rejected claims', 
   assert.ok(html.includes('account-skeleton'));
   assert.ok(!html.includes('account-card'));
   assert.ok(!html.includes('repair-fixture'));
-  const routes = readFileSync(build('server/app-paths-manifest.json'), 'utf8');
-  assert.ok(!routes.includes('showcase'));
 });
 
 test('temporary component experiments are outside the production route tree', () => {

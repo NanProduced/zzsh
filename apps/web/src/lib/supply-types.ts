@@ -20,6 +20,7 @@ export type PublicQuote = {
   }>;
   resourceTotal: Money;
   tenantDeposit: Money | null;
+  tenantPayableTotal: Money | null;
   termSeconds: string;
   expiryDisclosures: Array<{
     entitlementId: string;
@@ -39,9 +40,27 @@ export type OwnerQuote = PublicQuote & {
     }
   >;
 };
+export type PublicCodeLabel = {
+  code: string;
+  displayName: string | null;
+  mappingStatus: "CONFIRMED" | "UNCONFIRMED";
+  issueCode: string | null;
+};
+export type PublicAttributeDisplay = {
+  safeBox: PublicCodeLabel | null;
+  grading: PublicCodeLabel | null;
+  loginMethod: PublicCodeLabel | null;
+  serviceWindow: {
+    startMinute: number;
+    endMinute: number;
+    displayName: string;
+  } | null;
+};
 export type PublicListing = {
+  displayNo?: string | null;
   safeBox?: { code: string; displayName: string | null } | null;
   termOption?: { code: string; displayName: string | null; dailyConsumption: { quantity: string; unit: "HAFF_BASE" } | null } | null;
+  attributeDisplay?: PublicAttributeDisplay;
   id: string;
   versionId: string;
   title: string;
@@ -49,8 +68,8 @@ export type PublicListing = {
   game?: { id: string; code: string; name: string } | null;
   attributes: Record<string, string | number | boolean | null>;
   presentation: {
-    items: Array<{ id: string; name: string; unit: string }>;
-    skins: Array<{ id: string; name: string }>;
+    items: Array<{ id: string; code?: string; name: string; unit: string }>;
+    skins: Array<{ id: string; name: string; categoryCode?: string; categoryName?: string }>;
     entitlements: Array<{ id: string; name: string }>;
   };
   quote: PublicQuote;
@@ -111,7 +130,7 @@ export type PublicCatalog = {
     id: string;
     code: string;
     name: string;
-    unit: "HAFF_BASE" | "ROUND" | "PIECE";
+    unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
     quantityScale: number;
     required: boolean;
     sortOrder: number;
@@ -154,7 +173,7 @@ export type PublishingCatalog = {
     id: string;
     code: string;
     name: string;
-    unit: "HAFF_BASE" | "ROUND" | "PIECE";
+    unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
     quantityScale: number;
     required: boolean;
     sortOrder: number;
@@ -194,6 +213,9 @@ export type PublishingOptions = {
     durationRounding: "CEIL_DAY";
   }>;
   safeBoxCodes: string[];
+  safeBoxOptions?: PublicCodeLabel[];
+  gradingOptions?: PublicCodeLabel[];
+  loginMethodOptions?: PublicCodeLabel[];
   vitalityLevels: number[];
   bearLevels: number[];
   pricingOptionCodes: string[];

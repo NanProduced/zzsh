@@ -278,36 +278,19 @@
 .functional-shell .account-card {
   min-height: 100%;
   border-color: var(--color-border-default);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--color-bg-card);
-  box-shadow: 0 8px 22px color-mix(in srgb, #000 13%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 9%, transparent);
   transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
 }
 
 .functional-shell .account-card:hover {
   border-color: color-mix(in srgb, var(--color-delta-accent) 52%, var(--color-border-default));
-  box-shadow: 0 12px 28px color-mix(in srgb, #000 20%, transparent);
+  box-shadow: 0 12px 26px color-mix(in srgb, #000 14%, transparent);
   transform: translateY(-2px);
 }
 
-.functional-shell .account-image { height: 142px; background: var(--color-bg-elevated); }
-.functional-shell .favorite { top: 8px; right: 8px; border: 1px solid var(--color-border-default); border-radius: 10px; }
-.functional-shell .account-content { padding: 16px; }
-.functional-shell .account-content h3 { font-size: 16px; line-height: 1.45; }
-.functional-shell .account-resources { margin-top: 7px !important; line-height: 1.7; }
-.functional-shell .account-conditions { line-height: 1.65; }
-.functional-shell .account-fees { margin-top: 16px; }
-.functional-shell .account-fees dd { font-size: 18px; color: var(--color-accent-brand); }
-.functional-shell .account-terms { margin-block: 12px 16px; }
-
-.functional-shell .account-detail {
-  min-height: 42px;
-  border-color: var(--color-delta-border);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--color-delta-accent) 12%, var(--color-bg-card));
-}
-
-.functional-shell .account-detail:hover { border-color: var(--color-delta-accent); background: color-mix(in srgb, var(--color-delta-accent) 20%, var(--color-bg-card)); }
+.functional-shell .account-card:focus-within { border-color: var(--color-delta-accent); box-shadow: 0 14px 30px color-mix(in srgb, #000 18%, transparent); }
 
 .functional-shell .account-empty {
   min-height: 220px;
@@ -325,13 +308,14 @@
 
 .functional-shell .detail-gallery { gap: 12px; }
 
-.functional-shell .detail-gallery img,
-.functional-shell .detail-image-fallback {
+.functional-shell .detail-gallery-main {
   min-height: 190px;
   border-radius: var(--functional-radius);
 }
 
-.functional-shell .detail-gallery img { box-shadow: var(--shadow-sm); }
+.functional-shell .detail-gallery-main .detail-image-fallback { min-height: 0; border-radius: 0; }
+.functional-shell .detail-gallery-main { box-shadow: var(--shadow-sm); }
+.functional-shell .detail-gallery-thumb { border-radius: var(--functional-radius-sm); }
 
 .functional-shell .detail-sections { gap: 12px; }
 
@@ -621,12 +605,9 @@
   .functional-shell .market-filters fieldset { gap: 12px; }
   .functional-shell .filter-field { flex: 0 1 auto; }
   .functional-shell .account-grid { gap: 12px; }
-  .functional-shell .account-image { height: 128px; }
-  .functional-shell .account-content { padding: 15px; }
   .functional-shell .detail-sections > section,
   .functional-shell .detail-actions { padding: 16px; }
-  .functional-shell .detail-gallery img,
-  .functional-shell .detail-image-fallback { min-height: 150px; }
+  .functional-shell .detail-gallery-main { min-height: 150px; }
   .functional-shell .gunsmith-firearms,
   .functional-shell .gunsmith-detail { padding: 14px; }
   .functional-shell .publish-form { padding: 14px; }
@@ -885,13 +866,23 @@
 }
 
 .functional-shell.functional-shell--browse .account-grid--list .account-card {
-  display: grid;
+  display: block;
   grid-template-columns: 220px minmax(0, 1fr);
   min-height: 210px;
   border-width: 0 0 1px;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-card-surface {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 210px;
+}
+.functional-shell.functional-shell--browse .account-grid--list .account-card-link {
+  display: flex;
+  min-height: 0;
 }
 
 .functional-shell.functional-shell--browse .account-grid--list .account-card:hover {
@@ -901,28 +892,23 @@
   transform: none;
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-image {
-  height: auto;
-  min-height: 178px;
+.functional-shell.functional-shell--browse .account-grid--list .account-card-thumb {
+  grid-column: 1;
+  grid-row: 1;
+  width: auto;
+  aspect-ratio: 2.18 / 1;
   margin: 16px 18px 16px 0;
   border-radius: 8px;
-  overflow: hidden;
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-content {
+.functional-shell.functional-shell--browse .account-grid--list .account-body-area {
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   padding: 18px 0;
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-fees {
-  justify-content: flex-start;
-  gap: 30px;
-}
-
-.functional-shell.functional-shell--browse .account-grid--list .account-detail {
-  width: fit-content;
-  padding-inline: 18px;
-}
+.functional-shell.functional-shell--browse .account-grid--list .account-card-fav-wrap { top: 16px; right: 16px; }
 
 .functional-shell.functional-shell--browse .account-grid--list .account-skeleton {
   display: grid;
@@ -999,18 +985,16 @@
   .functional-shell.functional-shell--browse .market-results-toolbar { gap: 10px; padding-top: 16px; }
   .functional-shell.functional-shell--browse .market-view-toggle button { padding-inline: 9px; }
   .functional-shell.functional-shell--browse .account-grid--list .account-card {
-    grid-template-columns: 104px minmax(0, 1fr);
     min-height: 0;
   }
-  .functional-shell.functional-shell--browse .account-grid--list .account-image {
-    min-height: 112px;
+  .functional-shell.functional-shell--browse .account-grid--list .account-card-surface { grid-template-columns: 104px minmax(0, 1fr); min-height: 0; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-card-thumb {
+    min-height: 0;
+    aspect-ratio: 2.18 / 1;
     margin: 14px 12px 14px 0;
   }
-  .functional-shell.functional-shell--browse .account-grid--list .account-content { padding-block: 14px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-content h3 { font-size: 14px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-fees { gap: 14px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-fees dd { font-size: 15px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-detail { min-height: 38px; padding-inline: 12px; font-size: 12px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-body-area { padding-block: 14px; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-card-fav-wrap { top: 10px; right: 10px; }
   .functional-shell.functional-shell--browse .account-grid--list .account-skeleton { grid-template-columns: 104px minmax(0, 1fr); min-height: 150px; }
   .functional-shell.functional-shell--browse .account-grid--list .account-skeleton div { min-height: 112px; margin: 14px 12px 14px 0; }
 }

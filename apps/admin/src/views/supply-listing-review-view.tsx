@@ -38,6 +38,22 @@ type Declaration = {
     position: number;
   }>;
 };
+type CodeDisplay = {
+  code: string;
+  displayName: string | null;
+  mappingStatus: "CONFIRMED" | "UNCONFIRMED";
+  issueCode: string | null;
+};
+type AttributeDisplay = {
+  safeBox: CodeDisplay | null;
+  grading: CodeDisplay | null;
+  loginMethod: CodeDisplay | null;
+  serviceWindow: {
+    startMinute: number;
+    endMinute: number;
+    displayName: string;
+  } | null;
+};
 type Detail = {
   account: {
     id: string;
@@ -54,6 +70,9 @@ type Detail = {
     reviewState: string;
     releaseId: string | null;
     contentHash: string | null;
+    safeBox?: { code: string; displayName: string | null } | null;
+    termOption?: { code: string; displayName: string | null; dailyConsumption: { quantity: string; unit: "HAFF_BASE" } | null } | null;
+    attributeDisplay?: AttributeDisplay;
     declaration: Declaration;
     presentation: {
       items?: Array<{
@@ -64,6 +83,8 @@ type Detail = {
       skins?: Array<{
         id: string;
         name: string;
+        categoryCode?: string;
+        categoryName?: string;
       }>;
       entitlements?: Array<{
         id: string;
@@ -250,6 +271,34 @@ export function SupplyListingReviewView({
     version?.presentation.items?.find((i) => i.id === id)?.name ??
     detail?.previousPresentation?.items?.find((i) => i.id === id)?.name ??
     "历史物品";
+  const codeText = (label: CodeDisplay | null | undefined, raw: unknown) => {
+    if (label?.displayName) return label.displayName;
+    const code = label?.code ?? (raw === null || raw === undefined || raw === "" ? "" : String(raw));
+    return code ? `未确认（代码 ${code}）` : "未申报";
+  };
+  const quantityText = (value: string | null | undefined) => {
+    if (!value || !/^\d+$/.test(value)) return "未确认";
+    const amount = BigInt(value);
+    const millions = amount / 1_000_000n;
+    const remainder = amount % 1_000_000n;
+    return remainder === 0n ? `${millions} M 哈夫币` : `${millions}.${remainder.toString().padStart(6, "0").replace(/0+$/, "")} M 哈夫币`;
+  };
+  const attributeFacts = version
+    ? [
+        ["安全箱配置", codeText(version.attributeDisplay?.safeBox, version.declaration.attributes.safe_box_code)],
+        ["体力等级", version.declaration.attributes.vit_level === null || version.declaration.attributes.vit_level === undefined ? "未申报" : `${version.declaration.attributes.vit_level} 级`],
+        ["负重等级", version.declaration.attributes.bear_level === null || version.declaration.attributes.bear_level === undefined ? "未申报" : `${version.declaration.attributes.bear_level} 级`],
+        ["潜水等级", version.declaration.attributes.dive_level === null || version.declaration.attributes.dive_level === undefined ? "未申报" : `${version.declaration.attributes.dive_level} 级`],
+        ["角色等级", version.declaration.attributes.character_level === null || version.declaration.attributes.character_level === undefined ? "未申报" : `${version.declaration.attributes.character_level} 级`],
+        ["段位", codeText(version.attributeDisplay?.grading, version.declaration.attributes.grading_code)],
+        ["登录方式", codeText(version.attributeDisplay?.loginMethod, version.declaration.attributes.login_method_code)],
+        ["绝密 KD", String(version.declaration.attributes.secret_kd ?? "未申报")],
+        ["地区", [version.declaration.attributes.region_province, version.declaration.attributes.region_city].filter((value) => value !== null && value !== undefined && value !== "").join(" · ") || "未申报"],
+        ["上号时间", version.attributeDisplay?.serviceWindow?.displayName ?? "未确认"],
+        ["租期规则", version.termOption?.displayName ?? (version.termOption ? `未确认（代码 ${version.termOption.code}）` : "未申报")],
+        ["每日消耗", quantityText(version.termOption?.dailyConsumption?.quantity)],
+      ]
+    : [];
   return (
     <div className="space-y-5">
       <header className="flex flex-wrap items-end justify-between gap-4">
@@ -417,18 +466,11 @@ export function SupplyListingReviewView({
                 </p>
               )}
               <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-                {[
-                  ["safe_box_code", "安全箱配置"],
-                  ["vit_level", "体力等级"],
-                  ["bear_level", "负重等级"],
-                  ["dive_level", "潜水等级"],
-                  ["character_level", "角色等级"],
-                  ["login_method_code", "登录方式"],
-                ].map(([key, label]) => (
-                  <div key={key}>
+                {attributeFacts.map(([label, value]) => (
+                  <div key={label}>
                     <dt className="text-muted-foreground">{label}</dt>
                     <dd className="mt-1">
-                      {String(version.declaration.attributes[key!] ?? "未申报")}
+                      {value}
                     </dd>
                   </div>
                 ))}
@@ -464,12 +506,16 @@ export function SupplyListingReviewView({
                               {version.presentation.items?.find(
                                 (i) => i.id === id,
                               )?.unit === "HAFF_BASE"
-                                ? "基础币"
+                                ? "哈夫币"
                                 : version.presentation.items?.find(
                                       (i) => i.id === id,
-                                    )?.unit === "ROUND"
-                                  ? "颗"
-                                  : "件"}
+                                )?.unit === "ROUND"
+                                  ? "发"
+                                  : version.presentation.items?.find(
+                                        (i) => i.id === id,
+                                      )?.unit === "DAY"
+                                    ? "天"
+                                    : "件"}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-muted-foreground tabular-nums">
@@ -498,7 +544,7 @@ export function SupplyListingReviewView({
               </div>
               <p className="text-sm text-muted-foreground">
                 皮肤：
-                {version.presentation.skins?.map((s) => s.name).join("、") ||
+                {version.presentation.skins?.map((s) => s.categoryName ? `${s.categoryName} · ${s.name}` : s.name).join("、") ||
                   "未申报"}
               </p>
               {version.declaration.entitlements.length ? (
@@ -536,6 +582,9 @@ export function SupplyListingReviewView({
                   尚无有效报价，不能提交审核。
                 </p>
               )}
+              <p className="text-sm text-muted-foreground">
+                旧来源租金、物品费、押金与比例只作受限证据，不等同于当前服务端报价；未映射的复杂权益不按 0 处理。
+              </p>
             </section>
             <section className="space-y-3">
               <h3 className="text-sm font-semibold">申报图片</h3>

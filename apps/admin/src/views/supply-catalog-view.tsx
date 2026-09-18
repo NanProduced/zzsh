@@ -101,7 +101,7 @@ function toPayload(kind: CatalogKind, values: Record<string, string>, editing: b
 function validateEditor(kind: CatalogKind, values: Record<string, string>, editing: boolean): string | undefined {
   if (!editing && !CODE_PATTERN.test(values.code ?? "")) return "稳定 code 需以小写字母开头，仅含小写字母、数字、下划线、冒号或连字符。";
   if (!values.name || values.name.trim().length === 0) return "名称不能为空。";
-  if (kind === "items" && !["HAFF_BASE", "ROUND", "PIECE"].includes(values.unit ?? "")) return "单位无效。";
+  if (kind === "items" && !["HAFF_BASE", "ROUND", "PIECE", "DAY"].includes(values.unit ?? "")) return "单位无效。";
   if (kind === "skins" && !values.categoryId) return "皮肤必须选择所属分类。";
   return undefined;
 }
@@ -419,6 +419,7 @@ export function SupplyCatalogView({
                       <option value="HAFF_BASE">HAFF_BASE（哈夫币基础单位）</option>
                       <option value="ROUND">ROUND（发）</option>
                       <option value="PIECE">PIECE（件）</option>
+                      <option value="DAY">DAY（天）</option>
                     </select>
                   </Field>
                 ) : null}

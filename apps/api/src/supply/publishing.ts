@@ -19,6 +19,7 @@ import {
 } from "./pricing";
 import {
   projectOwnerMediaBinding,
+  projectPublicAttributeDisplay,
   projectPublicListingGame,
   projectPublicOffer,
   type BoundTermOption,
@@ -541,7 +542,7 @@ export async function quoteListing(
   if (!term) throw invalid("请选择当前租期选项", "termOptionCode");
   const rows = (
     await client.query(
-      `SELECT l.item_id AS "itemId", l.quantity::text,i.unit,i.name,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
+      `SELECT l.item_id AS "itemId", i.code, l.quantity::text,i.unit,i.name,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
       [v.id, release.price_version_id],
     )
   ).rows;
@@ -565,7 +566,7 @@ export async function quoteListing(
     throw invalid("权益值与目录类型不符", "entitlements");
   const skins = (
     await client.query(
-      `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id WHERE version_id=$1`,
+      `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.category_id AS category_id,c.code AS category_code,c.name AS category_name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE version_id=$1`,
       [v.id],
     )
   ).rows;
@@ -641,13 +642,111 @@ export async function quoteListing(
       computeContentHash(payload),
       release.id,
       {
-        items: rows.map((r) => ({ id: r.itemId, name: r.name, unit: r.unit })),
-        skins: skins.map((s) => ({ id: s.id, name: s.name })),
+        items: rows.map((r) => ({ id: r.itemId, code: r.code, name: r.name, unit: r.unit })),
+        skins: skins.map((s) => ({
+          id: s.id,
+          name: s.name,
+          categoryCode: s.category_code,
+          categoryName: s.category_name,
+        })),
         entitlements: ents.map((e) => ({ id: e.entitlementId, name: e.name })),
       },
     ],
   );
   await bumpAccount(client, a);
+}
+export async function readPresentation(
+  client: PoolClient,
+  v: ListingVersion,
+): Promise<Record<string, unknown>> {
+  const rawItems = Array.isArray(v.presentation.items)
+    ? v.presentation.items
+    : [];
+  const itemRefs = rawItems.filter(
+    (item): item is Record<string, unknown> =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as { id?: unknown }).id === "string",
+  );
+  const needsItems = itemRefs.some(
+    (item) =>
+      typeof item.code !== "string" ||
+      typeof item.name !== "string" ||
+      typeof item.unit !== "string",
+  );
+  const rawSkins = Array.isArray(v.presentation.skins)
+    ? v.presentation.skins
+    : [];
+  const skins = rawSkins.filter(
+    (skin): skin is { id: string; name: string; categoryCode?: string; categoryName?: string } =>
+      typeof skin === "object" &&
+      skin !== null &&
+      typeof (skin as { id?: unknown }).id === "string" &&
+      typeof (skin as { name?: unknown }).name === "string",
+  );
+  const needsSkins = skins.some(
+    (skin) =>
+      typeof skin.categoryCode !== "string" ||
+      typeof skin.categoryName !== "string",
+  );
+  if (!needsItems && !needsSkins)
+    return v.presentation;
+  const itemRows = needsItems
+    ? (
+      await client.query<{ id: string; code: string; name: string; unit: string }>(
+        `SELECT id,code,name,unit FROM zzsh_supply.billable_item WHERE id=ANY($1::text[])`,
+        [itemRefs.map((item) => item.id as string)],
+      )
+    ).rows
+    : [];
+  const rows = needsSkins
+    ? (
+    await client.query<{ id: string; categoryCode: string; categoryName: string }>(
+      `SELECT s.id,c.code AS "categoryCode",c.name AS "categoryName" FROM zzsh_supply.skin s JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE s.id=ANY($1::text[])`,
+      [skins.map((skin) => skin.id)],
+    )
+  ).rows
+    : [];
+  const itemById = new Map(itemRows.map((row) => [row.id, row]));
+  const categories = new Map(rows.map((row) => [row.id, row]));
+  return {
+    ...v.presentation,
+    items: rawItems.map((item) => {
+      if (
+        typeof item !== "object" ||
+        item === null ||
+        typeof (item as { id?: unknown }).id !== "string"
+      )
+        return item;
+      const current = item as Record<string, unknown>;
+      const catalog = itemById.get((current as { id: string }).id);
+      return catalog
+        ? {
+            ...current,
+            ...(typeof current.code === "string" ? {} : { code: catalog.code }),
+            ...(typeof current.name === "string" ? {} : { name: catalog.name }),
+            ...(typeof current.unit === "string" ? {} : { unit: catalog.unit }),
+          }
+        : item;
+    }),
+    skins: rawSkins.map((skin) => {
+      if (
+        typeof skin !== "object" ||
+        skin === null ||
+        typeof (skin as { id?: unknown }).id !== "string"
+      )
+        return skin;
+      const current = skin as Record<string, unknown>;
+      const category = categories.get((current as { id: string }).id);
+      return category
+        ? {
+            ...current,
+            ...(typeof current.categoryCode === "string" ? {} : { categoryCode: category.categoryCode }),
+            ...(typeof current.categoryName === "string" ? {} : { categoryName: category.categoryName }),
+          }
+        : skin;
+    }),
+  };
 }
 function requireVersionToken(
   v: ListingVersion,
@@ -990,6 +1089,8 @@ export async function listingDetail(
       termOptionCode: v.term_option_code,
       boundTerm: await readBoundTermOption(client, v),
     });
+    const attributeDisplay = projectPublicAttributeDisplay(attrs);
+    const presentation = await readPresentation(client, v);
     const publicAttrs = Object.fromEntries(
       [
         "vit_level",
@@ -1001,6 +1102,9 @@ export async function listingDetail(
         "region_province",
         "region_city",
         "safe_box_code",
+        "secret_kd",
+        "service_window_start_minute",
+        "service_window_end_minute",
       ].map((k) => [k, attrs[k] ?? null]),
     );
     const game = (
@@ -1011,6 +1115,7 @@ export async function listingDetail(
     ).rows[0];
     return {
       id: a.id,
+      displayNo: a.display_no,
       versionId: v.id,
       title: v.title,
       description: v.description,
@@ -1018,7 +1123,8 @@ export async function listingDetail(
       attributes: publicAttrs,
       safeBox: offer.safeBox,
       termOption: offer.termOption,
-      presentation: v.presentation,
+      attributeDisplay,
+      presentation,
       quote,
       media: v
         .payload!.declaration.mediaBindings.filter(
@@ -1058,6 +1164,12 @@ export async function listingDetail(
         )
       ).rows[0]
     : null;
+  const ownerOffer = projectPublicOffer({
+    attributes: v.attributes,
+    termOptionCode: v.term_option_code,
+    boundTerm: await readBoundTermOption(client, v),
+  });
+  const presentation = await readPresentation(client, v);
   return {
     ownerName,
     agreement,
@@ -1071,8 +1183,11 @@ export async function listingDetail(
       revision: v.revision,
       releaseId: v.rule_release_id,
       contentHash: v.content_hash,
+      safeBox: ownerOffer.safeBox,
+      termOption: ownerOffer.termOption,
+      attributeDisplay: projectPublicAttributeDisplay(v.attributes),
       declaration: await readOwnerDeclaration(client, v, publicRoute),
-      presentation: v.presentation,
+      presentation,
       quote,
     },
     available: !blockers.length,

@@ -30,6 +30,22 @@ export function projectPublicListingGame(
 }
 
 export type PublicSafeBox = { code: string; displayName: string | null };
+export type PublicCodeLabel = {
+  code: string;
+  displayName: string | null;
+  mappingStatus: "CONFIRMED" | "UNCONFIRMED";
+  issueCode: string | null;
+};
+export type PublicAttributeDisplay = {
+  safeBox: PublicCodeLabel | null;
+  grading: PublicCodeLabel | null;
+  loginMethod: PublicCodeLabel | null;
+  serviceWindow: {
+    startMinute: number;
+    endMinute: number;
+    displayName: string;
+  } | null;
+};
 export type PublicTermOption = {
   code: string;
   displayName: string | null;
@@ -40,6 +56,113 @@ export type BoundTermOption = {
   name: string;
   dailyConsumption: string;
 };
+
+const SAFE_BOX_DISPLAY_NAMES: Record<string, string> = {
+  safe_box_1x2: "基础安全箱(1*2)",
+  safe_box_2x2: "进阶安全箱(2*2)",
+  safe_box_2x3: "高级安全箱(2*3)",
+  safe_box_3x3: "顶级安全箱(3*3)",
+};
+const GRADING_DISPLAY_NAMES: Record<string, string> = {
+  "1": "无",
+  "2": "青铜",
+  "3": "白银",
+  "4": "黄金",
+  "5": "铂金",
+  "6": "钻石",
+  "7": "黑鹰",
+  "8": "巅峰",
+};
+const LOGIN_METHOD_DISPLAY_NAMES: Record<string, string> = {
+  legacy_login_qq: "QQ账密",
+  legacy_login_wechat: "微信扫码",
+  legacy_login_steam_cn: "Steam国服",
+  legacy_login_steam_global: "Steam国际服",
+};
+
+function codeOptions(
+  names: Record<string, string>,
+  codes: string[],
+  issueCode: string,
+): PublicCodeLabel[] {
+  return codes
+    .map((code) => codeLabel(code, names, issueCode))
+    .filter((option): option is PublicCodeLabel => option !== null);
+}
+
+export function publicSafeBoxOptions(codes: string[]): PublicCodeLabel[] {
+  return codeOptions(SAFE_BOX_DISPLAY_NAMES, codes, "SAFE_BOX_CODE_UNMAPPED");
+}
+
+export function publicGradingOptions(): PublicCodeLabel[] {
+  return codeOptions(
+    GRADING_DISPLAY_NAMES,
+    Object.keys(GRADING_DISPLAY_NAMES),
+    "GRADING_CODE_UNMAPPED",
+  );
+}
+
+export function publicLoginMethodOptions(): PublicCodeLabel[] {
+  return codeOptions(
+    LOGIN_METHOD_DISPLAY_NAMES,
+    Object.keys(LOGIN_METHOD_DISPLAY_NAMES),
+    "LOGIN_METHOD_CODE_UNMAPPED",
+  );
+}
+
+function attributeCode(value: unknown): string | null {
+  if (typeof value === "string") {
+    const code = value.trim();
+    return code || null;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  return null;
+}
+
+function codeLabel(
+  value: unknown,
+  names: Record<string, string>,
+  issueCode: string,
+): PublicCodeLabel | null {
+  const code = attributeCode(value);
+  if (!code) return null;
+  const displayName = names[code] ?? null;
+  return {
+    code,
+    displayName,
+    mappingStatus: displayName ? "CONFIRMED" : "UNCONFIRMED",
+    issueCode: displayName ? null : issueCode,
+  };
+}
+
+function displayMinute(value: unknown): number | null {
+  const minute = typeof value === "number" && Number.isSafeInteger(value) ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(minute) && minute >= 0 && minute <= 1_440 ? minute : null;
+}
+
+function minuteText(minute: number): string {
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+export function projectPublicAttributeDisplay(
+  attributes: Record<string, unknown>,
+): PublicAttributeDisplay {
+  const startMinute = displayMinute(attributes.service_window_start_minute);
+  const endMinute = displayMinute(attributes.service_window_end_minute);
+  return {
+    safeBox: codeLabel(attributes.safe_box_code, SAFE_BOX_DISPLAY_NAMES, "SAFE_BOX_CODE_UNMAPPED"),
+    grading: codeLabel(attributes.grading_code, GRADING_DISPLAY_NAMES, "GRADING_CODE_UNMAPPED"),
+    loginMethod: codeLabel(attributes.login_method_code, LOGIN_METHOD_DISPLAY_NAMES, "LOGIN_METHOD_CODE_UNMAPPED"),
+    serviceWindow:
+      startMinute === null || endMinute === null
+        ? null
+        : {
+            startMinute,
+            endMinute,
+            displayName: `${minuteText(startMinute)}–${minuteText(endMinute)}`,
+          },
+  };
+}
 
 export function projectPublicOffer(input: {
   attributes: Record<string, unknown>;
@@ -56,8 +179,11 @@ export function projectPublicOffer(input: {
       ? input.boundTerm
       : null;
   const quantity = bound?.dailyConsumption;
+  const display = projectPublicAttributeDisplay(input.attributes);
   return {
-    safeBox: safeBoxCode ? { code: safeBoxCode, displayName: null } : null,
+    safeBox: safeBoxCode
+      ? { code: safeBoxCode, displayName: display.safeBox?.displayName ?? null }
+      : null,
     termOption: termCode
       ? {
           code: termCode,

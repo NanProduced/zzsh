@@ -296,26 +296,382 @@ html[data-theme="light"] .game-logo-reveal img { filter: none; }
 .account-empty h3 { font-size: 15px; color: var(--color-text-primary); }
 .account-empty p { font-size: 14px; line-height: 22px; }
 .account-empty a { color: var(--color-text-primary); text-decoration: underline; font-size: 12px; }
-.account-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
-.account-card { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--color-border-default); background: var(--color-bg-card); border-radius: 4px; overflow: hidden; }
-.account-image { height: 80px; position: relative; background: var(--color-bg-elevated); }
-.account-image img { width: 100%; height: 100%; object-fit: cover; }
-.image-fallback { height: 100%; display: flex; justify-content: center; align-items: center; gap: 7px; color: var(--color-text-secondary); font-size: 11px; }
-.favorite { position: absolute; right: 3px; top: 3px; width: 44px; height: 44px; background: var(--color-bg-card); }
-.account-content { display: flex; flex-direction: column; flex: 1; padding: 12px; }
-.account-content h3 { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
-.account-resources { font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; color: var(--color-text-secondary); margin-top: 4px !important; }
-.account-resources span { color: var(--color-text-muted); }
-.account-fees { display: flex; flex-wrap: wrap; justify-content: space-between; margin-top: 12px; gap: 8px 12px; font-variant-numeric: tabular-nums; }
-.account-fees > div { max-width: 100%; }
-.account-fees dt, .account-terms dt { font-size: 12px; line-height: 1.65; color: var(--color-text-secondary); }
-.account-fees dd { font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
-.account-fees > div:first-child dd { color: var(--color-text-primary); }
-.account-terms { border-top: 1px solid var(--color-border-subtle); padding-top: 8px; margin-block: 8px 12px; display: grid; gap: 4px; }
-.account-terms > div { display: flex; gap: 8px; justify-content: space-between; font-size: 12px; line-height: 1.65; }
-.account-terms dt { flex-shrink: 0; }
-.account-terms dd { min-width: 0; overflow-wrap: anywhere; text-align: right; }
-.account-detail { margin-top: auto; min-height: 44px; padding: 8px; width: 100%; background: var(--color-delta-surface); border: 1px solid var(--color-delta-border); color: var(--color-text-primary); font-size: 13px; }
+.account-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1240px) {
+  .account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .account-grid { grid-template-columns: 1fr; }
+}
+
+/* 单张账号卡片 */
+.account-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  position: relative;
+}
+.account-card:hover, .account-card:focus-within {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  border-color: #cbd5e1;
+}
+html[data-theme="dark"] .account-card:hover {
+  border-color: #334e5e;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.account-card-surface {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 100%;
+  flex-direction: column;
+}
+.account-card-link {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  color: inherit;
+  text-decoration: none;
+}
+.account-card-link:focus-visible {
+  outline: 2px solid var(--color-accent-brand);
+  outline-offset: -3px;
+  border-radius: inherit;
+}
+
+/* 1. 顶部大图 */
+.account-card-thumb {
+  position: relative;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #0a0e14;
+}
+.account-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.28s ease;
+}
+.thumb-fallback {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #9ca3af;
+  font-size: 11px;
+  background: #f1f5f9;
+}
+html[data-theme="dark"] .thumb-fallback {
+  background: #1e293b;
+  color: #64748b;
+}
+/* 收藏圆钮 */
+.account-card-fav-wrap {
+  position: absolute;
+  z-index: 3;
+}
+.account-card-fav-wrap .favorite {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 0;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.account-card-fav-wrap .favorite svg {
+  width: 14px;
+  height: 14px;
+}
+.account-card-fav-wrap .favorite:hover {
+  transform: scale(1.08);
+  background: rgba(12, 16, 22, 0.82);
+}
+
+/* 2. 段位/等级伪标题与来源编号 */
+.account-title-row {
+  display: grid;
+  align-items: center;
+  min-width: 0;
+  margin: 0 0 5px;
+}
+.account-pseudo-title {
+  min-width: 0;
+  overflow: hidden;
+  color: #1f2937;
+  font-weight: 750;
+  letter-spacing: -0.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-theme="dark"] .account-pseudo-title { color: #f8fafc; }
+.account-source-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  min-width: 0;
+  color: #94a3b8;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.account-source-trigger,
+.account-source-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-source-trigger { display: inline-flex; cursor: help; }
+.account-source-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.account-source-copy-btn:hover {
+  color: #475569;
+}
+html[data-theme="dark"] .account-source-copy-btn:hover {
+  color: #cbd5e1;
+}
+.copy-icon {
+  color: #9ca3af;
+}
+.copy-icon--success {
+  color: #00a870;
+}
+
+/* 3. 卡片主体内容区 */
+.account-body-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.account-attr-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 0;
+  max-height: 3.1em;
+  overflow: hidden;
+  font-weight: 600;
+  color: #1e293b;
+}
+.attr-item-wrap { display: inline-flex; min-width: 0; }
+.attr-slash {
+  margin: 0 1.5px;
+  color: #94a3b8;
+  font-weight: 400;
+}
+.attr-normal {
+  color: #334155;
+}
+html[data-theme="dark"] .attr-normal {
+  color: #cbd5e1;
+}
+
+/* 资源概览：七类普通资源，数量优先，不混入物品金额 */
+.account-resource-section {
+  min-width: 0;
+  border-top: 1px solid #eef2f4;
+}
+html[data-theme="dark"] .account-resource-section { border-color: #22313a; }
+.account-resource-grid {
+  display: grid;
+  min-width: 0;
+}
+.account-resource-item,
+.account-resource-more {
+  min-width: 0;
+  padding: 5px 5px 6px;
+  border-bottom: 1px solid #eef2f4;
+}
+.account-resource-item:nth-child(3n + 2),
+.account-resource-item:nth-child(3n + 3),
+.account-resource-more { border-left: 1px solid #eef2f4; }
+html[data-theme="dark"] .account-resource-item,
+html[data-theme="dark"] .account-resource-more { border-color: #22313a; }
+.account-resource-item span,
+.account-resource-more {
+  display: block;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 9.5px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-resource-item strong {
+  display: block;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-theme="dark"] .account-resource-item strong { color: #f8fafc; }
+.account-resource-more { color: #94a3b8; font-weight: 600; }
+.account-resource-empty { color: #94a3b8; }
+
+/* 皮肤标签：用类别色区分，不再全部使用同一种薄荷色 */
+.account-skins-row {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.skin-tag {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #a7f3d0;
+  border-radius: 5px;
+  background: #f0fdf8;
+  color: #047857;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.skin-tag--knife { border-color: #d8b4fe; background: #faf5ff; color: #7e22ce; }
+.skin-tag--weapon { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
+.skin-tag--other { border-color: #fdba74; background: #fff7ed; color: #c2410c; }
+.skin-tag--empty,
+.skin-tag--more { border-color: #cbd5e1; background: #f8fafc; color: #64748b; }
+html[data-theme="dark"] .skin-tag { border-color: rgba(52, 211, 153, .38); background: rgba(16, 185, 129, .1); color: #6ee7b7; }
+html[data-theme="dark"] .skin-tag--knife { border-color: rgba(192, 132, 252, .38); background: rgba(168, 85, 247, .1); color: #d8b4fe; }
+html[data-theme="dark"] .skin-tag--weapon { border-color: rgba(96, 165, 250, .38); background: rgba(59, 130, 246, .1); color: #93c5fd; }
+html[data-theme="dark"] .skin-tag--other { border-color: rgba(251, 146, 60, .38); background: rgba(249, 115, 22, .1); color: #fdba74; }
+html[data-theme="dark"] .skin-tag--empty,
+html[data-theme="dark"] .skin-tag--more { border-color: #334155; background: #1e293b; color: #94a3b8; }
+
+/* 4. 四分格指标栏 (图标在上，文字在下) */
+.account-metric-quad {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  align-items: center;
+  border-top: 1px solid #f1f5f9;
+  border-bottom: 1px solid #f1f5f9;
+  margin-top: auto;
+}
+html[data-theme="dark"] .account-metric-quad {
+  border-color: #1f2d37;
+}
+.quad-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+}
+.quad-icon {
+  color: #64748b;
+}
+html[data-theme="dark"] .quad-icon {
+  color: #94a3b8;
+}
+.quad-text {
+  overflow: hidden;
+  font-size: 10.5px;
+  color: #475569;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+html[data-theme="dark"] .quad-text {
+  color: #94a3b8;
+}
+.login-method-icon { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; color: #475569; }
+.login-method-icon--steam-global { color: #0f9f75; }
+.login-method-icon--unknown { color: #94a3b8; }
+html[data-theme="dark"] .login-method-icon { color: #cbd5e1; }
+html[data-theme="dark"] .login-method-icon--steam-global { color: #6ee7b7; }
+
+/* 5. 底部价格与操作栏 */
+.account-card-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid #eef2f4;
+}
+html[data-theme="dark"] .account-card-bottom { border-color: #22313a; }
+.bottom-price-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.price-title {
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.2;
+}
+.price-amount-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1px;
+  line-height: 1;
+  margin-top: 2px;
+}
+.price-currency {
+  font-size: 14px;
+  font-weight: 800;
+  color: #ea580c;
+}
+.price-digits {
+  font-size: 21px;
+  font-weight: 800;
+  color: #ea580c;
+  font-variant-numeric: tabular-nums;
+}
+.bottom-finance-block {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: 1;
+  min-width: 0;
+  border-left: 1px solid #eef2f4;
+}
+.bottom-finance-block > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 10px;
+}
+.bottom-finance-block > div + div { border-left: 1px solid #eef2f4; padding-left: 10px; }
+.bottom-finance-block span { color: #64748b; font-size: 10px; line-height: 1.3; }
+.bottom-finance-block strong {
+  overflow: hidden;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-theme="dark"] .bottom-finance-block,
+html[data-theme="dark"] .bottom-finance-block > div + div { border-color: #22313a; }
+html[data-theme="dark"] .bottom-finance-block strong { color: #cbd5e1; }
+
+/* Loading placeholder */
 .account-skeleton { min-height: 224px; background: var(--color-bg-card); border: 1px solid var(--color-border-default); }
 .account-skeleton div { height: 80px; background: var(--color-bg-elevated); }
 .account-skeleton span { display: block; margin: 14px; height: 12px; background: var(--color-bg-elevated); }
@@ -475,11 +831,7 @@ html[data-theme="light"] .auth-field-error, html[data-theme="light"] .auth-statu
  .delta-attributes { margin-top: 10px; }
  .delta-actions { margin-top: 14px; }
  .delta-supply { padding: 15px 12px; }
- .account-grid { grid-template-columns: 1fr; }
- .account-image { height: 118px; } .account-content { padding: 14px; }
- .account-content h3 { font-size: 15px; } .account-resources { font-size: 12px; }
- .account-fees dt, .account-terms dt, .account-terms > div { font-size: 12px; }
- .account-detail { min-height: 44px; font-size: 13px; }
+  .account-grid { grid-template-columns: 1fr; }
  .help-section { padding-top: 18px; } .help-grid { grid-template-columns: 1fr; }
  .help-grid article, .help-grid article + article { border-left: 0; border-bottom: 1px solid var(--color-border-subtle); padding: 16px 4px; }
  .help-grid p { max-width: none; } .portal-footer { gap: 13px; font-size: 10px; }
@@ -808,3 +1160,141 @@ html.dark .service-benefit { --benefit-word:rgb(171 146 95 / 32%); --benefit-wor
 @media(max-width:899px) { .service-benefits { grid-template-columns:1fr; gap:10px; margin-bottom:18px; } .service-benefit { min-height:126px; padding:20px; } .benefit-word { top:38px; right:28px; font-size:56px; } .benefit-copy { max-width:calc(100% - 120px); } .benefit-art { width:132px; height:132px; right:18px; } .service-benefit:nth-child(2) .benefit-art { bottom:-12px; } }
 @media(hover:none) { .benefit-art { opacity:1; transform:none; width:100px; height:100px; right:16px; } .service-benefit:nth-child(2) .benefit-art { bottom:-10px; } .benefit-word { top:14px; right:20px; font-size:40px; } .benefit-copy { max-width:calc(100% - 100px); } }
 @media(prefers-reduced-motion:reduce) { .service-benefit,.benefit-art,.benefit-word,.benefit-word>span { transition:none; } }
+
+/* Delta shelf: compact cards in a wider, navigable rail. */
+.supply-heading-actions { display:flex; align-items:center; gap:10px; }
+.supply-heading-actions > a { flex:none; }
+.account-carousel-controls { display:flex; align-items:center; gap:4px; }
+.account-carousel-controls button { display:inline-grid; width:28px; height:28px; place-items:center; padding:0; border:1px solid var(--color-border-default); border-radius:7px; background:var(--color-bg-card); color:var(--color-text-secondary); }
+.account-carousel-controls button:hover:not(:disabled) { border-color:var(--color-delta-accent); color:var(--color-delta-accent); background:var(--color-delta-surface); }
+.account-carousel-controls button:disabled { opacity:.38; }
+.account-carousel { min-width:0; }
+.account-carousel-viewport { min-width:0; overflow:hidden; padding:2px 1px 5px; outline:none; }
+.account-carousel-viewport:focus-visible { outline:2px solid var(--color-delta-accent); outline-offset:3px; border-radius:12px; }
+.account-carousel-container { display:flex; margin-left:-8px; }
+.account-carousel-slide { display:flex; min-width:0; flex:0 0 25%; padding-left:8px; }
+.account-carousel-slide > .account-card { width:100%; }
+.account-carousel--loading .account-carousel-slide { min-height:360px; }
+
+/* The image is a distinct action; the body remains the detail link. */
+.account-card { height:100%; background:var(--color-bg-card); border-color:var(--color-border-default); }
+html[data-theme="dark"] .account-card { background:var(--color-bg-card); border-color:var(--color-border-default); }
+.account-card, .account-gallery-dialog { font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; font-kerning:normal; text-rendering:optimizeLegibility; -webkit-font-smoothing:antialiased; }
+.account-card-surface { height:100%; }
+.account-card-thumb { aspect-ratio:2.2 / 1; }
+.account-card-thumb { flex:none; min-height:0; padding:0; border:0; border-radius:0; color:inherit; font:inherit; text-align:inherit; cursor:pointer; }
+.account-card-thumb:disabled { cursor:default; opacity:1; }
+.account-card-thumb:focus-visible { position:relative; z-index:4; outline:2px solid var(--color-accent-brand); outline-offset:-3px; }
+.account-card:hover .account-card-thumb img { transform:none; }
+.account-card-thumb:hover img, .account-card-thumb:focus-visible img { transform:scale(1.025); }
+.account-card-gallery-hint { position:absolute; right:10px; bottom:10px; z-index:2; display:inline-flex; align-items:center; gap:3px; padding:4px 7px; border:1px solid rgb(255 255 255 / 22%); border-radius:999px; background:rgb(5 8 12 / 70%); color:#fff; font-size:10px; line-height:1.2; opacity:0; transform:translateY(3px); transition:opacity .18s ease,transform .18s ease; pointer-events:none; }
+.account-card-thumb:hover .account-card-gallery-hint, .account-card-thumb:focus-visible .account-card-gallery-hint { opacity:1; transform:translateY(0); }
+.account-card-fav-wrap { top:10px; right:10px; }
+.account-card-fav-wrap .favorite { width:29px; height:29px; border-color:rgb(255 255 255 / 24%); background:rgb(5 8 12 / 48%); color:#fff; opacity:.78; }
+.account-card-fav-wrap .favorite:hover, .account-card-fav-wrap .favorite:focus-visible { opacity:1; background:rgb(5 8 12 / 76%); }
+.account-body-area { padding:8px 10px 9px; }
+.account-title-row { grid-template-columns:minmax(0,1fr) minmax(0,30%); margin-bottom:4px; gap:6px; }
+.account-title-core { display:flex; min-width:0; align-items:baseline; gap:7px; }
+.account-haff-display { display:inline-flex; min-width:0; flex:0 0 auto; align-items:center; gap:3px; white-space:nowrap; }
+.account-haff-label { color:var(--color-text-secondary); font-size:10px; line-height:1.2; }
+.account-haff-quantity { color:var(--color-delta-accent); font-size:16px; font-weight:800; line-height:1.15; font-variant-numeric:tabular-nums; }
+.account-title-core .account-pseudo-link { flex:1; }
+.account-pseudo-link { min-width:0; overflow:hidden; color:inherit; text-decoration:none; }
+.account-pseudo-link:hover .account-pseudo-title { color:var(--color-delta-accent); }
+.account-pseudo-title { font-size:11px; line-height:1.3; }
+.account-source-label { max-width:100%; overflow:hidden; font-size:10px; text-overflow:ellipsis; }
+.account-source-trigger { max-width:100%; }
+.account-source-value { font-variant-numeric:tabular-nums; }
+.account-source-copy-btn { flex:0 0 auto; }
+.account-card-link--body { min-height:0; }
+.account-attr-line { font-size:12px; line-height:1.5; letter-spacing:0; word-break:keep-all; }
+.account-attr-line--secondary { max-height:1.5em; flex-wrap:nowrap; overflow:hidden; font-size:10.5px; line-height:1.45; text-overflow:ellipsis; white-space:nowrap; }
+.account-attr-line--secondary .attr-item-wrap { flex:0 0 auto; }
+.account-resource-section { margin-top:6px; padding-top:6px; border-color:var(--color-border-subtle); }
+.account-resource-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.account-resource-item:nth-child(3n + 2), .account-resource-item:nth-child(3n + 3), .account-resource-more { border-left:1px solid var(--color-border-subtle); }
+.account-resource-item, .account-resource-more { padding:3px 4px 4px; border-color:var(--color-border-subtle); }
+.account-resource-item span, .account-resource-more { color:var(--color-text-secondary); font-size:10.5px; line-height:1.3; white-space:nowrap; }
+.account-resource-item strong { margin-top:1px; color:var(--color-text-primary); font-size:12px; line-height:1.25; font-variant-numeric:tabular-nums; }
+.account-resource-item--full { grid-column:1 / -1; display:flex; align-items:baseline; justify-content:flex-start; gap:10px; margin-top:1px; padding:4px 4px 2px; border-top:1px solid var(--color-border-subtle); border-bottom:0; border-left:0 !important; }
+.account-resource-item--full span { min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; }
+.account-resource-item--full strong { flex:0 0 auto; margin-top:0; }
+.account-resource-empty { font-size:11px; }
+.account-skins-row { min-height:0; margin-top:6px; margin-bottom:6px; flex-wrap:nowrap; overflow:hidden; }
+.skin-tag { min-width:0; padding:2px 6px; font-size:10px; line-height:1.25; text-overflow:ellipsis; }
+.skin-tag--more { flex:none; }
+.account-metric-quad { min-height:44px; padding:6px 0; margin-bottom:6px; border-color:var(--color-border-subtle); }
+.quad-col { gap:3px; }
+.quad-text { color:var(--color-text-secondary); font-size:10.5px; line-height:1.3; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.account-card-bottom { padding-top:7px; border-color:var(--color-border-subtle); }
+.price-title, .bottom-finance-block span { color:var(--color-text-secondary); font-size:10px; }
+.price-currency, .price-digits { color:var(--color-accent-brand); }
+.price-currency { font-size:15px; }
+.price-digits { font-size:22px; font-weight:800; }
+.bottom-finance-block { border-color:var(--color-border-subtle); }
+.bottom-finance-block > div + div { border-color:var(--color-border-subtle); }
+.bottom-finance-block strong { color:var(--color-text-primary); font-size:12px; line-height:1.25; font-variant-numeric:tabular-nums; }
+html[data-theme="dark"] .account-attr-line { color:var(--color-text-primary); }
+html[data-theme="dark"] .attr-normal { color:var(--color-text-secondary); }
+html[data-theme="dark"] .account-resource-section,
+html[data-theme="dark"] .account-resource-item,
+html[data-theme="dark"] .account-resource-more,
+html[data-theme="dark"] .account-metric-quad,
+html[data-theme="dark"] .account-card-bottom,
+html[data-theme="dark"] .bottom-finance-block,
+html[data-theme="dark"] .bottom-finance-block > div + div { border-color:var(--color-border-subtle); }
+html[data-theme="dark"] .account-resource-item span,
+html[data-theme="dark"] .account-resource-more,
+html[data-theme="dark"] .quad-text,
+html[data-theme="dark"] .price-title,
+html[data-theme="dark"] .bottom-finance-block span { color:var(--color-text-secondary); }
+html[data-theme="dark"] .account-resource-item strong,
+html[data-theme="dark"] .bottom-finance-block strong { color:var(--color-text-primary); }
+
+.app-tooltip-content { z-index:200; max-width:min(280px,calc(100vw - 24px)); padding:6px 9px; border:1px solid var(--color-border-default); border-radius:7px; background:var(--color-bg-elevated); color:var(--color-text-primary); box-shadow:var(--shadow-md); font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; font-size:11px; line-height:1.45; white-space:normal; }
+
+/* Account image gallery. Match the reference's quiet, full-bleed viewer while preserving source ratios. */
+.account-gallery-overlay { background:rgb(0 0 0 / 88%); backdrop-filter:none; }
+.account-gallery-dialog { --gallery-stage-bg:#101010; --gallery-line:rgb(255 255 255 / 18%); --gallery-muted:rgb(255 255 255 / 72%); position:fixed; z-index:101; inset:0; display:grid; width:100vw; height:100dvh; max-height:none; place-items:center; padding:72px 36px 44px; overflow:hidden; isolation:isolate; border:0; border-radius:0; background:transparent; color:#fff; box-shadow:none; }
+html[data-theme="dark"] .account-gallery-dialog { --gallery-stage-bg:#080808; --gallery-line:rgb(255 255 255 / 22%); --gallery-muted:rgb(255 255 255 / 76%); color:#fff; }
+.account-gallery-title { position:absolute; top:24px; left:32px; margin:0 56px 0 0; color:#fff; font-size:15px; font-weight:700; line-height:1.5; letter-spacing:-.01em; text-shadow:0 1px 14px rgb(0 0 0 / 40%); }
+.account-gallery-close { position:absolute; top:20px; right:28px; z-index:3; display:inline-grid; width:36px; height:36px; place-items:center; padding:0; border:1px solid var(--gallery-line); border-radius:50%; background:rgb(255 255 255 / 7%); color:var(--gallery-muted); transition:background-color .18s ease,color .18s ease,border-color .18s ease,transform .18s ease; }
+.account-gallery-close:hover,.account-gallery-close:focus-visible { border-color:rgb(255 255 255 / 55%); background:rgb(255 255 255 / 16%); color:#fff; transform:scale(1.04); }
+.thumbnail-carousel { display:grid; width:min(768px,calc(100vw - 72px)); max-width:100%; gap:10px; min-width:0; }
+.thumbnail-carousel-stage { min-width:0; }
+.thumbnail-carousel-main { position:relative; display:flex; width:100%; min-width:0; height:min(400px,calc(100dvh - 220px)); min-height:240px; align-items:center; justify-content:center; overflow:hidden; border:0; border-radius:11px; background:var(--gallery-stage-bg); }
+.thumbnail-carousel-main::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(ellipse at center,transparent 55%,rgb(0 0 0 / 15%) 100%); }
+.thumbnail-carousel-track { display:flex; width:100%; height:100%; touch-action:pan-y; cursor:grab; }
+.thumbnail-carousel-track:active { cursor:grabbing; }
+.thumbnail-carousel-slide { display:flex; flex:0 0 100%; width:100%; height:100%; min-width:0; align-items:center; justify-content:center; }
+.thumbnail-carousel-slide img { position:relative; z-index:1; width:100%; height:100%; object-fit:contain; user-select:none; }
+.thumbnail-carousel-fallback { display:flex; align-items:center; gap:8px; color:var(--gallery-muted); font-size:12px; }
+.thumbnail-carousel-count { position:absolute; left:50%; bottom:12px; z-index:2; transform:translateX(-50%); color:#fff; font-size:14px; line-height:1.3; font-variant-numeric:tabular-nums; text-shadow:0 1px 10px rgb(0 0 0 / 78%); }
+.thumbnail-carousel-nav { position:absolute; top:50%; z-index:3; display:inline-grid; width:40px; height:40px; place-items:center; padding:0; transform:translateY(-50%); border:1px solid rgb(17 24 39 / 10%); border-radius:50%; background:rgb(255 255 255 / 88%); color:#192333; box-shadow:0 8px 24px rgb(0 0 0 / 20%); transition:background-color .18s ease,color .18s ease,border-color .18s ease,transform .18s ease,opacity .18s ease; }
+.thumbnail-carousel-nav--previous { left:12px; }
+.thumbnail-carousel-nav--next { right:12px; }
+.thumbnail-carousel-nav:hover:not(:disabled),.thumbnail-carousel-nav:focus-visible { border-color:var(--color-delta-accent); background:#fff; color:var(--color-delta-accent); transform:translateY(-50%) scale(1.05); }
+.thumbnail-carousel-nav:disabled { opacity:.36; box-shadow:none; }
+.thumbnail-carousel-thumbnails { display:flex; justify-content:center; gap:2px; min-width:0; height:80px; overflow-x:auto; padding:2px; scrollbar-width:none; }
+.thumbnail-carousel-thumbnails::-webkit-scrollbar { display:none; }
+.thumbnail-carousel-thumb { position:relative; flex:0 0 auto; height:100%; min-width:35px; padding:0; overflow:hidden; border:1px solid transparent; border-radius:5px; background:var(--gallery-stage-bg); opacity:.78; cursor:pointer; transition:border-color .18s ease,box-shadow .18s ease,opacity .18s ease,transform .18s ease; }
+.thumbnail-carousel-thumb img { display:block; width:100%; height:100%; object-fit:cover; user-select:none; }
+.thumbnail-carousel-thumb:hover,.thumbnail-carousel-thumb:focus-visible { opacity:1; transform:translateY(-2px); }
+.thumbnail-carousel-thumb[aria-pressed="true"] { border-color:var(--color-delta-accent); box-shadow:0 0 0 1px var(--color-delta-accent); opacity:1; }
+@media (max-width:1199px) {
+  .account-carousel-slide { flex-basis:50%; }
+}
+@media (max-width:599px) {
+  .supply-heading-actions { gap:6px; }
+  .account-carousel-container { margin-left:-6px; }
+  .account-carousel-slide { flex-basis:88%; padding-left:6px; }
+  .account-gallery-dialog { padding:62px 12px 28px; }
+  .account-gallery-title { top:18px; left:16px; font-size:14px; }
+  .account-gallery-close { top:14px; right:14px; width:32px; height:32px; }
+  .thumbnail-carousel { width:100%; }
+  .thumbnail-carousel-main { min-height:42dvh; }
+  .thumbnail-carousel-nav { width:34px; height:34px; }
+  .thumbnail-carousel-nav--previous { left:8px; }
+  .thumbnail-carousel-nav--next { right:8px; }
+  .thumbnail-carousel-thumbnails { justify-content:flex-start; }
+}
