@@ -1,3 +1,4 @@
+import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-dispatch";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import type { INestApplication } from "@nestjs/common";
@@ -45,6 +46,8 @@ export type AuthRuntimeCapabilities = {
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
+  /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
+  supportDispatch?: Omit<OrderDispatchOptions, "pool">;
   pool: Pool;
   yunxin?: { appId: string; appKey: string; appSecret: string };
   /** Test-only local provider seam; production construction must leave this unset. */
@@ -645,6 +648,7 @@ export async function mountAuthHandlers(
       })()
     : undefined;
   const yunxinConsultation: ConsultationRouteOptions | undefined = yunxinRuntime ? {
+    ...(options.supportDispatch?.appId === options.yunxin!.appId ? { wakeDispatch: () => app.get(OrderDispatchLifecycle).wake() } : {}),
     pool: options.pool,
     appId: options.yunxin!.appId,
     provider: yunxinRuntime.provider,
@@ -921,6 +925,7 @@ export async function mountAuthHandlers(
   });
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
+  if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool });
 }
 
 function mountRealm(

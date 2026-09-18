@@ -29,6 +29,8 @@ import {
   type YunxinSupportTeamState,
 } from "./yunxin-provider";
 import type { ImMessageTransport } from "./im-contract";
+import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidate, type LockedSupportRoster } from "./support-dispatch";
+import { assignWaitingOrders } from "./order-dispatch";
 
 export type SupportType = "SERVICE" | "COMPLAINT";
 export type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
@@ -38,6 +40,7 @@ export type SupportConnectionState = "DISCONNECTED" | "CONNECTING" | "CONNECTED"
 export type ConsultationRouteOptions = {
   pool: Pool;
   appId: string;
+  wakeDispatch?: () => void;
   provider?: YunxinSupportScopeApi;
   messageTransport?: ImMessageTransport;
   supportManager?: {
@@ -60,7 +63,6 @@ export type SupportPresence = {
   connectionState: SupportConnectionState;
   lastConnectedAt: string | null;
   activeLoad: number;
-  capacity: number;
   version: number;
 };
 
@@ -149,7 +151,6 @@ type PresenceRow = {
   connectionState: SupportConnectionState;
   lastConnectedAt: Date | string | null;
   activeLoad: number;
-  capacity: number;
   version: string | number;
 };
 
@@ -336,58 +337,24 @@ type Candidate = {
   accountId: string;
 };
 
-async function reserveEligibleAdmin(client: PoolClient, appId: string, type: SupportType, targetAdminId?: string): Promise<Candidate | null> {
-  const candidates = (await client.query<{ adminUserId: string; adminName: string; accountId: string }>(
-    `SELECT p."admin_user_id" AS "adminUserId", au."name" AS "adminName", m."account_id" AS "accountId"
-       FROM "zzsh_iam"."im_support_presence" p
-       JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = p."admin_user_id"
-       JOIN "zzsh_auth_admin"."user" au ON au."id" = p."admin_user_id"
-       JOIN "zzsh_iam"."im_identity_mapping" m
-         ON m."provider" = 'yunxin' AND m."app_id" = $1 AND m."realm" = 'admin'
-        AND m."identity_kind" = 'ADMIN' AND m."platform_subject_id" = p."admin_user_id"
-        AND m."status" = 'READY'
-      WHERE p."app_id" = $1 AND s."status" = 'ACTIVE' AND p."availability" = 'AVAILABLE'
-        AND p."connection_state" = 'CONNECTED'
-        AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
-        AND p."active_load" < p."capacity"
-        AND ($2::text IS NULL OR p."admin_user_id" = $2)
-      ORDER BY p."active_load", p."updated_at", p."admin_user_id"`,
-    [appId, targetAdminId ?? null],
-  )).rows;
-
-  for (const candidate of candidates) {
-    const access = await loadEffectiveAdminAccess(client, candidate.adminUserId);
-    if (!requiredSupportPermission(type).every((permission) => hasPermission(access, permission))) continue;
-    const locked = (await client.query<PresenceRow>(
-      `SELECT p."admin_user_id" AS "adminUserId", p."availability", p."connection_state" AS "connectionState",
-              p."last_connected_at" AS "lastConnectedAt", p."active_load" AS "activeLoad",
-              p."capacity", p."version"
-         FROM "zzsh_iam"."im_support_presence" p
-         JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = p."admin_user_id"
-        WHERE p."app_id" = $1 AND p."admin_user_id" = $2 AND s."status" = 'ACTIVE'
-          AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-          AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
-          AND p."active_load" < p."capacity"
-        FOR UPDATE OF p, s SKIP LOCKED`,
-      [appId, candidate.adminUserId],
-    )).rows[0];
-    if (!locked) continue;
-    const lockedAccess = await loadEffectiveAdminAccess(client, candidate.adminUserId);
-    if (!requiredSupportPermission(type).every((permission) => hasPermission(lockedAccess, permission))) continue;
-    const lockedAccountId = await readyAccount(client, identityKey(appId, "admin", "ADMIN", candidate.adminUserId));
-    if (lockedAccountId !== candidate.accountId) continue;
-    const updated = (await client.query(
-      `UPDATE "zzsh_iam"."im_support_presence"
-          SET "active_load" = "active_load" + 1, "updated_at" = clock_timestamp()
-        WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "active_load" < "capacity"
-        RETURNING "admin_user_id"`,
-      [appId, candidate.adminUserId],
-    )).rowCount;
-    if (updated === 1) return candidate;
-  }
-  return null;
+async function reserveEligibleAdmin(client: PoolClient, appId: string, locked: LockedSupportRoster, type: SupportType, targetAdminId?: string, excludedIds: string[] = []): Promise<Candidate | null> {
+  return reserveSupportCandidate(client, appId, type, await readEligibleSupport(client, appId, locked), targetAdminId, excludedIds);
 }
 
+async function complaintExclusions(client: PoolClient, appId: string, userId: string, kind: SupportType, subjectRef: string | null): Promise<string[]> {
+  if (kind !== "COMPLAINT") return [];
+  const result = await client.query<{ id: string }>(`SELECT assigned_admin_id AS id FROM zzsh_iam.im_consultation
+    WHERE app_id=$1 AND user_id=$2 AND kind='SERVICE' AND assigned_admin_id IS NOT NULL AND (id=$3 OR state='ACTIVE')
+    UNION SELECT g.assigned_admin_id FROM zzsh_order.im_order_group g JOIN zzsh_order.rental_order o ON o.id=g.order_id
+    WHERE g.app_id=$1 AND o.id=$3 AND (o.renter_user_id=$2 OR o.owner_user_id=$2) AND g.assigned_admin_id IS NOT NULL`, [appId, userId, subjectRef]);
+  return result.rows.map((r) => r.id);
+}
+
+async function storedComplaintExclusions(client: PoolClient, consultationId: string): Promise<string[]> {
+  const row = (await client.query(`SELECT details FROM zzsh_iam.im_consultation_event WHERE consultation_id=$1 AND event_type='CREATED' ORDER BY created_at,id LIMIT 1`, [consultationId])).rows[0];
+  const ids: unknown = row?.details?.excludedAdminIds;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && ID_PATTERN.test(id)) : [];
+}
 async function decrementPresence(client: PoolClient, appId: string, adminUserId: string | null): Promise<void> {
   if (!adminUserId) return;
   await client.query(
@@ -650,6 +617,7 @@ async function beginMessageScopeProvision(options: ConsultationRouteOptions, con
   if (!options.provider) throw unavailable("IM message scope provider is not configured");
   const manager = supportManagerAccount(options);
   return withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     const row = await readConsultation(client, options.appId, consultationId, true);
     if (row.state !== "ACTIVE") return null;
     if (row.messageScopeState === "READY" || row.messageScopeState === "REVOKED") return null;
@@ -724,6 +692,7 @@ async function settleScopeOperationFailure(
   const needsReview = failure.manual || remoteActionMayStillBeInFlight(failure.failureClass) || claim.attemptCount >= SCOPE_AUTO_ATTEMPT_LIMIT;
   const nextState: MessageScopeOperationState = needsReview ? "NEEDS_REVIEW" : "UNKNOWN";
   await withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     await readConsultation(client, options.appId, claim.consultationId, true);
     const settled = await client.query(
       `UPDATE "zzsh_iam"."im_consultation_scope_operation"
@@ -763,6 +732,7 @@ async function settleScopeOperationFailure(
 
 async function quarantineUncertainScopeOperations(options: ConsultationRouteOptions, limit: number): Promise<void> {
   await withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     const candidates = (await client.query<{
       id: string;
       consultationId: string;
@@ -780,11 +750,12 @@ async function quarantineUncertainScopeOperations(options: ConsultationRouteOpti
               AND COALESCE("last_failure_detail", '') NOT LIKE 'remote action may still be in flight;%')
         )
         ORDER BY "next_retry_at", "updated_at", "id"
-        LIMIT $2 FOR UPDATE SKIP LOCKED`,
+        LIMIT $2`,
       [options.appId, limit],
     )).rows;
 
     for (const candidate of candidates) {
+      await readConsultation(client, options.appId, candidate.consultationId, true);
       const detail = "remote action may still be in flight; local lease is not provider fencing";
       const updated = candidate.state === "RUNNING"
         ? await client.query(
@@ -836,6 +807,7 @@ async function quarantineUncertainScopeOperations(options: ConsultationRouteOpti
 
 async function attachCreatedTeam(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string): Promise<boolean> {
   return withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     const row = await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
     if (operation.state !== "RUNNING" || operation.leaseTokenHash !== scopeLeaseHash(claim.leaseToken)) return false;
@@ -895,6 +867,7 @@ async function attachCreatedTeam(options: ConsultationRouteOptions, claim: Scope
 
 async function rememberCreatedTeamCandidate(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string): Promise<void> {
   await withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
     if (operation.state !== "RUNNING" || operation.leaseTokenHash !== scopeLeaseHash(claim.leaseToken)) {
@@ -988,6 +961,7 @@ async function reconcileCreate(options: ConsultationRouteOptions, claim: ScopeOp
 
 async function completeTransferRecovery(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string): Promise<void> {
   await withTransaction(options.pool, async (client) => {
+    await lockSupportMutation(client, options.appId, [], [claim.previousAdminId, claim.targetAdminId].filter((id): id is string => Boolean(id)));
     const row = await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
     if (operation.state !== "RUNNING") return;
@@ -1066,6 +1040,7 @@ async function completeCloseRecovery(
     throw new ScopeOperationFailure("STALE_OPERATION", "close operation is not bound to this team", true);
   }
   await withTransaction(options.pool, async (client) => {
+    await lockSupportMutation(client, options.appId, [], [claim.previousAdminId, claim.targetAdminId].filter((id): id is string => Boolean(id)));
     const row = await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
     if (operation.state !== "RUNNING") return;
@@ -1204,6 +1179,7 @@ async function claimCloseReconciliation(
 ): Promise<ScopeOperationClaim | "SUCCEEDED" | null> {
   if (!options.provider) throw unavailable("IM message scope provider is not configured");
   return withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const access = await loadEffectiveAdminAccess(client, context.userId);
@@ -1473,16 +1449,19 @@ export async function createOrResumeUserConsultation(
   requestId: string,
 ): Promise<{ consultation: ConsultationView }> {
   const result = await withTransaction(options.pool, async (client) => {
+    const locked = await lockSupportMutation(client, options.appId, [context.userId]);
     await setAuditContext(client, "user", context.userId, context.sessionId, requestId);
     await assertUserContextInTransaction(client, context);
     const accountId = await readyAccount(client, identityKey(options.appId, "user", "USER", context.userId));
+    const priority = await assignWaitingOrders(client, options.appId, await readEligibleSupport(client, options.appId, locked));
     const existing = (await client.query<ConsultationRow>(
       `${CONSULTATION_SELECT} WHERE c."app_id" = $1 AND c."user_id" = $2 AND c."kind" = $3 AND c."state" <> 'CLOSED' FOR UPDATE OF c`,
       [options.appId, context.userId, type],
     )).rows[0];
     if (existing) return { id: existing.id, state: existing.state, consultation: toView(existing, accountId) };
 
-    const candidate = await reserveEligibleAdmin(client, options.appId, type);
+    const excludedIds = await complaintExclusions(client, options.appId, context.userId, type, subjectRef);
+    const candidate = priority.more ? null : await reserveEligibleAdmin(client, options.appId, locked, type, undefined, excludedIds);
     const id = `im_consult_${randomUUID().replaceAll("-", "")}`;
     await client.query(
       `INSERT INTO "zzsh_iam"."im_consultation"
@@ -1490,7 +1469,7 @@ export async function createOrResumeUserConsultation(
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [id, options.appId, context.userId, type, candidate ? "ACTIVE" : "WAITING", accountId, candidate?.accountId ?? null, candidate?.adminUserId ?? null, subjectRef],
     );
-    await writeEvent(client, { consultationId: id, eventType: "CREATED", actorType: "user", actorId: context.userId, peerAccountId: candidate?.accountId ?? null, details: { type } });
+    await writeEvent(client, { consultationId: id, eventType: "CREATED", actorType: "user", actorId: context.userId, peerAccountId: candidate?.accountId ?? null, details: { type, excludedAdminIds: excludedIds } });
     if (candidate) {
       await writeEvent(client, { consultationId: id, eventType: "ASSIGNED", actorType: "system", actorId: context.userId, toAdminId: candidate.adminUserId, peerAccountId: candidate.accountId, details: { reason: "availability" } });
     }
@@ -1543,7 +1522,7 @@ export async function readOwnPresence(options: ConsultationRouteOptions, context
     await assertAdminContextInTransaction(client, context);
     const row = (await client.query<PresenceRow>(
       `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"
          FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
     )).rows[0];
@@ -1552,7 +1531,7 @@ export async function readOwnPresence(options: ConsultationRouteOptions, context
 }
 
 function defaultPresence(adminUserId: string): SupportPresence {
-  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, capacity: 3, version: 0 };
+  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0 };
 }
 
 function presenceView(row: PresenceRow): SupportPresence {
@@ -1562,7 +1541,6 @@ function presenceView(row: PresenceRow): SupportPresence {
     connectionState: row.connectionState,
     lastConnectedAt: iso(row.lastConnectedAt),
     activeLoad: row.activeLoad,
-    capacity: row.capacity,
     version: numberValue(row.version),
   };
 }
@@ -1573,7 +1551,7 @@ export async function updateOwnPresence(
   input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number },
   requestId: string,
 ): Promise<SupportPresence> {
-  return withTransaction(options.pool, async (client) => {
+  const result = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const access = await loadEffectiveAdminAccess(client, context.userId);
@@ -1582,7 +1560,7 @@ export async function updateOwnPresence(
     }
     const current = (await client.query<PresenceRow>(
       `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"
+              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"
          FROM "zzsh_iam"."im_support_presence"
         WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
@@ -1603,7 +1581,7 @@ export async function updateOwnPresence(
          VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END)
          ON CONFLICT ("app_id", "admin_user_id") DO NOTHING
          RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"`,
+                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"`,
         [options.appId, context.userId, input.availability, input.connectionState],
       );
       persisted = inserted.rows[0];
@@ -1617,7 +1595,7 @@ export async function updateOwnPresence(
                 "updated_at" = clock_timestamp()
           WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "version" = $5
           RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "capacity", "version"`,
+                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version"`,
         [options.appId, context.userId, input.availability, input.connectionState, currentVersion],
       );
       persisted = updated.rows[0];
@@ -1636,19 +1614,25 @@ export async function updateOwnPresence(
     });
     return presenceView(persisted);
   });
+  if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") options.wakeDispatch?.();
+  return result;
 }
 
 async function claimInTransaction(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string): Promise<string> {
-  return withTransaction(options.pool, async (client) => {
+  const result = await withTransaction(options.pool, async (client) => {
+    const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const currentAccess = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
-    const row = await readConsultation(client, options.appId, consultationId, true);
+    const row = await readConsultation(client, options.appId, consultationId);
     requireSupportAccess(currentAccess, row.kind);
     if (row.state === "ACTIVE" && row.assignedAdminId === context.userId) return row.id;
     if (row.state !== "WAITING" || row.assignedAdminId) throw conflict("Consultation is already assigned");
-    const candidate = await reserveEligibleAdmin(client, options.appId, row.kind, context.userId);
+    const priority = await assignWaitingOrders(client, options.appId, await readEligibleSupport(client, options.appId, locked));
+    if (priority.more) return null;
+    await readConsultation(client, options.appId, consultationId, true);
+    const candidate = await reserveEligibleAdmin(client, options.appId, locked, row.kind, context.userId, await storedComplaintExclusions(client, row.id));
     if (!candidate) throw unavailable("当前客服不可接待新咨询");
     await client.query(
       `UPDATE "zzsh_iam"."im_consultation"
@@ -1661,6 +1645,8 @@ async function claimInTransaction(options: ConsultationRouteOptions, context: Ad
     await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "im.consultation.claimed", objectType: "im_consultation", objectId: row.id, outcome: "SUCCESS", requestId });
     return row.id;
   });
+  if (!result) throw unavailable("已付款订单正在优先分配，请稍后重试");
+  return result;
 }
 
 type TransferPlan = {
@@ -1670,17 +1656,21 @@ type TransferPlan = {
 async function beginTransfer(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, targetAdminId: string, requestId: string): Promise<TransferPlan> {
   const manager = supportManagerAccount(options);
   if (!options.provider) throw unavailable("IM message scope provider is not configured");
-  return withTransaction(options.pool, async (client) => {
+  const result = await withTransaction(options.pool, async (client) => {
+    const locked = await lockSupportMutation(client, options.appId, [], [context.userId, targetAdminId]);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const currentAccess = await loadEffectiveAdminAccess(client, context.userId);
     if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     if (!ID_PATTERN.test(targetAdminId)) throw invalid("Target administrator is invalid");
-    const row = await readConsultation(client, options.appId, consultationId, true);
+    const row = await readConsultation(client, options.appId, consultationId);
     requireSupportAccess(currentAccess, row.kind, "transfer");
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
     if (targetAdminId === context.userId) throw invalid("Target administrator must be different");
     if (row.messageScopeState !== "READY" || !row.messageScopeId || !row.peerAccountId || !row.assignedAdminId) throw unavailable("IM message scope is not ready for transfer");
+    const priority = await assignWaitingOrders(client, options.appId, await readEligibleSupport(client, options.appId, locked));
+    if (priority.more) return null;
+    await readConsultation(client, options.appId, consultationId, true);
     const activeOperation = (await client.query<{ id: string }>(
       `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
         WHERE "app_id" = $1 AND "consultation_id" = $2 AND "state" IN ('PENDING', 'RUNNING', 'UNKNOWN')
@@ -1690,7 +1680,7 @@ async function beginTransfer(options: ConsultationRouteOptions, context: AdminCo
     if (activeOperation) throw unavailable("IM message scope operation is being recovered");
     const targetAccess = await loadEffectiveAdminAccess(client, targetAdminId);
     if (!requiredSupportPermission(row.kind).every((permission) => hasPermission(targetAccess, permission))) throw new SecurityApiError(403, "FORBIDDEN", "Target administrator is not authorized");
-    const target = await reserveEligibleAdmin(client, options.appId, row.kind, targetAdminId);
+    const target = await reserveEligibleAdmin(client, options.appId, locked, row.kind, targetAdminId, await storedComplaintExclusions(client, row.id));
     if (!target) throw unavailable("目标客服当前不可接待");
     const updated = await client.query<{ messageScopeVersion: string | number }>(
       `UPDATE "zzsh_iam"."im_consultation"
@@ -1714,6 +1704,8 @@ async function beginTransfer(options: ConsultationRouteOptions, context: AdminCo
       operationId,
     };
   });
+  if (!result) throw unavailable("已付款订单正在优先分配，请稍后重试");
+  return result;
 }
 
 async function transferWithScope(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, targetAdminId: string, requestId: string): Promise<{ consultation: ConsultationView }> {
@@ -1726,6 +1718,7 @@ type ClosePlan = { operationId: string };
 
 async function beginClose(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string): Promise<ClosePlan | null> {
   return withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const access = await loadEffectiveAdminAccess(client, context.userId);
@@ -1770,13 +1763,19 @@ async function beginClose(options: ConsultationRouteOptions, context: AdminConte
 
 async function completeLocalClose(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string): Promise<void> {
   await withTransaction(options.pool, async (client) => {
+    await lockSupportMutation(client, options.appId, [], [context.userId]);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    await assertAdminContextInTransaction(client, context);
     const row = await readConsultation(client, options.appId, consultationId, true);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    requireSupportAccess(access, row.kind);
     if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw conflict("Consultation changed during close");
     if (row.messageScopeId) throw conflict("IM message scope requires remote close");
+    // No Team ever existed: close the business object without claiming remote revocation.
     await client.query(
       `UPDATE "zzsh_iam"."im_consultation"
-          SET "state" = 'CLOSED', "message_scope_state" = 'REVOKED',
+          SET "state" = 'CLOSED',
               "version" = "version" + 1, "message_scope_version" = "message_scope_version" + 1,
               "updated_at" = clock_timestamp()
         WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "assigned_admin_id" = $3`,
@@ -1822,6 +1821,7 @@ export async function retryMessageScopeOperation(
     return readAdminConsultationView(options, context, consultationId);
   }
   const operationId = await withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const access = await loadEffectiveAdminAccess(client, context.userId);

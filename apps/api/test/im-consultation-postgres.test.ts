@@ -1,3 +1,4 @@
+import { FakeSupportScopeProvider, seedIdentity, seedUser, seedAdmin, userContext, adminContext } from "./im-test-fixtures";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -136,6 +137,7 @@ async function ensureRegisteredResource(maintenance: Pool): Promise<PoolClient> 
       });
     }
 
+    assert.equal((await maintenance.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1`, [DATABASE])).rows[0].n, 0, "registered database is in use");
     const migrationPassword = randomBytes(32).toString("hex");
     const runtimePassword = randomBytes(32).toString("hex");
     await maintenance.query(`ALTER ROLE ${identifier(MIGRATION_USER)} PASSWORD ${literal(migrationPassword)}`);
@@ -162,224 +164,6 @@ function identityKey(kind: "USER" | "ADMIN", subject: string): ImIdentityKey {
     realm: kind === "ADMIN" ? "admin" : "user",
     kind,
     platformSubjectId: subject,
-  };
-}
-
-class FakeSupportScopeProvider implements YunxinSupportScopeApi {
-  private nextTeamId = 900001;
-  readonly created: YunxinSupportTeamCreateInput[] = [];
-  readonly dismissed: string[] = [];
-  readonly members = new Map<string, Set<string>>();
-  readonly teams = new Map<string, YunxinSupportTeamCreateInput>();
-  readonly pendingCreates = new Map<string, YunxinSupportTeamCreateInput>();
-  readonly pendingLateAdds: Array<{ teamId: string; memberAccountId: string }> = [];
-  findCalls = 0;
-  existenceReads = 0;
-  existenceFailure: unknown;
-  failCreateAfterPersist = false;
-  failCreateBeforePersist = false;
-  failAddAfterPersist = false;
-  failAddBeforePersist = false;
-  failRemoveAfterPersist = false;
-  failDismissAfterPersist = false;
-  lastPendingCreateTeamId: string | undefined;
-  beforeGet?: (teamId: string) => Promise<void>;
-  beforeCreate?: (teamId: string) => Promise<void>;
-  afterAdd?: (teamId: string, memberAccountId: string) => Promise<void>;
-
-  async createSupportTeam(input: YunxinSupportTeamCreateInput): Promise<{ teamId: string }> {
-    const teamId = String(this.nextTeamId++);
-    this.created.push(input);
-    const beforeCreate = this.beforeCreate;
-    this.beforeCreate = undefined;
-    await beforeCreate?.(teamId);
-    if (this.failCreateBeforePersist) {
-      this.failCreateBeforePersist = false;
-      this.pendingCreates.set(teamId, input);
-      this.lastPendingCreateTeamId = teamId;
-      throw new YunxinTransportError("create-support-team");
-    }
-    this.teams.set(teamId, input);
-    this.members.set(teamId, new Set([input.ownerAccountId, ...input.memberAccountIds]));
-    if (this.failCreateAfterPersist) {
-      this.failCreateAfterPersist = false;
-      throw new YunxinTransportError("create-support-team");
-    }
-    return { teamId };
-  }
-
-  async addSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void> {
-    const members = this.members.get(teamId);
-    const team = this.teams.get(teamId);
-    if (!members?.has(operatorAccountId) || team?.ownerAccountId !== operatorAccountId) throw new Error("fake support team owner is required");
-    if (this.failAddBeforePersist) {
-      this.failAddBeforePersist = false;
-      this.pendingLateAdds.push({ teamId, memberAccountId });
-      throw new YunxinTransportError("add-support-team-member");
-    }
-    members.add(memberAccountId);
-    if (this.failAddAfterPersist) {
-      this.failAddAfterPersist = false;
-      throw new YunxinTransportError("add-support-team-member");
-    }
-    const afterAdd = this.afterAdd;
-    this.afterAdd = undefined;
-    await afterAdd?.(teamId, memberAccountId);
-  }
-
-  async removeSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void> {
-    const members = this.members.get(teamId);
-    const team = this.teams.get(teamId);
-    if (!members?.has(operatorAccountId) || team?.ownerAccountId !== operatorAccountId) throw new Error("fake support team owner is required");
-    members.delete(memberAccountId);
-    if (this.failRemoveAfterPersist) {
-      this.failRemoveAfterPersist = false;
-      throw new YunxinTransportError("remove-support-team-member");
-    }
-  }
-
-  async dismissSupportTeam(teamId: string, ownerAccountId: string): Promise<void> {
-    const members = this.members.get(teamId);
-    const team = this.teams.get(teamId);
-    if (!members?.has(ownerAccountId) || team?.ownerAccountId !== ownerAccountId) throw new Error("fake support team owner is required");
-    this.members.delete(teamId);
-    this.dismissed.push(teamId);
-    if (this.failDismissAfterPersist) {
-      this.failDismissAfterPersist = false;
-      throw new YunxinTransportError("dismiss-support-team");
-    }
-  }
-
-  async getSupportTeam(teamId: string): Promise<YunxinSupportTeamState | null> {
-    const beforeGet = this.beforeGet;
-    this.beforeGet = undefined;
-    await beforeGet?.(teamId);
-    const input = this.teams.get(teamId);
-    const members = this.members.get(teamId);
-    if (!input || !members) return null;
-    return {
-      teamId,
-      ownerAccountId: input.ownerAccountId,
-      memberAccountIds: [...members],
-      serverExtension: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: input.appId, consultationId: input.consultationId }),
-    };
-  }
-
-  async readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup> {
-    this.existenceReads += 1;
-    if (this.existenceFailure) throw this.existenceFailure;
-    const team = await this.getSupportTeam(input.teamId);
-    if (!team) return { status: "ABSENT" };
-    if (
-      team.ownerAccountId !== input.ownerAccountId
-      || team.serverExtension !== JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: input.appId, consultationId: input.consultationId })
-    ) {
-      return { status: "AMBIGUOUS" };
-    }
-    return {
-      status: "FOUND",
-      team: { teamId: team.teamId, teamType: 1, ownerAccountId: team.ownerAccountId, serverExtension: team.serverExtension! },
-    };
-  }
-
-  async findSupportTeam(input: { appId: string; consultationId: string; ownerAccountId: string }): Promise<YunxinSupportTeamLookup> {
-    this.findCalls += 1;
-    const matches = [...this.teams.entries()].filter(([teamId, team]) => team.appId === input.appId && team.consultationId === input.consultationId && team.ownerAccountId === input.ownerAccountId && this.members.has(teamId));
-    if (matches.length > 1) return { status: "AMBIGUOUS" };
-    if (!matches[0]) return { status: "ABSENT" };
-    const team = await this.getSupportTeam(matches[0][0]);
-    return team ? { status: "FOUND", team } : { status: "ABSENT" };
-  }
-
-  applyLateCreate(teamId: string): void {
-    const input = this.pendingCreates.get(teamId);
-    if (!input) throw new Error("fake late create is not pending");
-    this.pendingCreates.delete(teamId);
-    this.teams.set(teamId, input);
-    this.members.set(teamId, new Set([input.ownerAccountId, ...input.memberAccountIds]));
-  }
-
-  applyLateAdd(teamId: string, memberAccountId: string): void {
-    const pending = this.pendingLateAdds.findIndex((item) => item.teamId === teamId && item.memberAccountId === memberAccountId);
-    if (pending < 0) throw new Error("fake late member add is not pending");
-    this.pendingLateAdds.splice(pending, 1);
-    this.members.get(teamId)?.add(memberAccountId);
-  }
-}
-
-async function seedIdentity(runtime: Pool, key: ImIdentityKey, runId: string): Promise<void> {
-  await runtime.query(
-    `INSERT INTO "zzsh_iam"."im_identity_mapping"
-      ("id", "provider", "app_id", "realm", "identity_kind", "platform_subject_id", "account_id", "identity_marker", "status")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'READY')`,
-    [
-      `im_cpg_mapping_${runId}_${key.kind.toLowerCase()}_${key.platformSubjectId}`,
-      key.provider,
-      key.appId,
-      key.realm,
-      key.kind,
-      key.platformSubjectId,
-      deriveYunxinAccountId(key),
-      buildYunxinIdentityMarker(key),
-    ],
-  );
-}
-
-async function seedUser(runtime: Pool, userId: string, sessionId: string, runId: string): Promise<void> {
-  const now = new Date();
-  await runtime.query(
-    `INSERT INTO "zzsh_auth_user"."user"
-      ("id", "name", "email", "createdAt", "updatedAt", "username", "displayUsername", "twoFactorEnabled", "suspended")
-     VALUES ($1, $2, $3, $4, $4, $5, $5, true, false)`,
-    [userId, `PG consultation user ${runId}`, `${userId}@user.zzsh.invalid`, now, userId],
-  );
-  await runtime.query(
-    `INSERT INTO "zzsh_auth_user"."session"
-      ("id", "expiresAt", "token", "createdAt", "updatedAt", "userId")
-     VALUES ($1, $2, $3, $4, $4, $5)`,
-    [sessionId, new Date(now.getTime() + 3_600_000), `im_cpg_token_${runId}_${sessionId}`, now, userId],
-  );
-}
-
-async function seedAdmin(runtime: Pool, adminId: string, sessionId: string, runId: string): Promise<void> {
-  const now = new Date();
-  await runtime.query(
-    `INSERT INTO "zzsh_auth_admin"."user"
-      ("id", "name", "email", "createdAt", "updatedAt", "username", "displayUsername", "twoFactorEnabled", "suspended")
-     VALUES ($1, $2, $3, $4, $4, $5, $5, true, false)`,
-    [adminId, `PG consultation admin ${runId}`, `${adminId}@admin.zzsh.invalid`, now, adminId],
-  );
-  await runtime.query(
-    `INSERT INTO "zzsh_iam"."admin_security"
-      ("admin_user_id", "status", "is_boss", "password_change_required")
-     VALUES ($1, 'PENDING_ENROLLMENT', true, false)`,
-    [adminId],
-  );
-  await runtime.query(
-    `UPDATE "zzsh_iam"."admin_security"
-        SET "status" = 'ACTIVE', "first_activated_at" = $2, "updated_at" = clock_timestamp()
-      WHERE "admin_user_id" = $1`,
-    [adminId, now],
-  );
-  await runtime.query(
-    `INSERT INTO "zzsh_auth_admin"."session"
-      ("id", "expiresAt", "token", "createdAt", "updatedAt", "userId")
-     VALUES ($1, $2, $3, $4, $4, $5)`,
-    [sessionId, new Date(now.getTime() + 3_600_000), `im_cpg_admin_token_${runId}_${sessionId}`, now, adminId],
-  );
-}
-
-function userContext(userId: string, sessionId: string) {
-  return { userId, sessionId };
-}
-
-function adminContext(adminId: string, sessionId: string): AdminContext {
-  return {
-    userId: adminId,
-    sessionId,
-    credentials: { headers: new Headers(), conflict: false, malformed: false },
-    security: { status: "ACTIVE", isBoss: true, passwordChangeRequired: false },
-    sessionLocked: false,
   };
 }
 
@@ -445,16 +229,16 @@ test(
 
       runtime = pool(DATABASE, RUNTIME_USER, guard.runtimePassword, "zzsh-yunxin-consultation-runtime", 8);
       await assertBusinessRuntimeIdentity(runtime, { database: { name: DATABASE, user: RUNTIME_USER, runtimeUser: RUNTIME_USER } });
-      const privileges = await runtime.query<{ consultationDelete: boolean; eventDelete: boolean; presenceUpdate: boolean; capacityUpdate: boolean; operationDelete: boolean; operationUpdateOwner: boolean; operationUpdateState: boolean }>(
+      const privileges = await runtime.query<{ consultationDelete: boolean; eventDelete: boolean; presenceUpdate: boolean; rotationUpdate: boolean; operationDelete: boolean; operationUpdateOwner: boolean; operationUpdateState: boolean }>(
         `SELECT has_table_privilege(current_user, 'zzsh_iam.im_consultation', 'DELETE') AS "consultationDelete",
                 has_table_privilege(current_user, 'zzsh_iam.im_consultation_event', 'DELETE') AS "eventDelete",
                 has_column_privilege(current_user, 'zzsh_iam.im_support_presence', 'availability', 'UPDATE') AS "presenceUpdate",
-                has_column_privilege(current_user, 'zzsh_iam.im_support_presence', 'capacity', 'UPDATE') AS "capacityUpdate",
+                has_column_privilege(current_user, 'zzsh_iam.im_support_presence', 'last_order_assigned_at', 'UPDATE') AS "rotationUpdate",
                 has_table_privilege(current_user, 'zzsh_iam.im_consultation_scope_operation', 'DELETE') AS "operationDelete",
                 has_column_privilege(current_user, 'zzsh_iam.im_consultation_scope_operation', 'owner_account_id', 'UPDATE') AS "operationUpdateOwner",
                 has_column_privilege(current_user, 'zzsh_iam.im_consultation_scope_operation', 'state', 'UPDATE') AS "operationUpdateState"`,
       );
-      assert.deepEqual(privileges.rows[0], { consultationDelete: false, eventDelete: false, presenceUpdate: true, capacityUpdate: false, operationDelete: false, operationUpdateOwner: false, operationUpdateState: true });
+      assert.deepEqual(privileges.rows[0], { consultationDelete: false, eventDelete: false, presenceUpdate: true, rotationUpdate: true, operationDelete: false, operationUpdateOwner: false, operationUpdateState: true });
 
       await seedUser(runtime, userId, userSessionId, runId);
       await seedUser(runtime, boundaryUserId, boundaryUserSessionId, runId);
@@ -934,7 +718,9 @@ test(
       );
 
       await writePresence(options, targetAdmin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}target-offline-for-recovery-transfer`);
-      const recoveryTransfer = await createOrResumeUserConsultation(options, user, "COMPLAINT", "listing_recovery_transfer", `${prefix}recovery-transfer-create`);
+      // Recovery is independent of complaint routing: this user has no current
+      // SERVICE assignee to exclude. Accused-member exclusion has its own PG case.
+      const recoveryTransfer = await createOrResumeUserConsultation(options, userContext(identityPendingUserId, identityPendingUserSessionId), "COMPLAINT", "listing_recovery_transfer", `${prefix}recovery-transfer-create`);
       assert.equal(recoveryTransfer.consultation.assignedAdmin?.id, adminId);
       assert.equal(recoveryTransfer.consultation.messageScopeState, "READY");
       await writePresence(options, targetAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}target-refresh`);
@@ -945,7 +731,7 @@ test(
       );
       assert.equal(await reconcileMessageScopes(options), 0);
       assert.equal(provider.members.get("900007")?.has(managerAccountId), true);
-      assert.equal(provider.members.get("900007")?.has(userAccountId), true);
+      assert.equal(provider.members.get("900007")?.has(deriveYunxinAccountId(identityKey("USER", identityPendingUserId))), true);
       assert.equal(provider.members.get("900007")?.has(adminAccountId), true);
       assert.equal(provider.members.get("900007")?.has(targetAdminAccountId), false);
       provider.applyLateAdd("900007", targetAdminAccountId);
@@ -1078,7 +864,7 @@ test(
         [APP_ID, unknownReadOperation],
       )).rows[0];
       assert.deepEqual(unknownReadState, { state: "NEEDS_REVIEW", attemptCount: 2, failureClass: "PROVIDER_UNKNOWN", messageScopeState: "FAILED" });
-      assert.equal((await readOwnPresence(options, admin)).activeLoad, loadBeforeUnknownRead, "unknown read does not release capacity");
+      assert.equal((await readOwnPresence(options, admin)).activeLoad, loadBeforeUnknownRead, "unknown read does not release consultation load");
       assert.equal(provider.existenceReads, readsBeforeUnknownRead + 1, "unknown reconciliation query is attempted once");
       await removeCloseFixture(unknownReadOperation);
 
@@ -1107,7 +893,7 @@ test(
         consultationState: "ACTIVE",
         messageScopeState: "FAILED",
       }, "member-not-found is not Team absence");
-      assert.equal((await readOwnPresence(options, admin)).activeLoad, loadBeforeMemberNotFound, "member-not-found does not release capacity");
+      assert.equal((await readOwnPresence(options, admin)).activeLoad, loadBeforeMemberNotFound, "member-not-found does not release consultation load");
       assert.equal(provider.dismissed.length, dismissedBeforeMemberNotFound, "member-not-found does not dismiss again");
       assert.equal(provider.existenceReads, readsBeforeMemberNotFound + 1, "member-not-found is attempted once and remains unknown");
       await removeCloseFixture(memberNotFoundOperation);
@@ -1209,8 +995,8 @@ test(
 
       const primaryPresence = await readOwnPresence(options, admin);
       const targetPresence = await readOwnPresence(options, targetAdmin);
-      assert.equal(primaryPresence.activeLoad, recoveryCloseAdmin === admin ? 2 : 3, "only the reconciled close releases its reserved local capacity");
-      assert.equal(targetPresence.activeLoad, recoveryCloseAdmin === targetAdmin ? 2 : 3, "only the reconciled close releases its reserved local capacity");
+      assert.equal(primaryPresence.activeLoad, recoveryCloseAdmin === admin ? 2 : 3, "only the reconciled close releases its reserved consultation load");
+      assert.equal(targetPresence.activeLoad, recoveryCloseAdmin === targetAdmin ? 2 : 3, "only the reconciled close releases its reserved consultation load");
       assert.equal((await readOwnPresence(options, identityAdmin)).activeLoad, 1);
       const eventCount = await runtime.query<{ consultationId: string; count: string }>(
         `SELECT "consultation_id" AS "consultationId", count(*)::text AS count

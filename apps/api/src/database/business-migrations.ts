@@ -52,7 +52,7 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
-    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "active_load", "version", "updated_at") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
+    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
@@ -70,6 +70,7 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_order" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE zzsh_order.payment_confirmation, zzsh_order.im_order_group FROM ${runtimeUser};
+    GRANT UPDATE (provision_state,assigned_admin_id,assigned_at,version,wait_reason) ON zzsh_order.im_order_group TO ${runtimeUser};
     GRANT DELETE ON TABLE "zzsh_supply"."price_line", "zzsh_supply"."term_option" TO ${runtimeUser};
     GRANT DELETE ON TABLE zzsh_supply.favorite TO ${runtimeUser};
     REVOKE UPDATE ON TABLE zzsh_supply.favorite FROM ${runtimeUser};

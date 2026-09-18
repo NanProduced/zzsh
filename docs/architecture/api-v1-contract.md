@@ -162,6 +162,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | GET /api/v1/admin/orders(/+id) | 要求 `order.read` 动态权限 + 该游戏 `admin_supply_scope`（Boss 豁免 scope）；平台金额仅另有 `supply.quote.internal.read` 时投影 |
 
 - 状态为 `PENDING_PAYMENT`/`PAID`/`CANCELLED`；占用集合为待付+已付。触发器限制 INSERT 为待付、仅允许待付→取消/已付，快照与 hold_until 不可变。PAID 表示收款已接纳，不表示建群、交付或开租；DTO 的 paymentOpen/cancelOpen 均为 false，并返回 paidAt。状态过滤接受 PAID，未知状态不得默认显示可付款/可取消。
+- 已有订单查询在有履约意图时追加 `fulfillmentAssignment={state,waitingReason,assignedAt,teamReady}`；当前state为WAITING/ASSIGNED，waitingReason可为NO_ELIGIBLE_STAFF，teamReady固定false。本地分配不改变PAID或占用，不向无归属者开放订单信息；完整群入口尚未接入。
 - 金额四要素分开：租金（快照 resourceTotal）、押金（快照 tenantDeposit）、总应付（派生）。`depositPolicy=UNCONFIGURED` 一律拒绝 409 `DEPOSIT_UNCONFIGURED`；未配置不是免押金，权威零押金必须是显式配置值。新增稳定码 `OCCUPIED`/`RULE_CHANGED`/`VERSION_CHANGED`/`DEPOSIT_UNCONFIGURED`（均 409）。
 - 创建与重放分开授权：首次创建要求交易资格；命中幂等记录只复核请求人会话/活性/归属，不因号主停用、供给占用/下架、规则变化而重复执行创建条件，也不泄露他人幂等响应。读/取消要求会话+活性+归属，不要求交易资格。
 - 占用时间只认数据库时钟，`hold_until` 创建即冻结不可续期。到期不改变事实状态（DTO 派生 `expiredAwaitingCancel`、`paymentOpen=false`，文案“已过期，取消处理中”）；清扫器按 (hold_until,id) 升序、批上限逐单事务取消（CAS 同 id+status+hold_until），lock_timeout 跳过不占批预算使持续被锁的队首不饥饿后续，行级失败经 onResult 可观察；worker 由显式校验过的配置对象启动（无环境变量兜底），先于业务连接池结束而停止并等待在途批次。

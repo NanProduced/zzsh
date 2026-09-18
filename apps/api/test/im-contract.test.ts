@@ -11,19 +11,16 @@ const ready = {
   lastConnectedAt: "2026-09-15T10:00:00.000Z",
   now: "2026-09-15T10:00:30.000Z",
   staleAfterMs: 60_000,
-  activeLoad: 1,
-  capacity: 3,
   hasServiceScope: true,
 };
 
-test("routing requires a fresh connected identity, availability, scope and capacity", () => {
+test("routing requires a fresh connected identity, availability and scope", () => {
   assert.deepEqual(evaluateImRouting(ready), { eligible: true, blockers: [] });
   assert.deepEqual(evaluateImRouting({ ...ready, connection: "RECONNECTING" }), {
     eligible: false,
     blockers: ["IM_CONNECTION_UNAVAILABLE"],
   });
   assert.deepEqual(evaluateImRouting({ ...ready, now: "2026-09-15T10:02:00.000Z" }).blockers, ["IM_CONNECTION_STALE"]);
-  assert.deepEqual(evaluateImRouting({ ...ready, activeLoad: 3 }).blockers, ["CAPACITY_REACHED"]);
 });
 
 test("routing reports platform and business blockers independently", () => {

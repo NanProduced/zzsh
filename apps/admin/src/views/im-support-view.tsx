@@ -30,7 +30,7 @@ type Consultation = {
 };
 type SupportMessage = { id: string; from: "customer" | "agent" | "system"; text: string; time: string; self?: boolean; createTime?: number };
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
-type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; capacity: number; version: number };
+type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number };
 type QueueItem = { id: string; title: string; preview: string; age: string; state: "待接入" | "处理中" | "已结束" | "待核验"; unread: number; consultation?: Consultation };
 
 const PREVIEW_QUEUE: QueueItem[] = [
@@ -115,7 +115,7 @@ export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapsh
   const [notice, setNotice] = useState<string>();
   const [blockedConsultations, setBlockedConsultations] = useState<Record<string, boolean>>({});
   const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">(preview ? "idle" : "idle");
-  const [presence, setPresence] = useState<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, capacity: 3, version: 0 });
+  const [presence, setPresence] = useState<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
   const [busy, setBusy] = useState(false);
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
@@ -188,7 +188,7 @@ export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapsh
     setMessages({});
     setDrafts({});
     setSelectedId(null);
-    setPresence({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, capacity: 3, version: 0 });
+    setPresence({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
     presenceVersionRef.current = null;
     availabilityRef.current = "OFF_DUTY";
     setConnection("idle");

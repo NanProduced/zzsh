@@ -33,8 +33,7 @@ export type ImRoutingBlocker =
   | "NOT_ACCEPTING"
   | "IM_CONNECTION_UNAVAILABLE"
   | "IM_CONNECTION_STALE"
-  | "SERVICE_SCOPE_MISSING"
-  | "CAPACITY_REACHED";
+  | "SERVICE_SCOPE_MISSING";
 
 export type ImRoutingInput = {
   platformAccountState: ImPlatformAccountState;
@@ -44,8 +43,6 @@ export type ImRoutingInput = {
   lastConnectedAt: string | null;
   now: string;
   staleAfterMs: number;
-  activeLoad: number;
-  capacity: number;
   hasServiceScope: boolean;
 };
 
@@ -61,7 +58,7 @@ function parsedTime(value: string): number | null {
 
 /**
  * IM presence is only one input to dispatch. The platform still owns account,
- * availability, scope and workload decisions.
+ * availability and scope decisions. Workload is a statistic, never a gate.
  */
 export function evaluateImRouting(input: ImRoutingInput): ImRoutingDecision {
   const blockers: ImRoutingBlocker[] = [];
@@ -79,7 +76,6 @@ export function evaluateImRouting(input: ImRoutingInput): ImRoutingDecision {
   }
 
   if (!input.hasServiceScope) blockers.push("SERVICE_SCOPE_MISSING");
-  if (input.activeLoad >= input.capacity) blockers.push("CAPACITY_REACHED");
   return { eligible: blockers.length === 0, blockers };
 }
 

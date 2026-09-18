@@ -17,6 +17,7 @@ import { computeDeltaQuote } from "../src/supply/pricing";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHolds, type SweepResult } from "../src/order/order";
 import { runPaymentAcceptance } from "./order-payment-im-postgres.test";
+import { runDispatchAcceptance } from "./order-dispatch-postgres.test";
 
 // M4-A order reservation foundation: real PostgreSQL acceptance (V01–V21).
 // Deterministic barriers only; no sleeps to guess races.
@@ -1636,7 +1637,7 @@ test("M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
     assert.ok(Number(orderAudits.rows[0]?.count ?? "0") >= 8, "order writes must be audited");
     const paymentOwner = await signupUser("付款号主", "oim_owner");
     const paymentBuyer = await signupUser("付款买家", "oim_buyer");
-    if (RESOURCE_SET) await runPaymentAcceptance(t, {
+    const acceptance: Parameters<typeof runPaymentAcceptance>[1] = {
       pool: runtimePool, migrationPool, ownerPool: maintenanceDataPool, config: { ...resources.runtime, testOperationsEnabled: true },
       resourceSet: RESOURCE_SET,
       fixture: async (label, offset) => {
@@ -1652,7 +1653,11 @@ test("M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
       },
       api: (path, body, method) => request(base, path, body, paymentBuyer, USER_ORIGIN, method, orderKey()),
       clone: cloneOrderOnAccount,
-    });
+    };
+    if (RESOURCE_SET) {
+      await runPaymentAcceptance(t, acceptance);
+      await runDispatchAcceptance(t, acceptance);
+    }
   } finally {
     const cleanupErrors: unknown[] = [];
     probeWatched.clear();

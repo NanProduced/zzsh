@@ -2,7 +2,16 @@
 
 用户端通过全站共享客服容器进入在线客服或投诉咨询；管理员通过客服工作台处理受权队列。咨询与支付后的订单履约群是不同业务对象，当前不提供订单群或完整履约流程。
 
-订单付款接纳已具备隔离受控入口：成功事实、PAID与按服务端App绑定的唯一WAITING记录同事务提交，IM身份暂未就绪不影响付款事实；无负责人、accid或Team占位。WAITING仅为后续待匹配意图，尚无派单、建群或消费worker，也不开放普通HTTP付款成功入口。
+订单付款接纳具备隔离受控入口：成功事实、PAID与按服务端App绑定的唯一WAITING记录同事务提交，不开放普通HTTP付款成功入口。本地派单可将WAITING转为ASSIGNED并记录负责人、时刻和审计；ASSIGNED不是群READY，不创建Team/成员，也不开始租用或首响计时。买卖双方IM身份尚未就绪不影响本地付款/分配事实。
+
+## 本地派单
+
+- 客服需ACTIVE、未停用、同App的READY身份映射、手动AVAILABLE、CONNECTED且2分钟内心跳新鲜，当前有im.support.read/accept；订单另按游戏范围，Boss按既有范围规则豁免。无capacity列或负载门槛，active_load只保留既有咨询负载统计。
+- 订单/咨询分别按last_order_assigned_at、last_consultation_assigned_at最早优先，NULL先、管理员ID打平；成功分配同事务更新时间，presence连接version不变。投诉另需complaint权限，创建时记录用户当前服务咨询及受权关联对象的接待人排除集，claim/transfer沿用。
+- 付款发布、订单分配及咨询分配使用同App事务闸门；可派订单按付款接纳时间/订单ID先处理。单批未处理完时咨询保持等待，手动接入/转交提示重试；已先完成的咨询不追溯转走。没有合格订单客服的项保留WAITING/NO_ELIGIBLE_STAFF，不堵住其他可派业务。
+- 派单及咨询关闭/转交恢复在对象锁前有序锁定资格与presence；资格行/角色/范围锁忙使整轮延期，不跳到另一客服。供应商调用不占App事务闸门；未知结果仍按原租约/CAS隔离。
+- 本地调度仅通过AuthRuntimeOptions.supportDispatch显式传入appId/batchLimit/intervalMs开启，缺省关闭，无环境变量兜底。启动扫描、presence提交后唤醒与周期扫描共用有界消费者，防重叠，Nest关闭时先等在途再关池。主环境不会因合入自动启动。
+- 无Team的本地关闭仅将咨询置CLOSED，保留PENDING/FAILED的未建群事实，不虚报REVOKED；所有消息授权仍要求咨询ACTIVE。已建Team关闭沿原供应商核验流程。
 
 ## 身份与授权
 

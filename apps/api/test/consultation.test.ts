@@ -1,7 +1,58 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 
 import { MessageScopeRecoveryLifecycle, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, startMessageScopeRecovery, toView } from "../src/im/consultation";
+import { OrderDispatchLifecycle } from "../src/im/order-dispatch";
+
+for (const kind of ["onResult", "onFailure"] as const) {
+  test(`dispatcher isolates throwing ${kind}, settles stop and accepts a later wake`, () => {
+    const script = `
+      const assert=require('node:assert/strict');
+      const {OrderDispatchLifecycle}=require(${JSON.stringify(resolve(__dirname, "../src/im/order-dispatch.js"))});
+      (async()=>{
+        let calls=0, commits=0, observerCalls=0, oppositeCalls=0, reached;
+        const signal=()=>new Promise(r=>{reached=r});
+        let seen=signal();
+        const pool={connect:async()=>{calls++; ${kind === "onFailure" ? "throw Object.assign(new Error('database-secret'),{code:'55P03'});" : "return {query:async sql=>{if(sql==='COMMIT')commits++;return {rows:[]}},release(){}};"}}};
+        const worker=new OrderDispatchLifecycle();
+        const options={pool,appId:'observer-regression',batchLimit:1,intervalMs:100000,
+          ${kind === "onResult" ? "onFailure" : "onResult"}:()=>{oppositeCalls++},
+          ${kind}:()=>{observerCalls++;reached();if(observerCalls===1)throw new Error('observer-secret');}};
+        worker.start(options);await seen;await worker.beforeApplicationShutdown();
+        worker.wake();await new Promise(r=>setImmediate(r));assert.equal(calls,1);
+        seen=signal();worker.start(options);await seen;await worker.beforeApplicationShutdown();
+        await new Promise(r=>setImmediate(r));assert.equal(calls,2);assert.equal(oppositeCalls,0);
+        assert.equal(commits,${kind === "onResult" ? 2 : 0});
+      })().catch(e=>{console.error(e);process.exitCode=1});`;
+    const child = spawnSync(process.execPath, ["--unhandled-rejections=strict", "-e", script], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+    assert.equal(child.status, 0, child.stderr);
+    assert.match(child.stdout + child.stderr, /im.order.dispatch.observer_failed/);
+    assert.doesNotMatch(child.stdout + child.stderr, /observer-secret|database-secret/);
+  });
+}
+
+test("order dispatcher stays off by default and reports only sanitized failure codes", async () => {
+  const lifecycle = new OrderDispatchLifecycle();
+  let calls = 0;
+  let observed!: () => void;
+  const failed = new Promise<void>((resolve) => { observed = resolve; });
+  const failures: string[] = [];
+  lifecycle.wake();
+  await lifecycle.beforeApplicationShutdown();
+  assert.equal(calls, 0);
+  lifecycle.start({ appId: "unit-dispatch", batchLimit: 1, intervalMs: 100_000,
+    pool: { connect: async () => { calls++; throw Object.assign(new Error("sensitive connection detail"), { code: "55P03" }); } } as never,
+    onFailure: (code) => { failures.push(code); observed(); },
+  });
+  await failed;
+  await lifecycle.beforeApplicationShutdown();
+  lifecycle.wake();
+  assert.equal(calls, 1);
+  assert.deepEqual(failures, ["LOCK_BUSY"]);
+  assert.equal(JSON.stringify(failures).includes("sensitive"), false);
+});
 
 test("consultation input accepts only the supported type and safe subject reference", () => {
   assert.deepEqual(parseConsultationBody({ type: "SERVICE", subjectRef: "listing_01" }), { type: "SERVICE", subjectRef: "listing_01" });

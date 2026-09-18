@@ -469,6 +469,7 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
     sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
   } catch (error) {
     if (error instanceof SecurityApiError) sendError(response, error, requestId);
+    else if ((error as { code?: string })?.code === "55P03") sendUnavailable(response, requestId);
     else if (error instanceof ImIdentityUnavailableError) sendUnavailable(response, requestId);
     else if (error instanceof ImIdentityInvariantError) sendInternalError(response, requestId);
     else sendInternalError(response, requestId);
