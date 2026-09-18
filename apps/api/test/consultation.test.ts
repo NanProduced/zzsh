@@ -5,6 +5,43 @@ import { resolve } from "node:path";
 
 import { MessageScopeRecoveryLifecycle, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, startMessageScopeRecovery, toView } from "../src/im/consultation";
 import { OrderDispatchLifecycle } from "../src/im/order-dispatch";
+import { createImScopeLease, onLeaseConnection } from "../src/im/scope-lease";
+import { scanOrderTeams } from "../src/im/order-team";
+
+test("order Team scanning stops on a global database failure instead of trying every object", async () => {
+  const failure=Object.assign(new Error("private connection detail"),{code:"08006"});
+  let attempted=0;
+  const pool={query:async(sql:string)=>{
+    if(sql.includes("SELECT g.*,o.renter_user_id")){attempted++;throw failure;}
+    return {rows:sql.includes("SELECT g.order_id,op.id")?[{order_id:"a",id:null},{order_id:"b",id:null}]:[]};
+  }};
+  await assert.rejects(scanOrderTeams({pool,appId:"unavailable"} as never),error=>error===failure);
+  assert.equal(attempted,1);
+});
+
+test("shared lease renews on its borrowed connection but never inside the callback transaction", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let transaction = false, renewals = 0, releases = 0;
+  const connection = { query: async (sql: string) => {
+    if (sql === "BEGIN") transaction = true;
+    if (sql === "COMMIT" || sql === "ROLLBACK") transaction = false;
+    return { rows: [] };
+  }, release: () => { releases++; } };
+  const pool = { connect: async () => connection };
+  const lease = createImScopeLease(pool as never, "test-app", async (db) => {
+    assert.equal(db, connection); assert.equal(transaction, false); renewals++; return true;
+  }, () => new Error("lease lost"), 10);
+  try {
+    await lease.mutate("order:test", async (client) => {
+      const before = renewals;
+      await onLeaseConnection(client, async () => {
+        t.mock.timers.tick(30); await Promise.resolve(); assert.equal(renewals, before);
+      });
+      t.mock.timers.tick(10); await Promise.resolve(); assert.ok(renewals > before);
+    });
+    assert.equal(releases, 1);
+  } finally { await lease.stop(); t.mock.timers.reset(); }
+});
 
 for (const kind of ["onResult", "onFailure"] as const) {
   test(`dispatcher isolates throwing ${kind}, settles stop and accepts a later wake`, () => {

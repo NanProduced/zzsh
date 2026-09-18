@@ -1,3 +1,4 @@
+import { createImScopeLease, onLeaseConnection, lockTeamBinding, type ScopeLease } from "./scope-lease";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { Injectable, Logger, type BeforeApplicationShutdown } from "@nestjs/common";
@@ -23,6 +24,7 @@ import {
 import {
   YunxinApiError,
   YunxinTransportError,
+  supportMarkerMatches,
   type YunxinSupportScopeApi,
   type YunxinSupportTeamExistenceLookup,
   type YunxinSupportTeamLookup,
@@ -408,18 +410,6 @@ class ScopeOperationFailure extends Error {
 
 type ScopeRecoveryFailureObserver = (failureClass: ScopeFailureClass | "RECOVERY_UNEXPECTED") => void;
 
-type ScopeLease = {
-  assertValid(): Promise<void>;
-  mutate<T>(scope: string, action: () => Promise<T>): Promise<T>;
-  stop(): Promise<void>;
-};
-
-const SCOPE_LEASE_RENEW_MS = 5_000;
-
-function scopeRemoteLockKey(appId: string, scope: string): string {
-  return BigInt(`0x${createHash("sha256").update(`zzsh:im-scope:${appId}:${scope}`).digest("hex").slice(0, 15)}`).toString();
-}
-
 function recoveryFailureClass(error: unknown): ScopeFailureClass | "RECOVERY_UNEXPECTED" {
   if (error instanceof ScopeOperationFailure) return error.failureClass;
   if (error instanceof YunxinApiError) return error.retryable ? "PROVIDER_UNKNOWN" : "REQUIRES_MANUAL_REVIEW";
@@ -437,102 +427,14 @@ function reportRecoveryFailure(observer: ScopeRecoveryFailureObserver | undefine
 }
 
 function createScopeLease(options: ConsultationRouteOptions, claim: ScopeOperationClaim): ScopeLease {
-  let stopped = false;
-  let lost: ScopeOperationFailure | undefined;
-  let heartbeat: Promise<void> | undefined;
-  let timer: NodeJS.Timeout | undefined;
-
-  const markLost = (error?: unknown) => {
-    if (lost) return;
-    lost = error instanceof ScopeOperationFailure
-      ? error
-      : new ScopeOperationFailure("STALE_OPERATION", "scope lease is no longer valid", true);
-  };
-
-  const renew = async (): Promise<void> => {
-    if (stopped || lost) return;
-    try {
-      const result = await options.pool.query(
-        `UPDATE "zzsh_iam"."im_consultation_scope_operation"
-            SET "lease_until" = clock_timestamp() + ($3::bigint * interval '1 millisecond'),
-                "updated_at" = clock_timestamp()
-          WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'RUNNING'
-            AND "lease_token_hash" = $4 AND "lease_until" > clock_timestamp()
-          RETURNING "id"`,
-        [options.appId, claim.id, SCOPE_LEASE_MS, scopeLeaseHash(claim.leaseToken)],
-      );
-      if (result.rowCount !== 1) markLost();
-    } catch (error) {
-      markLost(error);
-    }
-  };
-
-  const scheduleRenew = () => {
-    if (stopped || heartbeat) return;
-    const current = renew();
-    let tracked: Promise<void>;
-    tracked = current.finally(() => {
-      if (heartbeat === tracked) heartbeat = undefined;
-    });
-    heartbeat = tracked;
-  };
-
-  timer = setInterval(scheduleRenew, SCOPE_LEASE_RENEW_MS);
-  timer.unref?.();
-
-  const assertValid = async (): Promise<void> => {
-    if (lost) throw lost;
-    const currentHeartbeat = heartbeat;
-    if (currentHeartbeat) await currentHeartbeat;
-    if (lost) throw lost;
-    await renew();
-    if (lost) throw lost;
-  };
-
-  return {
-    assertValid,
-    async mutate<T>(scope: string, action: () => Promise<T>): Promise<T> {
-      await assertValid();
-      const lockClient = await options.pool.connect();
-      const lockKey = scopeRemoteLockKey(options.appId, scope);
-      let result: T | undefined;
-      let failure: unknown;
-      let completed = false;
-      try {
-        await lockClient.query("SELECT pg_advisory_lock($1::bigint)", [lockKey]);
-        await assertValid();
-        try {
-          result = await action();
-          completed = true;
-        } catch (error) {
-          failure = error;
-        }
-      } catch (error) {
-        failure = error;
-      }
-      let unlockFailure: unknown;
-      try {
-        await lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [lockKey]);
-      } catch (error) {
-        unlockFailure = error;
-      } finally {
-        lockClient.release(unlockFailure instanceof Error ? unlockFailure : undefined);
-      }
-      if (unlockFailure) throw new ScopeOperationFailure("DB_WRITEBACK_UNKNOWN", "remote mutation lock release is unknown", true);
-      await assertValid();
-      if (!completed) throw failure;
-      return result as T;
-    },
-    async stop(): Promise<void> {
-      if (stopped) return;
-      stopped = true;
-      if (timer) clearInterval(timer);
-      const currentHeartbeat = heartbeat;
-      if (currentHeartbeat) await currentHeartbeat;
-    },
-  };
+  return createImScopeLease(options.pool, options.appId, async (db) => {
+    const result = await db.query(`UPDATE zzsh_iam.im_consultation_scope_operation
+      SET lease_until=clock_timestamp()+($3::bigint*interval '1 millisecond'),updated_at=clock_timestamp()
+      WHERE app_id=$1 AND id=$2 AND state='RUNNING' AND lease_token_hash=$4 AND lease_until>clock_timestamp() RETURNING id`,
+      [options.appId,claim.id,SCOPE_LEASE_MS,scopeLeaseHash(claim.leaseToken)]);
+    return result.rowCount===1;
+  }, () => new ScopeOperationFailure("STALE_OPERATION", "scope lease is no longer valid", true));
 }
-
 function scopeOperationId(): string {
   return `im_scope_op_${randomBytes(16).toString("hex")}`;
 }
@@ -808,6 +710,8 @@ async function quarantineUncertainScopeOperations(options: ConsultationRouteOpti
 async function attachCreatedTeam(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string): Promise<boolean> {
   return withTransaction(options.pool, async (client) => {
     await lockDispatchGate(client, options.appId);
+    await lockTeamBinding(client, options.appId, teamId);
+    if ((await client.query(`SELECT 1 FROM zzsh_order.im_order_group WHERE app_id=$1 AND team_id=$2`, [options.appId,teamId])).rowCount) throw new ScopeOperationFailure("REMOTE_MISMATCH", "Team is already bound to an order", true);
     const row = await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
     if (operation.state !== "RUNNING" || operation.leaseTokenHash !== scopeLeaseHash(claim.leaseToken)) return false;
@@ -865,8 +769,8 @@ async function attachCreatedTeam(options: ConsultationRouteOptions, claim: Scope
   });
 }
 
-async function rememberCreatedTeamCandidate(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string): Promise<void> {
-  await withTransaction(options.pool, async (client) => {
+async function rememberCreatedTeamCandidate(options: ConsultationRouteOptions, claim: ScopeOperationClaim, teamId: string, connection: PoolClient): Promise<void> {
+  await onLeaseConnection(connection, async (client) => {
     await lockDispatchGate(client, options.appId);
     await readConsultation(client, options.appId, claim.consultationId, true);
     const operation = await readScopeOperation(client, options.appId, claim.id, true);
@@ -928,11 +832,14 @@ async function convergeCreateTeam(options: ConsultationRouteOptions, claim: Scop
       () => options.provider!.addSupportTeamMember(current.teamId, claim.ownerAccountId, accountId));
   }
   if (!exactMembers(current, required)) throw new ScopeOperationFailure("REMOTE_MISMATCH", "support team members do not match consultation", true);
+  if (supportMarkerMatches(current.serverExtension,options.appId,claim.consultationId)!==true) throw new ScopeOperationFailure("REMOTE_MISMATCH", "consultation Team marker is not confirmed", true);
   if (!await attachCreatedTeam(options, claim, current.teamId)) throw new ScopeOperationFailure("STALE_OPERATION", "scope operation lost its consultation version", true);
 }
 
 async function reconcileCreate(options: ConsultationRouteOptions, claim: ScopeOperationClaim, lease: ScopeLease): Promise<void> {
-  const owner = await lease.mutate(`consultation:${claim.consultationId}`, () => ensureSupportManager(options));
+  await lease.assertValid();
+  const owner = await ensureSupportManager(options);
+  await lease.assertValid();
   const targetAdminAccountId = claim.targetAdminAccountId;
   if (!owner) throw new ScopeOperationFailure("IDENTITY_PENDING", "IM support manager identity is pending");
   if (owner !== claim.ownerAccountId || !targetAdminAccountId) throw new ScopeOperationFailure("REMOTE_MISMATCH", "scope create identity is inconsistent", true);
@@ -949,9 +856,9 @@ async function reconcileCreate(options: ConsultationRouteOptions, claim: ScopeOp
     if (lookup.status === "FOUND") team = lookup.team;
   }
   if (!team) {
-    team = await lease.mutate(`consultation:${claim.consultationId}`, async () => {
+    team = await lease.mutate(`consultation:${claim.consultationId}`, async (connection) => {
       const created = await options.provider!.createSupportTeam({ appId: options.appId, consultationId: claim.consultationId, ownerAccountId: owner, memberAccountIds: [claim.userAccountId, targetAdminAccountId] });
-      await rememberCreatedTeamCandidate(options, claim, created.teamId);
+      await rememberCreatedTeamCandidate(options, claim, created.teamId, connection);
       return readAndValidateTeam(options, created.teamId, owner);
     });
   }
@@ -1006,7 +913,9 @@ async function completeTransferRecovery(options: ConsultationRouteOptions, claim
 }
 
 async function reconcileTransfer(options: ConsultationRouteOptions, claim: ScopeOperationClaim, lease: ScopeLease): Promise<void> {
-  const owner = await lease.mutate(`consultation:${claim.consultationId}`, () => ensureSupportManager(options));
+  await lease.assertValid();
+  const owner = await ensureSupportManager(options);
+  await lease.assertValid();
   if (!owner) throw new ScopeOperationFailure("IDENTITY_PENDING", "IM support manager identity is pending");
   if (owner !== claim.ownerAccountId || !claim.providerTeamId || !claim.previousAdminAccountId || !claim.targetAdminAccountId || !claim.previousAdminId || !claim.targetAdminId) {
     throw new ScopeOperationFailure("REMOTE_MISMATCH", "transfer identity is inconsistent", true);
@@ -1113,7 +1022,9 @@ async function readSupportTeamExistenceWithLease(
 }
 
 async function reconcileClose(options: ConsultationRouteOptions, claim: ScopeOperationClaim, lease: ScopeLease): Promise<void> {
-  const owner = await lease.mutate(`consultation:${claim.consultationId}`, () => ensureSupportManager(options));
+  await lease.assertValid();
+  const owner = await ensureSupportManager(options);
+  await lease.assertValid();
   if (!owner) throw new ScopeOperationFailure("IDENTITY_PENDING", "IM support manager identity is pending");
   if (owner !== claim.ownerAccountId || !claim.providerTeamId) throw new ScopeOperationFailure("REMOTE_MISMATCH", "close identity is inconsistent", true);
   const team = await readTeamWithLease(options, lease, claim.providerTeamId);

@@ -1,4 +1,5 @@
 import type { INestApplication } from "@nestjs/common";
+import { readOrderTeamAccess } from "../im/order-team-access";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
@@ -172,6 +173,13 @@ export async function handleOrderUserRoute(
       return;
     }
 
+    const teamMatch = /^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
+    if(method==="GET"&&teamMatch){
+      const context=await readUserContext(request,options);
+      const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");
+      const data=await withTransaction(options.pool,c=>readOrderTeamAccess(c,{...context,realm:"user"},decodeId(teamMatch[1]!),operation));
+      sendJson(response,200,data,requestId);return;
+    }
     const detailMatch = /^\/([A-Za-z0-9._:-]+)$/.exec(path);
     if (method === "GET" && detailMatch) {
       const context = await readUserContext(request, options);
@@ -203,6 +211,8 @@ export async function handleOrderAdminRoute(
     const context = await readAdminContext(request, options);
     await withTransaction(options.pool, async (client) => {
       await assertAdminContextInTransaction(client, context);
+      const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
+      if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation),requestId);return;}
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.orderRead);
       const admin = {

@@ -17,6 +17,9 @@ test('order BFF list/detail forward only user cookies and preserve query',async(
     const d=await GET(input(['order_abc'],{}),ctx(['order_abc']));
     assert.equal(d.status,200);
     assert.equal(seen[1].url,'http://127.0.0.1:3102/api/bff/user/orders/order_abc');
+    const im=await GET(input(['order_abc','im'],{},'?operation=send'),ctx(['order_abc','im']));
+    assert.equal(im.status,200);
+    assert.equal(seen[2].url,'http://127.0.0.1:3102/api/bff/user/orders/order_abc/im?operation=send');
     assert.equal(r.headers.get('cache-control'),'no-store');
   }finally{globalThis.fetch=old;}
 });
@@ -25,6 +28,7 @@ test('order BFF rejects unknown paths, wrong method, cross-origin writes and aut
   try{
     for(const p of [['admin','orders'],['order_abc','pay'],['order_abc','cancel','extra'],['a','..','b']])assert.equal((await GET(input(p),ctx(p))).status,404);
     assert.equal((await POST(input(['order_abc','cancel'],{method:'PUT'}),ctx(['order_abc','cancel']))).status,404);
+    assert.equal((await POST(input(['order_abc','im'],{method:'POST'}),ctx(['order_abc','im']))).status,404);
     assert.equal((await POST(input([],{method:'POST',headers:{origin:'https://other.invalid','content-type':'application/json'},body:'{}'}),ctx(undefined))).status,403);
     assert.equal((await GET(input([],{headers:{authorization:'Bearer forbidden'}}),ctx(undefined))).status,403);
     assert.equal(calls,0);

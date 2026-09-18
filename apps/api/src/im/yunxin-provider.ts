@@ -91,6 +91,24 @@ export type YunxinSupportTeamCreateInput = {
   memberAccountIds: string[];
 };
 
+export const ORDER_TEAM_CONFIGURATION = Object.freeze({ join_mode: 2, agree_mode: 1, invite_mode: 0,
+  update_team_info_mode: 0, update_extension_mode: 0, chat_banned_mode: 0 });
+export type YunxinOrderTeamInput = { appId: string; orderId: string; name: string; ownerAccountId: string; memberAccountIds: string[]; membersLimit: number };
+export type YunxinOrderTeamState = { teamId: string; ownerAccountId: string; serverExtension: string | null;
+  teamType: number; name: string; membersLimit: number; configuration: Record<keyof typeof ORDER_TEAM_CONFIGURATION, number>;
+  members: { accountId: string; role: number; chatBanned: boolean | null }[] };
+export type YunxinOrderTeamApi = {
+  createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }>;
+  readOrderTeam(teamId: string): Promise<YunxinOrderTeamState | null>;
+};
+export function validateOrderTeamInput(input: YunxinOrderTeamInput): void {
+  if (![input.appId,input.orderId].every((id) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id))
+    || !input.name || [...input.name].length>64 || CONTROL_PATTERN.test(input.name)
+    || !Number.isInteger(input.membersLimit) || input.membersLimit<4 || input.membersLimit>5000
+    || input.memberAccountIds.length!==3 || new Set(input.memberAccountIds).size!==3 || input.memberAccountIds.includes(input.ownerAccountId)) throw new Error("Invalid order Team input");
+  [input.ownerAccountId,...input.memberAccountIds].forEach(normalizeAccountId);
+}
+
 export type YunxinSupportTeamState = {
   teamId: string;
   ownerAccountId: string;
@@ -359,7 +377,7 @@ function supportTeamState(value: unknown): YunxinSupportTeamState {
   return { ...summary, memberAccountIds };
 }
 
-function supportMarkerMatches(extension: string | null, appId: string, consultationId: string): boolean | null {
+export function supportMarkerMatches(extension: string | null, appId: string, consultationId: string): boolean | null {
   if (extension === null) return null;
   const marker = parseMaybeJson(extension);
   if (!isRecord(marker)) return false;
@@ -649,6 +667,62 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const data = responseData(response);
     const failed = field(data, "failed_list");
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("add-support-team-member", null, false);
+  }
+
+  async createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }> {
+    validateOrderTeamInput(input);
+    const data = responseData(await this.request("create-order-team", "POST", "/im/v2.1/teams", {
+      owner_account_id: input.ownerAccountId, team_type: 1, name: input.name, members_limit: input.membersLimit,
+      server_extension: JSON.stringify({ schema: "zzsh.im-order.v1", appId: input.appId, orderId: input.orderId }),
+      invite_account_ids: input.memberAccountIds, invite_msg: "洲洲商行订单履约邀请", configuration: ORDER_TEAM_CONFIGURATION,
+    }, "", "v2"));
+    if (!isRecord(data.team_info)) throw new YunxinApiError("create-order-team", null, false);
+    const teamId = teamIdFromUnknown(data.team_info.team_id);
+    if (!teamId) throw new YunxinApiError("create-order-team", null, false);
+    // A syntactically valid ID is only a candidate; keep it even for partial or
+    // malformed ownership results so the caller cannot blindly create again.
+    return { teamId, partial: (data.failed_list!==undefined&&(!Array.isArray(data.failed_list)||data.failed_list.length>0)) || data.team_info.owner_account_id!==input.ownerAccountId };
+  }
+
+  async readOrderTeam(id: string): Promise<YunxinOrderTeamState | null> {
+    const teamId=normalizeTeamId(id);
+    let data: JsonRecord;
+    try { data=responseData(await this.request("read-order-team","GET",`/im/v2.1/teams/${teamId}?team_type=1`,undefined,"","v2")); }
+    catch(error) {
+      if(error instanceof YunxinApiError && error.httpStatus===200 && error.providerCode===108404) return null;
+      throw error;
+    }
+    const info=data.team_info;
+    if(!isRecord(info) || !isRecord(info.configuration)) throw new YunxinApiError("read-order-team",null,false);
+    const summary=teamSummary(info);
+    const teamType=asNumber(info.team_type), membersLimit=asNumber(info.members_limit), count=asNumber(info.member_count);
+    if(summary.teamId!==teamId || teamType===undefined || membersLimit===undefined || count===undefined
+      || !Number.isInteger(count) || count<1 || count>5000 || typeof info.name!=="string") throw new YunxinApiError("read-order-team",null,false);
+    const configuration={} as YunxinOrderTeamState["configuration"];
+    for(const key of Object.keys(ORDER_TEAM_CONFIGURATION) as (keyof typeof ORDER_TEAM_CONFIGURATION)[]) {
+      const value=asNumber(info.configuration[key]); if(value===undefined || !Number.isInteger(value)) throw new YunxinApiError("read-order-team",null,false);
+      configuration[key]=value;
+    }
+    const members: YunxinOrderTeamState["members"]=[];
+    const tokens=new Set<string>(); let token="";
+    for(let page=0;page<50;page++) {
+      const query=new URLSearchParams({team_type:"1",member_type:"0",chat_banned_type:"0",limit:"100"});
+      if(token)query.set("page_token",token);
+      const batch=responseData(await this.request("read-order-team-members","GET",`/im/v2.1/teams/${teamId}/actions/list_members?${query}`,undefined,"","v2"));
+      if(!Array.isArray(batch.items)||typeof batch.has_more!=="boolean")throw new YunxinApiError("read-order-team-members",null,false);
+      for(const item of batch.items) {
+        if(!isRecord(item)||teamIdFromUnknown(item.team_id)!==teamId||typeof item.account_id!=="string"||!Number.isInteger(item.member_role))throw new YunxinApiError("read-order-team-members",null,false);
+        members.push({accountId:normalizeAccountId(item.account_id),role:item.member_role as number,chatBanned:asBoolean(item.chat_banned)??null});
+      }
+      if(new Set(members.map(m=>m.accountId)).size!==members.length||members.length>count)throw new YunxinApiError("read-order-team-members",null,false);
+      if(!batch.has_more) {
+        if(members.length!==count)throw new YunxinApiError("read-order-team-members",null,false);
+        return {...summary,teamType,name:info.name,membersLimit,configuration,members};
+      }
+      if(typeof batch.next_token!=="string"||!batch.next_token||tokens.has(batch.next_token))throw new YunxinApiError("read-order-team-members",null,false);
+      token=batch.next_token;tokens.add(token);
+    }
+    throw new YunxinApiError("read-order-team-members",null,false);
   }
 
   async removeSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void> {

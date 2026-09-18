@@ -71,6 +71,10 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_order" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE zzsh_order.payment_confirmation, zzsh_order.im_order_group FROM ${runtimeUser};
     GRANT UPDATE (provision_state,assigned_admin_id,assigned_at,version,wait_reason) ON zzsh_order.im_order_group TO ${runtimeUser};
+    GRANT UPDATE (team_state,system_identity_id,team_name,members_limit,team_id,team_ready_at,team_failure,team_retry_at) ON zzsh_order.im_order_group TO ${runtimeUser};
+    REVOKE UPDATE ON zzsh_order.im_order_member,zzsh_order.im_order_operation FROM ${runtimeUser};
+    GRANT UPDATE (state,joined_at) ON zzsh_order.im_order_member TO ${runtimeUser};
+    GRANT UPDATE (state,version,attempt_count,next_retry_at,lease_until,lease_token_hash,sent_at,candidate_team_id,failure_class,updated_at) ON zzsh_order.im_order_operation TO ${runtimeUser};
     GRANT DELETE ON TABLE "zzsh_supply"."price_line", "zzsh_supply"."term_option" TO ${runtimeUser};
     GRANT DELETE ON TABLE zzsh_supply.favorite TO ${runtimeUser};
     REVOKE UPDATE ON TABLE zzsh_supply.favorite FROM ${runtimeUser};

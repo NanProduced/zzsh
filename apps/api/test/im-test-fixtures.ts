@@ -4,7 +4,7 @@ import type { AdminContext } from "../src/auth/auth-security";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } from "../src/im/identity-lifecycle";
 import { YunxinTransportError, type YunxinSupportScopeApi, type YunxinSupportTeamCreateInput, type YunxinSupportTeamExistenceLookup, type YunxinSupportTeamLookup, type YunxinSupportTeamState } from "../src/im/yunxin-provider";
 export class FakeSupportScopeProvider implements YunxinSupportScopeApi {
-  private nextTeamId = 900001;
+  constructor(private nextTeamId = 900001) {}
   readonly created: YunxinSupportTeamCreateInput[] = [];
   readonly dismissed: string[] = [];
   readonly members = new Map<string, Set<string>>();

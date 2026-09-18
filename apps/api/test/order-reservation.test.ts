@@ -18,6 +18,7 @@ import { computeContentHash, normalizeContentPayload } from "../src/supply/conte
 import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHolds, type SweepResult } from "../src/order/order";
 import { runPaymentAcceptance } from "./order-payment-im-postgres.test";
 import { runDispatchAcceptance } from "./order-dispatch-postgres.test";
+import { runOrderTeamAcceptance } from "./order-team-postgres.test";
 
 // M4-A order reservation foundation: real PostgreSQL acceptance (V01–V21).
 // Deterministic barriers only; no sleeps to guess races.
@@ -1657,6 +1658,7 @@ test("M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
     if (RESOURCE_SET) {
       await runPaymentAcceptance(t, acceptance);
       await runDispatchAcceptance(t, acceptance);
+      await runOrderTeamAcceptance(t, acceptance);
     }
   } finally {
     const cleanupErrors: unknown[] = [];

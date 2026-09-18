@@ -46,6 +46,7 @@ export type OrderRow = {
   dispatchState: "WAITING" | "ASSIGNED" | null;
   dispatchWaitReason: string | null;
   assignedAt: string | null;
+  teamState: string | null;
   cancelReason: "USER" | "TIMEOUT" | null;
   cancelledAt: string | null;
   createdAt: string;
@@ -64,6 +65,7 @@ const ORDER_FIELDS = `
   to_char(o.hold_until AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "holdUntil",
   to_char(o.paid_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "paidAt",
   g.provision_state AS "dispatchState", g.wait_reason AS "dispatchWaitReason",
+  g.team_state AS "teamState",
   to_char(g.assigned_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "assignedAt",
   o.cancel_reason AS "cancelReason",
   CASE WHEN o.cancelled_at IS NULL THEN NULL ELSE to_char(o.cancelled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "cancelledAt",
@@ -134,7 +136,7 @@ export function projectOrder(
     cancelOpen: row.status === ORDER_STATUS.PENDING_PAYMENT,
     ...(row.status === ORDER_STATUS.PAID ? { paidAt: row.paidAt } : {}),
     ...(row.dispatchState ? { fulfillmentAssignment: { state: row.dispatchState, waitingReason: row.dispatchWaitReason,
-      assignedAt: row.assignedAt, teamReady: false } } : {}),
+      assignedAt: row.assignedAt, teamReady: row.teamState === "READY", teamState: row.teamState } } : {}),
     ...(row.status === ORDER_STATUS.CANCELLED
       ? { cancelReason: row.cancelReason, cancelledAt: row.cancelledAt }
       : {}),

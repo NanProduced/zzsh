@@ -80,7 +80,7 @@ async function ensureDatabase(maintenance: Pool): Promise<void> {
   assert.equal(row.marker, DATABASE_MARKER);
 }
 
-async function ensureRole(maintenance: Pool, roleName: string, password: string, marker: string): Promise<void> {
+async function ensureRole(maintenance: Pool, roleName: string, password: string, marker: string, validateOnly = false): Promise<void> {
   const result = await maintenance.query<{
     canLogin: boolean;
     isSuperuser: boolean;
@@ -104,6 +104,7 @@ async function ensureRole(maintenance: Pool, roleName: string, password: string,
     [roleName],
   );
   const current = result.rows[0];
+  if (validateOnly) assert.ok(current, "registered role is missing");
   if (!current) {
     await maintenance.query(
       `CREATE ROLE ${identifier(roleName)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD ${literal(password)}`,
@@ -124,7 +125,7 @@ async function ensureRole(maintenance: Pool, roleName: string, password: string,
     memberOfRole: false,
     grantedToRole: false,
   });
-  await maintenance.query(`ALTER ROLE ${identifier(roleName)} PASSWORD ${literal(password)}`);
+  if (!validateOnly) await maintenance.query(`ALTER ROLE ${identifier(roleName)} PASSWORD ${literal(password)}`);
 }
 
 async function acquireGuard(maintenance: Pool): Promise<PoolClient> {
@@ -158,7 +159,11 @@ async function releaseGuard(guard: PoolClient | undefined): Promise<void> {
 async function prepareResource(maintenance: Pool, migrationPassword: string, runtimePassword: string): Promise<PoolClient> {
   const guard = await acquireGuard(maintenance);
   try {
+    assert.equal((await maintenance.query(`SELECT count(*)::int AS n FROM pg_database WHERE datname=$1`, [DATABASE])).rows[0].n, 1, "registered database is missing");
     await ensureDatabase(maintenance);
+    await ensureRole(maintenance, MIGRATION_USER, migrationPassword, `${DATABASE_MARKER}:${DATABASE}:migration`, true);
+    await ensureRole(maintenance, RUNTIME_USER, runtimePassword, `${DATABASE_MARKER}:${DATABASE}:runtime`, true);
+    assert.equal((await maintenance.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1`, [DATABASE])).rows[0].n, 0, "registered database is in use");
     await ensureRole(maintenance, MIGRATION_USER, migrationPassword, `${DATABASE_MARKER}:${DATABASE}:migration`);
     await ensureRole(maintenance, RUNTIME_USER, runtimePassword, `${DATABASE_MARKER}:${DATABASE}:runtime`);
     await maintenance.query(`GRANT CONNECT ON DATABASE ${identifier(DATABASE)} TO ${identifier(MIGRATION_USER)}, ${identifier(RUNTIME_USER)}`);

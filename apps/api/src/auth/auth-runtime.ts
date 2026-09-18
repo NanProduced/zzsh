@@ -1,4 +1,6 @@
 import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-dispatch";
+import { OrderTeamLifecycle } from "../im/order-team";
+import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import type { INestApplication } from "@nestjs/common";
@@ -48,6 +50,7 @@ export type AuthRuntimeCapabilities = {
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
   supportDispatch?: Omit<OrderDispatchOptions, "pool">;
+  orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number };
   pool: Pool;
   yunxin?: { appId: string; appKey: string; appSecret: string };
   /** Test-only local provider seam; production construction must leave this unset. */
@@ -925,7 +928,13 @@ export async function mountAuthHandlers(
   });
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
-  if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool });
+  if (options.orderTeams) {
+    const provider=yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
+    if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");
+    app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,membersLimit:options.orderTeams.membersLimit},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
+  }
+  if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
+    onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });
 }
 
 function mountRealm(
