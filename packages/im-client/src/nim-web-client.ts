@@ -23,11 +23,12 @@ export type NimMessageLike = {
 
 export type NimWebClientLike = {
   readonly accountId: string;
+  readonly transport?: "nim" | "local-fake";
   getConnectionState(): NimWebConnectionState;
   onConnectionStateChange(listener: (state: NimWebConnectionState) => void): () => void;
   onMessages(listener: (messages: NimMessageLike[]) => void): () => void;
-  getMessageHistory(conversationId: string, limit?: number): Promise<NimMessageLike[]>;
-  sendText(conversationId: string, text: string): Promise<NimMessageLike>;
+  getMessageHistory(conversationId: string, limit?: number, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]>;
+  sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
 };
 
 type NimMessageServiceLike = {
@@ -112,6 +113,7 @@ export function resolveNimSdkModule(module: { default?: unknown }): NimSdkLike |
 }
 
 export class NimWebClient implements NimWebClientLike {
+  readonly transport = "nim" as const;
   readonly accountId: string;
   readonly nim: NimInstanceLike;
   private readonly context: ImClientContext;
@@ -139,13 +141,13 @@ export class NimWebClient implements NimWebClientLike {
   onMessages(listener: (messages: NimMessageLike[]) => void): () => void { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
   conversationIdForPeer(peerAccountId: string): string { const peer = requireNonBlank(peerAccountId, "NIM peer account ID"); if (!this.nim.V2NIMConversationIdUtil) throw new Error("NIM conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.p2pConversationId(peer); }
   conversationIdForTeam(teamId: string): string { const id = requireNonBlank(teamId, "NIM team ID"); if (!this.nim.V2NIMConversationIdUtil?.teamConversationId) throw new Error("NIM team conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.teamConversationId(id); }
-  async getMessageHistory(conversationId: string, limit = 50): Promise<NimMessageLike[]> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("NIM history limit must be between 1 and 100"); if (!this.messageService?.getMessageList) throw new Error("NIM message history is unavailable"); await this.authorizeMessage(id, "read"); const messages = await this.messageService.getMessageList({ conversationId: id, limit }); this.assertCurrent(); return Array.isArray(messages) ? messages : []; }
-  async sendText(conversationId: string, text: string): Promise<NimMessageLike> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); const body = requireNonBlank(text, "NIM message text"); if (body.length > 4_000) throw new TypeError("NIM message text must be at most 4000 characters"); if (!this.messageService || !this.nim.V2NIMMessageCreator) throw new Error("NIM message sending is unavailable"); await this.authorizeMessage(id, "send"); const result = await this.messageService.sendMessage(this.nim.V2NIMMessageCreator.createTextMessage(body), id); this.assertCurrent(); if (!result?.message || typeof result.message !== "object") throw new Error("NIM message response is invalid"); return result.message; }
+  async getMessageHistory(conversationId: string, limit = 50, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("NIM history limit must be between 1 and 100"); if (!this.messageService?.getMessageList) throw new Error("NIM message history is unavailable"); await this.authorizeMessage(id, "read", authorize); const messages = await this.messageService.getMessageList({ conversationId: id, limit, ...(before ? { anchorMessage: before } : {}) }); this.assertCurrent(); return Array.isArray(messages) ? messages : []; }
+  async sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); const body = requireNonBlank(text, "NIM message text"); if (body.length > 4_000) throw new TypeError("NIM message text must be at most 4000 characters"); if (!this.messageService || !this.nim.V2NIMMessageCreator) throw new Error("NIM message sending is unavailable"); await this.authorizeMessage(id, "send", authorize); const result = await this.messageService.sendMessage(this.nim.V2NIMMessageCreator.createTextMessage(body), id); this.assertCurrent(); if (!result?.message || typeof result.message !== "object") throw new Error("NIM message response is invalid"); return result.message; }
   async login(options: NimWebClientOptions): Promise<void> { this.assertCurrent(); const loginOptions: Record<string, unknown> = { authType: options.tokenProvider ? 1 : 0, forceMode: options.forceMode ?? false }; if (options.retryCount !== undefined) loginOptions.retryCount = options.retryCount; if (options.timeout !== undefined) loginOptions.timeout = options.timeout; if (options.tokenProvider) loginOptions.tokenProvider = async () => { this.assertCurrent(); const token = await options.tokenProvider?.(this.accountId); this.assertCurrent(); return requireNonBlank(token ?? "", "NIM token provider result"); }; this.setState("CONNECTING"); await this.nim.V2NIMLoginService.login(this.accountId, options.token ?? "", loginOptions); this.assertCurrent(); this.loggedIn = true; this.setState(mapConnectStatus(this.getSdkConnectStatus()) ?? "CONNECTED"); }
   async logout(): Promise<void> { if (!this.loggedIn || this.disposed) return; await this.nim.V2NIMLoginService.logout(); this.loggedIn = false; this.setState("DISCONNECTED"); }
   async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; if (this.messageService && this.messageEventHandler) { try { this.messageService.off("onReceiveMessages", this.messageEventHandler); } catch { /* cleanup continues */ } } this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
   private assertCurrent(): void { if (this.disposed) throw new Error("NIM client is disposed"); if (!this.context.isCurrent()) throw new ImLifecycleSupersededError(); }
-  private async authorizeMessage(conversationId: string, operation: "read" | "send"): Promise<void> { this.assertCurrent(); if (!this.messageAuthorization) throw localTransportError("NIM message authorization is unavailable", 403); await this.messageAuthorization({ conversationId, operation }); this.assertCurrent(); }
+  private async authorizeMessage(conversationId: string, operation: "read" | "send", override?: NimMessageAuthorization): Promise<void> { this.assertCurrent(); const authorize=typeof override==="function"?override:this.messageAuthorization; if (!authorize) throw localTransportError("NIM message authorization is unavailable", 403); await authorize({ conversationId, operation }); this.assertCurrent(); }
   private getSdkConnectStatus(): unknown { return (this.nim.V2NIMLoginService as NimLoginServiceLike & { getConnectStatus?: () => unknown }).getConnectStatus?.(); }
   private setState(next: NimWebConnectionState): void { if (this.disposed || this.state === next) return; this.state = next; for (const listener of this.listeners) listener(next); }
 }
@@ -174,6 +176,7 @@ function validateLocalFakeOptions(options: LocalFakeNimWebClientOptions): void {
 }
 
 export class LocalFakeNimWebClient implements NimWebClientLike {
+  readonly transport = "local-fake" as const;
   readonly accountId: string;
   private readonly context: ImClientContext;
   private readonly endpoint: string;
@@ -186,6 +189,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
   private readonly listeners = new Set<(state: NimWebConnectionState) => void>();
   private readonly messageListeners = new Set<(messages: NimMessageLike[]) => void>();
   private readonly known = new Map<string, Set<string>>();
+  private readonly latestSeen = new Map<string, number>();
 
   constructor(context: ImClientContext, options: LocalFakeNimWebClientOptions) {
     validateLocalFakeOptions(options);
@@ -216,19 +220,21 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     this.setState("CONNECTED");
   }
 
-  async getMessageHistory(conversationId: string, limit = 50): Promise<NimMessageLike[]> {
+  async getMessageHistory(conversationId: string, limit = 50, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]> {
     this.assertCurrent();
-    const messages = await this.readHistory(conversationId, limit);
+    if(typeof authorize==="function")await authorize({conversationId,operation:"read"});this.assertCurrent();
+    const messages = await this.readHistory(conversationId, limit, before);
     this.assertCurrent();
     this.remember(conversationId, messages);
     return messages;
   }
 
-  async sendText(conversationId: string, text: string): Promise<NimMessageLike> {
+  async sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike> {
     this.assertCurrent();
     const id = conversationId.trim();
     const body = text.trim();
     if (!id || id.length > 160 || !body || body.length > 4_000) throw new TypeError("Local IM message is invalid");
+    if(typeof authorize==="function")await authorize({conversationId:id,operation:"send"});this.assertCurrent();
     let response: Response;
     try {
       response = await fetch(this.endpoint, {
@@ -259,20 +265,23 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     this.listeners.clear();
     this.messageListeners.clear();
     this.known.clear();
+    this.latestSeen.clear();
   }
 
-  private async readHistory(conversationId: string, limit: number): Promise<NimMessageLike[]> {
+  private async readHistory(conversationId: string, limit: number, before?: NimMessageLike): Promise<NimMessageLike[]> {
     const id = conversationId.trim();
     if (!id || id.length > 160 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("Local IM history request is invalid");
     let response: Response;
     try {
-      response = await fetch(`${this.endpoint}?conversationId=${encodeURIComponent(id)}&limit=${limit}`, { credentials: "same-origin", cache: "no-store" });
+      response = await fetch(`${this.endpoint}?conversationId=${encodeURIComponent(id)}&limit=${limit}${before?`&before=${encodeURIComponent(before.messageServerId||before.messageClientId)}`:""}`, { credentials: "same-origin", cache: "no-store" });
     } catch {
+      this.setState("RECONNECTING");
       throw new Error("IM history request failed");
     }
     if (!response.ok) throw localTransportError("IM history request failed", response.status);
     const value = await response.json().catch(() => null) as { messages?: unknown } | null;
     if (!Array.isArray(value?.messages)) throw new Error("IM history response is invalid");
+    this.setState("CONNECTED");
     return value.messages.filter((message): message is NimMessageLike => Boolean(message && typeof message === "object"));
   }
 
@@ -287,7 +296,8 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     try {
       for (const [conversationId, known] of this.known) {
         const messages = await this.readHistory(conversationId, 100);
-        const incoming = messages.filter((message) => !known.has(this.messageKey(message)));
+        const latest=this.latestSeen.get(conversationId)??-Infinity;
+        const incoming = messages.filter((message) => !known.has(this.messageKey(message))&&message.createTime>=latest);
         this.remember(conversationId, messages);
         if (incoming.length > 0 && !this.disposed && this.context.isCurrent()) {
           for (const listener of this.messageListeners) listener(incoming);
@@ -304,6 +314,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     const known = this.known.get(conversationId) ?? new Set<string>();
     for (const message of messages) known.add(this.messageKey(message));
     this.known.set(conversationId, known);
+    this.latestSeen.set(conversationId,Math.max(this.latestSeen.get(conversationId)??-Infinity,...messages.map(message=>message.createTime)));
   }
 
   private messageKey(message: NimMessageLike): string {

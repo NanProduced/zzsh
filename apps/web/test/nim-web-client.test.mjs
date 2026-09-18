@@ -108,6 +108,23 @@ function testContext(identity) {
   };
 }
 
+test("order-scoped authorization guards the shared SDK and forwards an exact history anchor",async()=>{
+  let sends=0,reads=0,defaultCalls=0,seen;
+  const anchor={messageClientId:"older",conversationId:"viewer|2|1",senderId:"viewer",receiverId:"1",createTime:1};
+  const {sdk}=fakeSdk({messageService:{on(){},off(){},async getMessageList(options){reads++;seen=options;return [];},async sendMessage(){sends++;return {message:anchor};}},messageCreator:{createTextMessage:text=>({text})}});
+  const state=testContext("viewer"),handle=await createNimWebClientFactory({appKey:"test",token:"test",messageAuthorization:async()=>{defaultCalls++;}},async()=>sdk)(state.context);
+  try{
+    const deny=async()=>{throw Object.assign(new Error("denied"),{status:403});};
+    await assert.rejects(handle.client.getMessageHistory(anchor.conversationId,50,anchor,deny),{status:403});
+    await assert.rejects(handle.client.sendText(anchor.conversationId,"text",deny),{status:403});
+    assert.equal(reads+sends+defaultCalls,0);
+    await handle.client.getMessageHistory(anchor.conversationId,50,anchor,async()=>undefined);
+    assert.deepEqual(seen,{conversationId:anchor.conversationId,limit:50,anchorMessage:anchor});
+    const gate=deferred();const pending=handle.client.sendText(anchor.conversationId,"text",()=>gate.promise);
+    state.supersede();gate.resolve();await assert.rejects(pending,ImLifecycleSupersededError);assert.equal(sends,0);
+  }finally{await handle.dispose();}
+});
+
 test("initializes the V2 SDK, logs in, maps connection states, and cleans up listeners", async () => {
   const { sdk, calls, loginService } = fakeSdk();
   const factory = createNimWebClientFactory(

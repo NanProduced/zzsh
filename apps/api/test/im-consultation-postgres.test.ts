@@ -1053,6 +1053,7 @@ test(
         await migration!.query(`DELETE FROM "zzsh_iam"."audit_event" WHERE "actor_id" = ANY($1::text[]) OR "object_id" = ANY($1::text[]) OR "request_id" LIKE $2`, [allSyntheticIds, `${prefix}%`]);
         await migration!.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = ANY($1::text[])`, [syntheticAdminIds]);
         await migration!.query(`DELETE FROM "zzsh_auth_user"."session" WHERE "userId" = ANY($1::text[])`, [syntheticUserIds]);
+        await migration!.query(`DELETE FROM "zzsh_iam"."user_rental_membership" WHERE "user_id" = ANY($1::text[])`, [syntheticUserIds]);
         await migration!.query(`DELETE FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = ANY($1::text[])`, [syntheticAdminIds]);
         await migration!.query(`DELETE FROM "zzsh_auth_admin"."user" WHERE "id" = ANY($1::text[])`, [syntheticAdminIds]);
         await migration!.query(`DELETE FROM "zzsh_auth_user"."user" WHERE "id" = ANY($1::text[])`, [syntheticUserIds]);

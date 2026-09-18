@@ -8,7 +8,7 @@ import { createApp } from "../src/app";
 import { createControlledPaymentSource,confirmOrderPayment } from "../src/order/payment-confirmation";
 import { dispatchPaidOrders } from "../src/im/order-dispatch";
 import { advanceOrderTeam,prepareOrderTeam,reconcileOrderTeam,scanOrderTeams,OrderTeamLifecycle,type OrderTeamOptions } from "../src/im/order-team";
-import { readOrderTeamAccess } from "../src/im/order-team-access";
+import { readOrderTeamAccess,listJoinedOrderTeams } from "../src/im/order-team-access";
 import { ImIdentityProvisioner,deriveYunxinAccountId,type ImIdentityKey } from "../src/im/identity-lifecycle";
 import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
 import { createOrResumeUserConsultation,closeConsultation,supportManagerIdentityKey,MessageScopeRecoveryLifecycle } from "../src/im/consultation";
@@ -283,6 +283,32 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
       await scanOrderTeams(opts,2);await scanOrderTeams(opts,2);
       for(const row of rows){assert.equal((await group(row.order_id)).team_state,"READY");assert.equal((await group(row.order_id)).team_id,row.candidate_team_id);}
       assert.equal(wire.creates.length,count);
+    });
+    await t.test("T15 member-scoped order directory and safe identity context do not require order.read",async()=>{
+      const primary=await actor(staff,"admin");
+      await pool.query(`INSERT INTO zzsh_iam.admin_user_permission(admin_user_id,permission_code,effect) VALUES($1,'order.read','DENY') ON CONFLICT(admin_user_id,permission_code) DO UPDATE SET effect='DENY'`,[staff]);
+      const list=await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,2));
+      assert.equal((list.items as unknown[]).length,2);assert.ok(list.nextCursor);
+      const second=await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,list.nextCursor as string,2));
+      assert.ok(!(second.items as {id:string}[]).some(row=>(list.items as {id:string}[]).some(old=>row.id===old.id)));
+      const detail=await withTransaction(pool,c=>readOrderTeamAccess(c,primary,legacy.orderId));
+      assert.equal(detail.gameName,"三角洲行动");assert.equal((detail.account as {id:string}).id,(await pool.query(`SELECT account_id FROM zzsh_order.rental_order WHERE id=$1`,[legacy.orderId])).rows[0].account_id);
+      assert.ok((detail.members as {name:string}[]).every(member=>typeof member.name==="string"));
+      assert.ok((detail.members as {party:string;identityStatus?:string}[]).filter(m=>m.party!=="STAFF").every(m=>m.identityStatus==="UNKNOWN"));
+      assert.doesNotMatch(JSON.stringify(detail),/phoneNumber|password|token|rental_amount|deposit_amount/);
+      const boss=`team_outside_boss_${run}`;await seedAdmin(pool,boss,`${boss}_s`,run,true);await seedIdentity(pool,identityKey("ADMIN",boss),run);
+      const bossActor=await actor(boss,"admin");
+      assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,bossActor,null,20))).items,[]);
+      await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,bossActor,legacy.orderId)),{status:403});
+      await ownerPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`,[staff,gameId]);
+      try{assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20))).items,[]);await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,primary,legacy.orderId)),{status:403});}
+      finally{await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[staff,gameId]);}
+      await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,[staff]);
+      try{await assert.rejects(withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20)),{status:403});}
+      finally{await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='ALLOW' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,[staff]);}
+      const unpaid=await o.fixture("未付款群入口");const renter=(await pool.query(`SELECT renter_user_id FROM zzsh_order.rental_order WHERE id=$1`,[unpaid.orderId])).rows[0].renter_user_id;
+      const renterActor=await actor(renter,"user");const pending=await withTransaction(pool,c=>readOrderTeamAccess(c,renterActor,unpaid.orderId));
+      assert.equal(pending.orderStatus,"PENDING_PAYMENT");assert.equal(pending.canRead,false);assert.equal(pending.teamId,null);
     });
     assert.equal(outside,0);assert.equal((await ownerPool.query(`SELECT deadlocks::text FROM pg_stat_database WHERE datname=current_database()`)).rows[0].deadlocks,deadlocks);
     console.log("order Team acceptance",JSON.stringify({realRequests:outside,deadlocksDelta:0,creates:wire.creates.length}));
