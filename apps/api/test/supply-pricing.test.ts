@@ -191,14 +191,35 @@ test("fixed unit lines round half-up to cents and conserve buyer minus owner", (
   assert.equal(percent.platformFullProfit.amount, "8.00");
 });
 
+test("fixed unit lines preserve round bundles and day quantities", () => {
+  const quote = quoteOf(
+    accountQuote("SPREAD", "A", {
+      lines: [
+        { itemId: "item-haff", quantity: "60000000", pricingKind: "HAFF_RATIO" },
+        { itemId: "level6-bullet", quantity: "180", unit: "ROUND", pricingKind: "FIXED_UNIT", unitQuantity: "60", buyerUnitAmount: "10", ownerUnitAmount: "4" },
+        { itemId: "top-insure-card", quantity: "3", unit: "DAY", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "5", ownerUnitAmount: "3" },
+      ],
+    }),
+  );
+  const bullets = quote.lines.find((line) => line.itemId === "level6-bullet")!;
+  const insurance = quote.lines.find((line) => line.itemId === "top-insure-card")!;
+  assert.equal(bullets.unit, "ROUND");
+  assert.equal(bullets.unitQuantity, "60");
+  assert.equal(bullets.buyerAmount.amount, "30.00");
+  assert.equal(insurance.unit, "DAY");
+  assert.equal(insurance.buyerAmount.amount, "15.00");
+});
+
 test("unconfigured deposit policy stays null instead of pretending free amounts", () => {
   const withoutDeposits = quoteOf(accountQuote("SPREAD", "A"));
   assert.equal(withoutDeposits.tenantDeposit, null);
+  assert.equal(projectQuote(withoutDeposits, "public").tenantPayableTotal, null);
   assert.equal(withoutDeposits.publisherBailRequirement, null);
   assert.equal(withoutDeposits.pricingInputs.depositPolicy, "UNCONFIGURED");
 
   const withDeposits = quoteOf(accountQuote("SPREAD", "A", { deposits: { tenantDepositCents: "500", publisherBailRequirementCents: "3000" } }));
   assert.equal(withDeposits.tenantDeposit?.amount, "5.00");
+  assert.equal(projectQuote(withDeposits, "public").tenantPayableTotal?.amount, "155.00");
   assert.equal(withDeposits.publisherBailRequirement?.amount, "30.00");
   assert.equal(withDeposits.pricingInputs.depositPolicy, "CONFIGURED");
 });

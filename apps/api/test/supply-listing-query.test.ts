@@ -5,6 +5,7 @@ import {
   listingSearchPattern,
   parsePublicListingSearch,
   projectOwnerMediaBinding,
+  projectPublicAttributeDisplay,
   projectPublicListingGame,
   projectPublicOffer,
 } from "../src/supply/listing-query";
@@ -83,6 +84,41 @@ test("public offer keeps snapshot codes and null names without inventing zeros",
     }).termOption?.dailyConsumption,
     null,
     "a mismatched catalog row must not rewrite the version code or invent a quantity",
+  );
+});
+
+test("public attribute projection keeps stable codes beside confirmed labels", () => {
+  assert.deepEqual(
+    projectPublicAttributeDisplay({
+      safe_box_code: "safe_box_3x3",
+      grading_code: 6,
+      login_method_code: "legacy_login_wechat",
+      service_window_start_minute: 9 * 60,
+      service_window_end_minute: 23 * 60,
+    }),
+    {
+      safeBox: { code: "safe_box_3x3", displayName: "顶级安全箱(3*3)", mappingStatus: "CONFIRMED", issueCode: null },
+      grading: { code: "6", displayName: "钻石", mappingStatus: "CONFIRMED", issueCode: null },
+      loginMethod: { code: "legacy_login_wechat", displayName: "微信扫码", mappingStatus: "CONFIRMED", issueCode: null },
+      serviceWindow: { startMinute: 540, endMinute: 1380, displayName: "09:00–23:00" },
+    },
+  );
+  assert.deepEqual(
+    projectPublicAttributeDisplay({ safe_box_code: "box-unknown", grading_code: "gold", login_method_code: "steam_cn", service_window_start_minute: 1_441, service_window_end_minute: 60 }),
+    {
+      safeBox: { code: "box-unknown", displayName: null, mappingStatus: "UNCONFIRMED", issueCode: "SAFE_BOX_CODE_UNMAPPED" },
+      grading: { code: "gold", displayName: null, mappingStatus: "UNCONFIRMED", issueCode: "GRADING_CODE_UNMAPPED" },
+      loginMethod: { code: "steam_cn", displayName: null, mappingStatus: "UNCONFIRMED", issueCode: "LOGIN_METHOD_CODE_UNMAPPED" },
+      serviceWindow: null,
+    },
+  );
+  assert.deepEqual(
+    projectPublicAttributeDisplay({ login_method_code: "legacy_login_steam_cn" }).loginMethod,
+    { code: "legacy_login_steam_cn", displayName: "Steam国服", mappingStatus: "CONFIRMED", issueCode: null },
+  );
+  assert.deepEqual(
+    projectPublicAttributeDisplay({ login_method_code: "legacy_login_steam_global" }).loginMethod,
+    { code: "legacy_login_steam_global", displayName: "Steam国际服", mappingStatus: "CONFIRMED", issueCode: null },
   );
 });
 

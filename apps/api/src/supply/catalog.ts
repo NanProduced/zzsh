@@ -20,7 +20,7 @@ import {
 import { ensureGameServiceRows, isSupportedGameService, type GameServiceCode } from "./game-services";
 
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
-const UNITS = new Set(["HAFF_BASE", "ROUND", "PIECE"]);
+const UNITS = new Set(["HAFF_BASE", "ROUND", "PIECE", "DAY"]);
 
 function requireCode(body: Record<string, unknown>, field = "code"): string {
   const value = requiredString(body, field, 64);

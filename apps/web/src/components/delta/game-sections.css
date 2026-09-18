@@ -6,6 +6,7 @@
 .game-row--upcoming { margin-top:20px; }
 .game-identity { position:relative; min-height:340px; color:var(--color-text-primary); }
 .game-portrait { position:absolute; left:0; top:12px; bottom:0; width:340px; z-index:-1; pointer-events:none; background-size:100% auto; background-position:left top; background-repeat:no-repeat; mask-image:linear-gradient(90deg,black 45%,transparent 100%); filter:brightness(.7) saturate(.8); }
+.game-identity--delta .game-portrait { top:0; bottom:0; width:340px; background-size:auto 100%; background-position:left top; mask-image:linear-gradient(90deg,black 38%,transparent 96%); }
 .game-identity::after { content:""; position:absolute; inset:0 -130px 0 0; z-index:-1; pointer-events:none; background:linear-gradient(180deg,var(--color-bg-surface),transparent 32%,transparent 76%,var(--color-bg-surface)); }
 html[data-theme="light"] .game-portrait { filter:none; }
 .game-identity-heading { padding:22px 20px; }
@@ -33,12 +34,11 @@ html[data-theme="light"] .game-portrait { filter:none; }
   .game-identity,.game-row--upcoming .game-identity { min-height:180px; }
   .game-identity-heading { padding:22px 20px; }
   .game-portrait { left:auto; right:-40px; top:-18px; bottom:0; width:235px; background-size:235px auto; background-position:left 22%; mask-image:linear-gradient(90deg,transparent,black 30%,black 72%,transparent); }
+  .game-identity--delta .game-portrait { top:0; bottom:0; width:220px; background-size:auto 100%; background-position:left top; }
   .game-identity::after { inset:0; background:linear-gradient(90deg,var(--color-bg-surface) 15%,transparent 70%),linear-gradient(0deg,var(--color-bg-surface),transparent 38%); }
   .game-identity-actions { left:20px; right:auto; bottom:16px; }
   .game-identity-actions .button { min-height:44px; padding:8px 16px; }
   .game-coming-soon { padding:24px 20px 28px; min-height:150px; }
   .game-row--upcoming { margin-top:16px; }
 }
-
-
 

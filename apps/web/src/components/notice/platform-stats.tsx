@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { Megaphone, Pause, Play, ChartNoAxesCombined, Info } from "lucide-react";
 import Counter from "../effects/counter";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isPublicCount, type PlatformStatsData, type PublicDeal } from "../../lib/public-activity";
 export type { PlatformStatsData, PublicDeal } from "../../lib/public-activity";
 export function RollingNumber({value,reduced,fontSize=24}:{value:number|null;reduced:boolean;fontSize?:number}) {
@@ -42,7 +43,7 @@ export function PlatformStats({data,deals=[],isDemo=false}:{data?:PlatformStatsD
     <div className="activity-metrics">{metrics.map(([label,value])=><div key={label}><span>{label}</span>{isPublicCount(value)?<RollingNumber value={value} reduced={reduced} fontSize={20}/>:<span className="stat-unknown" aria-label="数据暂未提供">—</span>}</div>)}</div>
     <div className="deal-ticker" data-running={running} onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)} onFocusCapture={()=>setFocused(true)} onBlurCapture={e=>{if(!e.currentTarget.contains(e.relatedTarget))setFocused(false);}}>
       <span className="deal-label"><Megaphone size={18} aria-hidden="true"/><span className="sr-only">最新成交</span></span>
-      {current?<div className="deal-message" aria-live="off" key={current.id}><strong>{current.game}</strong><span className="deal-title" title={current.title}>{current.title}</span><span className="deal-price"><small>成交价</small>{current.priceLabel}</span></div>:<span className="deal-title">暂无可展示的成交信息</span>}
+      {current?<div className="deal-message" aria-live="off" key={current.id}><strong>{current.game}</strong><Tooltip><TooltipTrigger asChild><span className="deal-title">{current.title}</span></TooltipTrigger><TooltipContent side="top">{current.title}</TooltipContent></Tooltip><span className="deal-price"><small>成交价</small>{current.priceLabel}</span></div>:<span className="deal-title">暂无可展示的成交信息</span>}
       {records.length>1&&<button className="deal-pause" disabled={reduced} aria-label={reduced?'减少动态：成交播报已暂停':paused?'恢复成交播报':'暂停成交播报'} onClick={()=>setPaused(p=>!p)}>{paused||reduced?<Play size={14}/>:<Pause size={14}/>}</button>}
       <img className="deal-companion" src="/art/zhouzhou/deal-announcer.webp" alt="" aria-hidden="true" width={110} height={110} />
     </div>

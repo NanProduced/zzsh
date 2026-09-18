@@ -18,6 +18,7 @@ function render(stage,home=true){
   if(name.includes('auth-overlay-provider'))return {useAuthOverlay:()=>({open(){}})};
   if(name.includes('brand-logo'))return {BrandLogo:()=>null};
   if(name.includes('theme-toggle'))return {ThemeToggle:()=>null};
+  if(name.includes('components/ui/tooltip'))return {Tooltip:({children})=>React.createElement(React.Fragment,null,children),TooltipTrigger:({children})=>React.createElement(React.Fragment,null,children),TooltipContent:()=>null};
   if(name==='./mobile-nav')return {MobileNav:()=>null};
   if(name.endsWith('.css'))return {};
   return require(name);

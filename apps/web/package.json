@@ -8,15 +8,15 @@
     "start": "next start --hostname 127.0.0.1 --port 3100",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "node --experimental-strip-types --test test/auth-user-route.test.mjs test/user-account-status.test.mjs test/supply-route.test.mjs test/supply-client.test.mjs test/order-route.test.mjs",
-    "test:ui": "node --experimental-strip-types --test test/account-search.test.mjs test/portal-draft.test.mjs test/service-navigation.test.mjs test/listing-filters.test.mjs test/listing-view.test.mjs test/media-upload.test.mjs test/favorites-lib.test.mjs test/favorites-store.test.mjs test/user-session-store.test.mjs test/user-session-client.test.mjs test/safe-return.test.mjs test/supply-games.test.mjs test/supply-workspaces-contract.test.mjs test/supply-workspaces-behavior.test.mjs test/header-scroll.test.mjs test/hero-carousel.test.mjs test/personal-task-panel.test.mjs test/platform-stats.test.mjs test/gunsmith-mode.test.mjs test/auth-entry-behavior.test.mjs test/auth-form-ui.test.mjs",
-    "test:production": "node --test test/production-isolation.test.mjs",
-    "dev:showcase": "vite --config dev-showcase/vite.config.mts"
+    "test:ui": "node --experimental-strip-types --test test/account-search.test.mjs test/portal-draft.test.mjs test/service-navigation.test.mjs test/listing-filters.test.mjs test/listing-view.test.mjs test/media-upload.test.mjs test/favorites-lib.test.mjs test/favorites-store.test.mjs test/user-session-store.test.mjs test/user-session-client.test.mjs test/safe-return.test.mjs test/supply-games.test.mjs test/supply-workspaces-contract.test.mjs test/supply-workspaces-behavior.test.mjs test/header-scroll.test.mjs test/hero-carousel.test.mjs test/thumbnail-carousel.test.mjs test/personal-task-panel.test.mjs test/platform-stats.test.mjs test/gunsmith-mode.test.mjs test/auth-entry-behavior.test.mjs test/auth-form-ui.test.mjs",
+    "test:production": "node --test test/production-isolation.test.mjs"
   },
   "dependencies": {
     "@heroui/react": "3.2.4",
     "@heroui/styles": "3.2.4",
     "@radix-ui/react-dialog": "1.1.23",
     "@radix-ui/react-popover": "1.1.23",
+    "@radix-ui/react-tooltip": "1.2.16",
     "@zzsh/ui": "0.0.0",
     "clsx": "2.1.1",
     "embla-carousel-react": "8.6.0",
@@ -29,11 +29,8 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",
-    "@tailwindcss/vite": "4.3.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
-    "@vitejs/plugin-react": "6.1.1",
-    "tailwindcss": "4.3.3",
-    "vite": "8.2.2"
+    "tailwindcss": "4.3.3"
   }
 }

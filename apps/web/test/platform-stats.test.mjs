@@ -11,6 +11,7 @@ const exports={};
 new Function('require','exports',ts.transpileModule(source,{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS}}).outputText)(name=>{
  if(name==='../effects/counter')return {default:()=>null};
  if(name==='../../lib/public-activity')return {isPublicCount:v=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=0};
+ if(name.includes('components/ui/tooltip'))return {Tooltip:({children})=>React.createElement(React.Fragment,null,children),TooltipTrigger:({children})=>React.createElement(React.Fragment,null,children),TooltipContent:()=>null};
  return require(name);
 },exports);
 const render=props=>renderToStaticMarkup(React.createElement(exports.PlatformStats,props));
