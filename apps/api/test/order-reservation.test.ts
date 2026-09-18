@@ -16,6 +16,7 @@ import { runBusinessMigrations } from "../src/database/business-migrations";
 import { computeDeltaQuote } from "../src/supply/pricing";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHolds, type SweepResult } from "../src/order/order";
+import { runPaymentAcceptance } from "./order-payment-im-postgres.test";
 
 // M4-A order reservation foundation: real PostgreSQL acceptance (V01–V21).
 // Deterministic barriers only; no sleeps to guess races.
@@ -143,7 +144,7 @@ function poolFor(config: AppConfig, database: string, applicationName: string, m
   });
 }
 
-async function resourceGuard(pool: Pool): Promise<PoolClient> {
+async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClient> {
   const client = await pool.connect();
   try {
     const identity = await client.query<{ databaseName: string; currentUser: string; port: string }>("SELECT current_database() AS \"databaseName\", current_user AS \"currentUser\", current_setting('port') AS port");
@@ -151,6 +152,29 @@ async function resourceGuard(pool: Pool): Promise<PoolClient> {
     assert.equal(identity.rows[0]?.currentUser, pool.options.user);
     assert.equal(identity.rows[0]?.port, "5432");
     assert.equal((await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", [LOCK_KEY])).rows[0]?.acquired, true, "dedicated order test target is already in use");
+    // Complete read-only preflight BEFORE either ensureRole can change a password.
+    const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,
+      shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
+    if (RESOURCE_SET === "yunxin_main_integrate") {
+      assert.equal(resources.maintenance.database.user, "zzsh");
+      assert.ok(db, "registered OIM database must already exist");
+    }
+    if (db) {
+      assert.equal(db.owner, resources.maintenance.database.user);
+      assert.equal(db.marker, RESOURCE_MARKER);
+      assert.equal((await client.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1`, [resources.databaseName])).rows[0].n, 0, "another connection owns this database");
+    }
+    for (const [name, kind] of [[resources.migrationUser, "migration"], [resources.runtimeUser, "runtime"]] as const) {
+      const row = (await client.query(`SELECT rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,rolinherit,rolreplication,rolbypassrls,
+        shobj_description(oid,'pg_authid') AS marker,
+        EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS membership,
+        EXISTS(SELECT 1 FROM pg_database WHERE datdba=r.oid) AS owns_db FROM pg_roles r WHERE rolname=$1`, [name])).rows[0];
+      if (RESOURCE_SET === "yunxin_main_integrate") assert.ok(row, "registered OIM role must already exist");
+      if (!row) continue;
+      assert.deepEqual(row, { rolcanlogin: true, rolsuper: false, rolcreaterole: false, rolcreatedb: false,
+        rolinherit: false, rolreplication: false, rolbypassrls: false, marker: roleMarker(resources.databaseName, kind), membership: false, owns_db: false });
+    }
+    console.log("order resource preflight PASS", resources.databaseName, LOCK_KEY);
     return client;
   } catch (error) {
     client.release(true);
@@ -345,7 +369,7 @@ function singleArrivalGate() {
 
 let pngFixture = Buffer.alloc(0);
 
-test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", async () => {
+test("M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
   let resources: Resources | undefined;
   let maintenancePool: Pool | undefined;
   let maintenanceDataPool: Pool | undefined;
@@ -357,6 +381,7 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
   let smallPool: Pool | undefined;
   let runtimeClosedByApp = false;
   let smallClosedByApp = false;
+  let fixturesStarted = false;
   const publicationGates = new Map<string, SupplyGate>();
   const probeWatched = new Set<string>();
   const probe: { run?: (accountId: string) => Promise<void> } = {};
@@ -364,7 +389,7 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
     resources = makeResources();
     pngFixture = await sharp({ create: { width: 64, height: 64, channels: 3, background: "blue" } }).png().toBuffer();
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-order-maintenance", 2);
-    guard = await resourceGuard(maintenancePool);
+    guard = await resourceGuard(maintenancePool, resources);
     await ensureDatabase(maintenancePool, resources);
     await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
     await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
@@ -372,11 +397,20 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-order-owner", 2);
     await prepareOwnership(maintenanceDataPool, resources);
     migrationPool = createBusinessPool(resources.migration);
+    const hasJournal = (await migrationPool.query(`SELECT to_regclass('zzsh_business_meta.migrations') AS name`)).rows[0].name;
+    const migrationBefore = hasJournal ? (await migrationPool.query(`SELECT count(*)::int AS n, max(created_at)::text AS latest FROM zzsh_business_meta.migrations`)).rows[0] : { n: 0, latest: null };
     await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+    const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
     await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+    assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
+    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, tail: migrated.slice(-2), replayUnchanged: true }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+    fixturesStarted = true;
+    // B6 deliberately jumps this sequence to 999998 later. Reset the isolated
+    // fixture sequence first so a repeat run cannot collide with that range.
+    await maintenanceDataPool.query(`SELECT setval('zzsh_order.display_no_seq', 1, false)`);
     assert.equal(
       (await runtimePool.query(`SELECT to_regclass('zzsh_order.rental_order') IS NOT NULL AS exists`)).rows[0]?.exists,
       true,
@@ -923,7 +957,7 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
     const recreatedState = await runtimePool.query(`SELECT status FROM zzsh_order.rental_order WHERE id = $1`, [recreatedOrderId]);
     assert.equal(recreatedState.rows[0]?.status, "PENDING_PAYMENT", "stale sweeps must not release the new occupancy");
 
-    // V12：支付边界（模拟；不实现支付，不产生任何 PAID 行）
+    // V12：普通预订路径不产生 PAID；不能直接插入已付或复活已取消单。
     const paidInsert = await maintenanceDataPool.query(
       `INSERT INTO zzsh_order.rental_order (id, display_no, account_id, listing_version_id, owner_user_id, renter_user_id, game_id, rule_release_id, content_hash, term_option_code, status, rental_amount_cents, deposit_amount_cents, currency, term_seconds, quote_snapshot, title, hold_until)
        SELECT 'order_paid_probe', 'ZZPROBE-1', account_id, listing_version_id, owner_user_id, renter_user_id, game_id, rule_release_id, content_hash, term_option_code, 'PAID', rental_amount_cents, deposit_amount_cents, currency, term_seconds, quote_snapshot, title, hold_until FROM zzsh_order.rental_order WHERE id = $1`,
@@ -934,19 +968,19 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
       },
       (error: unknown) => error as { code?: string },
     );
-    assert.equal(paidInsert.code, "40001", "inserting a future state directly must hit the transition guard");
+    assert.equal(paidInsert.code, "40001", "orders must start pending even after the payment seam is installed");
     const paidUpdate = await maintenanceDataPool.query(`UPDATE zzsh_order.rental_order SET status = 'PAID' WHERE id = $1`, [sweepOrderId]).then(
       () => {
         throw new Error("expected the probe to be rejected");
       },
       (error: unknown) => error as { code?: string },
     );
-    assert.equal(paidUpdate.code, "40001", "transition to an unopened state must hit the transition guard");
+    assert.equal(paidUpdate.code, "40001", "cancelled orders cannot be revived as paid");
     const casLive = await runtimePool.query(`SELECT count(*)::text AS count FROM zzsh_order.rental_order WHERE id = $1 AND status = 'PENDING_PAYMENT' AND hold_until > clock_timestamp()`, [recreatedOrderId]);
     assert.equal(casLive.rows[0]?.count, "1", "the M5 CAS predicate is satisfiable only for a live pending order");
     const casDead = await runtimePool.query(`SELECT count(*)::text AS count FROM zzsh_order.rental_order WHERE id = $1 AND status = 'PENDING_PAYMENT' AND hold_until > clock_timestamp()`, [sweepOrderId]);
     assert.equal(casDead.rows[0]?.count, "0", "the CAS predicate never matches a cancelled order");
-    assert.equal((await runtimePool.query(`SELECT count(*)::text AS count FROM zzsh_order.rental_order WHERE status NOT IN ('PENDING_PAYMENT','CANCELLED')`)).rows[0]?.count, "0", "no row ever reaches an unopened state");
+    assert.equal((await runtimePool.query(`SELECT count(*)::text AS count FROM zzsh_order.rental_order WHERE status NOT IN ('PENDING_PAYMENT','CANCELLED')`)).rows[0]?.count, "0", "reservation-only paths do not create payment facts");
 
     // V18+V21：已过期未清扫订单——可取消、可展示“已过期，取消处理中”，不回写状态
     const expiredCase = await makeExpiredOrder(owner2, renter1, "过期账号");
@@ -1600,6 +1634,25 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
 
     const orderAudits = await runtimePool.query(`SELECT count(*)::text AS count FROM zzsh_iam.audit_event WHERE action LIKE 'order.reservation.%'`);
     assert.ok(Number(orderAudits.rows[0]?.count ?? "0") >= 8, "order writes must be audited");
+    const paymentOwner = await signupUser("付款号主", "oim_owner");
+    const paymentBuyer = await signupUser("付款买家", "oim_buyer");
+    if (RESOURCE_SET) await runPaymentAcceptance(t, {
+      pool: runtimePool, migrationPool, ownerPool: maintenanceDataPool, config: { ...resources.runtime, testOperationsEnabled: true },
+      resourceSet: RESOURCE_SET,
+      fixture: async (label, offset) => {
+        const account = await publishApproved(paymentOwner, label, "2500");
+        const created = await createOrder(paymentBuyer, account);
+        assert.equal(created.response.status, 200, JSON.stringify(created.body));
+        let orderId = created.body!.order.id as string;
+        if (offset !== undefined) {
+          assert.equal((await request(base, `/api/v1/orders/${orderId}/cancel`, {}, paymentBuyer, USER_ORIGIN, "POST", orderKey())).response.status, 200);
+          orderId = await cloneOrderOnAccount(orderId, offset);
+        }
+        return { ...account, orderId };
+      },
+      api: (path, body, method) => request(base, path, body, paymentBuyer, USER_ORIGIN, method, orderKey()),
+      clone: cloneOrderOnAccount,
+    });
   } finally {
     const cleanupErrors: unknown[] = [];
     probeWatched.clear();
@@ -1619,15 +1672,10 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
         cleanupErrors.push(error);
       }
     }
-    if (guard) {
-      try {
-        await guard.query("SELECT pg_advisory_unlock($1::bigint)", [LOCK_KEY]);
-        guard.release();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
+    if (fixturesStarted && maintenanceDataPool && guard) {
+      try { await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE); } catch (error) { cleanupErrors.push(error); }
     }
-    for (const pool of [smallClosedByApp ? undefined : smallPool, runtimePool && !runtimeClosedByApp ? runtimePool : undefined, migrationPool, maintenanceDataPool, maintenancePool]) {
+    for (const pool of [smallClosedByApp ? undefined : smallPool, runtimePool && !runtimeClosedByApp ? runtimePool : undefined, migrationPool, maintenanceDataPool]) {
       if (!pool) continue;
       try {
         await pool.end();
@@ -1635,6 +1683,13 @@ test("M4-A order reservation foundation: real PostgreSQL acceptance V01–V21", 
         cleanupErrors.push(error);
       }
     }
+    if (guard) {
+      try {
+        assert.equal((await guard.query("SELECT pg_advisory_unlock($1::bigint) AS released", [LOCK_KEY])).rows[0].released, true);
+      } catch (error) { cleanupErrors.push(error); } finally { guard.release(); }
+    }
+    if (maintenancePool) { try { await maintenancePool.end(); } catch (error) { cleanupErrors.push(error); } }
+    console.log("order cleanup", JSON.stringify({ failures: cleanupErrors.length }));
     if (cleanupErrors.length > 0) throw cleanupErrors[0];
   }
 });

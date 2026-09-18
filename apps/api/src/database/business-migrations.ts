@@ -69,6 +69,7 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_content" FROM ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_order" FROM ${runtimeUser};
+    REVOKE UPDATE ON TABLE zzsh_order.payment_confirmation, zzsh_order.im_order_group FROM ${runtimeUser};
     GRANT DELETE ON TABLE "zzsh_supply"."price_line", "zzsh_supply"."term_option" TO ${runtimeUser};
     GRANT DELETE ON TABLE zzsh_supply.favorite TO ${runtimeUser};
     REVOKE UPDATE ON TABLE zzsh_supply.favorite FROM ${runtimeUser};

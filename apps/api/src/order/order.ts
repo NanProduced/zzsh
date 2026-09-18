@@ -16,6 +16,7 @@ import { conflict, forbidden, invalid, notFound, sha256Hex } from "../supply/sup
 
 export const ORDER_STATUS = {
   PENDING_PAYMENT: "PENDING_PAYMENT",
+  PAID: "PAID",
   CANCELLED: "CANCELLED",
 } as const;
 export type OrderStatus = (typeof ORDER_STATUS)[keyof typeof ORDER_STATUS];
@@ -41,6 +42,7 @@ export type OrderRow = {
   quoteSnapshot: InternalQuote & { contentHash?: string };
   title: string;
   holdUntil: string;
+  paidAt: string | null;
   cancelReason: "USER" | "TIMEOUT" | null;
   cancelledAt: string | null;
   createdAt: string;
@@ -57,6 +59,7 @@ const ORDER_FIELDS = `
   o.status, o.rental_amount_cents::text AS "rentalAmountCents", o.deposit_amount_cents::text AS "depositAmountCents",
   o.currency, o.term_seconds::text AS "termSeconds", o.quote_snapshot AS "quoteSnapshot", o.title,
   to_char(o.hold_until AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "holdUntil",
+  to_char(o.paid_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "paidAt",
   o.cancel_reason AS "cancelReason",
   CASE WHEN o.cancelled_at IS NULL THEN NULL ELSE to_char(o.cancelled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "cancelledAt",
   to_char(o.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
@@ -122,6 +125,8 @@ export function projectOrder(
     holdUntil: row.holdUntil,
     expiredAwaitingCancel: expired,
     paymentOpen: row.status === ORDER_STATUS.PENDING_PAYMENT && !expired,
+    cancelOpen: row.status === ORDER_STATUS.PENDING_PAYMENT,
+    ...(row.status === ORDER_STATUS.PAID ? { paidAt: row.paidAt } : {}),
     ...(row.status === ORDER_STATUS.CANCELLED
       ? { cancelReason: row.cancelReason, cancelledAt: row.cancelledAt }
       : {}),
@@ -614,7 +619,7 @@ export async function getAdminOrder(
 export async function readOrderOccupancy(client: PoolClient, accountId: string): Promise<boolean> {
   return (
     ((await client.query(
-      `SELECT 1 FROM zzsh_order.rental_order WHERE account_id = $1 AND status = 'PENDING_PAYMENT' LIMIT 1`,
+      `SELECT 1 FROM zzsh_order.rental_order WHERE account_id = $1 AND status IN ('PENDING_PAYMENT','PAID') LIMIT 1`,
       [accountId],
     )).rowCount ?? 0) > 0
   );
@@ -628,6 +633,33 @@ export function composeSupplyGateWithOrderOccupancy(base: SupplyGateReader): Sup
     const occupied = await readOrderOccupancy(client, account.id);
     return { ...gate, occupancy: occupied ? "OCCUPIED" : "FREE" };
   };
+}
+
+/** Caller holds account then order (or performs the order CAS here). */
+export async function cancelExpiredReservation(client: PoolClient, orderId: string, holdUntil: string, requestId: string): Promise<boolean> {
+  const updated = await client.query(
+    `UPDATE zzsh_order.rental_order
+        SET status = 'CANCELLED', cancel_reason = 'TIMEOUT', cancelled_at = clock_timestamp(),
+            updated_at = clock_timestamp(), revision = revision + 1
+      WHERE id = $1 AND status = 'PENDING_PAYMENT' AND hold_until = $2::timestamptz`,
+    [orderId, holdUntil],
+  );
+  if (updated.rowCount !== 1) return false;
+  await recordAudit(client, {
+    actorType: "system",
+    action: "order.reservation.cancelled",
+    objectType: "rental_order",
+    objectId: orderId,
+    outcome: "SUCCESS",
+    reason: "TIMEOUT",
+    requestId,
+    details: {
+      before: { status: "PENDING_PAYMENT" },
+      after: { status: "CANCELLED", cancelReason: "TIMEOUT" },
+      result: "CANCELLED",
+    },
+  });
+  return true;
 }
 
 export type SweepOptions = {
@@ -704,29 +736,7 @@ export async function sweepExpiredHolds(pool: Pool, options: SweepOptions): Prom
         await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id = $1 FOR UPDATE`, [
           candidate.account_id,
         ]);
-        const updated = await client.query(
-          `UPDATE zzsh_order.rental_order
-              SET status = 'CANCELLED', cancel_reason = 'TIMEOUT', cancelled_at = clock_timestamp(),
-                  updated_at = clock_timestamp(), revision = revision + 1
-            WHERE id = $1 AND status = 'PENDING_PAYMENT' AND hold_until = $2::timestamptz`,
-          [candidate.id, candidate.hold_until_text],
-        );
-        if (updated.rowCount !== 1) return false;
-        await recordAudit(client, {
-          actorType: "system",
-          action: "order.reservation.cancelled",
-          objectType: "rental_order",
-          objectId: candidate.id,
-          outcome: "SUCCESS",
-          reason: "TIMEOUT",
-          requestId: `req_sweep_${randomUUID().replaceAll("-", "")}`,
-          details: {
-            before: { status: "PENDING_PAYMENT" },
-            after: { status: "CANCELLED", cancelReason: "TIMEOUT" },
-            result: "CANCELLED",
-          },
-        });
-        return true;
+        return cancelExpiredReservation(client, candidate.id, candidate.hold_until_text, `req_sweep_${randomUUID().replaceAll("-", "")}`);
       });
       if (changed) result.cancelled.push(candidate.id);
       else result.skippedChanged.push(candidate.id);

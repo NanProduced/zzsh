@@ -161,12 +161,12 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | GET /api/v1/orders/{id} | 按归属投影（renter/owner 否则 404）；会话与活性在事务内复核 |
 | GET /api/v1/admin/orders(/+id) | 要求 `order.read` 动态权限 + 该游戏 `admin_supply_scope`（Boss 豁免 scope）；平台金额仅另有 `supply.quote.internal.read` 时投影 |
 
-- 状态仅 `PENDING_PAYMENT`/`CANCELLED`（占用由状态派生，非独立字段）；触发器限制 INSERT 初态、仅允许 PENDING→CANCELLED、快照与 hold_until 不可变、金额列与快照一致。未来状态随 M5/M6 迁移连同转换定义进入。
+- 状态为 `PENDING_PAYMENT`/`PAID`/`CANCELLED`；占用集合为待付+已付。触发器限制 INSERT 为待付、仅允许待付→取消/已付，快照与 hold_until 不可变。PAID 表示收款已接纳，不表示建群、交付或开租；DTO 的 paymentOpen/cancelOpen 均为 false，并返回 paidAt。状态过滤接受 PAID，未知状态不得默认显示可付款/可取消。
 - 金额四要素分开：租金（快照 resourceTotal）、押金（快照 tenantDeposit）、总应付（派生）。`depositPolicy=UNCONFIGURED` 一律拒绝 409 `DEPOSIT_UNCONFIGURED`；未配置不是免押金，权威零押金必须是显式配置值。新增稳定码 `OCCUPIED`/`RULE_CHANGED`/`VERSION_CHANGED`/`DEPOSIT_UNCONFIGURED`（均 409）。
 - 创建与重放分开授权：首次创建要求交易资格；命中幂等记录只复核请求人会话/活性/归属，不因号主停用、供给占用/下架、规则变化而重复执行创建条件，也不泄露他人幂等响应。读/取消要求会话+活性+归属，不要求交易资格。
 - 占用时间只认数据库时钟，`hold_until` 创建即冻结不可续期。到期不改变事实状态（DTO 派生 `expiredAwaitingCancel`、`paymentOpen=false`，文案“已过期，取消处理中”）；清扫器按 (hold_until,id) 升序、批上限逐单事务取消（CAS 同 id+status+hold_until），lock_timeout 跳过不占批预算使持续被锁的队首不饥饿后续，行级失败经 onResult 可观察；worker 由显式校验过的配置对象启动（无环境变量兜底），先于业务连接池结束而停止并等待在途批次。
 - 占用事实只由订单表派生（无订单即 FREE），保证金资格仍走既有 SupplyGateReader seam（UNKNOWN 不放行）；占用中禁止建/存草稿、恢复上架、提交/通过新版本，暂停不受占用限制，取消后重新评估。占用账号公共列表/详情 404（既有行为延伸，订单卡后续接入须走受权订单接口）。注销义务检查纳入占用订单（双方视角）。
-- 本阶段不提供支付端点或模拟支付；迟到支付不复活已取消订单、不抢新占用（支付边界为 M5 契约，渠道收款事实由 M5 记录并进入异常处置）。正式押金配置来源与保证金权威来源未就绪前，生产建单不可用，本地以隔离 fixture 验证。
+- 无 HTTP/BFF 付款成功注入端点。0036 增加可信收款事实及同事务 PAID/唯一 WAITING 意图；当前仅有明确 test/fake、资源和合成订单 allowlist 的进程内受控来源，未接真实支付渠道。同流水重放比较不可变绑定，冲突保留原事实并审计；不同流水重复收款、金额/币种/订单号不符及迟到款保留 REVIEW_REQUIRED。锁内 DB 时钟到期则按 TIMEOUT 取消待付，不复活旧单或抢新占用；已付不被旧取消/清扫释放。正式押金配置来源与保证金权威来源未就绪前，生产建单不可用，本地以隔离 fixture 验证。
 
 ## 验证入口
 

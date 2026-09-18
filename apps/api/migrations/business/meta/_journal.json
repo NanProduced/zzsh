@@ -246,6 +246,20 @@
       "when": 1789490003000,
       "tag": "0034_yunxin_consultation_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1789490004000,
+      "tag": "0035_supply_day_unit",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1789490005000,
+      "tag": "0036_oim_order_payment",
+      "breakpoints": true
     }
   ]
 }

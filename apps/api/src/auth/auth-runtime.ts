@@ -843,7 +843,7 @@ export async function mountAuthHandlers(
     userObligationReader: async (userId,client) => {
       const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED') LIMIT 1",[userId]);
       if(pending.rowCount) return "PENDING";
-      const orderPending=await client.query("SELECT 1 FROM zzsh_order.rental_order WHERE status='PENDING_PAYMENT' AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1",[userId]);
+      const orderPending=await client.query("SELECT 1 FROM zzsh_order.rental_order WHERE status IN ('PENDING_PAYMENT','PAID') AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1",[userId]);
       if(orderPending.rowCount) return "PENDING";
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
     },
