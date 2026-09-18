@@ -61,7 +61,7 @@ test('server query uses contract names and only sends minQuantity with an item',
     cursor: 'cur_1',
     limit: 5,
   });
-  assert.equal(query.toString(), 'gameId=game_1&itemId=item_1&minQuantity=100&skinId=skin_a&skinId=skin_b&skinMatch=ALL&limit=5&cursor=cur_1');
+  assert.equal(query.toString(), 'gameId=game_1&itemId=item_1&minQuantity=100&skinId=skin_a&skinId=skin_b&skinMatch=ALL&q=local-search-only&limit=5&cursor=cur_1');
 });
 
 test('filter changes reset the cursor while pagination keeps it', () => {
@@ -71,6 +71,15 @@ test('filter changes reset the cursor while pagination keeps it', () => {
   assert.equal(listingFiltersUrl(paged).includes('cursor=cur_1'), true);
   assert.equal(listingFiltersUrl(withFilterChange(paged, { q: 'x' })).includes('cursor'), false);
   assert.equal(listingFiltersUrl(base), '/accounts');
+});
+
+test('server search is part of the request key and clears with the full filter set', () => {
+  const q = '[SEC真实来源] 100%_';
+  const paged = { ...base, q, cursor: 'cur_2' };
+  const query = listingQuery(paged);
+  assert.equal(query.get('q'), q);
+  assert.equal(listingFilterKey(paged), listingFilterKey({ ...paged, cursor: null }));
+  assert.deepEqual(withFilterChange(paged, { q: null }), { ...base, q: null, cursor: null });
 });
 
 test('skin toggles stay stable and filter count reflects active server filters', () => {
