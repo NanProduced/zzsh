@@ -9,6 +9,7 @@
 - 先读 `docs/architecture/technology-decisions.md` 和 `docs/README.md`；按任务需要读旧资料，不遍历或输出生产配置。
 - 本地过程资料先查 `tmp/README.md`；当前进度只看 `tmp/docs/planning/rebuild-development-tracker.md` 与对应Master评审，执行brief不等于通过。已完成阶段放 `tmp/archive/`，不把历史prompt/快照当当前授权；正在执行的任务输入保持路径稳定，不遍历整个tmp或复制多份“最新状态”。
 - 本地服务遵守 `docs/local-environments.md`：主环境固定用户站3100、管理站3101、API3102，由Master/指定维护者管理；先查主检出 `tmp/local-environments.md` 和监听归属，按需复用，不擅自启动三端、抢端口、停他人服务或重置数据。分支预览独立worktree并登记端口/数据资源。
+- 本地业务验收先按 [测试快速登录](docs/local-test-auth.md) 使用 `npm run local:auth -- login --resource <资源集> --actor <身份>`，自动完成用户密码或管理员密码/TOTP并导入浏览器登录态，跳过人工认证操作。Owner 已授权此工作方式，无须每轮重复确认；认证专项才完整走登录/初始化页面。环境维护者首次用 `ensure --input` 登记现有 fixture；凭据集中保存在主检出 `apps/api/.secrets/local-auth/`，随环境复用，停服务不删除。禁止为登录问题重建/重置数据库、重复初始化 Boss、重新随机生成整套账号或认证加密 secret；查错按该文档执行。工具不改变实际角色、冻结和对象权限。
 - PostgreSQL资源遵守 `docs/local-postgresql.md`；建库或测试前查主检出 `tmp/postgresql-resources.md`。同任务返修复用资源集，不逐轮新建随机库；完成整合后清理专用库与角色，保留资源必须登记用途与下一步。
 - 仓库根目录是本文件所在目录。上级 `../analysis`、`../reports`、`../.archive` 是受控旧平台证据，不是新代码工作区。
 - 默认中文沟通。区分已确认事实、代码推断、未知项和设计建议，结论附文件/方法或官方来源。
@@ -27,6 +28,7 @@
 
 ## 架构与业务
 
+- 后续代码设计、开发、修复及评审任务默认指定 `ponytail:ponytail`（full）。先读相关调用链、搜索已有模块/工具/测试，按“现有实现→标准库/原生能力→已安装依赖→最小新增”选择方案；在共同入口修根因，避免重复造轮子和为未来空建抽象。新增模块或依赖须说明现有能力缺口与当前需求；交付简述复用了什么、为何必须新增，并做相称验证。不得为缩短代码省略权限校验、事务/幂等、错误处理、多端边界或必要测试；不借此扩大为未授权的全仓重构。任务 prompt 应明确这一要求，避免旧 worktree 漏读主检出规范。
 - npm workspaces monorepo：`apps/*` 放可部署应用，`packages/*` 只放已有实际共享需求的代码。
 - NestJS + TypeScript、模块化单体、托管 PostgreSQL 已确认。其他技术与版本以选型记录状态为准。
 - 业务规则集中在 API；客户端不能决定最终价格、授权范围、支付成功或退款到账。

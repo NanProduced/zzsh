@@ -1,0 +1,14 @@
+{
+  "name": "@zzsh/im-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./lifecycle": "./src/im-client-lifecycle.ts",
+    "./nim-web-client": "./src/nim-web-client.ts",
+    "./message-state": "./src/message-state.ts"
+  },
+  "dependencies": {
+    "nim-web-sdk-ng": "10.9.30"
+  }
+}

@@ -129,5 +129,10 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_auth_user"."account",
       "zzsh_auth_user"."user",
       "zzsh_iam"."user_identity_state",
+      "zzsh_iam"."im_consultation_scope_operation",
+      "zzsh_iam"."im_consultation_event",
+      "zzsh_iam"."im_consultation",
+      "zzsh_iam"."im_support_presence",
+      "zzsh_iam"."im_identity_mapping",
       "zzsh_iam"."admin_security",
       "zzsh_iam"."audit_event"`;

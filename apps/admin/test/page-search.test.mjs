@@ -10,6 +10,7 @@ test("page search only lists implemented pages in the current permission set", (
   });
   assert.deepEqual(boss.map((page) => page.path), [
     "/workbench",
+    "/support",
     "/admins",
     "/roles",
     "/supply/catalog",

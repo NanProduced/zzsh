@@ -10,7 +10,6 @@ import { PortalFooter } from "./layout/portal-footer";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { searchAccounts } from "@/lib/account-search";
 import { UpcomingGames } from "./delta/game-identity";
-import { SupportRail } from "./support/support-rail";
 export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=false, onRetrySupply }: { accounts?: AccountCardData[]; supplyState?: SupplyState; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean; onRetrySupply?:()=>void }) {
   const [query, setQuery] = useState("");
   return <FavoritesProvider><div className="portal-home">
@@ -27,6 +26,5 @@ export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=f
       <UpcomingGames />
     </main>
     <PortalFooter />
-    <SupportRail />
   </div></FavoritesProvider>;
 }

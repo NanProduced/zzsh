@@ -21,13 +21,14 @@ export function useAuthOverlay(): AuthOverlayApi {
 }
 
 function protectedPath(pathname: string): boolean {
-  return pathname === "/publish" || pathname.startsWith("/publish/") || pathname === "/account" || pathname.startsWith("/account/");
+  return pathname === "/publish" || pathname.startsWith("/publish/") || pathname === "/account" || pathname.startsWith("/account/") || pathname === "/support" || pathname.startsWith("/support/");
 }
 
 function intentLabel(target?: string): string | undefined {
   const pathname = target?.split(/[?#]/, 1)[0];
   if (pathname === "/publish" || pathname?.startsWith("/publish/")) return "登录后继续上架出租";
   if (pathname === "/account" || pathname?.startsWith("/account/")) return "登录后继续查看个人中心";
+  if (pathname === "/support" || pathname?.startsWith("/support/")) return "登录后继续联系客服";
   return undefined;
 }
 
@@ -179,7 +180,7 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="modal-overlay auth-modal-overlay" />
-        <Dialog.Content className="auth-dialog-content" aria-describedby="auth-overlay-description" onCloseAutoFocus={(event) => {
+        <Dialog.Content data-auth-dialog className="auth-dialog-content" aria-describedby="auth-overlay-description" onCloseAutoFocus={(event) => {
           if (triggerRef.current?.isConnected) {
             event.preventDefault();
             triggerRef.current.focus();

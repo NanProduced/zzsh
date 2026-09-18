@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ThemeProvider } from "@/components/theme-provider";
 import { UserSessionProvider } from "@/components/session/user-session-provider";
 import { AuthOverlayProvider } from "@/components/auth/auth-overlay-provider";
+import { SupportRail } from "@/components/support/support-rail";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
@@ -56,9 +57,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body className="min-h-screen bg-[var(--color-bg-canvas)] text-[var(--color-text-primary)] antialiased selection:bg-[var(--color-accent-brand)] selection:text-black">
         <TooltipProvider delayDuration={180} skipDelayDuration={100}>
-          <ThemeProvider>
-            <UserSessionProvider><AuthOverlayProvider>{children}</AuthOverlayProvider></UserSessionProvider>
-          </ThemeProvider>
+        <ThemeProvider>
+          <UserSessionProvider><AuthOverlayProvider>{children}<SupportRail /></AuthOverlayProvider></UserSessionProvider>
+        </ThemeProvider>
         </TooltipProvider>
       </body>
     </html>

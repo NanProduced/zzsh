@@ -2,6 +2,7 @@ export const API_ROOT = "/api/bff/admin";
 export const CHANNEL_NAME = "zzsh-admin-security";
 export const EVENT_KEY = `${CHANNEL_NAME}:event`;
 export const IDLE_KEY = "zzsh-admin-idle-minutes";
+export const ADMIN_AUTH_FAILURE_EVENT = "zzsh-admin-auth-failure";
 
 export type Theme = "dark" | "light";
 export type View = "login" | "challenge" | "onboarding" | "recovery" | "app";
@@ -424,6 +425,9 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
     const error = payload && typeof payload === "object" && "error" in payload
       ? (payload as { error?: { code?: string; requestId?: string } }).error
       : undefined;
+    if ((response.status === 401 || response.status === 423) && path !== "/session" && !path.startsWith("/auth/")) {
+      window.dispatchEvent(new CustomEvent(ADMIN_AUTH_FAILURE_EVENT, { detail: { status: response.status, path } }));
+    }
     throw new AdminApiError(response.status, error?.code ?? "INTERNAL_ERROR", error?.requestId);
   }
   return payload as T;

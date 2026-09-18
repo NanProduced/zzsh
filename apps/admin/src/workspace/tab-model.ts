@@ -4,6 +4,7 @@ const SENSITIVE_QUERY = /(password|pin|otp|totp|backup|credential|token|secret|t
 
 export type WorkspaceRouteKind =
   | "workbench"
+  | "support"
   | "account"
   | "admins"
   | "admin-object"
@@ -45,6 +46,7 @@ export type NavPermission = {
 
 const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   [WORKBENCH_TAB_ID]: { id: WORKBENCH_TAB_ID, title: "工作台", path: "/workbench", closable: false, kind: "workbench" },
+  support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
   admins: { id: "admins", title: "管理员", path: "/admins", closable: true, kind: "admins" },
   roles: { id: "roles", title: "角色权限", path: "/roles", closable: true, kind: "roles" },
@@ -74,6 +76,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   const path = pathname.replace(/\/+$/, "") || "/";
   if (path === "/" || path === "/workbench") return { kind: "workbench", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
+  if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
   if (path === "/admins") return { kind: "admins", tabId: "admins", path: "/admins", title: "管理员" };
   const adminObject = path.match(/^\/admins\/([^/]+)$/);
   if (adminObject) {
@@ -129,6 +132,7 @@ export function tabHref(tab: WorkspaceTab): string {
 export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boolean {
   const has = (code: string) => nav.permissions.includes(code);
   if (kind === "workbench" || kind === "account") return true;
+  if (kind === "support") return has("im.support.read") || nav.isBoss;
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
   if (kind === "roles" || kind === "role-object") return has("admin.role.read") || has("admin.permission.read");
   if (kind === "approvals" || kind === "approval-object") {
@@ -146,7 +150,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

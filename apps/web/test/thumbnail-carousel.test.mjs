@@ -21,7 +21,7 @@ function setup({ index = 1, itemCount = 3, width = 100 } = {}) {
   const state = [false];
   let stateSlot = 0;
   let refSlot = 0;
-  const x = { set: (value) => xUpdates.push(value) };
+  const x = { stop: () => xUpdates.push("stop"), set: (value) => xUpdates.push(value) };
   const exports = {};
   const previousResizeObserver = globalThis.ResizeObserver;
   globalThis.ResizeObserver = class {
@@ -73,7 +73,7 @@ test('thumbnail carousel resynchronizes the active slide after viewport resize',
   state.xUpdates.length = 0;
   state.viewport.offsetWidth = 160;
   state.observers[0].callback();
-  assert.deepEqual(state.xUpdates, [-160]);
+  assert.deepEqual(state.xUpdates, ["stop", -160]);
   state.restore();
 });
 

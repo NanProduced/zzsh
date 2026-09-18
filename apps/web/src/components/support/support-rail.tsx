@@ -1,13 +1,35 @@
 "use client";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowUp, Gift, Headphones, MessageSquare, Share2, X } from "lucide-react";
+import { ArrowUp, Gift, Headphones, MessageSquare, Share2 } from "lucide-react";
 import { ContactPopover } from "./contact-popover";
+import { CustomerSupportWorkspace } from "./customer-support-workspace";
+import type { SupportType } from "@/lib/support-intent";
 import "./service-navigation.css";
-export function SupportRail(){return <aside className="support-rail" aria-label="常驻工具">
-  <ContactPopover kind="service" side="left" className="rail-item"><Headphones size={21}/><span>联系客服</span></ContactPopover>
-  <Link href="/account?view=invite" className="rail-item"><Gift size={21}/><span>邀请码</span></Link>
-  <ContactPopover kind="follow" side="left" className="rail-item"><Share2 size={21}/><span>关注我们</span></ContactPopover>
-  <Dialog.Root><Dialog.Trigger className="rail-item"><MessageSquare size={21}/><span>投诉建议</span></Dialog.Trigger><Dialog.Portal><Dialog.Overlay className="modal-overlay"/><Dialog.Content className="feedback-dialog complaint-panel"><Dialog.Title>投诉建议</Dialog.Title><Dialog.Description>反馈通道暂未开放，请稍后再来查看。</Dialog.Description><Dialog.Close className="icon-button dialog-close" aria-label="关闭投诉建议"><X size={20}/></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>
-  <button className="rail-item rail-top" onClick={()=>window.scrollTo({top:0,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'})}><ArrowUp size={21}/><span>返回顶部</span></button>
-</aside>;}
+export function SupportRail(){
+  const pathname = usePathname();
+  const [supportOpen,setSupportOpen]=useState(false);
+  const [requestedType,setRequestedType]=useState<SupportType>("SERVICE");
+  const [preview,setPreview]=useState(false);
+  const lastSupportTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const setSupportVisibility = (open: boolean) => {
+    setSupportOpen(open);
+    if (!open) requestAnimationFrame(() => lastSupportTriggerRef.current?.focus());
+  };
+  useEffect(()=>{
+    if(pathname === "/support") setSupportOpen(true);
+    setPreview(new URLSearchParams(window.location.search).get("preview") === "1");
+  },[pathname]);
+  return <aside className="support-rail" aria-label="常驻工具">
+    <Dialog.Root open={supportOpen} modal={false} onOpenChange={setSupportVisibility}>
+      <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>{lastSupportTriggerRef.current=event.currentTarget;setRequestedType("SERVICE");setSupportOpen(true);}}><Headphones size={21}/><span>联系客服</span></button>
+      <Dialog.Portal forceMount><Dialog.Overlay className="modal-overlay support-dialog-overlay"/><Dialog.Content forceMount className="support-dialog-content" aria-describedby="support-dialog-description" onPointerDownOutside={(event)=>{if(event.detail.originalEvent.target instanceof HTMLElement && event.detail.originalEvent.target.closest("[data-support-trigger], [data-auth-dialog]")) event.preventDefault();}}><Dialog.Title className="sr-only">站内客服</Dialog.Title><Dialog.Description id="support-dialog-description" className="sr-only">选择客服类型并开始站内咨询。</Dialog.Description><CustomerSupportWorkspace embedded preview={preview} initialType={requestedType} onClose={()=>setSupportVisibility(false)} /></Dialog.Content></Dialog.Portal>
+      <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>{lastSupportTriggerRef.current=event.currentTarget;setRequestedType("COMPLAINT");setSupportOpen(true);}}><MessageSquare size={21}/><span>投诉建议</span></button>
+    </Dialog.Root>
+    <Link href="/account?view=invite" className="rail-item"><Gift size={21}/><span>邀请码</span></Link>
+    <ContactPopover kind="follow" side="left" className="rail-item"><Share2 size={21}/><span>关注我们</span></ContactPopover>
+    <button className="rail-item rail-top" onClick={()=>window.scrollTo({top:0,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'})}><ArrowUp size={21}/><span>返回顶部</span></button>
+  </aside>;
+}

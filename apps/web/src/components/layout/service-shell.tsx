@@ -6,8 +6,6 @@ import { ArrowLeft } from "lucide-react";
 import { Chip } from "@heroui/react";
 import { PortalHeader } from "./portal-header";
 import { PortalFooter } from "./portal-footer";
-import { SupportRail } from "../support/support-rail";
-
 export type ServiceSurface = "browse" | "detail" | "editor" | "account" | "utility";
 export type BreadcrumbItem = { label: string; href?: string };
 
@@ -75,7 +73,6 @@ export function ServiceShell({
       {children}
     </main>
     <PortalFooter />
-    <SupportRail />
   </div>;
 }
 

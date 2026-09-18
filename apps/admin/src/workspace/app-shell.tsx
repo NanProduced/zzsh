@@ -208,6 +208,20 @@ export function WorkspaceApp({
     }
   };
 
+  const hasSupportRead = snapshot.permissions.includes("im.support.read");
+
+  useEffect(() => {
+    if (hasSupportRead || active.kind === "support") return;
+    let refreshing = false;
+    const refreshSession = () => {
+      if (refreshing) return;
+      refreshing = true;
+      void onRefresh().catch(() => undefined).finally(() => { refreshing = false; });
+    };
+    const timer = window.setInterval(refreshSession, 5_000);
+    return () => window.clearInterval(timer);
+  }, [active.kind, hasSupportRead, onRefresh]);
+
   const signOutAndClear = () => {
     clearTabs(snapshot.adminUserId);
     onSignOut();

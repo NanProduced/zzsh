@@ -30,6 +30,8 @@ export function ThumbnailCarousel({
   const x = useMotionValue(0);
   const [isDragging, setIsDragging] = useState(false);
   const activeIndex = items.length > 0 ? Math.min(Math.max(index, 0), items.length - 1) : 0;
+  const activeIndexRef = useRef(activeIndex);
+  activeIndexRef.current = activeIndex;
   const selectIndex = (nextIndex: number) => onIndexChange(Math.max(0, Math.min(items.length - 1, nextIndex)));
 
   useEffect(() => {
@@ -50,12 +52,15 @@ export function ThumbnailCarousel({
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || typeof ResizeObserver === "undefined") return;
-    const syncPosition = () => x.set(-activeIndex * (viewport.offsetWidth || 1));
+    const syncPosition = () => {
+      x.stop();
+      x.set(-activeIndexRef.current * (viewport.offsetWidth || 1));
+    };
     const observer = new ResizeObserver(syncPosition);
     observer.observe(viewport);
     syncPosition();
     return () => observer.disconnect();
-  }, [activeIndex, x]);
+  }, [x]);
 
   useEffect(() => {
     const activeThumbnail = thumbnailsRef.current?.querySelector<HTMLElement>(`[data-thumbnail-index="${activeIndex}"]`);
