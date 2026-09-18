@@ -10,6 +10,7 @@ export const ADMIN_PERMISSION = {
   accountFreeze: "admin.account.freeze",
   accountUnfreeze: "admin.account.unfreeze",
   userAccountRestore: "user.account.restore",
+  userRentalMembershipManage: "user.rental_membership.manage",
   auditRead: "admin.audit.read",
   roleRead: "admin.role.read",
   roleConfigure: "admin.role.configure",

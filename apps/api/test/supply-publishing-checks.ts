@@ -11,7 +11,7 @@ type Jar = {
   header: () => string;
   update?: (r: Response) => void;
 };
-type Options = {
+export type Options = {
   testContext: TestContext;
   readProbe: {
     run?: (client: PoolClient, account: { id: string }) => Promise<void>;

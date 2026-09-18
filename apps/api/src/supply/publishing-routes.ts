@@ -117,6 +117,8 @@ export async function handlePublishingRoute(
       )
     ).rows;
     const rule = release.haff_rule as {
+      schema?: string;
+      compatibility?: import("./delta-rental").DeltaCompatPricing;
       baseBySafeBox?: Record<string, string>;
       options?: Record<string, { enabled: boolean }>;
       vitalityDeltaByLevel?: Record<string,string>;
@@ -139,6 +141,7 @@ export async function handlePublishingRoute(
           .filter(([, v]) => v.enabled)
           .map(([key]) => key)
           .sort(),
+        ...(rule?.schema === "haff-ratio-v2" ? { pricingSchema: "haff-ratio-v2", rentalModes: rule.compatibility?.modes } : {}),
         agreement: {
           id: release.agreement_id,
           title: release.title,

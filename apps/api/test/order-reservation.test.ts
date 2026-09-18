@@ -23,11 +23,15 @@ import { runOrderTeamAcceptance } from "./order-team-postgres.test";
 // M4-A order reservation foundation: real PostgreSQL acceptance (V01–V21).
 // Deterministic barriers only; no sleeps to guess races.
 
-const RESOURCE_SET = process.env.ORDER_TEST_RESOURCE_SET?.trim() || "";
+// PC-1 reuses its one explicitly registered supply resource for legacy order regression.
+const PRICING_COMPAT = process.env.SUPPLY_TEST_RESOURCE_SET === "pricing_compat";
+if (PRICING_COMPAT && process.env.ORDER_TEST_RESOURCE_SET) throw new Error("Conflicting order/supply resource selection");
+const RESOURCE_SET = PRICING_COMPAT ? "pricing_compat" : process.env.ORDER_TEST_RESOURCE_SET?.trim() || "";
+const ROLE_PREFIX = PRICING_COMPAT ? "zzsh_m3b_" : "zzsh_order_";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid order test resource set");
-const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_order_" + RESOURCE_SET : "zzsh_test_order_reservation";
-const RESOURCE_MARKER = "zzsh:order-reservation-test:v1";
-const LOCK_KEY = RESOURCE_SET
+const DEFAULT_DATABASE = PRICING_COMPAT ? "zzsh_test_supply_pricing_compat" : RESOURCE_SET ? "zzsh_test_order_" + RESOURCE_SET : "zzsh_test_order_reservation";
+const RESOURCE_MARKER = PRICING_COMPAT ? "zzsh:m3b-supply-test:v1" : "zzsh:order-reservation-test:v1";
+const LOCK_KEY = PRICING_COMPAT ? "1001320784187617071" : RESOURCE_SET
   ? (BigInt("0x" + createHash("sha256").update("order-test:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 2000000n).toString()
   : "805021";
 const USER_ORIGIN = "http://127.0.0.1:3100";
@@ -95,15 +99,15 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 function makeResources(): Resources {
   const databaseName = process.env.ORDER_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
   assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.ORDER_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? "zzsh_order_" + RESOURCE_SET + "_m" : "zzsh_order_migration"), "migration user");
-  const runtimeUser = safeIdentifier(process.env.ORDER_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? "zzsh_order_" + RESOURCE_SET + "_r" : "zzsh_order_runtime"), "runtime user");
+  const migrationUser = safeIdentifier(process.env.ORDER_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? ROLE_PREFIX + RESOURCE_SET + "_m" : "zzsh_order_migration"), "migration user");
+  const runtimeUser = safeIdentifier(process.env.ORDER_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? ROLE_PREFIX + RESOURCE_SET + "_r" : "zzsh_order_runtime"), "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
   if (RESOURCE_SET) {
     assert.equal(databaseName, DEFAULT_DATABASE);
-    assert.equal(migrationUser, "zzsh_order_" + RESOURCE_SET + "_m");
-    assert.equal(runtimeUser, "zzsh_order_" + RESOURCE_SET + "_r");
+    assert.equal(migrationUser, ROLE_PREFIX + RESOURCE_SET + "_m");
+    assert.equal(runtimeUser, ROLE_PREFIX + RESOURCE_SET + "_r");
   }
-  if (!migrationUser.startsWith("zzsh_order_") || !runtimeUser.startsWith("zzsh_order_")) throw new Error("order test roles must use the isolated zzsh_order_ prefix");
+  if (!migrationUser.startsWith(ROLE_PREFIX) || !runtimeUser.startsWith(ROLE_PREFIX)) throw new Error("order test role prefix mismatch");
   const maintenanceUser = process.env.ORDER_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -157,7 +161,7 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     // Complete read-only preflight BEFORE either ensureRole can change a password.
     const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,
       shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
-    if (RESOURCE_SET === "yunxin_main_integrate") {
+    if (RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT) {
       assert.equal(resources.maintenance.database.user, "zzsh");
       assert.ok(db, "registered OIM database must already exist");
     }
@@ -171,7 +175,7 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
         shobj_description(oid,'pg_authid') AS marker,
         EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS membership,
         EXISTS(SELECT 1 FROM pg_database WHERE datdba=r.oid) AS owns_db FROM pg_roles r WHERE rolname=$1`, [name])).rows[0];
-      if (RESOURCE_SET === "yunxin_main_integrate") assert.ok(row, "registered OIM role must already exist");
+      if (RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT) assert.ok(row, "registered role must already exist");
       if (!row) continue;
       assert.deepEqual(row, { rolcanlogin: true, rolsuper: false, rolcreaterole: false, rolcreatedb: false,
         rolinherit: false, rolreplication: false, rolbypassrls: false, marker: roleMarker(resources.databaseName, kind), membership: false, owns_db: false });
@@ -371,7 +375,7 @@ function singleArrivalGate() {
 
 let pngFixture = Buffer.alloc(0);
 
-test("M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
+test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM workers)" : "M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
   let resources: Resources | undefined;
   let maintenancePool: Pool | undefined;
   let maintenanceDataPool: Pool | undefined;
@@ -1655,7 +1659,7 @@ test("M4-A V01–V21 and OIM-2A payment acceptance", async (t) => {
       api: (path, body, method) => request(base, path, body, paymentBuyer, USER_ORIGIN, method, orderKey()),
       clone: cloneOrderOnAccount,
     };
-    if (RESOURCE_SET) {
+    if (RESOURCE_SET && !PRICING_COMPAT) {
       await runPaymentAcceptance(t, acceptance);
       await runDispatchAcceptance(t, acceptance);
       await runOrderTeamAcceptance(t, acceptance);

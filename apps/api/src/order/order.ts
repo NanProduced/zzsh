@@ -39,7 +39,7 @@ export type OrderRow = {
   depositAmountCents: string;
   currency: string;
   termSeconds: string;
-  quoteSnapshot: InternalQuote & { contentHash?: string };
+  quoteSnapshot: InternalQuote & { contentHash?: string; quoteKind?: "ORDER_CONFIRMATION" };
   title: string;
   holdUntil: string;
   paidAt: string | null;
@@ -101,7 +101,7 @@ export function centsToYuan(cents: string | bigint): QuoteAmount {
   };
 }
 
-function orderConflict(code: "OCCUPIED" | "RULE_CHANGED" | "VERSION_CHANGED" | "DEPOSIT_UNCONFIGURED", message: string): SecurityApiError {
+function orderConflict(code: "OCCUPIED" | "RULE_CHANGED" | "VERSION_CHANGED" | "DEPOSIT_UNCONFIGURED" | "PRICING_SCHEMA_UNSUPPORTED", message: string): SecurityApiError {
   return new SecurityApiError(409, API_V1_ERROR_CODES[code], message);
 }
 
@@ -112,6 +112,11 @@ export function projectOrder(
   party: OrderParty,
   options?: { internalQuote?: boolean },
 ): Record<string, unknown> {
+  const projectSnapshot = (viewer: "public" | "owner" | "admin") => {
+    const projected = projectDeltaQuote(row.quoteSnapshot, viewer);
+    if (row.quoteSnapshot.quoteKind === "ORDER_CONFIRMATION" && viewer !== "admin") delete projected.publisherBailRequirement;
+    return projected;
+  };
   const expired = row.expiredAwaitingCancel === true;
   const amounts = {
     rental: centsToYuan(row.rentalAmountCents),
@@ -142,13 +147,13 @@ export function projectOrder(
       : {}),
   };
   if (party === "renter") {
-    return { ...base, quote: projectDeltaQuote(row.quoteSnapshot as InternalQuote, "public") };
+    return { ...base, quote: projectSnapshot("public") };
   }
   if (party === "owner") {
     return {
       ...base,
       renterName: row.renterName,
-      quote: projectDeltaQuote(row.quoteSnapshot as InternalQuote, "owner"),
+      quote: projectSnapshot("owner"),
     };
   }
   return {
@@ -161,7 +166,7 @@ export function projectOrder(
     releaseId: row.releaseId,
     contentHash: row.contentHash,
     revision: row.revision,
-    quote: projectDeltaQuote(row.quoteSnapshot as InternalQuote, options?.internalQuote ? "admin" : "owner"),
+    quote: projectSnapshot(options?.internalQuote ? "admin" : "owner"),
   };
 }
 
@@ -317,30 +322,39 @@ export async function createReservation(
   // fails closed as "not publicly orderable" without claiming an occupancy fact.
   if (blockers.length > 0) throw notFound();
   if (!version.payload) throw notFound();
+  if (version.payload.schemaVersion !== 1 || version.payload.quoteValues.schemaVersion !== 1) {
+    throw orderConflict("PRICING_SCHEMA_UNSUPPORTED", "该报价版本尚未开放建单");
+  }
   const quote = normalizeQuote(version.payload.quoteValues);
   if (quote.pricingInputs.depositPolicy !== "CONFIGURED" || !quote.tenantDeposit) {
     throw orderConflict("DEPOSIT_UNCONFIGURED", "押金规则未配置，暂不能创建可付款订单");
   }
+  return insertReservationSnapshot(client,{context:input.context,account,version,snapshot:{...quote,contentHash:version.content_hash!},holdSeconds:input.holdSeconds as number,requestId:input.requestId});
+}
+
+/** Caller holds both users, game and account locks and has validated its quote contract. */
+export async function insertReservationSnapshot(client:PoolClient,input:{context:OrderUserContext;account:PublishingAccount;version:ListingVersion;snapshot:InternalQuote;holdSeconds:number;requestId:string;confirmationId?:string}):Promise<{status:number;body:unknown}> {
+  const {account,version,snapshot}=input;
+  const quote=snapshot;
   const rentalCents = yuanToCents(quote.resourceTotal, "rental amount");
   const depositCents = yuanToCents(quote.tenantDeposit, "deposit amount");
   const orderId = `order_${randomUUID().replaceAll("-", "")}`;
-  const snapshot = { ...quote, contentHash: version.content_hash };
   const inserted = await client.query(
     `INSERT INTO zzsh_order.rental_order (
        id, display_no, account_id, listing_version_id, owner_user_id, renter_user_id, game_id,
        rule_release_id, content_hash, term_option_code, status,
        rental_amount_cents, deposit_amount_cents, currency, term_seconds,
-       quote_snapshot, title, hold_until
+       quote_snapshot, title, hold_until${input.confirmationId ? ", confirmation_id" : ""}
      ) VALUES (
        $1,
        zzsh_order.next_display_no(),
        $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_PAYMENT',
        $10, $11, 'CNY', $12, $13::jsonb, $14,
-       clock_timestamp() + make_interval(secs => $15)
+       clock_timestamp() + make_interval(secs => $15)${input.confirmationId ? ", $16" : ""}
      ) RETURNING id`,
     [
       orderId,
-      input.accountId,
+      account.id,
       version.id,
       account.owner_user_id,
       input.context.userId,
@@ -354,6 +368,7 @@ export async function createReservation(
       JSON.stringify(snapshot),
       version.title,
       input.holdSeconds,
+      ...(input.confirmationId ? [input.confirmationId] : []),
     ],
   );
   if (inserted.rowCount !== 1) throw conflict("Request conflicts with current state");
@@ -368,7 +383,7 @@ export async function createReservation(
     objectType: "rental_order",
     objectId: orderId,
     outcome: "SUCCESS",
-    reason: "order.reservation.create",
+    reason: input.confirmationId ? "order.reservation.create.v2" : "order.reservation.create",
     requestId: input.requestId,
     details: {
       before: null,

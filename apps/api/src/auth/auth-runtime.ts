@@ -2,6 +2,11 @@ import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-d
 import { OrderTeamLifecycle } from "../im/order-team";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
+import { mountRentalMembership } from "./rental-membership-routes";
+import { mountPersonalConfirmations } from "../order/confirmation-routes";
+import { mountPersonalOrders } from "../order/personal-order-routes";
+import type { ConfirmationKey } from "../order/confirmation-token";
+import type { ConfirmationFundingReader } from "../order/personal-confirmation";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomInt, randomUUID } from "node:crypto";
@@ -48,6 +53,8 @@ export type AuthRuntimeCapabilities = {
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
+  confirmationKey?: ConfirmationKey;
+  testConfirmationFundingReader?: ConfirmationFundingReader;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
   supportDispatch?: Omit<OrderDispatchOptions, "pool">;
   orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number };
@@ -566,6 +573,10 @@ export function loadAuthRuntimeConfig(
 
   const userSecret = readSecret(env, "AUTH_USER_SECRET", "AUTH_USER_SECRET_FILE", workingDirectory);
   const adminSecret = readSecret(env, "AUTH_ADMIN_SECRET", "AUTH_ADMIN_SECRET_FILE", workingDirectory);
+  const confirmationSecret = env.ORDER_CONFIRMATION_SECRET !== undefined || env.ORDER_CONFIRMATION_SECRET_FILE !== undefined
+    ? readSecret(env,"ORDER_CONFIRMATION_SECRET","ORDER_CONFIRMATION_SECRET_FILE",workingDirectory) : undefined;
+  const confirmationKeyId = env.ORDER_CONFIRMATION_KEY_ID;
+  if (confirmationSecret !== undefined && (confirmationSecret.length<32 || confirmationSecret===userSecret || confirmationSecret===adminSecret || !confirmationKeyId || !/^[A-Za-z0-9_-]{1,64}$/.test(confirmationKeyId))) throw new ConfigurationError("Order confirmation requires a dedicated secret and key ID");
   if (userSecret.length < 32 || adminSecret.length < 32) {
     throw new ConfigurationError("Better Auth secrets must be at least 32 characters");
   }
@@ -597,6 +608,7 @@ export function loadAuthRuntimeConfig(
   }
   return {
     apiOrigin,
+    ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
     userOrigin,
     adminOrigin,
     userSecret,
@@ -886,6 +898,7 @@ export async function mountAuthHandlers(
     app.get(MessageScopeRecoveryLifecycle).start(yunxinConsultation!);
   }
   if(options.testSupplyGateReader && !options.testOperationsEnabled) throw new Error("Supply fixtures require test operations capability");
+  if(options.testConfirmationFundingReader && (!options.testOperationsEnabled || process.env.NODE_ENV==="production")) throw new Error("Confirmation fixtures require test/fake operations capability");
   // Occupancy truth comes from the order table; the base reader keeps the
   // publisher-bail seam semantics (UNKNOWN fails closed until M5).
   const supplyGateReader=composeSupplyGateWithOrderOccupancy(options.testSupplyGateReader ?? unknownSupplyGate);
@@ -928,6 +941,9 @@ export async function mountAuthHandlers(
   });
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
+  mountRentalMembership(app,securityOptions);
+  mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,...(options.testConfirmationFundingReader?{fundingReader:options.testConfirmationFundingReader}:{})});
+  mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,...(options.testConfirmationFundingReader?{fundingReader:options.testConfirmationFundingReader}:{})});
   if (options.orderTeams) {
     const provider=yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");

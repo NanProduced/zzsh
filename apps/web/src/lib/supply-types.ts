@@ -7,7 +7,8 @@ export type UnitAmount = {
   scale: 8;
 };
 export type PublicQuote = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
+  rentalMode?: "ordinary" | "custom" | "fast";
   currency: "CNY";
   ruleReleaseId: string | null;
   lines: Array<{
@@ -266,7 +267,7 @@ export type MySupply = {
   };
   version: null | {
     id: string;
-    schemaVersion: 1;
+    schemaVersion: 1 | 2;
     sequence: string;
     reviewState:
       | "DRAFT"

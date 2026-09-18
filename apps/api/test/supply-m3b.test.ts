@@ -1,6 +1,9 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
+import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
+import { personalFixture } from "./personal-confirmation-checks";
+import { createFakeRealNameProvider } from "../src/auth/user-identity";
 import { runMediaOssChecks, type MediaStorageFaults } from "./supply-media-oss-checks";
 import { runGunsmithChecks } from "./supply-gunsmith-checks";
 import type { SupplyGate } from "../src/supply/publishing";
@@ -8,7 +11,7 @@ import sharp from "sharp";
 import { fingerprintRequest } from "../src/supply/supply-util";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -141,7 +144,7 @@ function poolFor(config: AppConfig, database: string, applicationName: string, m
   });
 }
 
-async function resourceGuard(pool: Pool): Promise<PoolClient> {
+async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClient> {
   const client = await pool.connect();
   try {
     const identity = await client.query<{ databaseName: string; currentUser: string; port: string }>("SELECT current_database() AS \"databaseName\", current_user AS \"currentUser\", current_setting('port') AS port");
@@ -149,6 +152,19 @@ async function resourceGuard(pool: Pool): Promise<PoolClient> {
     assert.equal(identity.rows[0]?.currentUser, pool.options.user);
     assert.equal(identity.rows[0]?.port, "5432");
     assert.equal((await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", [LOCK_KEY])).rows[0]?.acquired, true, "dedicated supply test target is already in use");
+    assert.equal(resources.maintenance.database.host, "127.0.0.1");
+    assert.equal(resources.maintenance.database.port, 55432);
+    if (RESOURCE_SET === "pricing_compat") assert.equal(resources.maintenance.database.user, "zzsh");
+    const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,datallowconn,datistemplate,shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
+    if(RESOURCE_SET==="pricing_compat") assert.ok(db,"PC-2A must reuse the registered database, not recreate it");
+    if (db) assert.deepEqual(db, { owner: resources.maintenance.database.user, datallowconn: true, datistemplate: false, marker: RESOURCE_MARKER });
+    assert.equal((await client.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1 OR usename=ANY($2::text[])`, [resources.databaseName, [resources.migrationUser,resources.runtimeUser]])).rows[0].n, 0);
+    for (const [name,kind] of [[resources.migrationUser,"migration"],[resources.runtimeUser,"runtime"]] as const) {
+      const row=(await client.query(`SELECT rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,rolinherit,rolreplication,rolbypassrls,shobj_description(oid,'pg_authid') AS marker,EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS membership,EXISTS(SELECT 1 FROM pg_database WHERE datdba=r.oid) AS owns_db FROM pg_roles r WHERE rolname=$1`,[name])).rows[0];
+      if(RESOURCE_SET==="pricing_compat") assert.ok(row,"PC-2A registered roles must already exist");
+      if(row) assert.deepEqual(row,{rolcanlogin:true,rolsuper:false,rolcreaterole:false,rolcreatedb:false,rolinherit:false,rolreplication:false,rolbypassrls:false,marker:roleMarker(resources.databaseName,kind),membership:false,owns_db:false});
+    }
+    console.log("supply resource preflight PASS",resources.databaseName,LOCK_KEY);
     return client;
   } catch (error) {
     client.release(true);
@@ -219,7 +235,8 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+  const present=(await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation;
+  await pool.query(present?ISOLATED_BUSINESS_DATA_TRUNCATE:ISOLATED_BUSINESS_DATA_TRUNCATE.replace('      "zzsh_iam"."user_rental_membership",\n',""));
 }
 
 function base32Decode(value: string): Buffer {
@@ -322,6 +339,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
   let guard: PoolClient | undefined;
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   let runtimeClosedByApp = false;
+  let cleanupAuthorized = false;
   const mediaDir = await mkdtemp(join(tmpdir(), "zzsh-m3b-media-"));
   const baseStorage = createLocalMediaStorage(mediaDir);
   const publicationGates=new Map<string,SupplyGate>();
@@ -359,7 +377,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     resources = makeResources();
     pngFixture = await sharp({ create: { width: 64, height: 64, channels: 3, background: "red" } }).withExif({ IFD0: { Artist: "private original" } }).png().toBuffer();
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-m3b-maintenance", 2);
-    guard = await resourceGuard(maintenancePool);
+    guard = await resourceGuard(maintenancePool, resources);
     await ensureDatabase(maintenancePool, resources);
     await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
     await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
@@ -367,11 +385,21 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-m3b-owner", 2);
     await prepareOwnership(maintenanceDataPool, resources);
     migrationPool = createBusinessPool(resources.migration);
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+    if (RESOURCE_SET === "pricing_compat") {
+      const folder=join(mediaDir,"baseline-0038");
+      await cp(join(__dirname,"../../migrations/business"),folder,{recursive:true});
+      const journal=JSON.parse(await readFile(join(folder,"meta/_journal.json"),"utf8"));
+      journal.entries=journal.entries.filter((entry:{idx:number})=>entry.idx<=38);
+      await writeFile(join(folder,"meta/_journal.json"),JSON.stringify(journal));
+      await runBusinessMigrations(migrationPool,{runtimeUser:resources.runtimeUser,migrationsFolder:folder});
+    } else {
+      await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+      await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+    }
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     await resetIsolatedData(maintenanceDataPool);
+    cleanupAuthorized = true;
 
     const tables = await runtimePool.query<{ exists: boolean }>(
       "SELECT to_regclass('zzsh_supply.media_asset') IS NOT NULL AND to_regclass('zzsh_supply.price_version') IS NOT NULL AND to_regclass('zzsh_supply.idempotency_record') IS NOT NULL AS exists",
@@ -382,6 +410,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     const bootstrapSecret = randomBytes(32).toString("hex");
     const authOptions = {
+      ...(RESOURCE_SET==="pricing_compat"?{confirmationKey:personalFixture.key,orderHoldSeconds:300,testConfirmationFundingReader:async()=>personalFixture.funding,fakeSmsOutbox:personalFixture.sms,realNameProvider:createFakeRealNameProvider("VERIFIED_ADULT")}:{}),
       ...loadAuthRuntimeConfig({
         AUTH_API_ORIGIN: API_ORIGIN,
         AUTH_USER_ORIGIN: USER_ORIGIN,
@@ -394,6 +423,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       mediaStorage,
       testSupplyGateReader: async (client:PoolClient,a:{id:string}) => {await readProbe.run?.(client,a);return publicationGates.get(a.id) ?? {publisherBail:"UNKNOWN" as const,occupancy:"UNKNOWN" as const,reference:null};},
     };
+    if(RESOURCE_SET==="pricing_compat")personalFixture.runtimeAuth=authOptions;
     app = await createApp({
       health: {
         dependencies: {
@@ -898,6 +928,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(rejectedAudit?.reason, "合成驳回");
     assert.equal(audits.some((a) => a.object_id === firstActivation.body?.releaseId && a.details.before.current_release_id === null && a.details.after.generation === "1"), true);
     assert.equal(JSON.stringify(audits).includes("uploadToken"), false);
+    if (RESOURCE_SET === "pricing_compat") await runPricingCompatChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
   } finally {
     const cleanupErrors: unknown[] = [];
     if (app) {
@@ -910,6 +941,9 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     }
     if (runtimePool && !runtimeClosedByApp) {
       try { await runtimePool.end(); } catch (error) { cleanupErrors.push(error); }
+    }
+    if (cleanupAuthorized && maintenanceDataPool && RESOURCE_SET === "pricing_compat") {
+      try { await resetIsolatedData(maintenanceDataPool); console.log("PC1 synthetic cleanup PASS"); } catch (error) { cleanupErrors.push(error); }
     }
     if (guard) {
       try {

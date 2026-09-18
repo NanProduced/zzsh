@@ -22,6 +22,8 @@ import {
   type DeltaProjectedQuote,
   type DeltaQuoteReasonCode,
   type DeltaQuoteViewer,
+  type CustomerTier,
+  type DeltaHaffConditions,
 } from "./delta-rental";
 
 export const QUOTE_SCHEMA_VERSION = DELTA_QUOTE_SCHEMA_VERSION;
@@ -34,6 +36,7 @@ export type HaffRatioRule = DeltaHaffRule;
 
 export type PricingLineInput = {
   itemId: string;
+  customerTier?: CustomerTier;
   quantity: string;
   pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
   unitQuantity?: string;
@@ -49,19 +52,14 @@ export type EntitlementInput = {
 };
 
 export type QuoteInput = {
+  customerTier?: CustomerTier;
   priceVersionId: string;
   mode: "SPREAD" | "PERCENT";
   roundingPolicy: string;
   commissionRate?: string;
   haffRule?: HaffRatioRule;
   lines: readonly PricingLineInput[];
-  conditions: {
-    safeBoxCode?: string;
-    vitLevel?: number;
-    bearLevel?: number;
-    termOptionCode?: string;
-    pricingOptionCode?: string;
-  };
+  conditions: DeltaHaffConditions;
   termOption: { code: string; dailyConsumption: string; durationRounding: "CEIL_DAY" };
   entitlements?: readonly EntitlementInput[];
   deposits?: {
@@ -101,7 +99,7 @@ export type QuoteExactRatio = {
 };
 
 export type InternalQuote = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   currency: "CNY";
   priceVersionId: string;
   ruleReleaseId: string | null;
@@ -117,6 +115,7 @@ export type InternalQuote = {
   unitAmountsInformational: boolean;
   roundingPolicy: string;
   pricingInputs: {
+    compatibility?: import("./delta-rental").DeltaHaffContext["compatibility"];
     haffRatioSchema: string | null;
     conditions: Record<string, string> | null;
     denominators: { owner: string; buyer: string } | null;
@@ -170,7 +169,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   }
 
   const hasHaffLines = input.lines.some((line) => line.pricingKind === "HAFF_RATIO");
-  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions });
+  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier });
   for (const reason of deltaHaff.reasonCodes) fail(reason);
   const { haffSchema, ownerDenominator, buyerDenominator, spreadDelta, conditions } = deltaHaff;
 
@@ -181,6 +180,10 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   let totalHaffBase = 0n;
 
   for (const line of input.lines) {
+    if (deltaHaff.compatibility && line.customerTier !== input.customerTier) {
+      fail("RULE_INPUT_MISSING");
+      continue;
+    }
     let quantity: Decimal;
     try {
       quantity = parseNonNegativeDecimal(line.quantity, 0, "quantity");
@@ -296,7 +299,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   return {
     quotable: true,
     quote: normalizeQuote({
-      schemaVersion: QUOTE_SCHEMA_VERSION,
+      schemaVersion: deltaHaff.compatibility ? 2 : QUOTE_SCHEMA_VERSION,
       currency: "CNY",
       priceVersionId: input.priceVersionId,
       ruleReleaseId: null,
@@ -312,6 +315,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
       unitAmountsInformational: hasHaffLines,
       roundingPolicy: ROUNDING_POLICY,
       pricingInputs: {
+        ...(deltaHaff.compatibility ? { compatibility: deltaHaff.compatibility } : {}),
         haffRatioSchema: haffSchema,
         conditions: hasHaffLines ? conditions : null,
         denominators:
