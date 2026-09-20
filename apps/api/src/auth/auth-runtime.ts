@@ -861,7 +861,6 @@ export async function mountAuthHandlers(
       imAppId: options.yunxin!.appId,
     } : {}),
   };
-  (app as unknown as { useBodyParser: (parser: "json", rawBody: boolean) => void }).useBodyParser("json", true);
   mountRealm(
     app,
     "user",

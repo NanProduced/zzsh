@@ -1,8 +1,8 @@
 "use client";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { mergeImMessages } from "@zzsh/im-client/message-state";
-import type { NimMessageLike, NimWebClientLike, NimWebConnectionState, NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
+import { NimImageSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
 
 type Member={platformId:string;accountId:string;party:string;name:string|null;avatar:string|null;responsible?:boolean;membershipStatus?:string;identityStatus?:string};
 export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;assignmentState:string|null;teamState:string|null;
@@ -30,6 +30,28 @@ function serverTimeLabel(value:string):string{
   return Number.isFinite(date.getTime())?new Intl.DateTimeFormat("zh-CN",{dateStyle:"medium",timeStyle:"short"}).format(date):"时间暂不可用";
 }
 const role=(m:Member)=>m.party==="BUYER"?"买家":m.party==="OWNER"?"号主":m.responsible?"负责客服":"协作客服";
+type ImageAttachment=NonNullable<NimMessageLike["attachment"]>;
+type ImageDraft={file:File;previewUrl:string;name:string;size:number;width:number;height:number;state:"DECODING"|"READY"|"SENDING"|"FAILED"|"UNKNOWN";progress:number;messageClientId?:string};
+function supportedImageUrl(value:unknown):string|null{
+  if(typeof value!=="string"||value.length>2048)return null;
+  if(/^\/api\/(?:im|bff\/admin\/im)\/images\/[A-Za-z0-9._:-]{1,128}$/.test(value))return value;
+  try{const parsed=new URL(value,typeof window==="undefined"?"https://invalid.local":window.location.origin),protocol=parsed.protocol.toLowerCase();if(["blob:","data:","file:","javascript:"].includes(protocol))return null;return protocol==="https:"||(protocol==="http:"&&typeof window!=="undefined"&&parsed.origin===window.location.origin)?parsed.href:null;}catch{return null;}
+}
+function decodeImage(url:string):Promise<{width:number;height:number}>{
+  return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>image.naturalWidth>0&&image.naturalHeight>0?resolve({width:image.naturalWidth,height:image.naturalHeight}):reject(new Error("图片无法解码"));image.onerror=()=>reject(new Error("图片无法解码"));image.src=url;});
+}
+function formatBytes(value:number):string{return value>=1024*1024?`${(value/1024/1024).toFixed(1)} MiB`:`${Math.max(1,Math.round(value/1024))} KiB`;}
+function imageErrorMessage(error:unknown):string{
+  if(error instanceof NimImageSendError&&error.kind==="UNKNOWN")return "图片发送结果未确认，请先刷新历史；确认未发送后再重试";
+  return statusOf(error)===403?"发送权限已变化，图片草稿已保留":"图片发送失败，可重试";
+}
+function MessageImage({attachment,onOpen}:{attachment:ImageAttachment;onOpen:(url:string,name:string,trigger:HTMLButtonElement)=>void}){
+  const [failed,setFailed]=useState(false);
+  const thumbnail=supportedImageUrl((attachment as {thumbUrl?:unknown}).thumbUrl)??supportedImageUrl(attachment.url);
+  const full=supportedImageUrl(attachment.url)??thumbnail;
+  if(!thumbnail||failed)return <span className="order-team-image-placeholder">图片暂不可预览</span>;
+  return <button type="button" className="order-team-image" onClick={event=>full&&onOpen(full,typeof attachment.name==="string"?attachment.name:"订单图片",event.currentTarget)}><img src={thumbnail} alt={typeof attachment.name==="string"?attachment.name:"订单图片"} loading="lazy" onError={()=>setFailed(true)}/></button>;
+}
 
 /** Both platforms pass their existing client. This component never logs in or creates a Team. */
 export function OrderTeamPanel({identity,realm,client,connection,active,initialParty="renter",sendAllowed=true,request,onAuthError}:Props){
@@ -116,12 +138,22 @@ export function OrderTeamPanel({identity,realm,client,connection,active,initialP
 
 function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{client:NimWebClientLike;info:OrderTeamAccess;connection:Props["connection"];readAccess:(operation:"read"|"send")=>Promise<OrderTeamAccess>;draft:string;setDraft:(value:string)=>void}){
   type Message=NimMessageLike&{id:string};
-  const [messages,setMessages]=useState<Message[]>([]),[error,setError]=useState(""),[sending,setSending]=useState(false),[reading,setReading]=useState(false),[more,setMore]=useState(true);
-  const generation=useRef(0),clientRef=useRef(client),accessRef=useRef(readAccess),sendOwner=useRef(0),readOwner=useRef(0),draftRef=useRef(draft);
-  accessRef.current=readAccess;draftRef.current=draft;
+  const [messages,setMessages]=useState<Message[]>([]),[error,setError]=useState(""),[sending,setSending]=useState(false),[reading,setReading]=useState(false),[more,setMore]=useState(true),[image,setImage]=useState<ImageDraft|null>(null),[viewer,setViewer]=useState<{url:string;name:string}|null>(null);
+  const generation=useRef(0),clientRef=useRef(client),accessRef=useRef(readAccess),sendOwner=useRef(0),readOwner=useRef(0),draftRef=useRef(draft),imageRef=useRef<ImageDraft|null>(null),selection=useRef(0),viewerTrigger=useRef<HTMLElement|null>(null),viewerClose=useRef<HTMLButtonElement|null>(null);
+  accessRef.current=readAccess;draftRef.current=draft;imageRef.current=image;
   if(clientRef.current!==client){clientRef.current=client;generation.current++;}
   const scope=JSON.stringify([info.appId,info.orderId,info.teamId,info.conversationId,info.viewerAccountId]);
   const scopeRef=useRef(scope);scopeRef.current=scope;
+  const revoke=(draftToRelease:ImageDraft|null)=>{if(draftToRelease?.previewUrl)URL.revokeObjectURL(draftToRelease.previewUrl);};
+  useEffect(()=>()=>{selection.current++;revoke(imageRef.current);},[]);
+  useEffect(()=>{if(viewer){const dialog=viewerClose.current?.closest("dialog");dialog?.showModal();viewerClose.current?.focus();return()=>dialog?.close();}else viewerTrigger.current?.focus();},[viewer]);
+  const replaceImage=(next:ImageDraft|null)=>{setImage(current=>{if(current&&current!==next)revoke(current);imageRef.current=next;return next;});};
+  const chooseImage=(event:ChangeEvent<HTMLInputElement>)=>{
+    const file=event.target.files?.[0];event.target.value="";if(!file)return;const ticket=++selection.current;
+    try{validateNimImageFile(file);}catch(cause){setError(cause instanceof Error?cause.message:"图片无效");return;}
+    const previewUrl=URL.createObjectURL(file);const draftImage:ImageDraft={file,previewUrl,name:file.name,size:file.size,width:0,height:0,state:"DECODING",progress:0};replaceImage(draftImage);
+    void decodeImage(previewUrl).then(({width,height})=>{if(ticket!==selection.current){revoke(draftImage);return;}setImage(current=>current===draftImage?{...current,width,height,state:"READY"}:current);}).catch(()=>{if(ticket===selection.current){replaceImage(null);setError("图片无法解码，请选择有效的 JPG 或 PNG");}});
+  };
   const authorize=(version:number):NimMessageAuthorization=>async({conversationId,operation})=>{
     const fresh=await accessRef.current(operation);
     if(version!==generation.current||clientRef.current!==client||scope!==scopeRef.current)throw new ImLifecycleSupersededError();
@@ -147,22 +179,40 @@ function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{c
   const previousConnection=useRef(connection);
   useEffect(()=>{if(connection==="CONNECTED"&&previousConnection.current!=="CONNECTED")void history();previousConnection.current=connection;},[connection]);
   const send=async(event:FormEvent)=>{
-    event.preventDefault();const text=draft.trim();if(!text||sending||!info.canSend||connection!=="CONNECTED")return;
+    event.preventDefault();const text=draft.trim(),selectedImage=imageRef.current;if((!text&&!selectedImage)||sending||!info.canSend||connection!=="CONNECTED")return;
+    if(selectedImage&&(selectedImage.state==="DECODING"||selectedImage.width<=0||selectedImage.height<=0)){setError("图片仍在检查，请稍候");return;}
     const version=generation.current,owner=++sendOwner.current;setSending(true);setError("");
-    try{const sent=await client.sendText(info.conversationId!,text,authorize(version));if(version!==generation.current)return;merge([sent]);if(draftRef.current.trim()===text)setDraft("");}
-    catch(cause){if(version===generation.current&&!superseded(cause)){setError(statusOf(cause)===403?"发送权限已变化，草稿已保留":"发送结果未确认，请先查看历史再决定是否重试");if(statusOf(cause)===403)void accessRef.current("read").catch(()=>undefined);}}
-    finally{if(version===generation.current&&owner===sendOwner.current)setSending(false);}
+    try{
+      if(selectedImage){
+        setImage(current=>current?{...current,state:"SENDING",progress:0}:current);
+        const progress=(percentage:number)=>{if(version===generation.current)setImage(current=>current?{...current,progress:percentage}:current);};
+        const sent=selectedImage.messageClientId?await client.retryImage(info.conversationId!,selectedImage.messageClientId,{authorize:authorize(version),onProgress:progress}):await client.sendImage(info.conversationId!,selectedImage.file,{authorize:authorize(version),onProgress:progress,width:selectedImage.width,height:selectedImage.height});
+        if(version!==generation.current)return;merge([sent]);replaceImage(null);
+      }else{
+        const sent=await client.sendText(info.conversationId!,text,authorize(version));if(version!==generation.current)return;merge([sent]);if(draftRef.current.trim()===text)setDraft("");
+      }
+    }catch(cause){
+      if(version===generation.current&&!superseded(cause)){
+        if(selectedImage){const messageClientId=cause instanceof NimImageSendError?cause.messageClientId:selectedImage.messageClientId;setImage(current=>current?{...current,state:cause instanceof NimImageSendError&&cause.kind==="UNKNOWN"?"UNKNOWN":"FAILED",messageClientId:messageClientId??current.messageClientId}:current);setError(imageErrorMessage(cause));if(cause instanceof NimImageSendError&&cause.kind==="UNKNOWN")void history();}
+        else{setError(statusOf(cause)===403?"发送权限已变化，草稿已保留":"发送结果未确认，请先查看历史再决定是否重试");}
+        if(statusOf(cause)===403)void accessRef.current("read").catch(()=>undefined);
+      }
+    }finally{if(version===generation.current&&owner===sendOwner.current)setSending(false);}
   };
-  return <section className="order-team-chat" aria-label="订单文字沟通">
+  const removeImage=()=>{selection.current++;replaceImage(null);};
+  const imageBlocked=Boolean(image&&(image.state==="DECODING"||image.width<=0||image.height<=0));
+  return <section className="order-team-chat" aria-label="订单文字和图片沟通">
     <p role="status">{client.transport==="local-fake"?"local-fake 受控消息 · ":""}{connection==="CONNECTED"?"已连接":connection==="RECONNECTING"?"网络中断，正在重连":"连接不可用"}{!info.canSend?" · 当前只可阅读":""}</p>
     <button type="button" onClick={()=>void history()} disabled={reading}>刷新消息</button>
     {more&&messages.length?<button type="button" disabled={reading} onClick={()=>void history(messages[0])}>更早的消息</button>:null}
     {error?<p role="alert">{error}</p>:null}
     <ol className="order-team-messages" aria-label="订单消息" aria-live="polite">{messages.map(message=>{
       const member=info.members.find(m=>m.accountId===message.senderId),self=message.senderId===client.accountId;
-      return <li key={message.id} data-self={self}><small>{self?"我":member?.name?.trim()|| (member?role(member):"平台消息")} {member?role(member):""} · {serverTimeLabel(new Date(message.createTime).toString())}</small><p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>{self?<small>已发送</small>:null}</li>;
+      return <li key={message.id} data-self={self}><small>{self?"我":member?.name?.trim()|| (member?role(member):"平台消息")} {member?role(member):""} · {serverTimeLabel(new Date(message.createTime).toString())}</small>{message.messageType===1&&message.attachment?<MessageImage attachment={message.attachment} onOpen={(url,name,trigger)=>{viewerTrigger.current=trigger;setViewer({url,name});}}/>:<p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>}{self?<small>已发送</small>:null}</li>;
     })}</ol>
-    {!messages.length?<p>{reading?"正在读取历史…":"暂无文字消息"}</p>:null}
-    <form onSubmit={send}><label>订单消息<textarea aria-label="订单消息输入" value={draft} maxLength={4000} onChange={e=>setDraft(e.target.value)} placeholder="输入文字；上号资料不进入固定摘要"/></label><button type="submit" disabled={!info.canSend||connection!=="CONNECTED"||sending||!draft.trim()}>{sending?"发送中…":"发送文字"}</button></form>
+    {!messages.length?<p>{reading?"正在读取历史…":"暂无文字或图片消息"}</p>:null}
+    {image?<div className="order-team-image-draft" aria-label="待发送图片"><img src={image.previewUrl} alt={image.name}/><span>{image.name} · {formatBytes(image.size)}{image.state==="DECODING"?" · 正在检查":image.state==="SENDING"?` · 发送中 ${image.progress}%`:image.state==="UNKNOWN"?" · 结果未确认":image.state==="FAILED"?" · 发送失败":" · 待发送"}</span><button type="button" onClick={removeImage} disabled={sending}>移除</button></div>:null}
+    <form onSubmit={send}><label>订单消息<textarea aria-label="订单消息输入" value={draft} maxLength={4000} onChange={e=>setDraft(e.target.value)} placeholder="输入文字；上号资料不进入固定摘要"/></label><label className="order-team-image-picker">选择图片<input type="file" accept="image/jpeg,image/png" onChange={chooseImage} disabled={!info.canSend||connection!=="CONNECTED"||sending}/></label><button type="submit" disabled={!info.canSend||connection!=="CONNECTED"||sending||imageBlocked||(!draft.trim()&&!image)}>{sending?"发送中…":image?(image.state==="FAILED"||image.state==="UNKNOWN"?"重试图片":"发送图片"):"发送文字"}</button></form>
+    {viewer?<dialog className="order-team-image-viewer" aria-label="图片预览" onKeyDown={event=>{if(event.key==="Tab"){event.preventDefault();viewerClose.current?.focus();}else if(event.key==="Escape"){event.preventDefault();event.stopPropagation();setViewer(null);}}} onCancel={event=>{event.preventDefault();setViewer(null);}}><button ref={viewerClose} type="button" onClick={()=>setViewer(null)}>关闭图片</button><img src={viewer.url} alt={viewer.name}/></dialog>:null}
   </section>;
 }

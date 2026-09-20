@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import sharp from "sharp";
 
 import { mountAuthHandlers } from "../src/auth/auth-runtime";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityMapping } from "../src/im/identity-lifecycle";
 import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
-import { handleYunxinRoute, type YunxinRouteOptions } from "../src/im/yunxin-routes";
+import { handleYunxinRoute, parseMessageBody, type YunxinRouteOptions } from "../src/im/yunxin-routes";
+import { MAX_MEDIA_BYTES } from "../src/supply/media";
 
 const APP_ID = "provider-test";
 
@@ -195,4 +197,57 @@ test("test IM seams fail closed without the explicit test capability", async () 
     }),
     /Test IM providers require test operations capability/,
   );
+});
+
+async function noisyPng(width: number, height: number): Promise<Buffer> {
+  const bytes = Buffer.alloc(width * height * 3);
+  let seed = 0x12345678;
+  for (let index = 0; index < bytes.length; index += 1) {
+    seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+    bytes[index] = seed >>> 24;
+  }
+  return sharp(bytes, { raw: { width, height, channels: 3 } }).png({ compressionLevel: 0, adaptiveFiltering: false }).toBuffer();
+}
+
+function imageBody(bytes: Buffer, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    conversationId: "viewer|2|1",
+    image: {
+      messageClientId: "image-1",
+      name: "proof.png",
+      mimeType: "image/png",
+      size: bytes.length,
+      data: bytes.toString("base64"),
+      ...overrides,
+    },
+  };
+}
+
+test("IM image body uses bounded Base64 and the full decoder", async () => {
+  const small = await sharp({ create: { width: 8, height: 4, channels: 3, background: "red" } }).png().toBuffer();
+  const parsed = await parseMessageBody(imageBody(small));
+  assert.equal(parsed.kind, "image");
+  if (parsed.kind !== "image") throw new Error("image parser returned text");
+  assert.deepEqual({ width: parsed.image.width, height: parsed.image.height }, { width: 8, height: 4 });
+
+  const sizes: Array<[number, number]> = [[1_250, 1_400], [1_660, 2_100]];
+  for (const [width, height] of sizes) {
+    const large = await noisyPng(width, height);
+    assert.ok(large.length > (width === 1_250 ? 5 * 1024 * 1024 : 10_000_000));
+    assert.ok(large.length <= MAX_MEDIA_BYTES);
+    const accepted = await parseMessageBody(imageBody(large, { messageClientId: `image-${width}` }));
+    assert.equal(accepted.kind, "image");
+    if (accepted.kind !== "image") throw new Error("image parser returned text");
+    assert.equal(accepted.image.body.length, large.length);
+  }
+
+  await assert.rejects(() => parseMessageBody(imageBody(small, { size: MAX_MEDIA_BYTES + 1 })), /Image message is invalid/);
+  await assert.rejects(() => parseMessageBody(imageBody(small, { size: 1, data: "" })), /Image data is invalid/);
+  await assert.rejects(() => parseMessageBody(imageBody(small, { mimeType: "image/jpeg" })), /Image MIME type is invalid/);
+  await assert.rejects(() => parseMessageBody(imageBody(small, { width: 9 })), /Image dimensions are invalid/);
+  const corrupted = Buffer.from(small);
+  const idat = corrupted.indexOf("IDAT");
+  assert.ok(idat > 0);
+  corrupted[idat + 8] = (corrupted[idat + 8] ?? 0) ^ 0xff;
+  await assert.rejects(() => parseMessageBody(imageBody(corrupted)), /Image bytes are invalid/);
 });

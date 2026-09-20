@@ -17,14 +17,39 @@ export type ImTransportMessage = {
   senderId: string;
   receiverId: string;
   createTime: number;
-  text: string;
-  messageType: 0;
+  text?: string;
+  messageType: 0 | 1;
+  attachment?: {
+    imageId: string;
+    url?: string;
+    name: string;
+    mimeType: "image/jpeg" | "image/png";
+    size: number;
+    width?: number;
+    height?: number;
+  };
+};
+
+export type ImOrderImageScope = {
+  appId: string;
+  orderId: string;
+  teamId: string;
+};
+
+export type ImTransportImage = {
+  imageId: string;
+  scope: ImOrderImageScope;
+  mimeType: "image/jpeg" | "image/png";
+  body: Uint8Array;
 };
 
 /** Server-authorized seam for the explicit local IM substitute. */
 export type ImMessageTransport = {
   history(input: { conversationId: string; viewerAccountId: string; limit: number; before?: string }): Promise<ImTransportMessage[]>;
   sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string }): Promise<ImTransportMessage>;
+  sendImage?(input: { conversationId: string; scope: ImOrderImageScope; senderAccountId: string; receiverAccountId: string; messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Uint8Array; width?: number; height?: number }): Promise<ImTransportMessage>;
+  getImageScope?(imageId: string): Promise<{ imageId: string; scope: ImOrderImageScope } | null>;
+  readImage?(input: { imageId: string; scope: ImOrderImageScope; viewerAccountId: string }): Promise<ImTransportImage | null>;
 };
 
 export type ImRoutingBlocker =

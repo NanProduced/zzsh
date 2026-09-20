@@ -40,6 +40,8 @@ import {
   updateOwnPresence,
   type ConsultationRouteOptions,
 } from "./consultation";
+import { inspectImage, MAX_MEDIA_BYTES } from "../supply/media";
+import type { ImOrderImageScope, ImTransportMessage } from "./im-contract";
 
 type NodeRequest = AuthSecurityNodeRequest;
 type NodeResponse = AuthSecurityNodeResponse;
@@ -227,15 +229,87 @@ function messageConversationId(value: string | null): string {
   return value;
 }
 
-function parseMessageBody(value: unknown): { conversationId: string; text: string } {
+type ParsedMessageBody =
+  | { conversationId: string; kind: "text"; text: string }
+  | { conversationId: string; kind: "image"; image: { messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Buffer; width: number; height: number } };
+
+const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_MEDIA_BYTES / 3) * 4;
+const BASE64_ALPHABET = /^[A-Za-z0-9+/]$/;
+
+function decodeBase64(value: string, size: number): Buffer {
+  if (!value || value.length !== Math.ceil(size / 3) * 4 || value.length > MAX_IMAGE_BASE64_LENGTH || value.length % 4 !== 0) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image data is invalid");
+  }
+  let padding = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (character === "=") {
+      padding += 1;
+      if (padding > 2 || index < value.length - 2) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image data is invalid");
+    } else if (padding > 0 || !BASE64_ALPHABET.test(character)) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image data is invalid");
+    }
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.length !== size) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image bytes are invalid");
+  return bytes;
+}
+
+export async function parseMessageBody(value: unknown): Promise<ParsedMessageBody> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
   const body = value as Record<string, unknown>;
-  if (Object.keys(body).some((key) => key !== "conversationId" && key !== "text") || typeof body.conversationId !== "string" || typeof body.text !== "string") {
+  if (typeof body.conversationId !== "string" || (body.text === undefined && body.image === undefined) || (body.text !== undefined && body.image !== undefined)) {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
   }
-  const text = body.text.trim();
-  if (!text || text.length > 4_000) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message text is invalid");
-  return { conversationId: messageConversationId(body.conversationId), text };
+  const conversationId = messageConversationId(body.conversationId);
+  if (body.text !== undefined) {
+    if (Object.keys(body).some((key) => key !== "conversationId" && key !== "text") || typeof body.text !== "string") throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
+    const text = body.text.trim();
+    if (!text || text.length > 4_000) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message text is invalid");
+    return { conversationId, kind: "text", text };
+  }
+  if (Object.keys(body).some((key) => key !== "conversationId" && key !== "image") || !body.image || typeof body.image !== "object" || Array.isArray(body.image)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image message is invalid");
+  const image = body.image as Record<string, unknown>;
+  if (Object.keys(image).some((key) => !["messageClientId", "name", "mimeType", "size", "data", "width", "height"].includes(key))
+    || typeof image.messageClientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(image.messageClientId)
+    || typeof image.name !== "string" || image.name.length < 1 || image.name.length > 255
+    || /[\u0000-\u001F\u007F]/.test(image.name)
+    || (image.mimeType !== "image/jpeg" && image.mimeType !== "image/png")
+    || typeof image.size !== "number" || !Number.isInteger(image.size) || image.size < 1 || image.size > MAX_MEDIA_BYTES
+    || typeof image.data !== "string") {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image message is invalid");
+  }
+  const size = image.size as number;
+  const bytes = decodeBase64(image.data as string, size);
+  let actual;
+  try {
+    actual = await inspectImage(bytes);
+  } catch {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image bytes are invalid");
+  }
+  if (actual.mime !== image.mimeType) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image MIME type is invalid");
+  const declaredDimension = (key: "width" | "height") => image[key] === undefined ? actual[key] : Number.isInteger(image[key]) && Number(image[key]) === actual[key] ? actual[key] : null;
+  const width = declaredDimension("width");
+  const height = declaredDimension("height");
+  if (width === null || height === null) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image dimensions are invalid");
+  const messageClientId = image.messageClientId as string;
+  const name = image.name as string;
+  const mimeType = image.mimeType as "image/jpeg" | "image/png";
+  return { conversationId, kind: "image", image: { messageClientId, name, mimeType, size, body: bytes, width, height } };
+}
+
+function publicMessage(message: ImTransportMessage, realm: "user" | "admin"): ImTransportMessage {
+  const imageId = message.attachment?.imageId;
+  if (message.messageType !== 1 || !imageId) return message;
+  const prefix = realm === "user" ? "/api/im/images/" : "/api/bff/admin/im/images/";
+  return { ...message, attachment: { ...message.attachment, url: `${prefix}${encodeURIComponent(imageId)}` } } as ImTransportMessage;
+}
+
+function sendImage(response: NodeResponse, image: { mimeType: string; body: Uint8Array }, requestId: string): void {
+  if (response.headersSent) return;
+  response.status(200).setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store").setHeader("Content-Type", image.mimeType);
+  if (response.send) response.send(image.body);
+  else sendInternalError(response, requestId);
 }
 
 function parseMessageOperation(value: string | null): "read" | "send" {
@@ -268,7 +342,9 @@ async function handleAdminMessageAccess(request: NodeRequest, response: NodeResp
   sendJson(response, 200, { authorized: true }, requestId);
 }
 
-async function readMessageAccess(options:YunxinRouteOptions,actor:({realm:"user"}&Awaited<ReturnType<typeof readUserContext>>)|({realm:"admin"}&Awaited<ReturnType<typeof readAdminContext>>),conversationId:string,send=false):Promise<{viewerAccountId:string;peerAccountId:string}>{
+type MessageAccess = { viewerAccountId: string; peerAccountId: string; scope?: ImOrderImageScope };
+
+async function readMessageAccess(options:YunxinRouteOptions,actor:({realm:"user"}&Awaited<ReturnType<typeof readUserContext>>)|({realm:"admin"}&Awaited<ReturnType<typeof readAdminContext>>),conversationId:string,send=false):Promise<MessageAccess>{
   const teamId=/^[^|]+\|2\|([0-9]{1,19})$/.exec(conversationId)?.[1];
   if(teamId){
     const access=await withTransaction(options.security.pool,async c=>{
@@ -276,11 +352,32 @@ async function readMessageAccess(options:YunxinRouteOptions,actor:({realm:"user"
       if(!row)return null;
       const result=await readOrderTeamAccess(c,actor,row.order_id,send?"send":"read");
       if(result.canRead!==true||result.conversationId!==conversationId)throw new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
-      return {viewerAccountId:result.viewerAccountId as string,peerAccountId:teamId};
+      return {viewerAccountId:result.viewerAccountId as string,peerAccountId:teamId,scope:{appId:options.appId,orderId:result.orderId as string,teamId:result.teamId as string}};
     });
     if(access)return access;
   }
   return actor.realm==="user"?readUserMessageAccess(options.consultation!,actor,conversationId):readAdminMessageAccess(options.consultation!,actor,conversationId,send);
+}
+
+function sameImageScope(left: ImOrderImageScope, right: ImOrderImageScope): boolean {
+  return left.appId === right.appId && left.orderId === right.orderId && left.teamId === right.teamId;
+}
+
+async function readOrderImageAccess(
+  options: YunxinRouteOptions,
+  actor: ({ realm: "user" } & Awaited<ReturnType<typeof readUserContext>>) | ({ realm: "admin" } & Awaited<ReturnType<typeof readAdminContext>>),
+  scope: ImOrderImageScope,
+): Promise<{ viewerAccountId: string; peerAccountId: string }> {
+  if (scope.appId !== options.appId) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Image not found");
+  const access = await withTransaction(options.security.pool, async (c) => {
+    const row = (await c.query(`SELECT order_id,team_id,app_id FROM zzsh_order.im_order_group WHERE app_id=$1 AND order_id=$2 AND team_id=$3`, [options.appId, scope.orderId, scope.teamId])).rows[0];
+    if (!row) return null;
+    const result = await readOrderTeamAccess(c, actor, row.order_id, "read");
+    if (result.canRead !== true || result.appId !== scope.appId || result.orderId !== scope.orderId || result.teamId !== scope.teamId) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team image access denied");
+    return { viewerAccountId: result.viewerAccountId as string, peerAccountId: result.teamId as string };
+  });
+  if (!access) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Image not found");
+  return access;
 }
 
 function messageBefore(request:NodeRequest):string|undefined{
@@ -298,12 +395,22 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
   if (request.method?.toUpperCase() === "GET") {
     const conversationId = messageConversationId(routeQuery(request).get("conversationId"));
     const access = await readMessageAccess(options, {...context,realm:"user"}, conversationId);
-    sendJson(response, 200, { messages: await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) }) }, requestId);
+    sendJson(response, 200, { messages: (await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) })).map(message => publicMessage(message, "user")) }, requestId);
     return;
   }
-  const input = parseMessageBody(request.body);
+  const input = await parseMessageBody(request.body);
   const access = await readMessageAccess(options, {...context,realm:"user"}, input.conversationId,true);
-  sendJson(response, 200, { message: await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }) }, requestId);
+  if (input.kind === "text") {
+    sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "user") }, requestId);
+    return;
+  }
+  if (!transport.sendImage) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const image = input.image;
+  if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team image access denied");
+  sendJson(response, 200, { message: publicMessage(await transport.sendImage({ conversationId: input.conversationId, scope: access.scope, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, messageClientId: image.messageClientId, name: image.name, mimeType: image.mimeType, size: image.size, body: image.body, width: image.width, height: image.height }), "user") }, requestId);
 }
 
 async function handleAdminMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
@@ -317,12 +424,42 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
   if (request.method?.toUpperCase() === "GET") {
     const conversationId = messageConversationId(routeQuery(request).get("conversationId"));
     const access = await readMessageAccess(options, {...context,realm:"admin"}, conversationId);
-    sendJson(response, 200, { messages: await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) }) }, requestId);
+    sendJson(response, 200, { messages: (await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) })).map(message => publicMessage(message, "admin")) }, requestId);
     return;
   }
-  const input = parseMessageBody(request.body);
+  const input = await parseMessageBody(request.body);
   const access = await readMessageAccess(options, {...context,realm:"admin"}, input.conversationId, true);
-  sendJson(response, 200, { message: await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }) }, requestId);
+  if (input.kind === "text") {
+    sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "admin") }, requestId);
+    return;
+  }
+  if (!transport.sendImage) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const image = input.image;
+  if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team image access denied");
+  sendJson(response, 200, { message: publicMessage(await transport.sendImage({ conversationId: input.conversationId, scope: access.scope, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, messageClientId: image.messageClientId, name: image.name, mimeType: image.mimeType, size: image.size, body: image.body, width: image.width, height: image.height }), "admin") }, requestId);
+}
+
+async function handleImage(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, realm: "user" | "admin", imageId: string): Promise<void> {
+  const transport = options.consultation?.messageTransport;
+  if (!options.consultation || !transport?.getImageScope || !transport.readImage) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const scope = await transport.getImageScope(imageId);
+  if (!scope || scope.imageId !== imageId) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Image not found");
+  const access = realm === "user"
+    ? await readOrderImageAccess(options, { ...(await readUserContext(request, options.security)), realm: "user" as const }, scope.scope)
+    : await (async () => {
+      const context = await readAdminContext(request, options.security);
+      await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+      return readOrderImageAccess(options, { ...context, realm: "admin" as const }, scope.scope);
+    })();
+  const image = await transport.readImage({ imageId, scope: scope.scope, viewerAccountId: access.viewerAccountId });
+  if (!image || image.imageId !== imageId || !sameImageScope(image.scope, scope.scope)) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Image not found");
+  sendImage(response, image, requestId);
 }
 
 async function handleAdminConsultations(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, action?: { id: string; name: "claim" | "transfer" | "close" | "reconcile" }): Promise<void> {
@@ -431,6 +568,15 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       await handleUserMessages(request, response, requestId, options);
       return;
     }
+    const userImage = /^\/user\/images\/([A-Za-z0-9._:-]{1,128})$/.exec(path);
+    if (userImage) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleImage(request, response, requestId, options, "user", userImage[1]!);
+      return;
+    }
     if (path === "/user/message-access") {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "GET") {
         sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
@@ -457,6 +603,15 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleAdminMessages(request, response, requestId, options);
+      return;
+    }
+    const adminImage = /^\/admin\/images\/([A-Za-z0-9._:-]{1,128})$/.exec(path);
+    if (adminImage) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleImage(request, response, requestId, options, "admin", adminImage[1]!);
       return;
     }
     if (path === "/admin/message-access") {

@@ -272,6 +272,10 @@ function captureResponse(): CapturedResponse & NodeResponse {
       captured.body = body;
       captured.headersSent = true;
     },
+    send(body) {
+      captured.body = body;
+      captured.headersSent = true;
+    },
   };
   return captured;
 }
@@ -329,7 +333,9 @@ async function forwardYunxin(
   await handleYunxinRoute({ ...request, url: targetPath, originalUrl: targetPath, headers: forwardedHeaders }, captured, options.yunxin!);
   for (const [name, value] of captured.headers) response.setHeader(name, value);
   response.setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store");
-  response.status(captured.statusCode).json(captured.body);
+  response.status(captured.statusCode);
+  if (targetPath.includes("/images/") && response.send) response.send(captured.body);
+  else response.json(captured.body);
 }
 
 async function handleAdminBff(request: NodeRequest, response: NodeResponse, options: AdminBffOptions): Promise<void> {
@@ -428,8 +434,9 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
     return;
   }
   const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
-  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || Boolean(imAction);
-  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence"
+  const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
+  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || imImage || Boolean(imAction);
+  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || imImage
     ? (method === "GET" || ((path === "/im/consultations" || path === "/im/messages") && method === "POST") || (path === "/im/presence" && method === "PUT"))
     : method === "POST";
   if (imPathAllowed) {

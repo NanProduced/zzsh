@@ -9,6 +9,23 @@ const request = (path, init = {}) => new Request(`http://127.0.0.1:3100/api/im/$
   headers: { origin: "http://127.0.0.1:3100", ...init.headers },
 });
 
+test("user IM history forwards the anchor and receives the older page", async () => {
+  const original = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const anchor = new URL(url).searchParams.get("before");
+    seen.push(anchor);
+    return Response.json({ messages: [{ messageClientId: anchor ? "older-image" : "latest-image" }] });
+  };
+  try {
+    const url = "http://127.0.0.1:3100/api/im/messages?conversationId=user%7C2%7C1&limit=50";
+    const first = await GET(new Request(url), context(["messages"]));
+    const older = await GET(new Request(url + "&before=oldest-client-id"), context(["messages"]));
+    assert.deepEqual(seen, [null, "oldest-client-id"]);
+    assert.notDeepEqual(await first.json(), await older.json());
+  } finally { globalThis.fetch = original; }
+});
+
 test("user IM proxy forwards only the user cookie and preserves the short-lived token", async () => {
   const oldFetch = globalThis.fetch;
   let seen;
@@ -65,7 +82,7 @@ test("user IM proxy forwards only the consultation intent body", async () => {
     assert.equal(seen.url, "http://127.0.0.1:3102/api/v1/im/user/consultations");
     assert.equal(seen.options.headers.get("cookie"), "zzsh_user.session_token=user");
     assert.equal(seen.options.headers.get("authorization"), null);
-    assert.deepEqual(JSON.parse(seen.options.body), { type: "SERVICE", subjectRef: "listing_1" });
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(seen.options.body)), { type: "SERVICE", subjectRef: "listing_1" });
   } finally {
     globalThis.fetch = oldFetch;
   }
