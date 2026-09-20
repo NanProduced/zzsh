@@ -87,6 +87,9 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."user_identity_state" FROM ${runtimeUser};
   `);
   await pool.query(`GRANT USAGE, SELECT ON SEQUENCE "zzsh_iam"."admin_login_number_seq" TO ${runtimeUser}`);
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation) {
+    await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.listing_filter_config TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_filter_config FROM ${runtimeUser}`);
+  }
   if ((await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_iam.user_rental_membership TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_iam.user_rental_membership FROM ${runtimeUser}; GRANT UPDATE (tier,version,source_ref,updated_by_admin_id) ON zzsh_iam.user_rental_membership TO ${runtimeUser}`);
   }

@@ -1,6 +1,8 @@
 import { withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
+import { handleListingFilters } from "./listing-filter-routes";
+import type { ListingCursorKey } from "./listing-cursor";
 import type { SupplyGateReader } from "./publishing";
 import type { INestApplication } from "@nestjs/common";
 import type { Pool, PoolClient } from "pg";
@@ -96,7 +98,7 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 
-export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader };
+export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader; listingCursorKey?: ListingCursorKey };
 
 export type SupplyResponse = SupplyNodeResponse & {
   send?: (body: Buffer | string) => void;
@@ -436,6 +438,7 @@ export async function handleSupplyUserRoute(
   await safely(response, requestId, async () => {
     if (await handlePublicGunsmithRoute(response, options, requestId, method, path, query)) return;
     if (await handleFavorites(request,response,options,requestId,path,query)) return;
+    if (await handleListingFilters(request,response,options,requestId,path,query,false)) return;
     if (await handlePublishingRoute(request,response,options,requestId,path,query,false)) return;
     if (method === "GET") {
       if (path === "/games") {
@@ -615,6 +618,7 @@ export async function handleSupplyAdminRoute(
 
   await safely(response, requestId, async () => {
     if (!requireOrigin(request, response, options, requestId)) return;
+    if (await handleListingFilters(request,response,options,requestId,path,query,true)) return;
     if (await handlePublishingRoute(request,response,options,requestId,path,query,true)) return;
     const context = await readAdminContext(request, options);
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };

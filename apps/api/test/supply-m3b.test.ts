@@ -3,6 +3,7 @@ import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
 import { personalFixture } from "./personal-confirmation-checks";
+import { queryFixtureKey,runListingQueryAChecks } from "./listing-query-a-checks";
 import { createFakeRealNameProvider } from "../src/auth/user-identity";
 import { runMediaOssChecks, type MediaStorageFaults } from "./supply-media-oss-checks";
 import { runGunsmithChecks } from "./supply-gunsmith-checks";
@@ -26,6 +27,7 @@ import { createLocalMediaStorage, MediaStorageError } from "../src/supply/media"
 import { loadConfig, type AppConfig } from "../src/config/config";
 
 const RESOURCE_SET = process.env.SUPPLY_TEST_RESOURCE_SET?.trim() || "";
+if(process.env.SUPPLY_QUERY_A_ONLY==="1"&&RESOURCE_SET!=="pricing_compat")throw new Error("Query A requires explicit pricing_compat resource");
 if(RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid supply test resource set");
 const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_supply_"+RESOURCE_SET : "zzsh_test_m3b_supply";
 const RESOURCE_MARKER = "zzsh:m3b-supply-test:v1";
@@ -236,7 +238,10 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
   const present=(await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation;
-  await pool.query(present?ISOLATED_BUSINESS_DATA_TRUNCATE:ISOLATED_BUSINESS_DATA_TRUNCATE.replace('      "zzsh_iam"."user_rental_membership",\n',""));
+  const configPresent=(await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation;
+  let statement=present?ISOLATED_BUSINESS_DATA_TRUNCATE:ISOLATED_BUSINESS_DATA_TRUNCATE.replace('      "zzsh_iam"."user_rental_membership",\n',"");
+  if(!configPresent)statement=statement.replace('      "zzsh_supply"."listing_filter_config",\n',"");
+  await pool.query(statement);
 }
 
 function base32Decode(value: string): Buffer {
@@ -410,6 +415,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     const bootstrapSecret = randomBytes(32).toString("hex");
     const authOptions = {
+      ...(RESOURCE_SET==="pricing_compat"?{listingCursorKey:queryFixtureKey}:{}),
       ...(RESOURCE_SET==="pricing_compat"?{confirmationKey:personalFixture.key,orderHoldSeconds:300,testConfirmationFundingReader:async()=>personalFixture.funding,fakeSmsOutbox:personalFixture.sms,realNameProvider:createFakeRealNameProvider("VERIFIED_ADULT")}:{}),
       ...loadAuthRuntimeConfig({
         AUTH_API_ORIGIN: API_ORIGIN,
@@ -928,7 +934,11 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(rejectedAudit?.reason, "合成驳回");
     assert.equal(audits.some((a) => a.object_id === firstActivation.body?.releaseId && a.details.before.current_release_id === null && a.details.after.generation === "1"), true);
     assert.equal(JSON.stringify(audits).includes("uploadToken"), false);
-    if (RESOURCE_SET === "pricing_compat") await runPricingCompatChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
+    if (RESOURCE_SET === "pricing_compat") {
+      const checks={testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates};
+      if(process.env.SUPPLY_QUERY_A_ONLY!=="1")await runPricingCompatChecks(checks);
+      await runListingQueryAChecks(checks);
+    }
   } finally {
     const cleanupErrors: unknown[] = [];
     if (app) {

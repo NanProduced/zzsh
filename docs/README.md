@@ -8,6 +8,7 @@
 - [API v1 契约](architecture/api-v1-contract.md)
 - [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [租赁会员、个人确认与建单](architecture/personal-confirmation.md)
+- [公开列表组合筛选与配置](architecture/listing-query.md)
 - [认证与账号安全](architecture/authentication.md)
 - [开发与验证](development.md)
 - [本地环境协作规则](local-environments.md)

@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
-import { assertGameScope, conflict, invalid, newSupplyId, notFound } from "./supply-util";
+import { assertGameScope, bumpCatalogRevision, conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
 export const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 export const MAX_MEDIA_SIDE = 8192;
@@ -499,8 +499,10 @@ export async function changeMediaVisibility(
 }
 
 async function clearMediaBindings(client: PoolClient, assetId: string): Promise<void> {
-  await client.query(`UPDATE "zzsh_supply"."game" SET "cover_media_id" = NULL, "catalog_revision" = "catalog_revision" + 1, "updated_at" = clock_timestamp() WHERE "cover_media_id" = $1`, [assetId]);
-  await client.query(`UPDATE "zzsh_supply"."skin" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
-  await client.query(`UPDATE "zzsh_supply"."billable_item" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
-  await client.query(`UPDATE "zzsh_supply"."firearm" SET "media_id" = NULL, "revision" = "revision" + 1, "updated_at" = clock_timestamp() WHERE "media_id" = $1`, [assetId]);
+  const cover = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."game" SET "cover_media_id" = NULL, "updated_at" = clock_timestamp() WHERE "cover_media_id" = $1 RETURNING id AS "gameId"`, [assetId]);
+  const skins = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."skin" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
+  const items = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."billable_item" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
+  const firearms = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."firearm" SET "media_id" = NULL, "revision" = "revision" + 1, "updated_at" = clock_timestamp() WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
+  const games = new Set([...cover.rows,...skins.rows,...items.rows,...firearms.rows].map(row=>row.gameId));
+  for(const gameId of [...games].sort())await bumpCatalogRevision(client,gameId);
 }

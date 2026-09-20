@@ -1111,6 +1111,8 @@ export async function listingDetail(
         "secret_kd",
         "service_window_start_minute",
         "service_window_end_minute",
+        "service_window_timezone",
+        "service_window_cross_midnight",
       ].map((k) => [k, attrs[k] ?? null]),
     );
     const game = (

@@ -2,6 +2,7 @@ import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-d
 import { OrderTeamLifecycle } from "../im/order-team";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
+import type { ListingCursorKey } from "../supply/listing-cursor";
 import { mountRentalMembership } from "./rental-membership-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
 import { mountPersonalOrders } from "../order/personal-order-routes";
@@ -54,6 +55,7 @@ export type AuthRuntimeCapabilities = {
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   confirmationKey?: ConfirmationKey;
+  listingCursorKey?: ListingCursorKey;
   testConfirmationFundingReader?: ConfirmationFundingReader;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
   supportDispatch?: Omit<OrderDispatchOptions, "pool">;
@@ -576,6 +578,9 @@ export function loadAuthRuntimeConfig(
   const confirmationSecret = env.ORDER_CONFIRMATION_SECRET !== undefined || env.ORDER_CONFIRMATION_SECRET_FILE !== undefined
     ? readSecret(env,"ORDER_CONFIRMATION_SECRET","ORDER_CONFIRMATION_SECRET_FILE",workingDirectory) : undefined;
   const confirmationKeyId = env.ORDER_CONFIRMATION_KEY_ID;
+  const listingSecret=env.LISTING_CURSOR_SECRET!==undefined||env.LISTING_CURSOR_SECRET_FILE!==undefined?readSecret(env,"LISTING_CURSOR_SECRET","LISTING_CURSOR_SECRET_FILE",workingDirectory):undefined;
+  const listingKeyId=env.LISTING_CURSOR_KEY_ID;
+  if(listingSecret!==undefined && (listingSecret.length<32||[userSecret,adminSecret,confirmationSecret].includes(listingSecret)||!listingKeyId||!/^[A-Za-z0-9_-]{1,64}$/.test(listingKeyId)))throw new ConfigurationError("Listing cursors require an independent secret and key ID");
   if (confirmationSecret !== undefined && (confirmationSecret.length<32 || confirmationSecret===userSecret || confirmationSecret===adminSecret || !confirmationKeyId || !/^[A-Za-z0-9_-]{1,64}$/.test(confirmationKeyId))) throw new ConfigurationError("Order confirmation requires a dedicated secret and key ID");
   if (userSecret.length < 32 || adminSecret.length < 32) {
     throw new ConfigurationError("Better Auth secrets must be at least 32 characters");
@@ -609,6 +614,7 @@ export function loadAuthRuntimeConfig(
   return {
     apiOrigin,
     ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
+    ...(listingSecret===undefined?{}:{listingCursorKey:{keyId:listingKeyId!,secret:listingSecret}}),
     userOrigin,
     adminOrigin,
     userSecret,
@@ -915,7 +921,7 @@ export async function mountAuthHandlers(
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
-    supply: { ...securityOptions, mediaStorage, supplyGateReader },
+    supply: { ...securityOptions, mediaStorage, supplyGateReader,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
     ...(yunxinRuntime ? {
       yunxin: {
@@ -928,11 +934,12 @@ export async function mountAuthHandlers(
       },
     } : {}),
   });
-  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader});
+  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,listingCursorKey:options.listingCursorKey});
   mountSupplyHandlers(app, {
     ...securityOptions,
     mediaStorage,
     supplyGateReader,
+    listingCursorKey:options.listingCursorKey,
   });
   mountContentHandlers(app, {
     ...securityOptions,

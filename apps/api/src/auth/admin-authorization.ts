@@ -26,6 +26,7 @@ export const ADMIN_PERMISSION = {
   approvalAuditRead: "approval.audit.read",
   supplyCatalogManage: "supply.catalog.manage",
   supplyRulesEdit: "supply.rules.edit",
+  supplyListingFiltersManage: "supply.listing_filters.manage",
   supplyRulesActivate: "supply.rules.activate",
   supplyReviewRead: "supply.review.read",
   supplyReviewDecide: "supply.review.decide",

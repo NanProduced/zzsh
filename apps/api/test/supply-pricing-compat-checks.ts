@@ -19,7 +19,7 @@ export async function runPricingCompatChecks(o: Options): Promise<void> {
   const before=await frozen();
   assert.ok(before.listings.length>0);
   const countBefore=(await o.migration.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n;
-  assert.ok(countBefore===39 || countBefore===40 || countBefore===41 || countBefore===42);
+  assert.ok(countBefore===39 || countBefore===40 || countBefore===41 || countBefore===42 || countBefore===43);
   await runBusinessMigrations(o.migration,{runtimeUser:o.runtimeUser});
   await runBusinessMigrations(o.migration,{runtimeUser:o.runtimeUser});
   assert.deepEqual(await frozen(),before,"incremental migration preserves sealed payload/hash/order snapshots");
@@ -27,7 +27,7 @@ export async function runPricingCompatChecks(o: Options): Promise<void> {
   const folder=join(__dirname,"../../migrations/business");
   const journal=JSON.parse(await readFile(join(folder,"meta/_journal.json"),"utf8"));
   const migrations=(await o.migration.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
-  assert.equal(migrations.length,42);
+  assert.equal(migrations.length,43);
   for(const [i,entry] of journal.entries.entries()) {
     const hash=createHash("sha256").update(await readFile(join(folder,entry.tag+".sql"))).digest("hex");
     assert.deepEqual(migrations[i],{hash,created_at:String(entry.when)});
