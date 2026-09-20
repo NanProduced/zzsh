@@ -1,6 +1,105 @@
 import { divideToScale, multiplyDecimal, parseNonNegativeDecimal } from "../src/supply/decimal";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { compatRule } from "./pricing-compat-fixture";
+import { CUSTOMER_TIERS, parseDeltaPriceLines, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
+import type { QuoteInput } from "../src/supply/pricing";
+
+test("price line parser distinguishes omitted tier from null and invalid values", () => {
+  const line = {itemId:"round",pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"10",ownerUnitAmount:"4"};
+  assert.deepEqual(parseDeltaPriceLines([line],"SPREAD"),[line],"legacy omission stays omitted for the v2 write guard");
+  for (const customerTier of CUSTOMER_TIERS) assert.equal(parseDeltaPriceLines([{...line,customerTier}],"SPREAD")[0]!.customerTier,customerTier);
+  for (const customerTier of [null,0,false,{},[],["STANDARD"],"","standard","UNKNOWN"]) {
+    assert.throws(()=>parseDeltaPriceLines([{...line,customerTier}],"SPREAD"),(error: any)=>error.status===400 && error.code==="INVALID_ARGUMENT");
+  }
+});
+
+function compatInput(base: string, selection: RentalPricingSelection, tier: CustomerTier = "STANDARD"): QuoteInput {
+  return { priceVersionId: "pc1-fixture", mode: "SPREAD", customerTier: tier, roundingPolicy: "HALF_UP_CENT_V1", haffRule: compatRule(base),
+    conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: selection },
+    lines: [{ itemId: "haff", pricingKind: "HAFF_RATIO", customerTier: tier, quantity: "100000000" }],
+    termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } };
+}
+
+test("PC1 reviewed 42 vectors, per-line cent rounding and legacy integer difference", () => {
+  const bs = [44,45,46,47,53,60,99];
+  const expected = [
+    ["277.78","270.27","263.16","256.41","222.22","192.31","109.89"],
+    ["263.16","256.41","250.00","243.90","212.77","185.19","107.53"],
+    ["256.41","250.00","243.90","238.10","208.33","181.82","106.38"],
+    ["312.50","303.03","294.12","285.71","243.90","208.33","114.94"],
+    ["294.12","285.71","277.78","270.27","232.56","200.00","112.36"],
+    ["277.78","270.27","263.16","256.41","222.22","192.31","109.89"],
+  ];
+  const owners = ["227.27","222.22","217.39","212.77","188.68","166.67","101.01"];
+  const oldOwners=[227n,222n,217n,213n,189n,167n,101n];
+  const oldBuyers=[[278n,270n,263n,256n,222n,192n,110n],[263n,256n,250n,244n,213n,185n,108n],[256n,250n,244n,238n,208n,182n,106n],[313n,303n,294n,286n,244n,208n,115n],[294n,286n,278n,270n,233n,200n,112n],[278n,270n,263n,256n,222n,192n,110n]];
+  for (const [lane, mode] of (["ordinary", "fast"] as const).entries()) for (const [ti, tier] of (["STANDARD","VIP","SVIP"] as const).entries()) for (const [bi,b] of bs.entries()) {
+    const input = compatInput(String(mode === "fast" ? b-6 : b), mode === "ordinary" ? { rentalMode: mode } : { rentalMode: mode, ownerRatioB: String(b) }, tier);
+    const q = quoteOf(computeQuote(input));
+    assert.equal(q.ownerTotal.amount, owners[bi]);
+    assert.equal(q.resourceTotal.amount, expected[lane*3+ti]![bi]);
+    const cents = (s: string) => BigInt(s.replace(".", ""));
+    assert.equal(cents(q.platformFullProfit.amount), cents(q.resourceTotal.amount)-cents(q.ownerTotal.amount));
+    const oldOwner = divideToScale({value:10000n,scale:0},{value:BigInt(b),scale:0},0);
+    const v = [0,2,mode === "fast" ? 4 : 3][ti]!;
+    const oldBuyer = divideToScale({value:10000n,scale:0},{value:BigInt(b-(mode === "fast" ? 12 : 8)+v),scale:0},0);
+    assert.equal(oldOwner.value,oldOwners[bi]);
+    assert.equal(oldBuyer.value,oldBuyers[lane*3+ti]![bi]);
+    assert.equal(oldBuyer.value-oldOwner.value,oldBuyers[lane*3+ti]![bi]!-oldOwners[bi]!);
+    assert.ok(oldBuyer.value >= oldOwner.value);
+    if (b===44 && mode==="fast" && tier==="STANDARD") assert.equal(oldBuyer.value,313n);
+    if (mode === "ordinary") {
+      const custom = quoteOf(computeQuote(compatInput(String(b+1),{rentalMode:"custom",ownerRatioB:String(b)},tier)));
+      assert.deepEqual(custom.lines,q.lines);
+    }
+  }
+});
+
+test("PC1 four tiers, bounds, invalid inputs, resource units and projection", () => {
+  for (const tier of CUSTOMER_TIERS) {
+    const input = compatInput("47",{rentalMode:"ordinary"},tier);
+    input.lines = [...input.lines, {itemId:"round",pricingKind:"FIXED_UNIT",customerTier:tier,quantity:"60",unit:"ROUND",unitQuantity:"60",ownerUnitAmount:"4",buyerUnitAmount:"10"}, {itemId:"day",pricingKind:"FIXED_UNIT",customerTier:tier,quantity:"3",unit:"DAY",unitQuantity:"1",ownerUnitAmount:"3",buyerUnitAmount:"5"}];
+    const q=quoteOf(computeQuote(input));
+    assert.equal(q.lines.find(l=>l.itemId==="round")!.buyerAmount.amount,"10.00");
+    assert.equal(q.lines.find(l=>l.itemId==="day")!.buyerAmount.amount,"15.00");
+    assert.equal(q.tenantDeposit,null);
+    const publicQ=projectQuote(q,"public");
+    assert.equal(publicQ.pricingInputs,undefined);
+    assert.equal(publicQ.ownerTotal,undefined);
+    assert.equal(publicQ.rentalMode,"ordinary");
+    input.lines = input.lines.map(l=>l.itemId==="day"?{...l,customerTier:undefined}:l);
+    assert.equal(computeQuote(input).quotable,false,"missing tier cannot fallback");
+  }
+  for(const [mode,b,ok] of [["custom","44",true],["custom","46",true],["custom","43",false],["custom","47",false],["fast","53",true],["fast","99",true],["fast","52",false],["fast","100",false]] as const) assert.equal(computeQuote(compatInput("47",{rentalMode:mode,ownerRatioB:b})).quotable,ok);
+  assert.equal(computeQuote(compatInput("94",{rentalMode:"fast",ownerRatioB:"99"})).quotable,false);
+  assert.equal(computeQuote(compatInput("8",{rentalMode:"ordinary"})).quotable,false);
+  for(const quantity of [null,undefined,"-1","1.5","1e3"]) assert.equal(computeQuote({...compatInput("47",{rentalMode:"ordinary"}),lines:[{itemId:"haff",pricingKind:"HAFF_RATIO",customerTier:"STANDARD",quantity:quantity as string}]}).quotable,false);
+  const bad=compatRule(); bad.compatibility!.ordinary.discounts.VIP="9";
+  assert.throws(()=>validateDeltaHaffRule(bad,"SPREAD"));
+  assert.throws(()=>validateDeltaHaffRule(compatRule(),"PERCENT"));
+  for(const invalidV of ["-1",undefined]) {const r=compatRule();r.compatibility!.ordinary.discounts.DISCOUNT_USER=invalidV as string;assert.throws(()=>validateDeltaHaffRule(r,"SPREAD"));}
+  const disabled=compatRule();disabled.compatibility!.modes.custom.enabled=false;
+  assert.equal(computeQuote({...compatInput("47",{rentalMode:"custom",ownerRatioB:"46"}),haffRule:disabled}).quotable,false);
+  const empty=compatRule();empty.compatibility!.modes.custom.min!.value="1";
+  assert.equal(computeQuote({...compatInput("47",{rentalMode:"custom",ownerRatioB:"46"}),haffRule:empty}).quotable,false);
+  const input=compatInput("47",{rentalMode:"ordinary"});
+  assert.equal(computeQuote({...input,customerTier:undefined}).quotable,false);
+  assert.equal(computeQuote({...input,conditions:{...input.conditions,pricingOptionCode:"standard"}}).quotable,false);
+  const fixed = [
+    ["awm","60","1","ROUND","0.4","1.2"], ["six","60","60","ROUND","4","10"],
+    ["helmet","1","1","PIECE","0.8","2"], ["armor","1","1","PIECE","1","3"],
+    ["barrett","60","1","ROUND","0.2","0.5"], ["coffee","1","1","PIECE","2","4"],
+    ["insurance","3","1","DAY","3","5"],
+  ].map(([itemId,quantity,unitQuantity,unit,ownerUnitAmount,buyerUnitAmount])=>({itemId:itemId!,quantity:quantity!,unitQuantity:unitQuantity!,unit:unit as "ROUND"|"PIECE"|"DAY",ownerUnitAmount:ownerUnitAmount!,buyerUnitAmount:buyerUnitAmount!,customerTier:"STANDARD" as const,pricingKind:"FIXED_UNIT" as const}));
+  const withItems=quoteOf(computeQuote({...input,lines:[...input.lines,...fixed]}));
+  const cents=(s:string)=>BigInt(s.replace(".",""));
+  const fixedLines=withItems.lines.filter(l=>l.pricingKind==="FIXED_UNIT");
+  assert.equal(fixedLines.reduce((sum,l)=>sum+cents(l.ownerAmount.amount),0n),5280n);
+  assert.equal(fixedLines.reduce((sum,l)=>sum+cents(l.buyerAmount.amount),0n),13600n);
+  assert.equal(fixedLines.reduce((sum,l)=>sum+cents(l.platformAmount.amount),0n),8320n);
+  assert.equal(computeQuote({...input,lines:[...input.lines,...fixed.map(l=>({...l,quantity:"0"}))]}).quotable,true);
+});
 
 import { computeQuote, projectQuote, type HaffRatioRule, type InternalQuote } from "../src/supply/pricing";
 

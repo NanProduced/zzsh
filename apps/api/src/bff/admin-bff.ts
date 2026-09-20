@@ -14,6 +14,7 @@ import {
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { handleContentAdminRoute } from "../content/content-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
+import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
 
@@ -380,6 +381,10 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (/^\/users\/[^/]+\/rental-membership$/.test(path)) {
+    await handleRentalMembershipAdmin(request,response,options.adminSecurityOptions);
     return;
   }
   if (path === "/supply" || path.startsWith("/supply/")) {

@@ -206,6 +206,7 @@ export type AdminGunsmithResponse = {
 
 export type PriceLineRecord = {
   priceVersionId: string;
+  customerTier?: "STANDARD" | "VIP" | "SVIP" | "DISCOUNT_USER";
   itemId: string;
   pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
   unitQuantity: string | null;

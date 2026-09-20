@@ -1,5 +1,19 @@
 # 用户供给表单数据契约
 
+## 定价兼容 API（PC-1）
+
+`haff-ratio-v1` 的声明、报价和内容摘要保持原结构。`haff-ratio-v2` 仅使用 SPREAD；现有价格版本保存 `compatibility.ordinary` 与 `compatibility.fast` 的 `spreadDelta` 和四档 `discounts`（STANDARD/VIP/SVIP/DISCOUNT_USER）。custom 共用 ordinary 参数。`compatibility.modes` 保存三种模式的 enabled；custom/fast 的 min/max 为 `{base:"C"|"ABSOLUTE",value:"精确十进制文本"}`。无生产默认参数。
+
+新声明在既有 `attributes.rentalPricing` 保存 `{rentalMode:"ordinary"|"custom"|"fast",ownerRatioB?:"十进制文本"}`，`pricingOptionCode` 留空。ordinary 禁止提交 B，由服务端计算 C；custom/fast 必须提交范围内 B，空区间、缺值和非法分母拒绝，不夹值。C 由安全箱/体力/负重/日耗基础规则计算，未加入模式增量或皮肤加价。草稿、quote、payload 使用结构版本 2，模式及 B/P/V/C/tier 随冻结报价参与 hash、协议接受和审核；修改需重新报价确认。克隆旧版本不改写历史内容。
+
+固定资源 `price_line.customerTier` 支持四档；同一物品的 owner 单价、单位数量与计价种类跨 tier 一致。缺某档价目不能回退。每行先按分 HALF_UP，再求两侧差额；60 发/组和 DAY 数量沿既有单位合同。
+
+价格草稿全量保存时，原规则或请求规则为 v2 的每一行必须显式包含 `customerTier`；缺失返回400且不改变规则、revision、价目或成功审计。仅v1保留省略tier表示STANDARD的兼容。当前Admin编辑器将v2或多档价目逐档只读展示，关闭保存、封存和旧版演算；v1编辑不变。
+
+发布与管理试算接口均由服务端指定 STANDARD，不接受客户端 tier。其他档位目前仅为纯计算能力；DISCOUNT_USER 不引入免押。公开投影只含租客金额和 rentalMode，不含 owner 内价、平台利润或 pricingInputs。publishing-options 对 v2 返回 pricingSchema/rentalModes（只含启停与范围），不暴露 P/V。现有发布 UI 尚未提供 v2 模式编辑控件，不能将接口能力视为浏览器验收。
+
+旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员权威资格、个人确认凭据及新版建单属于 PC-2，当前没有接通会员交易。
+
 用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。
 
 | 分组 | 数据/写入 | 校验与恢复 |

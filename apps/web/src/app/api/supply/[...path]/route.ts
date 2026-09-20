@@ -15,7 +15,7 @@ const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const getPath = new RegExp(
-  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}|media/${id}/(?:access|content))$`,
+  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
   `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents)$`,
@@ -40,7 +40,7 @@ function localUrls(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [
       key,
-      key === "url" &&
+      (key === "url" || key === "skinCatalogUrl") &&
       typeof child === "string" &&
       child.startsWith("/api/v1/supply/") &&
       getPath.test(child.slice("/api/v1/supply".length))
@@ -60,6 +60,8 @@ async function forward(
         : "req_web_" + randomUUID().replaceAll("-", "");
   if (!isHttpOrigin(apiOrigin) || !isHttpOrigin(webOrigin))
     return error(503, "INTERNAL_ERROR", requestId);
+  const incoming=new URL(request.url);
+  if(incoming.searchParams.get("queryVersion")==="2"&&Buffer.byteLength(incoming.pathname+incoming.search,"utf8")>8192)return Response.json({error:{code:"INVALID_ARGUMENT",message:"查询地址超过8KiB",requestId,details:[{path:"url",code:"INVALID_FIELD"}]}},{status:400,headers:{"cache-control":"no-store","x-request-id":requestId}});
   const { path: segments } = await context.params,
     path = "/" + segments.join("/"),
     method = request.method;

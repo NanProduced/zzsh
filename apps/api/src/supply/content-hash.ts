@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { parseSignedDecimal, formatDecimalAtScale, formatScaledInteger } from "./decimal";
-import { DeltaDeclarationError, normalizeDeltaAttributes } from "./delta-rental";
+import { CUSTOMER_TIERS, DeltaDeclarationError, normalizeDeltaAttributes, normalizeRentalPricing } from "./delta-rental";
 import type { InternalQuote } from "./pricing";
 
 export class ContentHashError extends Error {}
@@ -35,7 +35,7 @@ export type ContentRuleRefs = {
 };
 
 export type ContentPayloadInput = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   accountId: string;
   gameId: string;
   declaration: ContentDeclaration;
@@ -80,7 +80,7 @@ export function normalizeTime(value: string | null): string | null {
 export function normalizeQuote(value: Record<string, unknown> | InternalQuote): InternalQuote {
   fields(value, ["schemaVersion", "currency", "priceVersionId", "ruleReleaseId", "mode", "lines", "resourceTotal", "ownerTotal", "platformFullProfit", "tenantDeposit", "publisherBailRequirement", "termSeconds", "expiryDisclosures", "unitAmountsInformational", "roundingPolicy", "pricingInputs"]);
   const q = value as InternalQuote;
-  if (q.schemaVersion !== 1 || q.currency !== "CNY" || !["SPREAD", "PERCENT"].includes(q.mode) || !Array.isArray(q.lines)) throw new ContentHashError("Invalid quote");
+  if (![1, 2].includes(q.schemaVersion) || q.currency !== "CNY" || !["SPREAD", "PERCENT"].includes(q.mode) || !Array.isArray(q.lines)) throw new ContentHashError("Invalid quote");
   const amount = <T extends { currency: "CNY"; unit: "yuan"; amount: string; scale: 2 | 8 }>(v: T, scale: 2 | 8): T => {
     fields(v, ["currency", "unit", "amount", "scale"]);
     if (v.currency !== "CNY" || v.unit !== "yuan" || v.scale !== scale) throw new ContentHashError("Invalid amount unit");
@@ -92,7 +92,15 @@ export function normalizeQuote(value: Record<string, unknown> | InternalQuote): 
     return { ...l, quantity: integerText(l.quantity), unitQuantity: integerText(l.unitQuantity), buyerUnitAmount: amount(l.buyerUnitAmount, 8), ownerUnitAmount: amount(l.ownerUnitAmount, 8), buyerAmount: amount(l.buyerAmount, 2), ownerAmount: amount(l.ownerAmount, 2), platformAmount: amount(l.platformAmount, 2) };
   }), (l) => l.itemId);
   const p = q.pricingInputs;
-  fields(p, ["haffRatioSchema", "conditions", "denominators", "spreadDelta", "commissionRate", "exactRatios", "roundingPolicy", "depositPolicy", "reasonCodes"]);
+  if (q.schemaVersion === 1 && p.haffRatioSchema === "haff-ratio-v2") throw new ContentHashError("Compatibility quote requires schema 2");
+  fields(p, ["haffRatioSchema", "conditions", "denominators", "spreadDelta", "commissionRate", "exactRatios", "roundingPolicy", "depositPolicy", "reasonCodes", ...(q.schemaVersion === 2 ? ["compatibility"] : [])]);
+  if (q.schemaVersion === 2) {
+    const c = p.compatibility;
+    if (!c || q.mode !== "SPREAD" || p.haffRatioSchema !== "haff-ratio-v2") throw new ContentHashError("Invalid compatibility quote");
+    fields(c, ["rentalMode", "customerTier", "baseRatioC", "ownerRatioB", "memberDelta"]);
+    if (!["ordinary", "custom", "fast"].includes(c.rentalMode) || !CUSTOMER_TIERS.includes(c.customerTier)) throw new ContentHashError("Invalid compatibility inputs");
+    for (const key of ["baseRatioC", "ownerRatioB", "memberDelta"] as const) decimalText(c[key]);
+  }
   if (p.conditions) fields(p.conditions, ["safeBoxCode", "vitLevel", "bearLevel", "termOptionCode", "pricingOptionCode"]);
   if (p.denominators) fields(p.denominators, ["owner", "buyer"]);
   ensureUnique(p.exactRatios.map((r) => r.itemId), "exact ratios");
@@ -124,7 +132,7 @@ function ensureUnique(values: readonly string[], label: string): void {
   }
 }
 
-export function normalizeDeclaration(declaration: ContentDeclaration): ContentDeclaration {
+export function normalizeDeclaration(declaration: ContentDeclaration, schemaVersion: 1 | 2 = 1): ContentDeclaration {
   fields(declaration, ["title", "description", "attributes", "inventory", "skins", "entitlements", "termOptionCode", "pricingOptionCode", "mediaBindings"]);
   for (const media of declaration.mediaBindings) { fields(media, ["assetId", "byteHash", "purpose", "position"]); if (!Number.isSafeInteger(media.position) || media.position < 0) throw new ContentHashError("Invalid position"); }
   ensureUnique(declaration.inventory.map((item) => item.itemId), "inventory");
@@ -133,7 +141,10 @@ export function normalizeDeclaration(declaration: ContentDeclaration): ContentDe
   ensureUnique(declaration.mediaBindings.map((item) => `${item.purpose}:${item.position}:${item.assetId}`), "mediaBindings");
   let attributes: Record<string, unknown>;
   try {
-    attributes = normalizeDeltaAttributes(declaration.attributes);
+    if (schemaVersion === 2) {
+      const { rentalPricing, ...existing } = declaration.attributes;
+      attributes = { ...normalizeDeltaAttributes(existing), rentalPricing: normalizeRentalPricing(rentalPricing) };
+    } else attributes = normalizeDeltaAttributes(declaration.attributes);
   } catch (error) {
     if (error instanceof DeltaDeclarationError) throw new ContentHashError(error.message);
     throw error;
@@ -160,7 +171,7 @@ export function normalizeDeclaration(declaration: ContentDeclaration): ContentDe
   };
 }
 
-function canonicalize(value: unknown, depth: number): string {
+export function canonicalize(value: unknown, depth = 0): string {
   if (depth > MAX_DEPTH) throw new ContentHashError("payload nesting is too deep");
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
@@ -190,12 +201,17 @@ export function normalizeContentPayload(input: ContentPayloadInput): ContentPayl
   fields(input, ["schemaVersion", "accountId", "gameId", "declaration", "ruleRefs", "quoteValues"]);
   fields(input.ruleRefs, ["releaseId", "priceVersionId", "termVersionId", "agreementVersionId", "agreementDigest"]);
   if (Object.values(input.ruleRefs).some((value) => typeof value !== "string")) throw new ContentHashError("Invalid rule reference");
-  if (input.schemaVersion !== 1) throw new ContentHashError("Invalid content schema");
+  if (![1, 2].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
+  if (input.schemaVersion === 2) {
+    const choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);
+    const quote = normalizeQuote(input.quoteValues);
+    if (quote.pricingInputs.compatibility?.customerTier !== "STANDARD" || choice.rentalMode !== quote.pricingInputs.compatibility.rentalMode || (choice.ownerRatioB !== undefined && choice.ownerRatioB !== decimalText(quote.pricingInputs.compatibility.ownerRatioB))) throw new ContentHashError("Declaration and quote pricing disagree");
+  }
   return {
-    schemaVersion: 1,
+    schemaVersion: input.schemaVersion,
     accountId: input.accountId,
     gameId: input.gameId,
-    declaration: normalizeDeclaration(input.declaration),
+    declaration: normalizeDeclaration(input.declaration, input.schemaVersion),
     ruleRefs: input.ruleRefs,
     quoteValues: normalizeQuote(input.quoteValues) as unknown as Record<string, unknown>,
   };

@@ -58,6 +58,7 @@ export function listingQuery(filters: ListingFilters): URLSearchParams {
   }
   for (const skinId of filters.skinIds) query.append("skinId", skinId);
   if (filters.skinIds.length) query.set("skinMatch", filters.match);
+  if (filters.q) query.set("q", filters.q);
   query.set("limit", String(filters.limit));
   if (filters.cursor) query.set("cursor", filters.cursor);
   return query;

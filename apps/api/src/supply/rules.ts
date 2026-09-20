@@ -5,7 +5,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
 import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
-import { DELTA_ROUNDING_POLICY, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
+import { DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
@@ -48,7 +48,7 @@ export async function listRules(
     [gameId],
   );
   const priceLines = await client.query(
-    `SELECT l."price_version_id" AS "priceVersionId", l."item_id" AS "itemId", l."pricing_kind" AS "pricingKind",
+    `SELECT l."price_version_id" AS "priceVersionId", l.customer_tier AS "customerTier", l."item_id" AS "itemId", l."pricing_kind" AS "pricingKind",
             l."unit_quantity"::text AS "unitQuantity", l."buyer_unit_amount"::text AS "buyerUnitAmount", l."owner_unit_amount"::text AS "ownerUnitAmount"
        FROM "zzsh_supply"."price_line" l
        JOIN "zzsh_supply"."price_version" v ON v."id" = l."price_version_id"
@@ -152,6 +152,13 @@ export async function updatePriceDraft(
   if (body.haffRule !== undefined) {
     haffRule = body.haffRule === null ? null : validateDeltaHaffRule(body.haffRule, mode);
   }
+  const lines = body.lines === undefined ? undefined : parseDeltaPriceLines(body.lines, mode);
+  // Check both stored and requested schemas: an old editor must not erase tiers,
+  // including when it also attempts to replace or clear the compatibility rule.
+  if (lines && ((current.haff_rule as HaffRuleInput | null)?.schema === "haff-ratio-v2" || haffRule?.schema === "haff-ratio-v2")
+    && lines.some((line) => line.customerTier === undefined)) {
+    throw invalid("Compatibility price lines require an explicit customerTier", "lines");
+  }
   const roundingPolicy = body.roundingPolicy === undefined ? undefined : body.roundingPolicy;
   if (roundingPolicy !== undefined && roundingPolicy !== DELTA_ROUNDING_POLICY) throw invalid("Rounding policy is unsupported");
   await client.query(
@@ -173,14 +180,13 @@ export async function updatePriceDraft(
       versionId,
     ],
   );
-  if (body.lines !== undefined) {
-    const lines = parseDeltaPriceLines(body.lines, mode);
+  if (lines !== undefined) {
     const items = await client.query<{ id: string; unit: string; gameId: string }>(
       `SELECT "id", "unit", "game_id" AS "gameId" FROM "zzsh_supply"."billable_item" WHERE "id" = ANY($1::text[])`,
       [lines.map((line) => line.itemId)],
     );
     const itemById = new Map(items.rows.map((item) => [item.id, item]));
-    if (itemById.size !== lines.length) throw invalid("Price line item does not exist");
+    if (itemById.size !== new Set(lines.map((line) => line.itemId)).size) throw invalid("Price line item does not exist");
     for (const line of lines) {
       const item = itemById.get(line.itemId)!;
       if (item.gameId !== String(current.game_id)) throw invalid("Price line item belongs to another game");
@@ -189,9 +195,9 @@ export async function updatePriceDraft(
     await client.query(`DELETE FROM "zzsh_supply"."price_line" WHERE "price_version_id" = $1`, [versionId]);
     for (const line of lines) {
       await client.query(
-        `INSERT INTO "zzsh_supply"."price_line" ("id", "price_version_id", "item_id", "pricing_kind", "unit_quantity", "buyer_unit_amount", "owner_unit_amount")
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [newSupplyId("pline"), versionId, line.itemId, line.pricingKind, line.unitQuantity ?? null, line.buyerUnitAmount ?? null, line.ownerUnitAmount ?? null],
+        `INSERT INTO "zzsh_supply"."price_line" ("id", "price_version_id", "item_id", "pricing_kind", "unit_quantity", "buyer_unit_amount", "owner_unit_amount", customer_tier)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [newSupplyId("pline"), versionId, line.itemId, line.pricingKind, line.unitQuantity ?? null, line.buyerUnitAmount ?? null, line.ownerUnitAmount ?? null, line.customerTier ?? "STANDARD"],
       );
     }
   }
@@ -401,7 +407,7 @@ export async function quotePreview(
   const conditions = body.conditions && typeof body.conditions === "object" && !Array.isArray(body.conditions)
     ? (body.conditions as Record<string, unknown>)
     : {};
-  ensureOnlyFields(conditions, ["safeBoxCode", "vitLevel", "bearLevel", "termOptionCode", "pricingOptionCode"]);
+  ensureOnlyFields(conditions, ["safeBoxCode", "vitLevel", "bearLevel", "termOptionCode", "pricingOptionCode", "rentalPricing"]);
   const termOptionCode = typeof conditions.termOptionCode === "string" ? conditions.termOptionCode : "";
   const termOptionRow = await client.query<{ code: string; dailyConsumption: string; durationRounding: "CEIL_DAY" }>(
     `SELECT "code", "daily_consumption"::text AS "dailyConsumption", "duration_rounding" AS "durationRounding"
@@ -433,7 +439,7 @@ export async function quotePreview(
     `SELECT l."item_id" AS "itemId", i."unit", l."pricing_kind" AS "pricingKind", l."unit_quantity"::text AS "unitQuantity",
             l."buyer_unit_amount"::text AS "buyerUnitAmount", l."owner_unit_amount"::text AS "ownerUnitAmount"
        FROM "zzsh_supply"."price_line" l JOIN "zzsh_supply"."billable_item" i ON i."id" = l."item_id"
-      WHERE l."price_version_id" = $1 ORDER BY l."item_id"`,
+      WHERE l."price_version_id" = $1 AND l.customer_tier='STANDARD' ORDER BY l."item_id"`,
     [priceVersionId],
   );
   const lines: PricingLineInput[] = [];
@@ -441,6 +447,7 @@ export async function quotePreview(
     const quantity = inventoryById.get(row.itemId);
     if (quantity === undefined) continue;
     lines.push({
+      customerTier: "STANDARD",
       itemId: row.itemId,
       quantity,
       pricingKind: row.pricingKind,
@@ -488,6 +495,7 @@ export async function quotePreview(
   }
 
   const result: QuoteResult = computeDeltaQuote({
+    customerTier: "STANDARD",
     priceVersionId,
     mode: priceRow.mode,
     roundingPolicy: priceRow.roundingPolicy,
@@ -495,6 +503,7 @@ export async function quotePreview(
     ...(priceRow.haffRule ? { haffRule: priceRow.haffRule as HaffRatioRule } : {}),
     lines,
     conditions: {
+      ...(conditions.rentalPricing === undefined ? {} : { rentalPricing: normalizeRentalPricing(conditions.rentalPricing) }),
       ...(typeof conditions.safeBoxCode === "string" ? { safeBoxCode: conditions.safeBoxCode } : {}),
       ...(typeof conditions.vitLevel === "number" ? { vitLevel: conditions.vitLevel } : {}),
       ...(typeof conditions.bearLevel === "number" ? { bearLevel: conditions.bearLevel } : {}),
@@ -521,7 +530,7 @@ export async function quotePreview(
     const declaration: ContentDeclaration = {
       title: typeof body.title === "string" ? body.title : "",
       description: typeof body.description === "string" ? body.description : null,
-      attributes: {},
+      attributes: conditions.rentalPricing === undefined ? {} : { rentalPricing: normalizeRentalPricing(conditions.rentalPricing) },
       inventory: [...inventoryById.entries()].map(([itemId, quantity]) => ({ itemId, quantity })),
       skins: Array.isArray(body.skins) ? body.skins.filter((value): value is string => typeof value === "string") : [],
       entitlements: entitlementInputs.map((entitlement) => ({
@@ -544,7 +553,7 @@ export async function quotePreview(
         : [],
     };
     const payload: ContentPayloadInput = {
-      schemaVersion: 1,
+      schemaVersion: result.quote.schemaVersion,
       accountId: body.accountId,
       gameId: priceRow.gameId,
       declaration,

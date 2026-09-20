@@ -11,7 +11,6 @@ import { ActionFeedbackDialog } from "@/components/ui/action-feedback-dialog";
 import { FavoriteNotice } from "@/components/favorites/favorite-button";
 import { FavoritesProvider } from "@/components/favorites/favorites-context";
 import { ServiceShell } from "@/components/layout/service-shell";
-import { searchAccounts } from "@/lib/account-search";
 import {
   activeListingFilterCount,
   listingFilterKey,
@@ -134,7 +133,7 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
 
   const game = games.data?.find((entry) => entry.id === filters.game) ?? null;
   const items = feed.status === "ready" ? feed.items : [];
-  const visible = searchAccounts(items, filters.q ?? "");
+  const visible = items;
   const filterCount = activeListingFilterCount(filters);
   const trailIndex = cursorTrail.indexOf(filters.cursor);
   const canPrev = trailIndex > 0;
@@ -180,7 +179,7 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
 
   const resetFilters = () => {
     setMinQtyError(null);
-    navigate(withFilterChange(filters, { item: null, minQty: null, skinIds: [], match: "ANY" }));
+    navigate(withFilterChange(filters, { item: null, minQty: null, skinIds: [], match: "ANY", q: null }));
   };
   const skinOptions = catalog.data?.skins ?? [];
   const catalogUnavailable = Boolean(filters.game) && catalog.status === "error";
@@ -231,7 +230,7 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
     </>;
   };
 
-  return <ServiceShell surface="browse" contextLabel={null} breadcrumbs={breadcrumbs} title="租账号" description="先看资源配置与租用条件，费用和租期以服务端报价为准。" initialQuery={filters.q ?? ""} onSearch={(value) => navigate(withFilterChange(filters, { q: normalizeListingQuery(value) }))} searchLabel="在公开账号目录中搜索" searchPlaceholder="搜索账号编号或名称">
+  return <ServiceShell surface="browse" contextLabel={null} breadcrumbs={breadcrumbs} title="租账号" description="先看资源配置与租用条件，费用和租期以服务端报价为准。" initialQuery={filters.q ?? ""} onSearch={(value) => navigate(withFilterChange(filters, { q: normalizeListingQuery(value) }))} searchLabel="在公开账号目录中搜索账号名称" searchInputLabel="搜索账号名称" searchPlaceholder="搜索账号名称">
     <section className="game-section market-section" aria-label="公开账号市场">
       {game && <div className="market-context" aria-label={`${game.name}游戏上下文`}>
         <div className="market-context-mark" aria-hidden="true">{game.code === "delta" ? "D" : "G"}</div>
@@ -265,7 +264,7 @@ function MarketView({ filters, filterKey }: { filters: ListingFilters; filterKey
             </div>
           </form>
           {filters.q && <div className="site-search-summary" role="status">
-            <span>“{filters.q}” · {visible.length} 个匹配账号<small>仅筛选当前已加载的账号编号与名称；更多账号可继续加载。</small></span>
+            <span>“{filters.q}” · {visible.length} 个匹配账号<small>服务端按公开账号名称筛选，结果仍可继续翻页。</small></span>
             <button type="button" onClick={() => navigate(withFilterChange(filters, { q: null }))}>清空搜索</button>
           </div>}
           <FavoriteNotice />

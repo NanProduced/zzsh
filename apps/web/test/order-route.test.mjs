@@ -2,8 +2,33 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 process.env.NODE_ENV='test';
 const {GET,POST}=await import('../src/app/api/orders/[[...path]]/route.ts');
+const {POST:CONFIRM}=await import('../src/app/api/order-confirmations/route.ts');
+const {POST:CREATE_V2}=await import('../src/app/api/v2/orders/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={},query='')=>new Request('http://127.0.0.1:3100/api/orders/'+path.join('/')+query,{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
+
+test('v2 creation has an explicit path and preserves credential/body/key without changing v1',async()=>{
+  const old=globalThis.fetch;let seen;
+  globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({order:{id:'order-v2'}});};
+  try {
+    const body=JSON.stringify({confirmationToken:'original-signed-credential'});
+    const r=await CREATE_V2(new Request('http://127.0.0.1:3100/api/v2/orders',{method:'POST',headers:{origin:'http://127.0.0.1:3100','content-type':'application/json','idempotency-key':'v2-key',cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin'},body}));
+    assert.equal(r.status,200);assert.equal(seen.url,'http://127.0.0.1:3102/api/bff/user/orders-v2');assert.equal(seen.options.headers.get('idempotency-key'),'v2-key');assert.equal(seen.options.headers.get('cookie'),'zzsh_user.session_token=user');assert.equal(new TextDecoder().decode(seen.options.body),body);assert.equal(r.headers.get('cache-control'),'no-store');
+  } finally {globalThis.fetch=old;}
+});
+
+test('personal confirmation BFF preserves only user session, bounded body and no-store credential',async()=>{
+  const old=globalThis.fetch;let seen;
+  globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({confirmationToken:'synthetic-signed-credential',quote:{resourceTotal:{amount:'10.00'}}});};
+  try {
+    const body=JSON.stringify({accountId:'a',versionId:'v',releaseId:'r'});
+    const result=await CONFIRM(new Request('http://127.0.0.1:3100/api/order-confirmations',{method:'POST',headers:{origin:'http://127.0.0.1:3100','content-type':'application/json',cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin'},body}));
+    assert.equal(result.status,200);assert.equal(result.headers.get('cache-control'),'no-store');
+    assert.equal(seen.url,'http://127.0.0.1:3102/api/bff/user/order-confirmations');assert.equal(seen.options.headers.get('cookie'),'zzsh_user.session_token=user');
+    assert.equal(new TextDecoder().decode(seen.options.body),body);assert.equal((await result.json()).confirmationToken,'synthetic-signed-credential');
+    for(const headers of [{origin:'https://evil.invalid'},{origin:'http://127.0.0.1:3100',authorization:'Bearer unsafe'}])assert.equal((await CONFIRM(new Request('http://127.0.0.1:3100/api/order-confirmations',{method:'POST',headers:{'content-type':'application/json',...headers},body}))).status,403);
+  } finally {globalThis.fetch=old;}
+});
 
 test('order BFF list/detail forward only user cookies and preserve query',async()=>{
   const old=globalThis.fetch;const seen=[];

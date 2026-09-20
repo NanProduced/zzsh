@@ -10,6 +10,13 @@ const textareaClass = "w-full min-h-32 px-3 py-2 rounded border border-border bg
 type PriceLineDraft = { itemId: string; pricingKind: "FIXED_UNIT" | "HAFF_RATIO"; unitQuantity: string; buyerUnitAmount: string; ownerUnitAmount: string };
 type TermOptionDraft = { code: string; name: string; dailyConsumption: string };
 
+function requiresTierEditor(record: PriceVersionRecord, allLines: PriceLineRecord[]): boolean {
+  const selected = allLines.filter((line) => line.priceVersionId === record.id);
+  return (record.haffRule?.schema !== undefined && record.haffRule.schema !== "haff-ratio-v1")
+    || selected.some((line) => line.customerTier !== undefined && line.customerTier !== "STANDARD")
+    || new Set(selected.map((line) => line.itemId)).size !== selected.length;
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="space-y-1 text-xs block">
@@ -75,6 +82,12 @@ export function SupplyRulesView({
     setPriceMode(record.mode);
     setCommissionRate(record.commissionRate ?? "");
     setHaffRuleText(record.haffRule ? JSON.stringify(record.haffRule, null, 2) : "");
+    setPreview(null);
+    setPreviewError(undefined);
+    if (requiresTierEditor(record, allLines)) {
+      setLines({});
+      return;
+    }
     const next: Record<string, PriceLineDraft> = {};
     const linesForVersion = allLines.filter((line) => line.priceVersionId === record.id);
     if (linesForVersion.length === 0) {
@@ -151,6 +164,7 @@ export function SupplyRulesView({
   };
 
   const selectedPrice = rules?.priceVersions.find((version) => version.id === priceId);
+  const priceReadOnly = Boolean(selectedPrice && requiresTierEditor(selectedPrice, rules?.priceLines ?? []));
   const selectedTerm = rules?.termVersions.find((version) => version.id === termId);
   const selectedAgreement = rules?.agreementVersions.find((version) => version.id === agreementId);
   const items = rules?.items ?? [];
@@ -179,7 +193,7 @@ export function SupplyRulesView({
 
   const savePrice = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!selectedPrice) return;
+    if (!selectedPrice || priceReadOnly) return;
     let haffRule: unknown = undefined;
     if (haffRuleText.trim()) {
       try {
@@ -296,6 +310,7 @@ export function SupplyRulesView({
   };
 
   const seal = async (kind: "price" | "term" | "agreement", id: string, revision: string) => {
+    if (kind === "price" && priceReadOnly) return;
     setError(undefined);
     setLoading(true);
     try {
@@ -330,6 +345,7 @@ export function SupplyRulesView({
   };
 
   const runPreview = async () => {
+    if (priceReadOnly) return;
     if (!rules || !priceId || !termId || !haffItem) {
       setPreviewError("需要价格草稿、租期草稿与一个 HAFF_BASE 计费物品才能演算。");
       return;
@@ -405,9 +421,25 @@ export function SupplyRulesView({
               <select value={priceId} onChange={(event) => selectPrice(event.target.value)} className={selectClass}>
                 {rules.priceVersions.map((version) => <option key={version.id} value={version.id}>{version.mode} · {version.status} · rev {version.revision}</option>)}
               </select>
-              {selectedPrice?.status === "DRAFT" ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void seal("price", selectedPrice.id, selectedPrice.revision)}>封存</Button> : null}
+              {selectedPrice?.status === "DRAFT" && !priceReadOnly ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void seal("price", selectedPrice.id, selectedPrice.revision)}>封存</Button> : null}
             </div>
-            {selectedPrice ? (
+            {selectedPrice && priceReadOnly ? (
+              <div className="mt-4 space-y-3">
+                <p role="status" className="text-xs text-muted-foreground">此价目包含新版定价规则或会员档位，当前编辑器仅支持只读查看，暂不支持保存、封存和报价演算。</p>
+                <pre className="overflow-auto text-xs">{JSON.stringify(selectedPrice.haffRule, null, 2)}</pre>
+                <div className="table-wrap"><table className="data-table">
+                  <thead><tr><th>物品</th><th>档位</th><th>计价方式</th><th>单位数量</th><th>租客单价</th><th>号主单价</th></tr></thead>
+                  <tbody>{rules.priceLines.filter((line) => line.priceVersionId === selectedPrice.id).map((line) => (
+                    <tr key={`${line.itemId}:${line.customerTier ?? "STANDARD"}`}>
+                      <td>{items.find((item) => item.id === line.itemId)?.name ?? line.itemId}</td>
+                      <td>{line.customerTier ?? "STANDARD"}</td><td>{line.pricingKind}</td>
+                      <td>{line.unitQuantity ?? "—"}</td><td>{line.buyerUnitAmount ?? "—"}</td><td>{line.ownerUnitAmount ?? "—"}</td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+              </div>
+            ) : null}
+            {selectedPrice && !priceReadOnly ? (
               <form onSubmit={savePrice} className="mt-4 space-y-3">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <Field label="封存状态"><div className="h-9 flex items-center text-xs">{selectedPrice.status === "SEALED" ? "已封存（只读）" : "草稿"}</div></Field>
@@ -529,7 +561,7 @@ export function SupplyRulesView({
             </div>
           </section>
 
-          {canPreview ? (
+          {canPreview && !priceReadOnly ? (
             <section className="section-panel">
               <h3 className="text-sm font-semibold">报价演算（内部投影）</h3>
               <p className="text-[11px] text-muted-foreground mt-1">使用当前选中的价格/租期草稿与合成条件演算；押金策略未配置时以 null 返回，不会填 0.00。</p>

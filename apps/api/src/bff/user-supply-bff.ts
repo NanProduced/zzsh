@@ -11,6 +11,8 @@ import {
   type SupplyNodeResponse,
 } from "../supply/supply-util";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
+import { assertListingUrlBudget } from "../supply/listing-filter-contract";
+import { SecurityApiError } from "../auth/security-core";
 export function mountUserSupplyBff(
   app: INestApplication,
   options: SupplyRuntimeOptions,
@@ -31,6 +33,9 @@ export function mountUserSupplyBff(
           return;
         }
         const raw = request.originalUrl ?? request.url ?? "/";
+        if(new URLSearchParams(raw.split("?")[1]??"").get("queryVersion")==="2") {
+          try {assertListingUrlBudget(raw);}catch(e){if(e instanceof SecurityApiError){sendError(response,e,requestId);return;}throw e;}
+        }
         const suffix = raw.startsWith("/api/bff/user/supply")
           ? raw.slice("/api/bff/user/supply".length)
           : raw;

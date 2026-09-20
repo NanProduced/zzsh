@@ -550,7 +550,7 @@ export async function readPublicCatalog(
   parameters.push(limit + 1);
   const skins = await client.query(
     `SELECT s."id", s."code", s."name", s."category_id" AS "categoryId", s."rarity_code" AS "rarityCode",
-            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=s.media_id AND a.game_id=s.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN s."media_id" ELSE NULL END AS "mediaId", s."sort_order" AS "sortOrder"
+            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=s.media_id AND a.game_id=s.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='SKIN_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN s."media_id" ELSE NULL END AS "mediaId", s."sort_order" AS "sortOrder"
        FROM "zzsh_supply"."skin" s
       WHERE ${conditions.join(" AND ")}
       ORDER BY s."id"

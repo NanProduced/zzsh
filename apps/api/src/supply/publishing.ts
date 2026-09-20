@@ -33,6 +33,7 @@ import {
   notFound,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
+import { normalizeRentalPricing } from "./delta-rental";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -304,7 +305,7 @@ export async function createListingDraft(
   if (old?.review_state === "DRAFT") throw conflict("已有可编辑草稿");
   const id = newSupplyId("listing");
   await client.query(
-    `INSERT INTO zzsh_supply.listing_version(id,account_id,sequence,title,description,attributes,term_option_code,pricing_option_code) SELECT $1,$2,COALESCE(MAX(sequence),0)+1,$3,$4,$5,$6,$7 FROM zzsh_supply.listing_version WHERE account_id=$2`,
+    `INSERT INTO zzsh_supply.listing_version(id,account_id,sequence,title,description,attributes,term_option_code,pricing_option_code,schema_version) SELECT $1,$2,COALESCE(MAX(sequence),0)+1,$3,$4,$5,$6,$7,$8 FROM zzsh_supply.listing_version WHERE account_id=$2`,
     [
       id,
       a.id,
@@ -313,6 +314,7 @@ export async function createListingDraft(
       old?.attributes ?? {},
       old?.term_option_code ?? "",
       old?.pricing_option_code ?? "",
+      old?.schema_version ?? 1,
     ],
   );
   if (old) {
@@ -408,7 +410,7 @@ export async function saveListingDraft(
       mediaBindings: [],
       termOptionCode: String(body.termOptionCode ?? ""),
       pricingOptionCode: String(body.pricingOptionCode ?? ""),
-    });
+    }, (body.attributes as Record<string, unknown> | undefined)?.rentalPricing === undefined ? 1 : 2);
   } catch {
     throw invalid("属性格式或范围错误", "attributes");
   }
@@ -495,7 +497,7 @@ export async function saveListingDraft(
     );
   }
   await client.query(
-    `UPDATE zzsh_supply.listing_version SET title=$2,description=$3,attributes=$4,term_option_code=$5,pricing_option_code=$6,payload=NULL,content_hash=NULL,rule_release_id=NULL,revision=revision+1 WHERE id=$1`,
+    `UPDATE zzsh_supply.listing_version SET title=$2,description=$3,attributes=$4,term_option_code=$5,pricing_option_code=$6,schema_version=$7,payload=NULL,content_hash=NULL,rule_release_id=NULL,revision=revision+1 WHERE id=$1`,
     [
       v.id,
       title,
@@ -503,6 +505,7 @@ export async function saveListingDraft(
       normalized.attributes,
       normalized.termOptionCode,
       normalized.pricingOptionCode,
+      normalized.attributes.rentalPricing === undefined ? 1 : 2,
     ],
   );
   await bumpAccount(client, a);
@@ -580,6 +583,7 @@ export async function quoteListing(
   const vitality = attrs.vit_level ?? attrs.vitLevel;
   const bear = attrs.bear_level ?? attrs.bearLevel;
   const result = computeDeltaQuote({
+    customerTier: "STANDARD",
     priceVersionId: release.price_version_id,
     mode: release.mode,
     roundingPolicy: release.rounding_policy,
@@ -588,6 +592,7 @@ export async function quoteListing(
       : { commissionRate: release.commission_rate }),
     haffRule: release.haff_rule,
     lines: rows.map((r) => ({
+      customerTier: "STANDARD",
       itemId: r.itemId,
       quantity: r.quantity,
       unit: r.unit,
@@ -606,6 +611,7 @@ export async function quoteListing(
       bearLevel: typeof bear === "number" ? bear : undefined,
       termOptionCode: d.termOptionCode,
       pricingOptionCode: d.pricingOptionCode,
+      ...(attrs.rentalPricing === undefined ? {} : { rentalPricing: normalizeRentalPricing(attrs.rentalPricing) }),
     },
     termOption: term,
     entitlements: ents.map((e) => ({
@@ -621,7 +627,7 @@ export async function quoteListing(
     );
   result.quote.ruleReleaseId = release.id;
   const payload = normalizeContentPayload({
-    schemaVersion: 1,
+    schemaVersion: result.quote.schemaVersion,
     accountId: a.id,
     gameId: a.game_id,
     declaration: d,
@@ -1105,6 +1111,8 @@ export async function listingDetail(
         "secret_kd",
         "service_window_start_minute",
         "service_window_end_minute",
+        "service_window_timezone",
+        "service_window_cross_midnight",
       ].map((k) => [k, attrs[k] ?? null]),
     );
     const game = (

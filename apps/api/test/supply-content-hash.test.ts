@@ -1,6 +1,24 @@
 import { computeQuote } from "../src/supply/pricing";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { compatRule } from "./pricing-compat-fixture";
+
+test("PC1 explicit v2 declaration/quote binding and old consumer rejection", () => {
+  const make=(b:string, mode:"custom"|"fast"="custom")=>{
+    const selection={rentalMode:mode,ownerRatioB:b};
+    const result=computeQuote({priceVersionId:"pc1",mode:"SPREAD",customerTier:"STANDARD",roundingPolicy:"HALF_UP_CENT_V1",haffRule:compatRule(),lines:[{itemId:"haff",quantity:"100000000",pricingKind:"HAFF_RATIO",customerTier:"STANDARD"}],conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:selection},termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"}});
+    assert.ok(result.quotable);
+    const p=payload({schemaVersion:2,quoteValues:result.quote as unknown as Record<string,unknown>});
+    p.declaration.attributes={...p.declaration.attributes,rentalPricing:selection};p.declaration.pricingOptionCode="";
+    return p;
+  };
+  const p=make("46");
+  assert.notEqual(computeContentHash(p),computeContentHash(make("45")));
+  assert.notEqual(computeContentHash(p),computeContentHash(make("53","fast")));
+  assert.throws(()=>normalizeContentPayload({...p,schemaVersion:1}));
+  const mismatch=structuredClone(p);mismatch.declaration.attributes.rentalPricing={rentalMode:"fast",ownerRatioB:"53"};
+  assert.throws(()=>normalizeContentPayload(mismatch));
+});
 
 import {
   canonicalizeContentPayload,
@@ -82,6 +100,7 @@ test("R6 normalized content is stable across text, numbers, UTC time, nulls and 
 
 test("identical content with reordered collections and keys produces the same digest", () => {
   const first = computeContentHash(payload());
+  assert.equal(first,"30ff67e9a64765b4eda81ecda5badd00b84ed4ea6c55e4574d5c697dc5f22923","v1 baseline cc96482 byte contract");
   const reordered = payload({
     declaration: {
       ...payload().declaration,

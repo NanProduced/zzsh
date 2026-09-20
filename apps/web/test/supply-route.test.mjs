@@ -4,6 +4,18 @@ process.env.NODE_ENV='test';
 const {GET,POST,PUT}=await import('../src/app/api/supply/[...path]/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={})=>new Request('http://127.0.0.1:3100/api/supply/'+path.join('/')+'?limit=2',{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
+test('listing v2 BFF preserves encoded filters, rewrites metadata and bounds raw URLs',async()=>{
+  const old=globalThis.fetch;let seen,calls=0;
+  globalThis.fetch=async url=>{calls++;seen=String(url);return Response.json({skinCatalogUrl:'/api/v1/supply/games/delta/catalog'});};
+  try{
+    const params=new URLSearchParams({queryVersion:'2',gameId:'delta',filters:JSON.stringify({regions:[{province:'河南省',city:'郑州市'}]})});
+    const r=await GET(new Request('http://127.0.0.1:3100/api/supply/listings?'+params),ctx(['listings']));
+    assert.equal(r.status,200);assert.equal(new URL(seen).search,'?'+params);assert.equal((await r.json()).skinCatalogUrl,'/api/supply/games/delta/catalog');
+    assert.equal((await GET(input(['games','delta','listing-filters']),ctx(['games','delta','listing-filters']))).status,200);
+    const before=calls;const long=await GET(new Request('http://127.0.0.1:3100/api/supply/listings?queryVersion=2&q='+'x'.repeat(8192)),ctx(['listings']));
+    assert.equal(long.status,400);assert.equal((await long.json()).error.details[0].path,'url');assert.equal(calls,before);
+  }finally{globalThis.fetch=old;}
+});
 test('supply BFF forwards only user cookies, preserves query and adapts public URLs',async()=>{
   const old=globalThis.fetch;let seen;
   globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({items:[{url:'/api/v1/supply/listings/a/media/m',resourceTotal:{amount:'125.00'}}],sessionToken:'must-not-forward'});};

@@ -1,4 +1,6 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
+import { listV2 } from "./listing-filter-routes";
+import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
 import type { PoolClient } from "pg";
 import { readAdminContext, assertAdminContextInTransaction } from "../auth/auth-security";
 import {
@@ -35,7 +37,6 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 import {
-  listingSearchPattern,
   parsePublicListingSearch,
   publicGradingOptions,
   publicLoginMethodOptions,
@@ -117,6 +118,8 @@ export async function handlePublishingRoute(
       )
     ).rows;
     const rule = release.haff_rule as {
+      schema?: string;
+      compatibility?: import("./delta-rental").DeltaCompatPricing;
       baseBySafeBox?: Record<string, string>;
       options?: Record<string, { enabled: boolean }>;
       vitalityDeltaByLevel?: Record<string,string>;
@@ -139,6 +142,7 @@ export async function handlePublishingRoute(
           .filter(([, v]) => v.enabled)
           .map(([key]) => key)
           .sort(),
+        ...(rule?.schema === "haff-ratio-v2" ? { pricingSchema: "haff-ratio-v2", rentalModes: rule.compatibility?.modes } : {}),
         agreement: {
           id: release.agreement_id,
           title: release.title,
@@ -198,6 +202,10 @@ export async function handlePublishingRoute(
       } else sendJson(response, 200, result.detail, requestId);
       return true;
     }
+    if(query.has("queryVersion")) {
+      if(query.get("queryVersion")!=="2")throw invalid("Unsupported query version","queryVersion");
+      sendJson(response,200,await listV2(request,options,query),requestId);return true;
+    }
     const limit = Number(query.get("limit") ?? 20);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100)
       throw invalid("Limit is invalid");
@@ -237,21 +245,16 @@ export async function handlePublishingRoute(
         if (filter.gameId) {
           await requirePublicGameService(client, filter.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
         }
+        const values:unknown[]=[cursor,filter.gameId];
+        const param=(value:unknown)=>{values.push(value);return '$'+values.length;};
+        const predicates=candidatePredicates({resources:filter.itemId?[{itemId:filter.itemId,minQuantity:filter.minQuantity??"0"}]:[],skinGroups:[{ids:filter.skins,match:filter.skinMatch}]},filter.q,param);
         const rows = (
           await client.query<{
             id: string;
             version_id: string;
           }>(
-            `SELECT a.id,v.id AS version_id FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND v.review_state='APPROVED' AND v.rule_release_id=g.current_release_id AND ($2::text IS NULL OR a.game_id=$2) AND ($3::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=$3 AND l.quantity>=COALESCE($4::numeric,0))) AND (cardinality($5::text[])=0 OR CASE WHEN $6='ALL' THEN (SELECT count(*) FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY($5))=cardinality($5::text[]) ELSE EXISTS(SELECT 1 FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY($5)) END) AND ($7::text IS NULL OR v.title ILIKE $7 ESCAPE '\\') ORDER BY a.id LIMIT 200`,
-            [
-              cursor,
-              filter.gameId,
-              filter.itemId,
-              filter.minQuantity,
-              filter.skins,
-              filter.skinMatch,
-              filter.q === null ? null : listingSearchPattern(filter.q),
-            ],
+            `SELECT a.id,v.id AS version_id ${PUBLIC_CANDIDATE_FROM} WHERE a.id>$1 AND ${PUBLIC_CANDIDATE_WHERE} AND ($2::text IS NULL OR a.game_id=$2)${predicates.length?' AND '+predicates.join(' AND '):''} ORDER BY a.id LIMIT 200`,
+            values,
           )
         ).rows;
         const items: unknown[] = [];

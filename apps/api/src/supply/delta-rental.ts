@@ -15,6 +15,17 @@ import type { ExpiryDisclosure, InternalQuote, QuoteAmount, QuoteUnitAmount } fr
 
 export const DELTA_QUOTE_SCHEMA_VERSION = 1;
 export const DELTA_HAFF_RATIO_SCHEMA = "haff-ratio-v1";
+export const DELTA_HAFF_COMPAT_SCHEMA = "haff-ratio-v2";
+export const CUSTOMER_TIERS = ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"] as const;
+export type CustomerTier = typeof CUSTOMER_TIERS[number];
+export type RentalMode = "ordinary" | "custom" | "fast";
+export type RentalPricingSelection = { rentalMode: RentalMode; ownerRatioB?: string };
+type RatioBound = { base: "C" | "ABSOLUTE"; value: string };
+export type DeltaCompatPricing = {
+  ordinary: { spreadDelta: string; discounts: Record<CustomerTier, string> };
+  fast: { spreadDelta: string; discounts: Record<CustomerTier, string> };
+  modes: Record<RentalMode, { enabled: boolean; min?: RatioBound; max?: RatioBound }>;
+};
 export const DELTA_HAFF_BASE_PER_MILLION = 1_000_000n;
 export const DELTA_ROUNDING_POLICY = "HALF_UP_CENT_V1";
 
@@ -33,13 +44,24 @@ export type DeltaHaffRule = {
   vitalityDeltaByLevel: Record<string, string>;
   bearDeltaByLevel: Record<string, string>;
   dailyDeltaByTermOption: Record<string, string>;
-  options: Record<string, { delta: string; enabled: boolean }>;
+  options?: Record<string, { delta: string; enabled: boolean }>;
   spreadDelta?: string;
+  compatibility?: DeltaCompatPricing;
 };
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const SIGNED_DECIMAL_PATTERN = /^-?(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
+
+function compatFields(value: unknown, allowed: readonly string[]): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Invalid compatibility configuration");
+  ensureOnlyFields(value as Record<string, unknown>, allowed);
+}
+
+function compatDecimal(value: unknown, signed = false): Decimal {
+  if (typeof value !== "string" || value.length > 33 || !(signed ? SIGNED_DECIMAL_PATTERN : DECIMAL_PATTERN).test(value)) throw invalid("Invalid compatibility decimal");
+  return parseSignedDecimal(value, 8, "compatibility decimal");
+}
 
 function parsePositiveDecimalMap(value: unknown, label: string, allowZero: boolean): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid(`${label} is invalid`);
@@ -68,6 +90,42 @@ function parseSignedDecimalMap(value: unknown, label: string, integerKeys: boole
 export function validateDeltaHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"): DeltaHaffRule {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Haff rule is invalid");
   const rule = value as Record<string, unknown>;
+  if (rule.schema === DELTA_HAFF_COMPAT_SCHEMA) {
+    ensureOnlyFields(rule, ["schema", "baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel", "dailyDeltaByTermOption", "compatibility"]);
+    if (mode !== "SPREAD") throw invalid("Compatibility pricing requires SPREAD");
+    const compatibility = rule.compatibility as DeltaCompatPricing;
+    compatFields(compatibility, ["ordinary", "fast", "modes"]);
+    for (const lane of ["ordinary", "fast"] as const) {
+      const config = compatibility[lane];
+      compatFields(config, ["spreadDelta", "discounts"]);
+      const p = compatDecimal(config.spreadDelta);
+      compatFields(config.discounts, CUSTOMER_TIERS);
+      for (const tier of CUSTOMER_TIERS) {
+        const v = compatDecimal(config.discounts[tier]);
+        if (subtractDecimal(p, v).value < 0n || (tier === "STANDARD" && v.value !== 0n)) throw invalid("Invalid tier discount");
+      }
+    }
+    compatFields(compatibility.modes, ["ordinary", "custom", "fast"]);
+    for (const name of ["ordinary", "custom", "fast"] as const) {
+      const config = compatibility.modes[name];
+      compatFields(config, name === "ordinary" ? ["enabled"] : ["enabled", "min", "max"]);
+      if (typeof config.enabled !== "boolean") throw invalid("Mode enabled is required");
+      if (name !== "ordinary") for (const bound of [config.min, config.max]) {
+        compatFields(bound, ["base", "value"]);
+        if (!bound || !["C", "ABSOLUTE"].includes(bound.base)) throw invalid("Invalid ratio bound");
+        compatDecimal(bound.value, true);
+      }
+    }
+    if (!Object.values(compatibility.modes).some((entry) => entry.enabled)) throw invalid("No enabled pricing mode");
+    return {
+      schema: DELTA_HAFF_COMPAT_SCHEMA,
+      baseBySafeBox: parsePositiveDecimalMap(rule.baseBySafeBox, "Haff base ratios", false),
+      vitalityDeltaByLevel: parseSignedDecimalMap(rule.vitalityDeltaByLevel, "Haff vitality deltas", true),
+      bearDeltaByLevel: parseSignedDecimalMap(rule.bearDeltaByLevel, "Haff bear deltas", true),
+      dailyDeltaByTermOption: parseSignedDecimalMap(rule.dailyDeltaByTermOption, "Haff daily deltas", false),
+      compatibility,
+    };
+  }
   ensureOnlyFields(rule, ["schema", "baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel", "dailyDeltaByTermOption", "options", "spreadDelta"]);
   if (rule.schema !== DELTA_HAFF_RATIO_SCHEMA) throw invalid("Haff rule schema is unsupported");
   const baseBySafeBox = parsePositiveDecimalMap(rule.baseBySafeBox, "Haff base ratios", false);
@@ -96,6 +154,7 @@ export function validateDeltaHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"
 
 export type DeltaPriceLineInputBody = {
   itemId: string;
+  customerTier?: CustomerTier;
   pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
   unitQuantity?: string;
   buyerUnitAmount?: string;
@@ -112,9 +171,12 @@ export function parseDeltaPriceLines(value: unknown, mode: "SPREAD" | "PERCENT")
     const pricingKind = line.pricingKind;
     if (typeof itemId !== "string" || itemId.length === 0 || itemId.length > 128) throw invalid("Price line item is invalid");
     if (pricingKind !== "FIXED_UNIT" && pricingKind !== "HAFF_RATIO") throw invalid("Price line kind is invalid");
-    if (seen.has(itemId)) throw invalid("Price lines must not repeat an item");
-    seen.add(itemId);
-    const parsed: DeltaPriceLineInputBody = { itemId, pricingKind };
+    ensureOnlyFields(line, ["itemId", "customerTier", "pricingKind", "unitQuantity", "buyerUnitAmount", "ownerUnitAmount"]);
+    const customerTier = line.customerTier === undefined ? "STANDARD" : line.customerTier;
+    if (typeof customerTier !== "string" || !CUSTOMER_TIERS.includes(customerTier as CustomerTier)) throw invalid("Invalid customer tier");
+    if (seen.has(`${itemId}:${customerTier}`)) throw invalid("Price lines must not repeat an item tier");
+    seen.add(`${itemId}:${customerTier}`);
+    const parsed: DeltaPriceLineInputBody = { itemId, pricingKind, ...(line.customerTier === undefined ? {} : { customerTier: customerTier as CustomerTier }) };
     const unitQuantity = line.unitQuantity;
     if (unitQuantity !== undefined) {
       if (typeof unitQuantity !== "string" || !/^[1-9]\d{0,23}$/.test(unitQuantity)) throw invalid("Unit quantity is invalid");
@@ -143,6 +205,7 @@ export type DeltaHaffConditions = {
   bearLevel?: number;
   termOptionCode?: string;
   pricingOptionCode?: string;
+  rentalPricing?: RentalPricingSelection;
 };
 
 export type DeltaHaffContext = {
@@ -152,6 +215,7 @@ export type DeltaHaffContext = {
   spreadDelta: Decimal | null;
   conditions: Record<string, string>;
   reasonCodes: DeltaQuoteReasonCode[];
+  compatibility?: { rentalMode: RentalMode; customerTier: CustomerTier; baseRatioC: string; ownerRatioB: string; memberDelta: string };
 };
 
 export function resolveDeltaHaffContext(input: {
@@ -159,7 +223,10 @@ export function resolveDeltaHaffContext(input: {
   haffRule?: DeltaHaffRule | null;
   hasHaffLines: boolean;
   conditions: DeltaHaffConditions;
+  customerTier?: CustomerTier;
 }): DeltaHaffContext {
+  if (input.haffRule?.schema === DELTA_HAFF_COMPAT_SCHEMA) return resolveCompatHaffContext(input);
+  if (input.conditions.rentalPricing || (input.customerTier && input.customerTier !== "STANDARD")) return { haffSchema: null, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
   const reasons = new Set<DeltaQuoteReasonCode>();
   const fail = (code: DeltaQuoteReasonCode): void => { reasons.add(code); };
   let haffSchema: string | null = null;
@@ -184,7 +251,7 @@ export function resolveDeltaHaffContext(input: {
         conditions.bearLevel = String(bearLevel);
         conditions.termOptionCode = termOptionCode;
         conditions.pricingOptionCode = pricingOptionCode;
-        const option = haffRule.options[pricingOptionCode];
+        const option = haffRule.options?.[pricingOptionCode];
         const base = haffRule.baseBySafeBox[safeBoxCode];
         const vitality = haffRule.vitalityDeltaByLevel[String(vitLevel)];
         const bear = haffRule.bearDeltaByLevel[String(bearLevel)];
@@ -217,6 +284,49 @@ export function resolveDeltaHaffContext(input: {
     }
   }
   return { haffSchema, ownerDenominator, buyerDenominator, spreadDelta, conditions, reasonCodes: [...reasons] };
+}
+
+export function normalizeRentalPricing(value: unknown): RentalPricingSelection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Rental pricing is required");
+  const selection = value as RentalPricingSelection;
+  ensureOnlyFields(selection, ["rentalMode", "ownerRatioB"]);
+  if (!["ordinary", "custom", "fast"].includes(selection.rentalMode)) throw invalid("Invalid rental mode");
+  if (selection.rentalMode === "ordinary") {
+    if (selection.ownerRatioB !== undefined) throw invalid("Ordinary ratio is server determined");
+    return { rentalMode: "ordinary" };
+  }
+  const b = compatDecimal(selection.ownerRatioB);
+  if (b.value <= 0n) throw invalid("Owner ratio must be positive");
+  return { rentalMode: selection.rentalMode, ownerRatioB: formatDecimalExact(b) };
+}
+
+function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0]): DeltaHaffContext {
+  const failed: DeltaHaffContext = { haffSchema: DELTA_HAFF_COMPAT_SCHEMA, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
+  try {
+    const rule = validateDeltaHaffRule(input.haffRule, input.mode);
+    const tier = input.customerTier;
+    if (!tier || !CUSTOMER_TIERS.includes(tier) || !input.hasHaffLines || input.conditions.pricingOptionCode) return failed;
+    const selection = normalizeRentalPricing(input.conditions.rentalPricing);
+    const config = rule.compatibility!;
+    const mode = config.modes[selection.rentalMode];
+    if (!mode.enabled) return failed;
+    const c = input.conditions;
+    const base = addDecimal(addDecimal(parseNonNegativeDecimal(rule.baseBySafeBox[c.safeBoxCode! ]!, 8, "base"), parseSignedDecimal(rule.vitalityDeltaByLevel[String(c.vitLevel)]!, 8, "vitality")), addDecimal(parseSignedDecimal(rule.bearDeltaByLevel[String(c.bearLevel)]!, 8, "bear"), parseSignedDecimal(rule.dailyDeltaByTermOption[c.termOptionCode!]!, 8, "daily")));
+    const owner = selection.rentalMode === "ordinary" ? base : parseNonNegativeDecimal(selection.ownerRatioB!, 8, "B");
+    if (selection.rentalMode !== "ordinary") {
+      const bound = (value: RatioBound) => addDecimal(value.base === "C" ? base : { value: 0n, scale: 0 }, parseSignedDecimal(value.value, 8, "bound"));
+      const min = bound(mode.min!); const max = bound(mode.max!);
+      if (subtractDecimal(max, min).value < 0n || subtractDecimal(owner, min).value < 0n || subtractDecimal(max, owner).value < 0n) return failed;
+    }
+    const lane = config[selection.rentalMode === "fast" ? "fast" : "ordinary"];
+    const spread = parseNonNegativeDecimal(lane.spreadDelta, 8, "P");
+    const discount = parseNonNegativeDecimal(lane.discounts[tier], 8, "V");
+    const buyer = addDecimal(subtractDecimal(owner, spread), discount);
+    if (base.value <= 0n || owner.value <= 0n || buyer.value <= 0n) return { ...failed, reasonCodes: ["INVALID_DENOMINATOR"] };
+    return { haffSchema: rule.schema, ownerDenominator: owner, buyerDenominator: buyer, spreadDelta: spread,
+      conditions: { safeBoxCode: c.safeBoxCode!, vitLevel: String(c.vitLevel), bearLevel: String(c.bearLevel), termOptionCode: c.termOptionCode! }, reasonCodes: [],
+      compatibility: { rentalMode: selection.rentalMode, customerTier: tier, baseRatioC: formatDecimalExact(base), ownerRatioB: formatDecimalExact(owner), memberDelta: formatDecimalExact(discount) } };
+  } catch { return failed; }
 }
 
 export function calculateDeltaTermSeconds(
@@ -288,7 +398,8 @@ type DeltaProjectedLine = {
 };
 
 export type DeltaProjectedQuote = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
+  rentalMode?: RentalMode;
   currency: "CNY";
   ruleReleaseId: string | null;
   lines: DeltaProjectedLine[];
@@ -341,6 +452,7 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
     termSeconds: quote.termSeconds,
     expiryDisclosures: quote.expiryDisclosures,
     unitAmountsInformational: quote.unitAmountsInformational,
+    ...(quote.schemaVersion === 2 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
   };
   if (viewer === "owner" || viewer === "admin") {
     projected.ownerTotal = quote.ownerTotal;
