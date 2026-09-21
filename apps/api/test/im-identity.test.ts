@@ -176,6 +176,7 @@ function providerOf(overrides: Pick<YunxinServerApi, "createAccount" | "getProfi
     setAccountEnabled: async (accountId) => ({ accountId, enabled: true, p2pChatBanned: null, teamChatBanned: null, chatroomChatBanned: null, qchatChatBanned: null }),
     refreshAccountToken: async (accountId) => ({ accountId, token: "static-token" }),
     getOnlineStatuses: async () => ({ statuses: [], failed: [] }),
+    readTeamMessage: async () => null,
   };
 }
 

@@ -19,6 +19,7 @@ import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHold
 import { runPaymentAcceptance } from "./order-payment-im-postgres.test";
 import { runDispatchAcceptance } from "./order-dispatch-postgres.test";
 import { runOrderTeamAcceptance } from "./order-team-postgres.test";
+import { ORDER_IM_EVENT_APP, ORDER_IM_EVENT_SECRET, preparePartialMigrationsFolder, runOrderFirstResponseAcceptance } from "./order-first-response-postgres.test";
 
 // M4-A order reservation foundation: real PostgreSQL acceptance (V01–V21).
 // Deterministic barriers only; no sleeps to guess races.
@@ -305,6 +306,13 @@ function orderKey(): Record<string, string> {
   return { "idempotency-key": `idem_${randomUUID().replaceAll("-", "")}` };
 }
 
+/** Truncate the isolated business tables, tolerating a target that predates im_order_event. */
+async function truncateIsolatedBusinessData(pool: Pool): Promise<void> {
+  const relation = (await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation;
+  const statement = relation ? ISOLATED_BUSINESS_DATA_TRUNCATE : ISOLATED_BUSINESS_DATA_TRUNCATE.replace(/\s*"zzsh_order"\."im_order_event",/, "");
+  await pool.query(statement);
+}
+
 async function activateStaff(base: string, username: string, temporaryPassword: string): Promise<Staff> {
   const jar = cookieJar();
   assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username, password: temporaryPassword }, jar, ADMIN_ORIGIN)).response.status, 200);
@@ -405,14 +413,26 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     migrationPool = createBusinessPool(resources.migration);
     const hasJournal = (await migrationPool.query(`SELECT to_regclass('zzsh_business_meta.migrations') AS name`)).rows[0].name;
     const migrationBefore = hasJournal ? (await migrationPool.query(`SELECT count(*)::int AS n, max(created_at)::text AS latest FROM zzsh_business_meta.migrations`)).rows[0] : { n: 0, latest: null };
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+    // The OIM-4B resource stages its pending tail on a lower baseline so the suite can seed
+    // legacy rows first and then apply each migration as a real increment. An already-migrated
+    // resource is reused as-is: no drop, no replay from zero, no false staged claim.
+    const stagedFirstResponse = RESOURCE_SET === "oim_first_response";
+    const baselineCount = Number(migrationBefore.n ?? 0);
+    // A fresh resource stages up to 0042 before legacy fixtures; an existing one only refreshes
+    // grants (its journal tail is already applied), so the suite never drops or replays from zero.
+    const stageUpTo = baselineCount < 43 ? 42 : baselineCount - 1;
+    const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : undefined;
+    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
     const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
-    assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
-    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, tail: migrated.slice(-2), replayUnchanged: true }));
+    if (!stagedFirstResponse) {
+      await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+      assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
+    }
+    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse, baselineCount, tail: migrated.slice(-2), replayUnchanged: !stagedFirstResponse }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
-    await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+    // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
+    await truncateIsolatedBusinessData(maintenanceDataPool);
     fixturesStarted = true;
     // B6 deliberately jumps this sequence to 999998 later. Reset the isolated
     // fixture sequence first so a repeat run cannot collide with that range.
@@ -437,6 +457,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         AUTH_ADMIN_BOOTSTRAP_SECRET: bootstrapSecret,
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
+      // Explicit synthetic supplier-event ingress for OIM-4B; never reads a real AppSecret.
+      // No approval/freshness windows are passed: the mounted default path is what runs.
+      // The periodic sweep is pushed out so deterministic recovery tests own their own calls.
+      orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000 },
       realNameProvider: createFakeRealNameProvider("VERIFIED_ADULT"),
       orderHoldSeconds: HOLD_SECONDS,
       // Fixture: no further obligations beyond the composed supply/order checks.
@@ -1663,6 +1687,18 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       await runPaymentAcceptance(t, acceptance);
       await runDispatchAcceptance(t, acceptance);
       await runOrderTeamAcceptance(t, acceptance);
+      if (stagedFirstResponse) {
+        await runOrderFirstResponseAcceptance(t, acceptance, {
+          base,
+          baselineCount,
+          upgrade: async (upToIndex) => {
+            await runBusinessMigrations(migrationPool!, {
+              runtimeUser: resources!.runtimeUser,
+              migrationsFolder: preparePartialMigrationsFolder(upToIndex),
+            });
+          },
+        });
+      }
     }
   } finally {
     const cleanupErrors: unknown[] = [];
@@ -1684,7 +1720,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       }
     }
     if (fixturesStarted && maintenanceDataPool && guard) {
-      try { await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE); } catch (error) { cleanupErrors.push(error); }
+      try { await truncateIsolatedBusinessData(maintenanceDataPool); } catch (error) { cleanupErrors.push(error); }
     }
     for (const pool of [smallClosedByApp ? undefined : smallPool, runtimePool && !runtimeClosedByApp ? runtimePool : undefined, migrationPool, maintenanceDataPool]) {
       if (!pool) continue;

@@ -34,6 +34,7 @@ import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
 import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi } from "../im/yunxin-provider";
 import type { ImMessageTransport } from "../im/im-contract";
 import { mountYunxinHandlers } from "../im/yunxin-routes";
+import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
 type AuthRealmName = "user" | "admin";
 
@@ -60,6 +61,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
   supportDispatch?: Omit<OrderDispatchOptions, "pool">;
   orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number };
+  /** Explicit supplier event ingress; omitted by default and never mounted without configuration. */
+  orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number };
   pool: Pool;
   yunxin?: { appId: string; appKey: string; appSecret: string };
   /** Test-only local provider seam; production construction must leave this unset. */
@@ -611,6 +614,26 @@ export function loadAuthRuntimeConfig(
   if (env.NODE_ENV === "production" && !secureCookies) {
     throw new ConfigurationError("AUTH_SECURE_COOKIES=true is required in production");
   }
+  // Supplier event ingress is explicit and default-closed; missing configuration mounts nothing.
+  const orderImEventsSetting = env.ORDER_IM_EVENTS_ENABLED?.trim() || "false";
+  if (orderImEventsSetting !== "true" && orderImEventsSetting !== "false") {
+    throw new ConfigurationError("ORDER_IM_EVENTS_ENABLED must be true or false");
+  }
+  let orderImEvents: AuthRuntimeOptions["orderImEvents"];
+  if (orderImEventsSetting === "true") {
+    const appKey = env.ORDER_IM_EVENTS_APP_KEY?.trim();
+    if (!appKey || appKey.length > 128 || /[\u0000-\u001f\u007f\s]/.test(appKey)) {
+      throw new ConfigurationError("ORDER_IM_EVENTS_APP_KEY must be a single-line value of at most 128 characters");
+    }
+    const appSecret = readSecret(env, "ORDER_IM_EVENTS_APP_SECRET", "ORDER_IM_EVENTS_APP_SECRET_FILE", workingDirectory);
+    if (appSecret.length < 16) throw new ConfigurationError("ORDER_IM_EVENTS_APP_SECRET is too short");
+    const freshnessRaw = env.ORDER_IM_EVENTS_FRESHNESS_MS?.trim();
+    const freshnessMs = freshnessRaw ? Number(freshnessRaw) : undefined;
+    if (freshnessRaw && (!Number.isInteger(freshnessMs) || freshnessMs! < 60_000 || freshnessMs! > 3_600_000)) {
+      throw new ConfigurationError("ORDER_IM_EVENTS_FRESHNESS_MS must be between 60000 and 3600000");
+    }
+    orderImEvents = { appKey, appSecret, ...(freshnessMs === undefined ? {} : { freshnessMs }) };
+  }
   return {
     apiOrigin,
     ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
@@ -622,6 +645,7 @@ export function loadAuthRuntimeConfig(
     adminBootstrapSecret,
     secureCookies,
     localSmsMock,
+    ...(orderImEvents === undefined ? {} : { orderImEvents }),
     testOperationsEnabled: capabilities.testOperationsEnabled === true,
     // Independent of PROVIDER_MODE: selecting OSS media storage never turns SMS,
     // identity or payment providers into real mode.
@@ -891,6 +915,15 @@ export async function mountAuthHandlers(
   );
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
+  if (options.orderImEvents) {
+    const orderImEvents = { pool: options.pool, appId: options.orderImEvents.appKey,
+      appSecret: options.orderImEvents.appSecret,
+      ...(options.orderImEvents.freshnessMs === undefined ? {} : { freshnessMs: options.orderImEvents.freshnessMs }),
+      ...(options.orderImEvents.approvalLinkMs === undefined ? {} : { approvalLinkMs: options.orderImEvents.approvalLinkMs }) };
+    mountOrderImEventHandlers(app, orderImEvents);
+    app.get(OrderImEventRecoveryLifecycle).start(orderImEvents,
+      options.orderImEvents.recoveryIntervalMs === undefined ? undefined : options.orderImEvents.recoveryIntervalMs);
+  }
   if (yunxinRuntime) {
     mountYunxinHandlers(app, {
       security: securityOptions,
@@ -953,7 +986,7 @@ export async function mountAuthHandlers(
   if (options.orderTeams) {
     const provider=yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");
-    app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,membersLimit:options.orderTeams.membersLimit},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
+    app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId)},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });

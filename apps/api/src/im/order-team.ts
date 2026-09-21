@@ -10,7 +10,9 @@ import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, t
 import { ORDER_TEAM_CONFIGURATION, YunxinApiError, validateOrderTeamInput, type YunxinOrderTeamApi, type YunxinOrderTeamInput, type YunxinOrderTeamState } from "./yunxin-provider";
 
 export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrderTeamApi;
-  identities: Pick<ImIdentityProvisioner,"ensure">; membersLimit: number; leaseMs?: number };
+  identities: Pick<ImIdentityProvisioner,"ensure">; membersLimit: number; leaseMs?: number;
+  /** Activates first-response tracking for newly READY groups; historical groups stay NOT_STARTED. */
+  firstResponseEnabled?: boolean };
 type Db = Pool | PoolClient;
 type Member = { identity_id:string; party:"BUYER"|"OWNER"|"STAFF"; state:string; account_id:string; platform_subject_id:string; realm:string; identity_kind:"USER"|"ADMIN"; status:string; identity_marker:string };
 type Plan = { order_id:string; app_id:string; assigned_admin_id:string; provision_state:string; team_state:string; team_name:string|null;
@@ -152,7 +154,10 @@ async function finish(options:OrderTeamOptions,op:Claim,team:YunxinOrderTeamStat
       WHERE id=$1 AND version=$2 AND state='RUNNING' AND lease_token_hash=$3 AND lease_until>clock_timestamp() AND candidate_team_id=$4`,[op.id,op.version,hash(op.token),team.teamId]);
     if(changed.rowCount!==1)throw new OrderTeamError("STALE_OPERATION");
     await c.query(`UPDATE zzsh_order.im_order_member SET state='JOINED',joined_at=clock_timestamp() WHERE order_id=$1 AND state='PLANNED'`,[op.order_id]);
-    await c.query(`UPDATE zzsh_order.im_order_group SET team_state='READY',team_id=$2,team_ready_at=clock_timestamp(),team_failure=NULL,version=version+1 WHERE order_id=$1`,[op.order_id,team.teamId]);
+    // The activation column is referenced only when first-response tracking is enabled,
+    // so the same code path stays valid on a schema that predates 0043.
+    const firstResponseActivation=options.firstResponseEnabled?",first_response_state='RUNNING'":"";
+    await c.query(`UPDATE zzsh_order.im_order_group SET team_state='READY',team_id=$2,team_ready_at=clock_timestamp(),team_failure=NULL${firstResponseActivation},version=version+1 WHERE order_id=$1`,[op.order_id,team.teamId]);
     await recordAudit(c,{actorType:"system",action:"im.order.team.ready",objectType:"rental_order",objectId:op.order_id,outcome:"SUCCESS",requestId:op.id,details:{operationId:op.id,teamId:team.teamId,readOnlyReconciliation:op.readonlyMode}});
   });
 }
