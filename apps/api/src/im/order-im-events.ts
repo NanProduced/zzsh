@@ -24,6 +24,8 @@ export type OrderImEventOptions = {
   freshnessMs?: number;
   /** How long an approved pre-send decision may be linked to a later delivery (signed message times). */
   approvalLinkMs?: number;
+  /** Cancel unsent same-order escalation operations when first response is finalized. */
+  escalationEnabled?: boolean;
   now?: () => number;
   /** Supplier clock skew allowance before a fact is quarantined. */
   futureSkewMs?: number;
@@ -326,9 +328,25 @@ async function insertEvent(db: PoolClient, input: {
   return result.rowCount === 1 ? id : null;
 }
 
-async function quarantineGroupState(db: PoolClient, scope: OrderScope, actor: string): Promise<boolean> {
-  const changed = await db.query(`UPDATE zzsh_order.im_order_group SET first_response_state='VERIFY_REQUIRED', version=version+1
-    WHERE order_id=$1 AND app_id=$2 AND first_response_state='RUNNING'`, [scope.orderId, scope.appId]);
+async function cancelUnsentEscalations(db:PoolClient,scope:OrderScope):Promise<void>{
+  const rows=await db.query<{id:string}>(`SELECT id FROM zzsh_order.im_order_operation WHERE order_id=$1 AND app_id=$2
+    AND kind IN ('ADD_MEMBER','BOT_NOTICE') AND state IN ('PENDING','RUNNING') AND sent_at IS NULL ORDER BY id FOR UPDATE`,
+    [scope.orderId,scope.appId]);
+  if(rows.rowCount)await db.query(`UPDATE zzsh_order.im_order_operation SET state='CANCELLED',version=version+1,
+      lease_until=NULL,lease_token_hash=NULL,failure_class='FIRST_RESPONSE',updated_at=clock_timestamp()
+    WHERE id=ANY($1::text[]) AND state IN ('PENDING','RUNNING') AND sent_at IS NULL`,[rows.rows.map(row=>row.id)]);
+}
+
+async function quarantineGroupState(db: PoolClient, scope: OrderScope, actor: string, escalationEnabled=false): Promise<boolean> {
+  const changed = escalationEnabled
+    ? await db.query(`UPDATE zzsh_order.im_order_group SET first_response_state='VERIFY_REQUIRED',
+        escalation_state=CASE WHEN escalation_state='RUNNING' THEN 'VERIFY_REQUIRED' ELSE escalation_state END,
+        remind_due_at=CASE WHEN escalation_state='RUNNING' THEN NULL ELSE remind_due_at END,
+        next_add_due_at=CASE WHEN escalation_state='RUNNING' THEN NULL ELSE next_add_due_at END,version=version+1
+      WHERE order_id=$1 AND app_id=$2 AND first_response_state='RUNNING'`, [scope.orderId, scope.appId])
+    : await db.query(`UPDATE zzsh_order.im_order_group SET first_response_state='VERIFY_REQUIRED', version=version+1
+      WHERE order_id=$1 AND app_id=$2 AND first_response_state='RUNNING'`, [scope.orderId, scope.appId]);
+  if(changed.rowCount&&escalationEnabled)await cancelUnsentEscalations(db,scope);
   return changed.rowCount === 1;
 }
 
@@ -355,10 +373,10 @@ async function insertVerifyEvent(db: PoolClient, scope: OrderScope, event: Suppl
  * Conflicting key facts block automatic confirmation. Repeated identical conflicts reuse the
  * existing marker row, so neither evidence nor audit grows without a new distinct fact.
  */
-async function recordConflictEvidence(db: PoolClient, scope: OrderScope, event: SupplierMessageEvent, reason: string, rawBodySha256: string): Promise<boolean> {
+async function recordConflictEvidence(db: PoolClient, scope: OrderScope, event: SupplierMessageEvent, reason: string, rawBodySha256: string, escalationEnabled=false): Promise<boolean> {
   const marker = await insertVerifyEvent(db, scope, event, reason, rawBodySha256);
   if (!marker) return false;
-  const changed = await quarantineGroupState(db, scope, event.fromAccount);
+  const changed = await quarantineGroupState(db, scope, event.fromAccount, escalationEnabled);
   await auditVerifyRequired(db, scope, reason, event.fromAccount, changed);
   return true;
 }
@@ -381,7 +399,7 @@ function conflictingDelivery(existing: ExistingDelivery, event: SupplierMessageE
 /** Earliest verified human event wins; a later earlier fact may only move the pointer earlier. */
 async function applyFirstResponse(db: PoolClient, scope: OrderScope, delivery: {
   messageServerId: string; messageClientId: string | null; senderAccountId: string; occurredAt: Date; rawBodySha256: string;
-}): Promise<"CONFIRMED" | "ADVANCED" | "IGNORED"> {
+}, escalationEnabled=false): Promise<"CONFIRMED" | "ADVANCED" | "IGNORED"> {
   const current = (await db.query(`SELECT first_response_state, first_response_at FROM zzsh_order.im_order_group
     WHERE order_id=$1 AND app_id=$2 FOR UPDATE`, [scope.orderId, scope.appId])).rows[0];
   if (!current) return "IGNORED";
@@ -395,8 +413,17 @@ async function applyFirstResponse(db: PoolClient, scope: OrderScope, delivery: {
     metadata: advanced ? { previousAt: current.first_response_at } : {},
   });
   if (!eventId) return "IGNORED";
-  await db.query(`UPDATE zzsh_order.im_order_group SET first_response_event_id=$3, first_response_at=$4, first_response_state='STOPPED', version=version+1
-    WHERE order_id=$1 AND app_id=$2`, [scope.orderId, scope.appId, eventId, delivery.occurredAt]);
+  if(escalationEnabled){
+    await db.query(`UPDATE zzsh_order.im_order_group SET first_response_event_id=$3,first_response_at=$4,first_response_state='STOPPED',
+        escalation_state=CASE WHEN escalation_state='RUNNING' THEN 'STOPPED' ELSE escalation_state END,
+        remind_due_at=CASE WHEN escalation_state='RUNNING' THEN NULL ELSE remind_due_at END,
+        next_add_due_at=CASE WHEN escalation_state='RUNNING' THEN NULL ELSE next_add_due_at END,version=version+1
+      WHERE order_id=$1 AND app_id=$2`, [scope.orderId, scope.appId, eventId, delivery.occurredAt]);
+    await cancelUnsentEscalations(db,scope);
+  }else{
+    await db.query(`UPDATE zzsh_order.im_order_group SET first_response_event_id=$3, first_response_at=$4, first_response_state='STOPPED', version=version+1
+      WHERE order_id=$1 AND app_id=$2`, [scope.orderId, scope.appId, eventId, delivery.occurredAt]);
+  }
   await recordAudit(db, { actorType: "admin", actorId: delivery.senderAccountId,
     action: advanced ? "im.order.first_response.advanced" : "im.order.first_response.confirmed",
     objectType: "rental_order", objectId: scope.orderId, outcome: "SUCCESS", requestId: `im_event_${scope.orderId}`,
@@ -422,7 +449,7 @@ async function handleCopyDelivery(options: OrderImEventOptions, event: SupplierM
         if (existing.status === "WAITING_AUTH") {
           await db.query(`UPDATE zzsh_order.im_order_event SET status='VERIFY_REQUIRED' WHERE id=$1 AND status='WAITING_AUTH'`, [existing.id]);
         }
-        await recordConflictEvidence(db, scope, event, "DELIVERY_FIELD_CONFLICT", rawBodySha256);
+        await recordConflictEvidence(db, scope, event, "DELIVERY_FIELD_CONFLICT", rawBodySha256,options.escalationEnabled===true);
       }
       return "duplicate";
     }
@@ -454,7 +481,7 @@ async function handleCopyDelivery(options: OrderImEventOptions, event: SupplierM
     if (!inserted) return "duplicate";
     if (decision.status === "VERIFY_REQUIRED") {
       // The delivery row itself is the quarantined fact; only the group state changes.
-      const changed = await quarantineGroupState(db, scope, event.fromAccount);
+      const changed = await quarantineGroupState(db, scope, event.fromAccount,options.escalationEnabled===true);
       if (changed) await auditVerifyRequired(db, scope, decision.reason ?? "DELIVERY_VERIFY_REQUIRED", event.fromAccount, changed);
       return "stored";
     }
@@ -462,7 +489,7 @@ async function handleCopyDelivery(options: OrderImEventOptions, event: SupplierM
       await applyFirstResponse(db, scope, {
         messageServerId, messageClientId: event.messageClientId,
         senderAccountId: event.fromAccount, occurredAt: event.occurredAt, rawBodySha256,
-      });
+      },options.escalationEnabled===true);
     }
     return "stored";
   });
@@ -578,7 +605,7 @@ async function persistApproval(db: PoolClient, options: OrderImEventOptions, sco
     [scope.appId, scope.teamId, event.fromAccount, event.messageClientId])).rows[0];
     if (existing && (existing.status !== status || existing.message_type !== event.msgType
       || new Date(existing.occurred_at).getTime() !== event.occurredAt.getTime())) {
-      await recordConflictEvidence(db, scope, event, "APPROVAL_FIELD_CONFLICT", rawBodySha256);
+      await recordConflictEvidence(db, scope, event, "APPROVAL_FIELD_CONFLICT", rawBodySha256,options.escalationEnabled===true);
     }
     return;
   }
@@ -607,9 +634,9 @@ async function resolvePendingDeliveries(db: PoolClient, options: OrderImEventOpt
       await applyFirstResponse(db, scope, {
         messageServerId: row.message_server_id, messageClientId: row.message_client_id, senderAccountId: row.sender_account_id,
         occurredAt: new Date(row.occurred_at), rawBodySha256: row.raw_body_sha256,
-      });
+      },options.escalationEnabled===true);
     } else if (decision.status === "VERIFY_REQUIRED") {
-      const changed = await quarantineGroupState(db, scope, row.sender_account_id);
+      const changed = await quarantineGroupState(db, scope, row.sender_account_id,options.escalationEnabled===true);
       if (changed) await auditVerifyRequired(db, scope, decision.reason ?? "DELIVERY_VERIFY_REQUIRED", row.sender_account_id, changed);
     }
     resolved += 1;
@@ -775,9 +802,9 @@ export async function recoverOrderFirstResponse(options: OrderImEventOptions, bo
             await applyFirstResponse(db, scope, {
               messageServerId: row.message_server_id, messageClientId: row.message_client_id, senderAccountId: row.sender_account_id,
               occurredAt: new Date(row.occurred_at), rawBodySha256: row.raw_body_sha256,
-            });
+            },options.escalationEnabled===true);
           } else if (decision.status === "VERIFY_REQUIRED") {
-            const changed = await quarantineGroupState(db, scope, row.sender_account_id);
+            const changed = await quarantineGroupState(db, scope, row.sender_account_id,options.escalationEnabled===true);
             if (changed) await auditVerifyRequired(db, scope, decision.reason ?? "DELIVERY_VERIFY_REQUIRED", row.sender_account_id, changed);
           }
           return "resolved";

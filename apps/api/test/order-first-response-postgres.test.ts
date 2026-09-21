@@ -14,13 +14,15 @@ import type { Pool } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { confirmOrderPayment, createControlledPaymentSource } from "../src/order/payment-confirmation";
 import { dispatchPaidOrders } from "../src/im/order-dispatch";
-import { advanceOrderTeam } from "../src/im/order-team";
+import { advanceOrderTeam, OrderTeamLifecycle, scanOrderEscalations, type OrderTeamOptions } from "../src/im/order-team";
 import { ImIdentityProvisioner, deriveYunxinAccountId, type ImIdentityKey } from "../src/im/identity-lifecycle";
 import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
 import { BUSINESS_MIGRATIONS_FOLDER, runBusinessMigrations } from "../src/database/business-migrations";
 import {
   buildStaffApprovalBasis, mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, recoverOrderFirstResponse, readOrderTeamMessageFact,
 } from "../src/im/order-im-events";
+import { listJoinedOrderTeams, readOrderTeamAccess } from "../src/im/order-team-access";
+import { listAdminOrders } from "../src/order/order";
 import { seedAdmin, seedIdentity, seedUser } from "./im-test-fixtures";
 import { OrderTeamTransport, fakeIdentityAccounts } from "./order-team-fixtures";
 import type { runPaymentAcceptance } from "./order-payment-im-postgres.test";
@@ -31,6 +33,86 @@ const COPY_PATH = "/api/v1/im/order-events/copy";
 const PRE_SEND_PATH = "/api/v1/im/order-events/pre-send";
 const LEGACY_GROUP_COLUMNS = `order_id,app_id,payment_confirmation_id,provision_state,assigned_admin_id,assigned_at::text,wait_reason,
   team_state,system_identity_id,team_name,members_limit,team_id,team_ready_at::text,team_failure,team_retry_at::text,version,created_at::text`;
+
+function assertLegacyMemberSnapshotUnchanged(actual: any[], expected: any[]): void {
+  const ordered = (members: any[]) => [...members].sort((a, b) => {
+    const left = `${a.party}\0${a.platform_subject_id ?? ""}\0${a.identity_id}`;
+    const right = `${b.party}\0${b.platform_subject_id ?? ""}\0${b.identity_id}`;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  assert.deepEqual(ordered(actual), ordered(expected), "all legacy member columns and stable identity mappings must remain unchanged");
+}
+
+function assertLegacyOperationSnapshotUnchanged(actual: any[], expected: any[]): void {
+  assert.deepEqual(actual.map(({ round, target_admin_id, ...legacyColumns }) => legacyColumns), expected,
+    "all pre-0045 operation columns must remain unchanged");
+  assert.ok(actual.every((operation) => operation.round === 0 && operation.target_admin_id === null),
+    "only the two 0045 operation columns may take their declared defaults");
+}
+
+function assertReadyLegacyGroupContract(group: any, members: any[], operations: any[]): void {
+  assert.equal(group.provision_state, "ASSIGNED");
+  assert.equal(group.team_state, "READY");
+  const requireJoined = (party: string, realm: string, kind: string, subjectId: string) => {
+    const matches = members.filter((member) => member.party === party && member.identity_realm === realm
+      && member.identity_kind === kind && member.platform_subject_id === subjectId);
+    assert.equal(matches.length, 1, `one ${party} member must resolve through its stable identity mapping`);
+    const member = matches[0];
+    assert.equal(member.order_id, group.order_id);
+    assert.equal(member.app_id, group.app_id);
+    assert.equal(member.identity_status, "READY");
+    assert.equal(member.state, "JOINED");
+    assert.ok(member.joined_at, `${party} must retain its joined_at fact`);
+  };
+  assert.ok(group.renter_user_id && group.owner_user_id && group.assigned_admin_id && group.team_id);
+  requireJoined("BUYER", "user", "USER", group.renter_user_id);
+  requireJoined("OWNER", "user", "USER", group.owner_user_id);
+  requireJoined("STAFF", "admin", "ADMIN", group.assigned_admin_id);
+  assert.ok(operations.some((operation) => operation.order_id === group.order_id && operation.app_id === group.app_id
+    && operation.kind === "CREATE" && operation.state === "SUCCEEDED" && operation.candidate_team_id === group.team_id),
+  "a successful CREATE must bind this order's READY group to the same Team");
+}
+
+function verifyT00cOfflineAssertions(): void {
+  const group = { order_id: "order_1", app_id: "app_1", provision_state: "ASSIGNED", team_state: "READY",
+    team_id: "910000001", assigned_admin_id: "admin_1", renter_user_id: "buyer_1", owner_user_id: "owner_1" };
+  const member = (identity_id: string, party: string, identity_realm: string, identity_kind: string,
+    platform_subject_id: string, state = "JOINED", joined_at: string | null = "2026-09-21T10:00:00.000Z") => ({
+    order_id: group.order_id, app_id: group.app_id, identity_id, party, state, joined_at,
+    identity_realm, identity_kind, platform_subject_id, identity_status: "READY",
+  });
+  const three = [
+    member("map_buyer", "BUYER", "user", "USER", "buyer_1"),
+    member("map_owner", "OWNER", "user", "USER", "owner_1"),
+    member("map_assigned", "STAFF", "admin", "ADMIN", "admin_1"),
+  ];
+  const fourT07 = [...three, member("map_collab", "STAFF", "admin", "ADMIN", "team_extra_00000001")];
+  const fourPlanned = [...three, member("map_planned", "STAFF", "admin", "ADMIN", "history_1", "PLANNED", null)];
+  const create = [{ order_id: group.order_id, app_id: group.app_id, kind: "CREATE", state: "SUCCEEDED", candidate_team_id: group.team_id }];
+
+  for (const snapshot of [three, fourT07, fourPlanned]) {
+    assertReadyLegacyGroupContract(group, snapshot, create);
+    assertLegacyMemberSnapshotUnchanged([...snapshot].reverse(), snapshot);
+  }
+  assert.equal(three.length, 3);
+  assert.equal(fourT07.length, 4);
+  assert.throws(() => assertLegacyMemberSnapshotUnchanged(fourT07.slice(1), fourT07), "a missing legacy member must fail");
+  assert.throws(() => assertLegacyMemberSnapshotUnchanged([...fourT07, member("map_extra", "STAFF", "admin", "ADMIN", "extra_1")], fourT07),
+    "an added legacy member must fail");
+  assert.throws(() => assertLegacyMemberSnapshotUnchanged(
+    fourT07.map((row) => row.identity_id === "map_collab" ? { ...row, joined_at: "2026-09-21T10:00:01.000Z" } : row), fourT07),
+  "a changed legacy member fact must fail");
+
+  const oldOperation = { id: "op_1", order_id: group.order_id, app_id: group.app_id, kind: "CREATE", state: "SUCCEEDED",
+    candidate_team_id: group.team_id, version: "2" };
+  assertLegacyOperationSnapshotUnchanged([{ ...oldOperation, round: 0, target_admin_id: null }], [oldOperation]);
+  assert.throws(() => assertLegacyOperationSnapshotUnchanged([{ ...oldOperation, state: "PENDING", round: 0, target_admin_id: null }], [oldOperation]),
+    "an old operation column change must fail");
+  assert.throws(() => assertLegacyOperationSnapshotUnchanged([{ ...oldOperation, round: 1, target_admin_id: null }], [oldOperation]),
+    "new operation columns must retain their declared defaults");
+}
+
+verifyT00cOfflineAssertions();
 
 type Options = Parameters<typeof runPaymentAcceptance>[1];
 
@@ -109,7 +191,7 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     await withTransaction(pool, (client) => confirmOrderPayment(client, fact));
     return row;
   };
-  const makePaid = async (label: string, mode: "inactive" | "active") => {
+  const makePaid = async (label: string, mode: "inactive" | "active", escalation=false) => {
     const fixture = await o.fixture(label);
     const row = await pay(fixture.orderId);
     if (!gameId) {
@@ -120,7 +202,8 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     await dispatchPaidOrders(pool, appId);
     await setStaffPresence("OFF_DUTY");
     if (mode === "active") {
-      await advanceOrderTeam({ pool, appId, provider: wire.client, identities, membersLimit: 200, firstResponseEnabled: true }, fixture.orderId);
+      await advanceOrderTeam({ pool, appId, provider: wire.client, identities, membersLimit: 200, firstResponseEnabled: true,
+        ...(escalation?{escalationEnabled:true}:{}) }, fixture.orderId);
     } else {
       // Historical path: no activation flag, so the new column is never referenced.
       await advanceOrderTeam({ pool, appId, provider: wire.client, identities, membersLimit: 200 }, fixture.orderId);
@@ -194,34 +277,59 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
   });
 
   // ------------------------------------------------------------------ staged migrations
+  const stagedEscalation = o.resourceSet === "oim_escalation_stage";
+  if (stagedEscalation) assert.equal(hooks.baselineCount, 43, "the one-time stage must start from the actual 0042 baseline");
   const stagedLegacy = hooks.baselineCount <= 43;
-  let legacySnapshot: { legacy: unknown; waiting: unknown; waitingOrderId: string } | undefined;
+  if (stagedEscalation) assert.equal(stagedLegacy, true, "the one-time stage must seed legacy facts before 0043");
+  let legacySnapshot: { legacy: any; waiting: any; waitingOrderId: string } | undefined;
+  const captureLegacyFacts = async (orderId: string) => ({
+    group: await legacyGroupRow(orderId),
+    operations: (await pool.query(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id`, [orderId])).rows,
+    members: (await pool.query(`SELECT * FROM zzsh_order.im_order_member WHERE order_id=$1 ORDER BY party`, [orderId])).rows,
+  });
+  const assertLegacyFactsPreserved = (actual: any, expected: any) => {
+    assert.deepEqual(actual.group, expected.group);
+    assert.deepEqual(actual.operations.map(({ round, target_admin_id, ...legacyColumns }: any) => legacyColumns), expected.operations);
+    assert.deepEqual(actual.members, expected.members);
+  };
+  const runRequiredStageTest = async (name: string, runTest: () => Promise<void>) => {
+    let failed = false;
+    let failure: unknown;
+    await t.test(name, async () => {
+      try { await runTest(); } catch (error) { failed = true; failure = error; throw error; }
+    });
+    if (failed) throw failure;
+  };
   if (stagedLegacy) {
     const legacy = await makePaid("OIM4B 升级前旧READY群", "inactive");
     const waitingFixture = await o.fixture("OIM4B 升级前WAITING单");
     await pay(waitingFixture.orderId);
-    const snapshot = async (orderId: string) => ({
-      group: await legacyGroupRow(orderId),
-      operations: (await pool.query(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id`, [orderId])).rows,
-      members: (await pool.query(`SELECT * FROM zzsh_order.im_order_member WHERE order_id=$1 ORDER BY party`, [orderId])).rows,
-    });
-    legacySnapshot = { legacy: await snapshot(legacy.orderId), waiting: await snapshot(waitingFixture.orderId), waitingOrderId: waitingFixture.orderId };
-    assert.equal((await groupRow(legacy.orderId)).team_state, "READY");
-    assert.equal((await groupRow(waitingFixture.orderId)).provision_state, "WAITING");
+    legacySnapshot = { legacy: await captureLegacyFacts(legacy.orderId), waiting: await captureLegacyFacts(waitingFixture.orderId), waitingOrderId: waitingFixture.orderId };
+    const readyGroup = await groupRow(legacy.orderId);
+    const waitingGroup = await groupRow(waitingFixture.orderId);
+    assert.equal(readyGroup.team_state, "READY");
+    assert.equal(waitingGroup.provision_state, "WAITING");
+    if (stagedEscalation) {
+      assert.ok(legacySnapshot.legacy.operations.some((op: any) => op.kind === "CREATE" && op.state === "SUCCEEDED" && op.candidate_team_id === readyGroup.team_id));
+      assert.equal(legacySnapshot.legacy.members.length, 3);
+      assert.ok(legacySnapshot.legacy.members.every((member: any) => member.state === "JOINED"));
+      assert.equal(legacySnapshot.waiting.group.provision_state, "WAITING");
+    }
 
-    await t.test("T00a staged 0043 baseline keeps legacy facts and applies additively", async () => {
-      assert.equal((await migrationPool.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n, hooks.baselineCount);
+    await runRequiredStageTest("T00a staged 0043 baseline keeps legacy facts and applies additively", async () => {
+      const before = Number((await migrationPool.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n);
+      assert.equal(before, hooks.baselineCount);
+      if (stagedEscalation) assert.equal(before, 43);
       await hooks.upgrade(43);
       const after = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
       assert.equal(after.length, 44);
-      const snapshot = async (orderId: string) => ({
-        group: await legacyGroupRow(orderId),
-        operations: (await pool.query(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id`, [orderId])).rows,
-        members: (await pool.query(`SELECT * FROM zzsh_order.im_order_member WHERE order_id=$1 ORDER BY party`, [orderId])).rows,
-      });
-      assert.deepEqual(await snapshot((legacySnapshot as any).legacy.group.order_id), (legacySnapshot as any).legacy);
-      assert.deepEqual(await snapshot((legacySnapshot as any).waitingOrderId), (legacySnapshot as any).waiting);
-      const old = await groupRow((legacySnapshot as any).legacy.group.order_id);
+      const journal = JSON.parse(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8"));
+      const entry = journal.entries[43];
+      assert.equal(after[43].created_at, String(entry.when));
+      assert.equal(after[43].hash, createHash("sha256").update(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER, `${entry.tag}.sql`))).digest("hex"));
+      assert.deepEqual(await captureLegacyFacts(legacySnapshot!.legacy.group.order_id), legacySnapshot!.legacy);
+      assert.deepEqual(await captureLegacyFacts(legacySnapshot!.waitingOrderId), legacySnapshot!.waiting);
+      const old = await groupRow(legacySnapshot!.legacy.group.order_id);
       assert.equal(old.first_response_state, "NOT_STARTED");
       assert.equal(old.first_response_event_id, null);
       assert.equal(old.first_response_at, null);
@@ -231,31 +339,155 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
       assert.equal(ignored.status, 200);
       assert.equal((await eventRows(old.order_id)).length, 0);
       assert.equal((await groupRow(old.order_id)).first_response_state, "NOT_STARTED");
+      console.log("order migration stage", JSON.stringify({ resourceSet: o.resourceSet, stage: "0043->0044", beforeCount: before,
+        afterCount: after.length, migration: { idx: entry.idx, tag: entry.tag, when: after[43].created_at, hash: after[43].hash },
+        legacyReadySamples: 1, legacyWaitingSamples: 1,
+        legacyCreateSamples: legacySnapshot!.legacy.operations.filter((op: any) => op.kind === "CREATE" && op.state === "SUCCEEDED").length }));
     });
   }
 
-  await t.test("T00b staged 0044 adds the binding guards and both stages replay idempotently", async () => {
+  const captureOrderMembers=async(orderId:string)=>(await pool.query(`SELECT mm.*,m.realm AS identity_realm,m.identity_kind,m.platform_subject_id,m.status AS identity_status
+    FROM zzsh_order.im_order_member mm LEFT JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
+    WHERE mm.order_id=$1 ORDER BY mm.party,m.platform_subject_id,mm.identity_id`,[orderId])).rows;
+  const captureAssignedGroups=async()=>{
+    const groups=(await pool.query<{order_id:string;app_id:string;provision_state:string;renter_user_id:string;owner_user_id:string;version:string;
+      assigned_admin_id:string;assigned_at:string;team_id:string|null;team_state:string}>(`SELECT g.order_id,g.app_id,g.provision_state,o.renter_user_id,o.owner_user_id,g.version::text,
+      g.assigned_admin_id,g.assigned_at::text,g.team_id,g.team_state FROM zzsh_order.im_order_group g
+      JOIN zzsh_order.rental_order o ON o.id=g.order_id WHERE g.provision_state='ASSIGNED' ORDER BY g.order_id`)).rows;
+    return Promise.all(groups.map(async group=>({...group,
+      operations:(await pool.query(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id`,[group.order_id])).rows,
+      members:await captureOrderMembers(group.order_id),
+  })));
+  };
+  let escalationBackfillSnapshot:Awaited<ReturnType<typeof captureAssignedGroups>>|undefined;
+  await runRequiredStageTest("T00b staged 0044 adds the binding guards and both stages replay idempotently", async () => {
     const before = (await migrationPool.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n as number;
+    if(before===45)escalationBackfillSnapshot=await captureAssignedGroups();
     const staged0044 = before <= 44;
+    if (stagedEscalation) assert.equal(before, 44, "0043 must leave exactly 44 rows before 0044");
     if (staged0044) {
       assert.equal(before, hooks.baselineCount <= 43 ? 44 : hooks.baselineCount);
       await hooks.upgrade(44);
     } else {
-      assert.equal(before, 45, "an already-migrated resource must be reused, never dropped");
+      assert.ok(before===45||before===46,"an already-migrated resource must be reused, never dropped");
     }
+    if(before===44)escalationBackfillSnapshot=await captureAssignedGroups();
     const journal = JSON.parse(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8"));
     const after = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
-    assert.equal(after.length, 45);
-    assert.equal(journal.entries.length, 45);
+    assert.equal(after.length, Math.max(45,hooks.baselineCount));
+    if (stagedEscalation) assert.equal(after.length, 45, "0044 must leave exactly 45 rows before 0045");
+    assert.equal(journal.entries.length, 46);
     assert.ok(after.every((row: { hash: string; created_at: string }, index: number) => {
       const entry = journal.entries[index];
       return row.created_at === String(entry.when) && row.hash === createHash("sha256").update(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER, `${entry.tag}.sql`))).digest("hex");
     }));
-    await runBusinessMigrations(migrationPool, { runtimeUser: config.database.user });
+    await runBusinessMigrations(migrationPool, { runtimeUser: config.database.user,migrationsFolder:preparePartialMigrationsFolder(44) });
     assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, after);
     const triggers = (await migrationPool.query(`SELECT tgname FROM pg_trigger WHERE tgname IN ('im_order_event_guard','im_order_group_first_response_guard') ORDER BY tgname`)).rows.map((row: { tgname: string }) => row.tgname);
     assert.deepEqual(triggers, ["im_order_event_guard", "im_order_group_first_response_guard"]);
-    console.log("order migration evidence", JSON.stringify({ baselineCount: hooks.baselineCount, staged0043: stagedLegacy, staged0044, reusedExisting: !staged0044, afterCount: after.length }));
+    if (stagedEscalation) {
+      assert.ok(escalationBackfillSnapshot && escalationBackfillSnapshot.length > 0, "stage must have assigned rows before 0045");
+      assert.ok(escalationBackfillSnapshot.every((group)=>group.assigned_admin_id&&group.assigned_at),
+        "stage assignments must carry the legacy administrator and assignment time");
+      assert.ok(escalationBackfillSnapshot.some((group) => group.team_state === "READY"), "stage must have a READY assignment before 0045");
+      assert.ok(escalationBackfillSnapshot.some((group) => group.operations.some((op: any) => op.kind === "CREATE" && op.state === "SUCCEEDED")),
+        "stage must have a successful legacy CREATE before 0045");
+      assert.ok(legacySnapshot?.waiting.group.provision_state === "WAITING", "stage must preserve a legacy WAITING sample");
+    }
+    const entry = journal.entries[44];
+    console.log("order migration stage", JSON.stringify({ resourceSet: o.resourceSet, stage: "0044->0045", baselineCount: hooks.baselineCount,
+      beforeCount: before, afterCount: after.length, staged0044, migration: { idx: entry.idx, tag: entry.tag,
+        when: after[44]?.created_at ?? null, hash: after[44]?.hash ?? null },
+      assignedSamples: escalationBackfillSnapshot?.length ?? 0,
+      readyAssignedSamples: escalationBackfillSnapshot?.filter((group) => group.team_state === "READY").length ?? 0,
+      successfulCreateSamples: escalationBackfillSnapshot?.flatMap((group) => group.operations)
+        .filter((op: any) => op.kind === "CREATE" && op.state === "SUCCEEDED").length ?? 0,
+      legacyWaitingSamples: legacySnapshot ? 1 : 0 }));
+  });
+
+  await runRequiredStageTest("T00c OIM-4C migration 0045 upgrades 45 to 46 and preserves legacy facts",async()=>{
+    const beforeCount=Number((await migrationPool.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n);
+    if(stagedEscalation)assert.equal(beforeCount,45,"the one-time resource must run the final 45-to-46 increment");
+    if(stagedEscalation){
+      assert.ok(legacySnapshot&&escalationBackfillSnapshot&&escalationBackfillSnapshot.length>0,"the pre-0045 baseline snapshots must exist");
+      const readyGroups=escalationBackfillSnapshot.filter(group=>group.team_state==="READY");
+      assert.ok(readyGroups.length>0,"the pre-0045 baseline must include READY groups");
+      for(const group of readyGroups)assertReadyLegacyGroupContract(group,group.members,group.operations);
+
+      const basic=escalationBackfillSnapshot.find(group=>group.order_id===legacySnapshot!.legacy.group.order_id);
+      assert.ok(basic,"the three-party READY baseline must be present immediately before 0045");
+      assert.equal(basic.members.length,3,"the basic READY shape retains BUYER, OWNER and original STAFF");
+      const t07Members=escalationBackfillSnapshot.flatMap(group=>group.members
+        .filter(member=>member.identity_realm==="admin"&&member.identity_kind==="ADMIN"
+          &&typeof member.platform_subject_id==="string"&&member.platform_subject_id.startsWith("team_extra_")));
+      assert.equal(t07Members.length,1,"the pre-existing T07 collaborator must resolve by its stable admin identity mapping");
+      const t07=escalationBackfillSnapshot.find(group=>group.order_id===t07Members[0].order_id);
+      assert.ok(t07,"the T07 collaborator must belong to a captured assigned order");
+      assert.equal(t07.members.length,4,"the T07 READY shape includes the three required parties and one collaborator");
+      assert.equal(t07Members[0].party,"STAFF");
+      assert.equal(t07Members[0].state,"JOINED");
+      assert.equal(t07Members[0].identity_status,"READY");
+      assertReadyLegacyGroupContract(t07,t07.members,t07.operations);
+    }
+    try{await hooks.upgrade(45);}catch(error){
+      let databaseError:any=error;
+      while(databaseError&&typeof databaseError==="object"&&!databaseError.code&&databaseError.cause)databaseError=databaseError.cause;
+      console.error("OIM-4C migration database error",JSON.stringify({code:databaseError?.code??null,message:databaseError?.message??null,
+        constraint:databaseError?.constraint??null,table:databaseError?.table??null,column:databaseError?.column??null}));
+      throw error;
+    }
+    const migrations=(await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
+    const journal=JSON.parse(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER,"meta","_journal.json"),"utf8"));
+    assert.equal(migrations.length,46);assert.equal(journal.entries.length,46);
+    const staged0045=stagedEscalation&&beforeCount===45&&migrations.length===46;
+    if(stagedEscalation)assert.equal(staged0045,true,"hash equality alone is not staged migration evidence");
+    assert.ok(migrations.every((row:{hash:string;created_at:string},index:number)=>{
+      const entry=journal.entries[index];
+      return row.created_at===String(entry.when)&&row.hash===createHash("sha256").update(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER,`${entry.tag}.sql`))).digest("hex");
+    }));
+    const privilege=(await ownerPool.query(`SELECT has_column_privilege($1,'zzsh_order.im_order_group','remind_due_at','UPDATE') AS due,
+        has_column_privilege($1,'zzsh_order.im_order_group','responsible_admin_id','UPDATE') AS responsible`,[config.database.user])).rows[0];
+    assert.deepEqual(privilege,{due:true,responsible:true});
+    const backfillSnapshot=escalationBackfillSnapshot??[];
+    if(stagedEscalation){
+      assert.ok(legacySnapshot,"stage must retain its pre-0043 legacy samples through 0045");
+      assert.ok(escalationBackfillSnapshot,"stage must capture assigned rows immediately before 0045");
+      assert.ok(backfillSnapshot.length>0,"stage must backfill at least one legacy assignment");
+      assert.ok(backfillSnapshot.some((group)=>group.team_state==="READY"),"stage must include a READY assignment");
+      assert.ok(backfillSnapshot.some((group)=>group.operations.some((op:any)=>op.kind==="CREATE"&&op.state==="SUCCEEDED")),
+        "stage must include a successful legacy CREATE operation");
+      assert.equal(legacySnapshot.waiting.group.provision_state,"WAITING");
+    }
+    for(const old of backfillSnapshot){
+        const row=(await pool.query(`SELECT g.order_id,g.app_id,g.provision_state,g.version::text,g.assigned_admin_id,g.assigned_at::text,g.team_id,g.team_state,
+            g.responsible_admin_id,g.escalation_state,g.remind_due_at::text,g.next_add_due_at::text,o.renter_user_id,o.owner_user_id
+          FROM zzsh_order.im_order_group g JOIN zzsh_order.rental_order o ON o.id=g.order_id WHERE g.order_id=$1`,[old.order_id])).rows[0];
+        assert.equal(row.version,(BigInt(old.version)+1n).toString());
+        assert.equal(row.responsible_admin_id,old.assigned_admin_id);assert.equal(row.assigned_admin_id,old.assigned_admin_id);
+        assert.equal(row.assigned_at,old.assigned_at);assert.equal(row.team_id,old.team_id);assert.equal(row.team_state,old.team_state);
+        assert.equal(row.escalation_state,"NOT_STARTED");assert.equal(row.remind_due_at,null);assert.equal(row.next_add_due_at,null);
+        const operations=(await pool.query(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id`,[old.order_id])).rows;
+        assertLegacyOperationSnapshotUnchanged(operations,old.operations);
+        const members=await captureOrderMembers(old.order_id);
+        assertLegacyMemberSnapshotUnchanged(members,old.members);
+        if(old.team_state==="READY")assertReadyLegacyGroupContract(row,members,operations);
+      }
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.im_order_group WHERE team_state='READY' AND escalation_state<>'NOT_STARTED'`)).rows[0].n,0);
+    if(stagedEscalation){
+      assertLegacyFactsPreserved(await captureLegacyFacts(legacySnapshot!.waitingOrderId),legacySnapshot!.waiting);
+    }
+    await hooks.upgrade(45);
+    assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows,migrations,
+      "reapplying the final formal migration runner is idempotent");
+    console.log("order escalation migration evidence",JSON.stringify({resourceSet:o.resourceSet,baselineCount:hooks.baselineCount,beforeCount,
+      afterCount:migrations.length,staged0045,migration:{idx:journal.entries[45].idx,tag:journal.entries[45].tag,
+        when:migrations[45].created_at,hash:migrations[45].hash},backfilledAssignedGroups:backfillSnapshot.length,
+      preservedReadyGroups:backfillSnapshot.filter(group=>group.team_state==="READY").length,
+      preservedCreateOperations:backfillSnapshot.flatMap((group)=>group.operations)
+        .filter((op:any)=>op.kind==="CREATE"&&op.state==="SUCCEEDED").length,
+      preservedWaitingGroups:legacySnapshot?1:0,replayUnchanged:true,
+      assertions:{assignmentFactsUnchanged:true,responsibleAndVersionBackfilled:true,legacyGroupsNotStarted:true,
+        createAndMembersPreserved:true,waitingFactsPreserved:true,replayIdempotent:true}}));
   });
 
   // ------------------------------------------------------------------ ingress positives/negatives
@@ -266,6 +498,268 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
   assert.equal(mainGroup.first_response_state, "RUNNING", JSON.stringify({ teamState: mainGroup.team_state, provision: mainGroup.provision_state,
     failure: mainGroup.team_failure, teamId: mainGroup.team_id, creates: wire.creates.length }));
   assert.equal((await pool.query(`SELECT availability FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, staff])).rows[0].availability, "OFF_DUTY");
+
+  const escalationStaff=["a","b","c","d","e","f","g"].map(letter=>`oim4c_${letter}_${run}`);
+  for(const id of escalationStaff){
+    await seedAdmin(pool,id,`${id}_s`,run,false);
+    await seedIdentity(pool,identityKey("ADMIN",id),run);
+    await grantPermissions(id,["im.support.read","im.support.accept"]);
+    await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at)
+      VALUES($1,$2,'OFF_DUTY','DISCONNECTED',NULL)`,[appId,id]);
+    await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[id,gameId]);
+  }
+  const escalationOptions:OrderTeamOptions={pool,appId,provider:wire.client,identities,membersLimit:200,firstResponseEnabled:true,escalationEnabled:true};
+  const setEscalationStaff=async(ids:string[],available:boolean)=>pool.query(`UPDATE zzsh_iam.im_support_presence
+    SET availability=$3,connection_state=$4,last_connected_at=CASE WHEN $3='AVAILABLE' THEN clock_timestamp() ELSE NULL END,
+      version=version+1,updated_at=clock_timestamp() WHERE app_id=$1 AND admin_user_id=ANY($2::text[])`,
+    [appId,ids,available?"AVAILABLE":"OFF_DUTY",available?"CONNECTED":"DISCONNECTED"]);
+  const setEscalationDue=async(orderId:string,reminder:boolean,add:boolean)=>pool.query(`UPDATE zzsh_order.im_order_group
+    SET remind_due_at=CASE WHEN $2 THEN clock_timestamp()-interval '1 second' ELSE remind_due_at END,
+      next_add_due_at=CASE WHEN $3 THEN clock_timestamp()-interval '1 second' ELSE next_add_due_at END,version=version+1
+    WHERE order_id=$1`,[orderId,reminder,add]);
+  const escalationOps=async(orderId:string)=>(await pool.query(`SELECT id,kind,round,state,target_admin_id,sent_at,candidate_team_id,failure_class,version
+    FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY kind,round`,[orderId])).rows;
+  const driveEscalation=async(orderId:string,predicate:(group:any,ops:any[])=>boolean,label:string)=>{
+    for(let tick=0;tick<50;tick++){
+      const group=await groupRow(orderId),ops=await escalationOps(orderId);
+      if(predicate(group,ops))return{group,ops};
+      await scanOrderEscalations(escalationOptions,1);
+    }
+    assert.fail(`small-budget escalation did not reach ${label}`);
+  };
+  const staffActor={realm:"admin" as const,userId:staff,sessionId:`${staff}_s`};
+
+  await t.test("T18 small legal budgets 1-4 eventually process due reminders in PostgreSQL",async()=>{
+    for(const limit of [1,2,3,4]){
+      const order=await makePaid(`OIM4C 小预算提醒${limit}`,"active",true);
+      await setEscalationDue(order.orderId,true,false);
+      for(let tick=0;tick<5;tick++)await scanOrderEscalations(escalationOptions,limit);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.im_order_event
+        WHERE order_id=$1 AND type='first_response_reminder'`,[order.orderId])).rows[0].n,1,`limit ${limit} must reach the reminder phase`);
+    }
+  });
+
+  const verifyCancelledUnsentAddReselection=async()=>{
+    const [candidateA,candidateB]=escalationStaff;
+    const order=await makePaid("OIM4C 取消候选可重选单","active",true),original=await groupRow(order.orderId);
+    const team=original.team_id as string,addsBefore=wire.adds.length;
+    try{
+    await setEscalationStaff([candidateA!],true);await setEscalationDue(order.orderId,false,true);
+    const first=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.round===1&&op.state==="PENDING"),"round 1 plan");
+    const add1=first.ops.find((op:any)=>op.kind==="ADD_MEMBER"&&op.round===1);
+    assert.equal(add1?.target_admin_id,candidateA);assert.equal(add1?.sent_at,null);
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()+interval '1 day'
+      WHERE order_id=$1 AND kind='BOT_NOTICE'`,[order.orderId]);
+    await setEscalationStaff([candidateA!],false);
+    const cancelled1=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.id===add1.id&&op.state==="CANCELLED"),"round 1 cancellation");
+    const audit1=await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.audit_event
+      WHERE action='im.order.escalation.add_cancelled' AND object_id=$1 AND request_id=$2`,[order.orderId,add1.id]);
+    assert.equal(audit1.rows[0].n,1);assert.equal(add1.round,1);
+    assert.equal(cancelled1.ops.find((op:any)=>op.id===add1.id)?.sent_at,null);
+    assert.equal((await pool.query(`SELECT state FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND m.platform_subject_id=$2`,[order.orderId,candidateA])).rows[0]?.state,"PLANNED");
+    assert.equal(wire.adds.length,addsBefore);
+
+    await setEscalationStaff([candidateA!],true);
+    const second=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.round===2&&op.state==="PENDING"),"round 2 replan");
+    const add2=second.ops.find((op:any)=>op.kind==="ADD_MEMBER"&&op.round===2);
+    assert.equal(add2?.target_admin_id,candidateA);assert.equal(add2?.sent_at,null);
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()+interval '1 day'
+      WHERE order_id=$1 AND kind='BOT_NOTICE' AND round=2`,[order.orderId]);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND m.platform_subject_id=$2`,[order.orderId,candidateA])).rows[0].n,1,
+      "a later round reuses the historical PLANNED member row");
+
+    await setEscalationStaff([candidateA!],false);await setEscalationStaff([candidateB!],true);
+    await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.id===add2.id&&op.state==="CANCELLED"),"round 2 cancellation");
+    const third=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.round===3&&op.state==="PENDING"),"round 3 alternate candidate");
+    const add3=third.ops.find((op:any)=>op.kind==="ADD_MEMBER"&&op.round===3);
+    assert.equal(third.group.add_round,3);assert.equal(third.group.team_id,team);
+    assert.equal(add3?.target_admin_id,candidateB);assert.equal(add3?.sent_at,null);
+    assert.deepEqual(third.ops.filter((op:any)=>op.kind==="ADD_MEMBER").map((op:any)=>[op.round,op.state]),
+      [[1,"CANCELLED"],[2,"CANCELLED"],[3,"PENDING"]]);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND m.platform_subject_id=$2`,[order.orderId,candidateB])).rows[0].n,1);
+    const events=(await pool.query(`SELECT event_key FROM zzsh_order.im_order_event WHERE order_id=$1 AND type='add_member' ORDER BY event_key`,[order.orderId])).rows.map((row:any)=>row.event_key);
+    assert.deepEqual(events,["add_member:1","add_member:2","add_member:3"]);
+    assert.equal(wire.adds.length,addsBefore,"cancelled unsent rounds are never sent");
+    }finally{
+    await setEscalationStaff([candidateA!,candidateB!],false);
+    }
+  };
+
+  await t.test("T19 same-Team escalation keeps history, rotates eligible staff, records one reminder, and continues after an unknown notice",async()=>{
+    const [candidateA,candidateB]=escalationStaff;
+    const order=await makePaid("OIM4C 同群轮值单","active",true);
+    await setEscalationStaff([candidateA!,candidateB!],true);
+    const original=await groupRow(order.orderId),team=original.team_id as string;
+    await setEscalationDue(order.orderId,true,true);
+    wire.noticeResponseLoss=true;
+    await scanOrderEscalations(escalationOptions,100);
+    wire.noticeResponseLoss=false;
+    let group=await groupRow(order.orderId),operations=await escalationOps(order.orderId);
+    let add=operations.find((op:any)=>op.kind==="ADD_MEMBER"&&op.round===1),notice=operations.find((op:any)=>op.kind==="BOT_NOTICE"&&op.round===1);
+    assert.equal(group.add_round,1);assert.equal(group.team_id,team);assert.equal(group.assigned_admin_id,staff);
+    assert.equal(group.responsible_admin_id,candidateA);assert.equal(group.escalation_state,"RUNNING");
+    assert.equal(add?.state,"SUCCEEDED");assert.equal(add?.candidate_team_id,team);assert.equal(notice?.state,"NEEDS_REVIEW");
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.im_order_event WHERE order_id=$1 AND type='first_response_reminder'`,[order.orderId])).rows[0].n,1);
+    let joined=(await pool.query(`SELECT m.platform_subject_id FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND mm.state='JOINED' ORDER BY m.platform_subject_id`,[order.orderId])).rows.map((row:any)=>row.platform_subject_id);
+    assert.ok(joined.includes(staff)&&joined.includes(candidateA));
+    let projection=await withTransaction(pool,c=>readOrderTeamAccess(c,staffActor,order.orderId));
+    assert.equal((projection.supportEscalation as any).addRound,1);assert.equal((projection.supportEscalation as any).state,"RUNNING");
+    assert.equal((projection.members as any[]).find(member=>member.platformId===candidateA)?.responsible,true);
+    const directory=await withTransaction(pool,c=>listJoinedOrderTeams(c,staffActor,null,20));
+    assert.equal((directory.items as any[]).find(item=>item.id===order.orderId)?.addRound,1);
+    await setEscalationDue(order.orderId,false,true);
+    await scanOrderEscalations(escalationOptions,100);
+    group=await groupRow(order.orderId);operations=await escalationOps(order.orderId);
+    add=operations.find((op:any)=>op.kind==="ADD_MEMBER"&&op.round===2);
+    assert.equal(group.add_round,2);assert.equal(group.responsible_admin_id,candidateB);
+    assert.equal(add?.state,"SUCCEEDED","round-one BOT_NOTICE review must not block the next ADD");
+    joined=(await pool.query(`SELECT m.platform_subject_id FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND mm.state='JOINED' ORDER BY m.platform_subject_id`,[order.orderId])).rows.map((row:any)=>row.platform_subject_id);
+    assert.ok(joined.includes(staff)&&joined.includes(candidateA)&&joined.includes(candidateB));
+    await setEscalationDue(order.orderId,false,true);
+    await scanOrderEscalations(escalationOptions,100);
+    group=await groupRow(order.orderId);assert.equal(group.escalation_state,"EXHAUSTED");
+    projection=await withTransaction(pool,c=>readOrderTeamAccess(c,staffActor,order.orderId));
+    assert.equal((projection.supportEscalation as any).noEligibleStaff,true);
+    assert.equal((projection.supportEscalation as any).needsManualReview,true);
+    const adminOrders=await withTransaction(pool,c=>listAdminOrders(c,{adminId:staff,isBoss:false,internalQuote:false},{gameId,limit:100}));
+    const adminSummary=(adminOrders.items as any[]).find(item=>item.id===order.orderId);
+    assert.equal(adminSummary?.supportEscalation?.state,"EXHAUSTED");
+    assert.equal(adminSummary?.supportEscalation?.noEligibleStaff,true);
+    assert.deepEqual(Object.keys(adminSummary?.supportEscalation??{}).sort(),["addRound","firstResponseAt","needsManualReview","noEligibleStaff","remindDueAt","state"]);
+    await setEscalationStaff([candidateA!,candidateB!],false);
+  });
+
+  await t.test("T19b cancelled unsent ADD keeps its audit and member binding while new rounds reselect",verifyCancelledUnsentAddReselection);
+
+  await t.test("T20 verified first response cancels only unsent ADD and BOT operations",async()=>{
+    const candidate=escalationStaff[2]!;
+    const order=await makePaid("OIM4C 首响取消未发送操作单","active",true),group=await groupRow(order.orderId);
+    await setEscalationStaff([candidate],true);
+    await setEscalationDue(order.orderId,true,true);
+    const {ops:before}=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"),"unsent ADD plan");
+    assert.equal(before.find((op:any)=>op.kind==="ADD_MEMBER")?.state,"PENDING");
+    assert.equal(before.find((op:any)=>op.kind==="BOT_NOTICE")?.state,"PENDING");
+    const addCalls=wire.adds.length;
+    await confirmFirstResponse(order.orderId,group.team_id as string,"4291065454174145991");
+    const after=await escalationOps(order.orderId),stopped=await groupRow(order.orderId);
+    assert.equal(stopped.escalation_state,"STOPPED");assert.equal(stopped.remind_due_at,null);assert.equal(stopped.next_add_due_at,null);
+    assert.ok(after.filter((op:any)=>["ADD_MEMBER","BOT_NOTICE"].includes(op.kind)).every((op:any)=>op.state==="CANCELLED"&&op.sent_at===null));
+    assert.equal(wire.adds.length,addCalls);
+    await setEscalationStaff([candidate],false);
+  });
+
+  await t.test("T21 target requalification is checked before ADD and a lost candidate is never sent",async()=>{
+    const candidate=escalationStaff[3]!;
+    const order=await makePaid("OIM4C 候选失格单","active",true);
+    await setEscalationStaff([candidate],true);
+    await setEscalationDue(order.orderId,true,true);
+    const plannedResult=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"),"candidate ADD plan");
+    const planned=plannedResult.ops.find((op:any)=>op.kind==="ADD_MEMBER");
+    assert.equal(planned?.target_admin_id,candidate);
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()+interval '1 day'
+      WHERE order_id=$1 AND kind='BOT_NOTICE'`,[order.orderId]);
+    await setEscalationStaff([candidate],false);
+    const addCalls=wire.adds.length;await scanOrderEscalations(escalationOptions,100);
+    const after=(await escalationOps(order.orderId)).find((op:any)=>op.id===planned?.id);
+    assert.equal(after?.state,"CANCELLED");assert.equal(after?.sent_at,null);assert.equal(wire.adds.length,addCalls);
+    assert.ok(new Date((await groupRow(order.orderId)).next_add_due_at).getTime()<=Date.now()+5000);
+    await scanOrderEscalations(escalationOptions,100);
+    assert.equal((await groupRow(order.orderId)).escalation_state,"EXHAUSTED");
+  });
+
+  await t.test("T22 unknown ADD outcome enters review and recovery only reads the same Team",async()=>{
+    const candidate=escalationStaff[4]!;
+    const order=await makePaid("OIM4C ADD未知结果单","active",true);
+    await setEscalationStaff([candidate],true);
+    await setEscalationDue(order.orderId,true,true);
+    const plannedResult=await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"),"unknown-outcome ADD plan");
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()+interval '1 day'
+      WHERE order_id=$1 AND kind='BOT_NOTICE'`,[order.orderId]);
+    const planned=plannedResult.ops.find((op:any)=>op.kind==="ADD_MEMBER");
+    const addCalls=wire.adds.length;wire.rejectAddCode=500;
+    await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.id===planned?.id&&op.state==="NEEDS_REVIEW"),"unknown ADD outcome");wire.rejectAddCode=undefined;
+    let operation=(await escalationOps(order.orderId)).find((op:any)=>op.id===planned?.id);
+    assert.equal(operation?.state,"NEEDS_REVIEW");assert.equal(operation?.failure_class,"ADD_OUTCOME_UNKNOWN");assert.ok(operation?.sent_at);
+    assert.equal((await groupRow(order.orderId)).escalation_state,"VERIFY_REQUIRED");
+    assert.equal(wire.adds.length,addCalls+1);
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()-interval '1 second' WHERE id=$1`,[planned?.id]);
+    const teamReads=wire.calls.filter(call=>call.startsWith("GET /im/v2.1/teams/")).length;
+    for(let tick=0;tick<5;tick++)await scanOrderEscalations(escalationOptions,1);
+    operation=(await escalationOps(order.orderId)).find((op:any)=>op.id===planned?.id);
+    assert.equal(operation?.state,"NEEDS_REVIEW");assert.equal(wire.adds.length,addCalls+1,"unknown add is never blindly resent");
+    assert.ok(wire.calls.filter(call=>call.startsWith("GET /im/v2.1/teams/")).length>teamReads,"small-budget recovery reads the same Team");
+    await setEscalationStaff([candidate],false);
+  });
+
+  await t.test("T23 concurrent workers share one ADD claim; first response cannot undo an already-sent add",async()=>{
+    const candidate=escalationStaff[5]!;
+    const order=await makePaid("OIM4C 双worker首响竞态单","active",true),group=await groupRow(order.orderId);
+    await setEscalationStaff([candidate],true);
+    await setEscalationDue(order.orderId,true,true);
+    await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"),"concurrent ADD plan");
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()+interval '1 day'
+      WHERE order_id=$1 AND kind='BOT_NOTICE'`,[order.orderId]);
+    let arrived!:()=>void,release!:()=>void,timedOut=false;
+    const reached=new Promise<void>(resolve=>{arrived=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+    const watchdog=setTimeout(()=>{timedOut=true;arrived();release();},10_000);
+    wire.beforeAddResponse=async()=>{arrived();await gate;};
+    const addCalls=wire.adds.length;
+    const lifecycle=new OrderTeamLifecycle();let workerB:Promise<void>|undefined,shutdown:Promise<void>|undefined,drained=false;
+    try{
+      lifecycle.start(escalationOptions,60_000,100);
+      await reached;assert.equal(timedOut,false,"the lifecycle must reach the controlled provider barrier");
+      workerB=scanOrderEscalations(escalationOptions,100);
+      shutdown=lifecycle.beforeApplicationShutdown().then(()=>{drained=true;});
+      await Promise.resolve();assert.equal(drained,false,"shutdown must wait for the in-flight ADD");
+      const running=(await escalationOps(order.orderId)).find((op:any)=>op.kind==="ADD_MEMBER");
+      assert.equal(running?.state,"RUNNING");assert.ok(running?.sent_at);
+      await confirmFirstResponse(order.orderId,group.team_id as string,"4291065454174145992");
+      const stopped=await groupRow(order.orderId);assert.equal(stopped.escalation_state,"STOPPED");
+      const during=(await escalationOps(order.orderId)).find((op:any)=>op.kind==="ADD_MEMBER");assert.equal(during?.state,"RUNNING");
+    }finally{
+      clearTimeout(watchdog);release();wire.beforeAddResponse=undefined;
+      await Promise.allSettled([...(workerB?[workerB]:[]),...(shutdown?[shutdown]:[])]);
+      if(!shutdown)await lifecycle.beforeApplicationShutdown();
+    }
+    assert.equal(drained,true,"shutdown drains the completed escalation scan");
+    const finalGroup=await groupRow(order.orderId),finalOps=await escalationOps(order.orderId);
+    const add=finalOps.find((op:any)=>op.kind==="ADD_MEMBER"),bot=finalOps.find((op:any)=>op.kind==="BOT_NOTICE");
+    assert.equal(wire.adds.length,addCalls+1);assert.equal(add?.state,"SUCCEEDED");assert.equal(bot?.state,"CANCELLED");
+    assert.equal(finalGroup.responsible_admin_id,staff);assert.equal(finalGroup.next_add_due_at,null);
+    assert.equal((await pool.query(`SELECT state FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND m.platform_subject_id=$2`,[order.orderId,candidate])).rows[0]?.state,"JOINED");
+    await setEscalationStaff([candidate],false);
+  });
+
+  await t.test("T24 expired sent ADD lease is quarantined and its recovery remains read-only",async()=>{
+    const candidate=escalationStaff[6]!;
+    const order=await makePaid("OIM4C 过期租约单","active",true);
+    await setEscalationStaff([candidate],true);
+    await setEscalationDue(order.orderId,true,true);
+    await driveEscalation(order.orderId,(_group,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"),"expired-lease ADD plan");
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()+interval '1 day'
+      WHERE order_id=$1 AND kind='BOT_NOTICE'`,[order.orderId]);
+    const planned=(await escalationOps(order.orderId)).find((op:any)=>op.kind==="ADD_MEMBER");
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET state='RUNNING',version=version+1,attempt_count=attempt_count+1,
+        lease_until=clock_timestamp()-interval '1 second',lease_token_hash=repeat('a',64),sent_at=clock_timestamp()
+      WHERE id=$1 AND state='PENDING'`,[planned?.id]);
+    const addCalls=wire.adds.length;await scanOrderEscalations(escalationOptions,100);
+    let operation=(await escalationOps(order.orderId)).find((op:any)=>op.id===planned?.id);
+    assert.equal(operation?.state,"NEEDS_REVIEW");assert.equal(operation?.failure_class,"STALE_OPERATION");
+    assert.equal((await groupRow(order.orderId)).escalation_state,"VERIFY_REQUIRED");assert.equal(wire.adds.length,addCalls);
+    await pool.query(`UPDATE zzsh_order.im_order_operation SET next_retry_at=clock_timestamp()-interval '1 second' WHERE id=$1`,[planned?.id]);
+    const teamReads=wire.calls.filter(call=>call.startsWith("GET /im/v2.1/teams/")).length;
+    for(let tick=0;tick<5;tick++)await scanOrderEscalations(escalationOptions,1);
+    operation=(await escalationOps(order.orderId)).find((op:any)=>op.id===planned?.id);
+    assert.equal(operation?.state,"NEEDS_REVIEW");assert.equal(wire.adds.length,addCalls,"expired sent lease may only read the persisted Team");
+    assert.ok(wire.calls.filter(call=>call.startsWith("GET /im/v2.1/teams/")).length>teamReads);
+    await setEscalationStaff([candidate],false);
+  });
 
   await t.test("T01 pre-send authorizes order parties and JOINED staff without presence, denies strangers", async () => {
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(teamId, staffAccount), { base: hooks.base })).body?.errCode, 0);

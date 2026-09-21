@@ -60,9 +60,9 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   testConfirmationFundingReader?: ConfirmationFundingReader;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
   supportDispatch?: Omit<OrderDispatchOptions, "pool">;
-  orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number };
+  orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number; escalationEnabled?: boolean };
   /** Explicit supplier event ingress; omitted by default and never mounted without configuration. */
-  orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number };
+  orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number; escalationEnabled?: boolean };
   pool: Pool;
   yunxin?: { appId: string; appKey: string; appSecret: string };
   /** Test-only local provider seam; production construction must leave this unset. */
@@ -918,6 +918,9 @@ export async function mountAuthHandlers(
   if (options.orderImEvents) {
     const orderImEvents = { pool: options.pool, appId: options.orderImEvents.appKey,
       appSecret: options.orderImEvents.appSecret,
+      ...((options.orderImEvents.escalationEnabled===true
+        ||(options.orderTeams?.escalationEnabled===true&&orderImEventsActivateApp(options.orderImEvents,options.yunxin?.appId)))
+        &&(!options.yunxin||orderImEventsActivateApp(options.orderImEvents,options.yunxin.appId))?{escalationEnabled:true}:{}),
       ...(options.orderImEvents.freshnessMs === undefined ? {} : { freshnessMs: options.orderImEvents.freshnessMs }),
       ...(options.orderImEvents.approvalLinkMs === undefined ? {} : { approvalLinkMs: options.orderImEvents.approvalLinkMs }) };
     mountOrderImEventHandlers(app, orderImEvents);
@@ -986,7 +989,9 @@ export async function mountAuthHandlers(
   if (options.orderTeams) {
     const provider=yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");
-    app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId)},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
+    app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,
+      membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId),
+      ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });

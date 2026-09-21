@@ -47,6 +47,10 @@ export type OrderRow = {
   dispatchWaitReason: string | null;
   assignedAt: string | null;
   teamState: string | null;
+  firstResponseAt: string | null;
+  remindDueAt: string | null;
+  addRound: number;
+  escalationState: string;
   cancelReason: "USER" | "TIMEOUT" | null;
   cancelledAt: string | null;
   createdAt: string;
@@ -66,6 +70,10 @@ const ORDER_FIELDS = `
   to_char(o.paid_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "paidAt",
   g.provision_state AS "dispatchState", g.wait_reason AS "dispatchWaitReason",
   g.team_state AS "teamState",
+  to_jsonb(g)->>'first_response_at' AS "firstResponseAt",
+  to_jsonb(g)->>'remind_due_at' AS "remindDueAt",
+  COALESCE((to_jsonb(g)->>'add_round')::int,0) AS "addRound",
+  COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED') AS "escalationState",
   to_char(g.assigned_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "assignedAt",
   o.cancel_reason AS "cancelReason",
   CASE WHEN o.cancelled_at IS NULL THEN NULL ELSE to_char(o.cancelled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "cancelledAt",
@@ -167,6 +175,14 @@ export function projectOrder(
     contentHash: row.contentHash,
     revision: row.revision,
     quote: projectSnapshot(options?.internalQuote ? "admin" : "owner"),
+    ...(row.teamState === "READY" ? { supportEscalation: {
+      firstResponseAt: row.firstResponseAt,
+      remindDueAt: row.remindDueAt,
+      addRound: row.addRound,
+      state: row.escalationState,
+      needsManualReview: row.escalationState === "VERIFY_REQUIRED" || row.escalationState === "EXHAUSTED",
+      noEligibleStaff: row.escalationState === "EXHAUSTED",
+    } } : {}),
   };
 }
 
