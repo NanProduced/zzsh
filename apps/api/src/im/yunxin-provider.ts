@@ -82,6 +82,8 @@ export type YunxinServerApi = {
     statuses: YunxinOnlineStatus[];
     failed: YunxinAccountLookupFailure[];
   }>;
+  /** Narrow single-message read for order first-response verification. */
+  readTeamMessage(input: { teamId: string; operatorAccountId: string; messageServerId: string; messageTime?: number }): Promise<YunxinTeamMessageFact | null>;
 };
 
 export type YunxinSupportTeamCreateInput = {
@@ -97,9 +99,22 @@ export type YunxinOrderTeamInput = { appId: string; orderId: string; name: strin
 export type YunxinOrderTeamState = { teamId: string; ownerAccountId: string; serverExtension: string | null;
   teamType: number; name: string; membersLimit: number; configuration: Record<keyof typeof ORDER_TEAM_CONFIGURATION, number>;
   members: { accountId: string; role: number; chatBanned: boolean | null }[] };
+export type YunxinMessageRouteConfig = { routeEnabled: true; routeEnvironment: string };
 export type YunxinOrderTeamApi = {
   createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }>;
   readOrderTeam(teamId: string): Promise<YunxinOrderTeamState | null>;
+  addSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void>;
+  sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void>;
+};
+
+/** Trimmed single-message fact; text/attachment/URL are deliberately dropped. */
+export type YunxinTeamMessageFact = {
+  messageServerId: string;
+  messageClientId: string | null;
+  senderId: string;
+  teamId: string;
+  messageType: number;
+  createTime: number;
 };
 export function validateOrderTeamInput(input: YunxinOrderTeamInput): void {
   if (![input.appId,input.orderId].every((id) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id))
@@ -282,6 +297,12 @@ function teamIdFromUnknown(value: unknown): string | undefined {
   const candidate = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : asString(value);
   if (!candidate) return undefined;
   try { return normalizeTeamId(candidate); } catch { return undefined; }
+}
+
+/** Provider message IDs are 64-bit integers; the same numeric/string normalization applies. */
+function messageIdFromUnknown(value: unknown): string | undefined {
+  const candidate = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : asString(value);
+  return candidate && /^[0-9]{1,19}$/.test(candidate) ? candidate : undefined;
 }
 
 function teamIdBodyValue(teamId: string): number | string {
@@ -669,6 +690,30 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("add-support-team-member", null, false);
   }
 
+  async sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void> {
+    const team = normalizeTeamId(teamId);
+    const operator = normalizeAccountId(operatorAccountId);
+    const conversationId = `${operator}|2|${team}`;
+    if (routeConfig && (routeConfig.routeEnabled !== true || !/^[A-Za-z0-9._-]{1,32}$/.test(routeConfig.routeEnvironment))) {
+      throw new Error("Yunxin message route configuration is invalid");
+    }
+    const data = responseData(await this.request("send-order-team-notice", "POST",
+      `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        message: { message_type: 0, text: "客服正在为您安排接待，请稍候。" },
+        ...(routeConfig ? { route_config: { route_enabled: true, route_environment: routeConfig.routeEnvironment } } : {}),
+      }, "", "v2"));
+    const sender = asString(field(data, "sender_id"));
+    const conversationType = asNumber(field(data, "conversation_type"));
+    const messageType = asNumber(field(data, "message_type"));
+    const createTime = asNumber(field(data, "create_time"));
+    const clientId = asString(field(data, "message_client_id"));
+    if (!sender || normalizeAccountId(sender) !== operator || conversationType !== 2 || messageType !== 0
+      || createTime === undefined || !Number.isFinite(createTime) || !clientId
+      || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
+      throw new YunxinApiError("send-order-team-notice", null, false);
+    }
+  }
+
   async createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }> {
     validateOrderTeamInput(input);
     const data = responseData(await this.request("create-order-team", "POST", "/im/v2.1/teams", {
@@ -723,6 +768,41 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       token=batch.next_token;tokens.add(token);
     }
     throw new YunxinApiError("read-order-team-members",null,false);
+  }
+
+  /** Narrow single-message read for order first-response verification. Never a general history proxy. */
+  async readTeamMessage(input: { teamId: string; operatorAccountId: string; messageServerId: string; messageTime?: number }): Promise<YunxinTeamMessageFact | null> {
+    const teamId = normalizeTeamId(input.teamId);
+    const operator = normalizeAccountId(input.operatorAccountId);
+    const serverId = messageIdFromUnknown(input.messageServerId);
+    if (!serverId) throw new Error("Yunxin message ID is invalid");
+    const query = new URLSearchParams({ check_team_valid: "true", check_team_member_valid: "true" });
+    if (input.messageTime !== undefined) {
+      if (!Number.isInteger(input.messageTime) || input.messageTime <= 0) throw new Error("Yunxin message time is invalid");
+      query.set("message_time", String(input.messageTime));
+    }
+    const conversationId = `${operator}|2|${teamId}`;
+    let data: JsonRecord;
+    try {
+      data = responseData(await this.request("read-team-message", "GET",
+        `/im/v2.1/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(serverId)}?${query.toString()}`, undefined, "", "v2"));
+    } catch (error) {
+      // 107404 message not found, 108404 team not found: a confirmed absence, not an unknown result.
+      if (error instanceof YunxinApiError && (error.providerCode === 107404 || error.providerCode === 108404)) return null;
+      throw error;
+    }
+    const returnedServerId = messageIdFromUnknown(field(data, "message_server_id", "messageServerId"));
+    const senderId = asString(field(data, "sender_id", "senderId"));
+    const returnedTeamId = teamIdFromUnknown(field(data, "team_id", "teamId"));
+    const messageType = asNumber(field(data, "message_type", "messageType"));
+    const createTime = asNumber(field(data, "create_time", "createTime"));
+    const clientId = asString(field(data, "message_client_id", "messageClientId"));
+    if (returnedServerId !== serverId || !senderId || returnedTeamId !== teamId || messageType === undefined
+      || !Number.isInteger(messageType) || createTime === undefined || !Number.isFinite(createTime)) {
+      throw new YunxinApiError("read-team-message", null, false);
+    }
+    return { messageServerId: returnedServerId, messageClientId: clientId && clientId.length > 0 ? clientId : null,
+      senderId: normalizeAccountId(senderId), teamId: returnedTeamId, messageType, createTime };
   }
 
   async removeSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void> {

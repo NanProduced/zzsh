@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { isHttpOrigin, userCookies } from "../../../../lib/user-proxy.ts";
+import { BodyTooLargeError, isHttpOrigin, readBoundedBody, userCookies } from "../../../../lib/user-proxy.ts";
 
 const local = process.env.NODE_ENV !== "production";
 const apiOrigin = process.env.ZZSH_API_ORIGIN ?? (local ? "http://127.0.0.1:3102" : "");
 const webOrigin = process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
-const pathPattern = /^(?:\/token|\/consultations|\/messages|\/message-access)$/;
+const pathPattern = /^(?:\/token|\/consultations|\/messages|\/message-access|\/images\/[A-Za-z0-9._:-]{1,128})$/;
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function errorResponse(status: number, code: string, requestId: string): Response {
@@ -28,25 +28,28 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   const method = request.method.toUpperCase();
   if (path === "/token" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   if ((path === "/consultations" || path === "/messages") && method !== "GET" && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
+  if (path.startsWith("/images/") && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   if (path === "/message-access" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId });
   headers.set("accept", "application/json");
   const cookie = userCookies(request.headers.get("cookie"));
   if (cookie) headers.set("cookie", cookie);
-  let body: string | undefined;
+  let body: ArrayBuffer | undefined;
+  const deadline = AbortSignal.timeout(5_000);
   if (method === "POST") {
-    body = await request.text();
-    if (body.length > 16_384 || !request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    const maxBody = path === "/messages" ? 14_100_000 : 16_384;
+    if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
       return errorResponse(400, "INVALID_ARGUMENT", requestId);
     }
     try {
-      JSON.parse(body);
-    } catch {
-      return errorResponse(400, "INVALID_ARGUMENT", requestId);
+      body = await readBoundedBody(request, maxBody, deadline);
+      JSON.parse(new TextDecoder().decode(body));
+    } catch (cause) {
+      return errorResponse(cause instanceof BodyTooLargeError ? 413 : 400, "INVALID_ARGUMENT", requestId);
     }
     headers.set("content-type", "application/json");
   }
-  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : "/api/v1/im/user/consultations";
+  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : path.startsWith("/images/") ? `/api/v1/im/user${path}` : "/api/v1/im/user/consultations";
   const upstreamUrl = new URL(upstreamPath, apiOrigin);
   if (method === "GET" && (path === "/consultations" || path === "/messages" || path === "/message-access")) {
     const limit = new URL(request.url).searchParams.get("limit");
@@ -55,6 +58,8 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
     if (conversationId !== null) upstreamUrl.searchParams.set("conversationId", conversationId);
     const operation = new URL(request.url).searchParams.get("operation");
     if (operation !== null) upstreamUrl.searchParams.set("operation", operation);
+    const before = new URL(request.url).searchParams.get("before");
+    if (path === "/messages" && before !== null) upstreamUrl.searchParams.set("before", before);
   }
   let upstream: Response;
   try {
@@ -64,7 +69,7 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
       body,
       cache: "no-store",
       redirect: "error",
-      signal: AbortSignal.timeout(5_000),
+      signal: deadline,
     });
   } catch {
     return errorResponse(503, "INTERNAL_ERROR", requestId);
@@ -74,8 +79,17 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   if (contentType) responseHeaders.set("content-type", contentType);
   const retryAfter = upstream.headers.get("retry-after");
   if (retryAfter) responseHeaders.set("retry-after", retryAfter);
+  if (path.startsWith("/images/")) {
+    let bytes: ArrayBuffer;
+    try {
+      bytes = await readBoundedBody(upstream, 10 * 1024 * 1024, deadline);
+    } catch {
+      return errorResponse(502, "INTERNAL_ERROR", requestId);
+    }
+    return new Response(bytes, { status: upstream.status, headers: responseHeaders });
+  }
   try {
-    const text = await upstream.text();
+    const text = new TextDecoder().decode(await readBoundedBody(upstream, 2 * 1024 * 1024, deadline));
     if (!text) return new Response(null, { status: upstream.status, headers: responseHeaders });
     JSON.parse(text);
     return new Response(text, { status: upstream.status, headers: responseHeaders });

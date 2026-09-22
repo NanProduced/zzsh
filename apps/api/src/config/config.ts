@@ -17,6 +17,19 @@ export type YunxinConfig = {
   appSecret?: string;
 };
 
+export type OrderImSdkRouteConfig = {
+  routeEnvironment: string;
+  scopes: { appId: string; orderId: string; teamId: string; conversationId: string }[];
+};
+
+export function orderImSdkRouteFor(config: OrderImSdkRouteConfig | undefined, scope: {
+  appId: string; orderId: string; teamId: string; conversationId: string;
+}): (OrderImSdkRouteConfig["scopes"][number] & { routeEnvironment: string }) | undefined {
+  const exact = config?.scopes.find(item => item.appId === scope.appId && item.orderId === scope.orderId
+    && item.teamId === scope.teamId && item.conversationId === scope.conversationId);
+  return exact && config ? { ...exact, routeEnvironment: config.routeEnvironment } : undefined;
+}
+
 export type AppConfig = {
   profile: ConfigProfile;
   provider: ProviderMode;
@@ -40,6 +53,7 @@ export type AppConfig = {
   };
   providerTestScope?: string;
   yunxin: YunxinConfig;
+  orderImSdkRouteConfig?: OrderImSdkRouteConfig;
 };
 
 export class ConfigurationError extends Error {
@@ -175,6 +189,41 @@ function loadYunxinConfig(
   return { enabled: true, appKey, appSecret };
 }
 
+function loadOrderImSdkRouteConfig(env: NodeJS.ProcessEnv, profile: ConfigProfile, yunxin: YunxinConfig): OrderImSdkRouteConfig | undefined {
+  const raw = env.YUNXIN_ORDER_TEST_ROUTE_CONFIG;
+  if (raw === undefined) return undefined;
+  if (profile !== "provider-test" || env.NODE_ENV === "production" || !yunxin.enabled || !yunxin.appKey || raw.length > 4096) {
+    throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is only allowed for a non-production provider-test Yunxin App");
+  }
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(",") !== "routeEnvironment,scopes"
+    || typeof record.routeEnvironment !== "string" || !/^[A-Za-z0-9._-]{1,32}$/.test(record.routeEnvironment)
+    || !Array.isArray(record.scopes) || record.scopes.length < 1 || record.scopes.length > 8) {
+    throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+  }
+  const scopes: OrderImSdkRouteConfig["scopes"] = [];
+  const seen = new Set<string>();
+  for (const candidate of record.scopes) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    const scope = candidate as Record<string, unknown>;
+    if (Object.keys(scope).sort().join(",") !== "appId,conversationId,orderId,teamId"
+      || scope.appId !== yunxin.appKey
+      || typeof scope.orderId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(scope.orderId)
+      || typeof scope.teamId !== "string" || !/^[0-9]{1,19}$/.test(scope.teamId)
+      || typeof scope.conversationId !== "string") throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    const conversation = /^([A-Za-z0-9][A-Za-z0-9_@.-]{0,31})\|2\|([0-9]{1,19})$/.exec(scope.conversationId);
+    if (!conversation || conversation[2] !== scope.teamId) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    const exact = `${scope.appId}|${scope.orderId}|${scope.teamId}|${scope.conversationId}`;
+    if (seen.has(exact)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    seen.add(exact);
+    scopes.push({ appId: scope.appId as string, orderId: scope.orderId, teamId: scope.teamId, conversationId: scope.conversationId });
+  }
+  return { routeEnvironment: record.routeEnvironment, scopes };
+}
+
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   workingDirectory = process.cwd(),
@@ -264,6 +313,7 @@ export function loadConfig(
     throw new ConfigurationError("ENABLE_TEST_OPERATIONS=true requires APP_PROFILE=test and PROVIDER_MODE=fake");
   }
   const yunxin = loadYunxinConfig(env, workingDirectory, profile);
+  const orderImSdkRouteConfig = loadOrderImSdkRouteConfig(env, profile, yunxin);
 
   return {
     profile,
@@ -284,5 +334,6 @@ export function loadConfig(
     redis: { host: redisHost, port: redisPort, password: redisPassword },
     providerTestScope,
     yunxin,
+    ...(orderImSdkRouteConfig ? { orderImSdkRouteConfig } : {}),
   };
 }

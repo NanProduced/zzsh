@@ -1,4 +1,5 @@
 import type { INestApplication } from "@nestjs/common";
+import type { OrderImSdkRouteConfig } from "../config/config";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
@@ -27,6 +28,7 @@ import {
   safely,
   type SupplyResponse,
 } from "../supply/supply-routes";
+import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
 import {
   assertFreshCreateAuthorization,
   assertReplayAuthorization,
@@ -43,6 +45,9 @@ import {
 export type OrderRuntimeOptions = AuthSecurityOptions & {
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;
+  orderImSdkRouteConfig?: OrderImSdkRouteConfig;
+  /** Explicit controlled-test switch. Production leaves it unset. */
+  settlementRecordingEnabled?: boolean;
 };
 
 export type OrderResponse = SupplyResponse;
@@ -77,6 +82,7 @@ export async function handleOrderUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleSettlementUserRoute(request, response, options)) return;
     if (method === "POST" && path === "/") {
       if (!requireOrigin(request, response, options, requestId)) return;
       const context = await readUserContext(request, options);
@@ -177,7 +183,7 @@ export async function handleOrderUserRoute(
     if(method==="GET"&&teamMatch){
       const context=await readUserContext(request,options);
       const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");
-      const data=await withTransaction(options.pool,c=>readOrderTeamAccess(c,{...context,realm:"user"},decodeId(teamMatch[1]!),operation));
+      const data=await withTransaction(options.pool,c=>readOrderTeamAccess(c,{...context,realm:"user"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteConfig));
       sendJson(response,200,data,requestId);return;
     }
     const detailMatch = /^\/([A-Za-z0-9._:-]+)$/.exec(path);
@@ -207,6 +213,7 @@ export async function handleOrderAdminRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleSettlementAdminRoute(request, response, options)) return;
     if (method !== "GET") throw notFound();
     const context = await readAdminContext(request, options);
     await withTransaction(options.pool, async (client) => {
@@ -216,7 +223,7 @@ export async function handleOrderAdminRoute(
         sendJson(response,200,await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit"))),requestId);return;
       }
       const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
-      if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation),requestId);return;}
+      if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteConfig),requestId);return;}
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.orderRead);
       const admin = {

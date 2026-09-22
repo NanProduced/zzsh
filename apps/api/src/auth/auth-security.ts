@@ -54,6 +54,7 @@ export type AuthSecurityNodeResponse = {
   setHeader: (name: string, value: string | string[]) => AuthSecurityNodeResponse;
   status: (status: number) => AuthSecurityNodeResponse;
   json: (body: unknown) => void;
+  send?: (body: unknown) => void;
 };
 
 type NodeRequest = AuthSecurityNodeRequest;

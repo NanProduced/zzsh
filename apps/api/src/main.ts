@@ -35,6 +35,7 @@ export async function bootstrap() {
             auth: {
               ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
               pool: businessPool,
+              ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret
                 ? {
                     yunxin: {

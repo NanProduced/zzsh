@@ -17,8 +17,10 @@ import { computeDeltaQuote } from "../src/supply/pricing";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHolds, type SweepResult } from "../src/order/order";
 import { runPaymentAcceptance } from "./order-payment-im-postgres.test";
+import { runSettlementAcceptance } from "./settlement-postgres.test";
 import { runDispatchAcceptance } from "./order-dispatch-postgres.test";
 import { runOrderTeamAcceptance } from "./order-team-postgres.test";
+import { ORDER_IM_EVENT_APP, ORDER_IM_EVENT_SECRET, preparePartialMigrationsFolder, runOrderFirstResponseAcceptance } from "./order-first-response-postgres.test";
 
 // M4-A order reservation foundation: real PostgreSQL acceptance (V01–V21).
 // Deterministic barriers only; no sleeps to guess races.
@@ -161,7 +163,8 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     // Complete read-only preflight BEFORE either ensureRole can change a password.
     const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,
       shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
-    if (RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT) {
+    const requireRegisteredResources = RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT;
+    if (requireRegisteredResources) {
       assert.equal(resources.maintenance.database.user, "zzsh");
       assert.ok(db, "registered OIM database must already exist");
     }
@@ -175,7 +178,7 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
         shobj_description(oid,'pg_authid') AS marker,
         EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS membership,
         EXISTS(SELECT 1 FROM pg_database WHERE datdba=r.oid) AS owns_db FROM pg_roles r WHERE rolname=$1`, [name])).rows[0];
-      if (RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT) assert.ok(row, "registered role must already exist");
+      if (requireRegisteredResources) assert.ok(row, "registered role must already exist");
       if (!row) continue;
       assert.deepEqual(row, { rolcanlogin: true, rolsuper: false, rolcreaterole: false, rolcreatedb: false,
         rolinherit: false, rolreplication: false, rolbypassrls: false, marker: roleMarker(resources.databaseName, kind), membership: false, owns_db: false });
@@ -305,6 +308,38 @@ function orderKey(): Record<string, string> {
   return { "idempotency-key": `idem_${randomUUID().replaceAll("-", "")}` };
 }
 
+/** Truncate the isolated business tables, tolerating a target that predates later order tables. */
+async function truncateIsolatedBusinessData(pool: Pool): Promise<void> {
+  let statement = ISOLATED_BUSINESS_DATA_TRUNCATE;
+  const event = (await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation;
+  if (!event) statement = statement.replace(/\s*"zzsh_order"\."im_order_event",/, "");
+  const intake = (await pool.query(`SELECT to_regclass('zzsh_order.settlement_intake') AS relation`)).rows[0]?.relation;
+  if (!intake) statement = statement.replace(/\s*"zzsh_order"\."settlement_intake",/, "");
+  const opening = (await pool.query(`SELECT to_regclass('zzsh_order.rental_opening') AS relation`)).rows[0]?.relation;
+  if (!opening) {
+    statement = statement.replace(/\s*"zzsh_order"\."settlement_decision",\s*"zzsh_order"\."settlement_version",\s*"zzsh_order"\."rental_opening_ack",\s*"zzsh_order"\."rental_opening",/, "");
+  }
+  await pool.query(statement);
+}
+
+async function assertEmptyIsolatedBusinessData(pool: Pool): Promise<void> {
+  const tables = [...ISOLATED_BUSINESS_DATA_TRUNCATE.matchAll(/"([a-z_]+)"\."([A-Za-z0-9_]+)"/g)];
+  assert.ok(tables.length > 0, "isolated cleanup table inventory is missing");
+  const names = tables.map(([, schema, table]) => `"${schema}"."${table}"`);
+  const existing = new Set((await pool.query<{ name: string }>(
+    `SELECT name FROM unnest($1::text[]) AS target(name) WHERE to_regclass(name) IS NOT NULL`, [names],
+  )).rows.map(row => row.name));
+  // Staged migrations may not yet have created every table in the current source inventory.
+  const present = tables.filter((_, index) => existing.has(names[index]!));
+  assert.ok(present.length > 0, "no isolated cleanup tables exist at this migration stage");
+  const counts = await pool.query(present.map(([, schema, table]) =>
+    `SELECT '${schema}.${table}' AS table_name, count(*)::int AS row_count FROM "${schema}"."${table}"`).join(" UNION ALL "));
+  const occupied = counts.rows.filter((row) => row.row_count !== 0);
+  console.log("order cleanup-target preflight", JSON.stringify({ inventory: tables.length, tables: counts.rowCount,
+    notPresentAtStage: names.filter(name => !existing.has(name)), occupied }));
+  assert.deepEqual(occupied, [], "registered test target contains rows the suite would truncate; refusing to continue");
+}
+
 async function activateStaff(base: string, username: string, temporaryPassword: string): Promise<Staff> {
   const jar = cookieJar();
   assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username, password: temporaryPassword }, jar, ADMIN_ORIGIN)).response.status, 200);
@@ -405,14 +440,39 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     migrationPool = createBusinessPool(resources.migration);
     const hasJournal = (await migrationPool.query(`SELECT to_regclass('zzsh_business_meta.migrations') AS name`)).rows[0].name;
     const migrationBefore = hasJournal ? (await migrationPool.query(`SELECT count(*)::int AS n, max(created_at)::text AS latest FROM zzsh_business_meta.migrations`)).rows[0] : { n: 0, latest: null };
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+    // The OIM-4B resource stages its pending tail on a lower baseline so the suite can seed
+    // legacy rows first and then apply each migration as a real increment. An already-migrated
+    // resource is reused as-is: no drop, no replay from zero, no false staged claim.
+    const stagedFirstResponse = RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "oim_escalation_stage";
+    const stageSettlement = RESOURCE_SET === "trade_settlement" && Number(migrationBefore.n ?? 0) < 47;
+    const baselineCount = Number(migrationBefore.n ?? 0);
+    if (stageSettlement && baselineCount !== 0 && baselineCount !== 46) {
+      throw new Error(`trade_settlement migration count ${baselineCount} is not 0, 46, or 47`);
+    }
+    // A fresh resource stages up to 0042 before legacy fixtures; an existing one only refreshes
+    // grants (its journal tail is already applied), so the suite never drops or replays from zero.
+    const stageUpTo = baselineCount < 43 ? 42 : baselineCount - 1;
+    const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : stageSettlement && baselineCount === 0 ? preparePartialMigrationsFolder(45) : undefined;
+    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
     const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
-    assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
-    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, tail: migrated.slice(-2), replayUnchanged: true }));
+    if (RESOURCE_SET === "oim_escalation_stage") {
+      assert.equal(baselineCount, 0, "the one-time stage must be rebuilt through its registered empty-resource path");
+      assert.equal(stageUpTo, 42, "the staged runner must stop after migration 0042 before legacy seeding");
+      assert.equal(migrated.length, 43, "the staged runner must establish the exact 0042 baseline before 0043");
+    }
+    if (stageSettlement && baselineCount === 0) assert.equal(migrated.length, 46, "trade_settlement must stop at 0045 before retained payment facts");
+    const firstResponseBaselineCount = stagedFirstResponse ? migrated.length : baselineCount;
+    if (!stagedFirstResponse && !stageSettlement) {
+      await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+      assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
+    }
+    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse,
+      baselineCount, firstResponseBaselineCount, tail: migrated.slice(-2), replayUnchanged: !stagedFirstResponse }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
-    await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+    // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
+    await assertEmptyIsolatedBusinessData(maintenanceDataPool);
+    await truncateIsolatedBusinessData(maintenanceDataPool);
     fixturesStarted = true;
     // B6 deliberately jumps this sequence to 999998 later. Reset the isolated
     // fixture sequence first so a repeat run cannot collide with that range.
@@ -437,6 +497,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         AUTH_ADMIN_BOOTSTRAP_SECRET: bootstrapSecret,
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
+      // Explicit synthetic supplier-event ingress for OIM-4B; never reads a real AppSecret.
+      // No approval/freshness windows are passed: the mounted default path is what runs.
+      // The periodic sweep is pushed out so deterministic recovery tests own their own calls.
+      orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000, escalationEnabled: true },
       realNameProvider: createFakeRealNameProvider("VERIFIED_ADULT"),
       orderHoldSeconds: HOLD_SECONDS,
       // Fixture: no further obligations beyond the composed supply/order checks.
@@ -1663,6 +1727,36 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       await runPaymentAcceptance(t, acceptance);
       await runDispatchAcceptance(t, acceptance);
       await runOrderTeamAcceptance(t, acceptance);
+      if (RESOURCE_SET === "trade_settlement") {
+        await runSettlementAcceptance(t, {
+          ...acceptance,
+          base,
+          buyer: paymentBuyer,
+          buyerEmail: "oim_buyer@example.invalid",
+          owner: paymentOwner,
+          createStaff,
+          boss,
+          publishApproved,
+          request,
+          runtimeUser: resources!.runtimeUser,
+          staged: stageSettlement,
+          upgrade: async () => {
+            await runBusinessMigrations(migrationPool!, { runtimeUser: resources!.runtimeUser });
+          },
+        });
+      }
+      if (stagedFirstResponse) {
+      await runOrderFirstResponseAcceptance(t, acceptance, {
+          base,
+          baselineCount: firstResponseBaselineCount,
+          upgrade: async (upToIndex) => {
+            await runBusinessMigrations(migrationPool!, {
+              runtimeUser: resources!.runtimeUser,
+              migrationsFolder: preparePartialMigrationsFolder(upToIndex),
+            });
+          },
+        });
+      }
     }
   } finally {
     const cleanupErrors: unknown[] = [];
@@ -1684,7 +1778,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       }
     }
     if (fixturesStarted && maintenanceDataPool && guard) {
-      try { await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE); } catch (error) { cleanupErrors.push(error); }
+      try { await truncateIsolatedBusinessData(maintenanceDataPool); } catch (error) { cleanupErrors.push(error); }
     }
     for (const pool of [smallClosedByApp ? undefined : smallPool, runtimePool && !runtimeClosedByApp ? runtimePool : undefined, migrationPool, maintenanceDataPool]) {
       if (!pool) continue;

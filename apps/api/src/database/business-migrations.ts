@@ -93,7 +93,30 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
   if ((await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_iam.user_rental_membership TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_iam.user_rental_membership FROM ${runtimeUser}; GRANT UPDATE (tier,version,source_ref,updated_by_admin_id) ON zzsh_iam.user_rental_membership TO ${runtimeUser}`);
   }
+  // OIM-4B facts arrive with 0043; the runtime role writes the first-response pointer
+  // and appends delivery/approval evidence with status-only updates.
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation) {
+    await pool.query(`GRANT UPDATE (first_response_event_id,first_response_at,first_response_state) ON zzsh_order.im_order_group TO ${runtimeUser};
+      GRANT SELECT, INSERT, UPDATE ON TABLE zzsh_order.im_order_event TO ${runtimeUser};
+      REVOKE DELETE, TRUNCATE ON TABLE zzsh_order.im_order_event FROM ${runtimeUser};
+      REVOKE UPDATE ON TABLE zzsh_order.im_order_event FROM ${runtimeUser};
+      GRANT UPDATE (status) ON TABLE zzsh_order.im_order_event TO ${runtimeUser};`);
+  }
+  const hasEscalationColumns=(await pool.query(`SELECT count(*)=5 AS ready FROM pg_attribute
+    WHERE attrelid=to_regclass('zzsh_order.im_order_group') AND attname=ANY($1::text[]) AND NOT attisdropped`,
+    [["responsible_admin_id","remind_due_at","next_add_due_at","add_round","escalation_state"]])).rows[0]?.ready;
+  if(hasEscalationColumns)await pool.query(`GRANT UPDATE (responsible_admin_id,remind_due_at,next_add_due_at,add_round,escalation_state)
+    ON zzsh_order.im_order_group TO ${runtimeUser}`);
   await pool.query(`GRANT USAGE, SELECT ON SEQUENCE "zzsh_order"."display_no_seq" TO ${runtimeUser}`);
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.rental_opening') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.rental_opening, zzsh_order.rental_opening_ack, zzsh_order.settlement_version, zzsh_order.settlement_decision FROM ${runtimeUser};
+      GRANT UPDATE (status, confirmed_at) ON zzsh_order.rental_opening TO ${runtimeUser};
+      GRANT UPDATE (superseded_at) ON zzsh_order.settlement_version TO ${runtimeUser}`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.settlement_intake') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.settlement_intake FROM ${runtimeUser};
+      GRANT UPDATE (status, classified_at, superseded_at, settlement_version_id) ON zzsh_order.settlement_intake TO ${runtimeUser}`);
+  }
   for (const schema of ["zzsh_auth_user", "zzsh_auth_admin"] as const) {
     await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schema}" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtimeUser}`);
   }

@@ -69,8 +69,14 @@ export async function finishDatabaseTest(
 
 // Explicit tables owned by the isolated business test target; never use CASCADE.
 export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
+      "zzsh_order"."settlement_intake",
+      "zzsh_order"."settlement_decision",
+      "zzsh_order"."settlement_version",
+      "zzsh_order"."rental_opening_ack",
+      "zzsh_order"."rental_opening",
       "zzsh_supply"."listing_filter_config",
       "zzsh_iam"."user_rental_membership",
+      "zzsh_order"."im_order_event",
       "zzsh_order"."im_order_operation",
       "zzsh_order"."im_order_member",
       "zzsh_order"."im_order_group",

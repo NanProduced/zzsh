@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   createLocalFakeNimWebClientFactory,
   createNimWebClientFactory,
+  NimImageSendError,
   resolveNimSdkModule,
 } from "../src/lib/nim-web-client.ts";
 import { ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
@@ -60,7 +61,7 @@ class FakeLoginService {
   }
 }
 
-function fakeSdk({ loginService = new FakeLoginService(), loginError, messageService, messageCreator, conversationUtil } = {}) {
+function fakeSdk({ loginService = new FakeLoginService(), loginError, messageService, messageCreator, conversationUtil, storageService } = {}) {
   const calls = { initialize: [], destroyed: 0 };
   const sdk = {
     getInstance(initializeOptions, otherOptions) {
@@ -81,6 +82,7 @@ function fakeSdk({ loginService = new FakeLoginService(), loginError, messageSer
         },
         V2NIMMessageService: messageService,
         V2NIMMessageCreator: messageCreator,
+        V2NIMStorageService: storageService,
         V2NIMConversationIdUtil: conversationUtil,
         async destroy() {
           calls.destroyed += 1;
@@ -293,6 +295,164 @@ test("does not call the SDK when the server message authorization is rejected", 
   assert.equal(historyCalls, 0);
   assert.equal(sendCalls, 0);
   await handle.dispose();
+});
+
+test("passes the per-message route only for the exact authorized team and blocks stale or mismatched grants", async () => {
+  const sent = [];
+  const messageService = {
+    on() {}, off() {},
+    async sendMessage(...args) { sent.push(args); return { message: { messageClientId: `sent-${sent.length}`, conversationId: args[1] } }; },
+  };
+  const grant = { appId: "test-app", orderId: "order-1", teamId: "9001", conversationId: "staff-1|2|9001", routeEnvironment: "oim4d-test" };
+  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ text }) } });
+  const state = testContext("staff-1");
+  const handle = await createNimWebClientFactory({ appKey: "test-app", token: "test-token" }, async () => sdk)(state.context);
+  try {
+    await handle.client.sendText(grant.conversationId, "scoped", async ({ conversationId }) => conversationId === grant.conversationId ? grant : undefined);
+    await handle.client.sendText("staff-1|1|peer-1", "ordinary", async () => undefined);
+    assert.deepEqual(sent[0]?.[2], { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } });
+    assert.equal(sent[0]?.length, 3);
+    assert.equal(sent[1]?.length, 2);
+    await assert.rejects(handle.client.sendText("staff-1|2|9002", "wrong-team", async () => grant), /route scope is invalid/);
+    assert.equal(sent.length, 2);
+
+    const gate = deferred();
+    const stale = handle.client.sendText(grant.conversationId, "late", () => gate.promise);
+    await new Promise((resolve) => setImmediate(resolve));
+    state.supersede();
+    gate.resolve(grant);
+    await assert.rejects(stale, ImLifecycleSupersededError);
+    assert.equal(sent.length, 2);
+  } finally { await handle.dispose(); }
+});
+
+test("formal image adapter uses the installed V2 image creator, reports progress, and retries the same message after an unknown result", async () => {
+  const sent = [];
+  let first = true;
+  const messageService = {
+    on() {},
+    off() {},
+    async sendMessage(message, conversationId, params, progress) {
+      sent.push({ message, conversationId, params });
+      progress?.(42);
+      if (first) {
+        first = false;
+        throw new Error("connection lost after upload");
+      }
+      return { message: { ...message, conversationId, senderId: "customer-image", receiverId: "9001", createTime: 2, messageType: 1, attachment: { url: "https://nos.example/image" } } };
+    },
+  };
+  const created = [];
+  const { sdk } = fakeSdk({
+    messageService,
+    storageService: {},
+    messageCreator: {
+      createImageMessage(file, name, sceneName, width, height) {
+        const message = { messageClientId: "image-client-1", file, name, sceneName, width, height, messageType: 1 };
+        created.push(message);
+        return message;
+      },
+      createTextMessage: (text) => ({ text }),
+    },
+  });
+  const authorizations = [];
+  const progress = [];
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("customer-image").context);
+  const file = new File([new Uint8Array([1, 2, 3])], "proof.png", { type: "image/png" });
+  const route = { appId: "test-app", orderId: "order-image", teamId: "9001", conversationId: "customer-image|2|9001", routeEnvironment: "oim4d-test" };
+  const authorize = async (input) => { authorizations.push(input); return route; };
+  await assert.rejects(handle.client.sendImage("customer-image|2|9001", file, { authorize, width: 12, height: 8, onProgress: (value) => progress.push(value) }), (error) => error instanceof NimImageSendError && error.kind === "UNKNOWN" && error.messageClientId === "image-client-1");
+  const reply = await handle.client.retryImage("customer-image|2|9001", "image-client-1", { authorize, onProgress: (value) => progress.push(value) });
+  assert.equal(reply.messageClientId, "image-client-1");
+  assert.equal(sent[0].message, sent[1].message);
+  assert.deepEqual(sent.map(call => call.params), [
+    { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } },
+    { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } },
+  ]);
+  assert.equal(created.length, 1);
+  assert.deepEqual(authorizations, [
+    { conversationId: "customer-image|2|9001", operation: "send" },
+    { conversationId: "customer-image|2|9001", operation: "send" },
+  ]);
+  assert.deepEqual(progress, [0, 42, 0, 42, 100]);
+  await handle.dispose();
+});
+
+test("local fake image transport sends a bounded same-origin payload and keeps the client message ID for retry", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let first = true;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, init });
+    if (first) {
+      first = false;
+      throw new Error("local transport interrupted");
+    }
+    const body = JSON.parse(init.body);
+    return Response.json({ message: {
+      messageClientId: body.image.messageClientId,
+      messageServerId: body.image.messageClientId,
+      conversationId: body.conversationId,
+      senderId: "customer-local-image",
+      receiverId: "9001",
+      createTime: 1,
+      messageType: 1,
+      attachment: { imageId: "local-image-1", url: "/api/im/images/local-image-1", name: body.image.name, mimeType: body.image.mimeType, size: body.image.size },
+    } });
+  };
+  try {
+    const state = testContext("customer-local-image");
+    const handle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-local-image" })(state.context);
+    const file = new File([new Uint8Array([0xff, 0xd8, 0xff])], "proof.jpg", { type: "image/jpeg" });
+    await assert.rejects(handle.client.sendImage("customer-local-image|2|9001", file), (error) => error instanceof NimImageSendError && error.kind === "UNKNOWN");
+    const reply = await handle.client.retryImage("customer-local-image|2|9001", JSON.parse(requests[0].init.body).image.messageClientId);
+    const firstBody = JSON.parse(requests[0].init.body);
+    const retryBody = JSON.parse(requests[1].init.body);
+    assert.equal(reply.attachment.url, "/api/im/images/local-image-1");
+    assert.equal(firstBody.image.messageClientId, retryBody.image.messageClientId);
+    assert.equal(firstBody.image.size, 3);
+    assert.match(firstBody.image.data, /^[A-Za-z0-9+/]+=*$/);
+    assert.equal(requests[0].url, "/api/im/messages");
+    await handle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local fake image transport rechecks lifecycle after encoding and authorization before POST", async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => { requests += 1; return Response.json({}); };
+  const file = (gate) => ({ name: "proof.png", type: "image/png", size: 3, arrayBuffer: () => gate.promise });
+  try {
+    const encoded = deferred();
+    const firstState = testContext("customer-image-stale");
+    const firstHandle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-image-stale" })(firstState.context);
+    let authorizations = 0;
+    const firstSend = firstHandle.client.sendImage("customer-image-stale|2|9001", file(encoded), { authorize: async () => { authorizations += 1; } });
+    await new Promise((resolve) => setImmediate(resolve));
+    firstState.supersede();
+    encoded.resolve(new Uint8Array([0xff, 0xd8, 0xff]).buffer);
+    await assert.rejects(firstSend, ImLifecycleSupersededError);
+    assert.equal(authorizations, 0);
+    assert.equal(requests, 0);
+    await firstHandle.dispose();
+
+    const authGate = deferred();
+    const secondState = testContext("customer-image-auth-stale");
+    const secondHandle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-image-auth-stale" })(secondState.context);
+    let secondAuthorizeCalled = false;
+    const secondSend = secondHandle.client.sendImage("customer-image-auth-stale|2|9001", file({ promise: Promise.resolve(new Uint8Array([0xff, 0xd8, 0xff]).buffer) }), { authorize: async () => { secondAuthorizeCalled = true; await authGate.promise; } });
+    for (let attempt = 0; attempt < 50 && !secondAuthorizeCalled; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secondAuthorizeCalled, true);
+    secondState.supersede();
+    authGate.resolve();
+    await assert.rejects(secondSend, ImLifecycleSupersededError);
+    assert.equal(requests, 0);
+    await secondHandle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("disposed NIM client blocks protected SDK calls and keeps counters at zero", async () => {

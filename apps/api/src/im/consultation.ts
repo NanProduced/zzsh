@@ -324,7 +324,7 @@ function requiredSupportPermission(type: SupportType): string[] {
     : [ADMIN_PERMISSION.imSupportAccept];
 }
 
-function requireSupportAccess(access: EffectiveAdminAccess | null, type: SupportType, action: "accept" | "transfer" = "accept"): void {
+export function requireSupportAccess(access: EffectiveAdminAccess | null, type: SupportType, action: "accept" | "transfer" = "accept"): void {
   const required = action === "transfer"
     ? [...requiredSupportPermission(type), ADMIN_PERMISSION.imSupportTransfer]
     : requiredSupportPermission(type);

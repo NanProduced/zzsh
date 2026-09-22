@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
-import { ConfigurationError, loadConfig } from "../src/config/config";
+import { ConfigurationError, loadConfig, orderImSdkRouteFor } from "../src/config/config";
 
 const secret = "test-only-secret-that-must-not-be-logged";
 
@@ -158,6 +158,30 @@ test("keeps real providers behind provider-test scope and disables them for test
     (error: unknown) => error instanceof ConfigurationError && /PROVIDER_TEST_SCOPE/.test(error.message),
   );
   assert.equal(loadConfig({ ...validEnv("provider-test"), PROVIDER_MODE: "real" }).provider, "real");
+});
+
+test("routes only configured order/team/conversation pairs for the bound non-production provider-test App", () => {
+  const routeConfig = {
+    routeEnvironment: "oim4d-test",
+    scopes: [
+      { appId: "test-app", orderId: "order-1", teamId: "9001", conversationId: "staff-1|2|9001" },
+      { appId: "test-app", orderId: "order-1", teamId: "9001", conversationId: "sys-manager|2|9001" },
+    ],
+  };
+  const env = {
+    ...validEnv("provider-test"), PROVIDER_MODE: "real", YUNXIN_ENABLED: "true",
+    YUNXIN_APP_KEY: "test-app", YUNXIN_APP_SECRET: secret, YUNXIN_ORDER_TEST_ROUTE_CONFIG: JSON.stringify(routeConfig),
+  };
+  const config = loadConfig(env);
+  assert.deepEqual(config.orderImSdkRouteConfig, routeConfig);
+  assert.deepEqual(orderImSdkRouteFor(config.orderImSdkRouteConfig, routeConfig.scopes[0]!), {
+    ...routeConfig.scopes[0], routeEnvironment: "oim4d-test",
+  });
+  for (const change of [
+    { appId: "other-app" }, { orderId: "order-2" }, { teamId: "9002" }, { conversationId: "staff-1|2|9002" },
+  ]) assert.equal(orderImSdkRouteFor(config.orderImSdkRouteConfig, { ...routeConfig.scopes[0]!, ...change }), undefined);
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: "production" }), /non-production provider-test/);
+  assert.throws(() => loadConfig({ ...env, YUNXIN_APP_KEY: "other-app" }), /YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid/);
 });
 
 test("fails closed for incomplete or misplaced Yunxin configuration", () => {
