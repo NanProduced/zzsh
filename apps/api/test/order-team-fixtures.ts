@@ -4,11 +4,19 @@ import { YunxinServerApiClient, YunxinTransportError, type YunxinCreateAccountIn
 export class OrderTeamTransport {
   readonly teams=new Map<string,{info:Record<string,any>;members:Record<string,any>[]} >();
   readonly creates:Record<string,any>[]=[];
+  readonly adds:Record<string,any>[]=[];
+  readonly notices:Record<string,any>[]=[];
   readonly calls:string[]=[];
   nextId=910000001;
   responseLoss=false;partial=false;
   rejectCode:number|undefined;
   beforeResponse?:()=>Promise<void>;
+  beforeAddResponse?:()=>Promise<void>;
+  addResponseLoss=false;
+  noticeResponseLoss=false;
+  beforeNoticeResponse?:()=>Promise<void>;
+  rejectAddCode:number|undefined;
+  rejectNoticeCode:number|undefined;
   tweak?:(team:{info:Record<string,any>;members:Record<string,any>[]})=>void;
   readonly client=new YunxinServerApiClient({appKey:"order-fixture",appSecret:"fixture-only",fetch:async(url,init)=>{
     const parsed=new URL(String(url));this.calls.push(`${init?.method} ${parsed.pathname}`);
@@ -21,6 +29,31 @@ export class OrderTeamTransport {
       this.tweak?.(team);this.teams.set(id,team);await this.beforeResponse?.();
       if(this.responseLoss)throw new Error("simulated response loss");
       return Response.json({code:200,data:{team_info:{team_id:id,owner_account_id:body.owner_account_id},failed_list:this.partial?[{account_id:body.invite_account_ids[0]}]:[]}});
+    }
+    if(init?.method==="POST"&&parsed.pathname==="/im/v2/team_members"){
+      const body=JSON.parse(String(init.body));this.adds.push(body);
+      if(this.rejectAddCode)return Response.json({code:this.rejectAddCode});
+      const id=String(body.team_id),team=this.teams.get(id);
+      if(!team)return Response.json({code:108404});
+      const failed=[];
+      for(const accountId of body.invite_account_ids as string[]){
+        if(team.members.some((member)=>member.account_id===accountId)){failed.push({account_id:accountId});continue;}
+        team.members.push({team_id:id,account_id:accountId,member_role:0,chat_banned:false});
+      }
+      team.info.member_count=team.members.length;
+      await this.beforeAddResponse?.();
+      if(this.addResponseLoss)throw new Error("simulated add response loss");
+      return Response.json({code:200,data:{failed_list:failed}});
+    }
+    if(init?.method==="POST"&&parsed.pathname.startsWith("/im/v2/conversations/")&&parsed.pathname.endsWith("/messages")){
+      const body=JSON.parse(String(init.body));this.notices.push(body);
+      if(this.rejectNoticeCode)return Response.json({code:this.rejectNoticeCode});
+      const parts=decodeURIComponent(parsed.pathname.slice("/im/v2/conversations/".length,-"/messages".length)).split("|");
+      const [sender,,teamId]=parts;
+      await this.beforeNoticeResponse?.();
+      if(this.noticeResponseLoss)throw new Error("simulated notice response loss");
+      return Response.json({code:200,data:{message_client_id:`notice_${this.notices.length}`,sender_id:sender,conversation_type:2,
+        receiver_id:teamId,create_time:Date.now(),message_type:body.message?.message_type}});
     }
     const id=parsed.pathname.split("/")[4]!,team=this.teams.get(id);
     if(!team)return Response.json({code:108404});

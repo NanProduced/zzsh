@@ -416,7 +416,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     // The OIM-4B resource stages its pending tail on a lower baseline so the suite can seed
     // legacy rows first and then apply each migration as a real increment. An already-migrated
     // resource is reused as-is: no drop, no replay from zero, no false staged claim.
-    const stagedFirstResponse = RESOURCE_SET === "oim_first_response";
+    const stagedFirstResponse = RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "oim_escalation_stage";
     const baselineCount = Number(migrationBefore.n ?? 0);
     // A fresh resource stages up to 0042 before legacy fixtures; an existing one only refreshes
     // grants (its journal tail is already applied), so the suite never drops or replays from zero.
@@ -424,11 +424,18 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : undefined;
     await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
     const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
+    if (RESOURCE_SET === "oim_escalation_stage") {
+      assert.equal(baselineCount, 0, "the one-time stage must be rebuilt through its registered empty-resource path");
+      assert.equal(stageUpTo, 42, "the staged runner must stop after migration 0042 before legacy seeding");
+      assert.equal(migrated.length, 43, "the staged runner must establish the exact 0042 baseline before 0043");
+    }
+    const firstResponseBaselineCount = stagedFirstResponse ? migrated.length : baselineCount;
     if (!stagedFirstResponse) {
       await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
       assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
     }
-    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse, baselineCount, tail: migrated.slice(-2), replayUnchanged: !stagedFirstResponse }));
+    console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse,
+      baselineCount, firstResponseBaselineCount, tail: migrated.slice(-2), replayUnchanged: !stagedFirstResponse }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
@@ -460,7 +467,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       // Explicit synthetic supplier-event ingress for OIM-4B; never reads a real AppSecret.
       // No approval/freshness windows are passed: the mounted default path is what runs.
       // The periodic sweep is pushed out so deterministic recovery tests own their own calls.
-      orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000 },
+      orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000, escalationEnabled: true },
       realNameProvider: createFakeRealNameProvider("VERIFIED_ADULT"),
       orderHoldSeconds: HOLD_SECONDS,
       // Fixture: no further obligations beyond the composed supply/order checks.
@@ -1688,9 +1695,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       await runDispatchAcceptance(t, acceptance);
       await runOrderTeamAcceptance(t, acceptance);
       if (stagedFirstResponse) {
-        await runOrderFirstResponseAcceptance(t, acceptance, {
+      await runOrderFirstResponseAcceptance(t, acceptance, {
           base,
-          baselineCount,
+          baselineCount: firstResponseBaselineCount,
           upgrade: async (upToIndex) => {
             await runBusinessMigrations(migrationPool!, {
               runtimeUser: resources!.runtimeUser,

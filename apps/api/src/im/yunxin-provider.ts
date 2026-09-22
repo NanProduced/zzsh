@@ -102,6 +102,8 @@ export type YunxinOrderTeamState = { teamId: string; ownerAccountId: string; ser
 export type YunxinOrderTeamApi = {
   createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }>;
   readOrderTeam(teamId: string): Promise<YunxinOrderTeamState | null>;
+  addSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void>;
+  sendOrderTeamNotice(teamId: string, operatorAccountId: string): Promise<void>;
 };
 
 /** Trimmed single-message fact; text/attachment/URL are deliberately dropped. */
@@ -685,6 +687,26 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const data = responseData(response);
     const failed = field(data, "failed_list");
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("add-support-team-member", null, false);
+  }
+
+  async sendOrderTeamNotice(teamId: string, operatorAccountId: string): Promise<void> {
+    const team = normalizeTeamId(teamId);
+    const operator = normalizeAccountId(operatorAccountId);
+    const conversationId = `${operator}|2|${team}`;
+    const data = responseData(await this.request("send-order-team-notice", "POST",
+      `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        message: { message_type: 0, text: "客服正在为您安排接待，请稍候。" },
+      }, "", "v2"));
+    const sender = asString(field(data, "sender_id"));
+    const conversationType = asNumber(field(data, "conversation_type"));
+    const messageType = asNumber(field(data, "message_type"));
+    const createTime = asNumber(field(data, "create_time"));
+    const clientId = asString(field(data, "message_client_id"));
+    if (!sender || normalizeAccountId(sender) !== operator || conversationType !== 2 || messageType !== 0
+      || createTime === undefined || !Number.isFinite(createTime) || !clientId
+      || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
+      throw new YunxinApiError("send-order-team-notice", null, false);
+    }
   }
 
   async createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }> {

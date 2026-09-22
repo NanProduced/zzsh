@@ -102,6 +102,11 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
       REVOKE UPDATE ON TABLE zzsh_order.im_order_event FROM ${runtimeUser};
       GRANT UPDATE (status) ON TABLE zzsh_order.im_order_event TO ${runtimeUser};`);
   }
+  const hasEscalationColumns=(await pool.query(`SELECT count(*)=5 AS ready FROM pg_attribute
+    WHERE attrelid=to_regclass('zzsh_order.im_order_group') AND attname=ANY($1::text[]) AND NOT attisdropped`,
+    [["responsible_admin_id","remind_due_at","next_add_due_at","add_round","escalation_state"]])).rows[0]?.ready;
+  if(hasEscalationColumns)await pool.query(`GRANT UPDATE (responsible_admin_id,remind_due_at,next_add_due_at,add_round,escalation_state)
+    ON zzsh_order.im_order_group TO ${runtimeUser}`);
   await pool.query(`GRANT USAGE, SELECT ON SEQUENCE "zzsh_order"."display_no_seq" TO ${runtimeUser}`);
   for (const schema of ["zzsh_auth_user", "zzsh_auth_admin"] as const) {
     await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schema}" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtimeUser}`);

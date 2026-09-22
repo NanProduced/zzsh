@@ -268,6 +268,7 @@
     {"idx":41,"version":"7","when":1789490010000,"tag":"0041_order_personal_confirmation","breakpoints":true},
     {"idx":42,"version":"7","when":1789490011000,"tag":"0042_supply_listing_query","breakpoints":true},
     {"idx":43,"version":"7","when":1789490012000,"tag":"0043_oim_order_first_response","breakpoints":true},
-    {"idx":44,"version":"7","when":1789490013000,"tag":"0044_oim_order_first_response_guards","breakpoints":true}
+    {"idx":44,"version":"7","when":1789490013000,"tag":"0044_oim_order_first_response_guards","breakpoints":true},
+    {"idx":45,"version":"7","when":1789490014000,"tag":"0045_oim_order_escalation","breakpoints":true}
   ]
 }
