@@ -7,7 +7,7 @@ import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authoriza
 import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidate } from "./support-dispatch";
 import { createImScopeLease, lockTeamBinding, onLeaseConnection } from "./scope-lease";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityProvisioner } from "./identity-lifecycle";
-import { orderImSdkRouteFor, type OrderImSdkRouteConfig } from "../config/config";
+import { OrderImSdkRouteError, type OrderImSdkRouteBindings } from "../config/config";
 import { ORDER_TEAM_CONFIGURATION, YunxinApiError, validateOrderTeamInput, type YunxinMessageRouteConfig, type YunxinOrderTeamApi, type YunxinOrderTeamInput, type YunxinOrderTeamState } from "./yunxin-provider";
 
 export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrderTeamApi;
@@ -16,7 +16,7 @@ export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrde
   firstResponseEnabled?: boolean;
   /** Explicit opt-in; requires this App's first-response ingress to be enabled as well. */
   escalationEnabled?: boolean;
-  orderImSdkRouteConfig?: OrderImSdkRouteConfig };
+  orderImSdkRouteBindings?: OrderImSdkRouteBindings };
 type Db = Pool | PoolClient;
 type Member = { identity_id:string; party:"BUYER"|"OWNER"|"STAFF"; state:string; account_id:string; platform_subject_id:string; realm:string; identity_kind:"USER"|"ADMIN"; status:string; identity_marker:string };
 type Plan = { order_id:string; app_id:string; assigned_admin_id:string; provision_state:string; team_state:string; team_name:string|null;
@@ -213,7 +213,7 @@ async function execute(options:OrderTeamOptions,op:Claim):Promise<void>{
     if(!id)throw new OrderTeamError("CANDIDATE_UNKNOWN");
     phase="PROVIDER_UNKNOWN";
     const team=await lease.mutate(`team:${id}`,()=>options.provider.readOrderTeam(id!));validateTeam(p,team,id);
-    await lease.assertValid();await lease.stop();phase="DB_WRITEBACK_UNKNOWN";
+    await lease.assertValid();bindVerifiedOrderTeam(options,p,team!);await lease.stop();phase="DB_WRITEBACK_UNKNOWN";
     await finish(options,op,team!);
   }catch(error){
     await lease.stop();
@@ -298,7 +298,8 @@ async function escalationPlan(db:Db,appId:string,id:string):Promise<EscalationPl
   return {...row,members};
 }
 
-function assertSystemOwner(p:EscalationPlan):string{
+type VerifiedTeamPlan=Pick<EscalationPlan,"app_id"|"order_id"|"team_id"|"team_name"|"members_limit"|"system_account"|"system_status"|"system_marker"|"system_subject"|"members">;
+function assertSystemOwner(p:Pick<VerifiedTeamPlan,"app_id"|"system_account"|"system_status"|"system_marker"|"system_subject">):string{
   const expected=key(p.app_id,"SYSTEM","support-manager");
   if(!p.system_account||p.system_status!=="READY"||p.system_subject!=="support-manager"
     ||p.system_account!==deriveYunxinAccountId(expected)||p.system_marker!==buildYunxinIdentityMarker(expected))
@@ -306,7 +307,7 @@ function assertSystemOwner(p:EscalationPlan):string{
   return p.system_account;
 }
 
-function validateEscalationTeam(p:EscalationPlan,team:YunxinOrderTeamState|null,targetAdminId?:string):void{
+function validateEscalationTeam(p:VerifiedTeamPlan,team:YunxinOrderTeamState|null,targetAdminId?:string):void{
   const systemAccount=assertSystemOwner(p);
   let marker:unknown;try{marker=JSON.parse(team?.serverExtension??"null");}catch{throw new OrderTeamError("REMOTE_MISMATCH");}
   const expected=[systemAccount,...p.members.filter(m=>m.state==="JOINED").map(m=>m.account_id)];
@@ -324,6 +325,55 @@ function validateEscalationTeam(p:EscalationPlan,team:YunxinOrderTeamState|null,
     throw new OrderTeamError("REMOTE_MISMATCH");
 }
 
+function bindVerifiedOrderTeam(options:OrderTeamOptions,p:{app_id:string;order_id:string},team:YunxinOrderTeamState):void{
+  try{options.orderImSdkRouteBindings?.bindVerifiedTeam(p.app_id,p.order_id,team.teamId,team.members.map(member=>member.accountId));}
+  catch(error){if(error instanceof OrderImSdkRouteError)throw new OrderTeamError("ROUTE_BINDING_FAILED");throw error;}
+}
+function assertOrderRouteReady(options:OrderTeamOptions,p:{app_id:string;order_id:string;team_id:string|null}):void{
+  if(!p.team_id)return;
+  try{options.orderImSdkRouteBindings?.assertTeamReady(p.app_id,p.order_id,p.team_id);}
+  catch(error){if(error instanceof OrderImSdkRouteError)throw new OrderTeamError(error.code);throw error;}
+}
+
+function validateRestoredOrderTeam(p:Plan,team:YunxinOrderTeamState|null):void{
+  if(p.provision_state!=="ASSIGNED"||p.order_status!=="PAID"||p.team_state!=="READY"||!p.team_id||!p.team_name||!p.members_limit)
+    throw new OrderTeamError("BINDING_MISMATCH");
+  const buyers=p.members.filter(member=>member.party==="BUYER"),owners=p.members.filter(member=>member.party==="OWNER");
+  const staff=p.members.filter(member=>member.party==="STAFF"&&member.state==="JOINED");
+  if(buyers.length!==1||owners.length!==1||buyers[0]!.state!=="JOINED"||owners[0]!.state!=="JOINED"
+    ||!staff.some(member=>member.platform_subject_id===p.assigned_admin_id))throw new OrderTeamError("BINDING_MISMATCH");
+  for(const member of p.members.filter(item=>item.state==="JOINED")){
+    const kind=member.party==="STAFF"?"ADMIN":"USER";
+    const subject=member.party==="BUYER"?p.renter_user_id:member.party==="OWNER"?p.owner_user_id:member.platform_subject_id;
+    const identityKey=key(p.app_id,kind,subject);
+    if(member.realm!==kind.toLowerCase()||member.identity_kind!==kind||member.platform_subject_id!==subject||member.status!=="READY"
+      ||member.account_id!==deriveYunxinAccountId(identityKey)||member.identity_marker!==buildYunxinIdentityMarker(identityKey))
+      throw new OrderTeamError("IDENTITY_PENDING");
+  }
+  validateEscalationTeam(p,team);
+}
+
+/** Restores only explicitly approved orders after exact persisted and provider Team verification. */
+export async function restoreApprovedOrderRoutes(options:OrderTeamOptions):Promise<void>{
+  const bindings=options.orderImSdkRouteBindings;if(!bindings)return;
+  for(const orderId of bindings.approvedOrderIdsForRestore()){
+    try{
+      const p=await plan(options.pool,options.appId,orderId);if(!p)continue;
+      const create=(await options.pool.query<Operation>(`SELECT * FROM zzsh_order.im_order_operation WHERE order_id=$1 AND app_id=$2 AND kind='CREATE'`,[orderId,options.appId])).rows[0];
+      if(p.team_state==="READY"&&p.team_id){
+        if(create?.state!=="SUCCEEDED"||create.candidate_team_id!==p.team_id)throw new OrderTeamError("BINDING_MISMATCH");
+        const team=await options.provider.readOrderTeam(p.team_id);
+        validateRestoredOrderTeam(p,team);
+        bindVerifiedOrderTeam(options,p,team!);
+      }else if(create?.state==="NEEDS_REVIEW"&&create.failure_class==="ROUTE_BINDING_FAILED"&&create.candidate_team_id){
+        await reconcileOrderTeam(options,orderId,{operationId:create.id,version:create.version,teamId:create.candidate_team_id});
+      }
+    }catch{
+      new Logger("OrderTeamRoute").warn(JSON.stringify({event:"im.order.route.restore_deferred",orderId}));
+    }
+  }
+}
+
 async function insertOperationalEvent(c:PoolClient,p:EscalationPlan,input:{type:OperationalEventType;key:string;status:string;
   operationId?:string;metadata?:Record<string,unknown>}):Promise<boolean>{
   const systemAccount=assertSystemOwner(p);
@@ -336,7 +386,8 @@ async function insertOperationalEvent(c:PoolClient,p:EscalationPlan,input:{type:
   return result.rowCount===1;
 }
 
-async function recordDueReminder(c:PoolClient,p:EscalationPlan):Promise<boolean>{
+async function recordDueReminder(options:OrderTeamOptions,c:PoolClient,p:EscalationPlan):Promise<boolean>{
+  assertOrderRouteReady(options,p);
   if(!p.remind_due_at||p.escalation_state!=="RUNNING"||p.team_state!=="READY"||p.first_response_state!=="RUNNING")return false;
   const due=(await c.query(`SELECT $1::timestamptz<=clock_timestamp() AS due`,[p.remind_due_at])).rows[0]?.due;
   if(!due)return false;
@@ -353,7 +404,7 @@ async function recordReminder(options:OrderTeamOptions,id:string):Promise<void>{
   await withTransaction(options.pool,async(c)=>{
     const group=(await c.query(`SELECT order_id FROM zzsh_order.im_order_group WHERE app_id=$1 AND order_id=$2 FOR UPDATE`,[options.appId,id])).rows[0];
     if(!group)return;
-    const p=await escalationPlan(c,options.appId,id);if(p)await recordDueReminder(c,p);
+    const p=await escalationPlan(c,options.appId,id);if(p)await recordDueReminder(options,c,p);
   });
 }
 
@@ -392,11 +443,13 @@ async function exhaustSupport(c:PoolClient,p:EscalationPlan):Promise<void>{
 async function planNextAdd(options:OrderTeamOptions,id:string):Promise<void>{
   const discovered=await escalationPlan(options.pool,options.appId,id);
   if(!discovered||!discovered.team_id||!discovered.assigned_admin_id||!discovered.responsible_admin_id)return;
+  assertOrderRouteReady(options,discovered);
   await withTransaction(options.pool,async(c)=>{
     const roster=await lockSupportMutation(c,options.appId,[discovered.renter_user_id,discovered.owner_user_id],[discovered.responsible_admin_id!,discovered.assigned_admin_id!]);
     await lockTeamBinding(c,options.appId,discovered.team_id!);
     await lockGroup(c,discovered);
     let p=await escalationPlan(c,options.appId,id);if(!p||!p.team_id)return;
+    assertOrderRouteReady(options,p);
     await c.query(`SELECT id FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id FOR UPDATE`,[id]);
     if(p.escalation_state!=="RUNNING"||p.team_state!=="READY")return;
     if(p.first_response_state!=="RUNNING"){
@@ -405,7 +458,7 @@ async function planNextAdd(options:OrderTeamOptions,id:string):Promise<void>{
         WHERE order_id=$1 AND app_id=$2 AND escalation_state='RUNNING'`,[id,options.appId,state]);
       return;
     }
-    await recordDueReminder(c,p);
+    await recordDueReminder(options,c,p);
     p=await escalationPlan(c,options.appId,id);if(!p||p.escalation_state!=="RUNNING"||!p.next_add_due_at)return;
     if(!(await c.query(`SELECT $1::timestamptz<=clock_timestamp() AS due`,[p.next_add_due_at])).rows[0]?.due)return;
     const unresolved=(await c.query(`SELECT 1 FROM zzsh_order.im_order_operation WHERE order_id=$1 AND kind='ADD_MEMBER'
@@ -643,10 +696,12 @@ async function executeAdd(options:OrderTeamOptions,op:EscalationClaim):Promise<v
     p=await escalationPlan(options.pool,options.appId,op.order_id);
     if(!p?.team_id)throw new OrderTeamError("STALE_OPERATION");
     const member=targetMember(p,op),teamId=p.team_id;
+    if(!op.readonlyMode)assertOrderRouteReady(options,p);
     if(op.readonlyMode){
       observed=await lease.mutate(`team:${teamId}`,()=>options.provider.readOrderTeam(teamId));
       if(!observed)throw new OrderTeamError("REMOTE_MISMATCH");
       validateEscalationTeam(p,observed,op.target_admin_id!);
+      bindVerifiedOrderTeam(options,p,observed);
       await lease.stop();
       await finishAdd(options,op,observed);
       return;
@@ -655,6 +710,7 @@ async function executeAdd(options:OrderTeamOptions,op:EscalationClaim):Promise<v
       const fresh=await escalationPlan(c,options.appId,op.order_id);
       if(!fresh?.team_id)throw new OrderTeamError("STALE_OPERATION");
       const currentMember=targetMember(fresh,op);
+      assertOrderRouteReady(options,fresh);
       const existing=await options.provider.readOrderTeam(teamId);
       validateEscalationTeam(fresh,existing);
       const decision=await onLeaseConnection(c,db=>markAddSent(db,options,op,fresh));
@@ -666,6 +722,7 @@ async function executeAdd(options:OrderTeamOptions,op:EscalationClaim):Promise<v
       const confirmed=await options.provider.readOrderTeam(teamId);
       observed=confirmed;
       validateEscalationTeam(fresh,confirmed,op.target_admin_id!);
+      bindVerifiedOrderTeam(options,fresh,confirmed!);
       if(providerError)throw providerError;
       return confirmed;
     });
@@ -676,8 +733,12 @@ async function executeAdd(options:OrderTeamOptions,op:EscalationClaim):Promise<v
     await finishAdd(options,op,observed);
   }catch(error){
     await lease.stop();
+    if(sent&&p&&error instanceof OrderTeamError&&error.code==="ROUTE_BINDING_FAILED"){
+      await withTransaction(options.pool,c=>markAddOutcomeUnknown(c,options,op,p!,"ROUTE_BINDING_FAILED"));
+      return;
+    }
     if(!sent){
-      if(p&&["REMOTE_MISMATCH","IDENTITY_PENDING","BINDING_MISMATCH","TEAM_ALREADY_BOUND"].includes(error instanceof OrderTeamError?error.code:"")){
+      if(p&&["REMOTE_MISMATCH","IDENTITY_PENDING","BINDING_MISMATCH","TEAM_ALREADY_BOUND","ROUTE_NOT_READY","ROUTE_SCOPE_MISMATCH"].includes(error instanceof OrderTeamError?error.code:"")){
         await withTransaction(options.pool,c=>markUnsentAddReview(c,options,op,p!,error instanceof OrderTeamError?error.code:"REMOTE_MISMATCH"));
       }else if(p){
         await withTransaction(options.pool,c=>returnUnsentAddToPending(c,options,op,p!));
@@ -729,6 +790,26 @@ async function settleBot(options:OrderTeamOptions,op:EscalationClaim,state:"PEND
   });
 }
 
+async function markBotRouteFailure(options:OrderTeamOptions,op:EscalationClaim,p:EscalationPlan,reason:string):Promise<void>{
+  if(!p.team_id)return;
+  await withTransaction(options.pool,async(c)=>{
+    await lockEscalationMutation(c,p,p.team_id!);
+    const current=await escalationOperation(c,op.id,options.appId);
+    if(!current||current.version!==op.version||current.state!=="RUNNING"||current.sent_at||current.lease_token_hash!==hash(op.token)||!current.lease_until)return;
+    const leaseValid=(await c.query(`SELECT $1::timestamptz>clock_timestamp() AS valid`,[current.lease_until])).rows[0]?.valid;
+    if(!leaseValid)return;
+    const changed=await c.query(`UPDATE zzsh_order.im_order_operation SET state='NEEDS_REVIEW',lease_until=NULL,lease_token_hash=NULL,
+        failure_class=$3,next_retry_at=clock_timestamp()+interval '5 minutes',updated_at=clock_timestamp()
+      WHERE id=$1 AND app_id=$2 AND kind='BOT_NOTICE' AND version=$4 AND state='RUNNING' AND sent_at IS NULL AND lease_token_hash=$5
+        AND lease_until>clock_timestamp()`,
+      [op.id,options.appId,reason,op.version,hash(op.token)]);
+    if(!changed.rowCount)return;
+    const fresh=await escalationPlan(c,options.appId,op.order_id);if(!fresh)return;
+    await stopForReview(c,fresh,reason,op.id);
+    await escalationAudit(c,fresh,"im.order.escalation.bot_notice_review",op.id,{round:op.round,reason,sent:false});
+  });
+}
+
 async function executeBot(options:OrderTeamOptions,op:EscalationClaim):Promise<void>{
   const lease=escalationLease(options,op);let sent=Boolean(op.sent_at),p:EscalationPlan|null=null;
   try{
@@ -738,22 +819,23 @@ async function executeBot(options:OrderTeamOptions,op:EscalationClaim):Promise<v
       const fresh=await escalationPlan(c,options.appId,op.order_id);if(!fresh?.team_id)throw new OrderTeamError("STALE_OPERATION");
       const freshSystem=assertSystemOwner(fresh);
       if(freshSystem!==system)throw new OrderTeamError("STALE_OPERATION");
-      const shouldSend=await onLeaseConnection(c,db=>markBotSent(db,options,op,fresh));
-      if(!shouldSend)return false;
-      sent=true;
-      const routeScope=orderImSdkRouteFor(options.orderImSdkRouteConfig,{
+      const routeScope=options.orderImSdkRouteBindings?.forScope({
         appId:fresh.app_id,orderId:fresh.order_id,teamId:fresh.team_id,conversationId:`${freshSystem}|2|${fresh.team_id}`,
       });
       const routeConfig:YunxinMessageRouteConfig|undefined=routeScope
         ?{routeEnabled:true,routeEnvironment:routeScope.routeEnvironment}:undefined;
+      const shouldSend=await onLeaseConnection(c,db=>markBotSent(db,options,op,fresh));
+      if(!shouldSend)return false;
+      sent=true;
       await options.provider.sendOrderTeamNotice(fresh.team_id,freshSystem,routeConfig);
       return true;
     });
     await lease.stop();
     if(send)await settleBot(options,op,"SUCCEEDED",null);
-  }catch{
+  }catch(error){
     await lease.stop();
-    if(sent)await settleBot(options,op,"NEEDS_REVIEW","BOT_NOTICE_UNKNOWN");
+    if(!sent&&p&&error instanceof OrderImSdkRouteError)await markBotRouteFailure(options,op,p,error.code);
+    else if(sent)await settleBot(options,op,"NEEDS_REVIEW","BOT_NOTICE_UNKNOWN");
     else if(p)await settleBot(options,op,"PENDING","BOT_NOTICE_RETRYABLE");
   }
 }
@@ -763,6 +845,7 @@ async function expireEscalation(options:OrderTeamOptions,id:string):Promise<void
     AND kind IN ('ADD_MEMBER','BOT_NOTICE')`,[id,options.appId])).rows[0];
   if(!initial)return;
   const before=await escalationPlan(options.pool,options.appId,initial.order_id);if(!before?.team_id)return;
+  assertOrderRouteReady(options,before);
   await withTransaction(options.pool,async(c)=>{
     await lockEscalationMutation(c,before,before.team_id!);
     const current=await escalationOperation(c,id,options.appId);
@@ -862,7 +945,7 @@ export async function scanOrderEscalations(options:OrderTeamOptions,limit=10):Pr
 @Injectable()
 export class OrderTeamLifecycle implements BeforeApplicationShutdown {
   private readonly logger=new Logger(OrderTeamLifecycle.name);
-  private options?:OrderTeamOptions;private timer?:NodeJS.Timeout;private flight?:Promise<void>;private limit=10;
+  private options?:OrderTeamOptions;private timer?:NodeJS.Timeout;private flight?:Promise<void>;private limit=10;private routesRestored=false;
   start(options:OrderTeamOptions,intervalMs:number,limit:number):void{
     if(this.options||!Number.isSafeInteger(intervalMs)||intervalMs<1||!Number.isInteger(limit)||limit<1||limit>100||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(options.appId)
       ||!Number.isInteger(options.membersLimit)||options.membersLimit<4||options.membersLimit>5000
@@ -874,7 +957,8 @@ export class OrderTeamLifecycle implements BeforeApplicationShutdown {
   wake():void{
     if(!this.options||this.flight)return;
     const options=this.options;
-    const work=(async()=>{await scanOrderTeams(options,this.limit);if(options.escalationEnabled)await scanOrderEscalations(options,this.limit);})()
+    const work=(async()=>{if(!this.routesRestored){this.routesRestored=true;await restoreApprovedOrderRoutes(options);}
+      await scanOrderTeams(options,this.limit);if(options.escalationEnabled)await scanOrderEscalations(options,this.limit);})()
       .catch(()=>{this.logger.error(JSON.stringify({event:"im.order.team.scan_failed"}));});
     const clear=()=>{if(this.flight===settled)this.flight=undefined;};const settled=work.then(clear,clear);this.flight=settled;
   }

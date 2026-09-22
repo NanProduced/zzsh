@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
-import { ConfigurationError, loadConfig, orderImSdkRouteFor } from "../src/config/config";
+import { ConfigurationError, loadConfig, OrderImSdkRouteBindings, OrderImSdkRouteError, orderImSdkRouteFor } from "../src/config/config";
 
 const secret = "test-only-secret-that-must-not-be-logged";
 
@@ -182,6 +182,36 @@ test("routes only configured order/team/conversation pairs for the bound non-pro
   ]) assert.equal(orderImSdkRouteFor(config.orderImSdkRouteConfig, { ...routeConfig.scopes[0]!, ...change }), undefined);
   assert.throws(() => loadConfig({ ...env, NODE_ENV: "production" }), /non-production provider-test/);
   assert.throws(() => loadConfig({ ...env, YUNXIN_APP_KEY: "other-app" }), /YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid/);
+});
+
+test("approves dynamic route binding only for explicit provider-test App/order and fails closed until exact Team readback", () => {
+  const approved = { appId: "test-app", orderId: "order-new" };
+  const env = { ...validEnv("provider-test"), PROVIDER_MODE: "real", YUNXIN_ENABLED: "true",
+    YUNXIN_APP_KEY: "test-app", YUNXIN_APP_SECRET: secret,
+    YUNXIN_ORDER_TEST_ROUTE_CONFIG: JSON.stringify({ routeEnvironment: "oim4d-test", approvedOrders: [approved] }) };
+  const config = loadConfig(env).orderImSdkRouteConfig!;
+  assert.deepEqual(config, { routeEnvironment: "oim4d-test", scopes: [], approvedOrders: [approved] });
+  const routes = new OrderImSdkRouteBindings(config);
+  assert.deepEqual(routes.approvedOrderIdsForRestore(), ["order-new"]);
+  assert.throws(() => routes.forScope({ ...approved, teamId: "9001", conversationId: "buyer|2|9001" }),
+    (error: unknown) => error instanceof OrderImSdkRouteError && error.code === "ROUTE_NOT_READY");
+  assert.equal(routes.forScope({ appId: "test-app", orderId: "ordinary", teamId: "9001", conversationId: "buyer|2|9001" }), undefined);
+  routes.bindVerifiedTeam("test-app", "order-new", "9001", ["system", "buyer", "owner", "staff"]);
+  routes.bindVerifiedTeam("test-app", "order-new", "9001", ["system", "buyer", "owner", "staff"]);
+  assert.deepEqual(routes.forScope({ ...approved, teamId: "9001", conversationId: "staff|2|9001" }), {
+    ...approved, teamId: "9001", conversationId: "staff|2|9001", routeEnvironment: "oim4d-test",
+  });
+  routes.bindVerifiedTeam("test-app", "order-new", "9001", ["system", "buyer", "owner", "staff", "replacement"]);
+  assert.ok(routes.forScope({ ...approved, teamId: "9001", conversationId: "replacement|2|9001" }));
+  for (const change of [
+    { appId: "other-app" }, { teamId: "9002" }, { conversationId: "stranger|2|9001" },
+    { conversationId: "staff|2|9002" },
+  ]) assert.throws(() => routes.forScope({ ...approved, teamId: "9001", conversationId: "staff|2|9001", ...change }),
+    (error: unknown) => error instanceof OrderImSdkRouteError && error.code === "ROUTE_SCOPE_MISMATCH");
+  assert.throws(() => routes.bindVerifiedTeam("test-app", "order-new", "9002", ["system", "buyer"]),
+    (error: unknown) => error instanceof OrderImSdkRouteError && error.code === "ROUTE_SCOPE_MISMATCH");
+  assert.throws(() => loadConfig({ ...env, YUNXIN_ORDER_TEST_ROUTE_CONFIG: JSON.stringify({ routeEnvironment: "oim4d-test", approvedOrders: [{ ...approved, appId: "other-app" }] }) }), /YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid/);
+  assert.throws(() => loadConfig({ ...env, YUNXIN_ORDER_TEST_ROUTE_CONFIG: JSON.stringify({ routeEnvironment: "oim4d-test", approvedOrders: [{ appId: "test-app", orderId: "*" }] }) }), /YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid/);
 });
 
 test("fails closed for incomplete or misplaced Yunxin configuration", () => {

@@ -25,7 +25,7 @@ import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
-import { ConfigurationError, readSecret, type OrderImSdkRouteConfig } from "../config/config";
+import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { setAuditContext, withTransaction } from "./security-core";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
@@ -676,6 +676,13 @@ export async function mountAuthHandlers(
   if ((options.testYunxinProvider || options.testImMessageTransport) && !options.testOperationsEnabled) {
     throw new ConfigurationError("Test IM providers require test operations capability");
   }
+  if (options.orderImSdkRouteConfig && (!options.yunxin
+    || [...options.orderImSdkRouteConfig.scopes, ...(options.orderImSdkRouteConfig.approvedOrders ?? [])]
+      .some(scope => scope.appId !== options.yunxin!.appId))) {
+    throw new ConfigurationError("Order IM routes must be bound to the configured Yunxin App");
+  }
+  const orderImSdkRouteBindings = options.orderImSdkRouteConfig
+    ? new OrderImSdkRouteBindings(options.orderImSdkRouteConfig) : undefined;
   const fakeSmsOutbox = options.fakeSmsOutbox ?? new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>();
   const trustedOrigins = [options.apiOrigin, options.userOrigin, options.adminOrigin];
   const yunxinRuntime = options.yunxin
@@ -957,7 +964,7 @@ export async function mountAuthHandlers(
     orderHoldSeconds,
     supplyGateReader,
     settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
-    ...(options.orderImSdkRouteConfig ? { orderImSdkRouteConfig: options.orderImSdkRouteConfig } : {}),
+    ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
   };
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
@@ -999,7 +1006,7 @@ export async function mountAuthHandlers(
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");
     app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,
       membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId),
-      ...(options.orderImSdkRouteConfig ? { orderImSdkRouteConfig: options.orderImSdkRouteConfig } : {}),
+      ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
       ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,

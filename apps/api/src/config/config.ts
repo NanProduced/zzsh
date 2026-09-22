@@ -20,7 +20,95 @@ export type YunxinConfig = {
 export type OrderImSdkRouteConfig = {
   routeEnvironment: string;
   scopes: { appId: string; orderId: string; teamId: string; conversationId: string }[];
+  approvedOrders?: { appId: string; orderId: string }[];
 };
+
+export type OrderImSdkRouteScope = { appId: string; orderId: string; teamId: string; conversationId: string };
+export type OrderImSdkRoute = OrderImSdkRouteScope & { routeEnvironment: string };
+
+export class OrderImSdkRouteError extends Error {
+  constructor(readonly code: "ROUTE_NOT_READY" | "ROUTE_SCOPE_MISMATCH") { super(code); }
+}
+
+/** Per-process exact bindings for explicitly approved provider-test orders. */
+export class OrderImSdkRouteBindings {
+  private readonly orders = new Map<string, { appId: string; dynamic: boolean; scopes: Map<string, OrderImSdkRouteScope> }>();
+  private readonly teams = new Map<string, { appId: string; teamId: string; accounts: Set<string> }>();
+  private readonly restorable: string[] = [];
+  private readonly routeEnvironment: string;
+
+  constructor(config: OrderImSdkRouteConfig) {
+    this.routeEnvironment = config.routeEnvironment;
+    for (const scope of config.scopes) {
+      let order = this.orders.get(scope.orderId);
+      if (!order) { order = { appId: scope.appId, dynamic: false, scopes: new Map() }; this.orders.set(scope.orderId, order); }
+      if (order.dynamic || order.appId !== scope.appId) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG has conflicting order scopes");
+      order.scopes.set(scope.conversationId, scope);
+    }
+    for (const approved of config.approvedOrders ?? []) {
+      if (this.orders.has(approved.orderId)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG has conflicting order approvals");
+      this.orders.set(approved.orderId, { appId: approved.appId, dynamic: true, scopes: new Map() });
+      this.restorable.push(approved.orderId);
+    }
+  }
+
+  approvedOrderIdsForRestore(): string[] { return [...this.restorable]; }
+
+  isEnrolled(orderId: string): boolean { return this.orders.has(orderId); }
+
+  assertTeamReady(appId: string, orderId: string, teamId: string): void {
+    const order = this.orders.get(orderId);
+    if (!order) return;
+    if (order.appId !== appId) throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+    const bound = this.teams.get(orderId);
+    const ready = order.dynamic ? bound?.appId === appId && bound.teamId === teamId
+      : [...order.scopes.values()].some(scope => scope.teamId === teamId);
+    if (!ready) throw new OrderImSdkRouteError("ROUTE_NOT_READY");
+  }
+
+  /** Called only after the exact remote Team and all returned members have passed validation. */
+  bindVerifiedTeam(appId: string, orderId: string, teamId: string, accountIds: readonly string[]): void {
+    const order = this.orders.get(orderId);
+    if (!order) return;
+    if (order.appId !== appId || !/^[0-9]{1,19}$/.test(teamId)
+      || accountIds.length < 1 || accountIds.some(account => !/^[A-Za-z0-9][A-Za-z0-9_@.-]{0,31}$/.test(account))) {
+      throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+    }
+    const accounts = new Set(accountIds);
+    if (accounts.size !== accountIds.length) throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+    if (!order.dynamic) {
+      if ([...order.scopes.values()].some(scope => scope.teamId !== teamId
+        || !accounts.has(scope.conversationId.slice(0, scope.conversationId.indexOf("|2|"))))) {
+        throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+      }
+      return;
+    }
+    const current = this.teams.get(orderId);
+    if (current && (current.appId !== appId || current.teamId !== teamId)) throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+    const merged = new Set(current?.accounts ?? []);
+    for (const account of accounts) merged.add(account);
+    this.teams.set(orderId, { appId, teamId, accounts: merged });
+  }
+
+  forScope(scope: OrderImSdkRouteScope): OrderImSdkRoute | undefined {
+    const order = this.orders.get(scope.orderId);
+    if (!order) return undefined;
+    if (order.appId !== scope.appId) throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+    if (order.dynamic) {
+      const current = this.teams.get(scope.orderId);
+      const conversation = /^([A-Za-z0-9][A-Za-z0-9_@.-]{0,31})\|2\|([0-9]{1,19})$/.exec(scope.conversationId);
+      if (!current || current.appId !== scope.appId || current.teamId !== scope.teamId
+        || conversation?.[2] !== scope.teamId || !current.accounts.has(conversation[1]!)) {
+        throw new OrderImSdkRouteError(current ? "ROUTE_SCOPE_MISMATCH" : "ROUTE_NOT_READY");
+      }
+    } else {
+      const exact = order.scopes.get(scope.conversationId);
+      if (!exact || exact.appId !== scope.appId || exact.orderId !== scope.orderId
+        || exact.teamId !== scope.teamId) throw new OrderImSdkRouteError("ROUTE_SCOPE_MISMATCH");
+    }
+    return { ...scope, routeEnvironment: this.routeEnvironment };
+  }
+}
 
 export function orderImSdkRouteFor(config: OrderImSdkRouteConfig | undefined, scope: {
   appId: string; orderId: string; teamId: string; conversationId: string;
@@ -199,14 +287,18 @@ function loadOrderImSdkRouteConfig(env: NodeJS.ProcessEnv, profile: ConfigProfil
   try { value = JSON.parse(raw); } catch { throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).sort().join(",") !== "routeEnvironment,scopes"
+  const keys = Object.keys(record).sort().join(",");
+  if (!(["routeEnvironment,scopes", "approvedOrders,routeEnvironment,scopes", "approvedOrders,routeEnvironment"].includes(keys))
     || typeof record.routeEnvironment !== "string" || !/^[A-Za-z0-9._-]{1,32}$/.test(record.routeEnvironment)
-    || !Array.isArray(record.scopes) || record.scopes.length < 1 || record.scopes.length > 8) {
+    || (record.scopes !== undefined && (!Array.isArray(record.scopes) || record.scopes.length > 8))
+    || (record.approvedOrders !== undefined && (!Array.isArray(record.approvedOrders) || record.approvedOrders.length > 8))) {
     throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
   }
   const scopes: OrderImSdkRouteConfig["scopes"] = [];
+  const approvedOrders: NonNullable<OrderImSdkRouteConfig["approvedOrders"]> = [];
+  const orderApps = new Map<string, string>();
   const seen = new Set<string>();
-  for (const candidate of record.scopes) {
+  for (const candidate of (record.scopes ?? []) as unknown[]) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
     const scope = candidate as Record<string, unknown>;
     if (Object.keys(scope).sort().join(",") !== "appId,conversationId,orderId,teamId"
@@ -218,10 +310,27 @@ function loadOrderImSdkRouteConfig(env: NodeJS.ProcessEnv, profile: ConfigProfil
     if (!conversation || conversation[2] !== scope.teamId) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
     const exact = `${scope.appId}|${scope.orderId}|${scope.teamId}|${scope.conversationId}`;
     if (seen.has(exact)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    const previousApp = orderApps.get(scope.orderId);
+    if (previousApp && previousApp !== scope.appId) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    orderApps.set(scope.orderId, scope.appId as string);
     seen.add(exact);
     scopes.push({ appId: scope.appId as string, orderId: scope.orderId, teamId: scope.teamId, conversationId: scope.conversationId });
   }
-  return { routeEnvironment: record.routeEnvironment, scopes };
+  const approvedIds = new Set<string>();
+  for (const candidate of (record.approvedOrders ?? []) as unknown[]) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    const approved = candidate as Record<string, unknown>;
+    if (Object.keys(approved).sort().join(",") !== "appId,orderId" || approved.appId !== yunxin.appKey
+      || typeof approved.orderId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(approved.orderId)
+      || approvedIds.has(approved.orderId) || orderApps.has(approved.orderId)) throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+    approvedIds.add(approved.orderId);
+    approvedOrders.push({ appId: approved.appId as string, orderId: approved.orderId });
+  }
+  if (new Set([...orderApps.keys(), ...approvedIds]).size < 1 || new Set([...orderApps.keys(), ...approvedIds]).size > 8) {
+    throw new ConfigurationError("YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid");
+  }
+  return { routeEnvironment: record.routeEnvironment, scopes,
+    ...(record.approvedOrders !== undefined ? { approvedOrders } : {}) };
 }
 
 export function loadConfig(

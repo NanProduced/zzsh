@@ -4,13 +4,13 @@ import { assertUserContextInTransaction } from "../auth/user-identity";
 import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { SecurityApiError } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
-import { orderImSdkRouteFor, type OrderImSdkRouteConfig } from "../config/config";
+import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBindings } from "../config/config";
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
 const denied=()=>new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
 /** Same checks for every JOINED staff member; responsibility is not an exclusive grant. */
 export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orderId:string,operation:"read"|"send"="read",
-  orderImSdkRouteConfig?:OrderImSdkRouteConfig):Promise<Record<string,unknown>>{
+  orderImSdkRouteBindings?:OrderImSdkRouteBindings):Promise<Record<string,unknown>>{
   if(actor.realm==="user")await assertUserContextInTransaction(c,actor);else await assertAdminContextInTransaction(c,actor);
   const g=(await c.query(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.game_id,o.display_no,o.status AS order_status,o.title,o.account_id,game.name AS game_name,
       to_jsonb(g)->>'responsible_admin_id' AS escalation_responsible_admin_id,
@@ -50,9 +50,15 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   if(!own||own.state!=="JOINED"||own.status!=="READY"||own.account_id!==deriveYunxinAccountId(expected)||own.identity_marker!==buildYunxinIdentityMarker(expected))throw denied();
   if(operation==="send"&&!canSend)throw denied();
   const conversationId=`${own.account_id}|2|${g.team_id}`;
-  const messageRoute=operation==="send"?orderImSdkRouteFor(orderImSdkRouteConfig,{
-    appId:g.app_id,orderId,teamId:String(g.team_id),conversationId,
-  }):undefined;
+  let messageRoute:OrderImSdkRoute|undefined;
+  try {
+    messageRoute=operation==="send"?orderImSdkRouteBindings?.forScope({
+      appId:g.app_id,orderId,teamId:String(g.team_id),conversationId,
+    }):undefined;
+  } catch(error) {
+    if(error instanceof OrderImSdkRouteError)throw denied();
+    throw error;
+  }
   return {...summary,appId:g.app_id,teamState:"READY",teamId:g.team_id,name:g.team_name,
     viewerAccountId:own.account_id,conversationId,canRead:true,canSend,
     ...(messageRoute?{messageRoute}:{}),
