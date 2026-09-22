@@ -27,6 +27,7 @@ import {
   safely,
   type SupplyResponse,
 } from "../supply/supply-routes";
+import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
 import {
   assertFreshCreateAuthorization,
   assertReplayAuthorization,
@@ -43,6 +44,8 @@ import {
 export type OrderRuntimeOptions = AuthSecurityOptions & {
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;
+  /** Explicit controlled-test switch. Production leaves it unset. */
+  settlementRecordingEnabled?: boolean;
 };
 
 export type OrderResponse = SupplyResponse;
@@ -77,6 +80,7 @@ export async function handleOrderUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleSettlementUserRoute(request, response, options)) return;
     if (method === "POST" && path === "/") {
       if (!requireOrigin(request, response, options, requestId)) return;
       const context = await readUserContext(request, options);
@@ -207,6 +211,7 @@ export async function handleOrderAdminRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleSettlementAdminRoute(request, response, options)) return;
     if (method !== "GET") throw notFound();
     const context = await readAdminContext(request, options);
     await withTransaction(options.pool, async (client) => {
