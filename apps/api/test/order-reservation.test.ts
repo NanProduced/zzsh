@@ -17,6 +17,7 @@ import { computeDeltaQuote } from "../src/supply/pricing";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHolds, type SweepResult } from "../src/order/order";
 import { runPaymentAcceptance } from "./order-payment-im-postgres.test";
+import { runSettlementAcceptance } from "./settlement-postgres.test";
 import { runDispatchAcceptance } from "./order-dispatch-postgres.test";
 import { runOrderTeamAcceptance } from "./order-team-postgres.test";
 import { ORDER_IM_EVENT_APP, ORDER_IM_EVENT_SECRET, preparePartialMigrationsFolder, runOrderFirstResponseAcceptance } from "./order-first-response-postgres.test";
@@ -307,10 +308,17 @@ function orderKey(): Record<string, string> {
   return { "idempotency-key": `idem_${randomUUID().replaceAll("-", "")}` };
 }
 
-/** Truncate the isolated business tables, tolerating a target that predates im_order_event. */
+/** Truncate the isolated business tables, tolerating a target that predates later order tables. */
 async function truncateIsolatedBusinessData(pool: Pool): Promise<void> {
-  const relation = (await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation;
-  const statement = relation ? ISOLATED_BUSINESS_DATA_TRUNCATE : ISOLATED_BUSINESS_DATA_TRUNCATE.replace(/\s*"zzsh_order"\."im_order_event",/, "");
+  let statement = ISOLATED_BUSINESS_DATA_TRUNCATE;
+  const event = (await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation;
+  if (!event) statement = statement.replace(/\s*"zzsh_order"\."im_order_event",/, "");
+  const intake = (await pool.query(`SELECT to_regclass('zzsh_order.settlement_intake') AS relation`)).rows[0]?.relation;
+  if (!intake) statement = statement.replace(/\s*"zzsh_order"\."settlement_intake",/, "");
+  const opening = (await pool.query(`SELECT to_regclass('zzsh_order.rental_opening') AS relation`)).rows[0]?.relation;
+  if (!opening) {
+    statement = statement.replace(/\s*"zzsh_order"\."settlement_decision",\s*"zzsh_order"\."settlement_version",\s*"zzsh_order"\."rental_opening_ack",\s*"zzsh_order"\."rental_opening",/, "");
+  }
   await pool.query(statement);
 }
 
@@ -436,11 +444,15 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     // legacy rows first and then apply each migration as a real increment. An already-migrated
     // resource is reused as-is: no drop, no replay from zero, no false staged claim.
     const stagedFirstResponse = RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "oim_escalation_stage";
+    const stageSettlement = RESOURCE_SET === "trade_settlement" && Number(migrationBefore.n ?? 0) < 47;
     const baselineCount = Number(migrationBefore.n ?? 0);
+    if (stageSettlement && baselineCount !== 0 && baselineCount !== 46) {
+      throw new Error(`trade_settlement migration count ${baselineCount} is not 0, 46, or 47`);
+    }
     // A fresh resource stages up to 0042 before legacy fixtures; an existing one only refreshes
     // grants (its journal tail is already applied), so the suite never drops or replays from zero.
     const stageUpTo = baselineCount < 43 ? 42 : baselineCount - 1;
-    const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : undefined;
+    const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : stageSettlement && baselineCount === 0 ? preparePartialMigrationsFolder(45) : undefined;
     await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
     const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
     if (RESOURCE_SET === "oim_escalation_stage") {
@@ -448,8 +460,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       assert.equal(stageUpTo, 42, "the staged runner must stop after migration 0042 before legacy seeding");
       assert.equal(migrated.length, 43, "the staged runner must establish the exact 0042 baseline before 0043");
     }
+    if (stageSettlement && baselineCount === 0) assert.equal(migrated.length, 46, "trade_settlement must stop at 0045 before retained payment facts");
     const firstResponseBaselineCount = stagedFirstResponse ? migrated.length : baselineCount;
-    if (!stagedFirstResponse) {
+    if (!stagedFirstResponse && !stageSettlement) {
       await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
       assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
     }
@@ -1714,6 +1727,24 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       await runPaymentAcceptance(t, acceptance);
       await runDispatchAcceptance(t, acceptance);
       await runOrderTeamAcceptance(t, acceptance);
+      if (RESOURCE_SET === "trade_settlement") {
+        await runSettlementAcceptance(t, {
+          ...acceptance,
+          base,
+          buyer: paymentBuyer,
+          buyerEmail: "oim_buyer@example.invalid",
+          owner: paymentOwner,
+          createStaff,
+          boss,
+          publishApproved,
+          request,
+          runtimeUser: resources!.runtimeUser,
+          staged: stageSettlement,
+          upgrade: async () => {
+            await runBusinessMigrations(migrationPool!, { runtimeUser: resources!.runtimeUser });
+          },
+        });
+      }
       if (stagedFirstResponse) {
       await runOrderFirstResponseAcceptance(t, acceptance, {
           base,

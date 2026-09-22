@@ -182,16 +182,26 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         assert.equal((await group(f.orderId)).assigned_admin_id,null,"a locked staff set defers the whole attempt, never skips to b");
       } finally {await blocker.query("ROLLBACK");blocker.release();}
       const roleId=`dispatch_role_${run}`;
-      await pool.query(`INSERT INTO zzsh_iam.admin_role(id,code,name,status) VALUES($1,$1,'Dispatch fixture role','ACTIVE')`,[roleId]);
-      await pool.query(`INSERT INTO zzsh_iam.admin_role_permission(role_id,permission_code) VALUES($1,'im.support.read')`,[roleId]);
-      for(const id of [a,b]) await pool.query(`INSERT INTO zzsh_iam.admin_user_role(admin_user_id,role_id) VALUES($1,$2)`,[id,roleId]);
-      const roleWriter=await pool.connect();
+      let roleCreated=false;
       try {
-        await roleWriter.query("BEGIN");await roleWriter.query(`SELECT id FROM zzsh_iam.admin_role WHERE id=$1 FOR UPDATE`,[roleId]);
-        await assert.rejects(dispatchPaidOrders(pool,appId),{code:"55P03"});
-        assert.equal((await group(f.orderId)).assigned_admin_id,null,"IAM role writer defers the whole dispatch instead of forming a reverse wait cycle");
-      } finally {await roleWriter.query("ROLLBACK");roleWriter.release();}
-      await dispatchPaidOrders(pool,appId);
+        await pool.query(`INSERT INTO zzsh_iam.admin_role(id,code,name,status) VALUES($1,$1,'Dispatch fixture role','ACTIVE')`,[roleId]);
+        roleCreated=true;
+        await pool.query(`INSERT INTO zzsh_iam.admin_role_permission(role_id,permission_code) VALUES($1,'im.support.read')`,[roleId]);
+        for(const id of [a,b]) await pool.query(`INSERT INTO zzsh_iam.admin_user_role(admin_user_id,role_id) VALUES($1,$2)`,[id,roleId]);
+        const roleWriter=await pool.connect();
+        try {
+          await roleWriter.query("BEGIN");await roleWriter.query(`SELECT id FROM zzsh_iam.admin_role WHERE id=$1 FOR UPDATE`,[roleId]);
+          await assert.rejects(dispatchPaidOrders(pool,appId),{code:"55P03"});
+          assert.equal((await group(f.orderId)).assigned_admin_id,null,"IAM role writer defers the whole dispatch instead of forming a reverse wait cycle");
+        } finally {await roleWriter.query("ROLLBACK");roleWriter.release();}
+        await dispatchPaidOrders(pool,appId);
+      } finally {
+        if(roleCreated){
+          await migrationPool.query(`DELETE FROM zzsh_iam.admin_user_role WHERE role_id=$1`,[roleId]);
+          await migrationPool.query(`DELETE FROM zzsh_iam.admin_role_permission WHERE role_id=$1`,[roleId]);
+          await migrationPool.query(`DELETE FROM zzsh_iam.admin_role WHERE id=$1 AND code=$1`,[roleId]);
+        }
+      }
     });
 
     await t.test("D05 priority before create/claim, batch limit, and cross-App isolation", async () => {

@@ -422,7 +422,8 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
     return;
   }
   if (path === "/orders" || path.startsWith("/orders/")) {
-    if (method !== "GET") {
+    const settlementPath = /^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(openings|settlements|settlement-preview|settlement)(\/|$)/.test(path);
+    if (method !== "GET" && !(method === "POST" && settlementPath)) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }

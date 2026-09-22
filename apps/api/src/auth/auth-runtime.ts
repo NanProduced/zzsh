@@ -952,8 +952,13 @@ export async function mountAuthHandlers(
     const parsed = Number(raw);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
   })();
-  const orderOptions: OrderRuntimeOptions = { ...securityOptions, orderHoldSeconds, supplyGateReader,
-    ...(options.orderImSdkRouteConfig ? { orderImSdkRouteConfig: options.orderImSdkRouteConfig } : {}) };
+  const orderOptions: OrderRuntimeOptions = {
+    ...securityOptions,
+    orderHoldSeconds,
+    supplyGateReader,
+    settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
+    ...(options.orderImSdkRouteConfig ? { orderImSdkRouteConfig: options.orderImSdkRouteConfig } : {}),
+  };
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,

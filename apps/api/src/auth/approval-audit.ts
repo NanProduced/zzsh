@@ -169,12 +169,16 @@ function normalizeJson(value: unknown, depth = 0): JsonValue {
   return result;
 }
 
-function immutablePayload(body: Record<string, unknown>): { value: Record<string, unknown>; raw: string; hash: string } {
-  if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) invalid("Operation payload must be an object");
-  const value = normalizeJson(body.payload) as Record<string, JsonValue>;
+export function hashApprovalPayload(payload: Record<string, unknown>): { value: Record<string, unknown>; raw: string; hash: string } {
+  const value = normalizeJson(payload) as Record<string, JsonValue>;
   const raw = JSON.stringify(value);
   if (Buffer.byteLength(raw, "utf8") > MAX_PAYLOAD_BYTES) invalid("Operation payload is too large");
   return { value, raw, hash: createHash("sha256").update(raw, "utf8").digest("hex") };
+}
+
+function immutablePayload(body: Record<string, unknown>): { value: Record<string, unknown>; raw: string; hash: string } {
+  if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) invalid("Operation payload must be an object");
+  return hashApprovalPayload(body.payload as Record<string, unknown>);
 }
 
 function iso(value: Date | string | null | undefined): string | null {
