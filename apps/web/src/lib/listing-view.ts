@@ -1,4 +1,5 @@
 import type { Money, PublicListing, PublicCodeLabel } from "./supply-types.ts";
+import { resourceItemDisplayName } from "./listing-filters.ts";
 
 export type ResourceLine = {
   itemId: string;
@@ -118,10 +119,6 @@ function dailyConsumptionLabel(termOption: PublicListing["termOption"]): string 
   const quantity = termOption?.dailyConsumption?.quantity;
   return quantity ? `${haffMillionsLabel(quantity)} M 哈夫币` : null;
 }
-function presentationItemName(item: { code?: string; name: string } | undefined, itemId: string): string {
-  if (item?.code === "df_billable_level6_bullet") return "6级子弹";
-  return item?.name ?? `未确认（代码 ${itemId}）`;
-}
 export function conditionLines(
   attributes: PublicListing["attributes"],
   context: Pick<PublicListing, "attributeDisplay" | "safeBox" | "termOption"> = {},
@@ -165,7 +162,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
   const resourceLines: ResourceLine[] = listing.quote.lines.map((line) => ({
     itemId: line.itemId,
     code: items.get(line.itemId)?.code ?? null,
-    name: presentationItemName(items.get(line.itemId), line.itemId),
+    name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
     quantity: line.quantity,
     quantityLabel: quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, line.unitQuantity),
     unitLabel: unitLabel(line.unit),

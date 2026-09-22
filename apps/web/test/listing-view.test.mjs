@@ -148,6 +148,30 @@ test('resource labels use catalog code and quoted unit quantity', () => {
   assert.equal(resourceQuantityLabel(detail.resourceLines[2]), '3天');
 });
 
+test('card and detail share code-first resource names and only use Delta legacy fallback', () => {
+  const line = { itemId: 'item_bullet', quantity: '180', unit: 'ROUND', unitQuantity: '60', buyerUnitAmount: { currency: 'CNY', unit: 'yuan', amount: '10.00000000', scale: 8 }, buyerAmount: { currency: 'CNY', unit: 'yuan', amount: '30.00', scale: 2 } };
+  const project = (item, game = { id: 'game_delta', code: 'delta', name: '三角洲行动' }) => ({
+    ...listing,
+    game,
+    presentation: { ...listing.presentation, items: [item] },
+    quote: { ...listing.quote, lines: [line] },
+  });
+
+  const known = toListingCard(project({ id: 'item_bullet', code: 'df_billable_level6_bullet', name: '六级子弹', unit: 'ROUND' }));
+  assert.deepEqual([known.resourceLines[0].itemId, known.resourceLines[0].code, known.resourceLines[0].name, known.resourceLines[0].quantity, known.resourceLines[0].quantityLabel], ['item_bullet', 'df_billable_level6_bullet', '6级子弹', '180', '3组（180发）']);
+
+  const differentCode = toListingCard(project({ id: 'item_bullet', code: 'different_resource', name: '六级子弹', unit: 'ROUND' }));
+  assert.equal(differentCode.resourceLines[0].name, '六级子弹');
+  assert.equal(differentCode.resourceLines[0].quantityLabel, '180');
+
+  const legacy = toListingCard(project({ id: 'item_bullet', name: '六级子弹', unit: 'ROUND' }));
+  assert.equal(legacy.resourceLines[0].name, '6级子弹');
+  assert.equal(legacy.resourceLines[0].code, null);
+  assert.equal(legacy.resourceLines[0].quantityLabel, '180');
+  assert.equal(toListingDetail(project({ id: 'item_bullet', name: '六级子弹', unit: 'ROUND' })).resourceLines[0].name, '6级子弹');
+  assert.equal(toListingCard(project({ id: 'item_bullet', name: '六级子弹', unit: 'ROUND' }, null)).resourceLines[0].name, '六级子弹');
+});
+
 test('unmapped resource IDs stay explicit instead of becoming display names', () => {
   const card = toListingCard({
     ...listing,

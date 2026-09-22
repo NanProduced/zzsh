@@ -7,7 +7,7 @@ import { Calendar, Check, ChevronRight, Coins, Copy, Gauge, ImageOff, X } from "
 import { FavoriteButton } from "@/components/favorites/favorite-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThumbnailCarousel } from "@/components/ui/thumbnail-carousel";
-import { rememberAccountReturn } from "@/lib/account-return";
+import { rememberAccountReturn, type AccountReturnSnapshot } from "@/lib/account-return";
 import { haffRatioLabel, resourceQuantityLabel, type ListingCardData, type ResourceLine } from "@/lib/listing-view";
 import { LoginMethodIcon } from "./login-method-icon";
 
@@ -162,8 +162,10 @@ function AccountGallery({
 
 export function AccountCard({
   data,
+  getReturnState,
 }: {
   data: AccountCardData;
+  getReturnState?: () => AccountReturnSnapshot;
 }) {
   const [failedSrc, setFailedSrc] = useState<string>();
   const [copied, setCopied] = useState(false);
@@ -251,7 +253,10 @@ export function AccountCard({
                   className="account-pseudo-link"
                   href={accountHref(data.id)}
                   aria-label={`查看账号 ${data.title}`}
-                  onClick={() => rememberAccountReturn(data.id, window.location)}
+                  onClick={(event) => {
+                    if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey)
+                      rememberAccountReturn(data.id, window.location, getReturnState?.());
+                  }}
                 >
                   <strong className="account-pseudo-title">{pseudoTitle}</strong>
                 </Link>
@@ -289,7 +294,10 @@ export function AccountCard({
               className="account-card-link account-card-link--body"
               href={accountHref(data.id)}
               aria-label={`查看账号 ${data.title}`}
-              onClick={() => rememberAccountReturn(data.id, window.location)}
+              onClick={(event) => {
+                if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey)
+                  rememberAccountReturn(data.id, window.location, getReturnState?.());
+              }}
             >
               <Tooltip>
                 <TooltipTrigger asChild>
