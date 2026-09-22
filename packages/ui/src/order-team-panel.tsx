@@ -5,10 +5,13 @@ import { mergeImMessages } from "@zzsh/im-client/message-state";
 import { NimImageSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
 
 type Member={platformId:string;accountId:string;party:string;name:string|null;avatar:string|null;responsible?:boolean;membershipStatus?:string;identityStatus?:string};
+type SupportEscalation={firstResponseAt:string|null;remindDueAt:string|null;addRound:number;state:string;needsManualReview:boolean;noEligibleStaff:boolean};
 export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;assignmentState:string|null;teamState:string|null;
-  appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;conversationId?:string;canRead:boolean;canSend:boolean;members:Member[]};
-type OrderItem={id:string;displayNo:string;title:string;status:string;teamState?:string;fulfillmentAssignment?:{state:string;teamState:string}|null};
+  appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;conversationId?:string;canRead:boolean;canSend:boolean;members:Member[];supportEscalation:SupportEscalation};
+type OrderItem={id:string;displayNo:string;title:string;status:string;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;addRound?:number;escalationState?:string;fulfillmentAssignment?:{state:string;teamState:string|null}|null};
 type OrderPage={items:OrderItem[];nextCursor:string|null};
+type ListRefresh={scope:string;targetPages:number;pagesRead:number;cursor:string|null|undefined;items:OrderItem[]};
+const REFRESH_PAGE_BUDGET=2;
 type Requester=<T>(path:string)=>Promise<T>;
 type Props={identity:string;realm:"user"|"admin";client:NimWebClientLike|null;connection:NimWebConnectionState|"idle"|"error";active:boolean;initialParty?:"renter"|"owner";sendAllowed?:boolean;
   request:Requester;onAuthError:(status:number)=>void};
@@ -28,6 +31,49 @@ export function orderTeamLabel(order:{orderStatus?:string;status?:string;assignm
 function serverTimeLabel(value:string):string{
   const date=new Date(value);
   return Number.isFinite(date.getTime())?new Intl.DateTimeFormat("zh-CN",{dateStyle:"medium",timeStyle:"short"}).format(date):"时间暂不可用";
+}
+function escalationStateLabel(state:string,firstResponseAt:string|null=null):string{
+  switch(state){
+    case "RUNNING":return "待客服回应";
+    case "STOPPED":return firstResponseAt?"已收到客服回应":"接待跟踪已停止";
+    case "EXHAUSTED":return "暂无合格客服可补派";
+    case "VERIFY_REQUIRED":return "补派结果待人工核验";
+    case "NOT_STARTED":return "接待跟踪未启用";
+    default:return "接待状态待确认";
+  }
+}
+function reviewReason(value:Pick<SupportEscalation,"needsManualReview"|"noEligibleStaff">):string|null{
+  if(!value.needsManualReview)return null;
+  return value.noEligibleStaff?"待人工处理：当前没有符合条件的客服可补派":"待人工核验：补派结果尚未确认";
+}
+function AdminEscalationSummary({item}:{item:OrderItem}){
+  if(item.teamState!=="READY")return null;
+  const state=item.escalationState??"NOT_STARTED";
+  const review=state==="EXHAUSTED"?"待人工处理 · 暂无合格客服":state==="VERIFY_REQUIRED"?"待人工核验 · 补派结果待确认":null;
+  return <span className="order-team-list-escalation" aria-label="订单群接待状态">
+    <small>{escalationStateLabel(state,item.firstResponseAt)}</small>
+    {state==="RUNNING"&&item.remindDueAt?<small>提醒节点 · {serverTimeLabel(item.remindDueAt)}</small>:null}
+    {item.firstResponseAt?<small>首响时间 · {serverTimeLabel(item.firstResponseAt)}</small>:null}
+    <small>补派轮次 · {item.addRound??0}</small>
+    {review?<small>{review}</small>:null}
+  </span>;
+}
+function OrderTeamEscalation({value}:{value:SupportEscalation}){
+  const review=reviewReason(value);
+  return <section className="order-team-escalation" aria-label="接待状态">
+    <div className="order-team-escalation-heading">
+      <strong>{escalationStateLabel(value.state,value.firstResponseAt)}</strong>
+      {value.state==="NOT_STARTED"?<small>此订单群未启用接待跟踪。</small>:null}
+      {value.state==="STOPPED"?<small>首响后自动提醒与补派已停止。</small>:null}
+    </div>
+    <dl>
+      {value.state==="RUNNING"?<div><dt>提醒节点</dt><dd>{value.remindDueAt?<time dateTime={value.remindDueAt}>{serverTimeLabel(value.remindDueAt)}</time>:"暂未提供"}</dd></div>:null}
+      {value.firstResponseAt?<div><dt>首响时间</dt><dd><time dateTime={value.firstResponseAt}>{serverTimeLabel(value.firstResponseAt)}</time></dd></div>:null}
+      <div><dt>补派轮次</dt><dd>{value.addRound}</dd></div>
+    </dl>
+    {review?<p className="order-team-escalation-review" role="status">{review}</p>:null}
+    <small className="order-team-escalation-note">接待与消息状态不代表订单交付或结算。</small>
+  </section>;
 }
 const role=(m:Member)=>m.party==="BUYER"?"买家":m.party==="OWNER"?"号主":m.responsible?"负责客服":"协作客服";
 type ImageAttachment=NonNullable<NimMessageLike["attachment"]>;
@@ -57,24 +103,31 @@ function MessageImage({attachment,onOpen}:{attachment:ImageAttachment;onOpen:(ur
 export function OrderTeamPanel({identity,realm,client,connection,active,initialParty="renter",sendAllowed=true,request,onAuthError}:Props){
   const [party,setParty]=useState(initialParty),[items,setItems]=useState<OrderItem[]>([]),[next,setNext]=useState<string|null>(null);
   const [selected,setSelected]=useState<string|null>(null),[info,setInfo]=useState<OrderTeamAccess|null>(null),[error,setError]=useState("");
-  const [revision,setRevision]=useState(0),[loading,setLoading]=useState(false),[drafts,setDrafts]=useState<Record<string,string>>({});
+  const [revision,setRevision]=useState(0),[loading,setLoading]=useState(false),[refreshingPages,setRefreshingPages]=useState(false),[drafts,setDrafts]=useState<Record<string,string>>({});
   const requestRef=useRef(request),authErrorRef=useRef(onAuthError);requestRef.current=request;authErrorRef.current=onAuthError;
   const orderTrigger=useRef<HTMLButtonElement|null>(null);
-  const context=useRef(""),accessSequence=useRef(0),listSequence=useRef(0);
+  const context=useRef(""),accessSequence=useRef(0),listSequence=useRef(0),loadedPages=useRef(1),nextCursor=useRef<string|null>(null),refreshCycle=useRef<ListRefresh|null>(null),moreRequested=useRef(false),mounted=useRef(true),listFlight=useRef<{scope:string;ticket:number;cursor?:string;promise:Promise<void>}|null>(null);
   const accessFlight=useRef<{key:string;ticket:number;operation:"read"|"send";promise:Promise<OrderTeamAccess>}|null>(null);
   const contextKey=JSON.stringify([identity,realm,party,selected,active]);
-  if(context.current!==contextKey){context.current=contextKey;accessSequence.current++;listSequence.current++;}
+  const listScope=JSON.stringify([identity,realm,party]);
+  const listScopeRef=useRef(listScope),itemsScope=useRef(listScope);
+  const activeRef=useRef(active);activeRef.current=active;
+  if(context.current!==contextKey){context.current=contextKey;accessSequence.current++;}
+  if(listScopeRef.current!==listScope){listScopeRef.current=listScope;listSequence.current++;loadedPages.current=1;nextCursor.current=null;refreshCycle.current=null;moreRequested.current=false;}
+  const listWasActive=useRef(active);
+  if(listWasActive.current!==active){listWasActive.current=active;listSequence.current++;refreshCycle.current=null;moreRequested.current=false;}
   const prefix=realm==="admin"?"/orders":"/api/orders";
   const draftKey=info?JSON.stringify([identity,info.appId,info.orderId,info.teamId]):"";
   useEffect(()=>{setParty(initialParty);},[initialParty]);
-  const report=(cause:unknown,operation:"read"|"send",key:string)=>{
+  const report=(cause:unknown,operation:"list"|"read"|"send",key:string)=>{
     if(context.current!==key||superseded(cause))return;
     const status=statusOf(cause);
-    if(status===401||status===423){setInfo(null);setItems([]);setDrafts({});setError(status===423?"请先解锁管理会话":"登录已失效，请重新确认身份");authErrorRef.current(status);return;}
+    if(status===401||status===423){setInfo(null);itemsScope.current=listScopeRef.current;setItems([]);loadedPages.current=1;nextCursor.current=null;refreshCycle.current=null;moreRequested.current=false;setRefreshingPages(false);setNext(null);setDrafts({});setError(status===423?"请先解锁管理会话":"登录已失效，请重新确认身份");authErrorRef.current(status);return;}
     if(status===403||status===404){
-      if(operation==="read"){setInfo(null);setDrafts(current=>Object.fromEntries(Object.entries(current).filter(([key])=>JSON.parse(key)[2]!==selected)));}
+      if(operation==="list"){setInfo(null);itemsScope.current=listScopeRef.current;setItems([]);loadedPages.current=1;nextCursor.current=null;refreshCycle.current=null;moreRequested.current=false;setRefreshingPages(false);setNext(null);}
+      else if(operation==="read"){const revoked=selected;setInfo(null);if(revoked)setItems(current=>current.filter(item=>item.id!==revoked));setDrafts(current=>Object.fromEntries(Object.entries(current).filter(([key])=>JSON.parse(key)[2]!==selected)));}
       else setInfo(current=>current?{...current,canSend:false}:current);
-      setError(operation==="read"?"当前订单不可访问，请重新确认授权":"当前不可发送，已保留可读历史和草稿");return;
+      setError(operation==="send"?"当前不可发送，已保留可读历史和草稿":"当前订单不可访问，请重新确认授权");return;
     }
     setError("暂时无法连接服务，请检查网络后重试");
   };
@@ -87,45 +140,87 @@ export function OrderTeamPanel({identity,realm,client,connection,active,initialP
         const value=await requestRef.current<OrderTeamAccess>(`${prefix}/${encodeURIComponent(id)}/im?operation=${operation}`);
         if(context.current!==key||ticket!==accessSequence.current)throw new ImLifecycleSupersededError();
         if(value.orderId!==id)throw rejected();
-        setInfo(value);setError("");return value;
+        setInfo(value);setItems(current=>current.map(item=>item.id===id?{...item,status:value.orderStatus,teamState:value.teamState,firstResponseAt:value.supportEscalation.firstResponseAt,remindDueAt:value.supportEscalation.remindDueAt,addRound:value.supportEscalation.addRound,escalationState:value.supportEscalation.state,fulfillmentAssignment:item.fulfillmentAssignment?{...item.fulfillmentAssignment,state:value.assignmentState??item.fulfillmentAssignment.state,teamState:value.teamState}:item.fulfillmentAssignment}:item));setError("");return value;
       }catch(cause){if(ticket===accessSequence.current)report(cause,operation,key);throw cause;}})();
     accessFlight.current={key,ticket,operation,promise};
     const clear=()=>{if(accessFlight.current?.promise===promise)accessFlight.current=null;};void promise.then(clear,clear);
     return promise;
   };
   const accessRef=useRef(readAccess);accessRef.current=readAccess;
-  const loadList=async(cursor?:string)=>{
-    const key=context.current,ticket=++listSequence.current;setLoading(true);
-    try{
-      const value=await requestRef.current<OrderPage>(`${prefix}/${realm==="admin"?"im-groups":""}?${realm==="user"?`party=${party}&`:""}limit=20${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`);
-      if(key!==context.current||ticket!==listSequence.current)return;
-      setItems(current=>cursor?[...current,...value.items.filter(row=>!current.some(old=>old.id===row.id))]:value.items);setNext(value.nextCursor);setError("");
-    }catch(cause){if(ticket===listSequence.current)report(cause,"read",key);}
-    finally{if(ticket===listSequence.current)setLoading(false);}
+  const loadList=(cursor?:string):Promise<void>=>{
+    if(!mounted.current)return Promise.resolve();
+    const scope=listScope,flight=listFlight.current;
+    if(flight){
+      if(flight.scope===scope&&flight.ticket===listSequence.current&&cursor===undefined&&flight.cursor===undefined)return flight.promise;
+      if(cursor!==undefined){if(flight.scope===scope)moreRequested.current=true;return flight.promise;}
+      return flight.promise.then(()=>mounted.current&&activeRef.current?listRef.current():undefined);
+    }
+    if(!active)return Promise.resolve();
+    if(cursor!==undefined&&refreshCycle.current?.scope===scope){moreRequested.current=true;return Promise.resolve();}
+    const ticket=++listSequence.current,reportContext=context.current,isRefresh=cursor===undefined;
+    if(isRefresh&&(!refreshCycle.current||refreshCycle.current.scope!==scope))refreshCycle.current={scope,targetPages:Math.max(1,loadedPages.current),pagesRead:0,cursor:undefined,items:[]};
+    setLoading(true);
+    const promise=(async()=>{
+      try{
+        if(isRefresh){
+          const cycle=refreshCycle.current!;let requests=0;
+          while(requests<REFRESH_PAGE_BUDGET&&cycle.pagesRead<cycle.targetPages&&cycle.cursor!==null){
+            const pageCursor=cycle.pagesRead===0?undefined:cycle.cursor;
+            const value=await requestRef.current<OrderPage>(`${prefix}/${realm==="admin"?"im-groups":""}?${realm==="user"?`party=${party}&`:""}limit=20${pageCursor?`&cursor=${encodeURIComponent(pageCursor)}`:""}`);
+            if(listScopeRef.current!==scope||ticket!==listSequence.current||!activeRef.current)return;
+            const seen=new Set(cycle.items.map(item=>item.id));for(const item of value.items)if(!seen.has(item.id)){seen.add(item.id);cycle.items.push(item);}
+            cycle.pagesRead++;cycle.cursor=value.nextCursor;requests++;
+          }
+          if(cycle.cursor===null||cycle.pagesRead>=cycle.targetPages){
+            const fresh=cycle.items,nextPage=cycle.cursor??null;itemsScope.current=scope;setItems(fresh);loadedPages.current=Math.max(1,cycle.pagesRead);nextCursor.current=nextPage;setNext(nextPage);
+            refreshCycle.current=null;setRefreshingPages(false);setError("");
+            if(!nextPage)moreRequested.current=false;
+          }else{setRefreshingPages(true);setError("");}
+        }else{
+          const value=await requestRef.current<OrderPage>(`${prefix}/${realm==="admin"?"im-groups":""}?${realm==="user"?`party=${party}&`:""}limit=20${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`);
+          if(listScopeRef.current!==scope||ticket!==listSequence.current||!activeRef.current)return;
+          itemsScope.current=scope;setItems(current=>{const seen=new Set(current.map(item=>item.id));return [...current,...value.items.filter(row=>{if(seen.has(row.id))return false;seen.add(row.id);return true;})];});
+          loadedPages.current=Math.max(loadedPages.current,1)+1;nextCursor.current=value.nextCursor;setNext(value.nextCursor);setError("");
+        }
+      }catch(cause){
+        if(ticket===listSequence.current&&listScopeRef.current===scope){if(isRefresh){refreshCycle.current=null;setRefreshingPages(false);}moreRequested.current=false;report(cause,"list",reportContext);}
+      }finally{if(ticket===listSequence.current)setLoading(false);}
+    })();
+    listFlight.current={scope,ticket,cursor,promise};
+    const clear=()=>{if(listFlight.current?.promise===promise){listFlight.current=null;if(!refreshCycle.current){const queued=moreRequested.current;moreRequested.current=false;if(queued&&nextCursor.current&&activeRef.current&&mounted.current)void listRef.current(nextCursor.current);}}};void promise.then(clear,clear);
+    return promise;
   };
-  useEffect(()=>{if(active)void loadList();else setLoading(false);},[identity,party,active,revision]);
+  const listRef=useRef(loadList);listRef.current=loadList;
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;listSequence.current++;refreshCycle.current=null;moreRequested.current=false;};},[]);
   useEffect(()=>{
-    if(!active||!selected)return;
+    if(!active){setLoading(false);setRefreshingPages(false);listSequence.current++;refreshCycle.current=null;return;}
     let cancelled=false,pending=false;
-    const refresh=()=>{if(cancelled||pending)return;pending=true;void accessRef.current("read").catch(()=>undefined).finally(()=>{pending=false;});};
-    refresh();const timer=setInterval(refresh,5000);
+    const refresh=async()=>{
+      if(cancelled||pending||(typeof document!=="undefined"&&document.visibilityState==="hidden"))return;
+      pending=true;
+      try{await listRef.current();if(!cancelled&&selected)await accessRef.current("read").catch(()=>undefined);}
+      finally{pending=false;}
+    };
+    void refresh();const timer=setInterval(()=>{void refresh();},5000);
     return()=>{cancelled=true;clearInterval(timer);accessSequence.current++;};
   },[identity,party,selected,active,revision]);
-  const choose=(id:string|null)=>{accessSequence.current++;listSequence.current++;setInfo(null);setSelected(id);setError("");setLoading(false);};
+  const choose=(id:string|null)=>{accessSequence.current++;setInfo(null);setSelected(id);setError("");};
+  const visibleItems=itemsScope.current===listScope?items:[],visibleNext=itemsScope.current===listScope?next:null;
   return <section className="order-team-panel" hidden={!active} aria-label={realm==="admin"?"我参与的订单群":"我的订单群"}>
     <header className="order-team-toolbar"><strong>{realm==="admin"?"我参与的订单群":"我的订单群"}</strong>{realm==="user"?<label>订单身份 <select aria-label="订单身份" value={party} onChange={e=>{choose(null);setItems([]);setParty(e.target.value as "renter"|"owner");}}><option value="renter">买家 · 租入订单</option><option value="owner">号主 · 出租订单</option></select></label>:null}<button type="button" onClick={()=>setRevision(n=>n+1)}>重新确认授权</button></header>
     {error?<p role="alert">{error}</p>:null}
     <div className="order-team-grid" data-detail={Boolean(selected)}>
-      <nav className="order-team-list" aria-label="订单列表" aria-busy={loading}>
-        {!items.length?<p>{loading?"正在读取订单…":"暂无可访问的订单"}</p>:null}
-        {items.map(item=><button type="button" key={item.id} aria-current={selected===item.id?"page":undefined} onClick={event=>{orderTrigger.current=event.currentTarget;choose(item.id);}}><small>{item.displayNo}</small><strong>{item.title}</strong><span>{orderTeamLabel(item)}</span></button>)}
-        {next?<button type="button" disabled={loading} onClick={()=>void loadList(next)}>更多订单</button>:null}
+      <nav className="order-team-list" aria-label="订单列表" aria-busy={loading||refreshingPages}>
+        {!visibleItems.length?<p>{loading?"正在读取订单…":"暂无可访问的订单"}</p>:null}
+        {visibleItems.map(item=><button type="button" key={item.id} aria-current={selected===item.id?"page":undefined} onClick={event=>{orderTrigger.current=event.currentTarget;choose(item.id);}}><small>{item.displayNo}</small><strong>{item.title}</strong><span>{orderTeamLabel(item)}</span>{realm==="admin"?<AdminEscalationSummary item={item}/>:null}</button>)}
+        {visibleNext?<button type="button" disabled={loading||refreshingPages} onClick={()=>void loadList(visibleNext)}>更多订单</button>:null}
       </nav>
       <div className="order-team-detail">
         {selected?<button type="button" className="order-team-back" onClick={()=>{choose(null);requestAnimationFrame(()=>orderTrigger.current?.focus());}}>返回订单列表</button>:null}
         {!selected?<p>选择订单查看群状态和沟通记录。</p>:!info?<p role="status">{error?"订单信息未获确认":"正在核对订单授权…"}</p>:<>
           <header><h3>{info.name??info.displayNo}</h3><p>{orderTeamLabel(info)}</p><p>{info.gameName} · {info.account.title}</p><small>订单 {info.displayNo} · 账号 {info.account.id}</small></header>
           {info.canRead&&info.teamState==="READY"?<>
+            <OrderTeamEscalation value={info.supportEscalation}/>
             <ul className="order-team-members" aria-label="群成员">{info.members.map(m=><li key={m.accountId}>{m.avatar?<img src={m.avatar} alt="" width={28} height={28} onError={e=>{e.currentTarget.hidden=true;}}/>:<span aria-hidden="true">●</span>}<span>{m.name?.trim()||role(m)}<small>{role(m)}</small>{realm==="admin"&&m.party!=="STAFF"?<small>用户编号 {m.platformId} · 会员：未知 · 实名：未知</small>:null}</span></li>)}</ul>
             {client&&active?<OrderConversation key={JSON.stringify([identity,info.appId,info.orderId,info.teamId])} client={client} info={{...info,canSend:info.canSend&&sendAllowed}} connection={connection}
               readAccess={operation=>accessRef.current(operation)} draft={drafts[draftKey]??""} setDraft={value=>setDrafts(current=>({...current,[draftKey]:value}))}/>:<p role="status">聊天连接正在准备中，订单与付款状态不受影响。</p>}

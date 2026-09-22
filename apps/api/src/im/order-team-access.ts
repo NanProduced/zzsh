@@ -62,6 +62,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
   const access=await loadEffectiveAdminAccess(c,actor.userId);
   if(!hasPermission(access,"im.support.read"))throw denied();
   const rows=(await c.query(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,g.team_state AS "teamState",game.name AS "gameName",
+      to_jsonb(g)->>'first_response_at' AS "firstResponseAt",
       (to_jsonb(g)->>'remind_due_at') AS "remindDueAt",
       COALESCE((to_jsonb(g)->>'add_round')::int,0) AS "addRound",
       COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED') AS "escalationState"
