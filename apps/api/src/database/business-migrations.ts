@@ -117,6 +117,10 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     await pool.query(`REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.settlement_intake FROM ${runtimeUser};
       GRANT UPDATE (status, classified_at, superseded_at, settlement_version_id) ON zzsh_order.settlement_intake TO ${runtimeUser}`);
   }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.settlement_posting') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.settlement_posting, zzsh_order.settlement_ledger_entry FROM ${runtimeUser};
+      GRANT SELECT, INSERT ON zzsh_order.settlement_posting, zzsh_order.settlement_ledger_entry TO ${runtimeUser}`);
+  }
   for (const schema of ["zzsh_auth_user", "zzsh_auth_admin"] as const) {
     await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "${schema}" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtimeUser}`);
   }

@@ -219,13 +219,15 @@ export async function runIdempotentWrite(
   fingerprintBody: unknown,
   authorize: (client: PoolClient, replay: IdempotencyReplay) => Promise<boolean | void>,
   action: (client: PoolClient) => Promise<{ status: number; body: unknown }>,
+  projectResponse?: (client: PoolClient, result: { status: number; body: unknown }) => Promise<{ status: number; body: unknown }>,
 ): Promise<void> {
   const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
   const fingerprint = fingerprintRequest(scope.operation, scope.resourceId, fingerprintBody ?? null);
   try {
     const result = await withTransaction(options.pool, async (client) => {
       await setAuditContext(client, actor.realm, actor.id, actor.sessionId, requestId);
-      return withIdempotency(client, { ...scope, realm: actor.realm }, key, fingerprint, (replay) => authorize(client, replay), () => action(client));
+      const committed = await withIdempotency(client, { ...scope, realm: actor.realm }, key, fingerprint, (replay) => authorize(client, replay), () => action(client));
+      return projectResponse ? projectResponse(client, committed) : committed;
     });
     sendJson(response, result.status, result.body, requestId);
   } catch (error) {
@@ -241,15 +243,17 @@ export async function runIdempotentWrite(
         [JSON.stringify([actor.realm, scope.principalId, scope.operation, scope.resourceId ?? null]), key],
       )).rows[0];
         if (row) await authorize(client, { publishRequired: row.publishRequired === true });
-        return { row };
+        if (!row || row.requestFingerprint !== fingerprint) return { row, result: null };
+        const result = { status: row.responseStatus, body: row.responseBody };
+        return { row, result: projectResponse ? await projectResponse(client, result) : result };
       });
       const row = committed.row;
       if (row) {
-        if (row.requestFingerprint !== fingerprint) {
+        if (!committed.result) {
           sendError(response, new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Idempotency key was reused with a different request"), requestId);
           return;
         }
-        sendJson(response, row.responseStatus, row.responseBody, requestId);
+        sendJson(response, committed.result.status, committed.result.body, requestId);
         return;
       }
     }

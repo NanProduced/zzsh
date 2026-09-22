@@ -271,6 +271,8 @@
     {"idx":44,"version":"7","when":1789490013000,"tag":"0044_oim_order_first_response_guards","breakpoints":true},
     {"idx":45,"version":"7","when":1789490014000,"tag":"0045_oim_order_escalation","breakpoints":true},
     {"idx":46,"version":"7","when":1789490015000,"tag":"0046_order_settlement_confirmation","breakpoints":true},
-    {"idx":47,"version":"7","when":1789490016000,"tag":"0047_order_settlement_intake","breakpoints":true}
+    {"idx":47,"version":"7","when":1789490016000,"tag":"0047_order_settlement_intake","breakpoints":true},
+    {"idx":48,"version":"7","when":1789490017000,"tag":"0048_order_settlement_posting","breakpoints":true},
+    {"idx":49,"version":"7","when":1789490018000,"tag":"0049_order_settlement_posting_guards","breakpoints":true}
   ]
 }

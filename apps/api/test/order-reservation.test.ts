@@ -3,6 +3,8 @@ import type { SupplyGate } from "../src/supply/publishing";
 import sharp from "sharp";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { test } from "node:test";
 import { Pool, type PoolClient } from "pg";
 
@@ -159,11 +161,12 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     assert.equal(identity.rows[0]?.databaseName, "postgres");
     assert.equal(identity.rows[0]?.currentUser, pool.options.user);
     assert.equal(identity.rows[0]?.port, "5432");
+    if (RESOURCE_SET === "trade_settlement") assert.equal(LOCK_KEY, "860007356498332892", "registered settlement resource lock changed");
     assert.equal((await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", [LOCK_KEY])).rows[0]?.acquired, true, "dedicated order test target is already in use");
     // Complete read-only preflight BEFORE either ensureRole can change a password.
     const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,
-      shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
-    const requireRegisteredResources = RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT;
+      oid::text AS oid, shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
+    const requireRegisteredResources = RESOURCE_SET === "trade_settlement" || RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT;
     if (requireRegisteredResources) {
       assert.equal(resources.maintenance.database.user, "zzsh");
       assert.ok(db, "registered OIM database must already exist");
@@ -171,17 +174,50 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     if (db) {
       assert.equal(db.owner, resources.maintenance.database.user);
       assert.equal(db.marker, RESOURCE_MARKER);
+      if (RESOURCE_SET === "trade_settlement") assert.equal(db.oid, "578624", "registered settlement database OID changed");
       assert.equal((await client.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1`, [resources.databaseName])).rows[0].n, 0, "another connection owns this database");
     }
     for (const [name, kind] of [[resources.migrationUser, "migration"], [resources.runtimeUser, "runtime"]] as const) {
-      const row = (await client.query(`SELECT rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,rolinherit,rolreplication,rolbypassrls,
+      const row = (await client.query(`SELECT r.oid::text AS oid, rolcanlogin,rolsuper,rolcreaterole,rolcreatedb,rolinherit,rolreplication,rolbypassrls,
         shobj_description(oid,'pg_authid') AS marker,
         EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS membership,
         EXISTS(SELECT 1 FROM pg_database WHERE datdba=r.oid) AS owns_db FROM pg_roles r WHERE rolname=$1`, [name])).rows[0];
       if (requireRegisteredResources) assert.ok(row, "registered role must already exist");
       if (!row) continue;
-      assert.deepEqual(row, { rolcanlogin: true, rolsuper: false, rolcreaterole: false, rolcreatedb: false,
+      const expectedOid = RESOURCE_SET === "trade_settlement" ? (kind === "migration" ? "578625" : "578626") : undefined;
+      if (expectedOid) assert.equal(row.oid, expectedOid, `${kind} role OID changed`);
+      const { oid: _oid, ...privileges } = row;
+      assert.deepEqual(privileges, { rolcanlogin: true, rolsuper: false, rolcreaterole: false, rolcreatedb: false,
         rolinherit: false, rolreplication: false, rolbypassrls: false, marker: roleMarker(resources.databaseName, kind), membership: false, owns_db: false });
+    }
+    if (RESOURCE_SET === "trade_settlement") {
+      const target = poolFor(resources.maintenance, resources.databaseName, "zzsh-trade-settlement-migration-preflight", 1);
+      try {
+        const journal = JSON.parse(readFileSync(resolve(__dirname, "../../migrations/business/meta/_journal.json"), "utf8")) as {
+          entries: Array<{ idx: number; when: number; tag: string }>;
+        };
+        assert.equal(journal.entries.length, 50, "settlement source journal must end at assigned idx=49");
+        const applied = (await target.query<{ hash: string; createdAt: string }>(
+          `SELECT hash, created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY created_at`,
+        )).rows;
+        assert.ok(applied.length === 49 || applied.length === 50, `registered settlement migration count ${applied.length} is not 49 or 50`);
+        for (const [index, row] of applied.entries()) {
+          const entry = journal.entries[index]!;
+          assert.equal(entry.idx, index);
+          const sourceHash = createHash("sha256").update(readFileSync(resolve(__dirname, "../../migrations/business", `${entry.tag}.sql`))).digest("hex");
+          assert.equal(row.hash, sourceHash, `applied migration hash mismatch at idx=${index} ${entry.tag}`);
+          assert.equal(row.createdAt, String(entry.when), `applied migration timestamp mismatch at idx=${index} ${entry.tag}`);
+        }
+        assert.equal(applied[48]!.hash, "a889e0403f153e201a1b97ef8d7bbcc99c47276d27d48e3c0182bdfca1444e45", "applied 0048 hash is frozen");
+        console.log("trade settlement migration preflight PASS", JSON.stringify({
+          databaseOid: db.oid, roleOids: ["578625", "578626"], migrationCount: applied.length,
+          verifiedRows: applied.map((row, index) => ({ idx: index, tag: journal.entries[index]!.tag, when: journal.entries[index]!.when, hash: row.hash })),
+          frozen0048: applied[48]!.hash,
+          ...(applied.length === 50 ? { frozen0049: applied[49]!.hash } : {}),
+        }));
+      } finally {
+        await target.end();
+      }
     }
     console.log("order resource preflight PASS", resources.databaseName, LOCK_KEY);
     return client;
@@ -467,7 +503,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
     }
     console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse,
-      baselineCount, firstResponseBaselineCount, tail: migrated.slice(-2), replayUnchanged: !stagedFirstResponse }));
+      baselineCount, firstResponseBaselineCount, tail: migrated.slice(-2),
+      firstApplication0049: RESOURCE_SET === "trade_settlement" && baselineCount === 49 && migrated.length === 50,
+      migrationReplayVerified: !stagedFirstResponse }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
@@ -565,6 +603,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       return created.body?.id as string;
     };
     const haffItem = await createEntry("items", { code: "haff_base", name: "哈夫币", unit: "HAFF_BASE", required: true });
+    const fixedItem = await createEntry("items", { code: "settlement_test_piece", name: "结算测试物品", unit: "PIECE", required: false });
 
     const makeRuleSet = async (generation: string): Promise<{ releaseId: string; generation: string }> => {
       const price = await request(base, "/api/bff/admin/supply/price-drafts", { gameId, mode: "SPREAD" }, operator.jar, ADMIN_ORIGIN, "POST", orderKey());
@@ -578,7 +617,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         expectedRevision: "1",
         haffRule: HAFF_RULE,
         roundingPolicy: "HALF_UP_CENT_V1",
-        lines: [{ itemId: haffItem, pricingKind: "HAFF_RATIO" }],
+        lines: [
+          { itemId: haffItem, pricingKind: "HAFF_RATIO" },
+          { itemId: fixedItem, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1.5" },
+        ],
       }, operator.jar, ADMIN_ORIGIN, "PUT", orderKey())).response.status, 200);
       assert.equal((await request(base, `/api/bff/admin/supply/term-drafts/${termId}`, {
         expectedRevision: "1",
@@ -598,6 +640,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       owner: CookieJar,
       label: string,
       depositCents: string | null,
+      includeSettlementPiece = false,
     ): Promise<{ accountId: string; versionId: string; releaseId: string }> => {
       const created = await request(base, "/api/v1/supply/accounts", { gameId }, owner, USER_ORIGIN, "POST", orderKey());
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
@@ -615,6 +658,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       assert.equal(upload.status, 200);
       const asset = (await upload.json()) as { assetId: string };
       assert.equal((await request(base, `/api/bff/admin/supply/media/${asset.assetId}/review`, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" }, operator.jar, ADMIN_ORIGIN, "POST", orderKey())).response.status, 200);
+      const inventory = [
+        { itemId: haffItem, quantity: "60000000" },
+        ...(includeSettlementPiece ? [{ itemId: fixedItem, quantity: "10" }] : []),
+      ];
       d = await request(base, `${prefix}/draft`, {
         expectedRevision: d.body?.account.revision,
         title: `三角洲 · ${label}`,
@@ -622,7 +669,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         attributes: { safe_box_code: "box-a", vit_level: 6, bear_level: 6 },
         termOptionCode: "daily-10m",
         pricingOptionCode: "standard",
-        inventory: [{ itemId: haffItem, quantity: "60000000" }],
+        inventory,
         skins: [],
         entitlements: [],
         mediaBindings: [{ assetId: asset.assetId, position: 0 }],
@@ -642,7 +689,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
           mode: "SPREAD",
           roundingPolicy: "HALF_UP_CENT_V1",
           haffRule: HAFF_RULE,
-          lines: [{ itemId: haffItem, quantity: "60000000", pricingKind: "HAFF_RATIO" }],
+          lines: [
+            { itemId: haffItem, quantity: "60000000", pricingKind: "HAFF_RATIO" },
+            ...(includeSettlementPiece ? [{ itemId: fixedItem, quantity: "10", pricingKind: "FIXED_UNIT" as const, unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1.5" }] : []),
+          ],
           conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", pricingOptionCode: "standard" },
           termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
           entitlements: [],

@@ -17,6 +17,7 @@ import { conflict, forbidden, invalid, notFound, sha256Hex } from "../supply/sup
 export const ORDER_STATUS = {
   PENDING_PAYMENT: "PENDING_PAYMENT",
   PAID: "PAID",
+  COMPLETED: "COMPLETED",
   CANCELLED: "CANCELLED",
 } as const;
 export type OrderStatus = (typeof ORDER_STATUS)[keyof typeof ORDER_STATUS];
@@ -147,7 +148,7 @@ export function projectOrder(
     expiredAwaitingCancel: expired,
     paymentOpen: row.status === ORDER_STATUS.PENDING_PAYMENT && !expired,
     cancelOpen: row.status === ORDER_STATUS.PENDING_PAYMENT,
-    ...(row.status === ORDER_STATUS.PAID ? { paidAt: row.paidAt } : {}),
+    ...(row.status === ORDER_STATUS.PAID || row.status === ORDER_STATUS.COMPLETED ? { paidAt: row.paidAt } : {}),
     ...(row.dispatchState ? { fulfillmentAssignment: { state: row.dispatchState, waitingReason: row.dispatchWaitReason,
       assignedAt: row.assignedAt, teamReady: row.teamState === "READY", teamState: row.teamState } } : {}),
     ...(row.status === ORDER_STATUS.CANCELLED

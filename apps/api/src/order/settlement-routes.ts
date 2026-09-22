@@ -12,6 +12,7 @@ import {
   decideSettlement,
   previewSettlement,
   previewStaffSettlement,
+  projectSettlementResponse,
   readSettlement,
   recheckSettlement,
   recordOpening,
@@ -65,13 +66,16 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
   const context = await readUserContext(request, options);
   const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId };
   if (method === "GET" && read) {
-    sendJson(response, 200, (await withTransaction(options.pool, (client) => readSettlement(client, idOf(read[1]!), actor))).body, requestId);
+    const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await readSettlement(client, idOf(read[1]!), actor)));
+    sendJson(response, result.status, result.body, requestId);
     return true;
   }
   if (method === "POST" && preview) {
     const body = bodyOf(request);
     ensureOnlyFields(body, ["lines"]);
-    const result = await withTransaction(options.pool, (client) => previewSettlement(client, idOf(preview[1]!), actor, linesOf(body, "remainingQuantity")));
+    const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(
+      client, actor, await previewSettlement(client, idOf(preview[1]!), actor, linesOf(body, "remainingQuantity")),
+    ));
     sendJson(response, result.status, result.body, requestId);
     return true;
   }
@@ -84,7 +88,8 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.submit", resourceId: orderId },
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, acceptedHash },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => submitSettlement(client, orderId, actor, remaining, acceptedHash, requestId));
+      (client) => submitSettlement(client, orderId, actor, remaining, acceptedHash, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   if (method === "POST" && decision) {
@@ -100,8 +105,9 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
     }
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.decide", resourceId: versionId },
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { action: body.action, versionHash, reason },
-      async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId));
+      async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
+      (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   if (method === "POST" && opening) {
@@ -112,7 +118,8 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.opening.confirm", resourceId: openingId },
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { versionNo: body.versionNo },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => confirmOpening(client, orderId, openingId, body.versionNo as number, actor, requestId));
+      (client) => confirmOpening(client, orderId, openingId, body.versionNo as number, actor, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   throw notFound();
@@ -141,18 +148,19 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
     const endReason = body.endReason === undefined || body.endReason === null ? null : body.endReason;
     if (endReason !== null && endReason !== "TENANT_VOLUNTARY_EARLY" && endReason !== "OWNER_OR_ACCOUNT_EARLY") throw invalid("End reason is invalid", "endReason");
     const earlyReason = endReason as "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY" | null;
-    const result = await withTransaction(options.pool, (client) => previewStaffSettlement(client, orderId, actor, {
+    const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await previewStaffSettlement(client, orderId, actor, {
       remaining: linesOf(body, "remainingQuantity"),
       endReason: earlyReason,
       ...(typeof body.proposedOwnerNet === "string" ? { proposedOwnerNet: body.proposedOwnerNet } : {}),
       ...(typeof body.proposedRenterRefund === "string" ? { proposedRenterRefund: body.proposedRenterRefund } : {}),
       ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
-    }));
+    })));
     sendJson(response, result.status, result.body, requestId);
     return true;
   }
   if (method === "GET" && read) {
-    sendJson(response, 200, (await withTransaction(options.pool, (client) => readSettlement(client, orderId, actor))).body, requestId);
+    const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await readSettlement(client, orderId, actor)));
+    sendJson(response, result.status, result.body, requestId);
     return true;
   }
   if (method === "POST" && openings) {
@@ -162,7 +170,8 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.opening.record", resourceId: orderId },
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { lines },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => recordOpening(client, orderId, actor, lines, requestId));
+      (client) => recordOpening(client, orderId, actor, lines, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   if (method === "POST" && classify) {
@@ -174,7 +183,8 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.classify", resourceId: orderId },
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, endReason: body.endReason, acceptedHash },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => classifySettlement(client, orderId, actor, remaining, body.endReason as "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY", acceptedHash, requestId));
+      (client) => classifySettlement(client, orderId, actor, remaining, body.endReason as "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY", acceptedHash, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   if (method === "POST" && review) {
@@ -184,8 +194,9 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
     const versionHash = hashOf(body, "versionHash");
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.review", resourceId: versionId },
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { versionHash },
-      async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => reviewSettlement(client, orderId, versionId, actor, versionHash, requestId));
+      async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
+      (client) => reviewSettlement(client, orderId, versionId, actor, versionHash, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   if (method === "POST" && adjust) {
@@ -207,7 +218,8 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       (client) => adjustSettlement(client, orderId, actor, {
         remaining, endReason, proposedOwnerNet: body.proposedOwnerNet as string, proposedRenterRefund: body.proposedRenterRefund as string,
         reason: (body.reason as string).trim(), acceptedHash, requestId,
-      }));
+      }),
+      (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   throw notFound();

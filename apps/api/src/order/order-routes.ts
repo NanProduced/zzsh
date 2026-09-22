@@ -61,7 +61,7 @@ function idField(value: unknown, path: string): string {
 
 function parseStatus(raw: string | null): OrderStatus | undefined {
   if (raw === null) return undefined;
-  if (raw === ORDER_STATUS.PENDING_PAYMENT || raw === ORDER_STATUS.CANCELLED || raw === ORDER_STATUS.PAID) return raw;
+  if (raw === ORDER_STATUS.PENDING_PAYMENT || raw === ORDER_STATUS.CANCELLED || raw === ORDER_STATUS.PAID || raw === ORDER_STATUS.COMPLETED) return raw;
   throw invalid("Status is invalid");
 }
 

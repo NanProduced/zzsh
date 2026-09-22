@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
-import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { lockActor } from "../auth/admin-directory";
 import { hashApprovalPayload } from "../auth/approval-audit";
 import { assertAdminContextInTransaction } from "../auth/auth-security";
@@ -66,8 +66,8 @@ function blocked(reasons: string[]): Command {
   };
 }
 
-function done(body: Record<string, unknown>, orderStatus: string): Command {
-  return { status: 200, body: { ...body, postingAuthorized: false, feeDeducted: false, orderStatus } };
+function done(body: Record<string, unknown>, orderStatus: string, posted = false, feeDeducted = false): Command {
+  return { status: 200, body: { ...body, postingAuthorized: posted, feeDeducted, orderStatus } };
 }
 
 async function assertSettlementDatabase(client: PoolClient): Promise<void> {
@@ -78,7 +78,7 @@ async function assertSettlementDatabase(client: PoolClient): Promise<void> {
 /** Idempotency advisory is already held by the caller when this runs inside a keyed write.
  * Dispatch gate, then the acting admin, then party users, then game, account and order.
  * Admin before users matches restoreDeactivatedUserAccount, which locks the actor and then the user. */
-async function lockSettlement(client: PoolClient, orderId: string, actor: Actor, write: boolean): Promise<LockedOrder> {
+async function lockSettlement(client: PoolClient, orderId: string, actor: Actor, write: boolean, allowCompletedReplay = false): Promise<LockedOrder> {
   await assertSettlementDatabase(client);
   const located = (await client.query<{ renterUserId: string; ownerUserId: string; accountId: string; gameId: string; appId: string | null }>(
     `SELECT o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId", o.account_id AS "accountId",
@@ -128,6 +128,7 @@ async function lockSettlement(client: PoolClient, orderId: string, actor: Actor,
     if (write) requirePermission(adminAccess, ADMIN_PERMISSION.orderSettlementWrite);
     else if (!adminAccess.permissions.has(ADMIN_PERMISSION.orderSettlementWrite) && !adminAccess.permissions.has(ADMIN_PERMISSION.orderRead)) throw forbidden();
   }
+  if (write && row.status !== "PAID" && !(allowCompletedReplay && row.status === "COMPLETED")) throw conflict("ORDER_NOT_SETTLEABLE");
   return row;
 }
 
@@ -421,19 +422,20 @@ function needsEarlyReason(result: SettlementComputation): boolean {
 }
 
 /** Approval expiry applies even before an IAM action persists the EXPIRED status. */
-async function readSettlementApproval(client: PoolClient, requestId: string) {
-  return (await client.query<{ status: string; requestedBy: string; decidedBy: string | null; payloadHash: string }>(
-    `SELECT CASE WHEN status IN ('PENDING','APPROVED') AND expires_at <= clock_timestamp()
-                 THEN 'EXPIRED' ELSE status END AS status,
-            requested_by AS "requestedBy", decided_by AS "decidedBy", operation_payload_hash AS "payloadHash"
+async function readSettlementApproval(client: PoolClient, requestId: string, asOf?: string) {
+  return (await client.query<{ status: string; requestedBy: string; decidedBy: string | null; payloadHash: string; expiresAt: string }>(
+    `SELECT CASE WHEN status IN ('PENDING','APPROVED') AND expires_at <= COALESCE($2::timestamptz, clock_timestamp()) THEN 'EXPIRED'
+                 ELSE status END AS status,
+            requested_by AS "requestedBy", decided_by AS "decidedBy", operation_payload_hash AS "payloadHash",
+            expires_at::text AS "expiresAt"
        FROM zzsh_iam.approval_request WHERE id = $1`,
-    [requestId],
+    [requestId, asOf ?? null],
   )).rows[0];
 }
 
 async function readyFacts(client: PoolClient, version: {
   id: string; versionHash: string; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; early: boolean; initiatorParty: ConfirmationParty; approvalRequestId: string | null;
-}): Promise<{ ready: boolean; reasons: string[] }> {
+}, asOf?: string): Promise<{ ready: boolean; reasons: string[] }> {
   const decisions = (await client.query<{ party: string; action: string }>(
     `SELECT party, action FROM zzsh_order.settlement_decision WHERE settlement_version_id = $1`,
     [version.id],
@@ -441,7 +443,7 @@ async function readyFacts(client: PoolClient, version: {
   const hit = (party: string, action: string) => decisions.some((row) => row.party === party && row.action === action);
   let opsApproval: { status: "APPROVED" | "PENDING" | "REJECTED"; requesterId: string; approverId: string; payloadHash: string } | null = null;
   if (version.approvalRequestId) {
-    const approval = await readSettlementApproval(client, version.approvalRequestId);
+    const approval = await readSettlementApproval(client, version.approvalRequestId, asOf);
     if (approval?.status === "EXPIRED") return { ready: false, reasons: ["OPS_APPROVAL_EXPIRED"] };
     if (approval && (approval.status === "APPROVED" || approval.status === "PENDING" || approval.status === "REJECTED")) {
       opsApproval = { status: approval.status, requesterId: approval.requestedBy, approverId: approval.decidedBy ?? "", payloadHash: approval.payloadHash };
@@ -460,6 +462,82 @@ async function readyFacts(client: PoolClient, version: {
     supportReviewedVersionId: hit("SUPPORT", "REVIEW") ? version.id : null,
     opsApproval,
   });
+}
+
+async function settlementPostingView(client: PoolClient, orderId: string): Promise<Record<string, unknown> | null> {
+  const posting = (await client.query<{
+    id: string; settlementVersionId: string; paymentConfirmationId: string; versionHash: string; early: boolean;
+    capturedCents: string; systemOwnerNetCents: string; ownerNetCents: string; systemRenterRefundCents: string;
+    renterRefundCents: string; platformContributionCents: string; compensationFeeCents: string;
+    manualReason: string | null; approvalRequestId: string | null; approvalRequestedBy: string | null;
+    approvalApprovedBy: string | null; approvalExpiresAt: string | null; approvalPayloadHash: string | null;
+    postedAt: string; refundDueAt: string; inputSnapshot: Record<string, unknown>;
+  }>(
+    `SELECT p.id, p.settlement_version_id AS "settlementVersionId", p.payment_confirmation_id AS "paymentConfirmationId",
+            p.version_hash AS "versionHash", p.early, p.captured_cents::text AS "capturedCents",
+            p.system_owner_net_cents::text AS "systemOwnerNetCents", p.owner_net_cents::text AS "ownerNetCents",
+            p.system_renter_refund_cents::text AS "systemRenterRefundCents", p.renter_refund_cents::text AS "renterRefundCents",
+            p.platform_contribution_cents::text AS "platformContributionCents", p.compensation_fee_cents::text AS "compensationFeeCents",
+            p.manual_reason AS "manualReason", p.approval_request_id AS "approvalRequestId",
+            p.approval_requested_by AS "approvalRequestedBy", p.approval_approved_by AS "approvalApprovedBy",
+            p.approval_expires_at::text AS "approvalExpiresAt", p.approval_payload_hash AS "approvalPayloadHash",
+            p.posted_at::text AS "postedAt", p.refund_due_at::text AS "refundDueAt", v.input_snapshot AS "inputSnapshot"
+       FROM zzsh_order.settlement_posting p
+       JOIN zzsh_order.settlement_version v ON v.id = p.settlement_version_id
+      WHERE p.order_id = $1`,
+    [orderId],
+  )).rows[0];
+  if (!posting) return null;
+  const entries = (await client.query<{
+    id: string; lineNo: number; accountCode: string; debitCents: string; creditCents: string;
+    counterpartyUserId: string | null; sourcePaymentConfirmationId: string | null; details: Record<string, unknown>;
+  }>(
+    `SELECT id, line_no AS "lineNo", account_code AS "accountCode", debit_cents::text AS "debitCents",
+            credit_cents::text AS "creditCents", counterparty_user_id AS "counterpartyUserId",
+            source_payment_confirmation_id AS "sourcePaymentConfirmationId", details
+       FROM zzsh_order.settlement_ledger_entry WHERE posting_id = $1 ORDER BY line_no`,
+    [posting.id],
+  )).rows;
+  const snapshot = posting.inputSnapshot;
+  return {
+    id: posting.id,
+    settlementVersionId: posting.settlementVersionId,
+    versionHash: posting.versionHash,
+    paymentConfirmationId: posting.paymentConfirmationId,
+    early: posting.early,
+    currency: "CNY",
+    postedAt: posting.postedAt,
+    refundDueAt: posting.refundDueAt,
+    capturedCents: posting.capturedCents,
+    owner: {
+      gross: (snapshot.amounts as Record<string, unknown> | undefined)?.ownerGross ?? null,
+      systemNetCents: posting.systemOwnerNetCents,
+      availableCents: posting.ownerNetCents,
+    },
+    refund: {
+      systemCents: posting.systemRenterRefundCents,
+      payableCents: posting.renterRefundCents,
+      includesDeposit: (snapshot.amounts as Record<string, unknown> | undefined)?.depositRefund ?? null,
+    },
+    platformContributionCents: posting.platformContributionCents,
+    compensationFeeCents: posting.compensationFeeCents,
+    amounts: snapshot.amounts ?? null,
+    manualAdjustment: posting.manualReason === null ? null : {
+      reason: posting.manualReason,
+      systemOwnerNetCents: posting.systemOwnerNetCents,
+      postedOwnerNetCents: posting.ownerNetCents,
+      systemRenterRefundCents: posting.systemRenterRefundCents,
+      postedRenterRefundCents: posting.renterRefundCents,
+      approval: {
+        requestId: posting.approvalRequestId,
+        requestedBy: posting.approvalRequestedBy,
+        approvedBy: posting.approvalApprovedBy,
+        expiresAt: posting.approvalExpiresAt,
+        payloadHash: posting.approvalPayloadHash,
+      },
+    },
+    ledgerEntries: entries,
+  };
 }
 
 function frozenLineFacts(order: LockedOrder): Map<string, { unit: string; pricingKind: string }> {
@@ -531,7 +609,10 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
     [order.id],
   )).rows;
   const pendingIntake = intakes.at(-1)?.status === "OPEN" ? intakes.at(-1)! : null;
-  const readiness = pendingIntake
+  const posting = await settlementPostingView(client, order.id);
+  const readiness = posting
+    ? { ready: true, reasons: [] as string[] }
+    : pendingIntake
     ? { ready: false, reasons: ["SETTLEMENT_INTAKE_PENDING"] }
     : current ? await readyFacts(client, current) : { ready: false, reasons: ["SETTLEMENT_VERSION_MISSING"] };
   return done({
@@ -545,9 +626,127 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
       ? { kind: "INTAKE", id: pendingIntake.id, versionNo: pendingIntake.versionNo, status: pendingIntake.status }
       : current ? { kind: "SETTLEMENT_VERSION", id: current.id, versionNo: current.versionNo } : null,
     settlement: pendingIntake ? null : current ?? null,
+    posting,
     ready: readiness.ready,
     reasons: readiness.reasons,
-  }, order.status);
+  }, order.status, posting !== null,
+  posting !== null && BigInt(String((posting as { compensationFeeCents: string }).compensationFeeCents)) > 0n);
+}
+
+const CONFIRMATION_AMOUNT_FIELDS = [
+  "haffConsumedBuyer", "haffConsumedOwner", "itemConsumedBuyer", "itemConsumedOwner", "unusedItemRefund", "unusedHaffRefund",
+  "earlyMakeup", "feeBase", "feeRate", "feeAmount", "feePayer", "ownerGross", "ownerNet", "renterCharge", "renterRefund", "depositRefund",
+] as const;
+
+function pickFields(value: unknown, fields: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(fields.filter((field) => Object.hasOwn(source, field)).map((field) => [field, source[field]]));
+}
+
+function projectAmounts(value: unknown): Record<string, unknown> {
+  const amounts = pickFields(value, CONFIRMATION_AMOUNT_FIELDS);
+  for (const field of CONFIRMATION_AMOUNT_FIELDS) {
+    const amount = amounts[field];
+    if (amount && typeof amount === "object") amounts[field] = pickFields(amount, ["currency", "unit", "scale", "amount"]);
+  }
+  return amounts;
+}
+
+function projectComputation(value: unknown): Record<string, unknown> {
+  const computation = pickFields(value, ["ok", "reasons", "early", "consumed", "amounts"]);
+  if (computation.amounts !== undefined) computation.amounts = projectAmounts(computation.amounts);
+  if (computation.consumed && typeof computation.consumed === "object") {
+    const consumed = pickFields(computation.consumed, ["haff", "items"]);
+    if (Array.isArray(consumed.items)) consumed.items = consumed.items.map((line) => pickFields(line, ["itemId", "consumed", "remaining"]));
+    computation.consumed = consumed;
+  }
+  return computation;
+}
+
+function projectInputSnapshot(value: unknown): Record<string, unknown> {
+  const snapshot = pickFields(value, [
+    "schema", "openingId", "openingVersion", "capturedAmount", "depositAmount", "lines", "kind", "endReason", "early",
+    "proposedOwnerNet", "proposedRenterRefund", "reason", "feePolicyVersion", "amounts",
+  ]);
+  if (Array.isArray(snapshot.lines)) snapshot.lines = snapshot.lines.map((line) => pickFields(line, ["itemId", "openingQuantity", "remainingQuantity"]));
+  if (snapshot.amounts !== undefined) snapshot.amounts = projectAmounts(snapshot.amounts);
+  return snapshot;
+}
+
+function projectDecision(value: unknown): Record<string, unknown> {
+  return pickFields(value, ["party", "action", "reason", "versionHash", "createdAt"]);
+}
+
+function projectVersion(value: unknown): Record<string, unknown> {
+  const version = pickFields(value, [
+    "id", "versionNo", "kind", "endReason", "early", "initiatorParty", "versionHash", "supersededAt",
+    "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "inputSnapshot", "computation", "decisions",
+  ]);
+  if (version.inputSnapshot !== undefined) version.inputSnapshot = projectInputSnapshot(version.inputSnapshot);
+  if (version.computation !== undefined) version.computation = projectComputation(version.computation);
+  if (Array.isArray(version.decisions)) version.decisions = version.decisions.map(projectDecision);
+  return version;
+}
+
+function projectPosting(value: unknown): Record<string, unknown> {
+  const posting = pickFields(value, [
+    "id", "settlementVersionId", "versionHash", "early", "currency", "postedAt", "refundDueAt", "capturedCents",
+    "owner", "refund", "compensationFeeCents", "amounts", "manualAdjustment",
+  ]);
+  if (posting.owner !== undefined) posting.owner = pickFields(posting.owner, ["gross", "systemNetCents", "availableCents"]);
+  if (posting.refund !== undefined) posting.refund = pickFields(posting.refund, ["systemCents", "payableCents", "includesDeposit"]);
+  if (posting.amounts !== undefined) posting.amounts = projectAmounts(posting.amounts);
+  if (posting.manualAdjustment && typeof posting.manualAdjustment === "object") {
+    posting.manualAdjustment = pickFields(posting.manualAdjustment, [
+      "reason", "systemOwnerNetCents", "postedOwnerNetCents", "systemRenterRefundCents", "postedRenterRefundCents",
+    ]);
+  }
+  return posting;
+}
+
+function projectSettlementBody(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const body = pickFields(value, [
+    "error", "orderId", "revision", "rentalStarted", "openings", "intakes", "versions", "currentRequest", "settlement", "posting",
+    "ready", "reasons", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
+    "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "reason",
+  ]);
+  if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
+    const projected = pickFields(opening, ["id", "versionNo", "status", "confirmedAt", "createdAt", "quoteDigest", "paymentDigest", "lines", "acks"]);
+    if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "quantity", "unit", "pricingKind"]));
+    if (Array.isArray(projected.acks)) projected.acks = projected.acks.map((ack) => pickFields(ack, ["party", "createdAt"]));
+    return projected;
+  });
+  if (Array.isArray(body.intakes)) body.intakes = body.intakes.map((intake) => {
+    const projected = pickFields(intake, ["id", "versionNo", "initiatorParty", "lines", "status", "settlementVersionId", "createdAt"]);
+    if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "remainingQuantity"]));
+    return projected;
+  });
+  if (Array.isArray(body.versions)) body.versions = body.versions.map(projectVersion);
+  if (body.currentRequest !== undefined) body.currentRequest = pickFields(body.currentRequest, ["kind", "id", "versionNo", "status"]);
+  if (body.settlement !== undefined && body.settlement !== null) body.settlement = projectVersion(body.settlement);
+  if (body.posting !== undefined && body.posting !== null) body.posting = projectPosting(body.posting);
+  if (body.amounts !== undefined) body.amounts = projectAmounts(body.amounts);
+  if (body.consumed && typeof body.consumed === "object") {
+    const consumed = pickFields(body.consumed, ["haff", "items"]);
+    if (Array.isArray(consumed.items)) consumed.items = consumed.items.map((line) => pickFields(line, ["itemId", "consumed", "remaining"]));
+    body.consumed = consumed;
+  }
+  return body;
+}
+
+/** One actor-aware projection for reads, previews and both fresh/cached write receipts. */
+export async function projectSettlementResponse(
+  client: PoolClient,
+  actor: Actor,
+  result: { status: number; body: unknown },
+): Promise<{ status: number; body: unknown }> {
+  if (actor.realm === "admin") {
+    const access = await loadEffectiveAdminAccess(client, actor.userId);
+    if (access?.permissions.has(ADMIN_PERMISSION.supplyQuoteInternalRead)) return result;
+  }
+  return { ...result, body: projectSettlementBody(result.body) };
 }
 
 async function audit(client: PoolClient, actor: Actor, action: string, orderId: string, requestId: string, details: Record<string, unknown>, outcome: AuditOutcome = "SUCCESS"): Promise<void> {
@@ -561,8 +760,8 @@ export async function readSettlement(client: PoolClient, orderId: string, actor:
   return view(client, await lockSettlement(client, orderId, actor, false));
 }
 
-export async function recheckSettlement(client: PoolClient, orderId: string, actor: Actor): Promise<void> {
-  await lockSettlement(client, orderId, actor, true);
+export async function recheckSettlement(client: PoolClient, orderId: string, actor: Actor, allowCompletedReplay = false): Promise<void> {
+  await lockSettlement(client, orderId, actor, true, allowCompletedReplay);
 }
 
 export async function recordOpening(client: PoolClient, orderId: string, actor: Actor, lines: LineQty[], requestId: string): Promise<Command> {
@@ -910,16 +1109,21 @@ export async function adjustSettlement(client: PoolClient, orderId: string, acto
   });
 }
 
-async function currentVersion(client: PoolClient, orderId: string, versionId: string): Promise<{
-  id: string; versionHash: string; basisHash: string; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; early: boolean;
-  initiatorParty: ConfirmationParty; approvalRequestId: string | null; supersededAt: string | null;
-} | undefined> {
-  return (await client.query<{
-    id: string; versionHash: string; basisHash: string; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; early: boolean;
-    initiatorParty: ConfirmationParty; approvalRequestId: string | null; supersededAt: string | null;
-  }>(
-    `SELECT id, version_hash AS "versionHash", basis_hash AS "basisHash", kind, early, initiator_party AS "initiatorParty",
-            approval_request_id AS "approvalRequestId", superseded_at::text AS "supersededAt"
+type CurrentSettlementVersion = {
+  id: string; versionNo: number; openingId: string; versionHash: string; basisHash: string;
+  kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; early: boolean; initiatorParty: ConfirmationParty;
+  approvalRequestId: string | null; supersededAt: string | null; inputSnapshot: Record<string, unknown>;
+  computation: SettlementComputation; systemOwnerNet: string; systemRenterRefund: string;
+  proposedOwnerNet: string | null; proposedRenterRefund: string | null;
+};
+
+async function currentVersion(client: PoolClient, orderId: string, versionId: string): Promise<CurrentSettlementVersion | undefined> {
+  return (await client.query<CurrentSettlementVersion>(
+    `SELECT id, version_no AS "versionNo", opening_id AS "openingId", version_hash AS "versionHash", basis_hash AS "basisHash",
+            kind, early, initiator_party AS "initiatorParty", approval_request_id AS "approvalRequestId",
+            superseded_at::text AS "supersededAt", input_snapshot AS "inputSnapshot", computation,
+            system_owner_net_cents::text AS "systemOwnerNet", system_renter_refund_cents::text AS "systemRenterRefund",
+            proposed_owner_net_cents::text AS "proposedOwnerNet", proposed_renter_refund_cents::text AS "proposedRenterRefund"
        FROM zzsh_order.settlement_version WHERE id = $1 AND order_id = $2 FOR UPDATE`,
     [versionId, orderId],
   )).rows[0];
@@ -936,6 +1140,239 @@ async function manualGap(client: PoolClient, version: { kind: "SYSTEM" | "MANUAL
   return null;
 }
 
+function exactCents(value: unknown, label: string): bigint {
+  if (typeof value !== "string") throw conflict(`${label}_INVALID`);
+  const match = /^(-?)(0|[1-9]\d*)\.(\d{2})$/.exec(value);
+  if (!match) throw conflict(`${label}_INVALID`);
+  const magnitude = BigInt(match[2]!) * 100n + BigInt(match[3]!);
+  if (match[1] === "-" && magnitude === 0n) throw conflict(`${label}_INVALID`);
+  return match[1] === "-" ? -magnitude : magnitude;
+}
+
+function moneyString(cents: bigint): string {
+  return centsToYuan(cents).amount;
+}
+
+function amountObject(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as { currency?: unknown; unit?: unknown; scale?: unknown; amount?: unknown };
+  return row.currency === "CNY" && row.unit === "yuan" && row.scale === 2 && typeof row.amount === "string" ? row.amount : null;
+}
+
+function addPostingEntry(entries: Array<Record<string, unknown>>, accountCode: string, value: bigint, details: Record<string, unknown>, extra: {
+  counterpartyUserId?: string; sourcePaymentConfirmationId?: string;
+} = {}): void {
+  if (value === 0n) return;
+  entries.push({
+    id: `sledger_${randomUUID().replaceAll("-", "")}`,
+    accountCode,
+    debitCents: value < 0n ? (-value).toString() : "0",
+    creditCents: value > 0n ? value.toString() : "0",
+    details,
+    ...extra,
+  });
+}
+
+/** Posts only the immutable, currently accepted version; caller owns the order transaction and lock sequence. */
+async function postReadySettlement(
+  client: PoolClient,
+  order: LockedOrder,
+  versionId: string,
+  actor: Actor,
+  requestId: string,
+  requireReady: boolean,
+): Promise<void> {
+  if (order.status !== "PAID") throw conflict("ORDER_NOT_SETTLEABLE");
+  if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_posting WHERE order_id = $1`, [order.id])).rowCount) {
+    throw conflict("SETTLEMENT_ALREADY_POSTED");
+  }
+  const version = await currentVersion(client, order.id, versionId);
+  if (!version || version.supersededAt || version.basisHash !== version.versionHash) throw conflict("STALE_VERSION");
+  const snapshot = version.inputSnapshot;
+  if (hashApprovalPayload(snapshot).hash !== version.versionHash) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  if (snapshot.orderId !== order.id || snapshot.renterUserId !== order.renterUserId || snapshot.ownerUserId !== order.ownerUserId
+      || snapshot.openingId !== version.openingId || snapshot.kind !== version.kind || snapshot.early !== version.early
+      || snapshot.feePolicyVersion !== SETTLEMENT_FEE_POLICY_VERSION || snapshot.fullPayout !== "NOT_SELECTED") {
+    throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+
+  const latestIntake = (await client.query<IntakeAcceptanceBase>(
+    `SELECT id, version_no AS "versionNo", status, settlement_version_id AS "settlementVersionId"
+       FROM zzsh_order.settlement_intake WHERE order_id = $1 ORDER BY version_no DESC LIMIT 1 FOR UPDATE`,
+    [order.id],
+  )).rows[0] ?? null;
+  if (latestIntake?.status === "OPEN") throw conflict("SETTLEMENT_INTAKE_PENDING");
+  const baseIntake = snapshot.baseIntake as IntakeAcceptanceBase | null;
+  if (baseIntake === null) {
+    if (latestIntake !== null) throw conflict("SETTLEMENT_INTAKE_STALE");
+  } else if (!latestIntake || latestIntake.id !== baseIntake.id || latestIntake.versionNo !== baseIntake.versionNo
+      || (baseIntake.status === "OPEN"
+        ? latestIntake.status !== "CLASSIFIED" || latestIntake.settlementVersionId !== version.id
+        : latestIntake.status !== baseIntake.status || latestIntake.settlementVersionId !== baseIntake.settlementVersionId)) {
+    throw conflict("SETTLEMENT_INTAKE_STALE");
+  }
+
+  if (!Array.isArray(snapshot.lines) || snapshot.lines.length < 1) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  const remaining: LineQty[] = [];
+  for (const raw of snapshot.lines) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+    const line = raw as { itemId?: unknown; remainingQuantity?: unknown };
+    if (typeof line.itemId !== "string" || typeof line.remainingQuantity !== "string") throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+    remaining.push({ itemId: line.itemId, quantity: line.remainingQuantity });
+  }
+  const bill = await loadBill(client, order, remaining);
+  if ("status" in bill) throw conflict(String((bill.body.reasons as string[] | undefined)?.[0] ?? "SETTLEMENT_BASIS_INVALID"));
+  const sameLines = hashApprovalPayload({ lines: snapshot.lines }).hash === hashApprovalPayload({
+    lines: bill.lines.map((line) => ({ itemId: line.itemId, openingQuantity: line.openingQuantity, remainingQuantity: line.remainingQuantity })),
+  }).hash;
+  if (!sameLines || snapshot.openingVersion !== String(bill.opening.versionNo)
+      || snapshot.quoteDigest !== bill.basis.quoteDigest || snapshot.paymentDigest !== bill.basis.paymentDigest
+      || snapshot.paymentConfirmationId !== bill.basis.paymentConfirmationId || snapshot.capturedAmount !== bill.basis.captured
+      || snapshot.depositAmount !== bill.basis.deposit || snapshot.fundingSourceRef !== bill.basis.fundingSourceRef
+      || snapshot.fundingPolicyRef !== bill.basis.fundingPolicyRef) {
+    throw conflict("SETTLEMENT_BASIS_STALE");
+  }
+
+  const computation = version.computation;
+  if (!computation?.ok || computation.early !== version.early || !computation.amounts) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  const amounts = snapshot.amounts as Record<string, unknown> | undefined;
+  if (!amounts) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  const computed = computation.amounts;
+  const computedFields = [
+    "haffSpread", "itemSpread", "unusedItemRefund", "unusedHaffRefund", "earlyMakeup", "feeBase", "feeAmount",
+    "ownerGross", "ownerNet", "renterCharge", "renterRefund", "depositRefund", "platformContribution",
+  ] as const;
+  for (const field of computedFields) {
+    if (amountObject(computed[field]) !== amounts[field]) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+  if (computed.feeRate !== amounts.feeRate || computed.feePayer !== amounts.feePayer) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+
+  const captured = exactCents(snapshot.capturedAmount, "CAPTURED_AMOUNT");
+  const systemOwner = exactCents(amounts.ownerNet, "OWNER_NET");
+  const systemRefund = exactCents(amounts.renterRefund, "RENTER_REFUND");
+  const systemPlatform = ["haffSpread", "itemSpread", "earlyMakeup", "feeAmount"]
+    .map((field) => exactCents(amounts[field], field.toUpperCase()))
+    .reduce((sum, value) => sum + value, 0n);
+  if (systemPlatform !== exactCents(amounts.platformContribution, "PLATFORM_CONTRIBUTION")
+      || systemOwner !== BigInt(version.systemOwnerNet) || systemRefund !== BigInt(version.systemRenterRefund)) {
+    throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+
+  const manualReason = version.kind === "MANUAL_ADJUSTMENT" ? snapshot.reason : null;
+  if (version.kind === "MANUAL_ADJUSTMENT" && (typeof manualReason !== "string" || manualReason.trim().length < 3
+      || version.proposedOwnerNet === null || version.proposedRenterRefund === null)) {
+    throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+  const ownerNet = version.kind === "MANUAL_ADJUSTMENT" ? BigInt(version.proposedOwnerNet!) : systemOwner;
+  const renterRefund = version.kind === "MANUAL_ADJUSTMENT" ? BigInt(version.proposedRenterRefund!) : systemRefund;
+  if (version.kind === "MANUAL_ADJUSTMENT"
+      && (exactCents(snapshot.proposedOwnerNet, "OWNER_NET") !== ownerNet
+        || exactCents(snapshot.proposedRenterRefund, "RENTER_REFUND") !== renterRefund)) {
+    throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+  const adjustment = systemOwner + systemRefund - ownerNet - renterRefund;
+  const platformContribution = systemPlatform + adjustment;
+  if (captured < 0n || ownerNet < 0n || renterRefund < 0n || platformContribution < 0n
+      || ownerNet + renterRefund + platformContribution !== captured) {
+    throw conflict("FUNDING_SOURCE_REQUIRED");
+  }
+  const fee = exactCents(amounts.feeAmount, "COMPENSATION_FEE");
+  if (fee < 0n || exactCents(amounts.feeBase, "COMPENSATION_FEE_BASE") < 0n
+      || !["OWNER", "RENTER", "NONE"].includes(String(amounts.feePayer))) {
+    throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+
+  let approval: { requestedBy: string; decidedBy: string; expiresAt: string; payloadHash: string } | null = null;
+  if (version.kind === "MANUAL_ADJUSTMENT") {
+    const row = (await client.query<{ status: string; requestedBy: string; decidedBy: string | null; expiresAt: string; payloadHash: string }>(
+      `SELECT status, requested_by AS "requestedBy", decided_by AS "decidedBy", expires_at::text AS "expiresAt",
+              operation_payload_hash AS "payloadHash"
+         FROM zzsh_iam.approval_request WHERE id = $1 FOR SHARE`,
+      [version.approvalRequestId],
+    )).rows[0];
+    if (!row || row.status !== "APPROVED" || !row.decidedBy || row.decidedBy === row.requestedBy || row.payloadHash !== version.versionHash) {
+      throw conflict("OPS_APPROVAL_MISSING");
+    }
+    approval = { requestedBy: row.requestedBy, decidedBy: row.decidedBy, expiresAt: row.expiresAt, payloadHash: row.payloadHash };
+  }
+  const postedAt = (await client.query<{ postedAt: string }>(`SELECT clock_timestamp()::text AS "postedAt"`)).rows[0]!.postedAt;
+  const readiness = await readyFacts(client, version, postedAt);
+  if (!readiness.ready) {
+    const waitReasons = new Set(["RENTER_CONFIRMATION_MISSING", "OWNER_CONFIRMATION_MISSING", "SUPPORT_REVIEW_MISSING", "PARTY_REJECTED"]);
+    if (!requireReady && readiness.reasons.length > 0 && readiness.reasons.every((reason) => waitReasons.has(reason))) return;
+    throw conflict(readiness.reasons[0] ?? "SETTLEMENT_NOT_READY");
+  }
+  if (approval && Date.parse(approval.expiresAt) <= Date.parse(postedAt)) throw conflict("OPS_APPROVAL_EXPIRED");
+
+  const postingId = `spost_${randomUUID().replaceAll("-", "")}`;
+  const header = (await client.query<{ postedAt: string; refundDueAt: string }>(
+    `INSERT INTO zzsh_order.settlement_posting (
+       id, order_id, settlement_version_id, payment_confirmation_id, version_hash, early,
+       captured_cents, system_owner_net_cents, owner_net_cents, system_renter_refund_cents,
+       renter_refund_cents, platform_contribution_cents, compensation_fee_cents, manual_reason,
+       approval_request_id, approval_requested_by, approval_approved_by, approval_expires_at, approval_payload_hash,
+       posted_at, refund_due_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::timestamptz,NULL)
+     RETURNING posted_at::text AS "postedAt", refund_due_at::text AS "refundDueAt"`,
+    [postingId, order.id, version.id, bill.basis.paymentConfirmationId, version.versionHash, version.early,
+      captured.toString(), systemOwner.toString(), ownerNet.toString(), systemRefund.toString(), renterRefund.toString(),
+      platformContribution.toString(), fee.toString(), manualReason, version.approvalRequestId,
+      approval?.requestedBy ?? null, approval?.decidedBy ?? null, approval?.expiresAt ?? null, approval?.payloadHash ?? null, postedAt],
+  )).rows[0]!;
+
+  const entries: Array<Record<string, unknown>> = [];
+  addPostingEntry(entries, "CAPTURED_PAYMENT_SOURCE", -captured, {
+    paymentConfirmationId: bill.basis.paymentConfirmationId, disposition: "APPLIED", fundingSourceRef: bill.basis.fundingSourceRef,
+  }, { sourcePaymentConfirmationId: bill.basis.paymentConfirmationId });
+  addPostingEntry(entries, "OWNER_AVAILABLE", ownerNet, {
+    settlementVersionId: version.id, versionHash: version.versionHash,
+    systemGross: computed.ownerGross, systemNet: moneyString(systemOwner), postedNet: moneyString(ownerNet),
+    feePayer: amounts.feePayer, compensationFee: computed.feeAmount,
+  }, { counterpartyUserId: order.ownerUserId });
+  addPostingEntry(entries, "RENTER_REFUND_PAYABLE", renterRefund, {
+    settlementVersionId: version.id, versionHash: version.versionHash, dueAt: header.refundDueAt,
+    systemRefund: moneyString(systemRefund), depositRefund: computed.depositRefund,
+    unusedItemRefund: computed.unusedItemRefund, unusedHaffRefund: computed.unusedHaffRefund,
+  }, { counterpartyUserId: order.renterUserId });
+  addPostingEntry(entries, "PLATFORM_HAFF_SPREAD", exactCents(amounts.haffSpread, "HAFF_SPREAD"), { amount: computed.haffSpread });
+  addPostingEntry(entries, "PLATFORM_ITEM_SPREAD", exactCents(amounts.itemSpread, "ITEM_SPREAD"), { amount: computed.itemSpread });
+  addPostingEntry(entries, "PLATFORM_EARLY_MAKEUP", exactCents(amounts.earlyMakeup, "EARLY_MAKEUP"), {
+    amount: computed.earlyMakeup, endReason: snapshot.endReason,
+  });
+  addPostingEntry(entries, "PLATFORM_COMPENSATION_FEE", fee, {
+    base: computed.feeBase, rate: amounts.feeRate, payer: amounts.feePayer, policyVersion: SETTLEMENT_FEE_POLICY_VERSION,
+  });
+  addPostingEntry(entries, "PLATFORM_MANUAL_NET_ADJUSTMENT", adjustment, {
+    reason: manualReason, systemOwnerNet: moneyString(systemOwner), postedOwnerNet: moneyString(ownerNet),
+    systemRenterRefund: moneyString(systemRefund), postedRenterRefund: moneyString(renterRefund),
+    deltaOwnerNet: moneyString(ownerNet - systemOwner), deltaRenterRefund: moneyString(renterRefund - systemRefund),
+    approvalRequestId: version.approvalRequestId,
+  });
+  for (const [index, entry] of entries.entries()) {
+    await client.query(
+      `INSERT INTO zzsh_order.settlement_ledger_entry
+         (id, posting_id, line_no, account_code, debit_cents, credit_cents, counterparty_user_id, source_payment_confirmation_id, details)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,
+      [entry.id, postingId, index + 1, entry.accountCode, entry.debitCents, entry.creditCents,
+        entry.counterpartyUserId ?? null, entry.sourcePaymentConfirmationId ?? null, JSON.stringify(entry.details)],
+    );
+  }
+  const completed = await client.query(
+    `UPDATE zzsh_order.rental_order SET status = 'COMPLETED', updated_at = clock_timestamp(), revision = revision + 1
+      WHERE id = $1 AND status = 'PAID'`,
+    [order.id],
+  );
+  if (completed.rowCount !== 1) throw conflict("ORDER_NOT_SETTLEABLE");
+  order.status = "COMPLETED";
+  order.revision = (BigInt(order.revision) + 1n).toString();
+  await audit(client, actor, "order.settlement.posted", order.id, requestId, {
+    postingId, settlementVersionId: version.id, versionHash: version.versionHash,
+    paymentConfirmationId: bill.basis.paymentConfirmationId, postedAt: header.postedAt, refundDueAt: header.refundDueAt,
+    capturedCents: captured.toString(), ownerNetCents: ownerNet.toString(), renterRefundCents: renterRefund.toString(),
+    platformContributionCents: platformContribution.toString(), compensationFeeCents: fee.toString(),
+  });
+}
+
 export async function decideSettlement(client: PoolClient, orderId: string, versionId: string, actor: Actor, action: "CONFIRM" | "REJECT", versionHash: string, reason: string | null, requestId: string): Promise<Command> {
   if (actor.realm !== "user") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
@@ -944,6 +1381,9 @@ export async function decideSettlement(client: PoolClient, orderId: string, vers
   const party = partyOf(order, actor.userId);
   if (action === "REJECT" && !reason) throw invalid("A rejection reason is required");
   if (action === "CONFIRM") {
+    if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
+      return blocked(["SETTLEMENT_INTAKE_PENDING"]);
+    }
     const gap = await manualGap(client, version);
     if (gap) return blocked([gap]);
   }
@@ -960,6 +1400,7 @@ export async function decideSettlement(client: PoolClient, orderId: string, vers
     );
   }
   await audit(client, actor, "order.settlement.decided", orderId, requestId, { settlementVersionId: version.id, party, action });
+  if (action === "CONFIRM") await postReadySettlement(client, order, version.id, actor, requestId, false);
   return view(client, order);
 }
 
@@ -969,6 +1410,9 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
   const version = await currentVersion(client, orderId, versionId);
   if (!version || version.supersededAt || version.versionHash !== versionHash) return blocked(["STALE_VERSION"]);
   if (!version.early) return blocked(["SUPPORT_REVIEW_NOT_REQUIRED"]);
+  if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
+    return blocked(["SETTLEMENT_INTAKE_PENDING"]);
+  }
   const decisions = (await client.query<{ party: string; action: string }>(
     `SELECT party, action FROM zzsh_order.settlement_decision WHERE settlement_version_id = $1 AND party IN ('RENTER','OWNER')`,
     [version.id],
@@ -988,5 +1432,6 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
     );
   }
   await audit(client, actor, "order.settlement.reviewed", orderId, requestId, { settlementVersionId: version.id, versionHash });
+  await postReadySettlement(client, order, version.id, actor, requestId, true);
   return view(client, order);
 }
