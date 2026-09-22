@@ -223,7 +223,7 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     buildStaffApprovalBasis({ platformSubjectId: staff, memberJoinedAt: await memberJoinedAt(orderId), scope: gameId });
   const insertApprovalRow = async (input: {
     orderId: string; teamId: string; clientId: string; occurredAt: Date; recordedAt?: Date; msgType?: string;
-    status?: "VERIFIED" | "REJECTED"; basis?: unknown;
+    status?: "VERIFIED" | "REJECTED"; basis?: unknown; metadata?: unknown;
   }) => {
     await ownerPool.query(`INSERT INTO zzsh_order.im_order_event
       (id,order_id,app_id,team_id,event_key,type,status,actor,message_client_id,message_server_id,sender_account_id,message_type,occurred_at,recorded_at,raw_body_sha256,metadata)
@@ -231,7 +231,7 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
       `im_order_evt_${randomUUID().replaceAll("-", "")}`, input.orderId, appId, input.teamId,
       `send_approved:${input.teamId}:${staffAccount}:${input.clientId}`, input.status ?? "VERIFIED", staffAccount,
       input.clientId, input.msgType ?? "TEXT", input.occurredAt, input.recordedAt ?? null, "0".repeat(64),
-      JSON.stringify({ reason: "SEEDED", basis: input.basis ?? null }),
+      JSON.stringify(input.metadata ?? { reason: "SEEDED", basis: input.basis ?? null, fromClientType: "WEB" }),
     ]);
   };
   const insertPendingDelivery = async (input: { orderId: string; teamId: string; serverId: string; clientId: string | null; occurredAt: Date; status?: string; metadata?: unknown }) => {
@@ -1280,6 +1280,71 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     await recoverOrderFirstResponse({ pool, appId, appSecret: ORDER_IM_EVENT_SECRET }, { limit: 20, maxTotal: 200 });
     assert.equal((await deliveryRow(staleSource.orderId, "4291065454174145401"))?.status, "VERIFY_REQUIRED");
     assert.equal((await groupRow(staleSource.orderId)).first_response_at, null);
+
+    // A same-key resend without a trustworthy source quarantines the original pending WEB fact.
+    const sourceConflict = await makePaid("OIM4D1 来源冲突待核单", "active");
+    const conflictTeam = (await groupRow(sourceConflict.orderId)).team_id as string;
+    const conflictServerId = "4291065454174145192";
+    const conflictClientId = `sourceconflict_${randomUUID()}`;
+    const conflictAt = Date.now();
+    const originalWeb = copyBody(staffAccount, conflictServerId, conflictTeam, {
+      msgidClient: conflictClientId, msgTimestamp: String(conflictAt),
+    });
+    assert.equal((await signedRequest(COPY_PATH, originalWeb, { base: hooks.base })).status, 200);
+    assert.equal((await deliveryRow(sourceConflict.orderId, conflictServerId))?.status, "WAITING_AUTH");
+    assert.equal((await groupRow(sourceConflict.orderId)).first_response_state, "RUNNING");
+
+    const verifyAuditsBefore = await auditCount("im.order.first_response.verify_required");
+    const missingSourceRetry = copyBody(staffAccount, conflictServerId, conflictTeam, {
+      msgidClient: conflictClientId, msgTimestamp: String(conflictAt), fromClientType: undefined,
+    });
+    assert.equal((await signedRequest(COPY_PATH, missingSourceRetry, { base: hooks.base })).status, 200);
+    assert.equal((await deliveryRow(sourceConflict.orderId, conflictServerId))?.status, "VERIFY_REQUIRED");
+    assert.equal((await groupRow(sourceConflict.orderId)).first_response_state, "VERIFY_REQUIRED");
+    assert.equal(await verifyMarkerCount(sourceConflict.orderId), 1);
+    assert.equal(await auditCount("im.order.first_response.verify_required"), verifyAuditsBefore + 1);
+
+    const illegalSourceRetry = copyBody(staffAccount, conflictServerId, conflictTeam, {
+      msgidClient: conflictClientId, msgTimestamp: String(conflictAt), fromClientType: { nested: 8 },
+    });
+    assert.equal((await signedRequest(COPY_PATH, illegalSourceRetry, { base: hooks.base })).status, 200);
+    assert.equal(await verifyMarkerCount(sourceConflict.orderId), 1, "repeated source conflict evidence is idempotent");
+    assert.equal(await auditCount("im.order.first_response.verify_required"), verifyAuditsBefore + 1,
+      "repeated source conflict does not duplicate its audit");
+
+    const lateApproval = await signedRequest(PRE_SEND_PATH, preSendBody(conflictTeam, staffAccount, {
+      msgidClient: conflictClientId, msgTimestamp: String(conflictAt),
+    }), { base: hooks.base });
+    assert.equal(lateApproval.body?.errCode, 0);
+    assert.equal((await eventRows(sourceConflict.orderId)).some((row) => row.type === "send_approved"
+      && row.status === "VERIFIED" && row.message_client_id === conflictClientId), true);
+    await recoverOrderFirstResponse({ pool, appId, appSecret: ORDER_IM_EVENT_SECRET }, { limit: 20, maxTotal: 200 });
+    assert.equal((await deliveryRow(sourceConflict.orderId, conflictServerId))?.status, "VERIFY_REQUIRED");
+    const quarantined = await groupRow(sourceConflict.orderId);
+    assert.equal(quarantined.first_response_state, "VERIFY_REQUIRED");
+    assert.equal(quarantined.first_response_at, null);
+    assert.equal(quarantined.first_response_event_id, null);
+    assert.equal((await eventRows(sourceConflict.orderId)).filter((row) => row.type === "first_response").length, 0);
+
+    // WEB and its documented numeric alias 16 remain the same duplicate fact and can resolve normally.
+    const aliasOrder = await makePaid("OIM4D1 WEB数字别名正常重送单", "active");
+    const aliasTeam = (await groupRow(aliasOrder.orderId)).team_id as string;
+    const aliasServerId = "4291065454174145191";
+    const aliasClientId = `webalias_${randomUUID()}`;
+    const aliasAt = Date.now();
+    assert.equal((await signedRequest(COPY_PATH, copyBody(staffAccount, aliasServerId, aliasTeam, {
+      msgidClient: aliasClientId, msgTimestamp: String(aliasAt),
+    }), { base: hooks.base })).status, 200);
+    assert.equal((await signedRequest(COPY_PATH, copyBody(staffAccount, aliasServerId, aliasTeam, {
+      msgidClient: aliasClientId, msgTimestamp: String(aliasAt), fromClientType: 16,
+    }), { base: hooks.base })).status, 200);
+    assert.equal((await deliveryRow(aliasOrder.orderId, aliasServerId))?.status, "WAITING_AUTH");
+    assert.equal(await verifyMarkerCount(aliasOrder.orderId), 0);
+    assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(aliasTeam, staffAccount, {
+      msgidClient: aliasClientId, msgTimestamp: String(aliasAt),
+    }), { base: hooks.base })).body?.errCode, 0);
+    assert.equal((await deliveryRow(aliasOrder.orderId, aliasServerId))?.status, "VERIFIED");
+    assert.equal((await groupRow(aliasOrder.orderId)).first_response_state, "STOPPED");
   });
 
   await t.test("T16 pre-send qualification locks precede the group lock", async () => {

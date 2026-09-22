@@ -99,11 +99,12 @@ export type YunxinOrderTeamInput = { appId: string; orderId: string; name: strin
 export type YunxinOrderTeamState = { teamId: string; ownerAccountId: string; serverExtension: string | null;
   teamType: number; name: string; membersLimit: number; configuration: Record<keyof typeof ORDER_TEAM_CONFIGURATION, number>;
   members: { accountId: string; role: number; chatBanned: boolean | null }[] };
+export type YunxinMessageRouteConfig = { routeEnabled: true; routeEnvironment: string };
 export type YunxinOrderTeamApi = {
   createOrderTeam(input: YunxinOrderTeamInput): Promise<{ teamId: string; partial: boolean }>;
   readOrderTeam(teamId: string): Promise<YunxinOrderTeamState | null>;
   addSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void>;
-  sendOrderTeamNotice(teamId: string, operatorAccountId: string): Promise<void>;
+  sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void>;
 };
 
 /** Trimmed single-message fact; text/attachment/URL are deliberately dropped. */
@@ -689,13 +690,17 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("add-support-team-member", null, false);
   }
 
-  async sendOrderTeamNotice(teamId: string, operatorAccountId: string): Promise<void> {
+  async sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void> {
     const team = normalizeTeamId(teamId);
     const operator = normalizeAccountId(operatorAccountId);
     const conversationId = `${operator}|2|${team}`;
+    if (routeConfig && (routeConfig.routeEnabled !== true || !/^[A-Za-z0-9._-]{1,32}$/.test(routeConfig.routeEnvironment))) {
+      throw new Error("Yunxin message route configuration is invalid");
+    }
     const data = responseData(await this.request("send-order-team-notice", "POST",
       `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
         message: { message_type: 0, text: "客服正在为您安排接待，请稍候。" },
+        ...(routeConfig ? { route_config: { route_enabled: true, route_environment: routeConfig.routeEnvironment } } : {}),
       }, "", "v2"));
     const sender = asString(field(data, "sender_id"));
     const conversationType = asNumber(field(data, "conversation_type"));

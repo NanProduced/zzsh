@@ -6,8 +6,9 @@ import { NimImageSendError, validateNimImageFile, type NimMessageLike, type NimW
 
 type Member={platformId:string;accountId:string;party:string;name:string|null;avatar:string|null;responsible?:boolean;membershipStatus?:string;identityStatus?:string};
 type SupportEscalation={firstResponseAt:string|null;remindDueAt:string|null;addRound:number;state:string;needsManualReview:boolean;noEligibleStaff:boolean};
+type MessageRouteGrant={appId:string;orderId:string;teamId:string;conversationId:string;routeEnvironment:string};
 export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;assignmentState:string|null;teamState:string|null;
-  appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;conversationId?:string;canRead:boolean;canSend:boolean;members:Member[];supportEscalation:SupportEscalation};
+  appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;conversationId?:string;messageRoute?:MessageRouteGrant;canRead:boolean;canSend:boolean;members:Member[];supportEscalation:SupportEscalation};
 type OrderItem={id:string;displayNo:string;title:string;status:string;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;addRound?:number;escalationState?:string;fulfillmentAssignment?:{state:string;teamState:string|null}|null};
 type OrderPage={items:OrderItem[];nextCursor:string|null};
 type ListRefresh={scope:string;targetPages:number;pagesRead:number;cursor:string|null|undefined;items:OrderItem[]};
@@ -254,6 +255,11 @@ function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{c
     if(version!==generation.current||clientRef.current!==client||scope!==scopeRef.current)throw new ImLifecycleSupersededError();
     if(!fresh.canRead||fresh.teamState!=="READY"||fresh.appId!==info.appId||fresh.orderId!==info.orderId||fresh.teamId!==info.teamId
       ||fresh.conversationId!==conversationId||fresh.viewerAccountId!==client.accountId||(operation==="send"&&!fresh.canSend))throw rejected();
+    if(operation!=="send"||!fresh.messageRoute)return;
+    const grant=fresh.messageRoute;
+    if(grant.appId!==info.appId||grant.orderId!==info.orderId||grant.teamId!==info.teamId||grant.conversationId!==info.conversationId
+      ||grant.conversationId!==conversationId||!/^[A-Za-z0-9._-]{1,32}$/.test(grant.routeEnvironment))throw rejected();
+    return grant;
   };
   const merge=(incoming:NimMessageLike[])=>setMessages(current=>mergeImMessages(current,incoming.filter(m=>m.conversationId===info.conversationId&&typeof m.messageClientId==="string"&&Number.isFinite(m.createTime)).map(m=>({...m,id:m.messageServerId||m.messageClientId}))));
   const history=async(before?:NimMessageLike)=>{

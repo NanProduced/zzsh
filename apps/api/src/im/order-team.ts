@@ -7,14 +7,16 @@ import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authoriza
 import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidate } from "./support-dispatch";
 import { createImScopeLease, lockTeamBinding, onLeaseConnection } from "./scope-lease";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityProvisioner } from "./identity-lifecycle";
-import { ORDER_TEAM_CONFIGURATION, YunxinApiError, validateOrderTeamInput, type YunxinOrderTeamApi, type YunxinOrderTeamInput, type YunxinOrderTeamState } from "./yunxin-provider";
+import { orderImSdkRouteFor, type OrderImSdkRouteConfig } from "../config/config";
+import { ORDER_TEAM_CONFIGURATION, YunxinApiError, validateOrderTeamInput, type YunxinMessageRouteConfig, type YunxinOrderTeamApi, type YunxinOrderTeamInput, type YunxinOrderTeamState } from "./yunxin-provider";
 
 export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrderTeamApi;
   identities: Pick<ImIdentityProvisioner,"ensure">; membersLimit: number; leaseMs?: number;
   /** Activates first-response tracking for newly READY groups; historical groups stay NOT_STARTED. */
   firstResponseEnabled?: boolean;
   /** Explicit opt-in; requires this App's first-response ingress to be enabled as well. */
-  escalationEnabled?: boolean };
+  escalationEnabled?: boolean;
+  orderImSdkRouteConfig?: OrderImSdkRouteConfig };
 type Db = Pool | PoolClient;
 type Member = { identity_id:string; party:"BUYER"|"OWNER"|"STAFF"; state:string; account_id:string; platform_subject_id:string; realm:string; identity_kind:"USER"|"ADMIN"; status:string; identity_marker:string };
 type Plan = { order_id:string; app_id:string; assigned_admin_id:string; provision_state:string; team_state:string; team_name:string|null;
@@ -734,10 +736,17 @@ async function executeBot(options:OrderTeamOptions,op:EscalationClaim):Promise<v
     const system=assertSystemOwner(p);
     const send=await lease.mutate(`team:${p.team_id}`,async(c)=>{
       const fresh=await escalationPlan(c,options.appId,op.order_id);if(!fresh?.team_id)throw new OrderTeamError("STALE_OPERATION");
+      const freshSystem=assertSystemOwner(fresh);
+      if(freshSystem!==system)throw new OrderTeamError("STALE_OPERATION");
       const shouldSend=await onLeaseConnection(c,db=>markBotSent(db,options,op,fresh));
       if(!shouldSend)return false;
       sent=true;
-      await options.provider.sendOrderTeamNotice(fresh.team_id,system);
+      const routeScope=orderImSdkRouteFor(options.orderImSdkRouteConfig,{
+        appId:fresh.app_id,orderId:fresh.order_id,teamId:fresh.team_id,conversationId:`${freshSystem}|2|${fresh.team_id}`,
+      });
+      const routeConfig:YunxinMessageRouteConfig|undefined=routeScope
+        ?{routeEnabled:true,routeEnvironment:routeScope.routeEnvironment}:undefined;
+      await options.provider.sendOrderTeamNotice(fresh.team_id,freshSystem,routeConfig);
       return true;
     });
     await lease.stop();

@@ -40,8 +40,11 @@ const TEAM_ID = /^[0-9]{1,19}$/;
 const ACCOUNT_ID = /^[A-Za-z0-9._:-]{1,64}$/;
 const CLIENT_ID = /^[\x21-\x7e]{1,128}$/;
 const MESSAGE_ID = /^[0-9]{1,19}$/;
-/** Official callbacks report REST/robot sends as client type 32; they are never human replies. */
-const ROBOT_CLIENT_TYPE = "32";
+/** Current V2 callback enum. WINPHONE/8 is intentionally unsupported by this contract. */
+const CLIENT_SOURCE_BY_NUMBER: Readonly<Record<string, string>> = {
+  "1": "AOS", "2": "IOS", "4": "PC", "16": "WEB", "32": "REST", "64": "MAC", "65": "HARMONY",
+};
+const HUMAN_CLIENT_SOURCES = new Set(["AOS", "IOS", "PC", "WEB", "MAC", "HARMONY"]);
 type NodeRequest = AuthSecurityNodeRequest;
 type NodeResponse = AuthSecurityNodeResponse;
 type JsonRecord = Record<string, unknown>;
@@ -69,16 +72,26 @@ function send(response: NodeResponse, status: number, body: unknown): void {
   response.status(status).setHeader("Cache-Control", "no-store").json(body);
 }
 
-/** Normalize an official numeric/string client source; illegal shapes stay unknown instead of silently human. */
+/** Canonicalize only documented V2 callback aliases; preserve bounded unknown tokens for conflict checks. */
 export function normalizeClientSource(value: unknown): string | null {
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
-  if (typeof value === "string" && value.length > 0 && value.length <= 32 && /^[\x21-\x7e]+$/.test(value)) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return CLIENT_SOURCE_BY_NUMBER[String(value)] ?? String(value);
+  if (typeof value === "string" && value.length > 0 && value.length <= 32 && /^[\x21-\x7e]+$/.test(value)) {
+    return CLIENT_SOURCE_BY_NUMBER[value] ?? value;
+  }
   return null;
 }
 
-/** Only a recognized non-REST client source may count as a human reply; unknown/absent fails closed. */
-export function isHumanClientSource(fromClientType: string | null): boolean {
-  return fromClientType !== null && fromClientType.trim() !== ROBOT_CLIENT_TYPE;
+/** Source eligibility is separate from normal chat authorization. */
+export function isHumanClientSource(fromClientType: unknown): boolean {
+  const normalized = normalizeClientSource(fromClientType);
+  return normalized !== null && HUMAN_CLIENT_SOURCES.has(normalized);
+}
+
+/** Only equal normalized known facts match; missing/invalid source data is never trusted as equal. */
+export function clientSourcesConflict(left: unknown, right: unknown): boolean {
+  const a = normalizeClientSource(left);
+  const b = normalizeClientSource(right);
+  return a === null || b === null || a !== b;
 }
 
 /** First-response tracking activates only for the App whose event ingress is mounted. */
@@ -261,10 +274,14 @@ async function readApprovalFacts(db: PoolClient, appId: string, teamId: string, 
   }));
 }
 
-function conflictingApproval(facts: ApprovalFact[]): boolean {
+export function conflictingApproval(facts: ApprovalFact[]): boolean {
   const approvals = facts.filter((fact) => fact.type === "send_approved");
   if (facts.some((fact) => fact.type === "verify_required")) return true;
-  return new Set(approvals.map((fact) => `${fact.status}|${fact.messageType}|${fact.occurredAt.getTime()}`)).size > 1;
+  return new Set(approvals.map((fact) => `${fact.status}|${fact.messageType}|${fact.occurredAt.getTime()}`)).size > 1
+    || approvals.some((fact, index) => approvals.slice(index + 1).some((other) => {
+      const sourceOf = (value: unknown) => isRecord(value) ? value.fromClientType : undefined;
+      return clientSourcesConflict(sourceOf(fact.metadata), sourceOf(other.metadata));
+    }));
 }
 
 type DeliverySubject = {
@@ -296,6 +313,8 @@ async function decideDelivery(db: PoolClient, options: OrderImEventOptions, scop
   const approvals = facts.filter((fact) => fact.type === "send_approved");
   if (approvals.length === 0) return { status: "WAITING_AUTH", reason: "APPROVAL_PENDING" };
   const approval = approvals[0]!;
+  const approvalSource = isRecord(approval.metadata) ? approval.metadata.fromClientType : undefined;
+  if (clientSourcesConflict(approvalSource, delivery.source)) return { status: "VERIFY_REQUIRED", reason: "APPROVAL_SOURCE_MISMATCH" };
   if (approval.status === "REJECTED") return { status: "REJECTED", reason: "SEND_REJECTED" };
   if (approval.messageType !== delivery.msgType) return { status: "VERIFY_REQUIRED", reason: "APPROVAL_MESSAGE_MISMATCH" };
   const linkMs = options.approvalLinkMs ?? DEFAULT_APPROVAL_LINK_MS;
@@ -387,13 +406,13 @@ type ExistingDelivery = {
 };
 
 /** A duplicate delivery must match the original trusted key fields; resend flags and wrappers are not key fields. */
-function conflictingDelivery(existing: ExistingDelivery, event: SupplierMessageEvent): boolean {
-  const existingSource = isRecord(existing.metadata) && typeof existing.metadata.source === "string" ? existing.metadata.source : null;
+export function conflictingDelivery(existing: ExistingDelivery, event: SupplierMessageEvent): boolean {
+  const existingSource = deliverySourceOf(existing.metadata);
   return existing.sender_account_id !== event.fromAccount
     || new Date(existing.occurred_at).getTime() !== event.occurredAt.getTime()
     || (existing.message_client_id ?? null) !== (event.messageClientId ?? null)
     || (existing.message_type ?? null) !== event.msgType
-    || existingSource !== (event.fromClientType ?? null);
+    || clientSourcesConflict(existingSource, event.fromClientType);
 }
 
 /** Earliest verified human event wins; a later earlier fact may only move the pointer earlier. */
@@ -503,6 +522,12 @@ async function handleCopy(request: NodeRequest, response: NodeResponse, options:
     nowMs: (options.now ?? Date.now)(), freshnessMs: options.freshnessMs ?? DEFAULT_FRESHNESS_MS,
   });
   if (!verified.ok) { send(response, 403, { error: "callback signature rejected" }); return; }
+  // Yunxin's configured copy URL address probe is an authenticated empty POST, not a business fact.
+  if (rawBody.length === 0) {
+    if (verified.stale) { send(response, 403, { error: "callback signature rejected" }); return; }
+    send(response, 200, { ok: true });
+    return;
+  }
   let parsed: JsonRecord;
   try { parsed = JSON.parse(rawBody.toString("utf8")) as JsonRecord; } catch { send(response, 400, { error: "callback body invalid" }); return; }
   const event = parseSupplierMessageEvent(parsed, 1);
@@ -600,11 +625,12 @@ async function persistApproval(db: PoolClient, options: OrderImEventOptions, sco
     metadata: { reason: decision.reason, fromClientType: event.fromClientType, ...(decision.basis ? { basis: decision.basis } : {}) },
   });
   if (!inserted) {
-    const existing = (await db.query(`SELECT status, message_type, occurred_at::text FROM zzsh_order.im_order_event
+    const existing = (await db.query(`SELECT status, message_type, occurred_at::text, metadata FROM zzsh_order.im_order_event
       WHERE type='send_approved' AND app_id=$1 AND team_id=$2 AND sender_account_id=$3 AND message_client_id=$4`,
     [scope.appId, scope.teamId, event.fromAccount, event.messageClientId])).rows[0];
     if (existing && (existing.status !== status || existing.message_type !== event.msgType
-      || new Date(existing.occurred_at).getTime() !== event.occurredAt.getTime())) {
+      || new Date(existing.occurred_at).getTime() !== event.occurredAt.getTime()
+      || clientSourcesConflict(isRecord(existing.metadata) ? existing.metadata.fromClientType : undefined, event.fromClientType))) {
       await recordConflictEvidence(db, scope, event, "APPROVAL_FIELD_CONFLICT", rawBodySha256,options.escalationEnabled===true);
     }
     return;
@@ -644,8 +670,8 @@ async function resolvePendingDeliveries(db: PoolClient, options: OrderImEventOpt
   return resolved;
 }
 
-function deliverySourceOf(metadata: unknown): string | null {
-  return isRecord(metadata) && typeof metadata.source === "string" ? metadata.source : null;
+export function deliverySourceOf(metadata: unknown): string | null {
+  return isRecord(metadata) ? normalizeClientSource(metadata.source) : null;
 }
 
 /**

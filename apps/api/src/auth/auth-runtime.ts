@@ -25,7 +25,7 @@ import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
-import { ConfigurationError, readSecret } from "../config/config";
+import { ConfigurationError, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { setAuditContext, withTransaction } from "./security-core";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
@@ -69,6 +69,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   testYunxinProvider?: YunxinServerApi & YunxinSupportScopeApi;
   /** Test-only local message seam; production construction must leave this unset. */
   testImMessageTransport?: ImMessageTransport;
+  /** Exact server-side App/order/Team/conversation allowlist for local provider-test message routing. */
+  orderImSdkRouteConfig?: OrderImSdkRouteConfig;
   fakeSmsOutbox?: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>;
   fakeAdminNotificationOutbox?: AdminSecurityNotification[];
   rateLimitState?: Map<string, { failures: number; resetAt: number }>;
@@ -950,7 +952,8 @@ export async function mountAuthHandlers(
     const parsed = Number(raw);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
   })();
-  const orderOptions: OrderRuntimeOptions = { ...securityOptions, orderHoldSeconds, supplyGateReader };
+  const orderOptions: OrderRuntimeOptions = { ...securityOptions, orderHoldSeconds, supplyGateReader,
+    ...(options.orderImSdkRouteConfig ? { orderImSdkRouteConfig: options.orderImSdkRouteConfig } : {}) };
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
@@ -991,6 +994,7 @@ export async function mountAuthHandlers(
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");
     app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,
       membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId),
+      ...(options.orderImSdkRouteConfig ? { orderImSdkRouteConfig: options.orderImSdkRouteConfig } : {}),
       ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,

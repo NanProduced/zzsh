@@ -162,7 +162,8 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     // Complete read-only preflight BEFORE either ensureRole can change a password.
     const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,
       shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
-    if (RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT) {
+    const requireRegisteredResources = RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT;
+    if (requireRegisteredResources) {
       assert.equal(resources.maintenance.database.user, "zzsh");
       assert.ok(db, "registered OIM database must already exist");
     }
@@ -176,7 +177,7 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
         shobj_description(oid,'pg_authid') AS marker,
         EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid OR roleid=r.oid) AS membership,
         EXISTS(SELECT 1 FROM pg_database WHERE datdba=r.oid) AS owns_db FROM pg_roles r WHERE rolname=$1`, [name])).rows[0];
-      if (RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT) assert.ok(row, "registered role must already exist");
+      if (requireRegisteredResources) assert.ok(row, "registered role must already exist");
       if (!row) continue;
       assert.deepEqual(row, { rolcanlogin: true, rolsuper: false, rolcreaterole: false, rolcreatedb: false,
         rolinherit: false, rolreplication: false, rolbypassrls: false, marker: roleMarker(resources.databaseName, kind), membership: false, owns_db: false });
@@ -313,6 +314,24 @@ async function truncateIsolatedBusinessData(pool: Pool): Promise<void> {
   await pool.query(statement);
 }
 
+async function assertEmptyIsolatedBusinessData(pool: Pool): Promise<void> {
+  const tables = [...ISOLATED_BUSINESS_DATA_TRUNCATE.matchAll(/"([a-z_]+)"\."([A-Za-z0-9_]+)"/g)];
+  assert.ok(tables.length > 0, "isolated cleanup table inventory is missing");
+  const names = tables.map(([, schema, table]) => `"${schema}"."${table}"`);
+  const existing = new Set((await pool.query<{ name: string }>(
+    `SELECT name FROM unnest($1::text[]) AS target(name) WHERE to_regclass(name) IS NOT NULL`, [names],
+  )).rows.map(row => row.name));
+  // Staged migrations may not yet have created every table in the current source inventory.
+  const present = tables.filter((_, index) => existing.has(names[index]!));
+  assert.ok(present.length > 0, "no isolated cleanup tables exist at this migration stage");
+  const counts = await pool.query(present.map(([, schema, table]) =>
+    `SELECT '${schema}.${table}' AS table_name, count(*)::int AS row_count FROM "${schema}"."${table}"`).join(" UNION ALL "));
+  const occupied = counts.rows.filter((row) => row.row_count !== 0);
+  console.log("order cleanup-target preflight", JSON.stringify({ inventory: tables.length, tables: counts.rowCount,
+    notPresentAtStage: names.filter(name => !existing.has(name)), occupied }));
+  assert.deepEqual(occupied, [], "registered test target contains rows the suite would truncate; refusing to continue");
+}
+
 async function activateStaff(base: string, username: string, temporaryPassword: string): Promise<Staff> {
   const jar = cookieJar();
   assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username, password: temporaryPassword }, jar, ADMIN_ORIGIN)).response.status, 200);
@@ -439,6 +458,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
+    await assertEmptyIsolatedBusinessData(maintenanceDataPool);
     await truncateIsolatedBusinessData(maintenanceDataPool);
     fixturesStarted = true;
     // B6 deliberately jumps this sequence to 999998 later. Reset the isolated

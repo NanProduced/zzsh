@@ -297,6 +297,35 @@ test("does not call the SDK when the server message authorization is rejected", 
   await handle.dispose();
 });
 
+test("passes the per-message route only for the exact authorized team and blocks stale or mismatched grants", async () => {
+  const sent = [];
+  const messageService = {
+    on() {}, off() {},
+    async sendMessage(...args) { sent.push(args); return { message: { messageClientId: `sent-${sent.length}`, conversationId: args[1] } }; },
+  };
+  const grant = { appId: "test-app", orderId: "order-1", teamId: "9001", conversationId: "staff-1|2|9001", routeEnvironment: "oim4d-test" };
+  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ text }) } });
+  const state = testContext("staff-1");
+  const handle = await createNimWebClientFactory({ appKey: "test-app", token: "test-token" }, async () => sdk)(state.context);
+  try {
+    await handle.client.sendText(grant.conversationId, "scoped", async ({ conversationId }) => conversationId === grant.conversationId ? grant : undefined);
+    await handle.client.sendText("staff-1|1|peer-1", "ordinary", async () => undefined);
+    assert.deepEqual(sent[0]?.[2], { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } });
+    assert.equal(sent[0]?.length, 3);
+    assert.equal(sent[1]?.length, 2);
+    await assert.rejects(handle.client.sendText("staff-1|2|9002", "wrong-team", async () => grant), /route scope is invalid/);
+    assert.equal(sent.length, 2);
+
+    const gate = deferred();
+    const stale = handle.client.sendText(grant.conversationId, "late", () => gate.promise);
+    await new Promise((resolve) => setImmediate(resolve));
+    state.supersede();
+    gate.resolve(grant);
+    await assert.rejects(stale, ImLifecycleSupersededError);
+    assert.equal(sent.length, 2);
+  } finally { await handle.dispose(); }
+});
+
 test("formal image adapter uses the installed V2 image creator, reports progress, and retries the same message after an unknown result", async () => {
   const sent = [];
   let first = true;
@@ -330,11 +359,16 @@ test("formal image adapter uses the installed V2 image creator, reports progress
   const progress = [];
   const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("customer-image").context);
   const file = new File([new Uint8Array([1, 2, 3])], "proof.png", { type: "image/png" });
-  const authorize = async (input) => authorizations.push(input);
+  const route = { appId: "test-app", orderId: "order-image", teamId: "9001", conversationId: "customer-image|2|9001", routeEnvironment: "oim4d-test" };
+  const authorize = async (input) => { authorizations.push(input); return route; };
   await assert.rejects(handle.client.sendImage("customer-image|2|9001", file, { authorize, width: 12, height: 8, onProgress: (value) => progress.push(value) }), (error) => error instanceof NimImageSendError && error.kind === "UNKNOWN" && error.messageClientId === "image-client-1");
   const reply = await handle.client.retryImage("customer-image|2|9001", "image-client-1", { authorize, onProgress: (value) => progress.push(value) });
   assert.equal(reply.messageClientId, "image-client-1");
   assert.equal(sent[0].message, sent[1].message);
+  assert.deepEqual(sent.map(call => call.params), [
+    { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } },
+    { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } },
+  ]);
   assert.equal(created.length, 1);
   assert.deepEqual(authorizations, [
     { conversationId: "customer-image|2|9001", operation: "send" },

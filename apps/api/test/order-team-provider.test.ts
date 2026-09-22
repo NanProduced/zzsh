@@ -39,6 +39,21 @@ test("same-Team add and fixed bot notice use the signed server APIs with no clie
   await assert.rejects(invalid.sendOrderTeamNotice(created.teamId,"sys"));
 });
 
+test("Server API bot routing is an opt-in top-level route_config, independent from SDK params",async()=>{
+  const calls:{url:string;body:unknown}[]=[];
+  const client=new YunxinServerApiClient({appKey:"fixture",appSecret:"fixture",fetch:async(input,init)=>{
+    const url=String(input),body=JSON.parse(String(init?.body));calls.push({url,body});
+    return Response.json({code:200,data:{message_client_id:"notice-1",sender_id:"sys",conversation_type:2,receiver_id:"9001",create_time:Date.now(),message_type:0}});
+  }});
+  await client.sendOrderTeamNotice("9001","sys");
+  await client.sendOrderTeamNotice("9001","sys",{routeEnabled:true,routeEnvironment:"oim4d-test"});
+  assert.deepEqual(calls.map(call=>call.body),[
+    {message:{message_type:0,text:"客服正在为您安排接待，请稍候。"}},
+    {message:{message_type:0,text:"客服正在为您安排接待，请稍候。"},route_config:{route_enabled:true,route_environment:"oim4d-test"}},
+  ]);
+  assert.ok(calls.every(call=>call.url.endsWith("/im/v2/conversations/sys%7C2%7C9001/messages")));
+});
+
 test("small escalation budgets rotate across all phases and the default keeps its full budget",async()=>{
   const phases=["expired","reminder","due","pending","recoverable"];
   const runner=(appId:string)=>{

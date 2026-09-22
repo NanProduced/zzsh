@@ -1,29 +1,31 @@
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+import type { INestApplication } from "@nestjs/common";
 import type { Pool } from "pg";
 
 import {
-  OrderImEventRecoveryLifecycle, buildStaffApprovalBasis, isHumanClientSource, normalizeClientSource, orderImEventsActivateApp,
-  parseSupplierMessageEvent, recoverOrderFirstResponse, verifySupplierRequest,
+  OrderImEventRecoveryLifecycle, buildStaffApprovalBasis, clientSourcesConflict, conflictingApproval, conflictingDelivery,
+  deliverySourceOf, isHumanClientSource, normalizeClientSource, orderImEventsActivateApp, parseSupplierMessageEvent,
+  recoverOrderFirstResponse, verifySupplierRequest, mountOrderImEventHandlers,
 } from "../src/im/order-im-events";
 import { YunxinServerApiClient } from "../src/im/yunxin-provider";
+import { createApp } from "../src/app";
 
 const APP_KEY = "oim4b_synthetic_app";
 const APP_SECRET = "synthetic-secret-value";
 const NOW = 1_789_500_000_000;
 
-function signedHeaders(rawBody: string, overrides: Partial<Record<"appkey" | "curtime" | "md5" | "checksum", string>> = {}) {
+function signedHeadersAt(rawBody: string, curtime = String(NOW), appkey = APP_KEY) {
   const md5 = createHash("md5").update(rawBody).digest("hex");
-  const curtime = String(NOW);
   return {
-    appkey: APP_KEY,
+    appkey,
     curtime,
     md5,
     checksum: createHash("sha1").update(`${APP_SECRET}${md5}${curtime}`).digest("hex"),
-    ...overrides,
   };
 }
+const signedHeaders = (rawBody: string, overrides: Partial<Record<"appkey" | "curtime" | "md5" | "checksum", string>> = {}) => ({ ...signedHeadersAt(rawBody), ...overrides });
 
 test("supplier signature verification accepts only exact raw-body MD5 and CheckSum", () => {
   const rawBody = Buffer.from(JSON.stringify({ eventType: 1, convType: "TEAM" }), "utf8");
@@ -41,22 +43,35 @@ test("supplier signature verification accepts only exact raw-body MD5 and CheckS
   assert.deepEqual(tampered, { ok: false, reason: "body-md5-mismatch" });
 });
 
-test("robot client sends and cross-App activation are excluded by shape", () => {
-  assert.equal(isHumanClientSource("8"), true);
-  assert.equal(isHumanClientSource(" 8 "), true);
-  assert.equal(isHumanClientSource("32"), false);
-  assert.equal(isHumanClientSource(" 32 "), false);
-  assert.equal(isHumanClientSource(null), false);
-  // Numeric official sources normalize; illegal shapes stay unknown instead of silently human.
-  assert.equal(normalizeClientSource(32), "32");
-  assert.equal(normalizeClientSource("WEB"), "WEB");
+test("documented client source aliases normalize; REST, unknown and malformed values cannot count as human", () => {
+  for (const [name, number] of [["AOS", 1], ["IOS", 2], ["PC", 4], ["WEB", 16], ["REST", 32], ["MAC", 64], ["HARMONY", 65]] as const) {
+    assert.equal(normalizeClientSource(name), name);
+    assert.equal(normalizeClientSource(number), name);
+    assert.equal(normalizeClientSource(String(number)), name);
+  }
+  for (const source of ["AOS", "IOS", "PC", "WEB", "MAC", "HARMONY"]) assert.equal(isHumanClientSource(source), true);
+  for (const source of ["REST", 32, "32", "8", 8, "WINPHONE", "UNKNOWN", undefined, null, {}, [], true, 32.5, " 16 ", "x".repeat(33)]) {
+    assert.equal(isHumanClientSource(source), false, `unexpected human source ${String(source)}`);
+  }
+  assert.equal(normalizeClientSource({ clientType: 16 }), null);
   assert.equal(normalizeClientSource(""), null);
   assert.equal(normalizeClientSource(true), null);
   assert.equal(normalizeClientSource(32.5), null);
   assert.equal(normalizeClientSource({ clientType: 8 }), null);
   assert.equal(normalizeClientSource("x".repeat(33)), null);
+  assert.equal(clientSourcesConflict("WEB", 16), false);
+  assert.equal(clientSourcesConflict("WEB", "WEB"), false);
+  assert.equal(clientSourcesConflict("WEB", "MAC"), true);
+  assert.equal(clientSourcesConflict("WEB", "WINPHONE"), true);
+  assert.equal(clientSourcesConflict("WEB", undefined), true);
+  assert.equal(clientSourcesConflict(undefined, "WEB"), true);
+  assert.equal(clientSourcesConflict(undefined, undefined), true);
+  assert.equal(clientSourcesConflict("WEB", null), true);
+  assert.equal(clientSourcesConflict("WEB", {}), true);
+  assert.equal(clientSourcesConflict("WEB", 8), true);
   assert.equal(isHumanClientSource(normalizeClientSource(32)), false);
   assert.equal(isHumanClientSource(normalizeClientSource(undefined)), false);
+  assert.equal(isHumanClientSource("32"), false);
   assert.equal(orderImEventsActivateApp({ appKey: "app_a" }, "app_a"), true);
   assert.equal(orderImEventsActivateApp({ appKey: "app_a" }, "app_b"), false);
   assert.equal(orderImEventsActivateApp(undefined, "app_a"), false);
@@ -66,6 +81,48 @@ test("robot client sends and cross-App activation are excluded by shape", () => 
     basisVersion: 1, platformSubjectId: "admin_1", party: "STAFF", memberState: "JOINED",
     memberJoinedAt: "2026-09-20T00:00:00.000Z", permissions: ["im.support.read", "im.support.accept"], scope: "game_1", adminStatus: "ACTIVE",
   });
+});
+
+test("duplicate, approval and recovery metadata share source alias/conflict semantics", () => {
+  const timestamp = new Date(NOW);
+  const base = { type: "send_approved", status: "VERIFIED", messageType: "TEXT", occurredAt: timestamp };
+  assert.equal(conflictingApproval([
+    { ...base, metadata: { fromClientType: "WEB" } },
+    { ...base, metadata: { fromClientType: 16 } },
+  ]), false);
+  assert.equal(conflictingApproval([
+    { ...base, metadata: { fromClientType: "WEB" } },
+    { ...base, metadata: { fromClientType: "MAC" } },
+  ]), true);
+  assert.equal(conflictingApproval([
+    { ...base, metadata: {} },
+    { ...base, metadata: { fromClientType: "WEB" } },
+  ]), true);
+  assert.equal(conflictingApproval([
+    { ...base, metadata: {} },
+    { ...base, metadata: {} },
+  ]), true);
+
+  const eventResult = parseSupplierMessageEvent({ eventType: 1, convType: "TEAM", to: "1", fromAccount: "staff", msgType: "TEXT", msgTimestamp: NOW, msgidServer: "2", msgidClient: "client", fromClientType: 16 }, 1);
+  assert.equal(eventResult.ok, true);
+  if (!eventResult.ok) return;
+  const existing = { id: "event", status: "WAITING_AUTH", sender_account_id: "staff", occurred_at: timestamp.toISOString(), message_client_id: "client", message_type: "TEXT", metadata: { source: "WEB" } };
+  assert.equal(conflictingDelivery(existing, eventResult.event), false);
+  assert.equal(deliverySourceOf({ source: "16" }), "WEB");
+  assert.equal(deliverySourceOf({ source: "MAC" }), "MAC");
+  assert.equal(conflictingDelivery({ ...existing, metadata: { source: "WEB" } }, { ...eventResult.event, fromClientType: "MAC" }), true);
+  // Historical rows without source remain readable without rewriting or inventing a source.
+  assert.equal(deliverySourceOf({ reason: "legacy" }), null);
+  assert.equal(conflictingDelivery({ ...existing, metadata: {} }, eventResult.event), true);
+  for (const fromClientType of [undefined, null, {}, 8]) {
+    const retry = parseSupplierMessageEvent({
+      eventType: 1, convType: "TEAM", to: "1", fromAccount: "staff", msgType: "TEXT",
+      msgTimestamp: String(NOW), msgidServer: "2", msgidClient: "client",
+      ...(fromClientType === undefined ? {} : { fromClientType }),
+    }, 1);
+    assert.equal(retry.ok, true);
+    if (retry.ok) assert.equal(conflictingDelivery(existing, retry.event), true, `untrusted retry source ${String(fromClientType)}`);
+  }
 });
 
 test("supplier event parsing keeps only whitelisted identifiers", () => {
@@ -91,7 +148,47 @@ test("supplier event parsing keeps only whitelisted identifiers", () => {
   // The official numeric client source is normalized at the parse boundary, not dropped to null.
   const numericSource = parseSupplierMessageEvent({ eventType: 2, to: "63941858026", fromAccount: "zza123", fromClientType: 32, msgType: "TEXT", msgTimestamp: "1789500000000" }, 2);
   assert.equal(numericSource.ok, true);
-  if (numericSource.ok) assert.equal(numericSource.event.fromClientType, "32");
+  if (numericSource.ok) assert.equal(numericSource.event.fromClientType, "REST");
+});
+
+test("actual Nest/Express callback parser accepts only a fresh signed empty copy probe without business effects", async () => {
+  let databaseAttempts = 0;
+  let now = NOW;
+  const pool = {
+    async connect() { databaseAttempts += 1; throw new Error("synthetic persistence failure"); },
+  } as unknown as Pool;
+  const app = await createApp({ health: { dependencies: {
+    postgres: { check: async () => undefined, close: async () => undefined },
+    redis: { check: async () => undefined, close: async () => undefined },
+  } }, logSink: { write: () => undefined } });
+  mountOrderImEventHandlers(app as unknown as INestApplication, { pool, appId: APP_KEY, appSecret: APP_SECRET, now: () => now, freshnessMs: 300_000 });
+  await app.listen(0, "127.0.0.1");
+  try {
+    const base = await app.getUrl();
+    const send = (path: string, body: string, headers = signedHeaders(body)) => fetch(`${base}${path}`, {
+      method: "POST", headers: { ...headers, "content-type": "application/json" }, body: body || undefined,
+    });
+    let response = await send("/api/v1/im/order-events/copy", "");
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(databaseAttempts, 0);
+
+    assert.equal((await send("/api/v1/im/order-events/copy", "{}")).status, 400);
+    assert.equal((await send("/api/v1/im/order-events/copy", "{")).status, 400);
+    assert.equal((await send("/api/v1/im/order-events/copy", "", { ...signedHeadersAt(""), checksum: "0".repeat(40) })).status, 403);
+    assert.equal((await send("/api/v1/im/order-events/copy", "", signedHeadersAt("", String(NOW), "other-app"))).status, 403);
+    assert.equal((await send("/api/v1/im/order-events/copy", "", signedHeadersAt("", String(NOW - 400_000)))).status, 403);
+    assert.equal((await send("/api/v1/im/order-events/pre-send", "")).status, 400);
+    assert.equal(databaseAttempts, 0);
+
+    const business = JSON.stringify({ eventType: 1, convType: "TEAM", to: "63941858026", fromAccount: "admin-1", fromClientType: "WEB", msgType: "TEXT", msgTimestamp: NOW, msgidServer: "4291065454174142469", msgidClient: "client-1" });
+    response = await send("/api/v1/im/order-events/copy", business);
+    assert.equal(response.status, 503);
+    assert.equal(databaseAttempts, 1);
+  } finally {
+    now = NOW;
+    await app.close();
+  }
 });
 
 test("provider readTeamMessage uses the narrow conversation endpoint with explicit team checks", async () => {

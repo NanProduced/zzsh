@@ -30,6 +30,8 @@ export type NimImageSendOptions = {
   width?: number;
   height?: number;
 };
+export type NimMessageRouteGrant = { appId: string; orderId: string; teamId: string; conversationId: string; routeEnvironment: string };
+type NimV2SendMessageParams = { routeConfig: { routeEnabled: true; routeEnvironment: string } };
 export type NimImageSendErrorKind = "FAILED" | "UNKNOWN";
 
 export class NimImageSendError extends Error {
@@ -74,7 +76,7 @@ export type NimWebClientLike = {
 type NimMessageServiceLike = {
   on: (eventName: string, listener: NimListener) => void;
   off: (eventName: string, listener: NimListener) => void;
-  sendMessage: (message: unknown, conversationId: string, params?: unknown, progress?: (percentage: number) => void) => Promise<{ message?: NimMessageLike }>;
+  sendMessage: (message: unknown, conversationId: string, params?: NimV2SendMessageParams, progress?: (percentage: number) => void) => Promise<{ message?: NimMessageLike }>;
   getMessageList?: (options: Record<string, unknown>) => Promise<NimMessageLike[]>;
 };
 type NimMessageCreatorLike = { createTextMessage: (text: string) => unknown; createImageMessage?: (image: File, name?: string, sceneName?: string, width?: number, height?: number) => unknown };
@@ -105,7 +107,7 @@ function localTransportError(message: string, status: number): Error {
   return error;
 }
 export type NimTokenProvider = (accountId: string) => Promise<string>;
-export type NimMessageAuthorization = (input: { conversationId: string; operation: "read" | "send" }) => Promise<void>;
+export type NimMessageAuthorization = (input: { conversationId: string; operation: "read" | "send" }) => Promise<void | NimMessageRouteGrant>;
 export type NimWebClientOptions = {
   appKey: string;
   accountId?: string;
@@ -201,7 +203,7 @@ export class NimWebClient implements NimWebClientLike {
   conversationIdForPeer(peerAccountId: string): string { const peer = requireNonBlank(peerAccountId, "NIM peer account ID"); if (!this.nim.V2NIMConversationIdUtil) throw new Error("NIM conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.p2pConversationId(peer); }
   conversationIdForTeam(teamId: string): string { const id = requireNonBlank(teamId, "NIM team ID"); if (!this.nim.V2NIMConversationIdUtil?.teamConversationId) throw new Error("NIM team conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.teamConversationId(id); }
   async getMessageHistory(conversationId: string, limit = 50, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("NIM history limit must be between 1 and 100"); if (!this.messageService?.getMessageList) throw new Error("NIM message history is unavailable"); await this.authorizeMessage(id, "read", authorize); const messages = await this.messageService.getMessageList({ conversationId: id, limit, ...(before ? { anchorMessage: before } : {}) }); this.assertCurrent(); return Array.isArray(messages) ? messages : []; }
-  async sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); const body = requireNonBlank(text, "NIM message text"); if (body.length > 4_000) throw new TypeError("NIM message text must be at most 4000 characters"); if (!this.messageService || !this.nim.V2NIMMessageCreator) throw new Error("NIM message sending is unavailable"); await this.authorizeMessage(id, "send", authorize); const result = await this.messageService.sendMessage(this.nim.V2NIMMessageCreator.createTextMessage(body), id); this.assertCurrent(); if (!result?.message || typeof result.message !== "object") throw new Error("NIM message response is invalid"); return result.message; }
+  async sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); const body = requireNonBlank(text, "NIM message text"); if (body.length > 4_000) throw new TypeError("NIM message text must be at most 4000 characters"); if (!this.messageService || !this.nim.V2NIMMessageCreator) throw new Error("NIM message sending is unavailable"); const params=await this.authorizeMessage(id, "send", authorize); const message=this.nim.V2NIMMessageCreator.createTextMessage(body); const result=params?await this.messageService.sendMessage(message,id,params):await this.messageService.sendMessage(message,id); this.assertCurrent(); if (!result?.message || typeof result.message !== "object") throw new Error("NIM message response is invalid"); return result.message; }
   async sendImage(conversationId: string, file: File, options: NimImageSendOptions = {}): Promise<NimMessageLike> {
     this.assertCurrent();
     const id = requireNonBlank(conversationId, "NIM conversation ID");
@@ -209,31 +211,43 @@ export class NimWebClient implements NimWebClientLike {
     if (!this.messageService || !this.nim.V2NIMMessageCreator?.createImageMessage || !this.nim.V2NIMStorageService) throw new Error("NIM image sending is unavailable");
     const message = this.nim.V2NIMMessageCreator.createImageMessage(file, file.name, undefined, options.width, options.height);
     const messageClientId = messageClientIdOf(message);
-    await this.authorizeMessage(id, "send", options.authorize);
+    const params=await this.authorizeMessage(id, "send", options.authorize);
     this.assertCurrent();
     this.pendingImages.set(messageClientId, { conversationId: id, message });
-    return this.sendImageMessage(id, messageClientId, message, options);
+    return this.sendImageMessage(id, messageClientId, message, options, params);
   }
   async retryImage(conversationId: string, messageClientId: string, options: NimImageSendOptions = {}): Promise<NimMessageLike> {
     this.assertCurrent();
     const id = requireNonBlank(conversationId, "NIM conversation ID");
     const pending = this.pendingImages.get(requireNonBlank(messageClientId, "NIM image message ID"));
     if (!pending || pending.conversationId !== id) throw new NimImageSendError("FAILED", "待重试的图片消息已不可用", { messageClientId });
-    await this.authorizeMessage(id, "send", options.authorize);
+    const params=await this.authorizeMessage(id, "send", options.authorize);
     this.assertCurrent();
-    return this.sendImageMessage(id, messageClientId, pending.message, options);
+    return this.sendImageMessage(id, messageClientId, pending.message, options, params);
   }
   async login(options: NimWebClientOptions): Promise<void> { this.assertCurrent(); const loginOptions: Record<string, unknown> = { authType: options.tokenProvider ? 1 : 0, forceMode: options.forceMode ?? false }; if (options.retryCount !== undefined) loginOptions.retryCount = options.retryCount; if (options.timeout !== undefined) loginOptions.timeout = options.timeout; if (options.tokenProvider) loginOptions.tokenProvider = async () => { this.assertCurrent(); const token = await options.tokenProvider?.(this.accountId); this.assertCurrent(); return requireNonBlank(token ?? "", "NIM token provider result"); }; this.setState("CONNECTING"); await this.nim.V2NIMLoginService.login(this.accountId, options.token ?? "", loginOptions); this.assertCurrent(); this.loggedIn = true; this.setState(mapConnectStatus(this.getSdkConnectStatus()) ?? "CONNECTED"); }
   async logout(): Promise<void> { if (!this.loggedIn || this.disposed) return; await this.nim.V2NIMLoginService.logout(); this.loggedIn = false; this.setState("DISCONNECTED"); }
   async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; this.pendingImages.clear(); for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; if (this.messageService && this.messageEventHandler) { try { this.messageService.off("onReceiveMessages", this.messageEventHandler); } catch { /* cleanup continues */ } } this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
   private assertCurrent(): void { if (this.disposed) throw new Error("NIM client is disposed"); if (!this.context.isCurrent()) throw new ImLifecycleSupersededError(); }
-  private async authorizeMessage(conversationId: string, operation: "read" | "send", override?: NimMessageAuthorization): Promise<void> { this.assertCurrent(); const authorize=typeof override==="function"?override:this.messageAuthorization; if (!authorize) throw localTransportError("NIM message authorization is unavailable", 403); await authorize({ conversationId, operation }); this.assertCurrent(); }
-  private async sendImageMessage(conversationId: string, messageClientId: string, message: unknown, options: NimImageSendOptions): Promise<NimMessageLike> {
+  private async authorizeMessage(conversationId: string, operation: "read" | "send", override?: NimMessageAuthorization): Promise<NimV2SendMessageParams|undefined> {
+    this.assertCurrent(); const authorize=typeof override==="function"?override:this.messageAuthorization;
+    if (!authorize) throw localTransportError("NIM message authorization is unavailable", 403);
+    const grant=await authorize({ conversationId, operation }); this.assertCurrent();
+    if(grant===undefined||operation!=="send")return undefined;
+    const teamConversation=/^[A-Za-z0-9][A-Za-z0-9_@.-]{0,31}\|2\|([0-9]{1,19})$/.exec(grant.conversationId);
+    if(!grant.appId||!grant.orderId||!teamConversation||teamConversation[1]!==grant.teamId||grant.conversationId!==conversationId
+      ||!/^[A-Za-z0-9._-]{1,32}$/.test(grant.routeEnvironment))throw localTransportError("NIM message route scope is invalid",403);
+    return {routeConfig:{routeEnabled:true,routeEnvironment:grant.routeEnvironment}};
+  }
+  private async sendImageMessage(conversationId: string, messageClientId: string, message: unknown, options: NimImageSendOptions, params?: NimV2SendMessageParams): Promise<NimMessageLike> {
     let started = false;
     try {
       options.onProgress?.(0);
       started = true;
-      const result = await this.messageService!.sendMessage(message, conversationId, undefined, percentage => options.onProgress?.(imageProgress(percentage)));
+      const progress=(percentage:number)=>options.onProgress?.(imageProgress(percentage));
+      const result = params
+        ? await this.messageService!.sendMessage(message, conversationId, params, progress)
+        : await this.messageService!.sendMessage(message, conversationId, undefined, progress);
       this.assertCurrent();
       if (!result?.message || typeof result.message !== "object") throw new Error("NIM image response is invalid");
       this.pendingImages.delete(messageClientId);
