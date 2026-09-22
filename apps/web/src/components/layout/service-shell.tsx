@@ -19,6 +19,7 @@ const surfaceMeta: Record<ServiceSurface, { label: string; hint: string; color: 
 
 type ServiceShellProps = {
   children: ReactNode;
+  topContent?: ReactNode;
   title: string;
   description: string;
   initialQuery?: string;
@@ -27,6 +28,7 @@ type ServiceShellProps = {
   backLabel?: string;
   surface?: ServiceSurface;
   contextLabel?: string | null;
+  showPageHeading?: boolean;
   breadcrumbs?: readonly BreadcrumbItem[];
   searchLabel?: string;
   searchInputLabel?: string;
@@ -36,6 +38,7 @@ type ServiceShellProps = {
 
 export function ServiceShell({
   children,
+  topContent,
   title,
   description,
   initialQuery = "",
@@ -44,6 +47,7 @@ export function ServiceShell({
   backLabel = "返回首页",
   surface = "utility",
   contextLabel,
+  showPageHeading = true,
   breadcrumbs,
   searchLabel = "搜索公开账号",
   searchInputLabel = "搜索账号编号或名称",
@@ -58,18 +62,19 @@ export function ServiceShell({
   const context = contextLabel === undefined ? meta.label : contextLabel;
   return <div className={`portal-home portal-subpage functional-shell functional-shell--${surface}`}>
     <PortalHeader home={false} query={query} onQueryChange={setQuery} onSearch={onSearch ?? ((value: string) => router.push(`/accounts?q=${encodeURIComponent(value)}`))} searchLabel={searchLabel} searchInputLabel={searchInputLabel} searchPlaceholder={searchPlaceholder} searchCompactPlaceholder={searchCompactPlaceholder} />
+    {topContent ? <div className="functional-top-content portal-width">{topContent}</div> : null}
     <main id="main-content" className="portal-width subpage-main functional-main">
       <Breadcrumbs items={trail} />
-      <header className="functional-page-heading">
+      {showPageHeading ? <header className="functional-page-heading">
         <div className="functional-heading-copy">
           {surface !== "browse" && <Link className="functional-back" href={backHref}><ArrowLeft size={16} aria-hidden="true" /><span>{backLabel}</span></Link>}
-          <div className="functional-title-block"><h1>{title}</h1><p>{description}</p></div>
+          <div className="functional-title-block"><h1>{title}</h1>{description ? <p>{description}</p> : null}</div>
         </div>
         {context ? <div className="functional-context" aria-label="页面上下文">
           <Chip className="functional-context-chip" color={meta.color} variant="soft">{context}</Chip>
           <span>{meta.hint}</span>
         </div> : null}
-      </header>
+      </header> : <h1 className="sr-only">{title}</h1>}
       {children}
     </main>
     <PortalFooter />

@@ -8,15 +8,6 @@
     linear-gradient(180deg, color-mix(in srgb, var(--color-bg-canvas) 92%, var(--color-bg-surface)), var(--color-bg-canvas));
 }
 
-.functional-shell .site-header {
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-default) 62%, transparent);
-  background: transparent;
-}
-
-.functional-shell .site-header-bar {
-  background: transparent;
-  box-shadow: none;
-}
 
 .functional-shell .functional-main {
   padding-block: 22px 116px;
@@ -209,14 +200,6 @@
 }
 
 .functional-shell .game-section .supply-heading h3 { font-size: 20px; letter-spacing: -.02em; }
-
-.functional-shell .market-count {
-  padding: 5px 9px;
-  border: 1px solid var(--color-border-subtle);
-  border-radius: 999px;
-  color: var(--color-text-secondary);
-  font-size: 11px;
-}
 
 .functional-shell .market-filters {
   gap: 16px;
@@ -630,12 +613,6 @@
   .functional-shell .button { transition: none; }
 }
 
-/* Marketplace directory: keep the browse surface flat and information-led. */
-.functional-shell.functional-shell--browse .site-header,
-.functional-shell.functional-shell--browse .site-header-bar {
-  background: transparent;
-  box-shadow: none;
-}
 
 .functional-shell.functional-shell--browse .functional-page-heading {
   display: block;
@@ -715,33 +692,12 @@
   margin-top: 18px;
 }
 
-.functional-shell.functional-shell--browse .market-directory-heading,
 .functional-shell.functional-shell--browse .market-results-toolbar {
   display: flex;
   min-width: 0;
   align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
-}
-
-.functional-shell.functional-shell--browse .market-directory-heading {
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--color-border-default);
-}
-
-.functional-shell.functional-shell--browse .market-directory-heading h2 {
-  margin-top: 3px;
-  font-size: 23px;
-  letter-spacing: -.025em;
-}
-
-.functional-shell.functional-shell--browse .market-count {
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  white-space: nowrap;
 }
 
 .functional-shell.functional-shell--browse .market-trust-note {
@@ -943,7 +899,6 @@
 }
 
 @media (max-width: 799px) {
-  .functional-shell.functional-shell--browse .site-header { background: var(--color-bg-canvas); }
   .functional-shell.functional-shell--browse .market-filters--desktop { display: none; }
   .functional-shell.functional-shell--browse .market-filter-mobile-row {
     display: flex;
@@ -980,8 +935,7 @@
   .functional-shell.functional-shell--browse .functional-title-block h1 { font-size: 30px; }
   .functional-shell.functional-shell--browse .market-context { padding-block: 12px; }
   .functional-shell.functional-shell--browse .market-context > .button { padding-inline: 9px; font-size: 11px; }
-  .functional-shell.functional-shell--browse .market-directory { margin-top: 14px; }
-  .functional-shell.functional-shell--browse .market-directory-heading h2 { font-size: 20px; }
+  .functional-shell.functional-shell--browse .market-directory { margin-top: 8px; }
   .functional-shell.functional-shell--browse .market-results-toolbar { gap: 10px; padding-top: 16px; }
   .functional-shell.functional-shell--browse .market-view-toggle button { padding-inline: 9px; }
   .functional-shell.functional-shell--browse .account-grid--list .account-card {
@@ -1037,7 +991,7 @@
 
   form.market-filters--drawer .skin-chip { padding-block: 9px; }
   form.market-filters--drawer .skin-match { flex-wrap: wrap; gap: 8px 12px; }
-  .market-filter-drawer-footer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .market-filter-drawer-footer { padding-bottom: calc(78px + env(safe-area-inset-bottom)); }
 }
 
 .market-filter-drawer-dialog {

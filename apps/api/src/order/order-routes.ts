@@ -1,5 +1,5 @@
 import type { INestApplication } from "@nestjs/common";
-import type { OrderImSdkRouteConfig } from "../config/config";
+import type { OrderImSdkRouteBindings } from "../config/config";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
@@ -45,7 +45,7 @@ import {
 export type OrderRuntimeOptions = AuthSecurityOptions & {
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;
-  orderImSdkRouteConfig?: OrderImSdkRouteConfig;
+  orderImSdkRouteBindings?: OrderImSdkRouteBindings;
   /** Explicit controlled-test switch. Production leaves it unset. */
   settlementRecordingEnabled?: boolean;
 };
@@ -183,7 +183,7 @@ export async function handleOrderUserRoute(
     if(method==="GET"&&teamMatch){
       const context=await readUserContext(request,options);
       const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");
-      const data=await withTransaction(options.pool,c=>readOrderTeamAccess(c,{...context,realm:"user"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteConfig));
+      const data=await withTransaction(options.pool,c=>readOrderTeamAccess(c,{...context,realm:"user"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings));
       sendJson(response,200,data,requestId);return;
     }
     const detailMatch = /^\/([A-Za-z0-9._:-]+)$/.exec(path);
@@ -223,7 +223,7 @@ export async function handleOrderAdminRoute(
         sendJson(response,200,await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit"))),requestId);return;
       }
       const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
-      if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteConfig),requestId);return;}
+      if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings),requestId);return;}
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.orderRead);
       const admin = {

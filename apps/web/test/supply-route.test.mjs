@@ -8,9 +8,9 @@ test('listing v2 BFF preserves encoded filters, rewrites metadata and bounds raw
   const old=globalThis.fetch;let seen,calls=0;
   globalThis.fetch=async url=>{calls++;seen=String(url);return Response.json({skinCatalogUrl:'/api/v1/supply/games/delta/catalog'});};
   try{
-    const params=new URLSearchParams({queryVersion:'2',gameId:'delta',filters:JSON.stringify({regions:[{province:'河南省',city:'郑州市'}]})});
+    const params=new URLSearchParams({queryVersion:'2',gameId:'delta',filters:JSON.stringify({regions:[{province:'河南省',city:'郑州市'}],resources:[{itemId:'ammo',minQuantity:'10',maxQuantity:'20'}]})});
     const r=await GET(new Request('http://127.0.0.1:3100/api/supply/listings?'+params),ctx(['listings']));
-    assert.equal(r.status,200);assert.equal(new URL(seen).search,'?'+params);assert.equal((await r.json()).skinCatalogUrl,'/api/supply/games/delta/catalog');
+    assert.equal(r.status,200);assert.equal(new URL(seen).search,'?'+params);assert.deepEqual(JSON.parse(new URL(seen).searchParams.get('filters')).resources,[{itemId:'ammo',minQuantity:'10',maxQuantity:'20'}]);assert.equal((await r.json()).skinCatalogUrl,'/api/supply/games/delta/catalog');
     assert.equal((await GET(input(['games','delta','listing-filters']),ctx(['games','delta','listing-filters']))).status,200);
     const before=calls;const long=await GET(new Request('http://127.0.0.1:3100/api/supply/listings?queryVersion=2&q='+'x'.repeat(8192)),ctx(['listings']));
     assert.equal(long.status,400);assert.equal((await long.json()).error.details[0].path,'url');assert.equal(calls,before);

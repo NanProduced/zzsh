@@ -14,7 +14,7 @@ function windowLiteral(w:ServiceWindow,p:(v:unknown)=>string):string {
 export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:unknown)=>string):string[] {
   const where:string[]=[];
   if(q!==null)where.push(`v.title ILIKE ${p(listingSearchPattern(q))} ESCAPE '\\'`);
-  for(const row of filters.resources??[])where.push(`EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(row.itemId)} AND l.quantity>=${p(row.minQuantity)}::numeric)`);
+  for(const row of filters.resources??[]){const itemId=p(row.itemId),bounds=[row.minQuantity===undefined?null:`l.quantity>=${p(row.minQuantity)}::numeric`,row.maxQuantity===undefined?null:`l.quantity<=${p(row.maxQuantity)}::numeric`].filter(Boolean);where.push(`EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${itemId} AND ${bounds.join(" AND ")})`);}
   for(const group of filters.skinGroups??[]) {
     if(!group.ids.length)continue;const ids=p(group.ids);
     where.push(group.match==="ALL"?`(SELECT count(*) FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY(${ids}::text[]))=cardinality(${ids}::text[])`:`EXISTS(SELECT 1 FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY(${ids}::text[]))`);

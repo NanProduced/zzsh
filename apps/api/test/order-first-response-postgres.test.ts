@@ -12,9 +12,10 @@ import type { INestApplication } from "@nestjs/common";
 import type { Pool } from "pg";
 
 import { withTransaction } from "../src/auth/security-core";
+import { OrderImSdkRouteBindings } from "../src/config/config";
 import { confirmOrderPayment, createControlledPaymentSource } from "../src/order/payment-confirmation";
 import { dispatchPaidOrders } from "../src/im/order-dispatch";
-import { advanceOrderTeam, OrderTeamLifecycle, scanOrderEscalations, type OrderTeamOptions } from "../src/im/order-team";
+import { advanceOrderTeam, OrderTeamLifecycle, reconcileOrderTeam, restoreApprovedOrderRoutes, scanOrderEscalations, type OrderTeamOptions } from "../src/im/order-team";
 import { ImIdentityProvisioner, deriveYunxinAccountId, type ImIdentityKey } from "../src/im/identity-lifecycle";
 import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
 import { BUSINESS_MIGRATIONS_FOLDER, runBusinessMigrations } from "../src/database/business-migrations";
@@ -147,7 +148,9 @@ function signedRequest(path: string, body: Record<string, unknown>, options: {
 export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options, hooks: { base: string; baselineCount: number; upgrade: (upToIndex: number) => Promise<void> }): Promise<void> {
   const { pool, migrationPool, ownerPool, config } = o;
   if (!o.resourceSet) throw new Error("First-response acceptance requires ORDER_TEST_RESOURCE_SET");
-  const run = randomUUID().replaceAll("-", "").slice(0, 8);
+  const runId=process.env.OIM4D2_R1_RUN_ID??randomUUID().replaceAll("-","").slice(0,12);
+  const run=runId.slice(-8);
+  console.log("OIM-4D-2-R1 PG run",JSON.stringify({runId,resourceSet:o.resourceSet,stage:"start"}));
   const appId = ORDER_IM_EVENT_APP;
   const identityKey = (kind: "USER" | "ADMIN", id: string): ImIdentityKey => ({ provider: "yunxin", appId, realm: kind.toLowerCase(), kind, platformSubjectId: id });
   const staff = `oim4b_staff_${run}`;
@@ -191,7 +194,8 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     await withTransaction(pool, (client) => confirmOrderPayment(client, fact));
     return row;
   };
-  const makePaid = async (label: string, mode: "inactive" | "active", escalation=false) => {
+  const makePaid = async (label: string, mode: "inactive" | "active", escalation=false,
+    routesForOrder?:(orderId:string)=>OrderImSdkRouteBindings, beforeAdvance?:()=>Promise<void>) => {
     const fixture = await o.fixture(label);
     const row = await pay(fixture.orderId);
     if (!gameId) {
@@ -201,14 +205,17 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     await setStaffPresence("AVAILABLE");
     await dispatchPaidOrders(pool, appId);
     await setStaffPresence("OFF_DUTY");
+    const orderImSdkRouteBindings=routesForOrder?.(fixture.orderId);
+    await beforeAdvance?.();
     if (mode === "active") {
       await advanceOrderTeam({ pool, appId, provider: wire.client, identities, membersLimit: 200, firstResponseEnabled: true,
+        ...(orderImSdkRouteBindings?{orderImSdkRouteBindings}:{}),
         ...(escalation?{escalationEnabled:true}:{}) }, fixture.orderId);
     } else {
       // Historical path: no activation flag, so the new column is never referenced.
       await advanceOrderTeam({ pool, appId, provider: wire.client, identities, membersLimit: 200 }, fixture.orderId);
     }
-    return { ...fixture, renter: row.renter_user_id as string, owner: row.owner_user_id as string };
+    return { ...fixture, renter: row.renter_user_id as string, owner: row.owner_user_id as string, ...(orderImSdkRouteBindings?{orderImSdkRouteBindings}:{}) };
   };
   const groupRow = async (orderId: string) => (await pool.query(`SELECT * FROM zzsh_order.im_order_group WHERE order_id=$1`, [orderId])).rows[0];
   const legacyGroupRow = async (orderId: string) => (await pool.query(`SELECT ${LEGACY_GROUP_COLUMNS} FROM zzsh_order.im_order_group WHERE order_id=$1`, [orderId])).rows[0];
@@ -376,12 +383,14 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     const after = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
     assert.equal(after.length, Math.max(45,hooks.baselineCount));
     if (stagedEscalation) assert.equal(after.length, 45, "0044 must leave exactly 45 rows before 0045");
-    assert.equal(journal.entries.length, 46);
+    assert.ok(journal.entries.length >= after.length, "the applied first-response prefix must exist in the current journal");
+    assert.equal(journal.entries[44]?.tag, "0044_oim_order_first_response_guards");
+    if(after.length>=46)assert.equal(journal.entries[45]?.tag,"0045_oim_order_escalation");
     assert.ok(after.every((row: { hash: string; created_at: string }, index: number) => {
       const entry = journal.entries[index];
       return row.created_at === String(entry.when) && row.hash === createHash("sha256").update(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER, `${entry.tag}.sql`))).digest("hex");
     }));
-    await runBusinessMigrations(migrationPool, { runtimeUser: config.database.user,migrationsFolder:preparePartialMigrationsFolder(44) });
+    await runBusinessMigrations(migrationPool, { runtimeUser: config.database.user,migrationsFolder:preparePartialMigrationsFolder(after.length-1) });
     assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, after);
     const triggers = (await migrationPool.query(`SELECT tgname FROM pg_trigger WHERE tgname IN ('im_order_event_guard','im_order_group_first_response_guard') ORDER BY tgname`)).rows.map((row: { tgname: string }) => row.tgname);
     assert.deepEqual(triggers, ["im_order_event_guard", "im_order_group_first_response_guard"]);
@@ -438,7 +447,7 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     }
     const migrations=(await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
     const journal=JSON.parse(readFileSync(join(BUSINESS_MIGRATIONS_FOLDER,"meta","_journal.json"),"utf8"));
-    assert.equal(migrations.length,46);assert.equal(journal.entries.length,46);
+    assert.equal(migrations.length,46);assert.ok(journal.entries.length>=migrations.length,"the current journal must include the frozen applied prefix");
     const staged0045=stagedEscalation&&beforeCount===45&&migrations.length===46;
     if(stagedEscalation)assert.equal(staged0045,true,"hash equality alone is not staged migration evidence");
     assert.ok(migrations.every((row:{hash:string;created_at:string},index:number)=>{
@@ -517,17 +526,220 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     SET remind_due_at=CASE WHEN $2 THEN clock_timestamp()-interval '1 second' ELSE remind_due_at END,
       next_add_due_at=CASE WHEN $3 THEN clock_timestamp()-interval '1 second' ELSE next_add_due_at END,version=version+1
     WHERE order_id=$1`,[orderId,reminder,add]);
+  const resetOrderRotation=async(ids:string[])=>ownerPool.query(`UPDATE zzsh_iam.im_support_presence
+    SET last_order_assigned_at=NULL
+    WHERE app_id=$1 AND admin_user_id=ANY($2::text[]) AND last_order_assigned_at IS NOT NULL`,[appId,ids]);
   const escalationOps=async(orderId:string)=>(await pool.query(`SELECT id,kind,round,state,target_admin_id,sent_at,candidate_team_id,failure_class,version
     FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY kind,round`,[orderId])).rows;
-  const driveEscalation=async(orderId:string,predicate:(group:any,ops:any[])=>boolean,label:string)=>{
+  const driveEscalation=async(orderId:string,predicate:(group:any,ops:any[])=>boolean,label:string,options=escalationOptions)=>{
     for(let tick=0;tick<50;tick++){
       const group=await groupRow(orderId),ops=await escalationOps(orderId);
       if(predicate(group,ops))return{group,ops};
-      await scanOrderEscalations(escalationOptions,1);
+      await scanOrderEscalations(options,1);
     }
     assert.fail(`small-budget escalation did not reach ${label}`);
   };
   const staffActor={realm:"admin" as const,userId:staff,sessionId:`${staff}_s`};
+  const actorForUser=async(userId:string)=>{
+    const session=(await pool.query(`SELECT id FROM zzsh_auth_user.session WHERE "userId"=$1 AND "expiresAt">clock_timestamp()
+      ORDER BY "expiresAt" DESC LIMIT 1`,[userId])).rows[0];
+    assert.ok(session?.id,`fixture user ${userId} must have an active session`);
+    return {realm:"user" as const,userId,sessionId:session.id as string};
+  };
+  const routesForOrder=(orderId:string,routeEnvironment="oim4d-r1-isolated")=>new OrderImSdkRouteBindings({
+    routeEnvironment,scopes:[],approvedOrders:[{appId,orderId}],
+  });
+
+  await t.test("T25 exact CREATE readback binds parties and BOT before first READY; ADD and restart preserve scope and timers",async()=>{
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"create-start"}));
+    const order=await makePaid("OIM4D-R1 精确路由绑定单","active",true,id=>routesForOrder(id));
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"create-ready"}));
+    const routes=order.orderImSdkRouteBindings!,group=await groupRow(order.orderId),teamId=group.team_id as string;
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"first-ready"}));
+    assert.equal(group.team_state,"READY");assert.equal(group.first_response_state,"RUNNING");assert.equal(group.escalation_state,"RUNNING");
+    const timerFacts=(await pool.query(`SELECT round(extract(epoch FROM remind_due_at-team_ready_at)*1000)::int AS reminder_ms,
+        round(extract(epoch FROM next_add_due_at-team_ready_at)*1000)::int AS add_ms
+      FROM zzsh_order.im_order_group WHERE order_id=$1`,[order.orderId])).rows[0];
+    assert.deepEqual(timerFacts,{reminder_ms:120000,add_ms:240000});
+    const assertSendRoute=async(actor:{realm:"user"|"admin";userId:string;sessionId:string})=>{
+      const projection=await withTransaction(pool,c=>readOrderTeamAccess(c,actor,order.orderId,"send",routes));
+      assert.equal(projection.canSend,true);
+      assert.deepEqual(projection.messageRoute,{appId,orderId:order.orderId,teamId,
+        conversationId:`${projection.viewerAccountId}|2|${teamId}`,routeEnvironment:"oim4d-r1-isolated"});
+    };
+    await assertSendRoute(await actorForUser(order.renter));
+    await assertSendRoute(await actorForUser(order.owner));
+    await assertSendRoute(staffActor);
+    const ordinary=await makePaid("OIM4D-R1 普通会话默认路由单","active",true);
+    const ordinaryProjection=await withTransaction(pool,c=>readOrderTeamAccess(c,staffActor,ordinary.orderId,"send",routes));
+    assert.equal(ordinaryProjection.canSend,true);assert.equal(ordinaryProjection.messageRoute,undefined);
+
+    const candidate=escalationStaff[0]!;
+    try{
+    await setEscalationStaff([candidate],true);await setEscalationDue(order.orderId,false,true);
+    const routedEscalation={...escalationOptions,orderImSdkRouteBindings:routes};
+    const pending=await driveEscalation(order.orderId,(_g,ops)=>ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"),
+      "routed ADD pending",routedEscalation);
+    const candidateMember=(await pool.query(`SELECT mm.state FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+      WHERE mm.order_id=$1 AND mm.party='STAFF' AND m.platform_subject_id=$2`,[order.orderId,candidate])).rows[0];
+    assert.equal(candidateMember?.state,"PLANNED");
+    await assert.rejects(()=>withTransaction(pool,c=>readOrderTeamAccess(c,{realm:"admin",userId:candidate,sessionId:`${candidate}_s`},order.orderId,"send",routes)),
+      (error:any)=>error?.status===403,"reserved scope must not grant a PLANNED member access");
+    assert.ok(pending.ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="PENDING"));
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"add-pending"}));
+    const noticePath=encodeURIComponent(`${systemAccount}|2|${teamId}`);
+    const noticeCallsBefore=wire.calls.filter(call=>call.includes(noticePath)).length;
+    const added=await driveEscalation(order.orderId,(g,ops)=>g.responsible_admin_id===candidate
+      &&ops.some((op:any)=>op.kind==="ADD_MEMBER"&&op.state==="SUCCEEDED")
+      &&ops.some((op:any)=>op.kind==="BOT_NOTICE"&&op.round===1&&op.state==="SUCCEEDED"),
+      "routed ADD and BOT confirmed",routedEscalation);
+    assert.equal(added.group.team_id,teamId);assert.equal(added.group.assigned_admin_id,staff);
+    const candidateProjection=await withTransaction(pool,c=>readOrderTeamAccess(c,
+      {realm:"admin",userId:candidate,sessionId:`${candidate}_s`},order.orderId,"send",routes));
+    assert.equal(candidateProjection.canSend,true);
+    assert.deepEqual(candidateProjection.messageRoute,{appId,orderId:order.orderId,teamId,
+      conversationId:`${candidateProjection.viewerAccountId}|2|${teamId}`,routeEnvironment:"oim4d-r1-isolated"});
+    assert.equal(wire.calls.filter(call=>call.includes(noticePath)).length,noticeCallsBefore+1,
+      "exactly one BOT request may target this Team in the controlled round");
+    const routedNotice=[...wire.notices].reverse().find((notice:any)=>notice.route_config?.route_environment==="oim4d-r1-isolated");
+    assert.ok(routedNotice,"BOT must use the same precise route binding after validated Team readback");
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"add-bot-succeeded"}));
+
+    const restarted=routesForOrder(order.orderId),createCalls=wire.creates.length,readyAt=group.team_ready_at;
+    assert.throws(()=>restarted.forScope({appId,orderId:order.orderId,teamId,conversationId:`${staffAccount}|2|${teamId}`}),
+      (error:unknown)=>error instanceof Error&&error.message==="ROUTE_NOT_READY");
+    const teamReads=wire.calls.filter(call=>call.startsWith(`GET /im/v2.1/teams/${teamId}/`)).length;
+    await setEscalationStaff([candidate],false);
+    const snapshot=(row:any)=>({team_id:row.team_id,team_ready_at:row.team_ready_at?.getTime()??null,
+      first_response_state:row.first_response_state,escalation_state:row.escalation_state,add_round:row.add_round,
+      responsible_admin_id:row.responsible_admin_id,remind_due_at:row.remind_due_at?.getTime()??null,
+      next_add_due_at:row.next_add_due_at?.getTime()??null});
+    const beforeRestore=snapshot(await groupRow(order.orderId));
+    assert.equal(beforeRestore.team_ready_at,readyAt.getTime());
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"before-route-restore",facts:beforeRestore}));
+    await restoreApprovedOrderRoutes({...escalationOptions,orderImSdkRouteBindings:restarted});
+    assert.ok(restarted.forScope({appId,orderId:order.orderId,teamId,conversationId:`${staffAccount}|2|${teamId}`}),
+      "startup restoration must require and bind the exact persisted CREATE candidate and provider Team");
+    assert.ok(wire.calls.filter(call=>call.startsWith(`GET /im/v2.1/teams/${teamId}/`)).length>teamReads,
+      "route restoration must read the provider Team instead of trusting memory or the DB pointer alone");
+    assert.equal(wire.creates.length,createCalls,"restart restoration must never CREATE again");
+    const afterRestart=await groupRow(order.orderId);
+    assert.equal(afterRestart.team_ready_at.getTime(),readyAt.getTime());
+    const afterRestore=snapshot(afterRestart);
+    console.log("OIM-4D-2-R1 T25",JSON.stringify({runId,stage:"after-route-restore",facts:afterRestore}));
+    assert.deepEqual(afterRestore,beforeRestore,"route restoration must preserve same-stage group timers and state");
+    }finally{
+      await setEscalationStaff([candidate],false);
+    }
+  });
+
+  await t.test("T26 missing route blocks SDK and BOT before sent intent or Provider calls",async()=>{
+    const order=await makePaid("OIM4D-R1 路由未恢复阻断单","active",true,id=>routesForOrder(id));
+    const group=await groupRow(order.orderId),teamId=group.team_id as string;
+    const unbound=routesForOrder(order.orderId),operationId=`im_order_op_${randomUUID().replaceAll("-","")}`;
+    await assert.rejects(()=>withTransaction(pool,c=>readOrderTeamAccess(c,staffActor,order.orderId,"send",unbound)),
+      (error:any)=>error?.status===403,"SDK access must fail closed while a restarted binding is not restored");
+    await pool.query(`INSERT INTO zzsh_order.im_order_operation(id,order_id,app_id,kind,round,state,next_retry_at)
+      VALUES($1,$2,$3,'BOT_NOTICE',1,'PENDING',clock_timestamp()-interval '1 second')`,[operationId,order.orderId,appId]);
+    const noticeCalls=wire.notices.length,providerCalls=wire.calls.length;
+    await scanOrderEscalations({...escalationOptions,orderImSdkRouteBindings:unbound},100);
+    const op=(await pool.query(`SELECT state,sent_at,failure_class FROM zzsh_order.im_order_operation WHERE id=$1`,[operationId])).rows[0];
+    assert.deepEqual(op,{state:"NEEDS_REVIEW",sent_at:null,failure_class:"ROUTE_NOT_READY"});
+    assert.equal(wire.notices.length,noticeCalls);assert.equal(wire.calls.length,providerCalls,"no Provider call, including no Team read, before local route readiness");
+    const after=await groupRow(order.orderId);
+    assert.equal(after.escalation_state,"VERIFY_REQUIRED");assert.equal(after.first_response_state,"RUNNING");
+  });
+
+  await t.test("T28 expired BOT route failure cannot stop escalation after waiting on the group lock",async()=>{
+    const order=await makePaid("OIM4D-R1 过期BOT路由锁等待单","active",true,id=>routesForOrder(id));
+    const teamId=(await groupRow(order.orderId)).team_id as string;
+    const unbound=routesForOrder(order.orderId),operationId=`im_order_op_${randomUUID().replaceAll("-","")}`;
+    await pool.query(`INSERT INTO zzsh_order.im_order_operation(id,order_id,app_id,kind,round,state,next_retry_at)
+      VALUES($1,$2,$3,'BOT_NOTICE',1,'PENDING',clock_timestamp()-interval '1 second')`,[operationId,order.orderId,appId]);
+    const holder=await ownerPool.connect();let holding=false,scan:Promise<void>|undefined;
+    const providerCalls=wire.calls.length,noticeCalls=wire.notices.length;
+    try{
+      await holder.query("BEGIN");
+      holding=true;
+      await holder.query(`SELECT order_id FROM zzsh_order.im_order_group WHERE order_id=$1 FOR UPDATE`,[order.orderId]);
+      scan=scanOrderEscalations({...escalationOptions,leaseMs:1000,orderImSdkRouteBindings:unbound},100);
+      let waiting=0;
+      for(let attempt=0;attempt<40&&waiting===0;attempt++){
+        await new Promise(resolve=>setTimeout(resolve,10));
+        waiting=(await ownerPool.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database()
+          AND wait_event_type='Lock' AND query LIKE '%SELECT order_id FROM zzsh_order.im_order_group WHERE order_id=$1 FOR UPDATE%'`)).rows[0].n;
+      }
+      assert.ok(waiting>0,"BOT route failure must reach the ordered group lock before the lease expires");
+      console.log("OIM-4D-2-R1 T28",JSON.stringify({runId,stage:"worker-waiting-on-group-lock",operationId}));
+      const shortened=await ownerPool.query(`UPDATE zzsh_order.im_order_operation SET lease_until=clock_timestamp()+interval '150 milliseconds'
+        WHERE id=$1 AND app_id=$2 AND kind='BOT_NOTICE' AND state='RUNNING' AND sent_at IS NULL RETURNING lease_until`,[operationId,appId]);
+      assert.equal(shortened.rowCount,1,"test barrier must shorten only this run-scoped lease after the worker is waiting");
+      await new Promise(resolve=>setTimeout(resolve,250));
+      const expired=(await ownerPool.query(`SELECT lease_until<=clock_timestamp() AS expired FROM zzsh_order.im_order_operation WHERE id=$1`,[operationId])).rows[0].expired;
+      assert.equal(expired,true,"the DB lease must expire while the worker remains blocked");
+      console.log("OIM-4D-2-R1 T28",JSON.stringify({runId,stage:"lease-expired-under-lock",leaseUntil:shortened.rows[0].lease_until}));
+      await holder.query("COMMIT");holding=false;
+      await scan;scan=undefined;
+      const op=(await pool.query(`SELECT state,sent_at,failure_class,lease_until>clock_timestamp() AS lease_valid
+        FROM zzsh_order.im_order_operation WHERE id=$1`,[operationId])).rows[0];
+      assert.deepEqual(op,{state:"RUNNING",sent_at:null,failure_class:null,lease_valid:false});
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.audit_event
+        WHERE action='im.order.escalation.bot_notice_review' AND object_id=$1`,[operationId])).rows[0].n,0,
+        "an expired route failure cannot emit a review audit");
+      const after=await groupRow(order.orderId);
+      assert.equal(after.escalation_state,"RUNNING");assert.equal(after.first_response_state,"RUNNING");
+      assert.equal(wire.calls.length,providerCalls);assert.equal(wire.notices.length,noticeCalls);
+      console.log("OIM-4D-2-R1 T28",JSON.stringify({runId,stage:"expired-write-rejected",state:op.state}));
+    }finally{
+      if(holding)await holder.query("ROLLBACK").catch(()=>undefined);
+      holder.release();
+      if(scan)await scan.catch(()=>undefined);
+    }
+  });
+
+  await t.test("T27 READY rollback retains CREATE candidate, denies send, and recovers read-only without resetting clocks",async()=>{
+    const suffix=randomUUID().replaceAll("-","").slice(0,10);
+    const functionName=`oim4dr1_fail_ready_${suffix}`,triggerName=`oim4dr1_ready_${suffix}`;
+    const createGate=async()=>{
+      await migrationPool.query(`CREATE FUNCTION zzsh_iam."${functionName}"() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.action='im.order.team.ready' THEN RAISE EXCEPTION 'controlled OIM-4D-R1 READY rollback' USING ERRCODE='P0001'; END IF; RETURN NEW; END $$`);
+      await migrationPool.query(`CREATE TRIGGER "${triggerName}" BEFORE INSERT ON zzsh_iam.audit_event
+        FOR EACH ROW EXECUTE FUNCTION zzsh_iam."${functionName}"()`);
+    };
+    let order:{orderId:string;renter:string;owner:string;orderImSdkRouteBindings?:OrderImSdkRouteBindings}|undefined;
+    const callsBefore=wire.creates.length;
+    try{
+      order=await makePaid("OIM4D-R1 READY事务回滚单","active",true,id=>routesForOrder(id),createGate);
+    }finally{
+      await migrationPool.query(`DROP TRIGGER IF EXISTS "${triggerName}" ON zzsh_iam.audit_event`);
+      await migrationPool.query(`DROP FUNCTION IF EXISTS zzsh_iam."${functionName}"()`);
+    }
+    const op=(await pool.query(`SELECT id,version,state,failure_class,candidate_team_id,sent_at FROM zzsh_order.im_order_operation
+      WHERE order_id=$1 AND kind='CREATE'`,[order!.orderId])).rows[0];
+    const failedGroup=await groupRow(order!.orderId);
+    assert.equal(wire.creates.length,callsBefore+1);assert.equal(op.state,"NEEDS_REVIEW");
+    assert.equal(op.failure_class,"DB_WRITEBACK_UNKNOWN");assert.ok(op.candidate_team_id);assert.ok(op.sent_at);
+    assert.notEqual(failedGroup.team_state,"READY");assert.equal(failedGroup.team_id,null);assert.equal(failedGroup.team_ready_at,null);
+    assert.equal(failedGroup.first_response_state,"NOT_STARTED");assert.equal(failedGroup.remind_due_at,null);assert.equal(failedGroup.next_add_due_at,null);
+    await assert.rejects(()=>withTransaction(pool,c=>readOrderTeamAccess(c,staffActor,order!.orderId,"send",order!.orderImSdkRouteBindings)),
+      (error:any)=>error?.status===403,"an in-memory verified Team binding cannot bypass persisted READY authorization");
+    await advanceOrderTeam({...escalationOptions,orderImSdkRouteBindings:order!.orderImSdkRouteBindings},order!.orderId);
+    assert.equal(wire.creates.length,callsBefore+1,"failed READY writeback must not repeat CREATE");
+    const readyRoute=routesForOrder(order!.orderId),candidateTeamId=op.candidate_team_id as string;
+    await reconcileOrderTeam({...escalationOptions,orderImSdkRouteBindings:readyRoute},order!.orderId,
+      {operationId:op.id,version:op.version,teamId:candidateTeamId});
+    const recovered=await groupRow(order!.orderId);
+    assert.equal(recovered.team_state,"READY");assert.equal(recovered.team_id,candidateTeamId);
+    assert.equal(wire.creates.length,callsBefore+1,"read-only recovery reuses the persisted candidate");
+    const timerFacts=(await pool.query(`SELECT round(extract(epoch FROM remind_due_at-team_ready_at)*1000)::int AS reminder_ms,
+        round(extract(epoch FROM next_add_due_at-team_ready_at)*1000)::int AS add_ms
+      FROM zzsh_order.im_order_group WHERE order_id=$1`,[order!.orderId])).rows[0];
+    assert.deepEqual(timerFacts,{reminder_ms:120000,add_ms:240000});
+    const readyAt=recovered.team_ready_at.getTime();
+    await advanceOrderTeam({...escalationOptions,orderImSdkRouteBindings:readyRoute},order!.orderId);
+    assert.equal((await groupRow(order!.orderId)).team_ready_at.getTime(),readyAt,"duplicate activation must not restart timers");
+    assert.equal(wire.creates.length,callsBefore+1);
+  });
 
   await t.test("T18 small legal budgets 1-4 eventually process due reminders in PostgreSQL",async()=>{
     for(const limit of [1,2,3,4]){
@@ -541,6 +753,7 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
 
   const verifyCancelledUnsentAddReselection=async()=>{
     const [candidateA,candidateB]=escalationStaff;
+    await resetOrderRotation([candidateA!,candidateB!]);
     const order=await makePaid("OIM4C 取消候选可重选单","active",true),original=await groupRow(order.orderId);
     const team=original.team_id as string,addsBefore=wire.adds.length;
     try{
@@ -590,7 +803,9 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
 
   await t.test("T19 same-Team escalation keeps history, rotates eligible staff, records one reminder, and continues after an unknown notice",async()=>{
     const [candidateA,candidateB]=escalationStaff;
+    await resetOrderRotation([candidateA!,candidateB!]);
     const order=await makePaid("OIM4C 同群轮值单","active",true);
+    try{
     await setEscalationStaff([candidateA!,candidateB!],true);
     const original=await groupRow(order.orderId),team=original.team_id as string;
     await setEscalationDue(order.orderId,true,true);
@@ -631,7 +846,9 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     assert.equal(adminSummary?.supportEscalation?.state,"EXHAUSTED");
     assert.equal(adminSummary?.supportEscalation?.noEligibleStaff,true);
     assert.deepEqual(Object.keys(adminSummary?.supportEscalation??{}).sort(),["addRound","firstResponseAt","needsManualReview","noEligibleStaff","remindDueAt","state"]);
-    await setEscalationStaff([candidateA!,candidateB!],false);
+    }finally{
+      await setEscalationStaff([candidateA!,candidateB!],false);
+    }
   });
 
   await t.test("T19b cancelled unsent ADD keeps its audit and member binding while new rounds reselect",verifyCancelledUnsentAddReselection);

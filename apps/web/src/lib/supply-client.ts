@@ -3,6 +3,8 @@ import type {
   Favorite,
   MySupply,
   Page,
+  PublicListingFilterMetadata,
+  PublicListingPageV2,
   PublicCatalog,
   PublicListing,
   PublishingCatalog,
@@ -202,7 +204,12 @@ export const supplyApi = {
     signal?: AbortSignal,
   ) => supplyRequest<PublicGunsmithCodesPage>("/gunsmith/firearms/" + id(firearmId) + "/codes?" + query, { signal }),
   market: (query: URLSearchParams = new URLSearchParams(), signal?: AbortSignal) =>
-    supplyRequest<Page<PublicListing>>("/listings?" + query, { signal }),
+    supplyRequest<PublicListingPageV2>("/listings?" + query, { signal }),
+  listingFilters: (gameId: string, signal?: AbortSignal) =>
+    supplyRequest<PublicListingFilterMetadata>(
+      "/games/" + id(gameId) + "/listing-filters?queryVersion=2",
+      { signal },
+    ),
   listing: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<PublicListing>("/listings/" + id(accountId), { signal }),
   catalog: (

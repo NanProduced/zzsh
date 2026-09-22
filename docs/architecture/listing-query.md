@@ -15,12 +15,14 @@ const query = new URLSearchParams({
   catalogRevision: metadata.catalogRevision,
   ruleReleaseId: metadata.ruleReleaseId,
   sort: 'latest', direction: 'DESC', limit: '20',
-  filters: JSON.stringify({resources: [{itemId, minQuantity: '20000000'}]})
+  filters: JSON.stringify({resources: [{itemId, minQuantity: '20000000', maxQuantity: '80000000'}]})
 });
 const page = await fetch('/api/supply/listings?' + query).then(r => r.json());
 ```
 
 第一批可省略三个 revision 引用，服务端返回当前版本；后续 cursor 自动绑定。公开 metadata 包含允许字段、操作、选项、目录 ID/基础单位、排序和限制。皮肤沿 `skinCatalogUrl` 的既有分页目录读取，未绑定 mediaId 仍可筛选；不返回后台来源或内价。
+
+浏览器账号列表地址保持 `/accounts?game={gameId}`，筛选、排序、显示模式和加载更多由 React 状态驱动，不写入页面 URL。按游戏保存的 sessionStorage 状态用于刷新恢复；进入详情后的返回快照额外绑定筛选摘要、已加载 cursor 链、显示模式和滚动位置。后台仍通过同源 Web BFF 发出 queryVersion=2 GET，实际筛选、排序和 cursor 只在该请求中传递。
 
 ## 有限筛选合同
 
@@ -28,14 +30,16 @@ const page = await fetch('/api/supply/listings?' + query).then(r => r.json());
 
 | 字段 | 结构与语义 |
 |---|---|
-| resources | `[{itemId,minQuantity}]`，每行 AND，下限包含边界 |
+| resources | `[{itemId,minQuantity?,maxQuantity?}]`，每行至少提供一端；同资源两端是闭区间并作用于同一库存行，不同资源 AND |
 | safeBoxCodes / gradingCodes / loginMethodCodes | code 数组，同类 OR |
 | vitality / bear | `{min:6}`，目录规则及配置允许的等级下限 |
 | regions | `[{province,city}]`，成对 OR，禁止省市笛卡尔组合 |
 | skinGroups | `[{categoryId,ids,match:'ANY'或'ALL'}]`，组间 AND，皮肤必须属于当前可见分类或其子分类 |
 | serviceWindow | `{startMinute,endMinute,crossMidnight,timezone:'Asia/Shanghai'}`，账号时段完整覆盖请求时段 |
 
-资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND；DAY 保持天数，不乘租期。金额只使用服务端 quote。
+资源上下限均包含边界；只填一端合法，两端相等表示精确数量，未提供的端点不施加约束。每个提供的端点按当前 metadata 对应资源的配置 min/max 校验；空条件不发送，只有 `itemId` 的行非法。资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit；0 有效，未知/缺失库存不能按 0 满足上限。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND；DAY 保持天数，不乘租期。金额只使用服务端 quote。
+
+公开 metadata 的可选 `resourceQuantityRange` 能力仅在值为 `true` 时表示可提交 `maxQuantity`。`false` 或字段缺失代表兼容的 min-only 能力：客户端保留合法下限、剔除上限，并提示条件已按当前规则调整；上限单独存在时该资源条件移除。旧 v1 与旧 v2 min-only 请求及已有 `AND_MIN` 配置保持兼容。服务端按每个已提交端点校验配置，不为缺失端点补默认约束。
 
 时段起点 0–1439，终点 0–1440；终点小于起点才允许跨午夜，按两段覆盖。0→1440 是全天，等起止非法。旧未知/矛盾时段在启用过滤时不命中，不改历史 payload/hash。
 
@@ -53,7 +57,7 @@ const page = await fetch('/api/supply/listings?' + query).then(r => r.json());
 
 响应包含 `items,nextCursor,queryVersion,sort,direction,sortLabel,filterRevision,catalogRevision,ruleReleaseId,scannedCount,scanBudget:200,scanBudgetReached,limit`。limit 默认20、范围1–50。资格失败也推进 cursor；空 items 加非空 nextCursor 不是结束。下一次照传 cursor，直至 null；刚好200条可能多返回一个终止空页。
 
-cursor HMAC-SHA256 使用独立 audience、keyId 和 `LISTING_CURSOR_SECRET`（或 `_FILE`）/`LISTING_CURSOR_KEY_ID`，secret 至少32字符且不能复用认证或个人确认秘密。缺配置拒绝 v2，但不影响 v1。cursor 有界且签名，包含精确排序键、NULL标记、accountId、游戏、筛选摘要、排序和三个revision。view=list/card 不改变摘要；limit 可变。keyset 不承诺跨请求冻结数据库，客户端按稳定 accountId 去重。
+cursor HMAC-SHA256 使用独立 audience、keyId 和 `LISTING_CURSOR_SECRET`（或 `_FILE`）/`LISTING_CURSOR_KEY_ID`，secret 至少32字符且不能复用认证或个人确认秘密。缺配置拒绝 v2，但不影响 v1。cursor 有界且签名，包含精确排序键、NULL标记、accountId、游戏、规范化筛选摘要（资源上下限均绑定）、排序和三个revision。旧 min-only 条件规范化保持兼容；上限变化会改变筛选摘要，不能复用旧 cursor。view=list/card 不改变摘要；limit 可变。keyset 不承诺跨请求冻结数据库，客户端按稳定 accountId 去重。
 
 | HTTP / code | 处理 |
 |---|---|

@@ -84,6 +84,75 @@ export type Favorite = {
   listing: PublicListing | null;
 };
 export type Page<T> = { items: T[]; nextCursor: string | null };
+export type ListingFilterConditions = {
+  resources?: Array<{ itemId: string; minQuantity?: string; maxQuantity?: string }>;
+  safeBoxCodes?: string[];
+  gradingCodes?: string[];
+  loginMethodCodes?: string[];
+  vitality?: { min: number };
+  bear?: { min: number };
+  regions?: Array<{ province: string; city: string }>;
+  serviceWindow?: {
+    startMinute: number;
+    endMinute: number;
+    crossMidnight: boolean;
+    timezone: "Asia/Shanghai";
+  };
+  skinGroups?: Array<{ categoryId: string; ids: string[]; match: "ANY" | "ALL" }>;
+};
+export type PublicListingFilterField = {
+  key: string;
+  operator: string;
+  label: string;
+  enabled: boolean;
+  order: number;
+  items?: Array<{ itemId: string; min: string; max: string }>;
+  options?: Array<{ value: string; label: string }>;
+  levels?: number[];
+  regions?: Array<{ province: string; city: string }>;
+  categoryIds?: string[];
+};
+export type PublicListingFilterMetadata = {
+  available: boolean;
+  reasonCode: string | null;
+  gameId: string;
+  queryVersion: 2;
+  resourceQuantityRange?: boolean;
+  filterRevision: string | null;
+  catalogRevision: string | null;
+  ruleReleaseId: string | null;
+  defaultSort: { sort: string; direction: "ASC" | "DESC"; label: string };
+  fields: PublicListingFilterField[];
+  sorts: Array<{ key: string; label: string; enabled: boolean; order: number; itemIds?: string[] }>;
+  directions: Array<"ASC" | "DESC">;
+  items: Array<{ id: string; code: string; name: string; unit: string }>;
+  categories: Array<{ id: string; parentId: string | null; name: string }>;
+  skinCatalogUrl: string;
+  limits: {
+    urlBytes: number;
+    resources: number;
+    skinGroups: number;
+    skinIds: number;
+    enumValues: number;
+    regions: number;
+    limit: number;
+    scanBudget: number;
+  };
+  livePages: boolean;
+};
+export type PublicListingPageV2 = Page<PublicListing> & {
+  queryVersion: 2;
+  sort: string;
+  direction: "ASC" | "DESC";
+  sortLabel: string;
+  filterRevision: string;
+  catalogRevision: string;
+  ruleReleaseId: string;
+  scannedCount: number;
+  scanBudget: number;
+  scanBudgetReached: boolean;
+  limit: number;
+};
 export type SupplyGame = {
   id: string;
   code: string;
