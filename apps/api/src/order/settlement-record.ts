@@ -9,6 +9,7 @@ import { recordAudit, SecurityApiError, type AuditOutcome } from "../auth/securi
 import { assertActiveInTransaction, assertUserContextInTransaction } from "../auth/user-identity";
 import { readOrderTeamAccess } from "../im/order-team-access";
 import { lockDispatchGate } from "../im/support-dispatch";
+import { CUSTOMER_TIERS, type CustomerTier } from "../supply/delta-rental";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import {
@@ -35,10 +36,12 @@ type LockedOrder = {
   renterUserId: string;
   ownerUserId: string;
   accountId: string;
+  listingVersionId: string;
   gameId: string;
   status: string;
   depositCents: string;
   contentHash: string;
+  ruleReleaseId: string;
   quote: Record<string, unknown>;
   appId: string | null;
   revision: string;
@@ -103,11 +106,12 @@ async function lockSettlement(client: PoolClient, orderId: string, actor: Actor,
   await client.query(`SELECT id FROM zzsh_supply.game WHERE id = $1 FOR SHARE`, [located.gameId]);
   await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id = $1 FOR UPDATE`, [located.accountId]);
   const row = (await client.query<{
-    id: string; renterUserId: string; ownerUserId: string; accountId: string; gameId: string; status: string;
-    depositCents: string; contentHash: string; quote: Record<string, unknown>; appId: string | null; revision: string;
+    id: string; renterUserId: string; ownerUserId: string; accountId: string; listingVersionId: string; gameId: string; status: string;
+    depositCents: string; contentHash: string; ruleReleaseId: string; quote: Record<string, unknown>; appId: string | null; revision: string;
   }>(
     `SELECT o.id, o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId", o.account_id AS "accountId",
-            o.game_id AS "gameId", o.status, o.deposit_amount_cents::text AS "depositCents", o.content_hash AS "contentHash",
+            o.listing_version_id AS "listingVersionId", o.game_id AS "gameId", o.status, o.deposit_amount_cents::text AS "depositCents", o.content_hash AS "contentHash",
+            o.rule_release_id AS "ruleReleaseId",
             o.quote_snapshot AS quote, o.revision::text AS revision, g.app_id AS "appId"
        FROM zzsh_order.rental_order o
        LEFT JOIN zzsh_order.im_order_group g ON g.order_id = o.id
@@ -155,18 +159,65 @@ type Basis = {
   paymentDigest: string;
   paymentConfirmationId: string;
   fundingSourceRef: string;
+  fundingSourceVersion: string;
   fundingPolicyRef: string;
-  fullPayout: "NOT_SELECTED";
+  fundingPolicyVersion: string | null;
+  disclosureVersion: string | null;
+  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2";
+  listingVersionId: string;
+  listingHash: string;
+  fullPayoutSelected: boolean;
+  fullPayout: "SELECTED" | "NOT_SELECTED";
 };
 
 function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: string; currency: string }, openingLines: LineQty[]): { basis: Basis } | { reasons: string[] } {
-  const personal = order.quote.personal as { funding?: Record<string, unknown> } | undefined;
-  const funding = personal?.funding;
-  if (!funding || typeof funding.fullPayoutSelected !== "boolean" || typeof funding.fullPayoutPolicyRef !== "string" || !funding.fullPayoutPolicyRef.trim()
-    || typeof funding.sourceRef !== "string" || !funding.sourceRef.trim() || typeof funding.fullPayoutFeeCents !== "string") {
+  const personal = order.quote.personal as Record<string, unknown> | undefined;
+  const funding = personal?.funding as Record<string, unknown> | undefined;
+  const membership = personal?.membership as Record<string, unknown> | undefined;
+  const guarantee = personal?.guarantee as Record<string, unknown> | undefined;
+  const ruleRefs = personal?.ruleRefs as Record<string, unknown> | undefined;
+  if (!personal || !funding || !membership || !guarantee || !ruleRefs
+    || personal.userId !== order.renterUserId || personal.listingHash !== order.contentHash
+    || ruleRefs.releaseId !== order.ruleReleaseId || order.quote.ruleReleaseId !== order.ruleReleaseId
+    || typeof membership.version !== "string" || !membership.version.trim() || typeof membership.sourceRef !== "string" || !membership.sourceRef.trim()
+    || typeof membership.tier !== "string" || !CUSTOMER_TIERS.includes(membership.tier as CustomerTier)
+    || typeof guarantee.reference !== "string" || !guarantee.reference.trim() || !["SATISFIED", "NOT_REQUIRED"].includes(String(guarantee.status))
+    || typeof funding.version !== "string" || !funding.version.trim() || typeof funding.sourceRef !== "string" || !funding.sourceRef.trim()
+    || typeof funding.baseDepositCents !== "string" || !/^(0|[1-9]\d{0,17})$/.test(funding.baseDepositCents)
+    || typeof funding.publisherBailRequirementCents !== "string" || !/^(0|[1-9]\d{0,17})$/.test(funding.publisherBailRequirementCents)
+    || typeof funding.vipWaiver !== "boolean" || typeof funding.svipWaiver !== "boolean"
+    || typeof funding.fullPayoutPolicyRef !== "string" || !funding.fullPayoutPolicyRef.trim()) {
     return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
   }
-  if (funding.fullPayoutSelected || funding.fullPayoutFeeCents !== "0") return { reasons: ["FULL_PAYOUT_FORMAL_PATH_CLOSED"] };
+  let fullPayoutSelected: boolean;
+  let personalQuoteSchema: Basis["personalQuoteSchema"];
+  let fundingPolicyVersion: string | null = null;
+  let disclosureVersion: string | null = null;
+  if (personal.schema === "personal-quote-v1") {
+    if (typeof funding.fullPayoutSelected !== "boolean" || funding.fullPayoutSelected || funding.fullPayoutFeeCents !== "0"
+      || Object.hasOwn(personal, "fullPayoutDeclaration") || Object.hasOwn(personal, "ownerUserId") || Object.hasOwn(personal, "accountId")
+      || personal.listingVersionId !== undefined || Object.hasOwn(funding, "fullPayoutPolicyVersion") || Object.hasOwn(funding, "disclosureVersion")) {
+      return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
+    }
+    personalQuoteSchema = "personal-quote-v1";
+    fullPayoutSelected = false;
+  } else if (personal.schema === "personal-quote-v2") {
+    const declaration = personal.fullPayoutDeclaration as Record<string, unknown> | undefined;
+    if (!declaration || Object.keys(declaration).sort().join(",") !== "schema,selected"
+      || declaration.schema !== "full-payout-declaration-v1" || typeof declaration.selected !== "boolean"
+      || personal.ownerUserId !== order.ownerUserId || personal.accountId !== order.accountId
+      || personal.listingVersionId !== order.listingVersionId || Object.hasOwn(funding, "fullPayoutSelected")
+      || Object.hasOwn(funding, "fullPayoutFeeCents") || typeof funding.fullPayoutPolicyVersion !== "string" || !funding.fullPayoutPolicyVersion.trim()
+      || typeof funding.disclosureVersion !== "string" || !funding.disclosureVersion.trim()) {
+      return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
+    }
+    personalQuoteSchema = "personal-quote-v2";
+    fullPayoutSelected = declaration.selected;
+    fundingPolicyVersion = funding.fullPayoutPolicyVersion;
+    disclosureVersion = funding.disclosureVersion;
+  } else {
+    return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
+  }
   const quoteLines = order.quote.lines;
   const ratios = (order.quote.pricingInputs as { exactRatios?: Array<Record<string, string>> } | undefined)?.exactRatios;
   if (!Array.isArray(quoteLines) || !Array.isArray(ratios)) return { reasons: ["QUOTE_BASIS_INVALID"] };
@@ -228,8 +279,15 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
       paymentDigest,
       paymentConfirmationId: payment.id,
       fundingSourceRef: funding.sourceRef,
+      fundingSourceVersion: funding.version,
       fundingPolicyRef: funding.fullPayoutPolicyRef,
-      fullPayout: "NOT_SELECTED",
+      fundingPolicyVersion,
+      disclosureVersion,
+      personalQuoteSchema,
+      listingVersionId: order.listingVersionId,
+      listingHash: order.contentHash,
+      fullPayoutSelected,
+      fullPayout: fullPayoutSelected ? "SELECTED" : "NOT_SELECTED",
     },
   };
 }
@@ -334,7 +392,14 @@ function payloadFor(input: {
     capturedAmount: input.basis.captured,
     depositAmount: input.basis.deposit,
     fundingSourceRef: input.basis.fundingSourceRef,
+    fundingSourceVersion: input.basis.fundingSourceVersion,
     fundingPolicyRef: input.basis.fundingPolicyRef,
+    fundingPolicyVersion: input.basis.fundingPolicyVersion,
+    disclosureVersion: input.basis.disclosureVersion,
+    personalQuoteSchema: input.basis.personalQuoteSchema,
+    listingVersionId: input.basis.listingVersionId,
+    listingHash: input.basis.listingHash,
+    fullPayoutSelected: input.basis.fullPayoutSelected,
     fullPayout: input.basis.fullPayout,
     feePolicyVersion: SETTLEMENT_FEE_POLICY_VERSION,
     lines: input.lines.map((line) => ({ itemId: line.itemId, openingQuantity: line.openingQuantity, remainingQuantity: line.remainingQuantity })),
@@ -405,7 +470,7 @@ function probe(order: LockedOrder, openingId: string, basis: Basis, lines: Settl
     depositAmount: basis.deposit,
     capturedAmount: basis.captured,
     fullPayout: basis.fullPayout,
-    fullPayoutPolicyRef: null,
+    fullPayoutPolicyRef: basis.fundingPolicyRef,
     haff: lines.find((line) => line.pricingKind === "HAFF_RATIO") ?? basis.haff,
     items: lines.filter((line) => line.pricingKind !== "HAFF_RATIO"),
   };
@@ -1192,7 +1257,7 @@ async function postReadySettlement(
   if (hashApprovalPayload(snapshot).hash !== version.versionHash) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   if (snapshot.orderId !== order.id || snapshot.renterUserId !== order.renterUserId || snapshot.ownerUserId !== order.ownerUserId
       || snapshot.openingId !== version.openingId || snapshot.kind !== version.kind || snapshot.early !== version.early
-      || snapshot.feePolicyVersion !== SETTLEMENT_FEE_POLICY_VERSION || snapshot.fullPayout !== "NOT_SELECTED") {
+      || snapshot.feePolicyVersion !== SETTLEMENT_FEE_POLICY_VERSION) {
     throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   }
 
@@ -1229,7 +1294,13 @@ async function postReadySettlement(
       || snapshot.quoteDigest !== bill.basis.quoteDigest || snapshot.paymentDigest !== bill.basis.paymentDigest
       || snapshot.paymentConfirmationId !== bill.basis.paymentConfirmationId || snapshot.capturedAmount !== bill.basis.captured
       || snapshot.depositAmount !== bill.basis.deposit || snapshot.fundingSourceRef !== bill.basis.fundingSourceRef
-      || snapshot.fundingPolicyRef !== bill.basis.fundingPolicyRef) {
+      || snapshot.fundingSourceVersion !== bill.basis.fundingSourceVersion
+      || snapshot.fundingPolicyRef !== bill.basis.fundingPolicyRef
+      || snapshot.fundingPolicyVersion !== bill.basis.fundingPolicyVersion
+      || snapshot.disclosureVersion !== bill.basis.disclosureVersion
+      || snapshot.personalQuoteSchema !== bill.basis.personalQuoteSchema
+      || snapshot.listingVersionId !== bill.basis.listingVersionId || snapshot.listingHash !== bill.basis.listingHash
+      || snapshot.fullPayoutSelected !== bill.basis.fullPayoutSelected || snapshot.fullPayout !== bill.basis.fullPayout) {
     throw conflict("SETTLEMENT_BASIS_STALE");
   }
 

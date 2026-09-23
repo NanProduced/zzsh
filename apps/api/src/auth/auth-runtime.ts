@@ -948,7 +948,7 @@ export async function mountAuthHandlers(
     app.get(MessageScopeRecoveryLifecycle).start(yunxinConsultation!);
   }
   if(options.testSupplyGateReader && !options.testOperationsEnabled) throw new Error("Supply fixtures require test operations capability");
-  if(options.testConfirmationFundingReader && (!options.testOperationsEnabled || process.env.NODE_ENV==="production")) throw new Error("Confirmation fixtures require test/fake operations capability");
+  if(options.testConfirmationFundingReader && (!options.testOperationsEnabled || process.env.NODE_ENV==="production")) throw new Error("Confirmation fixtures require test operations capability");
   // Occupancy truth comes from the order table; the base reader keeps the
   // publisher-bail seam semantics (UNKNOWN fails closed until M5).
   const supplyGateReader=composeSupplyGateWithOrderOccupancy(options.testSupplyGateReader ?? unknownSupplyGate);

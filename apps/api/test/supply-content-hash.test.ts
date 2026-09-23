@@ -123,6 +123,27 @@ test("identical content with reordered collections and keys produces the same di
   assert.equal(canonicalizeContentPayload(reordered), canonicalizeContentPayload(payload()));
 });
 
+test("owner full-payout declaration is strict, hash-bound, and omitted without changing legacy hashes", () => {
+  const legacy = payload();
+  const legacyHash = computeContentHash(legacy);
+  const selected = structuredClone(legacy);
+  selected.declaration.attributes.full_payout_declaration = { schema: "full-payout-declaration-v1", selected: true };
+  const selectedHash = computeContentHash(selected);
+  assert.notEqual(selectedHash, legacyHash);
+  assert.deepEqual(normalizeContentPayload(selected).declaration.attributes.full_payout_declaration,
+    { schema: "full-payout-declaration-v1", selected: true });
+  const unselected = structuredClone(selected);
+  (unselected.declaration.attributes.full_payout_declaration as { selected: boolean }).selected = false;
+  assert.notEqual(computeContentHash(unselected), selectedHash);
+  for (const declaration of [null, { schema: "unknown", selected: true }, { schema: "full-payout-declaration-v1", selected: "true" },
+    { schema: "full-payout-declaration-v1", selected: true, fullPayoutFeeCents: "1" }]) {
+    const invalid = structuredClone(legacy);
+    (invalid.declaration.attributes as Record<string, unknown>).full_payout_declaration = declaration;
+    assert.throws(() => computeContentHash(invalid), ContentHashError);
+  }
+  assert.equal(computeContentHash(legacy), legacyHash, "absent field keeps the v1 content hash stable");
+});
+
 test("quantity, price, media bytes and skins change the digest", () => {
   const base = computeContentHash(payload());
   const quantityChanged = computeContentHash(

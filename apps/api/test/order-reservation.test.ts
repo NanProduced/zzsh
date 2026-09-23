@@ -15,6 +15,7 @@ import { withTransaction } from "../src/auth/security-core";
 import { loadConfig, type AppConfig } from "../src/config/config";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
+import { createControlledConfirmationFundingReader, type ControlledFundingListing } from "../src/order/personal-confirmation";
 import { computeDeltaQuote } from "../src/supply/pricing";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { composeSupplyGateWithOrderOccupancy, OrderSweepWorker, sweepExpiredHolds, type SweepResult } from "../src/order/order";
@@ -122,8 +123,13 @@ function makeResources(): Resources {
     ...(maintenanceUser ? { DB_USER: maintenanceUser } : {}),
   };
   const maintenance = loadConfig(baseEnv);
-  const migrationPassword = process.env.ORDER_TEST_MIGRATION_PASSWORD?.trim() || randomBytes(32).toString("hex");
-  const runtimePassword = process.env.ORDER_TEST_RUNTIME_PASSWORD?.trim() || randomBytes(32).toString("hex");
+  const migrationPassword = process.env.ORDER_TEST_MIGRATION_PASSWORD?.trim()
+    || (RESOURCE_SET === "trade_settlement" ? "" : randomBytes(32).toString("hex"));
+  const runtimePassword = process.env.ORDER_TEST_RUNTIME_PASSWORD?.trim()
+    || (RESOURCE_SET === "trade_settlement" ? "" : randomBytes(32).toString("hex"));
+  if (RESOURCE_SET === "trade_settlement" && (!migrationPassword || !runtimePassword)) {
+    throw new Error("trade_settlement requires its registered migration/runtime credentials; random role passwords are disabled");
+  }
   const runtime = loadConfig({ ...baseEnv, DB_USER: runtimeUser, DB_PASSWORD: runtimePassword, DB_PASSWORD_FILE: undefined });
   const migration = loadConfig({
     ...baseEnv,
@@ -196,11 +202,11 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
         const journal = JSON.parse(readFileSync(resolve(__dirname, "../../migrations/business/meta/_journal.json"), "utf8")) as {
           entries: Array<{ idx: number; when: number; tag: string }>;
         };
-        assert.equal(journal.entries.length, 50, "settlement source journal must end at assigned idx=49");
+        assert.equal(journal.entries.length, 52, "settlement source journal must end at assigned idx=51");
         const applied = (await target.query<{ hash: string; createdAt: string }>(
           `SELECT hash, created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY created_at`,
         )).rows;
-        assert.ok(applied.length === 49 || applied.length === 50, `registered settlement migration count ${applied.length} is not 49 or 50`);
+        assert.ok(applied.length === 51 || applied.length === 52, `registered settlement migration count ${applied.length} is not 51 or 52`);
         for (const [index, row] of applied.entries()) {
           const entry = journal.entries[index]!;
           assert.equal(entry.idx, index);
@@ -213,7 +219,9 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
           databaseOid: db.oid, roleOids: ["578625", "578626"], migrationCount: applied.length,
           verifiedRows: applied.map((row, index) => ({ idx: index, tag: journal.entries[index]!.tag, when: journal.entries[index]!.when, hash: row.hash })),
           frozen0048: applied[48]!.hash,
-          ...(applied.length === 50 ? { frozen0049: applied[49]!.hash } : {}),
+          frozen0049: applied[49]!.hash,
+          frozen0050: applied[50]!.hash,
+          ...(applied.length === 52 ? { frozen0051: applied[51]!.hash } : {}),
         }));
       } finally {
         await target.end();
@@ -468,8 +476,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-order-maintenance", 2);
     guard = await resourceGuard(maintenancePool, resources);
     await ensureDatabase(maintenancePool, resources);
-    await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
-    await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
+    if (RESOURCE_SET !== "trade_settlement") {
+      await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
+      await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
+    }
     await grantDatabaseAccess(maintenancePool, resources);
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-order-owner", 2);
     await prepareOwnership(maintenanceDataPool, resources);
@@ -483,7 +493,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const stageSettlement = RESOURCE_SET === "trade_settlement" && Number(migrationBefore.n ?? 0) < 47;
     const baselineCount = Number(migrationBefore.n ?? 0);
     if (stageSettlement && baselineCount !== 0 && baselineCount !== 46) {
-      throw new Error(`trade_settlement migration count ${baselineCount} is not 0, 46, or 47`);
+      throw new Error(`trade_settlement migration count ${baselineCount} is not 0, 46, 47, 50, or 51`);
     }
     // A fresh resource stages up to 0042 before legacy fixtures; an existing one only refreshes
     // grants (its journal tail is already applied), so the suite never drops or replays from zero.
@@ -504,7 +514,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     }
     console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse,
       baselineCount, firstResponseBaselineCount, tail: migrated.slice(-2),
-      firstApplication0049: RESOURCE_SET === "trade_settlement" && baselineCount === 49 && migrated.length === 50,
+      firstApplication0051: RESOURCE_SET === "trade_settlement" && baselineCount === 51 && migrated.length === 52,
       migrationReplayVerified: !stagedFirstResponse }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
@@ -525,6 +535,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     );
 
     const bootstrapSecret = randomBytes(32).toString("hex");
+    const settlementFundingRunId = randomUUID();
+    if (RESOURCE_SET === "trade_settlement") console.log("trade settlement controlled funding run", JSON.stringify({ runId: settlementFundingRunId }));
+    const settlementFundingListings = new Map<string, ControlledFundingListing>();
     const authOptions = {
       ...loadAuthRuntimeConfig({
         AUTH_API_ORIGIN: API_ORIGIN,
@@ -533,6 +546,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         AUTH_USER_SECRET: randomBytes(32).toString("hex"),
         AUTH_ADMIN_SECRET: randomBytes(32).toString("hex"),
         AUTH_ADMIN_BOOTSTRAP_SECRET: bootstrapSecret,
+        ORDER_CONFIRMATION_SECRET: randomBytes(32).toString("hex"),
+        ORDER_CONFIRMATION_KEY_ID: "trb3b1r2",
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
       // Explicit synthetic supplier-event ingress for OIM-4B; never reads a real AppSecret.
@@ -541,6 +556,14 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000, escalationEnabled: true },
       realNameProvider: createFakeRealNameProvider("VERIFIED_ADULT"),
       orderHoldSeconds: HOLD_SECONDS,
+      ...(RESOURCE_SET === "trade_settlement" ? {
+        testConfirmationFundingReader: createControlledConfirmationFundingReader({
+          config: { ...resources.runtime, testOperationsEnabled: true },
+          resourceSet: RESOURCE_SET,
+          runId: settlementFundingRunId,
+          allowedListings: settlementFundingListings,
+        }),
+      } : {}),
       // Fixture: no further obligations beyond the composed supply/order checks.
       userObligationReader: async () => "NONE" as const,
       testSupplyGateReader: async (_client: PoolClient, account: { id: string }): Promise<SupplyGate> => {
@@ -641,7 +664,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       label: string,
       depositCents: string | null,
       includeSettlementPiece = false,
-    ): Promise<{ accountId: string; versionId: string; releaseId: string }> => {
+      fullPayoutSelected?: boolean,
+      rentalPricing?: { rentalMode: "ordinary" | "custom" | "fast"; ownerRatioB?: string },
+      pricingOptionCode = "standard",
+    ): Promise<{ accountId: string; versionId: string; releaseId: string; listingHash: string }> => {
       const created = await request(base, "/api/v1/supply/accounts", { gameId }, owner, USER_ORIGIN, "POST", orderKey());
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       const accountId = created.body?.accountId as string;
@@ -666,9 +692,13 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         expectedRevision: d.body?.account.revision,
         title: `三角洲 · ${label}`,
         description: "合成申报，不代表平台已登录验号",
-        attributes: { safe_box_code: "box-a", vit_level: 6, bear_level: 6 },
+        attributes: {
+          safe_box_code: "box-a", vit_level: 6, bear_level: 6,
+            ...(rentalPricing === undefined ? {} : { rentalPricing }),
+          ...(fullPayoutSelected === undefined ? {} : { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: fullPayoutSelected } }),
+        },
         termOptionCode: "daily-10m",
-        pricingOptionCode: "standard",
+        pricingOptionCode,
         inventory,
         skins: [],
         entitlements: [],
@@ -683,17 +713,24 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       if (depositCents !== null) {
         // Isolated fixture: rebuild the persisted quote with an explicit deposit
         // using the production compute/normalize/hash functions, then re-accept.
-        const stored = (await runtimePool!.query<{ payload: any }>(`SELECT payload FROM zzsh_supply.listing_version WHERE id = $1`, [versionId])).rows[0]!.payload;
+         const stored = (await runtimePool!.query<{ payload: any }>(`SELECT payload FROM zzsh_supply.listing_version WHERE id = $1`, [versionId])).rows[0]!.payload;
+         const quoteRule = (await runtimePool!.query<{ mode: "SPREAD" | "PERCENT"; haffRule: any; roundingPolicy: string; commissionRate: string | null }>(
+           `SELECT p.mode, p.haff_rule AS "haffRule", p.rounding_policy AS "roundingPolicy", p.commission_rate::text AS "commissionRate"
+              FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id = r.price_version_id WHERE r.id = $1`, [releaseId],
+         )).rows[0]!;
         const recomputed = computeDeltaQuote({
+          customerTier: "STANDARD",
           priceVersionId: stored.quoteValues.priceVersionId,
-          mode: "SPREAD",
-          roundingPolicy: "HALF_UP_CENT_V1",
-          haffRule: HAFF_RULE,
+           mode: quoteRule.mode,
+           roundingPolicy: quoteRule.roundingPolicy,
+           ...(quoteRule.commissionRate === null ? {} : { commissionRate: quoteRule.commissionRate }),
+           haffRule: quoteRule.haffRule,
           lines: [
-            { itemId: haffItem, quantity: "60000000", pricingKind: "HAFF_RATIO" },
-            ...(includeSettlementPiece ? [{ itemId: fixedItem, quantity: "10", pricingKind: "FIXED_UNIT" as const, unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1.5" }] : []),
+            { itemId: haffItem, customerTier: "STANDARD" as const, quantity: "60000000", pricingKind: "HAFF_RATIO" },
+            ...(includeSettlementPiece ? [{ itemId: fixedItem, customerTier: "STANDARD" as const, quantity: "10", pricingKind: "FIXED_UNIT" as const, unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1.5" }] : []),
           ],
-          conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", pricingOptionCode: "standard" },
+           conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", pricingOptionCode,
+             ...(rentalPricing === undefined ? {} : { rentalPricing }) },
           termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
           entitlements: [],
           deposits: { tenantDepositCents: depositCents, publisherBailRequirementCents: "0" },
@@ -702,7 +739,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         if (!recomputed.quotable) throw new Error("fixture quote failed");
         recomputed.quote.ruleReleaseId = releaseId;
         const payload = normalizeContentPayload({
-          schemaVersion: 1,
+          schemaVersion: recomputed.quote.schemaVersion,
           accountId,
           gameId,
           declaration: stored.declaration,
@@ -720,7 +757,11 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       assert.equal(decided.response.status, 200, JSON.stringify(decided.body));
       const publicDetail = await request(base, `/api/v1/supply/listings/${accountId}`, undefined, cookieJar(), API_ORIGIN);
       assert.equal(publicDetail.response.status, 200, `listing ${accountId} must be public: ${JSON.stringify(publicDetail.body)}`);
-      return { accountId, versionId, releaseId };
+      if (fullPayoutSelected !== undefined) {
+        const ownerUserId = (await runtimePool!.query<{ ownerUserId: string }>(`SELECT owner_user_id AS "ownerUserId" FROM zzsh_supply.rental_account WHERE id = $1`, [accountId])).rows[0]!.ownerUserId;
+        settlementFundingListings.set(accountId, { runId: settlementFundingRunId, ownerUserId, listingVersionId: versionId, listingHash: contentHash });
+      }
+      return { accountId, versionId, releaseId, listingHash: contentHash };
     };
 
     const createOrder = async (

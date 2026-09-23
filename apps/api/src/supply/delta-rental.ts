@@ -370,9 +370,9 @@ function deltaDecimalText(value: unknown): string {
 }
 
 export function normalizeDeltaAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd"];
+  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration"];
   deltaFields(value, allowed);
-  return Object.fromEntries(allowed.map((key) => {
+  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration").map((key) => {
     const child = value[key] ?? null;
     if (child === null) return [key, null];
     if ((DELTA_LEVEL_FIELDS as readonly string[]).includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new DeltaDeclarationError("Invalid Delta level");
@@ -381,6 +381,15 @@ export function normalizeDeltaAttributes(value: Record<string, unknown>): Record
     if ((DELTA_TEXT_FIELDS as readonly string[]).includes(key)) return [key, deltaHumanText(child)];
     return [key, child];
   }));
+  if (Object.hasOwn(value, "full_payout_declaration")) {
+    const declaration = value.full_payout_declaration;
+    if (!declaration || typeof declaration !== "object" || Array.isArray(declaration)) throw new DeltaDeclarationError("Invalid full payout declaration");
+    const fields = declaration as Record<string, unknown>;
+    deltaFields(fields, ["schema", "selected"]);
+    if (fields.schema !== "full-payout-declaration-v1" || typeof fields.selected !== "boolean") throw new DeltaDeclarationError("Invalid full payout declaration");
+    normalized.full_payout_declaration = { schema: fields.schema, selected: fields.selected };
+  }
+  return normalized;
 }
 
 export type DeltaQuoteViewer = "public" | "owner" | "admin";

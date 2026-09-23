@@ -17,8 +17,10 @@ import { createPersonalReservation } from "../src/order/personal-order";
 import { computeSyntheticFullPayout, settlementSurfaceOpen } from "../src/order/settlement-record";
 import { readOrderOccupancy } from "../src/order/order";
 import { runBusinessMigrations } from "../src/database/business-migrations";
+import { CUSTOMER_TIERS, type CustomerTier } from "../src/supply/delta-rental";
 import { seedIdentity } from "./im-test-fixtures";
 import { OrderTeamTransport, fakeIdentityAccounts } from "./order-team-fixtures";
+import { compatRule } from "./pricing-compat-fixture";
 import type { runPaymentAcceptance } from "./order-payment-im-postgres.test";
 
 type Base = Parameters<typeof runPaymentAcceptance>[1];
@@ -96,7 +98,8 @@ async function withPostingInsertBarrier<T>(
 
 export async function runSettlementAcceptance(t: TestContext, o: Base & {
   base: string; buyer: Jar; buyerEmail: string; owner: Jar; boss: Staff; createStaff: (name: string, permissions: string[]) => Promise<Staff>;
-  publishApproved: (owner: any, label: string, depositCents: string | null, includeSettlementPiece?: boolean) => Promise<{ accountId: string; versionId: string; releaseId: string }>;
+  publishApproved: (owner: any, label: string, depositCents: string | null, includeSettlementPiece?: boolean, fullPayoutSelected?: boolean,
+    rentalPricing?: { rentalMode: "ordinary" | "custom" | "fast"; ownerRatioB?: string }, pricingOptionCode?: string) => Promise<{ accountId: string; versionId: string; releaseId: string; listingHash?: string }>;
   request: any; runtimeUser: string; staged: boolean; upgrade: () => Promise<void>;
 }): Promise<void> {
   const { pool, migrationPool, ownerPool } = o;
@@ -120,7 +123,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   await o.upgrade();
   const migrationFileHash = (tag: string) => createHash("sha256").update(readFileSync(resolve(__dirname, "../../migrations/business", `${tag}.sql`))).digest("hex");
   const after = await migrations();
-  assert.equal(after.length, 50);
+  assert.equal(after.length, 52);
   assert.equal(after[46]!.hash, migrationFileHash("0046_order_settlement_confirmation"));
   assert.equal(after[46]!.created_at, "1789490015000");
   assert.equal(after[47]!.hash, migrationFileHash("0047_order_settlement_intake"));
@@ -129,6 +132,13 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   assert.equal(after[48]!.created_at, "1789490017000");
   assert.equal(after[49]!.hash, migrationFileHash("0049_order_settlement_posting_guards"));
   assert.equal(after[49]!.created_at, "1789490018000");
+  assert.equal(after[50]!.hash, migrationFileHash("0050_order_personal_quote_v2_guard"));
+  assert.equal(after[50]!.created_at, "1789490019000");
+  assert.equal(after[51]!.hash, migrationFileHash("0051_order_personal_quote_v2_guard_fix"));
+  assert.equal(after[51]!.created_at, "1789490020000");
+  if (!o.staged) assert.equal(before.length, 52, "the post-application settlement run must start at 52 migrations");
+  console.log("trade settlement migration replay", JSON.stringify({ beforeCount: before.length, afterCount: after.length,
+    firstApplication: o.staged ? null : "51->52 already recorded by order runner", replay: !o.staged && before.length === 52 && after.length === 52 }));
   if (o.staged) assert.notDeepEqual(before, after);
   const retainedAfter = (await pool.query(`SELECT o.id, o.status, o.quote_snapshot, o.paid_confirmation_id, p.amount_cents::text AS amount, p.disposition
     FROM zzsh_order.rental_order o JOIN zzsh_order.payment_confirmation p ON p.id = o.paid_confirmation_id WHERE o.id = $1`, [retained.id])).rows[0];
@@ -161,11 +171,17 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     `SELECT u.id, s.id AS "sessionId" FROM zzsh_auth_user."user" u JOIN zzsh_auth_user."session" s ON s."userId" = u.id
       WHERE u.email = $1 ORDER BY s."createdAt" DESC LIMIT 1`, [o.buyerEmail])).rows[0]!;
   const membershipPath = `/api/bff/admin/users/${buyer.id}/rental-membership`;
-  const membership = await post(membershipPath, undefined, o.boss.jar, ADMIN_ORIGIN, {}, "GET");
-  assert.equal(membership.response.status, 200, JSON.stringify(membership.body));
-  assert.equal((await post(membershipPath, {
-    tier: "STANDARD", expectedVersion: membership.body!.membership.version, sourceRef: "fixture:trb2", reason: "isolated settlement membership",
-  }, o.boss.jar, ADMIN_ORIGIN, key(), "PUT")).response.status, 200);
+  const setMembershipTier = async (tier: CustomerTier) => {
+    const membership = await post(membershipPath, undefined, o.boss.jar, ADMIN_ORIGIN, {}, "GET");
+    assert.equal(membership.response.status, 200, JSON.stringify(membership.body));
+    const updated = await post(membershipPath, {
+      tier, expectedVersion: membership.body!.membership.version, sourceRef: "fixture:trb2", reason: "isolated settlement membership",
+    }, o.boss.jar, ADMIN_ORIGIN, key(), "PUT");
+    assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body!.membership.tier, tier);
+    return updated.body!.membership;
+  };
+  await setMembershipTier("STANDARD");
   const makePaid = async (label: string) => {
     const account = await o.publishApproved(o.owner, label, "30000", true);
     const context = { userId: buyer.id, sessionId: buyer.sessionId };
@@ -174,6 +190,11 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     const created = await withTransaction(pool, (client) => createPersonalReservation(client, context, issued.confirmationToken, options, `req_${randomUUID()}`));
     assert.equal(created.status, 200, JSON.stringify(created.body));
     const orderId = (created.body as { order: { id: string } }).order.id;
+    const v1Snapshot = (await pool.query<{ quote: Record<string, any> }>(
+      `SELECT quote_snapshot AS quote FROM zzsh_order.rental_order WHERE id = $1`, [orderId])).rows[0]!.quote;
+    assert.equal(v1Snapshot.personal.schema, "personal-quote-v1");
+    assert.equal(Object.hasOwn(v1Snapshot.personal, "quote"), false, "v1 must also keep the normalized quote at the order root");
+    assert.equal(v1Snapshot.priceVersionId, v1Snapshot.personal.ruleRefs.priceVersionId);
     const row = (await pool.query(`SELECT display_no, (rental_amount_cents + deposit_amount_cents)::text AS total FROM zzsh_order.rental_order WHERE id = $1`, [orderId])).rows[0];
     const input: PaymentInput = { orderId, merchantOrderNo: row.display_no, providerTransactionId: `tx_${randomUUID()}`, amountCents: row.total, currency: "CNY", providerPaidAt: new Date().toISOString(), requestId: `req_${randomUUID()}` };
     const fact = createControlledPaymentSource({ config: o.config, resourceSet: o.resourceSet, appId, merchantScopeId: "settle-merchant", allowedOrderIds: [orderId] })(input);
@@ -209,6 +230,59 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     `SELECT quote_snapshot->'lines' AS lines FROM zzsh_order.rental_order WHERE id = $1`, [orderId])).rows[0]!.lines;
   const openingBody = async (orderId: string) => ({ lines: (await quoteLines(orderId)).map((line) => ({ itemId: line.itemId, quantity: line.quantity })) });
   const remainingBody = async (orderId: string, remaining: string) => ({ lines: (await quoteLines(orderId)).map((line) => ({ itemId: line.itemId, remainingQuantity: remaining })) });
+  const makePaidV2 = async (label: string, selected = true, membershipTier: CustomerTier = "STANDARD") => {
+    assert.equal(o.resourceSet, "trade_settlement", "v2 controlled compensation is restricted to the registered settlement resource");
+    await setMembershipTier(membershipTier);
+    const account = await o.publishApproved(o.owner, label, "30000", true, selected,
+      membershipTier === "STANDARD" ? undefined : { rentalMode: "ordinary" }, membershipTier === "STANDARD" ? undefined : "");
+    const confirmation = await post("/api/v2/order-confirmations", {
+      accountId: account.accountId, versionId: account.versionId, releaseId: account.releaseId,
+    }, o.buyer);
+    assert.equal(confirmation.response.status, 200, JSON.stringify(confirmation.body));
+    assert.equal(confirmation.body!.compensationDisclosure.selected, selected);
+    assert.equal(hasKeyDeep(confirmation.body, "sourceRef"), false);
+    assertNoSettlementInternals(confirmation.body);
+    const created = await post("/api/v2/orders", { confirmationToken: confirmation.body!.confirmationToken }, o.buyer, USER_ORIGIN, key());
+    assert.equal(created.response.status, 200, JSON.stringify(created.body));
+    const orderId = created.body!.order.id as string;
+    const order = (await pool.query<{ displayNo: string; total: string; depositAmount: string; status: string; quote: Record<string, any>; paidConfirmationId: string | null }>(
+      `SELECT display_no AS "displayNo", (rental_amount_cents + deposit_amount_cents)::text AS total,
+              deposit_amount_cents::text AS "depositAmount",
+              status, quote_snapshot AS quote, paid_confirmation_id AS "paidConfirmationId"
+         FROM zzsh_order.rental_order WHERE id = $1`, [orderId])).rows[0]!;
+    const personal = order.quote.personal;
+    assert.equal(order.status, "PENDING_PAYMENT");
+    assert.equal(order.depositAmount, "30000", "membership tier must not alter the publisher deposit fixture");
+    assert.equal(personal.schema, "personal-quote-v2");
+    assert.deepEqual(Object.keys(personal).sort(), [
+      "accountId", "fullPayoutDeclaration", "funding", "guarantee", "listingHash", "listingVersionId",
+      "membership", "ownerUserId", "ruleRefs", "schema", "userId",
+    ]);
+    assert.equal(Object.hasOwn(personal, "quote"), false, "v2 keeps the normalized quote at the order snapshot root");
+    assert.equal(personal.fullPayoutDeclaration.selected, selected);
+    assert.equal(personal.membership.tier, membershipTier, "settlement must use the frozen membership tier");
+    assert.equal(personal.listingVersionId, account.versionId);
+    assert.equal(personal.listingHash, account.listingHash);
+    assert.equal(order.quote.priceVersionId, personal.ruleRefs.priceVersionId);
+    assert.equal(order.quote.ruleReleaseId, account.releaseId);
+    assert.equal(Object.hasOwn(personal.funding, "schema"), false, "personal.schema is the persisted quote version; funding has no duplicate schema truth");
+    assert.equal(Object.hasOwn(personal.funding, "fullPayoutFeeCents"), false, "fee is not pre-deducted or frozen as an amount");
+    const input: PaymentInput = {
+      orderId, merchantOrderNo: order.displayNo, providerTransactionId: `tx_${randomUUID()}`,
+      amountCents: order.total, currency: "CNY", providerPaidAt: new Date().toISOString(), requestId: `req_${randomUUID()}`,
+    };
+    const fact = createControlledPaymentSource({
+      config: o.config, resourceSet: o.resourceSet, appId, merchantScopeId: "settle-merchant", allowedOrderIds: [orderId],
+    })(input);
+    const applied = await withTransaction(pool, (client) => confirmOrderPayment(client, fact));
+    assert.equal(applied.disposition, "APPLIED");
+    const paid = (await pool.query<{ paymentId: string; amount: string }>(
+      `SELECT p.id AS "paymentId", p.amount_cents::text AS amount FROM zzsh_order.rental_order o
+       JOIN zzsh_order.payment_confirmation p ON p.id = o.paid_confirmation_id WHERE o.id = $1`, [orderId])).rows[0]!;
+    assert.equal(paid.amount, order.total);
+    assert.equal(order.paidConfirmationId, null);
+    return { orderId, account, paymentId: paid.paymentId };
+  };
   const waiters = async () => Number((await ownerPool.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`)).rows[0].n);
   const holdOrder = async (orderId: string, start: Array<Promise<unknown>>) => {
     const client = await ownerPool.connect();
@@ -250,6 +324,412 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     (SELECT count(*)::int FROM zzsh_iam.audit_event WHERE action = 'approval.request.created' AND details->>'operationCode' = 'order.settlement.adjust' AND outcome = 'SUCCESS') AS "adjustmentAudits",
     (SELECT count(*)::int FROM zzsh_order.settlement_posting WHERE order_id = $1) AS postings,
     (SELECT count(*)::int FROM zzsh_order.settlement_ledger_entry e JOIN zzsh_order.settlement_posting p ON p.id = e.posting_id WHERE p.order_id = $1) AS ledgerEntries`, [orderId])).rows[0];
+  const settleV2 = async (label: string, branch: "NORMAL" | "TENANT_EARLY" | "OWNER_EARLY" | "OWNER_ZERO_EARLY", membershipTier: CustomerTier = "STANDARD") => {
+    const created = await makePaidV2(label, true, membershipTier);
+    const orderId = created.orderId;
+    await joinTeam(orderId);
+    await addMember(orderId, staff.id);
+    const openingBodyValue = await openingBody(orderId);
+    assert.equal((await post(`/api/v1/admin/orders/${orderId}/openings`, openingBodyValue, staff.jar, ADMIN_ORIGIN, key())).response.status, 200);
+    const opening = (await post(`/api/v1/orders/${orderId}/settlement`, undefined, o.buyer)).body!.openings[0];
+    for (const jar of [o.buyer, o.owner]) {
+      const confirmed = await post(`/api/v1/orders/${orderId}/openings/${opening.id}/confirm`, { versionNo: opening.versionNo }, jar, USER_ORIGIN, key());
+      assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+    }
+    const haff = opening.lines.find((line: any) => line.pricingKind === "HAFF_RATIO");
+    assert.ok(haff && BigInt(haff.quantity) > 1n);
+    const isEarly = branch !== "NORMAL";
+    const consumedHaff = branch === "OWNER_ZERO_EARLY" ? 0n : isEarly ? BigInt(haff.quantity) / 2n : BigInt(haff.quantity);
+    const remaining = { lines: opening.lines.map((line: any) => ({
+      itemId: line.itemId,
+      remainingQuantity: line.pricingKind === "HAFF_RATIO" ? (BigInt(line.quantity) - consumedHaff).toString()
+        : branch === "TENANT_EARLY" || branch === "OWNER_ZERO_EARLY" ? line.quantity : "0",
+    })) };
+    let postingResponse: { response: Response; body: Record<string, any> | null };
+    let settlementVersionId: string;
+    let versionHash: string;
+    if (!isEarly) {
+      const preview = await post(`/api/v1/orders/${orderId}/settlement-preview`, remaining, o.buyer);
+      assert.equal(preview.response.status, 200, JSON.stringify(preview.body));
+      const submission = await post(`/api/v1/orders/${orderId}/settlements`, { ...remaining, acceptedHash: preview.body!.versionHash }, o.buyer, USER_ORIGIN, key());
+      assert.equal(submission.response.status, 200, JSON.stringify(submission.body));
+      settlementVersionId = submission.body!.settlement.id;
+      versionHash = submission.body!.settlement.versionHash;
+      postingResponse = await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+        action: "CONFIRM", versionHash,
+      }, o.owner, USER_ORIGIN, key());
+    } else {
+      const applicant = branch === "TENANT_EARLY" ? o.buyer : o.owner;
+      const applicationPreview = await post(`/api/v1/orders/${orderId}/settlement-preview`, remaining, applicant);
+      assert.equal(applicationPreview.response.status, 200, JSON.stringify(applicationPreview.body));
+      assert.ok(applicationPreview.body!.reasons.includes("EARLY_REASON_REQUIRED"));
+      const intake = await post(`/api/v1/orders/${orderId}/settlements`, {
+        ...remaining, acceptedHash: applicationPreview.body!.versionHash,
+      }, applicant, USER_ORIGIN, key());
+      assert.equal(intake.response.status, 200, JSON.stringify(intake.body));
+      assert.equal(intake.body!.currentRequest.status, "OPEN");
+      const endReason = branch === "TENANT_EARLY" ? "TENANT_VOLUNTARY_EARLY" : "OWNER_OR_ACCOUNT_EARLY";
+      const staffPreview = await post(`/api/v1/admin/orders/${orderId}/settlement-preview`, { ...remaining, endReason }, staff.jar, ADMIN_ORIGIN);
+      assert.equal(staffPreview.response.status, 200, JSON.stringify(staffPreview.body));
+      const classified = await post(`/api/v1/admin/orders/${orderId}/settlements/classify`, {
+        ...remaining, endReason, acceptedHash: staffPreview.body!.versionHash,
+      }, staff.jar, ADMIN_ORIGIN, key());
+      assert.equal(classified.response.status, 200, JSON.stringify(classified.body));
+      assert.equal(classified.body!.intakes.at(-1).status, "CLASSIFIED");
+      settlementVersionId = classified.body!.settlement.id;
+      versionHash = classified.body!.settlement.versionHash;
+      for (const jar of [o.buyer, o.owner]) {
+        const confirmed = await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+          action: "CONFIRM", versionHash,
+        }, jar, USER_ORIGIN, key());
+        assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+      }
+      const pending = await post(`/api/v1/orders/${orderId}/settlement`, undefined, o.buyer);
+      assert.equal(pending.body!.ready, false);
+      assert.ok(pending.body!.reasons.includes("SUPPORT_REVIEW_MISSING"));
+      postingResponse = await post(`/api/v1/admin/orders/${orderId}/settlements/${settlementVersionId}/review`, { versionHash }, staff.jar, ADMIN_ORIGIN, key());
+    }
+    assert.equal(postingResponse.response.status, 200, JSON.stringify(postingResponse.body));
+    const posted = (await pool.query<{ status: string; fee: string; paymentId: string; paidPaymentId: string; payer: string; rate: string; feeBase: string; ownerNet: string; refund: string; platform: string; refundDueAt: string; postedAt: string }>(
+      `SELECT o.status, p.compensation_fee_cents::text AS fee, p.payment_confirmation_id AS "paymentId",
+              o.paid_confirmation_id AS "paidPaymentId", v.computation#>>'{amounts,feePayer}' AS payer,
+              v.computation#>>'{amounts,feeRate}' AS rate, v.computation#>>'{amounts,feeBase,amount}' AS "feeBase",
+              p.owner_net_cents::text AS "ownerNet", p.renter_refund_cents::text AS refund,
+              p.platform_contribution_cents::text AS platform, p.refund_due_at::text AS "refundDueAt", p.posted_at::text AS "postedAt"
+         FROM zzsh_order.rental_order o JOIN zzsh_order.settlement_posting p ON p.order_id=o.id
+         JOIN zzsh_order.settlement_version v ON v.id=p.settlement_version_id WHERE o.id=$1`, [orderId])).rows[0]!;
+    assert.equal(posted.status, "COMPLETED");
+    assert.equal(posted.paymentId, posted.paidPaymentId);
+    assert.equal(posted.rate, "0.08");
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_posting WHERE order_id=$1`, [orderId])).rows[0].n, 1);
+    const feeEntries = await pool.query<{ credit: string; details: Record<string, unknown> }>(
+      `SELECT credit_cents::text AS credit, details FROM zzsh_order.settlement_ledger_entry
+        WHERE posting_id=(SELECT id FROM zzsh_order.settlement_posting WHERE order_id=$1) AND account_code='PLATFORM_COMPENSATION_FEE'`, [orderId]);
+    const expectedPayer = branch === "TENANT_EARLY" ? "RENTER" : "OWNER";
+    assert.equal(posted.payer, expectedPayer);
+    const expected = {
+      NORMAL: { fee: "1080", feeBase: "135.00", ownerNet: "12420", refund: "30000", platform: "4580" },
+      TENANT_EARLY: { fee: "1080", feeBase: "135.00", ownerNet: "6000", refund: "36920", platform: "4080" },
+      OWNER_EARLY: { fee: "600", feeBase: "75.00", ownerNet: "6900", refund: "37500", platform: "2600" },
+      OWNER_ZERO_EARLY: { fee: "0", feeBase: "0.00", ownerNet: "0", refund: "47000", platform: "0" },
+    }[branch];
+    assert.deepEqual({ fee: posted.fee, feeBase: posted.feeBase, ownerNet: posted.ownerNet, refund: posted.refund, platform: posted.platform }, expected,
+      `${branch} must retain the fixed fixture amounts and fee base`);
+    if (branch === "OWNER_ZERO_EARLY") {
+      assert.equal(posted.fee, "0");
+      assert.equal(posted.feeBase, "0.00");
+      assert.equal(feeEntries.rowCount, 0, "selected but no consumed owner base produces no fee entry");
+    } else {
+      assert.ok(BigInt(posted.fee) > 0n, `${branch} must post a nonzero 8% fee`);
+      assert.equal(feeEntries.rowCount, 1, "one nonzero fee creates exactly one classification entry");
+      assert.equal(feeEntries.rows[0]!.credit, posted.fee);
+      assert.equal(feeEntries.rows[0]!.details.rate, "0.08");
+      assert.equal(feeEntries.rows[0]!.details.payer, expectedPayer);
+    }
+    const ledger = (await pool.query<{ debit: string; credit: string; sourceCount: number }>(
+      `SELECT sum(debit_cents)::text AS debit, sum(credit_cents)::text AS credit,
+              count(*) FILTER (WHERE account_code='CAPTURED_PAYMENT_SOURCE' AND source_payment_confirmation_id=$2)::int AS "sourceCount"
+         FROM zzsh_order.settlement_ledger_entry WHERE posting_id=(SELECT id FROM zzsh_order.settlement_posting WHERE order_id=$1)`,
+      [orderId, posted.paidPaymentId])).rows[0]!;
+    assert.equal(ledger.debit, ledger.credit);
+    assert.equal(ledger.sourceCount, 1);
+    console.log("trb3b1 controlled posting", JSON.stringify({ branch, orderId, feeCents: posted.fee, payer: posted.payer, feeBase: posted.feeBase, status: posted.status }));
+    return { orderId, feeCents: posted.fee, payer: posted.payer };
+  };
+  const settleSelectedManual = async (branch: "NORMAL" | "TENANT_EARLY") => {
+    const created = await makePaidV2(`TR-GUARD-2 R2 ${branch} selected manual`, true, "STANDARD");
+    const orderId = created.orderId;
+    await joinTeam(orderId);
+    await addMember(orderId, staff.id);
+    const openingBodyValue = await openingBody(orderId);
+    assert.equal((await post(`/api/v1/admin/orders/${orderId}/openings`, openingBodyValue, staff.jar, ADMIN_ORIGIN, key())).response.status, 200);
+    const opening = (await post(`/api/v1/orders/${orderId}/settlement`, undefined, o.buyer)).body!.openings[0];
+    for (const jar of [o.buyer, o.owner]) {
+      const confirmed = await post(`/api/v1/orders/${orderId}/openings/${opening.id}/confirm`, { versionNo: opening.versionNo }, jar, USER_ORIGIN, key());
+      assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+    }
+    const haff = opening.lines.find((line: any) => line.pricingKind === "HAFF_RATIO");
+    assert.ok(haff && BigInt(haff.quantity) > 1n);
+    const isEarly = branch === "TENANT_EARLY";
+    const consumedHaff = isEarly ? BigInt(haff.quantity) / 2n : BigInt(haff.quantity);
+    const remaining = { lines: opening.lines.map((line: any) => ({
+      itemId: line.itemId,
+      remainingQuantity: line.pricingKind === "HAFF_RATIO" ? (BigInt(line.quantity) - consumedHaff).toString()
+        : isEarly ? line.quantity : "0",
+    })) };
+    const expected = isEarly
+      ? { systemOwner: "6000", systemRefund: "36920", finalOwner: "5900", finalRefund: "36920", fee: "1080", feeBase: "135.00", payer: "RENTER", adjustment: "100", platform: "4180" }
+      : { systemOwner: "12420", systemRefund: "30000", finalOwner: "12300", finalRefund: "30000", fee: "1080", feeBase: "135.00", payer: "OWNER", adjustment: "120", platform: "4700" };
+    const assertPreview = (body: Record<string, any>) => {
+      assert.equal(body.amounts.ownerNet, `${expected.systemOwner.slice(0, -2)}.${expected.systemOwner.slice(-2)}`);
+      assert.equal(body.amounts.renterRefund, `${expected.systemRefund.slice(0, -2)}.${expected.systemRefund.slice(-2)}`);
+      assert.equal(body.amounts.feeAmount, `${expected.fee.slice(0, -2)}.${expected.fee.slice(-2)}`);
+      assert.equal(body.amounts.feeBase, expected.feeBase);
+      assert.equal(body.amounts.feePayer, expected.payer);
+    };
+    let settlementVersionId: string;
+    let versionHash: string;
+    let endReason: "TENANT_VOLUNTARY_EARLY" | null = null;
+    if (!isEarly) {
+      const preview = await post(`/api/v1/orders/${orderId}/settlement-preview`, remaining, o.buyer);
+      assert.equal(preview.response.status, 200, JSON.stringify(preview.body));
+      assertPreview(preview.body!);
+      const submission = await post(`/api/v1/orders/${orderId}/settlements`, { ...remaining, acceptedHash: preview.body!.versionHash }, o.buyer, USER_ORIGIN, key());
+      assert.equal(submission.response.status, 200, JSON.stringify(submission.body));
+      settlementVersionId = submission.body!.settlement.id;
+      versionHash = submission.body!.settlement.versionHash;
+    } else {
+      const applicationPreview = await post(`/api/v1/orders/${orderId}/settlement-preview`, remaining, o.buyer);
+      assert.equal(applicationPreview.response.status, 200, JSON.stringify(applicationPreview.body));
+      assert.ok(applicationPreview.body!.reasons.includes("EARLY_REASON_REQUIRED"));
+      const intake = await post(`/api/v1/orders/${orderId}/settlements`, {
+        ...remaining, acceptedHash: applicationPreview.body!.versionHash,
+      }, o.buyer, USER_ORIGIN, key());
+      assert.equal(intake.response.status, 200, JSON.stringify(intake.body));
+      assert.equal(intake.body!.currentRequest.status, "OPEN");
+      endReason = "TENANT_VOLUNTARY_EARLY";
+      const staffPreview = await post(`/api/v1/admin/orders/${orderId}/settlement-preview`, { ...remaining, endReason }, staff.jar, ADMIN_ORIGIN);
+      assert.equal(staffPreview.response.status, 200, JSON.stringify(staffPreview.body));
+      assertPreview(staffPreview.body!);
+      const classified = await post(`/api/v1/admin/orders/${orderId}/settlements/classify`, {
+        ...remaining, endReason, acceptedHash: staffPreview.body!.versionHash,
+      }, staff.jar, ADMIN_ORIGIN, key());
+      assert.equal(classified.response.status, 200, JSON.stringify(classified.body));
+      assert.equal(classified.body!.intakes.at(-1).status, "CLASSIFIED");
+      settlementVersionId = classified.body!.settlement.id;
+      versionHash = classified.body!.settlement.versionHash;
+    }
+    const adjustmentPreview = await post(`/api/v1/admin/orders/${orderId}/settlement-preview`, {
+      ...remaining, ...(endReason ? { endReason } : {}), proposedOwnerNet: isEarly ? "59.00" : "123.00",
+      proposedRenterRefund: isEarly ? "369.20" : "300.00", reason: `R2 ${branch} final operator net`,
+    }, staff.jar, ADMIN_ORIGIN);
+    assert.equal(adjustmentPreview.response.status, 200, JSON.stringify(adjustmentPreview.body));
+    assertPreview(adjustmentPreview.body!);
+    const adjusted = await post(`/api/v1/admin/orders/${orderId}/settlements/adjustments`, {
+      ...remaining, ...(endReason ? { endReason } : {}), proposedOwnerNet: isEarly ? "59.00" : "123.00",
+      proposedRenterRefund: isEarly ? "369.20" : "300.00", reason: `R2 ${branch} final operator net`,
+      acceptedHash: adjustmentPreview.body!.versionHash,
+    }, staff.jar, ADMIN_ORIGIN, key());
+    assert.equal(adjusted.response.status, 200, JSON.stringify(adjusted.body));
+    assert.equal(adjusted.body!.ready, false);
+    settlementVersionId = adjusted.body!.settlement.id;
+    versionHash = adjusted.body!.settlement.versionHash;
+    const version = (await pool.query<{ approvalRequestId: string; versionHash: string; kind: string }>(
+      `SELECT approval_request_id AS "approvalRequestId", version_hash AS "versionHash", kind
+         FROM zzsh_order.settlement_version WHERE id = $1`, [settlementVersionId])).rows[0]!;
+    assert.equal(version.kind, "MANUAL_ADJUSTMENT");
+    assert.equal(version.versionHash, versionHash);
+    const approval = (await pool.query<{ status: string; requestedBy: string; payloadHash: string }>(
+      `SELECT status, requested_by AS "requestedBy", operation_payload_hash AS "payloadHash"
+         FROM zzsh_iam.approval_request WHERE id = $1`, [version.approvalRequestId])).rows[0]!;
+    assert.equal(approval.status, "PENDING");
+    assert.equal(approval.requestedBy, staff.id);
+    assert.equal(approval.payloadHash, versionHash, "approval and manual version must bind the same payload");
+    const noApproval = await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+      action: "CONFIRM", versionHash,
+    }, o.buyer, USER_ORIGIN, key());
+    assert.equal(noApproval.response.status, 409);
+    assert.equal(noApproval.body!.reasons?.[0], "OPS_APPROVAL_MISSING");
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_decision WHERE settlement_version_id = $1`, [settlementVersionId])).rows[0].n, 0);
+    assert.equal((await post("/api/v1/admin/security/approvals/requests/decision", {
+      requestId: version.approvalRequestId, decision: "APPROVE", reason: `R2 ${branch} 非自审批准`,
+    }, staff.jar, ADMIN_ORIGIN, key())).response.status, 403);
+    assert.equal((await post("/api/v1/admin/security/approvals/requests/decision", {
+      requestId: version.approvalRequestId, decision: "APPROVE", reason: `R2 ${branch} 非自审批准`,
+    }, ops.jar, ADMIN_ORIGIN, key())).response.status, 200);
+    assert.equal((await pool.query(`SELECT status FROM zzsh_iam.approval_request WHERE id = $1`, [version.approvalRequestId])).rows[0].status, "APPROVED");
+    let posted: { response: Response; body: Record<string, any> | null };
+    if (!isEarly) {
+      const renterConfirm = await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+        action: "CONFIRM", versionHash,
+      }, o.buyer, USER_ORIGIN, key());
+      assert.equal(renterConfirm.response.status, 200, JSON.stringify(renterConfirm.body));
+      assert.equal(renterConfirm.body!.ready, false);
+      const ownerKey = key();
+      posted = await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+        action: "CONFIRM", versionHash,
+      }, o.owner, USER_ORIGIN, ownerKey);
+      assert.equal(posted.response.status, 200, JSON.stringify(posted.body));
+      assert.deepEqual((await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+        action: "CONFIRM", versionHash,
+      }, o.owner, USER_ORIGIN, ownerKey)).body, posted.body, "same-key replay must not post twice");
+    } else {
+      for (const jar of [o.buyer, o.owner]) {
+        const confirmed = await post(`/api/v1/orders/${orderId}/settlements/${settlementVersionId}/decision`, {
+          action: "CONFIRM", versionHash,
+        }, jar, USER_ORIGIN, key());
+        assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+        assert.equal(confirmed.body!.ready, false);
+      }
+      const pending = await post(`/api/v1/orders/${orderId}/settlement`, undefined, o.buyer);
+      assert.equal(pending.body!.ready, false);
+      assert.ok(pending.body!.reasons.includes("SUPPORT_REVIEW_MISSING"));
+      const reviewKey = key();
+      posted = await post(`/api/v1/admin/orders/${orderId}/settlements/${settlementVersionId}/review`, { versionHash }, staff.jar, ADMIN_ORIGIN, reviewKey);
+      assert.equal(posted.response.status, 200, JSON.stringify(posted.body));
+      assert.deepEqual((await post(`/api/v1/admin/orders/${orderId}/settlements/${settlementVersionId}/review`, { versionHash }, staff.jar, ADMIN_ORIGIN, reviewKey)).body,
+        posted.body, "same-key support review replay must not post twice");
+    }
+    assert.equal(posted.body!.ready, true);
+    assert.equal(posted.body!.orderStatus, "COMPLETED");
+    const row = (await pool.query<{ status: string; captured: string; systemOwner: string; owner: string; systemRefund: string; refund: string; platform: string; fee: string; feeBase: string; payer: string; depositRefund: string }>(
+      `SELECT o.status, p.captured_cents::text AS captured, p.system_owner_net_cents::text AS "systemOwner",
+              p.owner_net_cents::text AS owner, p.system_renter_refund_cents::text AS "systemRefund",
+              p.renter_refund_cents::text AS refund, p.platform_contribution_cents::text AS platform,
+              p.compensation_fee_cents::text AS fee, v.computation#>>'{amounts,feeBase,amount}' AS "feeBase",
+              v.computation#>>'{amounts,feePayer}' AS payer, v.computation#>>'{amounts,depositRefund,amount}' AS "depositRefund"
+         FROM zzsh_order.rental_order o JOIN zzsh_order.settlement_posting p ON p.order_id = o.id
+         JOIN zzsh_order.settlement_version v ON v.id = p.settlement_version_id WHERE o.id = $1`, [orderId])).rows[0]!;
+    assert.equal(row.status, "COMPLETED");
+    assert.deepEqual({ captured: row.captured, systemOwner: row.systemOwner, owner: row.owner, systemRefund: row.systemRefund,
+      refund: row.refund, platform: row.platform, fee: row.fee, feeBase: row.feeBase, payer: row.payer, depositRefund: row.depositRefund },
+      { captured: "47000", systemOwner: expected.systemOwner, owner: expected.finalOwner, systemRefund: expected.systemRefund,
+        refund: expected.finalRefund, platform: expected.platform, fee: expected.fee, feeBase: expected.feeBase, payer: expected.payer, depositRefund: "300.00" });
+    const ledger = (await pool.query<{ accountCode: string; debit: string; credit: string; entries: number }>(
+      `SELECT account_code AS "accountCode", sum(debit_cents)::text AS debit, sum(credit_cents)::text AS credit, count(*)::int AS entries
+         FROM zzsh_order.settlement_ledger_entry WHERE posting_id = (SELECT id FROM zzsh_order.settlement_posting WHERE order_id = $1)
+        GROUP BY account_code ORDER BY account_code`, [orderId])).rows;
+    const byCode = (code: string) => ledger.find((entry) => entry.accountCode === code)!;
+    assert.equal(ledger.reduce((sum, entry) => sum + BigInt(entry.debit), 0n), ledger.reduce((sum, entry) => sum + BigInt(entry.credit), 0n));
+    assert.equal(byCode("OWNER_AVAILABLE").credit, expected.finalOwner);
+    assert.equal(byCode("RENTER_REFUND_PAYABLE").credit, expected.finalRefund);
+    assert.equal(byCode("PLATFORM_MANUAL_NET_ADJUSTMENT").credit, expected.adjustment);
+    assert.equal(byCode("PLATFORM_COMPENSATION_FEE").credit, expected.fee);
+    assert.equal(byCode("CAPTURED_PAYMENT_SOURCE").debit, "47000");
+    const feeEntry = (await pool.query<{ credit: string; details: Record<string, any> }>(
+      `SELECT credit_cents::text AS credit, details FROM zzsh_order.settlement_ledger_entry
+        WHERE posting_id = (SELECT id FROM zzsh_order.settlement_posting WHERE order_id = $1) AND account_code = 'PLATFORM_COMPENSATION_FEE'`, [orderId])).rows;
+    assert.equal(feeEntry.length, 1);
+    assert.deepEqual({ credit: feeEntry[0]!.credit, rate: feeEntry[0]!.details.rate, payer: feeEntry[0]!.details.payer, base: feeEntry[0]!.details.base.amount },
+      { credit: expected.fee, rate: "0.08", payer: expected.payer, base: expected.feeBase });
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_posting WHERE order_id = $1`, [orderId])).rows[0].n, 1);
+    console.log("trg2 R2 selected manual", JSON.stringify({ branch, orderId, settlementVersionId, feeCents: expected.fee,
+      feeBase: expected.feeBase, payer: expected.payer, ownerAvailableCents: expected.finalOwner, renterRefundCents: expected.finalRefund,
+      manualAdjustmentCents: expected.adjustment, platformContributionCents: expected.platform }));
+  };
+  const assertV2GuardInsert = async (label: string, mutate: (snapshot: Record<string, any>) => void, expectRejected = true) => {
+    const base = (await pool.query<{
+      accountId: string; listingVersionId: string; ownerUserId: string; renterUserId: string; gameId: string;
+      releaseId: string; contentHash: string; termOptionCode: string; rentalAmount: string; depositAmount: string;
+      currency: string; termSeconds: string; quote: Record<string, any>; title: string;
+    }>(`SELECT account_id AS "accountId", listing_version_id AS "listingVersionId", owner_user_id AS "ownerUserId",
+             renter_user_id AS "renterUserId", game_id AS "gameId", rule_release_id AS "releaseId", content_hash AS "contentHash",
+             term_option_code AS "termOptionCode", rental_amount_cents::text AS "rentalAmount", deposit_amount_cents::text AS "depositAmount",
+             currency, term_seconds::text AS "termSeconds", quote_snapshot AS quote, title
+        FROM zzsh_order.rental_order WHERE id = $1`, [v2Normal.orderId])).rows[0]!;
+    const confirmationId = randomUUID();
+    const snapshot = JSON.parse(JSON.stringify(base.quote)) as Record<string, any>;
+    snapshot.confirmationId = confirmationId;
+    snapshot.confirmationDigest = "ab".repeat(32);
+    snapshot.confirmationExpiresAt = String(Math.floor(Date.now() / 1000) + 3600);
+    mutate(snapshot);
+    const beforeGuardRows = (await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE id LIKE 'guard_v2_%'`)).rows[0]!.n;
+    const client = await pool.connect();
+    let rejected = false;
+    try {
+      await client.query("BEGIN");
+      await client.query(`INSERT INTO zzsh_order.rental_order
+        (id, display_no, account_id, listing_version_id, owner_user_id, renter_user_id, game_id, rule_release_id, content_hash,
+         term_option_code, status, rental_amount_cents, deposit_amount_cents, currency, term_seconds, quote_snapshot, title, hold_until, confirmation_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PENDING_PAYMENT',$11,$12,$13,$14,$15::jsonb,$16,clock_timestamp() + interval '1 hour',$17)`, [
+        `guard_v2_${randomUUID().replaceAll("-", "")}`, `ZZ-GUARD-${randomUUID().replaceAll("-", "")}`,
+        base.accountId, base.listingVersionId, base.ownerUserId, base.renterUserId, base.gameId, base.releaseId, base.contentHash,
+        base.termOptionCode, base.rentalAmount, base.depositAmount, base.currency, base.termSeconds, JSON.stringify(snapshot), base.title, confirmationId,
+      ]);
+    } catch (error) {
+      rejected = true;
+      assert.equal(expectRejected, true, `${label} unchanged control must be accepted before testing mutations`);
+      assert.equal((error as { code?: string }).code, "40001", `${label} must be rejected by the personal snapshot guard`);
+      assert.match((error as { where?: string }).where ?? "", /guard_personal_order/, `${label} must fail in the intended personal snapshot guard`);
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+    assert.equal(rejected, expectRejected, `${label} produced an unexpected guard result`);
+    const afterGuardRows = (await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE id LIKE 'guard_v2_%'`)).rows[0]!.n;
+    assert.equal(afterGuardRows, beforeGuardRows, `${label} must leave no persisted order side effect`);
+  };
+  const v2Normal = await settleV2("B3B1 v2正常号主承担", "NORMAL");
+  await setMembershipTier("STANDARD");
+  await assertV2GuardInsert("unchanged v2 snapshot control", () => undefined, false);
+  const v2GuardNegativeCases: Array<[string, (snapshot: Record<string, any>) => void]> = [
+    ["schema null", (snapshot: Record<string, any>) => { snapshot.personal.schema = null; }],
+    ["unknown schema", (snapshot: Record<string, any>) => { snapshot.personal.schema = "personal-quote-v3"; }],
+    ["owner binding mismatch", (snapshot: Record<string, any>) => { snapshot.personal.ownerUserId = "wrong-owner"; }],
+    ["account binding mismatch", (snapshot: Record<string, any>) => { snapshot.personal.accountId = "wrong-account"; }],
+    ["listing version binding mismatch", (snapshot: Record<string, any>) => { snapshot.personal.listingVersionId = "wrong-version"; }],
+    ["listing hash binding mismatch", (snapshot: Record<string, any>) => { snapshot.personal.listingHash = "00".repeat(32); }],
+    ["root quote price binding mismatch", (snapshot: Record<string, any>) => { snapshot.priceVersionId = "wrong-price"; }],
+    ["root quote term wrong type", (snapshot: Record<string, any>) => { snapshot.termSeconds = Number(snapshot.termSeconds); }],
+    ["duplicate nested quote", (snapshot: Record<string, any>) => { snapshot.personal.quote = { priceVersionId: snapshot.priceVersionId }; }],
+    ["declaration missing", (snapshot: Record<string, any>) => { delete snapshot.personal.fullPayoutDeclaration; }],
+    ["declaration selected null", (snapshot: Record<string, any>) => { snapshot.personal.fullPayoutDeclaration.selected = null; }],
+    ["membership sourceRef null", (snapshot: Record<string, any>) => { snapshot.personal.membership.sourceRef = null; }],
+    ["membership tier unknown", (snapshot: Record<string, any>) => { snapshot.personal.membership.tier = "UNKNOWN"; }],
+    ["policy version missing", (snapshot: Record<string, any>) => { delete snapshot.personal.funding.fullPayoutPolicyVersion; }],
+    ["policy version null", (snapshot: Record<string, any>) => { snapshot.personal.funding.fullPayoutPolicyVersion = null; }],
+    ["funding base deposit wrong type", (snapshot: Record<string, any>) => { snapshot.personal.funding.baseDepositCents = 30000; }],
+    ["legacy fee field", (snapshot: Record<string, any>) => { snapshot.personal.funding.fullPayoutFeeCents = "0"; }],
+    ["rule references null", (snapshot: Record<string, any>) => { snapshot.personal.ruleRefs = null; }],
+    ["rule release binding mismatch", (snapshot: Record<string, any>) => { snapshot.personal.ruleRefs.releaseId = "wrong-release"; }],
+    ["confirmation expired", (snapshot: Record<string, any>) => { snapshot.confirmationExpiresAt = String(Math.floor(Date.now() / 1000) - 1); }],
+  ];
+  for (const [label, mutate] of v2GuardNegativeCases) {
+    await assertV2GuardInsert(label, mutate);
+  }
+  const duplicateBase = (await pool.query<{ accountId: string; listingVersionId: string; ownerUserId: string; renterUserId: string; gameId: string; releaseId: string; contentHash: string; termOptionCode: string; rentalAmount: string; depositAmount: string; currency: string; termSeconds: string; quote: Record<string, any>; title: string; confirmationId: string }>(
+    `SELECT account_id AS "accountId", listing_version_id AS "listingVersionId", owner_user_id AS "ownerUserId", renter_user_id AS "renterUserId",
+            game_id AS "gameId", rule_release_id AS "releaseId", content_hash AS "contentHash", term_option_code AS "termOptionCode",
+            rental_amount_cents::text AS "rentalAmount", deposit_amount_cents::text AS "depositAmount", currency, term_seconds::text AS "termSeconds",
+            quote_snapshot AS quote, title, confirmation_id AS "confirmationId"
+       FROM zzsh_order.rental_order WHERE id = $1`, [v2Normal.orderId])).rows[0]!;
+  const duplicateClient = await pool.connect();
+  let duplicateRejected = false;
+  try {
+    await duplicateClient.query("BEGIN");
+    await duplicateClient.query(`INSERT INTO zzsh_order.rental_order
+      (id, display_no, account_id, listing_version_id, owner_user_id, renter_user_id, game_id, rule_release_id, content_hash,
+       term_option_code, status, rental_amount_cents, deposit_amount_cents, currency, term_seconds, quote_snapshot, title, hold_until, confirmation_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PENDING_PAYMENT',$11,$12,$13,$14,$15::jsonb,$16,clock_timestamp() + interval '1 hour',$17)`, [
+      `guard_duplicate_${randomUUID().replaceAll("-", "")}`, `ZZ-GUARD-DUP-${randomUUID().replaceAll("-", "")}`,
+      duplicateBase.accountId, duplicateBase.listingVersionId, duplicateBase.ownerUserId, duplicateBase.renterUserId, duplicateBase.gameId,
+      duplicateBase.releaseId, duplicateBase.contentHash, duplicateBase.termOptionCode, duplicateBase.rentalAmount, duplicateBase.depositAmount,
+      duplicateBase.currency, duplicateBase.termSeconds, JSON.stringify(duplicateBase.quote), duplicateBase.title, duplicateBase.confirmationId,
+    ]);
+  } catch (error) {
+    duplicateRejected = true;
+    assert.equal((error as { code?: string; constraint?: string }).code, "23505");
+    assert.equal((error as { constraint?: string }).constraint, "rental_order_confirmation_unique");
+  } finally {
+    await duplicateClient.query("ROLLBACK").catch(() => undefined);
+    duplicateClient.release();
+  }
+  assert.equal(duplicateRejected, true, "a consumed confirmation must remain single-use");
+  const immutableClient = await pool.connect();
+  let immutableRejected = false;
+  try {
+    await immutableClient.query("BEGIN");
+    await immutableClient.query(`UPDATE zzsh_order.rental_order SET quote_snapshot = jsonb_set(quote_snapshot, '{personal,listingHash}', '"00"') WHERE id = $1`, [v2Normal.orderId]);
+  } catch (error) {
+    immutableRejected = true;
+    assert.equal((error as { code?: string }).code, "40001");
+  } finally {
+    await immutableClient.query("ROLLBACK").catch(() => undefined);
+    immutableClient.release();
+  }
+  assert.equal(immutableRejected, true, "a persisted v2 snapshot must remain immutable");
+  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE id LIKE 'guard_v2_%' OR id LIKE 'guard_duplicate_%'`)).rows[0].n, 0);
+  console.log("trb3b1 v2 guard negatives", JSON.stringify({ rejectedCases: v2GuardNegativeCases.length, duplicateConfirmationRejected: duplicateRejected, immutableSnapshotRejected: immutableRejected }));
+  const v2TenantEarly = await settleV2("B3B1 v2租客自愿提前", "TENANT_EARLY");
+  const v2OwnerEarly = await settleV2("B3B1 v2号主提前承担", "OWNER_EARLY");
+  const v2ZeroFee = await settleV2("B3B1 v2已选但零实耗", "OWNER_ZERO_EARLY");
+  assert.ok(BigInt(v2Normal.feeCents) > 0n && BigInt(v2TenantEarly.feeCents) > 0n && BigInt(v2OwnerEarly.feeCents) > 0n);
+  assert.equal(v2ZeroFee.feeCents, "0");
+  await settleSelectedManual("NORMAL");
+  await settleSelectedManual("TENANT_EARLY");
+  await setMembershipTier("STANDARD");
   const normalId = await makePaid("结算正常");
   await joinTeam(normalId);
   const actorGate = await ownerPool.connect();
@@ -427,7 +907,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   const stableEarlyRemain = earlyRemain.lines.map((line) => ({ itemId: line.itemId, remainingQuantity: line.remainingQuantity })).sort((a, b) => a.itemId.localeCompare(b.itemId));
   assert.deepEqual(intake.body!.intakes.at(-1).lines, stableEarlyRemain);
   const stateWithOpenIntake = await settlementState(earlyId);
-  assert.deepEqual(stateWithOpenIntake, { intakes: 1, versions: 0, decisions: 0, settlementAudits: 1, adjustmentApprovals: 0, adjustmentAudits: 0, postings: 0, ledgerentries: 0 });
+  assert.deepEqual(stateWithOpenIntake, { intakes: 1, versions: 0, decisions: 0, settlementAudits: 1, adjustmentApprovals: 2, adjustmentAudits: 2, postings: 0, ledgerentries: 0 });
   const staleParty = await post(`/api/v1/orders/${earlyId}/settlements`, { ...earlyRemain, acceptedHash: earlyPreview.body!.versionHash }, o.owner, USER_ORIGIN, key());
   const staleNormal = await post(`/api/v1/orders/${earlyId}/settlements`, { ...normalRemain, acceptedHash: normalPreviewBeforeIntake.body!.versionHash }, o.buyer, USER_ORIGIN, key());
   const staleStaff = await post(`/api/v1/admin/orders/${earlyId}/settlements/classify`, { ...earlyRemain, endReason: "TENANT_VOLUNTARY_EARLY", acceptedHash: oldStaffPreview.body!.versionHash }, staff.jar, ADMIN_ORIGIN, key());
@@ -911,6 +1391,52 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
       bool_and(owner_credits = owner_net_cents AND refund_credits = renter_refund_cents AND platform_net = platform_contribution_cents) AS accounts_reconciled,
       count(DISTINCT payment_confirmation_id)::int AS unique_payments FROM selected`, [normalId, earlyId, concurrentPostId]);
   assert.deepEqual(reconciliation.rows[0], { batches: 3, allocation_balanced: true, ledger_balanced: true, accounts_reconciled: true, unique_payments: 3 });
+
+  // R1 uses the existing compatibility pricing seam only to provide all four frozen membership tiers
+  // in the controlled fixture; settlement still runs through the normal confirmation/order/settlement HTTP paths.
+  const compatibilityRule = compatRule("50");
+  if (!compatibilityRule.compatibility) throw new Error("compatibility fixture is incomplete");
+  compatibilityRule.compatibility.ordinary.spreadDelta = "10";
+  compatibilityRule.compatibility.ordinary.discounts = Object.fromEntries(CUSTOMER_TIERS.map((tier) => [tier, "0"])) as typeof compatibilityRule.compatibility.ordinary.discounts;
+  const billable = (await pool.query<{ id: string; code: string }>(
+    `SELECT id, code FROM zzsh_supply.billable_item WHERE game_id = $1 AND code = ANY($2::text[])`, [gameId, ["haff_base", "settlement_test_piece"]],
+  )).rows;
+  const haffItem = billable.find((row) => row.code === "haff_base")?.id;
+  const fixedItem = billable.find((row) => row.code === "settlement_test_piece")?.id;
+  assert.ok(haffItem && fixedItem);
+  const adminCreate = (path: string, body: Record<string, unknown>, method = "POST") => post(path, body, o.boss.jar, ADMIN_ORIGIN, key(), method);
+  const priceDraft = await adminCreate("/api/bff/admin/supply/price-drafts", { gameId, mode: "SPREAD" });
+  assert.equal(priceDraft.response.status, 200, JSON.stringify(priceDraft.body));
+  const termDraft = await adminCreate("/api/bff/admin/supply/term-drafts", { gameId });
+  assert.equal(termDraft.response.status, 200, JSON.stringify(termDraft.body));
+  const agreementDraft = await adminCreate("/api/bff/admin/supply/agreement-drafts", { gameId, title: "结算兼容会员协议", body: "仅用于受控会员结算兼容验收。" });
+  assert.equal(agreementDraft.response.status, 200, JSON.stringify(agreementDraft.body));
+  const compatibilityLines = CUSTOMER_TIERS.flatMap((customerTier) => [
+    { itemId: haffItem, customerTier, pricingKind: "HAFF_RATIO" },
+    { itemId: fixedItem, customerTier, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1.5" },
+  ]);
+  const configuredPrice = await adminCreate(`/api/bff/admin/supply/price-drafts/${priceDraft.body!.id}`, {
+    expectedRevision: "1", haffRule: compatibilityRule, roundingPolicy: "HALF_UP_CENT_V1", lines: compatibilityLines,
+  }, "PUT");
+  assert.equal(configuredPrice.response.status, 200, JSON.stringify(configuredPrice.body));
+  const configuredTerm = await adminCreate(`/api/bff/admin/supply/term-drafts/${termDraft.body!.id}`, {
+    expectedRevision: "1", options: [{ code: "daily-10m", name: "日消耗 10M", dailyConsumption: "10000000" }],
+  }, "PUT");
+  assert.equal(configuredTerm.response.status, 200, JSON.stringify(configuredTerm.body));
+  assert.equal((await adminCreate(`/api/bff/admin/supply/price-drafts/${priceDraft.body!.id}/seal`, { expectedRevision: "2" })).response.status, 200);
+  assert.equal((await adminCreate(`/api/bff/admin/supply/term-drafts/${termDraft.body!.id}/seal`, { expectedRevision: "2" })).response.status, 200);
+  assert.equal((await adminCreate(`/api/bff/admin/supply/agreement-drafts/${agreementDraft.body!.id}/seal`, { expectedRevision: "1" })).response.status, 200);
+  const currentGeneration = (await pool.query<{ generation: string }>(
+    `SELECT COALESCE(MAX(generation), 0)::text AS generation FROM zzsh_supply.rule_release WHERE game_id = $1`, [gameId],
+  )).rows[0]!.generation;
+  const compatibilityRelease = await post("/api/bff/admin/supply/releases", {
+    gameId, priceVersionId: priceDraft.body!.id, termVersionId: termDraft.body!.id, agreementVersionId: agreementDraft.body!.id,
+    expectedGeneration: currentGeneration,
+  }, o.boss.jar, ADMIN_ORIGIN, key());
+  assert.equal(compatibilityRelease.response.status, 200, JSON.stringify(compatibilityRelease.body));
+  assert.equal(compatibilityRelease.body!.generation, String(Number(currentGeneration) + 1));
+  console.log("trg2 R1 DISCOUNT_USER compatibility fixture", JSON.stringify({ gameId, releaseId: compatibilityRelease.body!.releaseId, generation: compatibilityRelease.body!.generation, tiers: CUSTOMER_TIERS }));
+  await settleV2("B3B1 v2冻结DISCOUNT_USER", "NORMAL", "DISCOUNT_USER");
 
   const counts = (await pool.query(`SELECT
     (SELECT count(*)::int FROM zzsh_order.rental_order) AS orders,
