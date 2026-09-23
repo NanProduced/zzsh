@@ -1,20 +1,27 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listingFilterKey, listingQuery, type ListingFilters } from "@/lib/listing-filters";
+import {
+  ListingRequestBudgetError,
+  listingFilterKey,
+  listingQuery,
+  listingRequestBudget,
+  type ListingFilters,
+} from "@/lib/listing-filters";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { appendUniqueListings } from "@/lib/listing-feed-utils";
 import type { PublicListing, PublicListingFilterMetadata, SupplyFieldError } from "@/lib/supply-types";
 
 export type FeedStatus = "loading" | "ready" | "error";
+type FeedError = { status: number; code: string; details: SupplyFieldError[]; message?: string };
 export type ListingFeed = {
   status: FeedStatus;
   items: PublicListing[];
   nextCursor: string | null;
   requestedCursors: Array<string | null>;
-  error: { status: number; code: string; details: SupplyFieldError[] } | null;
+  error: FeedError | null;
   cursorInvalid: boolean;
   isLoadingMore: boolean;
-  loadMoreError: { status: number; code: string; details: SupplyFieldError[] } | null;
+  loadMoreError: FeedError | null;
   loadMoreCursorInvalid: boolean;
   resumeIncomplete: boolean;
   scanBudgetReached: boolean;
@@ -29,7 +36,10 @@ const EMPTY: FeedState = {
   resumeIncomplete: false, scanBudgetReached: false,
 };
 
-function errorInfo(error: unknown) {
+function errorInfo(error: unknown): FeedError {
+  if (error instanceof ListingRequestBudgetError) {
+    return { status: error.status, code: error.code, details: error.details, message: error.message };
+  }
   return error instanceof SupplyRequestError
     ? { status: error.status, code: error.code, details: error.details }
     : { status: 0, code: "NETWORK_ERROR", details: [] };
@@ -107,6 +117,8 @@ export function useListingFeed(
             incomplete = true;
             break;
           }
+          const budget = listingRequestBudget(filters, metadata, cursor);
+          if (budget) throw new ListingRequestBudgetError(budget);
           const page = await supplyApi.market(listingQuery({ ...filters, cursor }, metadata), controller.signal);
           if (controller.signal.aborted || mine !== sequence.current) return;
           requestedCursors.push(cursor);
@@ -151,7 +163,11 @@ export function useListingFeed(
     activeController.current = controller;
     busy.current = true;
     commit({ ...current, isLoadingMore: true, loadMoreError: null });
-    void supplyApi.market(listingQuery({ ...filters, cursor }, metadata), controller.signal)
+    const budget = listingRequestBudget(filters, metadata, cursor);
+    const request = budget
+      ? Promise.reject(new ListingRequestBudgetError(budget))
+      : supplyApi.market(listingQuery({ ...filters, cursor }, metadata), controller.signal);
+    void request
       .then((page) => {
         if (controller.signal.aborted || mine !== sequence.current) return;
         commit({
@@ -167,7 +183,13 @@ export function useListingFeed(
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || mine !== sequence.current) return;
-        commit({ ...stateRef.current, isLoadingMore: false, loadMoreError: errorInfo(error), loadMoreCursorInvalid: invalidCursor(error, cursor) });
+        commit({
+          ...stateRef.current,
+          status: error instanceof ListingRequestBudgetError ? "error" : stateRef.current.status,
+          isLoadingMore: false,
+          loadMoreError: errorInfo(error),
+          loadMoreCursorInvalid: invalidCursor(error, cursor),
+        });
       })
       .finally(() => {
         if (mine === sequence.current) {
@@ -179,8 +201,13 @@ export function useListingFeed(
 
   const reload = useCallback(() => setAttempt((value) => value + 1), []);
   const reloadFirstPage = useCallback(() => {
+    sequence.current += 1;
+    busy.current = false;
+    activeController.current?.abort();
+    activeController.current = null;
+    commit({ ...EMPTY, status: "loading" });
     setStartFromFirstPage(true);
     setAttempt((value) => value + 1);
-  }, []);
+  }, [commit]);
   return { ...state, loadMore, reload, reloadFirstPage };
 }

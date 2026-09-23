@@ -8,6 +8,8 @@ import {
   listingFilterKey,
   listingFiltersUrl,
   listingQuery,
+  listingRequestBudget,
+  listingRequestTargets,
   normalizeListingQuery,
   parseListingFilters,
   reconcileListingFilters,
@@ -60,6 +62,7 @@ const metadata = {
 
 const base = parseListingFilters({});
 
+
 test('resource display names prefer stable codes and gate legacy names to Delta context', () => {
   assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_bullet', name: '六级子弹' }), '6级子弹');
   assert.equal(resourceItemDisplayName({ code: 'different_resource', name: '六级子弹' }, { gameCode: 'delta' }), '六级子弹');
@@ -110,10 +113,59 @@ test('filter changes replace state and clear cursor; presentation mode does not 
   const paged = { ...base, game: 'game_delta', filters: { skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a'], match: 'ANY' }] }, cursor: 'cur_1' };
   assert.equal(withFilterChange(paged, { q: 'M4' }).cursor, null);
   assert.equal(listingFilterKey(paged, metadata), listingFilterKey({ ...paged, cursor: null, viewMode: 'grid' }, metadata));
-  assert.equal(listingFiltersUrl(paged).includes('cursor=cur_1'), true);
+  assert.equal(listingFiltersUrl(paged).includes('cursor=cur_1'), false);
   assert.equal(listingFiltersUrl(withFilterChange(paged, { q: 'M4' })).includes('cursor'), false);
   assert.equal(listingFiltersUrl(base), '/accounts');
   assert.equal(listingFiltersUrl({ ...base, viewMode: 'grid' }), '/accounts?view=grid');
+  assert.equal(listingFiltersUrl({ ...paged, coreItemId: 'item_haff' }).includes('coreItemId'), false);
+  assert.equal(listingFiltersUrl({ ...paged, sort: 'coreQuantity', coreItemId: 'item_haff', limit: 3 }).includes('limit='), false);
+});
+
+test('share URL canonicalizes unordered condition collections', () => {
+  const first = { ...base, game: 'game_delta', filters: {
+    resources: [{ itemId: 'item_haff', minQuantity: '2' }],
+    safeBoxCodes: ['safe_2', 'safe_1'],
+    regions: [{ province: '乙省', city: '乙市' }, { province: '甲省', city: '甲市' }],
+    skinGroups: [{ categoryId: 'category_agent', ids: ['skin_b', 'skin_a'], match: 'ALL' }],
+  } };
+  const second = { ...first, filters: {
+    resources: [{ itemId: 'item_haff', minQuantity: '2' }],
+    safeBoxCodes: ['safe_1', 'safe_2'],
+    regions: [{ province: '甲省', city: '甲市' }, { province: '乙省', city: '乙市' }],
+    skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a', 'skin_b'], match: 'ALL' }],
+  } };
+  assert.equal(listingFiltersUrl(first), listingFiltersUrl(second));
+});
+
+test('listing URL budget guards every real GET prefix, not only the share page', () => {
+  const conditions = {
+    resources: Array.from({ length: 16 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, '0')}${'x'.repeat(90)}`,
+      minQuantity: '1',
+      maxQuantity: '999999999999999999999999',
+    })),
+    skinGroups: [{
+      categoryId: 'category_1',
+      match: 'ALL',
+      ids: Array.from({ length: 33 }, (_, index) => `skin_${String(index).padStart(3, '0')}${'x'.repeat(118)}`),
+    }],
+  };
+  const longMetadata = { ...metadata, filterRevision: '123', catalogRevision: '456', ruleReleaseId: `release_${'r'.repeat(90)}` };
+  const filters = parseListingFilters({ game: 'game_delta', filters: JSON.stringify(conditions) });
+  const targets = listingRequestTargets(filters, longMetadata, null);
+
+  assert.deepEqual(targets.map(({ kind, bytes }) => ({ kind, bytes })), [
+    { kind: 'page', bytes: 8005 },
+    { kind: 'webBff', bytes: 8221 },
+    { kind: 'apiBff', bytes: 8230 },
+    { kind: 'api', bytes: 8224 },
+  ]);
+  assert.equal(listingRequestBudget(filters, longMetadata, null)?.kind, 'webBff');
+  assert.equal(filters.filters.resources.length, 16);
+  assert.equal(filters.filters.skinGroups[0].ids.length, 33);
+  assert.equal(listingRequestBudget({ ...filters, filters: {} }, longMetadata, null), null);
+  const nextPage = listingRequestTargets({ ...filters, cursor: 'cursor_' + 'x'.repeat(1000) }, longMetadata, 'cursor_' + 'x'.repeat(1000));
+  assert.equal(nextPage.find(({ kind }) => kind === 'webBff').bytes > 8192, true);
 });
 
 test('resource bounds normalize as inclusive min/max strings and remain cursor-bound', () => {

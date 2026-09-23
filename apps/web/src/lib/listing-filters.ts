@@ -12,6 +12,30 @@ export const LISTING_MAX_SKINS = 50;
 export type ListingViewMode = "list" | "grid";
 export type ResourceInputMode = "display" | "base";
 
+export type ListingRequestTargetKind = "page" | "webBff" | "apiBff" | "api";
+export type ListingRequestTarget = {
+  kind: ListingRequestTargetKind;
+  path: string;
+  bytes: number;
+  limit: number;
+};
+
+const listingRequestPrefixes: Array<{ kind: Exclude<ListingRequestTargetKind, "page">; prefix: string }> = [
+  { kind: "webBff", prefix: "/api/supply/listings?" },
+  { kind: "apiBff", prefix: "/api/bff/user/supply/listings?" },
+  { kind: "api", prefix: "/api/v1/supply/listings?" },
+];
+const listingRequestTargetLabels: Record<ListingRequestTargetKind, string> = {
+  page: "分享地址",
+  webBff: "Web BFF 请求",
+  apiBff: "用户 BFF 请求",
+  api: "原生 API 请求",
+};
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
 export type ListingFilters = {
   game: string | null;
   filters: ListingFilterConditions;
@@ -35,7 +59,7 @@ function id(value: unknown): value is string {
 
 function values(value: unknown, maximum: number): string[] {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter(id))].slice(0, maximum);
+  return [...new Set(value.filter(id))].sort().slice(0, maximum);
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -63,7 +87,7 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
 
   if (Array.isArray(value.resources)) {
     const seen = new Set<string>();
-    output.resources = value.resources.flatMap((entry) => {
+    output.resources = value.resources.filter(record).sort((left, right) => String(left.itemId ?? "").localeCompare(String(right.itemId ?? ""))).flatMap((entry) => {
       if (!record(entry) || !id(entry.itemId) || seen.has(entry.itemId)) return [];
       if (entry.minQuantity !== undefined && (typeof entry.minQuantity !== "string" || !QUANTITY_PATTERN.test(entry.minQuantity))) return [];
       if (entry.maxQuantity !== undefined && (typeof entry.maxQuantity !== "string" || !QUANTITY_PATTERN.test(entry.maxQuantity))) return [];
@@ -74,7 +98,7 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
       if (entry.minQuantity !== undefined) res.minQuantity = entry.minQuantity;
       if (entry.maxQuantity !== undefined) res.maxQuantity = entry.maxQuantity;
       return [res as any];
-    }).slice(0, 16);
+    }).sort((left, right) => left.itemId.localeCompare(right.itemId)).slice(0, 16);
     if (output.resources.length === 0) delete output.resources;
   }
 
@@ -100,7 +124,7 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
       if (!key || seen.has(key)) return [];
       seen.add(key);
       return [{ province: province!, city: city! }];
-    }).slice(0, 20);
+    }).sort((left, right) => left.province.localeCompare(right.province) || left.city.localeCompare(right.city)).slice(0, 20);
     if (output.regions.length === 0) delete output.regions;
   }
 
@@ -124,7 +148,7 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
     const seenCategories = new Set<string>();
     const seenSkins = new Set<string>();
     let remaining = LISTING_MAX_SKINS;
-    const groups = value.skinGroups.flatMap((entry) => {
+    const groups = value.skinGroups.filter(record).sort((left, right) => String(left.categoryId ?? "").localeCompare(String(right.categoryId ?? ""))).flatMap((entry) => {
       if (!record(entry) || !id(entry.categoryId) || seenCategories.has(entry.categoryId)) return [];
       const match: "ANY" | "ALL" = entry.match === "ALL" ? "ALL" : "ANY";
       const selected = values(entry.ids, remaining).filter((skinId) => !seenSkins.has(skinId));
@@ -133,7 +157,7 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
       selected.forEach((skinId) => seenSkins.add(skinId));
       remaining -= selected.length;
       return [{ categoryId: entry.categoryId, ids: selected, match }];
-    }).slice(0, 8);
+    }).sort((left, right) => left.categoryId.localeCompare(right.categoryId)).slice(0, 8);
     if (groups.length) output.skinGroups = groups;
   }
 
@@ -141,7 +165,7 @@ export function normalizeListingConditions(value: unknown): ListingFilterConditi
 }
 
 function conditionsFromUrl(value: string | null): ListingFilterConditions {
-  if (!value || value.length > 8192) return {};
+  if (!value || value.length > 64_000) return {};
   try {
     return normalizeListingConditions(JSON.parse(value));
   } catch {
@@ -187,7 +211,7 @@ export function listingQuery(
   query.set("direction", filters.direction);
   if (filters.sort === "coreQuantity" && filters.coreItemId) query.set("coreItemId", filters.coreItemId);
   if (Object.keys(filters.filters).length) {
-    query.set("filters", JSON.stringify(filters.filters));
+    query.set("filters", serializeListingConditions(filters.filters));
   }
   if (filters.q) query.set("q", filters.q);
   query.set("limit", String(filters.limit));
@@ -195,18 +219,56 @@ export function listingQuery(
   return query;
 }
 
+export function listingRequestTargets(
+  filters: ListingFilters,
+  metadata?: PublicListingFilterMetadata | null,
+  cursor: string | null = filters.cursor,
+): ListingRequestTarget[] {
+  const query = listingQuery({ ...filters, cursor }, metadata).toString();
+  const page = listingFiltersUrl(filters);
+  const limit = metadata?.limits.urlBytes ?? 8192;
+  return [
+    { kind: "page", path: page, bytes: utf8Bytes(page), limit },
+    ...listingRequestPrefixes.map(({ kind, prefix }) => {
+      const path = prefix + query;
+      return { kind, path, bytes: utf8Bytes(path), limit };
+    }),
+  ];
+}
+
+export function listingRequestBudget(
+  filters: ListingFilters,
+  metadata?: PublicListingFilterMetadata | null,
+  cursor: string | null = filters.cursor,
+): ListingRequestTarget | null {
+  return listingRequestTargets(filters, metadata, cursor).find((target) => target.bytes > target.limit) ?? null;
+}
+
+export function listingRequestBudgetMessage(target: ListingRequestTarget): string {
+  return `${listingRequestTargetLabels[target.kind]}为 ${target.bytes} 字节，超过 ${target.limit} 字节限制，请减少部分筛选条件后重试。`;
+}
+
+export class ListingRequestBudgetError extends Error {
+  readonly status = 400;
+  readonly code = "LISTING_URL_TOO_LONG";
+  readonly details = [{ path: "url", code: "INVALID_FIELD" }];
+  readonly target: ListingRequestTarget;
+
+  constructor(target: ListingRequestTarget) {
+    super(listingRequestBudgetMessage(target));
+    this.target = target;
+    this.name = "ListingRequestBudgetError";
+  }
+}
+
 export function listingFiltersUrl(filters: ListingFilters): string {
   const query = new URLSearchParams();
   if (filters.game) query.set("game", filters.game);
-  if (Object.keys(filters.filters).length) {
-    query.set("filters", JSON.stringify(filters.filters));
-  }
+  if (filters.q) query.set("q", filters.q);
+  if (Object.keys(filters.filters).length) query.set("filters", serializeListingConditions(filters.filters));
   if (filters.sort !== "latest") query.set("sort", filters.sort);
   if (filters.direction !== "DESC") query.set("direction", filters.direction);
-  if (filters.coreItemId) query.set("coreItemId", filters.coreItemId);
-  if (filters.q) query.set("q", filters.q);
-  if (filters.cursor) query.set("cursor", filters.cursor);
-  if (filters.limit !== LISTING_PAGE_SIZE) query.set("limit", String(filters.limit));
+  if (filters.sort === "coreQuantity" && filters.coreItemId) query.set("coreItemId", filters.coreItemId);
   if (filters.viewMode === "grid") query.set("view", "grid");
   return "/accounts" + (query.size ? "?" + query.toString() : "");
 }
