@@ -257,6 +257,7 @@
 .functional-shell .market-results[aria-busy="true"] { opacity: .72; }
 
 .functional-shell .account-grid { gap: 16px; }
+.functional-shell .account-grid--list { gap: 12px; }
 
 .functional-shell .account-card {
   min-height: 100%;
@@ -816,73 +817,252 @@
 
 .functional-shell.functional-shell--browse .market-results { padding-top: 0; }
 
+.functional-shell.functional-shell--browse .account-grid {
+  margin-top: 16px;
+}
+
 .functional-shell.functional-shell--browse .account-grid--list {
-  grid-template-columns: 1fr;
-  gap: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+.functional-shell.functional-shell--browse .account-grid--grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 1200px) {
+  .functional-shell.functional-shell--browse .account-grid--grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 900px) {
+  .functional-shell.functional-shell--browse .account-grid--grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  .functional-shell.functional-shell--browse .account-grid--grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .functional-shell.functional-shell--browse .account-grid--list .account-card {
   display: block;
-  grid-template-columns: 220px minmax(0, 1fr);
-  min-height: 210px;
-  border-width: 0 0 1px;
-  border-radius: 0;
-  background: transparent;
+  min-height: 0;
+  border-width: 1px;
+  border-radius: 12px;
+  background: var(--color-bg-card);
   box-shadow: none;
 }
 
+.functional-shell.functional-shell--browse .account-grid--list .account-list-item,
 .functional-shell.functional-shell--browse .account-grid--list .account-card-surface {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  min-height: 210px;
-}
-.functional-shell.functional-shell--browse .account-grid--list .account-card-link {
-  display: flex;
+  grid-template-columns: 240px minmax(0, 1fr) minmax(320px, 340px) minmax(205px, 220px);
+  grid-template-rows: auto var(--account-list-data-band-height, 81px) auto;
   min-height: 0;
+  align-items: start;
+  column-gap: 16px;
+  row-gap: 8px;
+  padding: 14px 16px;
 }
 
 .functional-shell.functional-shell--browse .account-grid--list .account-card:hover {
-  border-color: var(--color-border-default);
-  background: color-mix(in srgb, var(--color-bg-surface) 62%, transparent);
-  box-shadow: none;
+  border-color: color-mix(in srgb, var(--color-delta-accent) 45%, var(--color-border-default));
+  background: var(--color-bg-card);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
   transform: none;
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-card-thumb {
+.functional-shell.functional-shell--browse .account-grid--list .account-list-media {
   grid-column: 1;
-  grid-row: 1;
-  width: auto;
-  aspect-ratio: 2.18 / 1;
-  margin: 16px 18px 16px 0;
+  grid-row: 1 / span 3;
+  min-width: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-card-thumb {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: 16 / 10;
+  min-height: 120px;
+  max-height: 156px;
+  margin: 0;
   border-radius: 8px;
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-body-area {
-  grid-column: 2;
-  grid-row: 1;
-  min-width: 0;
-  padding: 18px 0;
+@media (max-width: 1199px) and (min-width: 761px) {
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-item,
+  .functional-shell.functional-shell--browse .account-grid--list .account-card-surface {
+    grid-template-columns: 190px minmax(0, 1fr) 210px;
+    grid-template-rows: auto auto auto auto;
+    column-gap: 14px;
+    row-gap: 8px;
+    padding: 12px 14px;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-media {
+    grid-column: 1;
+    grid-row: 1 / span 4;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-header {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-matrix {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-resources-panel {
+    grid-column: 2;
+    grid-row: 3;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-skins {
+    grid-column: 2;
+    grid-row: 4;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-rail {
+    grid-column: 3;
+    grid-row: 1 / span 4;
+    align-self: stretch;
+    height: 100%;
+    padding: 0 0 0 14px;
+  }
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-card-fav-wrap { top: 16px; right: 16px; }
+.functional-shell.functional-shell--browse .account-grid--list .account-list-header {
+  grid-column: 2 / 4;
+  grid-row: 1;
+  min-width: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-list-matrix {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  padding: 0;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-list-resources-panel {
+  grid-column: 3;
+  grid-row: 2;
+  min-width: 0;
+  padding: 0;
+  display: flex;
+  align-items: stretch;
+  height: var(--account-list-data-band-height, 81px);
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-list-skins {
+  grid-column: 2;
+  grid-row: 3;
+  min-width: 0;
+  padding: 0;
+}
+
+.functional-shell.functional-shell--browse .account-grid--list .account-list-rail {
+  grid-column: 4;
+  grid-row: 1 / span 3;
+  min-width: 0;
+  padding: 0 0 0 16px;
+  border-left: 1px solid var(--color-border-subtle);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  align-self: stretch;
+  height: 100%;
+}
+
+@media (max-width: 1199px) and (min-width: 761px) {
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-header,
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-matrix,
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-resources-panel,
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-skins {
+    grid-column: 2;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-header { grid-row: 1; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-matrix { grid-row: 2; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-resources-panel { grid-row: 3; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-skins { grid-row: 4; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-rail {
+    grid-column: 3;
+    grid-row: 1 / span 4;
+  }
+}
+
+@media (max-width: 760px) and (min-width: 600px) {
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-item,
+  .functional-shell.functional-shell--browse .account-grid--list .account-card-surface {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto;
+    column-gap: 12px;
+    row-gap: 8px;
+    align-items: start;
+    padding: 12px 14px;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-media {
+    grid-column: 1;
+    grid-row: 1 / span 4;
+    align-self: center;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-header {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-matrix {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-resources-panel {
+    grid-column: 2;
+    grid-row: 3;
+    height: var(--account-list-data-band-height, 81px);
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-skins {
+    grid-column: 2;
+    grid-row: 4;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-rail {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 0.7fr);
+    align-self: stretch;
+    height: auto;
+    align-items: end;
+    column-gap: 12px;
+    border-left: 0;
+    border-top: 1px solid var(--color-border-subtle);
+    padding: 10px 0 0;
+  }
+}
 
 .functional-shell.functional-shell--browse .account-grid--list .account-skeleton {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  min-height: 210px;
-  border-width: 0 0 1px;
-  border-radius: 0;
-  background: transparent;
+  grid-template-columns: minmax(220px, 240px) minmax(0, 1fr) minmax(220px, 250px);
+  min-height: 160px;
+  border-width: 1px;
+  border-radius: 12px;
+  background: var(--color-bg-card);
 }
 
 .functional-shell.functional-shell--browse .account-grid--list .account-skeleton div {
   height: auto;
-  min-height: 178px;
-  margin: 16px 18px 16px 0;
-  border-radius: 8px;
+  min-height: 118px;
+  margin: 14px 0 14px 14px;
+  border-radius: 10px;
 }
 
-.functional-shell.functional-shell--browse .account-grid--list .account-skeleton span { margin: 18px 0 0; }
+.functional-shell.functional-shell--browse .account-grid--list .account-skeleton span { margin: 22px 0 0 16px; }
 .functional-shell.functional-shell--browse .account-empty {
   min-height: 190px;
   border: 0;
@@ -941,16 +1121,92 @@
   .functional-shell.functional-shell--browse .account-grid--list .account-card {
     min-height: 0;
   }
-  .functional-shell.functional-shell--browse .account-grid--list .account-card-surface { grid-template-columns: 104px minmax(0, 1fr); min-height: 0; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-item,
+  .functional-shell.functional-shell--browse .account-grid--list .account-card-surface {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+    gap: 12px;
+    padding: 12px;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list {
+    padding-right: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--grid {
+    padding-right: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-media {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 0;
+  }
   .functional-shell.functional-shell--browse .account-grid--list .account-card-thumb {
     min-height: 0;
-    aspect-ratio: 2.18 / 1;
-    margin: 14px 12px 14px 0;
+    aspect-ratio: 2.2 / 1;
+    max-height: none;
+    margin: 0;
   }
-  .functional-shell.functional-shell--browse .account-grid--list .account-body-area { padding-block: 14px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-card-fav-wrap { top: 10px; right: 10px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-skeleton { grid-template-columns: 104px minmax(0, 1fr); min-height: 150px; }
-  .functional-shell.functional-shell--browse .account-grid--list .account-skeleton div { min-height: 112px; margin: 14px 12px 14px 0; }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-header {
+    grid-column: 1;
+    grid-row: 2;
+    padding: 0;
+    gap: 4px;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-matrix {
+    grid-column: 1;
+    grid-row: 3;
+    padding: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-resources-panel {
+    grid-column: 1;
+    grid-row: 4;
+    padding: 0;
+    border-left: 0;
+    height: var(--account-list-data-band-height, 81px);
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-skins {
+    grid-column: 1;
+    grid-row: 5;
+    padding: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-rail {
+    grid-column: 1;
+    grid-row: 6;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--color-border-subtle);
+  }
+  .functional-shell.functional-shell--browse .account-grid--list {
+    padding-right: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--grid {
+    padding-right: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-finance {
+    width: 100%;
+    min-width: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-cta-row {
+    width: 100%;
+    min-width: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-cta-row .account-card-cta {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-list-fav {
+    flex: 0 0 auto;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-skeleton {
+    grid-template-columns: 1fr;
+    min-height: 150px;
+  }
+  .functional-shell.functional-shell--browse .account-grid--list .account-skeleton div {
+    min-height: 112px;
+    margin: 12px 12px 0;
+  }
 }
 
 /* HeroUI Drawer is portalled outside .functional-shell; keep its mobile cascade and brand tokens global but scoped. */

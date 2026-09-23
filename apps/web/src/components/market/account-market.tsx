@@ -618,7 +618,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         <FavoriteNotice />
 
         <div className="market-results-toolbar">
-          <div><h2>可租账号</h2><p>{feed.status === "ready" ? `已加载 ${resultCount} 个结果` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>可租账号</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
             {activeMetadata && <div className="market-sort-controls" aria-label="账号排序">
               <div className="market-sort-field"><span>排序</span><MarketSelect
@@ -662,7 +662,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
 
 
         {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · 由服务端按公开账号名称筛选<button type="button" onClick={() => navigate(withFilterChange(filters, { q: null }))}>清除搜索</button></div>}
-        {feed.status === "ready" && feed.items.length > 0 && <div className="market-trust-note" role="note">公开浏览无需登录 · 报价取自服务端当前 quote · 未确认的信息会明确标注</div>}
         <div className="market-results" aria-busy={feed.status === "loading" || feed.isLoadingMore}>
           {feed.status === "loading" ? <div className={`account-grid account-grid--${filters.viewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
           {feed.status === "error" && feed.items.length === 0 && currentError ? <div className="market-inline-state" role={currentError.kind === "adjust" ? "alert" : "status"}>
@@ -671,7 +670,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
           </div> : null}
           {feed.items.length > 0 && currentError ? <p className="market-inline-state market-inline-state--compact" role="alert"><strong>{currentError.title}</strong> {currentError.description}{currentError.kind === "retry" ? <button type="button" onClick={feed.loadMoreError ? feed.loadMore : feed.reload}>{feed.loadMoreError ? "重试加载" : "重试读取"}</button> : currentError.kind === "adjust" ? <button type="button" onClick={resetFilters}>清空筛选条件</button> : null}</p> : null}
           {feed.items.length > 0 ? <div className={`account-grid account-grid--${filters.viewMode}`}>
-            {feed.items.map((listing) => <AccountCard key={listing.id} data={toListingCard(listing)} getReturnState={() => ({ scrollY: window.scrollY, pageCursors: feed.requestedCursors.length ? feed.requestedCursors : [null], filterKey, viewMode: filters.viewMode })} />)}
+            {feed.items.map((listing, index) => <AccountCard key={listing.id} data={toListingCard(listing)} viewMode={filters.viewMode} imageLoading={index < (filters.viewMode === "grid" ? 8 : 4) ? "eager" : "lazy"} getReturnState={() => ({ scrollY: window.scrollY, pageCursors: feed.requestedCursors.length ? feed.requestedCursors : [null], filterKey, viewMode: filters.viewMode })} />)}
           </div> : feed.status === "ready" && !feed.nextCursor ? <AccountCardEmpty message={filterCount > 0 ? "没有符合条件的账号" : "暂无可租账号"} description={filterCount > 0 ? "可以单项移除条件以逐步放宽范围，或重置全部条件：" : "当前没有可展示的号源，请稍后再来。"} onReset={filterCount > 0 ? resetFilters : undefined} onRetry={filterCount === 0 ? feed.reload : undefined}>
             {activeTags.length > 0 && <div className="account-empty-filters" role="group" aria-label="当前已选筛选条件">
               <div className="account-empty-chips">
