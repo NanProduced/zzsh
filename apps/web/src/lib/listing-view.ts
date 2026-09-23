@@ -1,4 +1,4 @@
-import type { Money, PublicListing, PublicCodeLabel } from "./supply-types.ts";
+import type { Money, PublicListing, PublicQuote, PublicCodeLabel } from "./supply-types.ts";
 import { resourceItemDisplayName } from "./listing-filters.ts";
 
 export type ResourceLine = {
@@ -27,6 +27,8 @@ export type ListingCardData = {
   media: ListingMedia[];
   resourceLines: ResourceLine[];
   resourceTotalLabel: string;
+  haffRentLabel: string | null;
+  itemResourceTotalLabel: string | null;
   depositLabel: string | null;
   payableTotalLabel: string | null;
   termLabel: string;
@@ -38,6 +40,7 @@ export type ListingCardData = {
   skinLabels: string[];
   skinTags: SkinTag[];
   entitlementNames: string[];
+  rentalMode?: "ordinary" | "custom" | "fast" | null;
 };
 export type ListingDetailData = ListingCardData & {
   description: string | null;
@@ -64,6 +67,23 @@ export function unitLabel(unit: string): string {
 }
 export function formatMoneyLabel(money: Money | null | undefined): string | null {
   return money ? `¥${money.amount}` : null;
+}
+function sumQuoteLineAmounts(lines: PublicQuote["lines"]): Money | null {
+  if (lines.length === 0) return null;
+  let cents = 0n;
+  for (const line of lines) {
+    const amount = line.buyerAmount.amount.trim();
+    if (!/^\d+\.\d{2}$/.test(amount)) return null;
+    cents += BigInt(amount.replace(".", ""));
+  }
+  const yuan = cents / 100n;
+  const remainder = (cents % 100n).toString().padStart(2, "0");
+  return { currency: "CNY", unit: "yuan", amount: `${yuan}.${remainder}`, scale: 2 };
+}
+function quoteLineSubtotalLabel(lines: PublicQuote["lines"], hasQuoteLines: boolean): string | null {
+  if (!hasQuoteLines) return null;
+  if (lines.length === 0) return "¥0.00";
+  return formatMoneyLabel(sumQuoteLineAmounts(lines));
 }
 // Base HAFF quantity uses 1,000,000 base units = 1 M (display only; the server amount is authoritative).
 export function haffMillionsLabel(quantity: string): string {
@@ -159,6 +179,8 @@ export function conditionLines(
 }
 export function toListingCard(listing: PublicListing): ListingCardData {
   const items = new Map(listing.presentation.items.map((item) => [item.id, item]));
+  const haffLines = listing.quote.lines.filter((line) => line.unit === "HAFF_BASE");
+  const itemLines = listing.quote.lines.filter((line) => line.unit !== "HAFF_BASE");
   const resourceLines: ResourceLine[] = listing.quote.lines.map((line) => ({
     itemId: line.itemId,
     code: items.get(line.itemId)?.code ?? null,
@@ -183,6 +205,8 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     media,
     resourceLines,
     resourceTotalLabel: formatMoneyLabel(listing.quote.resourceTotal) ?? "以平台确认为准",
+    haffRentLabel: quoteLineSubtotalLabel(haffLines, listing.quote.lines.length > 0),
+    itemResourceTotalLabel: quoteLineSubtotalLabel(itemLines, listing.quote.lines.length > 0),
     depositLabel: formatMoneyLabel(listing.quote.tenantDeposit),
     payableTotalLabel: formatMoneyLabel(listing.quote.tenantPayableTotal),
     termLabel: termLabel(listing.quote.termSeconds),
@@ -198,6 +222,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
       categoryName: skin.categoryName ?? null,
     })),
     entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
+    rentalMode: listing.quote.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
   };
 }
 export function toListingDetail(listing: PublicListing): ListingDetailData {

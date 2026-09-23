@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import {
   conditionLines,
   detailBreadcrumbs,
@@ -71,6 +73,9 @@ test('card view uses presentation names, public conditions and server totals', (
   const card = toListingCard(listing);
   assert.equal(card.id, 'account_1');
   assert.equal(card.resourceTotalLabel, '¥150.00');
+  assert.equal(card.haffRentLabel, '¥150.00');
+  // Haff-only quote has an explicitly known zero item subtotal.
+  assert.equal(card.itemResourceTotalLabel, '¥0.00');
   assert.equal(card.depositLabel, null);
   assert.equal(card.payableTotalLabel, null);
   assert.equal(card.termLabel, '6 天');
@@ -144,6 +149,8 @@ test('resource labels use catalog code and quoted unit quantity', () => {
   assert.equal(detail.resourceLines[1].name, '6级子弹');
   assert.equal(detail.resourceLines[1].quantityLabel, '3组（180发）');
   assert.equal(detail.resourceLines[2].quantityLabel, '3');
+  assert.equal(detail.haffRentLabel, '¥150.00');
+  assert.equal(detail.itemResourceTotalLabel, '¥45.00');
   assert.equal(resourceQuantityLabel(detail.resourceLines[1]), '3组（180发）');
   assert.equal(resourceQuantityLabel(detail.resourceLines[2]), '3天');
 });
@@ -178,4 +185,265 @@ test('unmapped resource IDs stay explicit instead of becoming display names', ()
     presentation: { ...listing.presentation, items: [] },
   });
   assert.equal(card.resourceLines[0].name, '未确认（代码 item_haff）');
+});
+
+const accountCardCode = ts.transpileModule(
+  readFileSync(new URL('../src/components/delta/account-card.tsx', import.meta.url), 'utf8'),
+  { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }
+).outputText;
+
+const accountCardExports = {};
+new Function('require', 'exports', accountCardCode)((name) => {
+  if (name === '@/lib/listing-view') return { haffRatioLabel, resourceQuantityLabel };
+  if (name === '@/lib/account-return') return {};
+  if (name === './login-method-icon') return { LoginMethodIcon: () => null };
+  if (name === '@/components/favorites/favorite-button') return { FavoriteButton: () => null };
+  if (name === '@/components/ui/tooltip') return { Tooltip: () => null, TooltipContent: () => null, TooltipTrigger: () => null };
+  if (name === '@/components/ui/thumbnail-carousel') return { ThumbnailCarousel: () => null };
+  return {};
+}, accountCardExports);
+
+const { composeGridTitle, composeListTitle, orderedQuoteResources, skinChipTone, moneyValue, listTermRuleLabel } = accountCardExports;
+
+test('grid resource projection excludes Haff-only quote lines', () => {
+  const haff = { itemId: 'haff', code: null, name: '哈夫币', unitLabel: '哈夫币', quantity: '60000000' };
+  const bullet = { itemId: 'bullet', code: 'df_billable_level6_bullet', name: '6级子弹', unitLabel: '发', quantity: '120' };
+
+  assert.deepEqual(orderedQuoteResources({ resourceLines: [haff] }), []);
+  assert.deepEqual(orderedQuoteResources({ resourceLines: [haff, bullet] }).map((line) => line.itemId), ['bullet']);
+});
+
+test('composeGridTitle handles haff, composite parts, fallback titles and prefix deduplication', () => {
+  const cardWithSafeBoxAndRank = {
+    title: '60M 哈夫币 极品全装号',
+    displayNo: 'A-001',
+    conditionLines: [
+      { key: 'safe_box_code', value: '3*3安全箱' },
+      { key: 'grading_code', value: '钻石' },
+      { key: 'character_level', value: '50级' },
+    ],
+  };
+
+  // Case 1: Haff + composite parts (safeBox + rank)
+  assert.deepEqual(composeGridTitle(cardWithSafeBoxAndRank, '60M'), {
+    haff: '60M 哈夫币',
+    rest: '3×3安全箱 · 钻石 50级',
+  });
+
+  // Case 2: No haff + composite parts
+  assert.deepEqual(composeGridTitle(cardWithSafeBoxAndRank, null), {
+    haff: null,
+    rest: '3×3安全箱 · 钻石 50级',
+  });
+
+  // Case 3: Haff only, missing composite parts -> fallback to title with deduplication
+  const cardHaffPrefix = {
+    title: '60M 哈夫币 极品满配全装',
+    displayNo: 'A-002',
+    conditionLines: [],
+  };
+  assert.deepEqual(composeGridTitle(cardHaffPrefix, '60M'), {
+    haff: '60M 哈夫币',
+    rest: '极品满配全装',
+  });
+
+  // Case 4: Title with dot/dash separator deduplication
+  const cardHaffDot = {
+    title: '60M哈夫币 · 精选热卖号',
+    displayNo: 'A-003',
+    conditionLines: [],
+  };
+  assert.deepEqual(composeGridTitle(cardHaffDot, '60M'), {
+    haff: '60M 哈夫币',
+    rest: '精选热卖号',
+  });
+
+  // Case 5: Title without haff quantity prefix
+  const cardNoPrefix = {
+    title: '三角洲顶级传家宝账号',
+    displayNo: 'A-004',
+    conditionLines: [],
+  };
+  assert.deepEqual(composeGridTitle(cardNoPrefix, '60M'), {
+    haff: '60M 哈夫币',
+    rest: '三角洲顶级传家宝账号',
+  });
+
+  // Case 6: No haff, missing composite parts -> fallback to title
+  assert.deepEqual(composeGridTitle(cardNoPrefix, null), {
+    haff: null,
+    rest: '三角洲顶级传家宝账号',
+  });
+
+  // Case 7: All missing -> fallback to displayNo or generic
+  const cardEmpty = {
+    title: '',
+    displayNo: 'A-005',
+    conditionLines: [],
+  };
+  assert.deepEqual(composeGridTitle(cardEmpty, null), {
+    haff: null,
+    rest: '账号 A-005',
+  });
+});
+
+test('composeListTitle prioritizes real identity, highlights haff, and leaves secondary summary', () => {
+  const cardWithSafeBoxAndRank = {
+    title: '120M 哈夫币 极品全装号',
+    displayNo: 'A-101',
+    conditionLines: [
+      { key: 'safe_box_code', value: '1*2安全箱' },
+      { key: 'grading_code', value: '白银' },
+      { key: 'character_level', value: '30级' },
+    ],
+  };
+
+  // Case 1: Real displayNo identity + haff highlight + safe box and rank secondary
+  assert.deepEqual(composeListTitle(cardWithSafeBoxAndRank, '120M'), {
+    identity: '账号 A-101',
+    haff: '120M 哈夫币',
+    rest: '1×2安全箱 · 白银 30级',
+  });
+
+  // Case 2: DisplayNo identity without safe box
+  const cardWithoutSafeBox = {
+    title: '120M 哈夫币 极品全装号',
+    displayNo: 'A-102',
+    conditionLines: [
+      { key: 'grading_code', value: '白银' },
+    ],
+  };
+  assert.deepEqual(composeListTitle(cardWithoutSafeBox, '120M'), {
+    identity: '账号 A-102',
+    haff: '120M 哈夫币',
+    rest: '白银',
+  });
+
+  // Case 3: Custom title identity when displayNo is absent
+  const cardCustomTitle = {
+    title: '三角洲行动 · 顶配战术号',
+    displayNo: null,
+    conditionLines: [],
+  };
+  assert.deepEqual(composeListTitle(cardCustomTitle, '120M'), {
+    identity: '三角洲行动 · 顶配战术号',
+    haff: '120M 哈夫币',
+    rest: '',
+  });
+
+  assert.equal(composeListTitle({
+    title: '铂金段位·377M哈夫币·多资源配置',
+    displayNo: null,
+    conditionLines: [],
+  }, '377M').identity, '铂金段位 · 多资源配置');
+
+  // Case 4: Missing identity and title fallback
+  const cardEmpty = {
+    title: '',
+    displayNo: null,
+    conditionLines: [],
+  };
+  assert.deepEqual(composeListTitle(cardEmpty, null), {
+    identity: '游戏账号',
+    haff: null,
+    rest: '',
+  });
+});
+
+test('skinChipTone maps strictly by category code and name without guessing by item name', () => {
+  // Knife / melee: teal
+  assert.equal(skinChipTone({ name: '刺刀', categoryCode: 'knife', categoryName: '近战' }), 'teal');
+  assert.equal(skinChipTone({ name: '暗影军刺', categoryCode: 'melee', categoryName: null }), 'teal');
+  assert.equal(skinChipTone({ name: '龙炎近战', categoryCode: null, categoryName: '近战武器' }), 'teal');
+
+  // Operator / agent: purple
+  assert.equal(skinChipTone({ name: '红狼', categoryCode: 'operator_skin', categoryName: '干员' }), 'purple');
+  assert.equal(skinChipTone({ name: '蜂医', categoryCode: 'agent', categoryName: null }), 'purple');
+  assert.equal(skinChipTone({ name: '特战角色', categoryCode: null, categoryName: '角色外观' }), 'purple');
+
+  // Weapon / gun: blue
+  assert.equal(skinChipTone({ name: 'M4A1 金色', categoryCode: 'weapon', categoryName: '武器' }), 'blue');
+  assert.equal(skinChipTone({ name: 'AK47 火蛇', categoryCode: 'gun_skin', categoryName: null }), 'blue');
+  assert.equal(skinChipTone({ name: '巴雷特 毁灭', categoryCode: null, categoryName: '枪械皮肤' }), 'blue');
+
+  // Same item name under different categories produces correct category tone, never guessing from name
+  const knifeItem = { name: '黑海玫瑰', categoryCode: 'knife', categoryName: '近战' };
+  const gunItem = { name: '黑海玫瑰', categoryCode: 'weapon', categoryName: '枪械' };
+  const operatorItem = { name: '黑海玫瑰', categoryCode: 'operator', categoryName: '干员' };
+  assert.equal(skinChipTone(knifeItem), 'teal');
+  assert.equal(skinChipTone(gunItem), 'blue');
+  assert.equal(skinChipTone(operatorItem), 'purple');
+
+  // Missing or unknown category -> default neutral tone, never guesses from keyword in name
+  assert.equal(skinChipTone({ name: '军刀之王', categoryCode: null, categoryName: null }), 'default');
+  assert.equal(skinChipTone({ name: '红狼特战', categoryCode: 'unknown_cat', categoryName: '其他' }), 'default');
+  assert.equal(skinChipTone({ name: 'AKM 突击步枪', categoryCode: undefined, categoryName: undefined }), 'default');
+});
+
+test('moneyValue and card amounts strictly reflect server quote line breakdown', () => {
+  // moneyValue helper behavior
+  assert.equal(moneyValue(null), '待确认');
+  assert.equal(moneyValue(undefined), '待确认');
+  assert.equal(moneyValue(''), '待确认');
+  assert.equal(moneyValue('   '), '待确认');
+  assert.equal(moneyValue('以平台确认为准'), '待确认');
+  assert.equal(moneyValue('¥150.00'), '¥150.00');
+  assert.equal(moneyValue('¥0.00'), '¥0.00');
+  assert.equal(moneyValue('¥0.00', '无物品费用'), '无物品费用');
+  assert.equal(moneyValue('¥0', '无需押金'), '无需押金');
+
+  // Server contract verification on toListingCard
+  const card = toListingCard(listing);
+  // Real contract fields present
+  assert.equal(card.resourceTotalLabel, '¥150.00');
+  assert.equal(card.depositLabel, null);
+  assert.equal(card.payableTotalLabel, null);
+
+  // Breakdown labels are grouped from quote line buyerAmount values; no subtraction is used.
+  assert.equal(card.haffRentLabel, '¥150.00');
+  assert.equal(card.itemResourceTotalLabel, '¥0.00');
+
+  // In card mode breakdown:
+  // - 租金/资源费用 use exact quote line groups
+  // - 总资源费 remains card.resourceTotalLabel
+  // - 押金 uses card.depositLabel
+  // - 合计 uses card.payableTotalLabel
+  // Unknown or null amounts become "待确认"
+  assert.equal(moneyValue(card.resourceTotalLabel), '¥150.00');
+  assert.equal(moneyValue(card.depositLabel), '待确认');
+  assert.equal(moneyValue(card.payableTotalLabel), '待确认');
+});
+
+test('quote subtotals distinguish known zero groups from absent quote data', () => {
+  const noQuote = toListingCard({
+    ...listing,
+    quote: { ...listing.quote, lines: [], resourceTotal: null },
+  });
+  assert.equal(noQuote.haffRentLabel, null);
+  assert.equal(noQuote.itemResourceTotalLabel, null);
+
+  const itemZero = toListingCard({
+    ...listing,
+    presentation: {
+      ...listing.presentation,
+      items: [...listing.presentation.items, { id: 'item_armor', code: 'df_billable_level6_armor', name: '6级护甲', unit: 'COUNT' }],
+    },
+    quote: {
+      ...listing.quote,
+      lines: [
+        ...listing.quote.lines,
+        { itemId: 'item_armor', quantity: '1', unit: 'COUNT', unitQuantity: '1', buyerUnitAmount: { currency: 'CNY', unit: 'yuan', amount: '0.00000000', scale: 8 }, buyerAmount: { currency: 'CNY', unit: 'yuan', amount: '0.00', scale: 2 } },
+      ],
+    },
+  });
+  assert.equal(itemZero.haffRentLabel, '¥150.00');
+  assert.equal(itemZero.itemResourceTotalLabel, '¥0.00');
+  assert.equal(moneyValue(itemZero.itemResourceTotalLabel, '无物品费用'), '无物品费用');
+});
+
+test('missing term rule stays explicitly unconfirmed', () => {
+  assert.equal(listTermRuleLabel(null), '租期规则待确认');
+  assert.equal(listTermRuleLabel(''), '租期规则待确认');
+  assert.equal(listTermRuleLabel('日消耗 10M (测试)'), '租期规则 待确认');
+  assert.equal(listTermRuleLabel('按月租用'), '租期规则 按月租用');
 });
