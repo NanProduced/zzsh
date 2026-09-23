@@ -22,7 +22,13 @@ const page = await fetch('/api/supply/listings?' + query).then(r => r.json());
 
 第一批可省略三个 revision 引用，服务端返回当前版本；后续 cursor 自动绑定。公开 metadata 包含允许字段、操作、选项、目录 ID/基础单位、排序和限制。皮肤沿 `skinCatalogUrl` 的既有分页目录读取，未绑定 mediaId 仍可筛选；不返回后台来源或内价。
 
-浏览器账号列表地址保持 `/accounts?game={gameId}`，筛选、排序、显示模式和加载更多由 React 状态驱动，不写入页面 URL。按游戏保存的 sessionStorage 状态用于刷新恢复；进入详情后的返回快照额外绑定筛选摘要、已加载 cursor 链、显示模式和滚动位置。后台仍通过同源 Web BFF 发出 queryVersion=2 GET，实际筛选、排序和 cursor 只在该请求中传递。
+浏览器账号列表地址为 `/accounts`，并以地址栏作为可分享筛选的权威输入。参数按固定顺序序列化为 `game`、`q`、`filters`、`sort`、`direction`、`coreItemId`、`view`；省略空值与默认值，默认 `latest`/`DESC`/`list` 不写入，`coreItemId` 仅随 `coreQuantity` 写入。`filters` 沿用规范化 JSON，资源上下限、皮肤分类及 `ANY`/`ALL` 语义不丢失；语义无序集合去重并稳定排序。分享地址不包含 metadata revision、Token、分页 cursor、已加载页链或 `limit`。
+
+首次打开、F5、收藏、新标签页、前进/后退均从 URL 恢复筛选、排序和显示模式，并用当前 metadata 重验；裸 `/accounts?game={gameId}` 表示无筛选，不得被旧 sessionStorage 条件覆盖。筛选改变使用 `history.replaceState`，前进/后退通过 `popstate` 重新导入 URL；输入控件沿用现有 250–350ms debounce，初始化期间不得让空状态覆盖链接条件。sessionStorage 仅保留滚动/详情返回体验信息，返回快照绑定规范化 URL 条件与游戏，并可携带合法 cursor 链；主动刷新清除该重放意图，从相同条件的最新第一页读取。
+
+页面地址与后台查询分别构造：页面分享 URL 不写 `cursor`/`limit`，后台仍通过同源 Web BFF 发出 `queryVersion=2` GET，实际筛选、排序和 cursor 只在该请求中传递。旧 `filters` 长链接继续解析；无效、过期或 metadata 不可用条件提示并保留仍合法项，不静默改成另一组筛选。各跳 request-target UTF-8 长度仍不得超过8192字节；超限提供可操作提示，不丢弃条件或引入短链/压缩格式。分页加载更多不改分享 URL；“刷新结果”保留 URL 条件、排序和模式，取消旧请求并从第一页读取，不追加迟到旧页。
+
+Web 客户端的预算校验与 `listingQuery` 共用序列化：分别计算 `/accounts...` 页面、`/api/supply/listings?...`、`/api/bff/user/supply/listings?...` 和 `/api/v1/supply/listings?...` 的 UTF-8 request-target，并使用当前 metadata 的 `limits.urlBytes`。首屏恢复、筛选变化和发请求前均检查；分页检查包含当前 cursor。页面未超限但任一 BFF/API 超限时保留可编辑条件、不发起该请求；分页超限进入明确错误状态，停止 sentinel 自动重试，减少条件后重新从当前筛选首屏读取。
 
 ## 有限筛选合同
 
@@ -79,3 +85,5 @@ config 固定 `{schemaVersion:1,fields,sorts}`。field 具有 key/operator/label
 0042 仅增加不可变配置表/守卫和窄权限。配置 revision、catalog revision、rule release 分别绑定，不复制目录。
 
 公开皮肤图片必须同游戏、PLATFORM_CATALOG/SKIN_MEDIA、已审核且允许公开，并有公开衍生文件；不合格绑定投影为无图。媒体撤回、拒绝或转私有会解除绑定，同一事务内每个实际受影响游戏的 catalog revision 只递增一次，无绑定不递增。旧公开图片 URL 沿权限合同失效，旧目录/列表 revision 引用需刷新。历史报价/presentation不随目录变动重写。管理配置页面及皮肤图片选择 UI 尚未实现。
+
+账号列表保留“刷新结果”动作，筛选链接由用户直接复制浏览器地址栏；页面不提供独立复制按钮或复制结果提示。

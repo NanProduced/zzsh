@@ -13,8 +13,11 @@ import { ServiceShell } from "@/components/layout/service-shell";
 import { MarketFilterControls, MarketSelect } from "@/components/market/market-filter-controls";
 import {
   activeListingFilterCount,
+  LISTING_PAGE_SIZE,
   listingFilterKey,
   listingFiltersUrl,
+  listingRequestBudget,
+  listingRequestBudgetMessage,
   parseListingFilters,
   reconcileListingFilters,
   resourceInputFromBase,
@@ -25,7 +28,7 @@ import {
   normalizeListingQuery,
   type ListingFilters,
 } from "@/lib/listing-filters";
-import { consumeAccountReturnSnapshot, readAccountListingState, rememberAccountListingState, type AccountReturnSnapshot } from "@/lib/account-return";
+import { consumeAccountReturnSnapshot, type AccountReturnSnapshot } from "@/lib/account-return";
 import { toListingCard } from "@/lib/listing-view";
 import { SupplyRequestError, supplyApi } from "@/lib/supply-client";
 import type { PublicCatalog, PublicListingFilterMetadata, SupplyFieldError, SupplyGame } from "@/lib/supply-types";
@@ -33,6 +36,15 @@ import { useListingFeed } from "./use-listing-feed";
 import "./market.css";
 
 type Directory<T> = { status: "idle" | "loading" | "ready" | "error"; data: T | null; error?: SupplyRequestError | null };
+
+function searchParamsRecord(search: string): Record<string, string | string[]> {
+  const result: Record<string, string | string[]> = {};
+  for (const [key, value] of new URLSearchParams(search)) {
+    const previous = result[key];
+    result[key] = previous === undefined ? value : Array.isArray(previous) ? [...previous, value] : [previous, value];
+  }
+  return result;
+}
 
 function DeltaBanner() {
   const [viewport] = useEmblaCarousel({ loop: false, watchDrag: false, watchFocus: false });
@@ -57,9 +69,7 @@ function DeltaBanner() {
 
 export function AccountMarket({ searchParams }: { searchParams: Record<string, string | string[] | undefined> }) {
   const initialFilters = parseListingFilters(searchParams);
-  const hasExplicitListingState = ["filters", "q", "sort", "direction", "coreItemId", "cursor", "limit", "view"]
-    .some((key) => Object.hasOwn(searchParams, key));
-  return <FavoritesProvider><MarketView initialFilters={initialFilters} hasExplicitListingState={hasExplicitListingState} /></FavoritesProvider>;
+  return <FavoritesProvider><MarketView initialFilters={initialFilters} /></FavoritesProvider>;
 }
 
 function errorForPath(details: SupplyFieldError[], metadata: PublicListingFilterMetadata | null): string[] {
@@ -69,21 +79,16 @@ function errorForPath(details: SupplyFieldError[], metadata: PublicListingFilter
   }).filter((message, index, all) => all.indexOf(message) === index);
 }
 
-function resultError(error: { status: number; details: SupplyFieldError[] } | null, metadata: PublicListingFilterMetadata | null): { title: string; description: string; kind: "retry" | "adjust" } | null {
+function resultError(error: { status: number; code: string; details: SupplyFieldError[]; message?: string } | null, metadata: PublicListingFilterMetadata | null): { title: string; description: string; kind: "retry" | "adjust" } | null {
   if (!error) return null;
+  if (error.code === "LISTING_URL_TOO_LONG") return { title: "筛选条件过多，未发起请求", description: error.message ?? "请减少部分筛选条件后重试。", kind: "adjust" };
   if (error.status === 400) return { title: "有筛选条件未被接受", description: errorForPath(error.details, metadata).join(" ") || "请检查筛选条件后重试。", kind: "adjust" };
   if (error.status === 409) return { title: "筛选规则刚刚更新", description: "已尝试刷新可用条件；如仍无法读取，请重试。", kind: "retry" };
   if (error.status === 503) return { title: "账号目录暂不可用", description: "服务恢复后可继续浏览，当前筛选条件会保留。", kind: "retry" };
   return { title: "账号列表加载失败", description: "请检查网络连接后重试。", kind: "retry" };
 }
 
-function stableAccountsAddress(gameId: string | null): string {
-  const query = new URLSearchParams();
-  if (gameId) query.set("game", gameId);
-  return `/accounts${query.size ? `?${query.toString()}` : ""}`;
-}
-
-function MarketView({ initialFilters, hasExplicitListingState }: { initialFilters: ListingFilters; hasExplicitListingState: boolean }) {
+function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const [filters, setFilters] = useState(initialFilters);
   const [filterSourceReady, setFilterSourceReady] = useState(false);
   const [games, setGames] = useState<Directory<SupplyGame[]>>({ status: "loading", data: null });
@@ -101,6 +106,7 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
   const [restoreReady, setRestoreReady] = useState(false);
   const [returnSnapshot, setReturnSnapshot] = useState<AccountReturnSnapshot | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const metadataRefreshed = useRef<string | null>(null);
   const invalidCursorHandled = useRef<string | null>(null);
   const catalogSequence = useRef(0);
@@ -111,6 +117,7 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
   const skinSearchBusy = useRef(false);
   const endRef = useRef<HTMLDivElement>(null);
   const initialRestoreDone = useRef(false);
+  const rejectedSharePathRef = useRef<string | null>(null);
   const activeMetadata = metadata.status === "ready" ? metadata.data : null;
   const filterKey = listingFilterKey(filters, activeMetadata);
   const configuredSkinCategoryIds = new Set(activeMetadata?.fields.find((entry) => entry.key === "skinGroups")?.categoryIds ?? []);
@@ -124,30 +131,46 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
     replayCursors: returnSnapshot?.filterKey === filterKey ? returnSnapshot.pageCursors : undefined,
   });
 
+
   const navigate = useCallback((next: ListingFilters) => {
+    const address = listingFiltersUrl(next);
+    const budget = listingRequestBudget(next, activeMetadata, null);
+    if (budget?.kind === "page") {
+      rejectedSharePathRef.current = address;
+      setRecoveryNotice(listingRequestBudgetMessage(budget));
+      setFilters(next);
+      return;
+    }
+    rejectedSharePathRef.current = null;
     if (listingFilterKey(filters, activeMetadata) !== listingFilterKey(next, activeMetadata)) setReturnSnapshot(null);
+    setRecoveryNotice(budget ? listingRequestBudgetMessage(budget) : null);
     setFilters(next);
-  }, [activeMetadata, filters]);
+    if (restoreReady && typeof window !== "undefined" && window.location.pathname === "/accounts" && window.location.pathname + window.location.search !== address) {
+      window.history.replaceState(window.history.state, "", address);
+    }
+  }, [activeMetadata, filters, restoreReady]);
 
   useEffect(() => {
-    let next = initialFilters;
-    if (!hasExplicitListingState && initialFilters.game) {
-      const cached = readAccountListingState(initialFilters.game);
-      if (cached) next = parseListingFilters({
-        game: initialFilters.game,
-        filters: JSON.stringify(cached.filters),
-        q: cached.q ?? undefined,
-        sort: cached.sort,
-        direction: cached.direction,
-        coreItemId: cached.coreItemId ?? undefined,
-        limit: String(cached.limit),
-        view: cached.viewMode,
-      });
-    }
-    setFilters({ ...next, cursor: hasExplicitListingState ? next.cursor : null });
+    const next = { ...initialFilters, cursor: null, limit: LISTING_PAGE_SIZE };
+    setFilters(next);
     setFilterSourceReady(true);
-    // URL conditions are imported once; reconciliation waits for public metadata.
+    // URL conditions are authoritative; reconciliation waits for public metadata.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const restoreFromAddress = () => {
+      const next = { ...parseListingFilters(searchParamsRecord(window.location.search)), cursor: null, limit: LISTING_PAGE_SIZE };
+      initialRestoreDone.current = false;
+      setRestoreReady(false);
+      setReturnSnapshot(null);
+      setRecoveryNotice(null);
+      rejectedSharePathRef.current = null;
+      setFilters(next);
+      setFilterSourceReady(true);
+    };
+    window.addEventListener("popstate", restoreFromAddress);
+    return () => window.removeEventListener("popstate", restoreFromAddress);
   }, []);
 
   useEffect(() => {
@@ -155,7 +178,6 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
     supplyApi.games(controller.signal).then((data) => {
       if (controller.signal.aborted) return;
       setGames({ status: "ready", data: data.games });
-      if (!filters.game && data.games.length === 1) navigate({ ...filters, game: data.games[0]!.id });
     }).catch(() => {
       if (!controller.signal.aborted) setGames({ status: "error", data: null });
     });
@@ -163,6 +185,10 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
     // Resolve a missing game context once; users do not choose among games on this route.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (games.status === "ready" && !filters.game && games.data?.length === 1) navigate({ ...filters, game: games.data[0]!.id });
+  }, [filters, games, navigate]);
 
   useEffect(() => {
     if (!filters.game) {
@@ -245,25 +271,41 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
     if (!metadata.data.available) {
       if (!initialRestoreDone.current) {
         initialRestoreDone.current = true;
-        const address = stableAccountsAddress(filters.game);
+        const address = listingFiltersUrl(filters);
+        const budget = listingRequestBudget(filters, metadata.data, null);
+        if (budget) setRecoveryNotice(listingRequestBudgetMessage(budget));
+        else if (window.location.pathname + window.location.search !== address) setRecoveryNotice("链接参数已按当前页面规范整理，筛选条件已保留。");
         if (window.location.pathname === "/accounts" && window.location.pathname + window.location.search !== address) window.history.replaceState(window.history.state, "", address);
         setRestoreReady(true);
       }
       return;
     }
     if (catalog.status !== "ready" && catalog.status !== "error") return;
+    const rawBudget = listingRequestBudget(filters, metadata.data, null);
+    if (rawBudget) {
+      setRecoveryNotice(listingRequestBudgetMessage(rawBudget));
+      if (!initialRestoreDone.current) {
+        initialRestoreDone.current = true;
+        setRestoreReady(true);
+      }
+      return;
+    }
     const skinIds = catalog.status === "ready" && !catalog.data?.nextCursor
       ? new Set(catalog.data?.skins.map((skin) => skin.id) ?? [])
       : undefined;
     const reconciled = reconcileListingFilters(filters, metadata.data, skinIds);
     const changed = listingFiltersUrl(reconciled) !== listingFiltersUrl(filters);
     if (changed) {
+      rejectedSharePathRef.current = null;
       setRecoveryNotice("已按当前服务端规则保留仍有效的筛选条件。");
       setFilters(reconciled);
     }
     if (!initialRestoreDone.current) {
       initialRestoreDone.current = true;
-      const address = stableAccountsAddress(reconciled.game);
+      const address = listingFiltersUrl(reconciled);
+      const budget = listingRequestBudget(reconciled, metadata.data, null);
+      if (budget) setRecoveryNotice(listingRequestBudgetMessage(budget));
+      else if (window.location.pathname + window.location.search !== address && !changed) setRecoveryNotice("链接中的部分参数不可用，已保留仍合法的筛选条件。");
       if (window.location.pathname === "/accounts" && window.location.pathname + window.location.search !== address) window.history.replaceState(window.history.state, "", address);
       const snapshot = consumeAccountReturnSnapshot(address, listingFilterKey(reconciled, metadata.data));
       if (snapshot) setReturnSnapshot(snapshot);
@@ -272,16 +314,10 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
   }, [catalog, filterSourceReady, filters, metadata]);
 
   useEffect(() => {
-    if (!restoreReady || !filters.game) return;
-    rememberAccountListingState(filters.game, {
-      filters: filters.filters,
-      q: filters.q,
-      sort: filters.sort,
-      direction: filters.direction,
-      coreItemId: filters.coreItemId,
-      limit: filters.limit,
-      viewMode: filters.viewMode,
-    });
+    if (!restoreReady || window.location.pathname !== "/accounts") return;
+    const address = listingFiltersUrl(filters);
+    if (rejectedSharePathRef.current === address) return;
+    if (window.location.pathname + window.location.search !== address) window.history.replaceState(window.history.state, "", address);
   }, [filters, restoreReady]);
 
   const conflictStatus = feed.error?.status === 409 ? 409 : feed.loadMoreError?.status === 409 ? 409 : null;
@@ -416,6 +452,17 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
   const readyToBrowse = metadata.status === "ready" && available && restoreReady;
   const resetFilters = () => navigate({ ...filters, filters: {}, q: null, cursor: null });
   const onFilterChange = useCallback((next: ListingFilters) => navigate(next), [navigate]);
+  const refreshResults = useCallback(() => {
+    if (!readyToBrowse || refreshing) return;
+    setRefreshing(true);
+    setReturnSnapshot(null);
+    setRecoveryNotice(null);
+    navigate(withFilterChange(filters, {}));
+    feed.reloadFirstPage();
+  }, [feed.reloadFirstPage, filters, navigate, readyToBrowse, refreshing]);
+  useEffect(() => {
+    if (refreshing && (!readyToBrowse || feed.status !== "loading")) setRefreshing(false);
+  }, [feed.status, readyToBrowse, refreshing]);
   const currentError = resultError(feed.error ?? feed.loadMoreError, activeMetadata);
 
   const activeTags = useMemo(() => {
@@ -603,12 +650,16 @@ function MarketView({ initialFilters, hasExplicitListingState }: { initialFilter
                 onChange={(coreItemId) => navigate(withFilterChange(filters, { coreItemId }))}
               /></div>}
             </div>}
+            <div className="market-results-actions">
+              <button type="button" className="market-toolbar-action" onClick={refreshResults} disabled={!readyToBrowse || refreshing} aria-busy={refreshing || undefined}><RotateCw size={15} aria-hidden="true" />{refreshing ? "刷新中…" : "刷新结果"}</button>
+            </div>
             <div className="market-view-toggle" role="group" aria-label="账号展示方式">
               <button type="button" aria-pressed={filters.viewMode === "list"} onClick={() => navigate({ ...filters, viewMode: "list" })}><List size={16} aria-hidden="true" /><span>列表</span></button>
               <button type="button" aria-pressed={filters.viewMode === "grid"} onClick={() => navigate({ ...filters, viewMode: "grid" })}><LayoutGrid size={16} aria-hidden="true" /><span>卡片</span></button>
             </div>
           </div>
         </div>
+
 
         {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · 由服务端按公开账号名称筛选<button type="button" onClick={() => navigate(withFilterChange(filters, { q: null }))}>清除搜索</button></div>}
         {feed.status === "ready" && feed.items.length > 0 && <div className="market-trust-note" role="note">公开浏览无需登录 · 报价取自服务端当前 quote · 未确认的信息会明确标注</div>}

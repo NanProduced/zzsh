@@ -311,3 +311,287 @@ test("snapshot consumption preserves pagination; filter changes, disable and unm
   ]);
   assert.equal(writesAfterUnmount, 0);
 });
+
+test("refreshFirstPage aborts an in-flight next page and coalesces rapid refreshes", async (t) => {
+  const { Window } = require("happy-dom");
+  const React = require("react");
+  const { act, createElement, useState } = React;
+  const browser = new Window({ url: "http://127.0.0.1:4320/accounts?game=game_delta" });
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    HTMLElement: globalThis.HTMLElement,
+    Node: globalThis.Node,
+    Event: globalThis.Event,
+    navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+    IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT,
+  };
+  Object.assign(globalThis, {
+    window: browser,
+    document: browser.document,
+    HTMLElement: browser.HTMLElement,
+    Node: browser.Node,
+    Event: browser.Event,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+
+  const { createRoot } = require("react-dom/client");
+  const calls = [];
+  const deferred = [];
+  let firstPages = 0;
+  const supplyApi = {
+    market: (query, signal) => {
+      const cursor = query.get("cursor");
+      calls.push(cursor);
+      if (cursor === "page2") return new Promise((resolve) => deferred.push({ resolve, signal }));
+      firstPages += 1;
+      return Promise.resolve({
+        items: [{ id: firstPages === 1 ? "old-first-page" : "fresh-first-page" }],
+        nextCursor: firstPages === 1 ? "page2" : null,
+        scanBudgetReached: false,
+      });
+    },
+  };
+  const { useListingFeed } = loadSource(path.join(repoRoot, "apps/web/src/components/market/use-listing-feed.ts"), {
+    react: React,
+    "@/lib/listing-filters": loadSource(path.join(repoRoot, "apps/web/src/lib/listing-filters.ts")),
+    "@/lib/listing-feed-utils": loadSource(path.join(repoRoot, "apps/web/src/lib/listing-feed-utils.ts")),
+    "@/lib/supply-client": { supplyApi, SupplyRequestError: class extends Error {} },
+  });
+  const filters = {
+    game: "game_delta", q: null, filters: {}, sort: "latest", direction: "DESC",
+    limit: 20, cursor: null, coreItemId: null, viewMode: "list",
+  };
+  const host = browser.document.createElement("div");
+  browser.document.body.append(host);
+  const root = createRoot(host);
+  let latestFeed;
+  let setRefreshCount;
+
+  function RefreshConsumer() {
+    const [, updateRefreshCount] = useState(0);
+    setRefreshCount = updateRefreshCount;
+    latestFeed = useListingFeed(filters, null, { enabled: true });
+    return createElement("output", null, `${latestFeed.status}:${latestFeed.items.map((item) => item.id).join(",")}:${latestFeed.isLoadingMore ? "more" : "idle"}`);
+  }
+
+  t.after(async () => {
+    await act(async () => root.unmount());
+    browser.happyDOM.abort();
+    for (const [key, value] of Object.entries(previous)) {
+      if (key === "navigator") continue;
+      if (value === undefined) delete globalThis[key];
+      else globalThis[key] = value;
+    }
+    if (previous.navigator) Object.defineProperty(globalThis, "navigator", previous.navigator);
+    else delete globalThis.navigator;
+  });
+
+  await act(async () => root.render(createElement(RefreshConsumer)));
+  for (let attempt = 0; attempt < 100 && host.textContent !== "ready:old-first-page:idle"; attempt += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  assert.equal(host.textContent, "ready:old-first-page:idle");
+  await act(async () => latestFeed.loadMore());
+  assert.equal(deferred.length, 1);
+  assert.equal(host.textContent, "ready:old-first-page:more");
+
+  await act(async () => {
+    latestFeed.reloadFirstPage();
+    latestFeed.reloadFirstPage();
+    setRefreshCount((value) => value + 1);
+  });
+  for (let attempt = 0; attempt < 100 && host.textContent !== "ready:fresh-first-page:idle"; attempt += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  assert.equal(host.textContent, "ready:fresh-first-page:idle");
+  assert.equal(deferred[0].signal.aborted, true);
+  assert.deepEqual(calls, [null, "page2", null]);
+});
+
+test("BFF-overlimit filters do not request and recover after reducing conditions", async (t) => {
+  const { Window } = require("happy-dom");
+  const React = require("react");
+  const { act, createElement, useState } = React;
+  const browser = new Window({ url: "http://127.0.0.1:4320/accounts" });
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    HTMLElement: globalThis.HTMLElement,
+    Node: globalThis.Node,
+    Event: globalThis.Event,
+    navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+    IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT,
+  };
+  Object.assign(globalThis, {
+    window: browser,
+    document: browser.document,
+    HTMLElement: browser.HTMLElement,
+    Node: browser.Node,
+    Event: browser.Event,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+
+  const listingFilters = loadSource(path.join(repoRoot, "apps/web/src/lib/listing-filters.ts"));
+  const longConditions = {
+    resources: Array.from({ length: 16 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, "0")}${"x".repeat(90)}`,
+      minQuantity: "1",
+      maxQuantity: "999999999999999999999999",
+    })),
+    skinGroups: [{
+      categoryId: "category_1",
+      match: "ALL",
+      ids: Array.from({ length: 33 }, (_, index) => `skin_${String(index).padStart(3, "0")}${"x".repeat(118)}`),
+    }],
+  };
+  const overlong = listingFilters.parseListingFilters({ game: "game_delta", filters: JSON.stringify(longConditions) });
+  const reduced = { ...overlong, filters: {} };
+  const metadata = { limits: { urlBytes: 8192 }, filterRevision: "123", catalogRevision: "456", ruleReleaseId: `release_${"r".repeat(90)}` };
+  const calls = [];
+  const supplyApi = {
+    market: async (query) => {
+      calls.push(query.toString());
+      return { items: [], nextCursor: null, scanBudgetReached: false };
+    },
+  };
+  const { createRoot } = require("react-dom/client");
+  const { useListingFeed } = loadSource(path.join(repoRoot, "apps/web/src/components/market/use-listing-feed.ts"), {
+    react: React,
+    "@/lib/listing-filters": listingFilters,
+    "@/lib/listing-feed-utils": loadSource(path.join(repoRoot, "apps/web/src/lib/listing-feed-utils.ts")),
+    "@/lib/supply-client": { supplyApi, SupplyRequestError: class extends Error {} },
+  });
+  const host = browser.document.createElement("div");
+  browser.document.body.append(host);
+  const root = createRoot(host);
+  let setFilters;
+
+  function Consumer() {
+    const [filters, updateFilters] = useState(overlong);
+    setFilters = updateFilters;
+    const feed = useListingFeed(filters, metadata, { enabled: true });
+    return createElement("output", null, `${feed.status}:${feed.error?.code ?? ""}`);
+  }
+
+  t.after(async () => {
+    await act(async () => root.unmount());
+    browser.happyDOM.abort();
+    for (const [key, value] of Object.entries(previous)) {
+      if (key === "navigator") continue;
+      if (value === undefined) delete globalThis[key];
+      else globalThis[key] = value;
+    }
+    if (previous.navigator) Object.defineProperty(globalThis, "navigator", previous.navigator);
+    else delete globalThis.navigator;
+  });
+
+  await act(async () => root.render(createElement(Consumer)));
+  for (let attempt = 0; attempt < 100 && host.textContent !== "error:LISTING_URL_TOO_LONG"; attempt += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  assert.equal(host.textContent, "error:LISTING_URL_TOO_LONG");
+  assert.deepEqual(calls, []);
+
+  await act(async () => setFilters(reduced));
+  for (let attempt = 0; attempt < 100 && host.textContent !== "ready:"; attempt += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  assert.equal(host.textContent, "ready:");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].includes("cursor="), false);
+});
+
+test("a cursor can exceed the BFF budget without retrying the next page forever", async (t) => {
+  const { Window } = require("happy-dom");
+  const React = require("react");
+  const { act, createElement } = React;
+  const browser = new Window({ url: "http://127.0.0.1:4320/accounts" });
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    HTMLElement: globalThis.HTMLElement,
+    Node: globalThis.Node,
+    Event: globalThis.Event,
+    navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+    IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT,
+  };
+  Object.assign(globalThis, {
+    window: browser,
+    document: browser.document,
+    HTMLElement: browser.HTMLElement,
+    Node: browser.Node,
+    Event: browser.Event,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+
+  const listingFilters = loadSource(path.join(repoRoot, "apps/web/src/lib/listing-filters.ts"));
+  const conditions = {
+    resources: Array.from({ length: 16 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, "0")}${"x".repeat(90)}`,
+      minQuantity: "1",
+      maxQuantity: "999999999999999999999999",
+    })),
+    skinGroups: [{
+      categoryId: "category_1",
+      match: "ALL",
+      ids: Array.from({ length: 27 }, (_, index) => `skin_${String(index).padStart(3, "0")}${"x".repeat(118)}`),
+    }],
+  };
+  const filters = listingFilters.parseListingFilters({ game: "game_delta", filters: JSON.stringify(conditions) });
+  const cursor = `cursor_${"x".repeat(1000)}`;
+  const metadata = { limits: { urlBytes: 8192 }, filterRevision: "123", catalogRevision: "456", ruleReleaseId: `release_${"r".repeat(90)}` };
+  assert.equal(listingFilters.listingRequestBudget(filters, metadata, null), null);
+  assert.equal(listingFilters.listingRequestBudget(filters, metadata, cursor).kind, "webBff");
+  const calls = [];
+  const supplyApi = {
+    market: async (query) => {
+      calls.push(query.get("cursor"));
+      return { items: [{ id: "first-page" }], nextCursor: cursor, scanBudgetReached: false };
+    },
+  };
+  const { createRoot } = require("react-dom/client");
+  const { useListingFeed } = loadSource(path.join(repoRoot, "apps/web/src/components/market/use-listing-feed.ts"), {
+    react: React,
+    "@/lib/listing-filters": listingFilters,
+    "@/lib/listing-feed-utils": loadSource(path.join(repoRoot, "apps/web/src/lib/listing-feed-utils.ts")),
+    "@/lib/supply-client": { supplyApi, SupplyRequestError: class extends Error {} },
+  });
+  const host = browser.document.createElement("div");
+  browser.document.body.append(host);
+  const root = createRoot(host);
+  let latestFeed;
+  function Consumer() {
+    latestFeed = useListingFeed(filters, metadata, { enabled: true });
+    return createElement("output", null, `${latestFeed.status}:${latestFeed.loadMoreError?.code ?? ""}`);
+  }
+
+  t.after(async () => {
+    await act(async () => root.unmount());
+    browser.happyDOM.abort();
+    for (const [key, value] of Object.entries(previous)) {
+      if (key === "navigator") continue;
+      if (value === undefined) delete globalThis[key];
+      else globalThis[key] = value;
+    }
+    if (previous.navigator) Object.defineProperty(globalThis, "navigator", previous.navigator);
+    else delete globalThis.navigator;
+  });
+
+  await act(async () => root.render(createElement(Consumer)));
+  for (let attempt = 0; attempt < 100 && !host.textContent.startsWith("ready:"); attempt += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  assert.equal(host.textContent, "ready:");
+  assert.deepEqual(calls, [null]);
+  await act(async () => latestFeed.loadMore());
+  for (let attempt = 0; attempt < 100 && host.textContent !== "error:LISTING_URL_TOO_LONG"; attempt += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  assert.equal(host.textContent, "error:LISTING_URL_TOO_LONG");
+  await act(async () => latestFeed.loadMore());
+  assert.deepEqual(calls, [null]);
+});
