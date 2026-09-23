@@ -23,6 +23,7 @@ import { loadMediaAsset } from "./media";
 import {
   assertGameScope,
   bodyOf,
+  conflict,
   ensureOnlyFields,
   fingerprintRequest,
   forbidden,
@@ -37,6 +38,8 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 import {
+  EFFECTIVE_PUBLICATION_STATE_SQL,
+  isAccountDisplayPubliclyEligible,
   parsePublicListingSearch,
   publicGradingOptions,
   publicLoginMethodOptions,
@@ -176,7 +179,7 @@ export async function handlePublishingRoute(
             !asset ||
             asset.ownerUserId !== a.owner_user_id ||
             asset.purpose !== "ACCOUNT_DISPLAY" ||
-            !asset.publicStorageKey ||
+            !isAccountDisplayPubliclyEligible(asset) ||
             !v.payload?.declaration.mediaBindings.some(
               (m) => m.assetId === asset.id && m.purpose === "ACCOUNT_DISPLAY",
             )
@@ -225,19 +228,19 @@ export async function handlePublishingRoute(
       throw invalid("Filter is invalid");
     let cursor = "";
     if (query.has("cursor")) {
+      let c: Record<string, unknown>;
       try {
-        const c = JSON.parse(
+        c = JSON.parse(
           Buffer.from(query.get("cursor")!, "base64url").toString(),
         );
-        if (
-          c.filter !== sha256Hex(JSON.stringify(filter)) ||
-          typeof c.id !== "string"
-        )
-          throw Error();
-        cursor = c.id;
       } catch {
         throw invalid("Cursor is invalid");
       }
+      if (!c || typeof c !== "object" || Array.isArray(c)) throw invalid("Cursor is invalid");
+      if (c.v === 1) throw conflict("Cursor is stale; refresh from the first page");
+      if (c.v !== 2 || c.filter !== sha256Hex(JSON.stringify(filter)) || typeof c.id !== "string")
+        throw invalid("Cursor is invalid");
+      cursor = c.id;
     }
     const data = await withPublicListingSnapshot(
       options.pool,
@@ -292,6 +295,7 @@ export async function handlePublishingRoute(
           nextCursor: hasMore
             ? Buffer.from(
                 JSON.stringify({
+                  v: 2,
                   id: last,
                   filter: sha256Hex(JSON.stringify(filter)),
                 }),
@@ -400,7 +404,7 @@ export async function handlePublishingRoute(
         ).rows;
         const previous = (
           await client.query(
-            `SELECT id FROM zzsh_supply.listing_version WHERE account_id=$1 AND id<>$2 AND review_state='APPROVED' ORDER BY sequence DESC LIMIT 1`,
+            `SELECT v.id FROM zzsh_supply.listing_version v JOIN zzsh_supply.listing_publication p ON p.version_id=v.id AND p.account_id=v.account_id WHERE v.account_id=$1 AND v.id<>$2 AND ${EFFECTIVE_PUBLICATION_STATE_SQL} ORDER BY v.sequence DESC LIMIT 1`,
             [a.id, a.current_version_id],
           )
         ).rows[0];
@@ -437,6 +441,7 @@ export async function handlePublishingRoute(
           "REJECTED",
           "WITHDRAWN",
           "DRAFT",
+          "PUBLISHED",
           "IMPORTED_UNVERIFIED",
         ].includes(state)
       )
@@ -536,7 +541,7 @@ export async function handlePublishingRoute(
         else if (action === "accept-rules")
           await acceptListingRules(client, a, body);
         else if (action === "submit")
-          await submitListing(client, a, body, gate);
+          await submitListing(client, a, actorId, body, gate);
         else if (action === "withdraw") await withdrawListing(client, a, body);
         else if (action === "pause" || action === "resume")
           await setOwnerPaused(client, a, body, action === "pause", gate);
@@ -581,14 +586,20 @@ export async function handlePublishingRoute(
             ],
           );
         } else throw notFound();
-        const after = await summary(client, a);
+        const responseAccount = (
+          await client.query<PublishingAccount>(
+            `SELECT * FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`,
+            [a.id],
+          )
+        ).rows[0]!;
+        const after = await summary(client, responseAccount);
         await recordAudit(client, {
           actorType: admin ? "admin" : "user",
           actorId,
           sessionId: context.sessionId,
           action: operation,
           objectType: "rental_account",
-          objectId: a.id,
+          objectId: responseAccount.id,
           outcome: "SUCCESS",
           reason: typeof body.reason === "string" ? body.reason : action,
           requestId,
@@ -611,7 +622,7 @@ export async function handlePublishingRoute(
           status: 200,
           body: await listingDetail(
             client,
-            a,
+            responseAccount,
             admin ? "admin" : "owner",
             gate,
             admin && !access!.permissions.has("supply.quote.internal.read")

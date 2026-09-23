@@ -1,4 +1,4 @@
-import { withPublicListingSnapshot } from "./publishing";
+import { lockPublishingAccount, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
 import { handleListingFilters } from "./listing-filter-routes";
@@ -314,6 +314,7 @@ export async function runMediaUpload(
     bytes: Buffer;
     authorize: (client: PoolClient) => Promise<void>;
     beforeFinalize?: (client: PoolClient) => Promise<void>;
+    lockPublishingAccount?: (client: PoolClient, accountId: string) => Promise<unknown>;
   },
 ): Promise<void> {
   const scope = { principalId: input.actor.id, operation: "supply.media.upload", resourceId: input.intentId };
@@ -345,7 +346,7 @@ export async function runMediaUpload(
       async (client) => {
         await input.beforeFinalize?.(client);
         if (!prepared) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media upload was not prepared");
-        const asset = await finalizeMediaUpload(client, input.mediaActor, prepared);
+        const asset = await finalizeMediaUpload(client, input.mediaActor, prepared, input.lockPublishingAccount);
         await recordAudit(client, {
           actorType: input.actor.realm,
           actorId: input.actor.id,
@@ -592,6 +593,7 @@ export async function handleSupplyUserRoute(
           await assertUserContextInTransaction(client, context);
           await authorizeUpload(client, { realm: "user", id: context.userId, sessionId: context.sessionId }, intentId);
         },
+        lockPublishingAccount,
       });
       return;
     }
@@ -1294,7 +1296,7 @@ async function handleAdminWrite(
         decision,
         ...(reason ? { reason } : {}),
         ...(visibility ? { visibility } : {}),
-      });
+      }, lockPublishingAccount);
       return { status: 200, body: asset, details: { reviewState: asset.reviewState, accessClass: asset.accessClass } };
     }, "supply.media.reviewed");
     return;
@@ -1311,7 +1313,7 @@ async function handleAdminWrite(
       if (!row || row.gameId === null) throw notFound();
       return row.gameId;
     }, async (client, access) => {
-      const asset = await changeMediaVisibility(client, actor.id, access.isBoss, assetId, { visibility, ...(reason ? { reason } : {}) });
+      const asset = await changeMediaVisibility(client, actor.id, access.isBoss, assetId, { visibility, ...(reason ? { reason } : {}) }, lockPublishingAccount);
       return { status: 200, body: asset, details: { accessClass: asset.accessClass } };
     }, "supply.media.visibility_changed");
     return;

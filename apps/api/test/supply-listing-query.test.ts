@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isAccountDisplayPubliclyEligible,
+  isEffectivePublicationState,
   LISTING_SEARCH_MAX_LENGTH,
   listingSearchPattern,
   parsePublicListingSearch,
@@ -9,6 +11,35 @@ import {
   projectPublicListingGame,
   projectPublicOffer,
 } from "../src/supply/listing-query";
+
+test("account display visibility checks the authorized target, not the old access class", () => {
+  const privateDisplay = {
+    purpose: "ACCOUNT_DISPLAY",
+    reviewState: "PENDING",
+    accessClass: "PRIVATE_REVIEW",
+    publicStorageKey: "b".repeat(64),
+    technicalState: "READY",
+  };
+  assert.equal(isAccountDisplayPubliclyEligible(privateDisplay, "PUBLIC_DISPLAY"), true);
+  assert.equal(isAccountDisplayPubliclyEligible(privateDisplay), false);
+  for (const reviewState of ["REJECTED", "QUARANTINED"]) {
+    assert.equal(isAccountDisplayPubliclyEligible({ ...privateDisplay, reviewState }, "PUBLIC_DISPLAY"), false);
+  }
+  assert.equal(isAccountDisplayPubliclyEligible({ ...privateDisplay, purpose: "ACCOUNT_EVIDENCE" }, "PUBLIC_DISPLAY"), false);
+});
+
+test("publication source and listing state must agree", () => {
+  assert.equal(isEffectivePublicationState("PUBLISHED", "OWNER_DIRECT"), true);
+  assert.equal(isEffectivePublicationState("APPROVED", "LEGACY_APPROVED"), true);
+  for (const pair of [
+    ["PUBLISHED", "LEGACY_APPROVED"],
+    ["APPROVED", "OWNER_DIRECT"],
+    ["DRAFT", "OWNER_DIRECT"],
+    ["SUBMITTED", "LEGACY_APPROVED"],
+    ["PUBLISHED", null],
+  ] as const)
+    assert.equal(isEffectivePublicationState(pair[0], pair[1]), false, `${pair[0]} + ${pair[1]}`);
+});
 
 test("listing search trims, bounds length and treats blank as absent", () => {
   assert.equal(parsePublicListingSearch(null), null);
@@ -136,12 +167,17 @@ test("owner media status does not infer public readability from approval alone",
     reviewState: "APPROVED",
     accessClass: "PUBLIC_DISPLAY",
     publicStorageKey: "b".repeat(64),
+    technicalState: "READY",
     ownerUserId: "user_1",
   };
   const displayApprovedPublic = projectOwnerMediaBinding(displayRow, live);
   assert.equal(displayApprovedPublic.reviewState, "APPROVED");
   assert.equal(displayApprovedPublic.publicDisplayEligible, true);
   assert.equal(displayApprovedPublic.publiclyReadable, true);
+  assert.equal(
+    projectOwnerMediaBinding({ ...displayRow, technicalState: "UNKNOWN" }, live).publicDisplayEligible,
+    false,
+  );
   const paused = projectOwnerMediaBinding(displayRow, {
     ...live,
     listingPublic: false,
@@ -170,6 +206,7 @@ test("owner media status does not infer public readability from approval alone",
       reviewState: "APPROVED",
       accessClass: "PRIVATE_REVIEW",
       publicStorageKey: null,
+      technicalState: "UNKNOWN",
       ownerUserId: "user_1",
     },
     {
@@ -207,12 +244,22 @@ test("owner media status does not infer public readability from approval alone",
         reviewState: "PENDING",
         accessClass: "PRIVATE_REVIEW",
         publicStorageKey: null,
+        technicalState: "UNKNOWN",
         ownerUserId: "user_1",
       },
       live,
     ).reviewState,
-    "PENDING",
+    "NOT_REQUIRED",
   );
+  for (const reviewState of ["REJECTED", "QUARANTINED"] as const) {
+    const isolated = projectOwnerMediaBinding(
+      { ...displayRow, reviewState, accessClass: "PUBLIC_DISPLAY" },
+      live,
+    );
+    assert.equal(isolated.reviewState, reviewState);
+    assert.equal(isolated.publicDisplayEligible, false);
+    assert.equal(isolated.publiclyReadable, false);
+  }
 });
 
 test("public listing game projection keeps identity and falls back to null", () => {

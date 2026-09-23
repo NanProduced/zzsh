@@ -1,5 +1,5 @@
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
-import type { SupplyGate } from "../src/supply/publishing";
+import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
 import sharp from "sharp";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -11,7 +11,7 @@ import { Pool, type PoolClient } from "pg";
 import { createApp } from "../src/app";
 import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
 import { createFakeRealNameProvider } from "../src/auth/user-identity";
-import { withTransaction } from "../src/auth/security-core";
+import { recordAudit, withTransaction } from "../src/auth/security-core";
 import { loadConfig, type AppConfig } from "../src/config/config";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
@@ -43,6 +43,23 @@ const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
 const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order"] as const;
+const PUB_DIRECT_CREDENTIALS = RESOURCE_SET === "pub_direct" ? (() => {
+  const path = process.env.PUB_DIRECT_ORDER_CREDENTIALS_FILE;
+  if (!path) throw new Error("pub_direct requires PUB_DIRECT_ORDER_CREDENTIALS_FILE");
+  const value = JSON.parse(readFileSync(path, "utf8")) as {
+    database?: string; host?: string; port?: number; marker?: string; state?: string;
+    migration?: { role?: string; password?: string };
+    runtime?: { role?: string; password?: string };
+  };
+  assert.deepEqual(
+    { database: value.database, host: value.host, port: value.port, marker: value.marker, state: value.state,
+      migrationRole: value.migration?.role, runtimeRole: value.runtime?.role },
+    { database: "zzsh_test_order_pub_direct", host: "127.0.0.1", port: 55432, marker: RESOURCE_MARKER, state: "RESERVED",
+      migrationRole: "zzsh_order_pub_direct_m", runtimeRole: "zzsh_order_pub_direct_r" },
+  );
+  if (!value.migration?.password || !value.runtime?.password) throw new Error("pub_direct credential values are missing");
+  return { migrationPassword: value.migration.password, runtimePassword: value.runtime.password };
+})() : null;
 const HOLD_SECONDS = 3600;
 const HAFF_RULE = {
   schema: "haff-ratio-v1",
@@ -123,9 +140,9 @@ function makeResources(): Resources {
     ...(maintenanceUser ? { DB_USER: maintenanceUser } : {}),
   };
   const maintenance = loadConfig(baseEnv);
-  const migrationPassword = process.env.ORDER_TEST_MIGRATION_PASSWORD?.trim()
+  const migrationPassword = PUB_DIRECT_CREDENTIALS?.migrationPassword || process.env.ORDER_TEST_MIGRATION_PASSWORD?.trim()
     || (RESOURCE_SET === "trade_settlement" ? "" : randomBytes(32).toString("hex"));
-  const runtimePassword = process.env.ORDER_TEST_RUNTIME_PASSWORD?.trim()
+  const runtimePassword = PUB_DIRECT_CREDENTIALS?.runtimePassword || process.env.ORDER_TEST_RUNTIME_PASSWORD?.trim()
     || (RESOURCE_SET === "trade_settlement" ? "" : randomBytes(32).toString("hex"));
   if (RESOURCE_SET === "trade_settlement" && (!migrationPassword || !runtimePassword)) {
     throw new Error("trade_settlement requires its registered migration/runtime credentials; random role passwords are disabled");
@@ -251,7 +268,7 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
   assert.equal(existing.rows[0]?.comment, RESOURCE_MARKER, "dedicated test database marker is missing or mismatched");
 }
 
-async function ensureRole(pool: Pool, roleName: string, password: string, marker: string): Promise<void> {
+async function ensureRole(pool: Pool, roleName: string, password: string, marker: string, allowPasswordChange = true): Promise<void> {
   const current = await pool.query<{ comment: string | null; canLogin: boolean; isSuperuser: boolean; canCreateRole: boolean; canCreateDb: boolean; canInherit: boolean; canReplicate: boolean; canBypassRls: boolean }>(
     "SELECT shobj_description(r.oid, 'pg_authid') AS comment, r.rolcanlogin AS \"canLogin\", r.rolsuper AS \"isSuperuser\", r.rolcreaterole AS \"canCreateRole\", r.rolcreatedb AS \"canCreateDb\", r.rolinherit AS \"canInherit\", r.rolreplication AS \"canReplicate\", r.rolbypassrls AS \"canBypassRls\" FROM pg_roles r WHERE r.rolname = $1",
     [roleName],
@@ -261,7 +278,7 @@ async function ensureRole(pool: Pool, roleName: string, password: string, marker
     const row = current.rows[0]!;
     assert.equal(row.comment, marker, roleName + " marker is missing or mismatched");
     assert.deepEqual([row.canLogin, row.isSuperuser, row.canCreateRole, row.canCreateDb, row.canInherit, row.canReplicate, row.canBypassRls], [true, false, false, false, false, false, false], roleName + " is not a least-privilege login role");
-    await pool.query("ALTER ROLE " + role + " PASSWORD " + quotedLiteral(password));
+    if (allowPasswordChange) await pool.query("ALTER ROLE " + role + " PASSWORD " + quotedLiteral(password));
     return;
   }
   await pool.query("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD " + quotedLiteral(password));
@@ -477,8 +494,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     guard = await resourceGuard(maintenancePool, resources);
     await ensureDatabase(maintenancePool, resources);
     if (RESOURCE_SET !== "trade_settlement") {
-      await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
-      await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
+      await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"), RESOURCE_SET !== "pub_direct");
+      await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"), RESOURCE_SET !== "pub_direct");
     }
     await grantDatabaseAccess(maintenancePool, resources);
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-order-owner", 2);
@@ -556,7 +573,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000, escalationEnabled: true },
       realNameProvider: createFakeRealNameProvider("VERIFIED_ADULT"),
       orderHoldSeconds: HOLD_SECONDS,
-      ...(RESOURCE_SET === "trade_settlement" ? {
+      ...(RESOURCE_SET === "trade_settlement" || RESOURCE_SET === "pub_direct" ? {
         testConfirmationFundingReader: createControlledConfirmationFundingReader({
           config: { ...resources.runtime, testOperationsEnabled: true },
           resourceSet: RESOURCE_SET,
@@ -658,7 +675,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     };
     await makeRuleSet("0");
 
-    // ---------- 发布一个已审核公开账号（可注入明确押金 fixture） ----------
+    // ---------- 发布一个公开账号（可注入明确押金 fixture） ----------
     const publishApproved = async (
       owner: CookieJar,
       label: string,
@@ -683,7 +700,6 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       });
       assert.equal(upload.status, 200);
       const asset = (await upload.json()) as { assetId: string };
-      assert.equal((await request(base, `/api/bff/admin/supply/media/${asset.assetId}/review`, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" }, operator.jar, ADMIN_ORIGIN, "POST", orderKey())).response.status, 200);
       const inventory = [
         { itemId: haffItem, quantity: "60000000" },
         ...(includeSettlementPiece ? [{ itemId: fixedItem, quantity: "10" }] : []),
@@ -753,8 +769,6 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       assert.equal(d.response.status, 200, JSON.stringify(d.body));
       d = await request(base, `${prefix}/submit`, { expectedRevision: d.body?.account.revision, versionId, releaseId, contentHash }, owner, USER_ORIGIN, "POST", orderKey());
       assert.equal(d.response.status, 200, JSON.stringify(d.body));
-      const decided = await request(base, `/api/bff/admin/supply/listing-reviews/${accountId}/decide`, { expectedRevision: d.body?.account.revision, versionId, releaseId, contentHash, decision: "APPROVE", reason: "合成通过" }, operator.jar, ADMIN_ORIGIN, "POST", orderKey());
-      assert.equal(decided.response.status, 200, JSON.stringify(decided.body));
       const publicDetail = await request(base, `/api/v1/supply/listings/${accountId}`, undefined, cookieJar(), API_ORIGIN);
       assert.equal(publicDetail.response.status, 200, `listing ${accountId} must be public: ${JSON.stringify(publicDetail.body)}`);
       if (fullPayoutSelected !== undefined) {
@@ -814,6 +828,232 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const renter2 = await signupUser("订单租客二", "m4_renter_2");
     const renter3 = await signupUser("订单租客三", "m4_renter_3");
     const owner3 = await signupUser("订单号主三", "m4_owner_3");
+
+    if (RESOURCE_SET === "pub_direct") {
+      // PUB-R4: real legal-deposit order writes must serialize with account-media
+      // isolation. The fixture uses the same publishApproved/createOrder path as
+      // the ordinary v1 acceptance; no order or media row is hand-built as a
+      // success case.
+      const r4OrderBarrierRunId = randomUUID();
+      const r4OrderBarrierResults: Array<Record<string, unknown>> = [];
+      const r4WaitForCommonLock = async (label: string) => {
+        const deadline = Date.now() + 10_000;
+        let lastQuery = "";
+        while (Date.now() < deadline) {
+          await maintenanceDataPool!.query("SELECT pg_stat_clear_snapshot()");
+          const observed = await maintenanceDataPool!.query<{ pid: number; waitEvent: string | null; blockers: number[]; query: string }>(
+            `SELECT pid,wait_event AS "waitEvent",pg_blocking_pids(pid) AS blockers,query
+               FROM pg_stat_activity
+              WHERE datname=current_database() AND wait_event_type='Lock'
+                AND cardinality(pg_blocking_pids(pid)) > 0
+                AND query LIKE '%FOR UPDATE%'
+                AND (query LIKE '%zzsh_auth_user%' OR query LIKE '%zzsh_supply.game%' OR query LIKE '%zzsh_supply.rental_account%')
+              ORDER BY pid`,
+          );
+          lastQuery = observed.rows.map((row) => `${row.pid}:${row.waitEvent ?? ""}`).join(",");
+          if (observed.rows.length > 0) return { label, pid: observed.rows[0]!.pid, blockers: observed.rows[0]!.blockers, waitEvent: observed.rows[0]!.waitEvent, query: observed.rows[0]!.query.slice(0, 240) };
+          await new Promise((resolve) => setTimeout(resolve, 15));
+        }
+        throw new Error(`${label}: legal order did not wait on the common publishing lock; observed=${lastQuery}`);
+      };
+      const r4MediaFor = async (target: { versionId: string }) => {
+        const row = (await runtimePool!.query<{ assetId: string; accountId: string }>(
+          `SELECT m.id AS "assetId",v.account_id AS "accountId"
+             FROM zzsh_supply.listing_media lm
+             JOIN zzsh_supply.media_asset m ON m.id=lm.asset_id
+             JOIN zzsh_supply.listing_version v ON v.id=lm.version_id
+            WHERE lm.version_id=$1 AND m.purpose='ACCOUNT_DISPLAY'
+            ORDER BY m.id LIMIT 1`,
+          [target.versionId],
+        )).rows[0];
+        if (!row) throw new Error("PUB_R4_ORDER_MEDIA_FIXTURE_MISSING");
+        return row;
+      };
+      const r4OrderCounts = async (accountId: string) => (await runtimePool!.query<{ orders: string; publications: string; successAudits: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM zzsh_order.rental_order WHERE account_id=$1) AS orders,
+           (SELECT count(*)::text FROM zzsh_supply.listing_publication WHERE account_id=$1) AS publications,
+           (SELECT count(*)::text FROM zzsh_iam.audit_event WHERE action='order.reservation.created' AND outcome='SUCCESS' AND details->'after'->>'accountId'=$1) AS "successAudits"`,
+        [accountId],
+      )).rows[0]!;
+      const r4QuarantineHeldAccount = async (client: PoolClient, target: { accountId: string }, mediaId: string, reason: string) => {
+        await lockPublishingAccount(client, target.accountId);
+        await client.query(`SELECT id FROM zzsh_supply.media_asset WHERE id=$1 FOR UPDATE`, [mediaId]);
+        await client.query(
+          `UPDATE zzsh_supply.media_asset
+              SET review_state='QUARANTINED',reviewed_by_admin_id=$1,reviewed_at=clock_timestamp(),
+                  review_reason=$2,access_class='PRIVATE_REVIEW',revision=revision+1,updated_at=clock_timestamp()
+            WHERE id=$3`,
+          [operator.id, reason, mediaId],
+        );
+        await recordAudit(client, {
+          actorType: "test_fixture",
+          actorId: "pub-r4-order-barrier",
+          action: "supply.media.barrier_isolation",
+          objectType: "media_asset",
+          objectId: mediaId,
+          outcome: "SUCCESS",
+          requestId: r4OrderBarrierRunId,
+          reason,
+          details: { controlledFixture: true, accountId: target.accountId, state: "QUARANTINED" },
+        });
+      };
+
+      const isolationFirst = await publishApproved(owner1, "PUB-R4 隔离先行合法建单", "2500");
+      const isolationFirstMedia = await r4MediaFor(isolationFirst);
+      const isolationFirstBefore = await r4OrderCounts(isolationFirst.accountId);
+      const isolationHolder = await maintenanceDataPool.connect();
+      let isolationOrder: Awaited<ReturnType<typeof createOrder>> | undefined;
+      let isolationWait: Record<string, unknown> | undefined;
+      try {
+        await isolationHolder.query("BEGIN");
+        await lockPublishingAccount(isolationHolder, isolationFirst.accountId);
+        await isolationHolder.query(`SELECT id FROM zzsh_supply.media_asset WHERE id=$1 FOR UPDATE`, [isolationFirstMedia.assetId]);
+        const pending = createOrder(renter1, isolationFirst, { "idempotency-key": `pub_r4_isolation_first_${r4OrderBarrierRunId}` });
+        isolationWait = await r4WaitForCommonLock("isolation-first legal order");
+        await isolationHolder.query(
+          `UPDATE zzsh_supply.media_asset
+              SET review_state='QUARANTINED',reviewed_by_admin_id=$1,reviewed_at=clock_timestamp(),
+                  review_reason='PUB-R4 isolation-first legal order barrier',access_class='PRIVATE_REVIEW',revision=revision+1,updated_at=clock_timestamp()
+            WHERE id=$2`,
+          [operator.id, isolationFirstMedia.assetId],
+        );
+        await recordAudit(isolationHolder, {
+          actorType: "test_fixture",
+          actorId: "pub-r4-order-barrier",
+          action: "supply.media.barrier_isolation",
+          objectType: "media_asset",
+          objectId: isolationFirstMedia.assetId,
+          outcome: "SUCCESS",
+          requestId: r4OrderBarrierRunId,
+          reason: "PUB-R4 isolation-first legal order barrier",
+          details: { controlledFixture: true, accountId: isolationFirst.accountId, state: "QUARANTINED" },
+        });
+        await isolationHolder.query("COMMIT");
+        isolationOrder = await pending;
+      } finally {
+        await isolationHolder.query("ROLLBACK").catch(() => undefined);
+        isolationHolder.release();
+      }
+      const isolationFirstAfter = await r4OrderCounts(isolationFirst.accountId);
+      assert.equal(isolationOrder?.response.status, 404, JSON.stringify(isolationOrder?.body));
+      assert.deepEqual(isolationFirstAfter, isolationFirstBefore, "isolation-first rejection must leave no order/publication/order-success audit");
+      r4OrderBarrierResults.push({
+        label: "isolation commits while legal v1 order waits, then order re-reads media and rejects",
+        passed: isolationOrder?.response.status === 404 && JSON.stringify(isolationFirstAfter) === JSON.stringify(isolationFirstBefore),
+        wait: isolationWait,
+        response: { status: isolationOrder?.response.status, code: isolationOrder?.body?.error?.code ?? null },
+        before: isolationFirstBefore,
+        after: isolationFirstAfter,
+      });
+
+      const orderFirst = await publishApproved(owner1, "PUB-R4 建单先行合法订单", "2500");
+      const orderFirstMedia = await r4MediaFor(orderFirst);
+      const orderHolder = await maintenanceDataPool.connect();
+      let orderFirstResponse: Awaited<ReturnType<typeof createOrder>> | undefined;
+      let orderFirstWait: Record<string, unknown> | undefined;
+      try {
+        await orderHolder.query("BEGIN");
+        await lockPublishingAccount(orderHolder, orderFirst.accountId);
+        await orderHolder.query(`SELECT id FROM zzsh_supply.media_asset WHERE id=$1 FOR UPDATE`, [orderFirstMedia.assetId]);
+        const pending = createOrder(renter2, orderFirst, { "idempotency-key": `pub_r4_order_first_${r4OrderBarrierRunId}` });
+        orderFirstWait = await r4WaitForCommonLock("order-first legal order");
+        await orderHolder.query("COMMIT");
+        orderFirstResponse = await pending;
+      } finally {
+        await orderHolder.query("ROLLBACK").catch(() => undefined);
+        orderHolder.release();
+      }
+      assert.equal(orderFirstResponse?.response.status, 200, JSON.stringify(orderFirstResponse?.body));
+      const retainedOrderId = orderFirstResponse?.body?.order?.id as string;
+      assert.match(retainedOrderId, /^order_/);
+      const retainedBeforeIsolation = (await runtimePool!.query<{ listingVersionId: string; contentHash: string; quoteSnapshot: string }>(
+        `SELECT listing_version_id AS "listingVersionId",content_hash AS "contentHash",quote_snapshot::text AS "quoteSnapshot" FROM zzsh_order.rental_order WHERE id=$1`,
+        [retainedOrderId],
+      )).rows[0]!;
+      const postOrderIsolation = await maintenanceDataPool.connect();
+      try {
+        await postOrderIsolation.query("BEGIN");
+        await r4QuarantineHeldAccount(postOrderIsolation, orderFirst, orderFirstMedia.assetId, "PUB-R4 order-first post-order isolation");
+        await postOrderIsolation.query("COMMIT");
+      } finally {
+        await postOrderIsolation.query("ROLLBACK").catch(() => undefined);
+        postOrderIsolation.release();
+      }
+      const retained = await request(base, `/api/v1/orders/${retainedOrderId}`, undefined, renter2, USER_ORIGIN);
+      assert.equal(retained.response.status, 200, JSON.stringify(retained.body));
+      const retainedAfterIsolation = (await runtimePool!.query<{ listingVersionId: string; contentHash: string; quoteSnapshot: string }>(
+        `SELECT listing_version_id AS "listingVersionId",content_hash AS "contentHash",quote_snapshot::text AS "quoteSnapshot" FROM zzsh_order.rental_order WHERE id=$1`,
+        [retainedOrderId],
+      )).rows[0]!;
+      assert.deepEqual(retainedAfterIsolation, retainedBeforeIsolation, "media isolation must not mutate the existing order snapshot");
+      assert.equal((await request(base, `/api/v1/orders/${retainedOrderId}/cancel`, {}, renter2, USER_ORIGIN, "POST", { "idempotency-key": `pub_r4_cancel_retained_${r4OrderBarrierRunId}` })).response.status, 200);
+      const newAfterIsolation = await createOrder(renter3, orderFirst, { "idempotency-key": `pub_r4_new_after_isolation_${r4OrderBarrierRunId}` });
+      assert.equal(newAfterIsolation.response.status, 404, JSON.stringify(newAfterIsolation.body));
+      r4OrderBarrierResults.push({
+        label: "legal v1 order completes first, later isolation retains its snapshot and blocks a new order",
+        passed: orderFirstResponse?.response.status === 200 && retained.response.status === 200 && newAfterIsolation.response.status === 404,
+        wait: orderFirstWait,
+        createdOrderId: retainedOrderId,
+        retained: { status: retained.response.status, snapshotUnchanged: JSON.stringify(retainedAfterIsolation) === JSON.stringify(retainedBeforeIsolation) },
+        afterIsolationNewOrder: { status: newAfterIsolation.response.status, code: newAfterIsolation.body?.error?.code ?? null },
+      });
+
+      const v2Target = await publishApproved(owner1, "PUB-R4 v2 确认后隔离", "2500", false, true);
+      const v2Media = await r4MediaFor(v2Target);
+      const confirmation = await request(base, "/api/bff/user/order-confirmations", { accountId: v2Target.accountId, versionId: v2Target.versionId, releaseId: v2Target.releaseId }, renter3, USER_ORIGIN, "POST", { "idempotency-key": `pub_r4_confirmation_${r4OrderBarrierRunId}` });
+      assert.equal(confirmation.response.status, 200, JSON.stringify(confirmation.body));
+      assert.equal(typeof confirmation.body?.confirmationToken, "string");
+      const confirmationToken = confirmation.body?.confirmationToken as string;
+      const v2Before = await r4OrderCounts(v2Target.accountId);
+      const v2Holder = await maintenanceDataPool.connect();
+      let v2Order: Awaited<ReturnType<typeof request>> | undefined;
+      let v2Wait: Record<string, unknown> | undefined;
+      try {
+        await v2Holder.query("BEGIN");
+        await lockPublishingAccount(v2Holder, v2Target.accountId);
+        await v2Holder.query(`SELECT id FROM zzsh_supply.media_asset WHERE id=$1 FOR UPDATE`, [v2Media.assetId]);
+        const pending = request(base, "/api/v2/orders", { confirmationToken }, renter3, USER_ORIGIN, "POST", { "idempotency-key": `pub_r4_v2_consume_${r4OrderBarrierRunId}` });
+        v2Wait = await r4WaitForCommonLock("v2 confirmation consume");
+        await v2Holder.query(
+          `UPDATE zzsh_supply.media_asset
+              SET review_state='QUARANTINED',reviewed_by_admin_id=$1,reviewed_at=clock_timestamp(),
+                  review_reason='PUB-R4 v2 confirmation consume barrier',access_class='PRIVATE_REVIEW',revision=revision+1,updated_at=clock_timestamp()
+            WHERE id=$2`,
+          [operator.id, v2Media.assetId],
+        );
+        await recordAudit(v2Holder, {
+          actorType: "test_fixture",
+          actorId: "pub-r4-order-barrier",
+          action: "supply.media.barrier_isolation",
+          objectType: "media_asset",
+          objectId: v2Media.assetId,
+          outcome: "SUCCESS",
+          requestId: r4OrderBarrierRunId,
+          reason: "PUB-R4 v2 confirmation consume barrier",
+          details: { controlledFixture: true, accountId: v2Target.accountId, state: "QUARANTINED" },
+        });
+        await v2Holder.query("COMMIT");
+        v2Order = await pending;
+      } finally {
+        await v2Holder.query("ROLLBACK").catch(() => undefined);
+        v2Holder.release();
+      }
+      const v2After = await r4OrderCounts(v2Target.accountId);
+      assert.equal(v2Order?.response.status, 503, JSON.stringify(v2Order?.body));
+      assert.equal(v2Order?.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+      assert.deepEqual(v2After, v2Before, "v2 confirmation failure must not consume or create an order");
+      r4OrderBarrierResults.push({
+        label: "v2 confirmation issued before isolation waits, then consume fails without order side effects",
+        passed: v2Order?.response.status === 503 && v2Order?.body?.error?.code === "CONFIRMATION_DEPENDENCY_UNAVAILABLE" && JSON.stringify(v2After) === JSON.stringify(v2Before),
+        wait: v2Wait,
+        response: { status: v2Order?.response.status, code: v2Order?.body?.error?.code ?? null },
+        before: v2Before,
+        after: v2After,
+      });
+      console.log("PUB_ORDER_MEDIA_BARRIERS " + JSON.stringify({ runId: r4OrderBarrierRunId, resourceSet: RESOURCE_SET, results: r4OrderBarrierResults, allPassed: r4OrderBarrierResults.every((item) => item.passed), notRun: ["real payment", "real channels"] }));
+      assert.equal(r4OrderBarrierResults.every((item) => item.passed), true, JSON.stringify(r4OrderBarrierResults));
+    }
 
     // ---------- S1: 正向建单与金额口径（V17 全押金/零押金/未配置/保证金 UNKNOWN） ----------
     const accFull = await publishApproved(owner1, "全押金账号", "2500");

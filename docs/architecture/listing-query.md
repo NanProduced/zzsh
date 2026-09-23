@@ -55,7 +55,7 @@ Web 客户端的预算校验与 `listingQuery` 共用序列化：分别计算 `/
 
 | sort | 排序真值 |
 |---|---|
-| latest（默认 DESC，“最新发布”） | 当前公开版本最新 APPROVE 的 decided_at，保留微秒 |
+| latest（默认 DESC，“最新发布”） | 当前公开版本 `listing_publication.published_at`，保留数据库微秒；历史 `LEGACY_APPROVED` 使用其真实 `decided_at` |
 | resourceTotal | 冻结的 STANDARD 买家资源总价，不含押金和个人优惠 |
 | coreQuantity | 明确 coreItemId 的基础库存数量，只允许配置内同游戏 HAFF_BASE 项 |
 
@@ -63,7 +63,9 @@ Web 客户端的预算校验与 `listingQuery` 共用序列化：分别计算 `/
 
 响应包含 `items,nextCursor,queryVersion,sort,direction,sortLabel,filterRevision,catalogRevision,ruleReleaseId,scannedCount,scanBudget:200,scanBudgetReached,limit`。limit 默认20、范围1–50。资格失败也推进 cursor；空 items 加非空 nextCursor 不是结束。下一次照传 cursor，直至 null；刚好200条可能多返回一个终止空页。
 
-cursor HMAC-SHA256 使用独立 audience、keyId 和 `LISTING_CURSOR_SECRET`（或 `_FILE`）/`LISTING_CURSOR_KEY_ID`，secret 至少32字符且不能复用认证或个人确认秘密。缺配置拒绝 v2，但不影响 v1。cursor 有界且签名，包含精确排序键、NULL标记、accountId、游戏、规范化筛选摘要（资源上下限均绑定）、排序和三个revision。旧 min-only 条件规范化保持兼容；上限变化会改变筛选摘要，不能复用旧 cursor。view=list/card 不改变摘要；limit 可变。keyset 不承诺跨请求冻结数据库，客户端按稳定 accountId 去重。
+cursor HMAC-SHA256 使用独立 audience、keyId 和 `LISTING_CURSOR_SECRET`（或 `_FILE`）/`LISTING_CURSOR_KEY_ID`，secret 至少32字符且不能复用认证或个人确认秘密。缺配置拒绝 v2，但不影响 v1。cursor 有界且签名，包含精确排序键、NULL标记、accountId、游戏、规范化筛选摘要（资源上下限均绑定）、排序和三个revision；`latest` 的 position 使用微秒时间戳与 accountId 打平。旧 min-only 条件规范化保持兼容；上限变化会改变筛选摘要，不能复用旧 cursor。view=list/card 不改变摘要；limit 可变。keyset 不承诺跨请求冻结数据库，客户端按稳定 accountId 去重。
+
+公开候选、详情和个人确认共用有效发布事实：`PUBLISHED + OWNER_DIRECT` 或 `APPROVED + LEGACY_APPROVED`，并要求当前版本、hash、release 和账号限制均匹配。恢复暂停或解除媒体隔离不会重写 `published_at`，不会把旧版本重新置顶。旧 v1 cursor 与新 v2 cursor 不共享含义；收到旧版本 cursor 时返回可操作的过期/刷新错误，客户端应从相同筛选的第一页重新查询。
 
 | HTTP / code | 处理 |
 |---|---|

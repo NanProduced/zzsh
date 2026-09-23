@@ -10,7 +10,7 @@ export function requireListingCursorKey(key:ListingCursorKey|undefined):asserts 
   if(!key||typeof key.secret!=="string"||Buffer.byteLength(key.secret)<32||typeof key.keyId!=="string"||!/^[A-Za-z0-9_-]{1,64}$/.test(key.keyId))throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Listing cursor signing is not configured");
 }
 export function encodeListingCursor(position:ListingPosition,binding:ListingCursorBinding,key:ListingCursorKey|undefined) {
-  requireListingCursorKey(key);const body=Buffer.from(JSON.stringify({schema:1,audience:"zzsh:listing-query-v2",keyId:key.keyId,...binding,position})).toString("base64url");return body+"."+createHmac("sha256",key.secret).update(body).digest("base64url");
+  requireListingCursorKey(key);const body=Buffer.from(JSON.stringify({schema:2,audience:"zzsh:listing-query-v2-publication",keyId:key.keyId,...binding,position})).toString("base64url");return body+"."+createHmac("sha256",key.secret).update(body).digest("base64url");
 }
 export function decodeListingCursor(token:string,binding:ListingCursorBinding,key:ListingCursorKey|undefined):ListingPosition {
   requireListingCursorKey(key);
@@ -20,7 +20,8 @@ export function decodeListingCursor(token:string,binding:ListingCursorBinding,ke
     if(signature.length!==expected.length||signature.toString("base64url")!==sig||!timingSafeEqual(signature,expected))throw Error();
     const bytes=Buffer.from(body,"base64url");if(bytes.toString("base64url")!==body)throw Error();
     const c=checkedObject(JSON.parse(bytes.toString()),"cursor",["schema","audience","keyId","queryVersion","gameId","queryHash","sort","direction","coreItemId","filterRevision","catalogRevision","ruleReleaseId","position"]);
-    if(Object.keys(c).length!==13||c.schema!==1||c.audience!=="zzsh:listing-query-v2"||c.keyId!==key.keyId||!Number.isSafeInteger(c.queryVersion)||(c.queryVersion as number)<1)throw Error();
+    if(c.schema===1||c.audience==="zzsh:listing-query-v2")throw conflict("Listing cursor is stale; refresh from the first page");
+    if(Object.keys(c).length!==13||c.schema!==2||c.audience!=="zzsh:listing-query-v2-publication"||c.keyId!==key.keyId||!Number.isSafeInteger(c.queryVersion)||(c.queryVersion as number)<1)throw Error();
     checkedId(c.gameId,"cursor");checkedId(c.ruleReleaseId,"cursor");if(c.coreItemId!==null)checkedId(c.coreItemId,"cursor");
     if(typeof c.queryHash!=="string"||!/^[0-9a-f]{64}$/.test(c.queryHash)||!["latest","resourceTotal","coreQuantity"].includes(c.sort as string)||!["ASC","DESC"].includes(c.direction as string))throw Error();
     for(const k of ["filterRevision","catalogRevision"])if(typeof c[k]!=="string"||!/^[1-9]\d{0,18}$/.test(c[k] as string))throw Error();

@@ -16,7 +16,7 @@
 
 `POST /api/v2/order-confirmations`及同源`/api/bff/user/order-confirmations`，Web入口`/api/order-confirmations`。输入仅`{accountId,versionId,releaseId}`；正式Cookie确定本人，拒绝客户端tier、金额或资格。响应no-store。
 
-短事务按双方user ID→game→account锁序，复核会话/活性/成年实名/非本人、已审核当前公开版本、release/hash、占用及保证金依据。会员修改锁同一user；重建仅使用锁内client，不另借连接。按同一封存release选四档价目，缺档/未知资格/不支持的旧规则档位均拒绝，不回退STANDARD，也不污染公开报价。
+短事务按双方user ID→game→account锁序，复核会话/活性/成年实名/非本人、有效发布事实及当前公开版本、release/hash、占用及保证金依据。有效发布事实必须是 `PUBLISHED + OWNER_DIRECT` 或真实 `APPROVED + LEGACY_APPROVED`；会员修改锁同一user；重建仅使用锁内client，不另借连接。按同一封存release选四档价目，缺档/未知资格/不支持的旧规则档位均拒绝，不回退STANDARD，也不污染公开报价。
 
 生产当前没有权威押金申报/保赔/保证金金额来源，默认失败关闭，不签token。即使VIP/SVIP也不能跳过未知依赖。`CONFIRMATION_DEPENDENCY_UNAVAILABLE`（503）表示这些依赖不全；`MEMBERSHIP_UNKNOWN`（503）表示资格未知。Admin试算deposits与旧payIs不会作为确认依据。
 
@@ -38,7 +38,7 @@
 
 幂等空间为user主体+`order.reservation.create.v2`+key，与v1隔离；请求指纹绑定完整原token/body。先执行有界类型/长度检查及回执查询，成功重放仅复核当前有效会话/活性/原订单归属，返回原回执。此时不检查旧token有效期或当前会员/规则/占用、hold/签名配置；异体同key仍409。重放回执是原创建结果，当前状态通过订单查询取得。
 
-首次执行才验证签名与用户/会话；按双方user ID→game→account锁序检查唯一消费、当前资格、审核版本/release/hash、会员/资金事实及完整金额摘要。新鲜签名认证本身不是建单许可，必须继续锁内完整重建/验证。持锁后与插单前按DB时间核expiry；0041插入触发器再次检查期限，等待导致过期则回滚，不留下占用或成功回执。原`ORDER_HOLD_SECONDS`独立决定订单hold，不取token剩余时间。
+首次执行才验证签名与用户/会话；按双方user ID→game→account锁序检查唯一消费、当前资格、有效发布版本/release/hash、会员/资金事实及完整金额摘要。新鲜签名认证本身不是建单许可，必须继续锁内完整重建/验证。持锁后与插单前按DB时间核expiry；0041插入触发器再次检查期限，等待导致过期则回滚，不留下占用或成功回执。原`ORDER_HOLD_SECONDS`独立决定订单hold，不取token剩余时间。
 
 唯一消费使用原订单表的nullable UUID `confirmation_id`（旧单NULL）和全状态唯一约束，无消费表/缓存/worker。同凭据换key再次使用返回409 `CONFIRMATION_USED`；取消和超时保留消费ID，不能复用。插单、消费、创建审计及幂等成功记录在一个事务中提交；任何一步失败均回滚。资金UNKNOWN继续拒绝，合成测试成功不构成生产资金依据。
 

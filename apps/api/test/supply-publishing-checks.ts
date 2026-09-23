@@ -166,6 +166,28 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   assert.equal(
     (
       await call(
+        "/api/bff/admin/supply/media/" + asset.assetId + "/visibility",
+        { visibility: "PRIVATE_REVIEW", reason: "R3 private display restore fixture" },
+        o.operator,
+      )
+    ).status,
+    200,
+    "a technically ready private display can remain private",
+  );
+  assert.equal(
+    (
+      await call(
+        "/api/bff/admin/supply/media/" + asset.assetId + "/visibility",
+        { visibility: "PUBLIC_DISPLAY", reason: "R3 target-state public restore fixture" },
+        o.operator,
+      )
+    ).status,
+    200,
+    "a technically ready private display can be restored to public",
+  );
+  assert.equal(
+    (
+      await call(
         "/api/v1/supply/media/" + asset.assetId + "/content",
         undefined,
       )
@@ -376,19 +398,21 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     occupancy: "FREE",
     reference: "fixture:m3c",
   });
-  assert.equal(
-    (await call(userPrefix + "/submit", token(d))).status,
-    409,
-    "display must be reviewed before publication",
-  );
-  await ok(
-    "/api/bff/admin/supply/media/" + asset.assetId + "/review",
-    { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" },
-    o.boss,
-  );
   d = await ok(userPrefix + "/submit", token(d));
-  assert.equal(d.version.reviewState, "SUBMITTED");
-  const submittedId = d.version.id;
+  assert.equal(d.version.reviewState, "PUBLISHED");
+  const publishedId = d.version.id;
+  const publication = (
+    await o.pool.query(
+      `SELECT source,published_by_realm,published_by_user_id,published_at,content_hash FROM zzsh_supply.listing_publication WHERE version_id=$1`,
+      [publishedId],
+    )
+  ).rows[0];
+  assert.deepEqual(
+    { source: publication.source, realm: publication.published_by_realm, actor: publication.published_by_user_id },
+    { source: "OWNER_DIRECT", realm: "user", actor: owner },
+  );
+  assert.ok(publication.published_at instanceof Date);
+  assert.equal(publication.content_hash, priceHash);
   assert.equal(
     (
       await call(
@@ -404,7 +428,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     () =>
       o.pool.query(
         `UPDATE zzsh_supply.inventory_line SET quantity=0 WHERE version_id=$1`,
-        [submittedId],
+        [publishedId],
       ),
     { code: "40001" },
   );
@@ -412,15 +436,6 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     expectedRevision: d.account.revision,
     reason: "审核期间暂不接单",
   });
-  d = await ok(
-    adminPrefix + "/decide",
-    {
-      ...token(d),
-      decision: "APPROVE",
-      reason: "资料与展示图一致，仅核对申报",
-    },
-    o.operator,
-  );
   assert.equal(d.account.owner_paused, true);
   assert.equal(
     (await call("/api/v1/supply/listings/" + o.accountId, undefined)).status,
@@ -505,7 +520,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   d = await ok(userPrefix + "/drafts", {
     expectedRevision: d.account.revision,
   });
-  assert.notEqual(d.version.id, submittedId);
+  assert.notEqual(d.version.id, publishedId);
   assert.equal(
     (await fetch(o.base + publicListing.media[0].url)).status,
     404,
@@ -515,13 +530,13 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     (
       await o.pool.query(
         `SELECT content_hash FROM zzsh_supply.listing_version WHERE id=$1`,
-        [submittedId],
+        [publishedId],
       )
     ).rows[0].content_hash,
     priceHash,
   );
-  const history = await ok(userPrefix + "?versionId=" + submittedId, undefined);
-  assert.equal(history.version.id, submittedId);
+  const history = await ok(userPrefix + "?versionId=" + publishedId, undefined);
+  assert.equal(history.version.id, publishedId);
   assert.equal(history.available, false);
   assert.equal(history.version.quote.resourceTotal.amount, "150.00");
   d = await ok(
@@ -541,7 +556,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   const race = await Promise.all([
     call(
       adminPrefix + "/decide",
-      { ...raceToken, decision: "REJECT", reason: "请补充账号截图" },
+      { ...raceToken, decision: "REJECT", reason: "直发布版本不可走人工决定" },
       o.operator,
     ),
     call(userPrefix + "/withdraw", {
@@ -550,9 +565,9 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       reason: "主动补充资料",
     }),
   ]);
-  assert.deepEqual(race.map((r) => r.status).sort(), [200, 409]);
+  assert.deepEqual(race.map((r) => r.status).sort(), [409, 409]);
   d = await get();
-  assert.ok(["WITHDRAWN", "REJECTED"].includes(d.version.reviewState));
+  assert.equal(d.version.reviewState, "PUBLISHED");
   d = await ok(userPrefix + "/drafts", {
     expectedRevision: d.account.revision,
   });
@@ -729,7 +744,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     decisionBody = {
       ...token(d),
       decision: "REJECT",
-      reason: "请补充可核对的资料截图",
+      reason: "直发布版本不可走人工决定",
     };
   const decision = await call(
     adminPrefix + "/decide",
@@ -738,8 +753,27 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     "POST",
     decisionKey,
   );
-  assert.equal(decision.status, 200);
-  d = decision.body;
+  assert.equal(decision.status, 409, "direct publication cannot be decided by admin");
+  d = await get();
+  assert.equal(d.version.reviewState, "PUBLISHED");
+  assert.equal(
+    (
+      await o.pool.query(
+        `SELECT count(*)::text AS count FROM zzsh_supply.review_decision WHERE version_id=$1`,
+        [d.version.id],
+      )
+    ).rows[0].count,
+    "0",
+  );
+  assert.equal(
+    (
+      await o.pool.query(
+        `SELECT count(*)::text AS count FROM zzsh_supply.listing_publication WHERE version_id=$1`,
+        [d.version.id],
+      )
+    ).rows[0].count,
+    "1",
+  );
   await o.maintenance.query(
     `DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`,
     [o.operatorId, o.gameId],
@@ -804,8 +838,8 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   assert.ok(
     audits.some(
       (r) =>
-        r.action === "supply.publication.decide" &&
-        r.details.after.versionState === "REJECTED",
+        r.action === "supply.publication.submit" &&
+        r.details.after.versionState === "PUBLISHED",
     ),
   );
   assert.equal(JSON.stringify(audits).includes("private fixture note"), false);
@@ -862,7 +896,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       .account.id,
     o.accountId,
   );
-  // Leave a real pending review for browser replay; API operations remain fixture-only.
+  // Leave a real direct publication for browser replay; API operations remain fixture-only.
   d = await ok(userPrefix + "/drafts", {
     expectedRevision: d.account.revision,
   });
@@ -879,7 +913,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   );
   d = await ok(userPrefix + "/quote", { expectedRevision: d.account.revision });
   d = await ok(userPrefix + "/accept-rules", token(d));
-  await ok(userPrefix + "/submit", token(d));
+  d = await ok(userPrefix + "/submit", token(d));
   await o.testContext.test(
     "M3-C review R1: anonymous versionless account is closed",
     async () => {
@@ -932,89 +966,73 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     },
   );
   await o.testContext.test(
-    "M3-C review R2: quote field revocation also applies to cached writes",
+    "M3-C publication R2: direct publish replay preserves the receipt",
     async () => {
-      const before = await get(),
-        key = "review_r2_" + randomUUID();
-      const body = {
-        ...token(before),
-        decision: "APPROVE",
-        reason: "定向返修缓存字段权限验证",
-      };
+      const draft = await ok(userPrefix + "/drafts", {
+        expectedRevision: d.account.revision,
+      });
+      const edited = await ok(
+        userPrefix + "/draft",
+        {
+          ...declaration,
+          title: "直发布回放样例",
+          inventory: [{ itemId: o.itemId, quantity: "50000000" }],
+          expectedRevision: draft.account.revision,
+        },
+        o.user,
+        "PUT",
+      );
+      const quoted = await ok(userPrefix + "/quote", {
+        expectedRevision: edited.account.revision,
+      });
+      const accepted = await ok(userPrefix + "/accept-rules", token(quoted));
+      const body = token(accepted),
+        key = "publication_r2_" + randomUUID();
       const first = await call(
-        adminPrefix + "/decide",
+        userPrefix + "/submit",
         body,
-        o.operator,
+        o.user,
         "POST",
         key,
       );
       assert.equal(first.status, 200);
+      assert.equal(first.body.version.reviewState, "PUBLISHED");
       assert.ok(first.body.version.quote.ownerTotal);
-      const count = async () =>
+      const replay = await call(
+        userPrefix + "/submit",
+        body,
+        o.user,
+        "POST",
+        key,
+      );
+      assert.equal(replay.status, 200);
+      assert.deepEqual(replay.body, first.body);
+      assert.equal(
         (
           await o.pool.query(
-            `SELECT count(*)::text AS count FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='supply.publication.decide'`,
-            [o.accountId],
+            `SELECT count(*)::text AS count FROM zzsh_supply.listing_publication WHERE version_id=$1`,
+            [first.body.version.id],
           )
-        ).rows[0].count;
-      const auditBefore = await count();
-      await o.maintenance.query(
-        `UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='supply.quote.internal.read'`,
-        [o.operatorId],
+        ).rows[0].count,
+        "1",
       );
-      try {
-        const advanced = await ok(
-          adminPrefix + "/restriction",
-          {
-            expectedRevision: first.body.account.revision,
-            restricted: false,
-            reason: "推进状态以验证缓存仍是原回执",
-          },
-          o.boss,
-        );
-        assert.notEqual(advanced.account.revision, first.body.account.revision);
-        const replay = await call(
-          adminPrefix + "/decide",
-          body,
-          o.operator,
-          "POST",
-          key,
-        );
-        assert.equal(replay.status, 200);
-        for (const field of [
-          "ownerTotal",
-          "ownerAmount",
-          "ownerUnitAmount",
-          "platformFullProfit",
-          "platformAmount",
-          "pricingInputs",
-          "publisherBailRequirement",
-        ])
-          assert.equal(
-            JSON.stringify(replay.body.version.quote).includes(field),
-            false,
-            field,
-          );
-        assert.equal(replay.body.version.id, first.body.version.id);
-        assert.equal(replay.body.account.revision, first.body.account.revision);
-        assert.equal(await count(), auditBefore);
-        const cached = (
+      assert.equal(
+        (
           await o.pool.query(
-            `SELECT response_body FROM zzsh_supply.idempotency_record WHERE key=$1`,
-            [key],
+            `SELECT count(*)::text AS count FROM zzsh_supply.review_decision WHERE version_id=$1`,
+            [first.body.version.id],
           )
-        ).rows[0].response_body;
-        assert.deepEqual(
-          cached,
-          first.body,
-          "response projection must not mutate the stored receipt",
-        );
-      } finally {
-        await o.maintenance.query(
-          `UPDATE zzsh_iam.admin_user_permission SET effect='ALLOW' WHERE admin_user_id=$1 AND permission_code='supply.quote.internal.read'`,
-          [o.operatorId],
-        );
-      }
+        ).rows[0].count,
+        "0",
+      );
+      const cached = (
+        await o.pool.query(
+          `SELECT response_body FROM zzsh_supply.idempotency_record WHERE key=$1`,
+          [key],
+        )
+      ).rows[0].response_body;
+      assert.deepEqual(cached, first.body, "receipt must remain immutable");
+      d = first.body;
     },
   );
   await o.testContext.test(

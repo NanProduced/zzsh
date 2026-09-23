@@ -13,6 +13,7 @@ import { fingerprintRequest } from "../src/supply/supply-util";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -36,6 +37,23 @@ const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
 const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply"] as const;
+const PUB_DIRECT_CREDENTIALS = RESOURCE_SET === "pub_direct" ? (() => {
+  const path = process.env.PUB_DIRECT_SUPPLY_CREDENTIALS_FILE;
+  if (!path) throw new Error("pub_direct requires PUB_DIRECT_SUPPLY_CREDENTIALS_FILE");
+  const value = JSON.parse(readFileSync(path, "utf8")) as {
+    database?: string; host?: string; port?: number; marker?: string; state?: string;
+    migration?: { role?: string; password?: string };
+    runtime?: { role?: string; password?: string };
+  };
+  assert.deepEqual(
+    { database: value.database, host: value.host, port: value.port, marker: value.marker, state: value.state,
+      migrationRole: value.migration?.role, runtimeRole: value.runtime?.role },
+    { database: "zzsh_test_supply_pub_direct", host: "127.0.0.1", port: 55432, marker: RESOURCE_MARKER, state: "RESERVED",
+      migrationRole: "zzsh_m3b_pub_direct_m", runtimeRole: "zzsh_m3b_pub_direct_r" },
+  );
+  if (!value.migration?.password || !value.runtime?.password) throw new Error("pub_direct credential values are missing");
+  return { migrationPassword: value.migration.password, runtimePassword: value.runtime.password };
+})() : null;
 const HAFF_RULE = {
   schema: "haff-ratio-v1",
   baseBySafeBox: { "box-a": "50", "box-b": "60" },
@@ -114,8 +132,8 @@ function makeResources(): Resources {
     ...(maintenanceUser ? { DB_USER: maintenanceUser } : {}),
   };
   const maintenance = loadConfig(baseEnv);
-  const migrationPassword = process.env.M3B_SUPPLY_TEST_MIGRATION_PASSWORD?.trim() || randomBytes(32).toString("hex");
-  const runtimePassword = process.env.M3B_SUPPLY_TEST_RUNTIME_PASSWORD?.trim() || randomBytes(32).toString("hex");
+  const migrationPassword = PUB_DIRECT_CREDENTIALS?.migrationPassword || process.env.M3B_SUPPLY_TEST_MIGRATION_PASSWORD?.trim() || randomBytes(32).toString("hex");
+  const runtimePassword = PUB_DIRECT_CREDENTIALS?.runtimePassword || process.env.M3B_SUPPLY_TEST_RUNTIME_PASSWORD?.trim() || randomBytes(32).toString("hex");
   const runtime = loadConfig({ ...baseEnv, DB_USER: runtimeUser, DB_PASSWORD: runtimePassword, DB_PASSWORD_FILE: undefined });
   const migration = loadConfig({
     ...baseEnv,
@@ -190,7 +208,7 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
   assert.equal(existing.rows[0]?.comment, RESOURCE_MARKER, "dedicated test database marker is missing or mismatched");
 }
 
-async function ensureRole(pool: Pool, roleName: string, password: string, marker: string): Promise<void> {
+async function ensureRole(pool: Pool, roleName: string, password: string, marker: string, allowPasswordChange = true): Promise<void> {
   const current = await pool.query<{ comment: string | null; canLogin: boolean; isSuperuser: boolean; canCreateRole: boolean; canCreateDb: boolean; canInherit: boolean; canReplicate: boolean; canBypassRls: boolean }>(
     "SELECT shobj_description(r.oid, 'pg_authid') AS comment, r.rolcanlogin AS \"canLogin\", r.rolsuper AS \"isSuperuser\", r.rolcreaterole AS \"canCreateRole\", r.rolcreatedb AS \"canCreateDb\", r.rolinherit AS \"canInherit\", r.rolreplication AS \"canReplicate\", r.rolbypassrls AS \"canBypassRls\" FROM pg_roles r WHERE r.rolname = $1",
     [roleName],
@@ -200,7 +218,7 @@ async function ensureRole(pool: Pool, roleName: string, password: string, marker
     const row = current.rows[0]!;
     assert.equal(row.comment, marker, roleName + " marker is missing or mismatched");
     assert.deepEqual([row.canLogin, row.isSuperuser, row.canCreateRole, row.canCreateDb, row.canInherit, row.canReplicate, row.canBypassRls], [true, false, false, false, false, false, false], roleName + " is not a least-privilege login role");
-    await pool.query("ALTER ROLE " + role + " PASSWORD " + quotedLiteral(password));
+    if (allowPasswordChange) await pool.query("ALTER ROLE " + role + " PASSWORD " + quotedLiteral(password));
     return;
   }
   await pool.query("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD " + quotedLiteral(password));
@@ -384,8 +402,8 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-m3b-maintenance", 2);
     guard = await resourceGuard(maintenancePool, resources);
     await ensureDatabase(maintenancePool, resources);
-    await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
-    await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
+    await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"), RESOURCE_SET !== "pub_direct");
+    await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"), RESOURCE_SET !== "pub_direct");
     await grantDatabaseAccess(maintenancePool, resources);
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-m3b-owner", 2);
     await prepareOwnership(maintenanceDataPool, resources);
@@ -819,7 +837,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const bindRejected = await request(base, `/api/bff/admin/supply/games/${gameId}/cover`, { mediaId: coverAssetId }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(bindRejected.response.status, 400, "rejected media must not be bindable");
 
-    const approvedReview = await request(base, `/api/bff/admin/supply/media/${coverAssetId}/review`, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    const approvedReview = await request(base, `/api/bff/admin/supply/media/${coverAssetId}/review`, { decision: "APPROVE", reason: "重新核验后恢复", visibility: "PUBLIC_DISPLAY" }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
     assert.equal(approvedReview.response.status, 200, JSON.stringify(approvedReview.body));
     assert.equal(approvedReview.body?.accessClass, "PUBLIC_DISPLAY");
     const publicCover = await fetch(`${base}/api/v1/supply/media/${coverAssetId}/content`);

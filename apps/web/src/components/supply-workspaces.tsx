@@ -115,13 +115,14 @@ function stateLabel(state: MySupply["version"] extends infer V ? V extends { rev
     WITHDRAWN: "已撤回",
     REJECTED: "已退回",
     APPROVED: "已通过",
+    PUBLISHED: "已上架",
     IMPORTED_UNVERIFIED: "待复核",
   };
   return labels[String(state)] ?? "未确认";
 }
 
 function mediaReviewLabel(state: string | undefined): string {
-  return ({ PENDING: "待审核", APPROVED: "审核通过", REJECTED: "审核退回" } as Record<string, string>)[state ?? ""] ?? "状态待核";
+  return ({ NOT_REQUIRED: "免人工预审", PENDING: "待核", APPROVED: "审核通过", REJECTED: "审核退回", QUARANTINED: "已隔离" } as Record<string, string>)[state ?? ""] ?? "状态待核";
 }
 
 function blockerText(code: string): string {
@@ -980,7 +981,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
         applySupply(submitted, false);
         setDraftDirty(false);
         setEditing(false);
-        setNotice("资料已提交审核；审核完成前不能直接编辑此版本。");
+        setNotice("资料已直接上架；展示图已完成技术校验，私有凭证仅内部可见。");
       });
     } catch (failure) {
       reportFailure(failure, undefined, context, "submit");
@@ -1122,7 +1123,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   if (identityState === "checking") return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在确认登录身份</h2><p>确认期间暂不展示私人发布资料，也不会继续发送保存、报价或上传请求。</p></section></ServiceShell>;
   if (identityState === "failed") return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。"><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、报价或上传请求。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重试身份确认</button></section></ServiceShell>;
 
-  if (!accountIdProp && gamesLoaded && games.length === 0) return <ServiceShell {...publishShell} title={publishTitle} description="填写账号资料并提交审核。"><section className="account-guest"><h2>暂未开放上架</h2><p>目前没有开放出租的游戏，请稍后再来。</p><Link className="button secondary" href="/">返回首页</Link></section></ServiceShell>;
+  if (!accountIdProp && gamesLoaded && games.length === 0) return <ServiceShell {...publishShell} title={publishTitle} description="填写账号资料并直接上架。"><section className="account-guest"><h2>暂未开放上架</h2><p>目前没有开放出租的游戏，请稍后再来。</p><Link className="button secondary" href="/">返回首页</Link></section></ServiceShell>;
 
   const fieldErrors = error?.details ?? [];
   const fieldError = (path: string) => {
@@ -1152,7 +1153,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
         ? `${item.bindingSaved ? "已保存" : "已上传，待保存"} · ${mediaReviewLabel(item.reviewState)}${item.publiclyReadable ? " · 当前公开展示" : item.publicDisplayEligible ? " · 图片可展示，账号尚未公开" : ""}`
         : item.bindingSaved ? "已保存，审核状态待核" : "已上传，待保存；审核状态待核";
 
-  return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；价格、规则和资格以当前结果为准。">
+  return <ServiceShell {...publishShell} title={publishTitle} description="填写公开账号资料与出租条件；满足资格后会直接上架，价格和规则以服务端结果为准。">
     <div className="publish-page-layout">
     <form className="publish-form supply-workspace" onSubmit={submit}>
       <div className="publish-mode"><Link href="/publish" aria-current={mode === "standard" ? "page" : undefined}>普通出租</Link><Link href="/publish?mode=fast" aria-current={mode === "fast" ? "page" : undefined}>极速出租</Link></div>
@@ -1161,7 +1162,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       <Notice error={error} text={notice} />
        {error?.status === 409 && serverSnapshot ? <div className="supply-conflict" role="alert"><strong>资料状态已变化</strong><p>已保留本页输入，没有自动覆盖。当前资料状态为 {serverSnapshot.version ? stateLabel(serverSnapshot.version.reviewState) : "未创建草稿"}。</p><div className="supply-inline-actions"><button type="button" className="button secondary" onClick={() => void refreshLatest(false)}>重新读取最新状态</button><button type="button" className="button secondary" onClick={() => void refreshLatest(true)}>采用最新资料</button></div></div> : null}
        {error?.status === 0 && lastRetry.current ? <div className="supply-conflict"><strong>结果未知</strong><p>本页没有自动重复操作。请重试当前步骤；如需修改内容，请先完成重试后再保存。</p><button type="button" className="button secondary" onClick={() => void retryLast()}>重试当前步骤</button></div> : null}
-      {readOnly ? <div className="supply-readonly" role="status"><strong>当前版本不可直接编辑</strong><span>审核中的版本请先撤回；已通过或已退回的版本会在你明确开始修改后创建新草稿。</span><button type="button" className="button secondary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "开始修改"}</button></div> : null}
+      {readOnly ? <div className="supply-readonly" role="status"><strong>当前版本不可直接编辑</strong><span>已上架、审核中的历史版本或已退回版本会在你明确开始修改后创建新草稿。</span><button type="button" className="button secondary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "开始修改"}</button></div> : null}
       <GroupNav errors={fieldErrors.map((item) => item.path)} />
 
       <section id="basics" className="supply-section" aria-labelledby="basics-heading">
@@ -1221,7 +1222,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
         {agreement ? <div className="supply-agreement"><h3>{agreement.title}</h3><div className="supply-agreement-body">{agreement.body}</div><label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !quoteData} onChange={(event) => setAgreementChecked(event.target.checked)} />我已阅读并同意当前协议</label><button type="button" className="button secondary" disabled={formDisabled || !quoteData || busy === "accept"} onClick={() => void acceptRules()}>{busy === "accept" ? "确认中…" : rulesAccepted ? "已按当前版本确认" : "确认规则与协议"}</button></div> : <p className="supply-muted">当前规则协议尚未配置。</p>}
       </section>
 
-      <div className="publish-actions supply-actions"><button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button><button type="button" className="button secondary" disabled={formDisabled} onClick={() => void quote()}>{busy === "quote" ? "获取报价中…" : "获取报价"}</button><button className="button primary" disabled={formDisabled || !rulesAccepted}>{busy === "submit" ? "提交中…" : "提交审核"}<Send size={16} /></button><span>草稿保存在账号下；提交后按审核状态继续处理。</span></div>
+      <div className="publish-actions supply-actions"><button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button><button type="button" className="button secondary" disabled={formDisabled} onClick={() => void quote()}>{busy === "quote" ? "获取报价中…" : "获取报价"}</button><button className="button primary" disabled={formDisabled || !rulesAccepted}>{busy === "submit" ? "上架中…" : "直接上架"}<Send size={16} /></button><span>规则、报价和资格确认后直接上架；无需等待管理员预审。</span></div>
     </form>
     <PublishSummary gameId={gameId} draft={draft} catalog={catalog} media={media} quote={quoteData} rulesAccepted={rulesAccepted} blockers={blockers} readOnly={readOnly} busy={busy} quoteStale={quoteStale} />
     </div>
@@ -1255,7 +1256,7 @@ function PublishSummary({ gameId, draft, catalog, media, quote, rulesAccepted, b
     { label: "图片凭证", detail: displayDetail, ready: displayReady },
     { label: "租期与协议", detail: rulesAccepted ? "协议已按当前版本确认" : quoteStale ? "资料已变更，报价需要重新获取" : quote ? "已取得当前报价，待协议确认" : "先保存草稿后获取报价", ready: rulesAccepted },
   ];
-  const busyText = busy === "save" ? "保存草稿" : busy === "quote" ? "获取报价" : busy === "accept" ? "确认协议" : busy === "submit" ? "提交审核" : busy === "edit" ? "准备草稿" : "处理当前操作";
+  const busyText = busy === "save" ? "保存草稿" : busy === "quote" ? "获取报价" : busy === "accept" ? "确认协议" : busy === "submit" ? "直接上架" : busy === "edit" ? "准备草稿" : "处理当前操作";
   return <aside className="publish-summary" aria-label="发布核对摘要">
     <div className="publish-summary-heading"><div><span>发布核对</span><h2>填写状态</h2></div><Chip color={rulesAccepted ? "success" : "warning"} variant="soft">{rulesAccepted ? "协议已确认" : "协议待确认"}</Chip></div>
     <ol className="publish-summary-steps">{steps.map((step, index) => <li key={step.label} className={step.ready ? "is-ready" : "is-pending"}><span className="publish-summary-index">{step.ready ? <Check size={14} aria-hidden="true" /> : index + 1}</span><span><strong>{step.label}</strong><small>{step.detail}</small></span></li>)}</ol>
@@ -1661,7 +1662,7 @@ function AccountDetail({ detail, latest, busy, identityReady, onAction, onRefres
   const version = detail.version;
   const reasons = detail.decisions?.filter((decision) => decision.decision === "REJECT") ?? [];
   const blockers = [...(detail.blockers ?? []), ...(detail.account.staff_restricted ? ["STAFF_RESTRICTED"] : [])];
-  const canPause = Boolean(version?.reviewState === "APPROVED" && !detail.account.owner_paused);
+  const canPause = Boolean(version?.reviewState === "PUBLISHED" && !detail.account.owner_paused);
   const canResume = Boolean(detail.account.owner_paused);
   return <div className="supply-account-detail"><div className="supply-detail-heading"><div><h2>{version?.declaration.title || "未命名出租账号"}</h2><p>{version ? stateLabel(version.reviewState) : "尚未创建发布版本"}</p></div><Link href={`/publish?accountId=${encodeURIComponent(detail.account.id)}&edit=1`} className="button secondary">{version?.reviewState === "DRAFT" ? "继续编辑" : "创建修改草稿"}</Link></div>{latest ? <div className="supply-conflict"><strong>资料状态已变化</strong><p>当前状态：{latest.version ? stateLabel(latest.version.reviewState) : "未创建草稿"}。</p><div className="supply-inline-actions"><button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={onRefresh}>重新读取</button><button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={onAdopt}>采用最新状态</button></div></div> : null}{blockers.length ? <div className="supply-blockers" role="alert"><strong>当前限制</strong>{[...new Set(blockers)].map((code) => <p key={code}>{blockerText(code)}</p>)}</div> : null}{reasons.length ? <div className="supply-decisions"><h3>退回原因</h3>{reasons.map((decision) => <p key={decision.id}>{decision.reason}</p>)}</div> : null}<dl className="supply-detail-facts"><div><dt>号主侧金额</dt><dd>{moneyText(version?.quote?.ownerTotal)}</dd></div><div><dt>发布保证金要求</dt><dd>{moneyText(version?.quote?.publisherBailRequirement)}</dd></div><div><dt>公开展示图</dt><dd>{version?.declaration.mediaBindings.filter((item) => item.purpose === "ACCOUNT_DISPLAY").length ?? 0} 张</dd></div><div><dt>私有审核凭证</dt><dd>{version?.declaration.mediaBindings.filter((item) => item.purpose === "ACCOUNT_EVIDENCE").length ?? 0} 张，仅审核可见</dd></div></dl>{version?.declaration.description ? <div className="supply-detail-copy"><h3>公开说明</h3><p>{version.declaration.description}</p></div> : null}<div className="supply-inline-actions">{version?.reviewState === "SUBMITTED" ? <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("withdraw")}><Undo2 size={16} />{busy === "withdraw" ? "撤回中…" : "撤回审核"}</button> : null}{canPause ? <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("pause")}><Pause size={16} />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}{canResume ? <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("resume")}><Play size={16} />{busy === "resume" ? "恢复中…" : "恢复接单"}</button> : null}<button type="button" className="button quiet" disabled={!identityReady || busy !== ""} onClick={onRefresh}><RefreshCw size={15} />读取最新状态</button></div><p className="supply-muted">撤回、暂停和恢复会进行资格与对象检查；本页不展示凭证链接。</p></div>;
 }

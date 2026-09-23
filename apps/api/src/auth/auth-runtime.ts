@@ -899,7 +899,7 @@ export async function mountAuthHandlers(
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },
     realNameProvider: options.realNameProvider ?? createFakeRealNameProvider("UNKNOWN"),
     userObligationReader: async (userId,client) => {
-      const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED') LIMIT 1",[userId]);
+      const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED') LIMIT 1",[userId]);
       if(pending.rowCount) return "PENDING";
       const orderPending=await client.query("SELECT 1 FROM zzsh_order.rental_order WHERE status IN ('PENDING_PAYMENT','PAID') AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1",[userId]);
       if(orderPending.rowCount) return "PENDING";

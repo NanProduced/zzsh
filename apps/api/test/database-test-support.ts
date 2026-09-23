@@ -95,6 +95,7 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_supply"."listing_entitlement",
       "zzsh_supply"."listing_skin",
       "zzsh_supply"."inventory_line",
+      "zzsh_supply"."listing_publication",
       "zzsh_supply"."listing_version",
       "zzsh_supply"."gunsmith_code",
       "zzsh_supply"."firearm_alias",

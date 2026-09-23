@@ -319,7 +319,7 @@ export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
     position: number;
     purpose: "ACCOUNT_EVIDENCE" | "ACCOUNT_DISPLAY";
     byteHash: string | null;
-    reviewState?: "PENDING" | "APPROVED" | "REJECTED" | "UNAVAILABLE";
+    reviewState?: "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED" | "QUARANTINED" | "UNAVAILABLE";
     publicDisplayEligible?: boolean;
     publiclyReadable?: boolean;
   }>;
@@ -344,6 +344,7 @@ export type MySupply = {
       | "WITHDRAWN"
       | "REJECTED"
       | "APPROVED"
+      | "PUBLISHED"
       | "IMPORTED_UNVERIFIED";
     releaseId: string | null;
     contentHash: string | null;

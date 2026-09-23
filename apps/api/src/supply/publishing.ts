@@ -22,6 +22,8 @@ import {
   projectPublicAttributeDisplay,
   projectPublicListingGame,
   projectPublicOffer,
+  isEffectivePublicationState,
+  mediaReviewAllowsPublication,
   type BoundTermOption,
   type PublicMediaRoute,
 } from "./listing-query";
@@ -79,6 +81,20 @@ export type ListingVersion = {
   presentation: Record<string, unknown>;
   revision: string;
   submitted_at: Date | null;
+};
+export type ListingPublication = {
+  id: string;
+  version_id: string;
+  account_id: string;
+  owner_user_id: string;
+  game_id: string;
+  rule_release_id: string;
+  content_hash: string;
+  source: "OWNER_DIRECT" | "LEGACY_APPROVED";
+  published_by_realm: "user" | "admin";
+  published_by_user_id: string | null;
+  published_by_admin_id: string | null;
+  published_at: Date;
 };
 export async function lockPublishingAccount(
   client: PoolClient,
@@ -165,6 +181,21 @@ export async function currentVersion(
   ).rows[0];
   if (!v) throw conflict("请先保存一份草稿");
   return v;
+}
+export async function readListingPublication(
+  client: PoolClient,
+  account: PublishingAccount,
+  version: ListingVersion,
+): Promise<ListingPublication | null> {
+  if (!version.rule_release_id || !version.content_hash) return null;
+  return (
+    await client.query<ListingPublication>(
+      `SELECT * FROM zzsh_supply.listing_publication
+        WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3
+          AND game_id=$4 AND rule_release_id=$5 AND content_hash=$6`,
+      [version.id, account.id, account.owner_user_id, account.game_id, version.rule_release_id, version.content_hash],
+    )
+  ).rows[0] ?? null;
 }
 async function bumpAccount(
   client: PoolClient,
@@ -824,28 +855,40 @@ async function assertAccepted(
 async function assertMediaReady(
   client: PoolClient,
   v: ListingVersion,
+  mode: "direct" | "review" = "direct",
+  lockMedia = false,
 ): Promise<void> {
   const media = (
     await client.query(
-      `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`,
+      `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1${lockMedia ? " ORDER BY a.id FOR UPDATE" : ""}`,
       [v.id],
     )
   ).rows;
   if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY"))
     throw invalid("至少需要一张展示图", "mediaBindings");
-  if (
-    media.some(
-      (m) =>
-        m.review_state !== "APPROVED" ||
-        (m.purpose === "ACCOUNT_DISPLAY" &&
-          (!m.public_storage_key || m.access_class !== "PUBLIC_DISPLAY")),
-    )
-  )
-    throw conflict("请先完成图片审核，私有凭证不能当展示图");
+  if (mode === "review") {
+    if (media.some((m) => m.review_state !== "APPROVED" ||
+      (m.purpose === "ACCOUNT_DISPLAY" && (!m.public_storage_key || m.access_class !== "PUBLIC_DISPLAY"))))
+      throw conflict("请先完成图片审核，私有凭证不能当展示图");
+    return;
+  }
+  if (media.some((m) => {
+    if (m.ownership_kind === "USER_SUPPLY" && m.purpose === "ACCOUNT_DISPLAY") {
+      return !mediaReviewAllowsPublication(m.review_state) ||
+        m.technical_state !== "READY" ||
+        !m.public_storage_key ||
+        m.access_class !== "PUBLIC_DISPLAY";
+    }
+    if (m.ownership_kind === "USER_SUPPLY" && m.purpose === "ACCOUNT_EVIDENCE") {
+      return m.access_class !== "PRIVATE_REVIEW";
+    }
+    return m.review_state !== "APPROVED";
+  })) throw conflict("图片技术校验尚未完成，私有凭证不能公开");
 }
 export async function submitListing(
   client: PoolClient,
   a: PublishingAccount,
+  actorId: string,
   body: Record<string, unknown>,
   gate: SupplyGateReader,
 ): Promise<void> {
@@ -856,9 +899,15 @@ export async function submitListing(
   const blockers = await publicationBlockers(client, a, v, gate);
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
-  await assertMediaReady(client, v);
+  await assertMediaReady(client, v, "direct", true);
   await client.query(
-    `UPDATE zzsh_supply.listing_version SET review_state='SUBMITTED',submitted_at=clock_timestamp(),revision=revision+1 WHERE id=$1`,
+    `INSERT INTO zzsh_supply.listing_publication
+      (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_user_id,published_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,'OWNER_DIRECT','user',$8,clock_timestamp())`,
+    [newSupplyId("publication"),v.id,a.id,a.owner_user_id,a.game_id,v.rule_release_id,v.content_hash,actorId],
+  );
+  await client.query(
+    `UPDATE zzsh_supply.listing_version SET review_state='PUBLISHED',revision=revision+1 WHERE id=$1`,
     [v.id],
   );
   await bumpAccount(client, a);
@@ -899,7 +948,7 @@ export async function reviewListing(
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
-    await assertMediaReady(client, v);
+    await assertMediaReady(client, v, "review", true);
   }
   await client.query(
     `INSERT INTO zzsh_supply.review_decision(id,version_id,release_id,content_hash,decision,reason,reviewer_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7)`,
@@ -913,10 +962,31 @@ export async function reviewListing(
       actorId,
     ],
   );
-  await client.query(
-    `UPDATE zzsh_supply.listing_version SET review_state=$2,revision=revision+1 WHERE id=$1`,
-    [v.id, body.decision === "APPROVE" ? "APPROVED" : "REJECTED"],
-  );
+  if (body.decision === "APPROVE") {
+    await client.query(
+      `UPDATE zzsh_supply.listing_version SET review_state='APPROVED',revision=revision+1 WHERE id=$1`,
+      [v.id],
+    );
+    const publication = await client.query(
+      `INSERT INTO zzsh_supply.listing_publication
+        (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_admin_id,published_at)
+       SELECT $1,d.version_id,v.account_id,a.owner_user_id,a.game_id,d.release_id,d.content_hash,
+              'LEGACY_APPROVED','admin',d.reviewer_admin_id,d.decided_at
+         FROM zzsh_supply.review_decision d
+         JOIN zzsh_supply.listing_version v ON v.id=d.version_id
+         JOIN zzsh_supply.rental_account a ON a.id=v.account_id
+        WHERE d.version_id=$2 AND d.release_id=v.rule_release_id AND d.content_hash=v.content_hash
+          AND d.decision='APPROVE' AND d.reviewer_admin_id=$3
+       RETURNING id`,
+      [newSupplyId("publication"), v.id, actorId],
+    );
+    if (publication.rowCount !== 1) throw conflict("审核决定未能形成发布事实");
+  } else {
+    await client.query(
+      `UPDATE zzsh_supply.listing_version SET review_state='REJECTED',revision=revision+1 WHERE id=$1`,
+      [v.id],
+    );
+  }
   await bumpAccount(client, a);
 }
 export async function setOwnerPaused(
@@ -929,12 +999,13 @@ export async function setOwnerPaused(
   checkAccountRevision(a, body.expectedRevision);
   if (!paused) {
     const v = await currentVersion(client, a);
-    if (v.review_state !== "APPROVED" || a.staff_restricted)
+    const publication = await readListingPublication(client, a, v);
+    if (!isEffectivePublicationState(v.review_state, publication?.source) || a.staff_restricted)
       throw conflict("请先完成资料审核或处理客服限制");
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
-    await assertMediaReady(client, v);
+    await assertMediaReady(client, v, "direct", true);
   }
   await client.query(
     `UPDATE zzsh_supply.rental_account SET owner_paused=$2 WHERE id=$1`,
@@ -971,7 +1042,8 @@ export async function evaluatePublication(
   gate: SupplyGateReader,
 ): Promise<string[]> {
   const blockers = await publicationBlockers(client, a, v, gate);
-  if (v.review_state !== "APPROVED") blockers.push("REVIEW_REQUIRED");
+  const publication = await readListingPublication(client, a, v);
+  if (!isEffectivePublicationState(v.review_state, publication?.source)) blockers.push("PUBLICATION_REQUIRED");
   if (a.owner_paused) blockers.push("OWNER_PAUSED");
   if (a.staff_restricted) blockers.push("STAFF_RESTRICTED");
   try {
@@ -1046,9 +1118,10 @@ async function readOwnerDeclaration(
       reviewState: string | null;
       accessClass: string | null;
       publicStorageKey: string | null;
+      technicalState: string | null;
       ownerUserId: string | null;
     }>(
-      `SELECT m.asset_id AS "assetId",m.position,a.purpose,a.content_hash AS "byteHash",a.review_state AS "reviewState",a.access_class AS "accessClass",a.public_storage_key AS "publicStorageKey",a.owner_user_id AS "ownerUserId" FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position,m.asset_id`,
+      `SELECT m.asset_id AS "assetId",m.position,a.purpose,a.content_hash AS "byteHash",a.review_state AS "reviewState",a.access_class AS "accessClass",a.public_storage_key AS "publicStorageKey",a.technical_state AS "technicalState",a.owner_user_id AS "ownerUserId" FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position,m.asset_id`,
       [v.id],
     )
   ).rows;
@@ -1078,6 +1151,7 @@ export async function listingDetail(
     return { account: a, version: null };
   }
   const blockers = await evaluatePublication(client, a, v, gate);
+  const publication = await readListingPublication(client, publicAccount, v);
   const quote = v.payload
     ? projectDeltaQuote(
         {
@@ -1134,6 +1208,7 @@ export async function listingDetail(
       attributeDisplay,
       presentation,
       quote,
+      publishedAt: publication?.published_at?.toISOString() ?? null,
       media: v
         .payload!.declaration.mediaBindings.filter(
           (m) => m.purpose === "ACCOUNT_DISPLAY",
@@ -1191,6 +1266,10 @@ export async function listingDetail(
       revision: v.revision,
       releaseId: v.rule_release_id,
       contentHash: v.content_hash,
+      publication: publication ? {
+        source: publication.source,
+        publishedAt: publication.published_at.toISOString(),
+      } : null,
       safeBox: ownerOffer.safeBox,
       termOption: ownerOffer.termOption,
       attributeDisplay: projectPublicAttributeDisplay(v.attributes),

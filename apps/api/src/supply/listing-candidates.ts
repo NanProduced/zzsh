@@ -1,9 +1,9 @@
-import { listingSearchPattern } from "./listing-query";
+import { effectivePublicationStateSql, listingSearchPattern } from "./listing-query";
 import type { ListingFilters, ListingQueryV2, ServiceWindow } from "./listing-filter-contract";
 
 type CandidateFilters=Omit<ListingFilters,"skinGroups">&{skinGroups?:{ids:string[];match:string}[]};
-export const PUBLIC_CANDIDATE_FROM=`FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.game g ON g.id=a.game_id`;
-export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND v.review_state='APPROVED' AND v.rule_release_id=g.current_release_id`;
+export const PUBLIC_CANDIDATE_FROM=`FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id JOIN zzsh_supply.game g ON g.id=a.game_id`;
+export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND ${effectivePublicationStateSql("v","pub")} AND v.rule_release_id=g.current_release_id AND pub.content_hash=v.content_hash`;
 const attrs=`v.payload#>'{declaration,attributes}'`;
 const attribute=(name:string)=>`(${attrs})->>'${name}'`;
 const numericAttribute=(name:string,digits:number)=>`CASE WHEN jsonb_typeof((${attrs})->'${name}')='number' AND ${attribute(name)} ~ '^(0|[1-9][0-9]{0,${digits-1}})$' THEN (${attribute(name)})::numeric END`;
@@ -37,16 +37,15 @@ export type ListingPosition={id:string;key:string|null;isNull:boolean};
 export function buildListingCandidates(query:ListingQueryV2,after:ListingPosition|null) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const where=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${p(query.gameId)}`,...candidatePredicates(query.filters,query.q,p)];
-  const approval=`approved.approved_at`;
+  const publication=`pub.published_at`;
   const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
   const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
-  const key=query.sort==="latest"?approval:query.sort==="resourceTotal"?price:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+  const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
   // Public v2 snapshots must be STANDARD. Legacy quotes have no tier field.
   where.push(`(v.payload#>>'{quoteValues,schemaVersion}'='1' OR v.payload#>>'{quoteValues,pricingInputs,compatibility,customerTier}'='STANDARD')`);
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
-  const approvals=query.sort==="latest"?` LEFT JOIN (SELECT version_id,max(decided_at) AS approved_at FROM zzsh_supply.review_decision WHERE decision='APPROVE' GROUP BY version_id) approved ON approved.version_id=v.id`:"";
-  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key ${PUBLIC_CANDIDATE_FROM}${approvals} WHERE ${where.join(" AND ")}) SELECT id,version_id,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key ${PUBLIC_CANDIDATE_FROM} WHERE ${where.join(" AND ")}) SELECT id,version_id,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
   return {text,values};
 }

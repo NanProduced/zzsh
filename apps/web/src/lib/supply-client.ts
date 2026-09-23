@@ -78,7 +78,8 @@ export const supplyBlockerMessages: Record<string, string> = {
   REVIEW_REQUIRED: "等待资料审核",
   OWNER_PAUSED: "号主已暂停接单",
   STAFF_RESTRICTED: "客服限制尚未解除",
-  CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片审核",
+  CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片技术校验",
+  PUBLICATION_REQUIRED: "公开发布事实尚未形成",
   HISTORICAL_VERSION: "这是历史版本",
 };
 export class SupplyRequestError extends Error {

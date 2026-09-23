@@ -3,6 +3,16 @@ import { escapeLike } from "./catalog";
 
 export const LISTING_SEARCH_MAX_LENGTH = 120;
 
+// Keep public, confirmation and order consumers on the same publication contract.
+export function effectivePublicationStateSql(versionAlias = "v", publicationAlias = "p"): string {
+  return `((${versionAlias}.review_state='PUBLISHED' AND ${publicationAlias}.source='OWNER_DIRECT') OR (${versionAlias}.review_state='APPROVED' AND ${publicationAlias}.source='LEGACY_APPROVED'))`;
+}
+export const EFFECTIVE_PUBLICATION_STATE_SQL = effectivePublicationStateSql();
+export function isEffectivePublicationState(versionState: unknown, source: unknown): boolean {
+  return (versionState === "PUBLISHED" && source === "OWNER_DIRECT") ||
+    (versionState === "APPROVED" && source === "LEGACY_APPROVED");
+}
+
 export function parsePublicListingSearch(raw: string | null): string | null {
   if (raw === null) return null;
   const normalized = raw.normalize("NFC").trim();
@@ -198,10 +208,35 @@ export function projectPublicOffer(input: {
 }
 
 export type OwnerMediaReviewState =
+  | "NOT_REQUIRED"
   | "PENDING"
   | "APPROVED"
   | "REJECTED"
+  | "QUARANTINED"
   | "UNAVAILABLE";
+
+type PublicDisplayMediaRow = {
+  purpose: string | null;
+  reviewState: string | null;
+  accessClass: string | null;
+  publicStorageKey: string | null;
+  technicalState?: string | null;
+};
+
+export function mediaReviewAllowsPublication(reviewState: unknown): boolean {
+  return reviewState === "PENDING" || reviewState === "APPROVED";
+}
+
+export function isAccountDisplayPubliclyEligible(
+  row: PublicDisplayMediaRow,
+  targetAccessClass = row.accessClass,
+): boolean {
+  return row.purpose === "ACCOUNT_DISPLAY" &&
+    mediaReviewAllowsPublication(row.reviewState) &&
+    row.technicalState === "READY" &&
+    targetAccessClass === "PUBLIC_DISPLAY" &&
+    Boolean(row.publicStorageKey);
+}
 
 export type PublicMediaRoute = {
   listingPublic: boolean;
@@ -218,6 +253,7 @@ export function projectOwnerMediaBinding(
     reviewState: string | null;
     accessClass: string | null;
     publicStorageKey: string | null;
+    technicalState?: string | null;
     ownerUserId: string | null;
   },
   publicRoute: PublicMediaRoute,
@@ -235,16 +271,15 @@ export function projectOwnerMediaBinding(
       ? row.purpose
       : null;
   const reviewState: OwnerMediaReviewState =
-    row.reviewState === "PENDING" ||
-    row.reviewState === "APPROVED" ||
-    row.reviewState === "REJECTED"
-      ? row.reviewState
-      : "UNAVAILABLE";
-  const publicDisplayEligible =
-    purpose === "ACCOUNT_DISPLAY" &&
-    row.reviewState === "APPROVED" &&
-    row.accessClass === "PUBLIC_DISPLAY" &&
-    Boolean(row.publicStorageKey);
+    purpose === "ACCOUNT_DISPLAY" && row.reviewState === "PENDING"
+      ? "NOT_REQUIRED"
+      : row.reviewState === "PENDING" ||
+          row.reviewState === "APPROVED" ||
+          row.reviewState === "REJECTED" ||
+          row.reviewState === "QUARANTINED"
+        ? row.reviewState
+        : "UNAVAILABLE";
+  const publicDisplayEligible = isAccountDisplayPubliclyEligible(row);
   return {
     assetId: row.assetId,
     position: row.position,

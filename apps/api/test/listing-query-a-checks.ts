@@ -4,7 +4,7 @@ import { readFile,writeFile,mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { withTransaction } from "../src/auth/security-core";
 import { runBusinessMigrations } from "../src/database/business-migrations";
-import { createListingDraft,saveListingDraft,quoteListing,acceptListingRules,submitListing,reviewListing,readPublishingAccount,readCurrentVersion } from "../src/supply/publishing";
+import { createListingDraft,saveListingDraft,quoteListing,acceptListingRules,submitListing,readPublishingAccount,readCurrentVersion } from "../src/supply/publishing";
 import { parseListingQueryV2,LISTING_OPERATORS,type FilterConfig,type ListingFilters } from "../src/supply/listing-filter-contract";
 import { buildListingCandidates } from "../src/supply/listing-candidates";
 import type { Options } from "./supply-publishing-checks";
@@ -114,14 +114,14 @@ export async function runListingQueryAChecks(o:Options) {
   }
   if(process.env.SUPPLY_QUERY_A_CONFIG_ONLY==="1")return;
   const owner=(await o.pool.query(`SELECT owner_user_id FROM zzsh_supply.rental_account WHERE id=$1`,[o.accountId])).rows[0].owner_user_id;
-  const media=(await o.pool.query(`SELECT * FROM zzsh_supply.media_asset WHERE account_id=$1 AND purpose='ACCOUNT_DISPLAY' AND review_state='APPROVED' AND access_class='PUBLIC_DISPLAY' ORDER BY id LIMIT 1`,[o.accountId])).rows[0];assert.ok(media);
+  const media=(await o.pool.query(`SELECT * FROM zzsh_supply.media_asset WHERE account_id=$1 AND purpose='ACCOUNT_DISPLAY' AND review_state IN ('APPROVED','PUBLISHED') AND access_class='PUBLIC_DISPLAY' ORDER BY id LIMIT 1`,[o.accountId])).rows[0];assert.ok(media);
   const samples:{id:string;core:string|null;price:bigint;at:string;index:number}[]=[];
   const start=performance.now();
   for(let batch=0;batch<100;batch++){
     await withTransaction(o.pool,async client=>{
       for(let i=batch*10;i<batch*10+10;i++) {
         const id="qa_account_"+String(i).padStart(4,"0");await client.query(`INSERT INTO zzsh_supply.rental_account(id,owner_user_id,game_id) VALUES($1,$2,$3)`,[id,owner,o.gameId]);
-        const asset={...media,id:"qa_media_"+i,account_id:id};const columns=Object.keys(asset);await client.query(`INSERT INTO zzsh_supply.media_asset(${columns.map(c=>'"'+c+'"').join(',')}) VALUES(${columns.map((_,i)=>'$'+(i+1)).join(',')})`,columns.map(c=>asset[c]));
+        const asset={...media,id:"qa_media_"+i,account_id:id,technical_state:"READY",technical_checked_at:new Date(),technical_failure_code:null};const columns=Object.keys(asset);await client.query(`INSERT INTO zzsh_supply.media_asset(${columns.map(c=>'"'+c+'"').join(',')}) VALUES(${columns.map((_,i)=>'$'+(i+1)).join(',')})`,columns.map(c=>asset[c]));
         o.gates.set(id,{publisherBail:"NOT_REQUIRED",occupancy:"FREE",reference:"fixture:query-a"});const gate=async()=>o.gates.get(id)!;
         const a=await readPublishingAccount(client,id);await createListingDraft(client,a,a.revision,gate);
         const extra=i%3===0?null:(i>=695&&i<705?9007199254740992n+BigInt(i-695):BigInt(i%11)*1000000n).toString();
@@ -131,8 +131,8 @@ export async function runListingQueryAChecks(o:Options) {
         const attrs={safe_box_code:i%2?"box-a":"box-b",vit_level:6+i%2,bear_level:6+Math.floor(i/2)%2,grading_code:i%2?"7":"6",login_method_code:i%3?"legacy_login_wechat":"legacy_login_qq",region_province:region.province,region_city:region.city,service_window_start_minute:hours.start,service_window_end_minute:hours.end,service_window_cross_midnight:i%19===0?!hours.cross:hours.cross,service_window_timezone:i%17===0?null:"Asia/Shanghai",...(rule.schema==="haff-ratio-v2"?{rentalPricing:{rentalMode:"ordinary"}}:{})};
         await saveListingDraft(client,a,{expectedRevision:a.revision,title:"query-a-"+String(i).padStart(4,"0"),attributes:attrs,termOptionCode:"daily-10m",pricingOptionCode:rule.schema==="haff-ratio-v2"?"":"standard",inventory:[{itemId:o.itemId,quantity:String((i%7+1)*10000000)},{itemId:round,quantity:String(i%13*60)},...(extra===null?[]:[{itemId:core,quantity:extra}])],skins:chosen,entitlements:[],mediaBindings:[{assetId:asset.id,position:0}]},gate);
         await quoteListing(client,a,a.revision);const v=await readCurrentVersion(client,a);const token=()=>({expectedRevision:a.revision,versionId:v.id,releaseId:v.rule_release_id,contentHash:v.content_hash});
-        await acceptListingRules(client,a,token());await submitListing(client,a,token(),gate);await reviewListing(client,a,o.bossId,{...token(),decision:"APPROVE",reason:"synthetic query benchmark"},gate);
-        const at=(await client.query(`SELECT to_char(max(decided_at) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM zzsh_supply.review_decision WHERE version_id=$1`,[v.id])).rows[0].at;
+        await acceptListingRules(client,a,token());await submitListing(client,a,owner,token(),gate);
+        const at=(await client.query(`SELECT to_char(published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM zzsh_supply.listing_publication WHERE version_id=$1`,[v.id])).rows[0].at;
         samples.push({id,index:i,core:extra,price:BigInt(String((v.payload!.quoteValues as any).resourceTotal.amount).replace('.','')),at});
       }
     });

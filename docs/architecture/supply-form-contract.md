@@ -16,6 +16,14 @@
 
 用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:"full-payout-declaration-v1",selected:boolean}`，并参与现有内容 hash 与审核决定；字段缺省时继续省略，不改写旧 v1 hash。发布 UI 尚无此控件；确认/账务的受控 test/fake 接线不代表正式配置或生产资金能力。
 
+## 直接发布与公开事实（PUB-1/2）
+
+账号版本保留原六种生命周期状态并增加 `PUBLISHED`。号主在报价、规则接受、资格、占用和媒体技术校验均通过后，`submit` 在同一事务内切换当前版本、写入唯一不可变的 `listing_publication` 事实并返回发布结果，不调用管理员 `decide`，也不生成管理员审核人或审核时间。发布事实绑定 `accountId`、`versionId`、`ownerUserId`、`gameId`、`ruleReleaseId`、`contentHash`、真实来源/操作者和数据库 `publishedAt`；来源为 `OWNER_DIRECT` 时版本必须为 `PUBLISHED`，号主操作者非空且与账号所有者一致。
+
+历史公开版本只有能逐项匹配真实 `APPROVE` decision 的版本，才以 `LEGACY_APPROVED` 写入发布事实并继续保留 `APPROVED`、原审核人、原决定时间、hash 和 release。`SUBMITTED`、`REJECTED`、`IMPORTED_UNVERIFIED` 不因迁移或查询自动公开。暂停、运营限制、媒体隔离及恢复使用现有状态/审计，不新增发布事实，也不改变原 `publishedAt`；正文改版须重新报价、接受规则并发布新版本。
+
+公开列表、详情、个人确认与建单只接受两种有效组合：`PUBLISHED + OWNER_DIRECT` 或 `APPROVED + LEGACY_APPROVED`，并继续执行身份、实名/成年、会员、保证金、规则/hash、占用和锁内重验。`ACCOUNT_DISPLAY` 仅要求服务端技术校验、所有权/用途绑定和公开衍生文件完整；`ACCOUNT_EVIDENCE` 始终私有，草稿、非当前绑定和隔离媒体不可由公开读取路径获取。技术合格不等于人工内容审核通过。
+
 | 分组 | 数据/写入 | 校验与恢复 |
 |---|---|---|
 | basics | title、description、受控attributes；safe_box_code及允许等级来自publishing-options | 错误path为title/description/attributes；未知保留null，不默认0 |
@@ -39,4 +47,4 @@ tenantPayableTotal由服务端将当前resourceTotal与tenantDeposit精确相加
 
 publishing-catalog.ready仅表示目录与生效价目配置齐备，不代表本人身份、保证金、占用或审核资格通过；是否能提交/恢复仍以M3-C服务端检查为准。
 
-发布与我的账号、收藏订阅根用户会话；身份未确认时隐藏私有视图并暂停后续写步骤，同用户恢复保留上下文，实际换身份才失效。页面查询、草稿和上传操作代次独立于会话身份代次。Admin对ACCOUNT_DISPLAY可通过并公开，对ACCOUNT_EVIDENCE只允许私有审核；服务端仍执行完整权限与用途校验。
+发布与我的账号、收藏订阅根用户会话；身份未确认时隐藏私有视图并暂停后续写步骤，同用户恢复保留上下文，实际换身份才失效。页面查询、草稿和上传操作代次独立于会话身份代次。Admin仍可按原权限查看和处理媒体；`ACCOUNT_DISPLAY` 的公开资格来自技术校验与有效发布事实，不要求人工预审，`ACCOUNT_EVIDENCE` 只允许私有访问。服务端仍执行完整权限、用途、对象归属和隔离校验。

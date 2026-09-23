@@ -6,6 +6,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
+import { isAccountDisplayPubliclyEligible } from "./listing-query";
 import { assertGameScope, bumpCatalogRevision, conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
 export const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
@@ -239,6 +240,11 @@ export type PreparedMediaUpload = {
   writtenStorageKeys: string[];
 };
 
+export type LockPublishingAccount = (
+  client: PoolClient,
+  accountId: string,
+) => Promise<unknown>;
+
 type UploadIntentRow = {
   tokenHash: string;
   accountId: string | null;
@@ -327,7 +333,14 @@ export async function finalizeMediaUpload(
   client: PoolClient,
   actor: MediaActor,
   prepared: PreparedMediaUpload,
+  lockPublishingAccount?: LockPublishingAccount,
 ): Promise<UploadedAsset> {
+  const locatedIntent = await loadUploadIntent(client, prepared.intentId);
+  if (!locatedIntent) throw notFound();
+  if (locatedIntent.accountId !== null) {
+    if (!lockPublishingAccount) throw conflict("Account media lock is required");
+    await lockPublishingAccount(client, locatedIntent.accountId);
+  }
   const intent = await loadUploadIntent(client, prepared.intentId, true);
   if (!intent) throw notFound();
   if (intent.consumedAt) throw conflict("Upload intent was already used");
@@ -339,8 +352,8 @@ export async function finalizeMediaUpload(
   await client.query(
     `INSERT INTO "zzsh_supply"."media_asset"
       ("id", "game_id", "purpose", "ownership_kind", "owner_user_id", "uploaded_by_realm", "uploaded_by_user_id", "uploaded_by_admin_id",
-       "storage_key", "content_hash", "mime", "byte_size", "width", "height", "public_storage_key", "account_id")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+       "storage_key", "content_hash", "mime", "byte_size", "width", "height", "public_storage_key", "access_class", "technical_state", "technical_checked_at", "account_id")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CASE WHEN $3='ACCOUNT_DISPLAY' THEN 'PUBLIC_DISPLAY' ELSE 'PRIVATE_REVIEW' END, 'READY', clock_timestamp(), $16)`,
     [
       assetId,
       intent.gameId,
@@ -369,8 +382,8 @@ export async function finalizeMediaUpload(
     gameId: intent.gameId,
     purpose: intent.purpose,
     ownershipKind: intent.ownershipKind,
-    reviewState: "PENDING",
-    accessClass: "PRIVATE_REVIEW",
+    reviewState: intent.purpose === "ACCOUNT_DISPLAY" ? "NOT_REQUIRED" : "PENDING",
+    accessClass: intent.purpose === "ACCOUNT_DISPLAY" ? "PUBLIC_DISPLAY" : "PRIVATE_REVIEW",
     mime: prepared.image.mime,
     byteSize: prepared.byteSize,
     width: prepared.image.width,
@@ -382,6 +395,7 @@ export async function finalizeMediaUpload(
 type MediaAssetRow = {
   id: string;
   gameId: string | null;
+  accountId: string | null;
   purpose: string;
   ownershipKind: string;
   ownerUserId: string | null;
@@ -397,20 +411,41 @@ type MediaAssetRow = {
   height: number;
   accessClass: string;
   reviewState: string;
+  technicalState: string;
   reviewReason: string | null;
   revision: string;
 };
 
-export async function loadMediaAsset(client: Pool | PoolClient, assetId: string): Promise<MediaAssetRow | null> {
+export async function loadMediaAsset(
+  client: Pool | PoolClient,
+  assetId: string,
+  forUpdate = false,
+): Promise<MediaAssetRow | null> {
   const result = await client.query<MediaAssetRow>(
-    `SELECT "id", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind", "owner_user_id" AS "ownerUserId",
+    `SELECT "id", "game_id" AS "gameId", "account_id" AS "accountId", "purpose", "ownership_kind" AS "ownershipKind", "owner_user_id" AS "ownerUserId",
             "uploaded_by_realm" AS "uploadedByRealm", "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
             "storage_key" AS "storageKey", "public_storage_key" AS "publicStorageKey", "content_hash" AS "contentHash", "mime", "byte_size"::text AS "byteSize",
-            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "review_reason" AS "reviewReason", "revision"::text AS "revision"
-       FROM "zzsh_supply"."media_asset" WHERE "id" = $1`,
+            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "technical_state" AS "technicalState", "review_reason" AS "reviewReason", "revision"::text AS "revision"
+       FROM "zzsh_supply"."media_asset" WHERE "id" = $1${forUpdate ? " FOR UPDATE" : ""}`,
     [assetId],
   );
   return result.rows[0] ?? null;
+}
+
+async function lockMediaAsset(
+  client: PoolClient,
+  assetId: string,
+  lockPublishingAccount?: LockPublishingAccount,
+): Promise<MediaAssetRow> {
+  const located = await loadMediaAsset(client, assetId);
+  if (!located) throw notFound();
+  if (located.accountId !== null) {
+    if (!lockPublishingAccount) throw conflict("Account media lock is required");
+    await lockPublishingAccount(client, located.accountId);
+  }
+  const asset = await loadMediaAsset(client, assetId, true);
+  if (!asset) throw notFound();
+  return asset;
 }
 
 export async function reviewMediaAsset(
@@ -419,17 +454,9 @@ export async function reviewMediaAsset(
   isBoss: boolean,
   assetId: string,
   input: { decision: string; reason?: string; visibility?: string },
+  lockPublishingAccount?: LockPublishingAccount,
 ): Promise<MediaAssetRow> {
-  const current = await client.query<MediaAssetRow & { gameId: string }>(
-    `SELECT "id", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind", "owner_user_id" AS "ownerUserId",
-            "storage_key" AS "storageKey", "public_storage_key" AS "publicStorageKey", "content_hash" AS "contentHash", "mime", "byte_size"::text AS "byteSize",
-            "width", "height", "access_class" as "accessClass", "review_state" AS "reviewState", "review_reason" AS "reviewReason", "revision"::text AS "revision",
-            "uploaded_by_realm" AS "uploadedByRealm", "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId"
-       FROM "zzsh_supply"."media_asset" WHERE "id" = $1 FOR UPDATE`,
-    [assetId],
-  );
-  const asset = current.rows[0];
-  if (!asset) throw notFound();
+  const asset = await lockMediaAsset(client, assetId, lockPublishingAccount);
   // Platform content media has no game scope; its authorization is the content
   // permission checked by the route. Catalog/user media keeps the game scope check.
   if (asset.gameId === null) {
@@ -438,8 +465,12 @@ export async function reviewMediaAsset(
     await assertGameScope(client, adminUserId, isBoss, asset.gameId);
   }
   if (input.decision !== "APPROVE" && input.decision !== "REJECT" && input.decision !== "QUARANTINE") throw invalid("Review decision is invalid");
-  if (input.decision !== "APPROVE" && (!input.reason || input.reason.trim().length < 2 || input.reason.length > 500)) {
+  const needsReason = input.decision !== "APPROVE" || asset.reviewState === "REJECTED" || asset.reviewState === "QUARANTINED";
+  if (needsReason && (!input.reason || input.reason.trim().length < 2 || input.reason.length > 500)) {
     throw invalid("A reason is required for this review decision");
+  }
+  if (input.decision === "APPROVE" && asset.ownershipKind === "USER_SUPPLY" && asset.purpose === "ACCOUNT_DISPLAY" && asset.technicalState !== "READY") {
+    throw conflict("Media must pass technical validation before recovery");
   }
   const nextState = input.decision === "APPROVE" ? "APPROVED" : input.decision === "REJECT" ? "REJECTED" : "QUARANTINED";
   const visibility = input.visibility ?? "PRIVATE_REVIEW";
@@ -447,6 +478,7 @@ export async function reviewMediaAsset(
   if (visibility === "PUBLIC_DISPLAY") {
     if (nextState !== "APPROVED") throw invalid("Only approved media can be public");
     if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.ownershipKind !== "PLATFORM_CONTENT" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
+    if (asset.ownershipKind === "USER_SUPPLY" && asset.purpose === "ACCOUNT_DISPLAY" && asset.technicalState !== "READY") throw conflict("Media is not technically ready for public display");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
   }
   await client.query(
@@ -466,17 +498,9 @@ export async function changeMediaVisibility(
   isBoss: boolean,
   assetId: string,
   input: { visibility: string; reason?: string },
+  lockPublishingAccount?: LockPublishingAccount,
 ): Promise<MediaAssetRow> {
-  const current = await client.query<MediaAssetRow>(
-    `SELECT "id", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind", "owner_user_id" AS "ownerUserId",
-            "storage_key" AS "storageKey", "public_storage_key" AS "publicStorageKey", "content_hash" AS "contentHash", "mime", "byte_size"::text AS "byteSize",
-            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "review_reason" AS "reviewReason", "revision"::text AS "revision",
-            "uploaded_by_realm" AS "uploadedByRealm", "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId"
-       FROM "zzsh_supply"."media_asset" WHERE "id" = $1 FOR UPDATE`,
-    [assetId],
-  );
-  const asset = current.rows[0];
-  if (!asset) throw notFound();
+  const asset = await lockMediaAsset(client, assetId, lockPublishingAccount);
   if (asset.gameId === null) {
     if (asset.ownershipKind !== "PLATFORM_CONTENT" || asset.purpose !== "CONTENT_MEDIA") throw notFound();
   } else {
@@ -484,7 +508,12 @@ export async function changeMediaVisibility(
   }
   if (input.visibility !== "PUBLIC_DISPLAY" && input.visibility !== "PRIVATE_REVIEW") throw invalid("Visibility is invalid");
   if (input.visibility === "PUBLIC_DISPLAY") {
-    if (asset.reviewState !== "APPROVED") throw conflict("Media must be approved before public display");
+    const accountDisplayReady = asset.ownershipKind === "USER_SUPPLY" &&
+      isAccountDisplayPubliclyEligible(asset, input.visibility);
+    const platformMediaReady = asset.reviewState === "APPROVED" &&
+      (asset.ownershipKind === "PLATFORM_CATALOG" || asset.ownershipKind === "PLATFORM_CONTENT") &&
+      Boolean(asset.publicStorageKey);
+    if (!((asset.ownershipKind === "USER_SUPPLY" && accountDisplayReady) || platformMediaReady)) throw conflict("Media is not technically ready for public display");
     if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.ownershipKind !== "PLATFORM_CONTENT" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
   }

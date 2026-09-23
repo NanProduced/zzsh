@@ -150,15 +150,6 @@ export async function runQueryContractChecks(o: {
       token(d),
     );
     d = await ok("/api/v1/supply/accounts/" + accountId + "/submit", token(d));
-    d = await ok(
-      "/api/bff/admin/supply/listing-reviews/" + accountId + "/decide",
-      {
-        ...token(d),
-        decision: "APPROVE",
-        reason: "合成检索样例核对通过",
-      },
-      o.boss,
-    );
     return {
       accountId,
       versionId: d.version.id as string,
@@ -581,11 +572,11 @@ export async function runQueryContractChecks(o: {
       );
       assert.equal(
         pending.version.declaration.mediaBindings[0].reviewState,
-        "PENDING",
+        "NOT_REQUIRED",
       );
       assert.equal(
         pending.version.declaration.mediaBindings[0].publicDisplayEligible,
-        false,
+        true,
       );
       assert.equal(
         pending.version.declaration.mediaBindings[0].publiclyReadable,
@@ -665,7 +656,7 @@ export async function runQueryContractChecks(o: {
       const revoked = afterRevoke.version.declaration.mediaBindings.find(
         (b: any) => b.assetId === published.displayId,
       );
-      assert.equal(afterRevoke.version.reviewState, "APPROVED");
+      assert.equal(afterRevoke.version.reviewState, "PUBLISHED");
       assert.equal(revoked.reviewState, "APPROVED");
       assert.equal(revoked.publicDisplayEligible, false);
       assert.equal(revoked.publiclyReadable, false);
