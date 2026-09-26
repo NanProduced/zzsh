@@ -9,6 +9,7 @@ import { mountPersonalOrders } from "../order/personal-order-routes";
 import type { ConfirmationKey } from "../order/confirmation-token";
 import type { ConfirmationFundingReader } from "../order/personal-confirmation";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
+import { createProductionConfirmationFundingReader, readFormalSupplyGate } from "../supply/funding-authority";
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -949,9 +950,12 @@ export async function mountAuthHandlers(
   }
   if(options.testSupplyGateReader && !options.testOperationsEnabled) throw new Error("Supply fixtures require test operations capability");
   if(options.testConfirmationFundingReader && (!options.testOperationsEnabled || process.env.NODE_ENV==="production")) throw new Error("Confirmation fixtures require test operations capability");
-  // Occupancy truth comes from the order table; the base reader keeps the
-  // publisher-bail seam semantics (UNKNOWN fails closed until M5).
-  const supplyGateReader=composeSupplyGateWithOrderOccupancy(options.testSupplyGateReader ?? unknownSupplyGate);
+  // Occupancy truth comes from the order table; production reads the formal
+  // funding authority on this same PoolClient. Explicit test seams retain
+  // their isolated fixture behavior and never become production defaults.
+  const fundingReader = options.testConfirmationFundingReader ?? createProductionConfirmationFundingReader();
+  const baseSupplyGateReader = options.testSupplyGateReader ?? (options.testConfirmationFundingReader ? unknownSupplyGate : readFormalSupplyGate);
+  const supplyGateReader=composeSupplyGateWithOrderOccupancy(baseSupplyGateReader);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
     const raw = process.env.ORDER_HOLD_SECONDS?.trim();
@@ -999,8 +1003,8 @@ export async function mountAuthHandlers(
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountRentalMembership(app,securityOptions);
-  mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,...(options.testConfirmationFundingReader?{fundingReader:options.testConfirmationFundingReader}:{})});
-  mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,...(options.testConfirmationFundingReader?{fundingReader:options.testConfirmationFundingReader}:{})});
+  mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,fundingReader});
+  mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,fundingReader});
   if (options.orderTeams) {
     const provider=yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");

@@ -18,6 +18,7 @@ import { computeSyntheticFullPayout, settlementSurfaceOpen } from "../src/order/
 import { readOrderOccupancy } from "../src/order/order";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { CUSTOMER_TIERS, type CustomerTier } from "../src/supply/delta-rental";
+import { validateFundingPolicy, validateOwnerDepositDeclaration } from "../src/supply/funding-policy";
 import { seedIdentity } from "./im-test-fixtures";
 import { OrderTeamTransport, fakeIdentityAccounts } from "./order-team-fixtures";
 import { compatRule } from "./pricing-compat-fixture";
@@ -47,6 +48,174 @@ function assertNoSettlementInternals(value: unknown): void {
     "fundingSourceRef", "fundingPolicyRef", "paymentConfirmationId", "approvalRequestId", "approval", "requestedBy",
     "approvedBy", "approvalPayloadHash", "approvalExpiresAt",
   ]) assert.equal(hasKeyDeep(value, field), false, `settlement response exposed ${field}`);
+}
+
+function cloneJson(value: unknown): Record<string, any> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, any>;
+}
+
+function setJsonPath(root: Record<string, any>, path: readonly string[], value: unknown): void {
+  let current = root;
+  for (const segment of path.slice(0, -1)) current = current[segment] as Record<string, any>;
+  current[path[path.length - 1]!] = value;
+}
+
+function getJsonPath(root: Record<string, any>, path: readonly string[]): unknown {
+  let current: unknown = root;
+  for (const segment of path) current = (current as Record<string, unknown>)[segment];
+  return current;
+}
+
+function deleteJsonPath(root: Record<string, any>, path: readonly string[]): void {
+  let current = root;
+  for (const segment of path.slice(0, -1)) current = current[segment] as Record<string, any>;
+  delete current[path[path.length - 1]!];
+}
+
+function assertThrows(action: () => unknown, message: string): void {
+  let thrown = false;
+  try {
+    action();
+  } catch {
+    thrown = true;
+  }
+  assert.equal(thrown, true, message);
+}
+
+async function assertStrictFundingPolicyVectors(pool: Pool, accountId: string): Promise<void> {
+  const row = (await pool.query<{ policy: Record<string, any> | null }>(
+    `SELECT p.funding_policy AS policy
+       FROM zzsh_supply.rental_account a
+       JOIN zzsh_supply.game g ON g.id=a.game_id
+       JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id
+       JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+      WHERE a.id=$1`, [accountId],
+  )).rows[0];
+  assert.ok(row?.policy, "formal policy fixture must exist");
+  const base = cloneJson(row.policy);
+  assert.doesNotThrow(() => validateFundingPolicy(base));
+  const validSql = (await pool.query<{ valid: boolean }>(
+    `SELECT zzsh_supply.valid_funding_policy($1::jsonb) AS valid`, [base],
+  )).rows[0]?.valid;
+  assert.equal(validSql, true, "TS and SQL must accept the same baseline policy");
+
+  type Kind = "string" | "cents" | "boolean";
+  const fields: Array<{ label: string; path: string[]; kind: Kind }> = [
+    { label: "policy.schema", path: ["schema"], kind: "string" },
+    { label: "policy.policyVersion", path: ["policyVersion"], kind: "string" },
+    { label: "policy.recommendation.schema", path: ["recommendation", "schema"], kind: "string" },
+    { label: "policy.recommendation.algorithm", path: ["recommendation", "algorithm"], kind: "string" },
+    { label: "policy.recommendation.version", path: ["recommendation", "version"], kind: "string" },
+    { label: "policy.recommendation.currency", path: ["recommendation", "currency"], kind: "string" },
+    { label: "policy.recommendation.unit", path: ["recommendation", "unit"], kind: "string" },
+    { label: "policy.inputSpec.schema", path: ["recommendation", "inputSpec", "schema"], kind: "string" },
+    { label: "policy.inputSpec.currency", path: ["recommendation", "inputSpec", "currency"], kind: "string" },
+    { label: "policy.inputSpec.unit", path: ["recommendation", "inputSpec", "unit"], kind: "string" },
+    ...["safeBoxCode", "vitality", "bear", "dive", "skinIds"].map((field) => ({
+      label: `policy.attributeFields.${field}`, path: ["recommendation", "inputSpec", "attributeFields", field], kind: "string" as const,
+    })),
+    { label: "policy.ownerDepositRules.schema", path: ["ownerDepositRules", "schema"], kind: "string" },
+    { label: "policy.ownerDepositRules.currency", path: ["ownerDepositRules", "currency"], kind: "string" },
+    { label: "policy.ownerDepositRules.unit", path: ["ownerDepositRules", "unit"], kind: "string" },
+    { label: "policy.guaranteeRequirement.schema", path: ["guaranteeRequirement", "schema"], kind: "string" },
+    { label: "policy.guaranteeRequirement.version", path: ["guaranteeRequirement", "version"], kind: "string" },
+    { label: "policy.guaranteeRequirement.scope", path: ["guaranteeRequirement", "scope"], kind: "string" },
+    { label: "policy.guaranteeRequirement.currency", path: ["guaranteeRequirement", "currency"], kind: "string" },
+    { label: "policy.guaranteeRequirement.unit", path: ["guaranteeRequirement", "unit"], kind: "string" },
+    { label: "policy.guaranteeRequirement.mode", path: ["guaranteeRequirement", "mode"], kind: "string" },
+    { label: "policy.proofValidity.schema", path: ["proofValidity", "schema"], kind: "string" },
+    { label: "policy.proofValidity.satisfiedMode", path: ["proofValidity", "satisfiedMode"], kind: "string" },
+    { label: "policy.fullPayoutPolicyRef", path: ["fullPayoutPolicyRef"], kind: "string" },
+    { label: "policy.fullPayoutPolicyVersion", path: ["fullPayoutPolicyVersion"], kind: "string" },
+    { label: "policy.disclosureVersion", path: ["disclosureVersion"], kind: "string" },
+    { label: "policy.vipWaiver", path: ["vipWaiver"], kind: "boolean" },
+    { label: "policy.svipWaiver", path: ["svipWaiver"], kind: "boolean" },
+    { label: "policy.ownerDepositRules.normal.zeroAllowed", path: ["ownerDepositRules", "normal", "zeroAllowed"], kind: "boolean" },
+    { label: "policy.ownerDepositRules.fullPayoutSelected.zeroAllowed", path: ["ownerDepositRules", "fullPayoutSelected", "zeroAllowed"], kind: "boolean" },
+    { label: "policy.recommendation.parameters.upperLimitCents", path: ["recommendation", "parameters", "upperLimitCents"], kind: "cents" },
+    { label: "policy.recommendation.parameters.vitalityAtLeast7Cents", path: ["recommendation", "parameters", "vitalityAtLeast7Cents"], kind: "cents" },
+    { label: "policy.recommendation.parameters.bearAtLeast7Cents", path: ["recommendation", "parameters", "bearAtLeast7Cents"], kind: "cents" },
+    { label: "policy.recommendation.parameters.diveAtLeast3Cents", path: ["recommendation", "parameters", "diveAtLeast3Cents"], kind: "cents" },
+    { label: "policy.recommendation.parameters.rounding.unitCents", path: ["recommendation", "parameters", "rounding", "unitCents"], kind: "cents" },
+    { label: "policy.recommendation.parameters.rounding.zeroFallbackCents", path: ["recommendation", "parameters", "rounding", "zeroFallbackCents"], kind: "cents" },
+    { label: "policy.ownerDepositRules.capCents", path: ["ownerDepositRules", "capCents"], kind: "cents" },
+    { label: "policy.ownerDepositRules.normal.minCents", path: ["ownerDepositRules", "normal", "minCents"], kind: "cents" },
+    { label: "policy.ownerDepositRules.fullPayoutSelected.minCents", path: ["ownerDepositRules", "fullPayoutSelected", "minCents"], kind: "cents" },
+    { label: "policy.guaranteeRequirement.requiredCents", path: ["guaranteeRequirement", "requiredCents"], kind: "cents" },
+    { label: "policy.proofValidity.satisfiedDays", path: ["proofValidity", "satisfiedDays"], kind: "cents" },
+  ];
+  const safeBoxCode = Object.keys(base.recommendation.parameters.safeBoxWeightsByCode)[0];
+  assert.ok(safeBoxCode, "formal policy fixture must contain a safe-box weight");
+  fields.push({ label: `policy.safeBoxWeightsByCode.${safeBoxCode}`, path: ["recommendation", "parameters", "safeBoxWeightsByCode", safeBoxCode], kind: "cents" });
+  for (const group of ["LEGACY_GOLD", "LEGACY_AGENT", "LEGACY_KNIFE", "LEGACY_WEAPON"]) {
+    fields.push(
+      { label: `policy.skinWeights.${group}.firstCents`, path: ["recommendation", "parameters", "skinWeights", group, "firstCents"], kind: "cents" },
+      { label: `policy.skinWeights.${group}.subsequentCents`, path: ["recommendation", "parameters", "skinWeights", group, "subsequentCents"], kind: "cents" },
+    );
+  }
+
+  const variants = (kind: Kind): Array<{ label: string; value?: unknown; missing?: true }> => {
+    if (kind === "boolean") return [
+      { label: "wrong-string", value: "false" }, { label: "number", value: 1 }, { label: "null", value: null },
+      { label: "object", value: {} }, { label: "array", value: [] }, { label: "missing", missing: true },
+    ];
+    return [
+      { label: "wrong-string", value: kind === "cents" ? "1.5" : "not valid" }, { label: "number", value: 1 }, { label: "null", value: null },
+      { label: "boolean", value: true }, { label: "object", value: {} }, { label: "array", value: [] }, { label: "missing", missing: true },
+    ];
+  };
+  const variantsForField = (field: { label: string; path: string[]; kind: Kind }, root: Record<string, any>) => {
+    const result = variants(field.kind);
+    if (field.label === "policy.guaranteeRequirement.mode") {
+      result.push(
+        { label: "array-not-required", value: ["NOT_REQUIRED"] },
+        { label: "array-fixed-cents", value: ["FIXED_CENTS"] },
+      );
+    }
+    const paddedFields = new Set([
+      "policy.policyVersion", "policy.fullPayoutPolicyRef", "policy.fullPayoutPolicyVersion", "policy.disclosureVersion", "declaration.declarationVersion",
+    ]);
+    if (paddedFields.has(field.label)) {
+      const original = String(getJsonPath(root, field.path));
+      result.push({ label: "padded-before", value: ` ${original}` }, { label: "padded-after", value: `${original} ` });
+    }
+    return result;
+  };
+  for (const field of fields) {
+    for (const variant of variantsForField(field, base)) {
+      const candidate = cloneJson(base);
+      if (variant.missing) deleteJsonPath(candidate, field.path);
+      else setJsonPath(candidate, field.path, variant.value);
+      assertThrows(() => validateFundingPolicy(candidate), `${field.label}/${variant.label}: TS must reject`);
+      const accepted = (await pool.query<{ valid: boolean }>(
+        `SELECT zzsh_supply.valid_funding_policy($1::jsonb) AS valid`, [candidate],
+      )).rows[0]?.valid;
+      assert.equal(accepted, false, `${field.label}/${variant.label}: SQL must reject`);
+    }
+  }
+
+  const declarationBase = { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "trc1-imp1-declaration-v1" };
+  assert.ok(validateOwnerDepositDeclaration(declarationBase));
+  assert.equal((await pool.query<{ valid: boolean }>(
+    `SELECT zzsh_supply.valid_owner_deposit_declaration($1::jsonb) AS valid`, [declarationBase],
+  )).rows[0]?.valid, true);
+  const declarationFields: Array<{ label: string; path: string[]; kind: Kind }> = [
+    { label: "declaration.schema", path: ["schema"], kind: "string" },
+    { label: "declaration.amountCents", path: ["amountCents"], kind: "cents" },
+    { label: "declaration.declarationVersion", path: ["declarationVersion"], kind: "string" },
+  ];
+  for (const field of declarationFields) {
+    for (const variant of variantsForField(field, declarationBase)) {
+      const candidate = cloneJson(declarationBase);
+      if (variant.missing) deleteJsonPath(candidate, field.path);
+      else setJsonPath(candidate, field.path, variant.value);
+      assertThrows(() => validateOwnerDepositDeclaration(candidate), `${field.label}/${variant.label}: TS must reject`);
+      const accepted = (await pool.query<{ valid: boolean }>(
+        `SELECT zzsh_supply.valid_owner_deposit_declaration($1::jsonb) AS valid`, [candidate],
+      )).rows[0]?.valid;
+      assert.equal(accepted, false, `${field.label}/${variant.label}: SQL must reject`);
+    }
+  }
 }
 
 async function withPostingInsertBarrier<T>(
@@ -99,8 +268,10 @@ async function withPostingInsertBarrier<T>(
 export async function runSettlementAcceptance(t: TestContext, o: Base & {
   base: string; buyer: Jar; buyerEmail: string; owner: Jar; boss: Staff; createStaff: (name: string, permissions: string[]) => Promise<Staff>;
   publishApproved: (owner: any, label: string, depositCents: string | null, includeSettlementPiece?: boolean, fullPayoutSelected?: boolean,
-    rentalPricing?: { rentalMode: "ordinary" | "custom" | "fast"; ownerRatioB?: string }, pricingOptionCode?: string) => Promise<{ accountId: string; versionId: string; releaseId: string; listingHash?: string }>;
+    rentalPricing?: { rentalMode: "ordinary" | "custom" | "fast"; ownerRatioB?: string }, pricingOptionCode?: string, formalFunding?: boolean) => Promise<{ accountId: string; versionId: string; releaseId: string; listingHash?: string }>;
   request: any; runtimeUser: string; staged: boolean; upgrade: () => Promise<void>;
+  createFormalApp: () => Promise<{ app: { close: () => Promise<void> }; base: string }>;
+  createFormalRelease: (mode?: "NOT_REQUIRED" | "SATISFIED") => Promise<void>;
 }): Promise<void> {
   const { pool, migrationPool, ownerPool } = o;
   assert.equal(settlementSurfaceOpen(true), true);
@@ -123,7 +294,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   await o.upgrade();
   const migrationFileHash = (tag: string) => createHash("sha256").update(readFileSync(resolve(__dirname, "../../migrations/business", `${tag}.sql`))).digest("hex");
   const after = await migrations();
-  assert.equal(after.length, 52);
+  assert.equal(after.length, 55);
   assert.equal(after[46]!.hash, migrationFileHash("0046_order_settlement_confirmation"));
   assert.equal(after[46]!.created_at, "1789490015000");
   assert.equal(after[47]!.hash, migrationFileHash("0047_order_settlement_intake"));
@@ -136,9 +307,15 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   assert.equal(after[50]!.created_at, "1789490019000");
   assert.equal(after[51]!.hash, migrationFileHash("0051_order_personal_quote_v2_guard_fix"));
   assert.equal(after[51]!.created_at, "1789490020000");
-  if (!o.staged) assert.equal(before.length, 52, "the post-application settlement run must start at 52 migrations");
+  assert.equal(after[52]!.hash, migrationFileHash("0052_supply_direct_publication"));
+  assert.equal(after[52]!.created_at, "1789490021000");
+  assert.equal(after[53]!.hash, migrationFileHash("0053_supply_funding_authority"));
+  assert.equal(after[53]!.created_at, "1789490022000");
+  assert.equal(after[54]!.hash, migrationFileHash("0054_supply_funding_guard_correction"));
+  assert.equal(after[54]!.created_at, "1789490023000");
+  if (!o.staged) assert.equal(before.length, 55, "the post-application settlement run must start at 55 migrations");
   console.log("trade settlement migration replay", JSON.stringify({ beforeCount: before.length, afterCount: after.length,
-    firstApplication: o.staged ? null : "51->52 already recorded by order runner", replay: !o.staged && before.length === 52 && after.length === 52 }));
+    firstApplication: o.staged ? null : "0054 already recorded by the controlled migration runner", replay: !o.staged && before.length === 55 && after.length === 55 }));
   if (o.staged) assert.notDeepEqual(before, after);
   const retainedAfter = (await pool.query(`SELECT o.id, o.status, o.quote_snapshot, o.paid_confirmation_id, p.amount_cents::text AS amount, p.disposition
     FROM zzsh_order.rental_order o JOIN zzsh_order.payment_confirmation p ON p.id = o.paid_confirmation_id WHERE o.id = $1`, [retained.id])).rows[0];
@@ -1391,6 +1568,281 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
       bool_and(owner_credits = owner_net_cents AND refund_credits = renter_refund_cents AND platform_net = platform_contribution_cents) AS accounts_reconciled,
       count(DISTINCT payment_confirmation_id)::int AS unique_payments FROM selected`, [normalId, earlyId, concurrentPostId]);
   assert.deepEqual(reconciliation.rows[0], { batches: 3, allocation_balanced: true, ledger_balanced: true, accounts_reconciled: true, unique_payments: 3 });
+
+  // TR-C1-IMP-1: switch one new release to the formal policy producer, append
+  // account-level proof through the admin API, then exercise the same DB reader
+  // from a second HTTP app. Legacy v1 fixtures above remain on the legacy release.
+  await o.createFormalRelease();
+  const roleVerifier = await o.createStaff("保证金角色核定员", []);
+  const allowVerifier = await o.createStaff("保证金个人允许核定员", ["supply.guarantee.verify"]);
+  const denyVerifier = await o.createStaff("保证金拒绝核定员", []);
+  const revokeVerifier = await o.createStaff("保证金撤销核定员", ["supply.guarantee.verify", "supply.guarantee.revoke"]);
+  for (const verifier of [roleVerifier, allowVerifier, denyVerifier, revokeVerifier]) {
+    await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope (admin_user_id,game_id,granted_by_admin_id) VALUES ($1,$2,$3)`, [verifier.id, gameId, o.boss.id]);
+  }
+  const guaranteeRoleId = `role_trc1_r2_${randomUUID().replaceAll("-", "")}`;
+  await pool.query(
+    `INSERT INTO zzsh_iam.admin_role (id,code,name,description,status) VALUES ($1,$2,$3,$4,'ACTIVE')`,
+    [guaranteeRoleId, guaranteeRoleId, "TR-C1-R2保证金核定角色", "formal correction acceptance role"],
+  );
+  await pool.query(`INSERT INTO zzsh_iam.admin_role_permission (role_id,permission_code) VALUES ($1,'supply.guarantee.verify')`, [guaranteeRoleId]);
+  await pool.query(`INSERT INTO zzsh_iam.admin_user_role (admin_user_id,role_id) VALUES ($1,$2)`, [roleVerifier.id, guaranteeRoleId]);
+  await pool.query(`INSERT INTO zzsh_iam.admin_user_role (admin_user_id,role_id) VALUES ($1,$2)`, [denyVerifier.id, guaranteeRoleId]);
+  await pool.query(`INSERT INTO zzsh_iam.admin_user_permission (admin_user_id,permission_code,effect) VALUES ($1,'supply.guarantee.verify','DENY')`, [denyVerifier.id]);
+
+  const appendProof = async (
+    accountId: string,
+    verifier: Staff,
+    status: "SATISFIED" | "NOT_REQUIRED" | "REVOKED",
+    coveredCents?: string,
+    expectedProofVersion = "0",
+    expectedStatus = 200,
+  ) => {
+    const policyRow = (await pool.query<{ policyVersion: string }>(
+      `SELECT p.funding_policy->>'policyVersion' AS "policyVersion"
+         FROM zzsh_supply.rental_account a JOIN zzsh_supply.game g ON g.id=a.game_id
+         JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id
+         JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE a.id=$1`, [accountId],
+    )).rows[0];
+    const result = await post(`/api/bff/admin/supply/accounts/${accountId}/guarantee-proof`, {
+      expectedProofVersion, expectedPolicyVersion: policyRow!.policyVersion, status, ...(coveredCents === undefined ? {} : { coveredCents }),
+      evidenceRef: `trc1-imp1:${accountId}`, evidenceDigest: "ab".repeat(32), reason: "isolated formal policy proof",
+    }, verifier.jar, ADMIN_ORIGIN, key());
+    assert.equal(result.response.status, expectedStatus, JSON.stringify(result.body));
+    if (expectedStatus !== 200) return undefined;
+    return result.body!.proof as { id: string; status: string; versionNo: string; priceVersionId: string; validFrom: string; validUntil: string | null };
+  };
+  const republishOnCurrentRelease = async (target: { accountId: string }): Promise<{ accountId: string; versionId: string; releaseId: string }> => {
+    const source = (await pool.query<{
+      accountRevision: string; versionId: string; title: string; description: string | null; attributes: Record<string, unknown>;
+      termOptionCode: string; pricingOptionCode: string;
+    }>(
+      `SELECT a.revision::text AS "accountRevision",v.id AS "versionId",v.title,v.description,v.attributes,
+              v.term_option_code AS "termOptionCode",v.pricing_option_code AS "pricingOptionCode"
+         FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id
+        WHERE a.id=$1`, [target.accountId],
+    )).rows[0];
+    assert.ok(source, "republish source listing must exist");
+    const inventory = (await pool.query(`SELECT item_id AS "itemId",quantity::text AS quantity FROM zzsh_supply.inventory_line WHERE version_id=$1 ORDER BY item_id`, [source.versionId])).rows;
+    const skins = (await pool.query(`SELECT skin_id AS "skinId" FROM zzsh_supply.listing_skin WHERE version_id=$1 ORDER BY skin_id`, [source.versionId])).rows.map((row) => row.skinId);
+    const entitlements = (await pool.query(
+      `SELECT entitlement_id AS "entitlementId",value,CASE WHEN expires_at IS NULL THEN NULL ELSE to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "expiresAt",expiry_knowledge AS "expiryKnowledge"
+         FROM zzsh_supply.listing_entitlement WHERE version_id=$1 ORDER BY entitlement_id`, [source.versionId],
+    )).rows;
+    const mediaBindings = (await pool.query(
+      `SELECT asset_id AS "assetId",position FROM zzsh_supply.listing_media WHERE version_id=$1 ORDER BY position`, [source.versionId],
+    )).rows;
+    const draft = await o.request(o.base, `/api/v1/supply/accounts/${target.accountId}/drafts`, { expectedRevision: source.accountRevision }, o.owner, USER_ORIGIN, "POST", key());
+    assert.equal(draft.response.status, 200, JSON.stringify(draft.body));
+    const saved = await o.request(o.base, `/api/v1/supply/accounts/${target.accountId}/draft`, {
+      expectedRevision: draft.body!.account.revision,
+      title: source.title,
+      description: source.description,
+      attributes: source.attributes,
+      termOptionCode: source.termOptionCode,
+      pricingOptionCode: source.pricingOptionCode,
+      inventory,
+      skins,
+      entitlements,
+      mediaBindings,
+    }, o.owner, USER_ORIGIN, "PUT", key());
+    assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
+    const quoted = await o.request(o.base, `/api/v1/supply/accounts/${target.accountId}/quote`, { expectedRevision: saved.body!.account.revision }, o.owner, USER_ORIGIN, "POST", key());
+    assert.equal(quoted.response.status, 200, JSON.stringify(quoted.body));
+    const versionId = quoted.body!.version.id as string;
+    const releaseId = quoted.body!.version.releaseId as string;
+    const contentHash = quoted.body!.version.contentHash as string;
+    const accepted = await o.request(o.base, `/api/v1/supply/accounts/${target.accountId}/accept-rules`, {
+      expectedRevision: quoted.body!.account.revision, versionId, releaseId, contentHash,
+    }, o.owner, USER_ORIGIN, "POST", key());
+    assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
+    const submitted = await o.request(o.base, `/api/v1/supply/accounts/${target.accountId}/submit`, {
+      expectedRevision: accepted.body!.account.revision, versionId, releaseId, contentHash,
+    }, o.owner, USER_ORIGIN, "POST", key());
+    assert.equal(submitted.response.status, 200, JSON.stringify(submitted.body));
+    return { accountId: target.accountId, versionId, releaseId };
+  };
+  const formalNormal = await o.publishApproved(o.owner, "正式reader普通声明", "30000", true, false, undefined, "standard", true);
+  const formalFull = await o.publishApproved(o.owner, "正式reader包赔声明", "30000", true, true, undefined, "standard", true);
+  await assertStrictFundingPolicyVectors(pool, formalNormal.accountId);
+  const normalProof = await appendProof(formalNormal.accountId, roleVerifier, "NOT_REQUIRED", "0");
+  const fullProof = await appendProof(formalFull.accountId, allowVerifier, "NOT_REQUIRED", "0");
+  assert.ok(normalProof && fullProof);
+  const staleNotRequired = await o.publishApproved(o.owner, "正式reader旧价格无要求", "30000", true, false, undefined, "standard", true);
+  const staleNotRequiredProofA = await appendProof(staleNotRequired.accountId, roleVerifier, "NOT_REQUIRED", "0");
+  assert.ok(staleNotRequiredProofA);
+  const formalDenied = await o.publishApproved(o.owner, "正式reader拒绝核定", "30000", true, false, undefined, "standard", true);
+  await appendProof(formalDenied.accountId, denyVerifier, "NOT_REQUIRED", "0", "0", 403);
+  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_supply.account_guarantee_proof WHERE account_id=$1`, [formalDenied.accountId])).rows[0].n, 0);
+  const deniedContext = (await pool.query<{ ownerUserId: string; priceVersionId: string; policyVersion: string }>(
+    `SELECT a.owner_user_id AS "ownerUserId",r.price_version_id AS "priceVersionId",p.funding_policy->>'policyVersion' AS "policyVersion"
+       FROM zzsh_supply.rental_account a JOIN zzsh_supply.game g ON g.id=a.game_id
+       JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+      WHERE a.id=$1`, [formalDenied.accountId],
+  )).rows[0]!;
+  await assert.rejects(
+    () => pool.query(
+      `INSERT INTO zzsh_supply.account_guarantee_proof
+        (id,account_id,owner_user_id,version_no,price_version_id,policy_version,status,required_cents,covered_cents,evidence_ref,evidence_digest,verified_by_admin_id,valid_from,valid_until,supersedes_id,reason)
+       VALUES ($1,$2,$3,1,$4,$5,'NOT_REQUIRED',0,0,$6,$7,$8,clock_timestamp(),NULL,NULL,$9)`,
+      [randomUUID(), formalDenied.accountId, deniedContext.ownerUserId, deniedContext.priceVersionId, deniedContext.policyVersion, `trc1-direct-deny:${formalDenied.accountId}`, "cd".repeat(32), denyVerifier.id, "direct trigger denial"],
+    ),
+    (error: any) => error?.code === "42501",
+  );
+  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_supply.account_guarantee_proof WHERE account_id=$1`, [formalDenied.accountId])).rows[0].n, 0);
+  const formal = await o.createFormalApp();
+  try {
+    const formalPost = (path: string, body: Record<string, unknown> | undefined, jar = o.buyer, origin = USER_ORIGIN, headers?: Record<string, string>) =>
+      o.request(formal.base, path, body, jar, origin, body === undefined ? "GET" : "POST", headers ?? (body === undefined ? {} : key()));
+    for (const [account, proof, selected] of [[formalNormal, normalProof, false], [formalFull, fullProof, true]] as const) {
+      const confirmation = await formalPost("/api/v2/order-confirmations", { accountId: account.accountId, versionId: account.versionId, releaseId: account.releaseId });
+      assert.equal(confirmation.response.status, 200, JSON.stringify(confirmation.body));
+      assert.equal(confirmation.body!.compensationDisclosure.selected, selected);
+      const created = await formalPost("/api/v2/orders", { confirmationToken: confirmation.body!.confirmationToken }, o.buyer, USER_ORIGIN, key());
+      assert.equal(created.response.status, 200, JSON.stringify(created.body));
+      const stored = (await pool.query<{ status: string; personal: Record<string, any> }>(
+        `SELECT status, quote_snapshot->'personal' AS personal FROM zzsh_order.rental_order WHERE id=$1`, [created.body!.order.id],
+      )).rows[0]!;
+      assert.equal(stored.status, "PENDING_PAYMENT");
+      assert.equal(stored.personal.schema, "personal-quote-v2");
+      assert.equal(stored.personal.fullPayoutDeclaration.selected, selected);
+      assert.equal(stored.personal.guarantee.status, "NOT_REQUIRED");
+      assert.equal(stored.personal.funding.version, "trc1-imp1-policy-v1");
+      assert.match(stored.personal.funding.sourceRef, new RegExp(proof.id));
+      assert.equal(Object.hasOwn(stored.personal.funding, "fullPayoutFeeCents"), false);
+    }
+    const staleNotRequiredConfirmationA = await formalPost("/api/v2/order-confirmations", {
+      accountId: staleNotRequired.accountId, versionId: staleNotRequired.versionId, releaseId: staleNotRequired.releaseId,
+    });
+    assert.equal(staleNotRequiredConfirmationA.response.status, 200, JSON.stringify(staleNotRequiredConfirmationA.body));
+    var staleNotRequiredTokenA = staleNotRequiredConfirmationA.body!.confirmationToken as string;
+    console.log("trc1 imp1 formal reader", JSON.stringify({ policy: "trc1-imp1-policy-v1", proofs: [normalProof.id, fullProof.id], selected: [false, true], source: "same runtime PoolClient via production reader" }));
+  } finally {
+    await formal.app.close();
+  }
+
+  // A proof is account-scoped but also frozen to the exact sealed price version.
+  // Keep this path HTTP-driven: publish a new version after the price switch,
+  // then let the production reader reject the old proof without creating an order.
+  await o.createFormalRelease();
+  const staleNotRequiredB = await republishOnCurrentRelease(staleNotRequired);
+  const staleNotRequiredPrice = (await pool.query<{ priceVersionId: string }>(
+    `SELECT r.price_version_id AS "priceVersionId" FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.rule_release r ON r.id=v.rule_release_id WHERE a.id=$1`, [staleNotRequired.accountId],
+  )).rows[0]!.priceVersionId;
+  assert.notEqual(staleNotRequiredProofA.priceVersionId, staleNotRequiredPrice, "the stale proof must be bound to price A while the listing uses price B");
+  const staleFormal = await o.createFormalApp();
+  try {
+    const staleFormalPost = (path: string, body: Record<string, unknown> | undefined, jar = o.buyer, origin = USER_ORIGIN, headers?: Record<string, string>) =>
+      o.request(staleFormal.base, path, body, jar, origin, body === undefined ? "GET" : "POST", headers ?? (body === undefined ? {} : key()));
+    const staleConfirmationB = await staleFormalPost("/api/v2/order-confirmations", {
+      accountId: staleNotRequiredB.accountId, versionId: staleNotRequiredB.versionId, releaseId: staleNotRequiredB.releaseId,
+    });
+    assert.equal(staleConfirmationB.response.status, 503, JSON.stringify(staleConfirmationB.body));
+    assert.equal(staleConfirmationB.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+    const staleOrdersBefore = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleNotRequired.accountId])).rows[0].n);
+    const staleOrder = await staleFormalPost("/api/v2/orders", { confirmationToken: staleNotRequiredTokenA }, o.buyer, USER_ORIGIN, key());
+    assert.ok([404, 503].includes(staleOrder.response.status), JSON.stringify(staleOrder.body));
+    assert.ok(staleOrder.response.status === 404
+      ? staleOrder.body?.error?.code === "NOT_FOUND"
+      : staleOrder.body?.error?.code === "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+    const staleOrdersAfter = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleNotRequired.accountId])).rows[0].n);
+    assert.equal(staleOrdersAfter, staleOrdersBefore, "stale confirmation token must not create an order");
+    const recoveredProofB = await appendProof(staleNotRequired.accountId, roleVerifier, "NOT_REQUIRED", "0", "1");
+    assert.ok(recoveredProofB);
+    assert.equal(recoveredProofB.priceVersionId, staleNotRequiredPrice);
+    const recoveredConfirmation = await staleFormalPost("/api/v2/order-confirmations", {
+      accountId: staleNotRequiredB.accountId, versionId: staleNotRequiredB.versionId, releaseId: staleNotRequiredB.releaseId,
+    });
+    assert.equal(recoveredConfirmation.response.status, 200, JSON.stringify(recoveredConfirmation.body));
+    console.log("trc1 imp1 price binding", JSON.stringify({ mode: "NOT_REQUIRED", priceA: staleNotRequiredProofA.priceVersionId, priceB: staleNotRequiredPrice, staleStatus: staleConfirmationB.response.status, recoveredStatus: recoveredConfirmation.response.status, zeroOrderSideEffect: staleOrdersAfter === staleOrdersBefore }));
+  } finally {
+    await staleFormal.app.close();
+  }
+
+  await o.createFormalRelease("SATISFIED");
+  const staleSatisfied = await o.publishApproved(o.owner, "正式reader旧价格满足核定", "30000", true, false, undefined, "standard", true);
+  const staleSatisfiedProofA = await appendProof(staleSatisfied.accountId, roleVerifier, "SATISFIED", "30000");
+  assert.ok(staleSatisfiedProofA);
+  const formalSatisfied = await o.publishApproved(o.owner, "正式reader满足核定", "30000", true, false, undefined, "standard", true);
+  const satisfiedProof = await appendProof(formalSatisfied.accountId, roleVerifier, "SATISFIED", "30000");
+  assert.ok(satisfiedProof);
+  assert.equal(satisfiedProof.status, "SATISFIED");
+  assert.equal(satisfiedProof.versionNo, "1");
+  assert.ok(satisfiedProof.validUntil && Date.parse(satisfiedProof.validUntil) > Date.now(), "a satisfied proof must have a future database expiry");
+  const revokedProof = await appendProof(formalSatisfied.accountId, revokeVerifier, "REVOKED", undefined, "1");
+  assert.ok(revokedProof);
+  assert.equal(revokedProof.status, "REVOKED");
+  assert.equal(revokedProof.versionNo, "2");
+  console.log("trc1 imp1 r2 proof authorization", JSON.stringify({ role: roleVerifier.id, userAllow: allowVerifier.id, deny: denyVerifier.id, revoke: revokeVerifier.id, notRequired: [normalProof.id, fullProof.id], satisfied: satisfiedProof.id, revoked: revokedProof.id }));
+
+  const satisfiedAtAApp = await o.createFormalApp();
+  let staleSatisfiedTokenA: string;
+  try {
+    const satisfiedAtAPost = (path: string, body: Record<string, unknown> | undefined, jar = o.buyer, origin = USER_ORIGIN, headers?: Record<string, string>) =>
+      o.request(satisfiedAtAApp.base, path, body, jar, origin, body === undefined ? "GET" : "POST", headers ?? (body === undefined ? {} : key()));
+    const confirmationA = await satisfiedAtAPost("/api/v2/order-confirmations", {
+      accountId: staleSatisfied.accountId, versionId: staleSatisfied.versionId, releaseId: staleSatisfied.releaseId,
+    });
+    assert.equal(confirmationA.response.status, 200, JSON.stringify(confirmationA.body));
+    staleSatisfiedTokenA = confirmationA.body!.confirmationToken as string;
+  } finally {
+    await satisfiedAtAApp.app.close();
+  }
+
+  await o.createFormalRelease("SATISFIED");
+  const staleSatisfiedB = await republishOnCurrentRelease(staleSatisfied);
+  const staleSatisfiedPrice = (await pool.query<{ priceVersionId: string }>(
+    `SELECT r.price_version_id AS "priceVersionId" FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.rule_release r ON r.id=v.rule_release_id WHERE a.id=$1`, [staleSatisfied.accountId],
+  )).rows[0]!.priceVersionId;
+  assert.notEqual(staleSatisfiedProofA.priceVersionId, staleSatisfiedPrice, "the satisfied proof must be bound to price A while the listing uses price B");
+  const satisfiedFormal = await o.createFormalApp();
+  try {
+    const satisfiedFormalPost = (path: string, body: Record<string, unknown> | undefined, jar = o.buyer, origin = USER_ORIGIN, headers?: Record<string, string>) =>
+      o.request(satisfiedFormal.base, path, body, jar, origin, body === undefined ? "GET" : "POST", headers ?? (body === undefined ? {} : key()));
+    const staleSatisfiedConfirmation = await satisfiedFormalPost("/api/v2/order-confirmations", {
+      accountId: staleSatisfiedB.accountId, versionId: staleSatisfiedB.versionId, releaseId: staleSatisfiedB.releaseId,
+    });
+    assert.equal(staleSatisfiedConfirmation.response.status, 503, JSON.stringify(staleSatisfiedConfirmation.body));
+    assert.equal(staleSatisfiedConfirmation.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+    const satisfiedOrdersBefore = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleSatisfied.accountId])).rows[0].n);
+    const staleSatisfiedOrder = await satisfiedFormalPost("/api/v2/orders", { confirmationToken: staleSatisfiedTokenA }, o.buyer, USER_ORIGIN, key());
+    assert.ok([404, 503].includes(staleSatisfiedOrder.response.status), JSON.stringify(staleSatisfiedOrder.body));
+    assert.ok(staleSatisfiedOrder.response.status === 404
+      ? staleSatisfiedOrder.body?.error?.code === "NOT_FOUND"
+      : staleSatisfiedOrder.body?.error?.code === "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+    const satisfiedOrdersAfter = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleSatisfied.accountId])).rows[0].n);
+    assert.equal(satisfiedOrdersAfter, satisfiedOrdersBefore, "stale satisfied confirmation token must not create an order");
+    const recoveredSatisfiedProof = await appendProof(staleSatisfied.accountId, roleVerifier, "SATISFIED", "30000", "1");
+    assert.ok(recoveredSatisfiedProof);
+    assert.equal(recoveredSatisfiedProof.priceVersionId, staleSatisfiedPrice);
+    const recoveredSatisfiedConfirmation = await satisfiedFormalPost("/api/v2/order-confirmations", {
+      accountId: staleSatisfiedB.accountId, versionId: staleSatisfiedB.versionId, releaseId: staleSatisfiedB.releaseId,
+    });
+    assert.equal(recoveredSatisfiedConfirmation.response.status, 200, JSON.stringify(recoveredSatisfiedConfirmation.body));
+    const beforeRevoke = await satisfiedFormalPost("/api/v2/order-confirmations", {
+      accountId: staleSatisfiedB.accountId, versionId: staleSatisfiedB.versionId, releaseId: staleSatisfiedB.releaseId,
+    });
+    assert.equal(beforeRevoke.response.status, 200, JSON.stringify(beforeRevoke.body));
+    const revokedAfterPriceSwitch = await appendProof(staleSatisfied.accountId, revokeVerifier, "REVOKED", undefined, "2");
+    assert.ok(revokedAfterPriceSwitch);
+    const revokedValidity = (await pool.query<{ valid: boolean }>(
+      `SELECT (valid_from <= clock_timestamp() AND (valid_until IS NULL OR clock_timestamp() < valid_until)) AS valid FROM zzsh_supply.account_guarantee_proof WHERE id=$1`, [revokedAfterPriceSwitch.id],
+    )).rows[0]!.valid;
+    assert.equal(revokedValidity, false, "revocation must be immediately outside the reader validity window");
+    const afterRevokeConfirmation = await satisfiedFormalPost("/api/v2/order-confirmations", {
+      accountId: staleSatisfiedB.accountId, versionId: staleSatisfiedB.versionId, releaseId: staleSatisfiedB.releaseId,
+    });
+    assert.equal(afterRevokeConfirmation.response.status, 503, JSON.stringify(afterRevokeConfirmation.body));
+    assert.equal(afterRevokeConfirmation.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+    const beforeRevokeOrder = await satisfiedFormalPost("/api/v2/orders", { confirmationToken: beforeRevoke.body!.confirmationToken }, o.buyer, USER_ORIGIN, key());
+    assert.equal(beforeRevokeOrder.response.status, 503, JSON.stringify(beforeRevokeOrder.body));
+    assert.equal(beforeRevokeOrder.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+    const afterRevokeOrders = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleSatisfied.accountId])).rows[0].n);
+    assert.equal(afterRevokeOrders, satisfiedOrdersBefore, "revoked confirmation token must not create an order");
+    console.log("trc1 imp1 price binding", JSON.stringify({ mode: "SATISFIED", priceA: staleSatisfiedProofA.priceVersionId, priceB: staleSatisfiedPrice, staleStatus: staleSatisfiedConfirmation.response.status, recoveredStatus: recoveredSatisfiedConfirmation.response.status, revokedConfirmationStatus: afterRevokeConfirmation.response.status, expiredValidityAfterRevoke: !revokedValidity, zeroOrderSideEffect: afterRevokeOrders === satisfiedOrdersBefore }));
+  } finally {
+    await satisfiedFormal.app.close();
+  }
 
   // R1 uses the existing compatibility pricing seam only to provide all four frozen membership tiers
   // in the controlled fixture; settlement still runs through the normal confirmation/order/settlement HTTP paths.

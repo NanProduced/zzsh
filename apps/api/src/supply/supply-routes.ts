@@ -60,6 +60,7 @@ import {
   updatePriceDraft,
   updateTermDraft,
 } from "./rules";
+import { appendAccountGuaranteeProof, readLatestAccountGuaranteeProof } from "./funding-authority";
 import {
   MAX_MEDIA_BYTES,
   assertDeclaredMediaSize,
@@ -646,6 +647,22 @@ async function handleAdminRead(
   query: URLSearchParams,
   adminUserId: string,
 ): Promise<void> {
+  const guaranteeMatch = /^\/accounts\/([^/]+)\/guarantee-proof$/.exec(path);
+  if (guaranteeMatch) {
+    const accountId = decodeId(guaranteeMatch[1]!);
+    const result = await withTransaction(options.pool, async (client) => {
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyGuaranteeRead);
+      const account = (await client.query<{ gameId: string }>(
+        `SELECT game_id AS "gameId" FROM zzsh_supply.rental_account WHERE id=$1`, [accountId],
+      )).rows[0];
+      if (!account) throw notFound();
+      await assertGameScope(client, adminUserId, access.isBoss, account.gameId);
+      return readLatestAccountGuaranteeProof(client, accountId);
+    });
+    sendJson(response, 200, { proof: result }, requestId);
+    return;
+  }
   if (path === "/games") {
     const games = await withTransaction(options.pool, async (client) => {
       const access = await requireAdminAccess(client, adminUserId);
@@ -916,6 +933,34 @@ async function handleAdminWrite(
       },
     );
   };
+
+  const guaranteeMatch = /^\/accounts\/([^/]+)\/guarantee-proof$/.exec(path);
+  if (guaranteeMatch && method === "POST") {
+    const accountId = decodeId(guaranteeMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedProofVersion", "expectedPolicyVersion", "status", "coveredCents", "evidenceRef", "evidenceDigest", "reason"]);
+    if (!["SATISFIED", "NOT_REQUIRED", "REVOKED"].includes(String(body.status))) throw invalid("Guarantee proof status is invalid");
+    const permission = body.status === "REVOKED" ? ADMIN_PERMISSION.supplyGuaranteeRevoke : ADMIN_PERMISSION.supplyGuaranteeVerify;
+    await write("supply.guarantee.proof.create", accountId, permission, async (client) => {
+      const account = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_supply.rental_account WHERE id=$1`, [accountId])).rows[0];
+      if (!account) throw notFound();
+      return account.gameId;
+    }, async (client, access) => {
+      const status = body.status as "SATISFIED" | "NOT_REQUIRED" | "REVOKED";
+      requirePermission(access, status === "REVOKED" ? ADMIN_PERMISSION.supplyGuaranteeRevoke : ADMIN_PERMISSION.supplyGuaranteeVerify);
+      const proof = await appendAccountGuaranteeProof(client, actor.id, accountId, {
+        expectedProofVersion: requiredString(body, "expectedProofVersion", 20),
+        expectedPolicyVersion: requiredString(body, "expectedPolicyVersion", 200),
+        status,
+        ...(body.coveredCents === undefined ? {} : { coveredCents: requiredString(body, "coveredCents", 30) }),
+        evidenceRef: requiredString(body, "evidenceRef", 200),
+        evidenceDigest: requiredString(body, "evidenceDigest", 64),
+        reason: requiredString(body, "reason", 500),
+      });
+      return { status: 200, body: { id: proof.id, proof } };
+    }, "supply.guarantee.proof_appended");
+    return;
+  }
 
   const serviceMatch = /^\/games\/([^/]+)\/services\/(ACCOUNT_RENTAL|GUNSMITH)$/.exec(path);
   if (serviceMatch && method === "PUT") {

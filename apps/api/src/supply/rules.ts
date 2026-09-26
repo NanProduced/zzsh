@@ -7,6 +7,7 @@ import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notF
 import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
 import { DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
+import { validateFundingPolicy } from "./funding-policy";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
@@ -42,7 +43,7 @@ export async function listRules(
   const priceVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."mode", v."status", v."commission_rate"::text AS "commissionRate",
             v."haff_rule" AS "haffRule", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
-            v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt"
+            v."funding_policy" AS "fundingPolicy", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt"
        FROM "zzsh_supply"."price_version" v
       WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
     [gameId],
@@ -161,15 +162,19 @@ export async function updatePriceDraft(
   }
   const roundingPolicy = body.roundingPolicy === undefined ? undefined : body.roundingPolicy;
   if (roundingPolicy !== undefined && roundingPolicy !== DELTA_ROUNDING_POLICY) throw invalid("Rounding policy is unsupported");
+  const fundingPolicy = Object.hasOwn(body, "fundingPolicy")
+    ? body.fundingPolicy === null ? null : validateFundingPolicy(body.fundingPolicy)
+    : undefined;
   await client.query(
     `UPDATE "zzsh_supply"."price_version"
         SET "mode" = $1,
             "commission_rate" = CASE WHEN $2::boolean THEN $3::numeric ELSE "commission_rate" END,
             "haff_rule" = CASE WHEN $4::boolean THEN $5::jsonb ELSE "haff_rule" END,
             "rounding_policy" = COALESCE($6, "rounding_policy"),
+            "funding_policy" = CASE WHEN $7::boolean THEN $8::jsonb ELSE "funding_policy" END,
             "revision" = "revision" + 1,
             "updated_at" = clock_timestamp()
-      WHERE "id" = $7`,
+      WHERE "id" = $9`,
     [
       mode,
       commissionRate !== undefined,
@@ -177,6 +182,8 @@ export async function updatePriceDraft(
       haffRule !== undefined,
       haffRule === null || haffRule === undefined ? null : JSON.stringify(haffRule),
       roundingPolicy ?? null,
+      fundingPolicy !== undefined,
+      fundingPolicy === null || fundingPolicy === undefined ? null : JSON.stringify(fundingPolicy),
       versionId,
     ],
   );
@@ -214,6 +221,7 @@ export async function sealVersion(
   const current = await lockDraftishVersion(client, adminUserId, isBoss, table, versionId);
   if (current.status !== "DRAFT") throw conflict("Version is already sealed");
   if (typeof expectedRevision !== "string" || current.revision !== expectedRevision) throw conflict("Version changed; refresh and retry");
+  if (table === "price_version" && current.funding_policy !== null && current.funding_policy !== undefined) validateFundingPolicy(current.funding_policy);
   await client.query(
     `UPDATE "zzsh_supply"."${table}"
         SET "status" = 'SEALED', "sealed_at" = clock_timestamp(), "sealed_by_admin_id" = $1,
@@ -349,6 +357,10 @@ export async function activateRelease(
     if (row.gameId !== gameId) throw invalid("Rule versions must belong to this game");
     if (row.status !== "SEALED") throw conflict("Rule versions must be sealed before activation");
   }
+  const pricePolicy = (await client.query<{ policy: unknown | null }>(
+    `SELECT "funding_policy" AS policy FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
+  )).rows[0]?.policy;
+  if (pricePolicy !== null && pricePolicy !== undefined) validateFundingPolicy(pricePolicy);
   const nextGeneration = await client.query<{ generation: string }>(
     `SELECT (COALESCE(MAX("generation"), 0) + 1)::text AS "generation" FROM "zzsh_supply"."rule_release" WHERE "game_id" = $1`,
     [gameId],

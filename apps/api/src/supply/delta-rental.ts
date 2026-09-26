@@ -12,6 +12,7 @@ import {
 } from "./decimal";
 import { ensureOnlyFields, invalid } from "./supply-util";
 import type { ExpiryDisclosure, InternalQuote, QuoteAmount, QuoteUnitAmount } from "./pricing";
+import { validateOwnerDepositDeclaration } from "./funding-policy";
 
 export const DELTA_QUOTE_SCHEMA_VERSION = 1;
 export const DELTA_HAFF_RATIO_SCHEMA = "haff-ratio-v1";
@@ -370,9 +371,9 @@ function deltaDecimalText(value: unknown): string {
 }
 
 export function normalizeDeltaAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration"];
+  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration"];
   deltaFields(value, allowed);
-  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration").map((key) => {
+  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration").map((key) => {
     const child = value[key] ?? null;
     if (child === null) return [key, null];
     if ((DELTA_LEVEL_FIELDS as readonly string[]).includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new DeltaDeclarationError("Invalid Delta level");
@@ -388,6 +389,15 @@ export function normalizeDeltaAttributes(value: Record<string, unknown>): Record
     deltaFields(fields, ["schema", "selected"]);
     if (fields.schema !== "full-payout-declaration-v1" || typeof fields.selected !== "boolean") throw new DeltaDeclarationError("Invalid full payout declaration");
     normalized.full_payout_declaration = { schema: fields.schema, selected: fields.selected };
+  }
+  if (Object.hasOwn(value, "owner_deposit_declaration")) {
+    try {
+      const declaration = validateOwnerDepositDeclaration(value.owner_deposit_declaration);
+      if (!declaration) throw new Error("missing owner deposit declaration");
+      normalized.owner_deposit_declaration = declaration;
+    } catch {
+      throw new DeltaDeclarationError("Invalid owner deposit declaration");
+    }
   }
   return normalized;
 }

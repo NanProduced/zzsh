@@ -276,6 +276,8 @@
     {"idx":49,"version":"7","when":1789490018000,"tag":"0049_order_settlement_posting_guards","breakpoints":true},
     {"idx":50,"version":"7","when":1789490019000,"tag":"0050_order_personal_quote_v2_guard","breakpoints":true},
     {"idx":51,"version":"7","when":1789490020000,"tag":"0051_order_personal_quote_v2_guard_fix","breakpoints":true},
-    {"idx":52,"version":"7","when":1789490021000,"tag":"0052_supply_direct_publication","breakpoints":true}
+    {"idx":52,"version":"7","when":1789490021000,"tag":"0052_supply_direct_publication","breakpoints":true},
+    {"idx":53,"version":"7","when":1789490022000,"tag":"0053_supply_funding_authority","breakpoints":true},
+    {"idx":54,"version":"7","when":1789490023000,"tag":"0054_supply_funding_guard_correction","breakpoints":true}
   ]
 }

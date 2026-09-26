@@ -7,7 +7,7 @@ const FIELDS: Record<string, string> = {
   skin_category: "id game_id code name parent_id sort_order enabled form_visible",
   skin: "id game_id code name category_id rarity_code enabled form_visible media_id",
   entitlement: "id game_id code name value_kind expiry_kind enabled",
-  price_version: "id game_id mode status commission_rate haff_rule rounding_policy compensation_policy_ref revision",
+  price_version: "id game_id mode status commission_rate haff_rule rounding_policy compensation_policy_ref funding_policy revision",
   term_version: "id game_id status revision",
   agreement_version: "id game_id title digest status revision",
   rule_release: "id game_id price_version_id term_version_id agreement_version_id generation",
@@ -18,6 +18,7 @@ const FIELDS: Record<string, string> = {
   firearm: "id game_id code name classification_id enabled sort_order media_id revision source_namespace source_token source_note",
   firearm_alias: "id game_id firearm_id locale name enabled sort_order revision source_namespace source_token source_note",
   gunsmith_code: "id game_id firearm_id code note mode_code status last_reviewed_at revision source_namespace source_token source_note",
+  account_guarantee_proof: "id account_id owner_user_id version_no price_version_id policy_version status required_cents covered_cents evidence_ref evidence_digest verified_by_admin_id valid_from valid_until supersedes_id reason created_at",
 };
 
 export function auditObjectType(operation: string): string {
@@ -29,6 +30,7 @@ export function auditObjectType(operation: string): string {
   if (operation.startsWith("supply.gunsmith.firearm.")) return "firearm";
   if (operation.startsWith("supply.gunsmith.alias.")) return "firearm_alias";
   if (operation.startsWith("supply.gunsmith.code.")) return "gunsmith_code";
+  if (operation.startsWith("supply.guarantee.")) return "account_guarantee_proof";
   return operation.includes("upload_intent") ? "media_upload_intent" : "media_asset";
 }
 
@@ -36,7 +38,11 @@ export async function auditSnapshot(client: PoolClient, table: string, id: strin
   const fields = FIELDS[table];
   if (!fields) throw new Error("Unknown supply audit object");
   // Explicit fields: never copy upload tokens, agreement bodies or original evidence.
-  const row = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")} FROM zzsh_supply."${table}" WHERE id = $1${table === "rule_release" ? "" : " FOR UPDATE"}`, [id])).rows[0];
+  // Proofs are append-only: the writer already locks the account before the
+  // append, and the runtime role intentionally has no UPDATE privilege on the
+  // proof table. Keep row locking for mutable audit objects.
+  const lock = table === "account_guarantee_proof" || table === "rule_release" ? "" : " FOR UPDATE";
+  const row = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")} FROM zzsh_supply."${table}" WHERE id = $1${lock}`, [id])).rows[0];
   if (!row) return null;
   if (table === "price_version") row.lines = (await client.query(`SELECT item_id, customer_tier, pricing_kind, unit_quantity, buyer_unit_amount, owner_unit_amount FROM zzsh_supply.price_line WHERE price_version_id = $1 ORDER BY item_id, customer_tier`, [id])).rows;
   if (table === "term_version") row.options = (await client.query(`SELECT code, name, daily_consumption, duration_rounding FROM zzsh_supply.term_option WHERE version_id = $1 ORDER BY code`, [id])).rows;
