@@ -24,6 +24,9 @@ import { API_V1_ERROR_CODES, ApiV1HttpException, ensureApiV1RequestId, validateI
 import {
   bindGameCover,
   createCatalogEntry,
+  createSkinOwner,
+  updateSkinOwner,
+  catalogIdentityReview,
   createGame,
   listGames,
   readAdminCatalog,
@@ -926,7 +929,7 @@ async function handleAdminWrite(
             outcome: "SUCCESS",
             requestId,
             reason: typeof (request.body as Record<string, unknown>)?.reason === "string" ? (request.body as Record<string, string>).reason! : operation,
-            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED" },
+            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}) },
           });
         }
         return { status: result.status, body: result.body };
@@ -1139,6 +1142,27 @@ async function handleAdminWrite(
     }, "supply.catalog.cover_bound");
     return;
   }
+  const createOwnerMatch = /^\/games\/([^/]+)\/skin-owners$/.exec(path);
+  if (createOwnerMatch && method === "POST") {
+    const gameId = decodeId(createOwnerMatch[1]!);
+    const body = bodyOf(request);
+    await write("supply.catalog.skin_owners.create", gameId, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client, access) => {
+      const result = await createSkinOwner(client, actor.id, access.isBoss, gameId, body);
+      return { status: 200, body: result, details: { identityReview: catalogIdentityReview(body) } };
+    }, "supply.catalog.skin_owner_created");
+    return;
+  }
+  const updateOwnerMatch = /^\/skin-owners\/([^/]+)$/.exec(path);
+  if (updateOwnerMatch && method === "PUT") {
+    const id = decodeId(updateOwnerMatch[1]!);
+    const body = bodyOf(request);
+    await write("supply.catalog.skin_owners.update", id, ADMIN_PERMISSION.supplyCatalogManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_supply.skin_owner WHERE id=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await updateSkinOwner(client, actor.id, access.isBoss, id, body) }), "supply.catalog.skin_owner_updated");
+    return;
+  }
   const createEntryMatch = /^\/games\/([^/]+)\/(items|rarities|categories|skins|entitlements)$/.exec(path);
   if (createEntryMatch && method === "POST") {
     const gameId = decodeId(createEntryMatch[1]!);
@@ -1161,7 +1185,7 @@ async function handleAdminWrite(
       return found.rows[0].gameId;
     }, async (client, access) => {
       const result = await updateCatalogEntry(client, actor.id, access.isBoss, kind, entryId, body);
-      return { status: 200, body: { id: entryId }, details: { kind, gameId: result.gameId } };
+      return { status: 200, body: { id: entryId, ...result }, details: { kind, gameId: result.gameId, ...(kind === "skins" && body.evidenceRefs ? { identityReview: catalogIdentityReview(body) } : {}) } };
     }, "supply.catalog.entry_updated");
     return;
   }

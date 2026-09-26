@@ -4,6 +4,8 @@ import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { SecurityApiError } from "../auth/security-core";
 import {
   assertGameExists,
+  ensureOnlyFields,
+  parseExpectedRevision,
   assertGameScope,
   bumpCatalogRevision,
   conflict,
@@ -21,6 +23,193 @@ import { ensureGameServiceRows, isSupportedGameService, type GameServiceCode } f
 
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
 const UNITS = new Set(["HAFF_BASE", "ROUND", "PIECE", "DAY"]);
+
+const ASCII_EDGE = /^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g;
+const SKIN_FIELDS = ["name", "categoryId", "rarityCode", "sortOrder", "enabled", "formVisible", "aliases", "sourceNamespace", "sourceField", "sourceToken", "expectedCatalogRevision"];
+type SkinOwnerRef = { kind: "AGENT" | "MELEE_TYPE" | "FIREARM"; id: string };
+
+function skinText(value: unknown, field: string, max: number, canonical = true): string {
+  if (typeof value !== "string") throw invalid("Text is required", field);
+  const trimmed = value.replace(ASCII_EDGE, "");
+  const result = canonical ? trimmed : value;
+  if (!trimmed || [...result].length > max) throw invalid("Text length is invalid", field);
+  return result;
+}
+
+function identityEvidence(body: Record<string, unknown>): void {
+  body.reason = skinText(body.reason, "reason", 500);
+  if (!Array.isArray(body.evidenceRefs) || body.evidenceRefs.length < 1 || body.evidenceRefs.length > 8) throw invalid("Identity evidence is required", "evidenceRefs");
+  body.evidenceRefs = [...body.evidenceRefs].map((value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Invalid evidence", "evidenceRefs");
+    const entry = value as Record<string, unknown>;
+    ensureOnlyFields(entry, ["url", "observedAt", "region", "note"]);
+    const url = skinText(entry.url, "evidenceRefs.url", 2000);
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw invalid("Invalid evidence URL", "evidenceRefs.url"); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw invalid("Public HTTPS evidence required", "evidenceRefs.url");
+    const observedAt = skinText(entry.observedAt, "evidenceRefs.observedAt", 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(observedAt) || !Number.isFinite(Date.parse(observedAt)) || new Date(observedAt).toISOString().slice(0, 10) !== observedAt) throw invalid("Invalid evidence date", "evidenceRefs.observedAt");
+    return { url, observedAt, region: skinText(entry.region, "evidenceRefs.region", 64), note: skinText(entry.note, "evidenceRefs.note", 500) };
+  });
+}
+
+export function catalogIdentityReview(input: Record<string, unknown>): Record<string, unknown> {
+  const body = { ...input }; identityEvidence(body);
+  return { reason: body.reason, evidenceRefs: body.evidenceRefs };
+}
+
+/** Transport-independent validation, shared by the actual catalog writers. */
+export function parseSkinWrite(input: Record<string, unknown>, editing: boolean): Record<string, unknown> {
+  ensureOnlyFields(input, [...SKIN_FIELDS, ...(editing ? ["mediaId", "ownerRef", "baseName", "confirmIdentity", "reason", "evidenceRefs"] : ["code"])]);
+  const body = { ...input };
+  parseExpectedRevision({ expectedRevision: body.expectedCatalogRevision });
+  for (const field of ["name", "baseName"] as const) if (field in body) body[field] = skinText(body[field], field, 120);
+  for (const field of ["categoryId", "mediaId"] as const) if (field in body && !(field === "mediaId" && body[field] === null)) body[field] = skinText(body[field], field, 128);
+  if ("rarityCode" in body && body.rarityCode !== null) body.rarityCode = skinText(body.rarityCode, "rarityCode", 64);
+  optionalInteger(body, "sortOrder", -100000, 100000);
+  for (const field of ["enabled", "formVisible", "confirmIdentity"]) optionalBoolean(body, field);
+  if ("aliases" in body) {
+    if (!Array.isArray(body.aliases) || body.aliases.length > 32) throw invalid("Invalid aliases", "aliases");
+    const aliases = [...body.aliases].map(value => skinText(value, "aliases", 200));
+    if (new Set(aliases).size !== aliases.length) throw invalid("Duplicate aliases", "aliases");
+    body.aliases = aliases;
+  }
+  const sourceFields = ["sourceNamespace", "sourceField", "sourceToken"];
+  if (sourceFields.some(field => field in body)) {
+    if (!sourceFields.every(field => field in body)) throw invalid("Complete primary source required", "sourceNamespace");
+    if (!sourceFields.every(field => body[field] === null)) {
+      for (const field of sourceFields) body[field] = skinText(body[field], field, field === "sourceToken" ? 200 : 64, field !== "sourceToken");
+    }
+    if (editing) identityEvidence(body);
+  }
+  if ("ownerRef" in body) {
+    if (!body.ownerRef || typeof body.ownerRef !== "object" || Array.isArray(body.ownerRef)) throw invalid("Invalid owner reference", "ownerRef");
+    const ref = body.ownerRef as Record<string, unknown>;
+    ensureOnlyFields(ref, ["kind", "id"]);
+    if (typeof ref.kind !== "string" || !["AGENT", "MELEE_TYPE", "FIREARM"].includes(ref.kind)) throw invalid("Invalid owner kind", "ownerRef.kind");
+    body.ownerRef = { kind: ref.kind, id: skinText(ref.id, "ownerRef.id", 128) };
+  }
+  if ("ownerRef" in body || "baseName" in body || body.confirmIdentity === true) {
+    if (body.confirmIdentity !== true) throw invalid("Explicit identity confirmation required", "confirmIdentity");
+    identityEvidence(body);
+  }
+  if ("reason" in body) body.reason = skinText(body.reason, "reason", 500);
+  if ("evidenceRefs" in body) identityEvidence(body);
+  if (!editing) {
+    requireCode(body);
+    if (!body.name || !body.categoryId) throw invalid("Name and category required");
+    if (body.enabled === true || body.formVisible === true) throw invalid("Create a disabled draft first");
+  } else if (![...SKIN_FIELDS.filter(field => field !== "expectedCatalogRevision"), "mediaId", "ownerRef", "baseName"].some(field => field in body) && body.confirmIdentity !== true) {
+    throw invalid("No catalog change requested");
+  }
+  return body;
+}
+
+async function checkCatalogRevision(client: PoolClient, gameId: string, body: Record<string, unknown>): Promise<void> {
+  const expected = parseExpectedRevision({ expectedRevision: body.expectedCatalogRevision });
+  const row = (await client.query<{ revision: string }>(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0];
+  if (!row) throw notFound();
+  if (row.revision !== expected) throw conflict("Catalog changed; refresh and retry");
+}
+
+async function finishCatalogWrite(client: PoolClient, gameId: string, body: Record<string, unknown>): Promise<string> {
+  const result = await client.query<{ revision: string }>(`UPDATE zzsh_supply.game SET catalog_revision=catalog_revision+1,updated_at=clock_timestamp() WHERE id=$1 AND catalog_revision::text=$2 RETURNING catalog_revision::text AS revision`, [gameId, body.expectedCatalogRevision]);
+  if (result.rowCount !== 1) throw conflict("Catalog changed; refresh and retry");
+  return result.rows[0]!.revision;
+}
+
+async function assertSkinSource(client: PoolClient, gameId: string, id: string, namespace: unknown, field: unknown, token: unknown): Promise<void> {
+  if (namespace === null) return;
+  const result = await client.query(`SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND source_namespace COLLATE "C"=$2 AND source_field COLLATE "C"=$3 AND source_token COLLATE "C"=$4 AND id<>$5`, [gameId, namespace, field, token, id]);
+  if (result.rowCount) throw conflict("Primary source is already attached to another skin");
+}
+
+async function createSkin(client: PoolClient, gameId: string, id: string, input: Record<string, unknown>): Promise<CatalogRow> {
+  const body = parseSkinWrite(input, false);
+  await checkCatalogRevision(client, gameId, body);
+  await assertUnique(client, "skin", gameId, body.code as string);
+  await assertCategoryParent(client, gameId, body.categoryId as string);
+  if (body.rarityCode) await assertRarity(client, gameId, body.rarityCode as string);
+  await assertSkinSource(client, gameId, id, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null);
+  await client.query(`INSERT INTO zzsh_supply.skin (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,sort_order,source_namespace,source_field,source_token,aliases)
+    VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10,$11)`, [id, gameId, body.code, body.name, body.categoryId, body.rarityCode ?? null, body.sortOrder ?? 0, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null, body.aliases ?? []]);
+  return { id, code: body.code as string, namingState: "PENDING", catalogRevision: await finishCatalogWrite(client, gameId, body) };
+}
+
+async function updateSkin(client: PoolClient, gameId: string, row: Record<string, unknown>, input: Record<string, unknown>): Promise<{ gameId: string; code: string; namingState: string; catalogRevision: string }> {
+  const body = parseSkinWrite(input, true);
+  await checkCatalogRevision(client, gameId, body);
+  let name = body.name ?? row.name;
+  let ownerKind = row.owner_kind ?? null, ownerId = row.owner_id ?? null, firearmId = row.firearm_id ?? null, baseName = row.base_name ?? null;
+  if (body.confirmIdentity === true) {
+    const ref = body.ownerRef as SkinOwnerRef | undefined;
+    ownerKind = ref?.kind ?? ownerKind;
+    ownerId = ref ? (ref.kind === "FIREARM" ? null : ref.id) : ownerId;
+    firearmId = ref ? (ref.kind === "FIREARM" ? ref.id : null) : firearmId;
+    baseName = body.baseName ?? baseName;
+    if (!ownerKind || !baseName) throw invalid("Complete owner and base name required");
+    const owner = ownerKind === "FIREARM"
+      ? (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$2`, [gameId, firearmId])).rows[0]
+      : (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 AND kind=$2 AND id=$3`, [gameId, ownerKind, ownerId])).rows[0];
+    if (!owner) throw invalid("Owner does not belong to this game", "ownerRef");
+    const newBinding = row.naming_state !== "VERIFIED" || ownerKind !== row.owner_kind || ownerId !== row.owner_id || firearmId !== row.firearm_id;
+    if (newBinding && !owner.enabled) throw invalid("Owner is disabled", "ownerRef");
+    name = skinText(`${owner.name}-${baseName}`, "name", 120);
+    if (body.name !== undefined && body.name !== name) throw invalid("Display name must match owner and base name", "name");
+  } else if (name !== row.name) {
+    if (row.naming_state === "VERIFIED") throw invalid("Confirm structured identity to rename this skin", "name");
+    if (!body.reason) throw invalid("Rename reason required", "reason");
+  }
+  const namingState = body.confirmIdentity === true ? "VERIFIED" : String(row.naming_state);
+  const enabled = body.enabled ?? row.enabled, formVisible = body.formVisible ?? row.form_visible;
+  if (namingState === "PENDING" && (enabled || formVisible)) throw invalid("Pending skins cannot be enabled");
+  if (namingState === "LEGACY" && ((!row.enabled && enabled) || (!row.form_visible && formVisible))) throw invalid("Review legacy identity before re-enabling");
+  const aliases = body.aliases === undefined ? [...(row.aliases as string[])] : [...body.aliases as string[]];
+  if (name !== row.name && !aliases.includes(row.name as string)) aliases.push(row.name as string);
+  if (aliases.length > 32) throw invalid("Preserving the old name would exceed the alias limit", "aliases");
+  const source = "sourceNamespace" in body
+    ? [body.sourceNamespace, body.sourceField, body.sourceToken]
+    : [row.source_namespace, row.source_field, row.source_token];
+  if (row.source_namespace !== null && source.some((v, i) => v !== [row.source_namespace, row.source_field, row.source_token][i])) throw conflict("Primary source cannot be overwritten");
+  if (row.source_namespace === null && row.source_field !== null && (source[1] !== row.source_field || source[2] !== row.source_token)) throw conflict("Legacy source token must be preserved");
+  if (namingState !== "LEGACY" && source[0] === null && (source[1] !== null || source[2] !== null)) throw invalid("Review legacy source namespace before confirming identity");
+  await assertSkinSource(client, gameId, String(row.id), source[0], source[1], source[2]);
+  const categoryId = body.categoryId ?? row.category_id;
+  await assertCategoryParent(client, gameId, categoryId as string);
+  const rarityCode = "rarityCode" in body ? body.rarityCode : row.rarity_code;
+  if (rarityCode) await assertRarity(client, gameId, rarityCode as string);
+  const mediaId = "mediaId" in body ? body.mediaId : row.media_id;
+  if (body.mediaId) await assertPlatformMediaBinding(client, gameId, body.mediaId as string, "SKIN_MEDIA");
+  const result = await client.query<{ namingState: string }>(`UPDATE zzsh_supply.skin SET name=$1,enabled=$2,form_visible=$3,sort_order=$4,category_id=$5,rarity_code=$6,media_id=$7,aliases=$8,source_namespace=$9,source_field=$10,source_token=$11,owner_kind=$12,owner_id=$13,firearm_id=$14,base_name=$15 WHERE id=$16 RETURNING naming_state AS "namingState"`,
+    [name, enabled, formVisible, body.sortOrder ?? row.sort_order, categoryId, rarityCode, mediaId, aliases, ...source, ownerKind, ownerId, firearmId, baseName, row.id]);
+  if (result.rowCount !== 1) throw notFound();
+  return { gameId, code: String(row.code), namingState: result.rows[0]!.namingState, catalogRevision: await finishCatalogWrite(client, gameId, body) };
+}
+
+export async function createSkinOwner(client: PoolClient, adminUserId: string, isBoss: boolean, gameId: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+  await assertGameScope(client, adminUserId, isBoss, gameId);
+  ensureOnlyFields(input, ["expectedCatalogRevision", "kind", "code", "name", "reason", "evidenceRefs"]);
+  const body = { ...input }; identityEvidence(body);
+  if (body.kind !== "AGENT" && body.kind !== "MELEE_TYPE") throw invalid("Unsupported owner kind");
+  const code = requireCode(body), name = skinText(body.name, "name", 120);
+  await checkCatalogRevision(client, gameId, body);
+  const id = newSupplyId("skin_owner");
+  await client.query(`INSERT INTO zzsh_supply.skin_owner (id,game_id,kind,code,name) VALUES ($1,$2,$3,$4,$5)`, [id, gameId, body.kind, code, name]);
+  return { id, kind: body.kind, code, enabled: true, catalogRevision: await finishCatalogWrite(client, gameId, body) };
+}
+
+export async function updateSkinOwner(client: PoolClient, adminUserId: string, isBoss: boolean, id: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+  ensureOnlyFields(input, ["expectedCatalogRevision", "enabled", "reason"]);
+  skinText(input.reason, "reason", 500);
+  const enabled = optionalBoolean(input, "enabled");
+  if (enabled === undefined) throw invalid("Enabled is required");
+  const row = (await client.query<{ gameId: string; kind: string; code: string }>(`SELECT game_id AS "gameId",kind,code FROM zzsh_supply.skin_owner WHERE id=$1 FOR UPDATE`, [id])).rows[0];
+  if (!row) throw notFound();
+  await assertGameScope(client, adminUserId, isBoss, row.gameId);
+  await checkCatalogRevision(client, row.gameId, input);
+  await client.query(`UPDATE zzsh_supply.skin_owner SET enabled=$1,updated_at=clock_timestamp() WHERE id=$2`, [enabled, id]);
+  return { id, kind: row.kind, code: row.code, enabled, catalogRevision: await finishCatalogWrite(client, row.gameId, input) };
+}
 
 function requireCode(body: Record<string, unknown>, field = "code"): string {
   const value = requiredString(body, field, 64);
@@ -139,7 +328,7 @@ export async function updateGame(
   if (result.rowCount !== 1) throw conflict("Catalog changed; refresh and retry");
 }
 
-type CatalogRow = { id: string };
+type CatalogRow = { id: string; code?: string; namingState?: string; catalogRevision?: string };
 
 export async function createCatalogEntry(
   client: PoolClient,
@@ -203,30 +392,7 @@ export async function createCatalogEntry(
       ],
     );
   } else if (kind === "skins") {
-    const code = requireCode(body);
-    await assertUnique(client, "skin", gameId, code);
-    const categoryId = requiredString(body, "categoryId", 128);
-    await assertCategoryParent(client, gameId, categoryId);
-    const rarityCode = optionalNullableString(body, "rarityCode", 64);
-    if (rarityCode !== undefined && rarityCode !== null) await assertRarity(client, gameId, rarityCode);
-    await client.query(
-      `INSERT INTO "zzsh_supply"."skin" ("id", "game_id", "code", "name", "category_id", "rarity_code", "enabled", "form_visible", "media_id", "sort_order", "source_field", "source_token")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [
-        id,
-        gameId,
-        code,
-        requiredString(body, "name", 120),
-        categoryId,
-        rarityCode ?? null,
-        optionalBoolean(body, "enabled") ?? true,
-        optionalBoolean(body, "formVisible") ?? true,
-        null,
-        optionalInteger(body, "sortOrder", -100000, 100000) ?? 0,
-        optionalString(body, "sourceField", 64) ?? null,
-        optionalString(body, "sourceToken", 200) ?? null,
-      ],
-    );
+    return createSkin(client, gameId, id, body);
   } else {
     const code = requireCode(body);
     await assertUnique(client, "entitlement", gameId, code);
@@ -262,10 +428,10 @@ export async function updateCatalogEntry(
   kind: "items" | "rarities" | "categories" | "skins" | "entitlements",
   entryId: string,
   body: Record<string, unknown>,
-): Promise<{ gameId: string }> {
+): Promise<{ gameId: string; code?: string; namingState?: string; catalogRevision?: string }> {
   const table = TABLE_BY_KIND[kind];
   const current = await client.query<Record<string, unknown>>(
-    `SELECT * FROM "zzsh_supply"."${table}" WHERE "id" = $1`,
+    `SELECT * FROM "zzsh_supply"."${table}" WHERE "id" = $1${kind === "skins" ? " FOR UPDATE" : ""}`,
     [entryId],
   );
   const row = current.rows[0];
@@ -321,28 +487,7 @@ export async function updateCatalogEntry(
       [name ?? null, enabled ?? null, formVisible ?? null, sortOrder ?? null, parentId !== undefined, parentId ?? null, entryId],
     );
   } else if (kind === "skins") {
-    const name = optionalString(body, "name", 120);
-    const enabled = optionalBoolean(body, "enabled");
-    const formVisible = optionalBoolean(body, "formVisible");
-    const sortOrder = optionalInteger(body, "sortOrder", -100000, 100000);
-    const categoryId = optionalString(body, "categoryId", 128);
-    const rarityCode = optionalNullableString(body, "rarityCode", 64);
-    const mediaId = optionalNullableString(body, "mediaId", 128);
-    if ([name, enabled, formVisible, sortOrder, categoryId, rarityCode, mediaId].every((value) => value === undefined)) throw invalid();
-    if (categoryId !== undefined) await assertCategoryParent(client, gameId, categoryId);
-    if (rarityCode !== undefined && rarityCode !== null) await assertRarity(client, gameId, rarityCode);
-    if (mediaId !== undefined && mediaId !== null) await assertPlatformMediaBinding(client, gameId, mediaId, "SKIN_MEDIA");
-    await client.query(
-      `UPDATE "zzsh_supply"."skin"
-          SET "name" = COALESCE($1, "name"), "enabled" = COALESCE($2, "enabled"),
-              "form_visible" = COALESCE($3, "form_visible"), "sort_order" = COALESCE($4, "sort_order"),
-              "category_id" = COALESCE($5, "category_id"),
-              "rarity_code" = CASE WHEN $6::boolean THEN $7::text ELSE "rarity_code" END,
-              "media_id" = CASE WHEN $8::boolean THEN $9::text ELSE "media_id" END,
-              "updated_at" = clock_timestamp()
-        WHERE "id" = $10`,
-      [name ?? null, enabled ?? null, formVisible ?? null, sortOrder ?? null, categoryId ?? null, rarityCode !== undefined, rarityCode ?? null, mediaId !== undefined, mediaId ?? null, entryId],
-    );
+    return updateSkin(client, gameId, row, body);
   } else {
     const name = optionalString(body, "name", 120);
     const enabled = optionalBoolean(body, "enabled");
@@ -589,7 +734,7 @@ export async function readAdminCatalog(
     [gameId],
   );
   if (game.rows.length === 0) throw notFound();
-  const [items, rarities, categories, skins, entitlements] = await Promise.all([
+  const [items, rarities, categories, skins, entitlements, owners] = await Promise.all([
     client.query(
       `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "enabled",
               "sort_order" AS "sortOrder", "media_id" AS "mediaId", "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_note" AS "sourceNote"
@@ -608,7 +753,9 @@ export async function readAdminCatalog(
     client.query(
       `SELECT "id", "code", "name", "category_id" AS "categoryId", "rarity_code" AS "rarityCode", "enabled",
               "form_visible" AS "formVisible", "media_id" AS "mediaId", "sort_order" AS "sortOrder",
-              "source_field" AS "sourceField", "source_token" AS "sourceToken"
+              "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_namespace" AS "sourceNamespace",
+              "base_name" AS "baseName", "aliases", "naming_state" AS "namingState",
+              CASE WHEN owner_kind IS NULL THEN NULL ELSE jsonb_build_object('kind',owner_kind,'id',COALESCE(owner_id,firearm_id)) END AS "ownerRef"
          FROM "zzsh_supply"."skin" WHERE "game_id" = $1 ORDER BY "sort_order", "code"`,
       [gameId],
     ),
@@ -618,6 +765,7 @@ export async function readAdminCatalog(
          FROM "zzsh_supply"."entitlement" WHERE "game_id" = $1 ORDER BY "sort_order", "code"`,
       [gameId],
     ),
+    client.query(`SELECT id,kind,code,name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 ORDER BY kind,code,id`, [gameId]),
   ]);
   return {
     game: game.rows[0],
@@ -626,5 +774,6 @@ export async function readAdminCatalog(
     categories: categories.rows,
     skins: skins.rows,
     entitlements: entitlements.rows,
+    owners: owners.rows,
   };
 }
