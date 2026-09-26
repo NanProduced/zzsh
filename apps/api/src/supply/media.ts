@@ -529,7 +529,7 @@ export async function changeMediaVisibility(
 
 async function clearMediaBindings(client: PoolClient, assetId: string): Promise<void> {
   const cover = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."game" SET "cover_media_id" = NULL, "updated_at" = clock_timestamp() WHERE "cover_media_id" = $1 RETURNING id AS "gameId"`, [assetId]);
-  const skins = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."skin" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
+  const skins = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."skin" SET "media_id" = NULL WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
   const items = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."billable_item" SET "media_id" = NULL, "updated_at" = clock_timestamp() WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
   const firearms = await client.query<{gameId:string}>(`UPDATE "zzsh_supply"."firearm" SET "media_id" = NULL, "revision" = "revision" + 1, "updated_at" = clock_timestamp() WHERE "media_id" = $1 RETURNING game_id AS "gameId"`, [assetId]);
   const games = new Set([...cover.rows,...skins.rows,...items.rows,...firearms.rows].map(row=>row.gameId));

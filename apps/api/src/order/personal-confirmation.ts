@@ -8,6 +8,7 @@ import { computeDeltaQuote, projectDeltaQuote } from "../supply/pricing";
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
+import { isProductionConfirmationFundingReader } from "../supply/funding-authority";
 import { EFFECTIVE_PUBLICATION_STATE_SQL, isEffectivePublicationState } from "../supply/listing-query";
 import { ensureOnlyFields, invalid, notFound } from "../supply/supply-util";
 import { assertFreshCreateAuthorization, type OrderUserContext } from "./order";
@@ -115,7 +116,7 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   const membership=await readRentalMembership(client,context.userId);
   if(membership.tier==="UNKNOWN")throw new SecurityApiError(503,"MEMBERSHIP_UNKNOWN","Rental membership is unknown");
   const ownerDeclaration=fullPayoutDeclaration(version.payload.declaration.attributes.full_payout_declaration);
-  if(ownerDeclaration && (!options.fundingReader || !isControlledConfirmationFundingReader(options.fundingReader)))unavailable("Controlled full-payout funding source is unavailable");
+  if(ownerDeclaration && (!options.fundingReader || (!isControlledConfirmationFundingReader(options.fundingReader) && !isProductionConfirmationFundingReader(options.fundingReader))))unavailable("Authoritative full-payout funding source is unavailable");
   const funding=await options.fundingReader?.(client,account,version) ?? null;
   if(!funding || (funding.schema!==undefined && funding.schema!=="personal-quote-v1" && funding.schema!=="personal-quote-v2")
     || typeof funding.version!=="string" || !funding.version.trim() || typeof funding.sourceRef!=="string" || !funding.sourceRef.trim()

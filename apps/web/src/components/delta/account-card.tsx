@@ -37,7 +37,7 @@ function compactLevel(value: string | null, fallback: string | null = null): str
   return compact ? `${compact}级` : fallback;
 }
 
-function isHaff(line: ResourceLine): boolean {
+export function isHaff(line: ResourceLine): boolean {
   return line.itemId === "haff" || line.unitLabel === "哈夫币" || line.name.includes("哈夫币");
 }
 

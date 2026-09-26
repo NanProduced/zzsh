@@ -41,6 +41,7 @@ export type ListingCardData = {
   skinTags: SkinTag[];
   entitlementNames: string[];
   rentalMode?: "ordinary" | "custom" | "fast" | null;
+  unitAmountsInformational: boolean;
 };
 export type ListingDetailData = ListingCardData & {
   description: string | null;
@@ -223,6 +224,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     })),
     entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
     rentalMode: listing.quote.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
+    unitAmountsInformational: listing.quote.unitAmountsInformational === true,
   };
 }
 export function toListingDetail(listing: PublicListing): ListingDetailData {

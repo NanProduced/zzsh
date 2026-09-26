@@ -86,12 +86,16 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."approval_request_candidate", "zzsh_iam"."approval_decision", "zzsh_iam"."approval_execution" FROM ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."user_identity_state" FROM ${runtimeUser};
   `);
+  await configureSkinIdentityPrivileges(pool, options.runtimeUser);
   await pool.query(`GRANT USAGE, SELECT ON SEQUENCE "zzsh_iam"."admin_login_number_seq" TO ${runtimeUser}`);
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.listing_filter_config TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_filter_config FROM ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_publication') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_publication FROM ${runtimeUser}`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.account_guarantee_proof') AS relation`)).rows[0]?.relation) {
+    await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.account_guarantee_proof TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.account_guarantee_proof FROM ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_iam.user_rental_membership TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_iam.user_rental_membership FROM ${runtimeUser}; GRANT UPDATE (tier,version,source_ref,updated_by_admin_id) ON zzsh_iam.user_rental_membership TO ${runtimeUser}`);
@@ -131,4 +135,25 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
   await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_supply" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${runtimeUser}`);
   await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_content" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${runtimeUser}`);
   await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_order" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${runtimeUser}`);
+}
+
+/** Kept separate so prefix migration and least-privilege branches can be checked offline. */
+export async function configureSkinIdentityPrivileges(pool: Pick<Pool, "query">, runtimeUser: string): Promise<void> {
+  const role = quoteIdentifier(runtimeUser);
+  const columns = (await pool.query(`SELECT count(*)::int AS count FROM pg_attribute
+    WHERE attrelid=to_regclass('zzsh_supply.skin') AND NOT attisdropped AND attname=ANY($1::text[])`,
+    [["owner_kind","owner_id","firearm_id","base_name","aliases","source_namespace","naming_state"]])).rows[0]?.count;
+  const owner = (await pool.query(`SELECT to_regclass('zzsh_supply.skin_owner') IS NOT NULL AS present`)).rows[0]?.present;
+  if (columns === 0 && !owner) return;
+  if (columns !== 7 || !owner) throw new Error("Skin identity schema is incomplete; runtime privileges not finalized");
+  await pool.query(`
+    REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin FROM ${role};
+    GRANT SELECT ON zzsh_supply.skin TO ${role};
+    GRANT INSERT (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases) ON zzsh_supply.skin TO ${role};
+    GRANT UPDATE (name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name) ON zzsh_supply.skin TO ${role};
+    REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin_owner FROM ${role};
+    GRANT SELECT ON zzsh_supply.skin_owner TO ${role};
+    GRANT INSERT (id,game_id,kind,code,name,enabled) ON zzsh_supply.skin_owner TO ${role};
+    GRANT UPDATE (enabled,updated_at) ON zzsh_supply.skin_owner TO ${role};
+  `);
 }

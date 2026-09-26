@@ -8,6 +8,8 @@
 *.js text eol=lf
 *.css text eol=lf
 *.sql text eol=lf
+# Applied 0055 has a frozen CRLF checksum; preserve its exact bytes.
+apps/api/migrations/business/0055_skin_identity_contract.sql -text !eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 *.sh text eol=lf
 *.ps1 text eol=lf
 *.png binary

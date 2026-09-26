@@ -36,6 +36,8 @@ import {
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
 import { normalizeRentalPricing } from "./delta-rental";
+import { readFundingPolicyForRelease } from "./funding-authority";
+import { validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -239,6 +241,25 @@ export async function publicationBlockers(
   if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
   if (!v.rule_release_id || game?.current_release_id !== v.rule_release_id)
     reasons.push("RULE_CHANGED");
+  if (v.rule_release_id && game?.current_release_id === v.rule_release_id) {
+    try {
+      const policy = await readFundingPolicyForRelease(client, v.rule_release_id);
+      if (policy) {
+        const declaration = validateOwnerDepositDeclaration(v.attributes.owner_deposit_declaration);
+        const fullPayout = v.attributes.full_payout_declaration;
+        if (!declaration || !fullPayout || typeof fullPayout !== "object" || Array.isArray(fullPayout)
+          || Object.keys(fullPayout).sort().join(",") !== "schema,selected"
+          || (fullPayout as Record<string, unknown>).schema !== "full-payout-declaration-v1"
+          || typeof (fullPayout as Record<string, unknown>).selected !== "boolean") {
+          reasons.push("FUNDING_UNKNOWN");
+        } else {
+          validateOwnerDepositAmount(policy, declaration.amountCents, (fullPayout as Record<string, unknown>).selected as boolean);
+        }
+      }
+    } catch {
+      reasons.push("FUNDING_UNKNOWN");
+    }
+  }
   if (
     a.lifecycle !== "ACTIVE" ||
     a.legacy_hold !== "NONE" ||

@@ -286,8 +286,12 @@
 .functional-shell .market-pagination { gap: 10px; margin-top: 22px; }
 
 .functional-shell .listing-detail {
-  gap: 24px;
   margin-top: 24px;
+}
+
+/* Side support rail sits in the right 78px; reserve it regardless of globals.css load order. */
+@media (min-width: 1100px) and (hover: hover) and (pointer: fine) {
+  .functional-shell--detail .functional-main.portal-width { width: min(1320px, calc(100% - 176px)); }
 }
 
 .functional-shell .detail-gallery { gap: 12px; }
@@ -303,8 +307,7 @@
 
 .functional-shell .detail-sections { gap: 12px; }
 
-.functional-shell .detail-sections > section,
-.functional-shell .detail-actions {
+.functional-shell .detail-sections > section {
   padding: 18px 20px;
   border: 1px solid var(--color-border-default);
   border-radius: var(--functional-radius-sm);
@@ -312,12 +315,8 @@
 }
 
 .functional-shell .detail-sections h2 { margin-bottom: 14px; font-size: 17px; }
-.functional-shell .detail-facts { gap: 0; }
-.functional-shell .detail-facts > div { padding-block: 10px; border-bottom-color: var(--color-border-subtle); }
 .functional-shell .detail-price { font-size: 20px; }
 .functional-shell .detail-skins li { border-radius: 9px; }
-.functional-shell .detail-actions { display: grid; gap: 10px; }
-.functional-shell .detail-actions .favorite-inline { justify-content: center; }
 
 .functional-shell .gunsmith-toolbar {
   margin-top: 24px;
@@ -552,7 +551,7 @@
 @media (max-width: 1023px) {
   .functional-shell .game-identity { min-height: 280px; border-right: 0; border-bottom: 1px solid var(--color-delta-border); }
   .functional-shell .game-row { grid-template-columns: 1fr; }
-  .functional-shell .listing-detail { grid-template-columns: 1fr; }
+  .functional-shell .detail-hero { grid-template-columns: 1fr; }
   .functional-shell .gunsmith-detail { position: static; }
   .functional-shell .publish-page-layout { grid-template-columns: minmax(0, 1fr) 270px; }
 }
@@ -589,8 +588,7 @@
   .functional-shell .market-filters fieldset { gap: 12px; }
   .functional-shell .filter-field { flex: 0 1 auto; }
   .functional-shell .account-grid { gap: 12px; }
-  .functional-shell .detail-sections > section,
-  .functional-shell .detail-actions { padding: 16px; }
+  .functional-shell .detail-sections > section { padding: 16px; }
   .functional-shell .detail-gallery-main { min-height: 150px; }
   .functional-shell .gunsmith-firearms,
   .functional-shell .gunsmith-detail { padding: 14px; }
