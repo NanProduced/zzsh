@@ -1,5 +1,6 @@
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
+import { createLocalMediaStorage } from "../src/supply/media";
 import sharp from "sharp";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -488,6 +489,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
   let runtimeClosedByApp = false;
   let smallClosedByApp = false;
   let fixturesStarted = false;
+  let retainedRoleIds: string[] = [];
   const publicationGates = new Map<string, SupplyGate>();
   const probeWatched = new Set<string>();
   const probe: { run?: (accountId: string) => Promise<void> } = {};
@@ -496,14 +498,15 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     pngFixture = await sharp({ create: { width: 64, height: 64, channels: 3, background: "blue" } }).png().toBuffer();
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-order-maintenance", 2);
     guard = await resourceGuard(maintenancePool, resources);
-    await ensureDatabase(maintenancePool, resources);
+    if (RESOURCE_SET !== "trade_settlement") await ensureDatabase(maintenancePool, resources);
     if (RESOURCE_SET !== "trade_settlement") {
       await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"), RESOURCE_SET !== "pub_direct");
       await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"), RESOURCE_SET !== "pub_direct");
     }
-    await grantDatabaseAccess(maintenancePool, resources);
+    if (RESOURCE_SET !== "trade_settlement") await grantDatabaseAccess(maintenancePool, resources);
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-order-owner", 2);
-    await prepareOwnership(maintenanceDataPool, resources);
+    if (RESOURCE_SET !== "trade_settlement") await prepareOwnership(maintenanceDataPool, resources);
+    retainedRoleIds = (await maintenanceDataPool.query<{ id: string }>(`SELECT id FROM zzsh_iam.admin_role`)).rows.map(r => r.id);
     migrationPool = createBusinessPool(resources.migration);
     const hasJournal = (await migrationPool.query(`SELECT to_regclass('zzsh_business_meta.migrations') AS name`)).rows[0].name;
     const migrationBefore = hasJournal ? (await migrationPool.query(`SELECT count(*)::int AS n, max(created_at)::text AS latest FROM zzsh_business_meta.migrations`)).rows[0] : { n: 0, latest: null };
@@ -520,7 +523,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     // grants (its journal tail is already applied), so the suite never drops or replays from zero.
     const stageUpTo = baselineCount < 43 ? 42 : baselineCount - 1;
     const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : stageSettlement && baselineCount === 0 ? preparePartialMigrationsFolder(45) : undefined;
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
+    if (RESOURCE_SET === "trade_settlement") assert.equal(baselineCount, 55, "reuse-only acceptance cannot migrate this resource");
+    else await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
     const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
     if (RESOURCE_SET === "oim_escalation_stage") {
       assert.equal(baselineCount, 0, "the one-time stage must be rebuilt through its registered empty-resource path");
@@ -530,7 +534,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     if (stageSettlement && baselineCount === 0) assert.equal(migrated.length, 46, "trade_settlement must stop at 0045 before retained payment facts");
     const firstResponseBaselineCount = stagedFirstResponse ? migrated.length : baselineCount;
     if (!stagedFirstResponse && !stageSettlement) {
-      await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+      if (RESOURCE_SET !== "trade_settlement") await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
       assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
     }
     console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse,
@@ -539,12 +543,12 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       firstApplication0052: RESOURCE_SET === "trade_settlement" && baselineCount === 52 && migrated.length === 54,
       firstApplication0053: RESOURCE_SET === "trade_settlement" && baselineCount === 53 && migrated.length === 54,
       firstApplication0054: RESOURCE_SET === "trade_settlement" && baselineCount === 54 && migrated.length === 55,
-      migrationReplayVerified: !stagedFirstResponse }));
+      migrationReplayVerified: !stagedFirstResponse && RESOURCE_SET !== "trade_settlement", reuseOnly55: RESOURCE_SET === "trade_settlement" }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
     await assertEmptyIsolatedBusinessData(maintenanceDataPool);
-    await truncateIsolatedBusinessData(maintenanceDataPool);
+    if (RESOURCE_SET !== "trade_settlement") await truncateIsolatedBusinessData(maintenanceDataPool);
     fixturesStarted = true;
     // B6 deliberately jumps this sequence to 999998 later. Reset the isolated
     // fixture sequence first so a repeat run cannot collide with that range.
@@ -560,6 +564,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
 
     const bootstrapSecret = randomBytes(32).toString("hex");
     const settlementFundingRunId = randomUUID();
+    const evidenceReadProbe: { run?: () => Promise<void> } = {};
+    const evidenceStorage = createLocalMediaStorage(resolve("../../tmp/trade-line/trc2-api-a/media", settlementFundingRunId));
     if (RESOURCE_SET === "trade_settlement") console.log("trade settlement controlled funding run", JSON.stringify({ runId: settlementFundingRunId }));
     const settlementFundingListings = new Map<string, ControlledFundingListing>();
     const authOptions = {
@@ -574,6 +580,11 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         ORDER_CONFIRMATION_KEY_ID: "trb3b1r2",
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
+      mediaStorage: { ...evidenceStorage, read: async (storageKey: string) => {
+        const bytes = await evidenceStorage.read(storageKey);
+        await evidenceReadProbe.run?.();
+        return bytes;
+      } },
       // Explicit synthetic supplier-event ingress for OIM-4B; never reads a real AppSecret.
       // No approval/freshness windows are passed: the mounted default path is what runs.
       // The periodic sweep is pushed out so deterministic recovery tests own their own calls.
@@ -2108,6 +2119,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
           buyerEmail: "oim_buyer@example.invalid",
           owner: paymentOwner,
           createStaff,
+          evidenceReadProbe,
           boss,
           publishApproved,
           request,
@@ -2141,7 +2153,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
             await makeRuleSet(currentGeneration, mode === "SATISFIED" ? satisfiedFundingPolicy : fundingPolicy);
           },
           upgrade: async () => {
-            await runBusinessMigrations(migrationPool!, { runtimeUser: resources!.runtimeUser });
+            // This resource is already at the frozen 55-row baseline. No DDL/ACL replay.
+            assert.equal((await migrationPool!.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n, 55);
           },
         });
       }
@@ -2179,6 +2192,12 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     }
     if (fixturesStarted && maintenanceDataPool && guard) {
       try { await truncateIsolatedBusinessData(maintenanceDataPool); } catch (error) { cleanupErrors.push(error); }
+      if (RESOURCE_SET === "trade_settlement" && cleanupErrors.length === 0) {
+        // Preflight proved business tables empty under the resource lock. Only this run's
+        // rows are cleared; retain every pre-existing role, including historical fixtures.
+        try { await maintenanceDataPool.query(`DELETE FROM zzsh_iam.admin_role WHERE NOT (id=ANY($1::text[]))`, [retainedRoleIds]); }
+        catch (error) { cleanupErrors.push(error); }
+      }
     }
     for (const pool of [smallClosedByApp ? undefined : smallPool, runtimePool && !runtimeClosedByApp ? runtimePool : undefined, migrationPool, maintenanceDataPool]) {
       if (!pool) continue;

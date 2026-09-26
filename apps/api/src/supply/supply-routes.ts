@@ -1,4 +1,4 @@
-import { lockPublishingAccount, withPublicListingSnapshot } from "./publishing";
+import { lockPublishingAccount, readPublishingAccount, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
 import { handleListingFilters } from "./listing-filter-routes";
@@ -18,6 +18,7 @@ import {
   type EffectiveAdminAccess,
 } from "../auth/admin-authorization";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
+import { lockActor } from "../auth/admin-directory";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
 import { readUserContext, assertUserContextInTransaction } from "../auth/user-identity";
 import { API_V1_ERROR_CODES, ApiV1HttpException, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
@@ -60,7 +61,7 @@ import {
   updatePriceDraft,
   updateTermDraft,
 } from "./rules";
-import { appendAccountGuaranteeProof, readLatestAccountGuaranteeProof } from "./funding-authority";
+import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
 import {
   MAX_MEDIA_BYTES,
   assertDeclaredMediaSize,
@@ -631,12 +632,26 @@ export async function handleSupplyAdminRoute(
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
 
     if (method === "GET") {
-      await handleAdminRead(response, options, requestId, path, query, context.userId);
+      await handleAdminRead(response, options, requestId, path, query, context.userId, context.sessionId);
       return;
     }
     if (method !== "POST" && method !== "PUT") throw notFound();
     await handleAdminWrite(request, response, options, requestId, method, path, actor);
   });
+}
+
+async function authorizeGuarantee(client: PoolClient, actor: Pick<WriteActor, "id" | "sessionId">, accountId?: string, writePermission?: string) {
+  // Acquire existing IAM locks before owner/game/account/media locks, including on replay.
+  if (writePermission) await lockActor(client, actor.id);
+  await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+  const access = await requireAdminAccess(client, actor.id);
+  requirePermission(access, ADMIN_PERMISSION.supplyGuaranteeRead);
+  if (writePermission) requirePermission(access, writePermission);
+  if (accountId) {
+    const account = await readPublishingAccount(client, accountId);
+    await assertGameScope(client, actor.id, access.isBoss, account.game_id);
+  }
+  return access;
 }
 
 async function handleAdminRead(
@@ -646,21 +661,60 @@ async function handleAdminRead(
   path: string,
   query: URLSearchParams,
   adminUserId: string,
+  adminSessionId: string,
 ): Promise<void> {
+  const guaranteeActor = { id: adminUserId, sessionId: adminSessionId };
+  const evidenceMatch = /^\/accounts\/([^/]+)\/guarantee-evidence\/([^/]+)\/content$/.exec(path);
+  if (evidenceMatch) {
+    const accountId = decodeId(evidenceMatch[1]!), assetId = decodeId(evidenceMatch[2]!);
+    const asset = await withTransaction(options.pool, async client => {
+      await authorizeGuarantee(client, guaranteeActor, accountId);
+      return readGuaranteeEvidenceAsset(client, await readPublishingAccount(client, accountId), assetId);
+    });
+    const bytes = await readGuaranteeEvidenceBytes(options.mediaStorage, asset);
+    // Storage is asynchronous: do not send bytes authorized before an intervening revocation/quarantine.
+    await withTransaction(options.pool, async client => {
+      await authorizeGuarantee(client, guaranteeActor, accountId);
+      const current = await readGuaranteeEvidenceAsset(client, await readPublishingAccount(client, accountId), assetId);
+      if (current.revision !== asset.revision || current.contentHash !== asset.contentHash) throw conflict("Evidence changed; refresh and retry");
+    });
+    response.status(200).setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "private, no-store")
+      .setHeader("Content-Type", asset.mime).setHeader("Content-Length", String(bytes.length)).setHeader("X-Content-Type-Options", "nosniff");
+    response.send?.(bytes);
+    return;
+  }
+  if (path === "/guarantee-accounts") {
+    for (const key of query.keys()) if (!["gameId", "after", "limit"].includes(key)) throw invalid("Unsupported account filter");
+    const gameId = decodeId(query.get("gameId") ?? ""), after = query.has("after") ? decodeId(query.get("after")!) : "";
+    const limit = Number(query.get("limit") ?? "20");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
+    const result = await withTransaction(options.pool, async client => {
+      const access = await authorizeGuarantee(client, guaranteeActor);
+      await assertGameScope(client, adminUserId, access.isBoss, gameId);
+      const rows = (await client.query(
+        `SELECT a.id AS "accountId",a.game_id AS "gameId",a.owner_user_id AS "ownerUserId",u.name AS "ownerName",
+                a.current_version_id AS "currentVersionId",a.revision::text AS "accountRevision",p.status AS "latestProofStatus"
+           FROM zzsh_supply.rental_account a JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id
+           LEFT JOIN LATERAL (SELECT status FROM zzsh_supply.account_guarantee_proof WHERE account_id=a.id ORDER BY version_no DESC LIMIT 1) p ON true
+          WHERE a.game_id=$1 AND a.id>$2 ORDER BY a.id LIMIT $3`, [gameId, after, limit + 1])).rows;
+      return { items: rows.slice(0, limit), nextCursor: rows.length > limit ? rows[limit - 1]!.accountId : null };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
   const guaranteeMatch = /^\/accounts\/([^/]+)\/guarantee-proof$/.exec(path);
   if (guaranteeMatch) {
     const accountId = decodeId(guaranteeMatch[1]!);
     const result = await withTransaction(options.pool, async (client) => {
-      const access = await requireAdminAccess(client, adminUserId);
-      requirePermission(access, ADMIN_PERMISSION.supplyGuaranteeRead);
-      const account = (await client.query<{ gameId: string }>(
-        `SELECT game_id AS "gameId" FROM zzsh_supply.rental_account WHERE id=$1`, [accountId],
-      )).rows[0];
-      if (!account) throw notFound();
-      await assertGameScope(client, adminUserId, access.isBoss, account.gameId);
-      return readLatestAccountGuaranteeProof(client, accountId);
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+      const access = await authorizeGuarantee(client, guaranteeActor, accountId);
+      return readGuaranteeContext(client, accountId, access.permissions, options.mediaStorage);
     });
-    sendJson(response, 200, { proof: result }, requestId);
+    const projected = await withTransaction(options.pool, async client => {
+      await authorizeGuarantee(client, guaranteeActor, accountId);
+      return revalidateGuaranteeContextEvidence(client, result);
+    });
+    sendJson(response, 200, projected, requestId);
     return;
   }
   if (path === "/games") {
@@ -938,27 +992,36 @@ async function handleAdminWrite(
   if (guaranteeMatch && method === "POST") {
     const accountId = decodeId(guaranteeMatch[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["expectedProofVersion", "expectedPolicyVersion", "status", "coveredCents", "evidenceRef", "evidenceDigest", "reason"]);
+    ensureOnlyFields(body, ["expectedPriceVersionId", "expectedReleaseId", "expectedProofVersion", "expectedPolicyVersion", "status", "coveredCents", "evidenceRef", "evidenceDigest", "reason"]);
     if (!["SATISFIED", "NOT_REQUIRED", "REVOKED"].includes(String(body.status))) throw invalid("Guarantee proof status is invalid");
     const permission = body.status === "REVOKED" ? ADMIN_PERMISSION.supplyGuaranteeRevoke : ADMIN_PERMISSION.supplyGuaranteeVerify;
-    await write("supply.guarantee.proof.create", accountId, permission, async (client) => {
-      const account = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_supply.rental_account WHERE id=$1`, [accountId])).rows[0];
-      if (!account) throw notFound();
-      return account.gameId;
-    }, async (client, access) => {
-      const status = body.status as "SATISFIED" | "NOT_REQUIRED" | "REVOKED";
-      requirePermission(access, status === "REVOKED" ? ADMIN_PERMISSION.supplyGuaranteeRevoke : ADMIN_PERMISSION.supplyGuaranteeVerify);
+    const authorize = (client: PoolClient) => authorizeGuarantee(client, actor, accountId, permission);
+    await runIdempotentWrite(options, request, response, requestId,
+      { principalId: actor.id, operation: "supply.guarantee.proof.create", resourceId: accountId }, actor, body,
+      async client => { await authorize(client); }, async client => {
       const proof = await appendAccountGuaranteeProof(client, actor.id, accountId, {
+        expectedPriceVersionId: requiredString(body, "expectedPriceVersionId", 128),
+        expectedReleaseId: requiredString(body, "expectedReleaseId", 128),
         expectedProofVersion: requiredString(body, "expectedProofVersion", 20),
         expectedPolicyVersion: requiredString(body, "expectedPolicyVersion", 200),
-        status,
+        status: body.status as "SATISFIED" | "NOT_REQUIRED" | "REVOKED",
         ...(body.coveredCents === undefined ? {} : { coveredCents: requiredString(body, "coveredCents", 30) }),
         evidenceRef: requiredString(body, "evidenceRef", 200),
         evidenceDigest: requiredString(body, "evidenceDigest", 64),
         reason: requiredString(body, "reason", 500),
-      });
+      }, options.mediaStorage, () => authorize(client));
+      const after = await auditSnapshot(client, "account_guarantee_proof", String(proof.id));
+      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId,
+        action: "supply.guarantee.proof_appended", objectType: "account_guarantee_proof", objectId: String(proof.id),
+        outcome: "SUCCESS", requestId, reason: String(body.reason), details: { operation: "supply.guarantee.proof.create", before: null, after, result: "APPLIED" } });
       return { status: 200, body: { id: proof.id, proof } };
-    }, "supply.guarantee.proof_appended");
+    }, async (client, result) => {
+      await authorize(client);
+      const cached = result.body as { id: string; proof: GuaranteeProof };
+      const proof = await projectGuaranteeProof(client, await readPublishingAccount(client, accountId), cached.proof, options.mediaStorage);
+      await authorize(client);
+      return { status: result.status, body: { id: cached.id, proof } };
+    });
     return;
   }
 

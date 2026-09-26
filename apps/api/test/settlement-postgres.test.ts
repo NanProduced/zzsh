@@ -3,6 +3,8 @@ import { strict as assert } from "node:assert";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import sharp from "sharp";
+import { runFundingAuthorityChecks } from "./funding-authority-checks";
 import type { TestContext } from "node:test";
 import type { Pool } from "pg";
 
@@ -272,6 +274,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   request: any; runtimeUser: string; staged: boolean; upgrade: () => Promise<void>;
   createFormalApp: () => Promise<{ app: { close: () => Promise<void> }; base: string }>;
   createFormalRelease: (mode?: "NOT_REQUIRED" | "SATISFIED") => Promise<void>;
+  evidenceReadProbe: { run?: () => Promise<void> };
 }): Promise<void> {
   const { pool, migrationPool, ownerPool } = o;
   assert.equal(settlementSurfaceOpen(true), true);
@@ -1579,6 +1582,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   const revokeVerifier = await o.createStaff("保证金撤销核定员", ["supply.guarantee.verify", "supply.guarantee.revoke"]);
   for (const verifier of [roleVerifier, allowVerifier, denyVerifier, revokeVerifier]) {
     await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope (admin_user_id,game_id,granted_by_admin_id) VALUES ($1,$2,$3)`, [verifier.id, gameId, o.boss.id]);
+    await pool.query(`INSERT INTO zzsh_iam.admin_user_permission (admin_user_id,permission_code,effect) VALUES ($1,'supply.guarantee.read','ALLOW')`, [verifier.id]);
   }
   const guaranteeRoleId = `role_trc1_r2_${randomUUID().replaceAll("-", "")}`;
   await pool.query(
@@ -1590,6 +1594,17 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   await pool.query(`INSERT INTO zzsh_iam.admin_user_role (admin_user_id,role_id) VALUES ($1,$2)`, [denyVerifier.id, guaranteeRoleId]);
   await pool.query(`INSERT INTO zzsh_iam.admin_user_permission (admin_user_id,permission_code,effect) VALUES ($1,'supply.guarantee.verify','DENY')`, [denyVerifier.id]);
 
+  const evidenceBytes = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } }).png().toBuffer();
+  const uploadEvidence = async (accountId: string) => {
+    const intent = await post("/api/v1/supply/media/upload-intents", { gameId, accountId, mime: "image/png", size: evidenceBytes.length, purpose: "ACCOUNT_EVIDENCE" }, o.owner);
+    assert.equal(intent.response.status, 200, JSON.stringify(intent.body));
+    const uploaded = await fetch(`${o.base}/api/v1/supply/media/uploads/${intent.body!.intentId}`, {
+      method: "PUT", headers: { origin: USER_ORIGIN, cookie: o.owner.header(), "content-type": "image/png", "x-upload-token": intent.body!.uploadToken, ...key() },
+      body: new Uint8Array(evidenceBytes),
+    });
+    assert.equal(uploaded.status, 200);
+    return { ...await uploaded.json() as { assetId: string }, bytes: evidenceBytes };
+  };
   const appendProof = async (
     accountId: string,
     verifier: Staff,
@@ -1598,15 +1613,15 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     expectedProofVersion = "0",
     expectedStatus = 200,
   ) => {
-    const policyRow = (await pool.query<{ policyVersion: string }>(
-      `SELECT p.funding_policy->>'policyVersion' AS "policyVersion"
-         FROM zzsh_supply.rental_account a JOIN zzsh_supply.game g ON g.id=a.game_id
-         JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id
-         JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE a.id=$1`, [accountId],
-    )).rows[0];
+    const asset = status === "SATISFIED" ? await uploadEvidence(accountId) : null;
+    const context = await post(`/api/bff/admin/supply/accounts/${accountId}/guarantee-proof`, undefined, o.boss.jar, ADMIN_ORIGIN);
+    assert.equal(context.response.status, 200, JSON.stringify(context.body));
+    const c = context.body!;
+    const evidence = status === "SATISFIED" ? c.evidenceOptions.find((e: { assetId: string }) => e.assetId === asset!.assetId)
+      : status === "NOT_REQUIRED" ? c.policyEvidence : c.revocationEvidence;
     const result = await post(`/api/bff/admin/supply/accounts/${accountId}/guarantee-proof`, {
-      expectedProofVersion, expectedPolicyVersion: policyRow!.policyVersion, status, ...(coveredCents === undefined ? {} : { coveredCents }),
-      evidenceRef: `trc1-imp1:${accountId}`, evidenceDigest: "ab".repeat(32), reason: "isolated formal policy proof",
+      expectedProofVersion, expectedPolicyVersion: c.context.policyVersion, expectedPriceVersionId: c.context.priceVersionId, expectedReleaseId: c.context.releaseId,
+      status, ...(coveredCents === undefined ? {} : { coveredCents }), evidenceRef: evidence.evidenceRef, evidenceDigest: evidence.evidenceDigest, reason: "isolated formal policy proof",
     }, verifier.jar, ADMIN_ORIGIN, key());
     assert.equal(result.response.status, expectedStatus, JSON.stringify(result.body));
     if (expectedStatus !== 200) return undefined;
@@ -1897,4 +1912,6 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     (SELECT count(*)::int FROM zzsh_iam.audit_event) AS audits`)).rows[0];
   const migrationCount = (await migrationPool.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n;
   console.log("trb3a pre-cleanup counts", JSON.stringify({ ...counts, migrations: migrationCount, migrationTail: after.at(-1), staged: o.staged }));
+  await runFundingAuthorityChecks(t, { pool, ownerPool, base: o.base, owner: o.owner, verifier: allowVerifier, secondVerifier: revokeVerifier,
+    boss: o.boss, gameId, post, uploadEvidence, createFormalRelease: o.createFormalRelease, evidenceReadProbe: o.evidenceReadProbe });
 }
