@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Icons } from "../components/icons";
 import { Button, StatusMessage } from "../components/ui-elements";
@@ -22,6 +22,8 @@ type AuditResponse = {
   nextCursor?: string | null;
   scope?: string;
 };
+
+type CursorPage = { cursors: (string | null)[]; index: number; nextCursor: string | null };
 
 const actions = [
   "admin.account.created",
@@ -72,12 +74,17 @@ export function AdminAuditView({
   const [actorUsername, setActorUsername] = useState(initialQuery?.actorUsername ?? "");
   const [requestId, setRequestId] = useState(initialQuery?.requestId ?? "");
   const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [page, setPage] = useState<CursorPage>({ cursors: [null], index: 0, nextCursor: null });
   const [scope, setScope] = useState<string>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const pageRef = useRef(page);
+  const seqRef = useRef(0);
 
-  const load = async (cursor?: string) => {
+  const load = async (target?: { cursors: (string | null)[]; index: number }) => {
+    const meta = target ? { cursors: target.cursors, index: target.index, nextCursor: pageRef.current.nextCursor } : pageRef.current;
+    const cursor = meta.cursors[meta.index];
+    const seq = ++seqRef.current;
     setError(undefined);
     setLoading(true);
     try {
@@ -88,23 +95,52 @@ export function AdminAuditView({
       if (requestId.trim()) params.set("requestId", requestId.trim());
       if (cursor) params.set("cursor", cursor);
       const result = await adminRequest<AuditResponse>(`/security/audit/events?${params.toString()}`);
+      if (seqRef.current !== seq) return;
       setEvents(result.events ?? []);
-      setNextCursor(result.nextCursor ?? null);
       setScope(result.scope);
+      pageRef.current = { cursors: meta.cursors, index: meta.index, nextCursor: result.nextCursor ?? null };
+      setPage(pageRef.current);
     } catch (failure) {
-      setError(friendlyError(failure));
+      if (seqRef.current === seq) setError(friendlyError(failure));
     } finally {
-      setLoading(false);
+      if (seqRef.current === seq) setLoading(false);
     }
   };
 
   useEffect(() => {
     if (canRead) void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canRead, refreshNonce]);
+
+  // B3: 同 tab 复用时 URL query 变化回填筛选表单。
+  useEffect(() => {
+    setAction(initialQuery?.action ?? "");
+    setObjectType(initialQuery?.objectType ?? "");
+    setActorUsername(initialQuery?.actorUsername ?? "");
+    setRequestId(initialQuery?.requestId ?? "");
+  }, [initialQuery]);
 
   if (!canRead) {
     return <section className="section-panel"><StatusMessage error="当前账号没有账号与权限审计读取权限。普通账号读取权限不自动包含此权限。" /></section>;
   }
+
+  const navigate = (kind: "prev" | "next" | "first") => {
+    const meta = pageRef.current;
+    let cursors = meta.cursors;
+    let index = meta.index;
+    if (kind === "next") {
+      if (!meta.nextCursor) return;
+      cursors = [...meta.cursors.slice(0, meta.index + 1), meta.nextCursor];
+      index = meta.index + 1;
+    } else if (kind === "prev") {
+      if (meta.index === 0) return;
+      index = meta.index - 1;
+    } else {
+      index = 0;
+    }
+    if (index === meta.index) return;
+    void load({ cursors, index });
+  };
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -114,7 +150,7 @@ export function AdminAuditView({
       ...(actorUsername.trim() ? { actorUsername: actorUsername.trim() } : {}),
       ...(requestId.trim() ? { requestId: requestId.trim() } : {}),
     });
-    void load();
+    void load({ cursors: [null], index: 0 });
   };
 
   return (
@@ -139,15 +175,20 @@ export function AdminAuditView({
       </section>
 
       <section className="section-panel">
-        <div className="flex items-center justify-between gap-3 mb-3"><h3 className="text-sm font-semibold">审计记录</h3><span className="text-[11px] text-muted-foreground">{events.length} 条</span></div>
-        {events.length === 0 ? <p className="text-xs text-muted-foreground py-6 text-center">暂无符合条件的账号与权限事件。</p> : (
+        <div className="flex items-center justify-between gap-3 mb-3"><h3 className="text-sm font-semibold">审计记录</h3><span className="text-[11px] text-muted-foreground">{loading ? "正在读取…" : `${events.length} 条`}</span></div>
+        {events.length === 0 && !loading ? <p className="text-xs text-muted-foreground py-6 text-center">暂无符合条件的账号与权限事件。</p> : (
           <div className="table-wrap">
             <table className="data-table"><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>对象摘要</th><th>结果 / 原因</th><th>安全详情</th></tr></thead><tbody>
-              {events.map((item) => <tr key={item.eventId}><td className="whitespace-nowrap">{formatDate(item.occurredAt)}</td><td>{actorLabel(item.actor)}</td><td className="font-mono text-[11px]">{item.action}</td><td>{objectLabel(item)}</td><td><span className={item.outcome === "SUCCESS" ? "text-emerald-400" : "text-rose-400"}>{item.outcome === "SUCCESS" ? "成功" : "失败"}</span>{item.reason ? <span className="block text-[11px] text-muted-foreground mt-1">{item.reason}</span> : null}</td><td className="max-w-xs"><pre className="whitespace-pre-wrap break-words text-[11px] text-muted-foreground">{JSON.stringify(item.details)}</pre></td></tr>)}
+              {events.map((item) => <tr key={item.eventId}><td className="whitespace-nowrap">{formatDate(item.occurredAt)}</td><td>{actorLabel(item.actor)}</td><td className="font-mono text-[11px]">{item.action}</td><td>{objectLabel(item)}</td><td><span className={item.outcome === "SUCCESS" ? "text-emerald-400" : "text-rose-400"}>{item.outcome === "SUCCESS" ? "成功" : "失败"}</span>{item.reason ? <span className="block text-[11px] text-muted-foreground mt-1">{item.reason}</span> : null}</td><td className="max-w-xs"><details className="text-[11px] text-muted-foreground"><summary className="cursor-pointer select-none">安全详情</summary><pre className="whitespace-pre-wrap break-words mt-1">{JSON.stringify(item.details)}</pre></details></td></tr>)}
             </tbody></table>
           </div>
         )}
-        <div className="flex justify-end mt-4"><Button type="button" size="sm" variant="secondary" disabled={!nextCursor || loading} onClick={() => void load(nextCursor ?? undefined)}>下一页</Button></div>
+        <div className="flex items-center justify-end gap-2 mt-4">
+          <span className="text-[11px] text-muted-foreground">第 {page.index + 1} 页</span>
+          <Button type="button" size="sm" variant="secondary" disabled={loading || page.index === 0} onClick={() => navigate("prev")}>上一页</Button>
+          {page.index > 0 ? <Button type="button" size="sm" variant="secondary" disabled={loading} onClick={() => navigate("first")}>回到首页</Button> : null}
+          <Button type="button" size="sm" variant="secondary" disabled={loading || !page.nextCursor} onClick={() => navigate("next")}>下一页</Button>
+        </div>
       </section>
     </div>
   );
