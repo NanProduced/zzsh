@@ -174,6 +174,10 @@ function createBarrier(participants: number, timeoutMs: number): Barrier {
     resolveBarrier = resolve;
     rejectBarrier = reject;
   });
+  // A cancel/timeout can settle before the first wait() call; observe the
+  // rejection immediately so it is not reported unhandled. wait() still
+  // returns the original promise, so callers receive the original error.
+  promise.catch(() => {});
   const timer = setTimeout(() => {
     if (settled) return;
     settled = true;
@@ -1245,6 +1249,41 @@ test("REAL-SOURCE-5 concurrency barrier has an independent bounded timeout", asy
   gate.arrive();
   await assert.rejects(() => gate.wait(), /concurrency barrier timed out/);
   assert.ok(Date.now() - started < 500, "barrier timeout was not bounded");
+});
+
+test("REAL-SOURCE-5 concurrency barrier delivers cancellation to a wait arriving across event-loop turns", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const gate = createBarrier(2, 1000);
+    gate.cancel(new Error("peer BEGIN failed before other waiter arrived"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await assert.rejects(() => gate.wait(), /peer BEGIN failed before other waiter arrived/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
+test("REAL-SOURCE-5 concurrency barrier delivers timeout to a wait arriving across event-loop turns", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const gate = createBarrier(2, 25);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await assert.rejects(() => gate.wait(), /concurrency barrier timed out/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
 });
 
 if (process.env.REAL_SOURCE_5_CREDENTIALS_FILE) {
