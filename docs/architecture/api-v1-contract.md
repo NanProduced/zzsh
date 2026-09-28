@@ -1,14 +1,14 @@
 # API v1 契约基线
 
-API v1 使用以下稳定约定；具体端点以代码生成的 OpenAPI 为准。
+以下是共享API约定；具体业务端点以对应模块契约及实际注册路由为准。OpenAPI探针验证格式约束，不代表所有业务路由均已生成完整文档。
 
 ## 范围与边界
 
-- 第一个真实业务接口使用 `/api/v1/...`；`/api/health` 继续是独立 liveness 探针，不参与业务版本或 readiness 语义。
+- 业务接口使用 `/api/v1/...`，个人确认及新版建单使用显式 `/api/v2/...`；`/api/health` 继续是独立 liveness 探针，不参与业务版本或 readiness 语义。
 - NestJS 业务层只依赖 JSON、HTTP header 和服务端校验，不依赖 Cookie、DOM、Next.js Server Actions 或小程序运行时。
-- 订单业务仍未完整实现，尚未创建订单、资金、数据库幂等表或 provider 调用。认证与管理员操作权限已由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
+- 已提供待支付订单、个人确认/v2建单、原子占用，以及隔离受控付款与开租/结算账务；没有面向客户端的付款成功注入接口，真实支付、退款和提现渠道未接入。认证与管理员操作权限已由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
 - OpenAPI 与运行时校验在 `apps/api/test/api-contract.test.ts` 的隔离 Nest app 中验证；该 probe controller 不在生产 `AppModule` 注册，不能作为生产测试写路由。
-- probe 的严格请求 schema 使用显式 ApiBody 声明；DTO 本身不会自动禁止所有未知字段。首个真实业务 controller 必须声明对应约束并验证其实际生成 schema，不得把测试示例通过当成业务文档自动一致。
+- probe 的严格请求 schema 使用显式 ApiBody 声明；DTO 本身不会自动禁止所有未知字段。业务 controller 必须声明对应约束并验证其实际生成 schema，不得把测试示例通过当成业务文档自动一致。
 
 ## 管理安全入口
 
@@ -48,7 +48,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 ## 错误与 requestId
 
-错误统一为：未知字段不会原样进入 `details.path`；顶层、金额对象和分页对象分别只返回固定的 `body`、`amount`、`page` 路径，最多返回 8 条安全问题。
+契约探针中的未知字段不会原样进入 `details.path`；顶层、金额对象和分页对象分别只返回固定的 `body`、`amount`、`page` 路径，最多返回 8 条安全问题。
 
 错误统一为：
 
@@ -86,14 +86,16 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 - 管理端入口 `/api/v1/admin/supply/...` 经 Admin BFF `/api/bff/admin/supply/...` 转发；用户材料入口 `/api/v1/supply/...` 使用用户 realm。写操作要求 `Idempotency-Key`，重放返回原结果，异体同 key 返回 409。管理权限：`supply.catalog.manage`、`supply.rules.edit`、`supply.rules.activate`（仅 Boss）、`supply.review.read`、`supply.review.decide`、`supply.quote.internal.read`；除 Boss 外必须存在 `admin_supply_scope` 游戏范围。
 - 目录：`GET /api/v1/supply/games/{gameId}/catalog` 为公共白名单并绑定 `catalogRevision` 游标；管理端目录、游戏、物品/分类/皮肤/稀有度/权益维护均在管理端前缀下。稳定 code 创建后不可改名，词条只停用不物理删除；旧来源字段以受限原文保留，未知值不默认成有效词条。计费物品（items）更新接受 `mediaId` 绑定经审核公开的 ITEM_MEDIA 资产，`mediaId: null` 解绑，撤销公开同事务清除绑定；公开目录 items 仅在资产 APPROVED+PUBLIC_DISPLAY 时投影 `mediaId`，与皮肤 mediaId 投影规则一致。
-- 素材选项：`GET /supply/games/{gameId}/media-options?purpose=ITEM_MEDIA&limit=&cursor=`（管理 BFF `/api/bff/admin/supply/...` 同理）返回可绑定候选，服务端只返回同游戏、PLATFORM_CATALOG、对应用途、APPROVED、PUBLIC_DISPLAY 且有公开衍生图的资产（id/mime/width/height/byteSize，不含私有字段与存储键），要求 `supply.catalog.manage` 与游戏 scope，不要求 `supply.review.read`。客户端不能凭素材 id 提升未审核/私有/异游戏素材；无权限时 404。分页沿用 /media/reviews 约定：`limit` 1–100 默认 20，响应 `{items, nextCursor, limit}`，按 `updated_at DESC, id DESC` 稳定排序，cursor 绑定 gameId/purpose/limit，过滤或翻页参数不一致时 409。选择器的预览/绑定图一律走公共衍生图 `GET /api/v1/supply/media/{id}/content`（校验 APPROVED+PUBLIC_DISPLAY+PLATFORM_CATALOG），不触碰私有原图接口；撤销公开后该路径 404。
+- 皮肤身份：新建为停用且不展示的PENDING，写请求绑定expectedCatalogRevision。显式confirmIdentity及同游戏ownerRef/baseName形成VERIFIED规范名称；VERIFIED改名必须重确认结构身份，LEGACY/PENDING直接改名须reason并保留旧名alias。LEGACY重新启用前须确认身份，来源namespace/field/token不得覆盖已冻结身份。后端合同已实现，不代表管理页面配套、真实目录导入或监管浏览器验收已完成。
+- 素材选项：`GET /supply/games/{gameId}/media-options?purpose=ITEM_MEDIA&limit=&cursor=`（管理 BFF `/api/bff/admin/supply/...` 同理）返回可绑定候选，服务端只返回同游戏、PLATFORM_CATALOG、对应用途、APPROVED、PUBLIC_DISPLAY 且有公开衍生图的资产（id/mime/width/height/byteSize，不含私有字段与存储键），要求 `supply.catalog.manage` 与游戏 scope，不要求 `supply.review.read`。客户端不能凭素材 id 提升未审核/私有/异游戏素材；缺操作权限返回403，超出游戏范围或对象不可见返回404。分页沿用 /media/reviews 约定：`limit` 1–100 默认 20，响应 `{items, nextCursor, limit}`，按 `updated_at DESC, id DESC` 稳定排序，cursor 绑定 gameId/purpose/limit，过滤或翻页参数不一致时 409。选择器的预览/绑定图一律走公共衍生图 `GET /api/v1/supply/media/{id}/content`（校验 APPROVED+PUBLIC_DISPLAY+PLATFORM_CATALOG），不触碰私有原图接口；撤销公开后该路径 404。
 - 规则：价格/租期/协议可编辑草稿并封存；明细写入锁定 OLD/NEW 父版本，不能将封存明细移入草稿。版本归属不可更换，已引用物品的单位/数量语义须新建词条。release 不可修改。
 - 生效：`POST /api/v1/admin/supply/releases` 携带 `expectedGeneration`（十进制字符串，未生效为 `"0"`）；Boss 在 game 锁内执行 CAS，过期确认返回409，同 key 重放不增加release。管理端显示确认代次。
 - 计价：`POST /quote-preview` 返回受权管理员内部投影。SPREAD/PERCENT 按精确十进制比例计算，费率范围 `[0,1)`；每行双边金额各舍入一次到分，平台金额为两者差额。HAFF 精确分子/分母随快照保留，展示单位价不能替代精确比例重算。`tenantDepositCents`、`publisherBailRequirementCents` 只接受整数分字符串；缺参为null。日档参与已配置币价条件及租期推算，无每日保底收费。
 - 内容摘要：白名单 payload 先规范化再计算 SHA-256；人类文本 NFC/LF，ID/code原样，整数十进制、比例去尾零、单位价8位/元金额2位、业务时间UTC六位微秒（超精度拒绝），可选值null，集合按业务键排序且拒绝重复/未知字段。带声明的预览回显同一 `contentPayload` 与报价，规则JSON和协议正文先规范化再保存；申报版本持久化与接受见下方发布契约。hash不包含自身、审核状态或审计时间。
 - 审计：统一写接点保存稳定对象类型/ID、版本或目录代次、变更前后白名单快照、原因和结果；价目明细、租期选项、媒体绑定变化包含在快照中。协议正文以digest引用，凭证只记录素材引用，不复制上传Token或原图；审计失败回滚业务。
-- 媒体：upload-intents → `PUT /media/uploads/{intentId}`（`x-upload-token`）。Sharp完整解码JPEG/PNG/WebP，限制10MiB、单边8192、4000万像素、单帧、处理超时10秒；公开衍生图重新编码并清理元数据，原始字节单独保留供私有审核/证据读取。公开仅返回审核通过的衍生图，旧资产无衍生图须重新上传。对象写入在数据库事务外分两阶段执行：先用短事务复核当前权限与归属（已撤权请求零对象写入）并把原始/衍生对象写入内容寻址存储（每次写入前登记候选键，结果未知也可追溯），再在幂等事务内锁定意图、复核单次消费与权限并原子落库；对象写入成功但事务失败时保留对象并记录孤儿候选日志，不在请求路径自动删除，重复内容按哈希去重。存储默认本地 `uploads/`，可用 `MEDIA_STORAGE=oss` 显式切换到已授权开发OSS（zzsh-dev / `zzsh-rebuild/dev/` 前缀，服务端凭据来自进程环境，独立于PROVIDER_MODE；适配器已通过开发Bucket合成图片直连验证）。切换后端不迁移历史对象，无逐对象后端定位：需先复制并逐键核验或保持 `local`。撤销公开同事务清除目录绑定，旧公共URL返回404，响应 `Cache-Control: public, max-age=0, must-revalidate`；生产CDN、公开域名与浏览器直传未启用，不把永久公开URL当权限控制。
-- 本轮不连接真实云资源；规则真实参数、包赔与押金策略、M4 订单占用与 M6 交付仍为后续范围。
+- 媒体：upload-intents → `PUT /media/uploads/{intentId}`（`x-upload-token`）。Sharp完整解码JPEG/PNG/WebP，限制10MiB、单边8192、4000万像素、单帧、处理超时10秒；公开衍生图重新编码并清理元数据，原始字节单独保留供私有审核/证据读取。平台目录/内容媒体需审核通过；用户ACCOUNT_DISPLAY按技术READY、审核状态PENDING或APPROVED及有效发布绑定提供公开衍生图，不要求人工预审。旧资产无衍生图须重新上传。对象写入在数据库事务外分两阶段执行：先用短事务复核当前权限与归属（已撤权请求零对象写入）并把原始/衍生对象写入内容寻址存储（每次写入前登记候选键，结果未知也可追溯），再在幂等事务内锁定意图、复核单次消费与权限并原子落库；对象写入成功但事务失败时保留对象并记录孤儿候选日志，不在请求路径自动删除，重复内容按哈希去重。存储默认本地 `uploads/`，可用 `MEDIA_STORAGE=oss` 显式切换到已授权开发OSS（zzsh-dev / `zzsh-rebuild/dev/` 前缀，服务端凭据来自进程环境，独立于PROVIDER_MODE；适配器已通过开发Bucket合成图片直连验证）。切换后端不迁移历史对象，无逐对象后端定位：需先复制并逐键核验或保持 `local`。撤销公开同事务清除目录绑定，旧公共URL返回404，响应 `Cache-Control: public, max-age=0, must-revalidate`；生产CDN、公开域名与浏览器直传未启用，不把永久公开URL当权限控制。
+- 保证金核定：管理 `GET/POST /api/v1/admin/supply/accounts/{id}/guarantee-proof`（同源BFF为 `/api/bff/admin/supply/...`）复用正式政策、声明与最新proof。读取需 `supply.guarantee.read` 和游戏范围；写入另需 `supply.guarantee.verify`，撤销需 `supply.guarantee.revoke`。POST绑定四个expected版本、status、evidenceRef/evidenceDigest和reason，追加不可变proof并审计；NOT_REQUIRED使用当前context返回的政策依据，不由旧payIs或未知金额推断豁免。SATISFIED核定材料也不是渠道到账通知。
+- 媒体接口不代表真实交易能力。正式资金政策/依据reader与保证金核定API已接入，完整配置/披露及真实资金渠道仍有缺口；订单与受控账务边界见下文及[结算合同](settlement-confirmation.md)。
 
 ## 供给发布与审核（M3-C）
 
@@ -102,15 +104,16 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | 核心接口 | 输入/结果 |
 |---|---|
 | GET /games/{gameId}/publishing-options | 生效release/generation、租期选项、允许的安全箱/计价选项代码、封存协议正文及digest；不含收价和抽成参数 |
-| GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本。号主读取的`declaration.mediaBindings`在既有`assetId/position/purpose/byteHash`上增加只读`reviewState`（`PENDING\|APPROVED\|REJECTED\|UNAVAILABLE`）、`publicDisplayEligible`与`publiclyReadable`。前者只表示素材当前具备 ACCOUNT_DISPLAY+APPROVED+PUBLIC_DISPLAY+公开衍生键；`publiclyReadable`表示`GET /listings/{accountId}/media/{assetId}`此刻会放行：须账号当前可公开（未暂停/未受限/规则有效/当前版本已审核且媒体就绪）且该图绑定在当前公开版本 payload 中。私有凭证、草稿独有图、撤权或暂停后均为 false。不由账号版本 APPROVED 推断。写入草稿仍只接受`assetId/position`，多带只读字段返回400。裁剪回`DraftInput`时只保留`assetId/position`。缺失或不可解析的绑定返回`UNAVAILABLE`且不让整份详情500。 |
+| POST /accounts | `{gameId}`；创建本人账号档案，不同时创建草稿。随后GET读取版本，再以当前expectedRevision调用POST /accounts/{id}/drafts |
+| GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本。号主读取的`declaration.mediaBindings`在既有`assetId/position/purpose/byteHash`上增加只读`reviewState`（`PENDING\|APPROVED\|REJECTED\|QUARANTINED\|UNAVAILABLE`）、`publicDisplayEligible`与`publiclyReadable`。前者只表示素材当前具备 ACCOUNT_DISPLAY+技术READY+审核状态PENDING或APPROVED+PUBLIC_DISPLAY+公开衍生键；`publiclyReadable`表示`GET /listings/{accountId}/media/{assetId}`此刻会放行：须账号当前可公开（未暂停/未受限/规则有效/当前版本具有有效发布事实且媒体就绪）且该图绑定在当前公开版本 payload 中。私有凭证、草稿独有图、撤权或暂停后均为 false。不由账号版本 APPROVED 推断。写入草稿仍只接受`assetId/position`，多带只读字段返回400。裁剪回`DraftInput`时只保留`assetId/position`。缺失或不可解析的绑定返回`UNAVAILABLE`且不让整份详情500。 |
 | POST /accounts/{id}/drafts | expectedRevision；首次草稿或从已处理版本复制新草稿。审核中先撤回，切换为草稿立即阻止旧版接单，不改写owner_paused |
 | PUT /accounts/{id}/draft | expectedRevision及title/description/attributes/termOptionCode/pricingOptionCode/inventory/skins/entitlements/mediaBindings；库存为整数基础单位文本或null，媒体只提交assetId/position，不接收价格/号主ID/digest/byteHash |
 | POST /accounts/{id}/quote | expectedRevision；从持久化草稿、当前封存规则、目录和媒体记录生成并保存唯一规范化payload/hash；未知数量、条件、有效期不补零 |
 | POST /accounts/{id}/accept-rules、/submit | expectedRevision、versionId、releaseId、contentHash；接受和提交必须匹配已保存报价及当前release |
 | POST /accounts/{id}/withdraw | expectedRevision、versionId、可选reason；只撤回确切待审版本 |
-| POST /accounts/{id}/pause、/resume | expectedRevision及可选reason；恢复另核审核、规则、身份、保证金资格、占用和媒体，不能解除客服限制 |
-| GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；list支持可选`q`（NFC+trim，空白视为未传，最长120，NUL拒绝；服务端参数化`ILIKE`且`%/_/\\`按字面量）、gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor。游标绑定规范化后的`q`及其他过滤，更换条件后旧游标400，不混页。`q`只匹配当前可公开版本标题；`rental_account.display_no`从未写入，本轮不搜索编号，也不搜索内部用户ID、登录资料或私人说明。详情在既有quote/attributes上增加`attributes.safe_box_code`、`safeBox{code,displayName}`（现无安全箱名称目录，`displayName`为null）和`termOption{code,displayName,dailyConsumption{quantity,unit=HAFF_BASE}}`，数据取自该公开版本绑定的封存release/term_option，不用当前运营草稿改写；缺字段为null，不默认0。`quote.termSeconds`仍为权威租期；每日消耗只用于租期推算，不是每日保底。不可公开统一404。 |
-| GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定、已审核ACCOUNT_DISPLAY的衍生图，no-store；下架、暂停、限制或规则过期后404 |
+| POST /accounts/{id}/pause、/resume | expectedRevision及可选reason；恢复另核有效发布事实、规则、身份、保证金资格、占用和媒体，不能解除客服限制 |
+| GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；以下为未指定queryVersion的v1合同，v2见[组合筛选合同](listing-query.md)。list支持可选`q`（NFC+trim，空白视为未传，最长120，NUL拒绝；服务端参数化`ILIKE`且`%/_/\\`按字面量）、gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor。游标绑定规范化后的`q`及其他过滤，更换条件后旧游标400，不混页。`q`只匹配当前可公开版本标题；`rental_account.display_no`从未写入，当前不搜索编号，也不搜索内部用户ID、登录资料或私人说明。详情在既有quote/attributes上增加`attributes.safe_box_code`、`safeBox{code,displayName}`（已知稳定code从受控映射返回中文名称，未知code的displayName为null；attributeDisplay保留UNCONFIRMED及issueCode，缺值不猜测）和`termOption{code,displayName,dailyConsumption{quantity,unit=HAFF_BASE}}`，数据取自该公开版本绑定的封存release/term_option，不用当前运营草稿改写；缺字段为null，不默认0。`quote.termSeconds`仍为权威租期；每日消耗只用于租期推算，不是每日保底。不可公开统一404。 |
+| GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定且技术/公开资格有效的ACCOUNT_DISPLAY衍生图，no-store；下架、暂停、限制或规则过期后404 |
 | 管理 GET /listing-reviews、/{accountId} | 按state/after/limit读取显式scope队列，nextCursor接后续after；详情含前版对比与审核/重复线索，不用内部ID作为主要人工入口 |
 | 管理 POST /listing-reviews/{accountId}/decide | expectedRevision、versionId、releaseId、contentHash、APPROVE/REJECT、具体reason；审核/撤回竞争只接受一次有效处理 |
 | 管理 POST /listing-reviews/{accountId}/restriction、/duplicates | 限制使用restricted+reason；重复线索使用relatedAccountId/evidenceRef/result/reason；均带expectedRevision，重复仅人工记录，不自动处置 |
@@ -118,9 +121,10 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - 匿名无版本档案统一404。公共详情、图片和整页列表在REPEATABLE READ READ ONLY事务中读取同一快照，不取用户/游戏/档案/版本的排他行锁。撤权提交后建立的新快照拒绝访问；已开始的读取可按其先前一致快照完成，响应保持no-store。
 - 发布写回执保留原版本、修订及结果；首次和缓存重放发送前均按当前内部报价权限投影报价字段，不重新执行业务或刷新成另一版本，不改写原缓存。
 - 全部写入带Idempotency-Key，重放仍检查当前身份、权限和对象范围。管理审核须supply.review.read，决定、限制、重复另需supply.review.decide、supply.restrict、supply.duplicate.review；内部双边报价另需supply.quote.internal.read。未配置scope不放行。
-- listing_version.schema_version=1约束草稿属性及展示快照；attributes采用受控字段，安全箱条件保存为safe_box_code。未知值可留草稿；报价/提交必须满足已配置规则，不允许把空等级变成0。提交后内容/明细不可改，撤回或驳回后创建新版本；规则变化需新报价/接受及审核，不自动继承历史通过。
-- M2用户行锁协调身份变化与发布事务；保证金/占用消费SupplyGateReader的明确结果，未接入默认UNKNOWN。仅服务端testSupplyGateReader与已启用test/fake能力允许正向fixture，HTTP请求不能提供已付款/未占用。M4原子占号、M5真实保证金尚未实现，不据本地fixture宣称不超卖或资金到账。
-- ACCOUNT_EVIDENCE始终为私有证据；ACCOUNT_DISPLAY单独申报、审核，绑定需同号主/档案/游戏。用户素材不能经无条件的/media/{id}/content公开；原始证据保持私有。未传purpose时仍兼容M3-B私有凭证及原幂等指纹。
+- 号主submit在门禁通过后写入不可变OWNER_DIRECT发布事实，版本置PUBLISHED，不伪造管理员APPROVE。历史APPROVED必须匹配真实LEGACY_APPROVED发布依据；详情见[直接发布合同](supply-form-contract.md)。
+- listing_version.schema_version保留旧1，含rentalPricing的新声明/报价使用2；attributes采用受控字段，安全箱条件保存为safe_box_code。未知值可留草稿；报价/提交必须满足已配置规则，不允许把空等级变成0。提交后内容/明细不可改，撤回或驳回后创建新版本；规则变化需新报价/接受并形成有效发布事实，不自动继承历史通过。
+- 用户行锁协调身份变化与发布事务，占用由订单表派生。默认SupplyGateReader读取当前正式政策及最新有效保证金依据，缺失或不匹配为UNKNOWN；测试替代reader仅限显式test/fake能力。HTTP不能自行声明已付款/未占用，正式核定依据也不等于真实资金到账。
+- ACCOUNT_EVIDENCE始终为私有证据；ACCOUNT_DISPLAY单独申报并执行技术/公开资格校验，绑定需同号主/档案/游戏；仍可由有权管理员审核或隔离。用户素材不能经无条件的/media/{id}/content公开；原始证据保持私有。未传purpose时仍兼容M3-B私有凭证及原幂等指纹。
 - 业务、接受、审核与审计同事务。审计保存版本/release/hash、前后状态、库存值和声明摘要/证据引用，不复制原始凭证。legacy_supply_map仅提供受控观察兼容入口，无生产导入命令；旧状态/未知单位不生成报价或审核通过。
 
 ## 游戏服务支持与改枪码（M3E）
@@ -145,7 +149,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - firearm 只引用同游戏 firearm_classification、已审核公开的 FIREARM_MEDIA 和
   同游戏 gunsmith_code。分类是受控目录数据，不是可由后台创建新实体类型或任意
   JSON 字段的配置系统。枪械、皮肤、计费物品的关系不可通过名称、皮肤分类或稀
-  有度推断；本轮不把枪械加入 skin 或 billable_item。
+  有度推断；当前枪械独立于 skin 和 billable_item。
 - 未来客户端使用同一稳定 ID/分页/错误契约。Web 页面只是 BFF 消费者，不能把
   DOM、Cookie 或 Server Action 变成改枪码或游戏业务模型。
 
@@ -161,13 +165,13 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | GET /api/v1/orders/{id} | 按归属投影（renter/owner 否则 404）；会话与活性在事务内复核 |
 | GET /api/v1/admin/orders(/+id) | 要求 `order.read` 动态权限 + 该游戏 `admin_supply_scope`（Boss 豁免 scope）；平台金额仅另有 `supply.quote.internal.read` 时投影 |
 
-- 状态为 `PENDING_PAYMENT`/`PAID`/`CANCELLED`；占用集合为待付+已付。触发器限制 INSERT 为待付、仅允许待付→取消/已付，快照与 hold_until 不可变。PAID 表示收款已接纳，不表示建群、交付或开租；DTO 的 paymentOpen/cancelOpen 均为 false，并返回 paidAt。状态过滤接受 PAID，未知状态不得默认显示可付款/可取消。
-- 已有订单查询在有履约意图时追加 `fulfillmentAssignment={state,waitingReason,assignedAt,teamReady}`；当前state为WAITING/ASSIGNED，waitingReason可为NO_ELIGIBLE_STAFF，teamReady固定false。本地分配不改变PAID或占用，不向无归属者开放订单信息；完整群入口尚未接入。
+- 状态为 `PENDING_PAYMENT`/`PAID`/`CANCELLED`/`COMPLETED`；占用集合为待付+已付。INSERT只允许待付，待付可转取消/已付；PAID仅在受控结算过账满足数据库守卫时转COMPLETED并释放占用。快照与hold_until不可改。PAID只表示本地收款事实已接纳，不表示真实到账、建群、交付或开租；PAID/COMPLETED的paymentOpen/cancelOpen为false并返回paidAt，未知状态不得默认放行。paymentOpen只是订单状态能力标志，不证明真实支付入口已开放。
+- 已有订单查询在有履约意图时追加 `fulfillmentAssignment={state,waitingReason,assignedAt,teamReady}`；当前state为WAITING/ASSIGNED，waitingReason可为NO_ELIGIBLE_STAFF，teamReady按teamState是否READY投影。本地分配不改变付款或占用，不向无归属者开放订单信息；群接入与真实渠道边界见[客服说明](customer-support.md)。
 - 金额四要素分开：租金（快照 resourceTotal）、押金（快照 tenantDeposit）、总应付（派生）。`depositPolicy=UNCONFIGURED` 一律拒绝 409 `DEPOSIT_UNCONFIGURED`；未配置不是免押金，权威零押金必须是显式配置值。新增稳定码 `OCCUPIED`/`RULE_CHANGED`/`VERSION_CHANGED`/`DEPOSIT_UNCONFIGURED`（均 409）。
 - 创建与重放分开授权：首次创建要求交易资格；命中幂等记录只复核请求人会话/活性/归属，不因号主停用、供给占用/下架、规则变化而重复执行创建条件，也不泄露他人幂等响应。读/取消要求会话+活性+归属，不要求交易资格。
 - 占用时间只认数据库时钟，`hold_until` 创建即冻结不可续期。到期不改变事实状态（DTO 派生 `expiredAwaitingCancel`、`paymentOpen=false`，文案“已过期，取消处理中”）；清扫器按 (hold_until,id) 升序、批上限逐单事务取消（CAS 同 id+status+hold_until），lock_timeout 跳过不占批预算使持续被锁的队首不饥饿后续，行级失败经 onResult 可观察；worker 由显式校验过的配置对象启动（无环境变量兜底），先于业务连接池结束而停止并等待在途批次。
 - 占用事实只由订单表派生（无订单即 FREE），保证金资格仍走既有 SupplyGateReader seam（UNKNOWN 不放行）；占用中禁止建/存草稿、恢复上架、提交/通过新版本，暂停不受占用限制，取消后重新评估。占用账号公共列表/详情 404（既有行为延伸，订单卡后续接入须走受权订单接口）。注销义务检查纳入占用订单（双方视角）。
-- 无 HTTP/BFF 付款成功注入端点。0036 增加可信收款事实及同事务 PAID/唯一 WAITING 意图；当前仅有明确 test/fake、资源和合成订单 allowlist 的进程内受控来源，未接真实支付渠道。同流水重放比较不可变绑定，冲突保留原事实并审计；不同流水重复收款、金额/币种/订单号不符及迟到款保留 REVIEW_REQUIRED。锁内 DB 时钟到期则按 TIMEOUT 取消待付，不复活旧单或抢新占用；已付不被旧取消/清扫释放。正式押金配置来源与保证金权威来源未就绪前，生产建单不可用，本地以隔离 fixture 验证。
+- 无 HTTP/BFF 付款成功注入端点。0036 增加可信收款事实及同事务 PAID/唯一 WAITING 意图；当前仅有明确 test/fake、资源和合成订单 allowlist 的进程内受控来源，未接真实支付渠道。同流水重放比较不可变绑定，冲突保留原事实并审计；不同流水重复收款、金额/币种/订单号不符及迟到款保留 REVIEW_REQUIRED。锁内 DB 时钟到期则按 TIMEOUT 取消待付，不复活旧单或抢新占用；已付不被旧取消/清扫释放。正式政策、号主声明和保证金依据reader已接入；依赖未就绪仍拒绝，配置页面、证明到期最终边界及真实渠道尚未完成，不能据隔离fixture判定完整生产交易可用。
 
 ## 验证入口
 
@@ -185,7 +189,7 @@ npm run typecheck
 - `PUT /api/v1/supply/favorites/{accountId}`：已认证本人、`Idempotency-Key`、`{saved:boolean}`，稳定供给ID，不使用版本ID。首次添加只接受当前公开供给；取消及既有收藏保持本人隔离。缓存只存`accountId/saved`原操作回执，重放不改动当前状态、不重复成功审计。
 - `GET /api/v1/supply/me/favorites?limit=&cursor=`：本人分页；AVAILABLE只含当前PublicListing，UNAVAILABLE为通用“暂不可用、收藏已保留”及null listing，不泄漏原价格、私有原因或资料。游标绑定本人及精确保存时间/ID。
 - Nest用户BFF仍为`/api/bff/user/supply`，透传查询串（含`q`、既有gameId/item/skin/cursor）和只读新字段，不自行搜索、重算租期或推断媒体审核状态。Next用户BFF新增`/api/supply/*`，仅允许已实现用户接口、筛选用户Cookie，保留幂等键/受限上传Token；JSON输入64KiB、图片10MiB，输出及读取时间有界。媒体URL仅作本地路径适配，金额原样传输；认证代理共用既有Cookie及有界读取工具，认证规则不变。`GET /listings` 的`q`走查询串，路径白名单无需为搜索新增段。
-- 用户调用DTO和错误恢复位于apps/web/src/lib/supply-types.ts、supply-client.ts；分组接入见[供给表单契约](supply-form-contract.md)。这部分是数据接口，正式市场/详情/发布页面及游客收藏合并仍待UI基线整合。
+- 用户调用DTO和错误恢复位于apps/web/src/lib/supply-types.ts、supply-client.ts；分组接入见[供给表单契约](supply-form-contract.md)。这部分是数据接口；用户站公开列表/详情与发布页已进入main基线，游客收藏合并与后续交易页仍按当前实现范围验收。
 
 ## 内容后台：公告、资讯与固定槽位轮播（M3 内容分片）
 

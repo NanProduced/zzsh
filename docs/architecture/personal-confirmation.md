@@ -18,17 +18,17 @@
 
 短事务按双方user ID→game→account锁序，复核会话/活性/成年实名/非本人、有效发布事实及当前公开版本、release/hash、占用及保证金依据。有效发布事实必须是 `PUBLISHED + OWNER_DIRECT` 或真实 `APPROVED + LEGACY_APPROVED`；会员修改锁同一user；重建仅使用锁内client，不另借连接。按同一封存release选四档价目，缺档/未知资格/不支持的旧规则档位均拒绝，不回退STANDARD，也不污染公开报价。
 
-生产当前没有权威押金申报/保赔/保证金金额来源，默认失败关闭，不签token。即使VIP/SVIP也不能跳过未知依赖。`CONFIRMATION_DEPENDENCY_UNAVAILABLE`（503）表示这些依赖不全；`MEMBERSHIP_UNKNOWN`（503）表示资格未知。Admin试算deposits与旧payIs不会作为确认依据。
+默认资金读取已接入正式持久化来源：有效发布版本中的号主押金与包赔声明、封存价格版本的 fundingPolicy，以及同账号/号主/价格/政策版本的最新有效保证金依据。缺项、撤销、过期或不一致时失败关闭，不签token；即使VIP/SVIP也不能跳过未知依赖。`CONFIRMATION_DEPENDENCY_UNAVAILABLE`（503）表示这些依赖不全；`MEMBERSHIP_UNKNOWN`（503）表示资格未知。Admin试算deposits与旧payIs不会作为确认依据。
 
-只有显式test/fake构造能力可注入完整合成资金依据，用于隔离验证；没有HTTP金额注入或生产默认金额。合成规则明确基础押金、保证金要求、来源/版本、未选择保赔及VIP/SVIP免押开关。正数保证金要求不能与NOT_REQUIRED资金资格组合；缺证明引用或UNKNOWN也拒绝。保赔已选择/非零费用当前不支持。STANDARD/DISCOUNT_USER不免押；VIP/SVIP按明确规则决定。生产接线需后续独立实现。
+正式路径不接受客户端注入最终金额或保证金状态，也没有生产默认金额。单元测试、边界测试与技术冒烟仍可显式构造隔离合成资金fixture，但不能补足真实来源业务验收的事实或依据，也不是正式来源或真实到账凭证。旧personal-quote-v1只兼容明确未选包赔且费用为零、依据完整的情况；personal-quote-v2绑定号主声明及包赔政策/披露版本，支持选中包赔，费用在结算生效时分类一次，确认不预扣。受控测试reader另受test/fake、测试操作能力、登记资源/角色及本run版本allowlist约束；它不限制默认正式reader的适用范围。正数保证金要求不能与NOT_REQUIRED组合，缺证明或UNKNOWN拒绝。STANDARD/DISCOUNT_USER不免押；VIP/SVIP按明确规则决定。
 
-完整合成依赖下响应提供本人报价、基础押金、本人档位/免押结果、确认ID、listingHash、有效截止及confirmationToken；租客DTO不含号主内价、平台利润、会员来源、号主保证金内部要求。
+权威依赖完整且签名配置有效时，响应提供本人报价、基础押金、本人档位/免押结果、确认ID、listingHash、有效截止及confirmationToken；租客DTO不含号主内价、平台利润、会员来源、号主保证金内部要求。
 
 ## 签名与后续消费边界
 
 - 配置`ORDER_CONFIRMATION_SECRET`或相对`.secrets`的`ORDER_CONFIRMATION_SECRET_FILE`，以及`ORDER_CONFIRMATION_KEY_ID`。密钥至少32字符、独立于认证密钥；无默认密钥，缺配置签发503 `CONFIRMATION_SIGNING_UNAVAILABLE`。
 - 固定HMAC-SHA256、base64url正文与签名。token白名单仅schema/audience/keyId、随机confirmationId、本人/会话、账号/版本/release/listingHash、quoteDigest、DB时间issuedAt/expiresAt；期限300秒。签名不加密，内部完整快照只参与规范化摘要，不放入可解码正文。
-- `rebuildPersonalConfirmation`提供锁内重建；`verifyPersonalConfirmation`将当前重建摘要与凭据核对。完整摘要包含会员version/source、保证金证明、资金规则版本和全部报价；资格变动即使金额相同也失效。个人摘要不替代号主审核content_hash，v1 hash规范不变。
+- `rebuildPersonalConfirmation`提供锁内重建；`verifyPersonalConfirmation`将当前重建摘要与凭据核对。完整摘要包含会员version/source、保证金证明、资金规则版本和全部报价；资格变动即使金额相同也失效。个人摘要不替代号主发布版本content_hash，v1 hash规范不变。
 - 验证长度、严格字段/类型、固定schema/audience/keyId、签名常量时间比较、用户/会话/对象绑定和DB有效期。无效凭据400 `CONFIRMATION_INVALID`；过期409 `CONFIRMATION_EXPIRED`；版本/规则/资格/金额摘要改变409 `CONFIRMATION_CHANGED`。密钥轮换会使旧keyId的未消费确认失效。
 - 凭据不是付款凭据，签发不保证预留；创建成功后才有订单占用。旧v1与v2 listing通过旧入口的`PRICING_SCHEMA_UNSUPPORTED`门禁保留。
 
@@ -42,10 +42,10 @@
 
 唯一消费使用原订单表的nullable UUID `confirmation_id`（旧单NULL）和全状态唯一约束，无消费表/缓存/worker。同凭据换key再次使用返回409 `CONFIRMATION_USED`；取消和超时保留消费ID，不能复用。插单、消费、创建审计及幂等成功记录在一个事务中提交；任何一步失败均回滚。资金UNKNOWN继续拒绝，合成测试成功不构成生产资金依据。
 
-新快照以`quoteKind=ORDER_CONFIRMATION`、`orderSnapshotSchema=1`明确标识，`schemaVersion`仍表示底层报价格式。保留原根层CNY/resourceTotal/tenantDeposit等字段，以复用既有金额与PAID保护；新增confirmationId/digest/expiry、listingHash及`personal`内部资格/资金/规则事实。订单content_hash仍是审核listingHash，个人摘要另存，不保存原token或签名。
+新快照以`quoteKind=ORDER_CONFIRMATION`、`orderSnapshotSchema=1`明确标识，`schemaVersion`仍表示底层报价格式。保留原根层CNY/resourceTotal/tenantDeposit等字段，以复用既有金额与PAID保护；新增confirmationId/digest/expiry、listingHash及`personal`内部资格/资金/规则事实。订单content_hash仍是发布版本listingHash，个人摘要另存，不保存原token或签名。
 
-0041独立触发器校验消费ID/快照绑定、期限、规则/资料引用和不可变性，沿用0036最终`guard_rental_order`与已有付款FK、占用索引，不替换PAID转换。新列继承既有订单INSERT/SELECT权限，写后改动由不可变触发器拒绝，包含取消/超时后的记录。旧快照不回填或重算。
+0041及后续0051纠正守卫校验消费ID/快照绑定、期限、规则/资料引用和不可变性，沿用0036的`guard_rental_order`与付款FK、占用索引，不替换PAID转换。v2持久化personal严格11个根字段、不含嵌套quote；guarantee仅status/reference，funding九字段。规范化quote位于订单快照root，旧订单不回填。新列继承既有订单INSERT/SELECT权限，写后改动由不可变触发器拒绝，包含取消/超时后的记录。旧快照不回填或重算。
 
 订单renter/owner/admin投影继续白名单输出。个人订单的会员sourceRef、资金内部事实、token/签名不透传；租客与号主不获得个人订单内部保证金要求，价差仍限原专用管理权限。状态、排序/游标、取消与IM最小元数据合同不变；本实现不执行付款、群操作、退款或结算。
 
-部署须先应用0040/0041及runtime授权。正式资金来源仍未接通，当前成功链只在显式test/fake合成依赖中可验；API/PG/协议级证据不等于浏览器或生产渠道验收。
+部署须按正式迁移器应用目标版本的连续迁移前缀及runtime授权；v2守卫依赖0051纠正，有效直发布事实依赖0052，不能仅应用0040/0041即运行最新代码。正式政策/依据读取及核定依赖0053/0054；未合入的证明到期最终竞态守卫不能视为已生效。配置页面、推荐/披露接线与真实渠道仍未形成完整交易闭环；API/PG/协议级证据不等于浏览器业务或生产渠道验收。

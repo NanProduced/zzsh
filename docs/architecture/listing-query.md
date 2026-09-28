@@ -2,7 +2,7 @@
 
 ## 接入
 
-先读取 `GET /api/v1/supply/games/{gameId}/listing-filters`。`available=false` 时按 `FILTERS_UNCONFIGURED`、`RULES_UNCONFIGURED` 或 `SIGNING_UNCONFIGURED` 展示不可用状态，不生成虚假选项。
+先读取 `GET /api/v1/supply/games/{gameId}/listing-filters`。`available=false` 时按 `FILTERS_UNCONFIGURED`、`RULES_UNCONFIGURED` 或 `SIGNING_UNCONFIGURED` 展示不可用状态，不生成虚假选项。`available=true`只表示查询配置可用，不保证存在可公开账号；页面HTTP200或空列表不能证明账号浏览链路已通过。
 
 列表保持 `GET /api/v1/supply/listings`，通过 `queryVersion=2` 显式选择新协议。Web 路径为 `/api/supply/...`，API 用户 BFF 为 `/api/bff/user/supply/...`。匿名可读；BFF 只适配路径、Cookie 和公开链接，不计算筛选或价格。
 
@@ -43,7 +43,7 @@ Web 客户端的预算校验与 `listingQuery` 共用序列化：分别计算 `/
 | skinGroups | `[{categoryId,ids,match:'ANY'或'ALL'}]`，组间 AND，皮肤必须属于当前可见分类或其子分类 |
 | serviceWindow | `{startMinute,endMinute,crossMidnight,timezone:'Asia/Shanghai'}`，账号时段完整覆盖请求时段 |
 
-资源上下限均包含边界；只填一端合法，两端相等表示精确数量，未提供的端点不施加约束。每个提供的端点按当前 metadata 对应资源的配置 min/max 校验；空条件不发送，只有 `itemId` 的行非法。资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit；0 有效，未知/缺失库存不能按 0 满足上限。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND；DAY 保持天数，不乘租期。金额只使用服务端 quote。
+资源上下限均包含边界；只填一端合法，两端相等表示精确数量，未提供的端点不施加约束。每个提供的端点按当前 metadata 对应资源的配置 min/max 校验；空条件不发送，只有 `itemId` 的行非法。资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit；0 有效，未知/缺失库存不能按 0 满足上限。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND；合法DAY资源不乘租期。保险卡业务数量已确认为仓库卡片张数，其现有DAY目录/报价/筛选仍待统一纠偏；客户端不能自行将天数解释为张数。金额只使用服务端 quote。
 
 公开 metadata 的可选 `resourceQuantityRange` 能力仅在值为 `true` 时表示可提交 `maxQuantity`。`false` 或字段缺失代表兼容的 min-only 能力：客户端保留合法下限、剔除上限，并提示条件已按当前规则调整；上限单独存在时该资源条件移除。旧 v1 与旧 v2 min-only 请求及已有 `AND_MIN` 配置保持兼容。服务端按每个已提交端点校验配置，不为缺失端点补默认约束。
 
@@ -82,7 +82,7 @@ Admin 原生 `/api/v1/admin/supply/games/{gameId}/listing-filters`，管理 BFF 
 
 config 固定 `{schemaVersion:1,fields,sorts}`。field 具有 key/operator/label/enabled/order，参数按类别限定为 items（itemId/min/max）、options（value/label）、levels、regions、categoryIds；serviceWindow 无额外参数。sort 具有 key/label/enabled/order，只有 coreQuantity 接受 itemIds。latest 必须启用且名称保持“最新发布”。不接受 SQL、任意路径、脚本或新增操作逻辑。
 
-读写均要求 `supply.listing_filters.manage` 及游戏范围，权限不默认授予客服。按游戏锁、expectedRevision CAS、既有幂等和审计事务追加不可变 revision；审计失败整笔回滚。恢复复制历史并用当前白名单/目录重验，生成新 revision，不重新启用旧编号。默认配置需明确保存，不自动注入生产游戏或价目。
+读写均要求 `supply.listing_filters.manage` 及游戏范围，权限不默认授予客服。按游戏锁、expectedRevision CAS、既有幂等和审计事务追加不可变 revision；审计失败整笔回滚。恢复复制历史并用当前白名单/目录重验，生成新 revision，不重新启用旧编号。默认配置需明确保存，不自动注入生产游戏或价目。配置范围须覆盖页面实际提供的快捷值（包括100/500/1000M等哈夫选项）；不适用时不提供该能力，不能用必然越界的快捷项充当可用筛选。
 
 0042 仅增加不可变配置表/守卫和窄权限。配置 revision、catalog revision、rule release 分别绑定，不复制目录。
 

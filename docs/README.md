@@ -1,13 +1,16 @@
 # 项目文档
 
-本目录仅保存与当前代码一致的架构决定、接口约束和运行说明。
+本目录保存当前架构、接口契约、必要运行说明，以及明确区分实现状态的已确认业务规则。
 
 - [技术选择](architecture/technology-decisions.md)
 - [仓库结构](architecture/repository-layout.md)
 - [多端与 BFF](architecture/multi-client-bff.md)
 - [API v1 契约](architecture/api-v1-contract.md)
+- [三角洲租赁业务边界](architecture/rental-business-rules.md)（已确认要求与当前实现范围分开）
+- [新旧交易与结算行为对照](architecture/legacy-business-behavior-diff.md)（测试用预期变更、保留行为与证据边界）
 - [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [租赁会员、个人确认与建单](architecture/personal-confirmation.md)
+- [开租与结算确认](architecture/settlement-confirmation.md)
 - [公开列表组合筛选与配置](architecture/listing-query.md)
 - [认证与账号安全](architecture/authentication.md)
 - [开发与验证](development.md)
