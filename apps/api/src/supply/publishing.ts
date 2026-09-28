@@ -283,14 +283,15 @@ export async function publicationBlockers(
     );
   return reasons;
 }
-async function assertEditable(
+export async function assertEditable(
   client: PoolClient,
   a: PublishingAccount,
   gate: SupplyGateReader,
+  allowLegacyResolution = false,
 ): Promise<void> {
   await assertActiveInTransaction(client, a.owner_user_id);
   await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
-  if (a.lifecycle !== "ACTIVE" || a.legacy_hold !== "NONE")
+  if (a.lifecycle !== "ACTIVE" || (!allowLegacyResolution && a.legacy_hold !== "NONE"))
     throw conflict("历史异常或归档账号不能发布");
   const external = await gate(client, a);
   if (external.occupancy !== "FREE")
