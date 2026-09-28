@@ -1,5 +1,6 @@
 import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
+import { createLocalMediaStorage } from "../src/supply/media";
 import sharp from "sharp";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -197,7 +198,7 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     if (db) {
       assert.equal(db.owner, resources.maintenance.database.user);
       assert.equal(db.marker, RESOURCE_MARKER);
-      if (RESOURCE_SET === "trade_settlement") assert.equal(db.oid, "578624", "registered settlement database OID changed");
+      if (RESOURCE_SET === "trade_settlement") assert.equal(db.oid, "748138", "registered settlement database OID changed");
       assert.equal((await client.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1`, [resources.databaseName])).rows[0].n, 0, "another connection owns this database");
     }
     for (const [name, kind] of [[resources.migrationUser, "migration"], [resources.runtimeUser, "runtime"]] as const) {
@@ -219,11 +220,12 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
         const journal = JSON.parse(readFileSync(resolve(__dirname, "../../migrations/business/meta/_journal.json"), "utf8")) as {
           entries: Array<{ idx: number; when: number; tag: string }>;
         };
-        assert.equal(journal.entries.length, 52, "settlement source journal must end at assigned idx=51");
+        assert.equal(journal.entries.length, 55, "settlement source journal must end at assigned idx=54");
+        assert.deepEqual(journal.entries[54], { idx: 54, version: "7", when: 1789490023000, tag: "0054_supply_funding_guard_correction", breakpoints: true });
         const applied = (await target.query<{ hash: string; createdAt: string }>(
           `SELECT hash, created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY created_at`,
         )).rows;
-        assert.ok(applied.length === 51 || applied.length === 52, `registered settlement migration count ${applied.length} is not 51 or 52`);
+        assert.ok([51, 52, 53, 54, 55].includes(applied.length), `registered settlement migration count ${applied.length} is not one of the registered 51..55 stages`);
         for (const [index, row] of applied.entries()) {
           const entry = journal.entries[index]!;
           assert.equal(entry.idx, index);
@@ -238,7 +240,10 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
           frozen0048: applied[48]!.hash,
           frozen0049: applied[49]!.hash,
           frozen0050: applied[50]!.hash,
-          ...(applied.length === 52 ? { frozen0051: applied[51]!.hash } : {}),
+          ...(applied.length >= 52 ? { frozen0051: applied[51]!.hash } : {}),
+          ...(applied.length >= 53 ? { frozen0052: applied[52]!.hash } : {}),
+          ...(applied.length >= 54 ? { frozen0053: applied[53]!.hash } : {}),
+          ...(applied.length >= 55 ? { frozen0054: applied[54]!.hash } : {}),
         }));
       } finally {
         await target.end();
@@ -484,6 +489,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
   let runtimeClosedByApp = false;
   let smallClosedByApp = false;
   let fixturesStarted = false;
+  let retainedRoleIds: string[] = [];
   const publicationGates = new Map<string, SupplyGate>();
   const probeWatched = new Set<string>();
   const probe: { run?: (accountId: string) => Promise<void> } = {};
@@ -492,14 +498,15 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     pngFixture = await sharp({ create: { width: 64, height: 64, channels: 3, background: "blue" } }).png().toBuffer();
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-order-maintenance", 2);
     guard = await resourceGuard(maintenancePool, resources);
-    await ensureDatabase(maintenancePool, resources);
+    if (RESOURCE_SET !== "trade_settlement") await ensureDatabase(maintenancePool, resources);
     if (RESOURCE_SET !== "trade_settlement") {
       await ensureRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"), RESOURCE_SET !== "pub_direct");
       await ensureRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"), RESOURCE_SET !== "pub_direct");
     }
-    await grantDatabaseAccess(maintenancePool, resources);
+    if (RESOURCE_SET !== "trade_settlement") await grantDatabaseAccess(maintenancePool, resources);
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-order-owner", 2);
-    await prepareOwnership(maintenanceDataPool, resources);
+    if (RESOURCE_SET !== "trade_settlement") await prepareOwnership(maintenanceDataPool, resources);
+    retainedRoleIds = (await maintenanceDataPool.query<{ id: string }>(`SELECT id FROM zzsh_iam.admin_role`)).rows.map(r => r.id);
     migrationPool = createBusinessPool(resources.migration);
     const hasJournal = (await migrationPool.query(`SELECT to_regclass('zzsh_business_meta.migrations') AS name`)).rows[0].name;
     const migrationBefore = hasJournal ? (await migrationPool.query(`SELECT count(*)::int AS n, max(created_at)::text AS latest FROM zzsh_business_meta.migrations`)).rows[0] : { n: 0, latest: null };
@@ -510,13 +517,14 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const stageSettlement = RESOURCE_SET === "trade_settlement" && Number(migrationBefore.n ?? 0) < 47;
     const baselineCount = Number(migrationBefore.n ?? 0);
     if (stageSettlement && baselineCount !== 0 && baselineCount !== 46) {
-      throw new Error(`trade_settlement migration count ${baselineCount} is not 0, 46, 47, 50, or 51`);
+      throw new Error(`trade_settlement migration count ${baselineCount} is not 0, 46, 47, 50, 51, 52, 53, 54, or 55`);
     }
     // A fresh resource stages up to 0042 before legacy fixtures; an existing one only refreshes
     // grants (its journal tail is already applied), so the suite never drops or replays from zero.
     const stageUpTo = baselineCount < 43 ? 42 : baselineCount - 1;
     const partialMigrationsFolder = stagedFirstResponse ? preparePartialMigrationsFolder(stageUpTo) : stageSettlement && baselineCount === 0 ? preparePartialMigrationsFolder(45) : undefined;
-    await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
+    if (RESOURCE_SET === "trade_settlement") assert.equal(baselineCount, 55, "reuse-only acceptance cannot migrate this resource");
+    else await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser, ...(partialMigrationsFolder ? { migrationsFolder: partialMigrationsFolder } : {}) });
     const migrated = (await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows;
     if (RESOURCE_SET === "oim_escalation_stage") {
       assert.equal(baselineCount, 0, "the one-time stage must be rebuilt through its registered empty-resource path");
@@ -526,18 +534,21 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     if (stageSettlement && baselineCount === 0) assert.equal(migrated.length, 46, "trade_settlement must stop at 0045 before retained payment facts");
     const firstResponseBaselineCount = stagedFirstResponse ? migrated.length : baselineCount;
     if (!stagedFirstResponse && !stageSettlement) {
-      await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
+      if (RESOURCE_SET !== "trade_settlement") await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
       assert.deepEqual((await migrationPool.query(`SELECT hash,created_at::text FROM zzsh_business_meta.migrations ORDER BY created_at`)).rows, migrated);
     }
     console.log("order migration evidence", JSON.stringify({ before: migrationBefore, afterCount: migrated.length, stagedFirstResponse,
       baselineCount, firstResponseBaselineCount, tail: migrated.slice(-2),
       firstApplication0051: RESOURCE_SET === "trade_settlement" && baselineCount === 51 && migrated.length === 52,
-      migrationReplayVerified: !stagedFirstResponse }));
+      firstApplication0052: RESOURCE_SET === "trade_settlement" && baselineCount === 52 && migrated.length === 54,
+      firstApplication0053: RESOURCE_SET === "trade_settlement" && baselineCount === 53 && migrated.length === 54,
+      firstApplication0054: RESOURCE_SET === "trade_settlement" && baselineCount === 54 && migrated.length === 55,
+      migrationReplayVerified: !stagedFirstResponse && RESOURCE_SET !== "trade_settlement", reuseOnly55: RESOURCE_SET === "trade_settlement" }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
     await assertEmptyIsolatedBusinessData(maintenanceDataPool);
-    await truncateIsolatedBusinessData(maintenanceDataPool);
+    if (RESOURCE_SET !== "trade_settlement") await truncateIsolatedBusinessData(maintenanceDataPool);
     fixturesStarted = true;
     // B6 deliberately jumps this sequence to 999998 later. Reset the isolated
     // fixture sequence first so a repeat run cannot collide with that range.
@@ -553,6 +564,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
 
     const bootstrapSecret = randomBytes(32).toString("hex");
     const settlementFundingRunId = randomUUID();
+    const evidenceReadProbe: { run?: () => Promise<void> } = {};
+    const evidenceStorage = createLocalMediaStorage(resolve("../../tmp/trade-line/trc2-api-a/media", settlementFundingRunId));
     if (RESOURCE_SET === "trade_settlement") console.log("trade settlement controlled funding run", JSON.stringify({ runId: settlementFundingRunId }));
     const settlementFundingListings = new Map<string, ControlledFundingListing>();
     const authOptions = {
@@ -567,6 +580,11 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         ORDER_CONFIRMATION_KEY_ID: "trb3b1r2",
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
+      mediaStorage: { ...evidenceStorage, read: async (storageKey: string) => {
+        const bytes = await evidenceStorage.read(storageKey);
+        await evidenceReadProbe.run?.();
+        return bytes;
+      } },
       // Explicit synthetic supplier-event ingress for OIM-4B; never reads a real AppSecret.
       // No approval/freshness windows are passed: the mounted default path is what runs.
       // The periodic sweep is pushed out so deterministic recovery tests own their own calls.
@@ -644,8 +662,40 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     };
     const haffItem = await createEntry("items", { code: "haff_base", name: "哈夫币", unit: "HAFF_BASE", required: true });
     const fixedItem = await createEntry("items", { code: "settlement_test_piece", name: "结算测试物品", unit: "PIECE", required: false });
+    // This is a deliberately explicit isolated policy, not a production default. It exercises
+    // the formal policy/declaration/reader seam without inventing a second pricing calculation.
+    const fundingPolicy = {
+      schema: "funding-policy-v1", policyVersion: "trc1-imp1-policy-v1",
+      recommendation: {
+        schema: "deposit-recommendation-v1", algorithm: "delta-deposit-owner-declared-v1", version: "1", currency: "CNY", unit: "cent",
+        inputSpec: {
+          schema: "deposit-recommendation-input-v1",
+          identityFields: ["accountId", "gameId", "listingVersionId", "priceVersionId", "ruleReleaseId"],
+          attributeFields: { safeBoxCode: "declaration.attributes.safe_box_code", vitality: "declaration.attributes.vit_level", bear: "declaration.attributes.bear_level", dive: "declaration.attributes.dive_level", skinIds: "declaration.skins[].skinId" },
+          currency: "CNY", unit: "cent",
+        },
+        parameters: {
+          safeBoxWeightsByCode: { "box-a": "5000" }, vitalityAtLeast7Cents: "5000", bearAtLeast7Cents: "5000", diveAtLeast3Cents: "5000",
+          skinGroupById: { "skin-a": "LEGACY_GOLD" },
+          skinWeights: {
+            LEGACY_GOLD: { firstCents: "5000", subsequentCents: "2500" }, LEGACY_AGENT: { firstCents: "5000", subsequentCents: "2500" },
+            LEGACY_KNIFE: { firstCents: "5000", subsequentCents: "2500" }, LEGACY_WEAPON: { firstCents: "5000", subsequentCents: "2500" },
+          },
+          rounding: { mode: "CEIL", unitCents: "5000", zeroFallbackCents: "5000" }, upperLimitCents: "120000",
+        },
+      },
+      ownerDepositRules: { schema: "owner-deposit-rule-v1", currency: "CNY", unit: "cent", normal: { minCents: "1", zeroAllowed: false }, fullPayoutSelected: { minCents: "30000", zeroAllowed: false }, capCents: "120000" },
+      guaranteeRequirement: { schema: "account-guarantee-requirement-v1", version: "1", scope: "GAME_ACCOUNT", currency: "CNY", unit: "cent", mode: "NOT_REQUIRED", requiredCents: "0" },
+      proofValidity: { schema: "guarantee-proof-validity-v1", satisfiedMode: "FIXED_DAYS", satisfiedDays: "7" },
+      vipWaiver: true, svipWaiver: true, fullPayoutPolicyRef: "trc1-imp1-full-payout", fullPayoutPolicyVersion: "1", disclosureVersion: "trc1-imp1-disclosure-v1",
+    };
+    const satisfiedFundingPolicy = {
+      ...fundingPolicy,
+      policyVersion: "trc1-imp1-fixed-policy-v1",
+      guaranteeRequirement: { ...fundingPolicy.guaranteeRequirement, mode: "FIXED_CENTS", requiredCents: "30000" },
+    };
 
-    const makeRuleSet = async (generation: string): Promise<{ releaseId: string; generation: string }> => {
+    const makeRuleSet = async (generation: string, policy?: Record<string, unknown>): Promise<{ releaseId: string; generation: string }> => {
       const price = await request(base, "/api/bff/admin/supply/price-drafts", { gameId, mode: "SPREAD" }, operator.jar, ADMIN_ORIGIN, "POST", orderKey());
       assert.equal(price.response.status, 200, JSON.stringify(price.body));
       const priceId = price.body?.id as string;
@@ -657,6 +707,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         expectedRevision: "1",
         haffRule: HAFF_RULE,
         roundingPolicy: "HALF_UP_CENT_V1",
+        ...(policy === undefined ? {} : { fundingPolicy: policy }),
         lines: [
           { itemId: haffItem, pricingKind: "HAFF_RATIO" },
           { itemId: fixedItem, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1.5" },
@@ -684,6 +735,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       fullPayoutSelected?: boolean,
       rentalPricing?: { rentalMode: "ordinary" | "custom" | "fast"; ownerRatioB?: string },
       pricingOptionCode = "standard",
+      formalFunding = false,
     ): Promise<{ accountId: string; versionId: string; releaseId: string; listingHash: string }> => {
       const created = await request(base, "/api/v1/supply/accounts", { gameId }, owner, USER_ORIGIN, "POST", orderKey());
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
@@ -710,8 +762,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         description: "合成申报，不代表平台已登录验号",
         attributes: {
           safe_box_code: "box-a", vit_level: 6, bear_level: 6,
+            ...(formalFunding ? { owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "trc1-imp1-owner-v1" } } : {}),
             ...(rentalPricing === undefined ? {} : { rentalPricing }),
-          ...(fullPayoutSelected === undefined ? {} : { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: fullPayoutSelected } }),
+          ...(formalFunding || fullPayoutSelected !== undefined ? { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: fullPayoutSelected ?? false } } : {}),
         },
         termOptionCode: "daily-10m",
         pricingOptionCode,
@@ -2066,13 +2119,42 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
           buyerEmail: "oim_buyer@example.invalid",
           owner: paymentOwner,
           createStaff,
+          evidenceReadProbe,
           boss,
           publishApproved,
           request,
           runtimeUser: resources!.runtimeUser,
           staged: stageSettlement,
+          createFormalApp: async () => {
+            const formalPool = createBusinessPool(resources!.runtime);
+            const formalApp = await createApp({
+              health: {
+                dependencies: {
+                  postgres: { check: async () => undefined, close: async () => undefined },
+                  redis: { check: async () => undefined, close: async () => undefined },
+                },
+              },
+              database: { pool: formalPool },
+              auth: {
+                ...authOptions,
+                pool: formalPool,
+                testOperationsEnabled: false,
+                testConfirmationFundingReader: undefined,
+                testSupplyGateReader: undefined,
+              },
+            });
+            await formalApp.listen(0, "127.0.0.1");
+            return { app: formalApp, base: await formalApp.getUrl() };
+          },
+          createFormalRelease: async (mode: "NOT_REQUIRED" | "SATISFIED" = "NOT_REQUIRED") => {
+            const currentGeneration = (await runtimePool!.query<{ generation: string }>(
+              `SELECT COALESCE(MAX(generation), 0)::text AS generation FROM zzsh_supply.rule_release WHERE game_id = $1`, [gameId],
+            )).rows[0]!.generation;
+            await makeRuleSet(currentGeneration, mode === "SATISFIED" ? satisfiedFundingPolicy : fundingPolicy);
+          },
           upgrade: async () => {
-            await runBusinessMigrations(migrationPool!, { runtimeUser: resources!.runtimeUser });
+            // This resource is already at the frozen 55-row baseline. No DDL/ACL replay.
+            assert.equal((await migrationPool!.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n, 55);
           },
         });
       }
@@ -2110,6 +2192,12 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     }
     if (fixturesStarted && maintenanceDataPool && guard) {
       try { await truncateIsolatedBusinessData(maintenanceDataPool); } catch (error) { cleanupErrors.push(error); }
+      if (RESOURCE_SET === "trade_settlement" && cleanupErrors.length === 0) {
+        // Preflight proved business tables empty under the resource lock. Only this run's
+        // rows are cleared; retain every pre-existing role, including historical fixtures.
+        try { await maintenanceDataPool.query(`DELETE FROM zzsh_iam.admin_role WHERE NOT (id=ANY($1::text[]))`, [retainedRoleIds]); }
+        catch (error) { cleanupErrors.push(error); }
+      }
     }
     for (const pool of [smallClosedByApp ? undefined : smallPool, runtimePool && !runtimeClosedByApp ? runtimePool : undefined, migrationPool, maintenanceDataPool]) {
       if (!pool) continue;

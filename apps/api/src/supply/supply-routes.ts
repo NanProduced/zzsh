@@ -1,4 +1,4 @@
-import { lockPublishingAccount, withPublicListingSnapshot } from "./publishing";
+import { lockPublishingAccount, readPublishingAccount, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
 import { handleListingFilters } from "./listing-filter-routes";
@@ -18,12 +18,16 @@ import {
   type EffectiveAdminAccess,
 } from "../auth/admin-authorization";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
+import { lockActor } from "../auth/admin-directory";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
 import { readUserContext, assertUserContextInTransaction } from "../auth/user-identity";
 import { API_V1_ERROR_CODES, ApiV1HttpException, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
 import {
   bindGameCover,
   createCatalogEntry,
+  createSkinOwner,
+  updateSkinOwner,
+  catalogIdentityReview,
   createGame,
   listGames,
   readAdminCatalog,
@@ -60,6 +64,7 @@ import {
   updatePriceDraft,
   updateTermDraft,
 } from "./rules";
+import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
 import {
   MAX_MEDIA_BYTES,
   assertDeclaredMediaSize,
@@ -630,12 +635,26 @@ export async function handleSupplyAdminRoute(
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
 
     if (method === "GET") {
-      await handleAdminRead(response, options, requestId, path, query, context.userId);
+      await handleAdminRead(response, options, requestId, path, query, context.userId, context.sessionId);
       return;
     }
     if (method !== "POST" && method !== "PUT") throw notFound();
     await handleAdminWrite(request, response, options, requestId, method, path, actor);
   });
+}
+
+async function authorizeGuarantee(client: PoolClient, actor: Pick<WriteActor, "id" | "sessionId">, accountId?: string, writePermission?: string) {
+  // Acquire existing IAM locks before owner/game/account/media locks, including on replay.
+  if (writePermission) await lockActor(client, actor.id);
+  await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+  const access = await requireAdminAccess(client, actor.id);
+  requirePermission(access, ADMIN_PERMISSION.supplyGuaranteeRead);
+  if (writePermission) requirePermission(access, writePermission);
+  if (accountId) {
+    const account = await readPublishingAccount(client, accountId);
+    await assertGameScope(client, actor.id, access.isBoss, account.game_id);
+  }
+  return access;
 }
 
 async function handleAdminRead(
@@ -645,7 +664,62 @@ async function handleAdminRead(
   path: string,
   query: URLSearchParams,
   adminUserId: string,
+  adminSessionId: string,
 ): Promise<void> {
+  const guaranteeActor = { id: adminUserId, sessionId: adminSessionId };
+  const evidenceMatch = /^\/accounts\/([^/]+)\/guarantee-evidence\/([^/]+)\/content$/.exec(path);
+  if (evidenceMatch) {
+    const accountId = decodeId(evidenceMatch[1]!), assetId = decodeId(evidenceMatch[2]!);
+    const asset = await withTransaction(options.pool, async client => {
+      await authorizeGuarantee(client, guaranteeActor, accountId);
+      return readGuaranteeEvidenceAsset(client, await readPublishingAccount(client, accountId), assetId);
+    });
+    const bytes = await readGuaranteeEvidenceBytes(options.mediaStorage, asset);
+    // Storage is asynchronous: do not send bytes authorized before an intervening revocation/quarantine.
+    await withTransaction(options.pool, async client => {
+      await authorizeGuarantee(client, guaranteeActor, accountId);
+      const current = await readGuaranteeEvidenceAsset(client, await readPublishingAccount(client, accountId), assetId);
+      if (current.revision !== asset.revision || current.contentHash !== asset.contentHash) throw conflict("Evidence changed; refresh and retry");
+    });
+    response.status(200).setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "private, no-store")
+      .setHeader("Content-Type", asset.mime).setHeader("Content-Length", String(bytes.length)).setHeader("X-Content-Type-Options", "nosniff");
+    response.send?.(bytes);
+    return;
+  }
+  if (path === "/guarantee-accounts") {
+    for (const key of query.keys()) if (!["gameId", "after", "limit"].includes(key)) throw invalid("Unsupported account filter");
+    const gameId = decodeId(query.get("gameId") ?? ""), after = query.has("after") ? decodeId(query.get("after")!) : "";
+    const limit = Number(query.get("limit") ?? "20");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
+    const result = await withTransaction(options.pool, async client => {
+      const access = await authorizeGuarantee(client, guaranteeActor);
+      await assertGameScope(client, adminUserId, access.isBoss, gameId);
+      const rows = (await client.query(
+        `SELECT a.id AS "accountId",a.game_id AS "gameId",a.owner_user_id AS "ownerUserId",u.name AS "ownerName",
+                a.current_version_id AS "currentVersionId",a.revision::text AS "accountRevision",p.status AS "latestProofStatus"
+           FROM zzsh_supply.rental_account a JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id
+           LEFT JOIN LATERAL (SELECT status FROM zzsh_supply.account_guarantee_proof WHERE account_id=a.id ORDER BY version_no DESC LIMIT 1) p ON true
+          WHERE a.game_id=$1 AND a.id>$2 ORDER BY a.id LIMIT $3`, [gameId, after, limit + 1])).rows;
+      return { items: rows.slice(0, limit), nextCursor: rows.length > limit ? rows[limit - 1]!.accountId : null };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const guaranteeMatch = /^\/accounts\/([^/]+)\/guarantee-proof$/.exec(path);
+  if (guaranteeMatch) {
+    const accountId = decodeId(guaranteeMatch[1]!);
+    const result = await withTransaction(options.pool, async (client) => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+      const access = await authorizeGuarantee(client, guaranteeActor, accountId);
+      return readGuaranteeContext(client, accountId, access.permissions, options.mediaStorage);
+    });
+    const projected = await withTransaction(options.pool, async client => {
+      await authorizeGuarantee(client, guaranteeActor, accountId);
+      return revalidateGuaranteeContextEvidence(client, result);
+    });
+    sendJson(response, 200, projected, requestId);
+    return;
+  }
   if (path === "/games") {
     const games = await withTransaction(options.pool, async (client) => {
       const access = await requireAdminAccess(client, adminUserId);
@@ -909,13 +983,50 @@ async function handleAdminWrite(
             outcome: "SUCCESS",
             requestId,
             reason: typeof (request.body as Record<string, unknown>)?.reason === "string" ? (request.body as Record<string, string>).reason! : operation,
-            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED" },
+            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}) },
           });
         }
         return { status: result.status, body: result.body };
       },
     );
   };
+
+  const guaranteeMatch = /^\/accounts\/([^/]+)\/guarantee-proof$/.exec(path);
+  if (guaranteeMatch && method === "POST") {
+    const accountId = decodeId(guaranteeMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedPriceVersionId", "expectedReleaseId", "expectedProofVersion", "expectedPolicyVersion", "status", "coveredCents", "evidenceRef", "evidenceDigest", "reason"]);
+    if (!["SATISFIED", "NOT_REQUIRED", "REVOKED"].includes(String(body.status))) throw invalid("Guarantee proof status is invalid");
+    const permission = body.status === "REVOKED" ? ADMIN_PERMISSION.supplyGuaranteeRevoke : ADMIN_PERMISSION.supplyGuaranteeVerify;
+    const authorize = (client: PoolClient) => authorizeGuarantee(client, actor, accountId, permission);
+    await runIdempotentWrite(options, request, response, requestId,
+      { principalId: actor.id, operation: "supply.guarantee.proof.create", resourceId: accountId }, actor, body,
+      async client => { await authorize(client); }, async client => {
+      const proof = await appendAccountGuaranteeProof(client, actor.id, accountId, {
+        expectedPriceVersionId: requiredString(body, "expectedPriceVersionId", 128),
+        expectedReleaseId: requiredString(body, "expectedReleaseId", 128),
+        expectedProofVersion: requiredString(body, "expectedProofVersion", 20),
+        expectedPolicyVersion: requiredString(body, "expectedPolicyVersion", 200),
+        status: body.status as "SATISFIED" | "NOT_REQUIRED" | "REVOKED",
+        ...(body.coveredCents === undefined ? {} : { coveredCents: requiredString(body, "coveredCents", 30) }),
+        evidenceRef: requiredString(body, "evidenceRef", 200),
+        evidenceDigest: requiredString(body, "evidenceDigest", 64),
+        reason: requiredString(body, "reason", 500),
+      }, options.mediaStorage, () => authorize(client));
+      const after = await auditSnapshot(client, "account_guarantee_proof", String(proof.id));
+      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId,
+        action: "supply.guarantee.proof_appended", objectType: "account_guarantee_proof", objectId: String(proof.id),
+        outcome: "SUCCESS", requestId, reason: String(body.reason), details: { operation: "supply.guarantee.proof.create", before: null, after, result: "APPLIED" } });
+      return { status: 200, body: { id: proof.id, proof } };
+    }, async (client, result) => {
+      await authorize(client);
+      const cached = result.body as { id: string; proof: GuaranteeProof };
+      const proof = await projectGuaranteeProof(client, await readPublishingAccount(client, accountId), cached.proof, options.mediaStorage);
+      await authorize(client);
+      return { status: result.status, body: { id: cached.id, proof } };
+    });
+    return;
+  }
 
   const serviceMatch = /^\/games\/([^/]+)\/services\/(ACCOUNT_RENTAL|GUNSMITH)$/.exec(path);
   if (serviceMatch && method === "PUT") {
@@ -1094,6 +1205,27 @@ async function handleAdminWrite(
     }, "supply.catalog.cover_bound");
     return;
   }
+  const createOwnerMatch = /^\/games\/([^/]+)\/skin-owners$/.exec(path);
+  if (createOwnerMatch && method === "POST") {
+    const gameId = decodeId(createOwnerMatch[1]!);
+    const body = bodyOf(request);
+    await write("supply.catalog.skin_owners.create", gameId, ADMIN_PERMISSION.supplyCatalogManage, async () => gameId, async (client, access) => {
+      const result = await createSkinOwner(client, actor.id, access.isBoss, gameId, body);
+      return { status: 200, body: result, details: { identityReview: catalogIdentityReview(body) } };
+    }, "supply.catalog.skin_owner_created");
+    return;
+  }
+  const updateOwnerMatch = /^\/skin-owners\/([^/]+)$/.exec(path);
+  if (updateOwnerMatch && method === "PUT") {
+    const id = decodeId(updateOwnerMatch[1]!);
+    const body = bodyOf(request);
+    await write("supply.catalog.skin_owners.update", id, ADMIN_PERMISSION.supplyCatalogManage, async (client) => {
+      const row = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_supply.skin_owner WHERE id=$1`, [id])).rows[0];
+      if (!row) throw notFound();
+      return row.gameId;
+    }, async (client, access) => ({ status: 200, body: await updateSkinOwner(client, actor.id, access.isBoss, id, body) }), "supply.catalog.skin_owner_updated");
+    return;
+  }
   const createEntryMatch = /^\/games\/([^/]+)\/(items|rarities|categories|skins|entitlements)$/.exec(path);
   if (createEntryMatch && method === "POST") {
     const gameId = decodeId(createEntryMatch[1]!);
@@ -1116,7 +1248,7 @@ async function handleAdminWrite(
       return found.rows[0].gameId;
     }, async (client, access) => {
       const result = await updateCatalogEntry(client, actor.id, access.isBoss, kind, entryId, body);
-      return { status: 200, body: { id: entryId }, details: { kind, gameId: result.gameId } };
+      return { status: 200, body: { id: entryId, ...result }, details: { kind, gameId: result.gameId, ...(kind === "skins" && body.evidenceRefs ? { identityReview: catalogIdentityReview(body) } : {}) } };
     }, "supply.catalog.entry_updated");
     return;
   }

@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ArrowDown, Check, CircleAlert, Clock3, FileUp, Headphones, Paperclip, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, FileUp, Headphones, Info, Paperclip, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { useUserSession } from "@/components/session/user-session-provider";
@@ -52,8 +52,8 @@ const PREVIEW_CONVERSATIONS = [
 const PREVIEW_MESSAGES: Record<string, SupportMessage[]> = {
   "preview-product": [
     { id: "system-1", from: "system", text: "本地演示数据 · 未连接云信", time: "09:41" },
-    { id: "customer-1", from: "customer", text: "你好，我想了解这件商品的租期和当前可咨询状态。", time: "09:42" },
-    { id: "agent-1", from: "agent", text: "你好，我来帮你确认。商品信息已附在右侧，具体规则以服务端报价和客服确认结果为准。", time: "09:43", status: "read" },
+    { id: "customer-1", from: "customer", text: "你好，我想了解这件商品的租期和当前可咨询状态。", time: "09:42", self: true, status: "sent" },
+    { id: "agent-1", from: "agent", text: "你好，我来帮你确认。商品信息已附在右侧，具体规则以服务端报价和客服确认结果为准。", time: "09:43", self: false },
   ],
   "preview-general": [],
 };
@@ -89,6 +89,23 @@ function messageFromNim(message: NimMessageLike, accountId: string): SupportMess
     self,
     createTime: message.createTime,
   };
+}
+
+function dayKeyOf(createTime?: number): string | null {
+  if (createTime === undefined) return null;
+  const date = new Date(createTime);
+  if (!Number.isFinite(date.getTime())) return null;
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function dayLabelOf(key: string): string {
+  const today = new Date();
+  const yesterday = new Date(Date.now() - 86_400_000);
+  const sameDay = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` === key;
+  if (sameDay(today)) return "今天";
+  if (sameDay(yesterday)) return "昨天";
+  const parts = key.split("-").map(Number);
+  return `${parts[1]! + 1}月${parts[2]}日`;
 }
 
 function responseError(response: Response, fallback: string): Error {
@@ -150,13 +167,14 @@ function SupportTypePicker({ value, onChange, disabled = false }: { value: Suppo
   </div>;
 }
 
-function MessageRow({ message }: { message: SupportMessage }) {
+function MessageRow({ message, agentMeta }: { message: SupportMessage; agentMeta?: { name: string; role: string } }) {
   if (message.from === "system") return <div className="support-message-marker" role="note"><span>{message.text}</span><time>{message.time}</time></div>;
-  const outgoing = message.self ?? message.from === "agent";
+  const outgoing = message.self === true;
+  const label = outgoing ? "我" : message.from === "agent" ? (agentMeta ? `${agentMeta.name} · ${agentMeta.role}` : "客服") : "用户";
   return <article className="support-message" data-from={message.from} data-self={outgoing}>
-    <div className="support-message-avatar" aria-hidden="true">{outgoing && !message.self ? <Headphones size={14} /> : <UserRound size={14} />}</div>
+    <div className="support-message-avatar" aria-hidden="true">{message.from === "agent" ? <Headphones size={14} /> : <UserRound size={14} />}</div>
     <div className="support-message-body">
-      <div className="support-message-meta"><span>{message.self ? "我" : outgoing ? "客服" : "用户"}</span><time>{message.time}</time></div>
+      <div className="support-message-meta"><span>{label}</span><time>{message.time}</time></div>
       <div className="support-message-bubble" data-slot="bubble">{message.text}</div>
       {outgoing && message.status ? <div className="support-message-status"><Check size={12} />{message.status === "read" ? "已读" : "已发送"}</div> : null}
     </div>
@@ -182,12 +200,18 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>(() => preview ? PREVIEW_MESSAGES : {});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<Record<string, string | null>>({});
+  const [panelView, setPanelView] = useState<"list" | "chat">("chat");
+  const [contextOpen, setContextOpen] = useState(false);
   const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">(preview ? "idle" : "idle");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [imReady, setImReady] = useState(preview);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const draftRef = useRef<HTMLTextAreaElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const chatHeadingRef = useRef<HTMLElement | null>(null);
+  const previousPanelViewRef = useRef(panelView);
+  const composingRef = useRef(false);
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
   const activeIdRef = useRef(activeId);
@@ -364,6 +388,20 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     setSelectedType(consultations[0]!.type);
   }, [activeId, consultations, isStartingNew, preview]);
 
+  useEffect(() => { setContextOpen(false); }, [activeId]);
+
+  useEffect(() => {
+    if (previousPanelViewRef.current === panelView) return;
+    previousPanelViewRef.current = panelView;
+    const target = panelView === "chat"
+      ? chatHeadingRef.current
+      : gridRef.current?.querySelector<HTMLElement>('.support-conversation-item[data-active="true"]') ?? gridRef.current?.querySelector<HTMLElement>(".support-conversation-item") ?? gridRef.current?.querySelector<HTMLElement>(".support-list-heading");
+    if (!target) return;
+    const active = document.activeElement;
+    if (active instanceof Node && target.contains(active)) return;
+    target.focus({ preventScroll: true });
+  }, [panelView]);
+
   const activeConversation = preview
     ? null
     : consultations.find((item) => item.id === activeId) ?? null;
@@ -371,6 +409,26 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const activeConversationKey = preview ? previewConversation?.id ?? "" : activeConversation?.id ?? "";
   const activeMessages = messages[activeConversationKey] ?? [];
   const canSend = preview || Boolean(activeConversation?.state === "ACTIVE" && activeConversation.conversationId && activeConversation.messageScopeState === "READY" && clientRef.current && connection === "CONNECTED");
+  const agentMeta = activeConversation?.assignedAdmin?.name ? { name: activeConversation.assignedAdmin.name, role: "客服" } : undefined;
+  let timelineDay = "";
+  const timelineItems: ReactNode[] = activeMessages.map((message) => {
+    const items: ReactNode[] = [];
+    const dayKey = dayKeyOf(message.createTime);
+    if (dayKey && dayKey !== timelineDay) {
+      timelineDay = dayKey;
+      items.push(<MessageScrollerPrimitive.Item key={`day-${dayKey}`} messageId={`day-${dayKey}`}><div className="support-day-divider">{dayLabelOf(dayKey)}</div></MessageScrollerPrimitive.Item>);
+    }
+    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"}><MessageRow message={message} agentMeta={message.from === "agent" ? agentMeta : undefined} /></MessageScrollerPrimitive.Item>);
+    return items;
+  }).flat();
+  const onComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return;
+    event.preventDefault();
+    const form = event.currentTarget.form;
+    if (!form) return;
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  };
 
   useEffect(() => {
     if (preview || !activeConversation?.conversationId || !clientRef.current || connection !== "CONNECTED") return;
@@ -455,6 +513,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     setSelectedType(activeConversation.type);
     setIsStartingNew(true);
     setActiveId(null);
+    setPanelView("chat");
     setError(undefined);
   };
 
@@ -472,33 +531,45 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const currentSubtitle = preview ? "商品咨询会话" : isStartingNew ? "选择类型后创建独立咨询" : activeConversation ? activeConversation.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可发送" : activeConversation.state === "WAITING" ? "已记录，等待合格客服接待" : activeConversation.state === "ACTIVE" ? "平台已授权当前接待关系" : "咨询已结束" : "选择类型后创建独立咨询";
 
   const consultationView = <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
-    <div className="support-workspace-heading">
-      <div><h2>咨询窗口</h2><p>{preview ? "用一条清晰的咨询链路承接商品问题，后续由云信恢复真实会话。" : `你好，${session.displayName ?? "用户"}。咨询记录和实际接待人由平台服务端恢复。`}</p></div>
-      <div className="support-heading-actions"><ConnectionState preview={preview} state={connection} error={error} />{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}</div>
-    </div>
     {error ? <div className="support-inline-error" role="alert"><CircleAlert size={15} />{error}</div> : null}
-    <div className="support-workspace-grid">
+    <div className="support-workspace-grid" ref={gridRef} data-view={panelView}>
       <nav className="support-conversation-list" aria-label="咨询会话">
-        <div className="support-list-heading"><div><strong>咨询记录</strong><span>{preview ? "演示" : "平台记录"}</span></div><span className="support-list-count">{preview ? PREVIEW_CONVERSATIONS.length : consultations.length}</span></div>
-        {preview ? PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(conversation.id); }} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>) : consultations.length > 0 ? consultations.map((consultation) => <button key={consultation.id} type="button" className="support-conversation-item" data-active={consultation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(consultation.id); setSelectedType(consultation.type); }} aria-current={consultation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{typeLabel(consultation.type)}</strong><span>{consultation.messageScopeState === "FAILED" ? "云信会话待人工核验" : consultation.assignedAdmin?.name ? `客服 ${consultation.assignedAdmin.name}` : consultation.state === "WAITING" ? "等待客服接待" : "咨询已结束"}</span></span><span className="support-conversation-meta"><time>{consultation.messageScopeState === "FAILED" ? "待核验" : consultation.state === "WAITING" ? "等待中" : consultation.state === "ACTIVE" ? "进行中" : "已结束"}</time></span></button>) : <div className="support-list-empty"><Headphones size={22} /><strong>还没有咨询记录</strong><span>选择类型后开始一次站内咨询，登录账号会自动保留记录。</span></div>}
+        <div className="support-list-heading" tabIndex={-1}><div><strong>咨询记录</strong><span>{preview ? "演示" : "平台记录"}</span></div><div className="support-list-heading-actions"><span className="support-list-count">{preview ? PREVIEW_CONVERSATIONS.length : consultations.length}</span><button type="button" className="support-back" data-action="back-to-chat" onClick={() => setPanelView("chat")}><ChevronLeft size={15} />返回</button>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={16} /></button> : null}</div></div>
+        {preview ? PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(conversation.id); setPanelView("chat"); }} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>) : consultations.length > 0 ? consultations.map((consultation) => <button key={consultation.id} type="button" className="support-conversation-item" data-active={consultation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(consultation.id); setSelectedType(consultation.type); setPanelView("chat"); }} aria-current={consultation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{typeLabel(consultation.type)}</strong><span>{consultation.messageScopeState === "FAILED" ? "云信会话待人工核验" : consultation.assignedAdmin?.name ? `客服 ${consultation.assignedAdmin.name}` : consultation.state === "WAITING" ? "等待客服接待" : "咨询已结束"}</span></span><span className="support-conversation-meta"><time>{consultation.messageScopeState === "FAILED" ? "待核验" : consultation.state === "WAITING" ? "等待中" : consultation.state === "ACTIVE" ? "进行中" : "已结束"}</time></span></button>) : <div className="support-list-empty"><Headphones size={22} /><strong>还没有咨询记录</strong><span>选择类型后开始一次站内咨询，登录账号会自动保留记录。</span></div>}
       </nav>
       <main className="support-conversation-panel">
-        <header className="support-conversation-heading"><div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3><span>{currentSubtitle}</span></div></div>{!preview && activeConversation?.state === "CLOSED" ? <button type="button" className="button secondary" data-action="start-new-consultation" onClick={beginNewConsultation}>再次咨询</button> : <button type="button" className="support-icon-button" aria-label="更多会话操作" disabled><span aria-hidden="true">•••</span></button>}</header>
+        <header className="support-conversation-heading" ref={chatHeadingRef} tabIndex={-1} data-focus-target="chat">
+          <button type="button" className="support-back" data-action="back-to-conversations" onClick={() => setPanelView("list")}><ChevronLeft size={15} />会话记录</button>
+          <div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3><span>{currentSubtitle}</span></div></div>
+          <div className="support-heading-actions">
+            {!preview && activeConversation?.state === "CLOSED" ? <button type="button" className="button secondary" data-action="start-new-consultation" onClick={beginNewConsultation}>再次咨询</button> : null}
+            {preview || subjectRef ? <button type="button" className="support-icon-button" data-action="toggle-product-context" aria-expanded={contextOpen} aria-label="商品上下文" onClick={() => setContextOpen((value) => !value)}><Info size={16} /></button> : null}
+            <ConnectionState preview={preview} state={connection} error={error} />
+            {embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}
+          </div>
+        </header>
+        <div className="support-facts-bar">
+          <span className="support-fact-chip">{activeConversation ? typeLabel(activeConversation.type) : preview ? "商品咨询" : isStartingNew ? "新咨询" : "客服咨询"}</span>
+          {activeConversation ? <span className="support-fact-chip" data-tone={activeConversation.messageScopeState === "FAILED" ? "warn" : activeConversation.state === "ACTIVE" ? "good" : "neutral"}>{activeConversation.messageScopeState === "FAILED" ? "待人工核验" : activeConversation.state === "WAITING" ? "等待接待" : activeConversation.state === "ACTIVE" ? "进行中" : "已结束"}</span> : null}
+          {activeConversation?.assignedAdmin ? <span className="support-fact-chip" data-tone="good">{`客服 · ${activeConversation.assignedAdmin.name}`}</span> : null}
+          {subjectRef ? <span className="support-fact-chip">{`对象 ${subjectRef}`}</span> : preview ? <span className="support-fact-chip">演示对象</span> : null}
+          <span className="support-facts-spacer" />
+        </div>
         <div className="support-message-area">
-           {!preview && !activeConversation ? <div className="support-start-panel" data-state={isStartingNew ? "new" : "initial"}><Headphones size={27} /><strong>{isStartingNew ? "发起新的咨询" : "从这里开始你的咨询"}</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" data-action={isStartingNew ? "submit-new-consultation" : "start-consultation"} onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找当前在线且有接待容量的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? activeMessages.map((message) => <MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"}><MessageRow message={message} /></MessageScrollerPrimitive.Item>) : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>等待第一条消息</strong><span>{preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state={isStartingNew ? "new" : "initial"}><Headphones size={27} /><strong>{isStartingNew ? "发起新的咨询" : "从这里开始你的咨询"}</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" data-action={isStartingNew ? "submit-new-consultation" : "start-consultation"} onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找当前在线且有接待容量的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? timelineItems : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>等待第一条消息</strong><span>{preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
           {attachment ? <div className="support-attachment" data-slot="attachment"><Paperclip size={14} /><span>{attachment}</span><button type="button" onClick={() => setAttachment(null)} aria-label="移除附件">×</button></div> : null}
-          <form className="support-composer" onSubmit={sendMessage}><textarea ref={draftRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={preview ? "输入咨询内容…" : activeConversation?.messageScopeState === "FAILED" ? "客服会话待人工核验，暂不可发送" : canSend ? "输入咨询内容…" : "等待客服接待后可发送消息"} aria-label="输入咨询内容" rows={2} disabled={!canSend || busy} /><div className="support-composer-actions"><label className="support-icon-button" aria-label="添加附件"><FileUp size={16} /><input ref={fileInputRef} type="file" onChange={(event) => setAttachment(event.target.files?.[0]?.name ?? null)} disabled={!preview || busy} /></label><span>{preview ? "仅本地演示，不会发送到云信" : activeConversation?.messageScopeState === "FAILED" ? "远端状态待人工核验" : canSend ? "消息由云信实时传输" : "当前不可发送"}</span><button type="submit" className="button primary" disabled={!canSend || busy || (!draft.trim() && !attachment)}><SendHorizontal size={15} />{busy ? "发送中…" : "发送"}</button></div></form>
+          <form className="support-composer" onSubmit={sendMessage}><textarea ref={draftRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }} placeholder={preview ? "输入咨询内容…" : activeConversation?.messageScopeState === "FAILED" ? "客服会话待人工核验，暂不可发送" : canSend ? "输入咨询内容…" : "等待客服接待后可发送消息"} aria-label="输入咨询内容" rows={2} disabled={!canSend || busy} /><div className="support-composer-actions"><label className="support-icon-button" aria-label="添加附件"><FileUp size={16} /><input ref={fileInputRef} type="file" onChange={(event) => setAttachment(event.target.files?.[0]?.name ?? null)} disabled={!preview || busy} /></label><span className="support-composer-hint">Enter 发送 · Shift+Enter 换行</span><span className="support-composer-status">{preview ? "仅本地演示，不会发送到云信" : activeConversation?.messageScopeState === "FAILED" ? "远端状态待人工核验" : canSend ? "消息由云信实时传输" : "当前不可发送"}</span><button type="submit" className="button primary" disabled={!canSend || busy || (!draft.trim() && !attachment)}><SendHorizontal size={15} />{busy ? "发送中…" : "发送"}</button></div></form>
         </div>
       </main>
-      <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品上下文</strong><span>{preview ? "演示快照" : "服务端授权快照"}</span></div><span className="support-context-dot" aria-hidden="true" /></div>{preview ? <article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article> : <div className="support-context-empty"><Headphones size={20} /><strong>{subjectRef ? "已带入公开对象" : "暂无商品上下文"}</strong><span>{subjectRef ? `对象 ${subjectRef} 会在服务端重新校验后展示。` : "从公开商品页发起咨询后，会在这里显示经过授权的快照。"}</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>商品卡只展示服务端确认的公开快照；接入后点击商品仍需重新校验当前权限。</p></div></aside>
+      {contextOpen ? <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品上下文</strong><span>{preview ? "演示快照" : "服务端授权快照"}</span></div><button type="button" className="support-icon-button" data-action="close-product-context" onClick={() => { setContextOpen(false); gridRef.current?.querySelector<HTMLButtonElement>('[data-action="toggle-product-context"]')?.focus(); }} aria-label="关闭商品上下文"><X size={15} /></button></div>{preview ? <article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article> : <div className="support-context-empty"><Headphones size={20} /><strong>{subjectRef ? "已带入公开对象" : "暂无商品上下文"}</strong><span>{subjectRef ? `对象 ${subjectRef} 会在服务端重新校验后展示。` : "从公开商品页发起咨询后，会在这里显示经过授权的快照。"}</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>商品卡只展示服务端确认的公开快照；接入后点击商品仍需重新校验当前权限。</p></div></aside> : null}
     </div>
   </section>;
   return <>
     {!preview?<nav className="order-team-toolbar" aria-label="沟通类型"><button type="button" aria-pressed={section==="consultation"} onClick={()=>setSection("consultation")}>平台咨询</button><button type="button" aria-pressed={section==="orders"} onClick={()=>setSection("orders")}>我的订单群</button>{section==="orders"&&onClose?<button type="button" onClick={onClose}>关闭订单群窗口</button>:null}</nav>:null}
-    <div hidden={section!=="consultation"}>{consultationView}</div>
+    <div className="support-pane" hidden={section!=="consultation"}>{consultationView}</div>
     {!preview?<OrderTeamPanel key={currentIdentity} identity={currentIdentity} realm="user" client={clientRef.current} connection={connection} active={section==="orders"} initialParty={initialOrderParty}
       request={orderRequest} onAuthError={()=>{void session.confirm();}}/>:null}
   </>;
