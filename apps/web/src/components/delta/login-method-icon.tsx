@@ -4,7 +4,8 @@ import type { PublicCodeLabel } from "@/lib/supply-types";
 type LoginMethodKind = "qq" | "wechat" | "steam" | "steam-global";
 
 function loginMethodKind(method: PublicCodeLabel | null): LoginMethodKind | null {
-  switch (method?.code) {
+  if (method?.mappingStatus !== "CONFIRMED") return null;
+  switch (method.code) {
     case "legacy_login_qq":
       return "qq";
     case "legacy_login_wechat":
