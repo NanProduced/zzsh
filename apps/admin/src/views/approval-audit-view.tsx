@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import {
+  AdminApiError,
   adminRequest,
   formatDate,
   friendlyError,
@@ -79,6 +80,26 @@ type RequestDetail = RequestSummary & {
 type ListKey = "mine" | "pending" | "audit";
 type ListPage = { cursors: (string | null)[]; index: number; nextCursor: string | null };
 type ConfirmKind = "approve" | "reject" | "execute" | "template";
+type ReadbackTarget =
+  | { kind: "templates" }
+  | { kind: "lists"; keys: ListKey[] }
+  | { kind: "detail-and-lists"; requestId: string; keys: ListKey[] };
+type WriteIntent = {
+  actorId: string;
+  sessionId: string;
+  objectKey: string;
+  objectEpoch: number;
+  contextKey: string;
+  contextEpoch: number;
+  path: string;
+  method: "POST";
+  body: Record<string, unknown>;
+  idempotencyKey: string;
+  successMessage: string;
+  readback: ReadbackTarget;
+  afterPost?: () => void;
+};
+type RecoveryState = { kind: "unknown" | "readback"; intent: WriteIntent };
 
 const statusLabels: Record<string, string> = {
   PENDING: "待审批",
@@ -89,6 +110,29 @@ const statusLabels: Record<string, string> = {
   EXECUTED: "已执行",
   EXECUTION_FAILED: "执行失败",
 };
+
+function emptyPageMeta(): Record<ListKey, ListPage> {
+  return {
+    mine: { cursors: [null], index: 0, nextCursor: null },
+    pending: { cursors: [null], index: 0, nextCursor: null },
+    audit: { cursors: [null], index: 0, nextCursor: null },
+  };
+}
+
+function contextKeyOf(snapshot: Extract<SessionSnapshot, { authenticated: true }>): string {
+  return JSON.stringify([
+    snapshot.adminUserId,
+    snapshot.user.username ?? "",
+    snapshot.session.id,
+    snapshot.security.status,
+    snapshot.security.isBoss,
+    [...snapshot.permissions].sort(),
+  ]);
+}
+
+function isUnknownWriteError(error: unknown): boolean {
+  return error instanceof AdminApiError && (error.code === "NETWORK_ERROR" || error.status >= 500);
+}
 
 function statusLabel(value: string): string {
   return statusLabels[value] ?? value;
@@ -145,6 +189,14 @@ export function ApprovalAuditView({
   const canAddApprover = hasPermission(snapshot, "approval.request.add_approver");
   const canAudit = hasPermission(snapshot, "approval.audit.read");
   const canReadAdmins = hasPermission(snapshot, "admin.account.read");
+  const contextKey = JSON.stringify([contextKeyOf(snapshot), initialRequestId ?? ""]);
+  const contextKeyRef = useRef(contextKey);
+  const contextEpochRef = useRef(0);
+  if (contextKeyRef.current !== contextKey) {
+    contextKeyRef.current = contextKey;
+    contextEpochRef.current += 1;
+  }
+  const contextEpoch = contextEpochRef.current;
 
   const [tab, setTab] = useState<"mine" | "pending" | "templates" | "audit">(initialTab ?? "mine");
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -167,16 +219,95 @@ export function ApprovalAuditView({
   const [reading, setReading] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState<{ kind: ConfirmKind } | null>(null);
   const [recall, setRecall] = useState("");
-  const [pageMeta, setPageMeta] = useState<Record<ListKey, ListPage>>({
-    mine: { cursors: [null], index: 0, nextCursor: null },
-    pending: { cursors: [null], index: 0, nextCursor: null },
-    audit: { cursors: [null], index: 0, nextCursor: null },
-  });
+  const [detailFresh, setDetailFresh] = useState(false);
+  const [recovery, setRecovery] = useState<RecoveryState | null>(null);
+  const [pageMeta, setPageMeta] = useState<Record<ListKey, ListPage>>(emptyPageMeta);
 
   const pageMetaRef = useRef(pageMeta);
   const seqRef = useRef<Record<ListKey | "detail" | "templates" | "admins", number>>({ mine: 0, pending: 0, audit: 0, detail: 0, templates: 0, admins: 0 });
+  const mountedRef = useRef(true);
+  const previousContextKeyRef = useRef(contextKey);
+  const objectKeyRef = useRef(initialRequestId ?? "");
+  const objectEpochRef = useRef(0);
+  const writeInFlightRef = useRef(false);
+  const readbackInFlightRef = useRef(false);
+  const recoveryRef = useRef<RecoveryState | null>(null);
 
-  const loadList = useCallback(async (key: ListKey, target?: { cursors: (string | null)[]; index: number }) => {
+  const isCurrent = (epoch: number, key: string) => mountedRef.current && contextEpochRef.current === epoch && contextKeyRef.current === key;
+  const isCurrentObject = (epoch: number, key: string) => objectEpochRef.current === epoch && objectKeyRef.current === key;
+  const isCurrentIntent = (intent: WriteIntent) => isCurrent(intent.contextEpoch, intent.contextKey) && isCurrentObject(intent.objectEpoch, intent.objectKey);
+  const updateRecovery = (next: RecoveryState | null) => {
+    recoveryRef.current = next;
+    setRecovery(next);
+  };
+
+  useEffect(() => {
+    // React StrictMode re-runs effect setup after its first cleanup. Restore
+    // the live epoch for that setup, while the sequence guards still reject
+    // responses from the first setup.
+    mountedRef.current = true;
+    contextEpochRef.current = contextEpoch;
+    return () => {
+      mountedRef.current = false;
+      contextEpochRef.current += 1;
+    };
+  }, [contextEpoch]);
+
+  useEffect(() => {
+    if (previousContextKeyRef.current === contextKey) return;
+    previousContextKeyRef.current = contextKey;
+    for (const key of Object.keys(seqRef.current) as Array<keyof typeof seqRef.current>) seqRef.current[key] += 1;
+    pageMetaRef.current = emptyPageMeta();
+    writeInFlightRef.current = false;
+    readbackInFlightRef.current = false;
+    setLoading(false);
+    updateRecovery(null);
+    setTemplates([]);
+    setAdmins([]);
+    setMine([]);
+    setPending([]);
+    setDetail(undefined);
+    setDetailFresh(false);
+    setAudit([]);
+    setPageMeta(pageMetaRef.current);
+    setReading({});
+    setError(undefined);
+    setMessage(undefined);
+    setConfirm(null);
+    setRecall("");
+    setRejectReason("");
+    setAppendUsername("");
+    setReason("");
+    setSummary("");
+    setOperationCode("approval.test.execute");
+    setTriggerCondition("manual");
+    setCandidateUsernames([]);
+  }, [contextKey]);
+
+  const beginObject = (requestId?: string) => {
+    const nextObjectKey = requestId ?? "";
+    if (objectKeyRef.current === nextObjectKey) return;
+    objectKeyRef.current = nextObjectKey;
+    objectEpochRef.current += 1;
+    writeInFlightRef.current = false;
+    readbackInFlightRef.current = false;
+    setLoading(false);
+    updateRecovery(null);
+    setConfirm(null);
+    setRecall("");
+    setRejectReason("");
+    setAppendUsername("");
+    setReason("");
+    setDetail(undefined);
+    setDetailFresh(false);
+    setError(undefined);
+    setMessage(undefined);
+  };
+
+  const loadList = useCallback(async (key: ListKey, target?: { cursors: (string | null)[]; index: number }): Promise<boolean> => {
+    const requestEpoch = contextEpoch;
+    const requestContextKey = contextKey;
+    if (!isCurrent(requestEpoch, requestContextKey)) return false;
     const meta = target
       ? { cursors: target.cursors, index: target.index, nextCursor: pageMetaRef.current[key].nextCursor }
       : pageMetaRef.current[key];
@@ -193,74 +324,106 @@ export function ApprovalAuditView({
       let nextCursor: string | null = null;
       if (key === "audit") {
         const data = await adminRequest<{ events?: AuditEvent[]; nextCursor?: string | null }>(url);
-        if (seqRef.current[key] !== seq) return;
+        if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current[key] !== seq) return false;
         setAudit(data.events ?? []);
         nextCursor = data.nextCursor ?? null;
       } else {
         const data = await adminRequest<{ requests?: RequestSummary[]; nextCursor?: string | null }>(url);
-        if (seqRef.current[key] !== seq) return;
+        if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current[key] !== seq) return false;
         if (key === "mine") setMine(data.requests ?? []);
         else setPending(data.requests ?? []);
         nextCursor = data.nextCursor ?? null;
       }
+      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current[key] !== seq) return false;
       pageMetaRef.current = { ...pageMetaRef.current, [key]: { cursors: meta.cursors, index: meta.index, nextCursor } };
       setPageMeta(pageMetaRef.current);
+      return true;
     } catch (failure) {
-      if (seqRef.current[key] === seq) setError(friendlyError(failure));
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current[key] === seq) setError(friendlyError(failure));
+      return false;
     } finally {
-      if (seqRef.current[key] === seq) setReading((current) => ({ ...current, [key]: false }));
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current[key] === seq) setReading((current) => ({ ...current, [key]: false }));
     }
-  }, []);
+  }, [contextEpoch, contextKey]);
 
-  const loadTemplates = useCallback(async () => {
+  const loadTemplates = useCallback(async (): Promise<boolean> => {
+    const requestEpoch = contextEpoch;
+    const requestContextKey = contextKey;
+    if (!isCurrent(requestEpoch, requestContextKey)) return false;
     const seq = ++seqRef.current.templates;
     setReading((current) => ({ ...current, templates: true }));
     try {
       const data = await adminRequest<{ templates?: Template[] }>("/security/approvals/templates");
-      if (seqRef.current.templates === seq) setTemplates(data.templates ?? []);
+      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current.templates !== seq) return false;
+      setTemplates(data.templates ?? []);
+      return true;
     } catch (failure) {
-      if (seqRef.current.templates === seq) setError(friendlyError(failure));
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.templates === seq) setError(friendlyError(failure));
+      return false;
     } finally {
-      if (seqRef.current.templates === seq) setReading((current) => ({ ...current, templates: false }));
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.templates === seq) setReading((current) => ({ ...current, templates: false }));
     }
-  }, []);
+  }, [contextEpoch, contextKey]);
 
-  const loadAdmins = useCallback(async () => {
+  const loadAdmins = useCallback(async (): Promise<boolean> => {
+    const requestEpoch = contextEpoch;
+    const requestContextKey = contextKey;
+    if (!isCurrent(requestEpoch, requestContextKey)) return false;
     const seq = ++seqRef.current.admins;
     try {
       const data = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
-      if (seqRef.current.admins === seq) setAdmins(data.admins ?? []);
+      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current.admins !== seq) return false;
+      setAdmins(data.admins ?? []);
+      return true;
     } catch (failure) {
-      if (seqRef.current.admins === seq) setError(friendlyError(failure));
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.admins === seq) setError(friendlyError(failure));
+      return false;
     }
-  }, []);
+  }, [contextEpoch, contextKey]);
 
-  const load = useCallback(async () => {
-    const tasks: Promise<void>[] = [];
+  const load = useCallback(async (): Promise<boolean> => {
+    const tasks: Promise<boolean>[] = [];
     if (canTemplateRead) tasks.push(loadTemplates());
     if (canRead) tasks.push(loadList("mine"));
     if (canApprove) tasks.push(loadList("pending"));
     if (canAudit) tasks.push(loadList("audit"));
     if (canReadAdmins) tasks.push(loadAdmins());
-    await Promise.all(tasks);
+    return (await Promise.all(tasks)).every(Boolean);
   }, [canApprove, canAudit, canRead, canReadAdmins, canTemplateRead, loadAdmins, loadList, loadTemplates]);
 
-  const loadDetail = useCallback(async (requestId: string) => {
+  const loadDetail = useCallback(async (requestId: string): Promise<boolean> => {
+    beginObject(requestId);
+    const requestEpoch = contextEpoch;
+    const requestContextKey = contextKey;
+    const requestObjectEpoch = objectEpochRef.current;
+    const requestObjectKey = objectKeyRef.current;
+    if (!isCurrent(requestEpoch, requestContextKey)) return false;
     const seq = ++seqRef.current.detail;
+    setDetail(undefined);
+    setDetailFresh(false);
     try {
       const result = await adminRequest<RequestDetail>("/security/approvals/requests/detail?requestId=" + encodeURIComponent(requestId));
-      if (seqRef.current.detail === seq) setDetail(result);
+      if (!isCurrent(requestEpoch, requestContextKey) || !isCurrentObject(requestObjectEpoch, requestObjectKey) || seqRef.current.detail !== seq) return false;
+      setDetail(result);
+      setDetailFresh(true);
+      return true;
     } catch (failure) {
-      if (seqRef.current.detail === seq) setError(friendlyError(failure));
+      if (isCurrent(requestEpoch, requestContextKey) && isCurrentObject(requestObjectEpoch, requestObjectKey) && seqRef.current.detail === seq) {
+        setDetail(undefined);
+        setDetailFresh(false);
+        setError(friendlyError(failure));
+      }
+      return false;
     }
-  }, []);
+  }, [contextEpoch, contextKey]);
 
   useEffect(() => {
-    void load().catch((failure) => setError(friendlyError(failure)));
+    void load();
   }, [load, refreshNonce]);
 
   useEffect(() => {
     if (initialRequestId) void loadDetail(initialRequestId);
+    else beginObject();
   }, [initialRequestId, loadDetail]);
 
   useEffect(() => {
@@ -295,25 +458,114 @@ export function ApprovalAuditView({
     void loadList(key, { cursors, index });
   };
 
-  const run = async (action: () => Promise<void>, success: string) => {
+  const performReadback = useCallback(async (target: ReadbackTarget): Promise<boolean> => {
+    if (target.kind === "templates") return loadTemplates();
+    if (target.kind === "lists") return (await Promise.all(target.keys.map((key) => loadList(key)))).every(Boolean);
+    const detailOk = await loadDetail(target.requestId);
+    const listOk = target.keys.length === 0 || (await Promise.all(target.keys.map((key) => loadList(key)))).every(Boolean);
+    return detailOk && listOk;
+  }, [loadDetail, loadList, loadTemplates]);
+
+  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void): WriteIntent => ({
+    actorId: snapshot.adminUserId,
+    sessionId: snapshot.session.id,
+    objectKey: objectKeyRef.current,
+    objectEpoch: objectEpochRef.current,
+    contextKey,
+    contextEpoch,
+    path,
+    method: "POST",
+    body,
+    idempotencyKey: `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`,
+    successMessage,
+    readback,
+    afterPost,
+  }), [contextEpoch, contextKey, snapshot.adminUserId, snapshot.session.id]);
+
+  const submitWrite = useCallback(async (intent: WriteIntent, recovering = false) => {
+    if (!isCurrentIntent(intent) || writeInFlightRef.current || readbackInFlightRef.current) return;
+    if (recoveryRef.current && !recovering) return;
+    writeInFlightRef.current = true;
     setError(undefined);
     setMessage(undefined);
     setLoading(true);
     try {
-      await action();
-      await load();
-      setMessage(success);
+      await adminRequest(intent.path, intent.body, intent.method, { "idempotency-key": intent.idempotencyKey });
+      if (!isCurrentIntent(intent)) return;
+      intent.afterPost?.();
+      const readbackOk = await performReadback(intent.readback);
+      if (!isCurrentIntent(intent)) return;
+      if (readbackOk) {
+        updateRecovery(null);
+        setMessage(intent.successMessage);
+      } else {
+        updateRecovery({ kind: "readback", intent });
+        setError(undefined);
+        setMessage(`${intent.successMessage} 已成功，最新状态未确认。`);
+      }
     } catch (failure) {
-      setError(friendlyError(failure));
+      if (!isCurrentIntent(intent)) return;
+      if (isUnknownWriteError(failure)) {
+        updateRecovery({ kind: "unknown", intent });
+        setMessage(undefined);
+        setError("请求结果未知：服务端可能已处理；仅可使用原请求重试或放弃恢复。");
+      } else {
+        updateRecovery(null);
+        setError(friendlyError(failure));
+      }
     } finally {
-      setLoading(false);
+      if (isCurrentIntent(intent)) {
+        writeInFlightRef.current = false;
+        setLoading(false);
+      }
+    }
+  }, [performReadback]);
+
+  const retryUnknown = () => {
+    const current = recoveryRef.current;
+    if (current?.kind === "unknown") void submitWrite(current.intent, true);
+  };
+
+  const discardRecovery = () => {
+    if (recoveryRef.current?.kind !== "unknown") return;
+    updateRecovery(null);
+    setDetail(undefined);
+    setDetailFresh(false);
+    setError(undefined);
+  };
+
+  const retryReadback = async () => {
+    const current = recoveryRef.current;
+    if (current?.kind !== "readback" || readbackInFlightRef.current) return;
+    if (!isCurrentIntent(current.intent)) return;
+    readbackInFlightRef.current = true;
+    setError(undefined);
+    setLoading(true);
+    try {
+      const readbackOk = await performReadback(current.intent.readback);
+      if (!isCurrentIntent(current.intent)) return;
+      if (readbackOk) {
+        updateRecovery(null);
+        setMessage(`${current.intent.successMessage} 最新状态已确认。`);
+      } else {
+        setError(undefined);
+        setMessage(`${current.intent.successMessage} 已成功，最新状态未确认。`);
+      }
+    } finally {
+      if (isCurrentIntent(current.intent)) {
+        readbackInFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
-  const saveTemplate = async () => {
-    await run(async () => {
-      await adminRequest("/security/approvals/templates/update", { operationCode, triggerCondition, candidateUsernames });
-    }, "审批模板已保存；只影响之后新建的申请。在途申请保留原版本与名单快照。");
+  const saveTemplate = () => {
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/templates/update",
+      { operationCode, triggerCondition, candidateUsernames: [...candidateUsernames] },
+      "审批模板已保存；只影响之后新建的申请。在途申请保留原版本与名单快照。",
+      { kind: "templates" },
+    ));
   };
 
   const configure = (event: FormEvent<HTMLFormElement>) => {
@@ -321,44 +573,57 @@ export function ApprovalAuditView({
     openConfirm("template");
   };
 
-  const createRequest = async (event: FormEvent<HTMLFormElement>) => {
+  const createRequest = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await run(async () => {
-      await adminRequest("/security/approvals/requests", { operationCode, triggerCondition, payloadVersion: 1, payload: { outcome }, summary });
-      setSummary("");
-    }, "申请已提交。审批同意不代表执行完成或资金到账。");
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/requests",
+      { operationCode, triggerCondition, payloadVersion: 1, payload: { outcome }, summary },
+      "申请已提交。审批同意不代表执行完成或资金到账。",
+      { kind: "lists", keys: ["mine"] },
+      () => setSummary(""),
+    ));
   };
 
-  const decide = async (decision: "APPROVE" | "REJECT") => {
-    if (!detail) return;
-    await run(async () => {
-      await adminRequest("/security/approvals/requests/decision", { requestId: detail.requestId, decision, ...(rejectReason.trim() ? { reason: rejectReason.trim() } : {}) });
-      await loadDetail(detail.requestId);
-      setRejectReason("");
-    }, decision === "APPROVE" ? "已记录首个有效同意。后续执行仍是独立步骤。" : "已拒绝；如需再次申请，请新建申请，不会复活原审批。");
+  const decide = (decision: "APPROVE" | "REJECT") => {
+    const current = detail;
+    if (!current) return;
+    const successMessage = decision === "APPROVE" ? "已记录首个有效同意。后续执行仍是独立步骤。" : "已拒绝；如需再次申请，请新建申请，不会复活原审批。";
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/requests/decision",
+      { requestId: current.requestId, decision, ...(rejectReason.trim() ? { reason: rejectReason.trim() } : {}) },
+      successMessage,
+      { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      () => setRejectReason(""),
+    ));
   };
 
-  const append = async (event: FormEvent<HTMLFormElement>) => {
+  const append = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!detail) return;
-    await run(async () => {
-      await adminRequest("/security/approvals/requests/add-candidate", { requestId: detail.requestId, username: appendUsername, reason });
-      await loadDetail(detail.requestId);
-      setAppendUsername("");
-      setReason("");
-    }, "已追加当前仍具备审批资格的审批人；原配置名单未删除或跳过。");
+    const current = detail;
+    if (!current) return;
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/requests/add-candidate",
+      { requestId: current.requestId, username: appendUsername, reason },
+      "已追加当前仍具备审批资格的审批人；原配置名单未删除或跳过。",
+      { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      () => { setAppendUsername(""); setReason(""); },
+    ));
   };
 
-  const execute = async () => {
-    if (!detail) return;
-    await run(async () => {
-      await adminRequest("/security/approvals/requests/execute", { requestId: detail.requestId });
-      await loadDetail(detail.requestId);
-      setRecall("");
-    }, "执行结果已单独记录；请以执行状态查看结果。");
+  const execute = () => {
+    const current = detail;
+    if (!current) return;
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/requests/execute",
+      { requestId: current.requestId },
+      "执行结果已单独记录；请以执行状态查看结果。",
+      { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      () => setRecall(""),
+    ));
   };
 
   const openConfirm = (kind: ConfirmKind) => {
+    if (loading || recoveryRef.current) return;
     setRecall("");
     if (kind === "approve" || kind === "reject") setRejectReason("");
     setConfirm({ kind });
@@ -450,26 +715,35 @@ export function ApprovalAuditView({
     </Dialog>
   );
 
-  const selectRequest = async (requestId: string, title?: string) => {
+  const selectRequest = (requestId: string, title?: string) => {
     if (onOpenObject) {
       onOpenObject(requestId, title ?? "审批详情");
       return;
     }
     setError(undefined);
-    await loadDetail(requestId);
+    void loadDetail(requestId);
   };
 
-  const actionRows = detail ? (
+  const actionRows = detail && detailFresh ? (
     <div className="flex flex-wrap gap-2 mt-4">
       {canApprove && detail.status === "PENDING" ? (
         <>
-          <Button type="button" size="sm" onClick={() => openConfirm("approve")}>同意</Button>
-          <Button type="button" size="sm" variant="danger" onClick={() => openConfirm("reject")}>拒绝</Button>
+          <Button type="button" size="sm" disabled={loading || recovery !== null} onClick={() => openConfirm("approve")}>同意</Button>
+          <Button type="button" size="sm" variant="danger" disabled={loading || recovery !== null} onClick={() => openConfirm("reject")}>拒绝</Button>
         </>
       ) : null}
       {canExecute && detail.status === "APPROVED" ? (
-        <Button type="button" size="sm" onClick={() => openConfirm("execute")}>执行本地测试动作</Button>
+        <Button type="button" size="sm" disabled={loading || recovery !== null} onClick={() => openConfirm("execute")}>执行本地测试动作</Button>
       ) : null}
+    </div>
+  ) : null;
+
+  const recoveryPanel = recovery ? (
+    <div className="flex flex-wrap items-center gap-2 mt-3 text-xs">
+      <Button type="button" size="sm" variant="secondary" loading={loading} onClick={recovery.kind === "unknown" ? retryUnknown : () => void retryReadback()}>
+        {recovery.kind === "unknown" ? "用原请求重试" : "重试读取最新状态"}
+      </Button>
+      {recovery.kind === "unknown" ? <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={discardRecovery}>放弃恢复</Button> : null}
     </div>
   ) : null;
 
@@ -481,6 +755,7 @@ export function ApprovalAuditView({
     return (
       <div className="space-y-6">
         <StatusMessage error={error} success={message} />
+        {recoveryPanel}
         {detail ? (
           <section className="section-panel">
             <div className="panel-heading"><div><h3>申请详情与历史</h3><p>申请载荷、模板版本、候选名单和决定历史均来自服务端快照。</p></div><span className={"text-sm font-medium " + statusTone(detail.status)}>{statusLabel(detail.status)}</span></div>
@@ -496,7 +771,7 @@ export function ApprovalAuditView({
             {detail.decision ? <p className="text-xs mt-4">决定：{detail.decision.decision === "APPROVED" ? "同意" : "拒绝"}，由 {personLabel(detail.decision.approver)} 于 {formatDate(detail.decision.createdAt)} 记录。{detail.decision.reason ? "原因：" + detail.decision.reason : ""}</p> : null}
             {detail.execution ? <p className={"text-xs mt-2 " + (detail.execution.status === "SUCCEEDED" ? "text-emerald-400" : "text-rose-400")}>执行：{detail.execution.status === "SUCCEEDED" ? "成功" : "失败"}，结果码 {detail.execution.resultCode}；{detail.execution.resultDetail ?? "无附加说明"}</p> : null}
             {actionRows}
-            {canAddApprover && detail.status === "PENDING" ? <form onSubmit={append} className="flex flex-wrap items-end gap-2 mt-5 pt-4 border-t border-border"><label className="space-y-1 text-xs"><span className="text-muted-foreground block">追加当前合格审批人</span><select value={appendUsername} onChange={(event) => setAppendUsername(event.target.value)} className="h-8 min-w-56 px-2 rounded border border-border bg-surface-raised text-xs" required><option value="">选择账号</option>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })}</option>)}</select></label><input value={reason} onChange={(event) => setReason(event.target.value)} className="h-8 min-w-56 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="追加原因" required /><Button type="submit" size="sm" variant="secondary" loading={loading} disabled={!appendUsername || reason.trim().length < 3}>追加审批人</Button></form> : null}
+            {canAddApprover && detailFresh && detail.status === "PENDING" ? <form onSubmit={append} className="flex flex-wrap items-end gap-2 mt-5 pt-4 border-t border-border"><label className="space-y-1 text-xs"><span className="text-muted-foreground block">追加当前合格审批人</span><select value={appendUsername} onChange={(event) => setAppendUsername(event.target.value)} className="h-8 min-w-56 px-2 rounded border border-border bg-surface-raised text-xs" required><option value="">选择账号</option>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })}</option>)}</select></label><input value={reason} onChange={(event) => setReason(event.target.value)} className="h-8 min-w-56 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="追加原因" required /><Button type="submit" size="sm" variant="secondary" loading={loading} disabled={loading || recovery !== null || !appendUsername || reason.trim().length < 3}>追加审批人</Button></form> : null}
             <div className="mt-5"><h4 className="text-xs font-semibold mb-2">状态历史</h4><div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>动作</th><th>账号</th><th>结果</th><th>说明</th></tr></thead><tbody>{detail.history.map((event) => <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td className="font-mono">{event.action}</td><td>{personLabel(event.actor)}</td><td>{event.outcome}</td><td>{event.reason ?? prettyDetails(event.details)}</td></tr>)}</tbody></table></div></div>
           </section>
         ) : null}
@@ -521,7 +796,8 @@ export function ApprovalAuditView({
           {canTemplateRead || canTemplateConfigure ? <Button type="button" size="sm" role="tab" aria-selected={tab === "templates"} variant={tab === "templates" ? "primary" : "secondary"} onClick={() => { setTab("templates"); onTabChange?.("templates"); }}>模板配置</Button> : null}
           {canAudit ? <Button type="button" size="sm" role="tab" aria-selected={tab === "audit"} variant={tab === "audit" ? "primary" : "secondary"} onClick={() => { setTab("audit"); onTabChange?.("audit"); }}>审计记录</Button> : null}
         </div>
-        <StatusMessage error={error} success={message} className="mt-4" />
+         <StatusMessage error={error} success={message} className="mt-4" />
+         {recoveryPanel}
       </section>
 
       {tab === "templates" ? (
@@ -579,7 +855,7 @@ export function ApprovalAuditView({
           {detail.decision ? <p className="text-xs mt-4">决定：{detail.decision.decision === "APPROVED" ? "同意" : "拒绝"}，由 {personLabel(detail.decision.approver)} 于 {formatDate(detail.decision.createdAt)} 记录。{detail.decision.reason ? "原因：" + detail.decision.reason : ""}</p> : null}
           {detail.execution ? <p className={"text-xs mt-2 " + (detail.execution.status === "SUCCEEDED" ? "text-emerald-400" : "text-rose-400")}>执行：{detail.execution.status === "SUCCEEDED" ? "成功" : "失败"}，结果码 {detail.execution.resultCode}；{detail.execution.resultDetail ?? "无附加说明"}</p> : null}
           {actionRows}
-          {canAddApprover && detail.status === "PENDING" ? <form onSubmit={append} className="flex flex-wrap items-end gap-2 mt-5 pt-4 border-t border-border"><label className="space-y-1 text-xs"><span className="text-muted-foreground block">追加当前合格审批人</span><select value={appendUsername} onChange={(event) => setAppendUsername(event.target.value)} className="h-8 min-w-56 px-2 rounded border border-border bg-surface-raised text-xs" required><option value="">选择账号</option>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })}</option>)}</select></label><input value={reason} onChange={(event) => setReason(event.target.value)} className="h-8 min-w-56 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="追加原因" required /><Button type="submit" size="sm" variant="secondary" loading={loading} disabled={!appendUsername || reason.trim().length < 3}>追加审批人</Button></form> : null}
+          {canAddApprover && detailFresh && detail.status === "PENDING" ? <form onSubmit={append} className="flex flex-wrap items-end gap-2 mt-5 pt-4 border-t border-border"><label className="space-y-1 text-xs"><span className="text-muted-foreground block">追加当前合格审批人</span><select value={appendUsername} onChange={(event) => setAppendUsername(event.target.value)} className="h-8 min-w-56 px-2 rounded border border-border bg-surface-raised text-xs" required><option value="">选择账号</option>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })}</option>)}</select></label><input value={reason} onChange={(event) => setReason(event.target.value)} className="h-8 min-w-56 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="追加原因" required /><Button type="submit" size="sm" variant="secondary" loading={loading} disabled={loading || recovery !== null || !appendUsername || reason.trim().length < 3}>追加审批人</Button></form> : null}
           <div className="mt-5"><h4 className="text-xs font-semibold mb-2">状态历史</h4><div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>动作</th><th>账号</th><th>结果</th><th>说明</th></tr></thead><tbody>{detail.history.map((event) => <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td className="font-mono">{event.action}</td><td>{personLabel(event.actor)}</td><td>{event.outcome}</td><td>{event.reason ?? prettyDetails(event.details)}</td></tr>)}</tbody></table></div></div>
         </section>
       ) : null}

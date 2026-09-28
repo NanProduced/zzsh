@@ -57,6 +57,25 @@ function scopeLabel(scope: string | undefined): string {
   return "已按当前账号的对象范围过滤";
 }
 
+function contextKeyOf(snapshot: Extract<SessionSnapshot, { authenticated: true }>): string {
+  return JSON.stringify([
+    snapshot.adminUserId,
+    snapshot.user.username ?? "",
+    snapshot.session.id,
+    snapshot.security.status,
+    snapshot.security.isBoss,
+    [...snapshot.permissions].sort(),
+  ]);
+}
+
+function emptyPage(): CursorPage {
+  return { cursors: [null], index: 0, nextCursor: null };
+}
+
+function queryKeyOf(query: Record<string, string> | undefined): string {
+  return JSON.stringify(["action", "objectType", "actorUsername", "requestId"].map((key) => [key, query?.[key]?.trim() ?? ""]));
+}
+
 export function AdminAuditView({
   snapshot,
   initialQuery,
@@ -69,19 +88,62 @@ export function AdminAuditView({
   refreshNonce?: number;
 }) {
   const canRead = hasPermission(snapshot, "admin.audit.read");
+  const contextKey = contextKeyOf(snapshot);
+  const contextKeyRef = useRef(contextKey);
+  const contextEpochRef = useRef(0);
+  if (contextKeyRef.current !== contextKey) {
+    contextKeyRef.current = contextKey;
+    contextEpochRef.current += 1;
+  }
+  const contextEpoch = contextEpochRef.current;
   const [action, setAction] = useState(initialQuery?.action ?? "");
   const [objectType, setObjectType] = useState(initialQuery?.objectType ?? "");
   const [actorUsername, setActorUsername] = useState(initialQuery?.actorUsername ?? "");
   const [requestId, setRequestId] = useState(initialQuery?.requestId ?? "");
   const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [page, setPage] = useState<CursorPage>({ cursors: [null], index: 0, nextCursor: null });
+  const [page, setPage] = useState<CursorPage>(emptyPage);
   const [scope, setScope] = useState<string>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const initialQueryKey = queryKeyOf(initialQuery);
   const pageRef = useRef(page);
   const seqRef = useRef(0);
+  const mountedRef = useRef(true);
+  const previousContextKeyRef = useRef(contextKey);
+  const previousQueryKeyRef = useRef(initialQueryKey);
+  const draftQueryKeyRef = useRef("");
+  draftQueryKeyRef.current = queryKeyOf({ action, objectType, actorUsername, requestId });
+
+  const isCurrent = (epoch: number, key: string) => mountedRef.current && contextEpochRef.current === epoch && contextKeyRef.current === key;
+
+  useEffect(() => {
+    // React StrictMode re-runs effect setup after its first cleanup. Restore
+    // the live epoch for that setup, while the sequence guards still reject
+    // responses from the first setup.
+    mountedRef.current = true;
+    contextEpochRef.current = contextEpoch;
+    return () => {
+      mountedRef.current = false;
+      contextEpochRef.current += 1;
+    };
+  }, [contextEpoch]);
+
+  useEffect(() => {
+    if (previousContextKeyRef.current === contextKey) return;
+    previousContextKeyRef.current = contextKey;
+    seqRef.current += 1;
+    pageRef.current = emptyPage();
+    setPage(pageRef.current);
+    setEvents([]);
+    setScope(undefined);
+    setError(undefined);
+    setLoading(false);
+  }, [contextKey]);
 
   const load = async (target?: { cursors: (string | null)[]; index: number }) => {
+    const requestEpoch = contextEpoch;
+    const requestContextKey = contextKey;
+    if (!isCurrent(requestEpoch, requestContextKey)) return;
     const meta = target ? { cursors: target.cursors, index: target.index, nextCursor: pageRef.current.nextCursor } : pageRef.current;
     const cursor = meta.cursors[meta.index];
     const seq = ++seqRef.current;
@@ -95,30 +157,40 @@ export function AdminAuditView({
       if (requestId.trim()) params.set("requestId", requestId.trim());
       if (cursor) params.set("cursor", cursor);
       const result = await adminRequest<AuditResponse>(`/security/audit/events?${params.toString()}`);
-      if (seqRef.current !== seq) return;
+      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current !== seq) return;
       setEvents(result.events ?? []);
       setScope(result.scope);
       pageRef.current = { cursors: meta.cursors, index: meta.index, nextCursor: result.nextCursor ?? null };
       setPage(pageRef.current);
     } catch (failure) {
-      if (seqRef.current === seq) setError(friendlyError(failure));
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current === seq) setError(friendlyError(failure));
     } finally {
-      if (seqRef.current === seq) setLoading(false);
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current === seq) setLoading(false);
     }
   };
 
   useEffect(() => {
     if (canRead) void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canRead, refreshNonce]);
+  }, [canRead, contextKey, refreshNonce]);
 
   // B3: 同 tab 复用时 URL query 变化回填筛选表单。
   useEffect(() => {
+    const queryChanged = previousQueryKeyRef.current !== initialQueryKey;
+    previousQueryKeyRef.current = initialQueryKey;
     setAction(initialQuery?.action ?? "");
     setObjectType(initialQuery?.objectType ?? "");
     setActorUsername(initialQuery?.actorUsername ?? "");
     setRequestId(initialQuery?.requestId ?? "");
-  }, [initialQuery]);
+    if (queryChanged && draftQueryKeyRef.current !== initialQueryKey) {
+      seqRef.current += 1;
+      pageRef.current = emptyPage();
+      setPage(pageRef.current);
+      setEvents([]);
+      setScope(undefined);
+      setError(undefined);
+    }
+  }, [initialQueryKey]);
 
   if (!canRead) {
     return <section className="section-panel"><StatusMessage error="当前账号没有账号与权限审计读取权限。普通账号读取权限不自动包含此权限。" /></section>;

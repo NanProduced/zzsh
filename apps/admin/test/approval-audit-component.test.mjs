@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Window } from "happy-dom";
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -412,6 +412,348 @@ test("sequence guard: a late list response cannot overwrite the refreshed data",
     mineFresh = false;
     if (releaseFirstMine) releaseFirstMine();
     releaseFirstMine = null;
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("unknown writes replay the frozen original request and preserve the original key", async () => {
+  writes = [];
+  mineCall = 0;
+  let decisionAttempts = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    const method = init.method ?? "GET";
+    if (method !== "GET" && url.pathname.endsWith("/requests/decision")) {
+      const entry = { path: url.pathname, body: JSON.parse(init.body ?? "{}"), headers: { ...(init.headers ?? {}) } };
+      writes.push(entry);
+      if (decisionAttempts++ === 0) throw new TypeError("connection lost after the write");
+      return json({ status: "APPROVED", requestId: entry.body.requestId });
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView();
+  try {
+    await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
+    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY)));
+    await waitFor(() => buttonByText("同意") !== undefined);
+    await click(buttonByText("同意"));
+    await waitFor(() => dialog() !== null);
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await waitFor(() => view.rootNode.textContent.includes("请求结果未知"));
+
+    const original = writes[0];
+    assert.equal(writes.length, 1, "the lost response creates one original write intent");
+    assert.match(original.headers["idempotency-key"], /^idem_/);
+    await click(buttonByText("模板配置"));
+    await waitFor(() => view.rootNode.querySelector('input[value="approval.test.execute"]') !== null);
+    setInput(view.rootNode.querySelectorAll("form input")[0], "changed-after-unknown");
+    await click(buttonByText("用原请求重试"));
+    await waitFor(() => writes.length === 2);
+
+    assert.equal(writes[1].path, original.path);
+    assert.deepEqual(writes[1].body, original.body, "recovery does not read changed form state");
+    assert.equal(writes[1].headers["idempotency-key"], original.headers["idempotency-key"], "recovery reuses the original idempotency key");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("successful write with failed detail readback keeps success fact and exposes GET-only recovery", async () => {
+  writes = [];
+  mineCall = 0;
+  let detailReads = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/requests/detail")) {
+      detailReads += 1;
+      if (detailReads === 2) throw new TypeError("detail readback lost");
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView();
+  try {
+    await waitFor(() => view.rootNode.textContent.includes(APPROVED_SUMMARY));
+    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(APPROVED_SUMMARY)));
+    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
+    await click(buttonByText("执行本地测试动作"));
+    await waitFor(() => dialog() !== null);
+    setInput(dialog().querySelector("input"), APPROVED_SUMMARY.slice(0, 8));
+    await settle();
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认执行"));
+    await waitFor(() => view.rootNode.textContent.includes("已成功，最新状态未确认"));
+    assert.equal(writes.filter((entry) => entry.path.endsWith("/requests/execute")).length, 1);
+    assert.ok(buttonByText("重试读取最新状态"), "readback recovery is GET-only");
+    assert.equal(buttonByText("执行本地测试动作"), undefined, "stale detail cannot drive another write");
+
+    await click(buttonByText("重试读取最新状态"));
+    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
+    assert.equal(writes.filter((entry) => entry.path.endsWith("/requests/execute")).length, 1, "readback recovery does not POST");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("approval lists clear when actor and session context changes before the new read returns", async () => {
+  writes = [];
+  mineCall = 0;
+  let releaseSecondMine = null;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/requests/mine")) {
+      mineCall += 1;
+      if (mineCall === 1) return json({ requests: [summary("actor-a", "PENDING", "账号 A 的旧列表")], nextCursor: null });
+      if (mineCall === 2) return new Promise((resolve) => { releaseSecondMine = () => resolve(json({ requests: [summary("actor-b", "PENDING", "账号 B 的新列表")], nextCursor: null })); });
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView();
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("账号 A 的旧列表"));
+    const nextSnapshot = {
+      ...snapshot(),
+      adminUserId: "admin-staff",
+      user: { name: "审批人", username: "zz00002", displayUsername: "ZZ00002", twoFactorEnabled: true },
+      session: { ...snapshot().session, id: "session-2" },
+    };
+    await view.render({ snapshot: nextSnapshot, refreshNonce: 1 });
+    await settle();
+    assert.equal(view.rootNode.textContent.includes("账号 A 的旧列表"), false, "old actor data is cleared while the new read is pending");
+    assert.ok(releaseSecondMine, "new actor read is held");
+    releaseSecondMine();
+    await waitFor(() => view.rootNode.textContent.includes("账号 B 的新列表"));
+  } finally {
+    if (releaseSecondMine) releaseSecondMine();
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("permission loss clears an unknown recovery before the permission is restored", async () => {
+  writes = [];
+  mineCall = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") !== "GET" && url.pathname.endsWith("/requests/decision")) {
+      writes.push({ path: url.pathname, body: JSON.parse(init.body ?? "{}"), headers: { ...(init.headers ?? {}) } });
+      throw new TypeError("response lost after write");
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView();
+  try {
+    await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
+    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY)));
+    await waitFor(() => buttonByText("同意") !== undefined);
+    await click(buttonByText("同意"));
+    await waitFor(() => dialog() !== null);
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await waitFor(() => view.rootNode.textContent.includes("请求结果未知"));
+
+    await view.render({ snapshot: snapshot(permissions.filter((permission) => permission !== "approval.request.approve")), refreshNonce: 1 });
+    await settle();
+    assert.equal(view.rootNode.textContent.includes("用原请求重试"), false, "permission loss clears the old recovery");
+    assert.equal(writes.length, 1);
+
+    await view.render({ snapshot: snapshot(), refreshNonce: 2 });
+    await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
+    assert.equal(view.rootNode.textContent.includes("用原请求重试"), false, "restoring permission does not resurrect the old intent");
+    assert.equal(writes.length, 1, "permission restoration does not replay a write");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("switching the approval object clears the old detail and drops its late response", async () => {
+  writes = [];
+  mineCall = 0;
+  let releaseFirstDetail = null;
+  let detailCalls = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/requests/detail")) {
+      detailCalls += 1;
+      if (detailCalls === 1) return new Promise((resolve) => { releaseFirstDetail = () => resolve(json(detail("m1", "PENDING", "对象 A 旧详情"))); });
+      return json(detail("m2", "APPROVED", "对象 B 新详情"));
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView({ initialRequestId: "m1", objectOnly: true });
+  try {
+    await view.render({ initialRequestId: "m2", refreshNonce: 1 });
+    await waitFor(() => view.rootNode.textContent.includes("对象 B 新详情"));
+    assert.equal(view.rootNode.textContent.includes("对象 A 旧详情"), false);
+    assert.ok(releaseFirstDetail, "old object detail remains in flight");
+    releaseFirstDetail();
+    await settle();
+    assert.equal(view.rootNode.textContent.includes("对象 B 新详情"), true, "late old-object detail cannot overwrite the new object");
+    assert.equal(view.rootNode.textContent.includes("对象 A 旧详情"), false);
+  } finally {
+    if (releaseFirstDetail) releaseFirstDetail();
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("repeated confirmation while a write is in flight cannot create a second write", async () => {
+  writes = [];
+  mineCall = 0;
+  let releaseDecision = null;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") !== "GET" && url.pathname.endsWith("/requests/decision")) {
+      writes.push({ path: url.pathname, body: JSON.parse(init.body ?? "{}"), headers: { ...(init.headers ?? {}) } });
+      return new Promise((resolve) => { releaseDecision = () => resolve(json({ status: "APPROVED", requestId: writes[0].body.requestId })); });
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView();
+  try {
+    await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
+    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY)));
+    await waitFor(() => buttonByText("同意") !== undefined);
+    await click(buttonByText("同意"));
+    await waitFor(() => dialog() !== null);
+    const confirm = buttons(dialog()).find((button) => button.textContent.trim() === "确认同意");
+    await act(async () => {
+      confirm.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true }));
+      confirm.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+    assert.equal(writes.length, 1, "the second confirmation is ignored while the first write is pending");
+    assert.ok(releaseDecision);
+    releaseDecision();
+    await waitFor(() => view.rootNode.textContent.includes("已记录首个有效同意"));
+  } finally {
+    if (releaseDecision) releaseDecision();
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("StrictMode restores approval reads and unmount rejects late responses", async () => {
+  writes = [];
+  mineCall = 0;
+  holdFirstMine = false;
+  mineFresh = false;
+  let releaseOld;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/security/approvals/requests/mine")) {
+      mineCall += 1;
+      if (mineCall === 1) return new Promise((resolve) => { releaseOld = () => resolve(json({ requests: [summary("strict-old", "PENDING", "StrictMode 旧列表")], nextCursor: null })); });
+      return json({ requests: [summary("strict-new", "PENDING", "StrictMode 新列表")], nextCursor: null });
+    }
+    return mockFetch(input, init);
+  };
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  const root = createRoot(rootNode);
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, createElement(ApprovalAuditView, { snapshot: snapshot() }))));
+    await waitFor(() => rootNode.textContent.includes("StrictMode 新列表"));
+    assert.equal(rootNode.textContent.includes("StrictMode 旧列表"), false, "StrictMode cleanup drops the first setup response");
+    releaseOld();
+    await settle();
+    assert.equal(rootNode.textContent.includes("StrictMode 新列表"), true, "the rebuilt effect remains live");
+  } finally {
+    await act(async () => root.unmount());
+    rootNode.remove();
+  }
+
+  let releaseLate;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/security/approvals/requests/mine")) {
+      return new Promise((resolve) => { releaseLate = () => resolve(json({ requests: [summary("late", "PENDING", "卸载后迟到列表")], nextCursor: null })); });
+    }
+    return mockFetch(input, init);
+  };
+  const late = await renderView();
+  try {
+    await waitFor(() => releaseLate !== undefined);
+  } finally {
+    await late.cleanup();
+    releaseLate();
+    await settle();
+    assert.equal(late.rootNode.textContent, "", "unmounted approval view ignores a late response");
+    globalThis.fetch = undefined;
+  }
+});
+
+test("object and actor-session changes release only the new approval lifecycle", async () => {
+  writes = [];
+  mineCall = 0;
+  let releaseWrite;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") !== "GET" && url.pathname.endsWith("/requests/decision")) {
+      writes.push({ path: url.pathname, body: JSON.parse(init.body ?? "{}"), headers: { ...(init.headers ?? {}) } });
+      return new Promise((resolve) => { releaseWrite = () => resolve(json({ status: "APPROVED", requestId: writes[0].body.requestId })); });
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView({ initialRequestId: "m1", objectOnly: true });
+  try {
+    await waitFor(() => buttonByText("同意") !== undefined);
+    await click(buttonByText("同意"));
+    await waitFor(() => dialog() !== null);
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    assert.ok(releaseWrite, "the original POST is in flight");
+
+    await view.render({ initialRequestId: "m2", refreshNonce: 1 });
+    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
+    assert.equal(buttonByText("执行本地测试动作").disabled, false, "the new object is not held by the old POST");
+    releaseWrite();
+    await settle();
+    assert.equal(buttonByText("执行本地测试动作").disabled, false, "the old finally cannot release a new object lock");
+  } finally {
+    if (releaseWrite) releaseWrite();
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("actor-session change during readback clears the old busy state", async () => {
+  writes = [];
+  mineCall = 0;
+  let detailCalls = 0;
+  let releaseReadback;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/security/approvals/requests/detail")) {
+      detailCalls += 1;
+      if (detailCalls === 2) return new Promise((resolve) => { releaseReadback = () => resolve(json(detail("m1", "APPROVED", APPROVED_SUMMARY))); });
+    }
+    if ((init.method ?? "GET") !== "GET" && url.pathname.endsWith("/requests/decision")) {
+      writes.push({ path: url.pathname, body: JSON.parse(init.body ?? "{}"), headers: { ...(init.headers ?? {}) } });
+      return json({ status: "APPROVED", requestId: "m1" });
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView({ initialRequestId: "m1", objectOnly: true });
+  try {
+    await waitFor(() => buttonByText("同意") !== undefined);
+    await click(buttonByText("同意"));
+    await waitFor(() => dialog() !== null);
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await waitFor(() => releaseReadback !== undefined);
+
+    await view.render({
+      snapshot: { ...snapshot(), adminUserId: "admin-staff", user: { name: "审批人", username: "zz00002", displayUsername: "ZZ00002", twoFactorEnabled: true }, session: { ...snapshot().session, id: "session-2" } },
+      initialRequestId: "m1",
+      refreshNonce: 1,
+    });
+    await waitFor(() => buttonByText("同意") !== undefined);
+    assert.equal(buttonByText("同意").disabled, false, "the new actor-session is not held by old readback");
+    releaseReadback();
+    await settle();
+    assert.equal(buttonByText("同意").disabled, false, "the old readback cannot clear the new actor-session state");
+  } finally {
+    if (releaseReadback) releaseReadback();
     await view.cleanup();
     globalThis.fetch = undefined;
   }

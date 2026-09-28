@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Window } from "happy-dom";
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -222,6 +222,89 @@ test("without permission the view refuses to render audit data", async () => {
     assert.equal(view.rootNode.textContent.includes("admin.account.updated"), false);
   } finally {
     await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("audit data clears when actor and session context changes before the new read returns", async () => {
+  calls = [];
+  let auditCalls = 0;
+  let releaseSecondAudit = null;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/security/audit/events")) {
+      auditCalls += 1;
+      if (auditCalls === 1) return json({ events: [auditEvent("actor-a", "admin.account.updated", { owner: "A" })], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" });
+      if (auditCalls === 2) return new Promise((resolve) => { releaseSecondAudit = () => resolve(json({ events: [auditEvent("actor-b", "admin.frozen", { owner: "B" })], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" })); });
+    }
+    return mockFetch(input, init);
+  };
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    const nextSnapshot = {
+      ...snapshot(["admin.audit.read"]),
+      adminUserId: "admin-staff",
+      user: { name: "审批人", username: "zz00002", displayUsername: "ZZ00002", twoFactorEnabled: true },
+      session: { ...snapshot().session, id: "session-2" },
+    };
+    await view.render({ snapshot: nextSnapshot, refreshNonce: 1 });
+    await settle();
+    assert.equal(tableText(view).includes("admin.account.updated"), false, "old actor audit data is cleared while the new read is pending");
+    assert.ok(releaseSecondAudit, "new actor audit read is held");
+    releaseSecondAudit();
+    await waitFor(() => tableText(view).includes("admin.frozen"));
+  } finally {
+    if (releaseSecondAudit) releaseSecondAudit();
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("StrictMode restores audit reads and unmount rejects late responses", async () => {
+  calls = [];
+  let auditCalls = 0;
+  let releaseOld;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/security/audit/events")) {
+      auditCalls += 1;
+      if (auditCalls === 1) return new Promise((resolve) => { releaseOld = () => resolve(json({ events: [auditEvent("strict-old", "admin.account.updated", { owner: "old" })], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" })); });
+      return json({ events: [auditEvent("strict-new", "admin.frozen", { owner: "new" })], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" });
+    }
+    return mockFetch(input, init);
+  };
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  const root = createRoot(rootNode);
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, createElement(AdminAuditView, { snapshot: snapshot(["admin.audit.read"]), initialQuery: {} }))));
+    await waitFor(() => tableText({ rootNode }).includes("admin.frozen"));
+    assert.equal(tableText({ rootNode }).includes("admin.account.updated"), false, "StrictMode cleanup drops the first setup response");
+    releaseOld();
+    await settle();
+    assert.equal(tableText({ rootNode }).includes("admin.frozen"), true, "the rebuilt effect remains live");
+  } finally {
+    await act(async () => root.unmount());
+    rootNode.remove();
+  }
+
+  let releaseLate;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if ((init.method ?? "GET") === "GET" && url.pathname.endsWith("/security/audit/events")) {
+      return new Promise((resolve) => { releaseLate = () => resolve(json({ events: [auditEvent("late", "admin.role.updated", { owner: "late" })], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" })); });
+    }
+    return mockFetch(input, init);
+  };
+  const late = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => releaseLate !== undefined);
+  } finally {
+    await late.cleanup();
+    releaseLate();
+    await settle();
+    assert.equal(late.rootNode.textContent, "", "unmounted audit view ignores a late response");
     globalThis.fetch = undefined;
   }
 });
