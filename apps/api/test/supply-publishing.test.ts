@@ -36,6 +36,16 @@ test("readPresentation only fills missing snapshot presentation fields", async (
   ]);
 });
 
+test("empty presentation is not filled from the current catalog", async () => {
+  let queried = false;
+  const result = await readPresentation(
+    { query: async () => { queried = true; return { rows: [] }; } } as never,
+    { presentation: {} } as never,
+  );
+  assert.equal(queried, false);
+  assert.deepEqual(result, {});
+});
+
 test("readPresentation fills both missing skin category fields without changing existing labels", async () => {
   const result = await readPresentation(
     {

@@ -7,6 +7,7 @@ import {
   type SessionSnapshot,
 } from "../api";
 import { Button, StatusMessage } from "../components/ui-elements";
+import { reviewItemLabel } from "./supply-review-labels";
 type QueueItem = {
   id: string;
   game_id: string;
@@ -74,11 +75,12 @@ type Detail = {
     termOption?: { code: string; displayName: string | null; dailyConsumption: { quantity: string; unit: "HAFF_BASE" } | null } | null;
     attributeDisplay?: AttributeDisplay;
     declaration: Declaration;
+    catalogItems?: Array<{ id: string; name: string; unit: string }>;
     presentation: {
       items?: Array<{
         id: string;
         name: string;
-        unit: string;
+        unit?: string;
       }>;
       skins?: Array<{
         id: string;
@@ -103,6 +105,7 @@ type Detail = {
     items?: Array<{
       id: string;
       name: string;
+      unit?: string;
     }>;
     skins?: Array<{
       id: string;
@@ -267,10 +270,14 @@ export function SupplyListingReviewView({
   };
   const version = detail?.version,
     old = detail?.previousDeclaration;
-  const nameOf = (id: string) =>
-    version?.presentation.items?.find((i) => i.id === id)?.name ??
-    detail?.previousPresentation?.items?.find((i) => i.id === id)?.name ??
-    "历史物品";
+  const itemLabel = (id: string) =>
+    reviewItemLabel({
+      itemId: id,
+      inCurrent: Boolean(version?.declaration.inventory.some((item) => item.itemId === id)),
+      presentation: version?.presentation?.items,
+      catalog: version?.catalogItems,
+      previousPresentation: detail?.previousPresentation?.items,
+    });
   const codeText = (label: CodeDisplay | null | undefined, raw: unknown) => {
     if (label?.displayName) return label.displayName;
     const code = label?.code ?? (raw === null || raw === undefined || raw === "" ? "" : String(raw));
@@ -494,28 +501,16 @@ export function SupplyListingReviewView({
                       const item = version.declaration.inventory.find(
                         (i) => i.itemId === id,
                       );
+                      const label = itemLabel(id);
                       const previous = old?.inventory.find(
                         (i) => i.itemId === id,
                       )?.quantity;
                       return (
                         <tr key={id} className="border-t border-border">
                           <td className="px-4 py-3">
-                            {nameOf(id)}
+                            {label.name}
                             <span className="mt-1 block text-xs text-muted-foreground">
-                              单位：
-                              {version.presentation.items?.find(
-                                (i) => i.id === id,
-                              )?.unit === "HAFF_BASE"
-                                ? "哈夫币"
-                                : version.presentation.items?.find(
-                                      (i) => i.id === id,
-                                )?.unit === "ROUND"
-                                  ? "发"
-                                  : version.presentation.items?.find(
-                                        (i) => i.id === id,
-                                      )?.unit === "DAY"
-                                    ? "天"
-                                    : "件"}
+                              单位：{label.unit}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-muted-foreground tabular-nums">

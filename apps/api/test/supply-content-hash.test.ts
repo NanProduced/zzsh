@@ -98,6 +98,19 @@ test("R6 normalized content is stable across text, numbers, UTC time, nulls and 
   assert.notEqual(computeContentHash(a), computeContentHash(b));
 });
 
+test("the optional legacy resource number participates in the hash only when present", () => {
+  const absent = payload();
+  const present = structuredClone(absent);
+  present.declaration.attributes = { ...present.declaration.attributes, legacy_resource_no: "202605260368" };
+  assert.notEqual(computeContentHash(present), computeContentHash(absent));
+  const explicitNull = structuredClone(present);
+  explicitNull.declaration.attributes.legacy_resource_no = null;
+  assert.notEqual(computeContentHash(explicitNull), computeContentHash(present));
+  const invalid = structuredClone(present);
+  invalid.declaration.attributes.legacy_resource_no = 42;
+  assert.throws(() => computeContentHash(invalid), ContentHashError);
+});
+
 test("identical content with reordered collections and keys produces the same digest", () => {
   const first = computeContentHash(payload());
   assert.equal(first,"30ff67e9a64765b4eda81ecda5badd00b84ed4ea6c55e4574d5c697dc5f22923","v1 baseline cc96482 byte contract");

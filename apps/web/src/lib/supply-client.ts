@@ -36,6 +36,75 @@ export function editableDeclaration(saved: SavedDeclaration): DraftInput {
   };
 }
 
+export function mergeInventory(
+  draft: { inventory: DraftInput["inventory"] },
+  catalog: { items: Array<{ id: string }> } | null,
+): DraftInput["inventory"] {
+  if (!catalog) return draft.inventory.map((item) => ({ ...item }));
+  const ids = new Set(catalog.items.map((item) => item.id));
+  return [
+    ...catalog.items.flatMap((item) => {
+      const existing = draft.inventory.find((row) => row.itemId === item.id);
+      return existing ? [{ itemId: item.id, quantity: existing.quantity }] : [];
+    }),
+    ...draft.inventory.filter((item) => !ids.has(item.itemId)).map((item) => ({ ...item })),
+  ];
+}
+
+export type CatalogAvailability = "pending" | "failed" | "ready";
+
+export type InventoryEditorRow = {
+  itemId: string;
+  name: string;
+  unit: string | null;
+  quantity: string | null;
+  priced: boolean | null;
+  required: boolean;
+  catalogState: CatalogAvailability;
+};
+
+export function inventoryEditorRows(
+  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean }> } | null,
+  inventory: DraftInput["inventory"],
+  labels: Array<{ id: string; name: string; unit: string; priced?: boolean }> = [],
+  availability: CatalogAvailability = catalog ? "ready" : "pending",
+): InventoryEditorRow[] {
+  // A loaded publishing catalog decides current quotability. Detail labels only reuse name and unit.
+  const catalogState: CatalogAvailability = catalog ? "ready" : availability === "failed" ? "failed" : "pending";
+  const labelById = new Map(labels.map((item) => [item.id, item]));
+  const pricedIds = new Set(catalogState === "ready" ? (catalog?.items ?? []).map((item) => item.id) : []);
+  const rows: InventoryEditorRow[] = (catalogState === "ready" ? catalog?.items ?? [] : []).map((item) => ({
+    itemId: item.id,
+    name: item.name,
+    unit: item.unit,
+    quantity: inventory.find((row) => row.itemId === item.id)?.quantity ?? null,
+    priced: true,
+    required: Boolean(item.required),
+    catalogState,
+  }));
+  for (const line of inventory) {
+    if (pricedIds.has(line.itemId)) continue;
+    const label = labelById.get(line.itemId);
+    rows.push({
+      itemId: line.itemId,
+      name: label?.name ?? `未确认（${line.itemId}）`,
+      unit: label?.unit ?? null,
+      quantity: line.quantity,
+      priced: catalogState === "ready" ? false : null,
+      required: false,
+      catalogState,
+    });
+  }
+  return rows;
+}
+
+export function inventoryPriceHint(row: InventoryEditorRow): string | null {
+  if (row.priced === false) return "未进入当前可用价目，不可报价";
+  if (row.catalogState === "failed") return "发布目录读取失败，暂不能判断可否报价";
+  if (row.catalogState === "pending") return "发布目录尚未加载，暂不能判断可否报价";
+  return null;
+}
+
 export const supplyGroups = [
   "basics",
   "inventory",

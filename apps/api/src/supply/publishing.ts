@@ -1111,6 +1111,29 @@ async function resolvePublicMediaRoute(
   };
 }
 
+async function readInventoryCatalogLabels(
+  client: PoolClient,
+  itemIds: string[],
+): Promise<Array<{ id: string; code: string; name: string; unit: string; priced: boolean }>> {
+  if (!itemIds.length) return [];
+  return (
+    await client.query<{ id: string; code: string; name: string; unit: string; priced: boolean }>(
+      `SELECT i.id, i.code, i.name, i.unit,
+              EXISTS (
+                SELECT 1 FROM zzsh_supply.game g
+                JOIN zzsh_supply.rule_release r ON r.id = g.current_release_id
+                JOIN zzsh_supply.price_line p ON p.price_version_id = r.price_version_id
+                 AND p.item_id = i.id AND p.customer_tier = 'STANDARD'
+                WHERE g.id = i.game_id
+              ) AS priced
+         FROM zzsh_supply.billable_item i
+        WHERE i.id = ANY($1::text[])
+        ORDER BY i.sort_order, i.code, i.id`,
+      [itemIds],
+    )
+  ).rows;
+}
+
 async function readBoundTermOption(
   client: PoolClient,
   v: ListingVersion,
@@ -1275,6 +1298,11 @@ export async function listingDetail(
     boundTerm: await readBoundTermOption(client, v),
   });
   const presentation = await readPresentation(client, v);
+  const declaration = await readOwnerDeclaration(client, v, publicRoute);
+  const catalogItems = await readInventoryCatalogLabels(
+    client,
+    (declaration.inventory as Array<{ itemId: string }>).map((item) => item.itemId),
+  );
   return {
     ownerName,
     agreement,
@@ -1295,7 +1323,8 @@ export async function listingDetail(
       safeBox: ownerOffer.safeBox,
       termOption: ownerOffer.termOption,
       attributeDisplay: projectPublicAttributeDisplay(v.attributes),
-      declaration: await readOwnerDeclaration(client, v, publicRoute),
+      declaration,
+      catalogItems,
       presentation,
       quote,
     },

@@ -127,7 +127,11 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
     { label: "潜水等级", value: orDash(conditionValue(data, "dive_level")) },
     { label: "租期规则", value: data.termOptionLabel ?? "-" },
   ];
-  const rules = [
+  const rules = data.historicalReadOnly ? [
+    { label: "资料来源", value: "旧站上架记录，原始数量、价格与租期按来源保留。" },
+    { label: "交易状态", value: "历史资料只读展示，尚不支持新建单、支付或预约。" },
+    { label: "缺失资料", value: "未迁入的图片和未提供的单项价格保持缺失，不按零值处理。" },
+  ] : [
     { label: "租期", value: data.termLabel },
     { label: "结算规则", value: "物品金额先预付，结算按实际使用量核算，未使用部分退还；最终以订单结算为准。" },
     { label: "真人客服履约", value: "租赁期间由真人客服协助完成上号与使用问题处理。" },
@@ -144,6 +148,7 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
       <div className="detail-hero-summary">
         <div className="detail-hero-title-row">
           <h2 className="detail-hero-title">{data.title}</h2>
+          {data.historicalReadOnly && <span className="detail-deal-tag">旧站原价 · 只读</span>}
           {data.rentalMode === "fast" ? <span className="detail-deal-tag">特惠</span> : null}
         </div>
         <p className="detail-meta">
@@ -164,16 +169,16 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
         </dl>
         <div className="detail-fees" role="group" aria-label="费用摘要">
           <div className="detail-fee-group" role="group" aria-label="资源费用">
-            <div className="detail-fee-row detail-fee-row--head"><span className="detail-fee-label">资源费用小计</span><span className={feeValueClass(resourceSubtotal, false)}>{resourceSubtotal}</span></div>
+            <div className="detail-fee-row detail-fee-row--head"><span className="detail-fee-label">{data.historicalReadOnly ? "旧站资源费用小计" : "资源费用小计"}</span><span className={feeValueClass(resourceSubtotal, false)}>{resourceSubtotal}</span></div>
             <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">哈夫币租金</span><span className={feeValueClass(haffRent, false)}>{haffRent}</span></div>
             <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">物品资源费用</span><span className={feeValueClass(itemResource, false)}>{itemResource}</span></div>
           </div>
           <div className="detail-fee-row"><span className="detail-fee-label">押金</span><span className={feeValueClass(deposit, false)}>{deposit}</span></div>
-          <div className="detail-fee-row detail-fee-row--total"><span className="detail-fee-label">预计合计</span><span className={feeValueClass(payableTotal, true)}>{payableTotal}</span></div>
+          <div className="detail-fee-row detail-fee-row--total"><span className="detail-fee-label">{data.historicalReadOnly ? "新订单" : "预计合计"}</span><span className={feeValueClass(payableTotal, true)}>{data.historicalReadOnly ? "未开放" : payableTotal}</span></div>
         </div>
         <div className="detail-hero-actions">
-          <FavoriteButton accountId={data.id} title={data.title} variant="inline" />
-          <p className="detail-stage-note">当前仅展示公开报价，确认租赁功能暂未开放</p>
+          {!data.historicalReadOnly && <FavoriteButton accountId={data.id} title={data.title} variant="inline" />}
+          <p className="detail-stage-note">{data.historicalReadOnly ? "旧站上架资料 · 原始价格只读展示，不能新建订单。历史租期不代表当前可租时长。" : "当前仅展示公开报价，确认租赁功能暂未开放"}</p>
         </div>
         <FavoriteNotice />
       </div>

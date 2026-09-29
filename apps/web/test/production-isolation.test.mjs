@@ -73,13 +73,13 @@ test('retained static and dynamic homepage artwork resolves after cleanup', () =
   for (const [, art] of games.matchAll(/art: "([\w.-]+)"/g)) assert.ok(existsSync(resolve(web, `public/art/games/${art}`)));
 });
 
-test('production campaigns retain approved content and labeled demo statistics',()=>{
+test('production campaigns retain approved content without fabricated activity statistics',()=>{
   const html=readFileSync(build('server/app/index.html'),'utf8');
   for(const content of ['未成年人','禁止消费','账号交易','即将上线','交易返现5%','2元即可提现']) assert.ok(html.includes(content),content);
   assert.ok(html.includes('class="platform-activity"'));
-  assert.equal((html.match(/class="stat-unknown"/g)||[]).length,0);
-  assert.ok(html.includes('演示数据'));
-  for(const value of ['12,580','150,960','3,086'])assert.ok(html.includes(value),value);
+  assert.equal((html.match(/class="stat-unknown"/g)||[]).length,3);
+  assert.ok(!html.includes('演示数据'));
+  for(const value of ['12,580','150,960','3,086'])assert.ok(!html.includes(value),value);
   assert.ok(html.includes('暂无可展示的成交信息'));
   assert.ok(!html.includes('class="game-transition"'));
   assert.ok(!html.includes('class="brand-signature"'));

@@ -11,7 +11,7 @@ import { AuthForm, WebAuthError, maskPhone, webAuthRequest } from "./auth/auth-f
 import { accountStatusLabel, cancellationFailureMessage, type UserIdentitySnapshot } from "@/app/user-account-status";
 import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
-import { groupForField, editableDeclaration, supplyApi, supplyBlockerMessages, supplyGroups, SupplyRequestError, uploadSupplyMedia } from "../lib/supply-client";
+import { groupForField, editableDeclaration, inventoryEditorRows, inventoryPriceHint, mergeInventory, supplyApi, supplyBlockerMessages, supplyGroups, SupplyRequestError, uploadSupplyMedia, type CatalogAvailability } from "../lib/supply-client";
 import { freezeRequest, IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import { MEDIA_ACCEPT_ATTRIBUTE, MEDIA_UPLOAD_HINT, mediaUploadFailureHint } from "../lib/media-upload";
 import type { SupplyGroup } from "../lib/supply-client";
@@ -89,7 +89,7 @@ function moneyText(money: OwnerQuote["ownerTotal"] | null | undefined): string {
 }
 
 function unitText(unit: string): string {
-  return ({ HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" } as Record<string, string>)[unit] ?? "单位待核";
+  return ({ HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" } as Record<string, string>)[unit] ?? "未确认";
 }
 
 function quantityText(value: string | null | undefined, unit: string): string {
@@ -176,19 +176,6 @@ function nextMediaPosition(bindings: DraftInput["mediaBindings"]): number {
   return position;
 }
 
-function mergeInventory(draft: DraftInput, catalog: PublishingCatalog | null): DraftInput["inventory"] {
-  if (!catalog) return draft.inventory;
-  const known = new Map(draft.inventory.map((item) => [item.itemId, item.quantity]));
-  const ids = new Set(catalog.items.map((item) => item.id));
-  return [
-    ...catalog.items
-      .map((item) => ({ itemId: item.id, quantity: known.get(item.id) ?? null }))
-      .filter((item) => item.quantity !== null),
-    ...draft.inventory.filter((item) => !ids.has(item.itemId) && item.quantity !== null),
-  ];
-}
-
-
 function FieldError({ text }: { text?: string }) {
   return text ? <span className="supply-field-error" role="alert">{text}</span> : null;
 }
@@ -254,6 +241,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   const [draft, setDraftState] = useState<DraftInput>(emptyDraft);
   const [options, setOptions] = useState<PublishingOptions | null>(null);
   const [catalog, setCatalog] = useState<PublishingCatalog | null>(null);
+  const [catalogAvailability, setCatalogAvailability] = useState<CatalogAvailability>("pending");
   const [skinNames, setSkinNames] = useState<Record<string, string>>({});
   const [skinQuery, setSkinQuery] = useState("");
   const [skinCategory, setSkinCategory] = useState("");
@@ -334,6 +322,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       setGames([]);
       setOptions(null);
       setCatalog(null);
+      setCatalogAvailability("pending");
       setSkinNames({});
       skinQueryRef.current = { gameId: "", key: "" };
     }
@@ -613,6 +602,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     const controller = beginRequest();
     setOptions(null);
     setCatalog(null);
+    setCatalogAvailability("pending");
     setSkinNames({});
     setLoadingCatalog(true);
     try {
@@ -624,6 +614,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       if (!currentContext(context, controller.signal) || !isCurrentQuery({ id: requestId, key: `${requestedGameId}:${queryKey}` }, skinRequestRef.current, `${skinQueryRef.current.gameId}:${skinQueryRef.current.key}`)) return;
       setOptions(nextOptions);
       setCatalog(nextCatalog);
+      setCatalogAvailability("ready");
       setSkinNames(Object.fromEntries(nextCatalog.skins.map((skin) => [skin.id, skin.name])));
       setDraftState((previous) => {
         const next = { ...previous, attributes: { ...previous.attributes } };
@@ -633,7 +624,10 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
         return next;
       });
     } catch (failure) {
-      if (currentContext(context, controller.signal) && isCurrentQuery({ id: requestId, key: `${requestedGameId}:${queryKey}` }, skinRequestRef.current, `${skinQueryRef.current.gameId}:${skinQueryRef.current.key}`)) reportFailure(failure, () => loadCatalog(requestedGameId), context, "catalog");
+      if (currentContext(context, controller.signal) && isCurrentQuery({ id: requestId, key: `${requestedGameId}:${queryKey}` }, skinRequestRef.current, `${skinQueryRef.current.gameId}:${skinQueryRef.current.key}`)) {
+        setCatalogAvailability("failed");
+        reportFailure(failure, () => loadCatalog(requestedGameId), context, "catalog");
+      }
     } finally {
       if (currentContext(context, controller.signal) && isCurrentQuery({ id: requestId, key: `${requestedGameId}:${queryKey}` }, skinRequestRef.current, `${skinQueryRef.current.gameId}:${skinQueryRef.current.key}`)) setLoadingCatalog(false);
       finishRequest(controller);
@@ -1089,6 +1083,7 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
     setGameId(nextGameId);
     setOptions(null);
     setCatalog(null);
+    setCatalogAvailability("pending");
     setSkinNames({});
     skinQueryRef.current = { gameId: "", key: "" };
   };
@@ -1143,6 +1138,17 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
   const loginMethodOptions = options?.loginMethodOptions ?? [];
   const currentGrading = String(draft.attributes.grading_code ?? "");
   const currentLoginMethod = String(draft.attributes.login_method_code ?? "");
+  const currentSafeBox = String(draft.attributes.safe_box_code ?? "");
+  const currentVitality = draft.attributes.vit_level === null || draft.attributes.vit_level === undefined ? "" : String(draft.attributes.vit_level);
+  const currentBear = draft.attributes.bear_level === null || draft.attributes.bear_level === undefined ? "" : String(draft.attributes.bear_level);
+  const safeBoxKnown = currentSafeBox !== "" && (options?.safeBoxCodes ?? []).includes(currentSafeBox);
+  const vitalityKnown = currentVitality !== "" && (options?.vitalityLevels ?? []).some((level) => String(level) === currentVitality);
+  const bearKnown = currentBear !== "" && (options?.bearLevels ?? []).some((level) => String(level) === currentBear);
+  const safeBoxDisplay = supply?.version?.attributeDisplay?.safeBox;
+  const retainedSafeBoxLabel = safeBoxDisplay?.code === currentSafeBox && safeBoxDisplay.displayName
+    ? safeBoxDisplay.displayName
+    : `未确认（代码 ${currentSafeBox}）`;
+  const inventoryRows = inventoryEditorRows(catalog, draft.inventory, supply?.version?.catalogItems, catalog ? "ready" : catalogAvailability);
   const categoryNames = new Map((catalog?.categories ?? []).map((item) => [item.id, item.name]));
   const rarityNames = new Map((catalog?.rarities ?? []).map((item) => [item.code, item.name]));
   const mediaStatusText = (item: MediaEntry) => item.status === "uploading"
@@ -1171,9 +1177,9 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
           <label>游戏<select value={gameId} disabled={Boolean(accountId) || formDisabled} onChange={(event) => selectGame(event.target.value)}><option value="">选择游戏</option>{games.map((game) => <option key={game.id} value={game.id}>{game.name}</option>)}</select></label>
           <label>账号名称<input maxLength={120} value={draft.title} disabled={formDisabled} aria-invalid={Boolean(fieldError("title"))} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：满仓哈夫币·多套护甲" /> <FieldError text={fieldError("title")} /></label>
           <label className="supply-wide">公开说明<textarea rows={5} maxLength={4000} value={draft.description ?? ""} disabled={formDisabled} aria-invalid={Boolean(fieldError("description"))} onChange={(event) => setDraft({ ...draft, description: event.target.value || null })} placeholder="描述资源组成、使用限制和可提供的服务窗口" /><FieldError text={fieldError("description")} /></label>
-          <label>安全箱档位<select value={String(draft.attributes.safe_box_code ?? "")} disabled={formDisabled || !options} onChange={(event) => changeAttribute("safe_box_code", event.target.value || null)}><option value="">未申报</option>{options?.safeBoxCodes.map((code) => <option key={code} value={code}>{safeBoxOptions.find((option) => option.code === code)?.displayName ?? `未确认（代码 ${code}）`}</option>)}</select><small>受控选项；未映射代码会保留为未确认。</small></label>
-          <label>活力等级<select value={String(draft.attributes.vit_level ?? "")} disabled={formDisabled || !options} onChange={(event) => changeAttribute("vit_level", event.target.value ? Number(event.target.value) : null)}><option value="">未申报</option>{options?.vitalityLevels.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
-          <label>负重等级<select value={String(draft.attributes.bear_level ?? "")} disabled={formDisabled || !options} onChange={(event) => changeAttribute("bear_level", event.target.value ? Number(event.target.value) : null)}><option value="">未申报</option>{options?.bearLevels.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
+          <label>安全箱档位<select value={currentSafeBox} disabled={formDisabled || !options} onChange={(event) => changeAttribute("safe_box_code", event.target.value || null)}><option value="">未申报</option>{currentSafeBox && !safeBoxKnown ? <option value={currentSafeBox}>{retainedSafeBoxLabel}</option> : null}{options?.safeBoxCodes.map((code) => <option key={code} value={code}>{safeBoxOptions.find((option) => option.code === code)?.displayName ?? `未确认（代码 ${code}）`}</option>)}</select><small>受控选项；未映射代码会保留为未确认，不会改成其他档位。</small></label>
+          <label>活力等级<select value={currentVitality} disabled={formDisabled || !options} onChange={(event) => changeAttribute("vit_level", event.target.value ? Number(event.target.value) : null)}><option value="">未申报</option>{currentVitality && !vitalityKnown ? <option value={currentVitality}>{`${currentVitality}（未确认）`}</option> : null}{options?.vitalityLevels.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
+          <label>负重等级<select value={currentBear} disabled={formDisabled || !options} onChange={(event) => changeAttribute("bear_level", event.target.value ? Number(event.target.value) : null)}><option value="">未申报</option>{currentBear && !bearKnown ? <option value={currentBear}>{`${currentBear}（未确认）`}</option> : null}{options?.bearLevels.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
           <label>潜水等级<input inputMode="numeric" value={String(draft.attributes.dive_level ?? "")} disabled={formDisabled} onChange={(event) => changeAttribute("dive_level", event.target.value ? Number.parseInt(event.target.value, 10) : null)} placeholder="未申报" /></label>
           <label>角色等级<input inputMode="numeric" value={String(draft.attributes.character_level ?? "")} disabled={formDisabled} onChange={(event) => changeAttribute("character_level", event.target.value ? Number.parseInt(event.target.value, 10) : null)} placeholder="未申报" /></label>
           <label>大武器数量<input inputMode="numeric" value={String(draft.attributes.awm_weapon_count ?? "")} disabled={formDisabled} onChange={(event) => changeAttribute("awm_weapon_count", event.target.value ? Number.parseInt(event.target.value, 10) : null)} placeholder="未申报" /></label>
@@ -1187,9 +1193,9 @@ export function PublishForm({ mode, accountId: accountIdProp, editRequested = fa
       </section>
 
        <section id="inventory" className="supply-section" aria-labelledby="inventory-heading">
-         <div className="supply-section-heading"><div><h2 id="inventory-heading">资源数量</h2><p>按目录标明的单位填写整数数量；空白代表尚未申报，不会被前端替换为 0。</p></div></div>
+         <div className="supply-section-heading"><div><h2 id="inventory-heading">资源数量</h2><p>按目录标明的单位填写整数数量；空白代表尚未申报，不会被前端替换为 0。已有库存始终保留。目录尚未加载或读取失败时不判断可否报价；已加载但缺项时标明未进入当前可用价目、不可报价。</p></div></div>
         {catalog?.blockers.length ? <div className="supply-blockers">{catalog.blockers.map((item) => <p key={`${item.code}-${item.itemId}`}>{blockerText(item.code)}{item.name ? `：${item.name}` : ""}</p>)}</div> : null}
-         <div className="supply-table-wrap"><table className="supply-table"><thead><tr><th scope="col">资源</th><th scope="col">单位</th><th scope="col">数量</th></tr></thead><tbody>{catalog?.items.map((item) => { const quantity = draft.inventory.find((row) => row.itemId === item.id)?.quantity ?? ""; return <tr key={item.id}><th scope="row">{item.name}{item.required ? <small>必填</small> : null}</th><td>{unitText(item.unit)}</td><td><input className="supply-quantity" inputMode="numeric" pattern="[0-9]*" maxLength={24} value={quantity ?? ""} disabled={formDisabled} aria-label={`${item.name}数量`} onChange={(event) => changeInventory(item.id, event.target.value)} /></td></tr>; })}</tbody></table></div>
+         <div className="supply-table-wrap"><table className="supply-table"><thead><tr><th scope="col">资源</th><th scope="col">单位</th><th scope="col">数量</th></tr></thead><tbody>{inventoryRows.map((item) => { const quantity = item.quantity ?? ""; const priceHint = inventoryPriceHint(item); return <tr key={item.itemId}><th scope="row">{item.name}{item.required ? <small>必填</small> : null}{priceHint ? <small>{priceHint}</small> : null}</th><td>{item.unit ? unitText(item.unit) : "未确认"}</td><td><input className="supply-quantity" inputMode="numeric" pattern="[0-9]*" maxLength={24} value={quantity} disabled={formDisabled} aria-label={`${item.name}数量`} onChange={(event) => changeInventory(item.itemId, event.target.value)} /></td></tr>; })}</tbody></table></div>
         {!catalog && loadingCatalog ? <p className="supply-muted">正在读取发布目录…</p> : null}
       </section>
 

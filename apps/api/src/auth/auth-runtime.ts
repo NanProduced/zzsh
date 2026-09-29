@@ -18,6 +18,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 
 import { createAuthSchema } from "./auth-schema";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, attemptLegacyCredentialUpgrade, type AdminSecurityNotification, type AuthSecurityOptions, type LegacyCredentialLookup } from "./auth-security";
+import { readPasswordSetupRequired } from "./legacy-login";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
@@ -544,12 +545,14 @@ function buildPhoneRegistrationPlugin(
           throw error;
         }
         if (requiresPassword) return ctx.json({ status: true, requiresPassword: true });
+        // Migrated users keep the server-derived first-login state; the client only reacts to it.
+        const passwordSetupRequired = await readPasswordSetupRequired(pool, resolvedUserId);
         const user = await ctx.context.internalAdapter.findUserById(resolvedUserId);
         if (!user) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create user" });
         const session = await ctx.context.internalAdapter.createSession(resolvedUserId);
         if (!session) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create session" });
         await setSessionCookie(ctx, { session, user });
-        return ctx.json({ status: true });
+        return ctx.json({ status: true, ...(passwordSetupRequired ? { requiresPasswordSetup: true } : {}) });
       }),
     },
     rateLimit: [

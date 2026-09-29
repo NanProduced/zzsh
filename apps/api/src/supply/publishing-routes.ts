@@ -1,3 +1,4 @@
+import { readLegacyListing } from "./legacy-listing-read";
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
@@ -171,7 +172,12 @@ export async function handlePublishingRoute(
         options.pool,
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
-          const detail = await listingDetail(client, a, "public", gate);
+          let detail;
+          try { detail = await listingDetail(client, a, "public", gate); }
+          catch (error) {
+            if (publicMatch[2] || (error as {status?:number}).status !== 404) throw error;
+            detail = await readLegacyListing(client, a.id);
+          }
           if (!publicMatch[2]) return { detail };
           const asset = await loadMediaAsset(client, publicMatch[2]);
           const v = await readCurrentVersion(client, a);
