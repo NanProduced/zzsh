@@ -1,4 +1,3 @@
-import { readLegacyListing } from "./legacy-listing-read";
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
@@ -53,6 +52,7 @@ import {
   currentVersion,
   listingDetail,
   lockPublishingAccount,
+  readPublicListing,
   readPublishingAccount,
   readCurrentVersion,
   withPublicListingSnapshot,
@@ -172,12 +172,7 @@ export async function handlePublishingRoute(
         options.pool,
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
-          let detail;
-          try { detail = await listingDetail(client, a, "public", gate); }
-          catch (error) {
-            if (publicMatch[2] || (error as {status?:number}).status !== 404) throw error;
-            detail = await readLegacyListing(client, a.id);
-          }
+          const detail = await readPublicListing(client, a, gate);
           if (!publicMatch[2]) return { detail };
           const asset = await loadMediaAsset(client, publicMatch[2]);
           const v = await readCurrentVersion(client, a);
@@ -186,9 +181,10 @@ export async function handlePublishingRoute(
             asset.ownerUserId !== a.owner_user_id ||
             asset.purpose !== "ACCOUNT_DISPLAY" ||
             !isAccountDisplayPubliclyEligible(asset) ||
-            !v.payload?.declaration.mediaBindings.some(
-              (m) => m.assetId === asset.id && m.purpose === "ACCOUNT_DISPLAY",
-            )
+            !(await client.query(
+              `SELECT 1 FROM zzsh_supply.listing_media WHERE version_id=$1 AND asset_id=$2`,
+              [v.id, asset.id],
+            )).rowCount
           )
             throw notFound();
           return { asset };

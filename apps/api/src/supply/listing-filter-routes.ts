@@ -1,4 +1,4 @@
-import { listLegacyReadListings } from "./legacy-listing-read";
+import { legacyListingSortLabel,listLegacyReadListings } from "./legacy-listing-read";
 import { readAdminContext,assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION } from "../auth/admin-authorization";
 import { withTransaction,recordAudit,setAuditContext } from "../auth/security-core";
@@ -36,7 +36,10 @@ export async function handleListingFilters(request:SupplyNodeRequest,response:Su
       if((previous?.revision??"0")!==expected)throw conflict("Filter configuration changed");
       const historical=restore===null?null:(await client.query(`SELECT config FROM zzsh_supply.listing_filter_config WHERE game_id=$1 AND revision=$2`,[gameId,restore])).rows[0];
       if(restore!==null&&!historical)throw invalid("Unknown historical revision","restoreFromRevision");
-      const config=parsed??parseFilterConfig(historical.config);validateConfigCatalog(config,await listingCatalogContext(client,gameId));
+      const config=parsed??parseFilterConfig(historical.config);const catalog=await listingCatalogContext(client,gameId);
+      // Configuration maintenance follows the game's rule state, not today's visible rows:
+      // a configured game without a current release keeps offering its filters on an empty list.
+      validateConfigCatalog(config,catalog,!catalog.game.ruleReleaseId);
       const next=(BigInt(expected)+1n).toString();
       await client.query(`INSERT INTO zzsh_supply.listing_filter_config(game_id,revision,config,restore_from_revision,created_by_admin_id) VALUES($1,$2,$3,$4,$5)`,[gameId,next,config,restore,context.userId]);
       await recordAudit(client,{actorType:"admin",actorId:context.userId,sessionId:context.sessionId,requestId,action:operation,objectType:"listing_filter_config",objectId:gameId,outcome:"SUCCESS",reason,details:{before:previous??null,after:{revision:next,config,restoreFromRevision:restore}}});
@@ -50,7 +53,11 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
   return withPublicListingSnapshot(options.pool,async client=>{
     const state=await readListingState(client,q.gameId);
     for(const k of ["filterRevision","catalogRevision","ruleReleaseId"] as const)if(q[k]!==null&&q[k]!==state[k])throw conflict("Listing metadata revision changed");
-    if(state.legacyReadOnly)return listLegacyReadListings(client,q,options.listingCursorKey!,state.catalogRevision);
+    if(state.legacyReadOnly){
+      await validateListingQuery(client,q,state);
+      const configuredLabel=state.config!.sorts.find(s=>s.key===q.sort)?.label??null;
+      return listLegacyReadListings(client,q,options.listingCursorKey!,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,sortLabel:legacyListingSortLabel(q.sort,configuredLabel)});
+    }
     const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);

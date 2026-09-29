@@ -326,7 +326,7 @@ export function AccountCard({
   const isFastMode = data.rentalMode === "fast" || conditionValue(data, "rental_mode") === "fast";
   const mediaCount = data.media.length;
 
-  const favorite = data.historicalReadOnly ? null : <FavoriteButton accountId={data.id} title={data.title} />;
+  const favorite = <FavoriteButton accountId={data.id} title={data.title} />;
 
   if (viewMode === "list") {
     const listTitle = composeListTitle(data, haffQuantityText);
@@ -449,7 +449,7 @@ export function AccountCard({
                   <span className="account-list-title-rest"> · {listTitle.rest}</span>
                 ) : null}
               </Link>
-              {data.historicalReadOnly ? <span className="account-list-deal-tag">旧站原价 · 只读</span> : isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
+              {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
             </div>
 
             <p className="account-list-subline">
@@ -560,13 +560,13 @@ export function AccountCard({
                 </span>
               </div>
               <div className="finance-total-row">
-                <span className="finance-total-label">{data.historicalReadOnly ? "新订单" : "总价"}</span>
+                <span className="finance-total-label">总价</span>
                 <strong
                   className={`finance-total-val ${
                     !isPayableConfirmed ? "finance-total-val--unconfirmed" : ""
                   }`}
                 >
-                  {data.historicalReadOnly ? "未开放" : moneyValue(data.payableTotalLabel, "无需支付")}
+                  {moneyValue(data.payableTotalLabel, "无需支付")}
                 </strong>
               </div>
             </div>
@@ -744,7 +744,7 @@ export function AccountCard({
 
             <div className="account-card-breakdown">
               <div className="breakdown-header">
-                <span className="breakdown-title">{data.historicalReadOnly ? "旧站原价 · 只读" : "金额构成"}</span>
+                <span className="breakdown-title">金额构成</span>
                 {showRatioNote ? (
                   <span className="breakdown-note" title="辅助换算 · 非报价">
                     {ratioText} · 辅助换算 · 非报价
@@ -768,7 +768,7 @@ export function AccountCard({
                     !isPayableConfirmed ? "breakdown-total-val--unconfirmed" : ""
                   }`}
                 >
-                  {data.historicalReadOnly ? "未开放" : moneyValue(data.payableTotalLabel, "无需支付")}
+                  {moneyValue(data.payableTotalLabel, "无需支付")}
                 </strong>
               </div>
             </div>

@@ -34,7 +34,6 @@ export type ListingCardData = {
   payableTotalLabel: string | null;
   termLabel: string;
   termOptionLabel: string | null;
-  quoteSourceLabel: string;
   conditionLines: ConditionLine[];
   loginMethod: PublicCodeLabel | null;
   skinNames: string[];
@@ -196,11 +195,8 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     costLabel: formatMoneyLabel(line.buyerAmount),
     unitPriceLabel: `¥${line.buyerUnitAmount.amount} / ${line.unitQuantity} ${unitLabel(line.unit)}`,
   }));
-  const media = [...listing.media]
-    .sort((a, b) => a.position - b.position)
-    .map(({ assetId, url }) => ({ assetId, url }));
+  const media = projectListingMedia(listing);
   const firstMedia = media[0];
-  const skinNames = listing.presentation.skins.map((skin) => skin.name);
   return {
     id: listing.id,
     displayNo: listing.displayNo ?? null,
@@ -215,20 +211,33 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     payableTotalLabel: formatMoneyLabel(listing.quote.tenantPayableTotal),
     termLabel: termLabel(listing.quote.termSeconds),
     termOptionLabel: listing.termOption?.displayName ?? (listing.termOption ? `未确认（代码 ${listing.termOption.code}）` : null),
-    quoteSourceLabel: "当前服务端报价（非旧站比例）",
     conditionLines: conditionLines(listing.attributes, listing),
     loginMethod: listing.attributeDisplay?.loginMethod ?? null,
-    skinNames,
+    ...projectListingSkins(listing),
+    entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
+    rentalMode: listing.quote.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
+    unitAmountsInformational: listing.quote.unitAmountsInformational === true,
+  };
+}
+function projectListingMedia(listing: PublicListing): ListingMedia[] {
+  return [...listing.media]
+    .sort((a, b) => a.position - b.position)
+    .map(({ assetId, url }) => ({ assetId, url }));
+}
+function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "skinNames" | "skinLabels" | "skinTags"> {
+  return {
+    skinNames: listing.presentation.skins.map((skin) => skin.name),
     skinLabels: listing.presentation.skins.map((skin) => skin.categoryName ? `${skin.categoryName} · ${skin.name}` : skin.name),
     skinTags: listing.presentation.skins.map((skin) => ({
       name: skin.name,
       categoryCode: skin.categoryCode ?? null,
       categoryName: skin.categoryName ?? null,
     })),
-    entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
-    rentalMode: listing.quote.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
-    unitAmountsInformational: listing.quote.unitAmountsInformational === true,
   };
+}
+function historicalCentsLabel(...amounts: string[]): string {
+  const cents = amounts.reduce((sum, amount) => sum + BigInt(amount.replace(".", "")), 0n);
+  return `¥${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
 }
 function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const history = listing.historicalQuote;
@@ -236,20 +245,22 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
     throw new Error("Invalid historical listing projection");
   const items = new Map(listing.presentation.items.map(item => [item.id, item]));
   const subtotal = BigInt(history.haffRent.amount.replace(".", "")) + BigInt(history.goods.amount.replace(".", ""));
+  const media = projectListingMedia(listing);
   return {
     historicalReadOnly: true, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title,
-    media: [], resourceLines: listing.inventory.map(line => ({
+    imageUrl: media[0]?.url,
+    media, resourceLines: listing.inventory.map(line => ({
       itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: items.get(line.itemId)?.name ?? "未确认物品",
       quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
       unitLabel: unitLabel(line.unit), costAmount: null, costLabel: null, unitPriceLabel: null,
     })),
     resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,
     haffRentLabel: formatMoneyLabel(history.haffRent), itemResourceTotalLabel: formatMoneyLabel(history.goods),
-    depositLabel: formatMoneyLabel(history.deposit), payableTotalLabel: null,
-    termLabel: `${history.termDays} 天（旧站记录）`, termOptionLabel: listing.termOption?.displayName ?? null,
-    quoteSourceLabel: "旧站原始价格，仅供历史资料核对，不可下单",
+    depositLabel: formatMoneyLabel(history.deposit),
+    payableTotalLabel: historicalCentsLabel(history.haffRent.amount, history.goods.amount, history.deposit.amount),
+    termLabel: `${history.termDays} 天`, termOptionLabel: listing.termOption?.displayName ?? null,
     conditionLines: conditionLines(listing.attributes, listing), loginMethod: listing.attributeDisplay?.loginMethod ?? null,
-    skinNames: [], skinLabels: [], skinTags: [], entitlementNames: [], rentalMode: null, unitAmountsInformational: false,
+    ...projectListingSkins(listing), entitlementNames: [], rentalMode: null, unitAmountsInformational: false,
   };
 }
 export function toListingDetail(listing: PublicListing): ListingDetailData {

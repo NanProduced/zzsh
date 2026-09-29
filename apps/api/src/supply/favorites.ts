@@ -11,7 +11,7 @@ import {
 } from "../auth/security-core";
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import {
-  listingDetail,
+  readPublicListing,
   readPublishingAccount,
   unknownSupplyGate,
   withPublicListingSnapshot,
@@ -93,10 +93,9 @@ export async function handleFavorites(
         for (const row of rows) {
           let listing: Record<string, unknown> | null = null;
           try {
-            listing = await listingDetail(
+            listing = await readPublicListing(
               client,
               await readPublishingAccount(client, row.account_id),
-              "public",
               gate,
             );
           } catch (error) {
@@ -141,10 +140,9 @@ export async function handleFavorites(
   if (saved) {
     try {
       await withPublicListingSnapshot(options.pool, async (reader) =>
-        listingDetail(
+        readPublicListing(
           reader,
           await readPublishingAccount(reader, accountId),
-          "public",
           gate,
         ),
       );

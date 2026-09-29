@@ -616,10 +616,8 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {recoveryNotice && <p className="market-recovery-note" role="status">{recoveryNotice}</p>}
         {catalog.status === "error" && activeMetadata ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
-        {activeMetadata?.readMode === "LEGACY_READ_ONLY" && <p className="market-inline-state" role="status">以下为旧站真实上架资料与原始价格，仅供核对，不可新建订单。图片未迁入时保留缺图状态。</p>}
-
         <div className="market-results-toolbar">
-          <div><h2>{activeMetadata?.readMode === "LEGACY_READ_ONLY" ? "旧站上架资料（只读）" : "可租账号"}</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>可租账号</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
             {activeMetadata && <div className="market-sort-controls" aria-label="账号排序">
               <div className="market-sort-field"><span>排序</span><MarketSelect

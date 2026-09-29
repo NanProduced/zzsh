@@ -4,14 +4,17 @@ import type { ListingFilters, ListingQueryV2, ServiceWindow } from "./listing-fi
 type CandidateFilters=Omit<ListingFilters,"skinGroups">&{skinGroups?:{ids:string[];match:string}[]};
 export const PUBLIC_CANDIDATE_FROM=`FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id JOIN zzsh_supply.game g ON g.id=a.game_id`;
 export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND ${effectivePublicationStateSql("v","pub")} AND v.rule_release_id=g.current_release_id AND pub.content_hash=v.content_hash`;
-const attrs=`v.payload#>'{declaration,attributes}'`;
-const attribute=(name:string)=>`(${attrs})->>'${name}'`;
-const numericAttribute=(name:string,digits:number)=>`CASE WHEN jsonb_typeof((${attrs})->'${name}')='number' AND ${attribute(name)} ~ '^(0|[1-9][0-9]{0,${digits-1}})$' THEN (${attribute(name)})::numeric END`;
+// LEGACY_OBSERVATION versions keep the same declaration attributes in the
+// immutable `attributes` column instead of a payload, so callers may pass the
+// column as the attribute source while sharing one predicate implementation.
+export const LISTING_ATTRIBUTES_SQL=`v.payload#>'{declaration,attributes}'`;
 function windowLiteral(w:ServiceWindow,p:(v:unknown)=>string):string {
   const start=p(w.startMinute),end=p(w.endMinute);
   return w.crossMidnight?`int4multirange(int4range(0,${end}::int,'[)'),int4range(${start}::int,1440,'[)'))`:`int4multirange(int4range(${start}::int,${end}::int,'[)'))`;
 }
-export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:unknown)=>string):string[] {
+export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:unknown)=>string,attrs=LISTING_ATTRIBUTES_SQL):string[] {
+  const attribute=(name:string)=>`(${attrs})->>'${name}'`;
+  const numericAttribute=(name:string,digits:number)=>`CASE WHEN jsonb_typeof((${attrs})->'${name}')='number' AND ${attribute(name)} ~ '^(0|[1-9][0-9]{0,${digits-1}})$' THEN (${attribute(name)})::numeric END`;
   const where:string[]=[];
   if(q!==null)where.push(`v.title ILIKE ${p(listingSearchPattern(q))} ESCAPE '\\'`);
   for(const row of filters.resources??[]){const itemId=p(row.itemId),bounds=[row.minQuantity===undefined?null:`l.quantity>=${p(row.minQuantity)}::numeric`,row.maxQuantity===undefined?null:`l.quantity<=${p(row.maxQuantity)}::numeric`].filter(Boolean);where.push(`EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${itemId} AND ${bounds.join(" AND ")})`);}

@@ -38,6 +38,7 @@ import { GAME_SERVICE, readGameService, requireWritableGameService } from "./gam
 import { normalizeRentalPricing } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
+import { readLegacyListing } from "./legacy-listing-read";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -1178,6 +1179,22 @@ async function readOwnerDeclaration(
   };
 }
 
+// One authorized public read for the detail page, favorites and any other
+// consumer of a visible account: the current published listing when it exists,
+// otherwise the immutable legacy read projection. Callers must not re-implement
+// visibility checks per feature.
+export async function readPublicListing(
+  client: PoolClient,
+  a: PublishingAccount,
+  gate: SupplyGateReader,
+): Promise<Record<string, unknown>> {
+  try {
+    return await listingDetail(client, a, "public", gate);
+  } catch (error) {
+    if ((error as { status?: number }).status !== 404) throw error;
+    return readLegacyListing(client, a.id);
+  }
+}
 export async function listingDetail(
   client: PoolClient,
   a: PublishingAccount,

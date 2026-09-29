@@ -1,4 +1,4 @@
-import { hasLegacyReadListings } from "./legacy-listing-read";
+import { hasLegacyReadSnapshots } from "./legacy-listing-read";
 import { lockPublishingAccount, readPublishingAccount, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
@@ -461,8 +461,11 @@ export async function handleSupplyUserRoute(
           )).rows;
           const visible = [];
           for (const {currentReleaseId, ...game} of games) {
+            // A configured game stays discoverable with an empty result set so
+            // users keep its filters; the listing query still hides every row.
+            const configured = Boolean((await client.query("SELECT 1 FROM zzsh_supply.listing_filter_config WHERE game_id=$1 LIMIT 1", [game.id])).rowCount);
             if (isSupportedGameService(game.code, GAME_SERVICE.ACCOUNT_RENTAL)
-              && (currentReleaseId || await hasLegacyReadListings(client, game.id))) visible.push(game);
+              && (currentReleaseId || configured || await hasLegacyReadSnapshots(client, game.id))) visible.push(game);
           }
           return visible;
         });

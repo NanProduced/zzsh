@@ -104,6 +104,12 @@ export function publicSafeBoxOptions(codes: string[]): PublicCodeLabel[] {
   return codeOptions(SAFE_BOX_DISPLAY_NAMES, codes, "SAFE_BOX_CODE_UNMAPPED");
 }
 
+// Legacy read mode keeps source attributes without a current pricing rule, so
+// option validation falls back to the public display mapping.
+export function publicSafeBoxCodes(): string[] {
+  return Object.keys(SAFE_BOX_DISPLAY_NAMES);
+}
+
 export function publicGradingOptions(): PublicCodeLabel[] {
   return codeOptions(
     GRADING_DISPLAY_NAMES,

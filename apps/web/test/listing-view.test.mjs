@@ -449,21 +449,32 @@ test('missing term rule stays explicitly unconfirmed', () => {
 });
 
 
-test('historical listing preserves original amounts without fabricating quote lines or payable totals', () => {
+test('historical listing keeps exact source amounts and derives the payable total from them', () => {
   const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
   const historical = { ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null,
     historicalQuote: { haffRent: money('2038.00'), goods: money('20.00'), deposit: money('50.00'), termDays: '102' },
-    inventory: [{ itemId: 'legacy-unknown', quantity: null, unit: 'ROUND' }, { itemId: 'legacy-zero', quantity: '0', unit: 'PIECE' }], media: [] };
+    inventory: [{ itemId: 'legacy-unknown', quantity: null, unit: 'ROUND' }, { itemId: 'legacy-zero', quantity: '0', unit: 'PIECE' }] };
   const view = toListingCard(historical);
   assert.equal(view.historicalReadOnly, true);
   assert.equal(view.haffRentLabel, '¥2038.00');
   assert.equal(view.resourceTotalLabel, '¥2058.00');
-  assert.equal(view.payableTotalLabel, null);
+  assert.equal(view.payableTotalLabel, '¥2108.00');
+  assert.equal(view.termLabel, '102 天');
+  assert.doesNotMatch(view.termLabel, /旧站/);
   assert.equal(view.resourceLines[0].quantityLabel, '未确认');
   assert.equal(view.resourceLines[1].quantity, '0');
   assert.equal(view.resourceLines[0].costAmount, null);
   assert.equal(view.resourceLines[1].unitPriceLabel, null);
-  assert.equal(view.media.length, 0);
+  // F3: real holdings and public display media project through the historical adapter.
+  assert.deepEqual(view.media.map((item) => item.assetId), ['asset_a', 'asset_b']);
+  assert.equal(view.imageUrl, '/api/supply/listings/account_1/media/asset_a');
+  assert.deepEqual(view.skinNames, ['M4A1 金色']);
+  assert.deepEqual(view.skinLabels, ['武器 · M4A1 金色']);
+  assert.deepEqual(view.skinTags, [{ name: 'M4A1 金色', categoryCode: null, categoryName: '武器' }]);
+  const empty = toListingCard({ ...historical, media: [], presentation: { ...listing.presentation, skins: [] } });
+  assert.equal(empty.media.length, 0);
+  assert.equal(empty.imageUrl, undefined);
+  assert.deepEqual(empty.skinNames, []);
   assert.throws(() => toListingCard({ ...historical, canCreateOrder: true }));
   assert.throws(() => toListingCard({ ...listing, quote: null }));
 });

@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
-import { SecurityApiError } from "../auth/security-core";
+import { SecurityApiError, recordAudit } from "../auth/security-core";
 import {
   assertGameExists,
   ensureOnlyFields,
@@ -18,15 +18,42 @@ import {
   optionalString,
   optionalTrimmedString,
   requiredString,
+  sha256Hex,
 } from "./supply-util";
+import { canonicalize } from "./content-hash";
 import { ensureGameServiceRows, isSupportedGameService, type GameServiceCode } from "./game-services";
 
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
 const UNITS = new Set(["HAFF_BASE", "ROUND", "PIECE", "DAY"]);
+const LEGACY_CATALOG_NAMESPACE = "legacy_mysql_restore";
 
 const ASCII_EDGE = /^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g;
 const SKIN_FIELDS = ["name", "categoryId", "rarityCode", "sortOrder", "enabled", "formVisible", "aliases", "sourceNamespace", "sourceField", "sourceToken", "expectedCatalogRevision"];
 type SkinOwnerRef = { kind: "AGENT" | "MELEE_TYPE" | "FIREARM"; id: string };
+
+/** Frozen-research evidence for the migration catalog seams. The caller reads the
+ * frozen artifact, records its digest and the digest of the exact identity record
+ * it is asserting; the seam recomputes that record from its own inputs so the
+ * evidence is bound to this request instead of a namespace prefix. */
+export type LegacyCatalogEvidence = { artifact: string; artifactSha256: string; recordDigest: string };
+export type LegacyCatalogAudit = { requestId: string; sessionId?: string };
+export function legacyCatalogRecordDigest(record: Record<string, unknown>): string {
+  return sha256Hex(canonicalize(record));
+}
+function checkedLegacyEvidence(evidence: LegacyCatalogEvidence | undefined): LegacyCatalogEvidence {
+  if (!evidence || typeof evidence !== "object") throw invalid("Legacy evidence is required", "evidence");
+  const artifact = skinText(evidence.artifact, "evidence.artifact", 200);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{1,199}$/.test(artifact) || artifact.includes("..")) throw invalid("Invalid evidence artifact", "evidence.artifact");
+  for (const field of ["artifactSha256", "recordDigest"] as const)
+    if (typeof evidence[field] !== "string" || !/^[a-f0-9]{64}$/.test(evidence[field])) throw invalid("Invalid evidence digest", `evidence.${field === "artifactSha256" ? "artifactSha256" : "recordDigest"}`);
+  return { artifact, artifactSha256: evidence.artifactSha256, recordDigest: evidence.recordDigest };
+}
+function checkedLegacyAudit(audit: LegacyCatalogAudit | undefined): LegacyCatalogAudit {
+  if (!audit || typeof audit !== "object") throw invalid("Legacy audit context is required", "audit");
+  const requestId = skinText(audit.requestId, "audit.requestId", 128);
+  const sessionId = audit.sessionId === undefined ? undefined : skinText(audit.sessionId, "audit.sessionId", 128);
+  return { requestId, ...(sessionId === undefined ? {} : { sessionId }) };
+}
 
 function skinText(value: unknown, field: string, max: number, canonical = true): string {
   if (typeof value !== "string") throw invalid("Text is required", field);
@@ -122,6 +149,108 @@ async function assertSkinSource(client: PoolClient, gameId: string, id: string, 
   if (namespace === null) return;
   const result = await client.query(`SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND source_namespace COLLATE "C"=$2 AND source_field COLLATE "C"=$3 AND source_token COLLATE "C"=$4 AND id<>$5`, [gameId, namespace, field, token, id]);
   if (result.rowCount) throw conflict("Primary source is already attached to another skin");
+}
+
+/**
+ * Controlled migration seam for skin owners imported from the frozen crosswalk.
+ * Human catalog maintenance records public HTTPS evidence; migration rows carry
+ * the frozen research artifact instead, recorded through the caller's audit.
+ */
+export async function importLegacySkinOwner(
+  client: PoolClient,
+  adminUserId: string,
+  isBoss: boolean,
+  gameId: string,
+  input: { kind: "AGENT" | "MELEE_TYPE"; code: string; name: string; evidence: LegacyCatalogEvidence; audit: LegacyCatalogAudit; reason: string },
+): Promise<{ id: string; kind: string; code: string; name: string; enabled: boolean }> {
+  await assertGameScope(client, adminUserId, isBoss, gameId);
+  const kind = input.kind;
+  if (kind !== "AGENT" && kind !== "MELEE_TYPE") throw invalid("Unsupported owner kind", "kind");
+  const code = requireCode(input);
+  const name = skinText(input.name, "name", 120);
+  const reason = skinText(input.reason, "reason", 500);
+  const evidence = checkedLegacyEvidence(input.evidence);
+  const audit = checkedLegacyAudit(input.audit);
+  const record = { namespace: LEGACY_CATALOG_NAMESPACE, kind, code, name };
+  if (legacyCatalogRecordDigest(record) !== evidence.recordDigest) throw invalid("Legacy evidence does not match the owner request", "evidence.recordDigest");
+  const existing = (await client.query<{ id: string; name: string }>(`SELECT id,name FROM zzsh_supply.skin_owner WHERE game_id=$1 AND kind=$2 AND code=$3 FOR UPDATE`, [gameId, kind, code])).rows[0];
+  if (existing) {
+    if (existing.name !== name) throw conflict("Legacy owner conflicts with the recorded identity");
+    await recordAudit(client, {
+      actorType: "admin", actorId: adminUserId, sessionId: audit.sessionId, action: "supply.catalog.legacy_owner_imported",
+      objectType: "skin_owner", objectId: existing.id, outcome: "SUCCESS", requestId: audit.requestId, reason,
+      details: { ...record, evidenceArtifact: evidence.artifact, evidenceArtifactSha256: evidence.artifactSha256, recordDigest: evidence.recordDigest, result: "REPLAY_VERIFIED" },
+    });
+    return { id: existing.id, kind, code, name, enabled: true };
+  }
+  const id = newSupplyId("skin_owner");
+  await client.query(`INSERT INTO zzsh_supply.skin_owner (id,game_id,kind,code,name) VALUES ($1,$2,$3,$4,$5)`, [id, gameId, kind, code, name]);
+  await bumpCatalogRevision(client, gameId);
+  await recordAudit(client, {
+    actorType: "admin", actorId: adminUserId, sessionId: audit.sessionId, action: "supply.catalog.legacy_owner_imported",
+    objectType: "skin_owner", objectId: id, outcome: "SUCCESS", requestId: audit.requestId, reason,
+    details: { ...record, evidenceArtifact: evidence.artifact, evidenceArtifactSha256: evidence.artifactSha256, recordDigest: evidence.recordDigest, result: "CREATED" },
+  });
+  return { id, kind, code, name, enabled: true };
+}
+
+/**
+ * Controlled migration seam for imported legacy skin identity. Human review
+ * confirms identity with public HTTPS evidence; migration rows cannot provide
+ * that, so the frozen crosswalk (source field + dictionary id + raw token +
+ * canonical match) is the recorded evidence instead. Creates the draft via the
+ * normal catalog service first, then writes the reviewed owner/base tuple; the
+ * schema trigger derives VERIFIED and enforces the display-name contract.
+ */
+export async function confirmLegacySkinIdentity(
+  client: PoolClient,
+  adminUserId: string,
+  isBoss: boolean,
+  gameId: string,
+  input: { code: string; ownerRef: SkinOwnerRef; baseName: string; aliases?: string[]; evidence: LegacyCatalogEvidence; audit: LegacyCatalogAudit; reason: string },
+): Promise<{ id: string; code: string; namingState: string; catalogRevision: string }> {
+  await assertGameScope(client, adminUserId, isBoss, gameId);
+  const code = requireCode(input);
+  const ownerRef = input.ownerRef;
+  if (!ownerRef || !["AGENT", "MELEE_TYPE", "FIREARM"].includes(ownerRef.kind) || typeof ownerRef.id !== "string") throw invalid("Invalid owner reference", "ownerRef");
+  const baseName = skinText(input.baseName, "baseName", 120);
+  const reason = skinText(input.reason, "reason", 500);
+  const evidence = checkedLegacyEvidence(input.evidence);
+  const audit = checkedLegacyAudit(input.audit);
+  const aliases = input.aliases === undefined ? [] : [...input.aliases].map((value) => skinText(value, "aliases", 200));
+  if (aliases.length > 32 || new Set(aliases).size !== aliases.length) throw invalid("Invalid aliases", "aliases");
+  const row = (await client.query(`SELECT id,naming_state AS "namingState",owner_kind AS "ownerKind",owner_id AS "ownerId",firearm_id AS "firearmId",base_name AS "baseName",source_namespace AS "sourceNamespace",source_field AS "sourceField",source_token AS "sourceToken" FROM zzsh_supply.skin WHERE game_id=$1 AND code=$2 FOR UPDATE`, [gameId, code])).rows[0];
+  if (!row) throw notFound();
+  if (row.sourceNamespace !== LEGACY_CATALOG_NAMESPACE || !row.sourceField || !row.sourceToken) throw conflict("Legacy identity requires the migration source tuple");
+  const record = { namespace: LEGACY_CATALOG_NAMESPACE, code, sourceField: row.sourceField, sourceToken: row.sourceToken, ownerKind: ownerRef.kind, ownerId: ownerRef.id, baseName };
+  if (legacyCatalogRecordDigest(record) !== evidence.recordDigest) throw invalid("Legacy evidence does not match the skin identity request", "evidence.recordDigest");
+  const recordedId = row.ownerKind === "FIREARM" ? row.firearmId : row.ownerId;
+  const details = { ...record, aliases, evidenceArtifact: evidence.artifact, evidenceArtifactSha256: evidence.artifactSha256, recordDigest: evidence.recordDigest };
+  if (row.namingState === "VERIFIED") {
+    if (row.ownerKind !== ownerRef.kind || recordedId !== ownerRef.id || row.baseName !== baseName) throw conflict("Legacy identity conflicts with the recorded skin");
+    await recordAudit(client, {
+      actorType: "admin", actorId: adminUserId, sessionId: audit.sessionId, action: "supply.catalog.legacy_identity_confirmed",
+      objectType: "skin", objectId: row.id, outcome: "SUCCESS", requestId: audit.requestId, reason, details: { ...details, result: "REPLAY_VERIFIED" },
+    });
+    return { id: row.id, code, namingState: row.namingState, catalogRevision: (await client.query(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0].revision };
+  }
+  if (row.namingState !== "PENDING") throw conflict("Only a pending draft can receive legacy identity");
+  const ownerName = ownerRef.kind === "FIREARM"
+    ? (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$2`, [gameId, ownerRef.id])).rows[0]?.name
+    : (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 AND kind=$2 AND id=$3`, [gameId, ownerRef.kind, ownerRef.id])).rows[0]?.name;
+  if (!ownerName) throw invalid("Owner does not belong to this game", "ownerRef");
+  await client.query(
+    `UPDATE zzsh_supply.skin SET owner_kind=$2, owner_id=$3, firearm_id=$4, base_name=$5, aliases=$6, name=$7, enabled=true, form_visible=true WHERE id=$1`,
+    [row.id, ownerRef.kind, ownerRef.kind === "FIREARM" ? null : ownerRef.id, ownerRef.kind === "FIREARM" ? ownerRef.id : null, baseName, aliases, `${ownerName}-${baseName}`],
+  );
+  const state = (await client.query<{ namingState: string }>(`SELECT naming_state AS "namingState" FROM zzsh_supply.skin WHERE id=$1`, [row.id])).rows[0]!.namingState;
+  await bumpCatalogRevision(client, gameId);
+  await recordAudit(client, {
+    actorType: "admin", actorId: adminUserId, sessionId: audit.sessionId, action: "supply.catalog.legacy_identity_confirmed",
+    objectType: "skin", objectId: row.id, outcome: "SUCCESS", requestId: audit.requestId, reason, details: { ...details, displayName: `${ownerName}-${baseName}`, result: "CREATED" },
+  });
+  const catalogRevision = (await client.query<{ revision: string }>(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0]!.revision;
+  return { id: row.id, code, namingState: state, catalogRevision };
 }
 
 async function createSkin(client: PoolClient, gameId: string, id: string, input: Record<string, unknown>): Promise<CatalogRow> {

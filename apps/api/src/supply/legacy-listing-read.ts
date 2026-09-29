@@ -2,10 +2,10 @@ import type { PoolClient } from "pg";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
 import { canonicalize } from "./content-hash";
-import { escapeLike } from "./catalog";
 import { projectPublicAttributeDisplay } from "./listing-query";
 import { assertGameScope, conflict, invalid, notFound, sha256Hex } from "./supply-util";
 import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, type ListingCursorKey } from "./listing-cursor";
+import { candidatePredicates, type ListingPosition } from "./listing-candidates";
 import type { ListingQueryV2 } from "./listing-filter-contract";
 
 export type LegacyReadSnapshot = {
@@ -56,9 +56,15 @@ export async function recordLegacyReadSnapshot(client: PoolClient, accountId: st
   await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站上架资料与原始金额只读展示；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,readOnly:true}});
 }
 
+// `v` is the version the public read actually shows: the owner's current native
+// draft when it exists (the editable representation that carries supplemented
+// fields such as the service window, skins and test media), otherwise the
+// immutable source observation. Source identity and amounts always stay on `h`.
 const FROM = `FROM zzsh_supply.legacy_listing_read_snapshot h
  JOIN zzsh_supply.rental_account a ON a.id=h.account_id
- JOIN zzsh_supply.listing_version v ON v.id=h.observation_version_id
+ JOIN zzsh_supply.listing_version ov ON ov.id=h.observation_version_id
+ LEFT JOIN zzsh_supply.listing_version dv ON dv.id=a.current_version_id AND dv.origin='NATIVE' AND dv.review_state='DRAFT'
+ JOIN zzsh_supply.listing_version v ON v.id=COALESCE(dv.id,ov.id)
  JOIN zzsh_supply.game g ON g.id=a.game_id
  JOIN zzsh_supply.game_service_operation gs ON gs.game_id=g.id AND gs.service_code='ACCOUNT_RENTAL'
  JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id
@@ -67,8 +73,11 @@ const VISIBLE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND a.legacy_
  AND NOT u.suspended AND COALESCE(us.account_status,'ACTIVE')='ACTIVE'
  AND NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id)`;
 
-export async function hasLegacyReadListings(client: PoolClient, gameId: string): Promise<boolean> {
-  return Boolean((await client.query(`SELECT 1 ${FROM} WHERE a.game_id=$1 AND ${VISIBLE} LIMIT 1`,[gameId])).rowCount);
+// Mode selection must not depend on the currently visible row count: an
+// enabled game with a valid configuration keeps its filters and returns an
+// empty list when every snapshot is hidden. Hidden rows are never projected.
+export async function hasLegacyReadSnapshots(client: PoolClient, gameId: string): Promise<boolean> {
+  return Boolean((await client.query(`SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h JOIN zzsh_supply.rental_account a ON a.id=h.account_id WHERE a.game_id=$1 LIMIT 1`,[gameId])).rowCount);
 }
 
 export async function readLegacyListing(client: PoolClient, accountId: string) {
@@ -77,29 +86,50 @@ export async function readLegacyListing(client: PoolClient, accountId: string) {
   if(!r)throw notFound();
   const snapshot=parseLegacyReadSnapshot(r.snapshot);
   const rows=(await client.query(`SELECT i.id,i.code,i.name,i.unit,l.quantity::text quantity FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id WHERE l.version_id=$1 ORDER BY i.sort_order,i.id`,[r.version_id])).rows;
+  const skins=(await client.query<{id:string;name:string;categoryCode:string|null;categoryName:string|null}>(`SELECT s.id,s.name,c.code AS "categoryCode",c.name AS "categoryName"
+    FROM zzsh_supply.listing_skin ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
+    WHERE ls.version_id=$1 AND s.enabled AND s.form_visible ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[r.version_id])).rows;
+  const media=(await client.query<{assetId:string;position:number}>(`SELECT m.asset_id AS "assetId",m.position
+    FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id
+    WHERE m.version_id=$1 AND a.purpose='ACCOUNT_DISPLAY' AND a.review_state IN ('PENDING','APPROVED') AND a.technical_state='READY' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL
+    ORDER BY m.position,m.asset_id`,[r.version_id])).rows;
   const attrs=Object.fromEntries(["safe_box_code","vit_level","bear_level","dive_level","character_level","grading_code","login_method_code","region_province","region_city","secret_kd","service_window_start_minute","service_window_end_minute","service_window_timezone","service_window_cross_midnight"].map(k=>[k,r.attributes[k]??null]));
   const display=projectPublicAttributeDisplay(attrs);
   const amount=(v:string)=>({currency:"CNY",unit:"yuan",amount:v,scale:2});
   return {id:r.id,versionId:r.version_id,displayNo:snapshot.resourceNo,title:r.title,description:r.description,
     game:{id:r.game_id,code:r.game_code,name:r.game_name},attributes:attrs,attributeDisplay:display,safeBox:display.safeBox,
-    termOption:{code:"legacy_source",displayName:`旧站租期 ${snapshot.termDays} 天`,dailyConsumption:{quantity:snapshot.dailyHaffBase,unit:"HAFF_BASE"}},
+    termOption:{code:"legacy_source",displayName:`${snapshot.termDays} 天`,dailyConsumption:{quantity:snapshot.dailyHaffBase,unit:"HAFF_BASE"}},
     source:"LEGACY_READ_ONLY" as const,canCreateOrder:false as const,sourceUpdatedAt:r.source_updated_at.toISOString(),
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:rows.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),
-    presentation:{items:rows.map(({quantity,...x})=>x),skins:[],entitlements:[]},media:[],publishedAt:null};
+    presentation:{items:rows.map(({quantity,...x})=>x),skins:skins.map(x=>({id:x.id,name:x.name,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})})),entitlements:[]},
+    media:media.map(m=>({assetId:m.assetId,position:m.position,url:`/api/v1/supply/listings/${r.id}/media/${m.assetId}`})),publishedAt:null};
 }
 
-/** Only the explicit migration fallback uses this mode; current quotes keep their existing query and guards. */
-export async function listLegacyReadListings(client: PoolClient,q:ListingQueryV2,key:ListingCursorKey, catalogRevision:string) {
-  if(q.sort!=="latest" || q.coreItemId!==null || Object.keys(q.filters).length) throw invalid("Historical read mode supports name search and source update ordering only");
-  const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"LEGACY_READ_ONLY",q:q.q})),sort:"latest",direction:q.direction,coreItemId:null,filterRevision:"1",catalogRevision,ruleReleaseId:"legacy-read-only"};
+/** Legacy read mode reuses the public v2 filter contract; only the public presentation differs. */
+export function legacyListingSortLabel(sort:string,configuredLabel:string|null):string {
+  if(sort==="latest")return "更新时间";
+  if(sort==="resourceTotal")return "资源费用";
+  return configuredLabel??sort;
+}
+
+export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingPosition|null) {
+  const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
+  const where=[VISIBLE,`a.game_id=${p(query.gameId)}`,...candidatePredicates(query.filters,query.q,p,"v.attributes")];
+  const key=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+  let seek="";
+  if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
+    else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
+  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key ${FROM} WHERE ${where.join(" AND ")}) SELECT id,version_id,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+  return {text,values};
+}
+
+export async function listLegacyReadListings(client: PoolClient,q:ListingQueryV2,key:ListingCursorKey,revisions:{filterRevision:string;catalogRevision:string;sortLabel:string}) {
+  const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"LEGACY_READ_ONLY",q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:"legacy-read-only"};
   const after=q.cursor?decodeListingCursor(q.cursor,binding,key):null;
-  const cmp=q.direction==="ASC"?">":"<",order=q.direction==="ASC"?"ASC":"DESC";
-  const rows=(await client.query<{id:string;key:string}>(`SELECT a.id,to_char(h.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') key ${FROM}
-    WHERE a.game_id=$1 AND ${VISIBLE} AND ($2::text IS NULL OR v.title ILIKE $2 ESCAPE '\\')
-      AND ($3::text IS NULL OR (h.source_updated_at,a.id) ${cmp} ($4::timestamptz,$3))
-    ORDER BY h.source_updated_at ${order},a.id ${order} LIMIT $5`,[q.gameId,q.q?`%${escapeLike(q.q)}%`:null,after?.id??null,after?.key??null,q.limit+1])).rows;
-  const visible=rows.slice(0,q.limit),last=visible.at(-1),items=[];
-  for(const r of visible)items.push(await readLegacyListing(client,r.id));
-  return {queryVersion:2,items,nextCursor:rows.length>q.limit&&last?encodeListingCursor({id:last.id,key:last.key,isNull:false},binding,key):null,sort:"latest",direction:q.direction,sortLabel:"来源更新时间",filterRevision:"1",catalogRevision,ruleReleaseId:null,scannedCount:visible.length,scanBudget:200,scanBudgetReached:false,limit:q.limit};
+  const sql=buildLegacyListingCandidates(q,after),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
+  const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;
+  for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(await readLegacyListing(client,row.id));}catch(error){if((error as {status?:number}).status!==404)throw error;}}
+  const more=scanned<rows.length||rows.length===200;
+  return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,key):null,sort:q.sort,direction:q.direction,sortLabel:revisions.sortLabel,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:null,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
 }
