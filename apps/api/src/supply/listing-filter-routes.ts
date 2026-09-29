@@ -1,3 +1,4 @@
+import { listLegacyReadListings } from "./legacy-listing-read";
 import { readAdminContext,assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION } from "../auth/admin-authorization";
 import { withTransaction,recordAudit,setAuditContext } from "../auth/security-core";
@@ -49,6 +50,7 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
   return withPublicListingSnapshot(options.pool,async client=>{
     const state=await readListingState(client,q.gameId);
     for(const k of ["filterRevision","catalogRevision","ruleReleaseId"] as const)if(q[k]!==null&&q[k]!==state[k])throw conflict("Listing metadata revision changed");
+    if(state.legacyReadOnly)return listLegacyReadListings(client,q,options.listingCursorKey!,state.catalogRevision);
     const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);

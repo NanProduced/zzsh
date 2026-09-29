@@ -6,13 +6,13 @@ import ts from 'typescript';
 import React from 'react';
 const require=createRequire(import.meta.url);
 const code=ts.transpileModule(readFileSync(new URL('../src/components/auth/auth-form.tsx',import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS}}).outputText;
-function harness(query='',newUser=false,gate){
+function harness(query='',newUser=false,gate,options={}){
  const states=[],refs=[],calls=[],effects=[];let si=0,ri=0,confirmations=0;const exports={};
  new Function('require','exports','window','fetch',code)(name=>{
   if(name==='react')return {...React,useState(initial){const i=si++;if(!(i in states))states[i]=typeof initial==='function'?initial():initial;return [states[i],v=>states[i]=typeof v==='function'?v(states[i]):v];},useRef(initial){return refs[ri++]??(refs[ri-1]={current:initial});},useEffect(fn){effects.push(fn);}};
   if(name.includes('session/user-session-provider'))return {useUserSession:()=>({confirm:async()=> { confirmations++; return 'authenticated'; }}),publishUserSessionChange(){}};
   return require(name);
- },exports,{location:{search:query},setInterval(){return 1},clearInterval(){}},async(url,init)=>{if(gate && url.endsWith("/sign-in/identifier")) await gate;calls.push({url,body:JSON.parse(init.body)});return {ok:true,json:async()=>({status:true,requiresPassword:newUser && url.endsWith("/complete") && !JSON.parse(init.body).password})};});
+ },exports,{location:{search:query},setInterval(){return 1},clearInterval(){}},async(url,init)=>{if(gate && url.endsWith("/sign-in/identifier")) await gate;calls.push({url,body:JSON.parse(init.body)});return {ok:true,json:async()=>({status:true,requiresPassword:newUser && url.endsWith("/complete") && !JSON.parse(init.body).password,...(options.requiresPasswordSetup && url.endsWith("/phone-registration/complete")?{requiresPasswordSetup:true}:{})})};});
  const render=()=>{si=ri=0;return exports.AuthForm({});};
  const find=(predicate)=>{let found;function walk(n){if(!n||typeof n!=='object')return;if(predicate(n))found=n;React.Children.forEach(n.props?.children,walk);}walk(render());assert.ok(found);return found;};
  const input=(id,value)=>find(n=>n.props?.id===id).props.onChange({target:{value,checked:value}});
@@ -37,4 +37,30 @@ test('switching tabs clears the old code and changing phones cannot reuse it',as
 
 test('late password response after unmount cannot confirm session',async()=>{
  let release;const gate=new Promise(resolve=>release=resolve);const h=harness('',false,gate);h.render();const unmount=h.effects[1]();await h.button('密码登录');h.input('auth-identifier','13800138000');h.input('auth-password','oldpass');h.input('auth-terms',true);const pending=h.submit();unmount();release();await pending;assert.equal(h.confirmations,0);
+});
+
+test('server-derived migration state routes SMS login into OTP password setup',async()=>{
+ const h=harness('',false,undefined,{requiresPasswordSetup:true});
+ h.input('auth-identifier','13800138000');h.input('auth-terms',true);await h.button('获取验证码');h.input('phone-registration-code','123456');await h.submit();
+ assert.equal(h.calls[1].url,'/api/auth/user/phone-registration/complete');
+ assert.equal(h.confirmations,0,'migrated login must not confirm before setting a password');
+ assert.equal(h.find(n=>n.props?.id==='auth-phone').props.value,'13800138000');
+ await h.button('获取验证码');
+ assert.equal(h.calls[2].url,'/api/auth/user/phone-number/request-password-reset');
+ assert.equal(h.calls[2].body.phoneNumber,'13800138000');
+ assert.equal(h.calls[2].body.terms,undefined,'recovery sends only the phone number');
+ h.input('auth-recover-code','654321');h.input('auth-password','new-password-12');await h.submit();
+ assert.equal(h.calls[3].url,'/api/auth/user/phone-number/reset-password');
+ assert.equal(h.calls[3].body.otp,'654321');
+ assert.equal(h.calls[3].body.newPassword,'new-password-12');
+ assert.equal(h.confirmations,0,'reset revokes sessions; the user signs in again with the new password');
+});
+
+test('logged-out recovery uses the phone OTP reset endpoints without a session',async()=>{
+ const h=harness();await h.button('密码登录');h.input('auth-identifier','13800138000');h.input('auth-password','oldpass');h.input('auth-terms',true);await h.button('忘记密码');
+ h.input('auth-phone','13800138000');await h.button('获取验证码');
+ assert.equal(h.calls[0].url,'/api/auth/user/phone-number/request-password-reset');
+ h.input('auth-recover-code','654321');h.input('auth-password','new-password-12');await h.submit();
+ assert.equal(h.calls[1].url,'/api/auth/user/phone-number/reset-password');
+ assert.equal(h.confirmations,0);
 });

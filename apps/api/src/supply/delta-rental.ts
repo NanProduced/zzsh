@@ -349,6 +349,9 @@ export class DeltaDeclarationError extends Error {}
 
 const DELTA_LEVEL_FIELDS = ["vitLevel", "bearLevel", "vit_level", "bear_level", "dive_level", "character_level", "awm_weapon_count", "service_window_start_minute", "service_window_end_minute"] as const;
 const DELTA_TEXT_FIELDS = ["safe_box_code", "grading_code", "login_method_code", "legacy_helmet_code", "legacy_armor_code", "legacy_insure_code", "service_window_timezone", "region_province", "region_city", "info_source"] as const;
+// Optional legacy keys are emitted only when present so the frozen content-hash
+// byte contract of previously accepted declarations is preserved.
+const DELTA_OPTIONAL_TEXT_FIELDS = ["legacy_resource_no"] as const;
 const DELTA_BOOLEAN_FIELDS = ["ban_record", "face_is_self", "service_window_cross_midnight"] as const;
 
 function deltaFields(value: object, allowed: readonly string[]): void {
@@ -371,15 +374,16 @@ function deltaDecimalText(value: unknown): string {
 }
 
 export function normalizeDeltaAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration"];
+  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration"];
   deltaFields(value, allowed);
-  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration").map((key) => {
+  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration"
+    && !((DELTA_OPTIONAL_TEXT_FIELDS as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
     const child = value[key] ?? null;
     if (child === null) return [key, null];
     if ((DELTA_LEVEL_FIELDS as readonly string[]).includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new DeltaDeclarationError("Invalid Delta level");
     if ((DELTA_BOOLEAN_FIELDS as readonly string[]).includes(key) && typeof child !== "boolean") throw new DeltaDeclarationError("Invalid Delta flag");
     if (key === "secret_kd") return [key, deltaDecimalText(child)];
-    if ((DELTA_TEXT_FIELDS as readonly string[]).includes(key)) return [key, deltaHumanText(child)];
+    if ((DELTA_TEXT_FIELDS as readonly string[]).includes(key) || (DELTA_OPTIONAL_TEXT_FIELDS as readonly string[]).includes(key)) return [key, deltaHumanText(child)];
     return [key, child];
   }));
   if (Object.hasOwn(value, "full_payout_declaration")) {

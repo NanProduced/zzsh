@@ -447,3 +447,31 @@ test('missing term rule stays explicitly unconfirmed', () => {
   assert.equal(listTermRuleLabel('日消耗 10M (测试)'), '租期规则 待确认');
   assert.equal(listTermRuleLabel('按月租用'), '租期规则 按月租用');
 });
+
+
+test('historical listing preserves original amounts without fabricating quote lines or payable totals', () => {
+  const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
+  const historical = { ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null,
+    historicalQuote: { haffRent: money('2038.00'), goods: money('20.00'), deposit: money('50.00'), termDays: '102' },
+    inventory: [{ itemId: 'legacy-unknown', quantity: null, unit: 'ROUND' }, { itemId: 'legacy-zero', quantity: '0', unit: 'PIECE' }], media: [] };
+  const view = toListingCard(historical);
+  assert.equal(view.historicalReadOnly, true);
+  assert.equal(view.haffRentLabel, '¥2038.00');
+  assert.equal(view.resourceTotalLabel, '¥2058.00');
+  assert.equal(view.payableTotalLabel, null);
+  assert.equal(view.resourceLines[0].quantityLabel, '未确认');
+  assert.equal(view.resourceLines[1].quantity, '0');
+  assert.equal(view.resourceLines[0].costAmount, null);
+  assert.equal(view.resourceLines[1].unitPriceLabel, null);
+  assert.equal(view.media.length, 0);
+  assert.throws(() => toListingCard({ ...historical, canCreateOrder: true }));
+  assert.throws(() => toListingCard({ ...listing, quote: null }));
+});
+
+
+test('registered migration catalog codes use the existing card resource roles without name guessing', () => {
+  assert.equal(accountCardExports.canonicalResourceCode('level6_round'), 'df_billable_level6_bullet');
+  assert.equal(accountCardExports.canonicalResourceCode('awm_round'), 'df_billable_awm_bullet');
+  assert.equal(accountCardExports.canonicalResourceCode('unrelated_item'), 'unrelated_item');
+  assert.equal(accountCardExports.canonicalResourceCode(null), null);
+});

@@ -20,6 +20,7 @@ export type SkinTag = {
 };
 export type ListingMedia = { assetId: string; url: string };
 export type ListingCardData = {
+  historicalReadOnly?: boolean;
   id: string;
   displayNo: string | null;
   title: string;
@@ -179,6 +180,8 @@ export function conditionLines(
   return lines;
 }
 export function toListingCard(listing: PublicListing): ListingCardData {
+  if (listing.source === "LEGACY_READ_ONLY") return toHistoricalListingCard(listing);
+  if (!listing.quote) throw new Error("Current listing has no authoritative quote");
   const items = new Map(listing.presentation.items.map((item) => [item.id, item]));
   const haffLines = listing.quote.lines.filter((line) => line.unit === "HAFF_BASE");
   const itemLines = listing.quote.lines.filter((line) => line.unit !== "HAFF_BASE");
@@ -225,6 +228,28 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
     rentalMode: listing.quote.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
     unitAmountsInformational: listing.quote.unitAmountsInformational === true,
+  };
+}
+function toHistoricalListingCard(listing: PublicListing): ListingCardData {
+  const history = listing.historicalQuote;
+  if (!history || !listing.inventory || listing.quote !== null || listing.canCreateOrder !== false)
+    throw new Error("Invalid historical listing projection");
+  const items = new Map(listing.presentation.items.map(item => [item.id, item]));
+  const subtotal = BigInt(history.haffRent.amount.replace(".", "")) + BigInt(history.goods.amount.replace(".", ""));
+  return {
+    historicalReadOnly: true, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title,
+    media: [], resourceLines: listing.inventory.map(line => ({
+      itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: items.get(line.itemId)?.name ?? "未确认物品",
+      quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
+      unitLabel: unitLabel(line.unit), costAmount: null, costLabel: null, unitPriceLabel: null,
+    })),
+    resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,
+    haffRentLabel: formatMoneyLabel(history.haffRent), itemResourceTotalLabel: formatMoneyLabel(history.goods),
+    depositLabel: formatMoneyLabel(history.deposit), payableTotalLabel: null,
+    termLabel: `${history.termDays} 天（旧站记录）`, termOptionLabel: listing.termOption?.displayName ?? null,
+    quoteSourceLabel: "旧站原始价格，仅供历史资料核对，不可下单",
+    conditionLines: conditionLines(listing.attributes, listing), loginMethod: listing.attributeDisplay?.loginMethod ?? null,
+    skinNames: [], skinLabels: [], skinTags: [], entitlementNames: [], rentalMode: null, unitAmountsInformational: false,
   };
 }
 export function toListingDetail(listing: PublicListing): ListingDetailData {

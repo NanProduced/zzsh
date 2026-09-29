@@ -1,3 +1,4 @@
+import { hasLegacyReadListings } from "./legacy-listing-read";
 import { lockPublishingAccount, readPublishingAccount, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
@@ -452,11 +453,19 @@ export async function handleSupplyUserRoute(
     if (await handlePublishingRoute(request,response,options,requestId,path,query,false)) return;
     if (method === "GET") {
       if (path === "/games") {
-        const rows = (await options.pool.query<{ id: string; code: string; name: string; description: string | null }>(
-          `SELECT g.id,g.code,g.name,g.description
-             FROM zzsh_supply.game g JOIN zzsh_supply.game_service_operation s ON s.game_id=g.id AND s.service_code='ACCOUNT_RENTAL'
-            WHERE g.enabled AND g.current_release_id IS NOT NULL AND s.enabled ORDER BY g.code,g.id`,
-        )).rows.filter((game) => isSupportedGameService(game.code, GAME_SERVICE.ACCOUNT_RENTAL));
+        const rows = await withTransaction(options.pool, async (client) => {
+          const games = (await client.query<{ id: string; code: string; name: string; description: string | null; currentReleaseId: string | null }>(
+            `SELECT g.id,g.code,g.name,g.description,g.current_release_id AS "currentReleaseId"
+               FROM zzsh_supply.game g JOIN zzsh_supply.game_service_operation s ON s.game_id=g.id AND s.service_code='ACCOUNT_RENTAL'
+              WHERE g.enabled AND s.enabled ORDER BY g.code,g.id`,
+          )).rows;
+          const visible = [];
+          for (const {currentReleaseId, ...game} of games) {
+            if (isSupportedGameService(game.code, GAME_SERVICE.ACCOUNT_RENTAL)
+              && (currentReleaseId || await hasLegacyReadListings(client, game.id))) visible.push(game);
+          }
+          return visible;
+        });
         sendJson(response,200,{games: rows},requestId);
         return;
       }

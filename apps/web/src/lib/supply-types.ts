@@ -73,7 +73,12 @@ export type PublicListing = {
     skins: Array<{ id: string; name: string; categoryCode?: string; categoryName?: string }>;
     entitlements: Array<{ id: string; name: string }>;
   };
-  quote: PublicQuote;
+  quote: PublicQuote | null;
+  source?: "LEGACY_READ_ONLY";
+  canCreateOrder?: false;
+  sourceUpdatedAt?: string;
+  historicalQuote?: { haffRent: Money; goods: Money; deposit: Money; termDays: string };
+  inventory?: Array<{ itemId: string; quantity: string | null; unit: string }>;
   media: Array<{ assetId: string; position: number; url: string }>;
 };
 export type Favorite = {
@@ -114,6 +119,7 @@ export type PublicListingFilterField = {
 };
 export type PublicListingFilterMetadata = {
   available: boolean;
+  readMode?: "LEGACY_READ_ONLY";
   reasonCode: string | null;
   gameId: string;
   queryVersion: 2;
@@ -349,6 +355,10 @@ export type MySupply = {
     releaseId: string | null;
     contentHash: string | null;
     declaration: SavedDeclaration;
+    catalogItems?: Array<{ id: string; code: string; name: string; unit: string; priced: boolean }>;
+    attributeDisplay?: {
+      safeBox: { code: string; displayName: string | null } | null;
+    };
     quote: OwnerQuote | null;
   };
   agreement?: PublishingOptions["agreement"] | null;

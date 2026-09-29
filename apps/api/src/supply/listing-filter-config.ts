@@ -1,3 +1,4 @@
+import { hasLegacyReadListings } from "./legacy-listing-read";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { checkedId,parseFilterConfig,type FilterConfig,type ListingQueryV2 } from "./listing-filter-contract";
@@ -33,7 +34,8 @@ export async function readListingState(client:PoolClient,gameId:string) {
   const row=(await client.query(`SELECT revision::text,config FROM zzsh_supply.listing_filter_config WHERE game_id=$1 ORDER BY revision DESC LIMIT 1`,[gameId])).rows[0];
   let config:FilterConfig|null=null;
   if(row){try{config=parseFilterConfig(row.config);}catch{throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Filter configuration requires an update");}}
-  return {catalog,config,filterRevision:row?.revision??null,catalogRevision:catalog.game.catalogRevision as string,ruleReleaseId:catalog.game.ruleReleaseId as string|null};
+  const legacyReadOnly=(!config || !catalog.game.ruleReleaseId) && await hasLegacyReadListings(client,gameId);
+  return {catalog,config,legacyReadOnly,filterRevision:row?.revision??null,catalogRevision:catalog.game.catalogRevision as string,ruleReleaseId:catalog.game.ruleReleaseId as string|null};
 }
 export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,state:Awaited<ReturnType<typeof readListingState>>) {
   if(!state.config || !state.ruleReleaseId)throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Listing filters or rules are not configured");
@@ -57,6 +59,7 @@ export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,st
 }
 export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListingState>>,signingReady:boolean) {
   const {catalog:c,config}=state;
+  if(state.legacyReadOnly) return {available:signingReady,readMode:"LEGACY_READ_ONLY",reasonCode:signingReady?null:"SIGNING_UNCONFIGURED",gameId:c.game.id,queryVersion:2,resourceQuantityRange:false,filterRevision:null,catalogRevision:state.catalogRevision,ruleReleaseId:null,defaultSort:{sort:"latest",direction:"DESC",label:"来源更新时间"},fields:[],sorts:[{key:"latest",label:"来源更新时间",enabled:true,order:0}],directions:["ASC","DESC"],items:c.items,categories:[],skinCatalogUrl:`/api/v1/supply/games/${checkedId(c.game.id,"gameId")}/catalog`,limits:{urlBytes:8192,resources:16,skinGroups:8,skinIds:50,enumValues:50,regions:20,limit:50,scanBudget:200},livePages:true};
   const fields=config?.fields.filter(f=>f.enabled).map(f=>({...f,
     ...(f.items?{items:f.items.filter(r=>c.items.some(i=>i.id===r.itemId))}:{}),
     ...(f.options?{options:f.options.filter(o=>allowedCodes(c,f.key).includes(o.value))}:{}),

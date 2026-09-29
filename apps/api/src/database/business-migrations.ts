@@ -91,6 +91,9 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.listing_filter_config TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_filter_config FROM ${runtimeUser}`);
   }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_listing_read_snapshot') AS relation`)).rows[0]?.relation) {
+    await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.legacy_listing_read_snapshot TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.legacy_listing_read_snapshot FROM ${runtimeUser}`);
+  }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_publication') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_publication FROM ${runtimeUser}`);
   }

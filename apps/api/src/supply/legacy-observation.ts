@@ -88,7 +88,7 @@ type NormalizedLegacyObservation = Omit<LegacyObservationInput, "inventory" | "d
   declaration?: LegacyCompleteDeclarationInput;
 };
 
-type LegacyMapRow = {
+export type LegacyMapRow = {
   source_digest: string;
   account_id: string;
   version_id: string;
@@ -297,14 +297,14 @@ function normalizeResolutionInput(input: LegacyDraftResolutionInput): LegacyDraf
   };
 }
 
-async function lockLegacySource(client: PoolClient, input: Pick<LegacyObservationInput, "sourceSystem" | "sourceEntity" | "legacyId">): Promise<void> {
+export async function lockLegacySource(client: PoolClient, input: Pick<LegacyObservationInput, "sourceSystem" | "sourceEntity" | "legacyId">): Promise<void> {
   await client.query(
     `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
     [JSON.stringify(["supply-legacy-source", input.sourceSystem, input.sourceEntity, input.legacyId])],
   );
 }
 
-async function readLegacyMap(
+export async function readLegacyMap(
   client: PoolClient,
   input: Pick<LegacyObservationInput, "sourceSystem" | "sourceEntity" | "legacyId">,
 ): Promise<LegacyMapRow | undefined> {
@@ -319,6 +319,9 @@ async function readLegacyMap(
     )
   ).rows[0];
 }
+
+/** Reads the immutable source map bound to one target account. */
+
 
 function comparableContent(input: NormalizedLegacyObservation): LegacyComparableContent {
   return {

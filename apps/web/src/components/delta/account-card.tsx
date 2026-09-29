@@ -58,8 +58,18 @@ const LIST_RESOURCE_SLOTS = [
   { code: "df_billable_awm_bullet", label: "AWM子弹", aliases: ["AWM子弹"] },
 ] as const;
 
+// Both registered catalog generations refer to the same resource concepts.
+// Unknown codes still never fall back to a coincidentally identical display name.
+export function canonicalResourceCode(code: string | null): string | null {
+  const known: Record<string, string> = {
+    level6_armor: "df_billable_level6_armor", level6_helmet: "df_billable_level6_helmet",
+    level6_round: "df_billable_level6_bullet", awm_round: "df_billable_awm_bullet",
+    coffee: "df_billable_coffee",
+  };
+  return code === null ? null : known[code] ?? code;
+}
 function resourceDisplayOrder(line: ResourceLine): number {
-  const index = RESOURCE_DISPLAY_ORDER.indexOf(line.code ?? "");
+  const index = RESOURCE_DISPLAY_ORDER.indexOf(canonicalResourceCode(line.code) ?? "");
   return index === -1 ? RESOURCE_DISPLAY_ORDER.length : index;
 }
 
@@ -316,7 +326,7 @@ export function AccountCard({
   const isFastMode = data.rentalMode === "fast" || conditionValue(data, "rental_mode") === "fast";
   const mediaCount = data.media.length;
 
-  const favorite = <FavoriteButton accountId={data.id} title={data.title} />;
+  const favorite = data.historicalReadOnly ? null : <FavoriteButton accountId={data.id} title={data.title} />;
 
   if (viewMode === "list") {
     const listTitle = composeListTitle(data, haffQuantityText);
@@ -356,7 +366,7 @@ export function AccountCard({
     const listResourceCells = LIST_RESOURCE_SLOTS.map((slot) => ({
       slot,
       line: data.resourceLines.find((line) =>
-        line.code === slot.code || (line.code === null && (slot.aliases as readonly string[]).includes(line.name))
+        canonicalResourceCode(line.code) === slot.code || (line.code === null && (slot.aliases as readonly string[]).includes(line.name))
       ) ?? null,
     }));
 
@@ -439,7 +449,7 @@ export function AccountCard({
                   <span className="account-list-title-rest"> · {listTitle.rest}</span>
                 ) : null}
               </Link>
-              {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
+              {data.historicalReadOnly ? <span className="account-list-deal-tag">旧站原价 · 只读</span> : isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
             </div>
 
             <p className="account-list-subline">
@@ -550,13 +560,13 @@ export function AccountCard({
                 </span>
               </div>
               <div className="finance-total-row">
-                <span className="finance-total-label">总价</span>
+                <span className="finance-total-label">{data.historicalReadOnly ? "新订单" : "总价"}</span>
                 <strong
                   className={`finance-total-val ${
                     !isPayableConfirmed ? "finance-total-val--unconfirmed" : ""
                   }`}
                 >
-                  {moneyValue(data.payableTotalLabel, "无需支付")}
+                  {data.historicalReadOnly ? "未开放" : moneyValue(data.payableTotalLabel, "无需支付")}
                 </strong>
               </div>
             </div>
@@ -734,7 +744,7 @@ export function AccountCard({
 
             <div className="account-card-breakdown">
               <div className="breakdown-header">
-                <span className="breakdown-title">金额构成</span>
+                <span className="breakdown-title">{data.historicalReadOnly ? "旧站原价 · 只读" : "金额构成"}</span>
                 {showRatioNote ? (
                   <span className="breakdown-note" title="辅助换算 · 非报价">
                     {ratioText} · 辅助换算 · 非报价
@@ -758,7 +768,7 @@ export function AccountCard({
                     !isPayableConfirmed ? "breakdown-total-val--unconfirmed" : ""
                   }`}
                 >
-                  {moneyValue(data.payableTotalLabel, "无需支付")}
+                  {data.historicalReadOnly ? "未开放" : moneyValue(data.payableTotalLabel, "无需支付")}
                 </strong>
               </div>
             </div>

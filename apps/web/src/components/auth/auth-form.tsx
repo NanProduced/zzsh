@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { publishUserSessionChange, useUserSession } from "@/components/session/user-session-provider";
 
 type Mode = "login" | "register" | "recover";
-type AuthOperation = "login" | "register" | "send-otp";
+type AuthOperation = "login" | "register" | "send-otp" | "recover";
 type LoginKind = "phone" | "username" | "sms";
 type FieldKey = "identifier" | "phone" | "code" | "password" | "terms";
 type FieldErrors = Partial<Record<FieldKey, string>>;
@@ -49,7 +49,7 @@ function authMessage(error: unknown, operation: AuthOperation): string {
   if (error.code === "CONFLICT") return operation === "login" ? "该标识同时对应手机号和账号名，请选择明确的登录方式。" : "该手机号已注册，请使用原密码登录。";
   if (error.code === "RATE_LIMITED" || error.code === "TOO_MANY_REQUESTS" || error.status === 429) return "尝试次数过多，请稍后再试。";
   if (error.code === "INVALID_ARGUMENT" || error.code === "BAD_REQUEST" || (error.status >= 400 && error.status < 500)) {
-    return operation === "login" ? "账号名、手机号或密码不正确。" : "请检查手机号、验证码和密码格式。";
+    return operation === "login" ? "账号名、手机号或密码不正确。" : operation === "recover" ? "请检查手机号、验证码和密码格式。" : "请检查手机号、验证码和密码格式。";
   }
   if (error.status >= 500) return operation === "register" ? "注册服务暂时异常，结果可能需要确认。" : operation === "login" ? "登录服务暂时不可用，请稍后重试。" : "服务暂时不可用，请稍后重试。";
   return "请求未完成，请稍后重试。";
@@ -168,6 +168,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
     }
     setMode(nextMode);
     setCode(""); setSentFor(""); setPassword(""); setAcceptedTerms(false);
+    setCooldownUntil(0); setNow(Date.now());
     setFieldErrors({});
     setError(undefined);
     setSuccess(undefined);
@@ -186,7 +187,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
 
   const sendOtp = async () => {
     if (busy || sending) return;
-    if (!acceptedTerms) { setField("terms", "请先阅读并同意平台服务协议与用户隐私政策。"); return; }
+    if (mode !== "recover" && !acceptedTerms) { setField("terms", "请先阅读并同意平台服务协议与用户隐私政策。"); return; }
     const target = compactPhone(mode === "login" ? identifier : phone);
     if (!isMainlandPhone(target)) {
       setField(mode === "login" ? "identifier" : "phone", "请输入有效的大陆手机号。");
@@ -200,14 +201,15 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
     const request = beginRequest();
     setSending(true);
     try {
-      await webAuthRequest<{ status: true }>("/phone-registration/send-otp", { phoneNumber: target }, request.controller.signal);
+      const path = mode === "recover" ? "/phone-number/request-password-reset" : "/phone-registration/send-otp";
+      await webAuthRequest<{ status: true }>(path, { phoneNumber: target }, request.controller.signal);
       if (!isCurrent(request)) return;
       setSentFor(target);
       setCooldownUntil(Date.now() + 60_000);
       setNow(Date.now());
       setSuccess("验证码已发送至 " + maskPhone(target) + "，请及时填写。");
     } catch (failure) {
-      if (isCurrent(request)) setError(authMessage(failure, "send-otp"));
+      if (isCurrent(request)) setError(authMessage(failure, mode === "recover" ? "recover" : "send-otp"));
     } finally {
       if (isCurrent(request)) setSending(false);
     }
@@ -215,7 +217,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
 
   const validate = (submitMode: Mode, submitLoginKind: LoginKind, submitIdentifier: string, submitPhone: string, submitCode: string, submitPassword: string): FieldErrors => {
     const nextErrors: FieldErrors = {};
-    if (!acceptedTerms) nextErrors.terms = "请先阅读并同意平台服务协议与用户隐私政策。";
+    if (submitMode !== "recover" && !acceptedTerms) nextErrors.terms = "请先阅读并同意平台服务协议与用户隐私政策。";
     if (submitMode === "login") {
       if (!submitIdentifier) nextErrors.identifier = submitLoginKind !== "username" ? "请输入手机号。" : "请输入账号名。";
       else if (submitLoginKind !== "username" && !isMainlandPhone(compactPhone(submitIdentifier))) nextErrors.identifier = "请输入有效的大陆手机号。";
@@ -231,6 +233,13 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
       if (!submitPassword) nextErrors.password = "请设置密码。";
       else if (submitPassword.length < 12) nextErrors.password = "注册密码至少需要 12 位。";
       if (!acceptedTerms) nextErrors.terms = "请先阅读并同意平台服务协议与用户隐私政策。";
+    } else if (submitMode === "recover") {
+      if (!submitPhone) nextErrors.phone = "请输入手机号。";
+      else if (!isMainlandPhone(submitPhone)) nextErrors.phone = "请输入有效的大陆手机号。";
+      if (!/^\d{6}$/.test(submitCode)) nextErrors.code = "请输入 6 位数字验证码。";
+      else if (submitPhone !== sentFor) nextErrors.code = "请先获取该手机号的验证码。";
+      if (!submitPassword) nextErrors.password = "请设置新密码。";
+      else if (submitPassword.length < 12) nextErrors.password = "新密码至少需要 12 位。";
     }
     return nextErrors;
   };
@@ -254,10 +263,17 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
     try {
       if (submitMode === "login") {
         if (submitLoginKind === "sms") {
-          const result = await webAuthRequest<{ requiresPassword?: boolean }>("/phone-registration/complete", { phoneNumber: submitIdentifier, code: submitCode, acceptedTerms, loginOrRegister: true }, request.controller.signal);
+          const result = await webAuthRequest<{ requiresPassword?: boolean; requiresPasswordSetup?: boolean }>("/phone-registration/complete", { phoneNumber: submitIdentifier, code: submitCode, acceptedTerms, loginOrRegister: true }, request.controller.signal);
           if (!isCurrent(request)) return;
           if (result.requiresPassword) {
             setPhone(submitIdentifier); setMode("register"); setPassword("");
+            return;
+          }
+          if (result.requiresPasswordSetup) {
+            // Server-derived migration state: the account exists without a locally set password.
+            setPhone(submitIdentifier); setMode("recover"); setLoginKind("sms"); setCode(""); setSentFor(""); setPassword("");
+            setCooldownUntil(0); setNow(Date.now());
+            setSuccess("请为该迁移账户设置新密码。");
             return;
           }
         } else {
@@ -269,6 +285,15 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
         if (submitPhone !== sentFor) throw new WebAuthError(400, "INVALID_ARGUMENT");
         await webAuthRequest<{ status: true }>("/phone-registration/complete", { phoneNumber: submitPhone, code: submitCode, password: submitPassword, acceptedTerms, loginOrRegister: true }, request.controller.signal);
         await confirmSession(request, "账号已创建。");
+      } else if (submitMode === "recover") {
+        if (submitPhone !== sentFor) throw new WebAuthError(400, "INVALID_ARGUMENT");
+        await webAuthRequest<{ status: true }>("/phone-number/reset-password", { phoneNumber: submitPhone, otp: submitCode, newPassword: submitPassword }, request.controller.signal);
+        if (!isCurrent(request)) return;
+        setMode("login"); setLoginKind("phone"); setIdentifier(submitPhone); setPhone("");
+        setSentFor(""); setCode(""); setPassword(""); setAcceptedTerms(false);
+        setFieldErrors({}); setError(undefined);
+        setSuccess("密码已设置，请使用新密码登录。");
+        return;
       }
     } catch (failure) {
       if (!isCurrent(request)) return;
@@ -306,24 +331,27 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Au
     {registrationPending ? <div className="auth-recovery" role="alert"><p>注册结果待确认，请稍后用刚设置的密码尝试登录。</p><button type="button" className="button secondary" onClick={() => goToLogin()}>使用该手机号登录</button></div> : null}
     {registeredPhone ? <div className="auth-recovery" role="status"><p>该手机号已注册，请使用原密码登录。</p><button type="button" className="button secondary" onClick={() => goToLogin(registeredPhone)}>使用该手机号登录</button></div> : null}
 
-    {mode === "recover" ? <div className="auth-unavailable" role="status"><p>短信找回暂未开放，暂时不能通过短信找回密码。</p><p>请<a href="/help">查看帮助与规则</a>，了解当前可用的处理方式。</p></div> : <form onSubmit={submit} className="auth-fields" noValidate>
+    <form onSubmit={submit} className="auth-fields" noValidate>
       {mode === "login" ? <div className="auth-login-stack">
         <div className="auth-field"><label className="auth-field-label sr-only" htmlFor="auth-identifier">{loginKind !== "username" ? "手机号" : "账号名"}</label><input key={loginKind} id="auth-identifier" name="identifier" autoFocus={autoFocus} type={loginKind !== "username" ? "tel" : "text"} inputMode={loginKind !== "username" ? "numeric" : undefined} value={identifier} disabled={formBusy} onChange={(event) => { setIdentifier(event.target.value); setCode(""); setField("identifier", ""); setError(undefined); }} placeholder={loginKind !== "username" ? "大陆手机号" : "原账号名"} autoComplete={loginKind !== "username" ? "tel" : "username"} aria-invalid={Boolean(fieldErrors.identifier)} aria-describedby={fieldErrors.identifier ? "auth-identifier-error" : undefined} /><FieldError id="auth-identifier-error" text={fieldErrors.identifier} /></div>
 
-      </div> : <p className="auth-context">手机号 {maskPhone(phone)} 已验证，设置密码即可完成注册。</p>}
+      </div> : mode === "register" ? <p className="auth-context">手机号 {maskPhone(phone)} 已验证，设置密码即可完成注册。</p> : <div className="auth-field"><label className="auth-field-label sr-only" htmlFor="auth-phone">手机号</label><input id="auth-phone" name="phone" autoFocus={autoFocus} type="tel" inputMode="numeric" value={phone} disabled={formBusy} onChange={(event) => { setPhone(event.target.value); setCode(""); setSentFor(""); setField("phone", ""); setError(undefined); }} placeholder="大陆手机号" autoComplete="tel" aria-invalid={Boolean(fieldErrors.phone)} aria-describedby={fieldErrors.phone ? "auth-phone-error" : undefined} /><FieldError id="auth-phone-error" text={fieldErrors.phone} /></div>}
       {mode === "login" && loginKind === "sms" && <>
         <div className="auth-code-field"><label className="auth-field-label sr-only" htmlFor="phone-registration-code">短信验证码</label><div className="auth-code-row"><input id="phone-registration-code" name="otp" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} disabled={formBusy || Boolean(registrationPending)} onChange={(event) => { setCode(event.target.value.replace(/\D/g, "")); setField("code", ""); setError(undefined); }} placeholder="6 位验证码" aria-invalid={Boolean(fieldErrors.code)} aria-describedby={fieldErrors.code ? "auth-code-error" : codeSentForCurrent ? "auth-code-help" : undefined} /><button type="button" className="button secondary" disabled={formBusy || cooldownActive || Boolean(registrationPending)} onClick={() => void sendOtp()}>{sending ? "发送中…" : cooldownActive ? remaining + "s 后重发" : "获取验证码"}</button></div>{codeSentForCurrent ? <p id="auth-code-help" className="auth-field-help" role="status">验证码已发送至 {maskPhone(sentFor)}，请及时填写。</p> : null}<FieldError id="auth-code-error" text={fieldErrors.code} /></div>
       </>}
+      {mode === "recover" && <>
+        <div className="auth-code-field"><label className="auth-field-label sr-only" htmlFor="auth-recover-code">短信验证码</label><div className="auth-code-row"><input id="auth-recover-code" name="otp" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} disabled={formBusy} onChange={(event) => { setCode(event.target.value.replace(/\D/g, "")); setField("code", ""); setError(undefined); }} placeholder="6 位验证码" aria-invalid={Boolean(fieldErrors.code)} aria-describedby={fieldErrors.code ? "auth-recover-code-error" : codeSentForCurrent ? "auth-recover-code-help" : undefined} /><button type="button" className="button secondary" disabled={formBusy || cooldownActive} onClick={() => void sendOtp()}>{sending ? "发送中…" : cooldownActive ? remaining + "s 后重发" : "获取验证码"}</button></div>{codeSentForCurrent ? <p id="auth-recover-code-help" className="auth-field-help" role="status">验证码已发送至 {maskPhone(sentFor)}，请及时填写。</p> : null}<FieldError id="auth-recover-code-error" text={fieldErrors.code} /></div>
+      </>}
       {mode === "login" && loginKind === "sms" && <p className="auth-field-help">未注册手机号验证后，将在此完成注册。</p>}
       {mode === "register" && <div className="auth-field"><label className="auth-field-label sr-only" htmlFor="auth-invite">邀请码 <span>（选填）</span></label><input id="auth-invite" value={inviteCode} maxLength={64} disabled={formBusy} onChange={event => setInviteCode(event.target.value)} placeholder="邀请码（选填，可由邀请链接带入）" autoComplete="off" /><span className="auth-field-help">邀请码绑定尚未开放，本次注册不会绑定邀请关系。</span></div>}
-      {(mode === "register" || loginKind !== "sms") && <div className="auth-field"><label className="auth-field-label sr-only" htmlFor="auth-password">密码</label><div className="auth-password-row"><input id="auth-password" name="password" type={showPassword ? "text" : "password"} disabled={formBusy} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={mode === "register" ? 12 : undefined} value={password} onChange={(event) => { setPassword(event.target.value); setField("password", ""); setError(undefined); }} placeholder={mode === "register" ? "设置密码（至少 12 位）" : "请输入现有密码"} aria-invalid={Boolean(fieldErrors.password)} aria-describedby={fieldErrors.password ? "auth-password-error" : undefined} /><button type="button" className="auth-password-toggle" disabled={formBusy} onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword}>{showPassword ? "隐藏" : "显示"}</button></div><FieldError id="auth-password-error" text={fieldErrors.password} /></div>}
+      {(mode === "register" || mode === "recover" || loginKind !== "sms") && <div className="auth-field"><label className="auth-field-label sr-only" htmlFor="auth-password">密码</label><div className="auth-password-row"><input id="auth-password" name="password" type={showPassword ? "text" : "password"} disabled={formBusy} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={mode === "login" ? undefined : 12} value={password} onChange={(event) => { setPassword(event.target.value); setField("password", ""); setError(undefined); }} placeholder={mode === "login" ? "请输入现有密码" : mode === "recover" ? "设置新密码（至少 12 位）" : "设置密码（至少 12 位）"} aria-invalid={Boolean(fieldErrors.password)} aria-describedby={fieldErrors.password ? "auth-password-error" : undefined} /><button type="button" className="auth-password-toggle" disabled={formBusy} onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword}>{showPassword ? "隐藏" : "显示"}</button></div><FieldError id="auth-password-error" text={fieldErrors.password} /></div>}
       {mode === "login" && loginKind !== "sms" && <div className="auth-secondary-actions"><button type="button" className="auth-switch-link" disabled={formBusy} onClick={() => { setLoginKind(loginKind !== "username" ? "username" : "phone"); setCode(""); setPassword(""); setFieldErrors({}); setError(undefined); setSuccess(undefined); }}>使用{loginKind !== "username" ? "账号名" : "手机号"}登录</button><button type="button" disabled={formBusy} onClick={() => chooseMode("recover")}>忘记密码</button></div>}
-      <button type="submit" className="button primary auth-submit" disabled={formBusy || Boolean(registrationPending) || Boolean(registeredPhone)} aria-busy={busy || undefined}>{busy ? mode === "login" ? "登录中…" : "创建中…" : mode === "login" ? (loginKind === "sms" ? "登录 / 注册" : "登录") : "完成注册并登录"}</button>
-      {<div className="auth-consent"><input id="auth-terms" name="terms" type="checkbox" checked={acceptedTerms} disabled={formBusy || Boolean(registrationPending)} onChange={(event) => { setAcceptedTerms(event.target.checked); setField("terms", ""); }} aria-invalid={Boolean(fieldErrors.terms)} aria-describedby={fieldErrors.terms ? "auth-terms-error" : undefined} /><div><label htmlFor="auth-terms">我已阅读并同意</label><button type="button" onClick={() => setPolicy("平台服务协议")}>《平台服务协议》</button>和<button type="button" onClick={() => setPolicy("用户隐私政策")}>《用户隐私政策》</button><FieldError id="auth-terms-error" text={fieldErrors.terms} /></div></div>}
+      <button type="submit" className="button primary auth-submit" disabled={formBusy || Boolean(registrationPending) || Boolean(registeredPhone)} aria-busy={busy || undefined}>{busy ? mode === "login" ? "登录中…" : mode === "recover" ? "设置中…" : "创建中…" : mode === "login" ? (loginKind === "sms" ? "登录 / 注册" : "登录") : mode === "recover" ? "设置新密码" : "完成注册并登录"}</button>
+      {mode !== "recover" && <div className="auth-consent"><input id="auth-terms" name="terms" type="checkbox" checked={acceptedTerms} disabled={formBusy || Boolean(registrationPending)} onChange={(event) => { setAcceptedTerms(event.target.checked); setField("terms", ""); }} aria-invalid={Boolean(fieldErrors.terms)} aria-describedby={fieldErrors.terms ? "auth-terms-error" : undefined} /><div><label htmlFor="auth-terms">我已阅读并同意</label><button type="button" onClick={() => setPolicy("平台服务协议")}>《平台服务协议》</button>和<button type="button" onClick={() => setPolicy("用户隐私政策")}>《用户隐私政策》</button><FieldError id="auth-terms-error" text={fieldErrors.terms} /></div></div>}
 
       {policy && <div className="auth-policy-notice" role="status"><strong>{policy}</strong><p>正式内容尚未提供，当前无法阅读或完成正式协议确认。</p><button type="button" onClick={() => setPolicy(undefined)}>收起说明</button></div>}
       {error || success ? <p className={"auth-status " + (error ? "is-error" : "is-success")} role={error ? "alert" : "status"}>{error ?? success}</p> : null}
 
-    </form>}
+    </form>
   </section>;
 }

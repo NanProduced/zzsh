@@ -7,17 +7,10 @@ import { toListingCard } from "@/lib/listing-view";
 import { supplyApi } from "@/lib/supply-client";
 import { selectDeltaGame } from "@/lib/supply-games";
 
-// Owner-approved draft statistics; replace this source with the public backend response.
-const DEMO_STATS = { visits: 12580, transactions: 150960, listings: 3086 };
+// Unknown statistics stay unknown until a real public aggregate endpoint exists.
+const EMPTY_STATS = { visits: null, transactions: null, listings: null };
 export function LiveHome() {
-  const [stats, setStats] = useState(DEMO_STATS);
   const [supply, setSupply] = useState<{ state: SupplyState; accounts: AccountCardData[] }>({ state: "loading", accounts: [] });
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (!document.hidden) setStats((value) => ({ visits: value.visits + 3, transactions: value.transactions + 1, listings: value.listings }));
-    }, 5000);
-    return () => clearInterval(timer);
-  }, []);
   const load = useCallback(async () => {
     setSupply({ state: "loading", accounts: [] });
     try {
@@ -28,7 +21,10 @@ export function LiveHome() {
         setSupply({ state: "ready", accounts: [] });
         return;
       }
-      const page = await supplyApi.market(new URLSearchParams({ gameId: delta.id, limit: "8" }));
+      const metadata = await supplyApi.listingFilters(delta.id);
+      const query = new URLSearchParams({ gameId: delta.id, limit: "8" });
+      if (metadata.readMode === "LEGACY_READ_ONLY") query.set("queryVersion", "2");
+      const page = await supplyApi.market(query);
       setSupply({ state: "ready", accounts: page.items.map(toListingCard) });
     } catch {
       setSupply({ state: "error", accounts: [] });
@@ -37,5 +33,5 @@ export function LiveHome() {
   useEffect(() => {
     void load();
   }, [load]);
-  return <PortalHome accounts={supply.accounts} supplyState={supply.state} stats={stats} statsAreDemo onRetrySupply={() => void load()} />;
+  return <PortalHome accounts={supply.accounts} supplyState={supply.state} stats={EMPTY_STATS} onRetrySupply={() => void load()} />;
 }
