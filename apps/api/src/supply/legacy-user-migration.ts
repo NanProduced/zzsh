@@ -77,7 +77,6 @@ type NormalizedLegacyOwner = {
 function recordValue(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
-
 function sourceReference(input: {
   sourceSystem: unknown;
   sourceEntity: unknown;
@@ -358,4 +357,3 @@ export async function migrateLegacyOwner(
   );
   return { userId: (result.body as { userId: string }).userId, replayed: result.replayed };
 }
-

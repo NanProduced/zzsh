@@ -215,7 +215,6 @@ test("legacy owner evidence is strict and its digest binds every status flag", (
   assert.throws(() => normalizeLegacyOwnerInput(input({ legacyPassword: { version: "legacy-md5-v1", md5: "XYZ", salt: "s" } })), /password evidence/);
   assert.throws(() => normalizeLegacyOwnerInput(input({ sourceDigest: "short" })), /source reference/);
 });
-
 test("migrateLegacyOwner writes evidence-driven statuses and never invents a password", async () => {
   const fake = new FakeClient();
   const result = await migrateLegacyOwner(asClient(fake), input(), ACTOR);
@@ -308,4 +307,3 @@ test("an UNKNOWN idempotency read recovers with the original intent", async () =
   assert.equal(fake.identities.size, 1);
   assert.equal(recovered.replayed, false);
 });
-
