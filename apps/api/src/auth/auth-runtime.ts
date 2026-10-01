@@ -4,6 +4,7 @@ import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { mountRentalMembership } from "./rental-membership-routes";
+import { mountUserDirectory } from "./user-directory-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
 import { mountPersonalOrders } from "../order/personal-order-routes";
 import type { ConfirmationKey } from "../order/confirmation-token";
@@ -17,6 +18,7 @@ import type { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 
 import { createAuthSchema } from "./auth-schema";
+import { normalizeMainlandPhone } from "./phone-number";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, attemptLegacyCredentialUpgrade, type AdminSecurityNotification, type AuthSecurityOptions, type LegacyCredentialLookup } from "./auth-security";
 import { readPasswordSetupRequired } from "./legacy-login";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
@@ -164,12 +166,7 @@ const PHONE_REGISTRATION_OTP_MAX_ATTEMPTS = 3;
 const PHONE_REGISTRATION_IDENTIFIER_PREFIX = "phone-registration:";
 
 /** Canonical form used by every phone auth operation: +86 followed by 11 digits. */
-export function normalizeMainlandPhone(value: unknown): string | null {
-  if (typeof value !== "string" || value.length > 32) return null;
-  const compact = value.trim().replace(/[\s-]/g, "");
-  const digits = compact.startsWith("+86") ? compact.slice(3) : compact.startsWith("0086") ? compact.slice(4) : compact;
-  return /^1[3-9]\d{9}$/.test(digits) ? `+86${digits}` : null;
-}
+export { normalizeMainlandPhone };
 
 function phoneRegistrationIdentifier(phoneNumber: string): string {
   return `${PHONE_REGISTRATION_IDENTIFIER_PREFIX}${phoneNumber}`;
@@ -1005,6 +1002,7 @@ export async function mountAuthHandlers(
   });
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
+  mountUserDirectory(app,securityOptions);
   mountRentalMembership(app,securityOptions);
   mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,fundingReader});
   mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,fundingReader});

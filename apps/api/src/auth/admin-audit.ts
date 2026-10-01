@@ -67,7 +67,7 @@ function sendSuccess(response: AuthSecurityNodeResponse, body: unknown, requestI
   response.status(200).setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store").json(body);
 }
 
-function sanitizeDetail(value: unknown): unknown {
+export function sanitizeDetail(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeDetail);
   if (!value || typeof value !== "object") return value;
   const result: Record<string, unknown> = {};

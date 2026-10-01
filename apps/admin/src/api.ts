@@ -43,6 +43,99 @@ export type RestorableUserCandidate = {
   name: string;
   accountStatus: "DEACTIVATED";
 };
+
+export type UserDirectorySourceKind = "LOCAL" | "MIGRATED" | "UNKNOWN";
+export type UserDirectoryItem = {
+  userId: string;
+  name: string;
+  image: string | null;
+  username: string | null;
+  displayUsername: string | null;
+  maskedPhone: string | null;
+  accountStatus: "ACTIVE" | "RESTRICTED" | "DEACTIVATED" | "CANCELLED" | "UNKNOWN";
+  suspended: boolean;
+  identityStatus: "UNVERIFIED" | "VERIFIED" | "REJECTED" | "UNKNOWN";
+  ageStatus: string;
+  source: { kind: UserDirectorySourceKind; legacyId?: string };
+  registeredAt: string | null;
+  registeredAtSource: "LEGACY" | "LOCAL";
+  localCreatedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  resourceSummary: { state: "ready"; count: number } | { state: "denied"; permission: string };
+  orderSummary: { state: "ready"; currentCount: number } | { state: "denied"; permission: string };
+  lastBusinessActivity: { state: "not_connected"; domains: string[] };
+};
+export type UserDirectoryPage = { items?: UserDirectoryItem[]; nextCursor?: string | null; limit?: number };
+
+export type UserDirectoryDetail = Omit<UserDirectoryItem, "source"> & {
+  phoneNumberVerified: boolean | null;
+  maskedEmail: string | null;
+  identity: { status: string; ageStatus: string; provider: string | null; verifiedAt: string | null };
+  source: {
+    kind: UserDirectorySourceKind;
+    legacyId?: string;
+    sourceSystem?: string | null;
+    sourceEntity?: string | null;
+    sourceCreatedAt?: string | null;
+    sourceUpdatedAt?: string | null;
+    sourceDigest?: string | null;
+    evidenceRef?: string | null;
+    migratedAt?: string | null;
+  };
+  localUpdatedAt: string;
+};
+
+export type UserRentalAccountItem = {
+  accountId: string;
+  displayNo: string | null;
+  game: { id: string; code: string; name: string };
+  lifecycle: "ACTIVE" | "ARCHIVED";
+  ownerPaused: boolean;
+  staffRestricted: boolean;
+  restrictionReason: string | null;
+  legacyHold: "NONE" | "UNRESOLVED" | "ACTIVE_LEGACY";
+  currentVersionId: string | null;
+  publication: { versionState: string | null; source: string | null; versionPublished: boolean };
+  createdAt: string;
+};
+export type UserRentalAccountPage = { items?: UserRentalAccountItem[]; nextCursor?: string | null };
+
+export type UserOrderAmount = { currency: string; unit: string; amount: string; scale: number };
+export type UserOrderItem = {
+  orderId: string;
+  displayNo: string;
+  status: "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED";
+  role: "renter" | "owner";
+  accountId?: string;
+  accountDisplayNo?: string | null;
+  title: string;
+  gameId: string;
+  counterpartyName: string;
+  amounts: { rental: UserOrderAmount; deposit: UserOrderAmount; totalDue: UserOrderAmount };
+  createdAt: string;
+  holdUntil: string;
+  paidAt: string | null;
+  cancelledAt: string | null;
+  cancelReason: string | null;
+  expiredAwaitingCancel: boolean;
+};
+export type UserOrderPage = { items?: UserOrderItem[]; nextCursor?: string | null };
+
+export type UserAuditEventItem = {
+  eventId: string;
+  actorType: string;
+  actor: { username: string | null; displayUsername: string | null; name: string };
+  action: string;
+  objectType: string;
+  objectId: string | null;
+  outcome: "SUCCESS" | "FAILURE";
+  reason: string | null;
+  requestId: string | null;
+  occurredAt: string | null;
+  details: Record<string, unknown>;
+};
+export type UserAuditEventPage = { items?: UserAuditEventItem[]; nextCursor?: string | null; scope?: string };
 export type AdminPermissionCatalogEntry = { code: string; name: string; description?: string | null };
 export type AdminRoleRecord = {
   id: string;

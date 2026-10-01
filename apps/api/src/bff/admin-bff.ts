@@ -15,6 +15,7 @@ import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/sup
 import { handleContentAdminRoute } from "../content/content-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
+import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
 
@@ -339,7 +340,7 @@ async function forwardYunxin(
   else response.json(captured.body);
 }
 
-async function handleAdminBff(request: NodeRequest, response: NodeResponse, options: AdminBffOptions): Promise<void> {
+export async function handleAdminBff(request: NodeRequest, response: NodeResponse, options: AdminBffOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   const path = requestPath(request);
@@ -385,6 +386,23 @@ async function handleAdminBff(request: NodeRequest, response: NodeResponse, opti
   }
   if (/^\/users\/[^/]+\/rental-membership$/.test(path)) {
     await handleRentalMembershipAdmin(request,response,options.adminSecurityOptions);
+    return;
+  }
+  if (path === "/users" || /^\/users\/[^/]+(?:\/(?:rental-accounts|orders|audit-events))?$/.test(path)) {
+    if (!(method === "GET" && path !== "/users/lookup") && !(method === "POST" && path === "/users/lookup")) {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/users${path.slice("/users".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleUserDirectoryAdmin(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.adminSecurityOptions);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
     return;
   }
   if (path === "/supply" || path.startsWith("/supply/")) {

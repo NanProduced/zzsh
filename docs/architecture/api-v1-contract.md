@@ -173,6 +173,25 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - 占用事实只由订单表派生（无订单即 FREE），保证金资格仍走既有 SupplyGateReader seam（UNKNOWN 不放行）；占用中禁止建/存草稿、恢复上架、提交/通过新版本，暂停不受占用限制，取消后重新评估。占用账号公共列表/详情 404（既有行为延伸，订单卡后续接入须走受权订单接口）。注销义务检查纳入占用订单（双方视角）。
 - 无 HTTP/BFF 付款成功注入端点。0036 增加可信收款事实及同事务 PAID/唯一 WAITING 意图；当前仅有明确 test/fake、资源和合成订单 allowlist 的进程内受控来源，未接真实支付渠道。同流水重放比较不可变绑定，冲突保留原事实并审计；不同流水重复收款、金额/币种/订单号不符及迟到款保留 REVIEW_REQUIRED。锁内 DB 时钟到期则按 TIMEOUT 取消待付，不复活旧单或抢新占用；已付不被旧取消/清扫释放。正式政策、号主声明和保证金依据reader已接入；依赖未就绪仍拒绝，配置页面、证明到期最终边界及真实渠道尚未完成，不能据隔离fixture判定完整生产交易可用。
 
+## 管理端用户目录读取
+
+核心前缀 `/api/v1/admin/users`，Admin经同源 `/api/bff/admin/users` 适配。普通构建直接使用BFF，不启用原型开关。全部查询复用管理员会话与事务内复检；用户主体仅由稳定 `userId` 标识，不按租用/出租经历生成用户类型。
+
+| 核心接口 | 输入/结果与权限 |
+|---|---|
+| GET /users | `user.directory.read`；`q`匹配稳定ID、旧ID、昵称、用户名/展示用户名；仍支持精确`userId/legacyId`和模糊`identifier`。筛选`accountStatus/source/identityStatus/ageStatus/registeredFrom/registeredTo/limit/cursor`；注册范围和排序均用canonical `user.createdAt`，时间为RFC3339，按(createdAt,id)倒序。游标绑定管理员、Boss状态、有效权限/游戏scope签名、全部筛选和limit，不一致409 |
+| POST /users/lookup | 同一只读查询，另需`user.phone.lookup`。手机号仅放JSON正文，允许与上述非敏感筛选一起提交；不改变数据。GET中的phone或搜索参数中的手机号拒绝400。响应只给脱敏手机号，游标仅含查询摘要及排序键，不含原手机号 |
+| GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态和脱敏联系方式；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。首期不投影会员/余额/收益，不在读取时补造资格 |
+| GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；当前版本、发布记录复用供给发布元组和有效版本判断，发布不等于可租资格 |
+| GET /users/{userId}/orders | 另需`order.read` + 游戏/对象范围；`role=renter|owner|any`仅表示该单参与方，另有status/limit/cursor。金额来自冻结订单快照；取消后仍保留paidAt，已付/完成但时间缺失不可推断未付。没有独立供给读取权限时不返回内部accountId/展示号 |
+| GET /users/{userId}/audit-events | 另需既有`admin.audit.read`；按用户对象过滤，Boss全量、非Boss仅本人操作；沿用敏感detail裁剪，不新增用户页专用IAM scope |
+
+列表与详情分开返回canonical `createdAt/updatedAt`和审计授权后的旧来源时间。兼容字段`registeredAt/localCreatedAt`都取canonical创建时间，`registeredAtSource=LOCAL`；旧`sourceCreatedAt/sourceUpdatedAt`仅技术追溯。管理身份状态行缺失返回UNKNOWN；其余按CANCELLED→DEACTIVATED→suspended时RESTRICTED→ACTIVE，不认识的值不默认正常。provider=legacy_mysql_restore表示旧平台用户；provider=none且无冲突来源表示未关联旧平台来源；无法判断则UNKNOWN。
+
+`resourceSummary`为`{state:ready,count}`或`{state:denied,permission}`；`orderSummary`为`{state:ready,currentCount}`或拒绝态。数量由各域权限和游戏范围裁剪；无权限不返回数值或内部ID，拒绝/失败不能当零。当前`lastBusinessActivity={state:not_connected,domains:[ORDER,SUPPLY]}`，不支持活动排序，不能以表更新时间或迁入时间代替事件。
+
+`user.directory.read/user.phone.lookup/supply.rental_account.read`已声明代码校验，正式数据库权限注册迁移仍由维护者分配；未登记时非Boss无法授予，不能用review.read或directory.read代替独立供给读权限。现有账号恢复入口沿用`user.account.restore`与密码/TOTP再认证，不新增写接口。上述合同与本地合成验证不等于旧数据迁移、真实PG或非空历史订单验收完成。
+
 ## 验证入口
 
 ```powershell

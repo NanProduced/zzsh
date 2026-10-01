@@ -1,6 +1,7 @@
 export const WORKBENCH_TAB_ID = "workbench";
 const STORAGE_PREFIX = "zzsh-admin-workspace-tabs:";
-const SENSITIVE_QUERY = /(password|pin|otp|totp|backup|credential|token|secret|temporary)/i;
+const SENSITIVE_QUERY = /(password|pin|otp|totp|backup|credential|token|secret|temporary|phone)/i;
+const PHONE_VALUE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
 
 export type WorkspaceRouteKind =
   | "workbench"
@@ -14,6 +15,8 @@ export type WorkspaceRouteKind =
   | "approval-object"
   | "audit"
   | "user-restore"
+  | "users"
+  | "user-object"
   | "catalog"
   | "gunsmith"
   | "rules"
@@ -53,6 +56,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   approvals: { id: "approvals", title: "审批与审计", path: "/approvals", closable: true, kind: "approvals" },
   audit: { id: "audit", title: "账号与权限审计", path: "/audit", closable: true, kind: "audit" },
   "user-restore": { id: "user-restore", title: "用户账号恢复", path: "/users/restore", closable: true, kind: "user-restore" },
+  users: { id: "users", title: "用户管理", path: "/users", closable: true, kind: "users" },
   catalog: { id: "catalog", title: "目录维护", path: "/supply/catalog", closable: true, kind: "catalog" },
   gunsmith: { id: "gunsmith", title: "改枪码目录", path: "/supply/gunsmith", closable: true, kind: "gunsmith" },
   rules: { id: "rules", title: "规则与价目", path: "/supply/rules", closable: true, kind: "rules" },
@@ -65,8 +69,8 @@ export function sanitizeTabQuery(query: Record<string, string> | URLSearchParams
   const source = query instanceof URLSearchParams ? Object.fromEntries(query.entries()) : query;
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (!key || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value)) continue;
-    if (value.length > 200) continue;
+    if (!key || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value)) continue;
+    if (value.length > (key === "cursor" ? 2048 : 200)) continue;
     result[key] = value;
   }
   return result;
@@ -97,6 +101,12 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   }
   if (path === "/audit") return { kind: "audit", tabId: "audit", path: "/audit", title: "账号与权限审计" };
   if (path === "/users/restore") return { kind: "user-restore", tabId: "user-restore", path: "/users/restore", title: "用户账号恢复" };
+  if (path === "/users") return { kind: "users", tabId: "users", path, title: "用户管理" };
+  const userObject = path.match(/^\/users\/([^/]+)$/);
+  if (userObject) {
+    let objectId = ""; try { objectId = decodeURIComponent(userObject[1] ?? ""); } catch { /* Invalid IDs follow the existing unknown-route path. */ }
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "user-object", objectType: "user", objectId, tabId: `user:${objectId}`, path, title: objectId };
+  }
   if (path === "/supply/catalog") return { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" };
   if (path === "/supply/gunsmith") return { kind: "gunsmith", tabId: "gunsmith", path: "/supply/gunsmith", title: "改枪码目录" };
   if (path === "/supply/rules") return { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" };
@@ -140,6 +150,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   }
   if (kind === "audit") return has("admin.audit.read");
   if (kind === "user-restore") return has("user.account.restore");
+  if (kind === "users" || kind === "user-object") return has("user.directory.read");
   if (kind === "catalog") return has("supply.catalog.manage") || nav.isBoss;
   if (kind === "gunsmith") return has("supply.gunsmith.manage") || nav.isBoss;
   if (kind === "rules") return has("supply.rules.edit") || nav.isBoss;
@@ -150,6 +161,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
+  if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
   if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));

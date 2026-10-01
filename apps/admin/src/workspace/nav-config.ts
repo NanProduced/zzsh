@@ -12,6 +12,7 @@ import {
   ShieldIcon,
   UserRoundCogIcon,
   UserRoundSearchIcon,
+  UsersRoundIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -75,6 +76,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   }
 
   const users: WorkspaceMenuItem[] = [];
+  if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
   if (has("user.account.restore")) {
     users.push({ label: "账号恢复", icon: UserRoundSearchIcon, path: "/users/restore", kind: "user-restore" });
   }
@@ -106,6 +108,8 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/approvals") return "审批与审计";
   if (pathname === "/audit") return "账号与权限审计";
   if (pathname === "/users/restore") return "用户账号恢复";
+  if (pathname === "/users") return "用户管理";
+  if (pathname.startsWith("/users/")) return "用户详情";
   if (pathname === "/supply/catalog") return "目录维护";
   if (pathname === "/supply/gunsmith") return "改枪码目录";
   if (pathname === "/supply/rules") return "规则与价目";

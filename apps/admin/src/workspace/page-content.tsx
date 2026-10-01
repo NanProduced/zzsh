@@ -2,6 +2,7 @@ import { SupplyListingReviewView } from "../views/supply-listing-review-view";
 import type { SessionSnapshot } from "../api";
 import { AdminAuditView } from "../views/admin-audit-view";
 import { AdminDirectoryView, UserRestorePanel } from "../views/admin-directory-view";
+import { UserDirectoryView } from "../views/user-directory/user-directory-view";
 import { ApprovalAuditView } from "../views/approval-audit-view";
 import { RoleConfigView } from "../views/role-config-view";
 import { SupplyCatalogView } from "../views/supply-catalog-view";
@@ -103,6 +104,7 @@ export function WorkspacePageContent({
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
+  if (tab.kind === "users" || tab.kind === "user-object") return <UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce}/>;
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
