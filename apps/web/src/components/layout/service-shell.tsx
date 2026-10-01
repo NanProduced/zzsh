@@ -21,11 +21,12 @@ type ServiceShellProps = {
   children: ReactNode;
   topContent?: ReactNode;
   title: string;
-  description: string;
+  description?: string;
   initialQuery?: string;
   onSearch?: (query: string) => void;
   backHref?: string;
   backLabel?: string;
+  showBack?: boolean;
   surface?: ServiceSurface;
   contextLabel?: string | null;
   showPageHeading?: boolean;
@@ -40,11 +41,12 @@ export function ServiceShell({
   children,
   topContent,
   title,
-  description,
+  description = "",
   initialQuery = "",
   onSearch,
   backHref = "/",
   backLabel = "返回首页",
+  showBack = true,
   surface = "utility",
   contextLabel,
   showPageHeading = true,
@@ -58,17 +60,20 @@ export function ServiceShell({
   const [query, setQuery] = useState(initialQuery);
   useEffect(() => setQuery(initialQuery), [initialQuery]);
   const meta = surfaceMeta[surface];
-  const trail = breadcrumbs?.length ? breadcrumbs : [{ label: "首页", href: "/" }, { label: title }];
+  const trail = breadcrumbs !== undefined ? breadcrumbs : [{ label: "首页", href: "/" }, { label: title }];
   const context = contextLabel === undefined ? meta.label : contextLabel;
   return <div className={`portal-home portal-subpage functional-shell functional-shell--${surface}`}>
     <PortalHeader home={false} query={query} onQueryChange={setQuery} onSearch={onSearch ?? ((value: string) => router.push(`/accounts?q=${encodeURIComponent(value)}`))} searchLabel={searchLabel} searchInputLabel={searchInputLabel} searchPlaceholder={searchPlaceholder} searchCompactPlaceholder={searchCompactPlaceholder} />
     {topContent ? <div className="functional-top-content portal-width">{topContent}</div> : null}
     <main id="main-content" className="portal-width subpage-main functional-main">
-      <Breadcrumbs items={trail} />
+      {trail.length > 0 ? <Breadcrumbs items={trail} /> : null}
       {showPageHeading ? <header className="functional-page-heading">
         <div className="functional-heading-copy">
-          {surface !== "browse" && <Link className="functional-back" href={backHref}><ArrowLeft size={16} aria-hidden="true" /><span>{backLabel}</span></Link>}
-          <div className="functional-title-block"><h1>{title}</h1>{description ? <p>{description}</p> : null}</div>
+          {showBack && backHref && surface !== "browse" && <Link className="functional-back" href={backHref}><ArrowLeft size={16} aria-hidden="true" /><span>{backLabel}</span></Link>}
+          <div className="functional-title-block">
+            <h1>{title}</h1>
+            {description ? <p>{description}</p> : null}
+          </div>
         </div>
         {context ? <div className="functional-context" aria-label="页面上下文">
           <Chip className="functional-context-chip" color={meta.color} variant="soft">{context}</Chip>
