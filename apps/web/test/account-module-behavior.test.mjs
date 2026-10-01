@@ -36,6 +36,8 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
   module.require = (name) => {
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "next/navigation") return { useRouter: () => router };
+    // This suite probes the parent's read permission; the real security control has its own React suite.
+    if (name === "./account/account-security-controls") return { AccountSecurityControls: ({ userId, canAct }) => canAct() ? React.createElement("p", null, `PRIVATE_${userId} 138****8000`) : null };
     if (name === "@heroui/react") return { Chip: ({ children }) => React.createElement("span", null, children) };
     if (name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
     if (name === "./layout/service-shell") return { ServiceShell: ({ children }) => React.createElement("main", null, children) };

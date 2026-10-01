@@ -13,6 +13,9 @@ import { createFakeRealNameProvider, type FakeRealNameScenario, type RealNamePro
 import { assertBusinessMigrationIdentity, assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { runUserSecurityChecks } from "./user-security-checks";
+import type { UserSecurityDelivery } from "../src/auth/user-security";
+import { migrateLegacyUserBatch, legacyOwnerEvidenceDigest, type LegacyOwnerEvidence } from "../src/supply/legacy-user-migration";
 
 const RESOURCE_SET = process.env.M2_AUTH_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid isolated resource set");
@@ -544,6 +547,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
 
     const fakeSmsOutbox = new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>();
     const fakeAdminNotificationOutbox: AdminSecurityNotification[] = [];
+    const fakeUserSecurityOutbox = new Map<string, UserSecurityDelivery>();
     const rateLimitState = new Map<string, { failures: number; resetAt: number }>();
     const securityVerificationBudget = { inFlight: 0 };
     const identityScenarios = new Map<string, FakeRealNameScenario>();
@@ -572,6 +576,8 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
         }),
         pool: runtimePool,
         fakeSmsOutbox,
+        fakeUserSecurityOutbox,
+        testOperationsEnabled: true,
         fakeAdminNotificationOutbox,
         rateLimitState,
         securityVerificationBudget,
@@ -591,15 +597,32 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     await app.listen(0, "127.0.0.1");
     const base = await app.getUrl();
 
+    let phoneFixtureSequence = 0;
+    const phoneFixture = async (fixtureBase: string, details: Record<string, unknown>, jar: CookieJar, origin: string) => {
+      const phoneNumber = '+8613600' + String(++phoneFixtureSequence).padStart(6, '0');
+      const sent = await request(fixtureBase, '/api/auth/user/phone-registration/send-otp', { phoneNumber }, cookieJar(), origin);
+      if (sent.response.status !== 200) return sent;
+      const delivery = fakeSmsOutbox.get('phone-registration:' + phoneNumber);
+      assert.ok(delivery);
+      const registered = await request(fixtureBase, '/api/auth/user/phone-registration/complete', { phoneNumber, code: delivery.code, password: details.password, acceptedTerms: true }, jar, origin);
+      if (registered.response.status !== 200) return registered;
+      const current = await request(fixtureBase, '/api/auth/user/get-session', undefined, jar, origin);
+      const id = current.body?.user?.id;
+      assert.ok(id);
+      // Controlled fixture metadata for existing identity tests; this is not an email/username auth route.
+      await migrationPool!.query('UPDATE zzsh_auth_user."user" SET email=$2,name=$3,username=$4 WHERE id=$1', [id, details.email, details.name, details.username]);
+      return request(fixtureBase, '/api/auth/user/get-session', undefined, jar, origin);
+    };
+
     await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    const failedSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const failedSignup = await phoneFixture(base, {
       email: "m2-audit-rollback@example.invalid",
       password: PASSWORD,
       name: "Audit Rollback",
       username: "m2_audit_rollback",
     }, cookieJar(), USER_ORIGIN);
-    assert.equal(failedSignup.response.status, 422);
-    assert.equal(failedSignup.body?.error?.code, "INVALID_ARGUMENT");
+    assert.equal(failedSignup.response.status, 500);
+    assert.equal(failedSignup.body?.error?.code, "INTERNAL_ERROR");
     assert.equal(failedSignup.response.headers.get("x-request-id")?.startsWith("req_"), true);
     assert.equal(failedSignup.body?.error?.requestId, failedSignup.response.headers.get("x-request-id"));
     const failedRows = await runtimePool.query<{ users: string; audits: string }>(`
@@ -611,14 +634,14 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
 
     const user = cookieJar();
-    const signup = await request(base, "/api/auth/user/sign-up/email", {
+    const signup = await phoneFixture(base, {
       email: "m2-user@example.invalid",
       password: PASSWORD,
       name: "M2 User",
       username: "m2_user",
     }, user, USER_ORIGIN);
     assert.equal(signup.response.status, 200);
-    assert.equal(signup.body?.user?.username, "m2_user");
+    assert.equal(signup.body?.user?.name, "M2 User");
     const userId = signup.body?.user?.id as string;
     assert.ok(userId);
     assert.notEqual(user.header(), "");
@@ -676,7 +699,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     );
 
     const minorUser = cookieJar();
-    const minorSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const minorSignup = await phoneFixture(base, {
       email: "m2-minor@example.invalid",
       password: PASSWORD,
       name: "Fixture Minor",
@@ -691,7 +714,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.match(minorForgedAdult.body?.error?.message, /年龄/);
 
     const auditRollbackUser = cookieJar();
-    const auditRollbackSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const auditRollbackSignup = await phoneFixture(base, {
       email: "m2-identity-rollback@example.invalid",
       password: PASSWORD,
       name: "Identity Rollback",
@@ -704,11 +727,12 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const failedIdentityAudit = await request(base, "/api/auth/user/identity/verify", { fullName: "Fixture Adult", documentNumber: "fixture-audit-rollback" }, auditRollbackUser, USER_ORIGIN);
     assert.equal(failedIdentityAudit.response.status, 500);
     const failedIdentityState = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."user_identity_state" WHERE "user_id" = $1`, [auditRollbackUserId]);
-    assert.equal(failedIdentityState.rows[0]?.count, "0");
+    assert.equal(failedIdentityState.rows[0]?.count, "1");
+    assert.equal((await runtimePool.query('SELECT identity_status,age_status FROM zzsh_iam.user_identity_state WHERE user_id=$1', [auditRollbackUserId])).rows[0]?.identity_status, "UNVERIFIED");
     await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
 
     const pendingCancelUser = cookieJar();
-    const pendingCancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const pendingCancelSignup = await phoneFixture(base, {
       email: "m2-cancel-pending@example.invalid",
       password: PASSWORD,
       name: "Pending Cancellation",
@@ -725,7 +749,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.ok(pendingStillSession.body?.user?.id);
 
     const unknownCancelUser = cookieJar();
-    const unknownCancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const unknownCancelSignup = await phoneFixture(base, {
       email: "m2-cancel-unknown@example.invalid",
       password: PASSWORD,
       name: "Unknown Cancellation",
@@ -737,7 +761,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.match(unknownCancel.body?.error?.message, /无法确认/);
 
     const invalidObligationUser = cookieJar();
-    const invalidObligationSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const invalidObligationSignup = await phoneFixture(base, {
       email: "m2-cancel-invalid-obligation@example.invalid",
       password: PASSWORD,
       name: "Invalid Obligation",
@@ -752,7 +776,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.ok((await request(base, "/api/auth/user/get-session", undefined, invalidObligationUser, USER_ORIGIN)).body?.user?.id);
 
     const failedObligationUser = cookieJar();
-    const failedObligationSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const failedObligationSignup = await phoneFixture(base, {
       email: "m2-cancel-obligation-fault@example.invalid",
       password: PASSWORD,
       name: "Obligation Fault",
@@ -767,7 +791,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.ok((await request(base, "/api/auth/user/get-session", undefined, failedObligationUser, USER_ORIGIN)).body?.user?.id);
 
     const barrierCancelUser = cookieJar();
-    const barrierCancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const barrierCancelSignup = await phoneFixture(base, {
       email: "m2-cancel-barrier@example.invalid",
       password: PASSWORD,
       name: "Barrier Cancellation",
@@ -811,7 +835,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     }
 
     const deactivateUser = cookieJar();
-    const deactivateSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const deactivateSignup = await phoneFixture(base, {
       email: "m2-deactivate@example.invalid",
       password: PASSWORD,
       name: "Deactivate Me",
@@ -834,7 +858,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.deepEqual(deactivatedRows.rows[0], { accountStatus: "DEACTIVATED", suspended: true, verifications: "0" });
 
     const cancelUser = cookieJar();
-    const cancelSignup = await request(base, "/api/auth/user/sign-up/email", {
+    const cancelSignup = await phoneFixture(base, {
       email: "m2-cancel@example.invalid",
       password: PASSWORD,
       name: "Cancel Me",
@@ -879,517 +903,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(hostile.response.status, 403);
     assert.equal(hostile.body?.error?.requestId, hostile.response.headers.get("x-request-id"));
 
-    const phone = "+8613800000000";
-    const phoneRegistrationJar = cookieJar();
-    const sendRegistration = async (phoneNumber: string, requestPhoneNumber = phoneNumber) => {
-      const sent = await request(base, "/api/auth/user/phone-registration/send-otp", { phoneNumber: requestPhoneNumber }, cookieJar(), USER_ORIGIN);
-      assert.equal(sent.response.status, 200);
-      const delivery = fakeSmsOutbox.get(`phone-registration:${phoneNumber}`);
-      assert.ok(delivery);
-      assert.equal(delivery.purpose, "phone-registration");
-      assert.match(delivery.code, /^\d{6}$/);
-      return delivery;
-    };
-    const unifiedPhone = "+8613800000098";
-    const unifiedDelivery = await sendRegistration(unifiedPhone);
-    const unifiedJar = cookieJar();
-    const unifiedBody = { phoneNumber: unifiedPhone, code: unifiedDelivery.code, acceptedTerms: true, loginOrRegister: true };
-    const needsPassword = await request(base, "/api/auth/user/phone-registration/complete", unifiedBody, unifiedJar, USER_ORIGIN);
-    assert.equal(needsPassword.response.status, 200);
-    assert.equal(needsPassword.body?.requiresPassword, true);
-    assert.equal((await request(base, "/api/auth/user/get-session", undefined, unifiedJar, USER_ORIGIN)).body, null);
-    assert.equal((await runtimePool.query('SELECT count(*)::text AS count FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1', [unifiedPhone])).rows[0]?.count, "0");
-    const completedUnified = await request(base, "/api/auth/user/phone-registration/complete", { ...unifiedBody, password: PASSWORD }, unifiedJar, USER_ORIGIN);
-    assert.equal(completedUnified.response.status, 200);
-    assert.ok((await request(base, "/api/auth/user/get-session", undefined, unifiedJar, USER_ORIGIN)).body?.user);
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", unifiedBody, cookieJar(), USER_ORIGIN)).response.status, 400, "consumed OTP cannot be replayed");
-    const unifiedLoginDelivery = await sendRegistration(unifiedPhone);
-    const unifiedLoginJar = cookieJar();
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", { ...unifiedBody, code: unifiedLoginDelivery.code }, unifiedLoginJar, USER_ORIGIN)).response.status, 200);
-    assert.ok((await request(base, "/api/auth/user/get-session", undefined, unifiedLoginJar, USER_ORIGIN)).body?.user);
-    const unifiedPasswordBefore = await runtimePool.query('SELECT a."password" FROM "zzsh_auth_user"."account" a JOIN "zzsh_auth_user"."user" u ON u."id"=a."userId" WHERE u."phoneNumber"=$1', [unifiedPhone]);
-    const unifiedConcurrentDelivery = await sendRegistration(unifiedPhone);
-    const unifiedConcurrentResults = await Promise.all([1, 2].map(() => request(base, "/api/auth/user/phone-registration/complete", { ...unifiedBody, code: unifiedConcurrentDelivery.code, password: PASSWORD }, cookieJar(), USER_ORIGIN)));
-    assert.deepEqual(unifiedConcurrentResults.map(r => r.response.status).sort(), [200, 400]);
-    assert.deepEqual((await runtimePool.query('SELECT a."password" FROM "zzsh_auth_user"."account" a JOIN "zzsh_auth_user"."user" u ON u."id"=a."userId" WHERE u."phoneNumber"=$1', [unifiedPhone])).rows, unifiedPasswordBefore.rows);
-    await migrationPool.query('UPDATE "zzsh_auth_user"."user" SET "suspended"=true WHERE "phoneNumber"=$1', [unifiedPhone]);
-    const frozenDelivery = await sendRegistration(unifiedPhone);
-    const frozenJar = cookieJar();
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", { ...unifiedBody, code: frozenDelivery.code }, frozenJar, USER_ORIGIN)).response.status, 403);
-    assert.equal((await request(base, "/api/auth/user/get-session", undefined, frozenJar, USER_ORIGIN)).body, null);
-    await migrationPool.query('UPDATE "zzsh_auth_user"."user" SET "suspended"=false WHERE "phoneNumber"=$1', [unifiedPhone]);
-    const unfinishedPhone = "+8613800000097";
-    const unfinishedDelivery = await sendRegistration(unfinishedPhone);
-    const unfinishedBody = { ...unifiedBody, phoneNumber: unfinishedPhone, code: unfinishedDelivery.code };
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", unfinishedBody, cookieJar(), USER_ORIGIN)).body?.requiresPassword, true);
-    await migrationPool.query(`UPDATE "zzsh_auth_user"."verification" SET "expiresAt"=clock_timestamp()-interval '1 second' WHERE "identifier"=$1`, [`phone-registration:${unfinishedPhone}`]);
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", { ...unfinishedBody, password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 400);
-    assert.equal((await runtimePool.query('SELECT count(*)::text AS count FROM "zzsh_auth_user"."user" WHERE "phoneNumber"=$1', [unfinishedPhone])).rows[0]?.count, "0");
-    const delivery = await sendRegistration(phone, "13800000000");
-    const preRegistrationSession = await request(base, "/api/auth/user/get-session", undefined, phoneRegistrationJar, USER_ORIGIN);
-    assert.equal(preRegistrationSession.response.status, 200);
-    assert.equal(preRegistrationSession.body, null);
-    const phonePassword = randomBytes(24).toString("base64url");
-    const phoneRegistered = await request(base, "/api/auth/user/phone-registration/complete", {
-      phoneNumber: phone,
-      code: delivery.code,
-      password: phonePassword,
-      acceptedTerms: true,
-    }, phoneRegistrationJar, USER_ORIGIN);
-    assert.equal(phoneRegistered.response.status, 200);
-    assert.equal(phoneRegistered.body?.status, true);
-    const consumedOtp = await runtimePool.query<{ count: string; verified: boolean }>(`
-      SELECT
-        (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1) AS count,
-        (SELECT "phoneNumberVerified" FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $2) AS verified
-    `, [`phone-registration:${phone}`, phone]);
-    assert.deepEqual(consumedOtp.rows[0], { count: "0", verified: true });
-
-    const exhaustedPhone = "+8613900000001";
-    const exhaustedDelivery = await sendRegistration(exhaustedPhone);
-    const wrongCode = exhaustedDelivery.code === "000000" ? "000001" : "000000";
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const rejected = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: exhaustedPhone, code: wrongCode, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-      assert.equal(rejected.response.status, 400);
-      const attemptQuery: Promise<{ rows: Array<{ value: string | null; count: string }> }> = runtimePool.query<{ value: string | null; count: string }>(
-        `SELECT (SELECT "value" FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1) AS value,
-                (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1) AS count`,
-       [`phone-registration:${exhaustedPhone}`],
-     );
-      const attemptState: { rows: Array<{ value: string | null; count: string }> } = await attemptQuery;
-      if (attempt < 3) {
-        assert.equal(attemptState.rows[0]?.count, "1");
-        assert.equal(attemptState.rows[0]?.value, `${exhaustedDelivery.code}:${attempt}`);
-      } else {
-        assert.deepEqual(attemptState.rows[0], { value: `${exhaustedDelivery.code}:3`, count: "1" });
-      }
-    }
-    const exhaustedCorrect = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: exhaustedPhone, code: exhaustedDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-    assert.equal(exhaustedCorrect.response.status, 400, "a correct code after three failures must remain rejected");
-    const exhaustedResendBlocked = await request(base, "/api/auth/user/phone-registration/send-otp", { phoneNumber: exhaustedPhone }, cookieJar(), USER_ORIGIN);
-    assert.equal(exhaustedResendBlocked.response.status, 429, "an exhausted challenge must keep the send cooldown");
-    await migrationPool.query(`UPDATE "zzsh_auth_user"."verification" SET "createdAt" = clock_timestamp() - interval '61 seconds', "updatedAt" = clock_timestamp() - interval '61 seconds' WHERE "identifier" = $1`, [`phone-registration:${exhaustedPhone}`]);
-    const exhaustedResend = await sendRegistration(exhaustedPhone);
-    // A new random OTP can equal the old digits; only a code different from the current challenge must fail.
-    const staleOrWrongCode = exhaustedResend.code !== exhaustedDelivery.code ? exhaustedDelivery.code : (exhaustedResend.code === "000000" ? "000001" : "000000");
-    const oldCodeAfterResend = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: exhaustedPhone, code: staleOrWrongCode, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-    assert.equal(oldCodeAfterResend.response.status, 400, "only the current challenge code may validate after resend");
-    const exhaustedResendState = await runtimePool.query<{ value: string; count: string }>(`SELECT "value", (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1) AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [`phone-registration:${exhaustedPhone}`]);
-    assert.deepEqual(exhaustedResendState.rows[0], { value: `${exhaustedResend.code}:1`, count: "1" });
-
-    const expiredPhone = "+8613900000002";
-    const expiredDelivery = await sendRegistration(expiredPhone);
-    await migrationPool.query(`UPDATE "zzsh_auth_user"."verification" SET "expiresAt" = clock_timestamp() - interval '1 second' WHERE "identifier" = $1`, [`phone-registration:${expiredPhone}`]);
-    const expired = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: expiredPhone, code: expiredDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-    assert.equal(expired.response.status, 400);
-    assert.equal((await runtimePool.query(`SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [`phone-registration:${expiredPhone}`])).rows[0]?.count, "0");
-
-    const resendPhone = "+8613900000003";
-    const firstResend = await sendRegistration(resendPhone);
-    await migrationPool.query(`UPDATE "zzsh_auth_user"."verification" SET "createdAt" = clock_timestamp() - interval '61 seconds', "updatedAt" = clock_timestamp() - interval '61 seconds' WHERE "identifier" = $1`, [`phone-registration:${resendPhone}`]);
-    const secondResend = await sendRegistration(resendPhone);
-    const resendState = await runtimePool.query<{ value: string; count: string }>(`SELECT "value", (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1) AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [`phone-registration:${resendPhone}`]);
-    assert.deepEqual(resendState.rows[0], { value: `${secondResend.code}:0`, count: "1" });
-
-    const concurrentPhone = "+8613900000004";
-    const concurrentDelivery = await sendRegistration(concurrentPhone);
-    const concurrentResults = await Promise.all([
-      request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: concurrentPhone, code: concurrentDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN),
-      request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: concurrentPhone, code: concurrentDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN),
-    ]);
-    assert.deepEqual(concurrentResults.map((result) => result.response.status).sort((left, right) => left - right), [200, 400]);
-    const concurrentState = await runtimePool.query<{ users: string; verifications: string }>(
-      `SELECT (SELECT count(*)::text FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1) AS users,
-              (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $2) AS verifications`,
-      [concurrentPhone, `phone-registration:${concurrentPhone}`],
-    );
-    assert.deepEqual(concurrentState.rows[0], { users: "1", verifications: "0" });
-
-    const rollbackPhone = "+8613900000005";
-    const rollbackDelivery = await sendRegistration(rollbackPhone);
-    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."user_identity_state" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    let failedRegistration: { response: Response; body: Record<string, any> | null } | undefined;
-    try {
-      failedRegistration = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: rollbackPhone, code: rollbackDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-    } finally {
-      await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."user_identity_state" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    }
-    assert.equal(failedRegistration?.response.status, 500);
-    const rollbackState = await runtimePool.query<{ users: string; accounts: string; identities: string; verifications: string }>(
-      `SELECT
-         (SELECT count(*)::text FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1) AS users,
-         (SELECT count(*)::text FROM "zzsh_auth_user"."account" a JOIN "zzsh_auth_user"."user" u ON u."id" = a."userId" WHERE u."phoneNumber" = $1) AS accounts,
-         (SELECT count(*)::text FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id" WHERE u."phoneNumber" = $1) AS identities,
-         (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $2) AS verifications`,
-      [rollbackPhone, `phone-registration:${rollbackPhone}`],
-    );
-    assert.deepEqual(rollbackState.rows[0], { users: "0", accounts: "0", identities: "0", verifications: "1" });
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: rollbackPhone, code: rollbackDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN)).response.status, 200);
-
-    const sessionFailurePhone = "+8613900000006";
-    const sessionFailureDelivery = await sendRegistration(sessionFailurePhone);
-    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_auth_user"."session" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    let failedSessionRegistration: { response: Response; body: Record<string, any> | null } | undefined;
-    try {
-      failedSessionRegistration = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: sessionFailurePhone, code: sessionFailureDelivery.code, password: PASSWORD, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-    } finally {
-      await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_auth_user"."session" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    }
-    assert.equal(failedSessionRegistration?.response.status, 500);
-    const sessionFailureState = await runtimePool.query<{ users: string; accounts: string; identities: string; sessions: string; verifications: string }>(
-      `SELECT
-         (SELECT count(*)::text FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1) AS users,
-         (SELECT count(*)::text FROM "zzsh_auth_user"."account" a JOIN "zzsh_auth_user"."user" u ON u."id" = a."userId" WHERE u."phoneNumber" = $1) AS accounts,
-         (SELECT count(*)::text FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id" WHERE u."id" = s."user_id" AND u."phoneNumber" = $1) AS identities,
-         (SELECT count(*)::text FROM "zzsh_auth_user"."session" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."userId" WHERE u."phoneNumber" = $1) AS sessions,
-         (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = $2) AS verifications`,
-      [sessionFailurePhone, `phone-registration:${sessionFailurePhone}`],
-    );
-    assert.deepEqual(sessionFailureState.rows[0], { users: "1", accounts: "1", identities: "1", sessions: "0", verifications: "0" });
-    assert.equal((await request(base, "/api/auth/user/sign-in/identifier", { identifier: sessionFailurePhone, password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 200, "a session failure must be recoverable by login");
-
-    const numericUsername = "13700000001";
-    const numericUsernamePassword = randomBytes(24).toString("base64url");
-    const numericUsernameJar = cookieJar();
-    const numericUsernameSignup = await request(base, "/api/auth/user/sign-up/email", { email: "numeric-username@example.invalid", password: numericUsernamePassword, name: "Numeric Username", username: numericUsername }, numericUsernameJar, USER_ORIGIN);
-    assert.equal(numericUsernameSignup.response.status, 200);
-    assert.equal((await request(base, "/api/auth/user/sign-out", {}, numericUsernameJar, USER_ORIGIN)).response.status, 200);
-    const numericPhone = "+8613700000001";
-    const numericPhonePassword = randomBytes(24).toString("base64url");
-    const numericPhoneDelivery = await sendRegistration(numericPhone);
-    assert.equal((await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: numericPhone, code: numericPhoneDelivery.code, password: numericPhonePassword, acceptedTerms: true }, cookieJar(), USER_ORIGIN)).response.status, 200);
-    const ambiguousIdentifier = await request(base, "/api/auth/user/sign-in/identifier", { identifier: numericUsername, password: numericUsernamePassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(ambiguousIdentifier.response.status, 400, "an identifier shared by different accounts must not guess a target");
-    const explicitUsernameLogin = await request(base, "/api/auth/user/sign-in/identifier", { identifier: numericUsername, kind: "username", password: numericUsernamePassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(explicitUsernameLogin.response.status, 200);
-    const wrongExplicitPhoneLogin = await request(base, "/api/auth/user/sign-in/identifier", { identifier: numericUsername, kind: "phone", password: numericUsernamePassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(wrongExplicitPhoneLogin.response.status, 401, "explicit phone selection must not fall through to username");
-    const explicitPhoneLogin = await request(base, "/api/auth/user/sign-in/identifier", { identifier: numericUsername, kind: "phone", password: numericPhonePassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(explicitPhoneLogin.response.status, 200);
-    assert.equal((await request(base, "/api/auth/user/sign-in/identifier", { identifier: "13999999999", password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 401);
-    assert.equal((await request(base, "/api/auth/user/sign-in/identifier", { identifier: "unknown_zzsh_identifier", password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 401);
-
-    const registrationPurposeDelivery = await sendRegistration(phone);
-    const resetRequested = await request(base, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: phone }, cookieJar(), USER_ORIGIN);
-    assert.equal(resetRequested.response.status, 200);
-    const resetDelivery = fakeSmsOutbox.get(`${phone}-request-password-reset`);
-    assert.ok(resetDelivery);
-    assert.equal(resetDelivery.purpose, "password-reset");
-    const wrongPurposeReset = await request(base, "/api/auth/user/phone-number/reset-password", {
-      phoneNumber: phone,
-      otp: registrationPurposeDelivery.code,
-      newPassword: PASSWORD,
-    }, cookieJar(), USER_ORIGIN);
-    assert.ok(wrongPurposeReset.response.status >= 400);
-    const phoneReset = await request(base, "/api/auth/user/phone-number/reset-password", {
-      phoneNumber: phone,
-      otp: resetDelivery.code,
-      newPassword: PASSWORD,
-    }, cookieJar(), USER_ORIGIN);
-    assert.equal(phoneReset.response.status, 200);
-    const resetReplay = await request(base, "/api/auth/user/phone-number/reset-password", {
-      phoneNumber: phone,
-      otp: resetDelivery.code,
-      newPassword: PASSWORD,
-    }, cookieJar(), USER_ORIGIN);
-    assert.ok(resetReplay.response.status >= 400);
-    const resetVerification = await runtimePool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`,
-      [`${phone}-request-password-reset`],
-    );
-    assert.equal(resetVerification.rows[0]?.count, "0");
-    const duplicatePassword = randomBytes(24).toString("base64url");
-    const duplicateRegistration = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: phone, code: registrationPurposeDelivery.code, password: duplicatePassword, acceptedTerms: true }, cookieJar(), USER_ORIGIN);
-    assert.equal(duplicateRegistration.response.status, 409, "existing phone registration must not overwrite the credential");
-    assert.equal((await request(base, "/api/auth/user/sign-in/identifier", { identifier: "13800000000", password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 200);
-    assert.equal((await request(base, "/api/auth/user/sign-in/identifier", { identifier: "13800000000", password: duplicatePassword }, cookieJar(), USER_ORIGIN)).response.status, 401);
-    await migrationPool.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [`phone-registration:${phone}`]);
-    const revokedPhoneSession = await request(base, "/api/auth/user/get-session", undefined, phoneRegistrationJar, USER_ORIGIN);
-    assert.equal(revokedPhoneSession.response.status, 200);
-    assert.equal(revokedPhoneSession.body, null);
-    const phoneLogin = await request(base, "/api/auth/user/sign-in/identifier", { identifier: "13800000000", password: PASSWORD }, cookieJar(), USER_ORIGIN);
-    assert.equal(phoneLogin.response.status, 200);
-
-    const legacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const legacyNow = new Date();
-    assert.equal(LEGACY_PASSWORD.length, 8, "the legacy fixture intentionally uses a short old password");
-    const legacyMd5 = createHash("md5").update(LEGACY_PASSWORD).digest("hex");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
-      [legacyUserId, "Legacy User", "legacy-user@example.invalid", legacyNow, "legacy_user"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, legacyUserId, legacyMd5, legacyNow],
-    );
-    const legacyWrong = await request(base, "/api/auth/user/sign-in/username", { username: "legacy_user", password: "wrong-legacy-password" }, cookieJar(), USER_ORIGIN);
-    assert.equal(legacyWrong.response.status, 401);
-    const legacyUntouched = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null; upgrades: string }>(
-      `SELECT a."legacyPasswordMd5" AS legacy, a."legacyPasswordVersion" AS version, a."password",
-              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades
-         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
-      [legacyUserId],
-    );
-    assert.deepEqual(legacyUntouched.rows[0], { legacy: legacyMd5, version: "legacy-md5-v0", password: null, upgrades: "0" });
-    // Concurrent first logins serialize on the account row; each request still gets a session.
-    const legacyJarA = cookieJar();
-    const legacyJarB = cookieJar();
-    const legacyAttempts = await Promise.all([
-      request(base, "/api/auth/user/sign-in/username", { username: "legacy_user", password: LEGACY_PASSWORD }, legacyJarA, USER_ORIGIN),
-      request(base, "/api/auth/user/sign-in/username", { username: "LEGACY_USER", password: LEGACY_PASSWORD }, legacyJarB, USER_ORIGIN),
-    ]);
-    assert.deepEqual(legacyAttempts.map((attempt) => attempt.response.status), [200, 200]);
-    const legacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; salt: string | null; password: string | null; upgrades: string }>(
-      `SELECT a."legacyPasswordMd5" AS legacy, a."legacyPasswordVersion" AS version, a."legacyPasswordSalt" AS salt, a."password",
-              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades
-         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
-      [legacyUserId],
-    );
-    assert.deepEqual(legacyAccount.rows[0], { legacy: null, version: null, salt: null, password: legacyAccount.rows[0]?.password, upgrades: "1" });
-    assert.equal(typeof legacyAccount.rows[0]?.password, "string");
-    const legacySessionA = await request(base, "/api/auth/user/get-session", undefined, legacyJarA, USER_ORIGIN);
-    assert.equal(legacySessionA.body?.user?.id, legacyUserId);
-    assert.equal(legacySessionA.body?.user?.username, "legacy_user");
-    const legacySessionB = await request(base, "/api/auth/user/get-session", undefined, legacyJarB, USER_ORIGIN);
-    assert.equal(legacySessionB.body?.user?.id, legacyUserId);
-    // A retry after a lost upgrade response uses the now-current password path (case-normalized identifier).
-    const legacyRetryJar = cookieJar();
-    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "Legacy_User", password: LEGACY_PASSWORD }, legacyRetryJar, USER_ORIGIN)).response.status, 200);
-    assert.equal((await request(base, "/api/auth/user/get-session", undefined, legacyRetryJar, USER_ORIGIN)).body?.user?.id, legacyUserId);
-    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "legacy_user", password: "wrong-legacy-password" }, cookieJar(), USER_ORIGIN)).response.status, 401);
-
-    const saltedLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const saltedLegacySalt = "aB3dE";
-    const saltedLegacyPassword = randomBytes(24).toString("base64url");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
-      [saltedLegacyUserId, "Salted Legacy User", "salted-legacy@example.invalid", legacyNow, "salted_legacy_user"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v1', $4, $5, $5)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, saltedLegacyUserId, createHash("md5").update(saltedLegacyPassword + saltedLegacySalt).digest("hex"), saltedLegacySalt, legacyNow],
-    );
-    const saltedWrong = await request(base, "/api/auth/user/sign-in/username", { username: "salted_legacy_user", password: saltedLegacyPassword + "wrong" }, cookieJar(), USER_ORIGIN);
-    assert.equal(saltedWrong.response.status, 401);
-    const saltedSuccess = await request(base, "/api/auth/user/sign-in/username", { username: "salted_legacy_user", password: saltedLegacyPassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(saltedSuccess.response.status, 200);
-    const saltedLegacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; salt: string | null; password: string | null }>(
-      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "legacyPasswordSalt" AS salt, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
-      [saltedLegacyUserId],
-    );
-    assert.deepEqual(saltedLegacyAccount.rows[0], { legacy: null, version: null, salt: null, password: saltedLegacyAccount.rows[0]?.password });
-    const legacyScope = await runtimePool.query<{ upgraded: string; legacyRemaining: string }>(
-      `SELECT
-        (SELECT count(*)::text FROM "zzsh_auth_user"."account" WHERE "legacyPasswordUpgradedAt" IS NOT NULL AND "userId" = ANY($1::text[])) AS upgraded,
-        (SELECT count(*)::text FROM "zzsh_auth_user"."account" WHERE "legacyPasswordMd5" IS NOT NULL) AS "legacyRemaining"`,
-      [[legacyUserId, saltedLegacyUserId]],
-    );
-    assert.deepEqual(legacyScope.rows[0], { upgraded: "2", legacyRemaining: "0" });
-
-    const unknownLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const unknownLegacyPassword = randomBytes(24).toString("base64url");
-    const unknownLegacyMd5 = createHash("md5").update(unknownLegacyPassword).digest("hex");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
-      [unknownLegacyUserId, "Unknown Legacy", "unknown-legacy@example.invalid", legacyNow, "unknown_legacy"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v9', NULL, $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, unknownLegacyUserId, unknownLegacyMd5, legacyNow],
-    );
-    const unknownLegacyAttempt = await request(base, "/api/auth/user/sign-in/username", { username: "unknown_legacy", password: unknownLegacyPassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(unknownLegacyAttempt.response.status, 401);
-    const unknownLegacyRow = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null; upgrades: string }>(
-      `SELECT a."legacyPasswordMd5" AS legacy, a."legacyPasswordVersion" AS version, a."password",
-              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades
-         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
-      [unknownLegacyUserId],
-    );
-    assert.deepEqual(unknownLegacyRow.rows[0], { legacy: unknownLegacyMd5, version: "legacy-md5-v9", password: null, upgrades: "0" });
-
-    // A body the endpoint schema rejects must never reach the legacy upgrade (the standard
-    // endpoint returns 400 before the compatibility path runs).
-    const invalidLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const invalidLegacyPassword = randomBytes(24).toString("base64url");
-    const invalidLegacyMd5 = createHash("md5").update(invalidLegacyPassword).digest("hex");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
-      [invalidLegacyUserId, "Invalid Legacy", "invalid-legacy@example.invalid", legacyNow, "invalid_legacy"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, invalidLegacyUserId, invalidLegacyMd5, legacyNow],
-    );
-    const invalidLegacyBody = await request(base, "/api/auth/user/sign-in/username", {
-      username: "invalid_legacy",
-      password: invalidLegacyPassword,
-      rememberMe: "not-a-boolean",
-    }, cookieJar(), USER_ORIGIN);
-    assert.equal(invalidLegacyBody.response.status, 400);
-    const invalidLegacyRow = await runtimePool.query<{ legacy: string | null; password: string | null; upgrades: string; sessions: string }>(
-      `SELECT a."legacyPasswordMd5" AS legacy, a."password",
-              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades,
-              (SELECT count(*)::text FROM "zzsh_auth_user"."session" WHERE "userId" = a."userId") AS sessions
-         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
-      [invalidLegacyUserId],
-    );
-    assert.deepEqual(invalidLegacyRow.rows[0], { legacy: invalidLegacyMd5, password: null, upgrades: "0", sessions: "0" });
-
-    const disabledLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const disabledLegacyPassword = randomBytes(24).toString("base64url");
-    const disabledLegacyMd5 = createHash("md5").update(disabledLegacyPassword).digest("hex");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "suspended") VALUES ($1, $2, $3, $4, $4, $5, true)`,
-      [disabledLegacyUserId, "Disabled Legacy", "disabled-legacy@example.invalid", legacyNow, "disabled_legacy"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, disabledLegacyUserId, disabledLegacyMd5, legacyNow],
-    );
-    const disabledLegacyJar = cookieJar();
-    const disabledLegacyAttempt = await request(base, "/api/auth/user/sign-in/username", { username: "disabled_legacy", password: disabledLegacyPassword }, disabledLegacyJar, USER_ORIGIN);
-    assert.equal(disabledLegacyAttempt.response.status, 401);
-    assert.equal((await request(base, "/api/auth/user/get-session", undefined, disabledLegacyJar, USER_ORIGIN)).body, null);
-    const disabledLegacyRow = await runtimePool.query<{ legacy: string | null; password: string | null }>(
-      `SELECT "legacyPasswordMd5" AS legacy, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
-      [disabledLegacyUserId],
-    );
-    assert.deepEqual(disabledLegacyRow.rows[0], { legacy: disabledLegacyMd5, password: null });
-
-    const resetLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const resetLegacyPhone = "+8613900000001";
-    const resetLegacyPassword = randomBytes(24).toString("base64url");
-    const resetNextPassword = randomBytes(24).toString("base64url");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "phoneNumber", "phoneNumberVerified") VALUES ($1, $2, $3, $4, $4, $5, $6, true)`,
-      [resetLegacyUserId, "Reset Legacy", "reset-legacy@example.invalid", legacyNow, "reset_legacy", resetLegacyPhone],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, resetLegacyUserId, createHash("md5").update(resetLegacyPassword).digest("hex"), legacyNow],
-    );
-    const legacyResetRequested = await request(base, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: resetLegacyPhone }, cookieJar(), USER_ORIGIN);
-    assert.equal(legacyResetRequested.response.status, 200);
-    const legacyResetDelivery = fakeSmsOutbox.get(`${resetLegacyPhone}-request-password-reset`);
-    assert.ok(legacyResetDelivery);
-    assert.equal((await request(base, "/api/auth/user/phone-number/reset-password", {
-      phoneNumber: resetLegacyPhone,
-      otp: legacyResetDelivery.code,
-      newPassword: resetNextPassword,
-    }, cookieJar(), USER_ORIGIN)).response.status, 200);
-    const resetLegacyRow = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
-      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
-      [resetLegacyUserId],
-    );
-    assert.deepEqual(resetLegacyRow.rows[0], { legacy: null, version: null, password: resetLegacyRow.rows[0]?.password });
-    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "reset_legacy", password: resetLegacyPassword }, cookieJar(), USER_ORIGIN)).response.status, 401);
-    assert.equal((await request(base, "/api/auth/user/sign-in/username", { username: "reset_legacy", password: resetNextPassword }, cookieJar(), USER_ORIGIN)).response.status, 200);
-
-    const phoneLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const phoneLegacyNumber = "+8613900000002";
-    const phoneLegacySalt = "z9Yw2";
-    const phoneLegacyPassword = randomBytes(24).toString("base64url");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username", "phoneNumber", "phoneNumberVerified") VALUES ($1, $2, $3, $4, $4, $5, $6, true)`,
-      [phoneLegacyUserId, "Phone Legacy", "phone-legacy@example.invalid", legacyNow, "phone_legacy", phoneLegacyNumber],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "legacyPasswordSalt", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v1', $4, $5, $5)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, phoneLegacyUserId, createHash("md5").update(phoneLegacyPassword + phoneLegacySalt).digest("hex"), phoneLegacySalt, legacyNow],
-    );
-    assert.equal((await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: phoneLegacyNumber, password: phoneLegacyPassword + "wrong" }, cookieJar(), USER_ORIGIN)).response.status, 401);
-    const phoneLegacyJar = cookieJar();
-    assert.equal((await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: phoneLegacyNumber, password: phoneLegacyPassword }, phoneLegacyJar, USER_ORIGIN)).response.status, 200);
-    assert.equal((await request(base, "/api/auth/user/get-session", undefined, phoneLegacyJar, USER_ORIGIN)).body?.user?.id, phoneLegacyUserId);
-    const phoneLegacyRow = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
-      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
-      [phoneLegacyUserId],
-    );
-    assert.deepEqual(phoneLegacyRow.rows[0], { legacy: null, version: null, password: phoneLegacyRow.rows[0]?.password });
-
-    const legacyRollbackUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const legacyRollbackPassword = randomBytes(24).toString("base64url");
-    const legacyRollbackHash = createHash("md5").update(legacyRollbackPassword).digest("hex");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
-      [legacyRollbackUserId, "Legacy Rollback", "legacy-rollback@example.invalid", legacyNow, "legacy_rollback"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, legacyRollbackUserId, legacyRollbackHash, legacyNow],
-    );
-    await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    const failedLegacyUpgrade = await request(base, "/api/auth/user/sign-in/username", { username: "legacy_rollback", password: legacyRollbackPassword }, cookieJar(), USER_ORIGIN);
-    assert.equal(failedLegacyUpgrade.response.status, 500);
-    const rollbackLegacyAccount = await runtimePool.query<{ legacy: string | null; version: string | null; password: string | null }>(
-      `SELECT "legacyPasswordMd5" AS legacy, "legacyPasswordVersion" AS version, "password" FROM "zzsh_auth_user"."account" WHERE "userId" = $1`,
-      [legacyRollbackUserId],
-    );
-    assert.deepEqual(rollbackLegacyAccount.rows[0], { legacy: legacyRollbackHash, version: "legacy-md5-v0", password: null });
-    await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-
-    // Rate limiting runs before the sign-in endpoint, so a rate-limited request can never reach
-    // the legacy upgrade. The isolated app opts into the installed Better Auth limiter; the main
-    // app keeps the library default (disabled outside production) for the remaining cases.
-    const rateLimitLegacyUserId = `user_${randomUUID().replaceAll("-", "")}`;
-    const rateLimitLegacyPassword = randomBytes(24).toString("base64url");
-    const rateLimitLegacyMd5 = createHash("md5").update(rateLimitLegacyPassword).digest("hex");
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "createdAt", "updatedAt", "username") VALUES ($1, $2, $3, $4, $4, $5)`,
-      [rateLimitLegacyUserId, "Rate Limited Legacy", "rate-limited-legacy@example.invalid", legacyNow, "rate_limit_legacy"],
-    );
-    await migrationPool.query(
-      `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "legacyPasswordMd5", "legacyPasswordVersion", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, NULL, $3, 'legacy-md5-v0', $4, $4)`,
-      [`account_${randomUUID().replaceAll("-", "")}`, rateLimitLegacyUserId, rateLimitLegacyMd5, legacyNow],
-    );
-    const rateLimitPool = poolFor(resources.runtime, resources.databaseName, "zzsh-m3-auth-rate-limit", 2);
-    const rateLimitApp = await createApp({
-      health: {
-        dependencies: {
-          postgres: { check: async () => undefined, close: async () => undefined },
-          redis: { check: async () => undefined, close: async () => undefined },
-        },
-      },
-      database: { pool: rateLimitPool },
-      auth: {
-        ...loadAuthRuntimeConfig({
-          AUTH_API_ORIGIN: API_ORIGIN,
-          AUTH_USER_ORIGIN: USER_ORIGIN,
-          AUTH_ADMIN_ORIGIN: ADMIN_ORIGIN,
-          AUTH_USER_SECRET: randomBytes(32).toString("hex"),
-          AUTH_ADMIN_SECRET: randomBytes(32).toString("hex"),
-        }),
-        pool: rateLimitPool,
-        userRateLimit: { enabled: true },
-      },
-    });
-    await rateLimitApp.listen(0, "127.0.0.1");
-    const rateLimitBase = await rateLimitApp.getUrl();
-    try {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const burn = await request(rateLimitBase, "/api/auth/user/sign-in/username", { username: "rate_limit_burn", password: "wrong-password" }, cookieJar(), USER_ORIGIN);
-        assert.equal(burn.response.status, 401);
-      }
-      const limited = await request(rateLimitBase, "/api/auth/user/sign-in/username", { username: "rate_limit_legacy", password: rateLimitLegacyPassword }, cookieJar(), USER_ORIGIN);
-      assert.equal(limited.response.status, 429);
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const identifierBurn = await request(rateLimitBase, "/api/auth/user/sign-in/identifier", { identifier: "identifier_rate_limit_burn", password: "wrong-password", kind: "username" }, cookieJar(), USER_ORIGIN);
-        assert.equal(identifierBurn.response.status, 401);
-      }
-      const limitedIdentifier = await request(rateLimitBase, "/api/auth/user/sign-in/identifier", { identifier: "rate_limit_legacy", password: rateLimitLegacyPassword, kind: "username" }, cookieJar(), USER_ORIGIN);
-      assert.equal(limitedIdentifier.response.status, 429, "the new identifier entry must be limited before legacy upgrade");
-    } finally {
-      await rateLimitApp.close();
-      await rateLimitPool.end().catch(() => undefined);
-    }
-    const rateLimitRow = await runtimePool.query<{ legacy: string | null; password: string | null; upgrades: string; sessions: string }>(
-      `SELECT a."legacyPasswordMd5" AS legacy, a."password",
-              (SELECT count(*)::text FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.legacy_password.upgraded' AND "object_id" = a."id") AS upgrades,
-              (SELECT count(*)::text FROM "zzsh_auth_user"."session" WHERE "userId" = a."userId") AS sessions
-         FROM "zzsh_auth_user"."account" a WHERE a."userId" = $1`,
-      [rateLimitLegacyUserId],
-    );
-    assert.deepEqual(rateLimitRow.rows[0], { legacy: rateLimitLegacyMd5, password: null, upgrades: "0", sessions: "0" });
+    await runUserSecurityChecks({ base, runtime: runtimePool, migration: migrationPool, runtimeRole: resources.runtimeUser, request, jar: cookieJar, sms: fakeSmsOutbox, security: fakeUserSecurityOutbox, origin: USER_ORIGIN });
 
     const firstBootstrap = await request(base, "/api/v1/admin/security/bootstrap", {
       bootstrapSecret: ADMIN_BOOTSTRAP_SECRET,
@@ -1547,6 +1061,24 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(bffSession.body?.session?.pinConfigured, false);
     assert.equal(bffSession.body?.security?.passwordChangeRequired, false);
     assert.equal(bffSession.body?.session?.token, undefined);
+    const batchEvidence = (index: number): LegacyOwnerEvidence => ({ sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: "auth-batch-" + index, sourceDigest: createHash("sha256").update("auth-batch-source-" + index).digest("hex"), evidenceRef: "auth-full-isolated-fixture", nickname: "同名" + "长".repeat(100), mobile: "1390090000" + index, sourceCreatedAt: null, sourceUpdatedAt: null, status: { realNameBound: false, ageAdult: null, disabled: false, deleted: false }, legacyPassword: null });
+    const batchInputs = [1, 2].map(index => { const evidence = batchEvidence(index); return { evidence, evidenceDigest: legacyOwnerEvidenceDigest(evidence) }; });
+    const planHash = createHash("sha256").update(JSON.stringify(batchInputs)).digest("hex");
+    const batchActor = { id: adminId, sessionId: adminSession.body?.session.id, requestId: "auth-full-batch-pg" };
+    const firstBatch = await migrateLegacyUserBatch(runtimePool, batchInputs, batchActor, { planSha256: planHash, nextIndex: 0 }, planHash, 1);
+    assert.equal(firstBatch.complete, false); assert.equal(firstBatch.cursor.nextIndex, 1);
+    const resumedBatch = await migrateLegacyUserBatch(runtimePool, batchInputs, batchActor, firstBatch.cursor, planHash, 1);
+    assert.equal(resumedBatch.complete, true); assert.equal(resumedBatch.cursor.nextIndex, 2);
+    assert.notEqual(firstBatch.results[0]?.userId, resumedBatch.results[0]?.userId);
+    assert.equal((await runtimePool.query(`SELECT name FROM zzsh_auth_user."user" WHERE id=$1`, [firstBatch.results[0]?.userId])).rows[0].name.length, 102);
+    const replayBatch = await migrateLegacyUserBatch(runtimePool, batchInputs, batchActor, { planSha256: planHash, nextIndex: 0 }, planHash);
+    assert.ok(replayBatch.results.every(item => item.outcome === "REPLAYED"));
+    await assert.rejects(() => migrateLegacyUserBatch(runtimePool!, batchInputs, batchActor, { planSha256: "0".repeat(64), nextIndex: 1 }, planHash), /checkpoint/);
+    const changedEvidence = { ...batchInputs[0]!.evidence, nickname: "changed source" };
+    const conflictBatch = await migrateLegacyUserBatch(runtimePool, [{ evidence: changedEvidence, evidenceDigest: legacyOwnerEvidenceDigest(changedEvidence) }], batchActor, { planSha256: planHash, nextIndex: 0 }, planHash);
+    assert.equal(conflictBatch.results[0]?.outcome, "QUARANTINED");
+    assert.equal((await runtimePool.query(`SELECT count(*)::int AS n FROM zzsh_auth_user."user" WHERE "phoneNumber" IN ('+8613900900001','+8613900900002')`)).rows[0].n, 2);
+    console.log("AUTH_FULL_BATCH_PG_CHECKS checkpoint,resume,replay,source-conflict,long-nickname,same-nickname-stable-ids");
     const bffDirectory = await request(base, "/api/bff/admin/security/admins", undefined, bffAdmin, ADMIN_ORIGIN);
     assert.equal(bffDirectory.response.status, 200);
     assert.ok(bffDirectory.body?.admins?.some((entry: { username?: string }) => entry.username === adminUsername.toUpperCase()));
@@ -1746,23 +1278,19 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const deactivatedForRestore = await request(base, "/api/auth/user/account/deactivate", { reason: "恢复流程 fixture" }, user, USER_ORIGIN);
     assert.equal(deactivatedForRestore.response.status, 200);
     assert.equal((await request(base, "/api/auth/user/get-session", undefined, user, USER_ORIGIN)).body, null);
-    const restoreOtpRequested = await request(base, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: restorePhone }, cookieJar(), USER_ORIGIN);
-    assert.equal(restoreOtpRequested.response.status, 200);
-    const restoreOtp = fakeSmsOutbox.get(`${restorePhone}-request-password-reset`);
-    assert.ok(restoreOtp);
-    assert.equal(restoreOtp.purpose, "password-reset");
-    const restoreOtpBefore = await runtimePool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`,
-      [`${restorePhone}-request-password-reset`],
-    );
-    assert.equal(restoreOtpBefore.rows[0]?.count, "1");
+    // Controlled old pending recovery proof for the existing Admin restore/revocation contract.
+    const restoreChallengeId = randomUUID().replaceAll('-', '');
+    const restoreOtp = { code: '123456' };
+    await migrationPool.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,$3,clock_timestamp()+interval '5 minutes',clock_timestamp(),clock_timestamp())`, [restoreChallengeId, 'user-security:'+restoreChallengeId, JSON.stringify({ version: 1, userId, purpose: 'recovery', verified: false, codeHash: createHash('sha256').update(restoreChallengeId+restoreOtp.code).digest('hex') })]);
+    const restoreOtpBefore = await runtimePool.query<{count:string}>('SELECT count(*)::text AS count FROM zzsh_auth_user.verification WHERE identifier=$1', ['user-security:'+restoreChallengeId]);
+    assert.equal(restoreOtpBefore.rows[0]?.count, '1');
     const identityBeforeRestore = await runtimePool.query<{ accountStatus: string; identityStatus: string; ageStatus: string; provider: string; version: number; suspended: boolean }>(
       `SELECT s."account_status" AS "accountStatus", s."identity_status" AS "identityStatus", s."age_status" AS "ageStatus", s."provider", s."version", u."suspended"
          FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
         WHERE s."user_id" = $1`,
       [userId],
     );
-    assert.deepEqual(identityBeforeRestore.rows[0], { accountStatus: "DEACTIVATED", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 2, suspended: true });
+    assert.deepEqual(identityBeforeRestore.rows[0], { accountStatus: "DEACTIVATED", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 3, suspended: true });
 
     const restoreUnauthenticated = await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, cookieJar(), ADMIN_ORIGIN);
     assert.equal(restoreUnauthenticated.response.status, 401);
@@ -1825,17 +1353,13 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
         WHERE s."user_id" = $1`,
       [userId],
     );
-    assert.deepEqual(restoredState.rows[0], { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 3, suspended: false });
+    assert.deepEqual(restoredState.rows[0], { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 4, suspended: false });
     const restoreOtpAfter = await runtimePool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`,
-      [`${restorePhone}-request-password-reset`],
+      ['user-security:'+restoreChallengeId],
     );
     assert.equal(restoreOtpAfter.rows[0]?.count, "0");
-    const revokedRestoreOtp = await request(base, "/api/auth/user/phone-number/reset-password", {
-      phoneNumber: restorePhone,
-      otp: restoreOtp.code,
-      newPassword: `${PASSWORD}-old-otp`,
-    }, cookieJar(), USER_ORIGIN);
+    const revokedRestoreOtp = await request(base, '/api/auth/user/security/challenge/verify', { challengeId: restoreChallengeId, code: restoreOtp.code }, cookieJar(), USER_ORIGIN);
     assert.ok(revokedRestoreOtp.response.status >= 400);
     const repeatRestore = await request(base, "/api/v1/admin/security/users/restore", {
       targetUserId: userId,
@@ -1859,7 +1383,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     );
     assert.deepEqual(cancelledAfterRestoreAttempt.rows[0], { accountStatus: "CANCELLED", suspended: true });
     const restoredUserLogin = cookieJar();
-    const restoredUserSignIn = await request(base, "/api/auth/user/sign-in/username", { username: "m2_user", password: PASSWORD }, restoredUserLogin, USER_ORIGIN);
+    const restoredUserSignIn = await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: restorePhone, password: PASSWORD }, restoredUserLogin, USER_ORIGIN);
     assert.equal(restoredUserSignIn.response.status, 200);
     assert.ok((await request(base, "/api/auth/user/get-session", undefined, restoredUserLogin, USER_ORIGIN)).body?.user?.id);
 
@@ -3037,16 +2561,31 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       assert.equal((await complete("888888")).response.status, 200);
       assert.notEqual((await complete("888888")).response.status, 200);
       const newPassword = randomBytes(24).toString("base64url");
-      const reset = () => request(mockBase, "/api/auth/user/phone-number/reset-password", { phoneNumber: mockPhone, otp: "888888", newPassword }, cookieJar(), USER_ORIGIN);
-      assert.notEqual((await reset()).response.status, 200);
-      assert.equal((await request(mockBase, "/api/auth/user/phone-number/request-password-reset", { phoneNumber: mockPhone }, cookieJar(), USER_ORIGIN)).response.status, 200);
-      const stored = await runtimePool.query('SELECT "value" FROM "zzsh_auth_user"."verification" WHERE "identifier"=$1', [mockPhone + "-request-password-reset"]);
-      assert.equal(stored.rows[0]?.value, "888888:0");
-      assert.equal((await reset()).response.status, 200);
-      assert.notEqual((await reset()).response.status, 200);
-      assert.equal((await request(mockBase, "/api/auth/user/sign-in/phone-number", { phoneNumber: mockPhone, password: newPassword }, cookieJar(), USER_ORIGIN)).response.status, 200);
-      assert.notEqual((await request(mockBase, "/api/auth/user/sign-in/phone-number", { phoneNumber: mockPhone, password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 200);
+      const sentRecovery = await request(mockBase, '/api/auth/user/security/challenge/send', { purpose: 'recovery', channel: 'phone', contact: mockPhone }, cookieJar(), USER_ORIGIN);
+      assert.equal(sentRecovery.response.status, 200);
+      const verifiedRecovery = await request(mockBase, '/api/auth/user/security/challenge/verify', { challengeId: sentRecovery.body?.challengeId, code: '888888' }, cookieJar(), USER_ORIGIN);
+      assert.equal(verifiedRecovery.response.status, 200);
+      const recoveryBody = { proofId: verifiedRecovery.body?.proofId, newPassword };
+      assert.equal((await request(mockBase, '/api/auth/user/security/recovery/complete', recoveryBody, cookieJar(), USER_ORIGIN)).response.status, 200);
+      assert.equal((await request(mockBase, '/api/auth/user/security/recovery/complete', recoveryBody, cookieJar(), USER_ORIGIN)).response.status, 200);
+      assert.equal((await request(mockBase, '/api/auth/user/security/recovery/complete', { ...recoveryBody, newPassword: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 409);
+      assert.equal((await request(mockBase, '/api/auth/user/sign-in/phone-number', { phoneNumber: mockPhone, password: newPassword }, cookieJar(), USER_ORIGIN)).response.status, 200);
+      assert.notEqual((await request(mockBase, '/api/auth/user/sign-in/phone-number', { phoneNumber: mockPhone, password: PASSWORD }, cookieJar(), USER_ORIGIN)).response.status, 200);
     } finally { await mockApp.close(); }
+
+    const limitedPool = new Pool(runtimePool.options);
+    const limitedApp = await createApp({
+      health: { dependencies: { postgres: { check: async () => undefined, close: async () => undefined }, redis: { check: async () => undefined, close: async () => undefined } } }, database: { pool: limitedPool },
+      auth: { ...loadAuthRuntimeConfig({ AUTH_USER_SECRET: "l".repeat(32), AUTH_ADMIN_SECRET: "q".repeat(32) }), pool: limitedPool, userRateLimit: { enabled: true, customRules: { "/sign-in/phone-number": { window: 60, max: 2 }, "/sign-in/identifier": { window: 60, max: 2 } } } },
+    });
+    try {
+      await limitedApp.listen(0, "127.0.0.1"); const limitedBase = await limitedApp.getUrl();
+      for (const route of ["/sign-in/phone-number", "/sign-in/identifier"]) {
+        for (let attempt = 0; attempt < 2; attempt++) assert.equal((await request(limitedBase, "/api/auth/user" + route, route.endsWith("identifier") ? { identifier: "not-a-phone", password: "x", kind: "phone" } : { phoneNumber: "not-a-phone", password: "x" }, cookieJar(), USER_ORIGIN, undefined, { "x-forwarded-for": "198.51.100.91" })).response.status, 400);
+        assert.equal((await request(limitedBase, "/api/auth/user" + route, route.endsWith("identifier") ? { identifier: "not-a-phone", password: "x", kind: "phone" } : { phoneNumber: "not-a-phone", password: "x" }, cookieJar(), USER_ORIGIN, undefined, { "x-forwarded-for": "198.51.100.91" })).response.status, 429);
+      }
+      console.log("AUTH_FULL_LIMITER_PG_CHECKS malformed-input-rate-limited-before-legacy-verification");
+    } finally { await limitedApp.close(); }
 
   } finally {
     const cleanupErrors: unknown[] = [];

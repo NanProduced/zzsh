@@ -7,6 +7,28 @@ const { GET, POST } = await import("../src/app/api/auth/user/[...path]/route.ts"
 const WEB_ORIGIN = "http://127.0.0.1:3100";
 const routeContext = (path) => ({ params: Promise.resolve({ path }) });
 
+test("username/email and legacy SDK change bypasses are rejected by the BFF without forwarding", async () => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ status: true }); };
+  try {
+    for (const path of [["sign-in", "username"], ["sign-in", "email"], ["sign-up", "email"], ["phone-number", "verify"], ["phone-number", "reset-password"]]) {
+      assert.equal((await POST(request(path, { method: "POST", body: "{}", headers: { "content-type": "application/json" } }), routeContext(path))).status, 404);
+    }
+    assert.equal(calls, 0);
+  } finally { globalThis.fetch = original; }
+});
+
+test("an accepted upstream write with an unreadable body keeps its filtered user Cookie and accepted fact", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.error(new Error("lost body")); } }), { status: 200, headers: { "set-cookie": "zzsh_user.session_token=fixture; HttpOnly; Path=/", "content-type": "application/json" } });
+  try {
+    const path = ["security", "password"];
+    const response = await POST(request(path, { method: "POST", body: "{}", headers: { "content-type": "application/json" } }), routeContext(path));
+    assert.equal(response.status, 502); assert.equal((await response.json()).error.accepted, true);
+    assert.ok(response.headers.getSetCookie().some(value => value.startsWith("zzsh_user.session_token=")));
+  } finally { globalThis.fetch = original; }
+});
+
 function request(path, init = {}) {
   return new Request(`http://localhost/api/auth/user/${path.join("/")}`, {
     ...init,

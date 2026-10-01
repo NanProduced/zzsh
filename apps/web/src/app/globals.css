@@ -2054,7 +2054,7 @@ html[data-theme="light"] .auth-brand-copy .brand-logo { filter:none; }
 .auth-dialog-form .auth-field input,.auth-dialog-form .auth-code-row input { border-color:transparent; background:var(--color-bg-canvas); }
 .auth-code-row { position:relative; display:block; }
 .auth-code-row input { padding-right:112px; }
-.auth-code-row .button { position:absolute; right:6px; top:0; background:transparent; border:0; padding-inline:10px; color:var(--color-accent-brand); font-weight:500; }
+.auth-code-row .button { position:absolute; right:6px; top:0; width:auto; background:transparent; border:0; padding-inline:10px; color:var(--color-accent-brand); font-weight:500; }
 .auth-secondary-actions { display:flex; justify-content:space-between; align-items:center; font-size:12px; }
 .auth-secondary-actions button { background:none; border:0; padding:0; color:var(--color-text-secondary); }
 .auth-secondary-actions .auth-switch-link { text-decoration:none; min-height:24px; }
@@ -2192,3 +2192,6 @@ html[data-theme="dark"] .account-gallery-dialog { --gallery-stage-bg:#080808; --
   .thumbnail-carousel-nav--next { right:8px; }
   .thumbnail-carousel-thumbnails { justify-content:flex-start; }
 }
+
+.auth-form .auth-methods button, .auth-form .auth-secondary-actions button, .auth-form .auth-password-toggle, .auth-form .auth-consent button { min-height:44px; }
+.auth-form input[aria-invalid="true"] { border-color:var(--color-accent-brand); }

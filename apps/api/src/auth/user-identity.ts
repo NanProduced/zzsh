@@ -400,15 +400,18 @@ async function revokeUserCredentials(client: PoolClient, userId: string): Promis
   if (phone) {
     identifiers.add(phone);
     identifiers.add(`${phone}-request-password-reset`);
+    identifiers.add(`phone-registration:${phone}`);
   }
   const verification = await client.query(
     `WITH target_challenges AS (
        SELECT "identifier" FROM "zzsh_auth_user"."verification"
         WHERE "value" = $1 OR "identifier" = ANY($2::text[])
+           OR CASE WHEN "identifier" LIKE 'user-security:%' THEN "value"::jsonb->>'userId' = $1 ELSE false END
      )
      DELETE FROM "zzsh_auth_user"."verification" AS verification
       WHERE verification."value" = $1
          OR verification."identifier" = ANY($2::text[])
+         OR CASE WHEN verification."identifier" LIKE 'user-security:%' THEN verification."value"::jsonb->>'userId' = $1 ELSE false END
          OR verification."identifier" IN (
            SELECT '2fa-attempts-' || "identifier" FROM target_challenges
          )`,

@@ -41,7 +41,7 @@ test("a broken read after a confirmed user does not become a guest and can be re
   let broken = true;
   const store = createBrowserUserSessionStore(async () => {
     if (broken) return new Response("{oops", { status: 200 });
-    return jsonResponse({ user: { id: "user-a", username: "alpha" } });
+    return jsonResponse({ user: { id: "user-a", name: "alpha", username: "legacy-alias" } });
   });
   await store.confirm();
   assert.equal(store.getSnapshot().status, "error");
@@ -51,6 +51,11 @@ test("a broken read after a confirmed user does not become a guest and can be re
   assert.equal(store.getSnapshot().userId, "user-a");
   assert.equal(store.getSnapshot().displayName, "alpha");
   store.dispose();
+});
+
+test("a historical username is never used as the user's display name", async () => {
+  const store = createBrowserUserSessionStore(async () => jsonResponse({ user: { id: "user-a", username: "historical-phone-alias" } }));
+  await store.confirm(); assert.equal(store.getSnapshot().displayName, null); store.dispose();
 });
 
 test("sign-out reports the server outcome instead of assuming success", async () => {

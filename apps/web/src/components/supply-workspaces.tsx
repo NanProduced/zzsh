@@ -13,6 +13,7 @@ import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { OrderWorkspace } from "./order/order-workspace";
 import { AccountCenterFrame, AccountOverview, accountSectionLabels, resolveAccountView } from "./account/account-center";
+import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { groupForField, editableDeclaration, inventoryEditorRows, inventoryPriceHint, mergeInventory, supplyApi, supplyBlockerMessages, supplyGroups, SupplyRequestError, uploadSupplyMedia, type CatalogAvailability } from "../lib/supply-client";
 import { freezeRequest, IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import { MEDIA_ACCEPT_ATTRIBUTE, MEDIA_UPLOAD_HINT, mediaUploadFailureHint } from "../lib/media-upload";
@@ -1293,6 +1294,10 @@ function AccountUnavailable({ label }: { label: string }) {
 export function AccountWorkspace({ view, accountId, orderId, status }: { view: string; accountId?: string; orderId?: string; status?: string }) {
   const router = useRouter();
   const session = useUserSession();
+  const nicknameDraft = useRef<SecurityNicknameDraft["current"]>(null);
+  const pendingSecurityWrite = useRef<SecurityPendingWrite["current"]>(null);
+  if (session.status === "guest" || session.status === "authenticated" && nicknameDraft.current?.userId !== session.userId) nicknameDraft.current = null;
+  if (session.status === "guest" || session.status === "authenticated" && pendingSecurityWrite.current?.userId !== session.userId) pendingSecurityWrite.current = null;
   const active = resolveAccountView(view);
   const accountShell = {
     surface: "account" as const,
@@ -1315,7 +1320,7 @@ export function AccountWorkspace({ view, accountId, orderId, status }: { view: s
   const identityScope = `${session.userId}:${session.identityVersion}`;
   return <ServiceShell {...accountShell} title={title}>
     <AccountCenterFrame active={active} accountId={accountId} orderId={orderId} status={status} scope={identityScope}>
-      {active === "overview" ? <AccountOverview scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} /> : <AccountUnavailable label={accountSectionLabels[active]} />}
+      {active === "overview" ? <AccountOverview scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} /> : <AccountUnavailable label={accountSectionLabels[active]} />}
     </AccountCenterFrame>
   </ServiceShell>;
 }
@@ -1418,7 +1423,7 @@ function AccountIdentityPanel() {
   </section>;
 }
 
-function AccountSecurityPanel() {
+function AccountSecurityPanel({ nicknameDraft, pendingWrite }: { nicknameDraft?: SecurityNicknameDraft; pendingWrite?: SecurityPendingWrite } = {}) {
   const session = useUserSession();
   const { profile, identity, loading, error: readError, load, proof, isAuthorized, invalidate } = useAccountIdentityRead("账号安全信息暂时无法读取，请重试。");
   const [actionState, setActionState] = useState<{ proof: AccountReadProof; busy: boolean; error: string; notice: string } | null>(null);
@@ -1460,14 +1465,11 @@ function AccountSecurityPanel() {
       {error ? <p className="account-module-note is-error" role="alert">{error}</p> : null}
       {notice ? <p className="account-module-note" role="status">{notice}</p> : null}
       <section className="account-module-card">
-        <div className="account-card-heading"><LockKeyhole size={20} aria-hidden="true" /><h3>登录与账号资料</h3></div>
         <dl className="account-fact-list">
-          <div><dt>账号名</dt><dd>{profile?.username || "未设置"}</dd></div>
-          <div><dt>手机号</dt><dd>{profile?.phoneNumber ? maskPhone(profile.phoneNumber) : "未绑定"}</dd></div>
           <div><dt>账号状态</dt><dd>{identity ? accountStatusLabel(identity.accountStatus) : "暂无法确认"}</dd></div>
         </dl>
-        <p className="account-module-note">手机号换绑、密码修改与登录设备管理暂未开放。</p>
       </section>
+      {proof ? <AccountSecurityControls key={proof.scope} userId={proof.userId} canAct={() => isAuthorized(proof)} nicknameDraft={nicknameDraft} pendingWrite={pendingWrite} /> : null}
       <section className="account-module-card account-danger-zone"><div><h3>注销账号</h3><p>注销会退出当前登录并匿名化普通资料。请先处理未完成订单等事项。</p></div><button type="button" className="button secondary" disabled={Boolean(busy) || !proof || !profile} onClick={() => void cancelAccount()}>{busy === "cancel" ? "处理中…" : "注销账号"}</button></section>
     </>}
   </section>;

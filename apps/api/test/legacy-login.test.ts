@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { readPasswordSetupRequired } from "../src/auth/legacy-login";
+import { readUserPasswordState } from "../src/auth/legacy-login";
 
 function db(rows: Array<Record<string, unknown>>) {
   const calls: Array<{ text: string; values?: unknown[] }> = [];
@@ -13,16 +13,16 @@ function db(rows: Array<Record<string, unknown>>) {
   };
 }
 
-test("a migrated user with a preserved legacy credential but no local password must set one", async () => {
-  const fake = db([{ migrated: true, legacyCredential: true }]);
-  assert.equal(await readPasswordSetupRequired(fake, "user-1"), true);
+test("recognized legacy and modern credentials are set without forcing a replacement", async () => {
+  const fake = db([{ modern: false, legacy: true }]);
+  assert.equal(await readUserPasswordState(fake, "user-1"), "set");
   assert.equal(fake.calls.length, 1);
   assert.deepEqual(fake.calls[0]!.values, ["user-1"]);
 });
 
-test("a user without a legacy credential is never told to set a password", async () => {
-  assert.equal(await readPasswordSetupRequired(db([{ migrated: true, legacyCredential: false }]), "user-1"), false);
-  assert.equal(await readPasswordSetupRequired(db([{ migrated: false, legacyCredential: true }]), "user-1"), false);
-  assert.equal(await readPasswordSetupRequired(db([{ migrated: null, legacyCredential: null }]), "user-1"), false);
-  assert.equal(await readPasswordSetupRequired(db([]), "user-1"), false);
+test("absent passwords and unavailable credentials are distinct, and reads fail closed", async () => {
+  assert.equal(await readUserPasswordState(db([{ modern: true, legacy: false }]), "user-1"), "set");
+  assert.equal(await readUserPasswordState(db([{ modern: false, legacy: false }]), "user-1"), "unavailable");
+  assert.equal(await readUserPasswordState(db([]), "user-1"), "not-set");
+  await assert.rejects(readUserPasswordState({ query: async () => { throw new Error("read failed"); } }, "user-1"));
 });
