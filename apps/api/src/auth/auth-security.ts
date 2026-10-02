@@ -1345,7 +1345,14 @@ export async function attemptLegacyCredentialUpgrade(
   password: string,
   requestId: string,
 ): Promise<LegacyCredentialOutcome> {
-  return withTransaction(pool, async (client) => {
+  return withTransaction(pool, (client) => verifyUserCredentialInTransaction(client, verifyPassword, hashPassword, lookup, password, requestId));
+}
+
+/** Same compatibility path, sharing the caller's lock/transaction with session creation or reset. */
+export async function verifyUserCredentialInTransaction(
+  client: PoolClient, verifyPassword: PasswordVerifier, hashPassword: PasswordHasher,
+  lookup: LegacyCredentialLookup, password: string, requestId: string,
+): Promise<LegacyCredentialOutcome> {
     const account = await client.query<{
       id: string;
       userId: string;
@@ -1390,7 +1397,6 @@ export async function attemptLegacyCredentialUpgrade(
     if (updated.rowCount !== 1) throw new Error("legacy credential upgrade did not apply");
     await recordAudit(client, { actorType: "user", actorId: row.userId, action: "user.legacy_password.upgraded", objectType: "auth_account", objectId: row.id, outcome: "SUCCESS", requestId });
     return "retry";
-  });
 }
 
 export async function handleAdminSecurity(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {

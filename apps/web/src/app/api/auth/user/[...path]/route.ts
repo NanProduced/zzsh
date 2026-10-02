@@ -11,16 +11,13 @@ const ORIGIN_CONFIGURATION_VALID = isHttpOrigin(API_ORIGIN) && isHttpOrigin(WEB_
 const USER_AUTH_PATHS = new Set([
   "/get-session",
   "/sign-in/identifier",
-  "/sign-in/username",
   "/sign-in/phone-number",
   "/sign-out",
-  "/sign-up/email",
-  "/phone-number/send-otp",
-  "/phone-number/verify",
-  "/phone-number/request-password-reset",
-  "/phone-number/reset-password",
   "/phone-registration/send-otp",
   "/phone-registration/complete",
+  "/security/overview", "/profile/nickname", "/security/challenge/send", "/security/challenge/verify",
+  "/security/password", "/security/email", "/security/phone", "/security/recovery/complete", "/security/operation",
+  "/security/sessions", "/security/sessions/revoke", "/security/sessions/revoke-others", "/security/sessions/revoke-all",
   "/identity/status",
   "/identity/verify",
   "/trade-eligibility/check",
@@ -41,8 +38,8 @@ const RESPONSE_HEADERS = new Set([
   "x-ratelimit-remaining",
   "x-ratelimit-reset",
 ]);
-function errorResponse(status: number, code: string, requestId: string): Response {
-  return Response.json({ error: { code, message: "Authentication request rejected", requestId } }, { status, headers: { "Cache-Control": "no-store", "X-Request-Id": requestId } });
+function errorResponse(status: number, code: string, requestId: string, headers?: Headers, accepted = false): Response {
+  return Response.json({ error: { code, message: "Authentication request rejected", requestId, ...(accepted ? { accepted: true } : {}) } }, { status, headers: headers ?? { "Cache-Control": "no-store", "X-Request-Id": requestId } });
 }
 
 async function forward(request: Request, { params }: { params: Promise<{ path: string[] }> }): Promise<Response> {
@@ -52,6 +49,8 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   const authPath = `/${path.join("/")}`;
   if (!USER_AUTH_PATHS.has(authPath)) return errorResponse(404, "NOT_FOUND", requestId);
   const method = request.method.toUpperCase();
+  const readPath = ["/get-session", "/identity/status", "/security/overview", "/security/sessions"].includes(authPath);
+  if (method !== (readPath ? "GET" : "POST") && !(readPath && method === "HEAD" && authPath === "/get-session")) return errorResponse(404, "NOT_FOUND", requestId);
   const expectedSecurityMethod = authPath === "/identity/status" ? "GET" : USER_SECURITY_POST_PATHS.has(authPath) ? "POST" : undefined;
   if (expectedSecurityMethod && method !== expectedSecurityMethod) return errorResponse(404, "NOT_FOUND", requestId);
   if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
@@ -88,11 +87,11 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   try {
     text = method === "HEAD" ? "" : await upstream.text();
   } catch {
-    return errorResponse(502, "INTERNAL_ERROR", requestId);
+    return errorResponse(502, "INTERNAL_ERROR", requestId, responseHeaders, upstream.ok);
   }
   if (!text) return new Response(null, { status: upstream.status, headers: responseHeaders });
   let payload: unknown;
-  try { payload = sanitizeResponse(JSON.parse(text)); } catch { return errorResponse(502, "INTERNAL_ERROR", requestId); }
+  try { payload = sanitizeResponse(JSON.parse(text)); } catch { return errorResponse(502, "INTERNAL_ERROR", requestId, responseHeaders, upstream.ok); }
   return new Response(JSON.stringify(payload), { status: upstream.status, headers: responseHeaders });
 }
 

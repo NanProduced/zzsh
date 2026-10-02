@@ -19,8 +19,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 
 import { createAuthSchema } from "./auth-schema";
 import { normalizeMainlandPhone } from "./phone-number";
-import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, attemptLegacyCredentialUpgrade, type AdminSecurityNotification, type AuthSecurityOptions, type LegacyCredentialLookup } from "./auth-security";
-import { readPasswordSetupRequired } from "./legacy-login";
+import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
+import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from "./user-auth-session";
+import { hasLegacyPhoneConflict, readUserPasswordState, type UserPasswordState } from "./legacy-login";
+import { buildUserSecurityPlugin, type UserSecurityDelivery } from "./user-security";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
@@ -76,6 +78,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Exact server-side App/order/Team/conversation allowlist for local provider-test message routing. */
   orderImSdkRouteConfig?: OrderImSdkRouteConfig;
   fakeSmsOutbox?: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>;
+  fakeUserSecurityOutbox?: Map<string, UserSecurityDelivery>;
   fakeAdminNotificationOutbox?: AdminSecurityNotification[];
   rateLimitState?: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget?: { inFlight: number };
@@ -125,16 +128,13 @@ type AuthHandler = (request: NodeRequest, response: NodeResponse) => Promise<voi
 const USER_ALLOWED_PATHS = new Set([
   "/get-session",
   "/sign-in/identifier",
-  "/sign-in/username",
   "/sign-in/phone-number",
   "/sign-out",
-  "/sign-up/email",
-  "/phone-number/send-otp",
-  "/phone-number/verify",
-  "/phone-number/request-password-reset",
-  "/phone-number/reset-password",
   "/phone-registration/send-otp",
   "/phone-registration/complete",
+  "/security/overview", "/profile/nickname", "/security/challenge/send", "/security/challenge/verify",
+  "/security/password", "/security/email", "/security/phone", "/security/recovery/complete", "/security/operation",
+  "/security/sessions", "/security/sessions/revoke", "/security/sessions/revoke-others", "/security/sessions/revoke-all",
 ]);
 
 const USER_SECURITY_PATHS = new Set([
@@ -170,27 +170,6 @@ export { normalizeMainlandPhone };
 
 function phoneRegistrationIdentifier(phoneNumber: string): string {
   return `${PHONE_REGISTRATION_IDENTIFIER_PREFIX}${phoneNumber}`;
-}
-
-type IdentifierResolution = "phone-number" | "username" | "ambiguous";
-
-async function resolveSignInIdentifier(pool: Pool, identifier: string): Promise<IdentifierResolution> {
-  const phoneNumber = normalizeMainlandPhone(identifier);
-  const loweredIdentifier = identifier.toLowerCase();
-  const result = await pool.query<{ id: string; username: string | null; phoneNumber: string | null }>(
-    `SELECT "id", "username", "phoneNumber"
-       FROM "zzsh_auth_user"."user"
-      WHERE ("phoneNumber" IS NOT NULL AND "phoneNumber" = $1)
-         OR ("username" IS NOT NULL AND LOWER("username") = $2)`,
-    [phoneNumber, loweredIdentifier],
-  );
-  const phoneMatch = phoneNumber ? result.rows.find((row) => row.phoneNumber === phoneNumber) : undefined;
-  const usernameMatch = result.rows.find((row) => row.username?.toLowerCase() === loweredIdentifier);
-  if (phoneMatch && usernameMatch && phoneMatch.id !== usernameMatch.id) return "ambiguous";
-  if (phoneMatch) return "phone-number";
-  if (usernameMatch) return "username";
-  // Unknown phone-shaped identifiers retain the phone error path without guessing a second account.
-  return phoneNumber ? "phone-number" : "username";
 }
 
 function registrationOtp(): string {
@@ -290,68 +269,6 @@ async function safeWebAuthHandler(
 
 type AdminSecurityStatus = "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN";
 
-const LEGACY_RETRY_HEADER = "x-zzsh-legacy-retry";
-
-type UserSignInHookContext = {
-  path: string;
-  body: unknown;
-  headers: Headers;
-  context: { returned?: unknown };
-};
-
-type LegacyAfterHookDeps = {
-  pool: Pool;
-  hashPassword: (password: string) => Promise<string>;
-  verifyPassword: (password: string, hash: string) => Promise<boolean>;
-  isAPIError: (value: unknown) => value is { status: string };
-  retrySignIn: (signIn: "username" | "phone-number", body: Record<string, unknown>, headers: Headers) => Promise<Response>;
-};
-
-function legacyLookupOf(path: string, body: Record<string, unknown>): LegacyCredentialLookup | null {
-  if (path === "/sign-in/username") {
-    const username = body.username;
-    if (typeof username !== "string" || username.length === 0) return null;
-    // The username plugin looks the account up with the same lowercased identifier.
-    return { username: username.toLowerCase() };
-  }
-  const phoneNumber = body.phoneNumber;
-  if (typeof phoneNumber !== "string" || phoneNumber.length === 0) return null;
-  // The phone-number plugin uses the validated value unchanged.
-  return { phoneNumber };
-}
-
-/**
- * Better Auth after hook: runs only once the sign-in endpoint finished, which means the installed
- * rate limiter and the endpoint body schema already accepted the request. When the endpoint
- * rejected the credentials, stored credential state decides whether a legacy upgrade applies;
- * only then is the standard sign-in endpoint executed once more (marked so the hook does not
- * recurse) and its response replaces the rejection. Invalid bodies never reach this branch
- * because the endpoint returns a 400, and rate-limited requests never reach the endpoint at all.
- */
-async function handleUserLegacyAfterHook(
-  ctx: UserSignInHookContext,
-  deps: LegacyAfterHookDeps,
-): Promise<Response | undefined> {
-  if (ctx.path !== "/sign-in/username" && ctx.path !== "/sign-in/phone-number") return undefined;
-  if (ctx.headers?.get?.(LEGACY_RETRY_HEADER) === "1") return undefined;
-  const returned = ctx.context?.returned;
-  if (!deps.isAPIError(returned) || returned.status !== "UNAUTHORIZED") return undefined;
-  if (!ctx.body || typeof ctx.body !== "object" || Array.isArray(ctx.body)) return undefined;
-  const body = ctx.body as Record<string, unknown>;
-  const password = body.password;
-  if (typeof password !== "string" || password.length === 0) return undefined;
-  const lookup = legacyLookupOf(ctx.path, body);
-  if (!lookup) return undefined;
-  const requestId = ctx.headers?.get?.("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
-  const outcome = await attemptLegacyCredentialUpgrade(deps.pool, deps.verifyPassword, deps.hashPassword, lookup, password, requestId);
-  if (outcome !== "retry") return undefined;
-  const headers = new Headers(ctx.headers);
-  headers.set(LEGACY_RETRY_HEADER, "1");
-  const signIn = ctx.path === "/sign-in/username" ? "username" : "phone-number";
-  // The Response replaces the endpoint rejection; its own status and Set-Cookie are preserved.
-  return await deps.retrySignIn(signIn, body, headers);
-}
-
 async function readAdminSecurity(pool: Pool, userId: string): Promise<{ status: AdminSecurityStatus; passwordChangeRequired: boolean } | null> {
   const result = await pool.query<{ status: AdminSecurityStatus; passwordChangeRequired: boolean }>(
     `SELECT "status", "password_change_required" AS "passwordChangeRequired" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1`,
@@ -370,9 +287,10 @@ async function assertAdminSessionCreationAllowed(pool: Pool, userId: string, API
 function buildFakePhoneNumberPlugin(
   phoneNumber: typeof import("better-auth/plugins").phoneNumber,
   outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
-  localSmsMock = false,
+  localSmsMock: boolean,
+  signIn: ReturnType<typeof buildTransactionalPhoneSignIn>,
 ) {
-  return phoneNumber({
+  const plugin = phoneNumber({
     phoneNumberValidator: (value) => Boolean(normalizeMainlandPhone(value)),
     sendOTP: async ({ phoneNumber: target, code }: { phoneNumber: string; code: string }) => {
       outbox.set(target, { code: localSmsMock ? "888888" : code, sentAt: new Date().toISOString(), purpose: "phone-verification" });
@@ -381,6 +299,7 @@ function buildFakePhoneNumberPlugin(
       outbox.set(`${target}-request-password-reset`, { code: localSmsMock ? "888888" : code, sentAt: new Date().toISOString(), purpose: "password-reset" });
     },
   });
+  return { ...plugin, endpoints: { ...plugin.endpoints, signInPhoneNumber: signIn } };
 }
 
 function buildPhoneRegistrationPlugin(
@@ -393,10 +312,11 @@ function buildPhoneRegistrationPlugin(
   localSmsMock: boolean,
   signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
 ) {
-  const bodyOf = (value: unknown): Record<string, unknown> => {
+  const bodyOf = (value: unknown, allowed: readonly string[]): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
     }
+    if (Object.keys(value).some(key => !allowed.includes(key))) throw new APIError("BAD_REQUEST", { message: "Only authentication fields are accepted" });
     return value as Record<string, unknown>;
   };
   const phoneFrom = (body: Record<string, unknown>): string => {
@@ -423,19 +343,19 @@ function buildPhoneRegistrationPlugin(
     version: "1.0.0",
     endpoints: {
       signInIdentifier: createAuthEndpoint("/sign-in/identifier", { method: "POST", metadata: noStore }, async (ctx) => {
-        const body = bodyOf(ctx.body);
+        const body = bodyOf(ctx.body, ["identifier", "password", "kind"]);
         const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
         const password = passwordFrom(body);
         if (!identifier || identifier.length > 128 || !signInIdentifier.dispatch) {
           throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
         }
-        const kind = body.kind === undefined ? undefined : body.kind === "phone" || body.kind === "username" ? body.kind : null;
+        const kind = body.kind === undefined ? undefined : body.kind === "phone" ? body.kind : null;
         if (kind === null) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
         return signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind);
       }),
       sendPhoneRegistrationOTP: createAuthEndpoint("/phone-registration/send-otp", { method: "POST", metadata: noStore }, async (ctx) => {
         if (!fakeSmsEnabled) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
-        const phoneNumber = phoneFrom(bodyOf(ctx.body));
+        const phoneNumber = phoneFrom(bodyOf(ctx.body, ["phoneNumber"]));
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const code = localSmsMock ? "888888" : registrationOtp();
         const now = new Date();
@@ -455,14 +375,14 @@ function buildPhoneRegistrationPlugin(
           );
         });
         outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
-        return ctx.json({ status: true });
+        return ctx.json({ status: true, cooldownUntil: new Date(now.getTime() + PHONE_REGISTRATION_OTP_COOLDOWN_MS).toISOString() });
       }),
       completePhoneRegistration: createAuthEndpoint("/phone-registration/complete", { method: "POST", metadata: noStore }, async (ctx) => {
-        const body = bodyOf(ctx.body);
+        const body = bodyOf(ctx.body, ["phoneNumber", "code", "password", "acceptedTerms", "loginOrRegister"]);
         const phoneNumber = phoneFrom(body);
         const code = codeFrom(body);
         const unified = body.loginOrRegister === true;
-        const password = unified && body.password === undefined ? undefined : passwordFrom(body);
+        const password = body.password === undefined ? undefined : passwordFrom(body);
         if (body.acceptedTerms !== true) throw new APIError("BAD_REQUEST", { message: "Terms must be accepted" });
         const minPasswordLength = ctx.context.password.config.minPasswordLength;
         const maxPasswordLength = ctx.context.password.config.maxPasswordLength;
@@ -472,7 +392,8 @@ function buildPhoneRegistrationPlugin(
         const passwordHash = password === undefined ? undefined : await ctx.context.password.hash(password);
         const userId = ctx.context.generateId({ model: "user" }) || `user_${randomUUID().replaceAll("-", "")}`;
         let resolvedUserId = userId;
-        let requiresPassword = false;
+        let authenticated: Awaited<ReturnType<typeof createTransactionalUserSession>> | undefined;
+        const passwordCapability: { state: UserPasswordState } = { state: "not-set" };
         const accountId = ctx.context.generateId({ model: "account" }) || `account_${randomUUID().replaceAll("-", "")}`;
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
@@ -505,26 +426,25 @@ function buildPhoneRegistrationPlugin(
               await client.query(`UPDATE "zzsh_auth_user"."verification" SET "value" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id, `${storedCode}:${attempts + 1}`]);
               return true;
             }
+            if (await hasLegacyPhoneConflict(client, phoneNumber)) throw new APIError("CONFLICT", { message: "Account association requires review" });
             const existing = await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1 FOR UPDATE`, [phoneNumber]);
             if (existing.rowCount) {
               if (!unified) throw new APIError("CONFLICT", { message: "Phone number is already registered" });
               resolvedUserId = existing.rows[0]!.id;
-              await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+              await client.query(`UPDATE zzsh_auth_user."user" SET "phoneNumberVerified"=true,"updatedAt"=clock_timestamp() WHERE id=$1`, [resolvedUserId]);
+              authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
+              passwordCapability.state = await readUserPasswordState(client, resolvedUserId);
+              await client.query(`UPDATE "zzsh_auth_user"."verification" SET value=$2,"updatedAt"=clock_timestamp() WHERE "identifier"=$1`, [identifier, `${storedCode}:3`]);
               return false;
             }
-            if (passwordHash === undefined) {
-              // Keep the verified code until password completion; the same expiry and attempt budget still apply.
-              requiresPassword = true;
-              return false;
-            }
-            await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
+            await client.query(`UPDATE "zzsh_auth_user"."verification" SET value=$2,"updatedAt"=clock_timestamp() WHERE "identifier"=$1`, [identifier, `${storedCode}:3`]);
             const now = new Date();
-            const email = `phone-${createHash("sha256").update(phoneNumber).digest("hex")}@phone.zzsh.invalid`;
+            const email = `user-${createHash("sha256").update(userId).digest("hex")}@phone.zzsh.invalid`;
             await client.query(
               `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "emailVerified", "createdAt", "updatedAt", "phoneNumber", "phoneNumberVerified", "suspended") VALUES ($1, $2, $3, false, $4, $4, $5, true, false)`,
               [userId, "洲洲用户", email, now, phoneNumber],
             );
-            await client.query(
+            if (passwordHash !== undefined) await client.query(
               `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, $3, $4, $4)`,
               [accountId, userId, passwordHash, now],
             );
@@ -532,6 +452,8 @@ function buildPhoneRegistrationPlugin(
               `INSERT INTO "zzsh_iam"."user_identity_state" ("user_id", "account_status", "identity_status", "age_status", "provider", "version", "updated_at") VALUES ($1, 'ACTIVE', 'UNVERIFIED', 'UNKNOWN', 'none', 1, $2)`,
               [userId, now],
             );
+            passwordCapability.state = passwordHash !== undefined ? "set" : "not-set";
+            authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
             return false;
           });
           if (invalidVerification) throw new APIError("BAD_REQUEST", { message: "Invalid verification code" });
@@ -541,15 +463,9 @@ function buildPhoneRegistrationPlugin(
           }
           throw error;
         }
-        if (requiresPassword) return ctx.json({ status: true, requiresPassword: true });
-        // Migrated users keep the server-derived first-login state; the client only reacts to it.
-        const passwordSetupRequired = await readPasswordSetupRequired(pool, resolvedUserId);
-        const user = await ctx.context.internalAdapter.findUserById(resolvedUserId);
-        if (!user) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create user" });
-        const session = await ctx.context.internalAdapter.createSession(resolvedUserId);
-        if (!session) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create session" });
-        await setSessionCookie(ctx, { session, user });
-        return ctx.json({ status: true, ...(passwordSetupRequired ? { requiresPasswordSetup: true } : {}) });
+        if (!authenticated) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create session" });
+        await setSessionCookie(ctx, authenticated);
+        return ctx.json({ status: true, userId: authenticated.user.id, passwordState: passwordCapability.state, passwordSet: passwordCapability.state === "unavailable" ? null : passwordCapability.state === "set" });
       }),
     },
     rateLimit: [
@@ -671,6 +587,10 @@ export async function mountAuthHandlers(
   ]);
 
   const userSchema = createAuthSchema("zzsh_auth_user");
+  if (options.fakeUserSecurityOutbox && (!options.testOperationsEnabled && !options.localSmsMock || process.env.NODE_ENV === "production")) {
+    throw new ConfigurationError("User security outbox requires local test capability");
+  }
+  const userSecurityPlugin = await buildUserSecurityPlugin({ pool: options.pool, outbox: options.fakeUserSecurityOutbox, localMock: options.localSmsMock === true });
   const adminSchema = createAuthSchema("zzsh_auth_admin");
   const userDatabase = drizzle(options.pool);
   const adminDatabase = drizzle(options.pool);
@@ -714,18 +634,7 @@ export async function mountAuthHandlers(
     },
   } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
-  const userSignInApi: { retry?: (signIn: "username" | "phone-number", body: Record<string, unknown>, headers: Headers) => Promise<Response> } = {};
   const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> } = {};
-  const legacyHook = (ctx: unknown) => handleUserLegacyAfterHook(ctx as UserSignInHookContext, {
-    pool: options.pool,
-    hashPassword,
-    verifyPassword: (password, hash) => verifyPassword({ password, hash }),
-    isAPIError,
-    retrySignIn: (signIn, body, headers) => {
-      if (!userSignInApi.retry) throw new Error("user sign-in API is unavailable");
-      return userSignInApi.retry(signIn, body, headers);
-    },
-  });
   const common = {
     baseURL: options.apiOrigin,
     trustedOrigins,
@@ -757,11 +666,12 @@ export async function mountAuthHandlers(
     database: drizzleAdapter(userDatabase, { provider: "pg", schema: userSchema, transaction: true }),
     session: { ...common.session, expiresIn: USER_SESSION_EXPIRES_IN_SECONDS },
     user: common.user,
+    emailAndPassword: { ...common.emailAndPassword, minPasswordLength: 12, maxPasswordLength: 128 },
     plugins: [
-      username({ immutableUsername: true }),
       bearer(),
-      buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock),
+      buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
       buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier),
+      userSecurityPlugin,
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
     ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : {}),
@@ -773,7 +683,6 @@ export async function mountAuthHandlers(
         if (!phoneNumber) throw new APIError("BAD_REQUEST", { message: "Invalid phone number" });
         (ctx.body as Record<string, unknown>).phoneNumber = phoneNumber;
       }),
-      after: createAuthMiddleware(legacyHook),
     },
     databaseHooks: {
       verification: {
@@ -809,11 +718,8 @@ export async function mountAuthHandlers(
 
   signInIdentifier.dispatch = async (identifier, password, headers, kind) => {
     const phoneNumber = normalizeMainlandPhone(identifier);
-    const resolution = kind === "phone" ? "phone-number" : kind === "username" ? "username" : await resolveSignInIdentifier(options.pool, identifier);
-    if (resolution === "ambiguous") throw new APIError("BAD_REQUEST", { message: "Ambiguous authentication identifier" });
-    const response = resolution === "phone-number"
-      ? await userAuth.api.signInPhoneNumber({ body: { phoneNumber: phoneNumber ?? identifier, password }, headers, asResponse: true })
-      : await userAuth.api.signInUsername({ body: { username: identifier.toLowerCase(), password }, headers, asResponse: true });
+    if (!phoneNumber || kind === "username") throw new APIError("BAD_REQUEST", { message: "Phone authentication required" });
+    const response = await userAuth.api.signInPhoneNumber({ body: { phoneNumber, password }, headers, asResponse: true });
     return response as Response;
   };
 
@@ -868,15 +774,6 @@ export async function mountAuthHandlers(
       },
     },
   });
-
-  userSignInApi.retry = async (signIn, body, headers) => {
-    // The hook body was already validated by the same endpoint; the cast only bridges the
-    // per-endpoint generated body types.
-    const response = signIn === "username"
-      ? await userAuth.api.signInUsername({ body: body as never, headers, asResponse: true })
-      : await userAuth.api.signInPhoneNumber({ body: body as never, headers, asResponse: true });
-    return response as unknown as Response;
-  };
 
   const userWebHandler = (request: Request) => safeWebAuthHandler(userAuth.handler, request);
   const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request);

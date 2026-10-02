@@ -795,3 +795,16 @@ html:not(.dark) {
     transition: none !important;
   }
 }
+
+.account-long-value { overflow-wrap: anywhere; min-width: 0; }
+.account-security-controls .auth-fields { margin-block: 20px; max-width: 560px; }
+.account-security-controls .auth-fields input,
+.account-security-controls .auth-fields select { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--color-border-default); border-radius: 8px; background: var(--color-bg-elevated); color: var(--color-text-primary); }
+.account-security-controls .auth-fields input:focus-visible,
+.account-security-controls .auth-fields select:focus-visible { outline: 2px solid var(--account-accent); outline-offset: 3px; }
+.account-security-controls .auth-fields input:disabled { opacity: .65; }
+.account-security-controls .button { min-height: 44px; }
+.account-security-controls .auth-fields input[aria-invalid="true"] { border-color: var(--account-danger); }
+.account-session-row { padding-block: 18px; border-bottom: 1px solid var(--color-border-default); }
+.account-session-row p { margin-block: 8px; color: var(--color-text-secondary); }
+.account-security-controls h4 { margin: 24px 0 12px; font-size: 16px; }

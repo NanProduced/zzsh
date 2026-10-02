@@ -141,7 +141,7 @@ function MembershipIdentity({ scope }: { scope: string }) {
     return () => controller.abort();
   }, [scope, reload, revalidate]);
 
-  const name = session.displayName?.trim() || "未设置用户名";
+  const name = session.displayName || "洲洲用户";
   const firstWord = session.displayName?.trim().split(/\s+/)[0];
   const monogram = firstWord ? Array.from(firstWord).slice(0, 2).join("").toUpperCase() : null;
   const contractGap = state.error?.code === "MEMBERSHIP_CONTRACT_REQUIRED";

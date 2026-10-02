@@ -19,8 +19,7 @@ function readSessionUser(value: unknown): { id: string; displayName: string | nu
   const id = (user as { id?: unknown }).id;
   if (typeof id !== "string" || id.length === 0) return null;
   const name = (user as { name?: unknown }).name;
-  const username = (user as { username?: unknown }).username;
-  const displayName = typeof name === "string" && name.trim() ? name.trim() : typeof username === "string" && username.trim() ? username.trim() : null;
+  const displayName = typeof name === "string" && name.trim() ? name : null;
   return { id, displayName };
 }
 

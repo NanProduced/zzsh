@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
+import { withTransaction } from "../auth/security-core";
 
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
-import { canonicalize, humanText } from "./content-hash";
+import { canonicalize } from "./content-hash";
+import { normalizeMainlandPhone } from "../auth/phone-number";
 import { lockLegacySource } from "./legacy-observation";
 import {
   conflict,
@@ -60,8 +62,28 @@ export type LegacyOwnerMigrationResult = {
   replayed: boolean;
 };
 
+/** One caller-owned checkpoint, tied to the exact frozen plan; failures stay isolated by source row. */
+export async function migrateLegacyUserBatch(
+  pool: Pool, inputs: readonly LegacyOwnerMigrationInput[], actor: LegacyOwnerMigrationActor,
+  cursor: { planSha256: string; nextIndex: number }, planSha256: string, batchSize = 500,
+) {
+  if (!/^[a-f0-9]{64}$/.test(planSha256) || cursor.planSha256 !== planSha256 || !Number.isSafeInteger(cursor.nextIndex) || cursor.nextIndex < 0 || cursor.nextIndex > inputs.length || !Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 5000) throw invalid("Invalid legacy batch checkpoint");
+  const results: Array<{ index: number; outcome: "MAPPED" | "REPLAYED" | "QUARANTINED"; userId?: string; errorCode?: string }> = [];
+  const end = Math.min(inputs.length, cursor.nextIndex + batchSize);
+  for (let index = cursor.nextIndex; index < end; index++) {
+    try {
+      const result = await withTransaction(pool, client => migrateLegacyOwner(client, inputs[index]!, actor));
+      results.push({ index, outcome: result.replayed ? "REPLAYED" : "MAPPED", userId: result.userId });
+    } catch (error) {
+      // Connection/permission/audit failures have unknown operational consequences: stop, retain the cursor.
+      if (!(error && typeof error === "object" && "status" in error && [400,409].includes(Number(error.status)))) throw error;
+      results.push({ index, outcome: "QUARANTINED", errorCode: "SOURCE_CONFLICT" });
+    }
+  }
+  return { cursor: { planSha256, nextIndex: end }, complete: end === inputs.length, results };
+}
+
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const MOBILE_PATTERN = /^1[3-9]\d{9}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const MD5_PATTERN = /^[a-f0-9]{32}$/;
 const SALT_PATTERN = /^[A-Za-z0-9]{1,64}$/;
@@ -95,15 +117,9 @@ function sourceReference(input: {
 }
 
 function normalizeMobile(value: unknown): string {
-  if (typeof value !== "string") throw invalid("Legacy owner mobile is invalid");
-  const compact = value.replace(/[\s-]/g, "");
-  const digits = compact.startsWith("+86")
-    ? compact.slice(3)
-    : compact.startsWith("0086")
-      ? compact.slice(4)
-      : compact;
-  if (!MOBILE_PATTERN.test(digits)) throw invalid("Legacy owner mobile is invalid");
-  return digits;
+  const normalized = normalizeMainlandPhone(value);
+  if (!normalized) throw invalid("Legacy owner mobile is invalid");
+  return normalized.slice(3);
 }
 
 function normalizeTimestamp(value: unknown): string | null {
@@ -145,8 +161,8 @@ function normalizeEvidence(value: unknown): LegacyOwnerEvidence {
     sourceSystem: unknown; sourceEntity: unknown; legacyId: unknown; evidenceRef: unknown; sourceDigest: unknown;
   });
   if (typeof value.nickname !== "string") throw invalid("Legacy owner nickname is invalid");
-  const nickname = humanText(value.nickname);
-  if (nickname.trim().length === 0 || nickname.length > 200) throw invalid("Legacy owner nickname is invalid");
+  const nickname = value.nickname;
+  if (nickname.trim().length === 0) throw invalid("Legacy owner nickname is invalid");
   return {
     sourceSystem: String(value.sourceSystem),
     sourceEntity: String(value.sourceEntity),
