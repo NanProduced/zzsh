@@ -112,9 +112,11 @@ export type UserOrderItem = {
   title: string;
   gameId: string;
   counterpartyName: string;
-  amounts: { rental: UserOrderAmount; deposit: UserOrderAmount; totalDue: UserOrderAmount };
-  createdAt: string;
-  holdUntil: string;
+  amounts: { rental: UserOrderAmount | null; deposit: UserOrderAmount | null; totalDue: UserOrderAmount | null };
+  createdAt: string | null;
+  holdUntil: string | null;
+  payment?: { state: string; recordedAt: string | null; recordedAmount: UserOrderAmount | null };
+  source?: { origin: string; statusLabel?: string };
   paidAt: string | null;
   cancelledAt: string | null;
   cancelReason: string | null;
@@ -458,6 +460,53 @@ export type CarouselRow = {
   mediaAccessClass?: string | null;
 };
 export type CarouselPage = { items: CarouselRow[]; nextCursor: string | null; limit: number };
+
+export type AdminOrderMoney = { currency: "CNY"; unit: "yuan"; amount: string; scale: 2 };
+export type AdminOrder = {
+  id: string;
+  displayNo: string;
+  status: "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "COMPLETED";
+  accountId: string;
+  versionId: string;
+  title: string;
+  termOptionCode: string;
+  termSeconds: string;
+  amounts: { rental: AdminOrderMoney; deposit: AdminOrderMoney; totalDue: AdminOrderMoney; currency: "CNY" };
+  createdAt: string;
+  holdUntil: string;
+  expiredAwaitingCancel: boolean;
+  paymentOpen: boolean;
+  cancelOpen: boolean;
+  paidAt?: string | null;
+  cancelReason?: "USER" | "TIMEOUT" | null;
+  cancelledAt?: string | null;
+  ownerUserId: string;
+  renterUserId: string;
+  ownerName: string;
+  renterName: string;
+  gameId: string;
+  releaseId: string;
+  contentHash: string;
+  revision: string;
+  fulfillmentAssignment?: {
+    state: "WAITING" | "ASSIGNED";
+    waitingReason: string | null;
+    assignedAt: string | null;
+    teamReady: boolean;
+    teamState: string | null;
+  };
+  supportEscalation?: {
+    firstResponseAt: string | null;
+    remindDueAt: string | null;
+    addRound: number;
+    state: string;
+    needsManualReview: boolean;
+    noEligibleStaff: boolean;
+  };
+  quote: Record<string, unknown> | null;
+};
+export type AdminOrdersPage = { items: AdminOrder[]; nextCursor: string | null; limit: number };
+export type AdminSettlementResponse = Record<string, unknown>;
 
 export type AuthResponse = { twoFactorRedirect?: boolean };
 export type EnrollmentResponse = { totpURI?: string; backupCodes?: string[] };

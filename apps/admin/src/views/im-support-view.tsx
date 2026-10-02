@@ -119,8 +119,9 @@ function AdminMessage({ message, meta }: { message: SupportMessage; meta?: { nam
   </article>;
 }
 
-export function ImSupportView({ snapshot, preview = false, onRefresh }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; preview?: boolean; onRefresh: () => Promise<SessionSnapshot> }) {
-  const [section,setSection]=useState<"consultation"|"orders">("consultation");
+export function ImSupportView({ snapshot, preview = false, initialSection = "consultation", onRefresh }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; preview?: boolean; initialSection?: "consultation"|"orders"; onRefresh: () => Promise<SessionSnapshot> }) {
+  const [section,setSection]=useState<"consultation"|"orders">(initialSection);
+  useEffect(()=>setSection(initialSection),[initialSection]);
   const canRead = hasPermission(snapshot, "im.support.read");
   const canComplaint = hasPermission(snapshot, "im.support.complaint");
   const canAccept = hasPermission(snapshot, "im.support.accept");

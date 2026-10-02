@@ -590,22 +590,33 @@ export type AdminOrdersFilter = {
   status?: OrderStatus;
   accountId?: string;
   gameId?: string;
+  displayNo?: string;
+  renterUserId?: string;
+  ownerUserId?: string;
+  createdFrom?: string;
+  createdTo?: string;
   limit: number;
   cursor?: string;
 };
 
 export async function listAdminOrders(
   client: PoolClient,
-  admin: { adminId: string; isBoss: boolean; internalQuote: boolean },
+  admin: { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey?: string },
   filter: AdminOrdersFilter,
 ): Promise<Record<string, unknown>> {
   const filterKey = sha256Hex(
     JSON.stringify({
       scope: "admin-orders",
       principal: admin.adminId,
+      ...(admin.authorizationKey ? { authorizationKey: admin.authorizationKey } : {}),
       status: filter.status ?? null,
       accountId: filter.accountId ?? null,
       gameId: filter.gameId ?? null,
+      displayNo: filter.displayNo ?? null,
+      renterUserId: filter.renterUserId ?? null,
+      ownerUserId: filter.ownerUserId ?? null,
+      createdFrom: filter.createdFrom ?? null,
+      createdTo: filter.createdTo ?? null,
       limit: filter.limit,
     }),
   );
@@ -619,15 +630,25 @@ export async function listAdminOrders(
           AND ($3::text IS NULL OR o.status = $3)
           AND ($4::text IS NULL OR o.account_id = $4)
           AND ($5::text IS NULL OR o.game_id = $5)
-          AND ($6::timestamptz IS NULL OR o.created_at < $6 OR (o.created_at = $6 AND o.id < $7))
+          AND ($6::text IS NULL OR o.display_no = $6)
+          AND ($7::text IS NULL OR o.renter_user_id = $7)
+          AND ($8::text IS NULL OR o.owner_user_id = $8)
+          AND ($9::timestamptz IS NULL OR o.created_at >= $9)
+          AND ($10::timestamptz IS NULL OR o.created_at < $10)
+          AND ($11::timestamptz IS NULL OR o.created_at < $11 OR (o.created_at = $11 AND o.id < $12))
         ORDER BY o.created_at DESC, o.id DESC
-        LIMIT $8`,
+        LIMIT $13`,
       [
         admin.isBoss,
         admin.adminId,
         filter.status ?? null,
         filter.accountId ?? null,
         filter.gameId ?? null,
+        filter.displayNo ?? null,
+        filter.renterUserId ?? null,
+        filter.ownerUserId ?? null,
+        filter.createdFrom ?? null,
+        filter.createdTo ?? null,
         cursor?.createdAt ?? null,
         cursor?.id ?? null,
         filter.limit + 1,

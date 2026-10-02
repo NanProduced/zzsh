@@ -1,6 +1,7 @@
 export const WORKBENCH_TAB_ID = "workbench";
 const STORAGE_PREFIX = "zzsh-admin-workspace-tabs:";
 const SENSITIVE_QUERY = /(password|pin|otp|totp|backup|credential|token|secret|temporary|phone)/i;
+const NON_PERSISTED_ORDER_QUERY = /^(displayNo|renterUserId|ownerUserId|createdFrom|createdTo|qKind|qValue)$/i;
 const PHONE_VALUE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
 
 export type WorkspaceRouteKind =
@@ -23,6 +24,9 @@ export type WorkspaceRouteKind =
   | "listing-review"
   | "media-review"
   | "content"
+  | "orders"
+  | "order-object"
+  | "resource-object"
   | "unknown";
 
 export type WorkspaceTab = {
@@ -62,6 +66,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   rules: { id: "rules", title: "规则与价目", path: "/supply/rules", closable: true, kind: "rules" },
   "listing-review": { id: "listing-review", title: "供给审核", path: "/supply/reviews", closable: true, kind: "listing-review" },
   "media-review": { id: "media-review", title: "平台素材审核", path: "/supply/media", closable: true, kind: "media-review" },
+  orders: { id: "orders", title: "订单", path: "/orders", closable: true, kind: "orders" },
   content: { id: "content", title: "内容管理", path: "/content", closable: true, kind: "content" },
 };
 
@@ -69,7 +74,7 @@ export function sanitizeTabQuery(query: Record<string, string> | URLSearchParams
   const source = query instanceof URLSearchParams ? Object.fromEntries(query.entries()) : query;
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (!key || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value)) continue;
+    if (!key || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value) || NON_PERSISTED_ORDER_QUERY.test(key)) continue;
     if (value.length > (key === "cursor" ? 2048 : 200)) continue;
     result[key] = value;
   }
@@ -108,10 +113,18 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "user-object", objectType: "user", objectId, tabId: `user:${objectId}`, path, title: objectId };
   }
   if (path === "/supply/catalog") return { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" };
+  const resourceObject=path.match(/^\/supply\/accounts\/([A-Za-z0-9._:-]+)$/);
+  if(resourceObject)return {kind:"resource-object",objectType:"resource",objectId:resourceObject[1]!,tabId:`resource:${resourceObject[1]}`,path,title:"资源账号"};
   if (path === "/supply/gunsmith") return { kind: "gunsmith", tabId: "gunsmith", path: "/supply/gunsmith", title: "改枪码目录" };
   if (path === "/supply/rules") return { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" };
   if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "供给审核" };
   if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" };
+  if (path === "/orders") return { kind: "orders", tabId: "orders", path, title: "订单" };
+  const orderObject = path.match(/^\/orders\/([^/]+)$/);
+  if (orderObject) {
+    const objectId = decodeURIComponent(orderObject[1] ?? "");
+    return { kind: "order-object", objectType: "order", objectId, tabId: `order:${objectId}`, path, title: objectId };
+  }
   if (path === "/content") return { kind: "content", tabId: "content", path: "/content", title: "内容管理" };
   return { kind: "unknown", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
 }
@@ -156,13 +169,15 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "rules") return has("supply.rules.edit") || nav.isBoss;
   if (kind === "listing-review") return has("supply.review.read") || nav.isBoss;
   if (kind === "media-review") return has("supply.review.read") || nav.isBoss;
+  if (kind === "orders" || kind === "order-object") return true;
+  if (kind === "resource-object") return nav.isBoss || has("supply.rental_account.read");
   if (kind === "content") return has("content.platform.read") || has("content.read") || nav.isBoss;
   return false;
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

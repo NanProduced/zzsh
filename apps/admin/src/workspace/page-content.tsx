@@ -12,6 +12,8 @@ import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
 import { ImSupportView } from "../views/im-support-view";
 
+import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
+
 import { AccountSecurityPage } from "./account-security-page";
 import type { WorkspaceTab } from "./tab-model";
 import { WorkbenchPage } from "./workbench";
@@ -58,7 +60,7 @@ export function WorkspacePageContent({
       />
     );
   }
-  if (tab.kind === "support") return <ImSupportView key={tab.id} snapshot={snapshot} preview={tab.query.preview === "1"} onRefresh={onRefresh} />;
+  if (tab.kind === "support") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} preview={tab.query.preview === "1"} initialSection={tab.query.section==="orders"?"orders":"consultation"} onRefresh={onRefresh} /></>;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (
       <AdminDirectoryView
@@ -104,7 +106,8 @@ export function WorkspacePageContent({
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "users" || tab.kind === "user-object") return <UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce}/>;
+  if (tab.kind === "users" || tab.kind === "user-object") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}onOpenPath(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange({...tab.query,...query})} refreshNonce={refreshNonce}/></>;
+  if(tab.kind==="resource-object")return <AdminResourceReadView snapshot={snapshot} accountId={tab.objectId!} fromOrderId={tab.query.fromOrderId} fromUserId={tab.query.fromUserId} fromUserSection={tab.query.fromUserSection} onOpenPath={onOpenPath} refreshNonce={refreshNonce}/>;
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
@@ -120,6 +123,20 @@ export function WorkspacePageContent({
   }
   if (tab.kind === "content") {
     return <ContentView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+  }
+  if (tab.kind === "orders" || tab.kind === "order-object") {
+    return (
+      <AdminOrderChainView
+        key={tab.id}
+        snapshot={snapshot}
+        initialOrderId={tab.objectId}
+        objectOnly={tab.kind === "order-object"}
+        initialQuery={tab.query}
+        onOpenPath={onOpenPath}
+        onQueryChange={onQueryChange}
+        refreshNonce={refreshNonce}
+      />
+    );
   }
   if (tab.kind === "user-restore") return <UserRestorePanel key={tab.id} />;
   return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;

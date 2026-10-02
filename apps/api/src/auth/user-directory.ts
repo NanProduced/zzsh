@@ -3,6 +3,8 @@ import type { PoolClient } from "pg";
 import { conflict, forbidden, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { isEffectivePublicationState } from "../supply/listing-query";
+import { notFound } from "../supply/supply-util";
+import { ORDER_READ_RELATION, projectAdminReadOrder } from "../order/admin-order-read";
 
 export const USER_DIRECTORY_SOURCE = {
   LOCAL: "LOCAL",
@@ -79,6 +81,7 @@ export type AdminDirectoryViewer = {
   orderRead?: boolean;
   auditRead?: boolean;
   authorizationKey?: string;
+  legacyRead?: boolean;
 };
 
 export type UserDirectoryFilter = {
@@ -263,7 +266,7 @@ export async function listUserDirectory(
                   AND ($1::boolean OR EXISTS (
                     SELECT 1 FROM zzsh_supply.admin_supply_scope sc
                      WHERE sc.admin_user_id = $2 AND sc.game_id = ra.game_id))) ELSE NULL END AS "resourceAccountCount",
-              CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM zzsh_order.rental_order o
+              CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
                   AND ($1::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope sc WHERE sc.admin_user_id=$2 AND sc.game_id=o.game_id))) ELSE NULL END AS "currentOrderCount"
          FROM zzsh_auth_user."user" u
@@ -338,7 +341,7 @@ export async function readUserDirectoryDetail(
                   AND ($2::boolean OR EXISTS (
                     SELECT 1 FROM zzsh_supply.admin_supply_scope sc
                      WHERE sc.admin_user_id = $3 AND sc.game_id = ra.game_id))) ELSE NULL END AS "resourceAccountCount",
-              CASE WHEN $5::boolean THEN (SELECT count(*)::int FROM zzsh_order.rental_order o
+              CASE WHEN $5::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
                   AND ($2::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope sc WHERE sc.admin_user_id=$3 AND sc.game_id=o.game_id))) ELSE NULL END AS "currentOrderCount"
          FROM zzsh_auth_user."user" u
@@ -442,7 +445,7 @@ export async function listUserRentalAccounts(
   const cursor = parseKeysetCursor(page.cursor, filterKey);
   const rows = (
     await client.query<UserRentalAccountRow>(
-      `SELECT a.id, a.display_no AS "displayNo", a.lifecycle, a.owner_paused AS "ownerPaused",
+      `SELECT a.id, ${viewer.legacyRead ? "COALESCE(a.display_no,(SELECT l.legacy_account_no FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=a.id ORDER BY l.imported_at DESC LIMIT 1))" : "a.display_no"} AS "displayNo", a.lifecycle, a.owner_paused AS "ownerPaused",
               a.staff_restricted AS "staffRestricted",
               CASE WHEN a.staff_restricted THEN a.restriction_reason ELSE NULL END AS "restrictionReason",
               a.legacy_hold AS "legacyHold", a.current_version_id AS "currentVersionId",
@@ -487,6 +490,15 @@ export async function listUserRentalAccounts(
   };
 }
 
+export async function readDirectoryRentalAccount(client:PoolClient,viewer:AdminDirectoryViewer,accountId:string) {
+  if(!viewer.resourceRead)throw forbidden("Resource reading requires supply.rental_account.read");
+  const account=(await client.query(`SELECT a.id AS "accountId",COALESCE(a.display_no,(SELECT l.legacy_account_no FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=a.id AND l.legacy_account_no IS NOT NULL ORDER BY l.imported_at DESC LIMIT 1)) AS "displayNo",
+    a.owner_user_id AS "ownerUserId",u.name AS "ownerName",a.lifecycle,a.owner_paused AS "ownerPaused",a.staff_restricted AS "staffRestricted",a.legacy_hold AS "legacyHold",v.title,v.id AS "versionId",v.review_state AS "versionState",g.name AS "gameName",g.id AS "gameId"
+    FROM zzsh_supply.rental_account a JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
+    WHERE a.id=$1 AND ($2::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=a.game_id))`,[accountId,viewer.isBoss,viewer.adminId])).rows[0];
+  if(!account)throw notFound();return {account,contextKey:viewer.authorizationKey};
+}
+
 const USER_ORDER_ROLES = ["renter", "owner", "any"] as const;
 export type UserOrderRole = (typeof USER_ORDER_ROLES)[number];
 
@@ -525,6 +537,7 @@ export async function listUserOrders(
   filter: UserOrderFilter,
 ): Promise<Record<string, unknown>> {
   if (!viewer.orderRead) throw forbidden("Order reading requires order.read");
+  if (viewer.legacyRead) return listUserReadOrders(client,viewer,userId,filter);
   const filterKey = sha256Hex(
     JSON.stringify({
       scope: "admin-user-orders",
@@ -615,6 +628,17 @@ export async function listUserOrders(
     nextCursor: hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: last.createdAt, id: last.id }) : null,
     limit: filter.limit,
   };
+}
+
+async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,userId:string,filter:UserOrderFilter) {
+  const key=sha256Hex(JSON.stringify({scope:'admin-user-read-orders',principal:viewer.adminId,authorizationKey:viewer.authorizationKey??null,userId,role:filter.role??'any',status:filter.status??null,limit:filter.limit}));
+  const cursor=parseKeysetCursor(filter.cursor,key),values:unknown[]=[userId,viewer.isBoss,viewer.adminId],where=[`(x.owner_user_id=$1 OR x.renter_user_id=$1)`,`($2::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=x.game_id))`];
+  if(filter.role==='owner')where.push('x.owner_user_id=$1');if(filter.role==='renter')where.push('x.renter_user_id=$1');if(filter.status)where.push('x.status=$'+values.push(filter.status));
+  const time='$'+values.push(cursor?.createdAt??null),id='$'+values.push(cursor?.id??null),limit='$'+values.push(filter.limit+1);
+  where.push(`(${time}::timestamptz IS NULL OR COALESCE(x.created_at,'0001-01-01'::timestamptz)<${time}::timestamptz OR (COALESCE(x.created_at,'0001-01-01'::timestamptz)=${time}::timestamptz AND x.id<${id}))`);
+  const rows=(await client.query(`WITH all_orders AS(${ORDER_READ_RELATION}) SELECT x.origin,x.record,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
+  const items=rows.slice(0,filter.limit),last=items.at(-1);
+  return {items:items.map(row=>{const order=projectAdminReadOrder(row.origin,row.record,{adminId:viewer.adminId,isBoss:viewer.isBoss,internalQuote:false,authorizationKey:viewer.authorizationKey??''});return {orderId:order.id,displayNo:order.displayNo,status:order.status,role:row.role,...(viewer.resourceRead?{accountId:order.accountId,accountDisplayNo:order.accountDisplayNo}:{}),title:order.title,gameId:order.gameId,counterpartyName:row.role==='renter'?order.ownerName:order.renterName,amounts:order.amounts,createdAt:order.createdAt,paidAt:order.paidAt,cancelledAt:order.cancelledAt,holdUntil:order.holdUntil,expiredAwaitingCancel:order.expiredAwaitingCancel,payment:order.payment,source:order.source};}),nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit};
 }
 
 /** User-object audit history for the directory takeover: operations and migration facts on one user. */

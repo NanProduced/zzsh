@@ -26,6 +26,26 @@ test("object tabs are de-duplicated by type and stable id", () => {
   assert.equal(withOther.filter((tab) => tab.kind === "admin-object").length, 2);
 });
 
+test("order tabs use the list singleton and stable order object IDs", () => {
+  const list = tabFromLocation("/orders", "status=PAID&displayNo=ZZ-should-not-be-here&renterUserId=user-1&ownerUserId=user-2&createdFrom=2026-09-01T00:00:00.000Z&createdTo=2026-10-01T00:00:00.000Z&qKind=party&qValue=private-clue");
+  const detail = tabFromLocation("/orders/order_123");
+  assert.equal(list.id, "orders");
+  assert.equal(list.kind, "orders");
+  assert.equal(list.query.status, "PAID");
+  assert.equal(list.query.displayNo, undefined);
+  assert.equal(list.query.qKind, undefined);
+  assert.equal(list.query.qValue, undefined);
+  assert.equal(list.query.renterUserId, undefined);
+  assert.equal(list.query.ownerUserId, undefined);
+  assert.equal(list.query.createdFrom, undefined);
+  assert.equal(list.query.createdTo, undefined);
+  assert.equal(detail.id, "order:order_123");
+  assert.equal(detail.kind, "order-object");
+  assert.equal(detail.objectId, "order_123");
+  assert.equal(canOpenKind("orders", limited), true, "direct access can render the server-denied permission state");
+  assert.equal(canOpenKind("order-object", limited), true);
+});
+
 test("list modules stay single-instance while workbench cannot close", () => {
   const workbench = tabFromLocation("/workbench");
   const admins = tabFromLocation("/admins", "page=2");

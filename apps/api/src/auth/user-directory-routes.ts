@@ -14,6 +14,7 @@ import {
   listUserOrders,
   listUserRentalAccounts,
   readUserDirectoryDetail,
+  readDirectoryRentalAccount,
   USER_DIRECTORY_SOURCE,
   USER_DIRECTORY_STATUS_FILTER,
   type UserDirectoryStatusFilter,
@@ -73,7 +74,8 @@ export async function handleUserDirectoryAdmin(
   const method = (request.method ?? "GET").toUpperCase();
   const detailMatch = path === null ? null : /^\/([^/]+)(\/(rental-accounts|orders|audit-events))?$/.exec(path);
   const lookup = method === "POST" && path === "/lookup";
-  const mine = lookup || method === "GET" && (path === "/" || path !== "/lookup" && detailMatch !== null);
+  const resourceMatch=path===null?null:/^\/resource-accounts\/([A-Za-z0-9._:-]+)$/.exec(path);
+  const mine = lookup || method === "GET" && (resourceMatch!==null || path === "/" || path !== "/lookup" && detailMatch !== null);
   if (!mine) {
     if (next) {
       next();
@@ -109,9 +111,12 @@ export async function handleUserDirectoryAdmin(
         resourceRead: hasPermission(access, ADMIN_PERMISSION.supplyRentalAccountRead),
         orderRead: hasPermission(access, ADMIN_PERMISSION.orderRead),
         auditRead: hasPermission(access, ADMIN_PERMISSION.auditRead),
-        authorizationKey: sha256Hex(JSON.stringify([access.isBoss, [...access.permissions].sort(), gameScope])),
+        authorizationKey: sha256Hex(JSON.stringify([context.userId, context.sessionId, access.isBoss, [...access.permissions].sort(), gameScope])),
+        legacyRead: false,
       };
+      const enableLegacyRead=async()=>{viewer.legacyRead=(await client.query("SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS present")).rows[0]?.present===true;};
       const cursor = query.get("cursor") ?? undefined;
+      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);sendJson(response,200,await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!)),requestId);return;}
       const limit = parseLimit(query.get("limit"));
 
       if (path === "/" || lookup) {
@@ -139,6 +144,7 @@ export async function handleUserDirectoryAdmin(
           if (!normalized) throw invalid("Phone is invalid");
           phone = normalized;
         }
+        await enableLegacyRead();
         const data = await listUserDirectory(client, viewer, {
           ...(userIdFilter !== undefined ? { userId: userIdFilter } : {}),
           ...(legacyIdFilter !== undefined ? { legacyId: legacyIdFilter } : {}),
@@ -163,6 +169,7 @@ export async function handleUserDirectoryAdmin(
       const section = detailMatch![3];
       if (section === undefined) {
         requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
+        await enableLegacyRead();
         const detail = await readUserDirectoryDetail(client, viewer, userId);
         if (!detail) throw notFound();
         sendJson(response, 200, { user: detail }, requestId);
@@ -174,6 +181,7 @@ export async function handleUserDirectoryAdmin(
       if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id = $1`, [userId])).rowCount) throw notFound();
       if (section === "rental-accounts") {
         requirePermission(access, ADMIN_PERMISSION.supplyRentalAccountRead);
+        await enableLegacyRead();
         sendJson(response, 200, await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }), requestId);
         return;
       }
@@ -183,6 +191,7 @@ export async function handleUserDirectoryAdmin(
         if (roleRaw !== null && roleRaw !== "renter" && roleRaw !== "owner" && roleRaw !== "any") throw invalid("Role is invalid");
         const statusRaw = query.get("status");
         if (statusRaw !== null && !["PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED"].includes(statusRaw)) throw invalid("Status is invalid");
+        await enableLegacyRead();
         sendJson(response, 200, await listUserOrders(client, viewer, userId, {
           ...(roleRaw !== null ? { role: roleRaw as "renter" | "owner" | "any" } : {}),
           ...(statusRaw !== null ? { status: statusRaw as "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED" } : {}),

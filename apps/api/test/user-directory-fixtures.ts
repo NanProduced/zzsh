@@ -28,6 +28,7 @@ export class DirectorySqlFixture {
   scenario='normal';fault='';
   async connect(){return this;} release(){}
   async query(sql:string,values:unknown[]=[]):Promise<any> {
+    if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')"))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql))return result([]);

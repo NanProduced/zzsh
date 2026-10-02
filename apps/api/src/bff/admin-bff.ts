@@ -388,7 +388,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleRentalMembershipAdmin(request,response,options.adminSecurityOptions);
     return;
   }
-  if (path === "/users" || /^\/users\/[^/]+(?:\/(?:rental-accounts|orders|audit-events))?$/.test(path)) {
+  if (path === "/users" || /^\/users\/resource-accounts\/[A-Za-z0-9._:-]+$/.test(path) || /^\/users\/[^/]+(?:\/(?:rental-accounts|orders|audit-events))?$/.test(path)) {
     if (!(method === "GET" && path !== "/users/lookup") && !(method === "POST" && path === "/users/lookup")) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;

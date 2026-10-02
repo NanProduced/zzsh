@@ -8,6 +8,7 @@ import {
   ListChecksIcon,
   MessagesSquareIcon,
   NewspaperIcon,
+  ShoppingBagIcon,
   ScrollTextIcon,
   ShieldIcon,
   UserRoundCogIcon,
@@ -75,6 +76,10 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "运营内容", isTitle: true }, ...content);
   }
 
+  if (has("order.read") || nav.isBoss) {
+    items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
+  }
+
   const users: WorkspaceMenuItem[] = [];
   if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
   if (has("user.account.restore")) {
@@ -116,6 +121,8 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/reviews") return "供给审核";
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
+  if (pathname.startsWith("/orders/")) return "订单详情";
+  if (pathname === "/orders") return "订单";
   if (pathname === "/account") return "账号安全";
   if (pathname === "/support") return "客服工作台";
   return "工作台";
