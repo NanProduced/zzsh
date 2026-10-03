@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { workspaceMenuItems, titleForPath } from "../src/workspace/nav-config.ts";
-import { canOpenKind, parseWorkspacePath, tabFromLocation } from "../src/workspace/tab-model.ts";
+import { canOpenKind, parseWorkspacePath, tabFromLocation, sanitizeTabQuery, upsertTab } from "../src/workspace/tab-model.ts";
 
 test("supply routes parse into dedicated workspace tabs", () => {
+  const account = tabFromLocation("/supply/reviews/account-a", "?context=review");
+  assert.equal(account.kind, "listing-object");
+  assert.equal(account.objectId, "account-a");
+  assert.equal(account.query.context, "review");
+  assert.equal(canOpenKind("listing-object", { isBoss: false, permissions: [] }), false);
+  assert.equal(canOpenKind("listing-object", { isBoss: false, permissions: ["supply.review.read"] }), true);
+  assert.equal(upsertTab([{...account,title:"旧来源号 TEST-A"}], account)[0].title,"旧来源号 TEST-A");
   assert.deepEqual(parseWorkspacePath("/supply/catalog"), { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" });
   assert.deepEqual(parseWorkspacePath("/supply/rules"), { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" });
   assert.deepEqual(parseWorkspacePath("/supply/media"), { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" });
@@ -14,6 +21,16 @@ test("supply routes parse into dedicated workspace tabs", () => {
   const tab = tabFromLocation("/supply/rules", "?state=SEALED");
   assert.equal(tab.kind, "rules");
   assert.equal(tab.query.state, "SEALED");
+});
+
+test("supply cursor history persists bounded metadata while secret and phone queries are removed", () => {
+  const token="e".repeat(300)+"."+"a".repeat(43), history=JSON.stringify(["",token]);
+  const value=sanitizeTabQuery({q:"ACCOUNT-TEST",cursor:token,supplyCursorHistory:history,password:"no",phone:"13800138000"});
+  assert.equal(value.supplyCursorHistory,history);
+  assert.equal(value.cursor,token);
+  assert.equal(value.password,undefined);
+  assert.equal(value.phone,undefined);
+  assert.equal(sanitizeTabQuery({supplyCursorHistory:"x".repeat(8193)}).supplyCursorHistory,undefined);
 });
 
 test("supply tabs require their own permissions instead of a generic admin role", () => {

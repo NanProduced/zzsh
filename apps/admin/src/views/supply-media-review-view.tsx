@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { adminRequest, friendlyError, hasPermission, type MediaAssetReview, type MediaReviewPage, type SessionSnapshot, type SupplyGame, type UploadedAssetResponse } from "../api";
+import { adminRequest, friendlyError, hasPermission, type AdminDirectoryEntry, type MediaAssetReview, type MediaReviewPage, type SessionSnapshot, type SupplyGame, type UploadedAssetResponse } from "../api";
 import { Button, StatusMessage } from "../components/ui-elements";
+import { Lightbox } from "./supply-review/lightbox";
+import { formatBytes, mediaContentUrl, shortId, type ZoomTarget } from "./supply-review/model";
 
 const inputClass = "w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs";
 const selectClass = "w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs";
@@ -25,13 +27,19 @@ const PURPOSE_LABELS: Record<MediaAssetReview["purpose"], string> = {
 export function SupplyMediaReviewView({
   snapshot,
   refreshNonce = 0,
+  onOpenPath,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   refreshNonce?: number;
+  onOpenPath?: (path: string) => void;
 }) {
   const canRead = hasPermission(snapshot, "supply.review.read");
   const canDecide = hasPermission(snapshot, "supply.review.decide");
   const canUpload = hasPermission(snapshot, "supply.catalog.manage");
+  const canReadAdmins = hasPermission(snapshot, "admin.account.read");
+  const [adminNames, setAdminNames] = useState<Record<string,string>>({});
+  const [zoom, setZoom] = useState<ZoomTarget>();
+  const closeZoom = useCallback(() => setZoom(undefined), []);
   const [games, setGames] = useState<SupplyGame[]>([]);
   const [state, setState] = useState<MediaAssetReview["reviewState"]>("PENDING");
   const [ownershipKind, setOwnershipKind] = useState<"PLATFORM_CATALOG" | "USER_SUPPLY">("PLATFORM_CATALOG");
@@ -54,6 +62,19 @@ export function SupplyMediaReviewView({
     setUploadGameId((current) => (current && result.games.some((game) => game.id === current) ? current : result.games[0]?.id ?? ""));
   }, [canUpload]);
 
+  useEffect(() => {
+    setAdminNames({});
+    if (!canReadAdmins) return;
+    let active = true;
+    void adminRequest<{admins?:AdminDirectoryEntry[]}>("/security/admins").then(data => {
+      if (active) setAdminNames(Object.fromEntries((data.admins??[]).map(admin => [admin.id,admin.name||admin.username])));
+    }).catch(() => undefined);
+    return () => {active=false;};
+  }, [canReadAdmins,snapshot.adminUserId,snapshot.session.id,refreshNonce]);
+  const uploaderText=(asset:MediaAssetReview) => {
+    const realm=asset.uploadedByRealm==="admin"?"管理员":"用户",id=asset.uploadedByAdminId??asset.uploadedByUserId;
+    return id?realm+" · "+(asset.uploadedByRealm==="admin"?adminNames[id]??shortId(id):shortId(id)):realm;
+  };
   const loadReviews = useCallback(async (cursor?: string) => {
     const params = new URLSearchParams({ state, ownershipKind, limit: "20" });
     if (cursor) params.set("cursor", cursor);
@@ -251,8 +272,8 @@ export function SupplyMediaReviewView({
                     </td>
                     <td>{gameNames.get(asset.gameId) ?? asset.gameId}</td>
                     <td>{PURPOSE_LABELS[asset.purpose]}</td>
-                    <td>{asset.uploadedByRealm === "admin" ? "管理员" : "用户"} · {asset.uploadedByAdminId ?? asset.uploadedByUserId ?? "-"}</td>
-                    <td className="font-mono text-[11px]">{asset.width}×{asset.height} · {asset.byteSize}B</td>
+                    <td>{uploaderText(asset)}</td>
+                    <td className="font-mono text-[11px]">{asset.width}×{asset.height} · {formatBytes(asset.byteSize)}</td>
                     <td>{STATE_LABELS[asset.reviewState]}{asset.accessClass === "PUBLIC_DISPLAY" ? " · 公开" : " · 私有"}</td>
                     <td className="max-w-xs text-[11px] text-muted-foreground">{asset.reviewReason ?? ""}</td>
                     <td><Button type="button" size="sm" variant="secondary" onClick={() => setSelected(asset)}>审核</Button></td>
@@ -279,10 +300,10 @@ export function SupplyMediaReviewView({
             <Button type="button" size="sm" variant="ghost" onClick={() => setSelected(null)}>关闭</Button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
-            <img src={`/api/bff/admin/supply/media/${selected.id}/content`} alt="素材预览" className="max-h-80 object-contain rounded border border-border bg-surface-raised" />
+            <button type="button" aria-label="放大核对素材" className="rounded border border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setZoom({src:mediaContentUrl(selected.id),alt:"素材预览",caption:PURPOSE_LABELS[selected.purpose]+" · "+STATE_LABELS[selected.reviewState]})}><img src={mediaContentUrl(selected.id)} alt="素材预览" className="max-h-80 w-full object-contain bg-surface-raised" /></button>
             <div className="space-y-3">
               <label className="space-y-1 text-xs block"><span className="text-muted-foreground">原因（驳回 / 隔离必填）</span><input value={reason} onChange={(event) => setReason(event.target.value)} className={inputClass} /></label>
-              {canDecide ? (
+              {selected.ownershipKind === "USER_SUPPLY" && selected.purpose === "ACCOUNT_DISPLAY" ? <div className="space-y-3"><p className="text-sm text-muted-foreground">账号展示图免发布前预审。处置前需在来源账号核对当前资料、图片版本与影响。</p>{selected.accountId && onOpenPath ? <Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(selected.accountId!)}?context=changes&assetId=${encodeURIComponent(selected.id)}`)}>进入来源账号核对本图</Button> : <p className="text-sm text-warning">来源账号未提供，请先核对对象关联。</p>}</div> : canDecide ? (
                 <div className="flex flex-wrap gap-2">
                   <Button type="button" size="sm" loading={loading} onClick={() => void decide("APPROVE", selected.ownershipKind === "PLATFORM_CATALOG" || selected.purpose === "ACCOUNT_DISPLAY" ? "PUBLIC_DISPLAY" : "PRIVATE_REVIEW")}>通过{selected.ownershipKind === "PLATFORM_CATALOG" || selected.purpose === "ACCOUNT_DISPLAY" ? "并公开" : "（保持私有）"}</Button>
                   <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void decide("APPROVE", "PRIVATE_REVIEW")}>通过但保持私有</Button>
@@ -290,7 +311,7 @@ export function SupplyMediaReviewView({
                   <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void decide("QUARANTINE", "PRIVATE_REVIEW")}>隔离</Button>
                 </div>
               ) : <StatusMessage error="当前账号可以查看但不能决定审核。" />}
-              {canDecide && selected.reviewState === "APPROVED" ? (
+              {canDecide && !(selected.ownershipKind === "USER_SUPPLY" && selected.purpose === "ACCOUNT_DISPLAY") && selected.reviewState === "APPROVED" ? (
                 <div className="flex flex-wrap gap-2">
                   {selected.accessClass === "PRIVATE_REVIEW" && (selected.ownershipKind === "PLATFORM_CATALOG" || selected.purpose === "ACCOUNT_DISPLAY") ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void changeVisibility("PUBLIC_DISPLAY")}>恢复公开展示</Button> : null}
                   {selected.accessClass === "PUBLIC_DISPLAY" ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void changeVisibility("PRIVATE_REVIEW")}>撤销公开</Button> : null}
@@ -304,6 +325,7 @@ export function SupplyMediaReviewView({
           </div>
         </section>
       ) : null}
+      {zoom ? <Lightbox {...zoom} onClose={closeZoom} /> : null}
     </div>
   );
 }

@@ -76,6 +76,7 @@ import {
   logOrphanedMediaObjects,
   prepareMediaUpload,
   reviewMediaAsset,
+  parseMediaReviewBinding,
   type MediaActor,
   type MediaStorage,
   type PreparedMediaUpload,
@@ -901,7 +902,7 @@ async function handleAdminRead(
       }
       parameters.push(limit + 1);
       const rows = await client.query(
-        `SELECT a."id", a."game_id" AS "gameId", a."purpose", a."ownership_kind" AS "ownershipKind", a."owner_user_id" AS "ownerUserId",
+        `SELECT a."id", a."account_id" AS "accountId", a."game_id" AS "gameId", a."purpose", a."ownership_kind" AS "ownershipKind", a."owner_user_id" AS "ownerUserId",
                 a."uploaded_by_realm" AS "uploadedByRealm", a."uploaded_by_user_id" AS "uploadedByUserId", a."uploaded_by_admin_id" AS "uploadedByAdminId",
                 a."content_hash" AS "contentHash", a."mime", a."byte_size"::text AS "byteSize", a."width", a."height",
                 a."access_class" AS "accessClass", a."review_state" AS "reviewState", a."review_reason" AS "reviewReason", a."created_at" AS "createdAt"
@@ -995,7 +996,7 @@ async function handleAdminWrite(
             outcome: "SUCCESS",
             requestId,
             reason: typeof (request.body as Record<string, unknown>)?.reason === "string" ? (request.body as Record<string, string>).reason! : operation,
-            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}) },
+            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}), ...(result.details?.mediaContext ? { mediaContext: result.details.mediaContext } : {}) },
           });
         }
         return { status: result.status, body: result.body };
@@ -1427,10 +1428,11 @@ async function handleAdminWrite(
   if (reviewMatch && method === "POST") {
     const assetId = decodeId(reviewMatch[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["decision", "reason", "visibility"]);
+    ensureOnlyFields(body, ["decision", "reason", "visibility", "accountContext"]);
     const decision = requiredString(body, "decision", 16);
     const reason = optionalTrimmedString(body, "reason", 500);
     const visibility = optionalString(body, "visibility", 32);
+    const accountContext = parseMediaReviewBinding(body.accountContext);
     await write("supply.media.review", assetId, ADMIN_PERMISSION.supplyReviewDecide, async (client) => {
       const row = await loadMediaAsset(client, assetId);
       if (!row || row.gameId === null) throw notFound();
@@ -1440,8 +1442,9 @@ async function handleAdminWrite(
         decision,
         ...(reason ? { reason } : {}),
         ...(visibility ? { visibility } : {}),
+        ...(accountContext ? { accountContext } : {}),
       }, lockPublishingAccount);
-      return { status: 200, body: asset, details: { reviewState: asset.reviewState, accessClass: asset.accessClass } };
+      return { status: 200, body: asset, details: { reviewState: asset.reviewState, accessClass: asset.accessClass, ...(accountContext ? { mediaContext: accountContext } : {}) } };
     }, "supply.media.reviewed");
     return;
   }
@@ -1449,16 +1452,17 @@ async function handleAdminWrite(
   if (visibilityMatch && method === "POST") {
     const assetId = decodeId(visibilityMatch[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["visibility", "reason"]);
+    ensureOnlyFields(body, ["visibility", "reason", "accountContext"]);
     const visibility = requiredString(body, "visibility", 32);
     const reason = optionalTrimmedString(body, "reason", 500);
+    const accountContext = parseMediaReviewBinding(body.accountContext);
     await write("supply.media.visibility", assetId, ADMIN_PERMISSION.supplyReviewDecide, async (client) => {
       const row = await loadMediaAsset(client, assetId);
       if (!row || row.gameId === null) throw notFound();
       return row.gameId;
     }, async (client, access) => {
-      const asset = await changeMediaVisibility(client, actor.id, access.isBoss, assetId, { visibility, ...(reason ? { reason } : {}) }, lockPublishingAccount);
-      return { status: 200, body: asset, details: { accessClass: asset.accessClass } };
+      const asset = await changeMediaVisibility(client, actor.id, access.isBoss, assetId, { visibility, ...(reason ? { reason } : {}), ...(accountContext ? { accountContext } : {}) }, lockPublishingAccount);
+      return { status: 200, body: asset, details: { accessClass: asset.accessClass, ...(accountContext ? { mediaContext: accountContext } : {}) } };
     }, "supply.media.visibility_changed");
     return;
   }

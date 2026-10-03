@@ -22,6 +22,7 @@ export type WorkspaceRouteKind =
   | "gunsmith"
   | "rules"
   | "listing-review"
+  | "listing-object"
   | "media-review"
   | "content"
   | "orders"
@@ -64,7 +65,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   catalog: { id: "catalog", title: "目录维护", path: "/supply/catalog", closable: true, kind: "catalog" },
   gunsmith: { id: "gunsmith", title: "改枪码目录", path: "/supply/gunsmith", closable: true, kind: "gunsmith" },
   rules: { id: "rules", title: "规则与价目", path: "/supply/rules", closable: true, kind: "rules" },
-  "listing-review": { id: "listing-review", title: "供给审核", path: "/supply/reviews", closable: true, kind: "listing-review" },
+  "listing-review": { id: "listing-review", title: "账号供给", path: "/supply/reviews", closable: true, kind: "listing-review" },
   "media-review": { id: "media-review", title: "平台素材审核", path: "/supply/media", closable: true, kind: "media-review" },
   orders: { id: "orders", title: "订单", path: "/orders", closable: true, kind: "orders" },
   content: { id: "content", title: "内容管理", path: "/content", closable: true, kind: "content" },
@@ -75,7 +76,7 @@ export function sanitizeTabQuery(query: Record<string, string> | URLSearchParams
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
     if (!key || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value) || NON_PERSISTED_ORDER_QUERY.test(key)) continue;
-    if (value.length > (key === "cursor" ? 2048 : 200)) continue;
+    if (value.length > (key === "cursor" ? 2048 : key === "supplyCursorHistory" ? 8192 : 200)) continue;
     result[key] = value;
   }
   return result;
@@ -117,7 +118,12 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if(resourceObject)return {kind:"resource-object",objectType:"resource",objectId:resourceObject[1]!,tabId:`resource:${resourceObject[1]}`,path,title:"资源账号"};
   if (path === "/supply/gunsmith") return { kind: "gunsmith", tabId: "gunsmith", path: "/supply/gunsmith", title: "改枪码目录" };
   if (path === "/supply/rules") return { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" };
-  if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "供给审核" };
+  if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "账号供给" };
+  const listingObject = path.match(/^\/supply\/reviews\/([^/]+)$/);
+  if (listingObject) {
+    let objectId = ""; try { objectId = decodeURIComponent(listingObject[1]!); } catch { /* Follow the existing unknown-route path. */ }
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "listing-object", objectType: "supply", objectId, tabId: `supply:${objectId}`, path, title: "账号供给详情" };
+  }
   if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" };
   if (path === "/orders") return { kind: "orders", tabId: "orders", path, title: "订单" };
   const orderObject = path.match(/^\/orders\/([^/]+)$/);
@@ -167,7 +173,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "catalog") return has("supply.catalog.manage") || nav.isBoss;
   if (kind === "gunsmith") return has("supply.gunsmith.manage") || nav.isBoss;
   if (kind === "rules") return has("supply.rules.edit") || nav.isBoss;
-  if (kind === "listing-review") return has("supply.review.read") || nav.isBoss;
+  if (kind === "listing-review" || kind === "listing-object") return has("supply.review.read") || nav.isBoss;
   if (kind === "media-review") return has("supply.review.read") || nav.isBoss;
   if (kind === "orders" || kind === "order-object") return true;
   if (kind === "resource-object") return nav.isBoss || has("supply.rental_account.read");
@@ -183,7 +189,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
     return [...tabs, next];
   }
   const existing = tabs.find((tab) => tab.id === next.id);
-  if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next } : tab));
+  if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, ...(next.kind === "listing-object" && next.title === "账号供给详情" ? { title: existing.title } : {}) } : tab));
   return [...tabs, next];
 }
 

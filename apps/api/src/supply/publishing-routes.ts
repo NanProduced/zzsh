@@ -1,4 +1,5 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
+import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
 import type { PoolClient } from "pg";
@@ -361,6 +362,20 @@ export async function handlePublishingRoute(
     return null;
   };
   if (method === "GET") {
+    if (admin && query.has("queryVersion")) {
+      if (query.get("queryVersion") !== "3") throw invalid("Unsupported supervision query version");
+      const data = await withPublicListingSnapshot(options.pool, async client => {
+        const access = await authorize(client);
+        const viewer = await supervisionViewer(client, context, access!);
+        if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
+        for (const key of query.keys()) if (!["queryVersion", "versionId"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported supervision detail query", key);
+        const a = await readPublishingAccount(client, accountMatch[1]!);
+        await authorize(client, a);
+        return readSupervision(client, a, viewer, gate, query.get("versionId"));
+      });
+      sendJson(response, 200, data, requestId);
+      return true;
+    }
     const data = await withTransaction(options.pool, async (client) => {
       const access = await authorize(client);
       if (accountMatch) {

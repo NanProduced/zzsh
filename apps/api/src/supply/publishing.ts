@@ -1204,9 +1204,7 @@ export async function listingDetail(
   publicAccount: PublishingAccount = a,
 ): Promise<Record<string, unknown>> {
   const v = a.current_version_id
-    ? await (viewer === "public"
-        ? readCurrentVersion(client, a)
-        : currentVersion(client, a))
+    ? await readCurrentVersion(client, a)
     : null;
   if (!v) {
     if (viewer === "public") throw notFound();

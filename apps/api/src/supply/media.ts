@@ -7,7 +7,7 @@ import type { Pool, PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { isAccountDisplayPubliclyEligible } from "./listing-query";
-import { assertGameScope, bumpCatalogRevision, conflict, invalid, newSupplyId, notFound } from "./supply-util";
+import { assertGameScope, bumpCatalogRevision, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
 
 export const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 export const MAX_MEDIA_SIDE = 8192;
@@ -448,15 +448,40 @@ async function lockMediaAsset(
   return asset;
 }
 
+export type MediaReviewBinding = { accountId: string; accountRevision: string; versionId: string; assetRevision: string; byteHash: string };
+export function parseMediaReviewBinding(value: unknown): MediaReviewBinding | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Invalid media account context");
+  const body = value as Record<string, unknown>;
+  ensureOnlyFields(body, ["accountId", "accountRevision", "versionId", "assetRevision", "byteHash"]);
+  for (const key of ["accountId", "versionId"]) if (typeof body[key] !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body[key])) throw invalid("Invalid media account context", key);
+  for (const key of ["accountRevision", "assetRevision"]) if (typeof body[key] !== "string" || !/^[1-9]\d{0,18}$/.test(body[key])) throw invalid("Invalid media revision", key);
+  if (typeof body.byteHash !== "string" || !/^[0-9a-f]{64}$/.test(body.byteHash)) throw invalid("Invalid media byte hash");
+  return body as MediaReviewBinding;
+}
+export function assertMediaReviewBinding(asset: Pick<MediaAssetRow, "accountId" | "ownerUserId" | "purpose" | "ownershipKind" | "revision" | "contentHash">, account: { revision: string; current_version_id: string | null; owner_user_id: string } | undefined, binding: MediaReviewBinding): void {
+  if (asset.accountId !== binding.accountId || asset.ownershipKind !== "USER_SUPPLY" || asset.purpose !== "ACCOUNT_DISPLAY") throw notFound();
+  if (!account || account.revision !== binding.accountRevision || account.current_version_id !== binding.versionId || account.owner_user_id !== asset.ownerUserId || asset.revision !== binding.assetRevision || asset.contentHash !== binding.byteHash) throw conflict("Account, listing version or image changed; review again");
+}
+async function assertLockedAccountMediaContext(client: PoolClient, asset: MediaAssetRow, input: { accountContext?: MediaReviewBinding; reason?: string }): Promise<void> {
+  if (asset.ownershipKind === "USER_SUPPLY" && asset.purpose === "ACCOUNT_DISPLAY" && !input.accountContext) throw conflict("Account image confirmation context is required; recheck in account supervision");
+  if (!input.accountContext) return;
+  const binding = parseMediaReviewBinding(input.accountContext)!;
+  const account = (await client.query<{ revision: string; current_version_id: string | null; owner_user_id: string }>("SELECT revision::text,current_version_id,owner_user_id FROM zzsh_supply.rental_account WHERE id=$1", [binding.accountId])).rows[0];
+  assertMediaReviewBinding(asset, account, binding);
+  if (!(await client.query("SELECT 1 FROM zzsh_supply.listing_media WHERE version_id=$1 AND asset_id=$2", [binding.versionId, asset.id])).rowCount) throw conflict("Image is no longer bound to this listing version");
+  if (!input.reason || input.reason.trim().length < 2 || input.reason.length > 500) throw invalid("A reason is required for account image disposition");
+}
 export async function reviewMediaAsset(
   client: PoolClient,
   adminUserId: string,
   isBoss: boolean,
   assetId: string,
-  input: { decision: string; reason?: string; visibility?: string },
+  input: { decision: string; reason?: string; visibility?: string; accountContext?: MediaReviewBinding },
   lockPublishingAccount?: LockPublishingAccount,
 ): Promise<MediaAssetRow> {
   const asset = await lockMediaAsset(client, assetId, lockPublishingAccount);
+  await assertLockedAccountMediaContext(client, asset, input);
   // Platform content media has no game scope; its authorization is the content
   // permission checked by the route. Catalog/user media keeps the game scope check.
   if (asset.gameId === null) {
@@ -497,10 +522,11 @@ export async function changeMediaVisibility(
   adminUserId: string,
   isBoss: boolean,
   assetId: string,
-  input: { visibility: string; reason?: string },
+  input: { visibility: string; reason?: string; accountContext?: MediaReviewBinding },
   lockPublishingAccount?: LockPublishingAccount,
 ): Promise<MediaAssetRow> {
   const asset = await lockMediaAsset(client, assetId, lockPublishingAccount);
+  await assertLockedAccountMediaContext(client, asset, input);
   if (asset.gameId === null) {
     if (asset.ownershipKind !== "PLATFORM_CONTENT" || asset.purpose !== "CONTENT_MEDIA") throw notFound();
   } else {

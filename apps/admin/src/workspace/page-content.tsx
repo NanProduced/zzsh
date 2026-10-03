@@ -17,6 +17,7 @@ import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order
 import { AccountSecurityPage } from "./account-security-page";
 import type { WorkspaceTab } from "./tab-model";
 import { WorkbenchPage } from "./workbench";
+import { Button } from "../components/ui-elements";
 
 export function WorkspacePageContent({
   tab,
@@ -43,6 +44,15 @@ export function WorkspacePageContent({
   onQueryChange: (query: Record<string, string>) => void;
   refreshNonce: number;
 }) {
+  const fromSupply = tab.query.fromSupplyId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromSupplyId) && snapshot.permissions.includes("supply.review.read") ? tab.query.fromSupplyId : null;
+  const supplyReturn = fromSupply ? <div className="wf-source-context"><Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(fromSupply)}?${new URLSearchParams({context:tab.query.fromSupplyContext??"situation",...(tab.query.fromSupplyVersionId?{versionId:tab.query.fromSupplyVersionId}:{})})}`)}>返回来源账号供给</Button></div> : null;
+  const withSupplyOrigin = (path: string, title?: string) => {
+    if (!fromSupply) return onOpenPath(path,title);
+    const [pathname,search=""] = path.split("?"), params = new URLSearchParams(search);
+    params.set("fromSupplyId",fromSupply); params.set("fromSupplyContext",tab.query.fromSupplyContext??"situation");
+    if (tab.query.fromSupplyVersionId) params.set("fromSupplyVersionId",tab.query.fromSupplyVersionId);
+    onOpenPath(pathname+"?"+params,title);
+  };
   if (tab.kind === "workbench") {
     return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
@@ -106,7 +116,7 @@ export function WorkspacePageContent({
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "users" || tab.kind === "user-object") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}onOpenPath(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange({...tab.query,...query})} refreshNonce={refreshNonce}/></>;
+  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}withSupplyOrigin(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange({...tab.query,...query})} refreshNonce={refreshNonce}/></>;
   if(tab.kind==="resource-object")return <AdminResourceReadView snapshot={snapshot} accountId={tab.objectId!} fromOrderId={tab.query.fromOrderId} fromUserId={tab.query.fromUserId} fromUserSection={tab.query.fromUserSection} onOpenPath={onOpenPath} refreshNonce={refreshNonce}/>;
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
@@ -117,25 +127,27 @@ export function WorkspacePageContent({
   if (tab.kind === "rules") {
     return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
+  if (tab.kind === "listing-review" || tab.kind === "listing-object") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} initialAccountId={tab.objectId} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {
-    return <SupplyMediaReviewView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} />;
+    return <SupplyMediaReviewView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} refreshNonce={refreshNonce} onOpenPath={onOpenPath} />;
   }
   if (tab.kind === "content") {
     return <ContentView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "orders" || tab.kind === "order-object") {
     return (
+      <>{supplyReturn}
       <AdminOrderChainView
         key={tab.id}
         snapshot={snapshot}
         initialOrderId={tab.objectId}
         objectOnly={tab.kind === "order-object"}
         initialQuery={tab.query}
-        onOpenPath={onOpenPath}
+        onOpenPath={withSupplyOrigin}
         onQueryChange={onQueryChange}
         refreshNonce={refreshNonce}
       />
+      </>
     );
   }
   if (tab.kind === "user-restore") return <UserRestorePanel key={tab.id} />;

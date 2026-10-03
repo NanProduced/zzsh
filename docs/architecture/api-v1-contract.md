@@ -115,6 +115,8 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；以下为未指定queryVersion的v1合同，v2见[组合筛选合同](listing-query.md)。list支持可选`q`（NFC+trim，空白视为未传，最长120，NUL拒绝；服务端参数化`ILIKE`且`%/_/\\`按字面量）、gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor。游标绑定规范化后的`q`及其他过滤，更换条件后旧游标400，不混页。`q`只匹配当前可公开版本标题；`rental_account.display_no`从未写入，当前不搜索编号，也不搜索内部用户ID、登录资料或私人说明。详情在既有quote/attributes上增加`attributes.safe_box_code`、`safeBox{code,displayName}`（已知稳定code从受控映射返回中文名称，未知code的displayName为null；attributeDisplay保留UNCONFIRMED及issueCode，缺值不猜测）和`termOption{code,displayName,dailyConsumption{quantity,unit=HAFF_BASE}}`，数据取自该公开版本绑定的封存release/term_option，不用当前运营草稿改写；缺字段为null，不默认0。`quote.termSeconds`仍为权威租期；每日消耗只用于租期推算，不是每日保底。不可公开统一404。 |
 | GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定且技术/公开资格有效的ACCOUNT_DISPLAY衍生图，no-store；下架、暂停、限制或规则过期后404 |
 | 管理 GET /listing-reviews、/{accountId} | 按state/after/limit读取显式scope队列，nextCursor接后续after；详情含前版对比与审核/重复线索，不用内部ID作为主要人工入口 |
+| 管理 GET /listing-reviews?queryVersion=3 | 跨资料状态账号供给读取；view=all/changes/restricted/paused/orders，queryKind=account/legacy/owner/nickname/order、q、gameId、limit（1–50）、cursor。号主昵称多候选，业务编号/旧来源编号/稳定ID分别保留；无新编号时不落库伪造。游标HMAC绑定管理员/会话/权限/游戏scope/完整查询；旧ID游标、绑定或签名不符409回首页。列表无全局总计。order线索/视图另需order.read。 |
+| 管理 GET /listing-reviews/{accountId}?queryVersion=3 | 独立对象读取，versionId限同账号历史；返回contractVersion/contextKey、当前资料与历史/前版、supervision的权威公开/新单/阻断与主要原因、对象相关限制事件、按独立权限裁剪的号主/订单目标。公开读取复用原生及旧来源只读合同，旧来源公开不等原生接单许可；缺资料/原事件/图片不补造证据。历史版本只读，当前业务事实仍单列。 |
 | 管理 POST /listing-reviews/{accountId}/decide | expectedRevision、versionId、releaseId、contentHash、APPROVE/REJECT、具体reason；审核/撤回竞争只接受一次有效处理 |
 | 管理 POST /listing-reviews/{accountId}/restriction、/duplicates | 限制使用restricted+reason；重复线索使用relatedAccountId/evidenceRef/result/reason；均带expectedRevision，重复仅人工记录，不自动处置 |
 
@@ -125,6 +127,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - listing_version.schema_version保留旧1，含rentalPricing的新声明/报价使用2；attributes采用受控字段，安全箱条件保存为safe_box_code。未知值可留草稿；报价/提交必须满足已配置规则，不允许把空等级变成0。提交后内容/明细不可改，撤回或驳回后创建新版本；规则变化需新报价/接受并形成有效发布事实，不自动继承历史通过。
 - 用户行锁协调身份变化与发布事务，占用由订单表派生。默认SupplyGateReader读取当前正式政策及最新有效保证金依据，缺失或不匹配为UNKNOWN；测试替代reader仅限显式test/fake能力。HTTP不能自行声明已付款/未占用，正式核定依据也不等于真实资金到账。
 - ACCOUNT_EVIDENCE始终为私有证据；ACCOUNT_DISPLAY单独申报并执行技术/公开资格校验，绑定需同号主/档案/游戏；仍可由有权管理员审核或隔离。用户素材不能经无条件的/media/{id}/content公开；原始证据保持私有。未传purpose时仍兼容M3-B私有凭证及原幂等指纹。
+  - 管理`POST /media/{assetId}/review`及`/visibility`对USER_SUPPLY/ACCOUNT_DISPLAY的新意图都要求`accountContext={accountId,accountRevision,versionId,assetRevision,byteHash}`及2–500字原因。账号→媒体锁内校验原号主、当前版本、仍绑定图片、两种修订及字节摘要；错账号/用途404，缺上下文或版本/绑定改变409重新核对。这是旧客户端写合同收紧：原媒体页转精确来源账号/图片核对；未绑定当前版本的图保留只读与待补合法处置边界，不能自动改其他图。平台目录/内容素材及私有凭证保持原合同。已成功旧key重放仍先核当前权限/scope再返回原回执，不重新执行或因旧CAS变更再写。
 - 业务、接受、审核与审计同事务。审计保存版本/release/hash、前后状态、库存值和声明摘要/证据引用，不复制原始凭证。legacy_supply_map仅提供受控观察兼容入口，无生产导入命令；旧状态/未知单位不生成报价或审核通过。
 
 ## 游戏服务支持与改枪码（M3E）

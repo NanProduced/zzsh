@@ -210,7 +210,14 @@ export type CatalogSkin = {
   sortOrder: number;
   sourceField?: string | null;
   sourceToken?: string | null;
+  sourceNamespace: string | null;
+  baseName: string | null;
+  aliases: string[];
+  namingState: "LEGACY" | "PENDING" | "VERIFIED";
+  ownerRef: { kind: "AGENT" | "MELEE_TYPE" | "FIREARM"; id: string } | null;
 };
+
+export type CatalogSkinOwner = { id: string; kind: "AGENT" | "MELEE_TYPE"; code: string; name: string; enabled: boolean };
 
 export type CatalogRarity = { id: string; code: string; name: string; sortOrder: number; enabled: boolean };
 export type CatalogEntitlement = {
@@ -231,6 +238,7 @@ export type AdminCatalogResponse = {
   rarities: CatalogRarity[];
   categories: CatalogSkinCategory[];
   skins: CatalogSkin[];
+  owners: CatalogSkinOwner[];
   entitlements: CatalogEntitlement[];
 };
 
@@ -360,6 +368,7 @@ export type RulesResponse = {
 
 export type MediaAssetReview = {
   id: string;
+  accountId?: string | null;
   gameId: string;
   purpose: "GAME_COVER" | "SKIN_MEDIA" | "ITEM_MEDIA" | "FIREARM_MEDIA" | "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE";
   ownershipKind: "PLATFORM_CATALOG" | "USER_SUPPLY";

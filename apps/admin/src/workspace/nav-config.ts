@@ -61,7 +61,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     supply.push({ label: "规则与价目", icon: ListChecksIcon, path: "/supply/rules", kind: "rules" });
   }
   if (has("supply.review.read") || nav.isBoss) {
-    supply.push({ label: "供给审核", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
+    supply.push({ label: "账号供给", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
     supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
   }
   if (supply.length > 0) {
@@ -118,7 +118,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/catalog") return "目录维护";
   if (pathname === "/supply/gunsmith") return "改枪码目录";
   if (pathname === "/supply/rules") return "规则与价目";
-  if (pathname === "/supply/reviews") return "供给审核";
+  if (pathname === "/supply/reviews") return "账号供给";
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
   if (pathname.startsWith("/orders/")) return "订单详情";
