@@ -20,8 +20,9 @@ import {
 import { maskPhone, webAuthRequest, WebAuthError } from "@/components/auth/auth-form";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { accountStatusLabel, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
-import { MembershipRequestError, readMyMembership, type MembershipTier } from "@/lib/membership-client";
+import { MembershipRequestError, readMyMembership, type MembershipTier, type MembershipSnapshot } from "@/lib/membership-client";
 import { formatOrderTime, orderApi, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
+import { WalletSummary } from "./personal-wallet";
 import "./account-center.css";
 
 export const accountSectionLabels = {
@@ -68,7 +69,7 @@ const NAV_ITEMS: NavItem[] = [
   { section: "favorites", label: "我的收藏", icon: Star },
   { section: "identity", label: "实名认证", icon: ShieldCheck },
   { section: "security", label: "账号安全", icon: Shield },
-  { section: "wallet", label: "我的钱包", icon: CreditCard, badge: "待接入" },
+  { section: "wallet", label: "我的钱包", icon: CreditCard },
   { section: "invite", label: "分销中心", icon: Sparkles, badge: "待接入" },
 ];
 
@@ -114,28 +115,28 @@ function MembershipIdentity({ scope }: { scope: string }) {
   const revalidate = session.revalidate;
   const [reload, setReload] = useState(0);
   const [copyStatus, setCopyStatus] = useState<{ scope: string; value: "copied" | "failed" } | null>(null);
-  const [state, setState] = useState<{ scope: string; status: "loading" | "ready" | "error"; tier: MembershipTier | null; error: MembershipRequestError | null }>({
+  const [state, setState] = useState<{ scope: string; status: "loading" | "ready" | "error"; membership: MembershipSnapshot | null; error: MembershipRequestError | null }>({
     scope,
     status: "loading",
-    tier: null,
+    membership: null,
     error: null,
   });
   const sequence = useRef(0);
-  if (state.scope !== scope) setState({ scope, status: "loading", tier: null, error: null });
+  if (state.scope !== scope) setState({ scope, status: "loading", membership: null, error: null });
 
   useEffect(() => {
     const current = ++sequence.current;
     const controller = new AbortController();
-    setState({ scope, status: "loading", tier: null, error: null });
+    setState({ scope, status: "loading", membership: null, error: null });
     readMyMembership(controller.signal).then(
       (membership) => {
-        if (current === sequence.current) setState({ scope, status: "ready", tier: membership.tier, error: null });
+        if (current === sequence.current) setState({ scope, status: "ready", membership, error: null });
       },
       (error: unknown) => {
         if (controller.signal.aborted || current !== sequence.current) return;
         const failure = error instanceof MembershipRequestError ? error : new MembershipRequestError(0, null);
         if (isAuthenticationFailure(failure)) revalidate();
-        setState({ scope, status: "error", tier: null, error: failure });
+        setState({ scope, status: "error", membership: null, error: failure });
       },
     );
     return () => controller.abort();
@@ -146,6 +147,11 @@ function MembershipIdentity({ scope }: { scope: string }) {
   const monogram = firstWord ? Array.from(firstWord).slice(0, 2).join("").toUpperCase() : null;
   const contractGap = state.error?.code === "MEMBERSHIP_CONTRACT_REQUIRED";
   const visibleCopyStatus = copyStatus?.scope === scope ? copyStatus.value : null;
+  const tier = state.membership?.tier ?? null;
+  const policy = state.status === "ready" ? state.membership?.benefitPolicy : null;
+  const depositNotice = tier && tier !== "UNKNOWN" && policy
+    ? policy.tenantDeposit[tier] === "WAIVED" ? "免租客押金；资源价格以当前个人报价为准。" : "租客押金按账号条件缴纳；资源价格以当前个人报价为准。"
+    : "会员资格尚未确认，当前押金权益暂无法判断。";
 
   const copyUserId = async () => {
     if (!session.userId) return;
@@ -168,10 +174,10 @@ function MembershipIdentity({ scope }: { scope: string }) {
             <div className="account-profile-info">
               <h2 className="account-profile-name" title={name}>{name}</h2>
               <div className="account-profile-tier-row">
-                {state.status === "ready" && state.tier ? (
+                {state.status === "ready" && tier ? (
                   <span className="membership-tier" data-testid="membership-tier">
                     <Crown size={12} aria-hidden="true" />
-                    <span>{TIER_LABELS[state.tier]}</span>
+                    <span>{TIER_LABELS[tier]}</span>
                   </span>
                 ) : (
                   <span
@@ -208,9 +214,18 @@ function MembershipIdentity({ scope }: { scope: string }) {
             <span><strong>信用分</strong><small>规则待公布</small></span>
             <em>即将上线</em>
           </div>
-          <p id="membership-benefits" className="membership-benefits-note" data-gap="MEMBERSHIP_CONTRACT_REQUIRED">会员权益说明待接入</p>
+          <p id="membership-benefits" className="membership-benefits-note" data-gap={policy ? undefined : "MEMBERSHIP_CONTRACT_REQUIRED"}>
+            {policy ? depositNotice : "会员权益说明暂未提供"}
+          </p>
+          {policy ? <details className="membership-benefits-details">
+            <summary>查看会员权益说明</summary>
+            <p>适用：{policy.scopeLabel}。VIP、SVIP免租客押金；标准用户与优惠用户不免押。</p>
+            <p>{policy.notice}</p>
+            <p>有效期、购买与授予方式暂未提供。</p>
+            <small>本人资格版本 {state.membership?.version} · 权益说明版本 {policy.version}</small>
+          </details> : null}
         </div>
-        <div className="account-profile-card-art-col"><MembershipCardArt tier={state.status === "ready" ? state.tier : null} /></div>
+        <div className="account-profile-card-art-col"><MembershipCardArt tier={state.status === "ready" ? tier : null} /></div>
       </div>
     </div>
   );
@@ -357,14 +372,7 @@ export function AccountOverview({ scope }: { scope: string }) {
           </div>
         </section>
         <div className="account-overview-aside">
-          <section className="account-wallet-preview" aria-labelledby="account-wallet-heading">
-            <div className="account-wallet-mark" aria-hidden="true"><CreditCard size={25} /></div>
-            <div>
-              <h2 id="account-wallet-heading">我的钱包</h2>
-              <strong>余额待接入</strong>
-              <p>资金流水功能正在准备中</p>
-            </div>
-          </section>
+          <WalletSummary scope={scope} />
           <section className="account-status-panel" aria-labelledby="account-status-heading" aria-busy={visibleStatus.phase === "loading" ? true : undefined}>
             <h2 id="account-status-heading">账号状态</h2>
             {visibleStatus.phase === "ready" && visibleStatus.identity ? (

@@ -31,7 +31,13 @@ function loadCenter(session) {
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
     if (name === "next/link") return function Link({ scroll: _scroll, ...props }) { return React.createElement("a", props); };
-    if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
+    if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => ({ getSnapshot: () => session }) };
+    if (name === "./personal-wallet" || name === "./controlled-withdrawal") {
+      const child = new Module(path.join(tree, "wallet-summary-probe.cjs"));
+      child.filename = path.join(tree, "wallet-summary-probe.cjs"); child.paths = Module._nodeModulePaths(tree); child.require = module.require;
+      child._compile(typescript.transpileModule(fs.readFileSync(path.join(tree, `apps/web/src/components/account/${name.slice(2)}.tsx`), "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, child.filename);
+      return child.exports;
+    }
     if (name === "@/components/auth/auth-form") return {
       WebAuthError: class WebAuthError extends Error { constructor(status) { super("AUTH_ERROR"); this.status = status; } },
       webAuthRequest: async (path, _body, signal) => {
@@ -47,6 +53,8 @@ function loadCenter(session) {
     };
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
     if (name === "@/lib/membership-client") return requireFromTree(path.join(tree, "apps/web/src/lib/membership-client.ts"));
+    if (name === "@/lib/personal-wallet-client") return requireFromTree(path.join(tree, "apps/web/src/lib/personal-wallet-client.ts"));
+    if (name === "@/lib/controlled-withdrawal-client") return requireFromTree(path.join(tree, "apps/web/src/lib/controlled-withdrawal-client.ts"));
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };
@@ -163,7 +171,7 @@ test("empty orders show the next step and no invented count", async () => {
     assert.doesNotMatch(probe.host.querySelector(".account-credit-preview").textContent, /\b98\b/);
     assert.match(probe.host.querySelector(".account-status-panel").textContent, /138\*\*\*\*8000/);
     assert.match(probe.host.querySelector(".account-status-panel").textContent, /实名已验证/);
-    assert.match(probe.host.querySelector(".account-wallet-preview").textContent, /余额待接入资金流水功能正在准备中/);
+    assert.match(probe.host.querySelector(".account-wallet-preview").textContent, /钱包暂时无法读取/);
     assert.equal(probe.host.querySelector(".account-overview-aside").firstElementChild.className, "account-wallet-preview");
     assert.doesNotMatch(probe.host.querySelector(".account-wallet-preview").textContent, /\d+\.\d{2}/);
     assert.equal(probe.host.querySelector("[data-testid=order-summary-renter] a[href='/accounts']").textContent, "浏览账号");
@@ -284,7 +292,7 @@ test("membership card uses the confirmed tier and a missing field is not invente
     assert.match(probe.host.textContent, /用户甲/);
     const note = probe.host.querySelector("#membership-benefits");
     assert.equal(note.getAttribute("data-gap"), "MEMBERSHIP_CONTRACT_REQUIRED");
-    assert.match(note.textContent, /会员权益说明待接入/);
+    assert.match(note.textContent, /会员权益说明暂未提供/);
     assert.doesNotMatch(note.textContent, /免押|黑金|升级|购买/);
     assert.equal(probe.host.querySelector(".membership-benefits"), null);
 
@@ -299,11 +307,40 @@ test("membership card uses the confirmed tier and a missing field is not invente
     assert.ok(nav.every((link) => link.tagName === "A" && link.getAttribute("href")?.startsWith("/account?view=")));
     assert.equal(probe.host.querySelector(".account-nav a[aria-current=page]").textContent.includes("总览"), true);
     const wallet = nav.find((link) => link.getAttribute("href") === "/account?view=wallet");
-    assert.match(wallet.textContent, /待接入/);
-    assert.equal(wallet.querySelector(".account-nav-chevron"), null);
+    assert.doesNotMatch(wallet.textContent, /待接入/);
+    assert.ok(wallet.querySelector(".account-nav-chevron"));
   } finally {
     await probe.dispose();
   }
+});
+
+test("membership benefits use the public policy without inventing validity or treating UNKNOWN as STANDARD", async () => {
+  const policy = { version: "rental-benefits-20261003.v1", scope: "DELTA_ACCOUNT_RENTAL", scopeLabel: "三角洲行动账号租赁",
+    tenantDeposit: { STANDARD: "ACCOUNT_BASE", VIP: "WAIVED", SVIP: "WAIVED", DISCOUNT_USER: "ACCOUNT_BASE" },
+    resourcePrice: "PERSONAL_QUOTE", validity: "UNKNOWN", acquisition: "UNKNOWN", notice: "以个人确认结果为准。" };
+  let body = { membership: { tier: "VIP", version: "12" }, benefitPolicy: policy };
+  const probe = await createProbe(async input => String(input).includes("rental-membership") ? json(body) : json(emptyPage));
+  try {
+    const render = scope => probe.render(React.createElement(probe.center.AccountOverview, { scope }));
+    await render("user_A:1");
+    assert.match(probe.host.querySelector("#membership-benefits").textContent, /免租客押金/);
+    const details = probe.host.querySelector(".membership-benefits-details");
+    assert.match(details.textContent, /本人资格版本 12.*权益说明版本 rental-benefits-20261003.v1/);
+    assert.match(details.textContent, /有效期、购买与授予方式暂未提供/);
+    assert.doesNotMatch(details.textContent, /终身|打折|升级会员/);
+    body = { ...body, membership: { tier: "DISCOUNT_USER", version: "13" } };
+    await render("user_A:2");
+    assert.match(probe.host.querySelector("#membership-benefits").textContent, /按账号条件缴纳/);
+    body = { ...body, membership: { tier: "UNKNOWN", version: "0" } };
+    await render("user_A:3");
+    assert.match(probe.host.querySelector("#membership-benefits").textContent, /资格尚未确认/);
+    assert.doesNotMatch(probe.host.querySelector("#membership-benefits").textContent, /免租客押金|按账号条件缴纳/);
+    body = { membership: { tier: "VIP", version: "14" }, benefitPolicy: { ...policy, validity: "FOREVER" } };
+    await render("user_A:4");
+    assert.equal(probe.host.querySelector("[data-testid=membership-tier]").textContent, "VIP");
+    assert.equal(probe.host.querySelector(".membership-benefits-details"), null);
+    assert.match(probe.host.querySelector("#membership-benefits").textContent, /暂未提供/);
+  } finally { await probe.dispose(); }
 });
 
 test("a membership read failure can retry and does not remove the order summaries", async () => {

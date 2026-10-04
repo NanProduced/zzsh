@@ -9,7 +9,8 @@
 资格更新先锁目标user，再核expectedVersion，首次赋值为1、后续严格+1，DB负责更新时间。同一事务保存前后来源、原因、实际管理员与审计；失败不留资格或幂等成功记录。无有效注册来源或管理员归属的来源不用于报价，返回UNKNOWN。资格不存入客户端可写profile。
 
 - 管理读/改：`GET/PUT /api/v1/admin/users/{id}/rental-membership`，同源Admin BFF对应`/api/bff/admin/users/{id}/rental-membership`。读写均需`user.rental_membership.manage`；权限只注册，不默认授普通客服。写body严格为`{tier,expectedVersion,sourceRef,reason}`，要求Idempotency-Key，沿用现有成功重放/异体同key冲突合同。
-- 本人读取：`GET /api/v1/users/me/rental-membership`，仅返回tier/version；不返回来源或提供本人修改接口。
+- 本人读取：`GET /api/v1/users/me/rental-membership`，membership仍仅含tier/version；另返回公开benefitPolicy，权益说明版本独立于本人资格版本。不返回来源或提供本人修改接口。
+- 公开说明适用三角洲行动账号租赁：VIP/SVIP免租客押金，STANDARD/DISCOUNT_USER不免押，资源价格以本次个人报价为准。有效期、购买与授予方式尚未由现有模型提供，返回UNKNOWN；不据tier推断终身、折扣数字或最终交易资格。Web BFF白名单裁剪说明，未知/旧说明不影响独立的已核档位读取，页面保留未提供状态。
 - runtime仅SELECT/INSERT及必要更新列；禁止DELETE/TRUNCATE和直接更新user_id/updated_at。SQL单调版本守卫与API用户锁/CAS共同约束。
 
 ## 个人确认

@@ -575,7 +575,7 @@ export function loadAuthRuntimeConfig(
 export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
-): Promise<void> {
+): Promise<AuthSecurityOptions> {
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
     import("@better-auth/drizzle-adapter"),
@@ -900,7 +900,7 @@ export async function mountAuthHandlers(
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);
-  mountRentalMembership(app,securityOptions);
+  mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey});
   mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,fundingReader});
   mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,fundingReader});
   if (options.orderTeams) {
@@ -913,6 +913,7 @@ export async function mountAuthHandlers(
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });
+  return securityOptions;
 }
 
 function mountRealm(

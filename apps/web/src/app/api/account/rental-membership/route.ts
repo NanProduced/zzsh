@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isHttpOrigin, readBoundedBody, userCookies } from "../../../../lib/user-proxy.ts";
+import { parseMembershipBenefitPolicy } from "../../../../lib/membership-client.ts";
 
 const local = process.env.NODE_ENV !== "production";
 const apiOrigin = process.env.ZZSH_API_ORIGIN ?? (local ? "http://127.0.0.1:3102" : "");
@@ -31,7 +32,8 @@ function projectMembership(payload: unknown, status: number, requestId: string) 
   const membership = record ? recordOf(record.membership) : null;
   const tier = membership?.tier;
   const version = membership?.version;
-  return { membership: { ...(typeof tier === "string" ? { tier } : {}), ...(typeof version === "string" ? { version } : {}) } };
+  const policy = parseMembershipBenefitPolicy(record?.benefitPolicy);
+  return { membership: { ...(typeof tier === "string" ? { tier } : {}), ...(typeof version === "string" ? { version } : {}) }, ...(policy ? { benefitPolicy: policy } : {}) };
 }
 
 export async function GET(request: Request): Promise<Response> {

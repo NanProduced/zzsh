@@ -1,3 +1,5 @@
+import { FINANCE_ACCESS_FAILURE_EVENT } from "../views/admin-finance-api";
+import { clearFinanceContexts } from "../views/admin-finance-view";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
@@ -100,6 +102,7 @@ export function WorkspaceApp({
     persistTabs(snapshot.adminUserId, { tabs, activeId });
   }, [activeId, snapshot.adminUserId, tabs]);
 
+  useEffect(()=>{const revoke=()=>{clearFinanceContexts();const next=tabsRef.current.filter(tab=>!tab.kind.startsWith("finance-"));setTabs(next);setActiveId(WORKBENCH_TAB_ID);replaceUrl(tabFromLocation("/workbench"),true);};window.addEventListener(FINANCE_ACCESS_FAILURE_EVENT,revoke);return()=>window.removeEventListener(FINANCE_ACCESS_FAILURE_EVENT,revoke);},[replaceUrl]);
   useEffect(() => {
     const next = filterTabsByPermission(tabs, nav);
     if (next.length !== tabs.length || next.some((tab, index) => tab.id !== tabs[index]?.id)) {

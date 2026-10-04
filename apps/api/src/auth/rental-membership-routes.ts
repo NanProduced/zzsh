@@ -8,7 +8,9 @@ import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { bodyOf, sendJson } from "../supply/supply-util";
 import { decodeId, safely, requireAdminAccess, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
 import { forbidden, notFound, type SupplyNodeRequest } from "../supply/supply-util";
-import { readRentalMembership, membershipProjection, parseMembershipChange, changeRentalMembership } from "./rental-membership";
+import { readRentalMembership, membershipProjection, parseMembershipChange, changeRentalMembership, RENTAL_MEMBERSHIP_BENEFIT_POLICY } from "./rental-membership";
+import { mountPersonalFinanceRead } from "../finance/personal-finance-routes";
+import type { ListingCursorKey } from "../supply/listing-cursor";
 
 export async function handleRentalMembershipAdmin(request:SupplyNodeRequest,response:SupplyResponse,options:AuthSecurityOptions) {
   const requestId=ensureApiV1RequestId(request);
@@ -30,7 +32,8 @@ export async function handleRentalMembershipAdmin(request:SupplyNodeRequest,resp
   });
 }
 
-export function mountRentalMembership(app:INestApplication,options:AuthSecurityOptions) {
+export function mountRentalMembership(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey}) {
+  mountPersonalFinanceRead(app,options);
   const express=app.getHttpAdapter().getInstance();
   express.use("/api/v1/admin/users",(request:SupplyNodeRequest,response:SupplyResponse)=>handleRentalMembershipAdmin(request,response,options));
   express.use("/api/v1/users/me/rental-membership",(request:SupplyNodeRequest,response:SupplyResponse)=>{
@@ -39,7 +42,7 @@ export function mountRentalMembership(app:INestApplication,options:AuthSecurityO
       if(request.method!=="GET" || (request.originalUrl??"").split("?")[0]!=="/api/v1/users/me/rental-membership")throw notFound();
       const context=await readUserContext(request,options);
       const membership=await withTransaction(options.pool,async client=>{await assertReplayAuthorization(client,context);return membershipProjection(await readRentalMembership(client,context.userId));});
-      sendJson(response,200,{membership},requestId);
+      sendJson(response,200,{membership,benefitPolicy:RENTAL_MEMBERSHIP_BENEFIT_POLICY},requestId);
     });
   });
 }

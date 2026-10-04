@@ -310,7 +310,7 @@ export function ImSupportView({ snapshot, preview = false, initialSection = "con
           }
         });
       } catch (cause) {
-        if (!cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator) { setConnection("error"); setNotice(cause instanceof Error ? cause.message : "暂时无法打开云信客服连接。"); }
+        if (!cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator) { setConnection("error"); setNotice(friendlyError(cause)); }
       }
     };
     void run();

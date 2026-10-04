@@ -122,13 +122,13 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     if (q.view === "orders")
         where.push(orderExists());
     if (q.q) {
-        const value = p(q.q);
+        const value = p(q.queryKind === "nickname" ? "%" + escapeLike(q.q) + "%" : q.q);
         if (q.queryKind === "account")
             where.push(`(a.id=${value} OR a.display_no=${value})`);
         if (q.queryKind === "owner")
             where.push(`(a.owner_user_id=${value} OR EXISTS(SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id=a.owner_user_id AND e.object_type='user' AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS' AND e.details->>'legacyId'=${value}))`);
         if (q.queryKind === "nickname")
-            where.push(`u.name ILIKE ${p("%" + escapeLike(q.q) + "%")} ESCAPE '\\'`);
+            where.push(`u.name ILIKE ${value} ESCAPE '\\'`);
         if (q.queryKind === "legacy")
             where.push(`(EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id AND m.legacy_id=${value}) OR EXISTS(SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h WHERE h.account_id=a.id AND h.snapshot->>'resourceNo'=${value}) OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot o WHERE o.account_id=a.id AND o.legacy_account_no=${value}))`);
         if (q.queryKind === "order")
