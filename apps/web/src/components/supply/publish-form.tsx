@@ -262,6 +262,22 @@ function Notice({ error, text }: { error?: SupplyRequestError | null; text?: str
   </div>;
 }
 
+function AgreementBody({ body }: { body: string }) {
+  const [text, setText] = useState<string | null>(null);
+  useEffect(() => {
+    if (!/<\/?[a-z][^>]*>/i.test(body)) { setText(body); return; }
+    // Legacy agreements contain HTML. Parse inertly and render text only;
+    // the original body remains unchanged in the signed server version.
+    const doc = new DOMParser().parseFromString(body, "text/html");
+    doc.querySelectorAll("script,style,iframe,object,template").forEach((node) => node.remove());
+    doc.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
+    doc.querySelectorAll("p,h1,h2,h3,h4,li,tr").forEach((node) => node.append("\n"));
+    doc.querySelectorAll("td,th").forEach((node) => node.append("\t"));
+    setText(doc.body.textContent ?? "");
+  }, [body]);
+  return <div className="publish-terms-body">{text ?? "正在读取条款正文…"}</div>;
+}
+
 function GroupSection({ id, icon, title, summary, summaryEmpty, open, hasError, onToggle, onEdit, children }: {
   id: PublishGroupId;
   icon: ReactNode;
@@ -1987,7 +2003,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           {readOnly ? <div className="publish-rail-readonly"><p>{reviewState === "SUBMITTED" ? "当前版本正在审核中，不能直接编辑。" : "当前版本不是可编辑草稿。"}</p><button type="button" className="button primary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "开始修改"}</button></div> : <>
             {effectiveQuote ? <div className="publish-confirm">
               {quoteConsistent ? <>
-                {agreement ? <details className="publish-terms"><summary>查看本次出租条款（{agreement.title}）</summary><div className="publish-terms-body">{agreement.body}</div></details> : <p className="supply-muted">本次条款正文尚未读取，暂不能确认上架。</p>}
+                {agreement ? <details className="publish-terms"><summary>查看本次出租条款（{agreement.title}）</summary><AgreementBody body={agreement.body} /></details> : <p className="supply-muted">本次条款正文尚未读取，暂不能确认上架。</p>}
                 <label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !agreement} onChange={(event) => setAgreementChecked(event.target.checked)} />我已阅读并同意本次出租条款与条件</label>
                 <button type="button" className="button primary" disabled={primaryDisabled} onClick={() => void confirmPublish()}>{busy === "submit" ? "上架中…" : busy === "accept" ? "确认条款中…" : "确认上架"}</button>
               </> : null}

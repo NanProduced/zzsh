@@ -93,7 +93,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
   const window = new Window({ url: "http://127.0.0.1:3100/publish" });
   Object.assign(globalThis, {
     window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
-    Event: window.Event, MouseEvent: window.MouseEvent, DOMException: window.DOMException, IS_REACT_ACT_ENVIRONMENT: true,
+    DOMParser: window.DOMParser, Event: window.Event, MouseEvent: window.MouseEvent, DOMException: window.DOMException, IS_REACT_ACT_ENVIRONMENT: true,
   });
   Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
   window.scrollTo = () => {};
@@ -509,4 +509,12 @@ test("missing title focuses the designated title field rather than the first sel
     assert.equal(p.window.document.activeElement,p.host.querySelector('input[placeholder^="例如：满仓"]'));
     assert.equal(p.calls.some(c=>c.op==="quote"),false);
   } finally { await p.close(); }
+});
+
+
+test("legacy agreement markup renders readable inert text while retaining the original body", async () => {
+  const body='<h3>真实条款</h3><p>请阅读<strong>条件</strong>。</p><table><tr><td>物品</td><td>金额</td></tr></table><script>bad()</script>';
+  const data={...supplyOf(declaration({title:"agreement"}),{quote:ownerQuote}),agreement:{...optionsV1.agreement,body}};
+  const p=await probe({accountId:"account_1",mine:()=>data});
+  try {await p.render();const node=p.host.querySelector('.publish-terms-body');assert.match(node.textContent,/真实条款\n请阅读条件/);assert.match(node.textContent,/物品\t金额/);assert.doesNotMatch(node.textContent,/<h3>|bad/);assert.equal(node.querySelector('script'),null);assert.equal(data.agreement.body,body);}finally{await p.close();}
 });
