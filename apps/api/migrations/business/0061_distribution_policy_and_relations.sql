@@ -184,5 +184,3 @@ CREATE TRIGGER invitation_relation_source_guard BEFORE INSERT ON zzsh_order.invi
 INSERT INTO zzsh_iam.admin_permission(code,name,description) VALUES
  ('personal.distribution.policy.read','分销政策读取','读取受权分销经营政策及不可变版本'),
  ('personal.distribution.policy.manage','分销政策配置','版本化编辑受权分销经营政策，不授予资金写权限');
-
-
