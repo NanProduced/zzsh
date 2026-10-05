@@ -201,9 +201,10 @@ function blockerText(code: string): string {
 }
 
 function localizedErrorMessage(message: string): string {
+  const messages: Record<string, string> = { ...supplyBlockerMessages, RULE_INPUT_MISSING: "当前资料不满足核价规则，请检查账号属性、库存和出租比例", TERM_UNDETERMINED: "暂不能确定租期，请检查每日消耗和哈夫币数量" };
   const codes = message.split(",").map((code) => code.trim()).filter(Boolean);
-  if (codes.length > 0 && codes.every((code) => code in supplyBlockerMessages)) {
-    return codes.map((code) => supplyBlockerMessages[code]).join("；");
+  if (codes.length > 0 && codes.every((code) => code in messages)) {
+    return codes.map((code) => messages[code]).join("；");
   }
   return message;
 }
@@ -275,12 +276,12 @@ function GroupSection({ id, icon, title, summary, summaryEmpty, open, hasError, 
 }) {
   return <section id={`publish-group-${id}`} data-publish-group={id} className={`publish-group${open ? " is-open" : ""}${hasError ? " is-error" : ""}`}>
     <div className="publish-group-heading">
-      <button type="button" className="publish-group-toggle" aria-expanded={open} aria-controls={`publish-panel-${id}`} onClick={onToggle}>
+      <h2 className="publish-group-title"><button type="button" className="publish-group-toggle" aria-expanded={open} aria-controls={`publish-panel-${id}`} onClick={onToggle}>
         <span className="publish-group-icon" aria-hidden="true">{icon}</span>
         <span className="publish-group-copy"><strong>{title}</strong><small className={summaryEmpty ? "is-empty" : undefined}>{summary}</small></span>
         <ChevronDown size={18} className="publish-group-chevron" aria-hidden="true" />
-      </button>
-      <button type="button" className="button quiet publish-group-edit" onClick={onEdit}><Pencil size={14} aria-hidden="true" />编辑</button>
+      </button></h2>
+      <button type="button" className="button quiet publish-group-edit" aria-label={`编辑${title}`} onClick={onEdit}><Pencil size={14} aria-hidden="true" />编辑</button>
     </div>
     <div id={`publish-panel-${id}`} className="publish-group-panel" hidden={!open}>{children}</div>
   </section>;
@@ -1171,7 +1172,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const firstFocusable = (group: PublishGroupId): HTMLElement | null => {
     const section = formRef.current?.querySelector<HTMLElement>(`[data-publish-group="${group}"]`);
     if (!section) return null;
-    return section.querySelector<HTMLElement>('[aria-invalid="true"], [data-first-field], input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])');
+    return section.querySelector<HTMLElement>('[aria-invalid="true"]:not([disabled])')
+      ?? section.querySelector<HTMLElement>('[data-first-field]:not([disabled])')
+      ?? section.querySelector<HTMLElement>('input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])');
   };
 
   const locate = (group: PublishGroupId, message: string) => {
@@ -1714,6 +1717,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const rentalModes = options?.rentalModes;
   const rentalModeEntries: RentalMode[] = (["ordinary", "custom", "fast"] as const).filter((entry) => rentalModes ? rentalModes[entry]?.enabled : true);
   const modeRange = ratioRangeText(rentalModes?.[rentalMode]);
+  const visibleBlockers = [...new Set(blockers)].filter((code) => code !== "PUBLICATION_REQUIRED" && code !== "CONFIRMATION_OR_MEDIA_REQUIRED");
   const termOption = options?.termOptions.find((option) => option.code === draft.termOptionCode) ?? null;
   const payoutSelected = fullPayoutSelected(draft.attributes);
   const displayItems = media.filter((item) => item.purpose === "ACCOUNT_DISPLAY");
@@ -1806,6 +1810,15 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (primaryDisabled) return;
     if (effectiveQuote) void confirmPublish();
     else void quote();
+  };
+
+  const mobileTermsPending = Boolean(effectiveQuote && quoteConsistent && !agreementChecked && agreement?.body && !formDisabled);
+  const showTerms = () => {
+    const terms = document.querySelector<HTMLDetailsElement>(".publish-terms");
+    if (!terms) return;
+    terms.open = true;
+    terms.scrollIntoView({ block: "center" });
+    terms.querySelector("summary")?.focus({ preventScroll: true });
   };
 
   const modeHref = (fast: boolean) => {
@@ -1928,7 +1941,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 {fastLocked ? <div className={`supply-ratio-locked${options?.rentalModes?.fast?.enabled === false ? " is-disabled" : ""}`} aria-label="极速比例（已锁定）"><LockKeyhole size={14} aria-hidden="true" />{options?.rentalModes?.fast?.enabled === false ? "极速比例当前未启用" : "极速比例"}</div> : rentalModeEntries.map((entry) => <label key={entry} className="supply-radio"><input type="radio" name="rental_mode" checked={rentalMode === entry} disabled={formDisabled} onChange={() => changeRentalMode(entry)} />{rentalModeLabel(entry)}</label>)}
                 <small>{fastLocked ? "极速入口固定使用极速比例；比例数值仍可填写。" : "切换比例类型会保留其他资料并重新核价。"}</small>
               </fieldset>
-              {rentalMode !== "ordinary" ? <label className="supply-ratio-input">填写比例<span className="supply-ratio-value"><input data-first-field inputMode="decimal" value={ratioInput} disabled={formDisabled} onChange={(event) => changeRatio(event.target.value)} placeholder="例如 42" /><span aria-hidden="true">万哈夫币 / 元</span></span><small>{modeRange ? `允许范围：${modeRange}。` : "允许范围以当前规则为准。"}</small></label> : <p className="supply-muted">普通比例由平台按账号条件计算。</p>}
+              {rentalMode !== "ordinary" ? <label className="supply-ratio-input">填写比例<span className="supply-ratio-value"><input data-first-field inputMode="decimal" value={ratioInput} disabled={formDisabled} onChange={(event) => changeRatio(event.target.value)} placeholder="例如 42" /><span aria-hidden="true">万哈夫币 / 元</span></span><small>{modeRange ? `允许范围：${modeRange}。C 为平台按账号资料核算的普通比例，具体下限以核价结果为准。` : "范围以当前规则为准"}</small></label> : <p className="supply-muted">普通比例由平台按账号条件计算。</p>}
             </div> : null}
             <div className="supply-grid">
               <label>租客押金申报<input data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><small>{payoutSelected === true ? "全额包赔的申报下限以当前规则为准。" : "是否免押以正式政策与租客资格为准。"}</small><FieldError text={depositProblem()?.message} /></label>
@@ -1969,7 +1982,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           <p className="publish-rail-note">{effectiveQuote ? "金额来自本次核价；押金与保证金不影响号主侧合计。" : "保存草稿后可核对本版报价。"}</p>
           {effectiveQuote?.expiryDisclosures.length ? <div className="publish-rail-expiry"><strong>权益有效期</strong>{effectiveQuote.expiryDisclosures.map((item) => <p key={item.entitlementId}>{catalog?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? supply?.version?.presentation?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? "该项权益"}：{item.expiresAt ? new Date(item.expiresAt).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" }) : "长期有效"} · 本租期不保证覆盖完整有效期</p>)}</div> : null}
           {effectiveQuote && !quoteConsistent ? <div className="supply-blockers" role="alert"><strong>报价金额待核对</strong><p>本次报价的行金额与合计不一致，暂不能确认上架。</p></div> : null}
-          {blockers.length ? <div className="supply-blockers" role="alert"><strong>当前不能上架</strong>{[...new Set(blockers)].map((code) => <p key={code}>{blockerText(code)}</p>)}</div> : null}
+          {visibleBlockers.length ? <div className="supply-blockers"><strong>上架前请处理</strong><ul>{visibleBlockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul></div> : null}
+          {blockers.includes("CONFIRMATION_OR_MEDIA_REQUIRED") ? <p className="publish-rail-note">请核对图片校验状态，并阅读确认本次出租条款后上架。</p> : null}
           {readOnly ? <div className="publish-rail-readonly"><p>{reviewState === "SUBMITTED" ? "当前版本正在审核中，不能直接编辑。" : "当前版本不是可编辑草稿。"}</p><button type="button" className="button primary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "开始修改"}</button></div> : <>
             {effectiveQuote ? <div className="publish-confirm">
               {quoteConsistent ? <>
@@ -1989,7 +2003,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       </aside>
     </div>
     <div className="publish-mobile-actions">
-      <button type="button" className="button primary" disabled={primaryDisabled} onClick={primaryAction}>{primaryLabel}</button>
+      <button type="button" className="button primary" disabled={mobileTermsPending ? false : primaryDisabled} onClick={mobileTermsPending ? showTerms : primaryAction}>{mobileTermsPending ? "查看报价与条款" : primaryLabel}</button>
       <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
     </div>
   </ServiceShell>;

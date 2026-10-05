@@ -485,3 +485,28 @@ test("a matching recommendation is adoptable and becomes stale after further edi
     await p.close();
   }
 });
+
+test("mobile terms action opens and focuses terms without consenting or submitting", async () => {
+  const p = await probe({accountId:"account_1", mine:()=>({...supplyOf(declaration({title:"quoted"}), {quote:ownerQuote}),blockers:["PUBLICATION_REQUIRED","CONFIRMATION_OR_MEDIA_REQUIRED"]})});
+  try {
+    await p.render();
+    assert.doesNotMatch(p.text(), /公开发布事实尚未形成/);
+    await p.click(".publish-mobile-actions .primary");
+    assert.equal(p.host.querySelector(".publish-terms").open,true);
+    assert.equal(p.window.document.activeElement,p.host.querySelector(".publish-terms summary"));
+    assert.equal(p.host.querySelector(".publish-confirm input").checked,false);
+    assert.equal(p.calls.some(c=>c.op==="confirm"),false);
+    assert.equal(p.host.querySelectorAll("h2.publish-group-title").length,4);
+    assert.ok(p.host.querySelector('[aria-label="编辑账号资料"]'));
+  } finally { await p.close(); }
+});
+
+test("missing title focuses the designated title field rather than the first select", async () => {
+  const p=await probe({accountId:"account_1",mine:()=>supplyOf(declaration({title:""}))});
+  try {
+    await p.render(); await p.clickButton("核对报价");
+    assert.match(p.text(), /请先填写账号名称/);
+    assert.equal(p.window.document.activeElement,p.host.querySelector('input[placeholder^="例如：满仓"]'));
+    assert.equal(p.calls.some(c=>c.op==="quote"),false);
+  } finally { await p.close(); }
+});
