@@ -14,7 +14,7 @@
 
 旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员资格、个人确认凭据及新版建单已实现，见[个人确认合同](personal-confirmation.md)。正式声明、封存资金政策与保证金依据reader及核定API已接入；配置页面、推荐/披露接线、证明到期最终边界及独立包赔条款管理仍有缺口，缺依赖继续拒绝，不代表正式交易闭环已可用。
 
-用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:"full-payout-declaration-v1",selected:boolean}`，并参与现有内容 hash 与发布事实（历史审核流程保留真实决定）；字段缺省时继续省略，不改写旧 v1 hash。发布 UI 尚无此控件；确认/账务的受控 test/fake 接线不代表正式配置或生产资金能力。
+用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。号主侧推荐押金由 `GET /accounts/{id}/deposit-recommendation` 按当前版本申报与正式 fundingPolicy 计算；成功时返回 `accountId/accountRevision/versionId/versionRevision/ruleReleaseId/priceVersionId` 与本次计算使用的规范化输入字段对象（`safeBoxCode/vitality/bear/dive/skinIds`），客户端必须与发起请求时的保存快照逐项比对，不匹配即标记过期且不提供采用；未配置政策或输入不足时返回 `available:false` 及原因，不返回猜测值。是否采用由号主决定，不会自动覆盖申报。Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:"full-payout-declaration-v1",selected:boolean}`，并参与现有内容 hash 与发布事实（历史审核流程保留真实决定）；字段缺省时继续省略，不改写旧 v1 hash。发布 UI 已提供普通/全额包赔申报控件（不自动勾选，最低金额以政策为准）；确认/账务的受控 test/fake 接线不代表正式配置或生产资金能力。
 
 ## 直接发布与公开事实（PUB-1/2）
 

@@ -172,6 +172,31 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_order.controlled_payout_notice') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON zzsh_order.controlled_payout_notice FROM ${runtimeUser}; GRANT SELECT ON zzsh_order.controlled_payout_notice TO ${runtimeUser};`);
   }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.distribution_policy_version') AS relation`)).rows[0]?.relation) {
+    await pool.query(`
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON zzsh_order.distribution_policy_version, zzsh_order.distribution_policy_head,
+        zzsh_order.distribution_participant, zzsh_order.distribution_invite_code, zzsh_order.invitation_relation FROM ${runtimeUser};
+      GRANT SELECT ON zzsh_order.distribution_policy_version, zzsh_order.distribution_policy_head,
+        zzsh_order.distribution_participant, zzsh_order.distribution_invite_code, zzsh_order.invitation_relation TO ${runtimeUser};
+      GRANT INSERT(id,revision,scope,schema_version,canonical_config,config_digest,created_by_admin_id)
+        ON zzsh_order.distribution_policy_version TO ${runtimeUser};
+      GRANT INSERT(scope,revision,current_version_id), UPDATE(revision,current_version_id)
+        ON zzsh_order.distribution_policy_head TO ${runtimeUser};
+      GRANT INSERT(user_id,eligibility,commission_frozen,level_code,policy_version_id,revision,inviter_knowledge,leader_knowledge,invitees_knowledge,source_type,source_ref,source_digest)
+        ON zzsh_order.distribution_participant TO ${runtimeUser};
+      GRANT UPDATE(leader_knowledge,revision) ON zzsh_order.distribution_participant TO ${runtimeUser};
+      GRANT INSERT(id,user_id,display_code,source_type,source_system,source_entity,source_id,source_digest)
+        ON zzsh_order.distribution_invite_code TO ${runtimeUser};
+      GRANT INSERT(id,type,child_user_id,parent_user_id,policy_version_id,source_type,source_ref,source_digest)
+        ON zzsh_order.invitation_relation TO ${runtimeUser};`);
+  }
+
+  const nativeOrigin=(await pool.query("SELECT to_regclass('zzsh_order.native_user_insert_proof') IS NOT NULL AS proof,to_regprocedure('zzsh_order.initialize_native_wallet_origin(text,text,text,text)') IS NOT NULL AS initializer")).rows[0];
+  if((nativeOrigin?.proof===true)!==(nativeOrigin?.initializer===true))throw new Error('Native wallet origin schema is incomplete');
+  if(nativeOrigin?.proof===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_user_insert_proof FROM ${runtimeUser};
+    GRANT SELECT ON TABLE zzsh_order.native_user_insert_proof TO ${runtimeUser};
+    GRANT EXECUTE ON FUNCTION zzsh_order.initialize_native_wallet_origin(text,text,text,text) TO ${runtimeUser};`);
+  await configureDistributionFinancialPrivileges(pool, runtimeRole);
 }
 
 /** Kept separate so prefix migration and least-privilege branches can be checked offline. */
@@ -192,5 +217,43 @@ export async function configureSkinIdentityPrivileges(pool: Pick<Pool, "query">,
     GRANT SELECT ON zzsh_supply.skin_owner TO ${role};
     GRANT INSERT (id,game_id,kind,code,name,enabled) ON zzsh_supply.skin_owner TO ${role};
     GRANT UPDATE (enabled,updated_at) ON zzsh_supply.skin_owner TO ${role};
+  `);
+}
+
+/** Re-converge after every broad order grant, including repeated standard migrations. */
+export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const names = ["distribution_order_admission", "payment_distribution_basis", "controlled_payment_declaration",
+    "rental_referral_earning", "rental_referral_reversal_source", "rental_referral_transition"].map(name => `zzsh_order.${name}`);
+  const found = (await pool.query("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [names])).rows;
+  if (found.length !== names.length) throw new Error("Financial schema inventory is incomplete");
+  if (found.every(row => row.present === false)) return;
+  if (found.some(row => row.present !== true)) throw new Error("Financial schema is incomplete; runtime privileges not finalized");
+  for (const table of names) {
+    const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows;
+    if (!columns.length) throw new Error("Financial table columns are unavailable");
+    const list = columns.map(row => quoteIdentifier(row.attname)).join(",");
+    // Table revocation alone does not clear an old explicit column grant.
+    await pool.query(`REVOKE ALL ON TABLE ${table} FROM ${role};
+      REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table} FROM ${role};
+      GRANT SELECT ON TABLE ${table} TO ${role}`);
+  }
+  await pool.query(`
+    GRANT INSERT(id,order_id,payment_confirmation_id,admission_id,admission_revision,canonical_basis,basis_digest)
+      ON zzsh_order.payment_distribution_basis TO ${role};
+    GRANT INSERT(id,economic_root_id,economic_key,order_id,payment_confirmation_id,posting_id,beneficiary_user_id,
+      beneficiary_role,amount_cents,due_at,basis_digest,posting_digest,canonical_seed,seed_digest,state,funds_disposition,version)
+      ON zzsh_order.rental_referral_earning TO ${role};
+    GRANT UPDATE(state,funds_disposition,recovery_required_cents,version) ON zzsh_order.rental_referral_earning TO ${role};
+    GRANT INSERT(id,earning_id,action,expected_version,result_version,finance_event_id,reversal_source_id,source_digest)
+      ON zzsh_order.rental_referral_transition TO ${role};
+    REVOKE ALL ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
+      zzsh_order.earning_expected_lines(text),zzsh_order.guard_distribution_order_admission(),zzsh_order.guard_payment_distribution_basis(),
+      zzsh_order.check_payment_distribution_basis_pair(),zzsh_order.guard_controlled_payment_declaration(),zzsh_order.guard_native_earning_root(),
+      zzsh_order.guard_rental_referral_earning(),zzsh_order.guard_earning_event(),zzsh_order.guard_earning_entry(),zzsh_order.check_earning_batch(),
+      zzsh_order.guard_referral_transition_source(),zzsh_order.guard_referral_reversal_declaration(),zzsh_order.check_earning_reverse_closure(),
+      zzsh_order.referral_debt_read_revision(),zzsh_order.guard_withdrawal_referral_recovery() FROM ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
+      zzsh_order.earning_expected_lines(text) TO ${role};
   `);
 }

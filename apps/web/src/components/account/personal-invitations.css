@@ -1,0 +1,36 @@
+.personal-invitations { display:grid; gap:24px; }
+.invitation-workbench { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.2fr); gap:20px; }
+.personal-invitations h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
+.invitation-code>strong { display:block; font-size:26px; line-height:1.5; letter-spacing:.015em; overflow-wrap:anywhere; }
+.personal-invitations p { color:var(--color-text-secondary); font-size:13px; line-height:1.75; }
+.invitation-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:20px; }
+.personal-invitations .button { min-height:44px; }
+.invitation-parent>strong { font-size:17px; }
+.invitation-parent form { display:grid; gap:12px; margin-top:20px; }
+.invitation-parent label { color:var(--color-text-secondary); font-size:13px; }
+.invitation-parent input:not([type=checkbox]) { width:100%; min-width:0; min-height:44px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-elevated); color:var(--color-text-primary); font:inherit; caret-color:var(--account-accent); }
+.invitation-confirm { display:flex; align-items:center; gap:10px; min-height:44px; cursor:pointer; }
+.invitation-confirm input { width:17px; height:17px; accent-color:var(--account-accent); }
+.invitation-source { margin:20px 0 0; padding-top:16px; border-top:1px solid var(--color-border-subtle); }
+.invitation-list-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
+.invitation-list-heading h3 { display:flex; align-items:center; gap:9px; margin:0; }
+.invitation-list-heading>span { color:var(--color-text-secondary); font-size:13px; font-variant-numeric:tabular-nums; }
+.invitation-filters { display:flex; flex-wrap:wrap; gap:20px; margin:18px 0 0; border-bottom:1px solid var(--color-border-subtle); }
+.invitation-filters button { min-height:44px; padding:8px 0; background:transparent; border:0; border-bottom:2px solid transparent; color:var(--color-text-secondary); font:inherit; font-size:13px; cursor:pointer; }
+.invitation-filters button[aria-pressed=true] { color:var(--account-accent); border-bottom-color:var(--account-accent); font-weight:600; }
+.invitation-list ul { list-style:none; margin:0; padding:0; }
+.invitation-list li { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:20px 0; border-bottom:1px solid var(--color-border-subtle); }
+.invitation-list li>div { min-width:0; }
+.invitation-list li strong { display:block; overflow-wrap:anywhere; font-size:14px; }
+.invitation-list li small { display:block; margin-top:6px; color:var(--color-text-secondary); font-size:12px; }
+.invitation-list li>span { color:var(--color-text-secondary); font-size:12px; white-space:nowrap; }
+.invitation-empty { margin:0; padding:28px 0; }
+.invitation-earnings-link { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:18px; padding:4px 0 20px; }
+.invitation-earnings-link h3 { margin-bottom:8px; }
+.invitation-earnings-link p { margin:0; max-width:60ch; }
+.invitation-pending { display:flex; align-items:flex-start; gap:14px; }
+.invitation-pending>svg { color:var(--account-accent); flex-shrink:0; }
+.personal-invitations .invitation-error { margin:0; color:var(--account-danger); }
+.invitation-notice { margin:0; }
+.personal-invitations :is(input,button,a):focus-visible { outline:2px solid var(--account-accent); outline-offset:3px; }
+@media(max-width:700px) { .invitation-workbench { grid-template-columns:minmax(0,1fr); gap:14px; }.personal-invitations { gap:20px; }.invitation-actions .button { flex:1 1 140px; }.invitation-code>strong { font-size:23px; }.invitation-earnings-link .button { width:100%; } }

@@ -284,6 +284,16 @@
     {"idx":57,"version":"7","when":1789490026000,"tag":"0057_admin_order_read_compat","breakpoints":true},
     {"idx":58,"version":"7","when":1789490027000,"tag":"0058_personal_finance_read_foundation","breakpoints":true},
     {"idx":59,"version":"7","when":1789490028000,"tag":"0059_controlled_withdrawal","breakpoints":true},
-    {"idx":60,"version":"7","when":1789490029000,"tag":"0060_controlled_withdrawal_observation","breakpoints":true}
+    {"idx":60,"version":"7","when":1789490029000,"tag":"0060_controlled_withdrawal_observation","breakpoints":true},
+    {"idx":61,"version":"7","when":1789490030000,"tag":"0061_distribution_policy_and_relations","breakpoints":true},
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1789490031000,
+      "tag": "0062_native_wallet_origin",
+      "breakpoints": true
+    },
+    {"idx":63,"version":"7","when":1789490032000,"tag":"0063_distribution_payment_and_earnings","breakpoints":true},
+    {"idx":64,"version":"7","when":1789490033000,"tag":"0064_referral_ledger_source_semantics","breakpoints":true}
   ]
 }

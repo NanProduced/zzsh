@@ -1,4 +1,5 @@
 import type {
+  DepositRecommendation,
   DraftInput,
   Favorite,
   MySupply,
@@ -139,7 +140,11 @@ export const supplyBlockerMessages: Record<string, string> = {
   IDENTITY_REQUIRED: "请先完成实名验证",
   ADULT_REQUIRED: "需确认成年资格",
   GAME_UNAVAILABLE: "游戏暂不可发布",
+  GAME_SERVICE_UNAVAILABLE: "该游戏暂未开放出租服务",
   RULE_CHANGED: "规则已更新，请重新预览并确认",
+  RULE_UNCONFIGURED: "当前缺少生效的价目规则，暂不能报价",
+  REQUIRED_ITEM_UNPRICED: "必填物品缺少当前价目，暂不能报价",
+  FUNDING_UNKNOWN: "押金与赔付依据尚未确认",
   ACCOUNT_NOT_PUBLISHABLE: "历史异常或归档资料需先处理",
   PUBLISHER_BAIL_UNCONFIRMED: "发布保证金资格尚未确认",
   OCCUPIED: "账号当前被占用",
@@ -316,6 +321,11 @@ export const supplyApi = {
     ),
   mine: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId), { signal }),
+  depositRecommendation: (accountId: string, signal?: AbortSignal) =>
+    supplyRequest<DepositRecommendation>(
+      "/accounts/" + id(accountId) + "/deposit-recommendation",
+      { signal },
+    ),
   myAccounts: (
     query: URLSearchParams = new URLSearchParams(),
     signal?: AbortSignal,

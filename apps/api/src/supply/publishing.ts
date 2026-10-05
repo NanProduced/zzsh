@@ -37,7 +37,7 @@ import {
 import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
 import { normalizeRentalPricing } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
-import { validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
+import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import { readLegacyListing } from "./legacy-listing-read";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
@@ -563,6 +563,78 @@ export async function saveListingDraft(
     ],
   );
   await bumpAccount(client, a);
+}
+export async function readDepositRecommendation(
+  client: PoolClient,
+  a: PublishingAccount,
+): Promise<Record<string, unknown>> {
+  const v = await currentVersion(client, a);
+  if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
+    throw conflict("仅可为新申报草稿查看推荐押金");
+  const release = (
+    await client.query<{ id: string; priceVersionId: string }>(
+      `SELECT r.id,r.price_version_id AS "priceVersionId" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id WHERE g.id=$1 AND g.enabled`,
+      [a.game_id],
+    )
+  ).rows[0];
+  if (!release) throw conflict("暂无可用规则");
+  const policy = await readFundingPolicyForRelease(client, release.id);
+  if (!policy)
+    return {
+      available: false,
+      reason: "FUNDING_POLICY_UNCONFIGURED",
+      releaseId: release.id,
+    };
+  const d = await readDeclaration(client, v);
+  const attrs = d.attributes as Record<string, unknown>;
+  const vitality = attrs.vit_level ?? attrs.vitLevel;
+  const bear = attrs.bear_level ?? attrs.bearLevel;
+  const inputs = {
+    safeBoxCode:
+      typeof attrs.safe_box_code === "string" ? attrs.safe_box_code : null,
+    vitality: typeof vitality === "number" ? vitality : null,
+    bear: typeof bear === "number" ? bear : null,
+    dive: typeof attrs.dive_level === "number" ? attrs.dive_level : null,
+    skinIds: [...d.skins],
+  };
+  const binding = {
+    accountId: a.id,
+    accountRevision: a.revision,
+    versionId: v.id,
+    versionRevision: v.revision,
+    ruleReleaseId: release.id,
+    priceVersionId: release.priceVersionId,
+    inputs,
+  };
+  try {
+    const amountCents = computeDepositRecommendation(policy, {
+      accountId: a.id,
+      gameId: a.game_id,
+      listingVersionId: v.id,
+      priceVersionId: release.priceVersionId,
+      ruleReleaseId: release.id,
+      safeBoxCode: inputs.safeBoxCode,
+      vitality: inputs.vitality,
+      bear: inputs.bear,
+      dive: inputs.dive,
+      skinIds: inputs.skinIds,
+    });
+    return {
+      available: true,
+      amountCents,
+      minCents: policy.ownerDepositRules.normal.minCents,
+      fullPayoutMinCents: policy.ownerDepositRules.fullPayoutSelected.minCents,
+      capCents: policy.ownerDepositRules.capCents,
+      policyVersion: policy.policyVersion,
+      ...binding,
+    };
+  } catch {
+    return {
+      available: false,
+      reason: "INPUTS_UNAVAILABLE",
+      releaseId: release.id,
+    };
+  }
 }
 export async function quoteListing(
   client: PoolClient,
@@ -1180,20 +1252,21 @@ async function readOwnerDeclaration(
 }
 
 // One authorized public read for the detail page, favorites and any other
-// consumer of a visible account: the current published listing when it exists,
-// otherwise the immutable legacy read projection. Callers must not re-implement
-// visibility checks per feature.
+// consumer of a visible account: an account with a publication fact is owned by
+// the native listing and never falls back to its legacy snapshot (a blocked,
+// paused or rule-invalid native listing must 404, not resurrect old data);
+// accounts without any publication fact are read through the legacy snapshot.
 export async function readPublicListing(
   client: PoolClient,
   a: PublishingAccount,
   gate: SupplyGateReader,
 ): Promise<Record<string, unknown>> {
-  try {
-    return await listingDetail(client, a, "public", gate);
-  } catch (error) {
-    if ((error as { status?: number }).status !== 404) throw error;
-    return readLegacyListing(client, a.id);
-  }
+  const publication = await client.query(
+    `SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`,
+    [a.id],
+  );
+  if (publication.rowCount) return listingDetail(client, a, "public", gate);
+  return readLegacyListing(client, a.id);
 }
 export async function listingDetail(
   client: PoolClient,

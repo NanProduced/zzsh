@@ -1,3 +1,4 @@
+import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
 import type { INestApplication } from "@nestjs/common";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "./auth-security";
 import { requirePermission, ADMIN_PERMISSION } from "./admin-authorization";
@@ -32,7 +33,7 @@ export async function handleRentalMembershipAdmin(request:SupplyNodeRequest,resp
   });
 }
 
-export function mountRentalMembership(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey}) {
+export function mountRentalMembership(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey;nativeWithdrawalScope?:NativeWithdrawalScope}) {
   mountPersonalFinanceRead(app,options);
   const express=app.getHttpAdapter().getInstance();
   express.use("/api/v1/admin/users",(request:SupplyNodeRequest,response:SupplyResponse)=>handleRentalMembershipAdmin(request,response,options));

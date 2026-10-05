@@ -365,14 +365,16 @@
   margin-top: 24px;
 }
 
-.functional-shell .publish-form {
-  max-width: none;
+/* The fixed support rail sits on the right edge; the publish layout keeps the
+   same reserved gutter as the detail surface so amounts are never covered. */
+@media (min-width: 1100px) {
+  .functional-shell--editor .functional-main.portal-width { width: min(1320px, calc(100% - 176px)); }
+}
+
+.functional-shell .publish-column {
+  display: grid;
+  align-content: start;
   min-width: 0;
-  padding: 24px;
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--functional-radius);
-  background: var(--color-bg-surface);
-  box-shadow: var(--shadow-sm);
 }
 
 .functional-shell .publish-mode {
@@ -453,55 +455,83 @@
 .functional-shell .supply-choice { border-radius: 9px; }
 .functional-shell .supply-upload { border-radius: 9px; }
 
-.functional-shell .supply-actions {
-  position: sticky;
-  bottom: 12px;
-  z-index: 4;
-  margin-inline: -24px;
-  padding: 14px 24px 0;
-  border-top: 1px solid var(--color-border-default);
-  background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
-  backdrop-filter: blur(12px);
-}
+.functional-shell .publish-groups { display: grid; gap: 14px; margin-top: 18px; }
+.functional-shell .publish-group { border: 1px solid var(--color-border-default); border-radius: var(--functional-radius); background: var(--color-bg-surface); box-shadow: var(--shadow-sm); overflow: clip; }
+.functional-shell .publish-group.is-error { border-color: color-mix(in srgb, var(--color-status-danger) 55%, var(--color-border-default)); }
+.functional-shell .publish-group-heading { display: flex; align-items: center; gap: 10px; padding: 6px 12px 6px 6px; }
+.functional-shell .publish-group-title { flex: 1 1 auto; min-width: 0; margin: 0; font: inherit; }
+.functional-shell .publish-group-toggle { width: 100%; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 60px; padding: 8px 6px; background: transparent; border: 0; border-radius: calc(var(--functional-radius) - 6px); color: var(--color-text-primary); text-align: left; cursor: pointer; }
+.functional-shell .publish-group-toggle:hover { background: var(--color-bg-canvas); }
+.functional-shell .publish-group-icon { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 10px; color: var(--color-accent-brand); background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-canvas)); border: 1px solid color-mix(in srgb, var(--color-accent-brand) 26%, var(--color-border-subtle)); }
+.functional-shell .publish-group-copy { display: grid; gap: 3px; min-width: 0; }
+.functional-shell .publish-group-copy strong { font-size: 16px; }
+.functional-shell .publish-group-copy small { color: var(--color-text-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.functional-shell .publish-group-copy small.is-empty { color: var(--color-text-muted); }
+.functional-shell .publish-group-chevron { color: var(--color-text-muted); transition: transform .18s ease; }
+.functional-shell .publish-group.is-open .publish-group-chevron { transform: rotate(180deg); }
+.functional-shell .publish-group-edit { flex: none; }
+.functional-shell .publish-group-panel { padding: 4px 20px 24px; border-top: 1px solid var(--color-border-subtle); }
+.functional-shell .supply-subsection { padding-top: 18px; }
+.functional-shell .supply-subsection + .supply-subsection { margin-top: 18px; border-top: 1px solid var(--color-border-subtle); }
+.functional-shell .supply-subsection h3 { margin: 0 0 6px; font-size: 15px; }
+.functional-shell .supply-subsection > .supply-muted { margin: 0 0 14px; }
+.functional-shell .supply-quantity-note { display: block; margin-top: 6px; }
+.functional-shell .supply-selected-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.functional-shell .supply-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px; border: 1px solid var(--color-border-default); border-radius: 999px; background: var(--color-bg-elevated); font-size: 12px; }
+.functional-shell .supply-chip-remove { display: grid; width: 22px; height: 22px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--color-text-muted); cursor: pointer; }
+.functional-shell .supply-chip-remove:hover { color: var(--color-status-danger); background: var(--color-bg-canvas); }
+.functional-shell .supply-skin-group + .supply-skin-group { margin-top: 14px; }
+.functional-shell .supply-skin-group h4 { margin: 0 0 8px; color: var(--color-text-secondary); font-size: 13px; }
+.functional-shell .supply-radio-field { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 0; padding: 12px 0 0; border: 0; }
+.functional-shell .supply-radio-field legend { padding: 0 0 8px; color: var(--color-text-secondary); font-size: 13px; }
+.functional-shell .supply-radio { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 8px 12px; border: 1px solid var(--color-border-default); border-radius: 9px; background: var(--color-bg-canvas); font-size: 13px; cursor: pointer; }
+.functional-shell .supply-radio input { accent-color: var(--color-accent-brand); }
+.functional-shell .supply-radio-field > small { flex-basis: 100%; color: var(--color-text-muted); font-size: 13px; line-height: 1.5; }
+.functional-shell .supply-pricing-block { margin-top: 16px; padding: 14px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius-sm); background: var(--color-bg-card); }
+.functional-shell .supply-ratio-locked { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 8px 14px; border: 1px dashed color-mix(in srgb, var(--color-accent-brand) 55%, var(--color-border-default)); border-radius: 9px; color: var(--color-accent-brand); background: color-mix(in srgb, var(--color-accent-brand) 9%, transparent); font-size: 13px; font-weight: 700; }
+.functional-shell .supply-ratio-locked.is-disabled { color: var(--color-status-warning); border-color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-border-default)); background: color-mix(in srgb, var(--color-status-warning) 8%, transparent); }
+.functional-shell .supply-recommend-result { display: flex; flex-direction: column; gap: 6px; }
+.functional-shell .supply-ratio-input { display: flex; flex-direction: column; gap: 7px; margin-top: 14px; color: var(--color-text-secondary); font-size: 13px; }
+.functional-shell .supply-ratio-value { display: flex; align-items: stretch; }
+.functional-shell .supply-ratio-value input { flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 10px 12px; color: var(--color-text-primary); background: var(--color-bg-canvas); border: 1px solid var(--color-border-default); border-radius: 9px 0 0 9px; font: inherit; }
+.functional-shell .supply-ratio-value > span { display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid var(--color-border-default); border-left: 0; border-radius: 0 9px 9px 0; color: var(--color-text-secondary); background: var(--color-bg-elevated); font-size: 12px; white-space: nowrap; }
+.functional-shell .supply-recommend { display: flex; flex-direction: column; gap: 8px; justify-content: end; padding-bottom: 2px; }
+.functional-shell .supply-recommend small { color: var(--color-text-muted); font-size: 13px; line-height: 1.5; }
+.functional-shell .supply-time-range { display: flex; align-items: center; gap: 8px; }
+.functional-shell .supply-time-range input { flex: 1 1 auto; min-width: 0; }
+.functional-shell .supply-toolbar .is-warning { color: var(--color-status-warning); }
 
-.functional-shell .publish-summary {
-  position: sticky;
-  top: 108px;
-  display: grid;
-  gap: 18px;
-  min-width: 0;
-  padding: 20px;
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--functional-radius);
-  background: linear-gradient(160deg, color-mix(in srgb, var(--color-accent-brand) 8%, var(--color-bg-surface)), var(--color-bg-surface) 46%);
-  box-shadow: var(--shadow-sm);
-}
-
-.publish-summary-heading,
-.publish-summary-heading > div,
-.publish-summary-quote > div { display: grid; gap: 5px; }
-.publish-summary-heading { grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
-.publish-summary-heading > div > span { color: var(--color-accent-brand); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.publish-summary-heading h2 { font-size: 20px; }
-.publish-summary-heading .chip { white-space: nowrap; }
-
-.publish-summary-steps { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.publish-summary-steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 9px; align-items: center; min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--color-border-subtle); }
-.publish-summary-steps li:last-child { border-bottom: 0; }
-.publish-summary-index { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--color-border-default); border-radius: 50%; color: var(--color-text-secondary); font-size: 12px; }
-.publish-summary-steps .is-ready .publish-summary-index { color: var(--color-status-success); border-color: color-mix(in srgb, var(--color-status-success) 58%, var(--color-border-default)); background: color-mix(in srgb, var(--color-status-success) 11%, transparent); }
-.publish-summary-steps li > span:last-child { display: grid; gap: 3px; min-width: 0; }
-.publish-summary-steps strong { font-size: 13px; }
-.publish-summary-steps small { overflow-wrap: anywhere; color: var(--color-text-secondary); font-size: 11px; line-height: 1.5; }
-.publish-summary-quote { padding: 14px; border: 1px solid var(--color-border-subtle); border-radius: 12px; background: var(--color-bg-card); }
-.publish-summary-quote span { color: var(--color-text-secondary); font-size: 11px; }
-.publish-summary-quote strong { color: var(--color-accent-brand); font-size: 20px; font-variant-numeric: tabular-nums; }
-.publish-summary-quote p,
-.publish-summary-note,
-.publish-summary-warning { color: var(--color-text-secondary); font-size: 11px; line-height: 1.7; }
-.publish-summary-note,
-.publish-summary-warning { margin: 0; }
-.publish-summary-warning { color: var(--color-status-warning); }
+.functional-shell .publish-rail { position: sticky; top: 108px; display: grid; gap: 16px; align-content: start; min-width: 0; padding: 20px; border: 1px solid var(--color-border-default); border-radius: var(--functional-radius); background: linear-gradient(160deg, color-mix(in srgb, var(--color-accent-brand) 8%, var(--color-bg-surface)), var(--color-bg-surface) 46%); box-shadow: var(--shadow-sm); }
+.functional-shell .publish-rail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; color: var(--color-text-muted); }
+.functional-shell .publish-rail-head > div { display: grid; gap: 4px; }
+.functional-shell .publish-rail-kicker { color: var(--color-accent-brand); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.functional-shell .publish-rail-head h2 { margin: 0; font-size: 19px; }
+.functional-shell .publish-rail-lines { display: grid; gap: 2px; margin: 0; }
+.functional-shell .publish-rail-lines > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 0; }
+.functional-shell .publish-rail-lines dt { color: var(--color-text-secondary); font-size: 13px; }
+.functional-shell .publish-rail-lines dd { margin: 0; color: var(--color-text-primary); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.functional-shell .publish-rail-lines .is-total { margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--color-border-subtle); }
+.functional-shell .publish-rail-lines .is-total dt { color: var(--color-text-primary); font-weight: 700; }
+.functional-shell .publish-rail-lines .is-total dd { color: var(--color-accent-brand); font-size: 21px; }
+.functional-shell .publish-rail-deposits { padding-top: 8px; border-top: 1px solid var(--color-border-subtle); }
+.functional-shell .publish-rail-deposits dd { color: var(--color-text-secondary); font-weight: 600; }
+.functional-shell .publish-rail-note,
+.functional-shell .publish-rail-expiry p { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
+.functional-shell .publish-rail-expiry { display: grid; gap: 5px; padding-top: 10px; border-top: 1px solid var(--color-border-subtle); }
+.functional-shell .publish-rail-expiry strong { font-size: 12px; }
+.functional-shell .publish-rail-actions,
+.functional-shell .publish-confirm,
+.functional-shell .publish-rail-readonly,
+.functional-shell .publish-success { display: grid; gap: 10px; }
+.functional-shell .publish-rail-actions .button,
+.functional-shell .publish-confirm .button { width: 100%; justify-content: center; }
+.functional-shell .publish-terms { border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-card); overflow: clip; }
+.functional-shell .publish-terms summary { padding: 11px 12px; cursor: pointer; color: var(--color-text-secondary); font-size: 12px; font-weight: 600; }
+.functional-shell .publish-terms-body { max-height: 220px; overflow: auto; padding: 0 12px 12px; white-space: pre-wrap; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
+.functional-shell .publish-success { justify-items: start; padding: 14px; border: 1px solid color-mix(in srgb, var(--color-status-success) 45%, var(--color-border-default)); border-radius: 12px; background: color-mix(in srgb, var(--color-status-success) 9%, var(--color-bg-card)); }
+.functional-shell .publish-success svg { color: var(--color-status-success); }
+.functional-shell .publish-success p { margin: 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.functional-shell .publish-mobile-actions { display: none; }
 
 .functional-shell--account .account-tabs {
   gap: 4px;
@@ -548,12 +578,18 @@
 .functional-shell--utility .help-page-content h2 { font-size: 21px; }
 .functional-shell--utility .help-page-content p { max-width: 70ch; font-size: 14px; }
 
+@media (max-width: 1099px) {
+  /* Below the desktop rail breakpoint the fixed support bar sits on the bottom
+     edge, so the quote rail must scroll instead of sticking under it. */
+  .functional-shell .publish-rail { position: static; }
+}
+
 @media (max-width: 1023px) {
   .functional-shell .game-identity { min-height: 280px; border-right: 0; border-bottom: 1px solid var(--color-delta-border); }
   .functional-shell .game-row { grid-template-columns: 1fr; }
   .functional-shell .detail-hero { grid-template-columns: 1fr; }
   .functional-shell .gunsmith-detail { position: static; }
-  .functional-shell .publish-page-layout { grid-template-columns: minmax(0, 1fr) 270px; }
+  .functional-shell .publish-page-layout { grid-template-columns: minmax(0, 1fr) 290px; }
 }
 
 @media (max-width: 799px) {
@@ -567,11 +603,12 @@
   .functional-context { max-width: none; justify-items: start; padding: 0; text-align: left; }
   .functional-shell .game-section { margin-top: 18px; }
   .functional-shell .game-section .delta-supply { padding: 16px 16px 20px; }
-  .functional-shell .publish-page-layout { grid-template-columns: 1fr; gap: 14px; }
-  .functional-shell .publish-summary { position: static; order: 2; }
+  .functional-shell .publish-page-layout { grid-template-columns: 1fr; gap: 14px; padding-bottom: 96px; }
+  .functional-shell .publish-rail { position: static; order: 2; }
   .functional-shell .publish-form { padding: 18px; }
+  .functional-shell .publish-mobile-actions { display: flex; position: fixed; left: 0; right: 0; bottom: 78px; z-index: 5; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--color-border-default); background: color-mix(in srgb, var(--color-bg-surface) 95%, transparent); backdrop-filter: blur(12px); }
+  .functional-shell .publish-mobile-actions .button { flex: 1 1 auto; justify-content: center; }
   .functional-shell .supply-group-nav { top: 120px; }
-  .functional-shell .supply-actions { margin-inline: -18px; padding-inline: 18px; }
   .functional-shell .gunsmith-toolbar { padding: 16px; }
 }
 
@@ -592,13 +629,12 @@
   .functional-shell .detail-gallery-main { min-height: 150px; }
   .functional-shell .gunsmith-firearms,
   .functional-shell .gunsmith-detail { padding: 14px; }
-  .functional-shell .publish-form { padding: 14px; }
+  .functional-shell .publish-group-heading { padding: 4px 8px 4px 4px; }
+  .functional-shell .publish-group-panel { padding: 4px 14px 20px; }
+  .functional-shell .publish-rail { padding: 16px; }
+  .functional-shell .publish-mobile-actions { bottom: 78px; padding: 10px 14px; }
+  .functional-shell .publish-mobile-actions .button { min-width: 0; padding-inline: 12px; font-size: 13px; }
   .functional-shell .supply-group-nav { top: 120px; margin-inline: -14px; padding-inline: 14px; }
-  .functional-shell .supply-section { padding-block: 26px; }
-  .functional-shell .supply-section-heading h2 { font-size: 20px; }
-  .functional-shell .supply-actions { bottom: 78px; margin-inline: -14px; padding: 12px 14px 0; }
-  .functional-shell .supply-actions .button { min-width: 0; flex: 1 1 30%; padding-inline: 9px; font-size: 12px; }
-  .functional-shell .supply-actions > span { flex-basis: 100%; order: 3; }
   .functional-shell--account .account-tabs { overflow-x: auto; flex-wrap: nowrap; margin-top: 18px; }
   .functional-shell--account .account-tabs a { flex: none; }
   .functional-shell--account .my-accounts-layout { gap: 12px; }

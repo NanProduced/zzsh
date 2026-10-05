@@ -9,9 +9,9 @@ function compactPhone(value: string): string {
   return compact.startsWith("+86") ? compact.slice(3) : compact.startsWith("0086") ? compact.slice(4) : compact;
 }
 export function maskPhone(value: string): string { const digits = compactPhone(value); return /^1[3-9]\d{9}$/.test(digits) ? digits.slice(0, 3) + "****" + digits.slice(-4) : "该手机号"; }
-type Props = { next?: string; contextLabel?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean };
+type Props = { next?: string; contextLabel?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean };
 
-export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Props) {
+export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, onSuccess, autoFocus = true }: Props) {
   const session = useUserSession();
   const sessionStore = useUserSessionStore();
   const [mode, setMode] = useState<"login" | "recover">("login");
@@ -23,6 +23,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Pr
   const [confirmation, setConfirmation] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [inviteCode, setInviteCode] = useState(initialInviteCode ?? "");
   const [challengeId, setChallengeId] = useState("");
   const [proofId, setProofId] = useState("");
   const [sentFor, setSentFor] = useState("");
@@ -79,6 +80,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Pr
     const needsCode = mode === "recover" ? !proofId : method === "sms";
     if (needsCode && (sentFor !== normalized() || !/^\d{6}$/.test(code))) { validationError("请先获取当前联系方式的验证码，并填写 6 位数字。", "phone-registration-code"); return; }
     if (mode === "login" && method === "password" && !password) { validationError("请输入现有密码。", "auth-password"); return; }
+    if (mode === "login" && method === "sms" && inviteCode.trim() && !/^[A-Za-z0-9_-]{1,30}$/.test(inviteCode.trim())) { validationError("邀请码仅支持30位以内的字母、数字、下划线和连字符。", "auth-invite-code"); return; }
     if (mode === "recover" && proofId && (password.length < 12 || password.length > 128 || password !== confirmation)) { validationError("新密码需要 12–128 位，两次输入须完全一致。", password.length < 12 || password.length > 128 ? "auth-password" : "auth-password-confirm"); return; }
     const request = begin(); setBusy(true);
     const writesIdentity = mode === "login" || Boolean(proofId); if (writesIdentity) writeLock.current = true;
@@ -99,7 +101,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Pr
         setProofId(""); setChallengeId(""); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setAcceptedTerms(false);
         writeLock.current = false; setNotice("密码已重置，旧会话已退出。请使用手机号和新密码登录。");
       } else {
-        const result = await webAuthRequest<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true } : { identifier: normalized(), password, kind: "phone" }, request.controller.signal);
+        const result = await webAuthRequest<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}) } : { identifier: normalized(), password, kind: "phone" }, request.controller.signal);
         accepted = true; if (!current(request.id)) return; setOutcome("accepted");
         if (result.status !== true || typeof result.userId !== "string" || !result.userId) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED", true);
         loginSubject.current = { phone: normalized(), userId: result.userId };
@@ -157,6 +159,7 @@ export function AuthForm({ next, contextLabel, onSuccess, autoFocus = true }: Pr
       <div className="auth-field"><label className="sr-only" htmlFor="auth-identifier">{mode === "recover" && channel === "email" ? "已绑定邮箱" : "手机号"}</label><input id="auth-identifier" aria-invalid={invalidField === "auth-identifier" || undefined} name="identifier" autoFocus={autoFocus} type={mode === "recover" && channel === "email" ? "email" : "tel"} inputMode={mode === "recover" && channel === "email" ? "email" : "tel"} autoComplete={mode === "recover" && channel === "email" ? "email" : "tel"} placeholder={mode === "recover" && channel === "email" ? "已绑定并验证的邮箱" : "大陆手机号"} value={contact} disabled={locked || Boolean(proofId)} onChange={event => { setContact(event.target.value); clearProof(); }} aria-describedby={error ? "auth-status" : undefined} /></div>
       {(mode === "login" && method === "sms" || mode === "recover" && !proofId) && <div className="auth-code-field"><label className="sr-only" htmlFor="phone-registration-code">验证码</label><div className="auth-code-row"><input id="phone-registration-code" aria-invalid={invalidField === "phone-registration-code" || undefined} name="otp" autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={code} disabled={locked} placeholder="6 位验证码" onChange={event => setCode(event.target.value)} aria-describedby={error ? "auth-status" : undefined} /><button type="button" className="button secondary" disabled={locked || remaining > 0} onClick={() => void sendOtp()}>{sending ? "发送中…" : remaining > 0 ? remaining + "s 后重发" : "获取验证码"}</button></div></div>}
       {mode === "login" && method === "sms" && <p className="auth-field-help">未注册的手机号验证后自动注册，密码可稍后设置。</p>}
+      {mode === "login" && method === "sms" && initialInviteCode !== undefined && <div className="auth-field"><label htmlFor="auth-invite-code">邀请码（选填）</label><input id="auth-invite-code" value={inviteCode} maxLength={30} autoComplete="off" disabled={locked} aria-invalid={invalidField === "auth-invite-code" || undefined} onChange={event => setInviteCode(event.target.value)} /><p className="auth-field-help">仅用于新账号注册来源。登录已有账号不会更改邀请关系。</p></div>}
       {(mode === "login" && method === "password" || mode === "recover" && proofId) && <div className="auth-field"><label className="sr-only" htmlFor="auth-password">{mode === "recover" ? "新密码" : "现有密码"}</label><div className="auth-password-row"><input id="auth-password" aria-invalid={invalidField === "auth-password" || undefined} name="password" type={showPassword ? "text" : "password"} value={password} disabled={locked} autoComplete={mode === "recover" ? "new-password" : "current-password"} placeholder={mode === "recover" ? "新密码（12–128 位）" : "请输入现有密码"} onChange={event => setPassword(event.target.value)} aria-describedby={error ? "auth-status" : undefined} /><button type="button" className="auth-password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={locked} onClick={() => setShowPassword(value => !value)}>{showPassword ? "隐藏" : "显示"}</button></div></div>}
       {mode === "recover" && proofId && <div className="auth-field"><label className="sr-only" htmlFor="auth-password-confirm">确认新密码</label><input id="auth-password-confirm" aria-invalid={invalidField === "auth-password-confirm" || undefined} name="password-confirm" type="password" autoComplete="new-password" placeholder="再次输入新密码" value={confirmation} disabled={locked} onChange={event => setConfirmation(event.target.value)} aria-describedby={error ? "auth-status" : undefined} /></div>}
       {mode === "login" && method === "password" && <div className="auth-secondary-actions"><button type="button" disabled={locked} onClick={() => changeMode("recover")}>忘记密码</button></div>}

@@ -49,7 +49,7 @@ function LoginPageContent() {
         {session.status === "loading" ? <div className="auth-page-session-state" role="status" aria-live="polite"><h2>正在准备登录…</h2><div className="auth-page-skeleton" aria-hidden="true"><span /><span /><span /></div></div> : null}
         {session.status === "error" ? <div className="auth-page-session-state is-error" role="alert"><h2>暂时无法确认账号状态</h2><p>登录表单仍可使用；如果未能继续，请重试。</p><button type="button" className="button quiet" onClick={session.revalidate}>重试</button></div> : null}
         <div hidden={formHidden} aria-hidden={formHidden}>
-          <AuthForm next={returnTo} contextLabel={intentLabel(returnTo)} onSuccess={redirectAfterAuth} />
+          <AuthForm next={returnTo} contextLabel={intentLabel(returnTo)} inviteCode={searchParams.get("inviteCode") ?? undefined} onSuccess={redirectAfterAuth} />
         </div>
         {session.status === "authenticated" ? <div className="auth-page-session-state" role="status"><h2>登录成功</h2><p>正在进入个人中心…</p></div> : null}
       </section>

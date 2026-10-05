@@ -1,3 +1,7 @@
+import {exactCents} from './finance-money';
+export {exactCents} from './finance-money';
+import {readNativeWalletBuckets,readNativeReservationStatus} from './native-wallet-projection';
+import type {NativeWithdrawalScope} from './native-withdrawal-resource';
 import { createHmac, timingSafeEqual, createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
@@ -8,10 +12,6 @@ import { canonicalize } from "../supply/content-hash";
 export const FINANCE_READ_VERSION = "personal-finance.read.v1";
 const hash = (s:string) => createHash("sha256").update(s).digest("hex");
 const money = (amountCents:string|null) => ({currency:"CNY",unit:"cent",knowledge:amountCents===null?"UNKNOWN":"KNOWN",amountCents});
-export function exactCents(value:unknown):string {
-  if(typeof value!=="string" || !/^-?(0|[1-9]\d{0,23})$/.test(value) || value==="-0") throw invalid("Invalid exact cents");
-  return value;
-}
 export function sourceYuanToCents(value:unknown):string {
   if(typeof value!=="string" || !/^(0|[1-9]\d{0,21})\.\d{2}$/.test(value))throw invalid("Invalid source amount");
   return (BigInt(value.replace(".",""))).toString();
@@ -48,12 +48,15 @@ async function ready(client:PoolClient,userId:string){
   if(!schema?.ready)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Wallet read schema is not available");
   if(!(await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR SHARE`,[userId])).rowCount)throw notFound();
 }
-export async function readPersonalWallet(client:PoolClient,userId:string){
+export async function readPersonalWallet(client:PoolClient,userId:string,nativeScope?:NativeWithdrawalScope){
   await ready(client,userId);
   const c=(await client.query(`SELECT c.origin,b.source_cutoff AS "cutoff",b.source_digest AS "sourceDigest",b.covered_set_digest AS "coveredSetDigest",c.coverage_version::text AS "coverageVersion" FROM zzsh_order.wallet_coverage c JOIN zzsh_order.finance_opening_basis b ON b.id=c.basis_id AND b.user_id=c.user_id WHERE c.user_id=$1`,[userId])).rows[0];
   const r=(await client.query(`SELECT ledger_revision::text AS "ledgerRevision",read_revision::text AS "readRevision" FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0]??{ledgerRevision:"0",readRevision:"0"};
   const sum=(await client.query(`SELECT COALESCE(sum(credit_cents-debit_cents),0)::text AS available FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE')`,[userId])).rows[0].available;
-  return {contractVersion:FINANCE_READ_VERSION,subjectId:userId,asOf:new Date().toISOString(),currency:"CNY",coverage:c?{knowledge:"KNOWN",...c}:{knowledge:"UNKNOWN",reason:"SOURCE_COVERAGE_NOT_ADMITTED"},...r,snapshotVersion:`${r.ledgerRevision}:${r.readRevision}:${c?.coverageVersion??"0"}`,buckets:{available:money(c?exactCents(sum):null),reserved:money(null),restricted:money(null),pendingEarnings:money(null),refundPayable:money(null)},withdrawable:{...money(null),reasonCodes:[c?"WITHDRAWAL_POLICY_NOT_ACTIVE":"SOURCE_COVERAGE_UNKNOWN"]}};
+  const native=c?.origin==='NATIVE_GENESIS'?await readNativeWalletBuckets(client,userId):null;
+  if(c?.origin==='NATIVE_GENESIS'&&!native)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native wallet origin is not closed');
+  const nativeWithdrawal=nativeScope?await readNativeReservationStatus(client,userId,nativeScope):undefined;
+  return {...(nativeScope?{nativeWithdrawal}:{}),contractVersion:FINANCE_READ_VERSION,subjectId:userId,asOf:new Date().toISOString(),currency:"CNY",coverage:c?{knowledge:"KNOWN",...c}:{knowledge:"UNKNOWN",reason:"SOURCE_COVERAGE_NOT_ADMITTED"},...r,snapshotVersion:`${r.ledgerRevision}:${r.readRevision}:${c?.coverageVersion??"0"}`,buckets:native??{available:money(c?exactCents(sum):null),reserved:money(null),restricted:money(null),pendingEarnings:money(null),refundPayable:money(null)},withdrawable:{...money(null),reasonCodes:[c?"WITHDRAWAL_POLICY_NOT_ACTIVE":"SOURCE_COVERAGE_UNKNOWN"]}};
 }
 export type FinanceQuery={limit:number;cursor:string|null;bucket:"AVAILABLE"|"REFUND_PAYABLE"|"ALL"};
 export function parseFinanceQuery(q:URLSearchParams):FinanceQuery {

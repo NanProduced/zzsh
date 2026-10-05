@@ -40,7 +40,7 @@ const catalog = {
   items: [{ id: "item_haff", code: "haff_base", name: "哈夫币", unit: "HAFF_BASE" }],
   categories: [],
 };
-const legacyState = { catalog, config, legacyReadOnly: true, filterRevision: "3", catalogRevision: "7", ruleReleaseId: null } as unknown as Parameters<typeof publicFilterMetadata>[0];
+const legacyState = { catalog, config, legacyReadOnly: true, mixed: false, mode: "LEGACY_READ_ONLY", hasLegacySnapshots: true, allowLegacyOptions: true, filterRevision: "3", catalogRevision: "7", ruleReleaseId: null } as unknown as Parameters<typeof publicFilterMetadata>[0];
 const baseQuery: ListingQueryV2 = { queryVersion: 2, gameId: "game_x", q: null, filters: {}, sort: "latest", direction: "DESC", coreItemId: null, limit: 20, cursor: null, filterRevision: null, catalogRevision: null, ruleReleaseId: null };
 const fakeClient = { query: async () => ({ rows: [] }) } as unknown as PoolClient;
 
@@ -70,7 +70,7 @@ test("legacy read query validation rejects conditions outside the configured con
   await assert.rejects(() => validateListingQuery(fakeClient, { ...baseQuery, filters: { safeBoxCodes: ["safe_box_1x2"] } }, legacyState));
   await assert.rejects(() => validateListingQuery(fakeClient, { ...baseQuery, filters: { vitality: { min: 4 } } }, legacyState));
   await assert.rejects(() => validateListingQuery(fakeClient, { ...baseQuery, sort: "coreQuantity", coreItemId: "item_other" }, legacyState));
-  const withoutRule = { ...legacyState, legacyReadOnly: false, ruleReleaseId: null } as typeof legacyState;
+  const withoutRule = { ...legacyState, legacyReadOnly: false, mixed: false, mode: "NATIVE", allowLegacyOptions: false, ruleReleaseId: null } as typeof legacyState;
   await assert.rejects(() => validateListingQuery(fakeClient, baseQuery, withoutRule));
 });
 

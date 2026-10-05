@@ -5,7 +5,7 @@ import { canonicalize } from "./content-hash";
 import { projectPublicAttributeDisplay } from "./listing-query";
 import { assertGameScope, conflict, invalid, notFound, sha256Hex } from "./supply-util";
 import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, type ListingCursorKey } from "./listing-cursor";
-import { candidatePredicates, type ListingPosition } from "./listing-candidates";
+import { candidatePredicates, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD, type ListingPosition } from "./listing-candidates";
 import type { ListingQueryV2 } from "./listing-filter-contract";
 
 export type LegacyReadSnapshot = {
@@ -53,7 +53,7 @@ export async function recordLegacyReadSnapshot(client: PoolClient, accountId: st
   }
   await client.query(`INSERT INTO zzsh_supply.legacy_listing_read_snapshot(account_id,observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,evidence_ref,snapshot,created_by_admin_id)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, values);
-  await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站上架资料与原始金额只读展示；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,readOnly:true}});
+  await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站上架资料与原始金额只读展示；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,readOnly:true,after:{readSnapshot:"RECORDED",observationVersionId:input.observationVersionId},result:"READ_SNAPSHOT_RECORDED"}});
 }
 
 // `v` is the version the public read actually shows: the owner's current native
@@ -69,9 +69,13 @@ const FROM = `FROM zzsh_supply.legacy_listing_read_snapshot h
  JOIN zzsh_supply.game_service_operation gs ON gs.game_id=g.id AND gs.service_code='ACCOUNT_RENTAL'
  JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id
  LEFT JOIN zzsh_iam.user_identity_state us ON us.user_id=u.id`;
+// Native takeover owns the account once any publication fact exists: a blocked,
+// paused or rule-invalid native listing must never fall back to its legacy
+// snapshot. The same guard is used by the detail read and the mixed list.
+export const LEGACY_NATIVE_TAKEOVER_GUARD = `NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id)`;
 const VISIBLE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE' AND NOT a.owner_paused AND NOT a.staff_restricted
  AND NOT u.suspended AND COALESCE(us.account_status,'ACTIVE')='ACTIVE'
- AND NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id)`;
+ AND ${LEGACY_NATIVE_TAKEOVER_GUARD}`;
 
 // Mode selection must not depend on the currently visible row count: an
 // enabled game with a valid configuration keeps its filters and returns an
@@ -122,6 +126,35 @@ export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingP
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
   const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key ${FROM} WHERE ${where.join(" AND ")}) SELECT id,version_id,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
   return {text,values};
+}
+
+// Mixed mode keeps native and legacy rows in one candidate set: the union is
+// deduplicated by accountId with the native publication taking priority, then
+// one seek/order/limit runs over the merged set. Legacy sort keys come from the
+// frozen snapshot facts; native keys from the frozen publication payload.
+export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPosition|null) {
+  const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
+  const game=p(query.gameId),core=query.coreItemId===null?null:p(query.coreItemId);
+  const nativeWhere=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${game}`,PUBLIC_STANDARD_TIER_GUARD,...candidatePredicates(query.filters,query.q,p)];
+  const legacyWhere=[VISIBLE,`a.game_id=${game}`,...candidatePredicates(query.filters,query.q,p,"v.attributes")];
+  const publication=`pub.published_at`;
+  const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
+  const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
+  const nativeKey=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
+  const legacyKey=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
+  let seek="";
+  if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
+    else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
+  const text=`WITH native AS (SELECT a.id AS id,v.id AS version_id,'native' AS source,0 AS priority,${nativeKey} AS sort_key ${PUBLIC_CANDIDATE_FROM} WHERE ${nativeWhere.join(" AND ")}),
+   legacy AS (SELECT a.id AS id,v.id AS version_id,'legacy' AS source,1 AS priority,${legacyKey} AS sort_key ${FROM} WHERE ${legacyWhere.join(" AND ")}),
+   merged AS (SELECT DISTINCT ON (id) id,version_id,source,priority,sort_key FROM (SELECT * FROM native UNION ALL SELECT * FROM legacy) combined ORDER BY id,priority),
+   candidates AS (SELECT id,version_id,source,sort_key FROM merged ${seek})
+   SELECT id,version_id,source,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+  return {text,values};
+}
+
+export function mixedListingBinding(query:ListingQueryV2,revisions:{filterRevision:string;catalogRevision:string;ruleReleaseId:string}):ListingCursorBinding {
+  return {queryVersion:2,gameId:query.gameId,queryHash:sha256Hex(canonicalize({mode:"MIXED",gameId:query.gameId,q:query.q,filters:query.filters,sort:query.sort,direction:query.direction,coreItemId:query.coreItemId})),sort:query.sort,direction:query.direction,coreItemId:query.coreItemId,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:revisions.ruleReleaseId};
 }
 
 export async function listLegacyReadListings(client: PoolClient,q:ListingQueryV2,key:ListingCursorKey,revisions:{filterRevision:string;catalogRevision:string;sortLabel:string}) {

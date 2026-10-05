@@ -1,7 +1,8 @@
+import type { PaymentDistributionStore } from "../finance/distribution-payment-store";
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
-import { recordAudit } from "../auth/security-core";
+import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { ConfigurationError, type AppConfig } from "../config/config";
 import { invalid, notFound } from "../supply/supply-util";
 import { cancelExpiredReservation, lockOrderPartiesInOrder } from "./order";
@@ -69,7 +70,7 @@ export type PaymentResult = {
 };
 
 /** Caller owns one transaction; audit failure rolls back the entire acceptance. */
-export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact): Promise<PaymentResult> {
+export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact, distribution?: PaymentDistributionStore): Promise<PaymentResult> {
   const scope = fact && verifiedFacts.get(fact);
   if (!scope) throw invalid("Payment fact is not verified");
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
@@ -100,8 +101,12 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
       });
       return { confirmationId: existing.id, disposition: "CONFLICT", reasonCode: "TRANSACTION_BINDING_CONFLICT", replay: false };
     }
+    if (distribution && existing.disposition === "APPLIED") await distribution.readOriginal(client, fact.orderId, existing.id);
     return { confirmationId: existing.id, disposition: existing.disposition, reasonCode: existing.reasonCode, replay: true };
   }
+
+  const prepared = distribution ? await distribution.prepare(client, fact.orderId) : null;
+  if (distribution && !prepared) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Explicit distribution payment admission unavailable");
 
   const located = (await client.query(`SELECT account_id, renter_user_id, owner_user_id FROM zzsh_order.rental_order WHERE id=$1`, [fact.orderId])).rows[0];
   if (!located) throw notFound();
@@ -133,6 +138,7 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
       revision=revision+1,updated_at=clock_timestamp() WHERE id=$1`, [fact.orderId, confirmationId, timing.accepted]);
     await client.query(`INSERT INTO zzsh_order.im_order_group(order_id,payment_confirmation_id,app_id) VALUES ($1,$2,$3)`,
       [fact.orderId, confirmationId, scope.appId]);
+    if (distribution && prepared) await distribution.record(client, prepared, confirmationId, fact.requestId);
   }
   await recordAudit(client, {
     actorType: "system", action: "order.payment.confirmed", objectType: "rental_order", objectId: fact.orderId,

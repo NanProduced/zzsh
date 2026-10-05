@@ -1,7 +1,8 @@
 import { runMarketChecks } from "./supply-market-checks";
 import { runQueryContractChecks } from "./supply-query-contract-checks";
+import { runListingCoexistenceChecks } from "./listing-coexistence-checks";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { TestContext } from "node:test";
 import type { SupplyGate } from "../src/supply/publishing";
@@ -29,6 +30,8 @@ export type Options = {
   itemId: string;
   user: Jar;
   stranger: Jar;
+  userPhone: string;
+  strangerPhone: string;
   boss: Jar;
   bossId: string;
   operator: Jar;
@@ -87,6 +90,12 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     reference: "fixture:m3c",
   });
   let d = await ok(userPrefix + "/drafts", { expectedRevision: "1" });
+  const recommendation = await ok(userPrefix + "/deposit-recommendation", undefined);
+  assert.equal(recommendation.available, false, "an unconfigured funding policy must be reported instead of guessing a recommendation");
+  assert.equal(recommendation.reason, "FUNDING_POLICY_UNCONFIGURED");
+  assert.equal(typeof recommendation.releaseId, "string");
+  assert.equal((await call(userPrefix + "/deposit-recommendation", undefined, o.stranger)).status, 404, "another user must not read the owner recommendation");
+  assert.equal((await call(userPrefix + "/deposit-recommendation", undefined, { header: () => "" } as Jar)).status, 401, "anonymous callers must not read the owner recommendation");
   const declaration = {
     title: "三角洲 · 60M资料审核样例",
     description: "合成申报，不代表平台已登录验号",
@@ -163,11 +172,30 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   );
   assert.equal(upload.status, 200);
   const asset = await upload.json();
+  // Account display disposition now requires the image to be bound to the current
+  // listing version plus an explicit account/version/asset confirmation context.
+  d = await ok(
+    userPrefix + "/draft",
+    {
+      ...declaration,
+      mediaBindings: [{ assetId: asset.assetId, position: 0 }],
+      expectedRevision: d.account.revision,
+    },
+    o.user,
+    "PUT",
+  );
+  const assetContext = (assetRevision: string) => ({
+    accountId: o.accountId,
+    accountRevision: d.account.revision,
+    versionId: d.version.id,
+    assetRevision,
+    byteHash: createHash("sha256").update(o.bytes).digest("hex"),
+  });
   assert.equal(
     (
       await call(
         "/api/bff/admin/supply/media/" + asset.assetId + "/visibility",
-        { visibility: "PRIVATE_REVIEW", reason: "R3 private display restore fixture" },
+        { visibility: "PRIVATE_REVIEW", reason: "R3 private display restore fixture", accountContext: assetContext("1") },
         o.operator,
       )
     ).status,
@@ -178,7 +206,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     (
       await call(
         "/api/bff/admin/supply/media/" + asset.assetId + "/visibility",
-        { visibility: "PUBLIC_DISPLAY", reason: "R3 target-state public restore fixture" },
+        { visibility: "PUBLIC_DISPLAY", reason: "R3 target-state public restore fixture", accountContext: assetContext("2") },
         o.operator,
       )
     ).status,
@@ -605,8 +633,8 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       `SELECT v.rule_release_id, v.content_hash, v.term_option_code,
               v.payload -> 'quoteValues' AS quote_values, u.id AS stranger_id
          FROM zzsh_supply.listing_version v, zzsh_auth_user."user" u
-        WHERE v.id = $1 AND u.email = 'm3b-user-2@example.invalid'`,
-      [d.version.id],
+        WHERE v.id = $1 AND u."phoneNumber" = $2`,
+      [d.version.id, o.strangerPhone],
     )
   ).rows[0];
   assert.ok(occupying?.stranger_id, "stranger user fixture exists");
@@ -712,9 +740,10 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     `UPDATE zzsh_iam.user_identity_state SET account_status='ACTIVE',identity_status='VERIFIED',age_status='ADULT' WHERE user_id=$1`,
     [owner],
   );
-  await ok("/api/auth/user/sign-in/username", {
-    username: "m3b_user_1",
+  await ok("/api/auth/user/sign-in/identifier", {
+    identifier: o.userPhone,
     password: "Sup3rSecret#One",
+    kind: "phone",
   });
   await o.migration.query(
     `REVOKE INSERT ON zzsh_iam.audit_event FROM "${o.runtimeUser}"`,
@@ -1183,5 +1212,6 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     },
   );
   await runMarketChecks(o);
-  await runQueryContractChecks(o);
+  const { publishedIds } = await runQueryContractChecks(o);
+  await runListingCoexistenceChecks({ testContext: o.testContext, base: o.base, userOrigin: o.userOrigin, adminOrigin: o.adminOrigin, gameId: o.gameId, itemId: o.itemId, user: o.user, boss: o.boss, bossId: o.bossId, pool: o.pool, maintenance: o.maintenance, publishedIds });
 }

@@ -1,3 +1,4 @@
+import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
 import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-dispatch";
 import { OrderTeamLifecycle } from "../im/order-team";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
@@ -42,6 +43,11 @@ import type { ImMessageTransport } from "../im/im-contract";
 import { mountYunxinHandlers } from "../im/yunxin-routes";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
+import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
+import { initializeNativeWalletOrigin } from "../finance/native-wallet-origin";
+import { mountInvitationRoutes } from "../finance/invitation-routes";
+import { mountDistributionPolicyRoutes } from "../finance/distribution-policy-routes";
+
 type AuthRealmName = "user" | "admin";
 
 type AuthRuntimeConfig = {
@@ -61,6 +67,8 @@ export type AuthRuntimeCapabilities = {
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
+  /** Explicit local capability only; never read from environment or HTTP. */
+  nativeWithdrawalScope?: NativeWithdrawalScope;
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   testConfirmationFundingReader?: ConfirmationFundingReader;
@@ -378,10 +386,11 @@ function buildPhoneRegistrationPlugin(
         return ctx.json({ status: true, cooldownUntil: new Date(now.getTime() + PHONE_REGISTRATION_OTP_COOLDOWN_MS).toISOString() });
       }),
       completePhoneRegistration: createAuthEndpoint("/phone-registration/complete", { method: "POST", metadata: noStore }, async (ctx) => {
-        const body = bodyOf(ctx.body, ["phoneNumber", "code", "password", "acceptedTerms", "loginOrRegister"]);
+        const body = bodyOf(ctx.body, ["phoneNumber", "code", "password", "acceptedTerms", "loginOrRegister", "inviteCode"]);
         const phoneNumber = phoneFrom(body);
         const code = codeFrom(body);
         const unified = body.loginOrRegister === true;
+        if (body.inviteCode !== undefined && (typeof body.inviteCode !== "string" || !/^[A-Za-z0-9_-]{1,30}$/.test(body.inviteCode))) throw new APIError("BAD_REQUEST", { message: "Invalid invitation code" });
         const password = body.password === undefined ? undefined : passwordFrom(body);
         if (body.acceptedTerms !== true) throw new APIError("BAD_REQUEST", { message: "Terms must be accepted" });
         const minPasswordLength = ctx.context.password.config.minPasswordLength;
@@ -452,6 +461,9 @@ function buildPhoneRegistrationPlugin(
               `INSERT INTO "zzsh_iam"."user_identity_state" ("user_id", "account_status", "identity_status", "age_status", "provider", "version", "updated_at") VALUES ($1, 'ACTIVE', 'UNVERIFIED', 'UNKNOWN', 'none', 1, $2)`,
               [userId, now],
             );
+            // Existing-user OTP returned above: only this new-user transaction initializes provenance.
+            await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) });
+            await initializeNativeWalletOrigin(client, userId, requestId);
             passwordCapability.state = passwordHash !== undefined ? "set" : "not-set";
             authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
             return false;
@@ -900,7 +912,9 @@ export async function mountAuthHandlers(
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);
-  mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey});
+  mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey});
+  mountDistributionPolicyRoutes(app,securityOptions);
+  mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope});
   mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,fundingReader});
   mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,fundingReader});
   if (options.orderTeams) {

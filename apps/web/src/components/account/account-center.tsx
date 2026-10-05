@@ -70,7 +70,7 @@ const NAV_ITEMS: NavItem[] = [
   { section: "identity", label: "实名认证", icon: ShieldCheck },
   { section: "security", label: "账号安全", icon: Shield },
   { section: "wallet", label: "我的钱包", icon: CreditCard },
-  { section: "invite", label: "分销中心", icon: Sparkles, badge: "待接入" },
+  { section: "invite", label: "分销中心", icon: Sparkles },
 ];
 
 export type AccountLocation = { view: AccountView; accountId?: string; orderId?: string; status?: string };

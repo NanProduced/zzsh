@@ -35,6 +35,16 @@ test("phone password login preserves a short exact string and supports a passwor
     assert.ok(call.body.password === " old "); assert.equal(call.body.kind, "phone"); assert.equal(call.body.identifier, "13800138000"); assert.equal(p.successes, 1);
   } finally { await p.close(); }
 });
+test("invitation link passes the displayed code only through unified phone registration, never password login", async () => {
+  const p = await mountAuthComponent(file, "AuthForm", {inviteCode:"fxOriginal"}, {fetch:async()=>reply()});
+  try { assert.equal(p.host.querySelector("#auth-invite-code").value,"fxOriginal");await fillSms(p);await p.submit();assert.equal(p.calls.find(item=>item.url.endsWith("/phone-registration/complete")).body.inviteCode,"fxOriginal");assert.match(p.host.textContent,/登录已有账号不会更改邀请关系/); } finally { await p.close(); }
+  const password = await mountAuthComponent(file,"AuthForm",{inviteCode:"fxOriginal"});
+  try {await password.click("密码登录");await password.input("auth-identifier","13800138000");await password.input("auth-password","existing");await password.input("auth-terms",true);await password.submit();assert.equal(password.calls.find(item=>item.url.endsWith("/sign-in/identifier")).body.inviteCode,undefined);}finally{await password.close();}
+});
+test("malformed displayed invitation fails before registration write and keeps the field editable", async () => {
+  const p=await mountAuthComponent(file,"AuthForm",{inviteCode:"invalid code"},{fetch:async()=>reply()});
+  try{await fillSms(p);await p.submit();assert.equal(p.calls.filter(item=>item.url.endsWith("/complete")).length,0);assert.match(p.host.textContent,/邀请码仅支持/);assert.equal(p.host.querySelector("#auth-invite-code").disabled,false);}finally{await p.close();}
+});
 
 test("accepted write plus failed session read offers only confirmation and cannot send a second write", async () => {
   let recovered = false;

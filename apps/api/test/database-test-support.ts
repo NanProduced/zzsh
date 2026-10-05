@@ -89,6 +89,7 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_content"."carousel_item",
       "zzsh_supply"."favorite",
   "zzsh_supply"."legacy_listing_read_snapshot",
+  "zzsh_order"."legacy_order_read_snapshot",
       "zzsh_supply"."skin_owner",
   "zzsh_supply"."legacy_supply_map",
       "zzsh_supply"."duplicate_hint",

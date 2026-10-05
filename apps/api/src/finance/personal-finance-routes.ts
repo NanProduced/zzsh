@@ -1,3 +1,4 @@
+import type {NativeWithdrawalScope} from './native-withdrawal-resource';
 import type { INestApplication } from "@nestjs/common";
 import type { AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
@@ -9,7 +10,7 @@ import { safely, decodeId, type SupplyResponse } from "../supply/supply-routes";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { readPersonalWallet, readPersonalFinanceEntries, readPersonalFinanceEntry, parseFinanceQuery } from "./personal-finance-read";
 import { mountControlledWithdrawalRoutes } from "./controlled-withdrawal-routes";
-export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey}){
+export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey;nativeWithdrawalScope?:NativeWithdrawalScope}){
   mountControlledWithdrawalRoutes(app,options);
   app.getHttpAdapter().getInstance().use('/api/v1/users/me/wallet',(request:SupplyNodeRequest,response:SupplyResponse)=>{
     const requestId=ensureApiV1RequestId(request);return safely(response,requestId,async()=>{
@@ -17,7 +18,7 @@ export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecuri
       if(request.method!=="GET"||!/^\/api\/v1\/users\/me\/wallet(?:\/entries(?:\/[^/]+)?)?$/.test(path))throw notFound();
       const origin=request.headers.origin;if(origin!==undefined&&origin!==options.userOrigin&&origin!==options.apiOrigin)throw forbidden();
       const context=await readUserContext(request,options);
-      const body=await withTransaction(options.pool,async client=>{await assertReplayAuthorization(client,context);if(path.endsWith('/wallet')){if(url.search)throw notFound();return {wallet:await readPersonalWallet(client,context.userId)};}if(path.endsWith('/entries'))return await readPersonalFinanceEntries(client,context,parseFinanceQuery(url.searchParams),options.listingCursorKey);if(url.search)throw notFound();return await readPersonalFinanceEntry(client,context.userId,decodeId(path.split('/').at(-1)!));});
+      const body=await withTransaction(options.pool,async client=>{await assertReplayAuthorization(client,context);if(path.endsWith('/wallet')){if(url.search)throw notFound();return {wallet:await readPersonalWallet(client,context.userId,options.nativeWithdrawalScope)};}if(path.endsWith('/entries'))return await readPersonalFinanceEntries(client,context,parseFinanceQuery(url.searchParams),options.listingCursorKey);if(url.search)throw notFound();return await readPersonalFinanceEntry(client,context.userId,decodeId(path.split('/').at(-1)!));});
       sendJson(response,200,body,requestId);
     });
   });

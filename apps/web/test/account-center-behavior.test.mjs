@@ -32,12 +32,13 @@ function loadCenter(session) {
   module.require = (name) => {
     if (name === "next/link") return function Link({ scroll: _scroll, ...props }) { return React.createElement("a", props); };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => ({ getSnapshot: () => session }) };
-    if (name === "./personal-wallet" || name === "./controlled-withdrawal") {
+    if (name === "./personal-wallet") {
       const child = new Module(path.join(tree, "wallet-summary-probe.cjs"));
       child.filename = path.join(tree, "wallet-summary-probe.cjs"); child.paths = Module._nodeModulePaths(tree); child.require = module.require;
-      child._compile(typescript.transpileModule(fs.readFileSync(path.join(tree, `apps/web/src/components/account/${name.slice(2)}.tsx`), "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, child.filename);
+      child._compile(typescript.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/account/personal-wallet.tsx"), "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, child.filename);
       return child.exports;
     }
+    if (name === "./controlled-withdrawal") return { ControlledWithdrawal: () => null };
     if (name === "@/components/auth/auth-form") return {
       WebAuthError: class WebAuthError extends Error { constructor(status) { super("AUTH_ERROR"); this.status = status; } },
       webAuthRequest: async (path, _body, signal) => {
@@ -54,7 +55,6 @@ function loadCenter(session) {
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
     if (name === "@/lib/membership-client") return requireFromTree(path.join(tree, "apps/web/src/lib/membership-client.ts"));
     if (name === "@/lib/personal-wallet-client") return requireFromTree(path.join(tree, "apps/web/src/lib/personal-wallet-client.ts"));
-    if (name === "@/lib/controlled-withdrawal-client") return requireFromTree(path.join(tree, "apps/web/src/lib/controlled-withdrawal-client.ts"));
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };
