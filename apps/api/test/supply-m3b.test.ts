@@ -257,8 +257,10 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 async function resetIsolatedData(pool: Pool): Promise<void> {
   const present=(await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation;
   const configPresent=(await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation;
+  const orderReadPresent=(await pool.query(`SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') AS relation`)).rows[0]?.relation;
   let statement=present?ISOLATED_BUSINESS_DATA_TRUNCATE:ISOLATED_BUSINESS_DATA_TRUNCATE.replace('      "zzsh_iam"."user_rental_membership",\n',"");
   if(!configPresent)statement=statement.replace('      "zzsh_supply"."listing_filter_config",\n',"");
+  if(!orderReadPresent)statement=statement.replace('  "zzsh_order"."legacy_order_read_snapshot",\n',"");
   await pool.query(statement);
 }
 
@@ -433,8 +435,9 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     const bootstrapSecret = randomBytes(32).toString("hex");
     const authOptions = {
-      ...(RESOURCE_SET==="pricing_compat"?{listingCursorKey:queryFixtureKey}:{}),
-      ...(RESOURCE_SET==="pricing_compat"?{confirmationKey:personalFixture.key,orderHoldSeconds:300,testConfirmationFundingReader:async()=>personalFixture.funding,fakeSmsOutbox:personalFixture.sms,realNameProvider:createFakeRealNameProvider("VERIFIED_ADULT")}:{}),
+      listingCursorKey: queryFixtureKey,
+      fakeSmsOutbox: personalFixture.sms,
+      ...(RESOURCE_SET==="pricing_compat"?{confirmationKey:personalFixture.key,orderHoldSeconds:300,testConfirmationFundingReader:async()=>personalFixture.funding,realNameProvider:createFakeRealNameProvider("VERIFIED_ADULT")}:{}),
       ...loadAuthRuntimeConfig({
         AUTH_API_ORIGIN: API_ORIGIN,
         AUTH_USER_ORIGIN: USER_ORIGIN,
@@ -505,10 +508,13 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     );
 
     const createEntry = async (kind: string, body: Record<string, unknown>): Promise<string> => {
-      const created = await request(base, `/api/bff/admin/supply/games/${gameId}/${kind}`, body, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+      const payload = kind === "skins" || kind === "skin-owners" ? { ...body, expectedCatalogRevision: await catalogRevision() } : body;
+      const created = await request(base, `/api/bff/admin/supply/games/${gameId}/${kind}`, payload, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       return created.body?.id as string;
     };
+    const catalogRevision = async (): Promise<string> =>
+      (await runtimePool!.query<{ revision: string }>(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0]!.revision;
     const haffItem = await createEntry("items", { code: "haff_base", name: "哈夫币", unit: "HAFF_BASE", required: true });
     const roundItem = await createEntry("items", { code: "round_item", name: "子弹", unit: "ROUND" });
     await createEntry("rarities", { code: "gold", name: "金色" });
@@ -522,11 +528,11 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const selfParent = await request(base, `/api/bff/admin/supply/categories/${weaponRoot}`, { parentId: weaponRoot }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(selfParent.response.status, 400);
 
-    const skin = await createEntry("skins", { code: "skin_m4_gold", name: "M4A1 金色", categoryId: model, rarityCode: "gold", sourceField: "knifeSkin", sourceToken: "legacy-unknown-token" });
+    const skin = await createEntry("skins", { code: "skin_m4_gold", name: "M4A1 金色", categoryId: model, rarityCode: "gold", sourceNamespace: "legacy_mysql_restore", sourceField: "knifeSkin", sourceToken: "legacy-unknown-token" });
     const rarityCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_supply"."skin_rarity" WHERE "game_id" = $1 AND "code" = 'legacy-unknown-token'`, [gameId]);
     assert.equal(rarityCount.rows[0]?.count, "0", "unknown legacy tokens must not be auto-created as valid catalog entries");
 
-    const renamed = await request(base, `/api/bff/admin/supply/skins/${skin}`, { name: "M4A1 金色（改名）" }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+    const renamed = await request(base, `/api/bff/admin/supply/skins/${skin}`, { name: "M4A1 金色（改名）", reason: "合成改名", expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(renamed.response.status, 200, JSON.stringify(renamed.body));
     const skinRow = await runtimePool.query<{ code: string; name: string; rarityCode: string | null; sourceToken: string | null }>(
       `SELECT "code", "name", "rarity_code" AS "rarityCode", "source_token" AS "sourceToken" FROM "zzsh_supply"."skin" WHERE "id" = $1`,
@@ -536,12 +542,21 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(skinRow.rows[0]?.name, "M4A1 金色（改名）");
     assert.equal(skinRow.rows[0]?.sourceToken, "legacy-unknown-token");
 
+    const skinOwner = await createEntry("skin-owners", { kind: "AGENT", code: "owner_luna", name: "露娜", reason: "合成词条", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "离线合成词条" }] });
+    const identityEvidence = { reason: "合成身份确认", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "离线合成词条" }] };
+    const confirmSkin = async (id: string, baseName: string) => {
+      const confirmed = await request(base, `/api/bff/admin/supply/skins/${id}`, { ownerRef: { kind: "AGENT", id: skinOwner }, baseName, confirmIdentity: true, enabled: true, formVisible: true, ...identityEvidence, expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+      assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+    };
+    await confirmSkin(skin, "天际线");
+
     const bareSkin = await createEntry("skins", { code: "skin_no_rarity", name: "无稀有度皮肤", categoryId: model });
     const bareRow = await runtimePool.query<{ rarityCode: string | null }>(`SELECT "rarity_code" AS "rarityCode" FROM "zzsh_supply"."skin" WHERE "id" = $1`, [bareSkin]);
     assert.equal(bareRow.rows[0]?.rarityCode, null, "missing rarity must stay null instead of defaulting to a value");
-    await createEntry("skins", { code: "skin_m4_red", name: "M4A1 红色", categoryId: model });
+    const redSkin = await createEntry("skins", { code: "skin_m4_red", name: "M4A1 红色", categoryId: model });
+    await confirmSkin(redSkin, "赤焰");
 
-    await request(base, `/api/bff/admin/supply/skins/${bareSkin}`, { enabled: false }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+    await request(base, `/api/bff/admin/supply/skins/${bareSkin}`, { enabled: false, expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
 
     const publicCatalog = await request(base, `/api/v1/supply/games/${gameId}/catalog`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(publicCatalog.response.status, 200, JSON.stringify(publicCatalog.body));
@@ -856,7 +871,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     const coverBound = await request(base, `/api/bff/admin/supply/games/${gameId}/cover`, { mediaId: coverAssetId }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(coverBound.response.status, 200, JSON.stringify(coverBound.body));
-    const coverOnSkin = await request(base, `/api/bff/admin/supply/skins/${skin}`, { mediaId: coverAssetId }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+    const coverOnSkin = await request(base, `/api/bff/admin/supply/skins/${skin}`, { mediaId: coverAssetId, expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(coverOnSkin.response.status, 400, "media purpose must match the binding");
 
     const mismatchedIntent = await request(base, "/api/bff/admin/supply/media/upload-intents", { gameId, purpose: "GAME_COVER", mime: "image/png", size: pngBytes().length }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
@@ -881,16 +896,23 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     storageAvailable = true;
 
     // ---------- 用户供给材料与跨用户/跨 realm 拒绝 ----------
+    const registerUser = async (jar: CookieJar, phone: string, password: string): Promise<void> => {
+      const sent = await request(base, "/api/auth/user/phone-registration/send-otp", { phoneNumber: phone }, jar, USER_ORIGIN);
+      assert.equal(sent.response.status, 200, JSON.stringify(sent.body));
+      const code = personalFixture.sms.get("phone-registration:" + phone)?.code;
+      assert.ok(code, "registration OTP must be captured by the fake outbox");
+      const done = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber: phone, code, password, acceptedTerms: true }, jar, USER_ORIGIN);
+      assert.equal(done.response.status, 200, JSON.stringify(done.body));
+    };
     const userOne = cookieJar();
-    const signupOne = await request(base, "/api/auth/user/sign-up/email", { email: "m3b-user-1@example.invalid", password: "Sup3rSecret#One", name: "供给用户一", username: "m3b_user_1" }, userOne, USER_ORIGIN);
-    assert.equal(signupOne.response.status, 200, JSON.stringify(signupOne.body));
+    const userPhone = "+8613800000001";
+    await registerUser(userOne, userPhone, "Sup3rSecret#One");
     const accountCreated = await request(base, "/api/v1/supply/accounts", { gameId }, userOne, USER_ORIGIN, "POST", supplyKey());
     assert.equal(accountCreated.response.status, 200, JSON.stringify(accountCreated.body));
     const accountId = accountCreated.body?.accountId as string;
 
     const userTwo = cookieJar();
-    const signupTwo = await request(base, "/api/auth/user/sign-up/email", { email: "m3b-user-2@example.invalid", password: "Sup3rSecret#Two", name: "供给用户二", username: "m3b_user_2" }, userTwo, USER_ORIGIN);
-    assert.equal(signupTwo.response.status, 200);
+    await registerUser(userTwo, "+8613800000002", "Sup3rSecret#Two");
 
     const foreignAccount = await request(base, "/api/v1/supply/media/upload-intents", { gameId, accountId, mime: "image/png", size: pngBytes().length }, userTwo, USER_ORIGIN, "POST", supplyKey());
     assert.equal(foreignAccount.response.status, 404, "users must not upload against another user's account");
@@ -935,7 +957,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(staleRead.response.status, 409, "cursors must be invalidated when the catalog revision changes");
 
     await runGunsmithChecks({base,gameId,boss:boss.jar,bossId:boss.id,user:userOne,operator:operator.jar,gunsmithOnly:gunsmithOnly.jar,catalogOnly:unscoped.jar,request,key:supplyKey,adminOrigin:ADMIN_ORIGIN,apiOrigin:API_ORIGIN,userOrigin:USER_ORIGIN,pool:runtimePool,uploadBytes,mediaBytes:pngBytes});
-    await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
+    await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,userPhone,strangerPhone:"+8613800000002",boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
     await runSupplyPoolChecks({testContext,pool:runtimePool,maintenance:maintenanceDataPool,auth:authOptions,user:userOne,boss:boss.jar,bossId:boss.id,accountId,gameId,bytes:pngBytes()});
     await runMediaOssChecks({base,pool:runtimePool,maintenance:maintenanceDataPool,operator:{jar:operator.jar,id:operator.id},boss:{jar:boss.jar,id:boss.id},catalogOnly:{jar:unscoped.jar,id:unscoped.id},gameId,itemId:haffItem,mediaDir,faults:storageFaults});
     const auditCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" LIKE 'supply.%'`);
@@ -953,7 +975,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(audits.some((a) => a.object_id === firstActivation.body?.releaseId && a.details.before.current_release_id === null && a.details.after.generation === "1"), true);
     assert.equal(JSON.stringify(audits).includes("uploadToken"), false);
     if (RESOURCE_SET === "pricing_compat") {
-      const checks={testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates};
+      const checks={testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,userPhone,strangerPhone:"+8613800000002",boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates};
       if(process.env.SUPPLY_QUERY_A_ONLY!=="1")await runPricingCompatChecks(checks);
       await runListingQueryAChecks(checks);
     }

@@ -8,6 +8,10 @@ export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused
 // immutable `attributes` column instead of a payload, so callers may pass the
 // column as the attribute source while sharing one predicate implementation.
 export const LISTING_ATTRIBUTES_SQL=`v.payload#>'{declaration,attributes}'`;
+// Public v2 snapshots must be STANDARD. Legacy quotes have no tier field. Mixed
+// mode reuses this exact predicate so the native side cannot drift from the
+// native-only candidate set.
+export const PUBLIC_STANDARD_TIER_GUARD=`(v.payload#>>'{quoteValues,schemaVersion}'='1' OR v.payload#>>'{quoteValues,pricingInputs,compatibility,customerTier}'='STANDARD')`;
 function windowLiteral(w:ServiceWindow,p:(v:unknown)=>string):string {
   const start=p(w.startMinute),end=p(w.endMinute);
   return w.crossMidnight?`int4multirange(int4range(0,${end}::int,'[)'),int4range(${start}::int,1440,'[)'))`:`int4multirange(int4range(${start}::int,${end}::int,'[)'))`;
@@ -44,8 +48,7 @@ export function buildListingCandidates(query:ListingQueryV2,after:ListingPositio
   const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
   const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
   const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
-  // Public v2 snapshots must be STANDARD. Legacy quotes have no tier field.
-  where.push(`(v.payload#>>'{quoteValues,schemaVersion}'='1' OR v.payload#>>'{quoteValues,pricingInputs,compatibility,customerTier}'='STANDARD')`);
+  where.push(PUBLIC_STANDARD_TIER_GUARD);
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}

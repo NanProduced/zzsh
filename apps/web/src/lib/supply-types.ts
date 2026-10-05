@@ -295,12 +295,50 @@ export type PublishingOptions = {
   vitalityLevels: number[];
   bearLevels: number[];
   pricingOptionCodes: string[];
+  pricingSchema?: "haff-ratio-v2";
+  rentalModes?: Record<
+    RentalMode,
+    {
+      enabled: boolean;
+      min?: { base: "C" | "ABSOLUTE"; value: string };
+      max?: { base: "C" | "ABSOLUTE"; value: string };
+    }
+  >;
   agreement: { id: string; title: string; body: string; digest: string };
 };
+export type RentalMode = "ordinary" | "custom" | "fast";
+export type DepositRecommendation =
+  | {
+      available: true;
+      amountCents: string;
+      minCents: string;
+      fullPayoutMinCents: string;
+      capCents: string;
+      policyVersion: string;
+      accountId: string;
+      accountRevision: string;
+      versionId: string;
+      versionRevision: string;
+      ruleReleaseId: string;
+      priceVersionId: string;
+      inputs: {
+        safeBoxCode: string | null;
+        vitality: number | null;
+        bear: number | null;
+        dive: number | null;
+        skinIds: string[];
+      };
+    }
+  | {
+      available: false;
+      reason: "FUNDING_POLICY_UNCONFIGURED" | "INPUTS_UNAVAILABLE";
+      releaseId?: string;
+    };
+export type RentalPricingSelection = { rentalMode: RentalMode; ownerRatioB?: string };
 export type DraftInput = {
   title: string;
   description: string | null;
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, string | number | boolean | null | RentalPricingSelection | { schema: "full-payout-declaration-v1"; selected: boolean } | { schema: "owner-deposit-declaration-v1"; amountCents: string; declarationVersion: string }>;
   termOptionCode: string;
   pricingOptionCode: string;
   inventory: Array<{ itemId: string; quantity: string | null }>;
@@ -344,6 +382,7 @@ export type MySupply = {
     id: string;
     schemaVersion: 1 | 2;
     sequence: string;
+    revision?: string;
     reviewState:
       | "DRAFT"
       | "SUBMITTED"
@@ -356,8 +395,17 @@ export type MySupply = {
     contentHash: string | null;
     declaration: SavedDeclaration;
     catalogItems?: Array<{ id: string; code: string; name: string; unit: string; priced: boolean }>;
-    attributeDisplay?: {
-      safeBox: { code: string; displayName: string | null } | null;
+    attributeDisplay?: PublicAttributeDisplay;
+    safeBox?: { code: string; displayName: string | null } | null;
+    termOption?: {
+      code: string;
+      displayName: string | null;
+      dailyConsumption: { quantity: string; unit: "HAFF_BASE" } | null;
+    } | null;
+    presentation?: {
+      items: Array<{ id: string; code?: string; name: string; unit: string }>;
+      skins: Array<{ id: string; name: string; categoryCode?: string; categoryName?: string }>;
+      entitlements: Array<{ id: string; name: string }>;
     };
     quote: OwnerQuote | null;
   };

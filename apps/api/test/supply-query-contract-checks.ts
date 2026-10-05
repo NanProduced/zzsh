@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type { TestContext } from "node:test";
 import type { SupplyGate } from "../src/supply/publishing";
@@ -21,7 +21,7 @@ export async function runQueryContractChecks(o: {
   adminOrigin: string;
   bytes: Buffer;
   gates: Map<string, SupplyGate>;
-}): Promise<void> {
+}): Promise<{ publishedIds: string[] }> {
   const call = async (
     path: string,
     body: unknown,
@@ -59,11 +59,13 @@ export async function runQueryContractChecks(o: {
     releaseId: d.version.releaseId,
     contentHash: d.version.contentHash,
   });
+  const publishedIds: string[] = [];
   const uploadApproved = async (
     accountId: string,
     purpose: "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE",
     visibility?: "PUBLIC_DISPLAY",
-  ) => {
+    draft?: any,
+  ): Promise<any> => {
     const intent = await ok("/api/v1/supply/media/upload-intents", {
       gameId: o.gameId,
       accountId,
@@ -87,15 +89,55 @@ export async function runQueryContractChecks(o: {
     );
     const asset = await uploaded.json();
     assert.equal(uploaded.status, 200, JSON.stringify(asset));
+    let current = draft;
+    if (purpose === "ACCOUNT_DISPLAY") {
+      // Account display disposition requires the image to be bound to the current
+      // version plus an explicit account/version/asset confirmation context.
+      assert.ok(current, "display review requires the current draft");
+      const declaration = current.version.declaration;
+      const bindings = [
+        ...declaration.mediaBindings.map((binding: any) => ({ assetId: binding.assetId, position: binding.position })),
+        { assetId: asset.assetId, position: declaration.mediaBindings.length },
+      ];
+      current = await ok(
+        "/api/v1/supply/accounts/" + accountId + "/draft",
+        {
+          title: declaration.title,
+          description: declaration.description,
+          attributes: declaration.attributes,
+          termOptionCode: declaration.termOptionCode,
+          pricingOptionCode: declaration.pricingOptionCode,
+          inventory: declaration.inventory,
+          skins: declaration.skins,
+          entitlements: declaration.entitlements,
+          mediaBindings: bindings,
+          expectedRevision: current.account.revision,
+        },
+        o.user,
+        "PUT",
+      );
+    }
     await ok(
       "/api/bff/admin/supply/media/" + asset.assetId + "/review",
       {
         decision: "APPROVE",
         ...(visibility ? { visibility } : {}),
+        ...(purpose === "ACCOUNT_DISPLAY"
+          ? {
+              reason: "合成账户展示图处置",
+              accountContext: {
+                accountId,
+                accountRevision: current.account.revision,
+                versionId: current.version.id,
+                assetRevision: "1",
+                byteHash: createHash("sha256").update(o.bytes).digest("hex"),
+              },
+            }
+          : {}),
       },
       o.boss,
     );
-    return asset.assetId as string;
+    return purpose === "ACCOUNT_DISPLAY" ? { assetId: asset.assetId as string, draft: current } : (asset.assetId as string);
   };
   const publish = async (input: {
     title: string;
@@ -113,11 +155,14 @@ export async function runQueryContractChecks(o: {
     let d = await ok("/api/v1/supply/accounts/" + accountId + "/drafts", {
       expectedRevision: "1",
     });
-    const displayId = await uploadApproved(
+    const display = await uploadApproved(
       accountId,
       "ACCOUNT_DISPLAY",
       "PUBLIC_DISPLAY",
+      d,
     );
+    d = display.draft;
+    const displayId = display.assetId;
     const evidenceId = input.bindEvidence
       ? await uploadApproved(accountId, "ACCOUNT_EVIDENCE")
       : null;
@@ -150,6 +195,7 @@ export async function runQueryContractChecks(o: {
       token(d),
     );
     d = await ok("/api/v1/supply/accounts/" + accountId + "/submit", token(d));
+    publishedIds.push(accountId);
     return {
       accountId,
       versionId: d.version.id as string,
@@ -584,7 +630,17 @@ export async function runQueryContractChecks(o: {
       );
       await ok(
         "/api/bff/admin/supply/media/" + pendingAsset.assetId + "/review",
-        { decision: "REJECT", reason: "合成驳回待替换" },
+        {
+          decision: "REJECT",
+          reason: "合成驳回待替换",
+          accountContext: {
+            accountId: pendingAccount.accountId,
+            accountRevision: pending.account.revision,
+            versionId: pending.version.id,
+            assetRevision: (await o.pool.query<{ revision: string }>(`SELECT revision::text AS revision FROM zzsh_supply.media_asset WHERE id=$1`, [pendingAsset.assetId])).rows[0]!.revision,
+            byteHash: createHash("sha256").update(o.bytes).digest("hex"),
+          },
+        },
         o.boss,
       );
       const rejected = await ok(
@@ -627,9 +683,23 @@ export async function runQueryContractChecks(o: {
       assert.equal(rejectedWrite.status, 400);
       assert.equal(rejectedWrite.body.error.details[0].path, "reviewState");
 
+      const currentPublished = await ok(
+        "/api/v1/supply/accounts/" + published.accountId,
+        undefined,
+      );
       await ok(
         "/api/bff/admin/supply/media/" + published.displayId + "/visibility",
-        { visibility: "PRIVATE_REVIEW", reason: "撤销公开展示" },
+        {
+          visibility: "PRIVATE_REVIEW",
+          reason: "撤销公开展示",
+          accountContext: {
+            accountId: published.accountId,
+            accountRevision: currentPublished.account.revision,
+            versionId: currentPublished.version.id,
+            assetRevision: (await o.pool.query<{ revision: string }>(`SELECT revision::text AS revision FROM zzsh_supply.media_asset WHERE id=$1`, [published.displayId])).rows[0]!.revision,
+            byteHash: createHash("sha256").update(o.bytes).digest("hex"),
+          },
+        },
         o.boss,
       );
       assert.equal(
@@ -668,12 +738,13 @@ export async function runQueryContractChecks(o: {
         published.accountId,
         "ACCOUNT_DISPLAY",
         "PUBLIC_DISPLAY",
+        drafted,
       );
       const draftedBindings = drafted.version.declaration.mediaBindings.map(
         (b: any) => ({ assetId: b.assetId, position: b.position }),
       );
       draftedBindings.push({
-        assetId: extraDisplay,
+        assetId: extraDisplay.assetId,
         position: draftedBindings.length,
       });
       const withDraftImage = await ok(
@@ -688,13 +759,13 @@ export async function runQueryContractChecks(o: {
           skins: [],
           entitlements: [],
           mediaBindings: draftedBindings,
-          expectedRevision: drafted.account.revision,
+          expectedRevision: extraDisplay.draft.account.revision,
         },
         o.user,
         "PUT",
       );
       const draftOnly = withDraftImage.version.declaration.mediaBindings.find(
-        (b: any) => b.assetId === extraDisplay,
+        (b: any) => b.assetId === extraDisplay.assetId,
       );
       assert.equal(draftOnly.publicDisplayEligible, true);
       assert.equal(draftOnly.publiclyReadable, false);
@@ -712,4 +783,5 @@ export async function runQueryContractChecks(o: {
       assert.equal(JSON.stringify(publicList).includes("reviewState"), false);
     },
   );
+  return { publishedIds };
 }

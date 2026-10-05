@@ -56,6 +56,7 @@ import {
   readPublicListing,
   readPublishingAccount,
   readCurrentVersion,
+  readDepositRecommendation,
   withPublicListingSnapshot,
   quoteListing,
   readDeclaration,
@@ -69,7 +70,7 @@ import {
   type PublishingAccount,
 } from "./publishing";
 const ACCOUNT_ROUTE =
-  /^\/accounts\/([A-Za-z0-9._:-]+)(?:\/(drafts|draft|quote|accept-rules|submit|withdraw|pause|resume|restriction|duplicates))?$/;
+  /^\/accounts\/([A-Za-z0-9._:-]+)(?:\/(drafts|draft|quote|accept-rules|submit|withdraw|pause|resume|restriction|duplicates|deposit-recommendation))?$/;
 const ADMIN_ROUTE =
   /^\/listing-reviews\/([A-Za-z0-9._:-]+)(?:\/(decide|restriction|duplicates))?$/;
 async function summary(
@@ -333,7 +334,7 @@ export async function handlePublishingRoute(
     : await readUserContext(request, options);
   const actorId = "userId" in context ? context.userId : "";
   const action = accountMatch?.[2];
-  if (accountMatch && method === "GET" && action) throw notFound();
+  if (accountMatch && method === "GET" && action && action !== "deposit-recommendation") throw notFound();
   if (
     accountMatch &&
     method !== "GET" &&
@@ -381,6 +382,8 @@ export async function handlePublishingRoute(
       if (accountMatch) {
         const a = await lockPublishingAccount(client, accountMatch[1]!);
         await authorize(client, a);
+        if (action === "deposit-recommendation")
+          return readDepositRecommendation(client, a);
         const requestedVersion = query.get("versionId");
         if (
           requestedVersion &&

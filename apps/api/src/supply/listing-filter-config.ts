@@ -14,19 +14,35 @@ export async function listingCatalogContext(client:PoolClient,gameId:string) {
   return {game,items,categories};
 }
 type Catalog=Awaited<ReturnType<typeof listingCatalogContext>>;
-function allowedCodes(c:Catalog,key:string,legacy=false):string[] {
-  if(key==="safeBoxCodes"){const priced=Object.keys(c.game.rule?.baseBySafeBox??{});return priced.length||!legacy?priced:publicSafeBoxCodes();}
-  return (key==="gradingCodes"?publicGradingOptions():publicLoginMethodOptions()).map(o=>o.code);
+type CodeField={key:string;options?:ReadonlyArray<{value:string}>};
+function allowedCodes(c:Catalog,field:CodeField,legacy=false):string[] {
+  if(field.key==="safeBoxCodes"){
+    const priced=Object.keys(c.game.rule?.baseBySafeBox??{});
+    if(!legacy)return priced;
+    // Mixed/legacy reads keep configured historical display codes next to the
+    // current rule codes; unknown codes stay rejected everywhere.
+    const configured=(field.options??[]).map(o=>o.value).filter(v=>publicSafeBoxCodes().includes(v));
+    return [...new Set([...priced,...configured])];
+  }
+  return (field.key==="gradingCodes"?publicGradingOptions():publicLoginMethodOptions()).map(o=>o.code);
 }
 function allowedLevels(c:Catalog,key:string):number[]{return Object.keys(c.game.rule?.[key==="vitality"?"vitalityDeltaByLevel":"bearDeltaByLevel"]??{}).map(Number);}
 export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false) {
   for(const f of config.fields) {
     if(f.items?.some(r=>!c.items.some(i=>i.id===r.itemId)))throw invalid("Unknown, disabled or foreign item","config.fields.items");
     if(f.categoryIds?.some(id=>!c.categories.some(c=>c.id===id)))throw invalid("Unknown, hidden or foreign category","config.fields.categoryIds");
-    if(f.options?.some(o=>!allowedCodes(c,f.key,legacy).includes(o.value)))throw invalid("Unknown option code","config.fields.options");
+    if(f.options?.some(o=>!allowedCodes(c,f,legacy).includes(o.value)))throw invalid("Unknown option code","config.fields.options");
     if(!legacy && f.levels?.some(l=>!allowedLevels(c,f.key).includes(l)))throw invalid("Unknown allowed level","config.fields.levels");
   }
   for(const sort of config.sorts)if(sort.itemIds?.some(id=>!c.items.some(i=>i.id===id&&i.unit==="HAFF_BASE")))throw invalid("Core sort requires enabled HAFF_BASE item","config.sorts.itemIds");
+}
+export type ListingReadMode="NATIVE"|"LEGACY_READ_ONLY"|"MIXED"|"UNCONFIGURED";
+// Mode selection is a pure decision: no release means legacy snapshots (when a
+// configuration or snapshots exist) are the only public source; an active
+// release keeps both sources and merges them in one candidate set.
+export function listingReadMode(input:{ruleReleaseId:string|null;hasConfig:boolean;hasSnapshots:boolean}):ListingReadMode {
+  if(!input.ruleReleaseId)return input.hasConfig||input.hasSnapshots?"LEGACY_READ_ONLY":"UNCONFIGURED";
+  return input.hasSnapshots?"MIXED":"NATIVE";
 }
 export async function readListingState(client:PoolClient,gameId:string) {
   await requirePublicGameService(client,gameId,GAME_SERVICE.ACCOUNT_RENTAL);
@@ -34,18 +50,20 @@ export async function readListingState(client:PoolClient,gameId:string) {
   const row=(await client.query(`SELECT revision::text,config FROM zzsh_supply.listing_filter_config WHERE game_id=$1 ORDER BY revision DESC LIMIT 1`,[gameId])).rows[0];
   let config:FilterConfig|null=null;
   if(row){try{config=parseFilterConfig(row.config);}catch{throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Filter configuration requires an update");}}
-  const legacyReadOnly=!catalog.game.ruleReleaseId && (Boolean(config) || await hasLegacyReadSnapshots(client,gameId));
-  return {catalog,config,legacyReadOnly,filterRevision:row?.revision??null,catalogRevision:catalog.game.catalogRevision as string,ruleReleaseId:catalog.game.ruleReleaseId as string|null};
+  const hasSnapshots=await hasLegacyReadSnapshots(client,gameId);
+  const mode=listingReadMode({ruleReleaseId:catalog.game.ruleReleaseId as string|null,hasConfig:Boolean(config),hasSnapshots});
+  const legacyReadOnly=mode==="LEGACY_READ_ONLY",mixed=mode==="MIXED";
+  return {catalog,config,legacyReadOnly,mixed,mode,hasLegacySnapshots:hasSnapshots,allowLegacyOptions:legacyReadOnly||mixed,filterRevision:row?.revision??null,catalogRevision:catalog.game.catalogRevision as string,ruleReleaseId:catalog.game.ruleReleaseId as string|null};
 }
 export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,state:Awaited<ReturnType<typeof readListingState>>) {
   if(!state.config || (!state.legacyReadOnly && !state.ruleReleaseId))throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Listing filters or rules are not configured");
-  const config=state.config,c=state.catalog,legacy=state.legacyReadOnly;
+  const config=state.config,c=state.catalog,legacy=state.allowLegacyOptions;
   const sort=config.sorts.find(s=>s.key===q.sort&&s.enabled);if(!sort)throw invalid("Sort is disabled","sort");
   if(q.coreItemId && (!sort.itemIds?.includes(q.coreItemId)||!c.items.some(i=>i.id===q.coreItemId&&i.unit==="HAFF_BASE")))throw invalid("Invalid core item","coreItemId");
   for(const [key,value] of Object.entries(q.filters)) {
     const f=config.fields.find(f=>f.key===key&&f.enabled);if(!f)throw invalid("Filter is disabled","filters."+key);
     if(key==="resources")for(const r of q.filters.resources!) {const item=f.items?.find(i=>i.itemId===r.itemId);if(!item||!c.items.some(i=>i.id===r.itemId))throw invalid("Resource is unavailable or outside configured bounds","filters.resources.itemId");for(const bound of ["minQuantity","maxQuantity"] as const){const quantity=r[bound];if(quantity!==undefined&&(BigInt(quantity)<BigInt(item.min)||BigInt(quantity)>BigInt(item.max)))throw invalid("Resource is unavailable or outside configured bounds",`filters.resources.${bound}`);}}
-    if(key==="safeBoxCodes"||key==="gradingCodes"||key==="loginMethodCodes")if((value as string[]).some(v=>!f.options?.some(o=>o.value===v)||!allowedCodes(c,key,legacy).includes(v)))throw invalid("Unavailable option","filters."+key);
+    if(key==="safeBoxCodes"||key==="gradingCodes"||key==="loginMethodCodes")if((value as string[]).some(v=>!f.options?.some(o=>o.value===v)||!allowedCodes(c,f,legacy).includes(v)))throw invalid("Unavailable option","filters."+key);
     if(key==="vitality"||key==="bear"){const min=(value as {min:number}).min;if(!f.levels?.includes(min)||(!legacy&&!allowedLevels(c,key).includes(min)))throw invalid("Unavailable level","filters."+key);}
     if(key==="regions")if(q.filters.regions!.some(r=>!f.regions?.some(a=>a.province===r.province&&a.city===r.city)))throw invalid("Unavailable region pair","filters.regions");
     if(key==="skinGroups") {
@@ -59,10 +77,11 @@ export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,st
 }
 export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListingState>>,signingReady:boolean) {
   const {catalog:c,config,legacyReadOnly:legacy}=state;
+  const legacyOptions=state.allowLegacyOptions;
   const fields=config?.fields.filter(f=>f.enabled).map(f=>({...f,
     ...(f.items?{items:f.items.filter(r=>c.items.some(i=>i.id===r.itemId))}:{}),
-    ...(f.options?{options:f.options.filter(o=>allowedCodes(c,f.key,legacy).includes(o.value))}:{}),
-    ...(f.levels?{levels:legacy?f.levels:f.levels.filter(n=>allowedLevels(c,f.key).includes(n))}:{}),
+    ...(f.options?{options:f.options.filter(o=>allowedCodes(c,f,legacyOptions).includes(o.value))}:{}),
+    ...(f.levels?{levels:legacyOptions?f.levels:f.levels.filter(n=>allowedLevels(c,f.key).includes(n))}:{}),
     ...(f.categoryIds?{categoryIds:f.categoryIds.filter(id=>c.categories.some(a=>a.id===id))}:{}),
   })).sort((a,b)=>a.order-b.order)||[];
   const sorts=config?.sorts.filter(s=>s.enabled).map(s=>({...s,...(legacy?{label:legacyListingSortLabel(s.key,s.label)}:{}),...(s.itemIds?{itemIds:s.itemIds.filter(id=>c.items.some(i=>i.id===id&&i.unit==="HAFF_BASE"))}:{})})).sort((a,b)=>a.order-b.order)||[];

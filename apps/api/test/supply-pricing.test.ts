@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { compatRule } from "./pricing-compat-fixture";
 import { CUSTOMER_TIERS, parseDeltaPriceLines, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
+import { computeDepositRecommendation, type FundingPolicy } from "../src/supply/funding-policy";
 import type { QuoteInput } from "../src/supply/pricing";
 
 test("price line parser distinguishes omitted tier from null and invalid values", () => {
@@ -359,4 +360,38 @@ test("quote projections are exhaustive whitelists without internal profit or own
   const adminView = projectQuote(quote, "admin");
   assert.equal(adminView.platformFullProfit?.amount, "30.00");
   assert.equal(adminView.pricingInputs?.denominators?.owner, "50");
+});
+
+
+test("deposit recommendation follows policy weights, skin groups, rounding and cap", () => {
+  const policy = {
+    recommendation: {
+      parameters: {
+        safeBoxWeightsByCode: { box: "10000", empty: "0" },
+        vitalityAtLeast7Cents: "5000",
+        bearAtLeast7Cents: "5000",
+        diveAtLeast3Cents: "5000",
+        skinGroupById: { knifeA: "LEGACY_KNIFE", knifeB: "LEGACY_KNIFE", weaponA: "LEGACY_WEAPON", plain: "NONE" },
+        skinWeights: {
+          LEGACY_GOLD: { firstCents: "10000", subsequentCents: "5000" },
+          LEGACY_AGENT: { firstCents: "10000", subsequentCents: "5000" },
+          LEGACY_KNIFE: { firstCents: "20000", subsequentCents: "10000" },
+          LEGACY_WEAPON: { firstCents: "15000", subsequentCents: "5000" },
+        },
+        rounding: { mode: "CEIL", unitCents: "5000", zeroFallbackCents: "5000" },
+        upperLimitCents: "100000",
+      },
+    },
+  } as unknown as FundingPolicy;
+  const base = { accountId: "account_a", gameId: "game_a", listingVersionId: "version_a", priceVersionId: "price_a", ruleReleaseId: "release_a", safeBoxCode: "box", vitality: 7, bear: 7, dive: 3, skinIds: ["knifeA", "knifeB", "weaponA", "plain"] as string[] };
+  assert.equal(computeDepositRecommendation(policy, base), "70000");
+  assert.equal(computeDepositRecommendation(policy, { ...base, vitality: 6, bear: 6, dive: 2, skinIds: [] }), "10000");
+  assert.equal(computeDepositRecommendation(policy, { ...base, safeBoxCode: "empty", vitality: 0, bear: 0, dive: 0, skinIds: [] }), "5000", "zero total falls back to the policy minimum unit");
+  assert.equal(computeDepositRecommendation(policy, { ...base, skinIds: ["knifeA", "knifeA", "knifeA", "knifeA"] }), "75000");
+  assert.throws(() => computeDepositRecommendation(policy, { ...base, safeBoxCode: "missing" }), (error: any) => error.status === 400);
+  assert.throws(() => computeDepositRecommendation(policy, { ...base, vitality: null }), (error: any) => error.status === 400);
+  assert.throws(() => computeDepositRecommendation(policy, { ...base, skinIds: ["unmapped"] }), (error: any) => error.status === 400);
+  assert.throws(() => computeDepositRecommendation(policy, { ...base, accountId: "bad id" }), (error: any) => error.status === 400);
+  const capped = { ...policy, recommendation: { parameters: { ...policy.recommendation.parameters, upperLimitCents: "60000" } } } as unknown as FundingPolicy;
+  assert.equal(computeDepositRecommendation(capped, base), "60000");
 });
