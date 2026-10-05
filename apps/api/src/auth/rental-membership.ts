@@ -14,6 +14,18 @@ export async function readRentalMembership(client: PoolClient, userId: string): 
 
 export function membershipProjection(value: RentalMembership) { return {tier:value.tier,version:value.version}; }
 
+/** Public copy for confirmed rental rules. This version is independent of a user's qualification version. */
+export const RENTAL_MEMBERSHIP_BENEFIT_POLICY = {
+  version: "rental-benefits-20261003.v1",
+  scope: "DELTA_ACCOUNT_RENTAL",
+  scopeLabel: "三角洲行动账号租赁",
+  tenantDeposit: { STANDARD: "ACCOUNT_BASE", VIP: "WAIVED", SVIP: "WAIVED", DISCOUNT_USER: "ACCOUNT_BASE" },
+  resourcePrice: "PERSONAL_QUOTE",
+  validity: "UNKNOWN",
+  acquisition: "UNKNOWN",
+  notice: "交易价格、押金与资格以本次个人确认结果为准。会员免押不免除号主保证金或包赔责任。",
+} as const;
+
 export function parseMembershipChange(body: Record<string,unknown>) {
   ensureOnlyFields(body,["tier","expectedVersion","sourceRef","reason"]);
   if (typeof body.tier!=="string" || ![...CUSTOMER_TIERS,"UNKNOWN"].includes(body.tier)) throw invalid("Invalid membership tier","tier");

@@ -8,6 +8,24 @@
   --account-card-shadow: var(--shadow-sm);
 }
 
+.membership-benefits-details {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.membership-benefits-details summary {
+  min-height: 44px;
+  padding: 10px 0;
+  cursor: pointer;
+  color: var(--account-accent);
+}
+.membership-benefits-details summary:focus-visible {
+  outline: 2px solid var(--account-accent);
+  outline-offset: 2px;
+}
+.membership-benefits-details p { margin: 0 0 8px; }
+.membership-benefits-details small { font-size: 11px; }
+
 html[data-theme="light"],
 html:not(.dark) {
   /* Compact account UI needs a darker amber on tinted light surfaces. */

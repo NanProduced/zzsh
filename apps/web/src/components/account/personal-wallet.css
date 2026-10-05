@@ -1,0 +1,81 @@
+.wallet-heading:focus { outline: none; }
+.personal-wallet .wallet-local-tabs { display: flex; flex-wrap: wrap; gap: 24px; border-bottom: 1px solid var(--color-border-subtle); }
+.wallet-local-tabs a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 0; border-bottom: 2px solid transparent; color: var(--color-text-secondary); font-size: 13px; }
+.wallet-local-tabs a[aria-current="page"] { color: var(--account-accent); border-bottom-color: var(--account-accent); font-weight: 600; }
+.personal-wallet .wallet-workbench { display: grid; grid-template-columns: minmax(0,1.5fr) minmax(250px,1fr); gap: 20px; }
+.wallet-available h3,.wallet-attention h3 { display: flex; align-items: center; gap: 9px; margin: 0 0 16px; font-size: 15px; color: var(--color-text-secondary); }
+.wallet-main-amount { display: block; color: var(--color-text-primary); font-size: 40px; font-weight: 650; line-height: 1.4; letter-spacing: -.025em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.wallet-available p,.wallet-attention p { margin: 10px 0 18px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.75; }
+.wallet-attention h3 { color: var(--color-text-primary); }
+.wallet-attention h3 svg { color: var(--account-accent); }
+.wallet-attention>strong { font-size: 14px; }
+.wallet-available .button,.wallet-attention .button { min-height: 44px; border-radius: 10px; }
+.wallet-other-funds { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 24px; margin: 0; padding: 20px 0; border-top: 1px solid var(--color-border-subtle); border-bottom: 1px solid var(--color-border-subtle); }
+.wallet-other-funds>div+div { padding-left: 24px; border-left: 1px solid var(--color-border-subtle); }
+.wallet-other-funds dt { color: var(--color-text-secondary); font-size: 13px; }
+.wallet-other-funds dd { margin: 6px 0; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.wallet-other-funds p { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
+.wallet-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.wallet-section-heading h3 { margin: 0; font-size: 18px; }
+.wallet-section-heading a,.account-wallet-preview a { display: inline-flex; align-items: center; min-height: 44px; gap: 5px; color: var(--account-accent); font-size: 13px; }
+.personal-wallet .wallet-record-card { padding-block: 0; }
+.wallet-record { display: grid; grid-template-columns: 40px minmax(0,1fr) auto auto 16px; align-items: center; gap: 14px; padding: 19px 0; min-height: 86px; border-bottom: 1px solid var(--color-border-subtle); text-decoration: none; color: var(--color-text-primary); }
+.wallet-record:last-child { border-bottom: 0; }
+.wallet-record-mark { display: grid; width: 40px; height: 40px; place-items: center; color: var(--account-accent); background: var(--account-accent-muted); border-radius: 12px; }
+.wallet-record-copy { min-width: 0; }
+.wallet-record-copy strong { display: block; font-size: 14px; font-weight: 600; }
+.wallet-record-copy small { display: block; margin-top: 5px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.wallet-delta { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.wallet-delta[data-direction="in"] { color: var(--account-success); }
+.wallet-tag { padding: 4px 8px; border-radius: 6px; background: var(--color-bg-elevated); color: var(--color-text-secondary); font-size: 11px; white-space: nowrap; }
+.wallet-record>svg { color: var(--color-text-secondary); }
+.wallet-record:hover .wallet-record-copy strong { color: var(--account-accent); }
+.wallet-history-note { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.75; }
+.wallet-period-totals { display: grid; gap: 10px; margin: 0; }
+.wallet-period-totals>div { display: grid; gap: 5px; padding: 12px 0; border-bottom: 1px solid var(--color-border-subtle); }
+.wallet-period-totals dt { color: var(--color-text-secondary); font-size: 12px; }
+.wallet-period-totals dd { margin: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.wallet-period-totals small { color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; font-variant-numeric: tabular-nums; }
+.wallet-read-error p { margin: 0 0 10px; color: var(--account-danger); font-size: 13px; }
+.wallet-load-more { justify-self: start; min-height: 44px; }
+.wallet-entry-detail h3 { margin: 20px 0 10px; font-size: 18px; }
+.wallet-withdraw-facts { width: 100%; max-width: 500px; }
+.account-wallet-preview strong { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.controlled-withdrawal { display:grid; gap:20px; }
+.controlled-withdrawal h3 { display:flex; align-items:center; gap:9px; margin:0 0 18px; font-size:16px; }
+.wallet-withdraw-form { display:grid; gap:10px; }
+.wallet-withdraw-form label { margin-top:8px; color:var(--color-text-secondary); font-size:13px; }
+.wallet-withdraw-form input,.wallet-withdraw-form select { width:100%; min-height:44px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:8px; color:var(--color-text-primary); background:var(--color-bg-elevated); font:inherit; font-size:14px; caret-color:var(--account-accent); }
+.wallet-withdraw-form input:focus-visible,.wallet-withdraw-form select:focus-visible { outline:2px solid var(--account-accent); outline-offset:3px; }
+.wallet-withdraw-form p,.wallet-withdraw-pending p { color:var(--color-text-secondary); font-size:12px; line-height:1.75; }
+.wallet-withdraw-form .button { margin-top:8px; }
+.wallet-withdraw-quote { margin-top:24px; padding-top:18px; border-top:1px solid var(--color-border-subtle); }
+.wallet-withdraw-quote .button { width:100%; margin-top:18px; }
+.controlled-withdrawal .wallet-attention { display:block; }
+.wallet-withdraw-record { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:20px 0; border-bottom:1px solid var(--color-border-subtle); }
+.wallet-withdraw-record:last-child { border-bottom:0; }
+.wallet-withdraw-record strong { font-size:14px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.wallet-withdraw-record > strong { white-space:nowrap; flex-shrink:0; }
+.wallet-withdraw-record p,.wallet-withdraw-record small { display:block; margin:7px 0 0; color:var(--color-text-secondary); font-size:12px; line-height:1.7; }
+@media(max-width:1100px) { .personal-wallet .wallet-workbench { grid-template-columns: minmax(0,1.2fr) minmax(230px,1fr); } }
+@media(max-width:700px) {
+  .personal-wallet .wallet-workbench { grid-template-columns: minmax(0,1fr); gap: 14px; }
+  .wallet-main-amount { font-size: 34px; }
+  .wallet-other-funds { display: block; padding: 0; }
+  .wallet-other-funds>div { display: grid; grid-template-columns: 1fr auto; padding: 14px 0; gap: 4px; }
+  .wallet-other-funds>div+div { padding-left: 0; border-left: 0; border-top: 1px solid var(--color-border-subtle); }
+  .wallet-other-funds dd { grid-column: 2; grid-row: 1; margin: 0; font-size: 18px; }
+  .wallet-other-funds p { grid-column: 1/-1; }
+  .wallet-record { grid-template-columns: 34px minmax(0,1fr) minmax(70px,auto) 12px; gap: 10px; padding: 16px 0; }
+  .wallet-record-mark { width: 34px; height: 34px; border-radius: 10px; grid-row: 1/3; }
+  .wallet-tag { grid-column: 2; grid-row: 2; justify-self: start; font-size: 10px; }
+  .wallet-delta { grid-column: 3; grid-row: 1; font-size: 14px; }
+  .wallet-record>svg { grid-column: 4; grid-row: 1/3; }
+  .wallet-record-copy strong { font-size: 13px; }
+  .wallet-record-copy small { font-size: 11px; }
+  .wallet-attention { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px 12px; }
+  .wallet-attention h3 { grid-column: 1/-1; margin-bottom: 2px; }
+  .wallet-attention>strong { grid-column: 1; font-size: 13px; }
+  .wallet-attention p { grid-column: 1/-1; margin: 0; font-size: 12px; }
+  .wallet-attention .button { grid-column: 2; grid-row: 2; padding-inline: 10px; font-size: 12px; }
+}

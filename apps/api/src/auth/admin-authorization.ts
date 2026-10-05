@@ -48,6 +48,8 @@ export const ADMIN_PERMISSION = {
   contentPlatformPublish: "content.platform.publish",
   orderRead: "order.read",
   orderSettlementWrite: "order.settlement.write",
+  financeDocumentRead: "finance.document.read",
+  financeRead: "finance.read",
   imSupportRead: "im.support.read",
   imSupportAccept: "im.support.accept",
   imSupportComplaint: "im.support.complaint",

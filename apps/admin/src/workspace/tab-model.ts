@@ -28,6 +28,10 @@ export type WorkspaceRouteKind =
   | "orders"
   | "order-object"
   | "resource-object"
+  | "finance-lookup"
+  | "finance-period"
+  | "finance-document"
+  | "finance-user"
   | "unknown";
 
 export type WorkspaceTab = {
@@ -131,6 +135,10 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     const objectId = decodeURIComponent(orderObject[1] ?? "");
     return { kind: "order-object", objectType: "order", objectId, tabId: `order:${objectId}`, path, title: objectId };
   }
+  if (path === "/finance") return {kind:"finance-lookup",tabId:"finance-lookup",path,title:"资金查找"};
+  if (path === "/finance/period") return {kind:"finance-period",tabId:"finance-period",path,title:"期间核对"};
+  const financeObject=/^\/finance\/(documents|users)\/([^/]+)$/.exec(path);
+  if(financeObject){let objectId="INVALID_REFERENCE";try{objectId=decodeURIComponent(financeObject[2]!);}catch{}const kind=financeObject[1]==="documents"?"finance-document":"finance-user";return {kind,objectType:kind,objectId,tabId:kind+":"+objectId,path,title:kind==="finance-document"?"资金单据":"用户资金"};}
   if (path === "/content") return { kind: "content", tabId: "content", path: "/content", title: "内容管理" };
   return { kind: "unknown", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
 }
@@ -161,6 +169,9 @@ export function tabHref(tab: WorkspaceTab): string {
 export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boolean {
   const has = (code: string) => nav.permissions.includes(code);
   if (kind === "workbench" || kind === "account") return true;
+  if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
+  if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
+  if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support") return has("im.support.read") || nav.isBoss;
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
   if (kind === "roles" || kind === "role-object") return has("admin.role.read") || has("admin.permission.read");
@@ -182,6 +193,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
+  if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
   if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
     const existing = tabs.find((tab) => tab.id === next.id);

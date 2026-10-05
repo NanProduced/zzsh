@@ -21,7 +21,12 @@ export const BUSINESS_MIGRATION_CONFIG = {
 
 export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: string; migrationsFolder?: string }): Promise<void> {
   await migrate(drizzle(pool), { ...BUSINESS_MIGRATION_CONFIG, ...(options.migrationsFolder ? { migrationsFolder: options.migrationsFolder } : {}) });
-  const runtimeUser = quoteIdentifier(options.runtimeUser);
+  await applyRuntimePrivileges(pool, options.runtimeUser);
+}
+
+/** Exact same post-migration ACL path; a reviewed rollback harness may own its transaction. */
+export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const runtimeUser = quoteIdentifier(runtimeRole);
   for (const schema of BUSINESS_SCHEMAS) {
     const schemaIdentifier = quoteIdentifier(schema);
     await pool.query(`GRANT USAGE ON SCHEMA ${schemaIdentifier} TO ${runtimeUser}`);
@@ -86,7 +91,7 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
     REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."approval_request_candidate", "zzsh_iam"."approval_decision", "zzsh_iam"."approval_execution" FROM ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."user_identity_state" FROM ${runtimeUser};
   `);
-  await configureSkinIdentityPrivileges(pool, options.runtimeUser);
+  await configureSkinIdentityPrivileges(pool, runtimeRole);
   await pool.query(`GRANT USAGE, SELECT ON SEQUENCE "zzsh_iam"."admin_login_number_seq" TO ${runtimeUser}`);
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.listing_filter_config TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_filter_config FROM ${runtimeUser}`);
@@ -141,6 +146,32 @@ export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: 
   await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_supply" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${runtimeUser}`);
   await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_content" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${runtimeUser}`);
   await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_order" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${runtimeUser}`);
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.finance_opening_basis') AS relation`)).rows[0]?.relation) {
+    await pool.query(`
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE zzsh_order.finance_opening_basis, zzsh_order.finance_covered_event,
+        zzsh_order.finance_economic_root, zzsh_order.finance_event, zzsh_order.wallet_coverage, zzsh_order.wallet_revision,
+        zzsh_order.finance_observation_admission, zzsh_order.personal_finance_observation, zzsh_iam.personal_finance_read_scope FROM ${runtimeUser};
+      GRANT SELECT ON TABLE zzsh_order.finance_opening_basis, zzsh_order.finance_covered_event, zzsh_order.finance_economic_root,
+        zzsh_order.finance_event, zzsh_order.wallet_coverage, zzsh_order.wallet_revision, zzsh_order.finance_observation_admission,
+        zzsh_order.personal_finance_observation, zzsh_iam.personal_finance_read_scope TO ${runtimeUser};`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.withdrawal_intent') AS relation`)).rows[0]?.relation) {
+    await pool.query(`
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE zzsh_order.withdrawal_admission, zzsh_order.withdrawal_destination,
+        zzsh_order.withdrawal_intent, zzsh_order.withdrawal_provider_fact, zzsh_order.controlled_payout_operation FROM ${runtimeUser};
+      GRANT SELECT ON TABLE zzsh_order.withdrawal_admission, zzsh_order.withdrawal_destination, zzsh_order.withdrawal_intent,
+        zzsh_order.withdrawal_provider_fact, zzsh_order.controlled_payout_operation TO ${runtimeUser};
+      GRANT INSERT(id,user_id,admission_id,destination_id,destination_revision,mode,policy_version,input_digest,gross_cents,net_cents,fee_cents,
+        expected_ledger_revision,accepted_at,payout_key,economic_root_id,state,operation_version,funds_disposition) ON zzsh_order.withdrawal_intent TO ${runtimeUser};
+      GRANT UPDATE(state,operation_version,funds_disposition,terminal,conflict_digest,lease_token_hash,lease_until,last_provider_fact_id) ON zzsh_order.withdrawal_intent TO ${runtimeUser};
+      GRANT INSERT(id,intent_id,payout_key,mode,result_key,evidence_canonical,evidence_digest,producer_lease_hash) ON zzsh_order.withdrawal_provider_fact TO ${runtimeUser};
+      GRANT INSERT(id,intent_id,payout_key,mode,scenario,final_evidence_canonical,final_evidence_digest,original_lease_hash) ON zzsh_order.controlled_payout_operation TO ${runtimeUser};
+      GRANT INSERT(id,basis_id,source_kind,source_type,source_system,source_entity,source_id,subject_user_id,beneficiary_role,policy_version,source_digest) ON zzsh_order.finance_economic_root TO ${runtimeUser};
+      GRANT INSERT(id,economic_root_id,kind,subject_user_id,expected_ledger_revision) ON zzsh_order.finance_event TO ${runtimeUser};`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.controlled_payout_notice') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON zzsh_order.controlled_payout_notice FROM ${runtimeUser}; GRANT SELECT ON zzsh_order.controlled_payout_notice TO ${runtimeUser};`);
+  }
 }
 
 /** Kept separate so prefix migration and least-privilege branches can be checked offline. */

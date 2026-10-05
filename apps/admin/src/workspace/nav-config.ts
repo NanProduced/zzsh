@@ -1,4 +1,5 @@
 import {
+  WalletIcon,
   BoxesIcon,
   CrosshairIcon,
   ClipboardCheckIcon,
@@ -76,6 +77,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "运营内容", isTitle: true }, ...content);
   }
 
+  if(has("finance.read")||has("finance.document.read")){items.push({label:"资金",isTitle:true},{label:"资金查找",icon:WalletIcon,path:"/finance",kind:"finance-lookup"});if(has("finance.read"))items.push({label:"期间核对",icon:ScrollTextIcon,path:"/finance/period",kind:"finance-period"});}
   if (has("order.read") || nav.isBoss) {
     items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
   }
@@ -121,6 +123,10 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/reviews") return "账号供给";
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
+  if(pathname==="/finance")return "资金查找";
+  if(pathname==="/finance/period")return "期间核对";
+  if(pathname.startsWith("/finance/documents/"))return "资金单据";
+  if(pathname.startsWith("/finance/users/"))return "用户资金";
   if (pathname.startsWith("/orders/")) return "订单详情";
   if (pathname === "/orders") return "订单";
   if (pathname === "/account") return "账号安全";

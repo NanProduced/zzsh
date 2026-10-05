@@ -50,7 +50,7 @@ const order = {
 };
 
 function response(body, status = 200) {
-  return { ok: status >= 200 && status < 300, status, json: async () => body };
+  return { ok: status >= 200 && status < 300, status, headers: new Headers(), json: async () => body };
 }
 
 async function setup(t) {

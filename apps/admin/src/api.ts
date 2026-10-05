@@ -527,7 +527,7 @@ export function hasPermission(snapshot: Extract<SessionSnapshot, { authenticated
 }
 
 export class AdminApiError extends Error {
-  constructor(readonly status: number, readonly code: string, readonly requestId?: string) {
+  constructor(readonly status: number, readonly code: string, readonly requestId?: string, readonly path?: string, readonly details: readonly {path:string;code:string}[] = []) {
     super(code);
     this.name = "AdminApiError";
   }
@@ -569,7 +569,7 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
     });
   } catch (error) {
     if (signal?.aborted) throw error;
-    throw new AdminApiError(0, "NETWORK_ERROR");
+    throw new AdminApiError(0, "NETWORK_ERROR", undefined, path);
   }
   let payload: unknown = null;
   try { payload = await response.json(); } catch { payload = null; }
@@ -580,13 +580,26 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
     if ((response.status === 401 || response.status === 423) && path !== "/session" && !path.startsWith("/auth/")) {
       window.dispatchEvent(new CustomEvent(ADMIN_AUTH_FAILURE_EVENT, { detail: { status: response.status, path } }));
     }
-    throw new AdminApiError(response.status, error?.code ?? "INTERNAL_ERROR", error?.requestId);
+    const rawDetails=(payload as {error?:{details?:unknown}}|null)?.error?.details;
+    const details=Array.isArray(rawDetails)?rawDetails.slice(0,32).filter((value):value is {path:string;code:string}=>!!value&&typeof value.path==="string"&&value.path.length<=256&&typeof value.code==="string"&&value.code.length<=64):[];
+    throw new AdminApiError(response.status, error?.code ?? "INTERNAL_ERROR", error?.requestId ?? response.headers.get("x-request-id") ?? undefined, path, details);
   }
   return payload as T;
 }
 
 export function friendlyError(error: unknown): string {
-  if (!(error instanceof AdminApiError) || error.code === "NETWORK_ERROR") return "网络暂时不可用，请检查 API 是否已启动后重试。";
+  if (!(error instanceof AdminApiError)) return "操作未完成，请重试；若仍失败，请联系维护人员。";
+  if (error.status === 0 || error.code === "NETWORK_ERROR") return "网络连接失败，请检查连接后重试。";
+  const auth = error.path === undefined || error.path.startsWith("/auth/");
+  const reference = error.requestId ? ` 请求编号：${error.requestId}` : "";
+  if (!auth) {
+    if (error.status === 400) return "查询或输入有误，请检查条件后重试。" + reference;
+    if (error.status === 401) return "会话已失效，请重新登录后继续。" + reference;
+    if (error.status === 403) return "当前账号没有访问此内容或执行此操作的权限。" + reference;
+    if (error.status === 404) return "未找到此内容，或当前账号无权访问；请核对引用与权限。" + reference;
+    if (error.status >= 500) return "服务暂时无法完成请求，请稍后重试；若仍失败，请提供请求编号。" + reference;
+    if (error.status === 409) return "数据或操作状态已变化，请刷新后重新核对。" + reference;
+  }
   if (error.status === 423) return "本次会话已锁定，请使用 PIN 或完整重新认证继续。";
   if (error.code === "RATE_LIMITED") return "尝试次数过多，请稍后再试。";
   if (error.code === "CONFLICT") return "当前安全状态不允许此操作，请刷新状态后重试。";
@@ -596,7 +609,7 @@ export function friendlyError(error: unknown): string {
   if (error.code === "INVALID_PASSWORD") return "当前密码错误，请重新输入。";
   if (error.code === "PASSWORD_TOO_WEAK") return "新密码强度不足，请至少输入 12 位字符。";
   if (error.code === "TWO_FACTOR_REQUIRED") return "需要完成二次验证方可继续。";
-  return "操作未完成，请检查输入或刷新页面后重试。";
+  return "操作未完成，请检查输入或刷新页面后重试。" + reference;
 }
 
 export function formatDate(value: string | null): string {

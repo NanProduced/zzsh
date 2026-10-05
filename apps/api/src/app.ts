@@ -1,3 +1,4 @@
+import { mountAdminFinanceRead, type AdminFinanceOptions } from "./finance/admin-finance-routes";
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
@@ -134,7 +135,10 @@ export async function createApp(options: ApiAppOptions) {
   app.enableShutdownHooks();
   if (options.auth) {
     if (!options.database) throw new Error("Auth requires a business database");
-    await mountAuthHandlers(app, options.auth);
+    let financeOptions: AdminFinanceOptions | undefined;
+    mountAdminFinanceRead(app,()=>financeOptions);
+    const securityOptions=await mountAuthHandlers(app, options.auth);
+    financeOptions={...securityOptions,listingCursorKey:options.auth.listingCursorKey};
   }
   if (process.env.NODE_ENV !== "production") {
     const config = new DocumentBuilder().setTitle("ZZSH API").setVersion("0.0.0").build();

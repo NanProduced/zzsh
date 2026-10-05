@@ -1,3 +1,4 @@
+import { AdminFinanceView } from "../views/admin-finance-view";
 import { SupplyListingReviewView } from "../views/supply-listing-review-view";
 import type { SessionSnapshot } from "../api";
 import { AdminAuditView } from "../views/admin-audit-view";
@@ -53,6 +54,7 @@ export function WorkspacePageContent({
     if (tab.query.fromSupplyVersionId) params.set("fromSupplyVersionId",tab.query.fromSupplyVersionId);
     onOpenPath(pathname+"?"+params,title);
   };
+  if(tab.kind.startsWith("finance-"))return <AdminFinanceView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
   if (tab.kind === "workbench") {
     return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }

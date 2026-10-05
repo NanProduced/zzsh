@@ -2,12 +2,20 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
 import { signConfirmation, verifyConfirmation } from "../src/order/confirmation-token";
-import { parseMembershipChange } from "../src/auth/rental-membership";
+import { parseMembershipChange, membershipProjection, RENTAL_MEMBERSHIP_BENEFIT_POLICY } from "../src/auth/rental-membership";
 import { confirmationInput } from "../src/order/personal-confirmation";
 import { personalOrderInput } from "../src/order/personal-order";
 
 const key={keyId:"fixture",secret:"isolated-fixture-only-not-production-key"};
 const binding={userId:"user-1",sessionId:"session-1",accountId:"account-1",versionId:"version-1",releaseId:"release-1",listingHash:"a".repeat(64),quoteDigest:"b".repeat(64)};
+test("confirmed public membership rules retain qualification privacy and independent content version",()=>{
+  assert.deepEqual(membershipProjection({tier:"VIP",version:"99",sourceRef:"private-grant"}),{tier:"VIP",version:"99"});
+  const p=RENTAL_MEMBERSHIP_BENEFIT_POLICY;
+  assert.equal(p.scope,"DELTA_ACCOUNT_RENTAL");
+  assert.equal(p.tenantDeposit.VIP,"WAIVED");assert.equal(p.tenantDeposit.SVIP,"WAIVED");
+  assert.equal(p.tenantDeposit.STANDARD,"ACCOUNT_BASE");assert.equal(p.tenantDeposit.DISCOUNT_USER,"ACCOUNT_BASE");
+  assert.equal(p.validity,"UNKNOWN");assert.equal(p.acquisition,"UNKNOWN");assert.notEqual(p.version,"99");
+});
 test("personal confirmation fixed HMAC, strict claims, expiry and rebuilt evidence binding",()=>{
   const signed=signConfirmation(binding,1000,key);
   assert.equal(verifyConfirmation(signed.token,binding,1001,key).confirmationId,signed.claims.confirmationId);
