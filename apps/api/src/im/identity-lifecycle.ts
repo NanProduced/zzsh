@@ -226,9 +226,23 @@ function providerCode(error: unknown): number | null {
   return error instanceof YunxinApiError ? error.providerCode : null;
 }
 
-function isNotFound(error: unknown): boolean {
+/**
+ * Account existence and profile existence are separate supplier facts. The
+ * accounts endpoint documents 102404 (account not exist); the users endpoint
+ * reports 103404 (user profile not exist). Only the accounts code proves the
+ * account is absent, so recovery must never treat a missing profile as proof.
+ */
+const ACCOUNT_NOT_FOUND_CODES = new Set([404, 102404]);
+const PROFILE_NOT_FOUND_CODES = new Set([103404]);
+
+function isAccountNotFound(error: unknown): boolean {
   const code = providerCode(error);
-  return code === 404 || code === 102404;
+  return code !== null && ACCOUNT_NOT_FOUND_CODES.has(code);
+}
+
+function isProfileNotFound(error: unknown): boolean {
+  const code = providerCode(error);
+  return code !== null && PROFILE_NOT_FOUND_CODES.has(code);
 }
 
 function classifyCreateFailure(error: unknown): ImProvisionFailure {
@@ -256,7 +270,7 @@ function ownedProfile(accountId: string, marker: string, profile: { accountId: s
 type Recovery =
   | { kind: "OWNED" }
   | { kind: "ABSENT" }
-  | { kind: "CONFLICT" }
+  | { kind: "CONFLICT"; providerCode: number | null }
   | { kind: "UNKNOWN"; failure: ImProvisionFailure };
 
 export class ImIdentityProvisioner {
@@ -344,11 +358,25 @@ export class ImIdentityProvisioner {
   }
 
   private async recover(accountId: string, marker: string): Promise<Recovery> {
+    // 1) The accounts endpoint is the only authority on account existence.
+    try {
+      const account = await this.provider.getAccount(accountId);
+      if (account.accountId !== accountId) {
+        return { kind: "UNKNOWN", failure: { class: "UNKNOWN_RESULT", providerCode: null } };
+      }
+    } catch (error) {
+      if (isAccountNotFound(error)) return { kind: "ABSENT" };
+      return { kind: "UNKNOWN", failure: { class: "UNKNOWN_RESULT", providerCode: providerCode(error) } };
+    }
+    // 2) The account exists; only the matching marker proves this intent owns it.
     try {
       const profile = await this.provider.getProfile(accountId);
-      return ownedProfile(accountId, marker, profile) ? { kind: "OWNED" } : { kind: "CONFLICT" };
+      return ownedProfile(accountId, marker, profile)
+        ? { kind: "OWNED" }
+        : { kind: "CONFLICT", providerCode: null };
     } catch (error) {
-      if (isNotFound(error)) return { kind: "ABSENT" };
+      // A missing profile on an existing account leaves ownership unprovable.
+      if (isProfileNotFound(error)) return { kind: "CONFLICT", providerCode: providerCode(error) };
       return { kind: "UNKNOWN", failure: { class: "UNKNOWN_RESULT", providerCode: providerCode(error) } };
     }
   }
@@ -360,7 +388,7 @@ export class ImIdentityProvisioner {
     if (recovery.kind === "CONFLICT") {
       return resultFor((await this.repository.markPermanentFailure({
         ...this.leaseInput(claim),
-        failure: { class: "ACCOUNT_OWNERSHIP_CONFLICT", providerCode: null },
+        failure: { class: "ACCOUNT_OWNERSHIP_CONFLICT", providerCode: recovery.providerCode },
       })).mapping);
     }
     return null;

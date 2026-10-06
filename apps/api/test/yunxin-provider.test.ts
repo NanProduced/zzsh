@@ -250,6 +250,74 @@ test("rejects missing business codes, incomplete batches and mismatched account 
   await assert.rejects(extraBatchAccount.getProfiles(["staff-1"]), YunxinApiError);
 });
 
+test("accepts an omitted empty list only when the other list fully covers the request", async () => {
+  // Measured V2 shape: every requested account is missing, so success_list is omitted.
+  const measured = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({
+      code: 200,
+      data: { failed_list: [{ account_id: "missing-1", error_code: 103404 }] },
+    }),
+  });
+  assert.deepEqual(await measured.getProfiles(["missing-1"]), {
+    profiles: [],
+    failed: [{ accountId: "missing-1", providerCode: 103404 }],
+  });
+
+  // Inferred symmetric path: failed_list omitted while success_list covers the request.
+  const failedOmitted = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({
+      code: 200,
+      data: { success_list: [{ account_id: "staff-1", name: "客服一号" }] },
+    }),
+  });
+  assert.deepEqual(await failedOmitted.getProfiles(["staff-1"]), {
+    profiles: [{ accountId: "staff-1", name: "客服一号" }],
+    failed: [],
+  });
+
+  const bothOmitted = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({ code: 200, data: {} }),
+  });
+  await assert.rejects(bothOmitted.getProfiles(["staff-1"]), YunxinApiError);
+
+  const nullList = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({ code: 200, data: { success_list: null, failed_list: [] } }),
+  });
+  await assert.rejects(nullList.getProfiles(["staff-1"]), YunxinApiError);
+
+  const partialCoverage = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({
+      code: 200,
+      data: { failed_list: [{ account_id: "missing-1", error_code: 103404 }] },
+    }),
+  });
+  await assert.rejects(partialCoverage.getProfiles(["missing-1", "missing-2"]), YunxinApiError);
+
+  // getOnlineStatuses shares the adapter; its omission shape is inferred, not measured.
+  const statuses = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async () => jsonResponse({
+      code: 200,
+      data: { failed_list: [{ account_id: "missing-1", error_code: 103404 }] },
+    }),
+  });
+  assert.deepEqual(await statuses.getOnlineStatuses(["missing-1"]), {
+    statuses: [],
+    failed: [{ accountId: "missing-1", providerCode: 103404 }],
+  });
+});
+
 test("keeps malformed JSON, HTTP failures, transport failures and timeouts generic", async () => {
   const malformed = new YunxinServerApiClient({
     appKey: APP_KEY,
@@ -452,7 +520,36 @@ test("parses the observed standard-team clientCustom and implicit-owner shape", 
   });
 });
 
-test("does not guess a support team when an owner-scoped candidate lacks a marker", async () => {
+test("ignores unrelated historical teams and selects the uniquely matching marker", async () => {
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/nimserver/team/joinTeams.action")) {
+        return jsonResponse({ code: 200, count: 3, infos: [
+          { tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" }) },
+          { tid: 2366886327, owner: "system-1", members: ["system-1", "user-2"], custom: null },
+          { tid: 2366886328, owner: "system-1", members: ["system-1", "user-3"], custom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-2" }) },
+        ] });
+      }
+      if (url.endsWith("/nimserver/team/query.action")) {
+        return jsonResponse({ code: 200, tinfos: [
+          { tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" }) },
+        ] });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), {
+    status: "FOUND",
+    team: { teamId: "2366886326", ownerAccountId: "system-1", memberAccountIds: ["system-1", "user-1", "staff-1"], serverExtension: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" }) },
+  });
+});
+
+test("fails closed when two owner-scoped teams carry the same consultation marker", async () => {
+  const marker = JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" });
   const api = new YunxinServerApiClient({
     appKey: APP_KEY,
     appSecret: APP_SECRET,
@@ -460,8 +557,8 @@ test("does not guess a support team when an owner-scoped candidate lacks a marke
       const url = String(input);
       if (url.endsWith("/nimserver/team/joinTeams.action")) {
         return jsonResponse({ code: 200, count: 2, infos: [
-          { tid: 2366886326, owner: "system-1", members: ["system-1", "user-1", "staff-1"], custom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-1" }) },
-          { tid: 2366886327, owner: "system-1", members: ["system-1", "user-2"], custom: null },
+          { tid: 2366886326, owner: "system-1", members: ["system-1", "user-1"], custom: marker },
+          { tid: 2366886327, owner: "system-1", members: ["system-1", "user-2"], custom: marker },
         ] });
       }
       throw new Error(`unexpected URL ${url}`);
@@ -469,6 +566,25 @@ test("does not guess a support team when an owner-scoped candidate lacks a marke
   });
 
   assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), { status: "AMBIGUOUS" });
+});
+
+test("treats teams with other markers or unparsable extensions as absent for this consultation", async () => {
+  const api = new YunxinServerApiClient({
+    appKey: APP_KEY,
+    appSecret: APP_SECRET,
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/nimserver/team/joinTeams.action")) {
+        return jsonResponse({ code: 200, count: 3, infos: [
+          { tid: 2366886326, owner: "system-1", members: ["system-1", "user-1"], custom: JSON.stringify({ schema: "zzsh.im-consultation.v1", appId: "provider-test", consultationId: "consult-other" }) },
+          { tid: 2366886327, owner: "system-1", members: ["system-1", "user-2"], custom: null },
+          { tid: 2366886328, owner: "system-1", members: ["system-1", "user-3"], custom: "not-json" },
+        ] });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+  assert.deepEqual(await api.findSupportTeam({ appId: "provider-test", consultationId: "consult-1", ownerAccountId: "system-1" }), { status: "ABSENT" });
 });
 
 test("accepts an advanced-team empty result with the observed omitted infos field", async () => {

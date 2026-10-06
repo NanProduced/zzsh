@@ -44,7 +44,8 @@ import { mountYunxinHandlers } from "../im/yunxin-routes";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
-import { initializeNativeWalletOrigin } from "../finance/native-wallet-origin";
+import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
+import { mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
 import { mountDistributionPolicyRoutes } from "../finance/distribution-policy-routes";
 
@@ -69,6 +70,10 @@ export type AuthRuntimeCapabilities = {
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit local capability only; never read from environment or HTTP. */
   nativeWithdrawalScope?: NativeWithdrawalScope;
+  /** Explicit local assembly only; lets fresh registrations initialize a native zero origin on one exact resource. */
+  nativeWalletOrigin?: NativeOriginResource;
+  /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
+  localControlledPayments?: LocalControlledPaymentOptions;
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   testConfirmationFundingReader?: ConfirmationFundingReader;
@@ -319,6 +324,7 @@ function buildPhoneRegistrationPlugin(
   fakeSmsEnabled: boolean,
   localSmsMock: boolean,
   signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
+  nativeWalletOrigin?: NativeOriginResource,
 ) {
   const bodyOf = (value: unknown, allowed: readonly string[]): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -463,7 +469,7 @@ function buildPhoneRegistrationPlugin(
             );
             // Existing-user OTP returned above: only this new-user transaction initializes provenance.
             await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) });
-            await initializeNativeWalletOrigin(client, userId, requestId);
+            await initializeNativeWalletOrigin(client, userId, requestId, nativeWalletOrigin);
             passwordCapability.state = passwordHash !== undefined ? "set" : "not-set";
             authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
             return false;
@@ -557,7 +563,9 @@ export function loadAuthRuntimeConfig(
       throw new ConfigurationError("ORDER_IM_EVENTS_APP_KEY must be a single-line value of at most 128 characters");
     }
     const appSecret = readSecret(env, "ORDER_IM_EVENTS_APP_SECRET", "ORDER_IM_EVENTS_APP_SECRET_FILE", workingDirectory);
-    if (appSecret.length < 16) throw new ConfigurationError("ORDER_IM_EVENTS_APP_SECRET is too short");
+    if (!appSecret.trim() || /[\u0000-\u001f\u007f]/.test(appSecret)) {
+      throw new ConfigurationError("ORDER_IM_EVENTS_APP_SECRET is invalid");
+    }
     const freshnessRaw = env.ORDER_IM_EVENTS_FRESHNESS_MS?.trim();
     const freshnessMs = freshnessRaw ? Number(freshnessRaw) : undefined;
     if (freshnessRaw && (!Number.isInteger(freshnessMs) || freshnessMs! < 60_000 || freshnessMs! > 3_600_000)) {
@@ -682,7 +690,7 @@ export async function mountAuthHandlers(
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin),
       userSecurityPlugin,
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
@@ -909,6 +917,7 @@ export async function mountAuthHandlers(
     mediaStorage,
     supplyGateReader,
   });
+  if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);

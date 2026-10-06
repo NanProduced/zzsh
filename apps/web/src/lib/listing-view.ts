@@ -22,6 +22,9 @@ export type ListingMedia = { assetId: string; url: string };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
   id: string;
+  gameId?: string;
+  versionId?: string;
+  releaseId?: string;
   displayNo: string | null;
   title: string;
   imageUrl?: string;
@@ -199,6 +202,9 @@ export function toListingCard(listing: PublicListing): ListingCardData {
   const firstMedia = media[0];
   return {
     id: listing.id,
+    gameId: listing.game?.id,
+    versionId: listing.versionId,
+    releaseId: listing.releaseId,
     displayNo: listing.displayNo ?? null,
     title: listing.title,
     imageUrl: firstMedia?.url,

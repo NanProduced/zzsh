@@ -485,6 +485,19 @@ export async function cancelReservation(
   return { status: 200, body: { order: projectOrder(row, "renter") } };
 }
 
+/** Catalog names for the frozen quote lines; the snapshot keeps ids/units, the label is a read projection. */
+async function attachLineNames(client: PoolClient, projected: Record<string, unknown>): Promise<void> {
+  const quote = projected.quote as { lines?: Array<{ itemId?: unknown; name?: unknown }> } | null | undefined;
+  const lines = quote?.lines ?? [];
+  const ids = [...new Set(lines.map((line) => line.itemId).filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)))];
+  if (ids.length === 0) return;
+  const names = (await client.query<{ id: string; name: string }>(`SELECT id,name FROM zzsh_supply.billable_item WHERE id=ANY($1)`, [ids])).rows;
+  const byId = new Map(names.map((item) => [item.id, item.name]));
+  for (const line of lines) {
+    if ((line.name === undefined || line.name === null || line.name === "") && typeof line.itemId === "string" && byId.has(line.itemId)) line.name = byId.get(line.itemId);
+  }
+}
+
 export async function getMyOrder(
   client: PoolClient,
   userId: string,
@@ -494,9 +507,11 @@ export async function getMyOrder(
     await client.query<OrderRow>(`SELECT ${ORDER_FIELDS} ${ORDER_FROM} WHERE o.id = $1`, [orderId])
   ).rows[0];
   if (!row) throw notFound();
-  if (row.renterUserId === userId) return { order: projectOrder(row, "renter") };
-  if (row.ownerUserId === userId) return { order: projectOrder(row, "owner") };
-  throw notFound();
+  const party = row.renterUserId === userId ? "renter" : row.ownerUserId === userId ? "owner" : null;
+  if (!party) throw notFound();
+  const projected = projectOrder(row, party);
+  await attachLineNames(client, projected);
+  return { order: projected };
 }
 
 export type MyOrdersFilter = {

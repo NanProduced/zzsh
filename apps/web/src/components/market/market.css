@@ -492,3 +492,32 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
   .market-resource-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
   .market-skin-panel-content { grid-template-columns:110px minmax(0,1fr) 210px; }
 }
+
+.rental-confirm { display: grid; gap: 9px; width: 100%; max-width: 520px; padding: 13px 14px; border: 1px solid var(--color-border-subtle); border-radius: 8px; background: var(--color-bg-surface); }
+.rental-confirm-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.rental-confirm-head strong { color: var(--color-text-primary); font-size: 13px; }
+.rental-confirm-tier { padding: 2px 9px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-muted); font-size: 11px; }
+.rental-confirm-facts { display: grid; gap: 0; margin: 0; }
+.rental-confirm-facts > div { display: flex; justify-content: space-between; gap: 14px; padding: 7px 0; border-bottom: 1px solid var(--color-border-subtle); }
+.rental-confirm-facts dt { color: var(--color-text-secondary); font-size: 12px; }
+.rental-confirm-facts dd { margin: 0; color: var(--color-text-primary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rental-confirm-total dd { font-size: 15px; font-weight: 700; }
+.rental-confirm-disclosure, .rental-confirm-expiry { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.55; }
+.rental-confirm-disclosure svg, .rental-confirm-expiry svg { flex: 0 0 auto; margin-top: 1px; }
+.rental-confirm-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.rental-confirm-primary { justify-self: start; }
+.rental-confirm-error, .rental-confirm-success { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-size: 12px; line-height: 1.55; }
+.rental-confirm-error { color: var(--color-status-warning); }
+.rental-confirm-success { color: var(--color-status-success); }
+.rental-confirm-error svg, .rental-confirm-success svg { flex: 0 0 auto; margin-top: 1px; }
+@media (max-width: 640px) { .rental-confirm { max-width: none; } }
+
+.rental-confirm-heading { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--color-text-primary); font-size: 13px; font-weight: 600; }
+.rental-confirm--unknown { border-color: color-mix(in srgb, var(--color-status-warning) 45%, var(--color-border-default)); }
+.rental-confirm-terms { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid var(--color-border-subtle); border-radius: 7px; background: var(--color-bg-card); }
+.rental-confirm-terms-meta { margin: 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.5; }
+.rental-confirm-agreement { max-height: 240px; overflow: auto; padding: 9px 10px; border: 1px solid var(--color-border-subtle); border-radius: 6px; background: var(--color-bg-surface); }
+.rental-confirm-agreement p { margin: 0 0 6px; color: var(--color-text-primary); font-size: 12px; }
+.rental-confirm-agreement pre { margin: 0; color: var(--color-text-secondary); font-family: inherit; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.rental-confirm-total-line { margin: 0; color: var(--color-text-primary); font-size: 14px; font-variant-numeric: tabular-nums; }

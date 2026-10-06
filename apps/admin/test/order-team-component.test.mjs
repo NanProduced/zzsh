@@ -7,6 +7,43 @@ import {act,createElement} from 'react';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
 
+test('order chat routes the normal send to the original message after an unknown text result',async(t)=>{
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const {NimTextSendError}=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;await vite.close();browser.happyDOM.abort();});
+  const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服甲',avatar:null,responsible:true}]};
+  const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
+  let sendCalls=0,retryCalls=0,retriedId=null;
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},
+    async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sendCalls++;throw new NimTextSendError('UNKNOWN','未确认',{messageClientId:'text-client-1'});},
+    async retryText(cid,messageClientId,authorize){await authorize({conversationId:cid,operation:'send'});retryCalls++;retriedId=messageClientId;return{messageClientId,messageServerId:'server-1',conversationId:cid,senderId:'viewer',receiverId:'1',createTime:2,text:'first',messageType:0};}};
+  const props={identity:'identity-text-unknown',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('text unknown condition timed out');};
+  const type=async value=>act(async()=>{const input=node.querySelector('textarea');Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());await until(()=>node.querySelector('textarea')&&!node.querySelector('textarea').disabled);
+  await type('first');await act(async()=>node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));await until(()=>node.textContent.includes('原消息重试'));
+  assert.equal(sendCalls,1);
+  await type('second');
+  await act(async()=>node.querySelector('form button[type=submit]').click());await until(()=>retryCalls===1);
+  assert.equal(sendCalls,1,'normal submit must not create a second message');
+  assert.equal(retriedId,'text-client-1','retry keeps the original messageClientId');
+  assert.equal(node.querySelector('textarea').value,'second','newer typing survives the original retry');
+  await until(()=>!node.textContent.includes('原消息重试'));
+});
+
 test('formal order panel isolates orders, authorization, drafts, late SDK work and identity',async(t)=>{
   const browser=new Window({url:'http://127.0.0.1:4311'});
   Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
@@ -374,4 +411,30 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   const input=node.querySelector('input[type=file]');const file=new browser.File([new Uint8Array([0xff,0xd8,0xff])],'proof.png',{type:'image/png'});Object.defineProperty(input,'files',{configurable:true,value:[file]});await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));await until(()=>pendingImages.length===1);
   const submit=node.querySelector('form button[type=submit]');assert.equal(submit.disabled,true);await act(async()=>node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));assert.equal(sendCalls,0);
   const decoder=pendingImages.shift();decoder.naturalWidth=640;decoder.naturalHeight=360;decoder.onload();await until(()=>!submit.disabled);await act(async()=>submit.click());await until(()=>sendCalls===1);assert.deepEqual(lastDimensions,{width:640,height:360,name:'proof.png'});
+});
+
+test('admin fulfillment slot receives the frozen order inventory projection',async(t)=>{
+  const browser=new Window({url:'http://127.0.0.1:4312'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;await vite.close();browser.happyDOM.abort();});
+  const frozenInventory=[{itemId:'item_a',quantity:'10',unit:'PIECE',pricingKind:'PER_UNIT',name:'物资A'}];
+  const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,frozenInventory,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服甲',avatar:null,responsible:true}]};
+  const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},async sendText(){throw new Error('text should not be used');}};
+  const seen=[];
+  const props={identity:'identity-slot',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{},renderFulfillment:context=>{seen.push(context);return createElement('div',null,'履约槽');}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('slot condition timed out');};
+  await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());await until(()=>node.textContent.includes('履约槽'));
+  assert.deepEqual(seen.at(-1).frozenInventory,frozenInventory,'the admin slot carries the frozen inventory projection, never a fabricated settlement field');
 });

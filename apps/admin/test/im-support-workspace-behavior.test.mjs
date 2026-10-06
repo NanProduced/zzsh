@@ -97,7 +97,7 @@ test("preview facts bar follows the selected display item instead of a missing r
 
 test("preview empty conversations keep their selected display state", async (t) => {
   const { rootNode } = await mount(t, { preview: true });
-  const emptyItem = rootNode.querySelectorAll(".im-support-queue-item")[1];
+  const emptyItem = [...rootNode.querySelectorAll(".im-support-queue-item")].find((item) => item.textContent.includes("一般咨询"));
   assert.ok(emptyItem, "preview queue includes an empty conversation");
 
   await act(async () => { emptyItem.click(); });

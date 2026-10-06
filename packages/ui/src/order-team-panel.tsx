@@ -1,21 +1,23 @@
 "use client";
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { mergeImMessages } from "@zzsh/im-client/message-state";
-import { NimImageSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
+import { NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
 
 type Member={platformId:string;accountId:string;party:string;name:string|null;avatar:string|null;responsible?:boolean;membershipStatus?:string;identityStatus?:string};
 type SupportEscalation={firstResponseAt:string|null;remindDueAt:string|null;addRound:number;state:string;needsManualReview:boolean;noEligibleStaff:boolean};
 type MessageRouteGrant={appId:string;orderId:string;teamId:string;conversationId:string;routeEnvironment:string};
 export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;assignmentState:string|null;teamState:string|null;
-  appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;conversationId?:string;messageRoute?:MessageRouteGrant;canRead:boolean;canSend:boolean;members:Member[];supportEscalation:SupportEscalation};
+  appId?:string;teamId?:string;name?:string;gameName:string;account:{id:string;title:string};viewerAccountId?:string;conversationId?:string;messageRoute?:MessageRouteGrant;canRead:boolean;canSend:boolean;members:Member[];supportEscalation:SupportEscalation;
+  frozenInventory?:Array<{itemId:string;quantity:string;unit:string;pricingKind:string;name:string|null}>};
 type OrderItem={id:string;displayNo:string;title:string;status:string;teamState?:string|null;firstResponseAt?:string|null;remindDueAt?:string|null;addRound?:number;escalationState?:string;fulfillmentAssignment?:{state:string;teamState:string|null}|null};
 type OrderPage={items:OrderItem[];nextCursor:string|null};
 type ListRefresh={scope:string;targetPages:number;pagesRead:number;cursor:string|null|undefined;items:OrderItem[]};
 const REFRESH_PAGE_BUDGET=2;
 type Requester=<T>(path:string)=>Promise<T>;
+type FulfillmentSlotContext={orderId:string;displayNo:string;teamState:string|null;canSend:boolean;frozenInventory?:OrderTeamAccess["frozenInventory"]};
 type Props={identity:string;realm:"user"|"admin";client:NimWebClientLike|null;connection:NimWebConnectionState|"idle"|"error";active:boolean;initialParty?:"renter"|"owner";sendAllowed?:boolean;
-  request:Requester;onAuthError:(status:number)=>void};
+  request:Requester;onAuthError:(status:number)=>void;renderFulfillment?:(context:FulfillmentSlotContext)=>ReactNode};
 const statusOf=(e:unknown)=>(e as {status?:number}|null)?.status;
 const superseded=(e:unknown)=>e instanceof ImLifecycleSupersededError;
 const rejected=()=>Object.assign(new Error("当前订单未获授权"),{status:403});
@@ -101,7 +103,7 @@ function MessageImage({attachment,onOpen}:{attachment:ImageAttachment;onOpen:(ur
 }
 
 /** Both platforms pass their existing client. This component never logs in or creates a Team. */
-export function OrderTeamPanel({identity,realm,client,connection,active,initialParty="renter",sendAllowed=true,request,onAuthError}:Props){
+export function OrderTeamPanel({identity,realm,client,connection,active,initialParty="renter",sendAllowed=true,request,onAuthError,renderFulfillment}:Props){
   const [party,setParty]=useState(initialParty),[items,setItems]=useState<OrderItem[]>([]),[next,setNext]=useState<string|null>(null);
   const [selected,setSelected]=useState<string|null>(null),[info,setInfo]=useState<OrderTeamAccess|null>(null),[error,setError]=useState("");
   const [revision,setRevision]=useState(0),[loading,setLoading]=useState(false),[refreshingPages,setRefreshingPages]=useState(false),[drafts,setDrafts]=useState<Record<string,string>>({});
@@ -222,6 +224,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,initialP
           <header><h3>{info.name??info.displayNo}</h3><p>{orderTeamLabel(info)}</p><p>{info.gameName} · {info.account.title}</p><small>订单 {info.displayNo} · 账号 {info.account.id}</small></header>
           {info.canRead&&info.teamState==="READY"?<>
             <OrderTeamEscalation value={info.supportEscalation}/>
+            {realm==="admin"&&renderFulfillment?<div className="order-team-fulfillment-slot">{renderFulfillment({orderId:info.orderId,displayNo:info.displayNo,teamState:info.teamState,canSend:info.canSend,...(info.frozenInventory?{frozenInventory:info.frozenInventory}:{})})}</div>:null}
             <ul className="order-team-members" aria-label="群成员">{info.members.map(m=><li key={m.accountId}>{m.avatar?<img src={m.avatar} alt="" width={28} height={28} onError={e=>{e.currentTarget.hidden=true;}}/>:<span aria-hidden="true">●</span>}<span>{m.name?.trim()||role(m)}<small>{role(m)}</small>{realm==="admin"&&m.party!=="STAFF"?<small>用户编号 {m.platformId} · 会员：未知 · 实名：未知</small>:null}</span></li>)}</ul>
             {client&&active?<OrderConversation key={JSON.stringify([identity,info.appId,info.orderId,info.teamId])} client={client} info={{...info,canSend:info.canSend&&sendAllowed}} connection={connection}
               readAccess={operation=>accessRef.current(operation)} draft={drafts[draftKey]??""} setDraft={value=>setDrafts(current=>({...current,[draftKey]:value}))}/>:<p role="status">聊天连接正在准备中，订单与付款状态不受影响。</p>}
@@ -234,7 +237,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,initialP
 
 function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{client:NimWebClientLike;info:OrderTeamAccess;connection:Props["connection"];readAccess:(operation:"read"|"send")=>Promise<OrderTeamAccess>;draft:string;setDraft:(value:string)=>void}){
   type Message=NimMessageLike&{id:string};
-  const [messages,setMessages]=useState<Message[]>([]),[error,setError]=useState(""),[sending,setSending]=useState(false),[reading,setReading]=useState(false),[more,setMore]=useState(true),[image,setImage]=useState<ImageDraft|null>(null),[viewer,setViewer]=useState<{url:string;name:string}|null>(null);
+  const [messages,setMessages]=useState<Message[]>([]),[error,setError]=useState(""),[sending,setSending]=useState(false),[reading,setReading]=useState(false),[more,setMore]=useState(true),[image,setImage]=useState<ImageDraft|null>(null),[viewer,setViewer]=useState<{url:string;name:string}|null>(null),[textRetry,setTextRetry]=useState<{messageClientId:string;text:string}|null>(null);
   const generation=useRef(0),clientRef=useRef(client),accessRef=useRef(readAccess),sendOwner=useRef(0),readOwner=useRef(0),draftRef=useRef(draft),imageRef=useRef<ImageDraft|null>(null),selection=useRef(0),viewerTrigger=useRef<HTMLElement|null>(null),viewerClose=useRef<HTMLButtonElement|null>(null);
   accessRef.current=readAccess;draftRef.current=draft;imageRef.current=image;
   if(clientRef.current!==client){clientRef.current=client;generation.current++;}
@@ -269,7 +272,7 @@ function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{c
     finally{if(version===generation.current&&owner===readOwner.current)setReading(false);}
   };
   useEffect(()=>{
-    const version=++generation.current;setMessages([]);setSending(false);setReading(false);let off:(()=>void)|undefined;let delivery=Promise.resolve();
+    const version=++generation.current;setMessages([]);setSending(false);setReading(false);setTextRetry(null);let off:(()=>void)|undefined;let delivery=Promise.resolve();
     void authorize(version)({conversationId:info.conversationId!,operation:"read"}).then(()=>{
       if(version!==generation.current)return;
       off=client.onMessages(incoming=>{if(!incoming.some(m=>m.conversationId===info.conversationId))return;delivery=delivery.then(async()=>{await authorize(version)({conversationId:info.conversationId!,operation:"read"});if(version===generation.current)merge(incoming);}).catch(()=>undefined);});
@@ -290,13 +293,38 @@ function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{c
         const sent=selectedImage.messageClientId?await client.retryImage(info.conversationId!,selectedImage.messageClientId,{authorize:authorize(version),onProgress:progress}):await client.sendImage(info.conversationId!,selectedImage.file,{authorize:authorize(version),onProgress:progress,width:selectedImage.width,height:selectedImage.height});
         if(version!==generation.current)return;merge([sent]);replaceImage(null);
       }else{
-        const sent=await client.sendText(info.conversationId!,text,authorize(version));if(version!==generation.current)return;merge([sent]);if(draftRef.current.trim()===text)setDraft("");
+        // A pending unknown result locks the normal send path: the primary
+        // button and Enter replay the original message instead of minting a
+        // second client ID.
+        const sent=textRetry
+          ? await client.retryText(info.conversationId!,textRetry.messageClientId,authorize(version))
+          : await client.sendText(info.conversationId!,text,authorize(version));
+        if(version!==generation.current)return;merge([sent]);
+        if(!textRetry||draftRef.current.trim()===textRetry.text)setDraft("");
+        setTextRetry(null);
       }
     }catch(cause){
       if(version===generation.current&&!superseded(cause)){
         if(selectedImage){const messageClientId=cause instanceof NimImageSendError?cause.messageClientId:selectedImage.messageClientId;setImage(current=>current?{...current,state:cause instanceof NimImageSendError&&cause.kind==="UNKNOWN"?"UNKNOWN":"FAILED",messageClientId:messageClientId??current.messageClientId}:current);setError(imageErrorMessage(cause));if(cause instanceof NimImageSendError&&cause.kind==="UNKNOWN")void history();}
-        else{setError(statusOf(cause)===403?"发送权限已变化，草稿已保留":"发送结果未确认，请先查看历史再决定是否重试");}
+        else{const textError=cause instanceof NimTextSendError?cause:null;setTextRetry(textError?.messageClientId?{messageClientId:textError.messageClientId,text}:null);setError(statusOf(cause)===403?"发送权限已变化，草稿已保留":textError?.kind==="UNKNOWN"?"发送结果未确认，草稿已保留；可先刷新历史或原消息重试":"发送失败，草稿已保留，可重试");}
         if(statusOf(cause)===403)void accessRef.current("read").catch(()=>undefined);
+      }
+    }finally{if(version===generation.current&&owner===sendOwner.current)setSending(false);}
+  };
+  const retryText=async()=>{
+    if(!textRetry||sending||!info.canSend||connection!=="CONNECTED")return;
+    const version=generation.current,owner=++sendOwner.current;setSending(true);setError("");
+    try{
+      const original=textRetry.text;
+      const sent=await client.retryText(info.conversationId!,textRetry.messageClientId,authorize(version));
+      if(version!==generation.current)return;merge([sent]);
+      if(draftRef.current.trim()===original)setDraft("");
+      setTextRetry(null);
+    }catch(cause){
+      if(version===generation.current&&!superseded(cause)){
+        const textError=cause instanceof NimTextSendError?cause:null;
+        setTextRetry(current=>current?{messageClientId:textError?.messageClientId??current.messageClientId,text:current.text}:current);
+        setError(textError?.kind==="UNKNOWN"?"发送结果仍未确认，请先刷新历史确认":"发送失败，可再次重试");
       }
     }finally{if(version===generation.current&&owner===sendOwner.current)setSending(false);}
   };
@@ -307,6 +335,7 @@ function OrderConversation({client,info,connection,readAccess,draft,setDraft}:{c
     <button type="button" onClick={()=>void history()} disabled={reading}>刷新消息</button>
     {more&&messages.length?<button type="button" disabled={reading} onClick={()=>void history(messages[0])}>更早的消息</button>:null}
     {error?<p role="alert">{error}</p>:null}
+    {textRetry?<button type="button" disabled={sending||!info.canSend||connection!=="CONNECTED"} onClick={()=>void retryText()}>原消息重试</button>:null}
     <ol className="order-team-messages" aria-label="订单消息" aria-live="polite">{messages.map(message=>{
       const member=info.members.find(m=>m.accountId===message.senderId),self=message.senderId===client.accountId;
       return <li key={message.id} data-self={self}><small>{self?"我":member?.name?.trim()|| (member?role(member):"平台消息")} {member?role(member):""} · {serverTimeLabel(new Date(message.createTime).toString())}</small>{message.messageType===1&&message.attachment?<MessageImage attachment={message.attachment} onOpen={(url,name,trigger)=>{viewerTrigger.current=trigger;setViewer({url,name});}}/>:<p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>}{self?<small>已发送</small>:null}</li>;

@@ -350,6 +350,28 @@ test("requires distinct auth secrets and secure production cookies", () => {
 });
 
 
+test("order event callbacks accept the supplier AppSecret without a local length floor but keep blank/control guards", () => {
+  const authEnv = { AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32), AUTH_SECURE_COOKIES: "false" };
+  const base = { ...authEnv, ORDER_IM_EVENTS_ENABLED: "true", ORDER_IM_EVENTS_APP_KEY: "provider-test" };
+  // Official callback contract: CheckSum = sha1(AppSecret + MD5 + CurTime) with
+  // the app's AppSecret and no documented minimum length.
+  const configured = loadAuthRuntimeConfig({ ...base, ORDER_IM_EVENTS_APP_SECRET: "short-secret" });
+  assert.equal(configured.orderImEvents?.appKey, "provider-test");
+  assert.equal(configured.orderImEvents?.appSecret, "short-secret");
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...base, ORDER_IM_EVENTS_APP_SECRET: "   " }),
+    (error: unknown) => error instanceof ConfigurationError,
+  );
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...base, ORDER_IM_EVENTS_APP_SECRET: "bad\nsecret" }),
+    (error: unknown) => error instanceof ConfigurationError && /invalid/.test(error.message),
+  );
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...base, ORDER_IM_EVENTS_APP_KEY: "bad key" }),
+    (error: unknown) => error instanceof ConfigurationError && /ORDER_IM_EVENTS_APP_KEY/.test(error.message),
+  );
+});
+
 test("fixed SMS mock is explicit and rejects non-local/production targets", () => {
   const env = { ...validEnv(), PROVIDER_MODE: "fake", AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32) };
   assert.equal(loadAuthRuntimeConfig(env).localSmsMock, false);

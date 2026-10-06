@@ -4,6 +4,7 @@ import {
   createLocalFakeNimWebClientFactory,
   createNimWebClientFactory,
   NimImageSendError,
+  NimTextSendError,
   resolveNimSdkModule,
 } from "../src/lib/nim-web-client.ts";
 import { ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
@@ -113,7 +114,7 @@ function testContext(identity) {
 test("order-scoped authorization guards the shared SDK and forwards an exact history anchor",async()=>{
   let sends=0,reads=0,defaultCalls=0,seen;
   const anchor={messageClientId:"older",conversationId:"viewer|2|1",senderId:"viewer",receiverId:"1",createTime:1};
-  const {sdk}=fakeSdk({messageService:{on(){},off(){},async getMessageList(options){reads++;seen=options;return [];},async sendMessage(){sends++;return {message:anchor};}},messageCreator:{createTextMessage:text=>({text})}});
+  const {sdk}=fakeSdk({messageService:{on(){},off(){},async getMessageList(options){reads++;seen=options;return [];},async sendMessage(){sends++;return {message:anchor};}},messageCreator:{createTextMessage:text=>({messageClientId:'text-client-1',text})}});
   const state=testContext("viewer"),handle=await createNimWebClientFactory({appKey:"test",token:"test",messageAuthorization:async()=>{defaultCalls++;}},async()=>sdk)(state.context);
   try{
     const deny=async()=>{throw Object.assign(new Error("denied"),{status:403});};
@@ -238,7 +239,7 @@ test("routes authorized P2P messages through the SDK and removes the receive lis
   };
   const { sdk } = fakeSdk({
     messageService,
-    messageCreator: { createTextMessage: (text) => ({ text, messageType: 0 }) },
+    messageCreator: { createTextMessage: (text) => ({ messageClientId: 'text-client-1', text, messageType: 0 }) },
     conversationUtil: { p2pConversationId: (peer) => `customer-4|1|${peer}`, teamConversationId: (teamId) => `customer-4|2|${teamId}` },
   });
   const factory = createNimWebClientFactory({
@@ -257,7 +258,7 @@ test("routes authorized P2P messages through the SDK and removes the receive lis
   assert.deepEqual(await handle.client.getMessageHistory("customer-4|1|agent-1", 20), history);
   const reply = await handle.client.sendText("customer-4|1|agent-1", "收到");
   assert.equal(reply.text, "收到");
-  assert.deepEqual(sent, [{ message: { text: "收到", messageType: 0 }, conversationId: "customer-4|1|agent-1" }]);
+  assert.deepEqual(sent, [{ message: { messageClientId: "text-client-1", text: "收到", messageType: 0 }, conversationId: "customer-4|1|agent-1" }]);
   assert.deepEqual(authorizations, [
     { conversationId: "customer-4|1|agent-1", operation: "read" },
     { conversationId: "customer-4|1|agent-1", operation: "send" },
@@ -278,7 +279,7 @@ test("does not call the SDK when the server message authorization is rejected", 
   };
   const { sdk } = fakeSdk({
     messageService,
-    messageCreator: { createTextMessage: (text) => ({ text }) },
+    messageCreator: { createTextMessage: (text) => ({ messageClientId: 'text-client-1', text }) },
   });
   const factory = createNimWebClientFactory({
     appKey: "test-app-key",
@@ -304,7 +305,7 @@ test("passes the per-message route only for the exact authorized team and blocks
     async sendMessage(...args) { sent.push(args); return { message: { messageClientId: `sent-${sent.length}`, conversationId: args[1] } }; },
   };
   const grant = { appId: "test-app", orderId: "order-1", teamId: "9001", conversationId: "staff-1|2|9001", routeEnvironment: "oim4d-test" };
-  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ text }) } });
+  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ messageClientId: 'text-client-1', text }) } });
   const state = testContext("staff-1");
   const handle = await createNimWebClientFactory({ appKey: "test-app", token: "test-token" }, async () => sdk)(state.context);
   try {
@@ -352,7 +353,7 @@ test("formal image adapter uses the installed V2 image creator, reports progress
         created.push(message);
         return message;
       },
-      createTextMessage: (text) => ({ text }),
+      createTextMessage: (text) => ({ messageClientId: 'text-client-1', text }),
     },
   });
   const authorizations = [];
@@ -466,7 +467,7 @@ test("disposed NIM client blocks protected SDK calls and keeps counters at zero"
   };
   const { sdk, loginService } = fakeSdk({
     messageService,
-    messageCreator: { createTextMessage: (text) => ({ text }) },
+    messageCreator: { createTextMessage: (text) => ({ messageClientId: 'text-client-1', text }) },
   });
   const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("disposed-client").context);
   await handle.dispose();
@@ -537,4 +538,31 @@ test("local fake transport preserves protected HTTP status for the caller", asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("keeps the SDK text message id for an unknown result and retries the same message", async () => {
+  const sent = [];
+  let failNext = true;
+  const messageService = {
+    on() {},
+    off() {},
+    async sendMessage(message, conversationId) {
+      sent.push({ message, conversationId });
+      if (failNext) { failNext = false; throw new Error("network lost"); }
+      return { message: { ...message, messageServerId: "server-text-1", senderId: "customer-x", receiverId: "team-1", conversationId, createTime: Date.now() } };
+    },
+  };
+  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ messageClientId: "text-client-retry", text, messageType: 0 }) } });
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token", messageAuthorization: async () => undefined }, async () => sdk)(testContext("customer-x").context);
+  const first = await handle.client.sendText("customer-x|2|9001", "重试我").catch((error) => error);
+  assert.ok(first instanceof NimTextSendError, "unknown text result keeps a typed error");
+  assert.equal(first.kind, "UNKNOWN");
+  assert.equal(first.messageClientId, "text-client-retry");
+  const reply = await handle.client.retryText("customer-x|2|9001", "text-client-retry");
+  assert.equal(reply.messageServerId, "server-text-1");
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].message, sent[1].message, "retry sends the same SDK message object");
+  assert.equal(sent[1].message.messageClientId, "text-client-retry");
+  await assert.rejects(handle.client.retryText("customer-x|2|9001", "missing-id"), (error) => error instanceof NimTextSendError && error.kind === "FAILED");
+  await handle.dispose();
 });

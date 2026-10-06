@@ -729,7 +729,7 @@ async function attachCreatedTeam(options: ConsultationRouteOptions, claim: Scope
             AND ("message_scope_id" IS NULL OR "message_scope_id" = $3)`,
         [options.appId, claim.consultationId, teamId],
       );
-      if (updated.rowCount !== 1) throw new ScopeOperationFailure("DB_WRITEBACK_UNKNOWN", "scope create writeback is unknown");
+      if (updated.rowCount !== 1) throw new ScopeOperationFailure("DB_WRITEBACK_UNKNOWN", `scope create writeback is unknown: state=${row.messageScopeState} scopeId=${row.messageScopeId ?? "null"} team=${teamId}`);
       const settled = await client.query(
         `UPDATE "zzsh_iam"."im_consultation_scope_operation"
             SET "provider_team_id" = $3, "state" = 'SUCCEEDED', "lease_until" = NULL,
@@ -1623,6 +1623,38 @@ async function transferWithScope(options: ConsultationRouteOptions, context: Adm
   const plan = await beginTransfer(options, context, consultationId, targetAdminId, requestId);
   await runScopeOperationNow(options, plan.operationId);
   return readAdminConsultationView(options, context, consultationId);
+}
+
+/**
+ * Read-only candidate projection for the transfer dialog. Reuses the same
+ * eligibility and complaint-exclusion rules as the transfer itself; it never
+ * reserves, updates presence or writes an operation.
+ */
+export async function listTransferTargets(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+): Promise<{ targets: { adminUserId: string; displayName: string }[]; transferReady: boolean }> {
+  return withTransaction(options.pool, async (client) => {
+    const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
+    await assertAdminContextInTransaction(client, context);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    const row = await readConsultation(client, options.appId, consultationId);
+    requireSupportAccess(access, row.kind, "transfer");
+    if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) {
+      throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
+    }
+    if (row.messageScopeState !== "READY" || !row.messageScopeId) return { targets: [], transferReady: false };
+    const candidates = await readEligibleSupport(client, options.appId, locked);
+    const exclusions = await storedComplaintExclusions(client, row.id);
+    const targets = candidates
+      .filter((candidate) => candidate.adminUserId !== context.userId
+        && !exclusions.includes(candidate.adminUserId)
+        && (row.kind !== "COMPLAINT" || candidate.complaint))
+      .map((candidate) => ({ adminUserId: candidate.adminUserId, displayName: candidate.adminName }));
+    return { targets, transferReady: true };
+  });
 }
 
 type ClosePlan = { operationId: string };

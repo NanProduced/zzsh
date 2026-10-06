@@ -261,31 +261,181 @@
       "tag": "0036_oim_order_payment",
       "breakpoints": true
     },
-    {"idx":37,"version":"7","when":1789490006000,"tag":"0037_oim_support_dispatch","breakpoints":true},
-    {"idx":38,"version":"7","when":1789490007000,"tag":"0038_oim_order_team","breakpoints":true},
-    {"idx":39,"version":"7","when":1789490008000,"tag":"0039_supply_pricing_compat","breakpoints":true},
-    {"idx":40,"version":"7","when":1789490009000,"tag":"0040_user_rental_membership","breakpoints":true},
-    {"idx":41,"version":"7","when":1789490010000,"tag":"0041_order_personal_confirmation","breakpoints":true},
-    {"idx":42,"version":"7","when":1789490011000,"tag":"0042_supply_listing_query","breakpoints":true},
-    {"idx":43,"version":"7","when":1789490012000,"tag":"0043_oim_order_first_response","breakpoints":true},
-    {"idx":44,"version":"7","when":1789490013000,"tag":"0044_oim_order_first_response_guards","breakpoints":true},
-    {"idx":45,"version":"7","when":1789490014000,"tag":"0045_oim_order_escalation","breakpoints":true},
-    {"idx":46,"version":"7","when":1789490015000,"tag":"0046_order_settlement_confirmation","breakpoints":true},
-    {"idx":47,"version":"7","when":1789490016000,"tag":"0047_order_settlement_intake","breakpoints":true},
-    {"idx":48,"version":"7","when":1789490017000,"tag":"0048_order_settlement_posting","breakpoints":true},
-    {"idx":49,"version":"7","when":1789490018000,"tag":"0049_order_settlement_posting_guards","breakpoints":true},
-    {"idx":50,"version":"7","when":1789490019000,"tag":"0050_order_personal_quote_v2_guard","breakpoints":true},
-    {"idx":51,"version":"7","when":1789490020000,"tag":"0051_order_personal_quote_v2_guard_fix","breakpoints":true},
-    {"idx":52,"version":"7","when":1789490021000,"tag":"0052_supply_direct_publication","breakpoints":true},
-    {"idx":53,"version":"7","when":1789490022000,"tag":"0053_supply_funding_authority","breakpoints":true},
-    {"idx":54,"version":"7","when":1789490023000,"tag":"0054_supply_funding_guard_correction","breakpoints":true},
-    {"idx":55,"version":"7","when":1789490024000,"tag":"0055_skin_identity_contract","breakpoints":true},
-    {"idx":56,"version":"7","when":1789490025000,"tag":"0056_legacy_listing_read_snapshot","breakpoints":true},
-    {"idx":57,"version":"7","when":1789490026000,"tag":"0057_admin_order_read_compat","breakpoints":true},
-    {"idx":58,"version":"7","when":1789490027000,"tag":"0058_personal_finance_read_foundation","breakpoints":true},
-    {"idx":59,"version":"7","when":1789490028000,"tag":"0059_controlled_withdrawal","breakpoints":true},
-    {"idx":60,"version":"7","when":1789490029000,"tag":"0060_controlled_withdrawal_observation","breakpoints":true},
-    {"idx":61,"version":"7","when":1789490030000,"tag":"0061_distribution_policy_and_relations","breakpoints":true},
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1789490006000,
+      "tag": "0037_oim_support_dispatch",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1789490007000,
+      "tag": "0038_oim_order_team",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1789490008000,
+      "tag": "0039_supply_pricing_compat",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1789490009000,
+      "tag": "0040_user_rental_membership",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1789490010000,
+      "tag": "0041_order_personal_confirmation",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1789490011000,
+      "tag": "0042_supply_listing_query",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1789490012000,
+      "tag": "0043_oim_order_first_response",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1789490013000,
+      "tag": "0044_oim_order_first_response_guards",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1789490014000,
+      "tag": "0045_oim_order_escalation",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1789490015000,
+      "tag": "0046_order_settlement_confirmation",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789490016000,
+      "tag": "0047_order_settlement_intake",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789490017000,
+      "tag": "0048_order_settlement_posting",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1789490018000,
+      "tag": "0049_order_settlement_posting_guards",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1789490019000,
+      "tag": "0050_order_personal_quote_v2_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1789490020000,
+      "tag": "0051_order_personal_quote_v2_guard_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1789490021000,
+      "tag": "0052_supply_direct_publication",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1789490022000,
+      "tag": "0053_supply_funding_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1789490023000,
+      "tag": "0054_supply_funding_guard_correction",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1789490024000,
+      "tag": "0055_skin_identity_contract",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1789490025000,
+      "tag": "0056_legacy_listing_read_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1789490026000,
+      "tag": "0057_admin_order_read_compat",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1789490027000,
+      "tag": "0058_personal_finance_read_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1789490028000,
+      "tag": "0059_controlled_withdrawal",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1789490029000,
+      "tag": "0060_controlled_withdrawal_observation",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1789490030000,
+      "tag": "0061_distribution_policy_and_relations",
+      "breakpoints": true
+    },
     {
       "idx": 62,
       "version": "7",
@@ -293,7 +443,33 @@
       "tag": "0062_native_wallet_origin",
       "breakpoints": true
     },
-    {"idx":63,"version":"7","when":1789490032000,"tag":"0063_distribution_payment_and_earnings","breakpoints":true},
-    {"idx":64,"version":"7","when":1789490033000,"tag":"0064_referral_ledger_source_semantics","breakpoints":true}
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1789490032000,
+      "tag": "0063_distribution_payment_and_earnings",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1789490033000,
+      "tag": "0064_referral_ledger_source_semantics",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1789490034000,
+      "tag": "0065_native_origin_resource_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1789490035000,
+      "tag": "0066_native_origin_admission_contract",
+      "breakpoints": true
+    }
   ]
 }

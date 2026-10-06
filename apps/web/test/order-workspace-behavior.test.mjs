@@ -38,6 +38,7 @@ function loadWorkspace(session, router) {
     if (name === "next/navigation") return { useRouter: () => router };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
+    if (name === "@/components/order/order-trade-actions") return { OrderTradeActions: () => null };
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };

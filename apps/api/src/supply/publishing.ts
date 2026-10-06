@@ -1332,6 +1332,7 @@ export async function listingDetail(
       id: a.id,
       displayNo: a.display_no,
       versionId: v.id,
+      releaseId: v.rule_release_id,
       title: v.title,
       description: v.description,
       game: projectPublicListingGame(game),

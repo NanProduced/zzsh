@@ -8,11 +8,32 @@ import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBinding
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
 const denied=()=>new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
+
+/**
+ * Frozen order inventory projection for the first opening recording. Reads the
+ * order snapshot only (never the account's current stock) and whitelists the
+ * quantity/unit facts plus a catalog display name; buyer/owner amounts are not
+ * projected here.
+ */
+export function projectFrozenInventory(snapshot: unknown, itemNames: ReadonlyMap<string, string>): Array<{itemId:string;quantity:string;unit:string;pricingKind:string;name:string|null}> {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return [];
+  const lines = (snapshot as { lines?: unknown }).lines;
+  if (!Array.isArray(lines)) return [];
+  const result: Array<{itemId:string;quantity:string;unit:string;pricingKind:string;name:string|null}> = [];
+  for (const raw of lines) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const line = raw as { itemId?: unknown; quantity?: unknown; unit?: unknown; pricingKind?: unknown };
+    if (typeof line.itemId !== "string" || typeof line.quantity !== "string" || typeof line.unit !== "string" || typeof line.pricingKind !== "string") continue;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(line.itemId) || !/^(0|[1-9]\d{0,18})$/.test(line.quantity)) continue;
+    result.push({ itemId: line.itemId, quantity: line.quantity, unit: line.unit, pricingKind: line.pricingKind, name: itemNames.get(line.itemId) ?? null });
+  }
+  return result;
+}
 /** Same checks for every JOINED staff member; responsibility is not an exclusive grant. */
 export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orderId:string,operation:"read"|"send"="read",
   orderImSdkRouteBindings?:OrderImSdkRouteBindings):Promise<Record<string,unknown>>{
   if(actor.realm==="user")await assertUserContextInTransaction(c,actor);else await assertAdminContextInTransaction(c,actor);
-  const g=(await c.query(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.game_id,o.display_no,o.status AS order_status,o.title,o.account_id,game.name AS game_name,
+  const g=(await c.query(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.game_id,o.display_no,o.status AS order_status,o.title,o.account_id,o.quote_snapshot AS quote_snapshot,game.name AS game_name,
       to_jsonb(g)->>'responsible_admin_id' AS escalation_responsible_admin_id,
       to_jsonb(g)->>'first_response_at' AS escalation_first_response_at,
       to_jsonb(g)->>'remind_due_at' AS escalation_remind_due_at,
@@ -38,7 +59,20 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   const own=members.find(m=>m.platform_subject_id===actor.userId&&m.realm===actor.realm&&m.identity_kind===(actor.realm==="user"?"USER":"ADMIN"));
   if(actor.realm==="admin"&&(!own||own.party!=="STAFF"||own.state!=="JOINED"))throw denied();
   const escalationState=g.escalation_state_projection??"NOT_STARTED";
+  let frozenInventory:ReturnType<typeof projectFrozenInventory>|undefined;
+  if(actor.realm==="admin"){
+    const snapshotLines=(g.quote_snapshot as {lines?:Array<{itemId?:unknown}>}|null)?.lines;
+    const itemIds=Array.isArray(snapshotLines)?[...new Set(snapshotLines.map(line=>line&&typeof line.itemId==="string"?line.itemId:"").filter(Boolean))]:[];
+    const names=new Map<string,string>();
+    if(itemIds.length>0){
+      const rows=(await c.query<{id:string;name:string}>(`SELECT id,name FROM zzsh_supply.billable_item WHERE id=ANY($1::text[])`,[itemIds])).rows;
+      for(const row of rows)names.set(row.id,row.name);
+    }
+    const projected=projectFrozenInventory(g.quote_snapshot,names);
+    if(projected.length>0)frozenInventory=projected;
+  }
   const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,
+    ...(frozenInventory?{frozenInventory}:{}),
     supportEscalation:{firstResponseAt:g.escalation_first_response_at??null,remindDueAt:g.escalation_remind_due_at??null,
       addRound:Number(g.escalation_add_round??0),state:escalationState,needsManualReview:escalationState==="VERIFY_REQUIRED"||escalationState==="EXHAUSTED",
       noEligibleStaff:escalationState==="EXHAUSTED"}};

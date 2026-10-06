@@ -10,6 +10,8 @@ import { isHaff, moneyValue, orderedQuoteResources, skinChipTone } from "@/compo
 import { accountReturnTarget, readAccountReturn } from "@/lib/account-return";
 import { detailBreadcrumbs, resourceQuantityLabel, toListingDetail, type ListingDetailData } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
+import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
+import { useUserSession } from "@/components/session/user-session-provider";
 
 type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetailData } | { status: "unavailable" } | { status: "error" };
 type BackTarget = { href: string; label: string };
@@ -96,6 +98,8 @@ function feeValueClass(value: string, total: boolean): string {
 }
 
 function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; back: BackTarget; activeAnchor: string }) {
+  const session = useUserSession();
+  const identityKey = session.status === "authenticated" && session.userId ? session.userId : "guest";
   const serviceWindow = conditionValue(data, "service_window");
   const loginValue = conditionValue(data, "login_method_code");
   const haffLine = data.resourceLines.find(isHaff);
@@ -173,7 +177,9 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
         </div>
         <div className="detail-hero-actions">
           <FavoriteButton accountId={data.id} title={data.title} variant="inline" />
-          <p className="detail-stage-note">{data.historicalReadOnly ? "当前仅展示账号公开信息，确认租赁功能暂未开放。" : "当前仅展示公开报价，确认租赁功能暂未开放"}</p>
+          {data.historicalReadOnly
+            ? <p className="detail-stage-note">历史只读账号仅展示公开信息，不支持在线租赁。</p>
+            : <RentalConfirmPanel key={identityKey} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} />}
         </div>
         <FavoriteNotice />
       </div>

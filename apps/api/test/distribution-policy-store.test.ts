@@ -1,4 +1,25 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';import {readDistributionPolicy,configureDistributionPolicy,DISTRIBUTION_POLICY_PERMISSION} from '../src/finance/distribution-policy-store';
+import type {PoolClient} from 'pg';
+import {readRegistrationDistributionPolicyInTransaction,readActiveDistributionPolicyInTransaction} from '../src/finance/distribution-policy-store';
+
+test('new resource registration keeps distribution unknown without opening ordinary policy reads',async()=>{
+ const queries:string[]=[];
+ const c={query:async(sql:string)=>{queries.push(sql);return{rows:[{oid:999999,name:'zzsh_test_order_fresh',role:'zzsh_order_fresh_r',marker:'zzsh:order-reservation-test:v1',complete:true}]};}} as unknown as PoolClient;
+ assert.deepEqual(await readRegistrationDistributionPolicyInTransaction(c),{knowledge:'UNKNOWN',policy:null,reason:'DISTRIBUTION_RESOURCE_NOT_ADMITTED'});
+ await assert.rejects(readActiveDistributionPolicyInTransaction(c),e=>(e as {status?:number}).status===503);
+ assert(queries.every(sql=>sql.startsWith('SELECT d.oid')));
+});
+test('registered resource with wrong role or incomplete schema still rejects registration policy read',async()=>{
+ for(const patch of [{role:'unexpected_role'},{complete:false},{marker:'unexpected-marker'}]){
+  const c={query:async()=>({rows:[{oid:869754,name:'zzsh_test_order_personal_finance',role:'zzsh_order_personal_finance_r',marker:'zzsh:order-reservation-test:v1',complete:true,...patch}]})} as unknown as PoolClient;
+  await assert.rejects(readRegistrationDistributionPolicyInTransaction(c),e=>(e as {status?:number}).status===503);
+ }
+});
+test('policy infrastructure failures are never downgraded into unconfigured registration',async()=>{
+ const failure=Object.assign(new Error('test infrastructure failure'),{code:'42501'});
+ const c={query:async()=>{throw failure;}} as unknown as PoolClient;
+ await assert.rejects(readRegistrationDistributionPolicyInTransaction(c),e=>e===failure);
+});
 const actor={userId:'operator',sessionId:'sdk-session',requestId:'req_policy_test'},config={schema:'distribution-policy.v1',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:7,levels:[{code:'LEGACY_L1',rank:1,default:true,renterPercent:'5',ownerPercent:'5',upgrade:null}]};
 function probe(permissions:string[],schema=true){const sql:string[]=[];const pool={connect:async()=>({release(){},query:async(text:string)=>{sql.push(text);if(text.startsWith('SELECT s.'))return{rows:[{locked:false,twoFactorEnabled:true}]};if(text.includes('FROM "zzsh_iam"."admin_security"'))return{rows:[{status:'ACTIVE',isBoss:false,passwordChangeRequired:false}]};if(text.startsWith('SELECT suspended'))return{rows:[{suspended:false}]};if(text.startsWith('WITH role_permissions'))return{rows:permissions.map(permissionCode=>({permissionCode}))};if(text.startsWith('SELECT d.oid'))return{rows:[{oid:820148,name:'zzsh_test_m2_auth_auth_compat',role:'zzsh_m2_auth_compat_r',marker:'zzsh:m2-auth-test:v1',complete:schema}]};if(text.startsWith('SELECT v.'))return{rows:[]};if(text.startsWith('SELECT revision::text'))return{rows:[{revision:'2',current_version_id:'policy_old'}]};if(text.includes('FROM "zzsh_supply"."idempotency_record"'))return{rows:[]};if(['BEGIN','COMMIT','ROLLBACK'].includes(text)||text.startsWith('SELECT pg_advisory_xact_lock'))return{rows:[]};throw Error('Unexpected policy unit-probe SQL');}})} as unknown as Pool;return{pool,sql};}
 test('policy read permission does not grant configuration; finance read alone does not reveal configuration',async()=>{const reader=probe([DISTRIBUTION_POLICY_PERMISSION.read]);assert.deepEqual(await readDistributionPolicy(reader.pool,actor),{knowledge:'UNKNOWN',policy:null,reason:'POLICY_NOT_CONFIGURED'});await assert.rejects(configureDistributionPolicy(reader.pool,actor,{expectedRevision:'0',config,reason:'valid reason'},'original-policy-key'),e=>(e as {status?:number}).status===403);const finance=probe(['personal.finance.read']);await assert.rejects(readDistributionPolicy(finance.pool,actor),e=>(e as {status?:number}).status===403);assert(![...reader.sql,...finance.sql].some(s=>/^INSERT|^UPDATE|^DELETE/.test(s)));});

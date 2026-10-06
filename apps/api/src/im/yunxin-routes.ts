@@ -28,6 +28,7 @@ import {
   closeConsultation,
   createOrResumeUserConsultation,
   listAdminConsultations,
+  listTransferTargets,
   listUserConsultations,
   parseConsultationBody,
   parseLimit,
@@ -496,6 +497,20 @@ async function handleAdminConsultations(request: NodeRequest, response: NodeResp
   sendJson(response, 200, await transferConsultation(options.consultation, context, action.id, (body as { targetAdminId: string }).targetAdminId, requestId), requestId);
 }
 
+async function handleAdminTransferTargets(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readAdminContext(request, options.security);
+  await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+  const consultationId = routeQuery(request).get("consultationId");
+  if (!consultationId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(consultationId)) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Consultation is invalid");
+  }
+  sendJson(response, 200, await listTransferTargets(options.consultation, context, consultationId), requestId);
+}
+
 async function handleAdminPresence(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   if (!options.consultation) {
     sendUnavailable(response, requestId);
@@ -591,6 +606,14 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleAdminConsultations(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/transfer-targets") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminTransferTargets(request, response, requestId, options);
       return;
     }
     if (path === "/admin/messages") {

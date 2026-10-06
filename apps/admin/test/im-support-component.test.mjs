@@ -12,6 +12,7 @@ const browser = new Window({ url: "http://127.0.0.1:3101/workspace/support" });
 globalThis.window = browser;
 globalThis.document = browser.document;
 globalThis.HTMLElement = browser.HTMLElement;
+globalThis.Element = browser.Element;
 globalThis.Node = browser.Node;
 globalThis.Event = browser.Event;
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });

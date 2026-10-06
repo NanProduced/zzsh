@@ -1,4 +1,4 @@
-import {createHash,randomBytes} from 'node:crypto';import type {PoolClient} from 'pg';import {canonicalize} from '../supply/content-hash';import {invalid,conflict} from '../supply/supply-util';import {recordAudit} from '../auth/security-core';import {readActiveDistributionPolicyInTransaction} from './distribution-policy-store';
+import {createHash,randomBytes} from 'node:crypto';import type {PoolClient} from 'pg';import {canonicalize} from '../supply/content-hash';import {invalid,conflict} from '../supply/supply-util';import {recordAudit} from '../auth/security-core';import {readRegistrationDistributionPolicyInTransaction} from './distribution-policy-store';
 import {readDistributionParentInTransaction} from './invitation-store';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 /** Candidate only. Caller must be the new-user INSERT branch, on its existing transaction.
@@ -13,7 +13,7 @@ export async function initializeNewDistributionRegistration(c:PoolClient,input:{
   ${birthProof} AS inserted_in_transaction
   FROM zzsh_auth_user."user" u JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id WHERE u.id=$1`,[input.userId])).rows[0];
  if(!user||user.suspended||user.account_status!=='ACTIVE'||!user.inserted_in_transaction)throw conflict('Only the new registration transaction may initialize provenance');
- const policy=await readActiveDistributionPolicyInTransaction(c,true),defaultLevel=policy.policy?.config.levels.find(l=>l.default),eligible=policy.knowledge==='KNOWN'?policy.policy.config.enabled?'ELIGIBLE':'INELIGIBLE':'UNKNOWN';
+ const policy=await readRegistrationDistributionPolicyInTransaction(c),defaultLevel=policy.policy?.config.levels.find(l=>l.default),eligible=policy.knowledge==='KNOWN'?policy.policy.config.enabled?'ELIGIBLE':'INELIGIBLE':'UNKNOWN';
  let inviter:any=null;if(input.inviteCode)inviter=(await c.query('SELECT * FROM zzsh_order.distribution_invite_code WHERE match_code=$1',[input.inviteCode.toUpperCase()])).rows[0];
  if(inviter?.user_id&&inviter.user_id!==input.userId)await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[inviter.user_id]);
  const parentFacts=inviter?.user_id?await readDistributionParentInTransaction(c,inviter.user_id):null,parent=parentFacts?.parent;

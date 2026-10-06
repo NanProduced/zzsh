@@ -167,16 +167,22 @@ class MemoryIdentityRepository implements ImIdentityRepository {
   }
 }
 
-function providerOf(overrides: Pick<YunxinServerApi, "createAccount" | "getProfile">): YunxinServerApi {
+function accountState(accountId: string) {
+  return { accountId, enabled: true, p2pChatBanned: null, teamChatBanned: null, chatroomChatBanned: null, qchatChatBanned: null };
+}
+
+function providerOf(overrides: Partial<Pick<YunxinServerApi, "createAccount" | "getProfile" | "getAccount">>): YunxinServerApi {
   return {
-    ...overrides,
+    createAccount: async (input) => successfulCreate(input),
+    getProfile: async (accountId) => ({ accountId }),
     getProfiles: async () => ({ profiles: [], failed: [] }),
     updateProfile: async () => undefined,
-    getAccount: async (accountId) => ({ accountId, enabled: true, p2pChatBanned: null, teamChatBanned: null, chatroomChatBanned: null, qchatChatBanned: null }),
-    setAccountEnabled: async (accountId) => ({ accountId, enabled: true, p2pChatBanned: null, teamChatBanned: null, chatroomChatBanned: null, qchatChatBanned: null }),
+    getAccount: async (accountId) => accountState(accountId),
+    setAccountEnabled: async (accountId) => accountState(accountId),
     refreshAccountToken: async (accountId) => ({ accountId, token: "static-token" }),
     getOnlineStatuses: async () => ({ statuses: [], failed: [] }),
     readTeamMessage: async () => null,
+    ...overrides,
   };
 }
 
@@ -309,7 +315,7 @@ test("persists retry backoff for an unresolved create instead of retrying immedi
       if (creates === 1) throw new YunxinTransportError("create-account");
       return successfulCreate(input);
     },
-    getProfile: async () => { throw new YunxinApiError("get-profile", 102404, false); },
+    getAccount: async () => { throw new YunxinApiError("get-account", 102404, false); },
   }), { now: () => new Date(nowMs) });
 
   const pending = await provisioner.ensure({ key: identity });
@@ -330,32 +336,110 @@ test("checks an earlier unknown result before attempting the same stable account
   const repository = new MemoryIdentityRepository();
   let nowMs = Date.parse("2026-09-15T00:00:00.000Z");
   let creates = 0;
-  let profiles = 0;
+  let accountQueries = 0;
   const events: string[] = [];
   const provisioner = new ImIdentityProvisioner(repository, providerOf({
-    createAccount: async () => {
+    createAccount: async (input) => {
       creates += 1;
       events.push("create");
-      throw new YunxinTransportError("create-account");
+      if (creates === 1) throw new YunxinTransportError("create-account");
+      return successfulCreate(input);
     },
-    getProfile: async (accountId) => {
-      profiles += 1;
-      if (profiles === 1) {
-        events.push("query-absent");
-        throw new YunxinApiError("get-profile", 102404, false);
+    getAccount: async () => {
+      accountQueries += 1;
+      if (accountQueries === 1) {
+        events.push("query-unknown");
+        throw new YunxinTransportError("get-account");
       }
-      events.push("query-owned");
-      return { accountId, extension: buildYunxinIdentityMarker(identity) };
+      events.push("query-absent");
+      throw new YunxinApiError("get-account", 102404, false);
+    },
+    getProfile: async () => {
+      throw new Error("profile must not be queried while account existence is unproven");
     },
   }), { now: () => new Date(nowMs) });
 
   const pending = await provisioner.ensure({ key: identity });
   assert.equal(pending.outcome, "PENDING");
+  assert.equal(pending.mapping.lastFailure?.class, "UNKNOWN_RESULT");
   nowMs += 1_001;
   const ready = await provisioner.ensure({ key: identity });
   assert.equal(ready.outcome, "READY");
+  assert.equal(creates, 2);
+  assert.deepEqual(events, ["create", "query-unknown", "query-absent", "create"]);
+});
+
+test("treats a missing profile on an existing account as an ownership conflict, never a create", async () => {
+  const identity = key("USER", "profile-missing");
+  const repository = new MemoryIdentityRepository();
+  let creates = 0;
+  const provisioner = new ImIdentityProvisioner(repository, providerOf({
+    createAccount: async () => { creates += 1; throw new YunxinTransportError("create-account"); },
+    getProfile: async () => { throw new YunxinApiError("get-profile", 103404, false); },
+  }), { now: () => new Date("2026-09-15T00:00:00.000Z") });
+
+  const result = await provisioner.ensure({ key: identity });
+  assert.equal(result.outcome, "BLOCKED");
+  assert.equal(result.mapping.lastFailure?.class, "ACCOUNT_OWNERSHIP_CONFLICT");
+  assert.equal(result.mapping.lastFailure?.providerCode, 103404);
   assert.equal(creates, 1);
-  assert.deepEqual(events, ["create", "query-absent", "query-owned"]);
+  assert.equal((await provisioner.ensure({ key: identity })).outcome, "BLOCKED");
+  assert.equal(creates, 1);
+});
+
+test("keeps an unknown account existence check as an unknown result without touching the profile", async () => {
+  const identity = key("USER", "account-query-unknown");
+  const repository = new MemoryIdentityRepository();
+  let creates = 0;
+  let profiles = 0;
+  const provisioner = new ImIdentityProvisioner(repository, providerOf({
+    createAccount: async () => { creates += 1; throw new YunxinTransportError("create-account"); },
+    getAccount: async () => { throw new YunxinTransportError("get-account"); },
+    getProfile: async () => { profiles += 1; throw new YunxinApiError("get-profile", 103404, false); },
+  }), { now: () => new Date("2026-09-15T00:00:00.000Z") });
+
+  const result = await provisioner.ensure({ key: identity });
+  assert.equal(result.outcome, "PENDING");
+  assert.equal(result.mapping.lastFailure?.class, "UNKNOWN_RESULT");
+  assert.equal(creates, 1);
+  assert.equal(profiles, 0);
+});
+
+test("creates again with the same stable account only when the accounts endpoint proves absence", async () => {
+  const identity = key("USER", "account-truly-absent");
+  const repository = new MemoryIdentityRepository();
+  let nowMs = Date.parse("2026-09-15T00:00:00.000Z");
+  const createdIds: string[] = [];
+  const provisioner = new ImIdentityProvisioner(repository, providerOf({
+    createAccount: async (input) => { createdIds.push(input.accountId); throw new YunxinTransportError("create-account"); },
+    getAccount: async () => { throw new YunxinApiError("get-account", 102404, false); },
+    getProfile: async () => { throw new YunxinApiError("get-profile", 103404, false); },
+  }), { now: () => new Date(nowMs) });
+
+  const first = await provisioner.ensure({ key: identity });
+  assert.equal(first.outcome, "PENDING");
+  assert.equal(first.mapping.lastFailure?.class, "UNKNOWN_RESULT");
+  nowMs += 1_001;
+  const second = await provisioner.ensure({ key: identity });
+  assert.equal(second.outcome, "PENDING");
+  assert.equal(createdIds.length, 2);
+  assert.equal(new Set(createdIds).size, 1);
+  assert.equal(createdIds[0], deriveYunxinAccountId(identity));
+});
+
+test("rejects a mismatched account response as an unknown result", async () => {
+  const identity = key("ADMIN", "account-id-mismatch");
+  const repository = new MemoryIdentityRepository();
+  let creates = 0;
+  const provisioner = new ImIdentityProvisioner(repository, providerOf({
+    createAccount: async () => { creates += 1; throw new YunxinTransportError("create-account"); },
+    getAccount: async () => accountState("another-account"),
+  }), { now: () => new Date("2026-09-15T00:00:00.000Z") });
+
+  const result = await provisioner.ensure({ key: identity });
+  assert.equal(result.outcome, "PENDING");
+  assert.equal(result.mapping.lastFailure?.class, "UNKNOWN_RESULT");
+  assert.equal(creates, 1);
 });
 
 test("a late provider success cannot re-enable an identity disabled while the request was in flight", async () => {
@@ -401,7 +485,7 @@ test("an expired lease lets a newer attempt win while the older provider result 
       }
       return successfulCreate(input);
     },
-    getProfile: async () => { throw new YunxinApiError("get-profile", 102404, false); },
+    getAccount: async () => { throw new YunxinApiError("get-account", 102404, false); },
   }), { now: () => new Date(nowMs), leaseMs: 1_000 });
 
   const firstPromise = provisioner.ensure({ key: identity });

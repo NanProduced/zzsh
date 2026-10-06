@@ -64,6 +64,7 @@ export type PublicListing = {
   attributeDisplay?: PublicAttributeDisplay;
   id: string;
   versionId: string;
+  releaseId?: string;
   title: string;
   description: string | null;
   game?: { id: string; code: string; name: string } | null;

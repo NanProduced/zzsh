@@ -196,6 +196,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if(nativeOrigin?.proof===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_user_insert_proof FROM ${runtimeUser};
     GRANT SELECT ON TABLE zzsh_order.native_user_insert_proof TO ${runtimeUser};
     GRANT EXECUTE ON FUNCTION zzsh_order.initialize_native_wallet_origin(text,text,text,text) TO ${runtimeUser};`);
+  // Admission rows are provisioning facts: the runtime never reads or writes them directly.
+  const nativeAdmission=(await pool.query("SELECT to_regclass('zzsh_order.native_origin_resource_admission') IS NOT NULL AS present")).rows[0];
+  if(nativeAdmission?.present===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_origin_resource_admission FROM ${runtimeUser};`);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
 }
 

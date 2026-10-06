@@ -13,3 +13,16 @@ test("merges history with live messages by stable id and keeps newer delivery", 
     { id: "live", createTime: 30, text: "实时补全" },
   ]);
 });
+
+test("keeps the uploaded image URL when a sender echo without it arrives later", () => {
+  const result = mergeImMessages(
+    [{ id: "image-1", createTime: 10, messageType: 1, attachment: { imageId: "", url: "https://nim-nosdn.example/image", name: "a.png" } }],
+    [{ id: "image-1", createTime: 10, messageType: 1, attachment: { name: "a.png", size: 70 } }],
+  );
+  assert.deepEqual(result, [{
+    id: "image-1",
+    createTime: 10,
+    messageType: 1,
+    attachment: { imageId: "", url: "https://nim-nosdn.example/image", name: "a.png", size: 70 },
+  }]);
+});

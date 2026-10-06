@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import { AlertCircle, ArrowLeft, CheckCircle2, Clock3, FileText, LockKeyhole, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { formatOrderMoney, formatOrderTime as timeText, mergeOrderItems, orderApi, OrderRequestError, type FulfillmentAssignment, type Order, type OrderPage, type OrderParty, type OrderStatus, type OrderStatusFilter } from "@/lib/order-client";
+import { OrderTradeActions } from "@/components/order/order-trade-actions";
 import "./order.css";
 
 const STATUS_LABELS: Record<OrderStatus, string> = {
@@ -106,8 +107,8 @@ function OrderTimeHint({ order }: { order: Order }) {
 
 function statusNotice(order: Order) {
   if (order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel) return <div className="order-notice is-warning" role="status"><Clock3 size={17} aria-hidden="true" /><div><strong>已到期，取消处理中</strong><span>占用时间以订单记录为准；系统正在按序释放，期间该账号不可再次预订。</span></div></div>;
-  if (order.status === "PENDING_PAYMENT") return <div className="order-notice is-info" role="status"><WalletCards size={17} aria-hidden="true" /><div><strong>待支付 · 支付功能暂未开放</strong><span>本页仅展示订单信息；支付入口开放前，订单保留至占用截止。</span></div></div>;
-  if (order.status === "PAID") return <div className="order-notice is-info" role="status"><CheckCircle2 size={17} aria-hidden="true" /><div><strong>已支付 · 平台已接纳收款事实</strong><span>这不等于真实到账、交付或开租。</span></div></div>;
+  if (order.status === "PENDING_PAYMENT") return <div className="order-notice is-info" role="status"><WalletCards size={17} aria-hidden="true" /><div><strong>待支付</strong><span>可在下方提交本地受控支付；支付前订单保留至占用截止。付款不等于交付或开租。</span></div></div>;
+  if (order.status === "PAID") return <div className="order-notice is-info" role="status"><CheckCircle2 size={17} aria-hidden="true" /><div><strong>已支付 · 平台已接纳收款事实</strong><span>这不等于真实到账、交付或开租；等待客服分配并按期初确认后开始计租。</span></div></div>;
   if (order.status === "COMPLETED") return <div className="order-notice is-success" role="status"><CheckCircle2 size={17} aria-hidden="true" /><div><strong>已完成</strong><span>订单已完成；结算与到账记录以服务端结算信息为准。</span></div></div>;
   if (order.status === "CANCELLED") return <div className="order-notice" role="status"><XCircle size={17} aria-hidden="true" /><div><strong>{statusLabel(order)}</strong><span>订单已关闭，账号占用已解除。</span></div></div>;
   return <div className="order-notice is-warning" role="status"><AlertCircle size={17} aria-hidden="true" /><div><strong>状态待确认</strong><span>当前订单状态暂不可确认，请刷新后查看最新记录。</span></div></div>;
@@ -124,7 +125,7 @@ function NextStep({ order, party }: { order: Order; party: OrderParty }) {
   const assignment = order.fulfillmentAssignment;
   if (!assignment) {
     if (order.status !== "PENDING_PAYMENT") return null;
-    return <section className="order-next-step" aria-label="下一步"><div><strong>下一步</strong><span>支付功能暂未开放；订单信息仍以服务端记录为准。</span></div></section>;
+    return <section className="order-next-step" aria-label="下一步"><div><strong>下一步</strong><span>确认金额后在下方提交本地受控支付；订单信息以服务端记录为准。</span></div></section>;
   }
   return <section className="order-next-step" aria-label="下一步"><div className="order-next-step-copy"><MessageCircle size={18} aria-hidden="true" /><span><strong>履约与沟通</strong><small>{fulfillmentText(assignment)}</small></span></div><button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button></section>;
 }
@@ -175,13 +176,13 @@ function OrderError({ error, first, onRetry, onLogin, onReauthorize, label }: { 
   return <section className="order-error-block" role="alert"><AlertCircle size={24} aria-hidden="true" /><h3>{label ?? (first ? "订单列表暂时没有读取成功" : "订单信息暂时没有读取成功")}</h3><p>当前没有更新已展示的订单信息，请稍后重试。</p><button type="button" className="button secondary" onClick={onRetry}><RefreshCw size={15} aria-hidden="true" />重试读取</button></section>;
 }
 
-function Detail({ party, status, accountId, orderId, state, onRetry, onLogin }: { party: OrderParty; status: OrderStatusFilter; accountId?: string; orderId: string; state: DetailState; onRetry: () => void; onLogin: () => void }) {
+function Detail({ party, status, accountId, orderId, state, onRetry, onLogin, onChanged }: { party: OrderParty; status: OrderStatusFilter; accountId?: string; orderId: string; state: DetailState; onRetry: () => void; onLogin: () => void; onChanged: () => void }) {
   const backHref = orderUrl(party, status, accountId);
   if (state.status === "loading") return <section className="order-detail-card order-detail-loading" aria-busy="true" role="status"><span /><span /><span /></section>;
   if (state.status === "error" && state.error) return <section className="order-detail-view"><Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回订单列表</Link><OrderError error={state.error} first={false} onRetry={onRetry} onLogin={onLogin} label="订单详情暂时无法读取" /></section>;
   if (state.status !== "ready" || !state.order) return <section className="order-detail-view"><Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回订单列表</Link><section className="order-error-block" role="status"><XCircle size={24} aria-hidden="true" /><h3>订单不可用</h3><p>当前身份没有这笔订单的可用详情，未展示另一方私人资料。</p></section></section>;
   const order = state.order;
-  return <section className="order-detail-view"><Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回订单列表</Link><article className="order-detail-card" data-testid="order-detail"><header className="order-detail-heading"><div><h2>{order.title ?? "账号信息暂不可用"}</h2><p>{order.displayNo ?? "订单号暂不可用"}</p></div><OrderStatusBadge order={order} /></header>{statusNotice(order)}<MoneyFacts order={order} party={party} /><NextStep order={order} party={party} /><section className="order-detail-section"><h3>订单信息</h3><OrderFacts order={order} party={party} /></section><OrderLines order={order} party={party} /></article></section>;
+  return <section className="order-detail-view"><Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回订单列表</Link><article className="order-detail-card" data-testid="order-detail"><header className="order-detail-heading"><div><h2>{order.title ?? "账号信息暂不可用"}</h2><p>{order.displayNo ?? "订单号暂不可用"}</p></div><OrderStatusBadge order={order} /></header>{statusNotice(order)}<MoneyFacts order={order} party={party} /><NextStep order={order} party={party} /><OrderTradeActions order={order} party={party} onChanged={onChanged} /><section className="order-detail-section"><h3>订单信息</h3><OrderFacts order={order} party={party} /></section><OrderLines order={order} party={party} /></article></section>;
 }
 
 function ListRow({ party, order, status, accountId, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
@@ -353,7 +354,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId 
   const showingDetail = Boolean(orderId);
 
   if (session.status !== "authenticated" || !session.userId) return <section className="order-session-guard" role="status"><LockKeyhole size={22} aria-hidden="true" /><h2>正在确认订单身份</h2><p>确认期间不会展示上一位用户的订单数据。</p></section>;
-  if (showingDetail && detail) return <Detail party={party} status={status} accountId={accountId} orderId={orderId!} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} />;
+  if (showingDetail && detail) return <Detail party={party} status={status} accountId={accountId} orderId={orderId!} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} onChanged={() => setDetailReload((value) => value + 1)} />;
   return <section className="order-workspace order-account-workspace" aria-labelledby={`orders-${party}-title`} data-testid={`orders-${party}`}>
     <div className="order-workspace-heading account-module-heading"><div><h2 id={`orders-${party}-title`}>{title}</h2><p>{party === "renter" ? "查看你发起的租号订单、费用与当前状态。" : "查看租客提交的订单、订单金额与当前状态。"}</p></div><button type="button" className="button quiet" onClick={retryList} disabled={visibleListState.refreshing}><RefreshCw size={15} aria-hidden="true" />{visibleListState.refreshing ? "刷新中…" : "刷新"}</button></div>
     <div className="order-list-toolbar"><label htmlFor={`order-status-${party}`}>订单状态<select id={`order-status-${party}`} value={status} onChange={(event) => onStatusChange(event.target.value)}><option value="">全部状态</option>{(Object.keys(STATUS_LABELS) as OrderStatus[]).map((value) => <option key={value} value={value}>{STATUS_LABELS[value]}</option>)}</select></label>{party === "owner" && Boolean(page?.items.length || status || accountId) ? <Link className="account-inline-link" href="/account?view=accounts" scroll={false}>管理账号资料与上架状态</Link> : null}</div>

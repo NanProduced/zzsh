@@ -459,8 +459,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
   const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
-  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || imImage || Boolean(imAction);
-  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || imImage
+  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || path === "/im/transfer-targets" || imImage || Boolean(imAction);
+  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || path === "/im/transfer-targets" || imImage
     ? (method === "GET" || ((path === "/im/consultations" || path === "/im/messages") && method === "POST") || (path === "/im/presence" && method === "PUT"))
     : method === "POST";
   if (imPathAllowed) {

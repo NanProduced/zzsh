@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, FileUp, Headphones, Info, Paperclip, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { ImClientLifecycle } from "@/lib/im-client-lifecycle";
-import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImMessages, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
+import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImMessages, NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
 import { clearSupportIntent, readSupportIntent, saveSupportIntent, type SupportType } from "@/lib/support-intent";
 import "./customer-support-workspace.css";
 import { OrderTeamPanel } from "@zzsh/ui/order-team-panel";
@@ -40,6 +40,7 @@ type SupportMessage = {
   status?: "sent" | "read";
   self?: boolean;
   createTime?: number;
+  image?: { imageId: string; url?: string; name: string; mimeType: string; size: number };
 };
 
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
@@ -73,13 +74,45 @@ function formatTime(value: number): string {
   return Number.isFinite(date.getTime()) ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "现在";
 }
 
-function messageFromNim(message: NimMessageLike, accountId: string): SupportMessage | null {
+function supportedImageUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2048) return null;
+  if (/^\/api\/(?:im|bff\/admin\/im)\/images\/[A-Za-z0-9._:-]{1,128}$/.test(value)) return value;
+  try {
+    const parsed = new URL(value, typeof window === "undefined" ? "https://invalid.local" : window.location.origin);
+    const protocol = parsed.protocol.toLowerCase();
+    if (["blob:", "data:", "file:", "javascript:"].includes(protocol)) return null;
+    return protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
+  if (message.messageType !== 1 || !message.attachment || typeof message.attachment !== "object") return undefined;
+  const attachment = message.attachment;
+  // The supplier SDK exposes url/thumbUrl while the local-fake transport uses
+  // imageId. A sender echo may lack the URL entirely: keep an image projection
+  // (placeholder) so a later no-URL echo can never overwrite a rich history
+  // record with the unsupported-text fallback.
+  const imageId = typeof attachment.imageId === "string" ? attachment.imageId : "";
+  const url = typeof attachment.url === "string" ? attachment.url : typeof attachment.thumbUrl === "string" ? attachment.thumbUrl : undefined;
+  return {
+    imageId,
+    url,
+    name: typeof attachment.name === "string" ? attachment.name : "图片",
+    mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/jpeg",
+    size: typeof attachment.size === "number" ? attachment.size : 0,
+  };
+}
+
+export function messageFromNim(message: NimMessageLike, accountId: string): SupportMessage | null {
   const senderId = typeof message.senderId === "string" ? message.senderId : "";
   if (!senderId) return null;
   const self = senderId === accountId;
+  const image = imageOf(message);
   const text = typeof message.text === "string" && message.text.trim()
     ? message.text
-    : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
+    : image ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
   return {
     id: message.messageServerId || message.messageClientId || `${senderId}-${message.createTime}`,
     from: self ? "customer" : "agent",
@@ -88,7 +121,15 @@ function messageFromNim(message: NimMessageLike, accountId: string): SupportMess
     status: self ? "sent" : undefined,
     self,
     createTime: message.createTime,
+    ...(image === undefined ? {} : { image }),
   };
+}
+
+function oldestOf(messages: NimMessageLike[]): NimMessageLike | undefined {
+  return messages.reduce<NimMessageLike | undefined>((oldest, item) => {
+    if (!oldest) return item;
+    return (item.createTime ?? 0) < (oldest.createTime ?? 0) ? item : oldest;
+  }, undefined);
 }
 
 function dayKeyOf(createTime?: number): string | null {
@@ -175,7 +216,12 @@ function MessageRow({ message, agentMeta }: { message: SupportMessage; agentMeta
     <div className="support-message-avatar" aria-hidden="true">{message.from === "agent" ? <Headphones size={14} /> : <UserRound size={14} />}</div>
     <div className="support-message-body">
       <div className="support-message-meta"><span>{label}</span><time>{message.time}</time></div>
-      <div className="support-message-bubble" data-slot="bubble">{message.text}</div>
+      {message.image ? (() => {
+        const url = supportedImageUrl(message.image!.url);
+        return url
+          ? <a className="support-message-image" href={url} target="_blank" rel="noreferrer" aria-label={`查看图片 ${message.image!.name}`}><img src={url} alt={message.image!.name} loading="lazy" /></a>
+          : <div className="support-message-bubble" data-slot="bubble">图片暂不可预览</div>;
+      })() : <div className="support-message-bubble" data-slot="bubble">{message.text}</div>}
       {outgoing && message.status ? <div className="support-message-status"><Check size={12} />{message.status === "read" ? "已读" : "已发送"}</div> : null}
     </div>
   </article>;
@@ -206,6 +252,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [imReady, setImReady] = useState(preview);
+  const [historyMore, setHistoryMore] = useState<Record<string, boolean>>({});
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [imageSending, setImageSending] = useState(false);
+  const [pendingImage, setPendingImage] = useState<Record<string, { conversationId: string; file: File; previewUrl: string; name: string; messageClientId?: string; state: "FAILED" | "UNKNOWN" } | null>>({});
+  const [failedSend, setFailedSend] = useState<{ conversationKey: string; conversationId: string; text: string; messageClientId?: string; unknown: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -220,6 +271,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
   const identityGenerationRef = useRef(0);
   const intentInFlightRef = useRef<string | null>(null);
   const readyIdentityRef = useRef<string | null>(null);
+  const historyAnchorRef = useRef<Record<string, NimMessageLike>>({});
   const subjectRef = useMemo(() => subjectRefFromLocation(), []);
 
   const currentIdentity = preview
@@ -298,6 +350,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     setError(undefined);
     setBusy(false);
     setImReady(false);
+    setHistoryMore({});
+    setHistoryLoading(false);
+    setFailedSend(null);
+    setPendingImage((current) => {
+      for (const item of Object.values(current)) if (item) URL.revokeObjectURL(item.previewUrl);
+      return {};
+    });
+    historyAnchorRef.current = {};
     readyIdentityRef.current = null;
     intentInFlightRef.current = null;
   }, [currentIdentity, preview]);
@@ -441,9 +501,37 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
       if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== conversation.id) return;
       const rows = history.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
       setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+      const oldest = oldestOf(history);
+      if (oldest) historyAnchorRef.current[conversation.id] = oldest;
+      setHistoryMore((current) => ({ ...current, [conversation.id]: history.length === 50 }));
     }).catch((cause) => { revalidateAfterUnauthorized(cause); });
     return () => { cancelled = true; };
   }, [activeConversation?.conversationId, activeConversation?.id, connection, currentIdentity, preview, revalidateAfterUnauthorized]);
+
+  const loadEarlier = async () => {
+    if (preview || !activeConversation?.conversationId || !clientRef.current || historyLoading) return;
+    const client = clientRef.current;
+    const conversation = activeConversation;
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    const anchor = historyAnchorRef.current[conversation.id];
+    if (!anchor) { setHistoryMore((current) => ({ ...current, [conversation.id]: false })); return; }
+    setHistoryLoading(true);
+    try {
+      const older = await client.getMessageHistory(conversation.conversationId!, 50, anchor);
+      if (generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== conversation.id) return;
+      const rows = older.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
+      setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+      const oldest = oldestOf(older);
+      if (oldest) historyAnchorRef.current[conversation.id] = oldest;
+      setHistoryMore((current) => ({ ...current, [conversation.id]: older.length === 50 }));
+    } catch (cause) {
+      revalidateAfterUnauthorized(cause);
+      if (generation === identityGenerationRef.current && identityRef.current === identity) setError(cause instanceof Error ? cause.message : "更早的消息读取失败。");
+    } finally {
+      if (generation === identityGenerationRef.current && identityRef.current === identity) setHistoryLoading(false);
+    }
+  };
 
   const startConsultation = async () => {
     if (session.status !== "authenticated") {
@@ -479,6 +567,13 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
     event.preventDefault();
     const text = draft.trim();
     if (!text && !attachment) return;
+    // A pending unknown result locks the normal send path: the primary button
+    // and Enter must replay the original message, never mint a second one.
+    if (!preview && failedSend && failedSend.conversationKey === activeConversationKey) {
+      if (failedSend.messageClientId) { await retrySend(); return; }
+      setError("原消息标识不可用，请先刷新历史确认是否送达。");
+      return;
+    }
     const conversationKey = activeConversationKey;
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
@@ -498,12 +593,125 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
         setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
         setDraftFor(conversationKey, "");
         setAttachmentFor(conversationKey, null);
+        setFailedSend(null);
       }
     } catch (cause) {
       revalidateAfterUnauthorized(cause);
-      if (generation === identityGenerationRef.current && identityRef.current === identity) setError(cause instanceof Error ? cause.message : "消息发送失败，请重试。");
+      if (generation === identityGenerationRef.current && identityRef.current === identity) {
+        const textError = cause instanceof NimTextSendError ? cause : null;
+        setError(textError?.kind === "UNKNOWN" ? "发送结果未确认，内容已保留；可先刷新历史确认是否送达。" : cause instanceof Error ? cause.message : "消息发送失败，请重试。");
+        setFailedSend({ conversationKey, conversationId: conversationId ?? "", text, messageClientId: textError?.messageClientId, unknown: textError?.kind === "UNKNOWN" });
+      }
     } finally {
       if (generation === identityGenerationRef.current && identityRef.current === identity) setBusy(false);
+    }
+  };
+
+  const retrySend = async () => {
+    if (!failedSend || !clientRef.current || !canSend) return;
+    const client = clientRef.current;
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    const { conversationKey, conversationId, text, messageClientId } = failedSend;
+    setBusy(true); setError(undefined);
+    try {
+      const sent = messageClientId ? await client.retryText(conversationId, messageClientId) : await client.sendText(conversationId, text);
+      const next = messageFromNim(sent, client.accountId);
+      if (next && generation === identityGenerationRef.current && identityRef.current === identity && clientRef.current === client) {
+        setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
+        // Only clear the draft when it still holds the original message; newer
+        // typing stays untouched.
+        setDrafts((current) => current[conversationKey] === text ? { ...current, [conversationKey]: "" } : current);
+        setFailedSend(null);
+      }
+    } catch (cause) {
+      revalidateAfterUnauthorized(cause);
+      if (generation === identityGenerationRef.current && identityRef.current === identity) {
+        const textError = cause instanceof NimTextSendError ? cause : null;
+        setError(textError?.kind === "UNKNOWN" ? "发送结果仍未确认，请先刷新历史确认。" : cause instanceof Error ? cause.message : "消息发送失败，请重试。");
+        setFailedSend((current) => current ? { ...current, messageClientId: textError?.messageClientId ?? current.messageClientId } : current);
+      }
+    } finally {
+      if (generation === identityGenerationRef.current && identityRef.current === identity) setBusy(false);
+    }
+  };
+
+  const setPendingImageFor = (key: string, next: { conversationId: string; file: File; previewUrl: string; name: string; messageClientId?: string; state: "FAILED" | "UNKNOWN" } | null) => {
+    setPendingImage((current) => {
+      const previous = current[key];
+      if (previous && previous.previewUrl !== next?.previewUrl) URL.revokeObjectURL(previous.previewUrl);
+      return { ...current, [key]: next };
+    });
+  };
+  const sendPendingImage = async (conversationKey: string, pending: NonNullable<(typeof pendingImage)[string]>) => {
+    const client = clientRef.current;
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    if (!client) return;
+    setImageSending(true);
+    setError(undefined);
+    try {
+      const sent = pending.messageClientId
+        ? await client.retryImage(pending.conversationId, pending.messageClientId)
+        : await client.sendImage(pending.conversationId, pending.file);
+      const next = messageFromNim(sent, client.accountId);
+      if (generation === identityGenerationRef.current && identityRef.current === identity && clientRef.current === client) {
+        if (next) setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
+        setPendingImageFor(conversationKey, null);
+      }
+    } catch (cause) {
+      revalidateAfterUnauthorized(cause);
+      if (generation === identityGenerationRef.current && identityRef.current === identity) {
+        const imageError = cause instanceof NimImageSendError ? cause : null;
+        setPendingImageFor(conversationKey, {
+          ...pending,
+          messageClientId: imageError?.messageClientId ?? pending.messageClientId,
+          state: imageError?.kind === "UNKNOWN" ? "UNKNOWN" : "FAILED",
+        });
+        setError(imageError?.kind === "UNKNOWN" ? "图片发送结果未确认，原图片已保留；可刷新历史或按原消息重试。" : cause instanceof Error ? cause.message : "图片发送失败，可重试。");
+      }
+    } finally {
+      if (generation === identityGenerationRef.current && identityRef.current === identity) setImageSending(false);
+    }
+  };
+  const chooseImage = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (preview) { setAttachment(file.name); return; }
+    const conversationId = activeConversation?.conversationId;
+    if (!clientRef.current || !conversationId || !canSend) return;
+    try {
+      validateNimImageFile(file);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "图片无效");
+      return;
+    }
+    const conversationKey = activeConversationKey;
+    const pending = { conversationId, file, previewUrl: URL.createObjectURL(file), name: file.name, state: "FAILED" as const };
+    setPendingImageFor(conversationKey, pending);
+    await sendPendingImage(conversationKey, pending);
+  };
+  const retryPendingImage = async () => {
+    const pending = pendingImage[activeConversationKey];
+    if (!pending || !canSend) return;
+    await sendPendingImage(activeConversationKey, pending);
+  };
+  const removePendingImage = () => setPendingImageFor(activeConversationKey, null);
+
+  const refreshHistory = async () => {
+    if (!activeConversation?.conversationId || !clientRef.current) return;
+    const client = clientRef.current;
+    const conversation = activeConversation;
+    setError(undefined);
+    try {
+      const history = await client.getMessageHistory(conversation.conversationId!, 50);
+      if (clientRef.current !== client || activeIdRef.current !== conversation.id) return;
+      const rows = history.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
+      setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+    } catch (cause) {
+      revalidateAfterUnauthorized(cause);
+      setError(cause instanceof Error ? cause.message : "历史刷新失败。");
     }
   };
 
@@ -556,12 +764,17 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, in
           <span className="support-facts-spacer" />
         </div>
         <div className="support-message-area">
-           {!preview && !activeConversation ? <div className="support-start-panel" data-state={isStartingNew ? "new" : "initial"}><Headphones size={27} /><strong>{isStartingNew ? "发起新的咨询" : "从这里开始你的咨询"}</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" data-action={isStartingNew ? "submit-new-consultation" : "start-consultation"} onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找当前在线且有接待容量的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? timelineItems : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>等待第一条消息</strong><span>{preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {failedSend && failedSend.conversationKey === activeConversationKey ? <div className="support-send-retry" role="alert"><CircleAlert size={15} /><span>{failedSend.unknown ? "发送结果未确认，内容已保留。" : "消息发送失败，内容已保留。"}</span><button type="button" onClick={() => void refreshHistory()}>刷新历史</button><button type="button" onClick={() => void retrySend()} disabled={busy || !canSend}>{failedSend.messageClientId ? "原消息重试" : "重试发送"}</button></div> : null}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state={isStartingNew ? "new" : "initial"}><Headphones size={27} /><strong>{isStartingNew ? "发起新的咨询" : "从这里开始你的咨询"}</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" data-action={isStartingNew ? "submit-new-consultation" : "start-consultation"} onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找当前在线且有接待容量的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>等待第一条消息</strong><span>{preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
           {attachment ? <div className="support-attachment" data-slot="attachment"><Paperclip size={14} /><span>{attachment}</span><button type="button" onClick={() => setAttachment(null)} aria-label="移除附件">×</button></div> : null}
-          <form className="support-composer" onSubmit={sendMessage}><textarea ref={draftRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }} placeholder={preview ? "输入咨询内容…" : activeConversation?.messageScopeState === "FAILED" ? "客服会话待人工核验，暂不可发送" : canSend ? "输入咨询内容…" : "等待客服接待后可发送消息"} aria-label="输入咨询内容" rows={2} disabled={!canSend || busy} /><div className="support-composer-actions"><label className="support-icon-button" aria-label="添加附件"><FileUp size={16} /><input ref={fileInputRef} type="file" onChange={(event) => setAttachment(event.target.files?.[0]?.name ?? null)} disabled={!preview || busy} /></label><span className="support-composer-hint">Enter 发送 · Shift+Enter 换行</span><span className="support-composer-status">{preview ? "仅本地演示，不会发送到云信" : activeConversation?.messageScopeState === "FAILED" ? "远端状态待人工核验" : canSend ? "消息由云信实时传输" : "当前不可发送"}</span><button type="submit" className="button primary" disabled={!canSend || busy || (!draft.trim() && !attachment)}><SendHorizontal size={15} />{busy ? "发送中…" : "发送"}</button></div></form>
+          {!preview && pendingImage[activeConversationKey] ? (() => {
+            const pending = pendingImage[activeConversationKey]!;
+            return <div className="support-pending-image" data-state={pending.state}><img src={pending.previewUrl} alt={pending.name} /><span>{pending.name} · {pending.state === "UNKNOWN" ? "发送结果未确认" : "发送失败"}{pending.messageClientId ? "" : "（无原消息标识）"}</span><button type="button" onClick={() => void retryPendingImage()} disabled={imageSending || !canSend}>{pending.messageClientId ? "原消息重试" : "重试"}</button><button type="button" onClick={removePendingImage} disabled={imageSending}>移除</button></div>;
+          })() : null}
+          <form className="support-composer" onSubmit={sendMessage}><textarea ref={draftRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }} placeholder={preview ? "输入咨询内容…" : activeConversation?.messageScopeState === "FAILED" ? "客服会话待人工核验，暂不可发送" : canSend ? "输入咨询内容…" : "等待客服接待后可发送消息"} aria-label="输入咨询内容" rows={2} disabled={!canSend || busy} /><div className="support-composer-actions"><label className="support-icon-button" aria-label="发送图片"><FileUp size={16} /><input ref={fileInputRef} type="file" accept="image/jpeg,image/png" onChange={(event) => void chooseImage(event)} disabled={preview ? busy : (!canSend || busy || imageSending)} /></label><span className="support-composer-hint">Enter 发送 · Shift+Enter 换行</span><span className="support-composer-status">{preview ? "仅本地演示，不会发送到云信" : activeConversation?.messageScopeState === "FAILED" ? "远端状态待人工核验" : canSend ? "消息由云信实时传输" : "当前不可发送"}</span><button type="submit" className="button primary" disabled={!canSend || busy || (!draft.trim() && !attachment)}><SendHorizontal size={15} />{busy ? "发送中…" : "发送"}</button></div></form>
         </div>
       </main>
       {contextOpen ? <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品上下文</strong><span>{preview ? "演示快照" : "服务端授权快照"}</span></div><button type="button" className="support-icon-button" data-action="close-product-context" onClick={() => { setContextOpen(false); gridRef.current?.querySelector<HTMLButtonElement>('[data-action="toggle-product-context"]')?.focus(); }} aria-label="关闭商品上下文"><X size={15} /></button></div>{preview ? <article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article> : <div className="support-context-empty"><Headphones size={20} /><strong>{subjectRef ? "已带入公开对象" : "暂无商品上下文"}</strong><span>{subjectRef ? `对象 ${subjectRef} 会在服务端重新校验后展示。` : "从公开商品页发起咨询后，会在这里显示经过授权的快照。"}</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>商品卡只展示服务端确认的公开快照；接入后点击商品仍需重新校验当前权限。</p></div></aside> : null}

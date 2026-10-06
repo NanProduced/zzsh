@@ -416,6 +416,23 @@ function assertReturnedAccount(expected: string, actual: string, operation: stri
   if (expected !== actual) throw new YunxinApiError(operation, null, false);
 }
 
+/**
+ * V2 batch lookups may omit an empty list (measured: get-profiles omits
+ * success_list when every requested account failed). An omitted field may only
+ * be read as an empty list when the other list is present, is an array, and the
+ * coverage check below proves it accounts for every requested ID. Null, wrong
+ * types and two omitted lists stay malformed.
+ */
+function batchLists(data: JsonRecord, operation: string): { success: unknown[]; failed: unknown[] } {
+  const success = data.success_list;
+  const failed = data.failed_list;
+  if (success === undefined && failed === undefined) throw new YunxinApiError(operation, null, false);
+  if ((success !== undefined && !Array.isArray(success)) || (failed !== undefined && !Array.isArray(failed))) {
+    throw new YunxinApiError(operation, null, false);
+  }
+  return { success: (success ?? []) as unknown[], failed: (failed ?? []) as unknown[] };
+}
+
 function assertBatchCoverage(expected: string[], actual: string[], operation: string): void {
   const expectedSet = new Set(expected);
   const actualSet = new Set(actual);
@@ -568,12 +585,9 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const normalized = normalizeAccountIds(accountIds);
     const query = new URLSearchParams({ account_ids: normalized.join(",") });
     const response = await this.request("get-profiles", "GET", `/im/v2/users?${query.toString()}`, undefined, "", "v2");
-    const data = responseData(response);
-    if (!Array.isArray(data.success_list) || !Array.isArray(data.failed_list)) {
-      throw new YunxinApiError("get-profiles", null, false);
-    }
-    const profiles = data.success_list.map((value) => profileFrom(value));
-    const failed = data.failed_list.map((value) => failureFrom(value));
+    const { success, failed: failedRaw } = batchLists(responseData(response), "get-profiles");
+    const profiles = success.map((value) => profileFrom(value));
+    const failed = failedRaw.map((value) => failureFrom(value));
     assertBatchCoverage(normalized, [...profiles.map((profile) => profile.accountId), ...failed.map((item) => item.accountId)], "get-profiles");
     return { profiles, failed };
   }
@@ -620,12 +634,11 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const response = await this.request("get-online-status", "POST", "/im/v2/users/actions/online_status", {
       account_ids: normalized,
     }, "", "v2");
-    const data = responseData(response);
-    if (!Array.isArray(data.success_list) || !Array.isArray(data.failed_list)) {
-      throw new YunxinApiError("get-online-status", null, false);
-    }
-    const statuses = data.success_list.map((value) => onlineStatusFrom(value));
-    const failed = data.failed_list.map((value) => failureFrom(value));
+    // The omitted-empty-list shape was measured on get-profiles only; this
+    // endpoint shares the same adapter but its omission shape is inferred.
+    const { success, failed: failedRaw } = batchLists(responseData(response), "get-online-status");
+    const statuses = success.map((value) => onlineStatusFrom(value));
+    const failed = failedRaw.map((value) => failureFrom(value));
     assertBatchCoverage(normalized, [...statuses.map((status) => status.accountId), ...failed.map((item) => item.accountId)], "get-online-status");
     return { statuses, failed };
   }
@@ -867,15 +880,17 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const teams = teamsValue;
     if (teams.length === 0) return { status: "ABSENT" };
     const matches: string[] = [];
-    let unidentifiable = false;
     for (const value of teams) {
       const summary = teamSummary(value);
       if (summary.ownerAccountId !== ownerAccountId) continue;
-      const matchesMarker = supportMarkerMatches(summary.serverExtension, appId, consultationId);
-      if (matchesMarker === null) unidentifiable = true;
-      else if (matchesMarker) matches.push(summary.teamId);
+      // Historical teams without our marker (or with another consultation's
+      // marker) are not this consultation's scope. The real non-production App
+      // already carries such teams for the shared SYSTEM owner, so only an
+      // exact appId+consultationId marker match may be selected; two matches
+      // still fail closed.
+      if (supportMarkerMatches(summary.serverExtension, appId, consultationId) === true) matches.push(summary.teamId);
     }
-    if (matches.length > 1 || unidentifiable) return { status: "AMBIGUOUS" };
+    if (matches.length > 1) return { status: "AMBIGUOUS" };
     if (matches.length === 0) return { status: "ABSENT" };
     const team = await this.getSupportTeam(matches[0]!);
     if (!team) return { status: "ABSENT" };
