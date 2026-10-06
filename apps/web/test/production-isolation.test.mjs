@@ -38,15 +38,20 @@ test('temporary component experiments are outside the production route tree', ()
 
 test('game framework keeps tools scoped and migrated guide links resolve', () => {
   const html = readFileSync(build('server/app/index.html'), 'utf8');
-  const help = readFileSync(build('server/app/help.html'), 'utf8');
   assert.ok(!html.includes('出发前，先了解'));
   for (const name of ['三角洲行动专区', '无畏契约专区', '英雄联盟专区']) assert.ok(html.includes(name));
   assert.equal((html.match(/COMING SOON/g) || []).length >= 2, true);
   for (const id of ['rental-guide', 'billing-guide', 'publish-guide', 'protection']) {
-    assert.ok(help.includes(`id="${id}"`));
     assert.ok(html.includes(`/help#${id}`));
   }
   assert.ok(!html.includes('href="/#help"'));
+  const legacy = readFileSync(resolve(web, 'src/content/help/legacy-links.ts'), 'utf8');
+  for (const id of ['rental-guide', 'billing-guide', 'publish-guide', 'protection']) {
+    assert.ok(legacy.includes(`"${id}"`), `legacy anchor ${id} must stay mapped to an article`);
+  }
+  for (const slug of ['rental-getting-started', 'fees-overview', 'publish-prepare', 'minor-protection']) {
+    assert.ok(existsSync(build(`server/app/help/${slug}.html`)), `${slug} must be prerendered`);
+  }
   const delta = readFileSync(resolve(web, 'src/components/delta/delta-section.tsx'), 'utf8');
   assert.match(delta, /<GameIdentity game="delta">.*改枪码.*<\/GameIdentity>/);
 });
