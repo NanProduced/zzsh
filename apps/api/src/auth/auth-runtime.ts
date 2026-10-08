@@ -46,6 +46,7 @@ import type { ImMessageTransport } from "../im/im-contract";
 import { mountYunxinHandlers } from "../im/yunxin-routes";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
+import { assertLocalDistributionAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
 import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
@@ -73,6 +74,8 @@ export type AuthRuntimeCapabilities = {
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit local capability only; never read from environment or HTTP. */
   nativeWithdrawalScope?: NativeWithdrawalScope;
+  /** Exact local creation-receipt capability; absent in ordinary configuration. */
+  distributionScope?: LocalDistributionScope;
   /** Explicit local assembly only; lets fresh registrations initialize a native zero origin on one exact resource. */
   nativeWalletOrigin?: NativeOriginResource;
   /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
@@ -331,6 +334,7 @@ function buildPhoneRegistrationPlugin(
   signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
   nativeWalletOrigin?: NativeOriginResource,
   creditGuaranteeEnabled = false,
+  distributionScope?: LocalDistributionScope,
 ) {
   const bodyOf = (value: unknown, allowed: readonly string[]): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -478,7 +482,7 @@ function buildPhoneRegistrationPlugin(
             // their existing auth behavior until the credit package is installed.
             if (creditGuaranteeEnabled) await ensureCreditAccount(client, userId);
             // Existing-user OTP returned above: only this new-user transaction initializes provenance.
-            await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) });
+            await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) }, distributionScope);
             await initializeNativeWalletOrigin(client, userId, requestId, nativeWalletOrigin);
             passwordCapability.state = passwordHash !== undefined ? "set" : "not-set";
             authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
@@ -608,6 +612,7 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions> {
+  assertLocalDistributionAssembly(options.distributionScope, options);
   await preflightCreditGuarantee(options.pool, options.creditGuaranteeEnabled === true);
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
@@ -703,7 +708,7 @@ export async function mountAuthHandlers(
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope),
       userSecurityPlugin,
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
@@ -937,8 +942,8 @@ export async function mountAuthHandlers(
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);
-  mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey});
-  mountDistributionPolicyRoutes(app,securityOptions);
+  mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope});
+  mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope});
   mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope});
   mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,fundingReader});
   mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,fundingReader});
