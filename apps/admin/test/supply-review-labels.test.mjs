@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { reviewItemLabel } from "../src/views/supply-review-labels.ts";
 
+test("only the distinct piece-count insurance identity uses 张; frozen DAY and other PIECE retain their units",()=>{
+  const label=(code,unit)=>reviewItemLabel({itemId:"i",inCurrent:true,presentation:[{id:"i",code,unit,name:"卡"}]});
+  assert.equal(label("top_insure_card_piece","PIECE").unit,"张");
+  assert.equal(label("top_insure_card_piece","DAY").unit,"天");
+  assert.equal(label("df_billable_top_insure_card","DAY").unit,"天");
+  assert.equal(label("coffee","PIECE").unit,"件");
+});
+
 test("draft item names use the current catalog and frozen snapshots stay unchanged", () => {
   assert.deepEqual(reviewItemLabel({
     itemId: "item-new",

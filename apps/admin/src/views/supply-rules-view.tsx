@@ -7,14 +7,13 @@ const inputClass = "w-full h-9 px-3 rounded border border-border bg-surface-rais
 const selectClass = "w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs";
 const textareaClass = "w-full min-h-32 px-3 py-2 rounded border border-border bg-surface-raised text-xs font-mono";
 
-type PriceLineDraft = { itemId: string; pricingKind: "FIXED_UNIT" | "HAFF_RATIO"; unitQuantity: string; buyerUnitAmount: string; ownerUnitAmount: string };
+const PRICE_TIERS = ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"] as const;
+type PriceTier = typeof PRICE_TIERS[number];
+type PriceLineDraft = { customerTier: PriceTier; itemId: string; pricingKind: "FIXED_UNIT" | "HAFF_RATIO"; unitQuantity: string; buyerUnitAmount: string; ownerUnitAmount: string };
 type TermOptionDraft = { code: string; name: string; dailyConsumption: string };
 
-function requiresTierEditor(record: PriceVersionRecord, allLines: PriceLineRecord[]): boolean {
-  const selected = allLines.filter((line) => line.priceVersionId === record.id);
-  return (record.haffRule?.schema !== undefined && record.haffRule.schema !== "haff-ratio-v1")
-    || selected.some((line) => line.customerTier !== undefined && line.customerTier !== "STANDARD")
-    || new Set(selected.map((line) => line.itemId)).size !== selected.length;
+function requiresTierEditor(record: PriceVersionRecord): boolean {
+  return record.haffRule?.schema !== undefined && !["haff-ratio-v1", "haff-ratio-v2"].includes(String(record.haffRule.schema));
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -52,6 +51,7 @@ export function SupplyRulesView({
   const [priceMode, setPriceMode] = useState<"SPREAD" | "PERCENT">("SPREAD");
   const [commissionRate, setCommissionRate] = useState("");
   const [haffRuleText, setHaffRuleText] = useState("");
+  const [priceTier, setPriceTier] = useState<PriceTier>("STANDARD");
   const [lines, setLines] = useState<Record<string, PriceLineDraft>>({});
   const [termOptions, setTermOptions] = useState<TermOptionDraft[]>([]);
   const [agreementTitle, setAgreementTitle] = useState("");
@@ -84,27 +84,19 @@ export function SupplyRulesView({
     setHaffRuleText(record.haffRule ? JSON.stringify(record.haffRule, null, 2) : "");
     setPreview(null);
     setPreviewError(undefined);
-    if (requiresTierEditor(record, allLines)) {
+    if (requiresTierEditor(record)) {
       setLines({});
       return;
     }
     const next: Record<string, PriceLineDraft> = {};
-    const linesForVersion = allLines.filter((line) => line.priceVersionId === record.id);
-    if (linesForVersion.length === 0) {
-      for (const item of items) {
-        next[item.id] = { itemId: item.id, pricingKind: item.unit === "HAFF_BASE" ? "HAFF_RATIO" : "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "", ownerUnitAmount: "" };
-      }
-    } else {
-      for (const line of linesForVersion) {
-        next[line.itemId] = {
-          itemId: line.itemId,
-          pricingKind: line.pricingKind,
-          unitQuantity: line.unitQuantity ?? "1",
-          buyerUnitAmount: line.buyerUnitAmount ?? "",
-          ownerUnitAmount: line.ownerUnitAmount ?? "",
-        };
-      }
+    for (const customerTier of PRICE_TIERS) for (const item of items) {
+      next[item.id + ":" + customerTier] = { customerTier, itemId:item.id, pricingKind:item.unit === "HAFF_BASE" ? "HAFF_RATIO" : "FIXED_UNIT", unitQuantity:"1", buyerUnitAmount:"", ownerUnitAmount:"" };
     }
+    for (const line of allLines.filter(line => line.priceVersionId === record.id)) {
+      const customerTier = line.customerTier ?? "STANDARD";
+      next[line.itemId + ":" + customerTier] = { customerTier, itemId:line.itemId, pricingKind:line.pricingKind, unitQuantity:line.unitQuantity ?? "1", buyerUnitAmount:line.buyerUnitAmount ?? "", ownerUnitAmount:line.ownerUnitAmount ?? "" };
+    }
+    setPriceTier("STANDARD");
     setLines(next);
   }, []);
 
@@ -164,7 +156,7 @@ export function SupplyRulesView({
   };
 
   const selectedPrice = rules?.priceVersions.find((version) => version.id === priceId);
-  const priceReadOnly = Boolean(selectedPrice && requiresTierEditor(selectedPrice, rules?.priceLines ?? []));
+  const priceReadOnly = Boolean(selectedPrice && requiresTierEditor(selectedPrice));
   const selectedTerm = rules?.termVersions.find((version) => version.id === termId);
   const selectedAgreement = rules?.agreementVersions.find((version) => version.id === agreementId);
   const items = rules?.items ?? [];
@@ -203,19 +195,29 @@ export function SupplyRulesView({
         return;
       }
     }
+    const requestedSchema = (haffRule as { schema?: string } | undefined)?.schema;
+    const tiered = requestedSchema === "haff-ratio-v2" || (rules?.priceLines ?? []).some(line => line.priceVersionId === selectedPrice.id && line.customerTier !== undefined && line.customerTier !== "STANDARD");
+    if (selectedPrice.haffRule?.schema === "haff-ratio-v2" && requestedSchema !== "haff-ratio-v2") {
+      setError("此草稿已有会员档位，不能改成旧规则保存并丢失价目。"); return;
+    }
     const builtLines = Object.values(lines)
+      .filter(line => tiered || line.customerTier === "STANDARD")
       .filter((line) => line.buyerUnitAmount !== "" || line.pricingKind === "HAFF_RATIO")
       .map((line) =>
         line.pricingKind === "HAFF_RATIO"
-          ? { itemId: line.itemId, pricingKind: "HAFF_RATIO" }
+          ? { itemId: line.itemId, pricingKind: "HAFF_RATIO", ...(tiered ? { customerTier:line.customerTier } : {}) }
           : {
               itemId: line.itemId,
+              ...(tiered ? { customerTier:line.customerTier } : {}),
               pricingKind: "FIXED_UNIT",
               unitQuantity: line.unitQuantity,
               buyerUnitAmount: line.buyerUnitAmount,
               ...(priceMode === "SPREAD" && line.ownerUnitAmount !== "" ? { ownerUnitAmount: line.ownerUnitAmount } : {}),
             },
       );
+    if (tiered && builtLines.some(line => PRICE_TIERS.some(tier => !builtLines.some(other => other.itemId === line.itemId && other.customerTier === tier)))) {
+      setError("每个计费物品须补齐普通、VIP、SVIP和折扣用户四档价目，缺价不能保存。"); return;
+    }
     if (builtLines.length === 0) {
       setError("至少配置一条计价行；固定物资需要买方单价。");
       return;
@@ -425,7 +427,7 @@ export function SupplyRulesView({
             </div>
             {selectedPrice && priceReadOnly ? (
               <div className="mt-4 space-y-3">
-                <p role="status" className="text-xs text-muted-foreground">此价目包含新版定价规则或会员档位，当前编辑器仅支持只读查看，暂不支持保存、封存和报价演算。</p>
+                <p role="status" className="text-xs text-muted-foreground">此规则版本尚不支持编辑，仅可查看。</p>
                 <pre className="overflow-auto text-xs">{JSON.stringify(selectedPrice.haffRule, null, 2)}</pre>
                 <div className="table-wrap"><table className="data-table">
                   <thead><tr><th>物品</th><th>档位</th><th>计价方式</th><th>单位数量</th><th>租客单价</th><th>号主单价</th></tr></thead>
@@ -449,23 +451,25 @@ export function SupplyRulesView({
                     </Field>
                   ) : null}
                 </div>
-                <Field label="haff-ratio-v1 规则 JSON（SPREAD 必须含 spreadDelta；所有比例单位为 M/100元）">
+                <Field label="哈夫币规则 JSON（保留原 schema；比例单位按该版本合同）">
                   <textarea value={haffRuleText} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setHaffRuleText(event.target.value); setDirty(true); }} className={textareaClass} />
                 </Field>
+                <Field label="价目档位"><select aria-label="价目档位" value={priceTier} onChange={event => setPriceTier(event.target.value as PriceTier)} className={selectClass}>{PRICE_TIERS.map(tier => <option key={tier} value={tier}>{tier}</option>)}</select></Field>
                 <div className="table-wrap">
                   <table className="data-table">
                     <thead><tr><th>物品</th><th>计价方式</th><th>unit_quantity</th><th>买方单价</th><th>号主单价</th></tr></thead>
                     <tbody>
                       {items.map((item) => {
-                        const line = lines[item.id];
+                        const key = item.id + ":" + priceTier;
+                        const line = lines[key];
                         if (!line) return null;
                         return (
                           <tr key={item.id}>
-                            <td>{item.name}（{item.code}）</td>
+                            <td>{item.name}（{item.code}） · {priceTier}</td>
                             <td>{line.pricingKind === "HAFF_RATIO" ? "HAFF_RATIO（按规则推算）" : "FIXED_UNIT"}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" ? "-" : <input value={line.unitQuantity} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [item.id]: { ...line, unitQuantity: event.target.value } }); setDirty(true); }} className={inputClass} />}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" ? "-" : <input value={line.buyerUnitAmount} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [item.id]: { ...line, buyerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2.5" />}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" || priceMode === "PERCENT" ? "-" : <input value={line.ownerUnitAmount} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [item.id]: { ...line, ownerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2" />}</td>
+                            <td>{line.pricingKind === "HAFF_RATIO" ? "-" : <input value={line.unitQuantity} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [key]: { ...line, unitQuantity: event.target.value } }); setDirty(true); }} className={inputClass} />}</td>
+                            <td>{line.pricingKind === "HAFF_RATIO" ? "-" : <input value={line.buyerUnitAmount} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [key]: { ...line, buyerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2.5" />}</td>
+                            <td>{line.pricingKind === "HAFF_RATIO" || priceMode === "PERCENT" ? "-" : <input value={line.ownerUnitAmount} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [key]: { ...line, ownerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2" />}</td>
                           </tr>
                         );
                       })}

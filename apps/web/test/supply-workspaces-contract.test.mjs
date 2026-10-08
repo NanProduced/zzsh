@@ -34,7 +34,6 @@ test('publish retries replay the frozen step and preserve input/media review bou
   assert.match(publishSource, /sendConfirmRequest/);
   assert.match(publishSource, /bindingSaved: false/);
   assert.match(publishSource, /已保存.*已上传，待保存/);
-  assert.match(publishSource, /function unitText/);
   assert.doesNotMatch(publishSource, /<td>\{item\.unit\}<\/td>/);
   assert.match(publishSource, /beforeunload/);
   assert.match(publishSource, /function nextMediaPosition/);
@@ -42,9 +41,9 @@ test('publish retries replay the frozen step and preserve input/media review bou
 });
 
 test('publish shows a server quote, separates owner income from deposits and requires an explicit agreement', () => {
-  assert.match(publishSource, /哈夫币租金/);
-  assert.match(publishSource, /物品计费/);
-  assert.match(publishSource, /号主侧合计/);
+  assert.match(publishSource, /哈夫币预计收入/);
+  assert.match(publishSource, /物品预计收入/);
+  assert.match(publishSource, /预计收入（扣费前）/);
   assert.match(publishSource, /租客押金/);
   assert.match(publishSource, /发布保证金/);
   assert.match(publishSource, /ownerQuoteBreakdown/);
@@ -52,7 +51,7 @@ test('publish shows a server quote, separates owner income from deposits and req
   assert.match(publishSource, /条款已按当前版本确认/);
   assert.match(publishSource, /核对报价/);
   assert.match(publishSource, /确认上架/);
-  assert.match(publishSource, /待核价/);
+  assert.match(publishSource, /尚未核价/);
   assert.doesNotMatch(publishSource, /可继续提交/);
   assert.doesNotMatch(publishSource, /服务端报价/);
 });
@@ -68,7 +67,8 @@ test('publish keeps v2 pricing selection, fast lock and config-missing split sta
   assert.match(publishSource, /service_window_cross_midnight/);
   assert.match(publishSource, /depositRecommendation/);
   assert.match(publishSource, /data-publish-group/);
-  assert.match(publishSource, /aria-expanded=\{open\}/);
+  assert.doesNotMatch(publishSource, /openGroups|setOpenGroups/);
+  assert.match(publishSource, /FormRadioGroup name="rental_mode"/);
   assert.match(publishSource, /delta-section/);
 });
 

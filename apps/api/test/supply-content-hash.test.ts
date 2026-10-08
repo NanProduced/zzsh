@@ -2,6 +2,44 @@ import { computeQuote } from "../src/supply/pricing";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { compatRule } from "./pricing-compat-fixture";
+import { canonicalize } from "../src/supply/content-hash";
+import { publicMediaCategory } from "../src/supply/publishing";
+import { deltaPublicationLevels, normalizeDeltaAttributes, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
+
+test("new declarations validate abilities and Beijing intervals while historical normalization stays unchanged", () => {
+  const attrs = {vit_level:4,bear_level:7,dive_level:0,service_window_start_minute:0,service_window_end_minute:1440,service_window_cross_midnight:false,service_window_timezone:"Asia/Shanghai"};
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes(attrs));
+  assert.deepEqual(deltaPublicationLevels({1:"0",3:"0",4:"0",6:"0",8:"0"}),[4,6]);
+  for (const changes of [{vit_level:3},{vit_level:null},{bear_level:8},{dive_level:null},{dive_level:4},{service_window_start_minute:1440},{service_window_end_minute:0},{service_window_timezone:null},{service_window_cross_midnight:true}]) assert.throws(() => validateDeltaPublicationAttributes({...attrs,...changes}));
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes({...attrs,service_window_start_minute:1320,service_window_end_minute:120,service_window_cross_midnight:true}));
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes({...attrs,service_window_start_minute:541}));
+  const historical=normalizeDeltaAttributes({vit_level:1,bear_level:null,dive_level:null,service_window_start_minute:541});
+  assert.equal(historical.vit_level,1); assert.equal(historical.bear_level,null); assert.equal(historical.service_window_start_minute,541);
+});
+
+test("new catalog binding changes only new content hashes; absent historical references remain absent",()=>{
+  const old=payload();
+  const before=computeContentHash(old);
+  const bound={...old,ruleRefs:{...old.ruleRefs,catalogRevision:"89"}};
+  assert.notEqual(computeContentHash(bound),before);
+  assert.equal(computeContentHash(old),before);
+  assert.equal(Object.hasOwn(normalizeContentPayload(old).ruleRefs,"catalogRevision"),false);
+  assert.throws(()=>normalizeContentPayload({...bound,ruleRefs:{...bound.ruleRefs,catalogRevision:"unknown"}}));
+});
+
+test("version-owned media categories preserve old declarations and cannot drift with asset provenance", () => {
+  const declaration = { title: "", description: null, attributes: {}, inventory: [], skins: [], entitlements: [], termOptionCode: "day", pricingOptionCode: "standard", mediaBindings: [{assetId:"asset_a",byteHash:"a".repeat(64),purpose:"ACCOUNT_DISPLAY" as const,position:0}] };
+  const old = normalizeDeclaration(declaration);
+  assert.equal(Object.hasOwn(old.attributes, "media_categories"), false);
+  const showcase = normalizeDeclaration({...declaration,attributes:{media_categories:{asset_a:"SHOWCASE"}}});
+  const penalty = normalizeDeclaration({...declaration,attributes:{media_categories:{asset_a:"PENALTY"}}});
+  assert.notEqual(canonicalize(showcase), canonicalize(penalty));
+  assert.equal(publicMediaCategory(showcase.attributes,"asset_a","PENALTY"),"SHOWCASE");
+  assert.equal(publicMediaCategory(penalty.attributes,"asset_a","SHOWCASE"),"PENALTY");
+  for (const categories of [{asset_a:"PRIVATE"},{asset_a:["PENALTY"]},["PENALTY"],null]) {
+    assert.throws(()=>normalizeDeclaration({...declaration,attributes:{media_categories:categories}}));
+  }
+});
 
 test("PC1 explicit v2 declaration/quote binding and old consumer rejection", () => {
   const make=(b:string, mode:"custom"|"fast"="custom")=>{

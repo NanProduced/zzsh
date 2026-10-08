@@ -6,7 +6,7 @@ import { act, createElement } from "react";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-test("actual price editor keeps v2/multi-tier read-only in either row order and still saves v1", async () => {
+test("actual price editor preserves every member tier in either row order and still saves v1", async () => {
   const browser = new Window({url:"http://127.0.0.1:3101/workspace/supply/rules"});
   Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,CustomEvent:browser.CustomEvent,IS_REACT_ACT_ENVIRONMENT:true,getComputedStyle:browser.getComputedStyle.bind(browser)});
   Object.defineProperty(globalThis,"navigator",{value:browser.navigator,configurable:true});
@@ -32,22 +32,14 @@ test("actual price editor keeps v2/multi-tier read-only in either row order and 
       await act(async()=>root.render(createElement(SupplyRulesView,{snapshot:{authenticated:true,security:{isBoss:true},permissions:["supply.rules.edit","supply.quote.internal.read"]},onDirtyChange:()=>{}})));
       const priceSection=[...el.querySelectorAll("section")].find(s=>s.querySelector("h3")?.textContent==="价格版本");
       assert.ok(priceSection);
-      if (readonly) {
-        assert.match(priceSection.textContent,/仅支持只读查看/);
-        assert.equal(priceSection.querySelector("form"),null);
-        assert.equal([...el.querySelectorAll("button")].some(b=>["保存价格草稿","演算"].includes(b.textContent)),false);
-        const rows=[...priceSection.querySelectorAll("tbody tr")].map(row=>[...row.querySelectorAll("td")].map(cell=>cell.textContent));
-        assert.equal(rows.length,8);
-        assert.deepEqual(Object.fromEntries(rows.filter(r=>r[0]==="Rounds").map(r=>[r[1],r[4]])),{STANDARD:"10",VIP:"8",SVIP:"7",DISCOUNT_USER:"8"});
-        await act(async()=>priceSection.dispatchEvent(new browser.Event("submit",{bubbles:true,cancelable:true})));
-        assert.deepEqual(writes,[],"read-only price never issues a mutation or preview");
-      } else {
+      {
         const save=[...priceSection.querySelectorAll("button")].find(b=>b.textContent==="保存价格草稿");assert.ok(save);
         await act(async()=>save.closest("form").dispatchEvent(new browser.Event("submit",{bubbles:true,cancelable:true})));
         assert.equal(writes.length,1);
         assert.match(writes[0].path,/price-drafts\/price$/);
-        assert.equal(writes[0].body.lines.length,2);
+        assert.equal(writes[0].body.lines.length,readonly ? 8 : 2);
         assert.equal(writes[0].body.lines.find(l=>l.itemId==="round").buyerUnitAmount,"10");
+        if(readonly) assert.deepEqual(Object.fromEntries(writes[0].body.lines.filter(l=>l.itemId==="round").map(l=>[l.customerTier,l.buyerUnitAmount])),{STANDARD:"10",VIP:"8",SVIP:"7",DISCOUNT_USER:"8"});
       }
       await act(async()=>root.unmount());root=null;el.remove();
     }

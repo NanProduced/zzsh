@@ -29,6 +29,32 @@ export type DeltaCompatPricing = {
 };
 export const DELTA_HAFF_BASE_PER_MILLION = 1_000_000n;
 export const DELTA_ROUNDING_POLICY = "HALF_UP_CENT_V1";
+export const DELTA_RESOURCE_UNITS: Readonly<Record<string, "ROUND" | "PIECE" | "DAY">> = {
+  df_billable_barrett_bullet:"ROUND", top_insure_card_piece:"PIECE", df_billable_top_insure_card:"DAY",
+};
+export const DELTA_PUBLISH_LEVELS = [4, 5, 6, 7] as const;
+
+export function deltaPublicationLevels(map: Record<string, unknown> | undefined): number[] {
+  return DELTA_PUBLISH_LEVELS.filter(level => Object.hasOwn(map ?? {}, String(level)));
+}
+
+// New quote/publication validation is separate from historical normalization.
+export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>): void {
+  const characterLevel=attributes.character_level;
+  if(characterLevel!==null&&characterLevel!==undefined&&(!Number.isSafeInteger(characterLevel)||Number(characterLevel)<0||Number(characterLevel)>60))throw invalid("账号等级须为0–60的整数","attributes.character_level");
+  for (const [field, alias, min, max] of [["vit_level", "vitLevel", 4, 7], ["bear_level", "bearLevel", 4, 7], ["dive_level", "dive_level", 0, 3]] as const) {
+    const value = attributes[field] ?? attributes[alias];
+    if (!Number.isSafeInteger(value) || Number(value) < min || Number(value) > max)
+      throw invalid(`请确认${field === "vit_level" ? "体力" : field === "bear_level" ? "负重" : "潜水"}等级（${min}–${max}）`, `attributes.${field}`);
+  }
+  const start = attributes.service_window_start_minute, end = attributes.service_window_end_minute;
+  if (!Number.isSafeInteger(start) || Number(start) < 0 || Number(start) > 1439)
+    throw invalid("请确认上号开始时间", "attributes.service_window_start_minute");
+  if (!Number.isSafeInteger(end) || Number(end) < 0 || Number(end) > 1440 || end === start)
+    throw invalid("请确认上号结束时间，起止不能相同", "attributes.service_window_end_minute");
+  if (attributes.service_window_timezone !== "Asia/Shanghai" || attributes.service_window_cross_midnight !== (Number(end) < Number(start)))
+    throw invalid("请确认上号时段及跨日状态", "attributes.service_window_timezone");
+}
 
 export type DeltaQuoteReasonCode =
   | "DEPENDENCY_UNAVAILABLE"
@@ -374,9 +400,9 @@ function deltaDecimalText(value: unknown): string {
 }
 
 export function normalizeDeltaAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration"];
+  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration", "media_categories"];
   deltaFields(value, allowed);
-  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration"
+  const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration" && key !== "media_categories"
     && !((DELTA_OPTIONAL_TEXT_FIELDS as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
     const child = value[key] ?? null;
     if (child === null) return [key, null];
@@ -386,6 +412,16 @@ export function normalizeDeltaAttributes(value: Record<string, unknown>): Record
     if ((DELTA_TEXT_FIELDS as readonly string[]).includes(key) || (DELTA_OPTIONAL_TEXT_FIELDS as readonly string[]).includes(key)) return [key, deltaHumanText(child)];
     return [key, child];
   }));
+  if (Object.hasOwn(value, "media_categories")) {
+    const categories = value.media_categories;
+    if (!categories || typeof categories !== "object" || Array.isArray(categories) || Object.keys(categories).length > 100)
+      throw new DeltaDeclarationError("Invalid media categories");
+    for (const [assetId, category] of Object.entries(categories)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$/.test(assetId) || typeof category !== "string" || !["SHOWCASE", "PENALTY"].includes(category))
+        throw new DeltaDeclarationError("Invalid media category");
+    }
+    normalized.media_categories = { ...categories };
+  }
   if (Object.hasOwn(value, "full_payout_declaration")) {
     const declaration = value.full_payout_declaration;
     if (!declaration || typeof declaration !== "object" || Array.isArray(declaration)) throw new DeltaDeclarationError("Invalid full payout declaration");
@@ -433,6 +469,7 @@ export type DeltaProjectedQuote = {
   tenantDeposit?: QuoteAmount | null;
   tenantPayableTotal: QuoteAmount | null;
   ownerTotal?: QuoteAmount;
+  ownerHaffRatio?: string;
   publisherBailRequirement?: QuoteAmount | null;
   contentHash?: string;
   platformFullProfit?: QuoteAmount;
@@ -479,6 +516,8 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
   };
   if (viewer === "owner" || viewer === "admin") {
     projected.ownerTotal = quote.ownerTotal;
+    const ownerRatio = quote.pricingInputs?.compatibility?.ownerRatioB ?? (quote as DeltaProjectedQuote).ownerHaffRatio;
+    if (ownerRatio !== undefined) projected.ownerHaffRatio = ownerRatio;
     projected.publisherBailRequirement = quote.publisherBailRequirement;
     projected.contentHash = quote.contentHash;
   }

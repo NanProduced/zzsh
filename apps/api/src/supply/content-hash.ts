@@ -28,6 +28,7 @@ export type ContentDeclaration = {
 
 export type ContentRuleRefs = {
   releaseId: string;
+  catalogRevision?: string;
   priceVersionId: string;
   termVersionId: string;
   agreementVersionId: string;
@@ -199,8 +200,9 @@ export function canonicalize(value: unknown, depth = 0): string {
 
 export function normalizeContentPayload(input: ContentPayloadInput): ContentPayloadInput {
   fields(input, ["schemaVersion", "accountId", "gameId", "declaration", "ruleRefs", "quoteValues"]);
-  fields(input.ruleRefs, ["releaseId", "priceVersionId", "termVersionId", "agreementVersionId", "agreementDigest"]);
+  fields(input.ruleRefs, ["releaseId", "priceVersionId", "termVersionId", "agreementVersionId", "agreementDigest", "catalogRevision"]);
   if (Object.values(input.ruleRefs).some((value) => typeof value !== "string")) throw new ContentHashError("Invalid rule reference");
+  if (input.ruleRefs.catalogRevision !== undefined && !/^(0|[1-9]\d*)$/.test(input.ruleRefs.catalogRevision)) throw new ContentHashError("Invalid catalog revision");
   if (![1, 2].includes(input.schemaVersion) || input.quoteValues.schemaVersion !== input.schemaVersion) throw new ContentHashError("Invalid content schema");
   if (input.schemaVersion === 2) {
     const choice = normalizeRentalPricing(input.declaration.attributes.rentalPricing);

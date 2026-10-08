@@ -1,4 +1,5 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
+import { deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
@@ -57,6 +58,7 @@ import {
   readPublishingAccount,
   readCurrentVersion,
   readDepositRecommendation,
+  readResourceIncomePreview,
   withPublicListingSnapshot,
   quoteListing,
   readDeclaration,
@@ -105,6 +107,21 @@ export async function handlePublishingRoute(
 ): Promise<boolean> {
   const method = (request.method ?? "GET").toUpperCase();
   const gate = options.supplyGateReader ?? unknownSupplyGate;
+  const resourcePreviewMatch = /^\/games\/([A-Za-z0-9._:-]+)\/resource-income-preview$/.exec(path);
+  if(!admin&&method==="GET"&&resourcePreviewMatch){
+    for(const key of query.keys())if(!["inventory","catalogRevision","releaseId"].includes(key)||query.getAll(key).length!==1)throw invalid("资源预估参数错误",key);
+    let inventory:unknown;try{inventory=JSON.parse(query.get("inventory")??"[]");}catch{throw invalid("库存格式错误","inventory");}
+    const catalogRevision=query.get("catalogRevision"),releaseId=query.get("releaseId");
+    if(!catalogRevision||!/^\d+$/.test(catalogRevision)||!releaseId||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(releaseId))throw invalid("资源预估须绑定当前目录和规则");
+    const context=await readUserContext(request,options);
+    const result=await withTransaction(options.pool,async client=>{
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+      await assertUserContextInTransaction(client,context);
+      await requirePublicGameService(client,resourcePreviewMatch[1]!,GAME_SERVICE.ACCOUNT_RENTAL);
+      return readResourceIncomePreview(client,resourcePreviewMatch[1]!,inventory,{catalogRevision,releaseId});
+    });
+    sendJson(response,200,result,requestId,"no-store");return true;
+  }
   const optionsMatch = /^\/games\/([A-Za-z0-9._:-]+)\/publishing-options$/.exec(
     path,
   );
@@ -138,8 +155,9 @@ export async function handlePublishingRoute(
         releaseId: release.id,
         generation: release.generation,
         termOptions: terms,
-        vitalityLevels:Object.keys(rule?.vitalityDeltaByLevel??{}).map(Number).filter(n=>Number.isSafeInteger(n)&&n>=0&&n<=2147483647).sort((a,b)=>a-b),
-        bearLevels:Object.keys(rule?.bearDeltaByLevel??{}).map(Number).filter(n=>Number.isSafeInteger(n)&&n>=0&&n<=2147483647).sort((a,b)=>a-b),
+        vitalityLevels:deltaPublicationLevels(rule?.vitalityDeltaByLevel),
+        bearLevels:deltaPublicationLevels(rule?.bearDeltaByLevel),
+        diveLevels:[0,1,2,3],
         safeBoxCodes: Object.keys(rule?.baseBySafeBox ?? {}).sort(),
         safeBoxOptions: publicSafeBoxOptions(Object.keys(rule?.baseBySafeBox ?? {}).sort()),
         gradingOptions: publicGradingOptions(),

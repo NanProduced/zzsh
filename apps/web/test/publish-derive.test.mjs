@@ -104,7 +104,7 @@ test('rental pricing selection keeps ordinary B-free and rejects invalid custom 
 });
 
 test('ratio ranges and deposit declarations derive from server payloads only', () => {
-  assert.equal(ratioRangeText({ min: { base: 'C', value: '-1' }, max: { base: 'C', value: '2' } }), 'C-1 ~ C+2');
+  assert.equal(ratioRangeText({ min: { base: 'C', value: '-1' }, max: { base: 'C', value: '2' } }), '普通比例-1 ~ 普通比例+2');
   assert.equal(ratioRangeText({ min: { base: 'ABSOLUTE', value: '39' }, max: { base: 'ABSOLUTE', value: '41' } }), '39 ~ 41');
   assert.equal(ratioRangeText(undefined), null);
   assert.equal(rentalModeLabel('custom'), '自定义比例');

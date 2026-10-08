@@ -30,6 +30,7 @@ type ServiceShellProps = {
   surface?: ServiceSurface;
   contextLabel?: string | null;
   showPageHeading?: boolean;
+  headingInContent?: boolean;
   breadcrumbs?: readonly BreadcrumbItem[];
   searchLabel?: string;
   searchInputLabel?: string;
@@ -50,6 +51,7 @@ export function ServiceShell({
   surface = "utility",
   contextLabel,
   showPageHeading = true,
+  headingInContent = false,
   breadcrumbs,
   searchLabel = "搜索公开账号",
   searchInputLabel = "搜索账号编号或名称",
@@ -79,7 +81,7 @@ export function ServiceShell({
           <Chip className="functional-context-chip" color={meta.color} variant="soft">{context}</Chip>
           <span>{meta.hint}</span>
         </div> : null}
-      </header> : <h1 className="sr-only">{title}</h1>}
+      </header> : headingInContent ? null : <h1 className="sr-only">{title}</h1>}
       {children}
     </main>
     <PortalFooter />

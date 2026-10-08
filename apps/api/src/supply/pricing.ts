@@ -144,6 +144,23 @@ function centsOrNull(text: string | undefined, label: string): bigint | null {
   return parsed.value;
 }
 
+export function computeFixedUnitAmounts(line: PricingLineInput, mode: "SPREAD" | "PERCENT", commissionRate: Decimal | null = null) {
+  if (line.pricingKind !== "FIXED_UNIT" || line.unitQuantity === undefined || line.buyerUnitAmount === undefined
+    || (mode === "SPREAD" && line.ownerUnitAmount === undefined)
+    || (mode === "PERCENT" && line.ownerUnitAmount !== undefined)) throw new DecimalError("fixed price inputs are missing");
+  const quantity = parseNonNegativeDecimal(line.quantity, 0, "quantity");
+  const unitQuantity = parseNonNegativeDecimal(line.unitQuantity, 0, "unit quantity");
+  if (unitQuantity.value <= 0n) throw new DecimalError("unit quantity must be positive");
+  const buyerUnit = parseNonNegativeDecimal(line.buyerUnitAmount, 8, "buyer unit amount");
+  const buyerAmount = divideToScale(multiplyDecimal(quantity, buyerUnit), unitQuantity, 2);
+  const ownerUnit = mode === "SPREAD" ? parseNonNegativeDecimal(line.ownerUnitAmount!, 8, "owner unit amount")
+    : multiplyDecimal(buyerUnit, subtractDecimal({ value: 1n, scale: 0 }, commissionRate ?? {value:0n,scale:8}));
+  if (subtractDecimal(ownerUnit, buyerUnit).value > 0n) throw new DecimalError("owner unit amount is invalid");
+  const ownerAmount = divideToScale(multiplyDecimal(quantity, ownerUnit), unitQuantity, 2);
+  if (ownerAmount.value > buyerAmount.value) throw new DecimalError("owner amount exceeds buyer amount");
+  return { quantity, unitQuantity, buyerUnit, ownerUnit, buyerAmount, ownerAmount };
+}
+
 export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   const reasons = new Set<QuoteReasonCode>();
   const fail = (code: QuoteReasonCode): void => {
@@ -205,23 +222,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
         continue;
       }
       try {
-        const unitQuantity = parseNonNegativeDecimal(line.unitQuantity, 0, "unit quantity");
-        if (unitQuantity.value <= 0n) throw new DecimalError("unit quantity must be positive");
-        const buyerUnit = parseNonNegativeDecimal(line.buyerUnitAmount, 8, "buyer unit amount");
-        const buyerAmount = divideToScale(multiplyDecimal(quantity, buyerUnit), unitQuantity, 2);
-        let ownerAmount: Decimal;
-        let ownerUnit: Decimal;
-        if (input.mode === "SPREAD") {
-          const ownerUnitParsed = parseNonNegativeDecimal(line.ownerUnitAmount!, 8, "owner unit amount");
-          if (subtractDecimal(ownerUnitParsed, buyerUnit).value > 0n) throw new DecimalError("owner unit amount exceeds buyer unit amount");
-          ownerAmount = divideToScale(multiplyDecimal(quantity, ownerUnitParsed), unitQuantity, 2);
-          ownerUnit = ownerUnitParsed;
-        } else {
-          const keep = subtractDecimal({ value: 1n, scale: 0 }, commissionRate ?? { value: 0n, scale: 8 });
-          ownerUnit = multiplyDecimal(buyerUnit, keep);
-          ownerAmount = divideToScale(multiplyDecimal(quantity, ownerUnit), unitQuantity, 2);
-        }
-        if (ownerAmount.value > buyerAmount.value) throw new DecimalError("owner amount exceeds buyer amount");
+        const { unitQuantity, buyerUnit, ownerUnit, buyerAmount, ownerAmount } = computeFixedUnitAmounts(line, input.mode, commissionRate);
         pushLine(quoteLines, line, quantity, unitQuantity, buyerUnit, ownerUnit, buyerAmount.value, ownerAmount.value);
         resourceTotalCents += buyerAmount.value;
         ownerTotalCents += ownerAmount.value;

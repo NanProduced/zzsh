@@ -149,7 +149,7 @@ export function rentalModeLabel(mode: RentalMode | null | undefined): string {
 export function ratioBoundText(bound: { base: "C" | "ABSOLUTE"; value: string } | null | undefined): string {
   if (!bound) return "未配置";
   if (bound.base === "ABSOLUTE") return bound.value;
-  return Number(bound.value) < 0 ? `C${bound.value}` : `C+${bound.value}`;
+  return bound.value.startsWith("-") ? `普通比例${bound.value}` : `普通比例+${bound.value}`;
 }
 
 export function ratioRangeText(

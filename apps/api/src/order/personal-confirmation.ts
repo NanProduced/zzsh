@@ -157,9 +157,15 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   // Explicit ordered fields, normalized quote and frozen refs. Internal evidence goes
   // only into the digest, never into a decodable signed payload or renter projection.
   const quote=normalizeQuote(result.quote);
+  // The personal-order contract has five refs; catalogRevision stays bound by listingHash.
+  const {releaseId,priceVersionId,termVersionId,agreementVersionId,agreementDigest}=version.payload.ruleRefs;
+  const ruleRefs={releaseId,priceVersionId,termVersionId,agreementVersionId,agreementDigest};
+  if(Object.values(ruleRefs).some(value=>typeof value!=="string" || !value.trim())
+    || !/^[0-9a-f]{64}$/.test(agreementDigest) || releaseId!==input.releaseId
+    || priceVersionId!==release.id || termVersionId!==release.term_version_id)unavailable("Personal rule references cannot be verified");
   const snapshot=ownerDeclaration
     ? {schema:"personal-quote-v2",userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
-      fullPayoutDeclaration:ownerDeclaration,ruleRefs:version.payload.ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},
+      fullPayoutDeclaration:ownerDeclaration,ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},
       guarantee:{status:guarantee.publisherBail,reference:guarantee.reference},funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,
         publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,
         disclosureVersion:v2Funding!.disclosureVersion,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote}

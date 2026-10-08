@@ -717,9 +717,9 @@ html[data-theme="dark"] .account-list-matrix .matrix-value {
   display: flex;
   align-items: stretch;
   min-width: 0;
-  height: var(--account-list-data-band-height);
+  height: auto;
   min-height: var(--account-list-data-band-height);
-  max-height: var(--account-list-data-band-height);
+  max-height: none;
   box-sizing: border-box;
 }
 
@@ -727,9 +727,9 @@ html[data-theme="dark"] .account-list-matrix .matrix-value {
   display: flex;
   align-items: stretch;
   width: 100%;
-  height: var(--account-list-data-band-height);
+  height: auto;
   min-height: var(--account-list-data-band-height);
-  max-height: var(--account-list-data-band-height);
+  max-height: none;
   border: 1px solid var(--color-border-subtle, #e2e8f0);
   border-radius: 6px;
   background: var(--color-bg-elevated, #f8fafc);
@@ -819,8 +819,9 @@ html[data-theme="dark"] .resources-info-icon {
   min-width: 0;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-template-rows: var(--account-list-data-row-height) var(--account-list-data-row-height);
-  height: var(--account-list-data-band-height);
+  grid-auto-rows: var(--account-list-data-row-height);
+  min-height: var(--account-list-data-band-height);
+  height: auto;
   box-sizing: border-box;
 }
 
@@ -1448,9 +1449,10 @@ html[data-theme="dark"] .account-skin-chip--more {
   align-items: center;
   gap: 4px;
   margin-top: 7px;
-  height: 24px;
+  flex-wrap: wrap;
+  height: auto;
   min-height: 24px;
-  overflow: hidden;
+  overflow: visible;
 }
 .account-resource-pill {
   display: inline-flex;

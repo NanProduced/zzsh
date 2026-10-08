@@ -474,6 +474,8 @@ export async function createCatalogEntry(
     const unit = requiredString(body, "unit", 16);
     if (!UNITS.has(unit)) throw invalid("Unit is invalid");
     const code = requireCode(body);
+    const resourceUnit = DELTA_RESOURCE_UNITS[code];
+    if (resourceUnit && (unit !== resourceUnit || (body.quantityScale !== undefined && body.quantityScale !== 0))) throw invalid("该资源的基础单位与数量精度固定", "unit");
     await assertUnique(client, "billable_item", gameId, code);
     await client.query(
       `INSERT INTO "zzsh_supply"."billable_item" ("id", "game_id", "code", "name", "unit", "quantity_scale", "required", "enabled", "sort_order", "source_field", "source_token", "source_note")
@@ -560,7 +562,7 @@ export async function updateCatalogEntry(
 ): Promise<{ gameId: string; code?: string; namingState?: string; catalogRevision?: string }> {
   const table = TABLE_BY_KIND[kind];
   const current = await client.query<Record<string, unknown>>(
-    `SELECT * FROM "zzsh_supply"."${table}" WHERE "id" = $1${kind === "skins" ? " FOR UPDATE" : ""}`,
+    `SELECT * FROM "zzsh_supply"."${table}" WHERE "id" = $1${kind === "skins" || kind === "items" ? " FOR UPDATE" : ""}`,
     [entryId],
   );
   const row = current.rows[0];
@@ -575,6 +577,12 @@ export async function updateCatalogEntry(
     const enabled = optionalBoolean(body, "enabled");
     const sortOrder = optionalInteger(body, "sortOrder", -100000, 100000);
     const quantityScale = optionalInteger(body, "quantityScale", 0, 6);
+    const resourceUnit = DELTA_RESOURCE_UNITS[String(row.code)];
+    if (resourceUnit && ((unit !== undefined && unit !== resourceUnit) || (quantityScale !== undefined && quantityScale !== 0))) throw invalid("该资源的基础单位与数量精度固定", "unit");
+    if ((unit !== undefined && unit !== row.unit) || (quantityScale !== undefined && quantityScale !== row.quantity_scale)) {
+      const referenced = await client.query(`SELECT 1 FROM zzsh_supply.inventory_line WHERE item_id=$1 UNION ALL SELECT 1 FROM zzsh_supply.price_line WHERE item_id=$1 LIMIT 1`, [entryId]);
+      if (referenced.rowCount) throw conflict("已引用物品不能更改数量单位，请创建独立目录身份");
+    }
     const mediaId = optionalNullableString(body, "mediaId", 128);
     if ([name, unit, required, enabled, sortOrder, quantityScale, mediaId].every((value) => value === undefined)) throw invalid();
     if (mediaId !== undefined && mediaId !== null) await assertPlatformMediaBinding(client, gameId, mediaId, "ITEM_MEDIA");
@@ -906,3 +914,4 @@ export async function readAdminCatalog(
     owners: owners.rows,
   };
 }
+import { DELTA_RESOURCE_UNITS } from "./delta-rental";

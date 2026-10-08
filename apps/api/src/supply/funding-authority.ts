@@ -108,7 +108,18 @@ function proofFailureReasons(policy: FundingPolicy, priceVersionId: string, acco
   return reasons;
 }
 
-async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string): Promise<{ policy: FundingPolicy; proof: ProofRow; priceVersionId: string; releaseId: string; gameId: string } | null> {
+type FormalFundingContext = {
+  policy: FundingPolicy;
+  proof: ProofRow | null;
+  guaranteeReference: string;
+  guaranteeStatus: "SATISFIED" | "NOT_REQUIRED";
+  publisherBailRequirementCents: string;
+  priceVersionId: string;
+  releaseId: string;
+  gameId: string;
+};
+
+async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string): Promise<FormalFundingContext | null> {
   const policyRow = versionId
     ? (await client.query<PolicyRow & { versionId: string; ownerUserId: string; accountId: string; contentHash: string | null; payload: ListingVersion["payload"]; currentVersionId: string | null; publicationSource: string | null }>(
       `SELECT p.id AS "priceVersionId",p.funding_policy AS policy,p.status,
@@ -128,16 +139,38 @@ async function readFormalContext(client: PoolClient, accountId: string, ownerUse
     : await currentPolicyForAccount(client, accountId, ownerUserId);
   if (!policyRow || policyRow.policy === null || policyRow.status !== "SEALED") return null;
   const policy = validateFundingPolicy(policyRow.policy);
-  const proof = effectiveProof(policy, policyRow.priceVersionId, accountId, ownerUserId, await latestProof(client, accountId));
-  if (!proof) return null;
-  return { policy, proof, priceVersionId: policyRow.priceVersionId, releaseId: policyRow.releaseId, gameId: policyRow.gameId };
+  if (policy.guaranteeRequirement.mode === "NOT_REQUIRED") {
+    // G0 is deliberately policy-only.  A valid sealed NOT_REQUIRED policy is
+    // its own stable waiver basis; it must not require the new credit schema
+    // or make a synthetic proof row.  An explicit historical revocation still
+    // blocks closed-loop use until an operator appends a new accepted record.
+    const latest = await latestProof(client, accountId);
+    if (latest?.status === "REVOKED") return null;
+    return {
+      policy,
+      proof: latest?.status === "NOT_REQUIRED" && latest.ownerUserId === ownerUserId && latest.accountId === accountId
+        && latest.priceVersionId === policyRow.priceVersionId && latest.policyVersion === policy.policyVersion
+        ? latest
+        : null,
+      guaranteeReference: `policy:${policyRow.priceVersionId}:${policy.policyVersion}:NOT_REQUIRED`,
+      guaranteeStatus: "NOT_REQUIRED",
+      publisherBailRequirementCents: "0",
+      priceVersionId: policyRow.priceVersionId,
+      releaseId: policyRow.releaseId,
+      gameId: policyRow.gameId,
+    };
+  }
+  const latest = await latestProof(client, accountId);
+  const proof = effectiveProof(policy, policyRow.priceVersionId, accountId, ownerUserId, latest);
+  if (proof) return { policy, proof, guaranteeReference: proof.id, guaranteeStatus: "SATISFIED", publisherBailRequirementCents: policy.guaranteeRequirement.requiredCents, priceVersionId: policyRow.priceVersionId, releaseId: policyRow.releaseId, gameId: policyRow.gameId };
+  return null;
 }
 
 export const readFormalSupplyGate: SupplyGateReader = async (client, account) => {
   try {
     const context = await readFormalContext(client, account.id, account.owner_user_id);
     if (!context) return unknownGate();
-    return { publisherBail: context.policy.guaranteeRequirement.mode === "NOT_REQUIRED" ? "NOT_REQUIRED" : "SATISFIED", occupancy: "FREE", reference: context.proof.id };
+    return { publisherBail: context.guaranteeStatus, occupancy: "FREE", reference: context.guaranteeReference };
   } catch {
     return unknownGate();
   }
@@ -169,9 +202,9 @@ export const readFormalConfirmationFunding: ConfirmationFundingReader = async (c
     validateOwnerDepositAmount(context.policy, declaration.amountCents, selected.selected);
     const fundingBase = {
       version: context.policy.policyVersion,
-      sourceRef: `funding-policy:${context.priceVersionId}:${context.policy.policyVersion}:guarantee:${context.proof.id}`,
+      sourceRef: `funding-policy:${context.priceVersionId}:${context.policy.policyVersion}:guarantee:${context.guaranteeReference}`,
       baseDepositCents: declaration.amountCents,
-      publisherBailRequirementCents: context.policy.guaranteeRequirement.requiredCents,
+      publisherBailRequirementCents: context.publisherBailRequirementCents,
       vipWaiver: context.policy.vipWaiver,
       svipWaiver: context.policy.svipWaiver,
       fullPayoutPolicyRef: context.policy.fullPayoutPolicyRef,

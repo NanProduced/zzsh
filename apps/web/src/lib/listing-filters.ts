@@ -487,7 +487,7 @@ function decimalBaseUnits(value: string, multiplier: bigint): string {
 export function resourceInputToBase(value: string, item: { unit: string; code?: string }, mode: ResourceInputMode = "display"): string {
   if (mode === "base") return decimalBaseUnits(value, 1n);
   if (item.unit === "HAFF_BASE") return decimalBaseUnits(value, 1_000_000n);
-  if (item.unit === "ROUND" && item.code === "df_billable_level6_bullet") return decimalBaseUnits(value, 60n);
+  if (item.unit === "ROUND" && canonicalResourceCode(item.code ?? null) === "df_billable_level6_bullet") return decimalBaseUnits(value, 60n);
   return decimalBaseUnits(value, 1n);
 }
 
@@ -497,11 +497,11 @@ export function validateResourceQuantityInput(
   bounds: { min: string; max: string },
   mode: ResourceInputMode = "display",
 ): string {
-  const isBullets = item.unit === "ROUND" && item.code === "df_billable_level6_bullet";
+  const isBullets = item.unit === "ROUND" && canonicalResourceCode(item.code ?? null) === "df_billable_level6_bullet";
   if (mode === "display" && isBullets) {
     const minGroup = (BigInt(bounds.min) + 59n) / 60n;
     const maxGroup = BigInt(bounds.max) / 60n;
-    if (!/^[1-9]\d*$/.test(value)) {
+    if (!/^(0|[1-9]\d*)$/.test(value)) {
       throw new Error(`请输入 ${minGroup} 至 ${maxGroup} 组。`);
     }
     const groups = BigInt(value);
@@ -530,7 +530,7 @@ export function resourceInputFromBase(value: string, item: { unit: string; code?
   if (mode === "base") return base.toString();
   let divisor = 1n;
   if (item.unit === "HAFF_BASE") divisor = 1_000_000n;
-  else if (item.unit === "ROUND" && item.code === "df_billable_level6_bullet") divisor = 60n;
+  else if (item.unit === "ROUND" && canonicalResourceCode(item.code ?? null) === "df_billable_level6_bullet") divisor = 60n;
   const whole = base / divisor;
   const remainder = base % divisor;
   if (remainder === 0n) return whole.toString();
@@ -541,20 +541,30 @@ export function resourceInputFromBase(value: string, item: { unit: string; code?
 }
 
 export function resourceUnitShort(item: { unit: string; code?: string }, mode: ResourceInputMode = "display"): string {
-  if (mode === "base") return item.unit === "ROUND" ? "发" : item.unit === "HAFF_BASE" ? "基础单位" : unitLabel(item.unit);
+  if (mode === "base") return item.unit === "ROUND" ? "发" : item.unit === "HAFF_BASE" ? "基础单位" : resourceUnitLabel(item.unit, item.code);
   if (item.unit === "HAFF_BASE") return "M";
-  if (item.unit === "ROUND" && item.code === "df_billable_level6_bullet") return "组";
-  return unitLabel(item.unit);
+  if (item.unit === "ROUND" && canonicalResourceCode(item.code ?? null) === "df_billable_level6_bullet") return "组";
+  return resourceUnitLabel(item.unit, item.code);
 }
 
 export function resourceUnitHint(item: { unit: string; code?: string }, mode: ResourceInputMode = "display"): string | null {
   if (mode === "base") return null;
   if (item.unit === "HAFF_BASE") return "1 M = 1,000,000 哈夫币";
-  if (item.unit === "ROUND" && item.code === "df_billable_level6_bullet") return "1 组 = 60 发";
+  if (item.unit === "ROUND" && canonicalResourceCode(item.code ?? null) === "df_billable_level6_bullet") return "1 组 = 60 发";
   return null;
 }
 
-function unitLabel(unit: string): string {
+export function canonicalResourceCode(code: string | null): string | null {
+  const aliases: Record<string, string> = {
+    level6_armor: "df_billable_level6_armor", level6_helmet: "df_billable_level6_helmet",
+    level6_round: "df_billable_level6_bullet", awm_round: "df_billable_awm_bullet",
+    coffee: "df_billable_coffee",
+  };
+  return code === null ? null : aliases[code] ?? code;
+}
+
+export function resourceUnitLabel(unit: string, code?: string | null): string {
+  if (unit === "PIECE" && (code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece")) return "张";
   return ({ HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" } as Record<string, string>)[unit] ?? unit;
 }
 
@@ -599,7 +609,7 @@ export function resourceItemDisplayName(
   item: { name?: string; code?: string } | undefined,
   context: { gameCode?: string; itemId?: string } = {},
 ): string {
-  if (item?.code === "df_billable_level6_bullet") return "6级子弹";
+  if (canonicalResourceCode(item?.code ?? null) === "df_billable_level6_bullet") return "6级子弹";
   if (!item?.code && context.gameCode === DELTA_GAME_CODE && item?.name === "六级子弹") return "6级子弹";
   return item?.name || (context.itemId ? `未确认（代码 ${context.itemId}）` : "未确认");
 }

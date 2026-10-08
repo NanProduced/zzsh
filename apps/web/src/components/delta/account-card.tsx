@@ -10,6 +10,8 @@ import { ThumbnailCarousel } from "@/components/ui/thumbnail-carousel";
 import { rememberAccountReturn, type AccountReturnSnapshot } from "@/lib/account-return";
 import { haffRatioLabel, resourceQuantityLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
 import { LoginMethodIcon } from "./login-method-icon";
+import { canonicalResourceCode } from "@/lib/listing-filters";
+export { canonicalResourceCode } from "@/lib/listing-filters";
 
 export type AccountCardData = ListingCardData;
 export type AccountCardViewMode = "list" | "grid";
@@ -38,7 +40,7 @@ function compactLevel(value: string | null, fallback: string | null = null): str
 }
 
 export function isHaff(line: ResourceLine): boolean {
-  return line.itemId === "haff" || line.unitLabel === "哈夫币" || line.name.includes("哈夫币");
+  return line.unitLabel === "哈夫币";
 }
 
 const RESOURCE_DISPLAY_ORDER = [
@@ -49,25 +51,9 @@ const RESOURCE_DISPLAY_ORDER = [
   "df_billable_barrett_bullet",
   "df_billable_coffee",
   "df_billable_top_insure_card",
+  "top_insure_card_piece",
 ];
 
-const LIST_RESOURCE_SLOTS = [
-  { code: "df_billable_level6_helmet", label: "6级头盔", aliases: ["6级头盔", "六级头盔"] },
-  { code: "df_billable_level6_armor", label: "6级护甲", aliases: ["6级护甲", "六级护甲"] },
-  { code: "df_billable_level6_bullet", label: "6级子弹", aliases: ["6级子弹", "六级子弹"] },
-  { code: "df_billable_awm_bullet", label: "AWM子弹", aliases: ["AWM子弹"] },
-] as const;
-
-// Both registered catalog generations refer to the same resource concepts.
-// Unknown codes still never fall back to a coincidentally identical display name.
-export function canonicalResourceCode(code: string | null): string | null {
-  const known: Record<string, string> = {
-    level6_armor: "df_billable_level6_armor", level6_helmet: "df_billable_level6_helmet",
-    level6_round: "df_billable_level6_bullet", awm_round: "df_billable_awm_bullet",
-    coffee: "df_billable_coffee",
-  };
-  return code === null ? null : known[code] ?? code;
-}
 function resourceDisplayOrder(line: ResourceLine): number {
   const index = RESOURCE_DISPLAY_ORDER.indexOf(canonicalResourceCode(line.code) ?? "");
   return index === -1 ? RESOURCE_DISPLAY_ORDER.length : index;
@@ -363,12 +349,7 @@ export function AccountCard({
       { label: "每日消耗", value: dailyVal },
     ];
 
-    const listResourceCells = LIST_RESOURCE_SLOTS.map((slot) => ({
-      slot,
-      line: data.resourceLines.find((line) =>
-        canonicalResourceCode(line.code) === slot.code || (line.code === null && (slot.aliases as readonly string[]).includes(line.name))
-      ) ?? null,
-    }));
+    const listResources = orderedQuoteResources(data);
 
     const extraSkinCount = Math.max(0, data.skinTags.length - 3);
 
@@ -497,18 +478,19 @@ export function AccountCard({
               </div>
 
               <div className="resources-grid-2x2">
-                {listResourceCells.map(({ slot, line }) => (
+                {listResources.map((line) => (
                   <div
-                    key={slot.code}
-                    className={`resources-cell${line ? "" : " resources-cell--placeholder"}`}
+                    key={line.itemId}
+                    className="resources-cell"
                   >
-                    <span className="resources-cell-name" title={slot.label}>{slot.label}</span>
-                    <strong className="resources-cell-qty" title={line ? resourceQuantityLabel(line) : "暂无该项资源"}>
-                      {line ? resourceQuantityLabel(line) : "-"}
+                    <span className="resources-cell-name" title={line.name}>{line.name}</span>
+                    <strong className="resources-cell-qty" title={resourceQuantityLabel(line)}>
+                      {resourceQuantityLabel(line)}
                     </strong>
                   </div>
                 ))}
               </div>
+              {listResources.length === 0 ? <span className="supply-muted">库存尚未申报</span> : null}
             </div>
           </section>
 
@@ -599,8 +581,7 @@ export function AccountCard({
   const extraSkinCount = Math.max(0, data.skinTags.length - visibleSkins.length);
 
   const gridQuoteResources = orderedQuoteResources(data);
-  const visibleResourcePills = gridQuoteResources.slice(0, 3);
-  const extraGridResourceCount = Math.max(0, gridQuoteResources.length - visibleResourcePills.length);
+  const visibleResourcePills = gridQuoteResources;
 
 
   const gridThumb = (
@@ -733,11 +714,6 @@ export function AccountCard({
                       </span>
                     );
                   })}
-                  {extraGridResourceCount > 0 ? (
-                    <span className="account-resource-pill account-resource-pill--more" title="更多资源见详情">
-                      +{extraGridResourceCount}
-                    </span>
-                  ) : null}
                 </>
               ) : null}
             </section>

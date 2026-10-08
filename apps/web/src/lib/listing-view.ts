@@ -1,5 +1,5 @@
 import type { Money, PublicListing, PublicQuote, PublicCodeLabel } from "./supply-types.ts";
-import { resourceItemDisplayName } from "./listing-filters.ts";
+import { canonicalResourceCode, resourceItemDisplayName, resourceUnitLabel } from "./listing-filters.ts";
 
 export type ResourceLine = {
   itemId: string;
@@ -18,7 +18,7 @@ export type SkinTag = {
   categoryCode: string | null;
   categoryName: string | null;
 };
-export type ListingMedia = { assetId: string; url: string };
+export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
   id: string;
@@ -123,7 +123,7 @@ export function haffRatioLabel(quantity: string, costAmount: string | null): str
 }
 function quantityLabel(unit: string, quantity: string, code: string | undefined, unitQuantity: string): string {
   if (unit === "HAFF_BASE") return `${haffMillionsLabel(quantity)} M`;
-  if (unit === "ROUND" && code === "df_billable_level6_bullet" && unitQuantity === "60" && /^\d+$/.test(quantity)) {
+  if (unit === "ROUND" && canonicalResourceCode(code ?? null) === "df_billable_level6_bullet" && unitQuantity === "60" && /^\d+$/.test(quantity)) {
     const rounds = BigInt(quantity);
     if (rounds % 60n === 0n) return `${rounds / 60n}组（${rounds}发）`;
   }
@@ -193,20 +193,25 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
     quantity: line.quantity,
     quantityLabel: quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, line.unitQuantity),
-    unitLabel: unitLabel(line.unit),
+    unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code),
     costAmount: line.buyerAmount.amount,
     costLabel: formatMoneyLabel(line.buyerAmount),
-    unitPriceLabel: `¥${line.buyerUnitAmount.amount} / ${line.unitQuantity} ${unitLabel(line.unit)}`,
+    unitPriceLabel: `¥${line.buyerUnitAmount.amount} / ${line.unitQuantity} ${resourceUnitLabel(line.unit, items.get(line.itemId)?.code)}`,
   }));
   const media = projectListingMedia(listing);
-  const firstMedia = media[0];
+  const firstMedia = media.find((m) => m.category !== "PENALTY");
+  const conditions = conditionLines(listing.attributes, listing);
+  const haff = resourceLines.find(line => line.unitLabel === "哈夫币");
+  const structuredTitle = [haff ? `${haff.quantityLabel} 哈夫币` : null,
+    ...["safe_box_code", "grading_code", "character_level"].map(key => conditions.find(line => line.key === key)?.value),
+  ].filter(Boolean).join(" · ");
   return {
     id: listing.id,
     gameId: listing.game?.id,
     versionId: listing.versionId,
     releaseId: listing.releaseId,
     displayNo: listing.displayNo ?? null,
-    title: listing.title,
+    title: listing.title?.trim() || structuredTitle || (listing.displayNo ? `账号 ${listing.displayNo}` : "账号资料待补充"),
     imageUrl: firstMedia?.url,
     media,
     resourceLines,
@@ -217,7 +222,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     payableTotalLabel: formatMoneyLabel(listing.quote.tenantPayableTotal),
     termLabel: termLabel(listing.quote.termSeconds),
     termOptionLabel: listing.termOption?.displayName ?? (listing.termOption ? `未确认（代码 ${listing.termOption.code}）` : null),
-    conditionLines: conditionLines(listing.attributes, listing),
+    conditionLines: conditions,
     loginMethod: listing.attributeDisplay?.loginMethod ?? null,
     ...projectListingSkins(listing),
     entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
@@ -228,7 +233,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
 function projectListingMedia(listing: PublicListing): ListingMedia[] {
   return [...listing.media]
     .sort((a, b) => a.position - b.position)
-    .map(({ assetId, url }) => ({ assetId, url }));
+    .map(({ assetId, url, category }) => ({ assetId, url, ...(category ? { category } : {}) }));
 }
 function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "skinNames" | "skinLabels" | "skinTags"> {
   return {
@@ -258,7 +263,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
     media, resourceLines: listing.inventory.map(line => ({
       itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: items.get(line.itemId)?.name ?? "未确认物品",
       quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
-      unitLabel: unitLabel(line.unit), costAmount: null, costLabel: null, unitPriceLabel: null,
+      unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: null, costLabel: null, unitPriceLabel: null,
     })),
     resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,
     haffRentLabel: formatMoneyLabel(history.haffRent), itemResourceTotalLabel: formatMoneyLabel(history.goods),

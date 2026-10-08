@@ -118,6 +118,56 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CODE_PATTERN = /^$|^[a-z][a-z0-9_:-]{1,63}$/;
 const QUANTITY_PATTERN = /^(0|[1-9]\d{0,23})$/;
 
+// Only source conversion uses the old 60-round group. Native inventory is
+// already in base units and must never pass through this function again.
+export function legacyResourceBaseQuantity(field: string, value: unknown, insuranceSemantic: "DAY" | "CARD_COUNT" | "UNKNOWN" = "UNKNOWN"): { quantity: string | null; unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY" | "UNKNOWN" } {
+  const units: Record<string, "HAFF_BASE" | "ROUND" | "PIECE"> = { haff:"HAFF_BASE",level6_bullet_num:"ROUND",awm_bullet_num:"ROUND",barrett_bullet_num:"ROUND",level6_armor_num:"PIECE",level6_helmet_num:"PIECE",coffee_num:"PIECE" };
+  const unit = field === "top_insure_card_num" ? insuranceSemantic === "CARD_COUNT" ? "PIECE" : insuranceSemantic : units[field];
+  if (!unit) throw invalid("Unknown legacy resource field");
+  if (value === null || value === undefined || value === "") return { quantity:null, unit };
+  const text = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : value;
+  if (typeof text !== "string" || !QUANTITY_PATTERN.test(text)) throw invalid("Legacy quantity is invalid");
+  if (unit === "UNKNOWN") return { quantity:text, unit };
+  const quantity = (BigInt(text) * (field === "level6_bullet_num" ? 60n : 1n)).toString();
+  if (!QUANTITY_PATTERN.test(quantity)) throw invalid("Legacy quantity is out of range");
+  return { quantity, unit };
+}
+
+const DELTA_LEGACY_RESOURCES = [
+  ["haff", ["haff_base", "df_billable_haff"]],
+  ["level6_bullet_num", ["level6_round", "df_billable_level6_bullet"]],
+  ["awm_bullet_num", ["awm_round", "df_billable_awm_bullet"]],
+  ["barrett_bullet_num", ["df_billable_barrett_bullet"]],
+  ["level6_armor_num", ["level6_armor", "df_billable_level6_armor"]],
+  ["level6_helmet_num", ["level6_helmet", "df_billable_level6_helmet"]],
+  ["coffee_num", ["coffee", "df_billable_coffee"]],
+  ["top_insure_card_num", ["df_billable_top_insure_card"]],
+] as const;
+
+/** Restore-source account inventory only. Native declarations already contain
+ * base quantities; frozen orders keep their own quantities/prices unchanged. */
+export function convertLegacyDeltaInventory(
+  source: { sourceSystem: string; sourceEntity: string; legacyId: string; row: Record<string, unknown> },
+  catalog: Array<{ id: string; code: string; unit: string; quantityScale: number }>,
+): { inventory: LegacyInventoryInput[]; pending: Array<{ field: string; quantity: string | null; unit: string; reason: string }> } {
+  if (source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts" || !source.legacyId)
+    throw invalid("Legacy resource source is not verified");
+  const inventory: LegacyInventoryInput[] = [], pending: Array<{ field: string; quantity: string | null; unit: string; reason: string }> = [];
+  for (const [field, codes] of DELTA_LEGACY_RESOURCES) {
+    if (!Object.hasOwn(source.row, field)) { pending.push({field,quantity:null,unit:"UNKNOWN",reason:"SOURCE_FIELD_MISSING"}); continue; }
+    // The restored release's UI explicitly prices/displays this field per day.
+    // It must bind the separate historical DAY identity, never the new card.
+    const converted = legacyResourceBaseQuantity(field, source.row[field], "DAY");
+    const matches = catalog.filter(item => (codes as readonly string[]).includes(item.code));
+    if (matches.length !== 1) { pending.push({field,...converted,reason:matches.length ? "AMBIGUOUS_ITEM_ID" : "CATALOG_ITEM_MISSING"}); continue; }
+    const item = matches[0]!;
+    if (item.unit !== converted.unit || item.quantityScale !== 0) { pending.push({field,...converted,reason:"CATALOG_UNIT_MISMATCH"}); continue; }
+    inventory.push({itemId:item.id,quantity:converted.quantity});
+  }
+  if (new Set(inventory.map(item => item.itemId)).size !== inventory.length) throw invalid("Legacy resources cannot share a target identity");
+  return {inventory:inventory.sort((a,b)=>a.itemId.localeCompare(b.itemId)),pending};
+}
+
 function recordValue(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

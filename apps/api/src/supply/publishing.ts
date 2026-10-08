@@ -12,11 +12,14 @@ import {
 } from "./content-hash";
 import {
   computeDeltaQuote,
+  computeFixedUnitAmounts,
+  ROUNDING_POLICY,
   projectDeltaQuote,
   type InternalQuote,
   type QuoteInput,
   type QuoteViewer,
 } from "./pricing";
+import { formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import {
   projectOwnerMediaBinding,
   projectPublicAttributeDisplay,
@@ -35,7 +38,7 @@ import {
   notFound,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
-import { normalizeRentalPricing } from "./delta-rental";
+import { normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import { readLegacyListing } from "./legacy-listing-read";
@@ -233,11 +236,12 @@ export async function publicationBlockers(
   if (user?.age_status !== "ADULT") reasons.push("ADULT_REQUIRED");
   const game = (
     await client.query(
-      `SELECT enabled,current_release_id FROM zzsh_supply.game WHERE id=$1`,
+      `SELECT enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
       [a.game_id],
     )
   ).rows[0];
   if (!game?.enabled) reasons.push("GAME_UNAVAILABLE");
+  if (v.review_state === "DRAFT" && v.payload && v.origin === "NATIVE" && v.payload.ruleRefs.catalogRevision !== game?.catalog_revision) reasons.push("RULE_CHANGED");
   const rentalService = await readGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
   if (!v.rule_release_id || game?.current_release_id !== v.rule_release_id)
@@ -469,6 +473,11 @@ export async function saveListingDraft(
     throw invalid("属性格式或范围错误", "attributes");
   }
   const inventory = list(body.inventory ?? [], "库存格式错误", "inventory");
+  const characterLevel=normalized.attributes.character_level;
+  if(typeof characterLevel==="number"&&characterLevel>60){
+    const previous=(await readDeclaration(client,v)).attributes.character_level;
+    if(previous!==characterLevel)throw invalid("账号等级须为0–60的整数","attributes.character_level");
+  }
   const seen = new Set<string>();
   for (const item of inventory) {
     ensureOnlyFields(item, ["itemId", "quantity"]);
@@ -537,19 +546,27 @@ export async function saveListingDraft(
       ],
     );
   }
+  const mediaCategories: Record<string, "SHOWCASE" | "PENALTY"> = {};
+  delete normalized.attributes.media_categories;
   for (const binding of media) {
-    ensureOnlyFields(binding, ["assetId", "position"]);
+    ensureOnlyFields(binding, ["assetId", "position", "category"]);
     if (
       !Number.isInteger(binding.position) ||
       Number(binding.position) < 0 ||
       Number(binding.position) > 99
     )
       throw invalid("图片顺序错误", "mediaBindings");
+    if (binding.category !== undefined && binding.category !== "SHOWCASE" && binding.category !== "PENALTY")
+      throw invalid("图片分类错误", "mediaBindings");
+    if (binding.category !== undefined) mediaCategories[idText(binding.assetId, "mediaBindings")] = binding.category;
     await client.query(
       `INSERT INTO zzsh_supply.listing_media(version_id,asset_id,position) VALUES($1,$2,$3)`,
       [v.id, idText(binding.assetId, "mediaBindings"), binding.position],
     );
   }
+  // Version-owned classification participates in the existing declaration hash.
+  // Never overwrite the asset's provenance or reclassify another published version.
+  if (Object.keys(mediaCategories).length) normalized.attributes.media_categories = mediaCategories;
   await client.query(
     `UPDATE zzsh_supply.listing_version SET title=$2,description=$3,attributes=$4,term_option_code=$5,pricing_option_code=$6,schema_version=$7,payload=NULL,content_hash=NULL,rule_release_id=NULL,revision=revision+1 WHERE id=$1`,
     [
@@ -636,6 +653,38 @@ export async function readDepositRecommendation(
     };
   }
 }
+export async function readResourceIncomePreview(client: PoolClient, gameId: string, inventory: unknown, expected: {catalogRevision: string; releaseId: string}) {
+  if (!Array.isArray(inventory) || inventory.length > 100) throw invalid("库存格式错误", "inventory");
+  const quantities = new Map<string, string | null>();
+  for (const row of inventory) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) throw invalid("库存格式错误", "inventory");
+    ensureOnlyFields(row, ["itemId", "quantity"]);
+    if (typeof row.itemId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.itemId) || quantities.has(row.itemId)
+      || (row.quantity !== null && (typeof row.quantity !== "string" || !/^(0|[1-9]\d{0,23})$/.test(row.quantity)))) throw invalid("库存须为不重复的物品身份和整数数量", "inventory");
+    quantities.set(row.itemId, row.quantity);
+  }
+  const release = (await client.query(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
+  if (!release) return {available:false,reason:"RULE_UNCONFIGURED"};
+  if (release.releaseId !== expected.releaseId || release.catalogRevision !== expected.catalogRevision) throw conflict("资源规则已更新，请重新读取目录");
+  if (release.roundingPolicy !== ROUNDING_POLICY || !["SPREAD", "PERCENT"].includes(release.mode)) return {available:false,reason:"RULE_UNSUPPORTED"};
+  const commission = release.mode === "PERCENT" && release.commissionRate !== null ? parseNonNegativeDecimal(release.commissionRate,8,"commission") : null;
+  if (release.mode === "PERCENT" && (!commission || commission.value >= 10n ** BigInt(commission.scale))) return {available:false,reason:"RULE_UNCONFIGURED"};
+  const items=(await client.query(`SELECT i.id AS "itemId",i.code,i.name,i.unit,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE i.game_id=$1 AND i.unit<>'HAFF_BASE' ORDER BY i.sort_order,i.code,i.id`,[gameId,release.priceVersionId])).rows;
+  if([...quantities.keys()].some(id=>!items.some(row=>row.itemId===id)))throw invalid("库存物品不属于当前游戏资源", "inventory");
+  const lines=[],unpricedItemIds:string[]=[];let total=0n,declared=0;
+  for(const item of items){
+    const quantity=quantities.get(item.itemId)??null;
+    if(!item.enabled||item.pricingKind!=="FIXED_UNIT") {if(quantity!==null)unpricedItemIds.push(item.itemId);continue;}
+    try {
+      const amounts=computeFixedUnitAmounts({...item,quantity:quantity??"0",...(item.ownerUnitAmount===null?{ownerUnitAmount:undefined}:{})},release.mode,commission);
+      const ownerAmount=quantity===null?null:yuanAmountObject(amounts.ownerAmount.value);
+      if(ownerAmount){total+=amounts.ownerAmount.value;declared++;}
+      lines.push({itemId:item.itemId,code:item.code,name:item.name,unit:item.unit,unitQuantity:amounts.unitQuantity.value.toString(),ownerUnitAmount:{currency:"CNY",unit:"yuan",amount:formatDecimalExact(amounts.ownerUnit),scale:amounts.ownerUnit.scale},quantity,ownerAmount});
+    }catch {if(quantity!==null)unpricedItemIds.push(item.itemId);}
+  }
+  return {available:true,binding:{gameId,releaseId:release.releaseId,releaseGeneration:release.generation,priceVersionId:release.priceVersionId,catalogRevision:release.catalogRevision},lines,ownerTotal:declared&&unpricedItemIds.length===0?yuanAmountObject(total):null,unreportedItemIds:lines.filter(row=>row.quantity===null).map(row=>row.itemId),unpricedItemIds,informationalOnly:true};
+}
+
 export async function quoteListing(
   client: PoolClient,
   a: PublishingAccount,
@@ -647,8 +696,9 @@ export async function quoteListing(
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可为新申报草稿报价");
   const d = await readDeclaration(client, v);
-  if (!d.title.trim() || d.inventory.some((i) => i.quantity === null))
-    throw invalid("请补齐标题及库存，未知数量不能当作零", "inventory");
+  validateDeltaPublicationAttributes(d.attributes);
+  if (d.inventory.some((i) => i.quantity === null))
+    throw invalid("请补齐库存，未知数量不能当作零", "inventory");
   const missing = await client.query(
     `SELECT 1 FROM zzsh_supply.billable_item i WHERE game_id=$1 AND enabled AND required AND NOT EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=$2 AND l.item_id=i.id AND l.quantity IS NOT NULL)`,
     [a.game_id, v.id],
@@ -657,7 +707,7 @@ export async function quoteListing(
     throw invalid("必填物品须明确填写数量或零", "inventory");
   const release = (
     await client.query(
-      `SELECT r.*,p.mode,p.commission_rate::text,p.haff_rule,p.rounding_policy,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,
+      `SELECT r.*,g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text,p.haff_rule,p.rounding_policy,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled FOR SHARE OF g`,
       [a.game_id],
     )
   ).rows[0];
@@ -759,6 +809,7 @@ export async function quoteListing(
     declaration: d,
     ruleRefs: {
       releaseId: release.id,
+      catalogRevision: release.catalogRevision,
       priceVersionId: release.price_version_id,
       termVersionId: release.term_version_id,
       agreementVersionId: release.agreement_version_id,
@@ -886,25 +937,24 @@ function requireVersionToken(
 ): void {
   if (
     v.id !== body.versionId ||
+    !v.payload ||
     !v.content_hash ||
     v.content_hash !== body.contentHash ||
     v.rule_release_id !== body.releaseId
   )
     throw conflict("资料或规则已变化，请重新预览确认");
 }
-async function assertCurrentRelease(
+export async function assertCurrentRelease(
   client: PoolClient,
   a: PublishingAccount,
   v: ListingVersion,
 ): Promise<void> {
-  if (
-    (
-      await client.query(
-        `SELECT current_release_id FROM zzsh_supply.game WHERE id=$1`,
-        [a.game_id],
-      )
-    ).rows[0]?.current_release_id !== v.rule_release_id
-  )
+  const game = (await client.query(
+    `SELECT current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1 FOR SHARE`,
+    [a.game_id],
+  )).rows[0];
+  if (game?.current_release_id !== v.rule_release_id ||
+    (v.review_state === "DRAFT" && v.origin === "NATIVE" && (!v.payload?.ruleRefs.catalogRevision || v.payload.ruleRefs.catalogRevision !== game.catalog_revision)))
     throw conflict("规则已更新，请创建新草稿并重新确认");
 }
 export async function acceptListingRules(
@@ -947,6 +997,12 @@ async function assertAccepted(
   )
     throw conflict("请先确认这份资料对应的规则和报价");
 }
+export function publicMediaCategory(attributes: Record<string, unknown>, assetId: string, legacyCategory?: string | null): "SHOWCASE" | "PENALTY" {
+  const categories = attributes.media_categories as Record<string, unknown> | undefined;
+  const category = categories ? categories[assetId] : legacyCategory;
+  return category === "PENALTY" ? "PENALTY" : "SHOWCASE";
+}
+
 async function assertMediaReady(
   client: PoolClient,
   v: ListingVersion,
@@ -959,7 +1015,7 @@ async function assertMediaReady(
       [v.id],
     )
   ).rows;
-  if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY"))
+  if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY" && publicMediaCategory(v.attributes, m.id, m.source_note) === "SHOWCASE"))
     throw invalid("至少需要一张展示图", "mediaBindings");
   if (mode === "review") {
     if (media.some((m) => m.review_state !== "APPROVED" ||
@@ -991,6 +1047,8 @@ export async function submitListing(
   const v = await currentVersion(client, a);
   requireVersionToken(v, body);
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
+  await assertCurrentRelease(client, a, v);
+  validateDeltaPublicationAttributes(v.payload!.declaration.attributes);
   const blockers = await publicationBlockers(client, a, v, gate);
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
@@ -1238,16 +1296,18 @@ async function readOwnerDeclaration(
       publicStorageKey: string | null;
       technicalState: string | null;
       ownerUserId: string | null;
+      category: string | null;
     }>(
-      `SELECT m.asset_id AS "assetId",m.position,a.purpose,a.content_hash AS "byteHash",a.review_state AS "reviewState",a.access_class AS "accessClass",a.public_storage_key AS "publicStorageKey",a.technical_state AS "technicalState",a.owner_user_id AS "ownerUserId" FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position,m.asset_id`,
+      `SELECT m.asset_id AS "assetId",m.position,a.purpose,a.content_hash AS "byteHash",a.review_state AS "reviewState",a.access_class AS "accessClass",a.public_storage_key AS "publicStorageKey",a.technical_state AS "technicalState",a.owner_user_id AS "ownerUserId",a.source_note AS "category" FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position,m.asset_id`,
       [v.id],
     )
   ).rows;
   return {
     ...declaration,
-    mediaBindings: media.map((row) =>
-      projectOwnerMediaBinding(row, publicRoute),
-    ),
+    mediaBindings: media.map((row) => ({
+      ...projectOwnerMediaBinding(row, publicRoute),
+      category: publicMediaCategory(v.attributes, row.assetId, row.category),
+    })),
   };
 }
 
@@ -1286,13 +1346,13 @@ export async function listingDetail(
   const blockers = await evaluatePublication(client, a, v, gate);
   const publication = await readListingPublication(client, publicAccount, v);
   const quote = v.payload
-    ? projectDeltaQuote(
+    ? { ...projectDeltaQuote(
         {
           ...v.payload.quoteValues,
           contentHash: v.content_hash,
         } as unknown as InternalQuote,
         quoteViewer,
-      )
+      ), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
     : null;
   if (viewer === "public") {
     if (blockers.length) throw notFound();
@@ -1328,6 +1388,11 @@ export async function listingDetail(
         [a.game_id],
       )
     ).rows[0];
+    const publicMedia = v.payload!.declaration.mediaBindings.filter(m => m.purpose === "ACCOUNT_DISPLAY");
+    const legacyCategories = Object.hasOwn(attrs, "media_categories") ? [] : (await client.query<{assetId:string; category:string|null}>(
+      `SELECT id AS "assetId",source_note AS category FROM zzsh_supply.media_asset WHERE id=ANY($1::text[])`,
+      [publicMedia.map(m => m.assetId)],
+    )).rows;
     return {
       id: a.id,
       displayNo: a.display_no,
@@ -1343,15 +1408,12 @@ export async function listingDetail(
       presentation,
       quote,
       publishedAt: publication?.published_at?.toISOString() ?? null,
-      media: v
-        .payload!.declaration.mediaBindings.filter(
-          (m) => m.purpose === "ACCOUNT_DISPLAY",
-        )
-        .map((m) => ({
-          assetId: m.assetId,
-          position: m.position,
-          url: `/api/v1/supply/listings/${a.id}/media/${m.assetId}`,
-        })),
+      media: publicMedia.map((m) => ({
+        assetId: m.assetId,
+        position: m.position,
+        category: publicMediaCategory(attrs, m.assetId, legacyCategories.find(row => row.assetId === m.assetId)?.category),
+        url: `/api/v1/supply/listings/${a.id}/media/${m.assetId}`,
+      })),
     };
   }
   const publicRoute = await resolvePublicMediaRoute(

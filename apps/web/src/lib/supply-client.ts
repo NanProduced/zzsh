@@ -10,6 +10,7 @@ import type {
   PublicListing,
   PublishingCatalog,
   PublishingOptions,
+  ResourceIncomePreview,
   SupplyErrorBody,
   SupplyFieldError,
   SupplyGame,
@@ -30,9 +31,10 @@ export function editableDeclaration(saved: SavedDeclaration): DraftInput {
     inventory: saved.inventory,
     skins: saved.skins,
     entitlements: saved.entitlements,
-    mediaBindings: saved.mediaBindings.map(({ assetId, position }) => ({
+    mediaBindings: saved.mediaBindings.map(({ assetId, position, category }) => ({
       assetId,
       position,
+      ...(category ? { category } : {}),
     })),
   };
 }
@@ -146,7 +148,7 @@ export const supplyBlockerMessages: Record<string, string> = {
   REQUIRED_ITEM_UNPRICED: "必填物品缺少当前价目，暂不能报价",
   FUNDING_UNKNOWN: "押金与赔付依据尚未确认",
   ACCOUNT_NOT_PUBLISHABLE: "历史异常或归档资料需先处理",
-  PUBLISHER_BAIL_UNCONFIRMED: "发布保证金资格尚未确认",
+  PUBLISHER_BAIL_UNCONFIRMED: "暂时无法确认保证金状态，请稍后重新读取",
   OCCUPIED: "账号当前被占用",
   OCCUPANCY_UNKNOWN: "暂不能确认账号是否空闲",
   REVIEW_REQUIRED: "等待资料审核",
@@ -187,6 +189,11 @@ export class SupplyRequestError extends Error {
       : [];
     this.idempotencyKey = key;
   }
+}
+// A transport/gateway failure does not prove the upstream transaction rejected.
+// Definitive business 4xx are separate; a 401 keeps the same identity-bound intent.
+export function uncertainSupplyWriteFailure(error: unknown): boolean {
+  return !(error instanceof SupplyRequestError) || error.status === 0 || error.status === 401 || error.status === 408 || error.status >= 500;
 }
 export function supplyRecovery(error: SupplyRequestError): {
   action:
@@ -301,6 +308,8 @@ export const supplyApi = {
       "/games/" + id(gameId) + "/publishing-options",
       { signal },
     ),
+  resourceIncomePreview: (gameId: string, inventory: DraftInput["inventory"], binding: {catalogRevision:string;releaseId:string}, signal?:AbortSignal) =>
+    supplyRequest<ResourceIncomePreview>("/games/"+id(gameId)+"/resource-income-preview?"+new URLSearchParams({inventory:JSON.stringify(inventory),...binding}),{signal}),
   browseCatalog: (
     gameId: string,
     query: URLSearchParams = new URLSearchParams(),

@@ -68,6 +68,9 @@ test("PC1 four tiers, bounds, invalid inputs, resource units and projection", ()
     const publicQ=projectQuote(q,"public");
     assert.equal(publicQ.pricingInputs,undefined);
     assert.equal(publicQ.ownerTotal,undefined);
+    assert.equal(publicQ.ownerHaffRatio,undefined);
+    assert.equal(projectQuote(q,"owner").ownerHaffRatio,"47");
+    assert.equal(projectQuote(projectQuote(q,"admin"),"owner").ownerHaffRatio,"47");
     assert.equal(publicQ.rentalMode,"ordinary");
     input.lines = input.lines.map(l=>l.itemId==="day"?{...l,customerTier:undefined}:l);
     assert.equal(computeQuote(input).quotable,false,"missing tier cannot fallback");
@@ -103,6 +106,26 @@ test("PC1 four tiers, bounds, invalid inputs, resource units and projection", ()
 });
 
 import { computeQuote, projectQuote, type HaffRatioRule, type InternalQuote } from "../src/supply/pricing";
+
+test("synthetic four-tier resource vectors freeze per-card/per-round/per-60 quantities without multiplying by rental days",()=>{
+  for(const tier of ["STANDARD","VIP","SVIP","DISCOUNT_USER"] as const){
+    const input=compatInput("47",{rentalMode:"ordinary"});
+    const fixed=[
+      {itemId:"new-card",unit:"PIECE" as const,quantity:"3",unitQuantity:"1",buyerUnitAmount:"5",ownerUnitAmount:"3"},
+      {itemId:"frozen-day",unit:"DAY" as const,quantity:"3",unitQuantity:"1",buyerUnitAmount:"5",ownerUnitAmount:"3"},
+      {itemId:"barrett",unit:"ROUND" as const,quantity:"2",unitQuantity:"1",buyerUnitAmount:"0.5",ownerUnitAmount:"0.2"},
+      {itemId:"six",unit:"ROUND" as const,quantity:"120",unitQuantity:"60",buyerUnitAmount:"10",ownerUnitAmount:"4"},
+    ].map(line=>({...line,customerTier:tier,pricingKind:"FIXED_UNIT" as const}));
+    const result=computeQuote({...input,customerTier:tier,lines:[...input.lines.map(line=>({...line,customerTier:tier})),...fixed]});
+    const quote=quoteOf(result),line=(id:string)=>quote.lines.find(line=>line.itemId===id)!;
+    assert.equal(line("new-card").unit,"PIECE");assert.equal(line("frozen-day").unit,"DAY");
+    assert.equal(line("new-card").buyerAmount.amount,"15.00");assert.equal(line("frozen-day").buyerAmount.amount,"15.00");
+    assert.equal(line("barrett").buyerAmount.amount,"1.00");assert.equal(line("barrett").ownerAmount.amount,"0.40");
+    assert.equal(line("six").buyerAmount.amount,"20.00");assert.equal(line("six").unitQuantity,"60");
+    assert.equal(quote.lines.reduce((sum,line)=>sum+BigInt(line.buyerAmount.amount.replace(".","")),0n).toString(),quote.resourceTotal.amount.replace(".",""));
+    assert.equal(quote.lines.reduce((sum,line)=>sum+BigInt(line.ownerAmount.amount.replace(".","")),0n).toString(),quote.ownerTotal.amount.replace(".",""));
+  }
+});
 
 const HAFF_RULE: HaffRatioRule = {
   schema: "haff-ratio-v1",

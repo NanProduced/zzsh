@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import * as listingFilters from '../src/lib/listing-filters.ts';
 import {
   conditionLines,
   detailBreadcrumbs,
@@ -194,6 +195,7 @@ const accountCardCode = ts.transpileModule(
 
 const accountCardExports = {};
 new Function('require', 'exports', accountCardCode)((name) => {
+  if (name === '@/lib/listing-filters') return listingFilters;
   if (name === '@/lib/listing-view') return { haffRatioLabel, resourceQuantityLabel };
   if (name === '@/lib/account-return') return {};
   if (name === './login-method-icon') return { LoginMethodIcon: () => null };

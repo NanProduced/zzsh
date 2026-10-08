@@ -18,12 +18,28 @@ import {
   resourceItemDisplayName,
   resourceUnitHint,
   resourceUnitShort,
+  resourceUnitLabel,
   validateResourceQuantityInput,
   toggleSkinId,
   regionProvinceSelectionState,
   toggleRegionSelection,
   withFilterChange,
 } from '../src/lib/listing-filters.ts';
+
+test('both registered six-round aliases convert once while other ammunition and insurance keep their base units',()=>{
+  for(const code of ['level6_round','df_billable_level6_bullet']) {
+    const item={code,unit:'ROUND'};
+    assert.equal(resourceInputToBase('2',item),'120');
+    assert.equal(resourceInputFromBase('120',item),'2');
+    assert.equal(validateResourceQuantityInput('0',item,{min:'0',max:'120'}),'0');
+    assert.equal(resourceInputToBase('120',item,'base'),'120');
+    assert.equal(resourceUnitShort(item),'组');
+  }
+  for(const code of ['awm_round','df_billable_awm_bullet','df_billable_barrett_bullet']) assert.equal(resourceInputToBase('2',{code,unit:'ROUND'}),'2');
+  assert.equal(resourceUnitLabel('PIECE','top_insure_card_piece'),'张');
+  assert.equal(resourceUnitLabel('DAY','top_insure_card_piece'),'天');
+  assert.equal(resourceUnitLabel('PIECE','coffee'),'件');
+});
 
 const metadata = {
   available: true,

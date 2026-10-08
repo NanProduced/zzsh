@@ -7,6 +7,7 @@ export type UnitAmount = {
   scale: 8;
 };
 export type PublicQuote = {
+  catalogRevision?: string;
   schemaVersion: 1 | 2;
   rentalMode?: "ordinary" | "custom" | "fast";
   currency: "CNY";
@@ -32,6 +33,7 @@ export type PublicQuote = {
 };
 export type OwnerQuote = PublicQuote & {
   ownerTotal: Money;
+  ownerHaffRatio?: string;
   publisherBailRequirement: Money | null;
   contentHash?: string;
   lines: Array<
@@ -80,7 +82,7 @@ export type PublicListing = {
   sourceUpdatedAt?: string;
   historicalQuote?: { haffRent: Money; goods: Money; deposit: Money; termDays: string };
   inventory?: Array<{ itemId: string; quantity: string | null; unit: string }>;
-  media: Array<{ assetId: string; position: number; url: string }>;
+  media: Array<{ assetId: string; position: number; url: string; category?: "SHOWCASE" | "PENALTY" }>;
 };
 export type Favorite = {
   accountId: string;
@@ -295,6 +297,7 @@ export type PublishingOptions = {
   loginMethodOptions?: PublicCodeLabel[];
   vitalityLevels: number[];
   bearLevels: number[];
+  diveLevels?: number[];
   pricingOptionCodes: string[];
   pricingSchema?: "haff-ratio-v2";
   rentalModes?: Record<
@@ -306,6 +309,11 @@ export type PublishingOptions = {
     }
   >;
   agreement: { id: string; title: string; body: string; digest: string };
+};
+export type ResourceIncomePreview = {available:false;reason:string} | {
+  available:true;informationalOnly:true;binding:{gameId:string;catalogRevision:string;releaseId:string;releaseGeneration:string;priceVersionId:string};
+  lines:Array<{itemId:string;code:string;name:string;unit:string;unitQuantity:string;ownerUnitAmount:{currency:"CNY";unit:"yuan";amount:string;scale:number};quantity:string|null;ownerAmount:{currency:"CNY";unit:"yuan";amount:string;scale:2}|null}>;
+  ownerTotal:{currency:"CNY";unit:"yuan";amount:string;scale:2}|null;unreportedItemIds:string[];unpricedItemIds:string[];
 };
 export type RentalMode = "ordinary" | "custom" | "fast";
 export type DepositRecommendation =
@@ -350,7 +358,7 @@ export type DraftInput = {
     expiresAt: string | null;
     expiryKnowledge: "KNOWN" | "UNKNOWN";
   }>;
-  mediaBindings: Array<{ assetId: string; position: number }>;
+  mediaBindings: Array<{ assetId: string; position: number; category?: "SHOWCASE" | "PENALTY" }>;
 };
 export type VersionToken = {
   expectedRevision: string;
@@ -363,6 +371,7 @@ export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
     assetId: string;
     position: number;
     purpose: "ACCOUNT_EVIDENCE" | "ACCOUNT_DISPLAY";
+    category?: "SHOWCASE" | "PENALTY";
     byteHash: string | null;
     reviewState?: "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED" | "QUARANTINED" | "UNAVAILABLE";
     publicDisplayEligible?: boolean;

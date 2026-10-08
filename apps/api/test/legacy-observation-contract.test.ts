@@ -5,8 +5,41 @@ import {
   recordLegacyObservation,
   resolveLegacyObservationToDraft,
   normalizeLegacyObservationInput,
+  legacyResourceBaseQuantity,
+  convertLegacyDeltaInventory,
   type LegacyObservationInput,
 } from "../src/supply/legacy-observation";
+
+test("legacy resource conversion keeps unknown, zero, ammunition groups and insurance generations separate", () => {
+  assert.deepEqual(legacyResourceBaseQuantity("level6_bullet_num","2"),{quantity:"120",unit:"ROUND"});
+  for(const field of ["awm_bullet_num","barrett_bullet_num"]) assert.deepEqual(legacyResourceBaseQuantity(field,"2"),{quantity:"2",unit:"ROUND"});
+  assert.deepEqual(legacyResourceBaseQuantity("coffee_num","0"),{quantity:"0",unit:"PIECE"});
+  assert.deepEqual(legacyResourceBaseQuantity("coffee_num",null),{quantity:null,unit:"PIECE"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3"),{quantity:"3",unit:"UNKNOWN"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","0"),{quantity:"0",unit:"UNKNOWN"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3","DAY"),{quantity:"3",unit:"DAY"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3","CARD_COUNT"),{quantity:"3",unit:"PIECE"});
+  for(const value of ["-5","1.5","01",1.5]) assert.throws(()=>legacyResourceBaseQuantity("level6_bullet_num",value));
+  assert.deepEqual(legacyResourceBaseQuantity("level6_bullet_num","2"),legacyResourceBaseQuantity("level6_bullet_num","2"));
+});
+
+test("restored account resources bind exact catalog identities, preserve old DAY and never take the new card identity",()=>{
+  const row={haff:"60000000",level6_bullet_num:"2",awm_bullet_num:"3",barrett_bullet_num:"4",level6_armor_num:"0",level6_helmet_num:null,coffee_num:"1",top_insure_card_num:"3"};
+  const source={sourceSystem:"legacy_mysql_restore",sourceEntity:"la_rental_accounts",legacyId:"account-1",row};
+  const catalog=[['haff_base','HAFF_BASE'],['level6_round','ROUND'],['awm_round','ROUND'],['df_billable_barrett_bullet','ROUND'],['level6_armor','PIECE'],['level6_helmet','PIECE'],['coffee','PIECE'],['df_billable_top_insure_card','DAY'],['top_insure_card_piece','PIECE']].map(([code,unit])=>({id:code!,code:code!,unit:unit!,quantityScale:0}));
+  const result=convertLegacyDeltaInventory(source,catalog);
+  assert.deepEqual(result.pending,[]);
+  const quantity=(id:string)=>result.inventory.find(item=>item.itemId===id)?.quantity;
+  assert.equal(quantity('level6_round'),'120');assert.equal(quantity('df_billable_barrett_bullet'),'4');
+  assert.equal(quantity('level6_armor'),'0');assert.equal(quantity('level6_helmet'),null);
+  assert.equal(quantity('df_billable_top_insure_card'),'3');assert.equal(quantity('top_insure_card_piece'),undefined);
+  assert.deepEqual(convertLegacyDeltaInventory(source,catalog),result);
+  const missing={...source,row:{...row}};delete (missing.row as Partial<typeof row>).barrett_bullet_num;
+  assert.equal(convertLegacyDeltaInventory(missing,catalog).pending[0]?.reason,'SOURCE_FIELD_MISSING');
+  assert.equal(convertLegacyDeltaInventory(source,catalog.filter(item=>item.code!=='df_billable_top_insure_card')).pending[0]?.reason,'CATALOG_ITEM_MISSING');
+  assert.equal(convertLegacyDeltaInventory(source,catalog.map(item=>item.code==='df_billable_top_insure_card'?{...item,unit:'PIECE'}:item)).pending[0]?.reason,'CATALOG_UNIT_MISMATCH');
+  assert.throws(()=>convertLegacyDeltaInventory({...source,sourceEntity:'la_order'},catalog));
+});
 
 const DIGEST = "a".repeat(64);
 const ACTOR = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };

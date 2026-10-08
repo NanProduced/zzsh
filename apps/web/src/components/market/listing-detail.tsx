@@ -44,14 +44,17 @@ function DetailImage({ src, alt, className, loading = "lazy" }: { src: string; a
 function DetailGallery({ title, media }: { title: string; media: ListingDetailData["media"] }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
-  if (media.length === 0) return <div className="detail-gallery"><span className="detail-image-fallback"><ImageOff size={24} />暂无可展示的图片</span></div>;
-  const activeMedia = media[activeIndex] ?? media[0]!;
+  const galleryMedia = media.filter((m) => m.category !== "PENALTY");
+  const activeList = galleryMedia;
+  useEffect(() => setActiveIndex(0), [media]);
+  if (activeList.length === 0) return <div className="detail-gallery"><span className="detail-image-fallback"><ImageOff size={24} />暂无可展示的图片</span></div>;
+  const activeMedia = activeList[activeIndex] ?? activeList[0]!;
   return <div className="detail-gallery" aria-label={`${title}公开展示图`}>
     <Dialog.Root open={previewOpen} onOpenChange={setPreviewOpen}>
       <Dialog.Trigger asChild>
         <button type="button" className="detail-gallery-main" aria-label={`放大查看第 ${activeIndex + 1} 张公开展示图`}>
           <DetailImage src={activeMedia.url} alt={`${title}公开展示图，第${activeIndex + 1}张`} loading="eager" />
-          {media.length > 1 ? <span className="detail-gallery-count">第 {activeIndex + 1} / {media.length} 张</span> : null}
+          {activeList.length > 1 ? <span className="detail-gallery-count">第 {activeIndex + 1} / {activeList.length} 张</span> : null}
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>
@@ -63,8 +66,8 @@ function DetailGallery({ title, media }: { title: string; media: ListingDetailDa
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-    {media.length > 1 ? <div className="detail-gallery-thumbs" aria-label="选择公开展示图">
-      {media.map((item, index) => <button key={item.assetId} type="button" className="detail-gallery-thumb" aria-label={`选择第 ${index + 1} 张公开展示图`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)}>
+    {activeList.length > 1 ? <div className="detail-gallery-thumbs" aria-label="选择公开展示图">
+      {activeList.map((item, index) => <button key={item.assetId} type="button" className="detail-gallery-thumb" aria-label={`选择第 ${index + 1} 张公开展示图`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)}>
         <DetailImage src={item.url} alt="" className="detail-gallery-thumb-image" />
         <span className="detail-gallery-thumb-index">{index + 1}</span>
       </button>)}
@@ -143,47 +146,52 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
       <Link className="functional-back" href={back.href}><ArrowLeft size={16} aria-hidden="true" /><span>{back.label}</span></Link>
     </div>
 
-    <div className="detail-hero">
-      <DetailGallery title={data.title} media={data.media} />
-      <div className="detail-hero-summary">
-        <div className="detail-hero-title-row">
-          <h2 className="detail-hero-title">{data.title}</h2>
-          {data.rentalMode === "fast" ? <span className="detail-deal-tag">特惠</span> : null}
-        </div>
-        <p className="detail-meta">
-          {serviceWindow ? <span>可上号 {serviceWindow}</span> : null}
-          <span>租期 {data.termLabel}</span>
-        </p>
-        <dl className="detail-assets" aria-label="核心资产">
-          {assetCells.map((cell) => <div key={cell.label}>
-            <dt>{cell.label}</dt>
-            <dd>{cell.value}</dd>
-          </div>)}
-        </dl>
-        <dl className="detail-matrix" aria-label="关键条件">
-          {matrixCells.map((cell) => <div key={cell.label} className="detail-matrix-cell">
-            <dt>{cell.label}</dt>
-            <dd>{cell.value}</dd>
-          </div>)}
-        </dl>
-        <div className="detail-fees" role="group" aria-label="费用摘要">
-          <div className="detail-fee-group" role="group" aria-label="资源费用">
-            <div className="detail-fee-row detail-fee-row--head"><span className="detail-fee-label">资源费用小计</span><span className={feeValueClass(resourceSubtotal, false)}>{resourceSubtotal}</span></div>
-            <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">哈夫币租金</span><span className={feeValueClass(haffRent, false)}>{haffRent}</span></div>
-            <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">物品资源费用</span><span className={feeValueClass(itemResource, false)}>{itemResource}</span></div>
+    {(() => {
+      const displayTitle = data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号");
+      return (
+        <div className="detail-hero">
+          <DetailGallery title={displayTitle} media={data.media} />
+          <div className="detail-hero-summary">
+            <div className="detail-hero-title-row">
+              <h2 className="detail-hero-title">{displayTitle}</h2>
+              {data.rentalMode === "fast" ? <span className="detail-deal-tag">特惠</span> : null}
+            </div>
+            <p className="detail-meta">
+              {serviceWindow ? <span>可上号 {serviceWindow}</span> : null}
+              <span>租期 {data.termLabel}</span>
+            </p>
+            <dl className="detail-assets" aria-label="核心资产">
+              {assetCells.map((cell) => <div key={cell.label}>
+                <dt>{cell.label}</dt>
+                <dd>{cell.value}</dd>
+              </div>)}
+            </dl>
+            <dl className="detail-matrix" aria-label="关键条件">
+              {matrixCells.map((cell) => <div key={cell.label} className="detail-matrix-cell">
+                <dt>{cell.label}</dt>
+                <dd>{cell.value}</dd>
+              </div>)}
+            </dl>
+            <div className="detail-fees" role="group" aria-label="费用摘要">
+              <div className="detail-fee-group" role="group" aria-label="资源费用">
+                <div className="detail-fee-row detail-fee-row--head"><span className="detail-fee-label">资源费用小计</span><span className={feeValueClass(resourceSubtotal, false)}>{resourceSubtotal}</span></div>
+                <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">哈夫币租金</span><span className={feeValueClass(haffRent, false)}>{haffRent}</span></div>
+                <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">物品资源费用</span><span className={feeValueClass(itemResource, false)}>{itemResource}</span></div>
+              </div>
+              <div className="detail-fee-row"><span className="detail-fee-label">押金</span><span className={feeValueClass(deposit, false)}>{deposit}</span></div>
+              <div className="detail-fee-row detail-fee-row--total"><span className="detail-fee-label">预计合计</span><span className={feeValueClass(payableTotal, true)}>{payableTotal}</span></div>
+            </div>
+            <div className="detail-hero-actions">
+              <FavoriteButton accountId={data.id} title={displayTitle} variant="inline" />
+              {data.historicalReadOnly
+                ? <p className="detail-stage-note">历史只读账号仅展示公开信息，不支持在线租赁。</p>
+                : <RentalConfirmPanel key={identityKey} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} />}
+            </div>
+            <FavoriteNotice />
           </div>
-          <div className="detail-fee-row"><span className="detail-fee-label">押金</span><span className={feeValueClass(deposit, false)}>{deposit}</span></div>
-          <div className="detail-fee-row detail-fee-row--total"><span className="detail-fee-label">预计合计</span><span className={feeValueClass(payableTotal, true)}>{payableTotal}</span></div>
         </div>
-        <div className="detail-hero-actions">
-          <FavoriteButton accountId={data.id} title={data.title} variant="inline" />
-          {data.historicalReadOnly
-            ? <p className="detail-stage-note">历史只读账号仅展示公开信息，不支持在线租赁。</p>
-            : <RentalConfirmPanel key={identityKey} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} />}
-        </div>
-        <FavoriteNotice />
-      </div>
-    </div>
+      );
+    })()}
 
     <nav className="detail-anchors" aria-label="详情章节">
       {ANCHORS.map(({ id, label }) => <a key={id} href={`#${id}`} aria-current={activeAnchor === id ? "true" : undefined}>{label}</a>)}
@@ -247,15 +255,36 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
         </ul> : <p className="detail-hint">暂无已确认权益。</p>}
       </section>
 
-      <section id="detail-shots" aria-labelledby="detail-shots-heading">
-        <div className="detail-section-heading">
-          <h2 id="detail-shots-heading">账号截图</h2>
-          {data.media.length > 0 ? <p className="detail-section-note">共 {data.media.length} 张截图</p> : null}
-        </div>
-        {data.media.length > 0 ? <div className="detail-shots">
-          {data.media.map((item, index) => <DetailImage key={item.assetId} src={item.url} alt={`${data.title}账号截图，第${index + 1}张`} className="detail-shot-image" />)}
-        </div> : <p className="detail-hint">暂无可展示的截图。</p>}
-      </section>
+      {(() => {
+        const showcaseMedia = data.media.filter((item) => item.category !== "PENALTY");
+        const penaltyMedia = data.media.filter((item) => item.category === "PENALTY");
+        const displayTitle = data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号");
+        return (
+          <>
+            <section id="detail-shots" aria-labelledby="detail-shots-heading">
+              <div className="detail-section-heading">
+                <h2 id="detail-shots-heading">账号展示图</h2>
+                {showcaseMedia.length > 0 ? <p className="detail-section-note">共 {showcaseMedia.length} 张展示图</p> : null}
+              </div>
+              {showcaseMedia.length > 0 ? <div className="detail-shots">
+                {showcaseMedia.map((item, index) => <DetailImage key={item.assetId} src={item.url} alt={`${displayTitle}账号展示图，第${index + 1}张`} className="detail-shot-image" />)}
+              </div> : <p className="detail-hint">暂无可展示的截图。</p>}
+            </section>
+
+            {penaltyMedia.length > 0 ? (
+              <section id="detail-penalty-shots" aria-labelledby="detail-penalty-heading">
+                <div className="detail-section-heading">
+                  <h2 id="detail-penalty-heading">封禁与处罚公示图</h2>
+                  <p className="detail-section-note">共 {penaltyMedia.length} 张公示图 · 号主申报公开资料</p>
+                </div>
+                <div className="detail-shots">
+                  {penaltyMedia.map((item, index) => <DetailImage key={item.assetId} src={item.url} alt={`${displayTitle}处罚与封禁公示图，第${index + 1}张`} className="detail-shot-image" />)}
+                </div>
+              </section>
+            ) : null}
+          </>
+        );
+      })()}
 
       <section id="detail-terms" aria-labelledby="detail-terms-heading">
         <div className="detail-section-heading">
