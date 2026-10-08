@@ -79,6 +79,7 @@ type RequestDetail = RequestSummary & {
 
 type ListKey = "mine" | "pending" | "audit";
 type ListPage = { cursors: (string | null)[]; index: number; nextCursor: string | null };
+type AuditFilter = { action: string; objectType: string; actorUsername: string; requestId: string };
 type ConfirmKind = "approve" | "reject" | "execute" | "template";
 type ReadbackTarget =
   | { kind: "templates" }
@@ -152,6 +153,74 @@ function prettyDetails(details: Record<string, unknown>): string {
   return Object.entries(details).map(([key, value]) => key + ": " + String(value)).join("；") || "无附加信息";
 }
 
+const emptyAuditFilter: AuditFilter = { action: "", objectType: "", actorUsername: "", requestId: "" };
+
+const approvalAuditActions = [
+  "approval.request.created",
+  "approval.request.approved",
+  "approval.request.rejected",
+  "approval.request.cancelled",
+  "approval.request.expired",
+  "approval.request.candidate_added",
+  "approval.execution.completed",
+  "approval.template.configured",
+];
+
+const approvalAuditObjectTypes: Record<string, string> = {
+  approval_request: "审批申请",
+  approval_template: "审批模板",
+};
+
+const approvalAuditActionLabels: Record<string, string> = {
+  "approval.request.created": "提交申请",
+  "approval.request.approved": "审批同意",
+  "approval.request.rejected": "审批拒绝",
+  "approval.request.cancelled": "申请终止",
+  "approval.request.expired": "申请过期",
+  "approval.request.candidate_added": "追加审批人",
+  "approval.execution.completed": "执行完成",
+  "approval.template.configured": "配置审批模板",
+};
+
+function approvalAuditActionLabel(action: string): string {
+  return approvalAuditActionLabels[action] ?? action;
+}
+
+function approvalAuditOutcomeLabel(outcome: string): string {
+  return outcome === "SUCCESS" ? "成功" : outcome === "FAILURE" ? "失败" : outcome;
+}
+
+function auditNarrative(event: AuditEvent): string {
+  if (event.reason) return event.reason;
+  const summary = event.details?.summary;
+  if (typeof summary === "string" && summary.trim()) return summary;
+  return "无附加说明";
+}
+
+function auditFilterFromQuery(query: Record<string, string> | undefined): AuditFilter {
+  return {
+    action: query?.action ?? "",
+    objectType: query?.objectType ?? "",
+    actorUsername: query?.actorUsername ?? "",
+    requestId: query?.requestId ?? "",
+  };
+}
+
+function auditFilterKey(filter: AuditFilter): string {
+  return JSON.stringify([filter.action, filter.objectType, filter.actorUsername.trim(), filter.requestId.trim()]);
+}
+
+function auditScopeLabel(scope: string | undefined): string {
+  if (scope === "BOSS_ALL_APPROVAL_EVENTS") return "Boss：全部审批与授权事件";
+  if (scope === "ACTOR_OR_REQUEST_SCOPE") return "当前账号：本人操作或本人相关申请的事件";
+  return "已按当前账号范围过滤";
+}
+
+function relatedRequestIdOf(event: AuditEvent): string | null {
+  // audit_event.request_id 是 HTTP 请求编号，不是审批申请；只有审批申请对象本身可跳转。
+  return event.objectType === "approval_request" ? event.objectId : null;
+}
+
 function PagePager({ page, busy, onPrev, onNext, onFirst }: { page: ListPage; busy: boolean; onPrev: () => void; onNext: () => void; onFirst: () => void }) {
   return (
     <div className="flex items-center justify-end gap-2 mt-3">
@@ -167,17 +236,21 @@ export function ApprovalAuditView({
   snapshot,
   initialRequestId,
   initialTab,
+  initialQuery,
   objectOnly = false,
   onOpenObject,
   onTabChange,
+  onQueryChange,
   refreshNonce = 0,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialRequestId?: string;
   initialTab?: "mine" | "pending" | "templates" | "audit";
+  initialQuery?: Record<string, string>;
   objectOnly?: boolean;
   onOpenObject?: (requestId: string, title: string) => void;
   onTabChange?: (tab: "mine" | "pending" | "templates" | "audit") => void;
+  onQueryChange?: (query: Record<string, string>) => void;
   refreshNonce?: number;
 }) {
   const canTemplateRead = hasPermission(snapshot, "approval.template.read");
@@ -222,8 +295,13 @@ export function ApprovalAuditView({
   const [detailFresh, setDetailFresh] = useState(false);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [pageMeta, setPageMeta] = useState<Record<ListKey, ListPage>>(emptyPageMeta);
+  const [auditFilter, setAuditFilter] = useState<AuditFilter>(() => auditFilterFromQuery(initialQuery));
+  const [auditDraft, setAuditDraft] = useState<AuditFilter>(() => auditFilterFromQuery(initialQuery));
+  const [auditScope, setAuditScope] = useState<string>();
 
   const pageMetaRef = useRef(pageMeta);
+  const auditFilterRef = useRef(auditFilter);
+  const previousAuditQueryKeyRef = useRef(auditFilterKey(auditFilterFromQuery(initialQuery)));
   const seqRef = useRef<Record<ListKey | "detail" | "templates" | "admins", number>>({ mine: 0, pending: 0, audit: 0, detail: 0, templates: 0, admins: 0 });
   const mountedRef = useRef(true);
   const previousContextKeyRef = useRef(contextKey);
@@ -272,6 +350,11 @@ export function ApprovalAuditView({
     setPageMeta(pageMetaRef.current);
     setReading({});
     setError(undefined);
+    auditFilterRef.current = emptyAuditFilter;
+    setAuditFilter(emptyAuditFilter);
+    setAuditDraft(emptyAuditFilter);
+    setAuditScope(undefined);
+    previousAuditQueryKeyRef.current = auditFilterKey(emptyAuditFilter);
     setMessage(undefined);
     setConfirm(null);
     setRecall("");
@@ -315,17 +398,28 @@ export function ApprovalAuditView({
     const seq = ++seqRef.current[key];
     setReading((current) => ({ ...current, [key]: true }));
     try {
-      const base = key === "mine"
-        ? "/security/approvals/requests/mine?limit=50"
-        : key === "pending"
-          ? "/security/approvals/requests/pending?limit=50"
-          : "/security/approvals/audit/events?limit=50";
-      const url = base + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+      let url: string;
+      if (key === "audit") {
+        const filter = auditFilterRef.current;
+        const params = new URLSearchParams({ limit: "50" });
+        if (filter.action) params.set("action", filter.action);
+        if (filter.objectType) params.set("objectType", filter.objectType);
+        if (filter.actorUsername) params.set("actorUsername", filter.actorUsername);
+        if (filter.requestId) params.set("requestId", filter.requestId);
+        if (cursor) params.set("cursor", cursor);
+        url = "/security/approvals/audit/events?" + params.toString();
+      } else {
+        const base = key === "mine"
+          ? "/security/approvals/requests/mine?limit=50"
+          : "/security/approvals/requests/pending?limit=50";
+        url = base + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+      }
       let nextCursor: string | null = null;
       if (key === "audit") {
-        const data = await adminRequest<{ events?: AuditEvent[]; nextCursor?: string | null }>(url);
+        const data = await adminRequest<{ events?: AuditEvent[]; nextCursor?: string | null; scope?: string }>(url);
         if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current[key] !== seq) return false;
         setAudit(data.events ?? []);
+        setAuditScope(data.scope);
         nextCursor = data.nextCursor ?? null;
       } else {
         const data = await adminRequest<{ requests?: RequestSummary[]; nextCursor?: string | null }>(url);
@@ -457,6 +551,53 @@ export function ApprovalAuditView({
     if (index === meta.index) return;
     void loadList(key, { cursors, index });
   };
+
+  const applyAuditFilter = (next: AuditFilter, syncUrl: boolean) => {
+    auditFilterRef.current = next;
+    setAuditFilter(next);
+    setAuditDraft(next);
+    // 新条件生效前清空旧条件的结果、范围与分页；失败时只显示错误，不把旧行当新结果。
+    setAudit([]);
+    setAuditScope(undefined);
+    pageMetaRef.current = { ...pageMetaRef.current, audit: { cursors: [null], index: 0, nextCursor: null } };
+    setPageMeta(pageMetaRef.current);
+    if (syncUrl && onQueryChange) {
+      const query: Record<string, string> = { ...(initialQuery ?? {}), tab: "audit" };
+      delete query.action;
+      delete query.objectType;
+      delete query.actorUsername;
+      delete query.requestId;
+      if (next.action) query.action = next.action;
+      if (next.objectType) query.objectType = next.objectType;
+      if (next.actorUsername) query.actorUsername = next.actorUsername;
+      if (next.requestId) query.requestId = next.requestId;
+      onQueryChange(query);
+    }
+    void loadList("audit", { cursors: [null], index: 0 });
+  };
+
+  const submitAuditFilter = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    applyAuditFilter({
+      action: auditDraft.action,
+      objectType: auditDraft.objectType,
+      actorUsername: auditDraft.actorUsername.trim(),
+      requestId: auditDraft.requestId.trim(),
+    }, true);
+  };
+
+  // 同一审批 tab 复用时，外部 URL query 变化（如恢复的标签）回填审计筛选并重新读取。
+  // 与“已应用”的查询比较：本页提交后的 URL 回声因 applied 相同而跳过；
+  // 未提交草稿与外部 URL 一致时仍按外部导航重新读取已应用条件。
+  const auditQueryKey = auditFilterKey(auditFilterFromQuery(initialQuery));
+  useEffect(() => {
+    const changed = previousAuditQueryKeyRef.current !== auditQueryKey;
+    previousAuditQueryKeyRef.current = auditQueryKey;
+    if (!changed || objectOnly) return;
+    if (auditFilterKey(auditFilterRef.current) === auditQueryKey) return;
+    applyAuditFilter(auditFilterFromQuery(initialQuery), false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auditQueryKey]);
 
   const performReadback = useCallback(async (target: ReadbackTarget): Promise<boolean> => {
     if (target.kind === "templates") return loadTemplates();
@@ -767,6 +908,13 @@ export function ApprovalAuditView({
               <div className="space-y-2"><p><span className="text-muted-foreground">业务摘要：</span>{detail.summary}</p><p><span className="text-muted-foreground">发起人：</span>{personLabel(detail.requester)}</p><p><span className="text-muted-foreground">操作：</span><span className="font-mono">{detail.operation.code}</span> / <span className="font-mono">{detail.operation.triggerCondition}</span></p><p><span className="text-muted-foreground">载荷版本 / 哈希：</span>{detail.operation.payloadVersion} / <span className="font-mono break-all">{detail.operation.payloadHash}</span></p><p><span className="text-muted-foreground">模板快照版本：</span>{detail.template.version}</p><p><span className="text-muted-foreground">有效期：</span>{formatDate(detail.expiresAt)}</p>{detail.statusReason ? <p className="text-amber-300">{detail.statusReason}</p> : null}</div>
               <div className="rounded border border-border bg-surface-soft p-3"><p className="text-muted-foreground mb-2">不可变测试载荷（不含资金字段）</p><pre className="font-mono text-[11px] whitespace-pre-wrap">{JSON.stringify(detail.operation.payload ?? {}, null, 2)}</pre></div>
             </div>
+            {detail.supersedesRequestId || detail.supersededByRequestId ? (
+              <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
+                {detail.supersedesRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersedesRequestId!, "被替代的审批申请")}>查看被替代的原申请</Button> : null}
+                {detail.supersededByRequestId ? <span className="text-amber-300">本申请已被另一申请替代，原申请不再推进。</span> : null}
+                {detail.supersededByRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersededByRequestId!, "替代本申请的审批申请")}>查看替代申请</Button> : null}
+              </div>
+            ) : null}
             <div className="mt-5"><h4 className="text-xs font-semibold mb-2">候选审批人</h4><div className="flex flex-wrap gap-2">{detail.candidates.map((candidate) => <span key={candidate.username + "-" + (candidate.source ?? "template")} className={"status-badge " + (candidate.eligible ? "success" : "warning")}>{personLabel(candidate)} · {candidate.eligible ? "当前可审批" : candidate.status === "FROZEN" ? "已冻结" : "当前无资格"}{candidate.source === "APPENDED" ? " · 追加" : " · 模板"}</span>)}</div></div>
             {detail.decision ? <p className="text-xs mt-4">决定：{detail.decision.decision === "APPROVED" ? "同意" : "拒绝"}，由 {personLabel(detail.decision.approver)} 于 {formatDate(detail.decision.createdAt)} 记录。{detail.decision.reason ? "原因：" + detail.decision.reason : ""}</p> : null}
             {detail.execution ? <p className={"text-xs mt-2 " + (detail.execution.status === "SUCCEEDED" ? "text-emerald-400" : "text-rose-400")}>执行：{detail.execution.status === "SUCCEEDED" ? "成功" : "失败"}，结果码 {detail.execution.resultCode}；{detail.execution.resultDetail ?? "无附加说明"}</p> : null}
@@ -851,6 +999,13 @@ export function ApprovalAuditView({
             <div className="space-y-2"><p><span className="text-muted-foreground">业务摘要：</span>{detail.summary}</p><p><span className="text-muted-foreground">发起人：</span>{personLabel(detail.requester)}</p><p><span className="text-muted-foreground">操作：</span><span className="font-mono">{detail.operation.code}</span> / <span className="font-mono">{detail.operation.triggerCondition}</span></p><p><span className="text-muted-foreground">载荷版本 / 哈希：</span>{detail.operation.payloadVersion} / <span className="font-mono break-all">{detail.operation.payloadHash}</span></p><p><span className="text-muted-foreground">模板快照版本：</span>{detail.template.version}</p><p><span className="text-muted-foreground">有效期：</span>{formatDate(detail.expiresAt)}</p>{detail.statusReason ? <p className="text-amber-300">{detail.statusReason}</p> : null}</div>
             <div className="rounded border border-border bg-surface-soft p-3"><p className="text-muted-foreground mb-2">不可变测试载荷（不含资金字段）</p><pre className="font-mono text-[11px] whitespace-pre-wrap">{JSON.stringify(detail.operation.payload ?? {}, null, 2)}</pre></div>
           </div>
+          {detail.supersedesRequestId || detail.supersededByRequestId ? (
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
+              {detail.supersedesRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersedesRequestId!, "被替代的审批申请")}>查看被替代的原申请</Button> : null}
+              {detail.supersededByRequestId ? <span className="text-amber-300">本申请已被另一申请替代，原申请不再推进。</span> : null}
+              {detail.supersededByRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersededByRequestId!, "替代本申请的审批申请")}>查看替代申请</Button> : null}
+            </div>
+          ) : null}
           <div className="mt-5"><h4 className="text-xs font-semibold mb-2">候选审批人</h4><div className="flex flex-wrap gap-2">{detail.candidates.map((candidate) => <span key={candidate.username + "-" + (candidate.source ?? "template")} className={"status-badge " + (candidate.eligible ? "success" : "warning")}>{personLabel(candidate)} · {candidate.eligible ? "当前可审批" : candidate.status === "FROZEN" ? "已冻结" : "当前无资格"}{candidate.source === "APPENDED" ? " · 追加" : " · 模板"}</span>)}</div></div>
           {detail.decision ? <p className="text-xs mt-4">决定：{detail.decision.decision === "APPROVED" ? "同意" : "拒绝"}，由 {personLabel(detail.decision.approver)} 于 {formatDate(detail.decision.createdAt)} 记录。{detail.decision.reason ? "原因：" + detail.decision.reason : ""}</p> : null}
           {detail.execution ? <p className={"text-xs mt-2 " + (detail.execution.status === "SUCCEEDED" ? "text-emerald-400" : "text-rose-400")}>执行：{detail.execution.status === "SUCCEEDED" ? "成功" : "失败"}，结果码 {detail.execution.resultCode}；{detail.execution.resultDetail ?? "无附加说明"}</p> : null}
@@ -863,9 +1018,20 @@ export function ApprovalAuditView({
       {tab === "audit" && canAudit ? (
         <section className="section-panel">
           <div className="panel-heading"><div><h3>授权审批审计</h3><p>按当前读取权限和对象范围游标分页读取；敏感字段已在 API 层裁剪，只有追加记录，没有改删入口。</p></div></div>
+          <form onSubmit={submitAuditFilter} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
+            <label className="space-y-1 text-xs"><span className="text-muted-foreground">动作</span><select value={auditDraft.action} onChange={(event) => setAuditDraft({ ...auditDraft, action: event.target.value })} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{approvalAuditActions.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+            <label className="space-y-1 text-xs"><span className="text-muted-foreground">对象类型</span><select value={auditDraft.objectType} onChange={(event) => setAuditDraft({ ...auditDraft, objectType: event.target.value })} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{Object.entries(approvalAuditObjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作者账号</span><input value={auditDraft.actorUsername} onChange={(event) => setAuditDraft({ ...auditDraft, actorUsername: event.target.value })} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="如 ZZ00001" /></label>
+            <label className="space-y-1 text-xs"><span className="text-muted-foreground">申请或请求编号（可选）</span><input value={auditDraft.requestId} onChange={(event) => setAuditDraft({ ...auditDraft, requestId: event.target.value })} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" /></label>
+            <Button type="submit" size="sm" loading={Boolean(reading.audit)}>查询审计</Button>
+          </form>
+          <p className="text-[11px] text-muted-foreground mt-3">查询范围：{auditScopeLabel(auditScope)}。审计按时间倒序分页，暂无时间区间筛选；精确追查请用动作、操作者或申请编号。</p>
           {reading.audit ? <p className="text-xs text-muted-foreground mt-4">正在读取…</p> : null}
-          <div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>结果</th><th>业务说明</th></tr></thead><tbody>{audit.map((event) => <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td>{personLabel(event.actor)}</td><td className="font-mono">{event.action}</td><td className="font-mono">{event.objectType}</td><td>{event.outcome}</td><td>{event.reason ?? prettyDetails(event.details)}</td></tr>)}</tbody></table></div>
-          {!reading.audit && audit.length === 0 ? <p className="text-xs text-muted-foreground mt-4">暂无授权审批审计。</p> : null}
+          <div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th className="whitespace-nowrap">结果</th><th className="w-24">关联</th><th>业务说明</th></tr></thead><tbody>{audit.map((event) => {
+            const relatedRequestId = relatedRequestIdOf(event);
+            return <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td>{personLabel(event.actor)}</td><td>{approvalAuditActionLabel(event.action)}<span className="block font-mono text-[11px] text-muted-foreground">{event.action}</span></td><td className="font-mono text-[11px]">{approvalAuditObjectTypes[event.objectType] ?? event.objectType}{event.objectId ? <span className="block text-muted-foreground break-all" title={event.objectId}>{event.objectId}</span> : null}</td><td><span className={"whitespace-nowrap " + (event.outcome === "SUCCESS" ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>{approvalAuditOutcomeLabel(event.outcome)}</span></td><td className="whitespace-nowrap">{relatedRequestId ? <Button type="button" size="sm" variant="secondary" className="whitespace-nowrap" onClick={() => selectRequest(relatedRequestId, "审批详情")}>查看申请</Button> : <span className="text-muted-foreground text-[11px]">—</span>}</td><td>{auditNarrative(event)}<details className="text-[11px] text-muted-foreground"><summary className="cursor-pointer select-none">技术详情</summary><pre className="whitespace-pre-wrap break-words mt-1">{prettyDetails(event.details)}</pre></details></td></tr>;
+          })}</tbody></table></div>
+          {!reading.audit && !error && audit.length === 0 ? <p className="text-xs text-muted-foreground mt-4">暂无符合条件的授权审批审计。</p> : null}
           <PagePager page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
         </section>
       ) : null}

@@ -200,6 +200,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   const nativeAdmission=(await pool.query("SELECT to_regclass('zzsh_order.native_origin_resource_admission') IS NOT NULL AS present")).rows[0];
   if(nativeAdmission?.present===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_origin_resource_admission FROM ${runtimeUser};`);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
+  await configureCreditGuaranteePrivileges(pool, runtimeRole);
 }
 
 /** Kept separate so prefix migration and least-privilege branches can be checked offline. */
@@ -258,5 +259,36 @@ export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, 
       zzsh_order.referral_debt_read_revision(),zzsh_order.guard_withdrawal_referral_recovery() FROM ${role};
     GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
       zzsh_order.earning_expected_lines(text) TO ${role};
+  `);
+}
+
+/** Optional schema: no-op on the old prefix; fail on partial deployment. */
+export async function configureCreditGuaranteePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const tables = ["zzsh_credit.user_credit_state", "zzsh_credit.credit_event", "zzsh_credit.credit_recovery_request",
+    "zzsh_order.owner_guarantee_requirement", "zzsh_order.owner_guarantee_payment", "zzsh_order.owner_guarantee_refund", "zzsh_order.owner_guarantee_reconciliation"];
+  const found = (await pool.query("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [tables])).rows;
+  if (found.length !== tables.length) throw new Error("Credit schema inventory is incomplete");
+  if (found.every(row => row.present === false)) return;
+  if (found.some(row => row.present !== true)) throw new Error("Credit schema is partially deployed");
+  await pool.query(`GRANT USAGE ON SCHEMA zzsh_credit TO ${role}; REVOKE CREATE ON SCHEMA zzsh_credit FROM ${role}`);
+  for (const table of tables) {
+    const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows;
+    if (!columns.length) throw new Error("Credit table columns unavailable");
+    const list = columns.map(row => quoteIdentifier(row.attname)).join(",");
+    await pool.query(`REVOKE ALL ON TABLE ${table} FROM ${role};
+      REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table} FROM ${role};
+      GRANT SELECT ON TABLE ${table} TO ${role}`);
+  }
+  await pool.query(`
+    GRANT INSERT(user_id,score,revision), UPDATE(score,revision,updated_at) ON zzsh_credit.user_credit_state TO ${role};
+    GRANT INSERT(id,user_id,event_key,event_type,source_type,source_id,subject_role,delta_score,applied_delta_score,score_before,score_after,visible_reason,internal_basis,actor_admin_id,reversal_of_id,payload_hash) ON zzsh_credit.credit_event TO ${role};
+    GRANT INSERT(id,user_id,request_key,request_fingerprint,reason,status,eligibility_snapshot,score_before,completed_orders), UPDATE(status,decision,decision_fingerprint,decision_reason,decided_by,event_id,decided_at) ON zzsh_credit.credit_recovery_request TO ${role};
+    GRANT INSERT(id,owner_user_id,account_id,game_id,listing_version_id,price_version_id,rule_release_id,policy_version,base_cents,required_cents,score_snapshot,status), UPDATE(status,updated_at) ON zzsh_order.owner_guarantee_requirement TO ${role};
+    GRANT INSERT(id,requirement_id,owner_user_id,request_key,request_fingerprint,merchant_order_no,provider,provider_request_state,amount_cents,status), UPDATE(status,provider_request_state,provider_transaction_id,observed_amount_cents,original_receipt,source_digest,finance_event_id,ledger_entry_ref,updated_at) ON zzsh_order.owner_guarantee_payment TO ${role};
+    GRANT INSERT(id,requirement_id,payment_id,owner_user_id,request_key,request_fingerprint,provider,provider_request_state,amount_cents,status,release_policy_state), UPDATE(status,provider_request_state,provider_refund_id,original_receipt,source_digest,finance_event_id,ledger_entry_ref,release_policy_state,release_decision_reason,release_decision_fingerprint,release_decided_by,release_decided_at,updated_at) ON zzsh_order.owner_guarantee_refund TO ${role};
+    GRANT INSERT(id,payment_id,refund_id,observed_state,observed_amount_cents,provider_reference,canonical_payload,payload_digest) ON zzsh_order.owner_guarantee_reconciliation TO ${role};
+    REVOKE ALL ON FUNCTION zzsh_credit.guard_credit_state_update(),zzsh_credit.guard_credit_event_insert(),zzsh_order.guard_guarantee_root(),zzsh_order.guard_guarantee_event(),zzsh_order.guard_guarantee_entry(),zzsh_order.check_guarantee_batch() FROM ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version() TO ${role};
   `);
 }

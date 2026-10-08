@@ -350,15 +350,16 @@ test("cursor stack restores the previous page and tabs expose role=tab with aria
     assert.equal(view.rootNode.textContent.includes("第二页样本"), false);
     assert.match(view.rootNode.textContent, /第 1 页/);
 
-    // 审计 tab 同样有游标分页
+    // 审计 tab 同样有游标分页（筛选下拉含有动作全名，断言限定在结果表体）
+    const auditRows = () => [...view.rootNode.querySelectorAll("tbody tr")].map((row) => row.textContent).join("\n");
     await click([...view.rootNode.querySelector('[role="tablist"]').querySelectorAll("button")].find((tab) => tab.textContent.includes("审计记录")));
-    await waitFor(() => view.rootNode.textContent.includes("approval.request.created"));
+    await waitFor(() => auditRows().includes("approval.request.created"));
     const auditNext = buttons(view.rootNode).find((button) => button.textContent.trim() === "下一页");
     assert.equal(auditNext.disabled, false, "audit page 1 has a next cursor");
     await click(auditNext);
-    await waitFor(() => view.rootNode.textContent.includes("approval.request.executed"));
+    await waitFor(() => auditRows().includes("approval.request.executed"));
     assert.match(view.rootNode.textContent, /第 2 页/);
-    assert.equal(view.rootNode.textContent.includes("approval.request.rejected"), false, "audit page 2 replaced page 1");
+    assert.equal(auditRows().includes("approval.request.rejected"), false, "audit page 2 replaced page 1");
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;

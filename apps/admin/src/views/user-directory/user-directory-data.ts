@@ -1,6 +1,7 @@
 import { adminRequest, AdminApiError, type SessionSnapshot, type UserDirectoryItem, type UserDirectoryDetail, type UserOrderItem, type UserRentalAccountItem, type UserAuditEventItem } from '../../api';
 
-export const PERMISSION = { orders: 'order.read', resources: 'supply.rental_account.read', support: 'im.support.read', audit: 'admin.audit.read' } as const;
+export const PERMISSION = { orders: 'order.read', resources: 'supply.rental_account.read', support: 'im.support.read', audit: 'admin.audit.read', credit: 'credit.read', creditDecide: 'credit.decide' } as const;
+export const CREDIT_GUARANTEE_PERMISSION = { read: 'credit.guarantee.read', manage: 'credit.guarantee.manage' } as const;
 export type Domain = keyof typeof PERMISSION;
 export type Part<T> = { state: 'ready'; data: T; count?: number; current?: number; nextCursor?: string | null } | { state: 'denied'; permission: string };
 export type Filters = { q: string; status: string; from: string; to: string; identity: string; age: string; source: string; sort: string };
@@ -34,8 +35,8 @@ export class UserDirectoryBff {
   private readonly users = new Map<string,User>();
   constructor(readonly snapshot: Snapshot) {}
   has(permission: string) { return this.snapshot.permissions.includes(permission); }
-  private async request<T>(path:string, signal:AbortSignal, body?:Record<string,unknown>) {
-    try { const result=await adminRequest<T>(path,body,undefined,{},signal); if(signal.aborted) throw new DOMException('Request cancelled','AbortError'); return result; }
+  private async request<T>(path:string, signal:AbortSignal, body?:Record<string,unknown>, extraHeaders:Record<string,string>={}) {
+    try { const result=await adminRequest<T>(path,body,undefined,extraHeaders,signal); if(signal.aborted) throw new DOMException('Request cancelled','AbortError'); return result; }
     catch(error) { if(signal.aborted) throw new DOMException('Request cancelled','AbortError'); throw error; }
   }
   async list(filters:Filters,cursor:string|undefined,signal:AbortSignal) {
@@ -78,6 +79,16 @@ export class UserDirectoryBff {
   }
   async restore(id:string,reason:string,password:string,totpCode:string,signal:AbortSignal) {
     await this.request('/security/users/restore',signal,{targetUserId:id,reason,password,totpCode});
+  }
+  async credit(id:string,signal:AbortSignal) {
+    if(!this.has(PERMISSION.credit)) throw new AdminApiError(403,'FORBIDDEN');
+    return this.request<{credit:any;recoveryRequests:any[];guarantees:any[];transactions:any[]}>(`/credit/users/${encodeURIComponent(id)}`,signal);
+  }
+  hasCreditGuaranteeRead() { return this.has(CREDIT_GUARANTEE_PERMISSION.read); }
+  hasCreditGuaranteeManage() { return this.has(CREDIT_GUARANTEE_PERMISSION.manage); }
+  async creditDecide(path:string,body:Record<string,unknown>,signal:AbortSignal,idempotencyKey?:string) {
+    if(!this.has(PERMISSION.creditDecide) && !(path.startsWith('guarantees/') && this.hasCreditGuaranteeManage())) throw new AdminApiError(403,'FORBIDDEN');
+    return this.request<Record<string,unknown>>(`/credit/${path}`,signal,body,idempotencyKey?{'idempotency-key':idempotencyKey}:{});
   }
   user(id:string) { const user=this.users.get(id); if(!user)throw new Error('用户尚未读取');return user; }
 }

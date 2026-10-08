@@ -93,8 +93,8 @@ test('orders retain cancelled payment, PAID/COMPLETED missing-time warning and p
   assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('本单租用方'));assert.ok(browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('本单资源归属方'));
 });
 
-test('canonical registration is distinct from old-source trace, with four sections and no membership',async t=>{
-  await mount(t,{path:'/users/user_normal'});await waitFor(()=>browser.document.querySelector('.ud-detail'));const text=browser.document.querySelector('.ud-detail').textContent;assert.ok(text.includes('2026'));assert.equal(text.includes('2019'),false);assert.equal(text.includes('会员'),false);assert.deepEqual([...browser.document.querySelectorAll('.ud-sections button')].map(e=>e.textContent),['概览','订单记录','资源账号','账号安全']);await click(namedButton('账号安全'));await waitFor(()=>browser.document.querySelector('.ud-trace'));assert.ok(browser.document.querySelector('.ud-trace').textContent.includes('2019'));
+test('canonical registration is distinct from old-source trace, with five sections and no membership',async t=>{
+  await mount(t,{path:'/users/user_normal'});await waitFor(()=>browser.document.querySelector('.ud-detail'));const text=browser.document.querySelector('.ud-detail').textContent;assert.ok(text.includes('2026'));assert.equal(text.includes('2019'),false);assert.equal(text.includes('会员'),false);assert.deepEqual([...browser.document.querySelectorAll('.ud-sections button')].map(e=>e.textContent),['概览','订单记录','资源账号','信用与保证金','账号安全']);await click(namedButton('账号安全'));await waitFor(()=>browser.document.querySelector('.ud-trace'));assert.ok(browser.document.querySelector('.ud-trace').textContent.includes('2019'));
 });
 
 test('section failure does not block user detail; main-object failure has retry and no detail facts',async t=>{

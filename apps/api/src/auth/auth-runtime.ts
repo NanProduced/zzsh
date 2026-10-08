@@ -8,10 +8,13 @@ import { mountRentalMembership } from "./rental-membership-routes";
 import { mountUserDirectory } from "./user-directory-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
 import { mountPersonalOrders } from "../order/personal-order-routes";
+import { mountCreditGuaranteeRoutes } from "../credit/credit-guarantee-routes";
+import { readCreditGuaranteeEnabled, preflightCreditGuarantee } from "../credit/credit-guarantee-runtime";
+import { ensureCreditAccount } from "../credit/credit-guarantee";
 import type { ConfirmationKey } from "../order/confirmation-token";
 import type { ConfirmationFundingReader } from "../order/personal-confirmation";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
-import { createProductionConfirmationFundingReader, readFormalSupplyGate } from "../supply/funding-authority";
+import { createProductionConfirmationFundingReader, createProductionSupplyGateReader, readFormalSupplyGate } from "../supply/funding-authority";
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -77,6 +80,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   testConfirmationFundingReader?: ConfirmationFundingReader;
+  /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
+  creditGuaranteeEnabled?: boolean;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
   supportDispatch?: Omit<OrderDispatchOptions, "pool">;
   orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number; escalationEnabled?: boolean };
@@ -325,6 +330,7 @@ function buildPhoneRegistrationPlugin(
   localSmsMock: boolean,
   signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
   nativeWalletOrigin?: NativeOriginResource,
+  creditGuaranteeEnabled = false,
 ) {
   const bodyOf = (value: unknown, allowed: readonly string[]): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -467,6 +473,10 @@ function buildPhoneRegistrationPlugin(
               `INSERT INTO "zzsh_iam"."user_identity_state" ("user_id", "account_status", "identity_status", "age_status", "provider", "version", "updated_at") VALUES ($1, 'ACTIVE', 'UNVERIFIED', 'UNKNOWN', 'none', 1, $2)`,
               [userId, now],
             );
+            // Credit initialization is a registration fact, not a first-page
+            // side effect.  Older baselines without the optional schema keep
+            // their existing auth behavior until the credit package is installed.
+            if (creditGuaranteeEnabled) await ensureCreditAccount(client, userId);
             // Existing-user OTP returned above: only this new-user transaction initializes provenance.
             await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) });
             await initializeNativeWalletOrigin(client, userId, requestId, nativeWalletOrigin);
@@ -498,6 +508,7 @@ export function loadAuthRuntimeConfig(
   workingDirectory = process.cwd(),
   capabilities: AuthRuntimeCapabilities = {},
 ): Omit<AuthRuntimeOptions, "pool"> {
+  const creditGuaranteeEnabled = readCreditGuaranteeEnabled(env);
   const apiOrigin = env.AUTH_API_ORIGIN?.trim() || `http://127.0.0.1:${env.PORT?.trim() || "3102"}`;
   const userOrigin = env.AUTH_USER_ORIGIN?.trim() || "http://127.0.0.1:3100";
   const adminOrigin = env.AUTH_ADMIN_ORIGIN?.trim() || "http://127.0.0.1:3101";
@@ -574,6 +585,7 @@ export function loadAuthRuntimeConfig(
     orderImEvents = { appKey, appSecret, ...(freshnessMs === undefined ? {} : { freshnessMs }) };
   }
   return {
+    creditGuaranteeEnabled,
     apiOrigin,
     ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
     ...(listingSecret===undefined?{}:{listingCursorKey:{keyId:listingKeyId!,secret:listingSecret}}),
@@ -596,6 +608,7 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions> {
+  await preflightCreditGuarantee(options.pool, options.creditGuaranteeEnabled === true);
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
     import("@better-auth/drizzle-adapter"),
@@ -690,7 +703,7 @@ export async function mountAuthHandlers(
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true),
       userSecurityPlugin,
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
@@ -870,8 +883,8 @@ export async function mountAuthHandlers(
   // Occupancy truth comes from the order table; production reads the formal
   // funding authority on this same PoolClient. Explicit test seams retain
   // their isolated fixture behavior and never become production defaults.
-  const fundingReader = options.testConfirmationFundingReader ?? createProductionConfirmationFundingReader();
-  const baseSupplyGateReader = options.testSupplyGateReader ?? (options.testConfirmationFundingReader ? unknownSupplyGate : readFormalSupplyGate);
+  const fundingReader = options.testConfirmationFundingReader ?? createProductionConfirmationFundingReader({ creditGuaranteeEnabled: options.creditGuaranteeEnabled === true });
+  const baseSupplyGateReader = options.testSupplyGateReader ?? (options.testConfirmationFundingReader ? unknownSupplyGate : options.creditGuaranteeEnabled === true ? createProductionSupplyGateReader({ creditGuaranteeEnabled: true }) : readFormalSupplyGate);
   const supplyGateReader=composeSupplyGateWithOrderOccupancy(baseSupplyGateReader);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
@@ -887,6 +900,9 @@ export async function mountAuthHandlers(
     settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
   };
+  // Credit routes own both BFF prefixes and must be registered before the
+  // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
+  if (options.creditGuaranteeEnabled === true) mountCreditGuaranteeRoutes(app, securityOptions);
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,

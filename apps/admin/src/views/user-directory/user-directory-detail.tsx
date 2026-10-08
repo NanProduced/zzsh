@@ -8,8 +8,9 @@ import { restoreTabs, tabHref, tabFromLocation } from '@/workspace/tab-model';
 import { AdminApiError } from '../../api';
 import { PERMISSION, STATUS_LABEL, sourceLabel, type Audit, type Order, type Resource, type User } from './user-directory-data';
 import { Denied, DomainBlock, Identity, Loading, Message, Status, Summary, errorText, time, useDirectoryRequest, type PageProps, type UserDirectoryData } from './user-directory-shared';
+import { CreditPanel } from './credit-panel';
 
-const SECTION_NAMES = { overview:'概览',orders:'订单记录',resources:'资源账号',security:'账号安全' };
+const SECTION_NAMES = { overview:'概览',orders:'订单记录',resources:'资源账号',credit:'信用与保证金',security:'账号安全' };
 const ORDER_STATUS:Record<string,string>={PENDING_PAYMENT:'待支付',PAID:'已支付',COMPLETED:'已完成',CANCELLED:'已取消'};
 const AUDIT_ACTION_LABEL:Record<string,string>={'user.account.restored':'账号恢复','user.account.deactivated':'账号停用','user.account.cancelled':'账号注销','user.identity.verification':'身份核验','user.legacy_owner.migrated':'旧用户迁入记录'};
 const auditActionLabel=(action:string)=>AUDIT_ACTION_LABEL[action]??'未识别操作';
@@ -88,7 +89,7 @@ export function UserDetail({adapter,snapshot,tab,onOpenPath,onQueryChange,refres
       <div className="ud-overview-row"><h2>最近业务活动</h2><Message title="业务活动暂不可用">当前可按注册时间定位用户；此处不推断近期业务。</Message></div>
       <div className="ud-overview-row"><h2>客服上下文</h2>{adapter.has(PERMISSION.support)?<><Message title="用户维度完整咨询历史暂未接入">客服工作台按指派与队列处理；进入工作台后重新核对权限，群访问还需已加入该订单群。</Message><Button variant="outline" onClick={()=>onOpenPath('/support')}>进入客服工作台<ArrowUpRightIcon size={14}/></Button></>:<Denied permission={PERMISSION.support}/>}</div>
       <Message title="数据完整性说明">订单和资源仅反映各自授权游戏范围。无权限、读取失败或暂未接入均不代表没有业务；请分别核对有权读取的订单和资源记录。</Message>
-    </>:view==='orders'?<Orders adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='resources'?<Resources adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:<>
+    </>:view==='orders'?<Orders adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='resources'?<Resources adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='credit'?<CreditPanel adapter={adapter} user={user} refreshNonce={refreshNonce}/>:<>
       <div className="ud-overview-row"><h2>账号与安全状态</h2><p>账号：{STATUS_LABEL[user.status]} · 实名：{user.identity} · 年龄：{user.age}</p><p>{user.phoneMasked} · {user.emailMasked??'未绑定真实邮箱'}</p></div>
       <Restore adapter={adapter} user={user} changed={()=>setRevision(value=>value+1)}/>
       <div className="ud-overview-row"><h2>账号安全操作审计</h2><p className="ud-muted">当前记录已按审计权限筛选。</p><DomainBlock adapter={adapter} id={id} domain="audit" refreshNonce={revision+refreshNonce}>{data=>(data as Audit[]).length?<ul className="ud-audit">{(data as Audit[]).map(event=><li key={event.eventId}>{auditActionLabel(event.action)} · {time(event.occurredAt)} · {event.outcome==='SUCCESS'?'成功':event.outcome==='FAILURE'?'失败':'结果未知'}<details><summary>技术标识</summary><code>{event.action} · {event.outcome} · {event.requestId??'无请求编号'}</code></details></li>)}</ul>:<Message kind="empty" title="范围内暂无账号安全操作记录">不代表其他管理员没有执行过操作。</Message>}</DomainBlock></div>

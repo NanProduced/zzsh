@@ -107,6 +107,32 @@ test("v2 five rule refs are signed and verified while catalog and listing hash s
   }
 });
 
+test("enabled credit snapshot is part of the existing quote digest and invalidates an old confirmation", async () => {
+  const f = personalRefsFixture(false);
+  let creditRevision = "1";
+  f.options.gate = async () => ({
+    publisherBail: "NOT_REQUIRED" as const,
+    occupancy: "FREE" as const,
+    reference: `credit:user:${creditRevision}:policy:price-1`,
+    creditGuarantee: {
+      status: "NOT_REQUIRED" as const,
+      accountId: f.account.id,
+      ownerUserId: f.account.owner_user_id,
+      gameId: f.account.game_id,
+      listingVersionId: f.version.id,
+      priceVersionId: "price-1",
+      releaseId: f.version.rule_release_id,
+      creditRevision,
+      coverageRevision: null,
+      requiredCents: "0",
+      reference: `credit:user:${creditRevision}:policy:price-1`,
+    },
+  });
+  const issued = await issuePersonalConfirmation(f.client, f.context, f.input, f.options);
+  creditRevision = "2";
+  await assert.rejects(() => verifyPersonalConfirmation(f.client, f.context, f.input, issued.confirmationToken, f.options), (error: any) => error?.code === "CONFIRMATION_CHANGED");
+});
+
 test("personal rule refs reject missing and mismatched frozen references before signing",async()=>{
   for(const field of ["releaseId","priceVersionId","termVersionId","agreementVersionId","agreementDigest"] as const){const f=personalRefsFixture();delete (f.payload.ruleRefs as Partial<typeof f.payload.ruleRefs>)[field];try{f.rehash();}catch{}await assert.rejects(()=>issuePersonalConfirmation(f.client,f.context,f.input,f.options));}
   for(const field of ["releaseId","priceVersionId","termVersionId"] as const){const f=personalRefsFixture();f.payload.ruleRefs[field]="wrong";f.rehash();await assert.rejects(()=>issuePersonalConfirmation(f.client,f.context,f.input,f.options));}
