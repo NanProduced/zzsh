@@ -17,6 +17,9 @@ export type SkinTag = {
   name: string;
   categoryCode: string | null;
   categoryName: string | null;
+  ownerName?: string | null;
+  baseName?: string | null;
+  mediaId?: string | null;
 };
 export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
 export type ListingCardData = {
@@ -243,6 +246,9 @@ function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "ski
       name: skin.name,
       categoryCode: skin.categoryCode ?? null,
       categoryName: skin.categoryName ?? null,
+      ...(skin.ownerName !== undefined ? { ownerName: skin.ownerName ?? null } : {}),
+      ...(skin.baseName !== undefined ? { baseName: skin.baseName ?? null } : {}),
+      ...(skin.mediaId !== undefined ? { mediaId: skin.mediaId ?? null } : {}),
     })),
   };
 }

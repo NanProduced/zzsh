@@ -73,7 +73,7 @@ export type PublicListing = {
   attributes: Record<string, string | number | boolean | null>;
   presentation: {
     items: Array<{ id: string; code?: string; name: string; unit: string }>;
-    skins: Array<{ id: string; name: string; categoryCode?: string; categoryName?: string }>;
+    skins: PublicListingSkin[];
     entitlements: Array<{ id: string; name: string }>;
   };
   quote: PublicQuote | null;
@@ -203,6 +203,25 @@ export type PublicGunsmithCodesPage = {
   nextCursor: string | null;
   limit: number;
 };
+export type PublicSkinSummary = {
+  id: string;
+  code: string;
+  name: string;
+  baseName: string | null;
+  ownerName: string | null;
+  categoryId: string;
+  rarityCode: string | null;
+  mediaId: string | null;
+};
+export type PublicListingSkin = {
+  id: string;
+  name: string;
+  baseName?: string | null;
+  ownerName?: string | null;
+  mediaId?: string | null;
+  categoryCode?: string;
+  categoryName?: string;
+};
 export type PublicCatalog = {
   game: SupplyGame & { catalogRevision: string; currentReleaseId: string | null };
   items: Array<{
@@ -221,14 +240,7 @@ export type PublicCatalog = {
     parentId: string | null;
   }>;
   rarities: Array<{ code: string; name: string }>;
-  skins: Array<{
-    id: string;
-    code: string;
-    name: string;
-    categoryId: string;
-    rarityCode: string | null;
-    mediaId: string | null;
-  }>;
+  skins: PublicSkinSummary[];
   nextCursor: string | null;
   limit: number;
 };
@@ -264,14 +276,7 @@ export type PublishingCatalog = {
     parentId: string | null;
   }>;
   rarities: Array<{ code: string; name: string }>;
-  skins: Array<{
-    id: string;
-    code: string;
-    name: string;
-    categoryId: string;
-    rarityCode: string | null;
-    mediaId: string | null;
-  }>;
+  skins: PublicSkinSummary[];
   entitlements: Array<{
     id: string;
     code: string;
@@ -414,7 +419,7 @@ export type MySupply = {
     } | null;
     presentation?: {
       items: Array<{ id: string; code?: string; name: string; unit: string }>;
-      skins: Array<{ id: string; name: string; categoryCode?: string; categoryName?: string }>;
+      skins: PublicListingSkin[];
       entitlements: Array<{ id: string; name: string }>;
     };
     quote: OwnerQuote | null;

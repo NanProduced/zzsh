@@ -450,6 +450,17 @@ test('missing term rule stays explicitly unconfirmed', () => {
   assert.equal(listTermRuleLabel('按月租用'), '租期规则 按月租用');
 });
 
+test('skin presentation carries the stable owner, base name and media summary', () => {
+  const view = toListingCard({
+    ...listing,
+    presentation: {
+      ...listing.presentation,
+      skins: [{ ...listing.presentation.skins[0], ownerName: '骇爪', baseName: '维什戴尔', mediaId: 'asset_skin' }],
+    },
+  });
+  assert.deepEqual(view.skinTags, [{ name: 'M4A1 金色', categoryCode: null, categoryName: '武器', ownerName: '骇爪', baseName: '维什戴尔', mediaId: 'asset_skin' }]);
+});
+
 
 test('historical listing keeps exact source amounts and derives the payable total from them', () => {
   const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });

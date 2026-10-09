@@ -156,6 +156,7 @@ export function SupplyCatalogView({
   // draft keystroke, so typing in ordinary fields must not reset the picker.
   const mediaPickSeq = useRef(0);
   const editorIdentity = editor ? `${editor.kind}:${editor.id ?? ""}` : null;
+  const mediaPickerPurpose = editor?.kind === "skins" ? "SKIN_MEDIA" : editor?.kind === "items" ? "ITEM_MEDIA" : null;
   // Cursor of the most recent request; kept when the request fails so the "重试"
   // button reloads exactly the failed page (null = first page).
   const [mediaRetryCursor, setMediaRetryCursor] = useState<string | null>(null);
@@ -300,7 +301,7 @@ export function SupplyCatalogView({
         const previous = { ...recordValues(editor.kind, editor.original as unknown as Record<string, unknown>), ...(editor.kind === "skins" ? skinValues(editor.original as CatalogSkin) : {}) };
         const fresh = { ...recordValues(editor.kind, latest as unknown as Record<string, unknown>), ...(editor.kind === "skins" ? skinValues(latest as CatalogSkin) : {}) };
         values = { ...values };
-        for (const key of ["name", "categoryId", "rarityCode", "sortOrder", "enabled", "formVisible", "aliases", "ownerKind", "ownerId", "baseName", "sourceNamespace", "sourceField", "sourceToken"]) if (values[key] === previous[key] && fresh[key] !== undefined) values[key] = fresh[key]!;
+        for (const key of ["name", "categoryId", "rarityCode", "sortOrder", "enabled", "formVisible", "aliases", "ownerKind", "ownerId", "baseName", "mediaId", "sourceNamespace", "sourceField", "sourceToken"]) if (values[key] === previous[key] && fresh[key] !== undefined) values[key] = fresh[key]!;
       }
       setEditor({ ...editor, revision: catalog.game.catalogRevision, original: latest, values });
     }
@@ -411,7 +412,7 @@ export function SupplyCatalogView({
   };
 
   const loadMediaOptionsPage = async (cursor: string | null) => {
-    if (!editor || editor.kind !== "items" || !editor.id || !gameId) return;
+    if (!editor || !editor.id || !gameId || !mediaPickerPurpose) return;
     if (!cursor) {
       // A fresh open clears stale candidates before the request starts.
       setMediaOptions([]);
@@ -423,7 +424,7 @@ export function SupplyCatalogView({
     const seq = ++mediaPickSeq.current;
     const context = scopeRef.current;
     try {
-      const params = new URLSearchParams({ purpose: "ITEM_MEDIA", limit: "20" });
+      const params = new URLSearchParams({ purpose: mediaPickerPurpose, limit: "20" });
       if (cursor) params.set("cursor", cursor);
       const result = await adminRequest<MediaOptionsResponse>(`/supply/games/${gameId}/media-options?${params.toString()}`);
       if (seq !== mediaPickSeq.current || scopeRef.current !== context) return;
@@ -445,7 +446,7 @@ export function SupplyCatalogView({
   };
 
   const openMediaPicker = () => {
-    if (!editor || editor.kind !== "items" || !editor.id) return;
+    if (!editor || !editor.id || !mediaPickerPurpose) return;
     setMediaPickerOpen(true);
     void loadMediaOptionsPage(null);
   };
@@ -663,10 +664,10 @@ export function SupplyCatalogView({
                 <Field label="适用地区"><input value={editor.values.region ?? ""} onChange={e => setEditor({ ...editor, values: { ...editor.values, region: e.target.value } })} className={inputClass} /></Field>
                 <Field label="证据说明" hint="说明所属关系及旧名称映射；核对日期、地区和说明用于本次各条链接。"><textarea value={editor.values.note ?? ""} onChange={e => setEditor({ ...editor, values: { ...editor.values, note: e.target.value } })} className={`${inputClass} h-20`} /></Field>
               </div> : null}
-              {editor.kind === "items" && editor.id ? (
+              {(editor.kind === "items" || editor.kind === "skins") && editor.id ? (
                 <div className="mt-4 border border-border rounded-md p-4 space-y-3">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-semibold">物品图片</h4>
+                    <h4 className="text-xs font-semibold">{editor.kind === "skins" ? "皮肤图片" : "物品图片"}</h4>
                     {editor.values.mediaId ? (
                       <Button type="button" size="sm" variant="secondary" onClick={unbindMedia}>解除绑定</Button>
                     ) : null}
@@ -697,13 +698,13 @@ export function SupplyCatalogView({
                   {mediaPickerOpen ? (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-[11px] text-muted-foreground">服务端已按游戏与用途过滤：ITEM_MEDIA、已审核且允许公开（候选以公共衍生图预览，无需审核读取权限）。</span>
+                        <span className="text-[11px] text-muted-foreground">服务端已按游戏与用途过滤：{mediaPickerPurpose}、已审核且允许公开（候选以公共衍生图预览，无需审核读取权限）。</span>
                         <Button type="button" size="sm" variant="ghost" onClick={dismissMediaPicker}>关闭</Button>
                       </div>
                       <StatusMessage error={mediaOptionsError} className="mt-1" />
                       {mediaOptionsLoading && mediaOptions.length === 0 ? <p className="text-xs text-muted-foreground">加载候选图片…</p> : null}
                       {!mediaOptionsLoading && !mediaOptionsError && mediaOptions.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">没有可绑定图片；请先在“平台素材审核”上传并审核公开 ITEM_MEDIA 素材。</p>
+                        <p className="text-xs text-muted-foreground">没有可绑定图片；请先在“平台素材审核”上传并审核公开 {mediaPickerPurpose} 素材。</p>
                       ) : null}
                       {mediaOptions.length > 0 ? (
                         <>
