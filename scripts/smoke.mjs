@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readdir, readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -38,18 +39,30 @@ function start(script, args, cwd, env = {}) {
   children.push(child);
   return child;
 }
-async function waitFor(child, url) {
+// Consume the body inside its request deadline; never leak a live Response to Promise.all callers.
+export async function readResponse(url, stage) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
+    const body = await response.text();
+    return { ok: response.ok, status: response.status, url: response.url, body };
+  } catch (error) {
+    throw new Error(stage + " " + url + ": " + (error?.name ?? "Error") + " " + (error?.cause?.code ?? ""));
+  }
+}
+export async function waitFor(child, url, stage) {
+  let last = "not requested";
   for (let attempt = 0; attempt < 120; attempt++) {
-    if (child.failure) throw child.failure;
-    if (child.exitCode !== null) throw new Error(child.output || "Server exited");
+    if (child.failure || child.exitCode !== null) throw new Error(stage + " " + url + ": child failed/exited " + (child.failure?.code ?? child.exitCode));
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
+      const response = await readResponse(url, stage);
       if (response.ok) return response;
-    } catch { /* Server is still starting. */ }
+      last = "HTTP " + response.status;
+    } catch (error) { last = error.message; }
     await delay(250);
   }
-  throw new Error("Server did not become ready: " + url);
+  throw new Error(stage + " " + url + ": readiness exhausted; " + last);
 }
+async function runSmoke() {
 try {
   for (const name of await readdir(resolve(root, "apps/admin/dist/assets"))) {
     if (!name.endsWith(".js")) continue;
@@ -81,25 +94,25 @@ try {
     ECS_TEST_TARGET_CONFIRMED: undefined,
   });
   const [webResponse, adminResponse, apiResponse, apiReadyResponse] = await Promise.all([
-    waitFor(web, `http://127.0.0.1:${webPort}/`),
-    waitFor(admin, `http://127.0.0.1:${adminPort}/`),
-    waitFor(api, `http://127.0.0.1:${apiPort}/api/health`),
-    waitFor(api, `http://127.0.0.1:${apiPort}/api/ready`),
+    waitFor(web, `http://127.0.0.1:${webPort}/`, "web-home"),
+    waitFor(admin, `http://127.0.0.1:${adminPort}/`, "admin-home"),
+    waitFor(api, `http://127.0.0.1:${apiPort}/api/health`, "api-health"),
+    waitFor(api, `http://127.0.0.1:${apiPort}/api/ready`, "api-ready"),
   ]);
-  const webHtml = await webResponse.text();
+  const webHtml = webResponse.body;
   assert.match(webHtml, /洲洲商行/);
   assert.match(webHtml, /id="main-content"/);
   assert.match(webHtml, /三角洲行动/);
-  const loginResponse = await fetch(`http://127.0.0.1:${webPort}/login`);
+  const loginResponse = await readResponse(`http://127.0.0.1:${webPort}/login`, "web-login");
   assert.equal(loginResponse.status, 200, "The separate login route must remain available");
-  const adminHtml = await adminResponse.text();
+  const adminHtml = adminResponse.body;
   assert.match(adminHtml, /洲洲商行/);
   const asset = adminHtml.match(/src="([^"]+\.js)"/)?.[1];
   assert.ok(asset, "Admin build must reference a JavaScript bundle");
-  assert.equal((await fetch(new URL(asset, adminResponse.url))).status, 200);
-  assert.deepEqual(await apiResponse.json(), { status: "ok", service: "zzsh-api", scope: "liveness" });
-  assert.deepEqual(await apiReadyResponse.json(), { status: "ok", service: "zzsh-api", scope: "readiness" });
-  assert.equal((await fetch(`http://127.0.0.1:${apiPort}/docs`)).status, 404);
+  assert.equal((await readResponse(new URL(asset, adminResponse.url), "admin-asset")).status, 200);
+  assert.deepEqual(JSON.parse(apiResponse.body), { status: "ok", service: "zzsh-api", scope: "liveness" });
+  assert.deepEqual(JSON.parse(apiReadyResponse.body), { status: "ok", service: "zzsh-api", scope: "readiness" });
+  assert.equal((await readResponse(`http://127.0.0.1:${apiPort}/docs`, "api-production-docs")).status, 404);
   console.log("PASS: built web, admin assets, API liveness and production docs boundary");
 } finally {
   await Promise.all(children.map(async child => {
@@ -110,3 +123,6 @@ try {
     try { await exited; } finally { clearTimeout(timer); }
   }));
 }
+
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await runSmoke();
