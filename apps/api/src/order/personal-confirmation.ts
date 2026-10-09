@@ -135,6 +135,16 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   }
   const guarantee=await options.gate(client,account);
   if(typeof guarantee.reference!=="string" || !guarantee.reference.trim() || guarantee.occupancy!=="FREE" || !["SATISFIED","NOT_REQUIRED"].includes(guarantee.publisherBail) || (guarantee.publisherBail==="NOT_REQUIRED" && BigInt(f.publisherBailRequirementCents)>0n))unavailable("Account guarantee evidence is unavailable");
+  const creditGuarantee=guarantee.creditGuarantee;
+  if (creditGuarantee) {
+    const expectedStatus = creditGuarantee.status === "NOT_REQUIRED" ? "NOT_REQUIRED" : creditGuarantee.status === "SATISFIED" ? "SATISFIED" : "UNKNOWN";
+    if (expectedStatus !== guarantee.publisherBail || creditGuarantee.accountId !== account.id || creditGuarantee.ownerUserId !== account.owner_user_id
+      || creditGuarantee.gameId !== account.game_id || creditGuarantee.listingVersionId !== version.id
+      || creditGuarantee.priceVersionId !== version.payload.ruleRefs.priceVersionId || creditGuarantee.releaseId !== version.rule_release_id
+      || creditGuarantee.reference !== guarantee.reference || creditGuarantee.requiredCents !== f.publisherBailRequirementCents) {
+      unavailable("Credit and guarantee authority changed; confirm again");
+    }
+  }
   const release=(await client.query(`SELECT p.id,p.status,p.mode,p.haff_rule,p.commission_rate::text,p.rounding_policy,r.term_version_id FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE r.id=$1 AND r.game_id=$2`,[input.releaseId,account.game_id])).rows[0];
   if(!release || release.status!=="SEALED" || release.id!==version.payload.ruleRefs.priceVersionId)unavailable("Frozen price version unavailable");
   const rows=(await client.query(`SELECT item_id,pricing_kind,unit_quantity::text,buyer_unit_amount::text,owner_unit_amount::text FROM zzsh_supply.price_line WHERE price_version_id=$1 AND customer_tier=$2 ORDER BY item_id`,[release.id,membership.tier])).rows;
@@ -163,13 +173,14 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   if(Object.values(ruleRefs).some(value=>typeof value!=="string" || !value.trim())
     || !/^[0-9a-f]{64}$/.test(agreementDigest) || releaseId!==input.releaseId
     || priceVersionId!==release.id || termVersionId!==release.term_version_id)unavailable("Personal rule references cannot be verified");
+  const guaranteeSnapshot = { status: guarantee.publisherBail, reference: guarantee.reference };
   const snapshot=ownerDeclaration
     ? {schema:"personal-quote-v2",userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
       fullPayoutDeclaration:ownerDeclaration,ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},
-      guarantee:{status:guarantee.publisherBail,reference:guarantee.reference},funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,
+      guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,
         publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,
         disclosureVersion:v2Funding!.disclosureVersion,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote}
-    : {schema:"personal-quote-v1",listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},guarantee:{status:guarantee.publisherBail,reference:guarantee.reference},funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
+    : {schema:"personal-quote-v1",listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
   return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection:{quote:projectDeltaQuote(result.quote,"public"),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),customerTier:membership.tier,depositWaived:waive,

@@ -46,6 +46,20 @@ export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
   reference: string | null;
+  creditGuarantee?: CreditGuaranteeGateSnapshot;
+};
+export type CreditGuaranteeGateSnapshot = {
+  status: "NOT_REQUIRED" | "REQUIRED_UNCOVERED" | "SATISFIED" | "UNKNOWN";
+  accountId: string;
+  ownerUserId: string;
+  gameId: string;
+  listingVersionId: string | null;
+  priceVersionId: string | null;
+  releaseId: string | null;
+  creditRevision: string | null;
+  coverageRevision: string | null;
+  requiredCents: string | null;
+  reference: string | null;
 };
 export type SupplyGateReader = (
   client: PoolClient,

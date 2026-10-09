@@ -14,6 +14,7 @@ import { OrderWorkspace } from "./order/order-workspace";
 import { AccountCenterFrame, AccountOverview, accountSectionLabels, resolveAccountView } from "./account/account-center";
 import { PersonalWallet } from "./account/personal-wallet";
 import { PersonalInvitations } from "./account/personal-invitations";
+import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { supplyApi, SupplyRequestError } from "../lib/supply-client";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
@@ -103,7 +104,7 @@ export function AccountWorkspace({ view, accountId, orderId, status }: { view: s
   const identityScope = `${session.userId}:${session.identityVersion}`;
   return <ServiceShell {...accountShell} title={title}>
     <AccountCenterFrame active={active} accountId={accountId} orderId={orderId} status={status} scope={identityScope}>
-      {active === "overview" ? <AccountOverview scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} /> : <AccountUnavailable label={accountSectionLabels[active]} />}
+      {active === "overview" ? <AccountOverview scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} /> : <AccountUnavailable label={accountSectionLabels[active]} />}
     </AccountCenterFrame>
   </ServiceShell>;
 }

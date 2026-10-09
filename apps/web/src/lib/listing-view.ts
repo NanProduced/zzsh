@@ -52,6 +52,14 @@ export type ListingCardData = {
 export type ListingDetailData = ListingCardData & {
   description: string | null;
   gameName: string | null;
+  publicTitle?: string | null;
+  publishedAt?: string | null;
+  entitlementDetails?: Array<{
+    id: string;
+    name: string;
+    expiresAt: string | null;
+    expiryState: "MISSING" | "PERMANENT" | "TIMED";
+  }>;
 };
 
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" };
@@ -267,7 +275,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
     historicalReadOnly: true, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title,
     imageUrl: media[0]?.url,
     media, resourceLines: listing.inventory.map(line => ({
-      itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: items.get(line.itemId)?.name ?? "未确认物品",
+      itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
       quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
       unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: null, costLabel: null, unitPriceLabel: null,
     })),
@@ -285,6 +293,17 @@ export function toListingDetail(listing: PublicListing): ListingDetailData {
     ...toListingCard(listing),
     description: listing.description,
     gameName: listing.game?.name ?? null,
+    publicTitle: listing.title?.trim() || null,
+    publishedAt: listing.publishedAt ?? null,
+    entitlementDetails: listing.presentation.entitlements.map(item => {
+      const disclosure = listing.quote?.expiryDisclosures?.find(entry => entry.entitlementId === item.id);
+      return {
+        id: item.id,
+        name: item.name,
+        expiresAt: disclosure?.expiresAt ?? null,
+        expiryState: !disclosure ? "MISSING" : disclosure.expiresAt === null ? "PERMANENT" : "TIMED",
+      };
+    }),
   };
 }
 // Detail breadcrumb stays generic until the server-confirmed object game is

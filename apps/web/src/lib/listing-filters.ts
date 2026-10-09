@@ -609,7 +609,12 @@ export function resourceItemDisplayName(
   item: { name?: string; code?: string } | undefined,
   context: { gameCode?: string; itemId?: string } = {},
 ): string {
-  if (canonicalResourceCode(item?.code ?? null) === "df_billable_level6_bullet") return "6级子弹";
-  if (!item?.code && context.gameCode === DELTA_GAME_CODE && item?.name === "六级子弹") return "6级子弹";
+  const code = canonicalResourceCode(item?.code ?? null);
+  if (code === "df_billable_level6_bullet") return "6级子弹";
+  if (code === "df_billable_level6_helmet") return "6级头盔";
+  if (code === "df_billable_level6_armor") return "6级护甲";
+  if (context.gameCode === DELTA_GAME_CODE && ["六级子弹", "六级头盔", "六级护甲"].includes(item?.name ?? "")) {
+    return item!.name!.replace(/^六级/, "6级");
+  }
   return item?.name || (context.itemId ? `未确认（代码 ${context.itemId}）` : "未确认");
 }

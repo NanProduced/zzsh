@@ -81,8 +81,11 @@ const base = parseListingFilters({});
 
 test('resource display names prefer stable codes and gate legacy names to Delta context', () => {
   assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_bullet', name: '六级子弹' }), '6级子弹');
-  assert.equal(resourceItemDisplayName({ code: 'different_resource', name: '六级子弹' }, { gameCode: 'delta' }), '六级子弹');
+  assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_helmet', name: '六级头盔' }), '6级头盔');
+  assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_armor', name: '六级护甲' }), '6级护甲');
+  assert.equal(resourceItemDisplayName({ code: 'different_resource', name: '六级子弹' }, { gameCode: 'delta' }), '6级子弹');
   assert.equal(resourceItemDisplayName({ name: '六级子弹' }, { gameCode: 'delta' }), '6级子弹');
+  assert.equal(resourceItemDisplayName({ name: '六级头盔' }, { gameCode: 'delta' }), '6级头盔');
   assert.equal(resourceItemDisplayName({ name: '六级子弹' }), '六级子弹');
   assert.equal(resourceItemDisplayName(undefined), '未确认');
   assert.equal(resourceItemDisplayName({ code: 'unknown_resource' }), '未确认');

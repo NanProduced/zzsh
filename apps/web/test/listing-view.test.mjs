@@ -169,7 +169,7 @@ test('card and detail share code-first resource names and only use Delta legacy 
   assert.deepEqual([known.resourceLines[0].itemId, known.resourceLines[0].code, known.resourceLines[0].name, known.resourceLines[0].quantity, known.resourceLines[0].quantityLabel], ['item_bullet', 'df_billable_level6_bullet', '6级子弹', '180', '3组（180发）']);
 
   const differentCode = toListingCard(project({ id: 'item_bullet', code: 'different_resource', name: '六级子弹', unit: 'ROUND' }));
-  assert.equal(differentCode.resourceLines[0].name, '六级子弹');
+  assert.equal(differentCode.resourceLines[0].name, '6级子弹');
   assert.equal(differentCode.resourceLines[0].quantityLabel, '180');
 
   const legacy = toListingCard(project({ id: 'item_bullet', name: '六级子弹', unit: 'ROUND' }));
@@ -320,6 +320,22 @@ test('composeListTitle prioritizes real identity, highlights haff, and leaves se
     haff: '120M 哈夫币',
     rest: '白银',
   });
+
+  assert.deepEqual(composeListTitle({
+    title: '120M 哈夫币 · 3×3安全箱 · 钻石段位 60级',
+    displayNo: null,
+    conditionLines: [
+      { key: 'safe_box_code', value: '3*3安全箱' },
+      { key: 'grading_code', value: '钻石' },
+      { key: 'character_level', value: '60级' },
+    ],
+  }, '120M'), {
+    identity: '账号资料',
+    haff: '120M 哈夫币',
+    rest: '3×3安全箱 · 钻石 60级',
+  });
+  assert.equal(composeListTitle({ title: '微信扫码', displayNo: null, conditionLines: [] }, null).identity, '游戏账号');
+  assert.equal(composeListTitle({ title: '1.5M 哈夫币 · 精选账号', displayNo: null, conditionLines: [] }, '1.5M').identity, '精选账号');
 
   // Case 3: Custom title identity when displayNo is absent
   const cardCustomTitle = {
@@ -498,4 +514,11 @@ test('registered migration catalog codes use the existing card resource roles wi
   assert.equal(accountCardExports.canonicalResourceCode('awm_round'), 'df_billable_awm_bullet');
   assert.equal(accountCardExports.canonicalResourceCode('unrelated_item'), 'unrelated_item');
   assert.equal(accountCardExports.canonicalResourceCode(null), null);
+});
+
+test('detail adds public title/time/expiry consumption without inventing missing declarations',()=>{
+ const listing={id:'a',displayNo:null,title:'',description:'public',publishedAt:'2026-10-08T07:33:16Z',attributes:{},media:[],presentation:{items:[],skins:[],entitlements:[{id:'e',name:'体验权益'}]},quote:{schemaVersion:2,lines:[],resourceTotal:{currency:'CNY',unit:'yuan',amount:'0.00',scale:2},tenantDeposit:null,tenantPayableTotal:null,termSeconds:'86400',expiryDisclosures:[{entitlementId:'e',expiresAt:'2026-10-09T07:00:00Z',fullTermGuaranteed:false}]}};
+  const detail=toListingDetail(listing);assert.equal(detail.publicTitle,null);assert.equal(detail.publishedAt,listing.publishedAt);assert.equal(detail.depositLabel,null);assert.deepEqual(detail.entitlementDetails,[{id:'e',name:'体验权益',expiresAt:'2026-10-09T07:00:00Z',expiryState:'TIMED'}]);assert.ok(!Object.hasOwn(detail,'faceIsSelf'));assert.ok(!Object.hasOwn(detail,'banRecord'));
+  delete listing.publishedAt;listing.quote.expiryDisclosures=[];assert.equal(toListingDetail(listing).publishedAt,null);assert.equal(toListingDetail(listing).entitlementDetails[0].expiresAt,null);assert.equal(toListingDetail(listing).entitlementDetails[0].expiryState,'MISSING');
+  listing.quote.expiryDisclosures=[{entitlementId:'e',expiresAt:null,fullTermGuaranteed:false}];assert.equal(toListingDetail(listing).entitlementDetails[0].expiryState,'PERMANENT');
 });

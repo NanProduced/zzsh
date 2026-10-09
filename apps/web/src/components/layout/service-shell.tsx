@@ -68,7 +68,10 @@ export function ServiceShell({
     <PortalHeader home={false} query={query} onQueryChange={setQuery} onSearch={onSearch ?? ((value: string) => router.push(`/accounts?q=${encodeURIComponent(value)}`))} searchLabel={searchLabel} searchInputLabel={searchInputLabel} searchPlaceholder={searchPlaceholder} searchCompactPlaceholder={searchCompactPlaceholder} />
     {topContent ? <div className="functional-top-content portal-width">{topContent}</div> : null}
     <main id="main-content" className="portal-width subpage-main functional-main">
-      {trail.length > 0 ? <Breadcrumbs items={trail} /> : null}
+      {trail.length > 0 ? <div className={surface === "detail" ? "functional-detail-trail" : undefined}>
+        <Breadcrumbs items={trail} />
+        {surface === "detail" && !showPageHeading && showBack && backHref ? <Link className="functional-back" href={backHref}><ArrowLeft size={16} aria-hidden="true" /><span>{backLabel}</span></Link> : null}
+      </div> : null}
       {showPageHeading ? <header className="functional-page-heading">
         <div className="functional-heading-copy">
           {showBack && backHref && surface !== "browse" && <Link className="functional-back" href={backHref}><ArrowLeft size={16} aria-hidden="true" /><span>{backLabel}</span></Link>}

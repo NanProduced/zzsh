@@ -20,6 +20,6 @@ test('convergence clears every discovered column privilege before granting only 
 test('the real common authorization entry converges after broad order grants on every invocation',async()=>{
  const p=probe();await applyRuntimePrivileges(p.pool,'runtime_role');const first=[...p.seen];p.seen.length=0;await applyRuntimePrivileges(p.pool,'runtime_role');assert.deepEqual(p.seen,first);
  const broad=p.seen.findIndex(s=>s.includes('GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order"'));
- const narrow=p.seen.findIndex(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_order.distribution_order_admission'));assert(broad>=0&&narrow>broad);assert(p.seen.at(-1)!.includes('GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json'));
+ const narrow=p.seen.findIndex(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_order.distribution_order_admission'));assert(broad>=0&&narrow>broad);assert(p.seen.some(s=>s.includes('GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json')));assert(p.seen.at(-1)!.includes('GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version'));
  // This checks dispatch/order and emitted grants, not PostgreSQL effective privileges.
 });

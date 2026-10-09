@@ -40,6 +40,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name === "./account/account-security-controls") return { AccountSecurityControls: ({ userId, canAct }) => canAct() ? React.createElement("p", null, `PRIVATE_${userId} 138****8000`) : null };
     if (name === "./account/personal-wallet") return { PersonalWallet: () => null };
     if (name === "./account/personal-invitations") return { PersonalInvitations: () => null };
+    if (name === "./account/credit-center") return { CreditCenter: () => null };
     if (name === "@heroui/react") return { Chip: ({ children }) => React.createElement("span", null, children) };
     if (name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
     if (name === "./layout/service-shell") return { ServiceShell: ({ children }) => React.createElement("main", null, children) };
@@ -61,7 +62,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
       AccountCenterFrame: ({ children }) => children,
       AccountOverview: () => null,
       resolveAccountView: (view) => view || "overview",
-      accountSectionLabels: { wallet: "我的钱包", invite: "分销中心" },
+      accountSectionLabels: { wallet: "我的钱包", invite: "分销中心", credit: "信用与保证金" },
     };
     if (name === "../lib/supply-client") {
       const actual = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));

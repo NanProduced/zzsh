@@ -108,9 +108,11 @@ export function WorkspacePageContent({
         snapshot={snapshot}
         initialRequestId={tab.objectId}
         initialTab={tab.query.tab === "pending" || tab.query.tab === "templates" || tab.query.tab === "audit" ? tab.query.tab : "mine"}
+        initialQuery={tab.query}
         objectOnly={tab.kind === "approval-object"}
         onOpenObject={(requestId, title) => onOpenPath(`/approvals/${encodeURIComponent(requestId)}`, title)}
         onTabChange={(value) => onQueryChange({ ...tab.query, tab: value })}
+        onQueryChange={onQueryChange}
         refreshNonce={refreshNonce}
       />
     );
@@ -118,7 +120,7 @@ export function WorkspacePageContent({
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}withSupplyOrigin(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange({...tab.query,...query})} refreshNonce={refreshNonce}/></>;
+  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}if(pathname.startsWith("/orders/")&&tab.objectId){params.set("fromUserId",tab.objectId);params.set("fromUserSection",tab.query.section??"orders");}withSupplyOrigin(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange({...tab.query,...query})} refreshNonce={refreshNonce}/></>;
   if(tab.kind==="resource-object")return <AdminResourceReadView snapshot={snapshot} accountId={tab.objectId!} fromOrderId={tab.query.fromOrderId} fromUserId={tab.query.fromUserId} fromUserSection={tab.query.fromUserSection} onOpenPath={onOpenPath} refreshNonce={refreshNonce}/>;
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
@@ -137,15 +139,24 @@ export function WorkspacePageContent({
     return <ContentView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "orders" || tab.kind === "order-object") {
+    const fromUser = tab.kind === "order-object" && tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? tab.query.fromUserId : null;
+    const userReturn = fromUser ? <button className="oc-back" onClick={() => onOpenPath(`/users/${fromUser}?${new URLSearchParams({ section: tab.query.fromUserSection ?? "orders" })}`)}>返回来源用户</button> : null;
+    const withUserOrigin = (path: string, title?: string) => {
+      if (!fromUser || !path.startsWith("/supply/accounts/")) return withSupplyOrigin(path, title);
+      const [pathname, search = ""] = path.split("?"), params = new URLSearchParams(search);
+      params.set("fromUserId", fromUser);
+      params.set("fromUserSection", tab.query.fromUserSection ?? "orders");
+      withSupplyOrigin(pathname + "?" + params, title);
+    };
     return (
-      <>{supplyReturn}
+      <>{supplyReturn}{userReturn}
       <AdminOrderChainView
         key={tab.id}
         snapshot={snapshot}
         initialOrderId={tab.objectId}
         objectOnly={tab.kind === "order-object"}
         initialQuery={tab.query}
-        onOpenPath={withSupplyOrigin}
+        onOpenPath={withUserOrigin}
         onQueryChange={onQueryChange}
         refreshNonce={refreshNonce}
       />

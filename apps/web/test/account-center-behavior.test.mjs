@@ -303,7 +303,7 @@ test("membership card uses the confirmed tier and a missing field is not invente
     assert.equal(probe.host.querySelector("[data-gap=MEMBERSHIP_CONTRACT_REQUIRED]").textContent.includes("会员等级暂未由服务端提供"), true);
     assert.doesNotMatch(probe.host.textContent, /SVIP|VIP|R1/);
     const nav = [...probe.host.querySelectorAll(".account-nav a")];
-    assert.equal(nav.length, 9);
+    assert.equal(nav.length, 10);
     assert.ok(nav.every((link) => link.tagName === "A" && link.getAttribute("href")?.startsWith("/account?view=")));
     assert.equal(probe.host.querySelector(".account-nav a[aria-current=page]").textContent.includes("总览"), true);
     const wallet = nav.find((link) => link.getAttribute("href") === "/account?view=wallet");
