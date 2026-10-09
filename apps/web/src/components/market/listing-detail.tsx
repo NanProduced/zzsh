@@ -1,60 +1,71 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { getImageProps } from "next/image";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowLeft, ImageOff, RotateCw, X } from "lucide-react";
+import { ArrowRight, Box, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Coins, Copy, Crosshair, Dumbbell, FileText, Gem, ImageOff, Info, LogIn, MapPin, Package, ReceiptText, RotateCw, Share2, Shield, Shirt, UserRound, Waves, X, Zap } from "lucide-react";
 import { ServiceShell } from "@/components/layout/service-shell";
 import { FavoriteButton, FavoriteNotice } from "@/components/favorites/favorite-button";
 import { FavoritesProvider } from "@/components/favorites/favorites-context";
-import { isHaff, moneyValue, orderedQuoteResources, skinChipTone } from "@/components/delta/account-card";
+import { accountHref, composeGridTitle, isHaff, moneyValue, orderedQuoteResources } from "@/components/delta/account-card";
 import { accountReturnTarget, readAccountReturn } from "@/lib/account-return";
-import { detailBreadcrumbs, resourceQuantityLabel, toListingDetail, type ListingDetailData } from "@/lib/listing-view";
+import { canonicalResourceCode } from "@/lib/listing-filters";
+import { DELTA_GAME_CODE } from "@/lib/supply-games";
+import { detailBreadcrumbs, haffRatioLabel, resourceQuantityLabel, toListingDetail, type ListingDetailData, type ResourceLine } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
 import { useUserSession } from "@/components/session/user-session-provider";
+import "./account-detail.css";
 
-type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetailData } | { status: "unavailable" } | { status: "error" };
+type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetailData; gameCode?: string } | { status: "unavailable" } | { status: "error" };
 type BackTarget = { href: string; label: string };
 
-const ANCHORS = [
-  { id: "detail-info", label: "账号信息" },
-  { id: "detail-resources", label: "资源与皮肤" },
-  { id: "detail-shots", label: "账号截图" },
-  { id: "detail-terms", label: "租赁说明" },
-] as const;
-
-const SKIN_GROUPS = [
-  { tone: "teal", label: "刀皮 / 近战" },
-  { tone: "purple", label: "干员皮肤" },
-  { tone: "blue", label: "枪械皮肤" },
-  { tone: "default", label: "其他" },
-] as const;
+function AccountDetailBanner() {
+  const desktop = getImageProps({ src: "/art/zhouzhou/account-detail-banner-d-desktop-final.png", width: 2141, height: 251, alt: "资源有据，租用有数；公开资料、费用构成与租赁规则", sizes: "100vw", loading: "eager" }).props;
+  const mobile = getImageProps({ src: "/art/zhouzhou/account-detail-banner-a-mobile-v2.png", width: 2172, height: 724, alt: "三角洲行动账号租赁", sizes: "100vw", loading: "eager" }).props;
+  return <section className="account-detail-banner" aria-label="三角洲行动账号租赁">
+    <picture>
+      <source media="(max-width: 699px)" srcSet={mobile.srcSet} sizes={mobile.sizes} />
+      <img {...desktop} src={desktop.src} className="account-detail-banner-image" />
+    </picture>
+  </section>;
+}
 
 export function ListingDetail({ accountId }: { accountId: string }) {
   return <FavoritesProvider><DetailView accountId={accountId} /></FavoritesProvider>;
 }
 
-function DetailImage({ src, alt, className, loading = "lazy" }: { src: string; alt: string; className?: string; loading?: "lazy" | "eager" }) {
+function DetailImage({ src, alt, className, loading = "lazy", onLoad }: { src: string; alt: string; className?: string; loading?: "lazy" | "eager"; onLoad?: (image: HTMLImageElement) => void }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
   if (failed) return <span className={`detail-image-fallback${className ? ` ${className}` : ""}`}><ImageOff size={24} />图片暂不可用</span>;
-  return <img className={className} src={src} alt={alt} loading={loading} onError={() => setFailed(true)} />;
+  return <img className={className} src={src} alt={alt} loading={loading} onLoad={event => onLoad?.(event.currentTarget)} onError={() => setFailed(true)} />;
 }
 
 function DetailGallery({ title, media }: { title: string; media: ListingDetailData["media"] }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [shape, setShape] = useState<{ assetId: string; ratio: number } | null>(null);
   const galleryMedia = media.filter((m) => m.category !== "PENALTY");
   const activeList = galleryMedia;
   useEffect(() => setActiveIndex(0), [media]);
   if (activeList.length === 0) return <div className="detail-gallery"><span className="detail-image-fallback"><ImageOff size={24} />暂无可展示的图片</span></div>;
-  const activeMedia = activeList[activeIndex] ?? activeList[0]!;
-  return <div className="detail-gallery" aria-label={`${title}公开展示图`}>
+  const index = Math.min(activeIndex, activeList.length - 1);
+  const activeMedia = activeList[index]!;
+  const select = (next: number) => setActiveIndex(Math.max(0, Math.min(activeList.length - 1, next)));
+  return <div className="detail-gallery" aria-label={`${title}公开展示图`} onKeyDown={event => {
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const next = Math.max(0, Math.min(activeList.length - 1, index + (event.key === "ArrowRight" ? 1 : -1)));
+    select(next);
+    if (!previewOpen && event.target instanceof Element && event.target.closest(".detail-gallery-thumbs")) event.currentTarget.querySelectorAll<HTMLElement>(".detail-gallery-thumb")[next]?.focus();
+  }}>
+    <div className="detail-gallery-stage">
     <Dialog.Root open={previewOpen} onOpenChange={setPreviewOpen}>
       <Dialog.Trigger asChild>
-        <button type="button" className="detail-gallery-main" aria-label={`放大查看第 ${activeIndex + 1} 张公开展示图`}>
-          <DetailImage src={activeMedia.url} alt={`${title}公开展示图，第${activeIndex + 1}张`} loading="eager" />
-          {activeList.length > 1 ? <span className="detail-gallery-count">第 {activeIndex + 1} / {activeList.length} 张</span> : null}
+        <button type="button" className="detail-gallery-main" style={{ aspectRatio: shape?.assetId === activeMedia.assetId ? shape.ratio : "16 / 9" }} aria-label={`放大查看第 ${index + 1} 张公开展示图`}>
+          <DetailImage src={activeMedia.url} alt={`${title}公开展示图，第${index + 1}张`} loading="eager" onLoad={image => { if (image.naturalWidth && image.naturalHeight) setShape({ assetId: activeMedia.assetId, ratio: Math.max(1, Math.min(8, image.naturalWidth / image.naturalHeight)) }); }} />
+          <span className="detail-gallery-count" aria-live="polite">{index + 1} / {activeList.length}</span>
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>
@@ -62,16 +73,21 @@ function DetailGallery({ title, media }: { title: string; media: ListingDetailDa
         <Dialog.Content className="detail-preview-content" aria-describedby={undefined}>
           <Dialog.Title className="sr-only">{title} 大图预览</Dialog.Title>
           <Dialog.Close className="icon-button detail-preview-close" aria-label="关闭预览"><X size={18} aria-hidden="true" /></Dialog.Close>
-          <DetailImage src={activeMedia.url} alt={`${title}公开展示图大图，第${activeIndex + 1}张`} className="detail-preview-image" loading="eager" />
+          <DetailImage src={activeMedia.url} alt={`${title}公开展示图大图，第${index + 1}张`} className="detail-preview-image" loading="eager" />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-    {activeList.length > 1 ? <div className="detail-gallery-thumbs" aria-label="选择公开展示图">
-      {activeList.map((item, index) => <button key={item.assetId} type="button" className="detail-gallery-thumb" aria-label={`选择第 ${index + 1} 张公开展示图`} aria-pressed={index === activeIndex} onClick={() => setActiveIndex(index)}>
+    {activeList.length > 1 ? <>
+      <button type="button" className="detail-gallery-nav detail-gallery-nav--previous" aria-label="上一张公开展示图" disabled={index === 0} onClick={() => select(index - 1)}><ChevronLeft size={20} aria-hidden="true" /></button>
+      <button type="button" className="detail-gallery-nav detail-gallery-nav--next" aria-label="下一张公开展示图" disabled={index === activeList.length - 1} onClick={() => select(index + 1)}><ChevronRight size={20} aria-hidden="true" /></button>
+    </> : null}
+    </div>
+    <div className="detail-gallery-thumbs" aria-label="选择公开展示图">
+      {activeList.map((item, thumbnailIndex) => <button key={item.assetId} type="button" className="detail-gallery-thumb" aria-label={`选择第 ${thumbnailIndex + 1} 张公开展示图`} aria-pressed={thumbnailIndex === index} onClick={() => select(thumbnailIndex)}>
         <DetailImage src={item.url} alt="" className="detail-gallery-thumb-image" />
-        <span className="detail-gallery-thumb-index">{index + 1}</span>
+        <span className="detail-gallery-thumb-index">{thumbnailIndex + 1}</span>
       </button>)}
-    </div> : null}
+    </div>
   </div>;
 }
 
@@ -79,231 +95,160 @@ function conditionValue(data: ListingDetailData, key: string): string | null {
   return data.conditionLines.find((line) => line.key === key)?.value ?? null;
 }
 
-function orDash(value: string | null | undefined): string {
-  return value?.trim() ? value : "-";
-}
-
 function regionValue(data: ListingDetailData): string {
   const parts = [conditionValue(data, "region_province"), conditionValue(data, "region_city")].filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(" · ") : "-";
+  return parts.length > 0 ? parts.join(" · ") : "未提供";
 }
 
-function quoteNote(line: ListingDetailData["resourceLines"][number], informational: boolean): string {
-  const parts = [line.costLabel ? `费用 ${line.costLabel}` : "费用待确认"];
-  if (line.unitPriceLabel) parts.push(`服务端单位价 ${line.unitPriceLabel}${informational ? "（辅助说明）" : ""}`);
-  return parts.join(" · ");
+function displayTime(value: string | null | undefined): string | null {
+  if (!value || !Number.isFinite(Date.parse(value))) return null;
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(value)).replaceAll("/", "-");
 }
 
-function feeValueClass(value: string, total: boolean): string {
-  const pending = value === "待确认";
-  if (total) return pending ? "detail-price detail-price--pending" : "detail-price";
-  return pending ? "detail-fee-pending" : "detail-fee-value";
+export function entitlementExpiryLabel(item: { expiresAt: string | null; expiryState: "MISSING" | "PERMANENT" | "TIMED" }, now = Date.now()): string {
+  if (item.expiryState === "MISSING") return "期限未提供 · 覆盖范围以个人确认时为准";
+  if (item.expiryState === "PERMANENT") return "长期权益 · 不保证覆盖全部租期";
+  const time = displayTime(item.expiresAt);
+  if (!time) return "到期时间未确认 · 覆盖范围以个人确认时为准";
+  return `${Date.parse(item.expiresAt!) <= now ? "已到期" : "到期"} ${time} · 不保证覆盖全部租期`;
 }
 
-function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; back: BackTarget; activeAnchor: string }) {
+function unitPriceText(line: ResourceLine): string {
+  if (!line.unitPriceLabel) return "未确认";
+  const match = line.unitPriceLabel.match(/^(¥\d+(?:\.\d+)?)\s*\/\s*(\d+)\s+(.+)$/);
+  if (!match) return line.unitPriceLabel;
+  const amount = match[1]!.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1");
+  const grouped = canonicalResourceCode(line.code) === "df_billable_level6_bullet" && match[2] === "60" && match[3] === "发";
+  return `${amount} / ${grouped ? "组" : `${match[2] === "1" ? "" : match[2]}${match[3]}`}`;
+}
+
+function InventoryArt({ code }: { code: string | null }) {
+  // Reuse the publisher's existing artwork and stable codes; no new inventory images.
+  const art = ({ df_billable_awm_bullet: "awm-round", df_billable_level6_bullet: "level6-round", df_billable_barrett_bullet: "barrett-round", df_billable_level6_armor: "level6-armor", df_billable_level6_helmet: "level6-helmet", df_billable_coffee: "coffee-beans", top_insure_card_piece: "insurance-card", df_billable_top_insure_card_piece: "insurance-card" } as Record<string, string>)[canonicalResourceCode(code) ?? ""];
+  return <span className="account-resource-art" aria-hidden="true">{art ? <DetailImage src={`/art/zhouzhou/inventory-polished/${art}.webp`} alt="" /> : <Box size={22} />}</span>;
+}
+
+function ReadyDetail({ data }: { data: ListingDetailData }) {
   const session = useUserSession();
   const identityKey = session.status === "authenticated" && session.userId ? session.userId : "guest";
-  const serviceWindow = conditionValue(data, "service_window");
-  const loginValue = conditionValue(data, "login_method_code");
-  const haffLine = data.resourceLines.find(isHaff);
-  const resourceRows = [...data.resourceLines.filter(isHaff), ...orderedQuoteResources(data)];
-  const skinGroups = SKIN_GROUPS
-    .map((group) => ({ ...group, skins: data.skinTags.filter((tag) => skinChipTone(tag) === group.tone) }))
-    .filter((group) => group.skins.length > 0);
-  const resourceSubtotal = moneyValue(data.resourceTotalLabel, "无需支付");
-  const haffRent = moneyValue(data.haffRentLabel, "无需支付");
-  const itemResource = moneyValue(data.itemResourceTotalLabel, "无物品费用");
-  const deposit = moneyValue(data.depositLabel, "无需押金");
-  const payableTotal = moneyValue(data.payableTotalLabel, "无需支付");
-  const assetCells = [
-    { label: "哈夫币", value: haffLine ? orDash(haffLine.quantityLabel || haffLine.quantity) : "-" },
-    { label: "安全箱", value: orDash(conditionValue(data, "safe_box_code")) },
-    { label: "段位", value: orDash(conditionValue(data, "grading_code")) },
+  const [copyState, setCopyState] = useState<{ number: string; ok: boolean } | null>(null);
+  const [linkState, setLinkState] = useState<{ accountId: string; ok: boolean } | null>(null);
+  const number = data.displayNo?.trim() || null;
+  const copyNumber = async () => {
+    if (!number) return;
+    try { await navigator.clipboard.writeText(number); setCopyState({ number, ok: true }); }
+    catch { setCopyState({ number, ok: false }); }
+  };
+  const value = (key: string) => { const raw = conditionValue(data, key); return !raw ? "未提供" : raw.startsWith("未确认（代码") ? "未确认" : raw; };
+  const haff = data.resourceLines.find(isHaff);
+  const titleParts = composeGridTitle({ ...data, title: data.publicTitle ?? "" }, haff ? resourceQuantityLabel(haff) : null);
+  const rank = conditionValue(data, "grading_code");
+  if (rank) titleParts.rest = titleParts.rest.replace(rank, `${rank}段位`);
+  const title = [titleParts.haff, titleParts.rest].filter(Boolean).join(" · ");
+  const fast = data.rentalMode === "fast";
+  const copyLink = async () => {
+    const accountId = data.id;
+    try { await navigator.clipboard.writeText(new URL(accountHref(accountId), window.location.origin).href); setLinkState({ accountId, ok: true }); }
+    catch { setLinkState({ accountId, ok: false }); }
+  };
+  const otherFacts = [
+    { label: "哈夫币", value: haff ? resourceQuantityLabel(haff) : "未申报", icon: Coins },
+    { label: "安全箱", value: value("safe_box_code"), icon: Box },
+    { label: "游戏段位", value: value("grading_code"), icon: Gem },
+    { label: "角色等级", value: value("character_level"), icon: UserRound },
+    { label: "体力", value: value("vit_level"), icon: Dumbbell },
+    { label: "负重", value: value("bear_level"), icon: Package },
+    { label: "潜水", value: value("dive_level"), icon: Waves },
+    { label: "绝密KD", value: value("secret_kd"), icon: Crosshair },
+    { label: "地区", value: regionValue(data), icon: MapPin },
+    { label: "参考比例", value: haff ? haffRatioLabel(haff.quantity, haff.costAmount) : "未确认", icon: Coins },
+    { label: "出租模式", value: ({ ordinary: "普通出租", custom: "自定义出租", fast: "极速出租" } as Record<string, string>)[data.rentalMode ?? ""] ?? "未提供", icon: Package },
+    { label: "人脸归属", value: "暂未公开", icon: UserRound },
+    { label: "封禁声明", value: "暂未公开", icon: Shield },
   ];
-  const matrixCells = [
-    { label: "体力", value: orDash(conditionValue(data, "vit_level")) },
-    { label: "负重", value: orDash(conditionValue(data, "bear_level")) },
-    { label: "绝密 KD", value: orDash(conditionValue(data, "secret_kd")) },
-    { label: "登录方式", value: orDash(loginValue) },
-    { label: "每日消耗", value: orDash(conditionValue(data, "daily_consumption")) },
+  const factGroups = [
+    { label: "账号基础", facts: otherFacts.slice(0, 4) },
+    { label: "作战属性", facts: otherFacts.slice(4, 8) },
+    { label: "租赁信息", facts: otherFacts.slice(8) },
   ];
-  const overviewFields = [
-    { label: "账号编号", value: data.displayNo ?? "-" },
-    { label: "地区", value: regionValue(data) },
-    { label: "角色等级", value: orDash(conditionValue(data, "character_level")) },
-    { label: "潜水等级", value: orDash(conditionValue(data, "dive_level")) },
-    { label: "租期规则", value: data.termOptionLabel ?? "-" },
+  const summary = [
+    { label: "上号方式", value: value("login_method_code"), icon: LogIn },
+    { label: "配合上号", value: value("service_window"), icon: Clock3, note: "北京时间" },
+    { label: "每日消耗", value: value("daily_consumption"), icon: Coins },
+    { label: data.historicalReadOnly ? "来源租期" : "推算租期", value: data.termLabel, icon: CalendarDays },
   ];
-  const rules = [
-    { label: "租期", value: data.termLabel },
-    { label: "结算规则", value: "物品金额先预付，结算按实际使用量核算，未使用部分退还；最终以订单结算为准。" },
-    { label: "真人客服履约", value: "租赁期间由真人客服协助完成上号与使用问题处理。" },
-    { label: "支付与订单", value: "支付与订单功能尚未开放。" },
-  ];
-
-  return <article className="listing-detail">
-    <div className="detail-topbar">
-      <Link className="functional-back" href={back.href}><ArrowLeft size={16} aria-hidden="true" /><span>{back.label}</span></Link>
-    </div>
-
-    {(() => {
-      const displayTitle = data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号");
-      return (
-        <div className="detail-hero">
-          <DetailGallery title={displayTitle} media={data.media} />
-          <div className="detail-hero-summary">
-            <div className="detail-hero-title-row">
-              <h2 className="detail-hero-title">{displayTitle}</h2>
-              {data.rentalMode === "fast" ? <span className="detail-deal-tag">特惠</span> : null}
-            </div>
-            <p className="detail-meta">
-              {serviceWindow ? <span>可上号 {serviceWindow}</span> : null}
-              <span>租期 {data.termLabel}</span>
-            </p>
-            <dl className="detail-assets" aria-label="核心资产">
-              {assetCells.map((cell) => <div key={cell.label}>
-                <dt>{cell.label}</dt>
-                <dd>{cell.value}</dd>
-              </div>)}
-            </dl>
-            <dl className="detail-matrix" aria-label="关键条件">
-              {matrixCells.map((cell) => <div key={cell.label} className="detail-matrix-cell">
-                <dt>{cell.label}</dt>
-                <dd>{cell.value}</dd>
-              </div>)}
-            </dl>
-            <div className="detail-fees" role="group" aria-label="费用摘要">
-              <div className="detail-fee-group" role="group" aria-label="资源费用">
-                <div className="detail-fee-row detail-fee-row--head"><span className="detail-fee-label">资源费用小计</span><span className={feeValueClass(resourceSubtotal, false)}>{resourceSubtotal}</span></div>
-                <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">哈夫币租金</span><span className={feeValueClass(haffRent, false)}>{haffRent}</span></div>
-                <div className="detail-fee-row detail-fee-row--sub"><span className="detail-fee-label">物品资源费用</span><span className={feeValueClass(itemResource, false)}>{itemResource}</span></div>
-              </div>
-              <div className="detail-fee-row"><span className="detail-fee-label">押金</span><span className={feeValueClass(deposit, false)}>{deposit}</span></div>
-              <div className="detail-fee-row detail-fee-row--total"><span className="detail-fee-label">预计合计</span><span className={feeValueClass(payableTotal, true)}>{payableTotal}</span></div>
-            </div>
-            <div className="detail-hero-actions">
-              <FavoriteButton accountId={data.id} title={displayTitle} variant="inline" />
-              {data.historicalReadOnly
-                ? <p className="detail-stage-note">历史只读账号仅展示公开信息，不支持在线租赁。</p>
-                : <RentalConfirmPanel key={identityKey} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} />}
-            </div>
-            <FavoriteNotice />
+  const published = displayTime(data.publishedAt);
+  const resources = orderedQuoteResources(data);
+  const penalties = data.media.filter(item => item.category === "PENALTY");
+  const skinGroups = new Map<string, ListingDetailData["skinTags"]>();
+  for (const tag of data.skinTags) { const category = tag.categoryName || "未分类"; skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
+  return <article className="listing-detail account-detail">
+    <div className="account-detail-top">
+      <section className="account-detail-info" aria-label="账号摘要">
+        <h1 className="account-detail-title">{titleParts.haff ? <><strong className="account-title-haff account-title-part">{titleParts.haff}</strong>{titleParts.rest ? <span className="account-title-separator"> · </span> : null}</> : null}{titleParts.rest.split(" · ").map((part, index) => <span key={index}>{index > 0 ? <span className="account-title-separator"> · </span> : null}<span className="account-title-part">{part}</span></span>)}</h1>
+        {fast ? <span className="account-detail-deal"><Zap size={14} aria-hidden="true" />特惠 · 极速出租</span> : null}
+        <div className="account-identity">
+          <div className="account-number-row"><span>账号编号</span><strong>{number ?? "未提供"}</strong>
+            <button type="button" className="account-copy" disabled={!number} onClick={() => void copyNumber()} aria-label="复制账号编号">{copyState?.number === number && copyState.ok ? <Check size={16} /> : <Copy size={16} />}<span>复制</span></button>
           </div>
+          <div className="account-published"><Clock3 size={15} aria-hidden="true" />{published ? <time dateTime={data.publishedAt!}>发布时间 {published}</time> : <span>发布时间未提供</span>}</div>
+          {copyState?.number === number ? <p className="account-copy-note" role="status">{copyState.ok ? "账号编号已复制" : "暂时无法自动复制，请选中编号复制。"}</p> : null}
         </div>
-      );
-    })()}
-
-    <nav className="detail-anchors" aria-label="详情章节">
-      {ANCHORS.map(({ id, label }) => <a key={id} href={`#${id}`} aria-current={activeAnchor === id ? "true" : undefined}>{label}</a>)}
-    </nav>
-
-    <div className="detail-sections">
-      <section id="detail-info" aria-labelledby="detail-info-heading">
-        <div className="detail-section-heading">
-          <h2 id="detail-info-heading">账号概览</h2>
-          <p className="detail-section-note">数据由号主提供，仅供参考。</p>
-        </div>
-        <dl className="detail-overview">
-          {overviewFields.map((field) => <div key={field.label}>
-            <dt>{field.label}</dt>
-            <dd>{field.value}</dd>
-          </div>)}
-        </dl>
-        {data.description ? <>
-          <h3 className="detail-subheading">号主说明</h3>
-          <p className="detail-description">{data.description}</p>
-        </> : null}
+        <div className="account-identity-actions"><FavoriteButton accountId={data.id} title={title} variant="inline" /><button type="button" className="button secondary account-share" onClick={() => void copyLink()}><Share2 size={16} aria-hidden="true" />{linkState?.accountId === data.id && linkState.ok ? "已复制链接" : "分享"}</button></div>
+        {linkState?.accountId === data.id ? <p className="account-link-notice" role="status">{linkState.ok ? "链接已复制，可粘贴分享。" : "暂时无法复制，请复制地址栏链接。"}</p> : null}
+      </section>
+      <aside className="account-quote" aria-label="租赁报价">
+        {data.historicalReadOnly ? <>
+          <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />来源资源费用 · 历史只读</h2></div>
+          <p className="account-readonly-badge">历史来源记录 · 不支持在线租赁</p>
+          <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
+          <dl className="account-fee-lines"><div><dt>哈夫币租金</dt><dd>{moneyValue(data.haffRentLabel)}</dd></div><div><dt>物资预付</dt><dd>{moneyValue(data.itemResourceTotalLabel)}</dd></div></dl>
+          <p className="detail-stage-note account-readonly">这笔费用来自历史来源记录，不是当前本人应付。</p>
+          <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回可租账号列表</Link>
+         </> : <>
+           <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} autoQuote reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
+           <section className="account-process-panel account-process-panel--quote" aria-labelledby="account-process-title">
+             <div className="account-section-title"><h2 id="account-process-title"><Shield size={20} aria-hidden="true" />租赁流程</h2><span>从核对到开租</span></div>
+             <ol className="account-process-steps">
+               {["核对资料与适用条款", "读取本人报价并确认建单", "付款后由真人客服协助履约", "交付确认后再开租"].map((step, index) => <li key={step}><span className="account-process-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{step}</strong><span>{index === 0 ? "公开属性与当前发布版本" : index === 1 ? "会员价格与押金在确认时读取" : index === 2 ? "订单阶段由真人客服协助处理" : "交付确认后才进入开租阶段"}</span></div></li>)}
+             </ol>
+             <div className="account-rental-tip"><Info size={17} aria-hidden="true" /><p>付款与开租是不同阶段。费用和适用协议在个人确认时核对，实际金额与进度以订单为准。</p></div>
+             <Link className="account-help-link" href="/help/rental-check-before-order">查看租赁须知 <ArrowRight size={15} aria-hidden="true" /></Link>
+           </section>
+         </>}
+        <FavoriteNotice />
+      </aside>
+      <div className="account-detail-gallery"><DetailGallery title={title} media={data.media} /><p className="account-media-caption">号主提供 · 点击图片查看大图</p>
+      <dl className="account-summary-conditions">{summary.map(fact => { const Icon = fact.icon; return <div key={fact.label}><dt><Icon size={24} aria-hidden="true" />{fact.label}</dt><dd>{fact.value}</dd>{fact.note && fact.value !== "未提供" ? <span>{fact.note}</span> : null}</div>; })}</dl>
+      </div>
+      <section className="account-detail-notes account-owner-section">
+        <section aria-labelledby="account-note-title"><h2 id="account-note-title"><FileText size={20} aria-hidden="true" />号主说明</h2><p className="account-owner-note">{data.description || "暂无公开备注。"}</p><p className="account-note-source">资料由号主申报，以公开信息与当次适用条款核对。</p>
+          <div className="account-cosmetics"><h3><Shirt size={17} aria-hidden="true" />皮肤与权益</h3>
+            {data.skinTags.length || data.entitlementNames.length ? <>
+              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项 · 图片待接入</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.name}:${i}`} className="account-skin-card"><div className="account-skin-card-media"><Shirt size={22} aria-hidden="true" /><span>图鉴图片待接入</span></div><strong>{tag.name}</strong></article>)}</div></section>)}</div>
+              <div className="account-entitlement-list">{data.entitlementDetails?.length ? data.entitlementDetails.map(item => <div key={item.id} className="account-entitlement-item"><strong>{item.name}</strong><span>{entitlementExpiryLabel(item)}</span></div>) : data.entitlementNames.map((name, index) => <div key={`${name}:${index}`} className="account-entitlement-item"><strong>{name}</strong><span>权益详情以个人确认时为准</span></div>)}</div>
+            </> : <p className="account-empty-note">暂无皮肤或权益的公开申报。</p>}
+          </div>
+          {penalties.length ? <details className="account-penalties"><summary><Shield size={17} aria-hidden="true" /><span>处罚公示资料</span><span>{penalties.length}张 · 查看公示</span></summary><p className="account-note-source">号主提供的公开资料，不替代平台核验。</p><div>{penalties.map((item, index) => <DetailImage key={item.assetId} src={item.url} alt={`处罚公示资料，第${index + 1}张`} />)}</div></details> : null}
+        </section>
       </section>
 
-      <section id="detail-resources" aria-labelledby="detail-resources-heading">
-        <div className="detail-section-heading">
-          <h2 id="detail-resources-heading">资源与费用明细</h2>
-        </div>
-        {resourceRows.length > 0 ? <div className="detail-table-wrap">
-          <table className="detail-table">
-            <thead>
-              <tr><th scope="col">资源名称</th><th scope="col">数量</th><th scope="col">报价说明</th></tr>
-            </thead>
-            <tbody>
-              {resourceRows.map((line) => <tr key={line.itemId}>
-                <td>{line.name}{isHaff(line) ? <span className="detail-line-tag">哈夫币租金</span> : null}</td>
-                <td data-label="数量">{resourceQuantityLabel(line)}</td>
-                <td data-label="报价说明" className="detail-table-note">{quoteNote(line, data.unitAmountsInformational)}</td>
-              </tr>)}
-            </tbody>
-          </table>
-        </div> : <p className="detail-hint">暂无可展示的资源明细。</p>}
-      </section>
-
-      <section id="detail-skins" aria-labelledby="detail-skins-heading">
-        <div className="detail-section-heading">
-          <h2 id="detail-skins-heading">皮肤与权益</h2>
-          <p className="detail-section-note">部分皮肤仅作展示，具体以游戏内实际为准。</p>
-        </div>
-        <h3 className="detail-subheading">皮肤</h3>
-        {data.skinTags.length > 0 ? <div className="detail-skin-groups">
-          {skinGroups.map((group) => <div key={group.tone} className={`detail-skin-group detail-skin-group--${group.tone}`}>
-            <div className="detail-skin-group-head"><span>{group.label}</span><span>{group.skins.length} 个</span></div>
-            <ul className="detail-skin-tags">
-              {group.skins.map((tag, index) => <li key={`${tag.name}-${index}`} className={`account-skin-chip account-skin-chip--${group.tone}`} title={tag.name}>{tag.name}</li>)}
-            </ul>
-          </div>)}
-        </div> : <p className="detail-hint">暂无可展示的皮肤。</p>}
-        <h3 className="detail-subheading">权益</h3>
-        {data.entitlementNames.length > 0 ? <ul className="detail-skins">
-          {data.entitlementNames.map((name) => <li key={name}>{name}</li>)}
-        </ul> : <p className="detail-hint">暂无已确认权益。</p>}
-      </section>
-
-      {(() => {
-        const showcaseMedia = data.media.filter((item) => item.category !== "PENALTY");
-        const penaltyMedia = data.media.filter((item) => item.category === "PENALTY");
-        const displayTitle = data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号");
-        return (
-          <>
-            <section id="detail-shots" aria-labelledby="detail-shots-heading">
-              <div className="detail-section-heading">
-                <h2 id="detail-shots-heading">账号展示图</h2>
-                {showcaseMedia.length > 0 ? <p className="detail-section-note">共 {showcaseMedia.length} 张展示图</p> : null}
-              </div>
-              {showcaseMedia.length > 0 ? <div className="detail-shots">
-                {showcaseMedia.map((item, index) => <DetailImage key={item.assetId} src={item.url} alt={`${displayTitle}账号展示图，第${index + 1}张`} className="detail-shot-image" />)}
-              </div> : <p className="detail-hint">暂无可展示的截图。</p>}
-            </section>
-
-            {penaltyMedia.length > 0 ? (
-              <section id="detail-penalty-shots" aria-labelledby="detail-penalty-heading">
-                <div className="detail-section-heading">
-                  <h2 id="detail-penalty-heading">封禁与处罚公示图</h2>
-                  <p className="detail-section-note">共 {penaltyMedia.length} 张公示图 · 号主申报公开资料</p>
-                </div>
-                <div className="detail-shots">
-                  {penaltyMedia.map((item, index) => <DetailImage key={item.assetId} src={item.url} alt={`${displayTitle}处罚与封禁公示图，第${index + 1}张`} className="detail-shot-image" />)}
-                </div>
-              </section>
-            ) : null}
-          </>
-        );
-      })()}
-
-      <section id="detail-terms" aria-labelledby="detail-terms-heading">
-        <div className="detail-section-heading">
-          <h2 id="detail-terms-heading">租赁说明与履约规则</h2>
-        </div>
-        <dl className="detail-rules">
-          {rules.map((rule) => <div key={rule.label}>
-            <dt>{rule.label}</dt>
-            <dd>{rule.value}</dd>
-          </div>)}
-        </dl>
-      </section>
-
-      <section className="detail-similar" aria-labelledby="detail-similar-heading">
-        <div>
-          <h2 id="detail-similar-heading">相似账号</h2>
-          <p className="detail-hint">更多账号请返回列表浏览</p>
-        </div>
-        <Link className="button secondary" href={back.href}>{back.label}</Link>
+    </div>
+    <section className="account-core" aria-labelledby="account-core-title">
+      <h2 id="account-core-title"><Box size={20} aria-hidden="true" />账号参数</h2>
+      <div className="account-fact-groups">{factGroups.map(group => <section key={group.label} className="account-fact-group" aria-labelledby={`account-fact-group-${group.label}`}>
+        <h3 id={`account-fact-group-${group.label}`}>{group.label}</h3>
+        <dl className="account-facts">{group.facts.map(fact => { const Icon = fact.icon; return <div key={fact.label} className="account-fact"><dt><Icon size={21} aria-hidden="true" /><span>{fact.label}</span></dt><dd>{fact.value}</dd></div>; })}</dl>
+      </section>)}</div>
+    </section>
+    <div className="account-detail-body">
+      <section className="account-stock" aria-labelledby="account-stock-title">
+        <div className="account-section-title"><h2 id="account-stock-title"><Box size={20} aria-hidden="true" />物资库存</h2><span>号主申报数量</span></div>
+        {resources.length ? <table className="account-stock-table"><thead><tr><th scope="col">物资</th><th scope="col">数量</th><th scope="col">参考单价</th><th scope="col">参考费用</th></tr></thead><tbody>
+          {resources.map(line => <tr key={line.itemId}><th scope="row"><InventoryArt code={line.code} /><span>{line.name}</span></th><td data-label="数量">{resourceQuantityLabel(line)}</td><td data-label="参考单价" className={!line.unitPriceLabel ? "account-value-unknown" : undefined}>{line.unitPriceLabel ? unitPriceText(line) : "未返回"}</td><td data-label="参考费用" className={!line.costLabel ? "account-value-unknown" : undefined}>{line.costLabel ?? "未返回"}</td></tr>)}
+        </tbody><tfoot><tr><th scope="row" colSpan={3}>物资参考合计</th><td>{data.itemResourceTotalLabel ?? "待服务端确认"}</td></tr></tfoot></table> : <p className="account-empty-note">尚未申报可展示的物资库存。</p>}
+        {resources.length ? <div className="account-stock-legend" role="note"><Info size={15} aria-hidden="true" /><span>“未返回”表示公开接口没有给出参考价，不等于零。</span></div> : null}
+        <p className="account-stock-note">物资金额先预付，最终按实际消耗与有效规则结算。</p>
       </section>
     </div>
   </article>;
@@ -312,7 +257,6 @@ function ReadyDetail({ data, back, activeAnchor }: { data: ListingDetailData; ba
 function DetailView({ accountId }: { accountId: string }) {
   const [state, setState] = useState<DetailState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const [activeAnchor, setActiveAnchor] = useState<string>(ANCHORS[0].id);
   const [back, setBack] = useState<BackTarget>({ href: "/accounts", label: "返回账号列表" });
   useEffect(() => {
     setBack(accountReturnTarget(readAccountReturn(accountId)));
@@ -323,7 +267,10 @@ function DetailView({ accountId }: { accountId: string }) {
     supplyApi
       .listing(accountId, controller.signal)
       .then((listing) => {
-        if (!controller.signal.aborted) setState({ status: "ready", data: toListingDetail(listing) });
+        if (!controller.signal.aborted) {
+          if (listing.id !== accountId) throw new Error("Listing object mismatch");
+          setState({ status: "ready", data: toListingDetail(listing), gameCode: listing.game?.code });
+        }
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -332,55 +279,33 @@ function DetailView({ accountId }: { accountId: string }) {
       });
     return () => controller.abort();
   }, [accountId, attempt]);
-  useEffect(() => {
-    if (state.status !== "ready" || typeof IntersectionObserver === "undefined") return;
-    const anchorByNode = new Map<Element, string>();
-    for (const { id } of ANCHORS) {
-      const node = document.getElementById(id);
-      if (node) anchorByNode.set(node, id);
-      if (id === "detail-resources") {
-        const skins = document.getElementById("detail-skins");
-        if (skins) anchorByNode.set(skins, id);
-      }
-    }
-    if (anchorByNode.size === 0) return;
-    const visible = new Set<string>();
-    const observer = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        const id = anchorByNode.get(entry.target);
-        if (!id) continue;
-        if (entry.isIntersecting) visible.add(id);
-        else visible.delete(id);
-      }
-      const active = ANCHORS.find(({ id }) => visible.has(id));
-      if (active) setActiveAnchor(active.id);
-    }, { rootMargin: "-15% 0px -35% 0px" });
-    for (const node of anchorByNode.keys()) observer.observe(node);
-    return () => observer.disconnect();
-  }, [state.status]);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
 
-  const title = state.status === "ready" ? state.data.title : state.status === "unavailable" ? "账号暂不可用" : "账号详情";
-  const description = state.status === "ready" ? state.data.displayNo ? `公开编号 ${state.data.displayNo}` : "公开编号待确认" : "账号详情";
+  const current = state.status === "ready" && state.data.id !== accountId ? { status: "loading" as const } : state;
+  const title = "账号详情";
+  const description = "";
   const breadcrumbs = detailBreadcrumbs(state.status === "ready" ? state.data.gameName : null);
-  return <ServiceShell surface="detail" contextLabel={null} breadcrumbs={breadcrumbs} title={title} description={description} backHref={back.href} backLabel={back.label} showPageHeading={false} searchLabel="在公开账号目录中搜索" searchPlaceholder="搜索其他账号">
-    {state.status === "loading" ? <div className="detail-skeleton" aria-busy="true" aria-label="正在加载账号详情">
+  return <ServiceShell surface="detail" contextLabel={null} breadcrumbs={breadcrumbs} title={title} description={description} backHref={back.href} backLabel={back.label} showPageHeading={false} headingInContent={current.status === "ready"} searchLabel="在公开目录中搜索账号名称" searchInputLabel="搜索账号名称" searchPlaceholder="搜索其他账号名称">
+    {current.status === "loading" ? <div className="detail-skeleton" aria-busy="true" aria-label="正在加载账号详情">
       <div className="detail-skeleton-hero" aria-hidden="true">
         <div className="detail-skeleton-gallery" />
         <div className="detail-skeleton-copy"><span /><span /><span /><span /></div>
       </div>
       <div className="detail-skeleton-blocks" aria-hidden="true"><div /><div /></div>
     </div> :
-      state.status === "unavailable" ? <section className="account-empty listing-unavailable" role="status">
+      current.status === "unavailable" ? <section className="account-empty listing-unavailable" role="status">
         <h3>该账号暂不可用或已下架</h3>
         <p>该账号当前没有可公开的租用信息，请返回列表选择其他账号。</p>
         <Link className="button secondary" href={back.href}>{back.label}</Link>
       </section> :
-      state.status === "error" ? <section className="account-empty" role="alert">
+      current.status === "error" ? <section className="account-empty" role="alert">
         <h3>账号详情加载失败</h3>
         <p>请检查网络后重试。</p>
         <button type="button" className="button secondary" onClick={retry}><RotateCw size={15} />重试</button>
       </section> :
-      <ReadyDetail data={state.data} back={back} activeAnchor={activeAnchor} />}
+      <>
+        {current.status === "ready" && current.gameCode === DELTA_GAME_CODE ? <AccountDetailBanner /> : null}
+        {current.status === "ready" ? <ReadyDetail data={current.data} /> : null}
+      </>}
   </ServiceShell>;
 }

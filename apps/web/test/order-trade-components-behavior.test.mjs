@@ -32,6 +32,8 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
     if (name === "@/components/session/identity-reset") return requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
     if (name === "@/components/order/order-trade-actions") return loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session);
+    if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
+    if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
@@ -55,14 +57,15 @@ async function withDom(run) {
   try { await run(window); } finally { await window.happyDOM.abort(); }
 }
 
-function createProbe(window, Component, props, fetchImpl) {
+function createProbe(window, Component, props, fetchImpl, { strict = false } = {}) {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = fetchImpl;
   const host = window.document.createElement("div");
   window.document.body.append(host);
   const root = requireFromTree("react-dom/client").createRoot(host);
   const render = async (nextProps = props) => {
-    await React.act(async () => { root.render(React.createElement(Component, nextProps)); });
+    const element = React.createElement(Component, nextProps);
+    await React.act(async () => { root.render(strict ? React.createElement(React.StrictMode, null, element) : element); });
     await tick();
   };
   const buttons = () => [...host.querySelectorAll("button")].map((button) => button.textContent ?? "");
@@ -252,6 +255,210 @@ function loadPanel(sessionUser, optionsResponder) {
   return loadPanelForSession(session(sessionUser), optionsResponder);
 }
 
+const referenceFees = { total: "¥295.91", haff: "¥256.41", items: "¥39.50" };
+const detailPanelProps = { accountId: "detail_price", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees };
+
+test("detail fees display API buyer amounts with exact cents; missing/mismatched lines never use public fees", () => {
+  const { personalFeeLines } = loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session("user_A"));
+  assert.deepEqual(personalFeeLines(confirmation), { haff: "¥150.00", items: "¥20.00" });
+  const changedName = { ...confirmation, quote: { ...confirmation.quote, lines: [{ ...haffLine, name: "not a name heuristic" }, pieceLine] } };
+  assert.deepEqual(personalFeeLines(changedName), { haff: "¥150.00", items: "¥20.00" });
+  for (const lines of [undefined, [], [{ ...haffLine, buyerAmount: null }], [{ ...haffLine, unit: "FUTURE_UNIT" }], [{ ...haffLine, buyerAmount: money("-1.00") }], [{ ...haffLine, buyerAmount: money("150.000") }]]) {
+    assert.equal(personalFeeLines({ ...confirmation, quote: { ...confirmation.quote, lines } }), null);
+  }
+  assert.equal(personalFeeLines({ ...confirmation, quote: { ...confirmation.quote, resourceTotal: money("171.00") } }), null);
+  const cents = { ...confirmation, quote: { ...confirmation.quote, lines: [{ ...haffLine, buyerAmount: money("0.10") }, { ...pieceLine, buyerAmount: money("0.20") }], resourceTotal: money("0.30") } };
+  assert.deepEqual(personalFeeLines(cents), { haff: "¥0.10", items: "¥0.20" });
+});
+
+test("detail card and dock replace the reference with the SAME personal payable; no guessed discount", async () => {
+  await withDom(async window => {
+    const log = [];
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), detailPanelProps, router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(confirmation) }], log));
+    try {
+      await probe.render();
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥295.91");
+      assert.match(probe.host.querySelector(".rental-dock-price").textContent, /押金另核/);
+      await probe.click("查看我的报价");
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥470.00");
+      assert.equal(probe.host.querySelector(".rental-dock-price strong").textContent, "¥470.00");
+      assert.match(probe.host.querySelector(".account-fee-lines").textContent, /¥150.00.*¥20.00.*¥300.00/);
+      assert.ok(!probe.host.textContent.includes("¥256.41"));
+      assert.equal(probe.host.querySelectorAll(".rental-confirm-primary").length, 1);
+      assert.equal(probe.host.querySelector("del"), null);
+      assert.ok(!probe.host.textContent.includes("已优惠"));
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("detail deposit waiver strikes only the authoritative base deposit, never the resource price", async () => {
+  await withDom(async window => {
+    const waived = { ...confirmation, customerTier: "VIP", depositWaived: true, quote: { ...confirmation.quote, tenantDeposit: money("0.00"), tenantPayableTotal: money("170.00") } };
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), detailPanelProps, router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(waived) }], []));
+    try {
+      await probe.render(); await probe.click("查看我的报价");
+      assert.equal(probe.host.querySelector("del").textContent, "¥300.00");
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥170.00");
+      assert.match(probe.host.querySelector(".rental-deposit").textContent, /¥0.00.*本次免押/);
+      assert.ok(!probe.host.textContent.includes("金卡"), "never map VIP to a new tier");
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("detail unknown deposit is not zero even with a tier or inconsistent waiver flag", async () => {
+  await withDom(async window => {
+    const incomplete = { ...confirmation, customerTier: "SVIP", depositWaived: true, quote: { ...confirmation.quote, tenantDeposit: null, tenantPayableTotal: null } };
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), detailPanelProps, router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(incomplete) }], []));
+    try {
+      await probe.render(); await probe.click("查看我的报价");
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "—");
+      assert.equal(probe.host.querySelector("del"), null);
+      assert.ok(!probe.host.querySelector(".rental-price-summary").textContent.includes("免押"));
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("detail expiry and 503 clear the payable while preserving a user-initiated requote", async () => {
+  await withDom(async window => {
+    const old = { ...confirmation, expiresAt: new Date(Date.now() - 10000).toISOString() };
+    let calls = 0;
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), detailPanelProps, router([{ match: "/api/order-confirmations", method: "POST", respond: () => ++calls === 1 ? json(old) : json({ error: { code: "DEPENDENCY_UNAVAILABLE" } }, 503) }], []));
+    try {
+      await probe.render(); await probe.click("查看我的报价");
+      assert.match(probe.host.querySelector(".rental-price-summary").textContent, /报价已过期/);
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "—");
+      assert.ok([...probe.host.querySelectorAll("button")].find(x => x.textContent.includes("确认并创建订单")).disabled);
+      await probe.click("重新报价");
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "—");
+      assert.ok(!probe.host.textContent.includes("¥470.00"));
+      assert.equal(calls, 2);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("detail identity loading/B and late A quote never reveal A payable or waiver", async () => {
+  await withDom(async window => {
+    const current = session("user_A"), pending = deferred();
+    const probe = createProbe(window, loadPanelForSession(current, async () => publishingOptions), detailPanelProps, router([{ match: "/api/order-confirmations", method: "POST", respond: () => pending.promise }], []));
+    try {
+      await probe.render(); await probe.click("查看我的报价");
+      current.status = "loading"; current.userId = null; await probe.render();
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "—");
+      current.status = "authenticated"; current.userId = "user_B"; current.identityVersion++; await probe.render();
+      pending.resolve(json({ ...confirmation, customerTier: "VIP", depositWaived: true, quote: { ...confirmation.quote, tenantDeposit: money("0.00") } }));
+      await React.act(async () => { await tick(); await tick(); });
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥295.91");
+      assert.ok(!probe.host.textContent.includes("¥470.00"));
+      assert.equal(probe.host.querySelector("del"), null);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("detail auto quote runs once, keeps the actionable button, and consumes the returned token", async () => {
+  await withDom(async window => {
+    const log = [];
+    const fetchImpl = router([
+      { match: "/api/order-confirmations", method: "POST", respond: () => json(confirmation) },
+      { match: "/api/v2/orders", method: "POST", respond: () => json({ order: { id: "order_auto", displayNo: "ZZ-AUTO", status: "PENDING_PAYMENT" } }) },
+    ], log);
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl, { strict: true });
+    try {
+      await probe.render();
+      await tick(); await tick();
+      assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥470.00");
+      assert.ok(probe.host.textContent.includes("立即租用"));
+      assert.ok(!probe.host.textContent.includes("查看我的报价"));
+      assert.ok(!probe.host.textContent.includes("确认并创建订单"));
+      await probe.render(); await tick();
+      assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
+      await probe.click("立即租用");
+      const creates = log.filter(entry => entry.url.endsWith("/api/v2/orders"));
+      assert.equal(creates.length, 1);
+      assert.deepEqual(creates[0].body, { confirmationToken: "token_1" });
+    } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", "detail_price")); }
+  });
+});
+
+test("guest detail auto quote links directly to login without a quote request", async () => {
+  await withDom(async window => {
+    const guest = { status: "guest", userId: null, identityVersion: 1, revalidate() {}, confirm: async () => "guest", signOut: async () => undefined };
+    const log = [];
+    const fetchImpl = router([], log);
+    const probe = createProbe(window, loadPanelForSession(guest, async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl);
+    try {
+      await probe.render();
+      const link = probe.host.querySelector('a[href*="/login?next="]');
+      assert.ok(link);
+      assert.match(link.textContent, /登录后显示最终报价/);
+      assert.equal(log.length, 0);
+      assert.ok(!probe.host.textContent.includes("查看我的报价"));
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("auto quote does not loop after 401 or 503", async () => {
+  for (const failure of [
+    { status: 401, body: { error: { code: "UNAUTHENTICATED", message: "登录已失效" } }, message: "登录状态已变化" },
+    { status: 503, body: { error: { code: "DEPENDENCY_UNAVAILABLE", message: "依赖暂不可用" } }, message: "最终报价暂时无法读取" },
+  ]) {
+    await withDom(async window => {
+      const current = session("user_A");
+      let confirms = 0;
+      current.confirm = async () => { confirms += 1; return "authenticated"; };
+      const log = [];
+      const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(failure.body, failure.status) }], log);
+      const probe = createProbe(window, loadPanelForSession(current, async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl, { strict: true });
+      try {
+        await probe.render(); await tick(); await tick();
+        assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
+        assert.equal(confirms, failure.status === 401 ? 1 : 0);
+        assert.match(probe.host.textContent, new RegExp(failure.message));
+        await probe.render(); await tick();
+        assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
+      } finally { await probe.dispose(); }
+    });
+  }
+});
+
+test("auto quote honors a frozen create intent before requesting a new quote", async () => {
+  await withDom(async window => {
+    intents.saveIntent({ userId: "user_A", kind: "order.create.v2", resourceId: "detail_intent", key: "op_frozen", body: {}, token: "token_frozen", context: { payable: "470.00" } });
+    const log = [];
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, accountId: "detail_intent", autoQuote: true }, router([], log), { strict: true });
+    try {
+      await probe.render(); await tick();
+      assert.ok(probe.host.textContent.includes("创建请求结果未知"));
+      assert.equal(log.length, 0);
+    } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", "detail_intent")); }
+  });
+});
+
+test("late auto quotes are dropped across an A to B to A object switch", async () => {
+  await withDom(async window => {
+    const pending = [deferred(), deferred(), deferred()];
+    let call = 0;
+    const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => pending[call++].promise }], []);
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl);
+    const props = accountId => ({ ...detailPanelProps, accountId, autoQuote: true });
+    try {
+      await probe.render(); await tick();
+      assert.equal(call, 1);
+      await probe.render(props("detail_other")); await tick();
+      assert.equal(call, 2);
+      await React.act(async () => { pending[0].resolve(json(confirmation)); await tick(); await tick(); });
+      assert.ok(!probe.host.textContent.includes("¥470.00"));
+      await probe.render(props("detail_price")); await tick();
+      assert.equal(call, 3);
+      await React.act(async () => { pending[1].resolve(json(confirmation)); await tick(); await tick(); });
+      assert.ok(!probe.host.textContent.includes("¥470.00"));
+      await React.act(async () => { pending[2].resolve(json(confirmation)); await tick(); await tick(); });
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥470.00");
+      assert.ok(probe.host.textContent.includes("立即租用"));
+    } finally { await probe.dispose(); }
+  });
+});
+
 test("F2: an unknown create keeps the original token and key and recovers after remount", async () => {
   await withDom(async (window) => {
     const log = [];
@@ -261,14 +468,16 @@ test("F2: an unknown create keeps the original token and key and recovers after 
       { match: "/api/v2/orders", method: "POST", respond: () => { createCalls += 1; if (createCalls === 1) throw new TypeError("network down"); return json({ order: { id: "order_B", displayNo: "ZZ-2", status: "PENDING_PAYMENT" } }); } },
     ], log);
     const Panel = loadPanel("user_A", async () => publishingOptions);
-    const props = { accountId: "account_1", gameId: "game_1", versionId: "listing_1", releaseId: "release_1" };
+    const props = { accountId: "account_1", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees };
     const first = createProbe(window, Panel, props, fetchImpl);
     await first.render();
-    await first.click("确认租赁");
+    await first.click("查看我的报价");
     assert.ok(first.host.textContent.includes("¥470.00"));
     assert.ok(first.host.textContent.includes("三角洲出租协议"));
     await first.click("确认并创建订单");
     assert.ok(first.host.textContent.includes("创建请求结果未知"), first.host.textContent.slice(0, 300));
+    assert.equal(first.host.querySelector(".account-reference-price").textContent, "—");
+    assert.ok(!first.host.querySelector(".rental-price-summary").textContent.includes("¥470.00"));
     const firstCreate = log.find((entry) => entry.url.endsWith("/api/v2/orders"));
     assert.deepEqual(firstCreate.body, { confirmationToken: "token_1" });
     await first.unmount();
@@ -276,6 +485,7 @@ test("F2: an unknown create keeps the original token and key and recovers after 
     const second = createProbe(window, Panel, props, fetchImpl);
     await second.render();
     assert.ok(second.host.textContent.includes("创建请求结果未知"), "remount must restore the unknown create");
+    assert.equal(second.host.querySelector(".account-reference-price").textContent, "—");
     await second.click("查询原创建结果");
     const creates = log.filter((entry) => entry.url.endsWith("/api/v2/orders"));
     assert.equal(creates.length, 2);
@@ -296,13 +506,13 @@ test("F2: another identity cannot see or reuse the frozen create intent; 401 kee
     const props = { accountId: "account_2", gameId: "game_1", versionId: "listing_1", releaseId: "release_1" };
     const ownerView = createProbe(window, loadPanel("user_A", async () => publishingOptions), props, fetchImpl);
     await ownerView.render();
-    await ownerView.click("确认租赁");
+    await ownerView.click("查看我的报价");
     await ownerView.click("确认并创建订单");
     assert.ok(ownerView.host.textContent.includes("登录状态已变化"), ownerView.host.textContent.slice(0, 300));
     assert.ok(intents.loadIntent("user_A", "order.create.v2", "account_2"), "the owner's intent is retained");
     const stranger = createProbe(window, loadPanel("user_B", async () => publishingOptions), props, fetchImpl);
     await stranger.render();
-    assert.ok(stranger.host.textContent.includes("确认租赁"), "another identity starts idle");
+    assert.ok(stranger.host.textContent.includes("查看我的报价"), "another identity starts idle");
     assert.ok(!stranger.host.textContent.includes("创建请求结果未知"), "another identity must not see the frozen intent");
     await stranger.dispose();
     await ownerView.dispose(() => intents.clearIntent("user_A", "order.create.v2", "account_2"));
@@ -318,7 +528,7 @@ test("F4: missing agreement evidence blocks creation instead of accepting a vers
     const Panel = loadPanel("user_A", async () => { throw new Error("options unavailable"); });
     const probe = createProbe(window, Panel, { accountId: "account_3", gameId: "game_1", versionId: "listing_1", releaseId: "release_1" }, fetchImpl);
     await probe.render();
-    await probe.click("确认租赁");
+    await probe.click("查看我的报价");
     assert.ok(probe.host.textContent.includes("条款依据暂时无法读取"), probe.host.textContent.slice(0, 300));
     const create = probe.buttons().find((text) => text.includes("确认并创建订单"));
     const button = [...probe.host.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes("确认并创建订单"));
@@ -431,13 +641,13 @@ test("R1: identity switch clears the private quote and resets order actions", as
     const Panel = loadPanelForSession(mutable, async () => publishingOptions);
     const probe = createProbe(window, Panel, { accountId: "account_switch", gameId: "game_1", versionId: "listing_1", releaseId: "release_1" }, fetchImpl);
     await probe.render();
-    await probe.click("确认租赁");
+    await probe.click("查看我的报价");
     assert.ok(probe.host.textContent.includes("¥470.00"));
     mutable.userId = "user_B";
     mutable.identityVersion = 2;
     await probe.render();
     assert.ok(!probe.host.textContent.includes("¥470.00"), "B must not see A's quote");
-    assert.ok(probe.host.textContent.includes("确认租赁"));
+    assert.ok(probe.host.textContent.includes("查看我的报价"));
     await probe.dispose();
   });
   await withDom(async (window) => {

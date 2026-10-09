@@ -10,7 +10,7 @@ import { PortalFooter } from "./layout/portal-footer";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { searchAccounts } from "@/lib/account-search";
 import { UpcomingGames } from "./delta/game-identity";
-export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=false, onRetrySupply }: { accounts?: AccountCardData[]; supplyState?: SupplyState; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean; onRetrySupply?:()=>void }) {
+export function PortalHome({ accounts, supplyState, supplyMayHaveMore, stats, deals, statsAreDemo=false, onRetrySupply }: { accounts?: AccountCardData[]; supplyState?: SupplyState; supplyMayHaveMore?: boolean; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean; onRetrySupply?:()=>void }) {
   const [query, setQuery] = useState("");
   return <FavoritesProvider><div className="portal-home">
     <div className="brand-backdrop" aria-hidden="true"><div className="brand-landscape"/></div>
@@ -22,7 +22,7 @@ export function PortalHome({ accounts, supplyState, stats, deals, statsAreDemo=f
       <ServiceBenefits />
       <div className="portal-width activity-shell"><PlatformStats data={stats} deals={deals} isDemo={statsAreDemo}/></div>
 
-      <DeltaSection accounts={searchAccounts(accounts ?? [], query)} supplyState={supplyState} searchQuery={query} onResetSearch={() => setQuery("")} onRetry={onRetrySupply} />
+      <DeltaSection accounts={searchAccounts(accounts ?? [], query)} supplyState={supplyState} supplyMayHaveMore={supplyMayHaveMore} searchQuery={query} onResetSearch={() => setQuery("")} onRetry={onRetrySupply} />
       <UpcomingGames />
     </main>
     <PortalFooter />

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, ChevronRight, Clock, Image as ImageIcon, ImageOff, X } from "lucide-react";
+import { Check, ChevronRight, Clock, Copy, Image as ImageIcon, ImageOff, PackageOpen, X } from "lucide-react";
 import { FavoriteButton } from "@/components/favorites/favorite-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThumbnailCarousel } from "@/components/ui/thumbnail-carousel";
@@ -73,6 +73,34 @@ function isZeroMoney(value: string): boolean {
   return /^￥?¥?\s*0(?:\.0+)?$/.test(value.replace(/\s+/g, ""));
 }
 
+function CopyableAccountNumber({ displayNo, compact = false }: { displayNo: string | null; compact?: boolean }) {
+  const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
+  const number = displayNo?.trim() || null;
+  if (!number) return <span className={`account-card-number account-card-number--missing${compact ? " account-card-number--compact" : ""}`}>账号编号暂未提供</span>;
+  const copy = async (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(number);
+      setStatus("ok");
+    } catch {
+      setStatus("error");
+    }
+  };
+  return <button type="button" className={`account-card-number${compact ? " account-card-number--compact" : ""}`} onClick={copy} aria-label={`复制账号编号 ${number}`}>
+    {status === "ok" ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+    <span>账号 {number}</span>
+    <span className="account-card-number-action">{status === "ok" ? "已复制" : status === "error" ? "复制失败" : "复制"}</span>
+  </button>;
+}
+
+function ResourceEmpty({ compact = false }: { compact?: boolean }) {
+  return <span className={`account-resource-empty${compact ? " account-resource-empty--compact" : ""}`} role="note">
+    <PackageOpen size={compact ? 13 : 15} aria-hidden="true" />
+    <span>{compact ? "物资未申报" : "库存尚未申报"}</span>
+  </span>;
+}
+
 export function moneyValue(value: string | null | undefined, zeroLabel = "¥0.00"): string {
   const trimmed = value?.trim();
   if (isUnknownMoney(trimmed)) return "待确认";
@@ -123,6 +151,16 @@ export function composeListTitle(
   data: Pick<AccountCardData, "title" | "displayNo" | "conditionLines">,
   haffQuantityText: string | null
 ): { identity: string; haff: string | null; rest: string } {
+  const haff = haffQuantityText ? `${haffQuantityText} 哈夫币` : null;
+  const parts: string[] = [];
+  const safeBoxRaw = conditionValue(data, "safe_box_code");
+  const safeBox = safeBoxSizeText(conditionValue(data, "safe_box_code"));
+  if (safeBox) parts.push(`${safeBox}安全箱`);
+  const grading = conditionValue(data, "grading_code");
+  const level = compactLevel(conditionValue(data, "character_level"), null);
+  const rank = [grading, level].filter(Boolean).join(" ");
+  if (rank) parts.push(rank);
+
   let identity = "";
   if (data.displayNo?.trim()) {
     identity = `账号 ${data.displayNo.trim()}`;
@@ -130,26 +168,38 @@ export function composeListTitle(
     let t = data.title.trim();
     t = t.replace(/(?:微信扫码|QQ账密|手机号|支持\s*QQ上号|支持\s*微信上号)/g, "").trim();
     if (haffQuantityText) {
-      const escaped = haffQuantityText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      t = t.replace(new RegExp(`^\\s*${escaped}\\s*(?:哈夫币)?\\s*[·\\-\\s]*`, "i"), "").trim();
-      t = t.replace(new RegExp(`(^|[^\\dA-Za-z])${escaped}\\s*哈夫币`, "gi"), "$1").trim();
-      t = t.replace(/[·|｜]\s*[·|｜]/g, "·");
+      const match = haffQuantityText.match(/^(\d+(?:\.\d+)?)M$/i);
+      if (match) {
+        const haffPattern = new RegExp(`(^|[·|｜\\s])${match[1]}\\s*M\\s*(?:哈夫币)?(?=$|[·|｜\\s])`, "gi");
+        t = t.replace(haffPattern, "$1");
+      }
     }
-    t = t.replace(/\s*[·|｜]\s*/g, " · ").replace(/^[·\-|｜\s]+|[·\-|｜\s]+$/g, "").trim();
-    identity = t.length > 0 ? t : "游戏账号";
+    if (safeBoxRaw) {
+      const safeBoxPattern = new RegExp(`(^|[·|｜\\s])${safeBoxRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[·|｜\\s])`, "gi");
+      t = t.replace(safeBoxPattern, "$1");
+    }
+    if (level) {
+      const levelMatch = level.match(/^(\d+)级$/);
+      if (levelMatch) {
+        const levelPattern = new RegExp(`(^|[·|｜\\s])${levelMatch[1]}\\s*级(?=$|[·|｜\\s])`, "gi");
+        t = t.replace(levelPattern, "$1");
+      }
+    }
+    const duplicateTokens = [
+      safeBox ? `${safeBox}安全箱` : null,
+      grading ? `${grading}段位` : null,
+      grading,
+      level,
+    ].filter((token): token is string => Boolean(token));
+    for (const token of duplicateTokens) {
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      t = t.replace(new RegExp(`(^|[·|｜\\s])${escaped}(?=$|[·|｜\\s])`, "gi"), "$1");
+    }
+    t = t.replace(/\s*[·|｜]\s*/g, " · ").replace(/^[·\-|｜\s]+|[·\-|｜\s]+$/g, "").replace(/(?:\s*·\s*){2,}/g, " · ").trim();
+    identity = t.length > 0 ? t : parts.length ? "账号资料" : "游戏账号";
   } else {
     identity = "游戏账号";
   }
-
-  const haff = haffQuantityText ? `${haffQuantityText} 哈夫币` : null;
-
-  const parts: string[] = [];
-  const safeBox = safeBoxSizeText(conditionValue(data, "safe_box_code"));
-  if (safeBox) parts.push(`${safeBox}安全箱`);
-  const grading = conditionValue(data, "grading_code");
-  const level = compactLevel(conditionValue(data, "character_level"), null);
-  const rank = [grading, level].filter(Boolean).join(" ");
-  if (rank) parts.push(rank);
 
   const rest = parts.join(" · ");
   return { identity, haff, rest };
@@ -316,6 +366,8 @@ export function AccountCard({
 
   if (viewMode === "list") {
     const listTitle = composeListTitle(data, haffQuantityText);
+    const listIdentity = listTitle.identity === "账号资料" ? "" : listTitle.identity;
+    const listAccessibleTitle = [listIdentity, listTitle.haff, listTitle.rest].filter(Boolean).join(" · ") || "游戏账号";
 
     const regionProvince = conditionValue(data, "region_province");
     const regionCity = conditionValue(data, "region_city");
@@ -419,23 +471,23 @@ export function AccountCard({
               <Link
                 className="account-list-title-link"
                 href={accountHref(data.id)}
-                aria-label={`查看账号 ${listTitle.identity}`}
+                aria-label={`查看账号 ${listAccessibleTitle}`}
                 onClick={rememberDetail}
               >
-                <span className="account-list-title-identity">{listTitle.identity}</span>
+                {listIdentity ? <span className="account-list-title-identity">{listIdentity}</span> : null}
                 {listTitle.haff ? (
-                  <span className="account-list-haff-lead"> · {listTitle.haff}</span>
+                  <span className="account-list-haff-lead">{listIdentity ? " · " : ""}{listTitle.haff}</span>
                 ) : null}
                 {listTitle.rest ? (
-                  <span className="account-list-title-rest"> · {listTitle.rest}</span>
+                  <span className="account-list-title-rest">{listIdentity || listTitle.haff ? " · " : ""}{listTitle.rest}</span>
                 ) : null}
               </Link>
-              {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
             </div>
-
-            <p className="account-list-subline">
-              {sublineContent}
-            </p>
+            <div className="account-list-subline-row">
+              {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
+              <p className="account-list-subline">{sublineContent}</p>
+              <CopyableAccountNumber displayNo={data.displayNo} compact />
+            </div>
           </div>
 
           <section className="account-list-matrix" aria-label="账号属性条件">
@@ -477,7 +529,7 @@ export function AccountCard({
                 </Tooltip>
               </div>
 
-              <div className="resources-grid-2x2">
+              {listResources.length > 0 ? <div className="resources-grid-2x2">
                 {listResources.map((line) => (
                   <div
                     key={line.itemId}
@@ -489,8 +541,7 @@ export function AccountCard({
                     </strong>
                   </div>
                 ))}
-              </div>
-              {listResources.length === 0 ? <span className="supply-muted">库存尚未申报</span> : null}
+              </div> : <ResourceEmpty />}
             </div>
           </section>
 
@@ -660,6 +711,10 @@ export function AccountCard({
                 </strong>
               </Link>
             </div>
+            <div className="account-card-meta-row">
+              {isFastMode ? <span className="account-card-deal-tag">特惠</span> : null}
+              <CopyableAccountNumber displayNo={data.displayNo} compact />
+            </div>
 
             {gridAttrs.length > 0 ? (
               <div className="account-grid-subattrs" title={gridAttrs.join(" · ")}>
@@ -715,7 +770,7 @@ export function AccountCard({
                     );
                   })}
                 </>
-              ) : null}
+              ) : <ResourceEmpty compact />}
             </section>
 
             <div className="account-card-breakdown">

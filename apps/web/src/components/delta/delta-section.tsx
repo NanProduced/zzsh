@@ -13,6 +13,7 @@ export type SupplyState = "unavailable" | "ready" | "loading" | "error";
 export interface DeltaSectionProps {
   accounts?: AccountCardData[];
   supplyState?: SupplyState;
+  supplyMayHaveMore?: boolean;
   searchQuery?: string;
   onResetSearch?: () => void;
   onRetry?: () => void;
@@ -21,6 +22,7 @@ export interface DeltaSectionProps {
 export function DeltaSection({
   accounts = [],
   supplyState = "unavailable",
+  supplyMayHaveMore = false,
   searchQuery = "",
   onResetSearch,
   onRetry,
@@ -132,6 +134,12 @@ export function DeltaSection({
                       description:
                         "试试其他账号编号或名称，也可以清空搜索查看全部。",
                       onReset: onResetSearch,
+                    }
+                  : supplyMayHaveMore
+                  ? {
+                      message: "首批结果中暂未找到极速出租账号",
+                      description: "目录仍有后续页，前往全部账号继续浏览。",
+                      children: <Link href="/accounts">浏览全部账号 <ArrowUpRight size={14} /></Link>,
                     }
                   : {
                       message: "暂无可选账号",

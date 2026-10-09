@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, Clock3, FileText, RotateCw, ShieldCheck, WalletCards } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Clock3, FileText, RotateCw, ShieldCheck, WalletCards } from "lucide-react";
 import { orderApi, orderIntentKey, OrderRequestError, type PersonalRentalQuote } from "@/lib/order-client";
 import { clearIntent, isIntentStale, loadIntent, saveIntent } from "@/lib/order-intents";
 import { formatMoneyLabel } from "@/lib/listing-view";
 import { supplyApi } from "@/lib/supply-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
+import { RentalPriceSummary, type ReferenceFees } from "./rental-price-summary";
+import { moneyText } from "@/lib/order-display";
 import { performGuardedWrite, type WriteOutcome } from "@/components/order/order-trade-actions";
 
 type AgreementInfo = { id: string; title: string; body: string; digest: string };
@@ -25,7 +27,7 @@ type Stage =
   | { kind: "pay-unknown"; orderId: string; message: string }
   | { kind: "paid"; orderId: string }
   | { kind: "review"; orderId: string; reason: string | null }
-  | { kind: "notice"; message: string; canRequote: boolean; orderId?: string };
+  | { kind: "notice"; message: string; canRequote: boolean; orderId?: string; action?: "orders" | "refresh" | "back" };
 
 const AUTH_MESSAGE = "登录状态已变化。原创建请求与幂等键已保留；正在确认身份，确认后可在本页恢复。";
 const BLOCKED_MESSAGE = "浏览器会话存储不可用，无法保存原请求恢复信息；已阻止创建，避免产生不可恢复的订单。";
@@ -35,15 +37,16 @@ function errorOf(error: unknown): OrderRequestError {
   return error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
 }
 
-function noticeFor(error: OrderRequestError): { message: string; canRequote: boolean } {
+function noticeFor(error: OrderRequestError): { message: string; canRequote: boolean; action?: "orders" | "refresh" | "back" } {
+  if (error.code === "PREVIEW_READ_ONLY") return { message: "当前预览仅开放浏览，暂未接通个人报价与租用。", canRequote: false, action: "back" };
   if (error.code === "CONFIRMATION_EXPIRED" || error.code === "CONFIRMATION_CHANGED") {
     return { message: "报价或资格已变化，原确认已失效；请重新确认后创建。", canRequote: true };
   }
   if (error.code === "CONFIRMATION_USED") {
-    return { message: "该确认凭据已被使用。请查询租入订单核对，不要重复付款。", canRequote: false };
+    return { message: "该确认凭据已被使用。请查询租入订单核对，不要重复付款。", canRequote: false, action: "orders" };
   }
-  if (error.status === 403) return { message: "当前身份没有发起该交易的权限。", canRequote: false };
-  if (error.status === 404) return { message: "账号或发布版本已变化，请刷新页面后重试。", canRequote: false };
+  if (error.status === 403) return { message: "当前身份暂不能租用该账号。", canRequote: false, action: "back" };
+  if (error.status === 404) return { message: "账号或发布版本已变化，请刷新页面后重试。", canRequote: false, action: "refresh" };
   return { message: error.message || "操作未完成，请稍后重试。", canRequote: true };
 }
 
@@ -57,17 +60,29 @@ function countdown(expiresAt: string, now: number): string | null {
 
 const orderHref = (orderId: string) => `/account?view=rentals&orderId=${encodeURIComponent(orderId)}`;
 
-export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: { accountId: string; gameId?: string | null; versionId?: string; releaseId?: string }) {
+export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, reference, autoQuote = false }: { accountId: string; gameId?: string | null; versionId?: string; releaseId?: string; reference?: ReferenceFees; autoQuote?: boolean }) {
   const session = useUserSession();
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [now, setNow] = useState(() => Date.now());
   const [agreementOpen, setAgreementOpen] = useState(false);
   const createKey = useRef<string | null>(null);
+  const autoQuotedContext = useRef<string | null>(null);
+  const quoteGeneration = useRef(0);
+  const quoteTarget = JSON.stringify([accountId, gameId, versionId, releaseId]);
+  const currentQuoteTarget = useRef(quoteTarget);
+  currentQuoteTarget.current = quoteTarget;
   const reset = useCallback(() => {
     createKey.current = null;
+    autoQuotedContext.current = null;
+    quoteGeneration.current += 1;
     setAgreementOpen(false);
     setStage({ kind: "idle" });
   }, []);
+  const previousQuoteTarget = useRef(quoteTarget);
+  if (previousQuoteTarget.current !== quoteTarget) {
+    previousQuoteTarget.current = quoteTarget;
+    reset();
+  }
   const { userId, isCurrent } = useIdentityReset(session, reset);
 
   useEffect(() => {
@@ -88,6 +103,9 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
       return;
     }
     const acting = userId;
+    const generation = ++quoteGeneration.current;
+    const target = currentQuoteTarget.current;
+    const isQuoteCurrent = () => isCurrent(acting) && generation === quoteGeneration.current && target === currentQuoteTarget.current;
     if (loadIntent(acting, "order.create.v2", accountId)) {
       const intent = loadIntent(acting, "order.create.v2", accountId)!;
       setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: isIntentStale(intent) ? STALE_MESSAGE : "检测到一笔结果未知的创建请求；请先查询原请求结果。", stale: isIntentStale(intent) });
@@ -100,6 +118,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
     setStage({ kind: "quoting" });
     try {
       const quote = await orderApi.confirmRental({ accountId, versionId, releaseId });
+      if (!isQuoteCurrent()) return;
       let agreement: AgreementInfo | null = null;
       let agreementProblem: string | null = null;
       try {
@@ -109,19 +128,32 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
       } catch {
         agreementProblem = "协议与条款依据暂时无法读取；为安全起见暂不能创建订单，请稍后重试。";
       }
-      if (!isCurrent(acting)) return;
+      if (!isQuoteCurrent()) return;
       setStage({ kind: "quoted", quote, agreement, agreementProblem });
     } catch (error) {
-      if (!isCurrent(acting)) return;
+      if (!isQuoteCurrent()) return;
       const typed = errorOf(error);
-      if (typed.status === 0 || typed.status >= 500) setStage({ kind: "notice", message: "读取个人报价时网络结果未知，可安全重试；不会创建订单。", canRequote: true });
+      if (typed.status === 401 || typed.code === "UNAUTHENTICATED") {
+        void session.confirm();
+        setStage({ kind: "notice", message: "登录状态已变化，请重新登录后查看最终报价。", canRequote: false });
+      } else if (typed.status === 0 || typed.status >= 500) setStage({ kind: "notice", message: "最终报价暂时无法读取，请稍后重试。", canRequote: true });
       else setStage({ kind: "notice", ...noticeFor(typed) });
     }
-  }, [accountId, gameId, releaseId, userId, isCurrent, versionId]);
+  }, [accountId, gameId, releaseId, userId, isCurrent, versionId, session]);
+
+  useEffect(() => {
+    if (!autoQuote || !userId || stage.kind !== "idle" || !gameId || !versionId || !releaseId) return;
+    const context = JSON.stringify([userId, accountId, gameId, versionId, releaseId]);
+    if (autoQuotedContext.current === context) return;
+    autoQuotedContext.current = context;
+    // Original unresolved intent wins inside requote. No automatic retries or order writes.
+    void requote();
+  }, [autoQuote, userId, accountId, gameId, versionId, releaseId, stage.kind, requote]);
 
   const sendCreate = useCallback(async (quote: PersonalRentalQuote) => {
     if (!userId) return;
     const acting = userId;
+    const target = currentQuoteTarget.current;
     if (loadIntent(acting, "order.create.v2", accountId)) {
       const intent = loadIntent(acting, "order.create.v2", accountId)!;
       setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: "已有未决的创建请求；只允许查询原结果，不会重新下单。", stale: isIntentStale(intent) });
@@ -145,7 +177,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
     setStage({ kind: "creating", quote });
     try {
       const order = await orderApi.createOrder(quote.confirmationToken, key);
-      if (!isCurrent(acting)) return;
+      if (!isCurrent(acting) || target !== currentQuoteTarget.current) return;
       clearIntent(acting, "order.create.v2", accountId);
       createKey.current = null;
       setStage({ kind: "created", quote, orderId: order.id });
@@ -172,6 +204,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
   const recoverCreate = useCallback(async () => {
     if (!userId) return;
     const acting = userId;
+    const target = currentQuoteTarget.current;
     const intent = loadIntent(acting, "order.create.v2", accountId);
     if (!intent?.token) {
       setStage({ kind: "notice", message: "未找到可恢复的原创建请求，请刷新后重新确认。", canRequote: true });
@@ -181,7 +214,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
     setStage({ kind: "creating", quote: null });
     try {
       const order = await orderApi.createOrder(intent.token, intent.key);
-      if (!isCurrent(acting)) return;
+      if (!isCurrent(acting) || target !== currentQuoteTarget.current) return;
       clearIntent(acting, "order.create.v2", accountId);
       createKey.current = null;
       setStage({ kind: "notice", message: `原创建请求已确认成功（订单 ${order.displayNo ?? order.id}）。`, canRequote: false, orderId: order.id });
@@ -259,108 +292,128 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId }: 
     applyPayment(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, orderId);
   }, [userId, isCurrent, applyPayment, resolvePayment]);
 
-  if (!versionId || !releaseId || !gameId) {
-    return <p className="detail-stage-note">该账号当前缺少可确认的发布依据；历史只读信息暂不支持在线租赁。</p>;
-  }
+  // Presentation uses the existing controller and identity reset; it owns no request state.
+  const expiredQuote = stage.kind === "quoted" && ["已过期", null].includes(countdown(stage.quote.expiresAt, now));
+  const priceQuote = userId && stage.kind === "quoted" && !expiredQuote ? stage.quote : null;
+  const pendingLabel = session.status === "loading" ? "正在确认登录状态" :
+    stage.kind === "quoted" && countdown(stage.quote.expiresAt, now) === null ? "报价有效期未确认" :
+    expiredQuote ? "报价已过期" : stage.kind === "quoting" ? "正在读取本人报价" :
+    stage.kind === "create-unknown" || stage.kind === "pay-unknown" ? "原请求结果待确认" :
+    stage.kind === "creating" ? "正在确认订单" : stage.kind === "notice" ? "本人报价待确认" :
+    stage.kind !== "idle" && stage.kind !== "quoted" ? "请查看订单金额" : undefined;
+  const dockPrice = reference ? <span className="rental-dock-price"><span>{priceQuote ? "本次应付" : pendingLabel ?? "参考费用 · 押金另核"}</span><strong>{priceQuote ? moneyText(priceQuote.quote.tenantPayableTotal) : pendingLabel ? "—" : reference.total}</strong></span> : null;
+  const renderStage = () => {
+    if (!versionId || !releaseId || !gameId) {
+      return <p className="detail-stage-note">该账号当前缺少可确认的发布依据；历史只读信息暂不支持在线租赁。</p>;
+    }
 
-  if (stage.kind === "idle") return <div className="rental-confirm">
-    <button type="button" className="button rental-confirm-primary" onClick={() => void requote()}>确认租赁</button>
-    <p className="detail-stage-note">按下后读取你的服务端个人报价、冻结费用依据与适用协议版本；最终金额以服务端确认为准。</p>
-  </div>;
+    if (stage.kind === "idle") return <div className="rental-confirm" data-stage="idle">
+      <div className="rental-confirm-actions"><div className="rental-confirm-primary-action">{dockPrice}{!userId && session.status !== "loading" ? <Link className="button rental-confirm-primary" href={`/login?next=${encodeURIComponent(`/accounts/${accountId}`)}`}>登录后显示最终报价</Link> : <button type="button" className="button rental-confirm-primary" onClick={() => void requote()} disabled={session.status === "loading" || autoQuote}>{autoQuote ? "正在读取最终报价…" : "查看我的报价"}</button>}</div></div>
+      <p className="detail-stage-note">先核对本人的会员价格、押金和适用条款，再确认创建订单。</p>
+    </div>;
 
-  if (stage.kind === "quoting") return <div className="rental-confirm" aria-busy="true"><button type="button" className="button rental-confirm-primary" disabled>正在读取个人报价与条款…</button></div>;
+    if (stage.kind === "quoting") return <div className="rental-confirm" data-stage="quoting" aria-busy="true"><div className="rental-confirm-actions"><div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" disabled>正在读取个人报价与条款…</button></div></div></div>;
 
-  if (stage.kind === "notice") return <div className="rental-confirm rental-confirm--error" role="alert">
-    <p className="rental-confirm-error"><AlertCircle size={15} aria-hidden="true" />{stage.message}</p>
-    <div className="rental-confirm-actions">
-      {stage.orderId ? <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单</Link> : null}
-      {stage.canRequote ? <button type="button" className="button secondary button--sm" onClick={() => void requote()}><RotateCw size={14} aria-hidden="true" />重新确认</button> : null}
-      {!stage.canRequote && !stage.orderId ? <Link className="button secondary button--sm" href={`/login?next=${encodeURIComponent(`/accounts/${accountId}`)}`}>去登录</Link> : null}
-    </div>
-  </div>;
-
-  if (stage.kind === "create-unknown") return <div className="rental-confirm rental-confirm--unknown" role="status">
-    <p className="rental-confirm-heading"><Clock3 size={15} aria-hidden="true" />创建请求结果未知</p>
-    <p className="detail-stage-note">原确认凭据与幂等键已冻结：{stage.context.payable ? `预计合计 ¥${stage.context.payable}、` : ""}{stage.context.tier ? `档位 ${stage.context.tier}` : ""}。请先查询原请求结果，不要重新确认、重复下单或改价。</p>
-    <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.message}</p>
-    <div className="rental-confirm-actions">
-      <button type="button" className="button rental-confirm-primary" onClick={() => void recoverCreate()}>查询原创建结果</button>
-      <Link className="button quiet button--sm" href="/account?view=rentals">查看租入订单</Link>
-    </div>
-  </div>;
-
-  if (stage.kind === "paid") return <div className="rental-confirm rental-confirm--done" role="status">
-    <p className="rental-confirm-success"><CheckCircle2 size={15} aria-hidden="true" />支付已接纳（本地受控收款依据，不代表真实到账）</p>
-    <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单与开租进度</Link>
-  </div>;
-
-  if (stage.kind === "review") return <div className="rental-confirm rental-confirm--done" role="status">
-    <p className="rental-confirm-error"><AlertCircle size={15} aria-hidden="true" />支付结果需要人工核对{stage.reason ? `（${stage.reason}）` : ""}；未重复扣款。</p>
-    <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单</Link>
-  </div>;
-
-  if (stage.kind === "pay-unknown") return <div className="rental-confirm rental-confirm--unknown" role="status">
-    <p className="rental-confirm-heading"><Clock3 size={15} aria-hidden="true" />支付请求结果未知</p>
-    <p className="detail-stage-note">请使用同一请求查询原结果（幂等重放），不会重复扣款。</p>
-    <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.message}</p>
-    <div className="rental-confirm-actions">
-      <button type="button" className="button rental-confirm-primary" onClick={() => void recoverPayment(stage.orderId)}>查询原支付结果</button>
-      <Link className="button quiet button--sm" href={orderHref(stage.orderId)}>查看订单</Link>
-    </div>
-  </div>;
-
-  if (stage.kind === "creating") return <div className="rental-confirm" aria-busy="true">
-    <p className="detail-stage-note">{stage.quote ? "正在创建订单并占用账号；若网络中断，本页会保留原请求供你查询。" : "正在查询原创建请求…"}</p>
-  </div>;
-
-  if (stage.kind === "created" || stage.kind === "paying") {
-    const orderId = stage.orderId;
-    return <div className="rental-confirm rental-confirm--quote">
-      <div className="rental-confirm-head"><strong>订单已创建</strong><span className="rental-confirm-tier">{orderId}</span></div>
-      {stage.kind === "created" ? <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p> : null}
-      <p className="detail-stage-note">本地受控支付只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
+    if (stage.kind === "notice") return <div className="rental-confirm rental-confirm--error" role="alert">
+      <p className="rental-confirm-error"><AlertCircle size={15} aria-hidden="true" />{stage.message}</p>
       <div className="rental-confirm-actions">
-        <button type="button" className="button rental-confirm-primary" onClick={() => void pay(orderId)} disabled={stage.kind === "paying"}>
-          {stage.kind === "paying" ? "提交支付请求…" : "提交本地受控支付"}
-        </button>
-        <Link className="button quiet button--sm" href={orderHref(orderId)}>稍后支付，查看订单</Link>
+        {stage.orderId ? <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单</Link> : null}
+        {stage.canRequote ? <button type="button" className="button secondary button--sm" onClick={() => void requote()}><RotateCw size={14} aria-hidden="true" />重新确认</button> : null}
+        {!stage.canRequote && !stage.orderId && !userId ? <Link className="button secondary button--sm" href={`/login?next=${encodeURIComponent(`/accounts/${accountId}`)}`}>去登录</Link> : null}
+        {!stage.canRequote && !stage.orderId && userId && stage.action === "orders" ? <Link className="button secondary button--sm" href="/account?view=rentals">查看租入订单</Link> : null}
+        {!stage.canRequote && !stage.orderId && userId && stage.action === "refresh" ? <button type="button" className="button secondary button--sm" onClick={() => window.location.reload()}>刷新账号资料</button> : null}
+        {!stage.canRequote && !stage.orderId && userId && (stage.action === "back" || !stage.action) ? <Link className="button secondary button--sm" href="/accounts">返回账号列表</Link> : null}
       </div>
     </div>;
-  }
 
-  const quote = stage.quote;
-  const money = quote.quote;
-  const payable = formatMoneyLabel(money.tenantPayableTotal ?? null) ?? "以服务端确认为准";
-  const disclosure = quote.compensationDisclosure;
-  const expired = countdown(quote.expiresAt, now) === "已过期";
-  return <div className="rental-confirm rental-confirm--quote">
-    <div className="rental-confirm-head"><strong>个人报价确认</strong>
-      <span className="rental-confirm-tier">{quote.customerTier}{quote.depositWaived ? " · 已免租客押金" : ""}</span></div>
-    <dl className="rental-confirm-facts">
-      <div><dt>资源费用</dt><dd>{formatMoneyLabel(money.resourceTotal ?? null) ?? "—"}</dd></div>
-      <div><dt>租客押金</dt><dd>{quote.depositWaived ? "已免押" : formatMoneyLabel(money.tenantDeposit ?? quote.baseTenantDeposit) ?? "—"}</dd></div>
-      <div className="rental-confirm-total"><dt>预计合计</dt><dd>{payable}</dd></div>
-    </dl>
-    <div className="rental-confirm-terms">
-      <p className="rental-confirm-disclosure"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；结算按生效规则的号主侧毛额费率 8% 计算，承担方由结束场景决定（正常由号主、租客自愿提前由租客、号主原因原则上仍由号主）。费用不与押金、平台价差、提前补足混算；实际赔付由客服与运营按约定处理。</p>
-      {disclosure ? <p className="rental-confirm-terms-meta">披露版本 {disclosure.disclosureVersion} · 与本次确认凭据绑定</p> : null}
-      {stage.agreement ? <>
-        <button type="button" className="button quiet button--sm" aria-expanded={agreementOpen} onClick={() => setAgreementOpen((open) => !open)}>
-          <FileText size={14} aria-hidden="true" />{agreementOpen ? `收起协议全文（${stage.agreement.title}）` : `查看本次适用协议全文（${stage.agreement.title}）`}
-        </button>
-        {agreementOpen ? <div className="rental-confirm-agreement" role="region" aria-label="适用协议全文">
-          <p><strong>{stage.agreement.title}</strong></p>
-          <pre>{stage.agreement.body}</pre>
-          <p className="rental-confirm-terms-meta">协议摘要 {stage.agreement.digest.slice(0, 16)}… · 版本 {stage.agreement.id}</p>
-        </div> : null}
+    if (stage.kind === "create-unknown") return <div className="rental-confirm rental-confirm--unknown" role="status">
+      <p className="rental-confirm-heading"><Clock3 size={15} aria-hidden="true" />创建请求结果未知</p>
+      <p className="detail-stage-note">原确认凭据与幂等键已冻结：{stage.context.payable ? `预计合计 ¥${stage.context.payable}、` : ""}{stage.context.tier ? `档位 ${stage.context.tier}` : ""}。请先查询原请求结果，不要重新确认、重复下单或改价。</p>
+      <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.message}</p>
+      <div className="rental-confirm-actions">
+        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void recoverCreate()}>查询原创建结果</button></div>
+        <Link className="button quiet button--sm" href="/account?view=rentals">查看租入订单</Link>
+      </div>
+    </div>;
+
+    if (stage.kind === "paid") return <div className="rental-confirm rental-confirm--done" role="status">
+      <p className="rental-confirm-success"><CheckCircle2 size={15} aria-hidden="true" />支付已接纳（本地受控收款依据，不代表真实到账）</p>
+      <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单与开租进度</Link>
+    </div>;
+
+    if (stage.kind === "review") return <div className="rental-confirm rental-confirm--done" role="status">
+      <p className="rental-confirm-error"><AlertCircle size={15} aria-hidden="true" />支付结果需要人工核对{stage.reason ? `（${stage.reason}）` : ""}；未重复扣款。</p>
+      <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单</Link>
+    </div>;
+
+    if (stage.kind === "pay-unknown") return <div className="rental-confirm rental-confirm--unknown" role="status">
+      <p className="rental-confirm-heading"><Clock3 size={15} aria-hidden="true" />支付请求结果未知</p>
+      <p className="detail-stage-note">请使用同一请求查询原结果（幂等重放），不会重复扣款。</p>
+      <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.message}</p>
+      <div className="rental-confirm-actions">
+        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void recoverPayment(stage.orderId)}>查询原支付结果</button></div>
+        <Link className="button quiet button--sm" href={orderHref(stage.orderId)}>查看订单</Link>
+      </div>
+    </div>;
+
+    if (stage.kind === "creating") return <div className="rental-confirm" aria-busy="true">
+      <p className="detail-stage-note">{stage.quote ? "正在创建订单并占用账号；若网络中断，本页会保留原请求供你查询。" : "正在查询原创建请求…"}</p>
+    </div>;
+
+    if (stage.kind === "created" || stage.kind === "paying") {
+      const orderId = stage.orderId;
+      return <div className="rental-confirm rental-confirm--quote">
+        <div className="rental-confirm-head"><strong>订单已创建</strong><span className="rental-confirm-tier">{orderId}</span></div>
+        {stage.kind === "created" ? <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p> : null}
+        <p className="detail-stage-note">本地受控支付只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
+        <div className="rental-confirm-actions">
+          <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void pay(orderId)} disabled={stage.kind === "paying"}>
+            {stage.kind === "paying" ? "提交支付请求…" : "提交本地受控支付"}
+          </button></div>
+          <Link className="button quiet button--sm" href={orderHref(orderId)}>稍后支付，查看订单</Link>
+        </div>
+      </div>;
+    }
+
+    const quote = stage.quote;
+    const money = quote.quote;
+    const payable = formatMoneyLabel(money.tenantPayableTotal ?? null) ?? "以服务端确认为准";
+    const disclosure = quote.compensationDisclosure;
+    const expired = ["已过期", null].includes(countdown(quote.expiresAt, now));
+    return <div className="rental-confirm rental-confirm--quote">
+      {!reference ? <><div className="rental-confirm-head"><strong>个人报价确认</strong>
+        <span className="rental-confirm-tier">{quote.customerTier}{quote.depositWaived ? " · 已免租客押金" : ""}</span></div>
+      <dl className="rental-confirm-facts">
+        <div><dt>资源费用</dt><dd>{formatMoneyLabel(money.resourceTotal ?? null) ?? "—"}</dd></div>
+        <div><dt>租客押金</dt><dd>{quote.depositWaived ? "已免押" : formatMoneyLabel(money.tenantDeposit ?? quote.baseTenantDeposit) ?? "—"}</dd></div>
+        <div className="rental-confirm-total"><dt>预计合计</dt><dd>{payable}</dd></div>
+      </dl>
       </> : null}
-      {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
-    </div>
-    <p className="rental-confirm-expiry"><Clock3 size={14} aria-hidden="true" />确认凭据 {countdown(quote.expiresAt, now) ?? "有效期以服务端为准"}；会员、规则或资格变化后需要重新确认。</p>
-    <div className="rental-confirm-actions">
-      <button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || expired}><WalletCards size={15} aria-hidden="true" />确认并创建订单</button>
-      <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button>
-      <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button>
-    </div>
+      <details className="rental-confirm-terms"><summary>费用与适用条款<ChevronDown size={16} aria-hidden="true" /></summary>
+        <p className="rental-confirm-disclosure"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；结算按生效规则的号主侧毛额费率 8% 计算，承担方由结束场景决定（正常由号主、租客自愿提前由租客、号主原因原则上仍由号主）。费用不与押金、平台价差、提前补足混算；实际赔付由客服与运营按约定处理。</p>
+        {disclosure ? <p className="rental-confirm-terms-meta">披露版本 {disclosure.disclosureVersion} · 与本次确认凭据绑定</p> : null}
+        {stage.agreement ? <>
+          <button type="button" className="button quiet button--sm" aria-expanded={agreementOpen} onClick={() => setAgreementOpen((open) => !open)}>
+            <FileText size={14} aria-hidden="true" />{agreementOpen ? `收起协议全文（${stage.agreement.title}）` : `查看本次适用协议全文（${stage.agreement.title}）`}
+          </button>
+          {agreementOpen ? <div className="rental-confirm-agreement" role="region" aria-label="适用协议全文">
+            <p><strong>{stage.agreement.title}</strong></p>
+            <pre>{stage.agreement.body}</pre>
+            <p className="rental-confirm-terms-meta">协议摘要 {stage.agreement.digest.slice(0, 16)}… · 版本 {stage.agreement.id}</p>
+          </div> : null}
+        </> : null}
+        {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
+      </details>
+      <p className="rental-confirm-expiry"><Clock3 size={14} aria-hidden="true" />确认凭据 {countdown(quote.expiresAt, now) ?? "有效期以服务端为准"}；会员、规则或资格变化后需要重新确认。</p>
+      <div className="rental-confirm-actions">
+        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || expired}><WalletCards size={15} aria-hidden="true" />{autoQuote ? "立即租用" : "确认并创建订单"}</button></div>
+        <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button>
+        {!autoQuote ? <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button> : null}
+      </div>
+    </div>;
+  };
+  return <div className={reference ? "rental-detail-confirm" : undefined} data-price-state={stage.kind}>
+    {reference ? <RentalPriceSummary reference={reference} quote={priceQuote} pendingLabel={pendingLabel} /> : null}
+    {renderStage()}
   </div>;
 }
