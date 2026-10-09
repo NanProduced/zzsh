@@ -42,7 +42,7 @@ const ACCOUNT_ID = "account-1";
 const STANDIN = "user-standin";
 
 type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean };
-type CredentialRow = { id: string; userId: string; providerId: string; password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null };
+type CredentialRow = { id: string; userId: string; providerId: string; password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null; legacyPasswordUpgradedAt: string | null };
 type IdentityRow = { user_id: string; account_status: string; identity_status: string; age_status: string; provider: string; provider_reference: string; verified_at: string | null };
 type MapRow = { source_system: string; source_entity: string; legacy_id: string; source_digest: string; account_id: string; version_id: string; evidence_ref: string };
 type BindingRow = {
@@ -132,9 +132,13 @@ class FakeClient {
       const row = [...this.audits].reverse().find((audit) => audit.action === "user.legacy_owner.migrated" && audit.details.sourceEntity === "la_user" && audit.details.legacyId === values[0]);
       return { rows: row ? [{ object_id: row.object_id, details: row.details } as T] : [], rowCount: row ? 1 : 0 };
     }
-    if (sql.startsWith('SELECT "password","legacyPasswordMd5","legacyPasswordSalt","legacyPasswordVersion"')) {
+    if (sql.startsWith('SELECT "id","password","legacyPasswordMd5","legacyPasswordSalt","legacyPasswordVersion","legacyPasswordUpgradedAt"')) {
       const row = [...this.credentials.values()].find((credential) => credential.userId === values[0] && credential.providerId === "credential");
       return { rows: row ? [row as T] : [], rowCount: row ? 1 : 0 };
+    }
+    if (sql.startsWith('SELECT 1 FROM "zzsh_iam"."audit_event"')) {
+      const row = [...this.audits].reverse().find((audit) => audit.action === "user.legacy_password.upgraded" && audit.object_id === values[0] && audit.details.actorId === values[1]);
+      return { rows: row ? [{ one: 1 } as T] : [], rowCount: row ? 1 : 0 };
     }
     if (sql.startsWith("INSERT INTO zzsh_iam.audit_event") || sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')) {
       this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])) });
@@ -146,7 +150,7 @@ class FakeClient {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."account"')) {
-      const row: CredentialRow = { id: String(values[0]), userId: String(values[1]), providerId: "credential", password: null, legacyPasswordMd5: String(values[2]), legacyPasswordSalt: String(values[3]), legacyPasswordVersion: String(values[4]) };
+      const row: CredentialRow = { id: String(values[0]), userId: String(values[1]), providerId: "credential", password: null, legacyPasswordMd5: String(values[2]), legacyPasswordSalt: String(values[3]), legacyPasswordVersion: String(values[4]), legacyPasswordUpgradedAt: null };
       this.credentials.set(row.id, row);
       return { rows: [], rowCount: 1 };
     }
@@ -204,6 +208,16 @@ class FakeClient {
 
 function asClient(fake: FakeClient) {
   return fake as unknown as PoolClient;
+}
+
+function upgradeCredential(fake: FakeClient, userId: string) {
+  const row = [...fake.credentials.values()].find((credential) => credential.userId === userId)!;
+  row.password = "upgraded-password-hash";
+  row.legacyPasswordMd5 = null;
+  row.legacyPasswordSalt = null;
+  row.legacyPasswordVersion = null;
+  row.legacyPasswordUpgradedAt = "2026-10-09T13:00:00.000000Z";
+  fake.audits.push({ object_id: row.id, action: "user.legacy_password.upgraded", details: { actorId: userId, actorType: "user", objectType: "auth_account" } });
 }
 
 test("legacy owner evidence is strict and its digest binds every status flag", () => {
@@ -286,6 +300,49 @@ test("same source replays to the same user and changed evidence conflicts", asyn
   await assert.rejects(() => migrateLegacyOwner(asClient(fake), input({ status: { realNameBound: false, ageAdult: null, disabled: false, deleted: false } }), freshAdmin), /identity record conflicts/);
   assert.equal(fake.users.size, 2, "only the stand-in plus the migrated user exist");
   assert.equal(fake.identities.size, 1);
+});
+
+test("an upgraded legacy credential replays compatibly and stays read-only", async () => {
+  const fake = new FakeClient();
+  const payload = evidence({ legacyPassword: { version: "legacy-md5-v1", md5: "d41d8cd98f00b204e9800998ecf8427e", salt: "ab1c2" } });
+  const migrationInput: LegacyOwnerMigrationInput = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
+  const first = await migrateLegacyOwner(asClient(fake), migrationInput, ACTOR);
+  upgradeCredential(fake, first.userId);
+  const credentialBefore = { ...[...fake.credentials.values()][0]! };
+  const identityBefore = { ...fake.identities.get(first.userId)! };
+  const auditsBefore = fake.audits.length;
+  const freshAdmin = { ...ACTOR, id: "admin-4", requestId: "request-4" };
+  const replay = await migrateLegacyOwner(asClient(fake), migrationInput, freshAdmin);
+  assert.deepEqual(replay, { userId: first.userId, replayed: false }, "a fresh admin's same-source replay is accepted without rewriting state");
+  assert.deepEqual([...fake.credentials.values()][0], credentialBefore, "the upgraded credential is never rewritten");
+  assert.deepEqual(fake.identities.get(first.userId), identityBefore, "identity state is never rewritten");
+  assert.equal(fake.audits.length, auditsBefore, "a compatible replay writes no audit");
+  assert.equal(credentialBefore.legacyPasswordMd5, null);
+});
+
+test("an upgraded credential without its upgrade audit still conflicts", async () => {
+  const fake = new FakeClient();
+  const payload = evidence({ legacyPassword: { version: "legacy-md5-v1", md5: "d41d8cd98f00b204e9800998ecf8427e", salt: "ab1c2" } });
+  const migrationInput: LegacyOwnerMigrationInput = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
+  const first = await migrateLegacyOwner(asClient(fake), migrationInput, ACTOR);
+  upgradeCredential(fake, first.userId);
+  fake.audits.splice(fake.audits.findIndex((audit) => audit.action === "user.legacy_password.upgraded"), 1);
+  const freshAdmin = { ...ACTOR, id: "admin-5", requestId: "request-5" };
+  await assert.rejects(() => migrateLegacyOwner(asClient(fake), migrationInput, freshAdmin), /credential conflicts with the supplied evidence/);
+});
+
+test("a password set with residual legacy md5 stays a conflict", async () => {
+  const fake = new FakeClient();
+  const payload = evidence({ legacyPassword: { version: "legacy-md5-v1", md5: "d41d8cd98f00b204e9800998ecf8427e", salt: "ab1c2" } });
+  const migrationInput: LegacyOwnerMigrationInput = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
+  const first = await migrateLegacyOwner(asClient(fake), migrationInput, ACTOR);
+  upgradeCredential(fake, first.userId);
+  const row = [...fake.credentials.values()][0]!;
+  row.legacyPasswordMd5 = "d41d8cd98f00b204e9800998ecf8427e";
+  row.legacyPasswordSalt = "ab1c2";
+  row.legacyPasswordVersion = "legacy-md5-v1";
+  const freshAdmin = { ...ACTOR, id: "admin-6", requestId: "request-6" };
+  await assert.rejects(() => migrateLegacyOwner(asClient(fake), migrationInput, freshAdmin), /credential conflicts with the supplied evidence/);
 });
 
 test("a mobile already owned by another user and missing permission are rejected", async () => {
