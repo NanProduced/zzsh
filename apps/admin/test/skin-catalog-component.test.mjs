@@ -45,11 +45,11 @@ test("actual catalog editor: skin identity, version conflicts and fixed request 
     return { id: record.id, code: record.code, catalogRevision: model.game.catalogRevision, ...(kind === "skins" ? { namingState: record.namingState } : { kind: record.kind, enabled: record.enabled }) };
   }
   globalThis.fetch = async (input, init = {}) => {
-    const path = new URL(String(input), browser.location.href).pathname;
+    const parsedUrl = new URL(String(input), browser.location.href), path = parsedUrl.pathname, query = parsedUrl.search;
     if (!init.method || init.method === "GET") {
-      reads.push(path);
+      reads.push(path + query);
       if (path.endsWith("/games")) return Response.json({ games: [model.game, { ...model.game, id: "other", name: "Other game" }] });
-      if (path.includes("media-options")) return Response.json({ items: [], nextCursor: null, limit: 20 });
+      if (path.includes("media-options")) return Response.json(query.includes("SKIN_MEDIA") ? { items: [{ id: "skin-media", gameId: "game", mime: "image/png", width: 32, height: 32, byteSize: "128" }], nextCursor: null, limit: 20 } : { items: [], nextCursor: null, limit: 20 });
       if (path.endsWith("/firearms")) return policy === "gun-denied" ? Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 }) : Response.json({ firearms: [{ id: "gun", gameId: "game", name: "Gun", enabled: true }] });
       if (policy === "delay-read") { policy = "ok"; const captured = structuredClone(model); return new Promise(resolve => { pendingRead = () => resolve(Response.json(captured)); }); }
       if (readFailure) { readFailure = false; throw new Error("readback failed"); }
@@ -182,6 +182,16 @@ test("actual catalog editor: skin identity, version conflicts and fixed request 
     await t.test("owner maintenance is narrow and existing item/media behavior remains available", async () => {
       await mount(); await click("所属对象"); await click("新增所属对象"); await fill("稳定 code", "new_owner"); await fill("名称", "New owner"); await fill("所属对象类型", "MELEE_TYPE"); await review(); await submit(); assert.match(writes[0].path, /skin-owners$/); assert.equal(writes[0].body.kind, "MELEE_TYPE"); assert.ok(!("sourceField" in writes[0].body));
       await click("计费物品"); await click("编辑", [...el.querySelectorAll('tbody tr')][0]); await click("选择图片"); assert.ok(reads.some(p => p.includes('media-options'))); assert.match(el.textContent, /没有可绑定图片/); await click("取消");
+    });
+    await t.test("skin editor reuses the public SKIN_MEDIA picker and sends a binding only on save", async () => {
+      await mount(); await click("编辑", row("verified")); await click("选择图片");
+      assert.ok(reads.some(p => p.includes("media-options") && p.includes("SKIN_MEDIA")));
+      const candidate = [...el.querySelectorAll("button")].find(button => button.textContent.includes("skin-media"));
+      assert.ok(candidate, "skin media candidate");
+      await act(async () => candidate.click());
+      assert.equal(writes.length, 0);
+      await submit();
+      assert.equal(writes[0].body.mediaId, "skin-media");
     });
   } finally {
     if (root) await act(async () => root.unmount());

@@ -294,21 +294,31 @@ export async function migrateLegacyOwner(
         if (!recorded || recorded.sourceDigest !== evidence.sourceDigest || recorded.evidenceDigest !== evidenceDigest)
           throw conflict("The legacy owner source conflicts with the recorded migration");
         const credential = (
-          await client.query<{ password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null }>(
-            `SELECT "password","legacyPasswordMd5","legacyPasswordSalt","legacyPasswordVersion"
+          await client.query<{ id: string; password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null; legacyPasswordUpgradedAt: string | null }>(
+            `SELECT "id","password","legacyPasswordMd5","legacyPasswordSalt","legacyPasswordVersion","legacyPasswordUpgradedAt"
                FROM "zzsh_auth_user"."account" WHERE "userId"=$1 AND "providerId"='credential'`,
             [userId],
           )
         ).rows[0];
         if (evidence.legacyPassword) {
-          if (
-            !credential ||
-            credential.password !== null ||
-            credential.legacyPasswordMd5 !== evidence.legacyPassword.md5 ||
-            credential.legacyPasswordSalt !== evidence.legacyPassword.salt ||
-            credential.legacyPasswordVersion !== evidence.legacyPassword.version
-          )
-            throw conflict("The legacy owner credential conflicts with the supplied evidence");
+          const upgradedInPlace = credential !== undefined
+            && credential.password !== null
+            && credential.legacyPasswordMd5 === null
+            && credential.legacyPasswordVersion === null
+            && credential.legacyPasswordSalt === null
+            && credential.legacyPasswordUpgradedAt !== null;
+          const compatible = credential !== undefined && (upgradedInPlace
+            ? (await client.query(
+                `SELECT 1 FROM "zzsh_iam"."audit_event"
+                  WHERE "object_id"=$1 AND "object_type"='auth_account' AND "actor_type"='user' AND "actor_id"=$2
+                    AND "action"='user.legacy_password.upgraded' AND "outcome"='SUCCESS' LIMIT 1`,
+                [credential.id, userId],
+              )).rowCount === 1
+            : credential.password === null
+              && credential.legacyPasswordMd5 === evidence.legacyPassword.md5
+              && credential.legacyPasswordSalt === evidence.legacyPassword.salt
+              && credential.legacyPasswordVersion === evidence.legacyPassword.version);
+          if (!compatible) throw conflict("The legacy owner credential conflicts with the supplied evidence");
         } else if (credential) {
           throw conflict("The legacy owner unexpectedly has a local credential");
         }

@@ -259,6 +259,42 @@ test("availability stays undeclared until chosen, and help opens by click", asyn
   } finally { await p.close(); }
 });
 
+test("skin picker renders the public summary, neutral missing-media state, and keyboard selection", async () => {
+  const skinCatalog = {
+    ...catalog,
+    categories: [{ id: "category_1", code: "agent", name: "干员外观", parentId: null }],
+    rarities: [{ code: "gold", name: "金色" }],
+    skins: [
+      { id: "skin_1", code: "skin_1", name: "骇爪-维什戴尔", baseName: "维什戴尔", ownerName: "骇爪", categoryId: "category_1", rarityCode: "gold", mediaId: "asset_1" },
+      { id: "skin_2", code: "skin_2", name: "待核缺图", baseName: null, ownerName: null, categoryId: "category_1", rarityCode: null, mediaId: null },
+    ],
+  };
+  const p = await probe({ accountId: "account_1", catalogValue: skinCatalog, mine: () => supplyOf(declaration({ skins: ["legacy_skin"] })) });
+  try {
+    await p.render();
+    assert.ok(await p.waitFor(() => p.host.querySelectorAll(".skin-card").length === 2));
+    assert.match(p.text(), /骇爪 · 维什戴尔/);
+    assert.match(p.text(), /暂无公开图/);
+    assert.equal(p.host.querySelector('.skin-card img')?.getAttribute("src"), "/api/supply/media/asset_1/content");
+    assert.match(p.text(), /目录名称待加载/, "a saved unknown skin remains visible instead of being silently dropped");
+    await p.click('input[aria-label="选择 骇爪-维什戴尔"]');
+    assert.equal(p.host.querySelector('input[aria-label="选择 骇爪-维什戴尔"]').checked, true);
+    const image = p.host.querySelector(".skin-card img");
+    await React.act(async () => image.dispatchEvent(new p.window.Event("error", { bubbles: true })));
+    assert.equal(image.hidden, true);
+    assert.equal(p.host.querySelector(".skin-card-media-fallback:not([hidden])") !== null, true);
+    skinCatalog.skins[0].mediaId = "asset_2";
+    const search = p.host.querySelector('input[aria-label="搜索皮肤名称"]');
+    await React.act(async () => search.dispatchEvent(new p.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    assert.ok(await p.waitFor(() => p.host.querySelector('.skin-card img')?.getAttribute('src') === '/api/supply/media/asset_2/content'));
+    const replacement = p.host.querySelector('.skin-card img');
+    await React.act(async () => image.dispatchEvent(new p.window.Event("error", { bubbles: true })));
+    assert.equal(replacement.hidden, false, "a late error from the old media cannot hide the replacement");
+    await React.act(async () => replacement.dispatchEvent(new p.window.Event("load", { bubbles: true })));
+    assert.equal(replacement.hidden, false, "replacement public media must recover after previous image failure");
+  } finally { await p.close(); }
+});
+
 test('gateway 500/503/504 keep frozen draft responsibility and same-key recovery',async()=>{
  for(const status of [500,503,504]){let attempts=0;const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration()),saveDraft:body=>{if(++attempts===1)throw new actualSupply.SupplyRequestError(status,{error:{code:'INTERNAL_ERROR',message:'upstream failure'}});return supplyOf(body);}});
  try{await p.render();await p.type('#publish-description','original body');await p.clickButton('保存草稿');await p.waitFor(()=>p.calls.some(c=>c.op==='saveDraft'));assert.equal(p.host.querySelector('#publish-description').disabled,true);const first=p.calls.find(c=>c.op==='saveDraft');await p.clickButton('重试当前步骤');await p.waitFor(()=>p.calls.filter(c=>c.op==='saveDraft').length===2);const second=p.calls.filter(c=>c.op==='saveDraft')[1];assert.equal(second.key,first.key);assert.deepEqual(second.body,first.body);}finally{await p.close();}}

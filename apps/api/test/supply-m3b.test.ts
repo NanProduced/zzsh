@@ -566,6 +566,13 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     }
     assert.equal(publicCatalog.body?.skins.some((entry: { id: string }) => entry.id === bareSkin), false);
     assert.equal(publicCatalog.body?.skins.some((entry: { id: string; rarityCode?: string }) => entry.id === skin && entry.rarityCode === "gold"), true);
+    const aliasCatalog = await request(base, `/api/v1/supply/games/${gameId}/catalog?q=${encodeURIComponent("M4A1 金色")}`, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(aliasCatalog.response.status, 200, JSON.stringify(aliasCatalog.body));
+    const aliasedSkin = aliasCatalog.body?.skins.find((entry: { id: string }) => entry.id === skin);
+    assert.equal(aliasedSkin?.ownerName, "露娜");
+    assert.equal(aliasedSkin?.baseName, "天际线");
+    assert.equal(JSON.stringify(aliasedSkin).includes("aliases"), false);
+    assert.equal(JSON.stringify(aliasedSkin).includes("ownerRef"), false);
 
     const pagedCatalog = await request(base, `/api/v1/supply/games/${gameId}/catalog?limit=1`, undefined, cookieJar(), API_ORIGIN);
     assert.ok(pagedCatalog.body?.nextCursor);

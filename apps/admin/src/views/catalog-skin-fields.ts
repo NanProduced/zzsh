@@ -17,12 +17,13 @@ export function skinContractReady(catalog: AdminCatalogResponse | null): boolean
     Array.isArray(catalog.skins) && catalog.skins.every(s => s && typeof s.id === "string" && typeof s.code === "string" && typeof s.name === "string" && typeof s.enabled === "boolean" && typeof s.formVisible === "boolean" && (s.sourceField === null || typeof s.sourceField === "string") && (s.sourceToken === null || typeof s.sourceToken === "string") && ["LEGACY", "PENDING", "VERIFIED"].includes(s.namingState) &&
       Array.isArray(s.aliases) && s.aliases.every(a => typeof a === "string") &&
       (s.baseName === null || typeof s.baseName === "string") && (s.sourceNamespace === null || typeof s.sourceNamespace === "string") &&
-      (s.ownerRef === null || (s.ownerRef && ["AGENT", "MELEE_TYPE", "FIREARM"].includes(s.ownerRef.kind) && typeof s.ownerRef.id === "string"))));
+      (s.ownerRef === null || (s.ownerRef && ["AGENT", "MELEE_TYPE", "FIREARM"].includes(s.ownerRef.kind) && typeof s.ownerRef.id === "string")) &&
+      (s.mediaId === null || typeof s.mediaId === "string")));
 }
 
 export function skinValues(skin?: CatalogSkin): Record<string, string> {
   return { aliases: skin?.aliases?.join("\n") ?? "", sourceNamespace: skin?.sourceNamespace ?? "", sourceField: skin?.sourceField ?? "", sourceToken: skin?.sourceToken ?? "",
-    changeSource: "false", ownerKind: skin?.ownerRef?.kind ?? "AGENT", ownerId: skin?.ownerRef?.id ?? "", baseName: skin?.baseName ?? "", reason: "", evidenceUrls: "", observedAt: "", region: "", note: "" };
+    mediaId: skin?.mediaId ?? "", changeSource: "false", ownerKind: skin?.ownerRef?.kind ?? "AGENT", ownerId: skin?.ownerRef?.id ?? "", baseName: skin?.baseName ?? "", reason: "", evidenceUrls: "", observedAt: "", region: "", note: "" };
 }
 
 export function evidenceFields(values: Record<string, string>) {
@@ -46,6 +47,7 @@ export function skinPayload(values: Record<string, string>, revision: string, or
   const aliases = lines(values.aliases).map(v => text(v, "别名", 200));
   if (aliases.length > 32 || new Set(aliases).size !== aliases.length) throw new Error("别名最多32项且不能重复，请每行填写一项。");
   if (!original || JSON.stringify(aliases) !== JSON.stringify(original.aliases)) body.aliases = aliases;
+  if (original && values.mediaId !== String(original.mediaId ?? "")) body.mediaId = values.mediaId === "" ? null : text(values.mediaId, "图片素材", 128);
   if (!original) {
     body.code = values.code; body.name = text(values.name, "名称", 120); body.categoryId = text(values.categoryId, "分类", 128);
     body.rarityCode = values.rarityCode || null; body.enabled = false; body.formVisible = false;

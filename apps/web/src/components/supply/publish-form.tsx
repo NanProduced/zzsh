@@ -385,6 +385,16 @@ function PublishingNotice({ open, onClose, agreement }: { open: boolean; onClose
   </Dialog.Root>;
 }
 
+function SkinCardMedia({ mediaId }: { mediaId: string | null }) {
+  const src = mediaId ? `/api/supply/media/${encodeURIComponent(mediaId)}/content` : null;
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) return <span className="skin-card-media" aria-hidden="true"><span className="skin-card-media-fallback"><FileImage size={16} /><span>暂无公开图</span></span></span>;
+  return <span className="skin-card-media" aria-hidden="true">
+    <img src={src} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; setFailed(true); }} onLoad={(event) => { event.currentTarget.hidden = false; setFailed(false); }} />
+    <span className="skin-card-media-fallback" hidden><FileImage size={16} /><span>暂无公开图</span></span>
+  </span>;
+}
+
 function LoginPlatformIcon({ code }: { code: string }) {
   const platform = ({ legacy_login_qq: "tencentqq", legacy_login_wechat: "wechat", legacy_login_steam_cn: "steam", legacy_login_steam_global: "steam" } as Record<string, string>)[code];
   return platform ? <img className="publish-login-platform-icon" src={`/images/login-platforms/${platform}.svg`} width={20} height={20} alt="" /> : <LogIn size={20} />;
@@ -2577,19 +2587,18 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   {visibleSkinRows.map((skin) => {
                     const isSelected = draft.skins.includes(skin.id);
                     return (
-                      <div key={skin.id} className={`skin-card${isSelected ? " is-selected" : ""}`} onClick={() => {
-                        if (formDisabled) return;
-                        setDraft((previous) => ({
-                          ...previous,
-                          skins: isSelected ? previous.skins.filter((id) => id !== skin.id) : [...previous.skins, skin.id],
-                        }));
-                      }}>
+                      <label key={skin.id} className={`skin-card${isSelected ? " is-selected" : ""}`}>
+                        <SkinCardMedia key={skin.mediaId ?? "missing"} mediaId={skin.mediaId} />
                         <div className="skin-card-copy">
                           <span className="skin-card-name" title={skin.name}>{skin.name}</span>
+                          {skin.ownerName || skin.baseName ? <span className="skin-card-owner" title={[skin.ownerName, skin.baseName].filter(Boolean).join(" · ")}>{[skin.ownerName, skin.baseName].filter(Boolean).join(" · ")}</span> : <span className="skin-card-owner">所属对象待核</span>}
                           {skin.rarityCode ? <span className="skin-card-rarity">{rarityNames.get(skin.rarityCode) ?? "稀有度待核"}</span> : null}
                         </div>
-                        <input type="checkbox" checked={isSelected} readOnly aria-label={skin.name} disabled={formDisabled} />
-                      </div>
+                        <input type="checkbox" checked={isSelected} aria-label={`选择 ${skin.name}`} disabled={formDisabled} onChange={() => setDraft((previous) => ({
+                          ...previous,
+                          skins: isSelected ? previous.skins.filter((id) => id !== skin.id) : [...previous.skins, skin.id],
+                        }))} />
+                      </label>
                     );
                   })}
                   {catalog && visibleSkinRows.length === 0 ? <p className="supply-muted" style={{ gridColumn: "1 / -1", margin: "10px 0" }}>当前类别没有匹配的皮肤。</p> : null}
