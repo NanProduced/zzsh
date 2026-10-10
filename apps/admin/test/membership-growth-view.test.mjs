@@ -89,3 +89,16 @@ test("admin membership view separates draft, local preview and approval executio
   await vite.close();
   await browser.happyDOM.abort();
 });
+
+test("policy approval uses immutable saved-draft metadata rather than the full policy body", async () => {
+  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)), "@brand": fileURLToPath(new URL("../../../assets/brand", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
+  try {
+    const { policyDraftApprovalPayload } = await vite.ssrLoadModule("/src/views/membership-growth-admin-host.tsx");
+    const meta = { id: "draft-1", version: "2", status: "DRAFT", payloadHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-1", sourceRef: "fixture", effectiveAtUtc: "2026-10-10T00:00:00.000Z" };
+    const payload = policyDraftApprovalPayload(meta);
+    assert.deepEqual(payload, { policyDraftId: "draft-1", policyDraftVersion: 2, policyDraftHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-1", sourceRef: "fixture", effectiveAtUtc: "2026-10-10T00:00:00.000Z" });
+    assert(Buffer.byteLength(JSON.stringify(payload)) < 8192);
+    assert.throws(() => policyDraftApprovalPayload({ ...meta, status: "APPROVED" }));
+    assert.throws(() => policyDraftApprovalPayload({ ...meta, payloadHash: "" }));
+  } finally { await vite.close(); }
+});

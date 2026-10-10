@@ -75,11 +75,11 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
         await assertAdminContextInTransaction(client, context);
         const access = await loadEffectiveAdminAccess(client, context.userId);
         if (!hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft) && !hasPermission(access, ADMIN_PERMISSION.membershipPolicyPublish) && !hasPermission(access, ADMIN_PERMISSION.membershipGrowthSummaryRead)) throw forbidden();
-        const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; policyPayload: GrowthBenefitPolicy }>(
-          `SELECT id, version::text AS version, status, effective_at AS "effectiveAt", rule_release_id AS "ruleReleaseId", price_version_id AS "priceVersionId", source_ref AS "sourceRef", policy_payload AS "policyPayload"
+        const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string; policyPayload: GrowthBenefitPolicy }>(
+          `SELECT id, version::text AS version, status, effective_at AS "effectiveAt", rule_release_id AS "ruleReleaseId", price_version_id AS "priceVersionId", source_ref AS "sourceRef", payload_hash AS "payloadHash", policy_payload AS "policyPayload"
              FROM zzsh_iam.membership_growth_policy ORDER BY version DESC, created_at DESC LIMIT 1`,
         )).rows[0];
-        return row ? { policy: row.policyPayload, meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef }, catalog: policyCatalog(row.policyPayload, row.priceVersionId), thresholds: Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()])) } : { policy: null, meta: null, catalog: policyCatalog(null, null), thresholds: Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()])) };
+        return row ? { policy: row.policyPayload, meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog: policyCatalog(row.policyPayload, row.priceVersionId), thresholds: Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()])) } : { policy: null, meta: null, catalog: policyCatalog(null, null), thresholds: Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()])) };
       });
       sendJson(response, 200, result, requestId);
       return;
@@ -115,7 +115,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
       );
       await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
       await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "membership.policy.draft.saved", objectType: "membership_growth_policy", objectId: draftId, outcome: "SUCCESS", requestId, details: { version: versionNo, payloadHash: digest } });
-      return { id: draftId, version: String(versionNo), status: "DRAFT", publishable: validation.publishable, warnings: validation.warnings };
+      return { id: draftId, version: String(versionNo), status: "DRAFT", payloadHash: digest, publishable: validation.publishable, warnings: validation.warnings };
     });
     sendJson(response, 200, result, requestId);
   });
