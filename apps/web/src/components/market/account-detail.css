@@ -234,3 +234,7 @@ html[data-theme="dark"] .account-quote { background:color-mix(in srgb,#8d5b0b 10
   .account-detail-notes > section { padding:20px 0; }
   .account-rental-steps { gap:8px; }
 }
+
+.account-skin-card-media img { width:100%; height:100%; object-fit:contain; }
+.account-skin-card-media-fallback { width:100%; height:100%; display:grid; place-items:center; gap:5px; }
+.account-skin-card-media { overflow:hidden; }

@@ -12,7 +12,7 @@
 .functional-shell--editor .skin-card {min-width:0;min-height:48px;}
 .functional-shell--editor .skin-card-name {white-space:normal;overflow-wrap:anywhere;}
 .functional-shell--editor .skin-card-media {display:grid;flex:0 0 48px;width:48px;height:48px;place-items:center;overflow:hidden;border:1px solid var(--color-border-subtle);border-radius:7px;background:var(--color-bg-elevated);color:var(--color-text-muted);}
-.functional-shell--editor .skin-card-media img,.functional-shell--editor .skin-card-media-fallback {width:100%;height:100%;object-fit:cover;display:grid;place-items:center;}
+.functional-shell--editor .skin-card-media img,.functional-shell--editor .skin-card-media-fallback {width:100%;height:100%;object-fit:contain;display:grid;place-items:center;}
 .functional-shell--editor .skin-card-media-fallback {gap:2px;font-size:9px;text-align:center;line-height:1.2;}
 .functional-shell--editor .skin-card-media-fallback span {display:block;}
 .functional-shell--editor .skin-card-owner {font-size:11px;line-height:1.35;color:var(--color-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}

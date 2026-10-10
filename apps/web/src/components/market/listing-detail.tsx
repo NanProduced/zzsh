@@ -15,6 +15,7 @@ import { detailBreadcrumbs, haffRatioLabel, resourceQuantityLabel, toListingDeta
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
 import { useUserSession } from "@/components/session/user-session-provider";
+import { SkinMediaThumb, skinCardTitle } from "@/components/supply/skin-media-thumb";
 import "./account-detail.css";
 
 type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetailData; gameCode?: string } | { status: "unavailable" } | { status: "error" };
@@ -225,7 +226,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
         <section aria-labelledby="account-note-title"><h2 id="account-note-title"><FileText size={20} aria-hidden="true" />号主说明</h2><p className="account-owner-note">{data.description || "暂无公开备注。"}</p><p className="account-note-source">资料由号主申报，以公开信息与当次适用条款核对。</p>
           <div className="account-cosmetics"><h3><Shirt size={17} aria-hidden="true" />皮肤与权益</h3>
             {data.skinTags.length || data.entitlementNames.length ? <>
-              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项 · 图片待接入</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.name}:${i}`} className="account-skin-card"><div className="account-skin-card-media"><Shirt size={22} aria-hidden="true" /><span>图鉴图片待接入</span></div><strong>{tag.name}</strong></article>)}</div></section>)}</div>
+              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.name}:${i}`} className="account-skin-card"><SkinMediaThumb mediaId={tag.mediaId ?? null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /><strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong></article>)}</div></section>)}</div>
               <div className="account-entitlement-list">{data.entitlementDetails?.length ? data.entitlementDetails.map(item => <div key={item.id} className="account-entitlement-item"><strong>{item.name}</strong><span>{entitlementExpiryLabel(item)}</span></div>) : data.entitlementNames.map((name, index) => <div key={`${name}:${index}`} className="account-entitlement-item"><strong>{name}</strong><span>权益详情以个人确认时为准</span></div>)}</div>
             </> : <p className="account-empty-note">暂无皮肤或权益的公开申报。</p>}
           </div>

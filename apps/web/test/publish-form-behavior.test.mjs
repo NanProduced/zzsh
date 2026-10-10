@@ -161,6 +161,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       controlModule._compile(ts.transpileModule(fs.readFileSync(controlPath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, controlPath);
       return controlModule.exports;
     }
+    if (name === "./skin-media-thumb") return loadThumbModule();
     if (name === "next/link") return ({ children, href, ...props }) => React.createElement("a", { href, ...props }, children);
     if (name === "next/navigation") return { useRouter: () => router };
     if (name === "../session/user-session-provider") return { useUserSessionStore: () => store, useUserSession: () => session };
@@ -281,7 +282,7 @@ test("skin picker renders the public summary, neutral missing-media state, and k
     assert.equal(p.host.querySelector('input[aria-label="选择 骇爪-维什戴尔"]').checked, true);
     const image = p.host.querySelector(".skin-card img");
     await React.act(async () => image.dispatchEvent(new p.window.Event("error", { bubbles: true })));
-    assert.equal(image.hidden, true);
+    assert.equal(p.host.querySelector(".skin-card img"), null, "加载失败后小图必须卸载而不是留着隐藏的图片节点");
     assert.equal(p.host.querySelector(".skin-card-media-fallback:not([hidden])") !== null, true);
     skinCatalog.skins[0].mediaId = "asset_2";
     const search = p.host.querySelector('input[aria-label="搜索皮肤名称"]');
@@ -289,9 +290,9 @@ test("skin picker renders the public summary, neutral missing-media state, and k
     assert.ok(await p.waitFor(() => p.host.querySelector('.skin-card img')?.getAttribute('src') === '/api/supply/media/asset_2/content'));
     const replacement = p.host.querySelector('.skin-card img');
     await React.act(async () => image.dispatchEvent(new p.window.Event("error", { bubbles: true })));
-    assert.equal(replacement.hidden, false, "a late error from the old media cannot hide the replacement");
+    assert.equal(p.host.querySelector(".skin-card img"), replacement, "a late error from the old media cannot hide the replacement");
     await React.act(async () => replacement.dispatchEvent(new p.window.Event("load", { bubbles: true })));
-    assert.equal(replacement.hidden, false, "replacement public media must recover after previous image failure");
+    assert.equal(p.host.querySelector(".skin-card img"), replacement, "replacement public media must recover after previous image failure");
   } finally { await p.close(); }
 });
 
@@ -1124,4 +1125,130 @@ test("unsupported images fail locally without a broken preview or a futile retry
     assert.equal([...p.host.querySelectorAll('.supply-media-actions button')].some(button=>button.textContent==='重试'),false);
     assert.equal(p.calls.length,0);
   }finally{await p.close();}
+});
+
+// --- 皮肤小图接线（离线 fixture；不需要服务、数据库或真实数据） ---
+function loadTsFile(file, overrides = {}) {
+  const mod = new Module(file, null);
+  mod.filename = file;
+  mod.paths = Module._nodeModulePaths(path.dirname(file));
+  const native = mod.require.bind(mod);
+  mod.require = (name) => overrides[name] ?? native(name);
+  mod._compile(ts.transpileModule(fs.readFileSync(file, "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+  }).outputText, file);
+  return mod.exports;
+}
+
+let thumbModuleCache;
+function loadThumbModule() {
+  thumbModuleCache ??= loadTsFile(path.join(tree, "apps/web/src/components/supply/skin-media-thumb.tsx"), {
+    react: React,
+    "lucide-react": { FileImage: (props) => React.createElement("span", { "data-icon": "FileImage", ...props }) },
+  });
+  return thumbModuleCache;
+}
+
+async function openThumb() {
+  const window = new Window({ url: "http://localhost/" });
+  Object.assign(globalThis, {
+    window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
+    Event: window.Event, IS_REACT_ACT_ENVIRONMENT: true, getComputedStyle: window.getComputedStyle.bind(window),
+  });
+  Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
+  const host = window.document.createElement("div");
+  window.document.body.append(host);
+  const root = require("react-dom/client").createRoot(host);
+  return {
+    window, host,
+    render: async (mediaId) => { await React.act(async () => root.render(React.createElement(loadThumbModule().SkinMediaThumb, { mediaId }))); },
+    img: () => host.querySelector("img"),
+    fallbacks: () => [...host.querySelectorAll(".skin-card-media-fallback")],
+    close: async () => { await React.act(async () => root.unmount()); await window.happyDOM.close(); },
+  };
+}
+
+test("皮肤小图：有 mediaId 才出图，且使用既有公开媒体 URL 合同", async () => {
+  const p = await openThumb();
+  try {
+    await p.render("m_1");
+    const img = p.img();
+    assert.ok(img, "有 mediaId 必须出图");
+    assert.equal(img.getAttribute("src"), "/api/supply/media/m_1/content");
+    assert.equal(p.fallbacks().length, 0, "出图时不渲染占位");
+
+    await p.render(null);
+    assert.equal(p.img(), null, "无 mediaId 不得留旧图");
+    assert.equal(p.fallbacks().length, 1, "无图时显示一个中性占位");
+    assert.match(p.host.textContent, /暂无公开图/);
+  } finally { await p.close(); }
+});
+
+test("皮肤小图：加载失败回退，换到新媒体后自动恢复", async () => {
+  const p = await openThumb();
+  try {
+    await p.render("m_1");
+    await React.act(async () => { p.img().dispatchEvent(new p.window.Event("error")); });
+    assert.equal(p.img(), null, "加载失败不再出图");
+    assert.equal(p.fallbacks().length, 1, "加载失败显示中性占位");
+
+    await p.render("m_2");
+    const second = p.img();
+    assert.ok(second, "换到新媒体后失败态必须恢复");
+    assert.equal(second.getAttribute("src"), "/api/supply/media/m_2/content");
+    assert.equal(p.fallbacks().length, 0, "恢复后不得残留占位");
+  } finally { await p.close(); }
+});
+
+test("皮肤小图：旧图迟到事件不影响当前图，撤图回到占位", async () => {
+  const p = await openThumb();
+  try {
+    await p.render("m_1");
+    const stale = p.img();
+    await p.render("m_2");
+    const current = p.img();
+    assert.notEqual(current, stale, "换图必须是新的图片元素，旧节点不得复用");
+    await React.act(async () => { stale.dispatchEvent(new p.window.Event("error")); });
+    assert.equal(p.img(), current, "旧图迟到 error 不得移除当前图");
+    assert.equal(current.getAttribute("src"), "/api/supply/media/m_2/content");
+    assert.equal(p.fallbacks().length, 0, "旧图迟到 error 不得露出占位");
+
+    await p.render(null);
+    assert.equal(p.img(), null, "撤图后不再出图");
+    assert.equal(p.fallbacks().length, 1, "撤图后回到中性占位");
+  } finally { await p.close(); }
+});
+
+test("皮肤小图：失败态不跨显示周期残留（换走再绑回同一媒体、撤图再绑回都重新出图）", async () => {
+  const p = await openThumb();
+  try {
+    await p.render("m_1");
+    await React.act(async () => { p.img().dispatchEvent(new p.window.Event("error")); });
+    assert.equal(p.fallbacks().length, 1, "首次失败显示占位");
+
+    await p.render("m_2");
+    assert.equal(p.img()?.getAttribute("src"), "/api/supply/media/m_2/content", "换到新媒体恢复出图");
+    await p.render("m_1");
+    const back = p.img();
+    assert.ok(back, "失败态不得跨周期残留：重新绑回同一媒体必须再次尝试出图");
+    assert.equal(back.getAttribute("src"), "/api/supply/media/m_1/content");
+    assert.equal(p.fallbacks().length, 0, "绑回后不得残留占位");
+
+    await React.act(async () => { p.img().dispatchEvent(new p.window.Event("error")); });
+    await p.render(null);
+    assert.equal(p.img(), null, "无图仍走中性占位");
+    assert.equal(p.fallbacks().length, 1);
+    await p.render("m_1");
+    assert.ok(p.img(), "撤图后重新绑回同一媒体必须重新出图");
+    assert.equal(p.fallbacks().length, 0, "重新绑回后不得残留占位");
+  } finally { await p.close(); }
+});
+
+test("皮肤标题：以服务端 name 为可靠回退，owner/base 齐全才组合且不重复前缀", () => {
+  const { skinCardTitle } = loadThumbModule();
+  assert.equal(skinCardTitle({ name: "服务端名" }), "服务端名");
+  assert.equal(skinCardTitle({ name: "服务端名", ownerName: "威龙" }), "服务端名", "缺 baseName 不组合");
+  assert.equal(skinCardTitle({ name: "服务端名", ownerName: "威龙", baseName: "凌霄戍卫" }), "威龙-凌霄戍卫");
+  assert.equal(skinCardTitle({ name: "威龙-凌霄戍卫", ownerName: "威龙", baseName: "凌霄戍卫" }), "威龙-凌霄戍卫", "已带前缀不重复拼接");
+  assert.equal(skinCardTitle({ name: "水墨云图", ownerName: "骇爪", baseName: "水墨云图" }), "骇爪-水墨云图", "裸名必须补所属对象，子串包含不算完整标题");
 });
