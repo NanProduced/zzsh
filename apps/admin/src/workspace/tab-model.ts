@@ -7,6 +7,7 @@ const PHONE_VALUE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
 export type WorkspaceRouteKind =
   | "workbench"
   | "support"
+  | "membership-growth"
   | "account"
   | "admins"
   | "admin-object"
@@ -59,6 +60,7 @@ export type NavPermission = {
 const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   [WORKBENCH_TAB_ID]: { id: WORKBENCH_TAB_ID, title: "工作台", path: "/workbench", closable: false, kind: "workbench" },
   support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
+  "membership-growth": { id: "membership-growth", title: "会员成长", path: "/membership-growth", closable: true, kind: "membership-growth" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
   admins: { id: "admins", title: "管理员", path: "/admins", closable: true, kind: "admins" },
   roles: { id: "roles", title: "角色权限", path: "/roles", closable: true, kind: "roles" },
@@ -91,6 +93,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/" || path === "/workbench") return { kind: "workbench", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
   if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
+  if (path === "/membership-growth") return { kind: "membership-growth", tabId: "membership-growth", path: "/membership-growth", title: "会员成长" };
   if (path === "/admins") return { kind: "admins", tabId: "admins", path: "/admins", title: "管理员" };
   const adminObject = path.match(/^\/admins\/([^/]+)$/);
   if (adminObject) {
@@ -173,6 +176,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support") return has("im.support.read") || nav.isBoss;
+  if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has);
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
   if (kind === "roles" || kind === "role-object") return has("admin.role.read") || has("admin.permission.read");
   if (kind === "approvals" || kind === "approval-object") {
@@ -195,7 +199,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

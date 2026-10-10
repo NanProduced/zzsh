@@ -11,6 +11,7 @@ test("page search only lists implemented pages in the current permission set", (
   assert.deepEqual(boss.map((page) => page.path), [
     "/workbench",
     "/support",
+    "/membership-growth",
     "/admins",
     "/roles",
     "/supply/catalog",
@@ -29,6 +30,10 @@ test("page search only lists implemented pages in the current permission set", (
   const limited = searchableWorkspacePages({ isBoss: false, permissions: [] });
   assert.deepEqual(limited.map((page) => page.path), ["/workbench", "/account"]);
   assert.equal(limited.some((page) => page.path === "/admins"), false);
+  assert.equal(limited.some((page) => page.path === "/membership-growth"), false);
+  for (const permission of ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"]) {
+    assert.ok(searchableWorkspacePages({ isBoss: false, permissions: [permission] }).some(page => page.path === "/membership-growth"));
+  }
 });
 
 test("page search matches label, group and path, and stays empty for unknown business queries", () => {

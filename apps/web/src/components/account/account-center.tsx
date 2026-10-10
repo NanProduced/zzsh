@@ -21,8 +21,10 @@ import { maskPhone, webAuthRequest, WebAuthError } from "@/components/auth/auth-
 import { useUserSession } from "@/components/session/user-session-provider";
 import { accountStatusLabel, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
 import { MembershipRequestError, readMyMembership, type MembershipTier, type MembershipSnapshot } from "@/lib/membership-client";
+import { MembershipGrowthRequestError, readMyMembershipGrowth } from "@/lib/membership-growth-client";
 import { formatOrderTime, orderApi, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
 import { WalletSummary } from "./personal-wallet";
+import { MembershipGrowthPanel, type MembershipGrowthViewState } from "./membership-growth-panel";
 import "./account-center.css";
 
 export const accountSectionLabels = {
@@ -233,6 +235,32 @@ function MembershipIdentity({ scope }: { scope: string }) {
   );
 }
 
+function MembershipGrowthSection({ scope }: { scope: string }) {
+  const revalidate = useUserSession().revalidate;
+  const [reload, setReload] = useState(0);
+  const [state, setState] = useState<{ scope: string; value: MembershipGrowthViewState }>({ scope, value: { status: "loading" } });
+  const sequence = useRef(0);
+  if (state.scope !== scope) setState({ scope, value: { status: "loading" } });
+
+  useEffect(() => {
+    const current = ++sequence.current;
+    const controller = new AbortController();
+    setState({ scope, value: { status: "loading" } });
+    readMyMembershipGrowth(controller.signal).then(
+      (value) => { if (current === sequence.current) setState({ scope, value }); },
+      (error: unknown) => {
+        if (controller.signal.aborted || current !== sequence.current) return;
+        const failure = error instanceof MembershipGrowthRequestError ? error : new MembershipGrowthRequestError(0, null);
+        if (isAuthenticationFailure(failure)) revalidate();
+        setState({ scope, value: { status: "error", message: failure.message, retryable: failure.status === 0 || failure.status >= 500 } });
+      },
+    );
+    return () => controller.abort();
+  }, [revalidate, reload, scope]);
+
+  return <MembershipGrowthPanel state={state.scope === scope ? state.value : { status: "loading" }} onRetry={() => setReload((value) => value + 1)} />;
+}
+
 function OrderSummaryCard({ party, scope }: { party: OrderParty; scope: string }) {
   const session = useUserSession();
   const revalidate = session.revalidate;
@@ -362,6 +390,7 @@ export function AccountOverview({ scope }: { scope: string }) {
   return (
     <div className="account-overview">
       <MembershipIdentity scope={scope} />
+      <MembershipGrowthSection scope={scope} />
       <div className="account-overview-grid">
         <section className="account-recent-panel" aria-labelledby="account-recent-orders-heading">
           <div className="account-panel-heading">

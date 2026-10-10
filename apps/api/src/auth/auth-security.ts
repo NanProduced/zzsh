@@ -100,6 +100,24 @@ export type AdminSecurityNotification = {
   requestId: string;
 };
 
+export type ApprovalOperationExecutorInput = {
+  requestId: string;
+  operationCode: string;
+  payloadVersion: number;
+  operationPayload: Record<string, unknown>;
+  operationPayloadHash: string;
+  requestedBy: string;
+  decidedBy: string;
+  expiresAt: Date | string;
+};
+
+export type ApprovalOperationExecutor = (
+  client: PoolClient,
+  input: ApprovalOperationExecutorInput,
+  actor: { userId: string; sessionId: string },
+  requestId: string,
+) => Promise<{ resultCode: string; resultDetail?: string }>;
+
 export type AuthSecurityOptions = {
   pool: Pool;
   adminAuth: AuthLike;
@@ -116,6 +134,7 @@ export type AuthSecurityOptions = {
   realNameProvider: RealNameProvider;
   userObligationReader: UserObligationReader;
   testOperationsEnabled: boolean;
+  approvalOperationExecutor?: ApprovalOperationExecutor;
   imProvisioner?: ImIdentityProvisioner;
   imIdentityRepository?: ImIdentityIntentRepository;
   imAppId?: string;

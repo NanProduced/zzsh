@@ -163,7 +163,7 @@ type Basis = {
   fundingPolicyRef: string;
   fundingPolicyVersion: string | null;
   disclosureVersion: string | null;
-  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2";
+  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3";
   listingVersionId: string;
   listingHash: string;
   fullPayoutSelected: boolean;
@@ -212,6 +212,27 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
       return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
     }
     personalQuoteSchema = "personal-quote-v2";
+    fullPayoutSelected = declaration.selected;
+    fundingPolicyVersion = funding.fullPayoutPolicyVersion;
+    disclosureVersion = funding.disclosureVersion;
+  } else if (personal.schema === "personal-quote-v3") {
+    const declaration = personal.fullPayoutDeclaration as Record<string, unknown> | undefined;
+    const growth = personal.membershipGrowth as Record<string, unknown> | undefined;
+    const binding = growth?.binding as Record<string, unknown> | undefined;
+    if (!declaration || Object.keys(declaration).sort().join(",") !== "schema,selected"
+      || declaration.schema !== "full-payout-declaration-v1" || typeof declaration.selected !== "boolean"
+      || personal.ownerUserId !== order.ownerUserId || personal.accountId !== order.accountId
+      || personal.listingVersionId !== order.listingVersionId || Object.hasOwn(funding, "fullPayoutSelected")
+      || Object.hasOwn(funding, "fullPayoutFeeCents") || typeof funding.fullPayoutPolicyVersion !== "string" || !funding.fullPayoutPolicyVersion.trim()
+      || typeof funding.disclosureVersion !== "string" || !funding.disclosureVersion.trim()
+      || growth?.schema !== "membership-growth-v1" || typeof growth.policyVersion !== "string" || !growth.policyVersion.trim()
+      || !["GROWTH", "FRIEND", "PRESTIGE"].includes(String(growth.selectedSource))
+      || !binding || binding.userId !== order.renterUserId || binding.ownerUserId !== order.ownerUserId
+      || binding.accountId !== order.accountId || binding.listingVersionId !== order.listingVersionId
+      || binding.ruleReleaseId !== order.ruleReleaseId || typeof binding.quantityDigest !== "string") {
+      return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
+    }
+    personalQuoteSchema = "personal-quote-v3";
     fullPayoutSelected = declaration.selected;
     fundingPolicyVersion = funding.fullPayoutPolicyVersion;
     disclosureVersion = funding.disclosureVersion;

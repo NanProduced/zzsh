@@ -1,5 +1,5 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
-import {applyRuntimePrivileges,configureDistributionFinancialPrivileges} from '../src/database/business-migrations';
+import {applyRuntimePrivileges,configureDistributionFinancialPrivileges,configureMembershipGrowthPrivileges} from '../src/database/business-migrations';
 function probe(present:boolean|boolean[]=true){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
  if(sql.startsWith('SELECT name,to_regclass'))return{rows:args[0].map((name:string,i:number)=>({name,present:Array.isArray(present)?present[i]:present}))};
  if(sql.startsWith('SELECT attname FROM pg_attribute'))return{rows:['id','state','canonical_seed','unlisted_column'].map(attname=>({attname}))};
@@ -22,4 +22,16 @@ test('the real common authorization entry converges after broad order grants on 
  const broad=p.seen.findIndex(s=>s.includes('GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order"'));
  const narrow=p.seen.findIndex(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_order.distribution_order_admission'));assert(broad>=0&&narrow>broad);assert(p.seen.some(s=>s.includes('GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json')));assert(p.seen.at(-1)!.includes('GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version'));
  // This checks dispatch/order and emitted grants, not PostgreSQL effective privileges.
+});
+
+test('membership ACL is optional on old schema, rejects partial schema and unsafe roles before grants',async()=>{
+ const absent=probe(false);await configureMembershipGrowthPrivileges(absent.pool,'runtime_role');assert.equal(absent.seen.length,1);
+ const partial=probe([true,true,false,true]);await assert.rejects(configureMembershipGrowthPrivileges(partial.pool,'runtime_role'),/incomplete/);assert.equal(partial.seen.length,1);
+ const unsafe=probe();await assert.rejects(configureMembershipGrowthPrivileges(unsafe.pool,'bad;role'),/safe identifier/);assert.equal(unsafe.seen.length,0);
+});
+test('common ACL converges membership column grants without mutable facts or projection writes',async()=>{
+ const p=probe();await applyRuntimePrivileges(p.pool,'runtime_role');const first=[...p.seen];p.seen.length=0;await applyRuntimePrivileges(p.pool,'runtime_role');assert.deepEqual(p.seen,first);
+ const revokes=p.seen.filter(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_iam.membership_'));assert.equal(revokes.length,4);assert(revokes.every(s=>s.includes('UPDATE (')&&s.includes('"unlisted_column"')));
+ const grants=p.seen.find(s=>s.includes('GRANT INSERT(id,version,status,effective_at'))!;assert(grants);assert.match(grants,/GRANT UPDATE\(status,revoked_reason,replaced_by_id,updated_at\) ON zzsh_iam.membership_entitlement/);
+ assert.equal((grants.match(/GRANT UPDATE/g)||[]).length,1);assert(!grants.includes('membership_growth_state'));assert(!grants.includes('GRANT DELETE'));assert(!grants.includes('unlisted_column'));
 });

@@ -15,6 +15,7 @@ import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/sup
 import { handleContentAdminRoute } from "../content/content-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
+import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
 import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
@@ -388,6 +389,24 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleRentalMembershipAdmin(request,response,options.adminSecurityOptions);
     return;
   }
+  const membershipGrowthPolicy = /^\/membership-growth\/(policy|policy-drafts|backfill)$/.test(path);
+  if (membershipGrowthPolicy) {
+    if ((path.endsWith("/policy") && method !== "GET") || (path.endsWith("/policy-drafts") && method !== "POST") || (path.endsWith("/backfill") && method !== "POST")) {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/membership-growth${path.slice("/membership-growth".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleMembershipGrowthPolicyAdmin(request, response as AuthSecurityNodeResponse, options.adminSecurityOptions);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
   if (path === "/users" || /^\/users\/resource-accounts\/[A-Za-z0-9._:-]+$/.test(path) || /^\/users\/[^/]+(?:\/(?:rental-accounts|orders|audit-events))?$/.test(path)) {
     if (!(method === "GET" && path !== "/users/lookup") && !(method === "POST" && path === "/users/lookup")) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
@@ -399,6 +418,24 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.headers = { ...request.headers, "x-request-id": requestId };
     try {
       await handleUserDirectoryAdmin(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.adminSecurityOptions);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
+  const membershipGrowthUser = /^\/users\/([^/]+)\/membership-growth$/.exec(path);
+  if (membershipGrowthUser) {
+    if (method !== "GET") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/users/${membershipGrowthUser[1]}/membership-growth${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleMembershipGrowthAdmin(request as AuthSecurityNodeRequest, response as AuthSecurityNodeResponse, options.adminSecurityOptions);
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);

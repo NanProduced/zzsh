@@ -54,6 +54,11 @@ function loadCenter(session) {
     };
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
     if (name === "@/lib/membership-client") return requireFromTree(path.join(tree, "apps/web/src/lib/membership-client.ts"));
+    if (name === "@/lib/membership-growth-client") return {
+      MembershipGrowthRequestError: class MembershipGrowthRequestError extends Error { constructor(status) { super("GROWTH_ERROR"); this.status = status; this.code = status === 401 ? "UNAUTHENTICATED" : "INTERNAL_ERROR"; } },
+      readMyMembershipGrowth: async () => ({ status: "unknown", message: "成长服务尚未接线" }),
+    };
+    if (name === "./membership-growth-panel") return { MembershipGrowthPanel: () => null };
     if (name === "@/lib/personal-wallet-client") return requireFromTree(path.join(tree, "apps/web/src/lib/personal-wallet-client.ts"));
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);

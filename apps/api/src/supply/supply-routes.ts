@@ -227,6 +227,7 @@ export async function runIdempotentWrite(
   authorize: (client: PoolClient, replay: IdempotencyReplay) => Promise<boolean | void>,
   action: (client: PoolClient) => Promise<{ status: number; body: unknown }>,
   projectResponse?: (client: PoolClient, result: { status: number; body: unknown }) => Promise<{ status: number; body: unknown }>,
+  afterCommit?: () => Promise<void>,
 ): Promise<void> {
   const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
   const fingerprint = fingerprintRequest(scope.operation, scope.resourceId, fingerprintBody ?? null);
@@ -236,6 +237,7 @@ export async function runIdempotentWrite(
       const committed = await withIdempotency(client, { ...scope, realm: actor.realm }, key, fingerprint, (replay) => authorize(client, replay), () => action(client));
       return projectResponse ? projectResponse(client, committed) : committed;
     });
+    if (afterCommit) await afterCommit();
     sendJson(response, result.status, result.body, requestId);
   } catch (error) {
     const uniqueViolation = (error as { code?: string }).code === "23505";

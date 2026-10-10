@@ -5,6 +5,7 @@ import { withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { bodyOf, ensureOnlyFields, invalid, notFound, sendJson } from "../supply/supply-util";
 import { decodeId, requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
+import { membershipGrowthPostCommitCallback } from "../auth/membership-growth-integration";
 import {
   adjustSettlement,
   classifySettlement,
@@ -107,7 +108,8 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { action: body.action, versionHash, reason },
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
       (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result),
+      membershipGrowthPostCommitCallback(options.pool, orderId, actor, requestId));
     return true;
   }
   if (method === "POST" && opening) {
@@ -196,7 +198,8 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { versionHash },
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
       (client) => reviewSettlement(client, orderId, versionId, actor, versionHash, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result),
+      membershipGrowthPostCommitCallback(options.pool, orderId, actor, requestId));
     return true;
   }
   if (method === "POST" && adjust) {

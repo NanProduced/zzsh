@@ -5,6 +5,9 @@ import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { mountRentalMembership } from "./rental-membership-routes";
+import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
+import { executeMembershipGrowthOperation } from "./membership-growth-approval";
+import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
 import { mountUserDirectory } from "./user-directory-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
 import { mountPersonalOrders } from "../order/personal-order-routes";
@@ -842,6 +845,7 @@ export async function mountAuthHandlers(
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
     },
     testOperationsEnabled: options.testOperationsEnabled,
+    approvalOperationExecutor: executeMembershipGrowthOperation,
     ...(yunxinRuntime ? {
       imProvisioner: yunxinRuntime.provisioner,
       imIdentityRepository: yunxinRuntime.repository,
@@ -945,8 +949,11 @@ export async function mountAuthHandlers(
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope});
   mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope});
-  mountPersonalConfirmations(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,fundingReader});
-  mountPersonalOrders(app,securityOptions,{gate:supplyGateReader,key:options.confirmationKey,holdSeconds:orderHoldSeconds,fundingReader});
+  mountMembershipGrowthRoutes(app, securityOptions);
+  const membershipGrowthReader = membershipGrowthEnabled() ? readMembershipGrowthQuoteCandidates : undefined;
+  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, ...(membershipGrowthReader ? { membershipGrowthReader } : {}) };
+  mountPersonalConfirmations(app, securityOptions, personalConfirmationOptions);
+  mountPersonalOrders(app, securityOptions, { ...personalConfirmationOptions, holdSeconds: orderHoldSeconds });
   if (options.orderTeams) {
     const provider=yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
     if(!yunxinRuntime || !provider?.createOrderTeam || !provider.readOrderTeam) throw new ConfigurationError("Order Teams require an explicitly configured provider");

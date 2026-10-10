@@ -77,6 +77,20 @@ function conflict(message: string): never {
   throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, message);
 }
 
+function requireMembershipBusinessPermission(access: EffectiveAdminAccess, operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): void {
+  if (!operationCode.startsWith("membership.")) return;
+  const permission = operationCode === "membership.benefit.policy.publish"
+    ? ADMIN_PERMISSION.membershipPolicyPublish
+    : operationCode === "membership.entitlement.revoke"
+      ? ADMIN_PERMISSION.membershipEntitlementRevoke
+      : stage === "REQUEST"
+        ? ADMIN_PERMISSION.membershipEntitlementRequest
+        : stage === "DECIDE"
+          ? ADMIN_PERMISSION.membershipEntitlementDecide
+          : ADMIN_PERMISSION.membershipEntitlementExecute;
+  if (!access.isBoss && !hasPermission(access, permission)) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Membership business permission is required");
+}
+
 function routePath(request: AuthSecurityNodeRequest): string {
   const source = request.originalUrl ?? request.url ?? "/";
   return source.split("?", 1)[0] || "/";
@@ -445,6 +459,7 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
   const result = await withTransaction(options.pool, async (client) => {
     const access = await lockActor(client, context.userId);
     requirePermission(access, ADMIN_PERMISSION.approvalRequestCreate);
+    requireMembershipBusinessPermission(access, op, "REQUEST");
     const templateResult = await client.query<TemplateRow>(
       `SELECT "id", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "version", "created_at" AS "createdAt", "updated_at" AS "updatedAt"
          FROM "zzsh_iam"."approval_template" WHERE "operation_code" = $1 AND "trigger_condition" = $2 FOR UPDATE`,
@@ -527,6 +542,7 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
     const access = await lockActor(client, context.userId);
     requirePermission(access, ADMIN_PERMISSION.approvalRequestApprove);
     const row = await readRequestForUpdate(client, targetRequestId);
+    requireMembershipBusinessPermission(access, row.operationCode, "DECIDE");
     if (row.requestedBy === context.userId) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "The requester cannot approve its own request");
     await requireRequestCandidate(client, row, context.userId);
     if (row.status !== "PENDING") conflict("This approval request is already closed");
@@ -606,10 +622,11 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
   const result = await withTransaction(options.pool, async (client) => {
     const access = await lockActor(client, context.userId);
     requirePermission(access, ADMIN_PERMISSION.approvalRequestExecute);
-    if (!options.testOperationsEnabled) {
+    const row = await readRequestForUpdate(client, targetRequestId);
+    requireMembershipBusinessPermission(access, row.operationCode, "EXECUTE");
+    if (row.operationCode === TEST_OPERATION && !options.testOperationsEnabled) {
       throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Test operation is disabled in this environment");
     }
-    const row = await readRequestForUpdate(client, targetRequestId);
     const linked = access.isBoss || row.requestedBy === context.userId || (await client.query(`SELECT 1 FROM "zzsh_iam"."approval_request_candidate" WHERE "request_id" = $1 AND "admin_user_id" = $2`, [row.id, context.userId])).rows.length === 1;
     if (!linked) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "The current administrator is outside this request scope");
     if (new Date(row.expiresAt).getTime() <= Date.now() && ["PENDING", "APPROVED"].includes(row.status)) {
@@ -617,19 +634,38 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
       return { expired: true } as const;
     }
     if (row.status !== "APPROVED") conflict("Only an approved request can be executed");
-    if (row.operationCode !== TEST_OPERATION) conflict("This package has no executor for the configured operation");
-    const outcome = row.operationPayload.outcome;
-    if (typeof outcome !== "string" || !TEST_OUTCOMES.has(outcome)) conflict("The test operation payload is invalid");
-    const executionStatus = outcome === "SUCCESS" ? "SUCCEEDED" : "FAILED";
-    const resultCode = outcome === "SUCCESS" ? "TEST_ACTION_EXECUTED" : "TEST_ACTION_FAILED";
+    let executionStatus: "SUCCEEDED" | "FAILED" = "SUCCEEDED";
+    let resultCode: string;
+    let resultDetail: string;
+    if (row.operationCode === TEST_OPERATION) {
+      const outcome = row.operationPayload.outcome;
+      if (typeof outcome !== "string" || !TEST_OUTCOMES.has(outcome)) conflict("The test operation payload is invalid");
+      executionStatus = outcome === "SUCCESS" ? "SUCCEEDED" : "FAILED";
+      resultCode = outcome === "SUCCESS" ? "TEST_ACTION_EXECUTED" : "TEST_ACTION_FAILED";
+      resultDetail = outcome === "SUCCESS" ? "本地非资金测试动作已执行一次" : "本地非资金测试动作按载荷返回失败";
+    } else {
+      if (!options.approvalOperationExecutor) conflict("This package has no executor for the configured operation");
+      const executed = await options.approvalOperationExecutor(client, {
+        requestId: row.id,
+        operationCode: row.operationCode,
+        payloadVersion: row.payloadVersion,
+        operationPayload: row.operationPayload,
+        operationPayloadHash: row.operationPayloadHash,
+        requestedBy: row.requestedBy,
+        decidedBy: row.decidedBy!,
+        expiresAt: row.expiresAt,
+      }, { userId: context.userId, sessionId: context.sessionId }, requestId);
+      resultCode = executed.resultCode;
+      resultDetail = executed.resultDetail ?? "会员操作已执行";
+    }
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await client.query(
       `INSERT INTO "zzsh_iam"."approval_execution" ("id", "request_id", "operation_code", "status", "result_code", "result_detail", "executed_by") VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [`approval_exec_${randomUUID().replaceAll("-", "")}`, row.id, row.operationCode, executionStatus, resultCode, outcome === "SUCCESS" ? "本地非资金测试动作已执行一次" : "本地非资金测试动作按载荷返回失败", context.userId],
+      [`approval_exec_${randomUUID().replaceAll("-", "")}`, row.id, row.operationCode, executionStatus, resultCode, resultDetail, context.userId],
     );
     await client.query(
       `UPDATE "zzsh_iam"."approval_request" SET "status" = $1, "status_reason" = $2 WHERE "id" = $3 AND "status" = 'APPROVED'`,
-      [outcome === "SUCCESS" ? "EXECUTED" : "EXECUTION_FAILED", executionStatus === "SUCCEEDED" ? "执行成功" : "执行失败，结果已记录", row.id],
+      [executionStatus === "SUCCEEDED" ? "EXECUTED" : "EXECUTION_FAILED", executionStatus === "SUCCEEDED" ? "执行成功" : "执行失败，结果已记录", row.id],
     );
     await recordAudit(client, {
       actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
@@ -637,7 +673,7 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
       outcome: executionStatus === "SUCCEEDED" ? "SUCCESS" : "FAILURE", requestId,
       details: { operationCode: row.operationCode, executionStatus, resultCode, summary: row.summary },
     });
-    return { status: outcome === "SUCCESS" ? "EXECUTED" : "EXECUTION_FAILED", executionStatus, resultCode, requestId: row.id } as const;
+    return { status: executionStatus === "SUCCEEDED" ? "EXECUTED" : "EXECUTION_FAILED", executionStatus, resultCode, requestId: row.id } as const;
   });
   if ("expired" in result && result.expired) conflict("Approved request expired before execution");
   sendSuccess(response, result, requestId);

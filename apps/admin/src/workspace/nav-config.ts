@@ -3,6 +3,7 @@ import {
   BoxesIcon,
   CrosshairIcon,
   ClipboardCheckIcon,
+  CrownIcon,
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -38,6 +39,10 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   if (has("im.support.read") || nav.isBoss) {
     items.push({ label: "客户服务", isTitle: true }, { label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
+  }
+
+  if (nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)) {
+    items.push({ label: "会员运营", isTitle: true }, { label: "会员成长", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
   }
 
   const system: WorkspaceMenuItem[] = [];
@@ -131,6 +136,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/orders") return "订单";
   if (pathname === "/account") return "账号安全";
   if (pathname === "/support") return "客服工作台";
+  if (pathname === "/membership-growth") return "会员成长";
   return "工作台";
 }
 

@@ -477,6 +477,13 @@
       "when": 1789490036000,
       "tag": "0067_credit_guarantee_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1789490037000,
+      "tag": "0068_membership_growth_contract",
+      "breakpoints": true
     }
   ]
 }

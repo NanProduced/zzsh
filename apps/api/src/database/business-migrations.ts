@@ -199,6 +199,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   // Admission rows are provisioning facts: the runtime never reads or writes them directly.
   const nativeAdmission=(await pool.query("SELECT to_regclass('zzsh_order.native_origin_resource_admission') IS NOT NULL AS present")).rows[0];
   if(nativeAdmission?.present===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_origin_resource_admission FROM ${runtimeUser};`);
+  await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
 }
@@ -234,13 +235,7 @@ export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, 
   if (found.every(row => row.present === false)) return;
   if (found.some(row => row.present !== true)) throw new Error("Financial schema is incomplete; runtime privileges not finalized");
   for (const table of names) {
-    const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows;
-    if (!columns.length) throw new Error("Financial table columns are unavailable");
-    const list = columns.map(row => quoteIdentifier(row.attname)).join(",");
-    // Table revocation alone does not clear an old explicit column grant.
-    await pool.query(`REVOKE ALL ON TABLE ${table} FROM ${role};
-      REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table} FROM ${role};
-      GRANT SELECT ON TABLE ${table} TO ${role}`);
+    await resetRuntimeTablePrivileges(pool, table, role);
   }
   await pool.query(`
     GRANT INSERT(id,order_id,payment_confirmation_id,admission_id,admission_revision,canonical_basis,basis_digest)
@@ -290,5 +285,35 @@ export async function configureCreditGuaranteePrivileges(pool: Pick<Pool, "query
     GRANT INSERT(id,payment_id,refund_id,observed_state,observed_amount_cents,provider_reference,canonical_payload,payload_digest) ON zzsh_order.owner_guarantee_reconciliation TO ${role};
     REVOKE ALL ON FUNCTION zzsh_credit.guard_credit_state_update(),zzsh_credit.guard_credit_event_insert(),zzsh_order.guard_guarantee_root(),zzsh_order.guard_guarantee_event(),zzsh_order.guard_guarantee_entry(),zzsh_order.check_guarantee_batch() FROM ${role};
     GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version() TO ${role};
+  `);
+}
+
+async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: string, role: string): Promise<void> {
+    const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows;
+    if (!columns.length) throw new Error("Table columns are unavailable");
+    const list = columns.map(row => quoteIdentifier(row.attname)).join(",");
+    // Table revocation alone does not clear an old explicit column grant.
+    await pool.query(`REVOKE ALL ON TABLE ${table} FROM ${role};
+      REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table} FROM ${role};
+      GRANT SELECT ON TABLE ${table} TO ${role}`);
+}
+
+/** Optional membership schema; immutable policy/contribution rows never need runtime UPDATE. */
+export async function configureMembershipGrowthPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const names = ["membership_growth_policy", "membership_growth_contribution", "membership_growth_state", "membership_entitlement"].map(name => "zzsh_iam." + name);
+  const found = (await pool.query("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [names])).rows;
+  if (found.length !== names.length) throw new Error("Membership schema inventory is incomplete");
+  if (found.every(row => row.present === false)) return;
+  if (found.some(row => row.present !== true)) throw new Error("Membership schema is incomplete; runtime privileges not finalized");
+  for (const table of names) await resetRuntimeTablePrivileges(pool, table, role);
+  await pool.query(`
+    GRANT INSERT(id,version,status,effective_at,rule_release_id,price_version_id,source_ref,policy_schema,policy_payload,payload_hash,approval_request_id,approved_by_admin_id)
+      ON zzsh_iam.membership_growth_policy TO ${role};
+    GRANT INSERT(id,user_id,game_id,source_key,source_type,source_id,settlement_version,revision,effective_at,recorded_at,amount_cents,previous_amount_cents,correction_of_source_key,correction_mode,state,eligible,source_digest)
+      ON zzsh_iam.membership_growth_contribution TO ${role};
+    GRANT INSERT(id,user_id,game_id,kind,scope_key,starts_at,ends_at,pricing_schema,pricing_payload,price_version_id,cost_basis_ref,deposit_waived,approved_policy_id,approval_request_id,approved_payload_hash,status)
+      ON zzsh_iam.membership_entitlement TO ${role};
+    GRANT UPDATE(status,revoked_reason,replaced_by_id,updated_at) ON zzsh_iam.membership_entitlement TO ${role};
   `);
 }

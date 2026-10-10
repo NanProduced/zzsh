@@ -3,8 +3,9 @@ import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import type { AppConfig } from "../config/config";
 import { readRentalMembership } from "../auth/rental-membership";
+import { chooseCompleteOffer, type GrowthOfferPlan } from "../auth/membership-growth";
 import { canonicalize, computeContentHash, normalizeQuote } from "../supply/content-hash";
-import { computeDeltaQuote, projectDeltaQuote } from "../supply/pricing";
+import { computeDeltaQuote, projectDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
@@ -26,7 +27,15 @@ export type V2ConfirmationFunding = ConfirmationFundingBase & {
 };
 export type ConfirmationFunding = LegacyConfirmationFunding | V2ConfirmationFunding;
 export type ConfirmationFundingReader = (client:PoolClient,account:PublishingAccount,version:ListingVersion)=>Promise<ConfirmationFunding|null>;
-export type PersonalConfirmationOptions = {gate:SupplyGateReader;fundingReader?:ConfirmationFundingReader;key?:ConfirmationKey};
+export type PersonalConfirmationOptions = {gate:SupplyGateReader;fundingReader?:ConfirmationFundingReader;key?:ConfirmationKey;membershipGrowthReader?:MembershipGrowthConfirmationReader};
+export type MembershipGrowthQuoteCandidate = { plan: GrowthOfferPlan; quote: InternalQuote };
+export type MembershipGrowthConfirmationReader = (client: PoolClient, input: {
+  userId: string; ownerUserId: string; accountId: string; gameId: string; listingVersionId: string; listingHash: string;
+  ruleReleaseId: string; priceVersionId: string; quantityDigest: string; baseQuote: InternalQuote; quoteInput: QuoteInput;
+}) => Promise<
+  | { knowledge: "KNOWN"; policyVersion: string; candidates: MembershipGrowthQuoteCandidate[]; entitlementIds: string[] }
+  | { knowledge: "UNKNOWN"; reason: string }
+>;
 
 export type ControlledFundingListing = Readonly<{runId:string;ownerUserId:string;listingVersionId:string;listingHash:string}>;
 const controlledFundingReaders=new WeakSet<ConfirmationFundingReader>();
@@ -155,18 +164,46 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   if(!term)unavailable("Frozen term unavailable");
   const attrs=version.payload.declaration.attributes;
   const waive=membership.tier==="VIP"?f.vipWaiver:membership.tier==="SVIP"?f.svipWaiver:false;
-  const result=computeDeltaQuote({priceVersionId:release.id,mode:release.mode,customerTier:membership.tier,roundingPolicy:release.rounding_policy,haffRule:release.haff_rule,...(release.commission_rate===null?{}:{commissionRate:release.commission_rate}),
+  const quoteInput: QuoteInput = { priceVersionId: release.id, mode: release.mode, customerTier: membership.tier, roundingPolicy: release.rounding_policy, haffRule: release.haff_rule, ...(release.commission_rate===null?{}:{commissionRate:release.commission_rate}),
     lines:original.lines.map(line=>{const price=prices.get(line.itemId)!;return {itemId:line.itemId,unit:line.unit,quantity:line.quantity,customerTier:membership.tier as Exclude<typeof membership.tier,"UNKNOWN">,pricingKind:price.pricing_kind,...(price.unit_quantity===null?{}:{unitQuantity:price.unit_quantity}),...(price.buyer_unit_amount===null?{}:{buyerUnitAmount:price.buyer_unit_amount}),...(price.owner_unit_amount===null?{}:{ownerUnitAmount:price.owner_unit_amount})};}),
     conditions:{safeBoxCode:attrs.safe_box_code as string,vitLevel:(attrs.vit_level??attrs.vitLevel) as number,bearLevel:(attrs.bear_level??attrs.bearLevel) as number,termOptionCode:term.code,pricingOptionCode:version.payload.declaration.pricingOptionCode,...(attrs.rentalPricing===undefined?{}:{rentalPricing:normalizeRentalPricing(attrs.rentalPricing)})},termOption:term,
     entitlements:original.expiryDisclosures.map(e=>({entitlementId:e.entitlementId,expiryKind:e.expiresAt===null?"PERMANENT":"TIMED",...(e.expiresAt===null?{}:{expiresAt:e.expiresAt})})),
     deposits:{tenantDepositCents:waive?"0":f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents},
-  });
+  };
+  const result=computeDeltaQuote(quoteInput);
   if(!result.quotable)unavailable("Membership price cannot be calculated");
   if(!result.quotable)throw new Error("unreachable");
-  result.quote.ruleReleaseId=input.releaseId;
+  const binding = {
+    userId: context.userId,
+    accountId: account.id,
+    ownerUserId: account.owner_user_id,
+    listingVersionId: version.id,
+    ruleReleaseId: input.releaseId,
+    quantityDigest: createHash("sha256").update(canonicalize(original.lines)).digest("hex"),
+  };
+  let selectedQuote = result.quote;
+  let growthExtension: { schema: "membership-growth-v1"; policyVersion: string; selectedSource: GrowthOfferPlan["source"]; entitlementIds: string[]; binding: typeof binding; depositSource: "GROWTH" | "FRIEND" | "PRESTIGE" | "UNKNOWN" } | null = null;
+  if (options.membershipGrowthReader) {
+    const growth = await options.membershipGrowthReader(client, {
+      userId: context.userId, ownerUserId: account.owner_user_id, accountId: account.id, gameId: account.game_id,
+      listingVersionId: version.id, listingHash: version.content_hash, ruleReleaseId: input.releaseId, priceVersionId: release.id,
+      quantityDigest: binding.quantityDigest, baseQuote: result.quote, quoteInput,
+    });
+    if (growth.knowledge === "UNKNOWN") throw new SecurityApiError(503, "MEMBERSHIP_UNKNOWN", "Membership growth is unknown; confirm later");
+    const knownGrowth = growth;
+    const candidates = knownGrowth.candidates;
+    const choice = chooseCompleteOffer(candidates.map((candidate) => candidate.plan), new Date().toISOString());
+    if (choice.knowledge === "UNKNOWN") throw new SecurityApiError(503, "CONFIRMATION_DEPENDENCY_UNAVAILABLE", `Membership offer unavailable: ${choice.reason}`);
+    const knownChoice = choice;
+    const selected = candidates.find((candidate) => candidate.plan === knownChoice.selected);
+    if (!selected) throw new SecurityApiError(503, "CONFIRMATION_DEPENDENCY_UNAVAILABLE", "Membership quote binding cannot be recovered");
+    selectedQuote = selected.quote;
+    growthExtension = { schema: "membership-growth-v1", policyVersion: knownGrowth.policyVersion, selectedSource: knownChoice.selected.source, entitlementIds: knownGrowth.entitlementIds, binding, depositSource: knownChoice.depositBasis };
+  }
+  selectedQuote.ruleReleaseId=input.releaseId;
   // Explicit ordered fields, normalized quote and frozen refs. Internal evidence goes
   // only into the digest, never into a decodable signed payload or renter projection.
-  const quote=normalizeQuote(result.quote);
+  const quote=normalizeQuote(selectedQuote);
   // The personal-order contract has five refs; catalogRevision stays bound by listingHash.
   const {releaseId,priceVersionId,termVersionId,agreementVersionId,agreementDigest}=version.payload.ruleRefs;
   const ruleRefs={releaseId,priceVersionId,termVersionId,agreementVersionId,agreementDigest};
@@ -174,16 +211,17 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
     || !/^[0-9a-f]{64}$/.test(agreementDigest) || releaseId!==input.releaseId
     || priceVersionId!==release.id || termVersionId!==release.term_version_id)unavailable("Personal rule references cannot be verified");
   const guaranteeSnapshot = { status: guarantee.publisherBail, reference: guarantee.reference };
-  const snapshot=ownerDeclaration
+  const baseSnapshot=ownerDeclaration
     ? {schema:"personal-quote-v2",userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
       fullPayoutDeclaration:ownerDeclaration,ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},
       guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,
         publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,
         disclosureVersion:v2Funding!.disclosureVersion,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote}
     : {schema:"personal-quote-v1",listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
+  const snapshot=growthExtension ? { ...baseSnapshot, schema: "personal-quote-v3", membershipGrowth: growthExtension } : baseSnapshot;
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
-  return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection:{quote:projectDeltaQuote(result.quote,"public"),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),customerTier:membership.tier,depositWaived:waive,
+  return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection:{quote:projectDeltaQuote(quote,"public"),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),customerTier:membership.tier,depositWaived:quote.tenantDeposit?.amount === "0.00",
     ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion}}:{})}};
 }
 
