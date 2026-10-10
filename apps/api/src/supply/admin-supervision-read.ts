@@ -5,6 +5,7 @@ import { queryAdminReadOrders } from "../order/admin-order-read";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
+import { loadLegacyHistoricalRead } from "./legacy-listing-read";
 import { listingDetail, readPublishingAccount, readPublicListing, type PublishingAccount, type SupplyGateReader } from "./publishing";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 export const SUPERVISION_READ_VERSION = "admin-supervision.read.v1";
@@ -100,7 +101,8 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const unknown = ["OCCUPANCY_UNKNOWN", "FUNDING_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED"], definite = blockers.filter(r => !unknown.includes(r));
     const newOrders = definite.length ? false : blockers.length ? null : Boolean(detail.available);
     const primaryReasonCode = a.staff_restricted ? "STAFF_RESTRICTED" : a.owner_paused ? "OWNER_PAUSED" : blockers.includes("CURRENT_VERSION_MISSING") ? "CURRENT_VERSION_MISSING" : blockers.includes("PUBLICATION_REQUIRED") ? "PUBLICATION_REQUIRED" : blockers[0] ?? null;
-    return { publicVisible, publicSource, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])] };
+    const historicalRead = await loadLegacyHistoricalRead(client, a.id);
+    return { publicVisible, publicSource, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 export async function listSupervision(client: PoolClient, viewer: SupervisionViewer, q: SupervisionQuery, gate: SupplyGateReader, key: ListingCursorKey | undefined) {
     const canOrder = viewer.access.permissions.has("order.read");

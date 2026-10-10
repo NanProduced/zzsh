@@ -1,6 +1,7 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
+import { loadLegacyHistoricalRead } from "./legacy-listing-read";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
 import type { PoolClient } from "pg";
@@ -464,6 +465,7 @@ export async function handlePublishingRoute(
           : null;
         return {
           ...detail,
+          historicalRead: await loadLegacyHistoricalRead(client, a.id),
           history,
           previousDeclaration:
             admin && old ? await readDeclaration(client, old) : null,

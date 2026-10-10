@@ -30,6 +30,50 @@ export function parseLegacyReadSnapshot(value: unknown): LegacyReadSnapshot {
   return x as LegacyReadSnapshot;
 }
 
+export const LEGACY_READ_SOURCE_STATUSES = [0, 3, 4, 5] as const;
+
+/** Public history stays status 3. Other saved statuses are not a public read. */
+export function legacyReadSourceAllowed(status: number, deleted: boolean): boolean {
+  return deleted === false && LEGACY_READ_SOURCE_STATUSES.includes(status as (typeof LEGACY_READ_SOURCE_STATUSES)[number]);
+}
+
+export function legacySnapshotReplaySql(): string {
+  return "SELECT observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,snapshot,evidence_ref FROM zzsh_supply.legacy_listing_read_snapshot WHERE account_id=$1";
+}
+
+/** Authorized admin or owner read. This is not the public VISIBLE predicate. */
+export function legacyHistoricalReadSql(): string {
+  return `SELECT h.source_status::int AS source_status, h.legacy_id, h.snapshot, a.owner_user_id
+    FROM zzsh_supply.legacy_listing_read_snapshot h
+    JOIN zzsh_supply.rental_account a ON a.id=h.account_id
+    WHERE h.account_id=$1`;
+}
+
+export function projectLegacyHistoricalRead(row: { source_status: number | string; legacy_id: string; owner_user_id: string; snapshot: unknown }) {
+  const snapshot = parseLegacyReadSnapshot(row.snapshot);
+  const sourceStatus = Number(row.source_status);
+  return {
+    legacyId: row.legacy_id, sourceStatus, ownerUserId: row.owner_user_id, resourceNo: snapshot.resourceNo,
+    historicalQuote: { haffRentYuan: snapshot.haffRentYuan, goodsYuan: snapshot.goodsYuan, depositYuan: snapshot.depositYuan, termDays: snapshot.termDays, dailyHaffBase: snapshot.dailyHaffBase },
+    canCreateOrder: false as const, trade: "UNKNOWN" as const,
+    sourceStatusPublicCandidate: sourceStatus === 3,
+  };
+}
+
+export async function loadLegacyHistoricalRead(client: PoolClient, accountId: string) {
+  const row = (await client.query(legacyHistoricalReadSql(), [accountId])).rows[0];
+  return row ? projectLegacyHistoricalRead(row) : null;
+}
+
+export function legacySnapshotConflicts(old: {
+  observation_version_id: string; source_system: string; source_entity: string; legacy_id: string; source_digest: string;
+  source_status: number | string; source_updated_at: Date; evidence_ref: string; snapshot: unknown;
+}, next: { observationVersionId: string; sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; sourceStatus: number; sourceUpdatedAt: string; evidenceRef: string }, snapshot: unknown): boolean {
+  return old.observation_version_id !== next.observationVersionId || old.source_system !== next.sourceSystem || old.source_entity !== next.sourceEntity
+    || old.legacy_id !== next.legacyId || old.source_digest !== next.sourceDigest || Number(old.source_status) !== next.sourceStatus
+    || old.source_updated_at.toISOString() !== next.sourceUpdatedAt || old.evidence_ref !== next.evidenceRef || canonicalize(old.snapshot) !== canonicalize(snapshot);
+}
+
 /** Controlled importer only; caller owns the transaction. No public write route. */
 export async function recordLegacyReadSnapshot(client: PoolClient, accountId: string, input: {
   observationVersionId: string; sourceSystem: string; sourceEntity: string; legacyId: string;
@@ -41,19 +85,19 @@ export async function recordLegacyReadSnapshot(client: PoolClient, accountId: st
   if (!account) throw notFound();
   await assertGameScope(client, actor.id, access!.isBoss, account.game_id);
   const snapshot = parseLegacyReadSnapshot(input.snapshot);
-  if (input.sourceSystem !== "legacy_mysql_restore" || input.sourceEntity !== "la_rental_accounts" || input.sourceStatus !== 3 || input.sourceDeleted !== false
+  if (!legacyReadSourceAllowed(input.sourceStatus, input.sourceDeleted)) throw invalid("Historical listing source status is not allowed");
+  if (input.sourceSystem !== "legacy_mysql_restore" || input.sourceEntity !== "la_rental_accounts"
     || !/^[a-f0-9]{64}$/.test(input.sourceDigest) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(input.sourceUpdatedAt)
     || Number.isNaN(Date.parse(input.sourceUpdatedAt)) || !input.evidenceRef || input.evidenceRef.length > 512) throw invalid("Historical listing requires source publication evidence");
   const values = [accountId,input.observationVersionId,input.sourceSystem,input.sourceEntity,input.legacyId,input.sourceDigest,input.sourceStatus,input.sourceUpdatedAt,input.evidenceRef,snapshot,actor.id];
-  const old = (await client.query("SELECT observation_version_id,source_system,source_entity,legacy_id,source_digest,source_updated_at,snapshot,evidence_ref FROM zzsh_supply.legacy_listing_read_snapshot WHERE account_id=$1",[accountId])).rows[0];
+  const old = (await client.query(legacySnapshotReplaySql(),[accountId])).rows[0];
   if (old) {
-    if (old.observation_version_id!==input.observationVersionId || old.source_system!==input.sourceSystem || old.source_entity!==input.sourceEntity || old.legacy_id!==input.legacyId || old.source_digest!==input.sourceDigest
-      || old.source_updated_at.toISOString()!==input.sourceUpdatedAt || old.evidence_ref!==input.evidenceRef || canonicalize(old.snapshot)!==canonicalize(snapshot)) throw conflict("Historical snapshot conflicts with the recorded source");
+    if (legacySnapshotConflicts(old, input, snapshot)) throw conflict("Historical snapshot conflicts with the recorded source");
     return;
   }
   await client.query(`INSERT INTO zzsh_supply.legacy_listing_read_snapshot(account_id,observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,evidence_ref,snapshot,created_by_admin_id)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, values);
-  await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站上架资料与原始金额只读展示；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,readOnly:true,after:{readSnapshot:"RECORDED",observationVersionId:input.observationVersionId},result:"READ_SNAPSHOT_RECORDED"}});
+  await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站账号资料与原始金额只读保存；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,sourceStatus:input.sourceStatus,readOnly:true,after:{readSnapshot:"RECORDED",observationVersionId:input.observationVersionId},result:"READ_SNAPSHOT_RECORDED"}});
 }
 
 // `v` is the version the public read actually shows: the owner's current native
@@ -69,11 +113,11 @@ const FROM = `FROM zzsh_supply.legacy_listing_read_snapshot h
  JOIN zzsh_supply.game_service_operation gs ON gs.game_id=g.id AND gs.service_code='ACCOUNT_RENTAL'
  JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id
  LEFT JOIN zzsh_iam.user_identity_state us ON us.user_id=u.id`;
-// Native takeover owns the account once any publication fact exists: a blocked,
-// paused or rule-invalid native listing must never fall back to its legacy
-// snapshot. The same guard is used by the detail read and the mixed list.
+// Native takeover owns the account once any publication fact exists. The guard
+// is absence of that fact, not a requirement that a publication exists.
+// Status 3 is explicit: lifting legacy_hold must not show a non-public source.
 export const LEGACY_NATIVE_TAKEOVER_GUARD = `NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id)`;
-const VISIBLE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE' AND NOT a.owner_paused AND NOT a.staff_restricted
+const VISIBLE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE' AND h.source_status=3 AND NOT a.owner_paused AND NOT a.staff_restricted
  AND NOT u.suspended AND COALESCE(us.account_status,'ACTIVE')='ACTIVE'
  AND ${LEGACY_NATIVE_TAKEOVER_GUARD}`;
 

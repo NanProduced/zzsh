@@ -83,6 +83,7 @@ test("missing current version leaves occupancy UNKNOWN without querying the gate
     assert.equal(facts.occupancy, "UNKNOWN");
     assert.equal(facts.newOrders, false);
     assert.deepEqual(facts.reasons, ["CURRENT_VERSION_MISSING"]);
+    assert.equal(facts.historicalRead, null);
 });
 for (const occupancy of ["FREE", "OCCUPIED", "UNKNOWN"] as const) {
     test("current version preserves authoritative gate occupancy " + occupancy, async t => {
@@ -124,4 +125,79 @@ test("account image guard checks locked account, listing, owner, asset revision 
     assert.throws(() => assertMediaReviewBinding({ ...asset, purpose: "ACCOUNT_EVIDENCE" }, account, binding), (error: any) => error.status === 404);
     for (const patch of [{ accountRevision: 7 }, { byteHash: "bad" }, { visibility: "PUBLIC_DISPLAY" }])
         assert.throws(() => parseMediaReviewBinding({ ...binding, ...patch }));
+});
+const historicalSnapshot = { schema: "legacy-listing-read-v1", resourceNo: "SOURCE-1", haffRentYuan: "1.00", goodsYuan: "2.00", depositYuan: "0.00", termDays: "1", dailyHaffBase: "10000000" };
+test("historical projection stays off public visibility for an empty row and a saved row", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
+    t.mock.method(publishing, "readPublishingAccount", async () => fixtureAccount);
+    t.mock.method(publishing, "listingDetail", async () => ({ version: null }));
+    let historicalRows: unknown[] = [];
+    let historicalQueries = 0;
+    const client = { query: async (sql: string) => {
+        assert.match(sql, /^\s*SELECT/);
+        if (sql.includes("source_status::int")) { historicalQueries++; return { rows: historicalRows }; }
+        if (sql.startsWith("SELECT a.id,")) return { rows: [{ id: fixtureAccount.id, sortAt: "2026-10-03T00:00:00.000000Z" }] };
+        return { rows: [] };
+    } };
+    const gate = async () => { throw new Error("no gate"); };
+    const absent = await supervisionFacts(client as never, fixtureAccount, { version: null }, gate);
+    assert.equal(absent.historicalRead, null);
+    assert.equal(absent.publicVisible, false);
+    assert.equal(historicalQueries, 1);
+    historicalRows = [{ source_status: 3, legacy_id: "1", owner_user_id: "fixture-owner", snapshot: historicalSnapshot }];
+    const candidate = await supervisionFacts(client as never, fixtureAccount, { version: null }, gate);
+    assert.equal(candidate.publicVisible, false);
+    assert.equal(candidate.historicalRead?.sourceStatus, 3);
+    assert.equal(candidate.historicalRead?.sourceStatusPublicCandidate, true);
+    assert.equal("publicRead" in (candidate.historicalRead ?? {}), false);
+    historicalRows = [{ source_status: 4, legacy_id: "1", owner_user_id: "fixture-owner", snapshot: historicalSnapshot }];
+    historicalQueries = 0;
+    const page = await listSupervision(client as never, queryViewer, parseSupervisionQuery(new URLSearchParams()), gate, queryKey);
+    assert.equal(historicalQueries, 1);
+    assert.equal(page.items.length, 1);
+    const listed = page.items[0] as { facts: { publicVisible: boolean; historicalRead: { sourceStatus: number; sourceStatusPublicCandidate: boolean } | null } };
+    assert.equal(listed.facts.publicVisible, false);
+    assert.equal(listed.facts.historicalRead?.sourceStatus, 4);
+    assert.equal(listed.facts.historicalRead?.sourceStatusPublicCandidate, false);
+    assert.equal("publicRead" in (listed.facts.historicalRead ?? {}), false);
+});
+test("account route lets the owner read history and stops another user first", async t => {
+    const routes = require("../src/supply/publishing-routes");
+    const userIdentity = require("../src/auth/user-identity");
+    const security = require("../src/auth/security-core");
+    const account = { ...fixtureAccount, id: "acc-1", owner_user_id: "owner-1", current_version_id: null };
+    const historicalSql: string[] = [];
+    const client = { query: async (sql: string) => {
+        if (sql.includes("source_status::int")) {
+            historicalSql.push(sql);
+            return { rows: [{ source_status: 4, legacy_id: "1", owner_user_id: "owner-1", snapshot: historicalSnapshot }] };
+        }
+        return { rows: [], rowCount: 0 };
+    } };
+    let userId = "other-user";
+    t.mock.method(userIdentity, "readUserContext", async () => ({ userId, sessionId: "session-1" }));
+    t.mock.method(userIdentity, "assertUserContextInTransaction", async () => {});
+    t.mock.method(publishing, "lockPublishingAccount", async () => account);
+    t.mock.method(security, "withTransaction", async (_pool: unknown, callback: (value: typeof client) => Promise<unknown>) => callback(client));
+    const options = { pool: {}, userAuth: { api: {} }, mediaStorage: {}, adminOrigin: "http://admin.example", userOrigin: "http://user.example" } as never;
+    const response = () => {
+        const target: { body?: unknown; headersSent: boolean; status: (code: number) => unknown; setHeader: () => unknown; json: (body: unknown) => unknown } = {
+            headersSent: false,
+            status() { return target; },
+            setHeader() { return target; },
+            json(body: unknown) { target.body = body; return target; },
+        };
+        return target;
+    };
+    const request = { method: "GET", headers: {} } as never;
+    await assert.rejects(() => routes.handlePublishingRoute(request, response(), options, "req-other", "/accounts/acc-1", new URLSearchParams(), false), (error: { status?: number }) => error.status === 404);
+    assert.equal(historicalSql.length, 0);
+    userId = "owner-1";
+    const ownerResponse = response();
+    await routes.handlePublishingRoute(request, ownerResponse, options, "req-owner", "/accounts/acc-1", new URLSearchParams(), false);
+    assert.equal(historicalSql.length, 1);
+    const saved = (ownerResponse.body as { historicalRead?: { sourceStatus?: number; sourceStatusPublicCandidate?: boolean } }).historicalRead;
+    assert.equal(saved?.sourceStatus, 4);
+    assert.equal(saved?.sourceStatusPublicCandidate, false);
+    assert.equal("publicRead" in (saved ?? {}), false);
 });

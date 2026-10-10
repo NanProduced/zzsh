@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { parseLegacyReadSnapshot,buildLegacyListingCandidates,legacyListingSortLabel } from "../src/supply/legacy-listing-read";
+import { parseLegacyReadSnapshot,buildLegacyListingCandidates,buildMixedListingCandidates,legacyListingSortLabel,legacyReadSourceAllowed,legacySnapshotConflicts,legacySnapshotReplaySql,legacyHistoricalReadSql,projectLegacyHistoricalRead,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
 import { publicFilterMetadata,validateConfigCatalog,validateListingQuery } from "../src/supply/listing-filter-config";
 import { parseFilterConfig,type ListingQueryV2 } from "../src/supply/listing-filter-contract";
 
@@ -92,6 +92,42 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
   assert.equal(legacyListingSortLabel("latest", "最新发布"), "更新时间");
   assert.equal(legacyListingSortLabel("resourceTotal", "资源总价"), "资源费用");
   assert.equal(legacyListingSortLabel("coreQuantity", "核心数量"), "核心数量");
+  assert.match(text, /h\.source_status=3/);
+  assert.match(text, /a\.legacy_hold='NONE'/);
+  assert.match(text, /NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication/);
+  const mixed = buildMixedListingCandidates(query, null);
+  assert.match(mixed.text, /h\.source_status=3/);
+  assert.match(mixed.text, new RegExp(LEGACY_NATIVE_TAKEOVER_GUARD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("non-public source statuses stay out of public reads and conflict on replay", () => {
+  for (const status of [0, 3, 4, 5]) assert.equal(legacyReadSourceAllowed(status, false), true);
+  for (const status of [-1, 1, 2, 6, 3.5]) assert.equal(legacyReadSourceAllowed(status, false), false);
+  assert.equal(legacyReadSourceAllowed(3, true), false);
+  assert.match(legacySnapshotReplaySql(), /source_status/);
+  const old = {
+    observation_version_id: "observation", source_system: "legacy_mysql_restore", source_entity: "la_rental_accounts",
+    legacy_id: "1", source_digest: "a".repeat(64), source_status: 3, source_updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    evidence_ref: "frozen", snapshot: valid,
+  };
+  const next = {
+    observationVersionId: "observation", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts",
+    legacyId: "1", sourceDigest: "a".repeat(64), sourceStatus: 3, sourceUpdatedAt: "2026-01-01T00:00:00.000Z", evidenceRef: "frozen",
+  };
+  assert.equal(legacySnapshotConflicts(old, next, valid), false);
+  assert.equal(legacySnapshotConflicts({ ...old, source_status: 4 }, next, valid), true);
+  assert.equal(legacySnapshotConflicts(old, { ...next, sourceStatus: 0 }, valid), true);
+  const historicalSql = legacyHistoricalReadSql();
+  assert.match(historicalSql, /source_status/);
+  assert.doesNotMatch(historicalSql, /h\.source_status=3/);
+  const saved = projectLegacyHistoricalRead({ source_status: 4, legacy_id: "1", owner_user_id: "owner-1", snapshot: valid });
+  assert.equal(saved.sourceStatusPublicCandidate, false);
+  assert.equal("publicRead" in saved, false);
+  assert.equal(saved.canCreateOrder, false);
+  assert.equal(saved.trade, "UNKNOWN");
+  assert.equal(saved.sourceStatus, 4);
+  assert.equal(saved.resourceNo, "SOURCE-1");
+  assert.equal(projectLegacyHistoricalRead({ source_status: 3, legacy_id: "1", owner_user_id: "owner-1", snapshot: valid }).sourceStatusPublicCandidate, true);
 });
 
 // F1: a configured game keeps its filter capability when the visible result set

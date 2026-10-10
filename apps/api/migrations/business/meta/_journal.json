@@ -484,6 +484,13 @@
       "when": 1789490037000,
       "tag": "0068_membership_growth_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1789490038000,
+      "tag": "0069_legacy_read_snapshot_source_status",
+      "breakpoints": true
     }
   ]
 }
