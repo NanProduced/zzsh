@@ -1207,7 +1207,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
        VALUES ($1, $2, $3, $4, $4, $5, $6, false, false)`,
       [`admin_${randomUUID().replaceAll("-", "")}`, "Occupied Login", `${occupiedUsername}@admin.zzsh.invalid`, occupiedNow, occupiedUsername, occupiedUsername.toUpperCase()],
     );
-    const skippedCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "跳号员工" }, adminOneActive, ADMIN_ORIGIN);
+    const skippedCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "跳号员工" }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(skippedCreate.response.status, 200);
     assert.notEqual(skippedCreate.body?.username?.toLowerCase(), occupiedUsername);
     assert.match(skippedCreate.body?.username ?? "", /^ZZ\d{5,}$/);
@@ -1216,38 +1216,38 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
 
     const beforeCreateCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_auth_admin"."user"`);
     await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    const failedCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "审计失败员工" }, adminOneActive, ADMIN_ORIGIN);
+    const failedCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "审计失败员工" }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(failedCreate.response.status, 500);
     await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
     const afterFailedCreate = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_auth_admin"."user"`);
     assert.equal(afterFailedCreate.rows[0]?.count, beforeCreateCount.rows[0]?.count);
 
     const concurrentCreates = await Promise.all([
-      request(base, "/api/v1/admin/security/admins/create", { name: "并发员工甲" }, adminOneActive, ADMIN_ORIGIN),
-      request(base, "/api/v1/admin/security/admins/create", { name: "并发员工乙" }, adminOneActive, ADMIN_ORIGIN),
-      request(base, "/api/v1/admin/security/admins/create", { name: "并发员工丙" }, adminOneActive, ADMIN_ORIGIN),
+      request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "并发员工甲" }, adminOneActive, ADMIN_ORIGIN),
+      request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "并发员工乙" }, adminOneActive, ADMIN_ORIGIN),
+      request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "并发员工丙" }, adminOneActive, ADMIN_ORIGIN),
     ]);
     assert.deepEqual(concurrentCreates.map((item) => item.response.status), [200, 200, 200]);
     const concurrentUsernames = concurrentCreates.map((item) => item.body?.username as string);
     assert.equal(new Set(concurrentUsernames).size, 3);
 
-    const readerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const readerCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "只读员工",
       roleIds: [readerRole.body?.id],
     }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(readerCreate.response.status, 200);
-    const freezerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const freezerCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "冻结员工",
       roleIds: [opsRole.id],
     }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(freezerCreate.response.status, 200);
-    const deniedCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const deniedCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "禁止冻结员工",
       roleIds: [opsRole.id],
       denyPermissions: ["admin.account.freeze"],
     }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(deniedCreate.response.status, 200);
-    const targetCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "被冻结目标" }, adminOneActive, ADMIN_ORIGIN);
+    const targetCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "被冻结目标" }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(targetCreate.response.status, 200);
     const createdList = await request(base, "/api/bff/admin/security/admins", undefined, adminOneActive, ADMIN_ORIGIN);
     assert.equal(createdList.body?.admins?.some((entry: Record<string, unknown>) => "temporaryPassword" in entry || "password" in entry || "email" in entry), false);
@@ -1261,7 +1261,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const freezer = await completeStaffEnrollment(base, freezerCreate.body?.username as string, freezerCreate.body?.temporaryPassword as string);
     const denied = await completeStaffEnrollment(base, deniedCreate.body?.username as string, deniedCreate.body?.temporaryPassword as string);
 
-    const restoreOperatorCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const restoreOperatorCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "用户恢复操作员",
       allowPermissions: ["user.account.restore"],
     }, adminOneActive, ADMIN_ORIGIN);
@@ -1404,7 +1404,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.deepEqual(failedRestoreState.rows[0], { accountStatus: "DEACTIVATED", suspended: true });
     await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
 
-    const forceTargetCreate = await request(base, "/api/v1/admin/security/admins/create", { name: "强制登出目标" }, adminOneActive, ADMIN_ORIGIN);
+    const forceTargetCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "强制登出目标" }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(forceTargetCreate.response.status, 200);
     const forceTarget = await completeStaffEnrollment(base, forceTargetCreate.body?.username as string, forceTargetCreate.body?.temporaryPassword as string);
     const forceTargetSessionBefore = await request(base, "/api/bff/admin/session", undefined, forceTarget.jar, ADMIN_ORIGIN);
@@ -1503,7 +1503,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const readerSnapshot = await request(base, "/api/bff/admin/session", undefined, reader.jar, ADMIN_ORIGIN);
     assert.equal(readerSnapshot.body?.permissions?.includes("admin.account.read"), true);
     assert.equal(readerSnapshot.body?.permissions?.includes("admin.account.create"), false);
-    const readerCreateDenied = await request(base, "/api/v1/admin/security/admins/create", { name: "越权创建" }, reader.jar, ADMIN_ORIGIN);
+    const readerCreateDenied = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "越权创建" }, reader.jar, ADMIN_ORIGIN);
     assert.equal(readerCreateDenied.response.status, 403);
     const readerUpdateDenied = await request(base, "/api/v1/admin/security/admins/update", {
       username: targetCreate.body?.username,
@@ -1515,7 +1515,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       allowPermissions: ["admin.account.freeze"],
     }, reader.jar, ADMIN_ORIGIN);
     assert.equal(readerGrantDenied.response.status, 403);
-    const overGrant = await request(base, "/api/v1/admin/security/admins/create", {
+    const overGrant = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "越权委派",
       allowPermissions: ["admin.account.freeze"],
     }, reader.jar, ADMIN_ORIGIN);
@@ -1554,7 +1554,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       reason: "获授权员工解冻普通账号",
     }, freezer.jar, ADMIN_ORIGIN)).response.status, 200);
 
-    const createBossRejected = await request(base, "/api/v1/admin/security/admins/create", {
+    const createBossRejected = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "伪 Boss",
       isBoss: true,
     }, adminOneActive, ADMIN_ORIGIN);
@@ -1614,7 +1614,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       code: "privileged_ops",
       status: "DISABLED",
     }, adminOneActive, ADMIN_ORIGIN)).response.status, 200);
-    const configurerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const configurerCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "角色配置员",
       allowPermissions: ["admin.account.read", "admin.role.read", "admin.role.configure"],
     }, adminOneActive, ADMIN_ORIGIN);
@@ -1637,7 +1637,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(bossEnable.response.status, 200);
 
-    const deniedReaderCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const deniedReaderCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "目录只读并禁止权限字段",
       allowPermissions: ["admin.account.read", "admin.role.read", "admin.permission.read"],
       denyPermissions: ["admin.role.read", "admin.permission.read"],
@@ -1661,7 +1661,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(deniedBffDetail.response.status, 200);
     assert.equal("roles" in (deniedBffDetail.body ?? {}), false);
     assert.equal("allowPermissions" in (deniedBffDetail.body ?? {}), false);
-    const permissionOnlyCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const permissionOnlyCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "仅权限目录",
       allowPermissions: ["admin.account.read", "admin.role.read", "admin.permission.read"],
       denyPermissions: ["admin.role.read"],
@@ -1671,7 +1671,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(permissionOnlyRoles.response.status, 200);
     assert.equal(permissionOnlyRoles.body?.roles?.length, 0);
     assert.ok((permissionOnlyRoles.body?.permissions?.length ?? 0) > 0);
-    const roleOnlyCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const roleOnlyCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "仅角色目录",
       allowPermissions: ["admin.account.read", "admin.role.read", "admin.permission.read"],
       denyPermissions: ["admin.permission.read"],
@@ -1688,7 +1688,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       permissionCodes: ["admin.account.read", "admin.account.freeze"],
     }, adminOneActive, ADMIN_ORIGIN);
     assert.equal(raceRole.response.status, 200);
-    const racerCreate = await request(base, "/api/v1/admin/security/admins/create", {
+    const racerCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
       name: "并发写操作员工",
       roleIds: [raceRole.body?.id],
       allowPermissions: ["admin.account.create", "admin.permission.grant", "admin.role.configure", "admin.role.read"],
@@ -1697,7 +1697,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const raceCreate = await withHeldRoleLock(
       runtimePool,
       raceRole.body?.id as string,
-      () => request(base, "/api/v1/admin/security/admins/create", {
+      () => request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
         name: "并发创建目标",
         allowPermissions: ["admin.account.freeze"],
       }, racer.jar, ADMIN_ORIGIN),

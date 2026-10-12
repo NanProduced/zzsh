@@ -84,7 +84,7 @@ test("administrator creation keeps its result when post-commit IM provisioning f
   const keyForCreated = identityKey();
   const result = await createAdministrator(
     { userId: "boss", sessionId: "session-1" },
-    { name: "客服一号" },
+    { name: "客服一号", mode: "ALL_GAMES" },
     "req-admin-im",
     {
       ...options(fixture.state),
@@ -110,7 +110,7 @@ test("administrator and IM intent roll back together when intent persistence fai
   await assert.rejects(
     createAdministrator(
       { userId: "boss", sessionId: "session-1" },
-      { name: "客服二号" },
+      { name: "客服二号", mode: "ALL_GAMES" },
       "req-admin-im-rollback",
       {
         ...options(fixture.state, new Error("intent write failed")),

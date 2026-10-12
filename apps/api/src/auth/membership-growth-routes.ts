@@ -3,6 +3,7 @@ import type { INestApplication } from "@nestjs/common";
 
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "./auth-security";
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "./admin-authorization";
+import { assertGameScopeUsable, isAllGamesScope, readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 import { readUserContext } from "./user-identity";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
 import { assertSealedRuleRelease } from "./membership-growth-approval";
@@ -64,7 +65,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
         if (!access || (!access.isBoss && !hasPermission(access, ADMIN_PERMISSION.membershipGrowthBackfill))) throw forbidden();
         const order = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_order.rental_order WHERE id=$1`, [orderId])).rows[0];
         if (!order) throw notFound();
-        if (!access || (!access.isBoss && !(await client.query(`SELECT 1 FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`, [context.userId, order.gameId])).rowCount)) throw forbidden();
+        if (!access.isBoss && !scopeAllowsGame(await readAdminGameScope(client, context.userId), false, order.gameId)) throw forbidden();
       });
       const result = await backfillAcceptedSettlementAfterPosting(options.pool, orderId, { source: "ADMIN_MAINTENANCE", realm: "admin", userId: context.userId, sessionId: context.sessionId }, requestId);
       sendJson(response, 200, { orderId, ...result }, requestId);
@@ -153,7 +154,11 @@ export async function handleMembershipGrowthAdmin(request: SupplyNodeRequest, re
         return { ...subject, authorizationState: "SUMMARY_AUTHORIZED" as const };
       }
       if (!hasPermission(access, ADMIN_PERMISSION.membershipGrowthDetailRead)) throw forbidden();
-      const gameIds = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 ORDER BY game_id`, [context.userId])).rows.map((row) => row.gameId);
+      const scope = await readAdminGameScope(client, context.userId);
+      assertGameScopeUsable(scope, false);
+      const gameIds = isAllGamesScope(scope)
+        ? (await client.query<{ gameId: string }>(`SELECT id AS "gameId" FROM zzsh_supply.game ORDER BY id`)).rows.map((row) => row.gameId)
+        : scope.gameIds;
       return readMembershipGrowthScopeDetail(client, subjectId, gameIds);
     });
     sendJson(response, 200, result, requestId);

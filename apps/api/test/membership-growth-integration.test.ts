@@ -8,6 +8,33 @@ import { lockReplacementEntitlement } from "../src/auth/membership-growth-approv
 import { executeMembershipGrowthOperation } from "../src/auth/membership-growth-approval";
 import { canonicalize } from "../src/supply/content-hash";
 import { createHash } from "node:crypto";
+import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
+
+test("membership approval accepts ALL_GAMES and selected targets, rejects empty or unrelated scope before mutation", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+  process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    for (const [mode, gameIds, allowed] of [["ALL_GAMES", [], true], ["SELECTED_GAMES", ["game-a"], true], ["SELECTED_GAMES", [], false], ["SELECTED_GAMES", ["game-b"], false]] as const) {
+      let writes = 0;
+      const client = { async query(sql: string) {
+        if (sql.includes('"game_scope_mode"')) return { rows: [{ mode, gameIds }], rowCount: 1 };
+        if (sql.includes('SELECT "status"')) return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }], rowCount: 1 };
+        if (sql.includes('UPDATE zzsh_iam.membership_entitlement')) { writes += 1; return { rows: [], rowCount: 1 }; }
+        if (sql.includes('admin_user_permission') || sql.includes('admin_role_permission')) return { rows: [{ permissionCode: ADMIN_PERMISSION.membershipEntitlementRevoke }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      } };
+      const input = { operationCode: "membership.entitlement.revoke", operationPayload: { entitlementId: "fixture-entitlement", gameId: "game-a", scopeKey: "fixture-scope", reason: "Fixture boundary" } };
+      if (allowed) {
+        const result = await executeMembershipGrowthOperation(client as never, input as never, { userId: "fixture-admin" } as never, "fixture-revoke");
+        assert.equal(result.resultCode, "MEMBERSHIP_ENTITLEMENT_REVOKED");
+        assert.equal(writes, 1);
+      } else {
+        await assert.rejects(() => executeMembershipGrowthOperation(client as never, input as never, { userId: "fixture-admin" } as never, "fixture-revoke"), (error: any) => error.code === "CONFLICT");
+        assert.equal(writes, 0);
+      }
+    }
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
 
 const snapshot = {
   orderId: "order-1",

@@ -230,7 +230,7 @@ async function reuseOrCreateOperator(base: string, boss: Staff, profile: AdminPr
       userId: String(stored.userId),
     });
   }
-  const operatorCreated = await request(base, "/api/bff/admin/security/admins/create", { name: `信用业务运营-${runId}`, allowPermissions: ["supply.catalog.manage", "supply.rules.edit", "supply.rules.activate", "supply.review.read", "supply.review.decide", "supply.quote.internal.read", "supply.guarantee.verify", "supply.guarantee.revoke", "credit.read", "credit.decide", "credit.guarantee.read", "credit.guarantee.manage"] }, boss.jar, ADMIN_ORIGIN, "POST", key("admin-create"));
+  const operatorCreated = await request(base, "/api/bff/admin/security/admins/create", { mode: "ALL_GAMES", name: `信用业务运营-${runId}`, allowPermissions: ["supply.catalog.manage", "supply.rules.edit", "supply.rules.activate", "supply.review.read", "supply.review.decide", "supply.quote.internal.read", "supply.guarantee.verify", "supply.guarantee.revoke", "credit.read", "credit.decide", "credit.guarantee.read", "credit.guarantee.manage"] }, boss.jar, ADMIN_ORIGIN, "POST", key("admin-create"));
   assert.equal(operatorCreated.response.status, 200);
   const username = String(operatorCreated.body?.username);
   const temporaryPassword = String(operatorCreated.body?.temporaryPassword);
@@ -313,7 +313,7 @@ test("credit business PG/API G0 then G1/G2 with maintenance fixture separation",
     let base = await app.getUrl();
     const boss = await signInExistingStaff(base, adminProfile);
     const operator = await reuseOrCreateOperator(base, boss, adminProfile, runId);
-    const selfAuditCreated = await request(base, "/api/bff/admin/security/admins/create", { name: `信用自审边界-${runId}`, allowPermissions: ["credit.decide"] }, boss.jar, ADMIN_ORIGIN, "POST", key("self-audit-admin-create"));
+    const selfAuditCreated = await request(base, "/api/bff/admin/security/admins/create", { mode: "ALL_GAMES", name: `信用自审边界-${runId}`, allowPermissions: ["credit.decide"] }, boss.jar, ADMIN_ORIGIN, "POST", key("self-audit-admin-create"));
     assert.equal(selfAuditCreated.response.status, 200, JSON.stringify(selfAuditCreated.body));
     const selfAuditUsername = String(selfAuditCreated.body?.username);
     const selfAuditTemporaryPassword = String(selfAuditCreated.body?.temporaryPassword);

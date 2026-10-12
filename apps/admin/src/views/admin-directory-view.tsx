@@ -632,6 +632,9 @@ export function AdminDirectoryView({
   const [closeBlocked, setCloseBlocked] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
+  const [createScopeSupported, setCreateScopeSupported] = useState(false);
+  const [createScopeChoice, setCreateScopeChoice] = useState<ScopeChoice | null>(null);
+  const [createScopeGameIds, setCreateScopeGameIds] = useState<string[]>([]);
   const [createRoleIds, setCreateRoleIds] = useState<string[]>([]);
   const [createAllow, setCreateAllow] = useState<string[]>([]);
   const [createDeny, setCreateDeny] = useState<string[]>([]);
@@ -666,8 +669,9 @@ export function AdminDirectoryView({
   };
 
   const load = useCallback(async () => {
-    const directory = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
+    const directory = await adminRequest<{ admins?: AdminDirectoryEntry[]; createScopeRequired?: boolean }>("/security/admins");
     setAdmins(directory.admins ?? []);
+    setCreateScopeSupported(directory.createScopeRequired === true);
     if (canReadRoles || canReadPermissions) {
       const catalog = await adminRequest<{ roles?: AdminRoleRecord[]; permissions?: AdminPermissionCatalogEntry[] }>("/security/roles");
       setRoles(catalog.roles ?? []);
@@ -855,13 +859,14 @@ export function AdminDirectoryView({
         createUndelivered !== undefined ||
         loading ||
         createName.trim().length > 0 ||
+        createScopeChoice !== null ||
         createRoleIds.length > 0 ||
         createAllow.length > 0 ||
         createDeny.length > 0 ||
         editDirty ||
         Boolean(securityAction),
     );
-  }, [createAllow, createDeny, createName, createPending, createRoleIds, createUndelivered, delivery, editDirty, loading, onDirtyChange, pendingTick, securityAction, targetPending.length]);
+  }, [createAllow, createDeny, createName, createScopeChoice, createPending, createRoleIds, createUndelivered, delivery, editDirty, loading, onDirtyChange, pendingTick, securityAction, targetPending.length]);
 
   const roleFilterItems = [{ value: "all", label: canReadRoles ? "全部" : "无权查看" }, ...roles.map((role) => ({ value: role.id, label: role.status === "DISABLED" ? `${role.name}（已停用）` : role.name }))];
   const activeRoleOptions = roles.filter((role) => role.status === "ACTIVE");
@@ -1030,6 +1035,8 @@ export function AdminDirectoryView({
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (writeLocked("create", CREATE_TARGET)) return;
+    if (!createScopeSupported || scopeChoiceError(createScopeChoice, createScopeGameIds)) return;
+    const { username: omittedUsername, ...creationScope } = buildScopePayload("", createScopeChoice as ScopeChoice, createScopeGameIds);
     setError(undefined);
     if (!markPending("create", CREATE_TARGET, "/security/admins/create", "UNKNOWN")) {
       setError("当前浏览器无法保存原操作记录，未提交任何写请求。请恢复站点存储后重试。");
@@ -1039,6 +1046,7 @@ export function AdminDirectoryView({
     try {
       const created = await adminRequest<Partial<CreatedAdministrator>>("/security/admins/create", {
         name: createName,
+        ...creationScope,
         roleIds: createRoleIds,
         allowPermissions: createAllow,
         denyPermissions: createDeny,
@@ -1049,6 +1057,8 @@ export function AdminDirectoryView({
       if (typeof created?.username !== "string" || !created.username || typeof created.temporaryPassword !== "string" || !created.temporaryPassword) {
         setCreateUndelivered(typeof created?.username === "string" ? created.username : "");
         setCreateName("");
+        setCreateScopeChoice(null);
+        setCreateScopeGameIds([]);
         setCreateRoleIds([]);
         setCreateAllow([]);
         setCreateDeny([]);
@@ -1067,6 +1077,8 @@ export function AdminDirectoryView({
         };
         setDelivery(delivered);
         setCreateName("");
+        setCreateScopeChoice(null);
+        setCreateScopeGameIds([]);
         setCreateRoleIds([]);
         setCreateAllow([]);
         setCreateDeny([]);
@@ -1971,6 +1983,18 @@ export function AdminDirectoryView({
                   <FieldLabel>显示名称</FieldLabel>
                   <Input value={createName} onChange={(event) => setCreateName(event.target.value)} className="focus-visible:outline-none!" required />
                 </label>
+                <fieldset className="space-y-2" disabled={loading || !createScopeSupported}>
+                  <FieldLabel>业务范围（必须明确选择）</FieldLabel>
+                  {!createScopeSupported ? <p className="text-xs text-muted-foreground">当前接口未接入创建时业务范围，暂不能创建管理员。</p> : null}
+                  {(["ALL_GAMES", "SELECTED_GAMES", "NO_SCOPE"] as const).map((choice) => (
+                    <label key={choice} className="mr-4 inline-flex items-center gap-2 text-sm">
+                      <input type="radio" name="create-admin-scope" value={choice} checked={createScopeChoice === choice} onChange={() => setCreateScopeChoice(choice)} />
+                      {choice === "ALL_GAMES" ? "全部游戏" : choice === "SELECTED_GAMES" ? "指定游戏" : "无业务范围"}
+                    </label>
+                  ))}
+                  {createScopeChoice === "SELECTED_GAMES" ? <div className="flex flex-wrap gap-3">{games.map((game) => <label key={game.id} className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={createScopeGameIds.includes(game.id)} onChange={() => toggle(createScopeGameIds, game.id, setCreateScopeGameIds)} />{game.name}</label>)}</div> : null}
+                  {scopeChoiceError(createScopeChoice, createScopeGameIds) ? <p className="text-xs text-muted-foreground">{scopeChoiceError(createScopeChoice, createScopeGameIds)}</p> : null}
+                </fieldset>
                 {activeRoleOptions.length > 0 ? (
                   <div>
                     <FieldLabel>预设角色</FieldLabel>
@@ -2001,7 +2025,7 @@ export function AdminDirectoryView({
                 <UiButton type="button" variant="outline" disabled={loading} onClick={() => setCreateOpen(false)}>
                   取消
                 </UiButton>
-                <Button type="submit" size="sm" loading={loading} disabled={Boolean(createPending) || createUndelivered !== undefined || !createName.trim()}>
+                <Button type="submit" size="sm" loading={loading} disabled={!createScopeSupported || Boolean(scopeChoiceError(createScopeChoice, createScopeGameIds)) || Boolean(createPending) || createUndelivered !== undefined || !createName.trim()}>
                   创建管理员
                 </Button>
               </div>

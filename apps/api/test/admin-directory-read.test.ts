@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { listAdministrators, readAdministratorDetail } from "../src/auth/admin-directory";
+import { createAdministrator, listAdministrators, readAdministratorDetail } from "../src/auth/admin-directory";
 import { evaluateAdminDirectoryActions, type AdminDirectoryAction } from "../src/auth/admin-authorization";
 
 const ROWS = [
@@ -32,6 +32,15 @@ function harness(options: { roleRead: boolean; permissionRead: boolean }) {
 }
 
 const bossActor = { id: "admin-boss", status: "ACTIVE", isBoss: true, permissions: new Set(["admin.account.read", "admin.account.update", "admin.permission.grant", "admin.account.freeze", "admin.account.unfreeze"]) };
+
+test("administrator creation rejects missing or implicit selected scope before hashing or writes", async () => {
+  let touched = 0;
+  const options = { pool: { connect: async () => { touched += 1; throw new Error("must not connect"); } }, hashPassword: async () => { touched += 1; return "fixture"; } };
+  for (const scope of [{}, { mode: "SELECTED_GAMES" }, { mode: "UNREGISTERED" }]) {
+    await assert.rejects(() => createAdministrator({ userId: "creator", sessionId: "fixture-session" } as never, { name: "Explicit scope fixture", ...scope }, "fixture-create", options as never), (error: any) => error.status === 400);
+  }
+  assert.equal(touched, 0);
+});
 
 test("directory detail selects and returns user.image without session identifiers or network facts", async () => {
   for (const image of ["https://cdn.example/avatar.png", null]) {

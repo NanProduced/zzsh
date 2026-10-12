@@ -32,6 +32,8 @@ const SECTION_LABELS: Record<string, string> = {
   "supply.rules": "规则与价目",
   "supply.review": "供给与媒体审核",
   "supply.guarantee": "账号保证金",
+  "membership.growth": "成长档案",
+  "membership.entitlement": "会员权益",
   content: "游戏内容",
   "content.platform": "平台内容",
   credit: "用户信用",
@@ -50,6 +52,7 @@ const GROUPS: Array<{ id: string; label: string; description: string; match: (co
   { id: "finance", label: "资金与财务", description: "财务汇总、单据和账务读取。", match: (code) => code.startsWith("finance.") },
   { id: "risk", label: "风控与审批", description: "信用、保证金、审批模板和审批处理。", match: (code) => code.startsWith("credit.") || code.startsWith("approval.") },
   { id: "distribution", label: "分配策略", description: "订单与个人分配策略。", match: (code) => code.startsWith("personal.") },
+  { id: "membership", label: "会员与成长", description: "会员读取、成长权益、政策与受控补读。", match: (code) => code.startsWith("membership.") },
 ];
 
 export function isBaselineAdminPermission(code: string): boolean {

@@ -93,7 +93,7 @@ function useServer(routes) {
 
 function baseRoutes(detailBody, overrides = {}) {
   return {
-    "GET /security/admins": () => json({ admins: [TARGET] }),
+    "GET /security/admins": () => json({ admins: [TARGET], createScopeRequired: true }),
     "GET /security/roles": () => json({ roles: [ACTIVE_ROLE, DISABLED_ROLE], permissions: CATALOG_PERMISSIONS }),
     "GET /supply/games": () => json({ games: GAMES }),
     "GET /security/admins/detail": () => json(detailBody),
@@ -248,6 +248,7 @@ test("R3 创建在途不可关闭，凭据未确认前计入离开保护且不�
   assert.ok(create, "创建弹窗已打开");
   typeInto(create.querySelector("input"), "新同事");
   assert.equal(view.dirty.at(-1), true, "已填写名称即进入离开保护");
+  await click(browser.document.querySelector('[data-slot="dialog-content"] input[type="radio"][value="ALL_GAMES"]'));
   await click(btn("创建管理员", create));
   await settle(5);
   assert.equal(calls.filter((call) => call.route === "POST /security/admins/create").length, 1);
@@ -497,6 +498,7 @@ test("Q2 creation NETWORK_ERROR must hold the attempted creation instead of enab
   await click(btn("新增管理员"));
   const form = dialogWith("新管理员默认全部游戏范围");
   await act(async () => typeInto(form.querySelector("input"), "Fixture create intent"));
+  await click(browser.document.querySelector('[data-slot="dialog-content"] input[type="radio"][value="ALL_GAMES"]'));
   await click(btn("创建管理员", form));
   await waitFor(() => calls.some(call => call.route === "POST /security/admins/create"));
   await settle(50);
@@ -511,6 +513,7 @@ test("Q2 malformed creation response must not expose an acknowledgement for miss
   await click(btn("新增管理员"));
   const form = dialogWith("新管理员默认全部游戏范围");
   await act(async () => typeInto(form.querySelector("input"), "Fixture create intent"));
+  await click(browser.document.querySelector('[data-slot="dialog-content"] input[type="radio"][value="ALL_GAMES"]'));
   await click(btn("创建管理员", form));
   await settle(50);
   assert.equal(Boolean(btn("我已抄录并关闭")), false, "No temporaryPassword was delivered; a successful-delivery acknowledgement is false");
@@ -586,6 +589,7 @@ test("P1-A 列表核对与重开创建弹窗都不解除 UNKNOWN，也不允许�
   await click(btn("新增管理员"));
   const form = () => dialogWith("对方首次登录必须改密");
   typeInto(form().querySelector("input"), "Fixture create intent");
+  await click(browser.document.querySelector('[data-slot="dialog-content"] input[type="radio"][value="ALL_GAMES"]'));
   await click(btn("创建管理员", form()));
   await waitFor(() => form()?.textContent.includes("无法确认这次创建请求是否已送达"));
   assert.equal(btn("创建管理员", form()).disabled, true);
@@ -599,6 +603,7 @@ test("P1-A 列表核对与重开创建弹窗都不解除 UNKNOWN，也不允许�
   await click(btn("新增管理员"));
   assert.ok(form().textContent.includes("无法确认这次创建请求是否已送达"), "重开弹窗仍保留待核对");
   assert.equal(btn("创建管理员", form()).disabled, true);
+  await click(browser.document.querySelector('[data-slot="dialog-content"] input[type="radio"][value="ALL_GAMES"]'));
   await click(btn("创建管理员", form()));
   assert.equal(calls.filter((call) => call.route === "POST /security/admins/create").length, 1);
 });
@@ -921,4 +926,24 @@ test("P2 七列表头、正文、colgroup一致，不在窄屏隐藏单独一列
   assert.equal(table.querySelectorAll("th").length, 7);
   assert.equal(table.querySelectorAll("tbody tr:first-child td").length, 7);
   for (const cell of table.querySelectorAll("th,td")) assert.equal(cell.classList.contains("hidden"), false);
+});
+
+test("D3 创建必须显式选范围，旧接口未声明支持时拒绝发送", async () => {
+  for (const supported of [true, false]) {
+    const calls = useServer({ ...baseRoutes(detailFixture()), "GET /security/admins": () => json({ admins: [TARGET], ...(supported ? { createScopeRequired: true } : {}) }) });
+    const view = mount();
+    try {
+      await view.render({ initialUsername: undefined });
+      await waitFor(() => browser.document.querySelector("tbody tr"));
+      await click(btn("新增管理员"));
+      const dialog = dialogWith("对方首次登录必须改密");
+      assert.ok(dialog);
+      typeInto(dialog.querySelector("input"), "Explicit scope fixture");
+      assert.equal(dialog.querySelector('input[type="radio"]:checked'), null);
+      assert.equal(btn("创建管理员", dialog).disabled, true);
+      await act(async () => dialog.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })));
+      assert.equal(calls.filter((call) => call.route.startsWith("POST ")).length, 0);
+      if (!supported) assert.ok(dialog.textContent.includes("未接入创建时业务范围"));
+    } finally { await view.cleanup(); }
+  }
 });

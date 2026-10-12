@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 
 import {
   contributionFromSettlement,
@@ -347,7 +348,7 @@ export async function backfillAcceptedSettlementAfterPosting(pool: Pool, orderId
       if (actor.source === "ADMIN_MAINTENANCE") {
         const access = await loadEffectiveAdminAccess(client, actor.userId);
         if (!access || (!access.isBoss && !hasPermission(access, ADMIN_PERMISSION.membershipGrowthBackfill))) throw new SecurityApiError(403, "FORBIDDEN", "Membership backfill permission is required");
-        if (!access.isBoss && !(await client.query(`SELECT 1 FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`, [actor.userId, row.gameId])).rowCount) throw new SecurityApiError(403, "FORBIDDEN", "Membership backfill is outside the administrator game scope");
+        if (!access.isBoss && !scopeAllowsGame(await readAdminGameScope(client, actor.userId), false, row.gameId)) throw new SecurityApiError(403, "FORBIDDEN", "Membership backfill is outside the administrator game scope");
       }
       const effectiveTime = resolveGrowthEffectiveTime(row.inputSnapshot, row.postedAt);
       const effectiveAtUtc = effectiveTime.effectiveAtUtc;

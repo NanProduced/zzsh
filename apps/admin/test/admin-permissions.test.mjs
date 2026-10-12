@@ -90,3 +90,12 @@ test('description is trimmed and absent descriptions become an empty string', ()
   assert.equal(permissionDescription({ code: 'x.y', name: 'X' }), '');
   assert.equal(permissionDescription({ code: 'widget.mystery.launch', name: '未知域能力', description: '  未登记业务域  ' }), '未登记业务域');
 });
+
+test('membership capabilities have a named business group without changing permission codes', () => {
+  const catalog = [{ code: 'membership.growth.detail.read', name: '成长范围明细', description: '受限明细' }, { code: 'membership.growth.backfill', name: '成长补读', description: '受控补读' }];
+  const groups = groupAdminPermissions(catalog);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].id, 'membership');
+  assert.equal(groups[0].label, '会员与成长');
+  assert.deepEqual(new Set(groups[0].codes), new Set(catalog.map((entry) => entry.code)));
+});

@@ -384,7 +384,7 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
     assert.equal(bootstrap.response.status, 200);
     const boss = await activateStaff(base, bootstrap.body?.username as string, bossPassword);
     const createStaff = async (name: string, allowPermissions: string[]): Promise<Staff> => {
-      const created = await request(base, "/api/v1/admin/security/admins/create", { name, allowPermissions }, boss.jar, ADMIN_ORIGIN);
+      const created = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name, allowPermissions }, boss.jar, ADMIN_ORIGIN);
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       return activateStaff(base, created.body?.username as string, created.body?.temporaryPassword as string);
     };

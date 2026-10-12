@@ -362,7 +362,7 @@ test("0031 identity lifecycle and authorization pass real PostgreSQL boundaries"
     } as unknown as ImIdentityProvisionerType;
     const created = await createAdministrator(
       { userId: bossId, sessionId: "im-pg-boss-session" },
-      { name: createdName },
+      { name: createdName, mode: "ALL_GAMES" },
       `${subjectPrefix}create`,
       { pool: runtime, hashPassword: async () => "hash", imAppId: APP_ID, imIdentityRepository: repository, imProvisioner: failingProvisioner },
     );
@@ -397,7 +397,7 @@ test("0031 identity lifecycle and authorization pass real PostgreSQL boundaries"
       await assert.rejects(
         createAdministrator(
           { userId: bossId, sessionId: "im-pg-boss-session" },
-          { name: rollbackName },
+          { name: rollbackName, mode: "ALL_GAMES" },
           `${subjectPrefix}rollback`,
           { pool: runtime, hashPassword: async () => "hash", imAppId: APP_ID, imIdentityRepository: repository, imProvisioner: failingProvisioner },
         ),

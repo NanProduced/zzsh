@@ -470,7 +470,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const boss = await activate(base, bootstrap.body?.username as string, bossPassword);
 
     const createStaff = async (name: string, allowPermissions: string[]): Promise<Staff> => {
-      const created = await request(base, "/api/v1/admin/security/admins/create", { name, allowPermissions }, boss.jar, ADMIN_ORIGIN);
+      const created = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name, allowPermissions }, boss.jar, ADMIN_ORIGIN);
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       return activate(base, created.body?.username as string, created.body?.temporaryPassword as string);
     };

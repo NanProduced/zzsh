@@ -68,7 +68,7 @@ export async function listAdministrators(
   pool: Pool,
   fields: AdminFieldAccess,
   actor?: { id: string; status: string; isBoss: boolean; permissions: ReadonlySet<string> },
-): Promise<{ admins: Record<string, unknown>[] }> {
+): Promise<{ admins: Record<string, unknown>[]; createScopeRequired: true }> {
   const result = await pool.query<{
     adminId: string;
     username: string | null;
@@ -142,6 +142,7 @@ export async function listAdministrators(
   const scopeByAdmin = new Map(scopeRows.rows.map((row) => [row.adminId, Number(row.gameCount)]));
   const sessionByAdmin = new Map(sessionRows.rows.map((row) => [row.adminId, row]));
   return {
+    createScopeRequired: true,
     admins: result.rows.map((row) => {
       const entry: Record<string, unknown> = {
         id: row.adminId,
@@ -358,6 +359,10 @@ export async function createAdministrator(
   }
   const name = requiredName(body);
   const grants = grantsFromBody(body);
+  const scopeChange = parseAdminGameScopeInput(body);
+  if (scopeChange.mode === "SELECTED_GAMES" && !scopeChange.replaceSelected) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An explicit selected game set is required");
+  }
   const imAppId = options.imAppId;
   const imProvisioner = options.imProvisioner;
   const imIdentityRepository = options.imIdentityRepository;
@@ -371,6 +376,11 @@ export async function createAdministrator(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId, grants.roleIds);
     requirePermission(actor, ADMIN_PERMISSION.accountCreate);
+    assertGameScopeDelegable(await readAdminGameScope(client, context.userId), actor.isBoss, scopeChange);
+    if (scopeChange.gameIds.length > 0) {
+      const games = await client.query(`SELECT "id" FROM "zzsh_supply"."game" WHERE "id" = ANY($1::text[])`, [scopeChange.gameIds]);
+      if (games.rows.length !== scopeChange.gameIds.length) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Selected game does not exist");
+    }
     const proposed = await computeProposedPermissions(client, grants);
     if (grants.roleIds.length > 0 || grants.allowPermissions.length > 0 || grants.denyPermissions.length > 0) {
       requirePermission(actor, ADMIN_PERMISSION.permissionGrant);
@@ -402,6 +412,7 @@ export async function createAdministrator(
       [id, new Date(now.getTime() + STAFF_ENROLLMENT_TTL_MS)],
     );
     await replaceGrants(client, id, grants);
+    await writeAdminGameScope(client, id, scopeChange, context.userId);
     const imMapping = imIntent && imIdentityRepository
       ? await imIdentityRepository.ensureIntentInTransaction({
           query: <T extends Record<string, any> = Record<string, any>>(text: string, values?: unknown[]) => client.query<T>(text, values),
@@ -424,6 +435,7 @@ export async function createAdministrator(
         allowPermissions: grants.allowPermissions,
         denyPermissions: grants.denyPermissions,
         effectivePermissions: [...proposed].sort(),
+        scope: publicGameScope(scopeChange),
       },
     });
     const result = {

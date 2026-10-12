@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
+import { readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess, type EffectiveAdminAccess } from "./admin-authorization";
 import type { ApprovalOperationExecutor, ApprovalOperationExecutorInput } from "./auth-security";
@@ -38,7 +39,7 @@ function checkBusinessPermission(access: EffectiveAdminAccess, code: string): vo
 
 async function assertGameScope(client: PoolClient, access: EffectiveAdminAccess, adminUserId: string, gameId: string): Promise<void> {
   if (access.isBoss) return;
-  const allowed = (await client.query<{ allowed: boolean }>(`SELECT EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2) AS allowed`, [adminUserId, gameId])).rows[0]?.allowed;
+  const allowed = scopeAllowsGame(await readAdminGameScope(client, adminUserId), false, gameId);
   if (!allowed) conflict("Membership operation is outside the administrator game scope");
 }
 
