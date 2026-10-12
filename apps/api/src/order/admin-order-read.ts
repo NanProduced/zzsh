@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
@@ -54,7 +55,7 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
 }
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
- const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[`($1::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$2 AND s.game_id=x.game_id))`];
+ const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
  const exact=(field:string,value:string|undefined)=>{if(value!==undefined)where.push(`${field}=$${values.push(value)}`);};
  exact('x.status',filter.status);exact('x.display_no',filter.displayNo);exact('x.account_id',filter.accountId);exact('x.renter_user_id',filter.renterUserId);exact('x.owner_user_id',filter.ownerUserId);
  if(filter.createdFrom)where.push(`x.created_at>=$${values.push(filter.createdFrom)}::timestamptz`);if(filter.createdTo)where.push(`x.created_at<$${values.push(filter.createdTo)}::timestamptz`);
@@ -68,6 +69,6 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
  return {items:result.items.map(r=>projectAdminReadOrder(r.origin,r.record,viewer)),page:filter.page,pageSize:filter.pageSize,total:Number(result.total),contextKey:viewer.authorizationKey};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string){
- const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${ORDER_READ_RELATION}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=$1 AND ($2::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=x.game_id))`,[id,viewer.isBoss,viewer.adminId])).rows[0];
+ const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${ORDER_READ_RELATION}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=$1 AND ${gameScopeSql("x.game_id","$3","$2")}`,[id,viewer.isBoss,viewer.adminId])).rows[0];
  if(!row)throw notFound();return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey};
 }

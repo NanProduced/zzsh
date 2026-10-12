@@ -4,6 +4,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse } from "../auth/auth-security";
 import { SecurityApiError, recordAudit, withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction } from "../auth/user-identity";
@@ -572,8 +573,9 @@ async function decideOrderPreSend(db: PoolClient, options: OrderImEventOptions, 
   }
   let scopeRef: string | null = "BOSS";
   if (!access.isBoss) {
-    const scoped = (await db.query(`SELECT 1 FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`, [mapping.platform_subject_id, scope.gameId])).rowCount;
-    if (!scoped) return { allow: false, reason: "SCOPE_REQUIRED", orderId: scope.orderId, staffCandidate };
+    if (!scopeAllowsGame(await readAdminGameScope(db, mapping.platform_subject_id), false, scope.gameId)) {
+      return { allow: false, reason: "SCOPE_REQUIRED", orderId: scope.orderId, staffCandidate };
+    }
     scopeRef = scope.gameId;
   }
   if (!member.joined_at) return { allow: false, reason: "MEMBER_NOT_JOINED", orderId: scope.orderId, staffCandidate };

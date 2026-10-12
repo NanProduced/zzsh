@@ -8,6 +8,7 @@ import {
   assertDelegable,
   assertRolePermissionSet,
   computeProposedPermissions,
+  evaluateAdminDirectoryActions,
   hasPermission,
   loadEffectiveAdminAccess,
   requirePermission,
@@ -16,6 +17,16 @@ import {
   type ProposedAdminGrants,
 } from "./admin-authorization";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
+import {
+  ADMIN_GAME_SCOPE_MODE,
+  assertGameScopeDelegable,
+  effectiveGameScopeChange,
+  parseAdminGameScopeInput,
+  publicGameScope,
+  readAdminGameScope,
+  writeAdminGameScope,
+  type AdminGameScope,
+} from "./admin-scope";
 import type { AuthSecurityOptions } from "./auth-security";
 import {
   buildYunxinIdentityMarker,
@@ -53,34 +64,83 @@ export async function nextAdminLogin(client: PoolClient): Promise<{ username: st
   }
 }
 
-export async function listAdministrators(pool: Pool, fields: AdminFieldAccess): Promise<{ admins: Record<string, unknown>[] }> {
+export async function listAdministrators(
+  pool: Pool,
+  fields: AdminFieldAccess,
+  actor?: { id: string; status: string; isBoss: boolean; permissions: ReadonlySet<string> },
+): Promise<{ admins: Record<string, unknown>[] }> {
   const result = await pool.query<{
     adminId: string;
     username: string | null;
     displayName: string;
+    twoFactorEnabled: boolean | null;
     status: string;
     isBoss: boolean;
+    passwordChangeRequired: boolean;
+    bootstrapExpiresAt: Date | null;
+    firstActivatedAt: Date | null;
+    scopeMode: string | null;
+    image: string | null;
     createdAt: Date;
     lastFullAuthenticatedAt: Date | null;
-    roleCodes: string[] | null;
-    roleNames: string[] | null;
+    roles: unknown;
   }>(
     `SELECT u."id" AS "adminId",
         COALESCE(NULLIF(u."displayUsername", ''), UPPER(u."username")) AS "username",
         u."name" AS "displayName",
+        u."twoFactorEnabled" AS "twoFactorEnabled",
+        u."image" AS "image",
         s."status",
         s."is_boss" AS "isBoss",
+        s."password_change_required" AS "passwordChangeRequired",
+        s."bootstrap_expires_at" AS "bootstrapExpiresAt",
+        s."first_activated_at" AS "firstActivatedAt",
+        s."game_scope_mode" AS "scopeMode",
         u."createdAt" AS "createdAt",
         s."last_full_authenticated_at" AS "lastFullAuthenticatedAt",
-        COALESCE(array_agg(r."code" ORDER BY r."code") FILTER (WHERE r."id" IS NOT NULL), '{}') AS "roleCodes",
-        COALESCE(array_agg(r."name" ORDER BY r."code") FILTER (WHERE r."id" IS NOT NULL), '{}') AS "roleNames"
+        COALESCE(
+          json_agg(json_build_object('id', r."id", 'code', r."code", 'name', r."name", 'status', r."status") ORDER BY r."code")
+          FILTER (WHERE r."id" IS NOT NULL),
+          '[]'::json
+        ) AS "roles"
        FROM "zzsh_auth_admin"."user" u
        JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = u."id"
        LEFT JOIN "zzsh_iam"."admin_user_role" ur ON ur."admin_user_id" = u."id"
        LEFT JOIN "zzsh_iam"."admin_role" r ON r."id" = ur."role_id"
-      GROUP BY u."id", u."displayUsername", u."username", u."name", s."status", s."is_boss", u."createdAt", s."last_full_authenticated_at"
+      GROUP BY u."id", u."displayUsername", u."username", u."name", u."twoFactorEnabled", s."status",
+               s."is_boss", s."password_change_required", s."bootstrap_expires_at", s."first_activated_at",
+               s."game_scope_mode", u."createdAt", s."last_full_authenticated_at"
       ORDER BY s."is_boss" DESC, u."username"`,
   );
+  // 两条按管理员分组的聚合，查询条数与行数无关；个人例外只在持有读取能力时才查。
+  const [grantRows, scopeRows, sessionRows] = await Promise.all([
+    fields.permissionRead
+      ? pool.query<{ adminId: string; allows: string; denies: string }>(
+          `SELECT "admin_user_id" AS "adminId",
+                  COUNT(*) FILTER (WHERE "effect" = 'ALLOW')::text AS "allows",
+                  COUNT(*) FILTER (WHERE "effect" = 'DENY')::text AS "denies"
+             FROM "zzsh_iam"."admin_user_permission"
+            GROUP BY "admin_user_id"`,
+        )
+      : null,
+    pool.query<{ adminId: string; gameCount: string }>(
+      `SELECT "admin_user_id" AS "adminId", COUNT(*)::text AS "gameCount"
+         FROM "zzsh_supply"."admin_supply_scope"
+        GROUP BY "admin_user_id"`,
+    ),
+    // 会话事实只出计数与时间：不返回 session id、token、IP、userAgent。
+    pool.query<{ adminId: string; activeCount: string; lockedCount: string; latestSessionAt: Date | null }>(
+      `SELECT "userId" AS "adminId",
+              COUNT(*) FILTER (WHERE "expiresAt" > now())::text AS "activeCount",
+              COUNT(*) FILTER (WHERE "locked" AND "expiresAt" > now())::text AS "lockedCount",
+              MAX("createdAt") FILTER (WHERE "expiresAt" > now()) AS "latestSessionAt"
+         FROM "zzsh_auth_admin"."session"
+        GROUP BY "userId"`,
+    ),
+  ]);
+  const grantsByAdmin = new Map((grantRows?.rows ?? []).map((row) => [row.adminId, row]));
+  const scopeByAdmin = new Map(scopeRows.rows.map((row) => [row.adminId, Number(row.gameCount)]));
+  const sessionByAdmin = new Map(sessionRows.rows.map((row) => [row.adminId, row]));
   return {
     admins: result.rows.map((row) => {
       const entry: Record<string, unknown> = {
@@ -91,33 +151,81 @@ export async function listAdministrators(pool: Pool, fields: AdminFieldAccess): 
         isBoss: row.isBoss,
         createdAt: row.createdAt.toISOString(),
         lastFullAuthenticatedAt: row.lastFullAuthenticatedAt?.toISOString() ?? null,
+        image: row.image,
+        // 列表只出会话事实：未过期会话数、其中锁定数、最近一条未过期会话的建立时间。
+        sessionSummary: {
+          activeCount: Number(sessionByAdmin.get(row.adminId)?.activeCount ?? 0),
+          lockedCount: Number(sessionByAdmin.get(row.adminId)?.lockedCount ?? 0),
+          lastSessionCreatedAt: sessionByAdmin.get(row.adminId)?.latestSessionAt?.toISOString() ?? null,
+        },
+        // 列表只出摘要事实；完整认证时间不等于"最近活跃"，会话数不等于"在线"，所以这里都不出。
+        securitySummary: {
+          passwordChangeRequired: row.passwordChangeRequired,
+          twoFactorEnabled: row.twoFactorEnabled,
+          bootstrapExpiresAt: row.bootstrapExpiresAt?.toISOString() ?? null,
+          firstActivatedAt: row.firstActivatedAt?.toISOString() ?? null,
+        },
+        scopeSummary:
+          row.scopeMode === ADMIN_GAME_SCOPE_MODE.ALL_GAMES
+            ? { mode: ADMIN_GAME_SCOPE_MODE.ALL_GAMES }
+            : { mode: ADMIN_GAME_SCOPE_MODE.SELECTED_GAMES, gameCount: scopeByAdmin.get(row.adminId) ?? 0 },
       };
-      if (fields.roleRead) {
-        entry.roles = (row.roleCodes ?? []).map((code, index) => ({ code, name: row.roleNames?.[index] ?? code }));
+      if (fields.roleRead) entry.roles = row.roles;
+      if (fields.permissionRead) {
+        const grants = grantsByAdmin.get(row.adminId);
+        entry.personalGrantSummary = { allows: Number(grants?.allows ?? 0), denies: Number(grants?.denies ?? 0) };
+      }
+      if (actor) {
+        entry.actions = evaluateAdminDirectoryActions({
+          actorId: actor.id,
+          actorStatus: actor.status,
+          actorIsBoss: actor.isBoss,
+          actorPermissions: actor.permissions,
+          targetId: row.adminId,
+          targetIsBoss: row.isBoss,
+          targetStatus: row.status,
+        });
       }
       return entry;
     }),
   };
 }
 
-export async function readAdministratorDetail(pool: Pool, username: string, fields: AdminFieldAccess): Promise<Record<string, unknown>> {
+export async function readAdministratorDetail(
+  pool: Pool,
+  username: string,
+  fields: AdminFieldAccess,
+  actor?: { id: string; status: string; isBoss: boolean; permissions: ReadonlySet<string> },
+): Promise<Record<string, unknown>> {
   const login = normalizeUsername(username);
   const result = await pool.query<{
     adminId: string;
     username: string | null;
     displayName: string;
     status: string;
+    image: string | null;
     isBoss: boolean;
+    passwordChangeRequired: boolean;
+    twoFactorEnabled: boolean | null;
+    bootstrapExpiresAt: Date | null;
+    bootstrapUsedAt: Date | null;
+    firstActivatedAt: Date | null;
     createdAt: Date;
     lastFullAuthenticatedAt: Date | null;
   }>(
     `SELECT u."id" AS "adminId",
         COALESCE(NULLIF(u."displayUsername", ''), UPPER(u."username")) AS "username",
         u."name" AS "displayName",
+        u."twoFactorEnabled" AS "twoFactorEnabled",
         s."status",
         s."is_boss" AS "isBoss",
+        s."password_change_required" AS "passwordChangeRequired",
+        s."bootstrap_expires_at" AS "bootstrapExpiresAt",
+        s."bootstrap_used_at" AS "bootstrapUsedAt",
+        s."first_activated_at" AS "firstActivatedAt",
         u."createdAt" AS "createdAt",
-        s."last_full_authenticated_at" AS "lastFullAuthenticatedAt"
+        s."last_full_authenticated_at" AS "lastFullAuthenticatedAt",
+        u."image" AS "image"
        FROM "zzsh_auth_admin"."user" u
        JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = u."id"
       WHERE LOWER(u."username") = $1
@@ -126,6 +234,17 @@ export async function readAdministratorDetail(pool: Pool, username: string, fiel
   );
   const row = result.rows[0];
   if (!row) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+  // 会话只数未过期的，且只出计数：不返回 session id、token、IP、userAgent、PIN。
+  const sessions = await pool.query<{ activeCount: string; lockedCount: string; latestSessionAt: Date | null }>(
+    `SELECT COUNT(*)::text AS "activeCount",
+            COUNT(*) FILTER (WHERE "locked")::text AS "lockedCount",
+            MAX("createdAt") AS "latestSessionAt"
+       FROM "zzsh_auth_admin"."session"
+      WHERE "userId" = $1 AND "expiresAt" > now()`,
+    [row.adminId],
+  );
+  const sessionRow = sessions.rows[0];
+  const at = (value: Date | null | undefined): string | null => (value ? value.toISOString() : null);
   const detail: Record<string, unknown> = {
     id: row.adminId,
     username: row.username ?? "未分配账号",
@@ -133,7 +252,23 @@ export async function readAdministratorDetail(pool: Pool, username: string, fiel
     status: row.status,
     isBoss: row.isBoss,
     createdAt: row.createdAt.toISOString(),
-    lastFullAuthenticatedAt: row.lastFullAuthenticatedAt?.toISOString() ?? null,
+    lastFullAuthenticatedAt: at(row.lastFullAuthenticatedAt),
+    image: row.image,
+    // twoFactorEnabled 列可空：NULL 表示未知，不折算成 false。
+    security: {
+      status: row.status,
+      isBoss: row.isBoss,
+      passwordChangeRequired: row.passwordChangeRequired,
+      twoFactorEnabled: row.twoFactorEnabled,
+      bootstrapExpiresAt: at(row.bootstrapExpiresAt),
+      bootstrapUsedAt: at(row.bootstrapUsedAt),
+      firstActivatedAt: at(row.firstActivatedAt),
+    },
+    sessionSummary: {
+      activeCount: Number(sessionRow?.activeCount ?? 0),
+      lockedCount: Number(sessionRow?.lockedCount ?? 0),
+      lastSessionCreatedAt: at(sessionRow?.latestSessionAt),
+    },
   };
   if (fields.roleRead || fields.permissionRead) {
     const grants = await readGrants(pool, row.adminId);
@@ -145,7 +280,35 @@ export async function readAdministratorDetail(pool: Pool, username: string, fiel
       detail.effectivePermissions = access ? [...access.permissions].sort() : [];
     }
   }
+  detail.scope = publicGameScope(await readAdminGameScope(pool, row.adminId));
+  if (actor) {
+    detail.actions = evaluateAdminDirectoryActions({
+      actorId: actor.id,
+      actorStatus: actor.status,
+      actorIsBoss: actor.isBoss,
+      actorPermissions: actor.permissions,
+      targetId: row.adminId,
+      targetIsBoss: row.isBoss,
+      targetStatus: row.status,
+    });
+  }
   return detail;
+}
+
+/** Account-level game scope read for the administrator page; no grants are changed. */
+export async function readAdministratorGameScope(pool: Pool, username: string): Promise<{ username: string; scope: AdminGameScope }> {
+  const login = normalizeUsername(username);
+  const result = await pool.query<{ adminId: string; username: string | null }>(
+    `SELECT u."id" AS "adminId", COALESCE(NULLIF(u."displayUsername", ''), UPPER(u."username")) AS "username"
+       FROM "zzsh_auth_admin"."user" u
+       JOIN "zzsh_iam"."admin_security" s ON s."admin_user_id" = u."id"
+      WHERE LOWER(u."username") = $1
+      LIMIT 1`,
+    [login],
+  );
+  const row = result.rows[0];
+  if (!row) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+  return { username: row.username ?? login.toUpperCase(), scope: publicGameScope(await readAdminGameScope(pool, row.adminId)) };
 }
 
 export async function listRolesAndCatalog(pool: Pool, fields: AdminFieldAccess): Promise<Record<string, unknown>> {
@@ -369,6 +532,52 @@ export async function assignAdministratorAccess(
       denyPermissions: grants.denyPermissions,
       effectivePermissions: [...proposed].sort(),
     };
+  });
+}
+
+/**
+ * Account-level game scope assignment. Scope binds to the administrator
+ * account, not to roles; a non-Boss actor cannot widen another account beyond
+ * their own effective scope and Boss scope is immutable (always ALL_GAMES).
+ */
+export async function assignAdministratorGameScope(
+  context: AdminContext,
+  body: Record<string, unknown>,
+  requestId: string,
+  options: DirectoryOptions,
+): Promise<Record<string, unknown>> {
+  const username = normalizeUsername(requiredString(body, "username", 64));
+  const change = parseAdminGameScopeInput(body);
+  return withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    const actor = await lockActor(client, context.userId);
+    requirePermission(actor, ADMIN_PERMISSION.permissionGrant);
+    const target = await lockTargetByUsername(client, username);
+    if (target.isBoss) {
+      throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be modified by this operation");
+    }
+    const before = await readAdminGameScope(client, target.id);
+    const effective = effectiveGameScopeChange(before, change);
+    assertGameScopeDelegable(await readAdminGameScope(client, context.userId), actor.isBoss, effective);
+    if (change.replaceSelected && change.gameIds.length > 0) {
+      const known = await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_supply"."game" WHERE "id" = ANY($1::text[])`, [change.gameIds]);
+      if (known.rows.length !== change.gameIds.length) {
+        throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Request body is invalid", [{ path: "gameIds", code: "INVALID_FIELD" }]);
+      }
+    }
+    await writeAdminGameScope(client, target.id, change, context.userId);
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "admin.game_scope.assigned",
+      objectType: "admin_user",
+      objectId: target.id,
+      outcome: "SUCCESS",
+      requestId,
+      details: { username: target.username, before, after: effective },
+    });
+    return { username: target.username, scope: publicGameScope(effective) };
   });
 }
 

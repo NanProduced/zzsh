@@ -1053,6 +1053,11 @@ async function runAcceptance(evidence: Evidence): Promise<void> {
     });
     expectConflict(permissionFailure, "permission revoked");
     const scopeFailure = await invokeRollback(runtimePool, async (client) => {
+      const mode = await client.query(
+        `UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`,
+        [directory.scopedActorId],
+      );
+      assert.equal(mode.rowCount, 1);
       const moved = await client.query(
         `UPDATE zzsh_supply.admin_supply_scope SET admin_user_id=$3 WHERE admin_user_id=$1 AND game_id=$2`,
         [directory.scopedActorId, directory.gameId, directory.bossActorId],

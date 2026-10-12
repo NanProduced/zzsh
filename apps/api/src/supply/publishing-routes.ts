@@ -5,6 +5,7 @@ import { loadLegacyHistoricalRead } from "./legacy-listing-read";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
 import type { PoolClient } from "pg";
+import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { readAdminContext, assertAdminContextInTransaction } from "../auth/auth-security";
 import {
   loadEffectiveAdminAccess,
@@ -450,7 +451,7 @@ export async function handlePublishingRoute(
         const duplicateHints = admin
           ? (
               await client.query(
-                `SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=related.game_id))`,
+                `SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`,
                 [a.id, access!.isBoss, actorId],
               )
             ).rows
@@ -488,9 +489,10 @@ export async function handlePublishingRoute(
         throw invalid("State is invalid");
       const limit = Number(query.get("limit") ?? 20);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid();
+      if (admin) assertGameScopeUsable(await readAdminGameScope(client, actorId), access?.isBoss === true);
       const rows = (
         await client.query(
-          `SELECT a.id,a.game_id,a.revision::text,a.owner_paused,a.staff_restricted,v.id AS version_id,v.title,v.review_state,v.sequence::text,u.name AS owner_name,g.name AS game_name FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND ($2::boolean OR a.owner_user_id=$3) AND (NOT $2::boolean OR (v.review_state=$4 AND ($5::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=a.game_id)))) ORDER BY a.id LIMIT $6`,
+          `SELECT a.id,a.game_id,a.revision::text,a.owner_paused,a.staff_restricted,v.id AS version_id,v.title,v.review_state,v.sequence::text,u.name AS owner_name,g.name AS game_name FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND ($2::boolean OR a.owner_user_id=$3) AND (NOT $2::boolean OR (v.review_state=$4 AND ${gameScopeSql("a.game_id","$3","$5")})) ORDER BY a.id LIMIT $6`,
           [
             query.get("after") ?? "",
             admin,
@@ -519,8 +521,7 @@ export async function handlePublishingRoute(
       "expectedRevision",
       "versionId",
       "releaseId",
-      "contentHash",
-    ],
+      "contentHash", "fullPayoutTermsAcceptance"],
     submit: ["expectedRevision", "versionId", "releaseId", "contentHash"],
     withdraw: ["expectedRevision", "versionId", "reason"],
     pause: ["expectedRevision", "reason"],

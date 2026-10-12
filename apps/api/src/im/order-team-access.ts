@@ -1,7 +1,8 @@
 import type { PoolClient } from "pg";
 import { assertAdminContextInTransaction } from "../auth/auth-security";
-import { assertUserContextInTransaction } from "../auth/user-identity";
 import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { assertUserContextInTransaction } from "../auth/user-identity";
+import { assertGameScopeUsable, gameScopeSql, noGameScopeError, readAdminGameScope, scopeAllowsGame, scopeIsEmpty } from "../auth/admin-scope";
 import { SecurityApiError } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBindings } from "../config/config";
@@ -48,7 +49,11 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     const access=await loadEffectiveAdminAccess(c,actor.userId);
     if(!hasPermission(access,"im.support.read"))throw denied();
     canSend=hasPermission(access,"im.support.accept");
-    if(!access!.isBoss&&!(await c.query(`SELECT 1 FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`,[actor.userId,g.game_id])).rowCount)throw denied();
+    if(!access!.isBoss){
+      const scope=await readAdminGameScope(c,actor.userId);
+      if(scopeIsEmpty(scope,false))throw noGameScopeError();
+      if(!scopeAllowsGame(scope,false,g.game_id))throw denied();
+    }
   }
   const members=(await c.query(`SELECT mm.party,mm.state,m.platform_subject_id,m.identity_kind,m.realm,m.account_id,m.status,m.identity_marker,
     CASE WHEN m.realm='user' THEN u.name ELSE a.name END AS name,
@@ -108,6 +113,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
   await assertAdminContextInTransaction(c,actor);
   const access=await loadEffectiveAdminAccess(c,actor.userId);
   if(!hasPermission(access,"im.support.read"))throw denied();
+  assertGameScopeUsable(await readAdminGameScope(c,actor.userId),access?.isBoss===true);
   const rows=(await c.query(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,g.team_state AS "teamState",game.name AS "gameName",
       to_jsonb(g)->>'first_response_at' AS "firstResponseAt",
       (to_jsonb(g)->>'remind_due_at') AS "remindDueAt",
@@ -117,7 +123,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
     JOIN zzsh_order.im_order_group g ON g.order_id=mm.order_id AND g.app_id=mm.app_id
     JOIN zzsh_order.rental_order o ON o.id=g.order_id JOIN zzsh_supply.game game ON game.id=o.game_id
     WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
-      AND m.platform_subject_id=$1 AND ($2::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$1 AND s.game_id=o.game_id))
+      AND m.platform_subject_id=$1 AND ${gameScopeSql("o.game_id","$1","$2")}
       AND ($3::text IS NULL OR o.id<$3) ORDER BY o.id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1])).rows;
   return {items:rows.slice(0,limit),nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit};
 }

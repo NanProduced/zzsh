@@ -5,6 +5,7 @@ import { parseRfc3339Timestamp } from "../content/content";
 import { queryAdminReadOrders, getAdminReadOrder, type OrderReadFilters } from "./admin-order-read";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
+import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "../auth/admin-scope";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
 import { withTransaction } from "../auth/security-core";
@@ -244,12 +245,13 @@ export async function handleOrderAdminRoute(
       if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings),requestId);return;}
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.orderRead);
-      const scope = (await client.query<{ gameId: string }>("SELECT game_id AS \"gameId\" FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 ORDER BY game_id", [context.userId])).rows.map(row=>row.gameId);
+      const gameScope = await readAdminGameScope(client, context.userId);
+      assertGameScopeUsable(gameScope, access.isBoss);
       const admin = {
         adminId: context.userId,
         isBoss: access.isBoss,
         internalQuote: access.permissions.has("supply.quote.internal.read"),
-        authorizationKey: sha256Hex(JSON.stringify([context.userId,context.sessionId,access.isBoss,[...access.permissions].sort(),scope])),
+        authorizationKey: sha256Hex(JSON.stringify([context.userId,context.sessionId,access.isBoss,[...access.permissions].sort(),gameScopeSignature(gameScope)])),
       };
       if (path === "/") {
         if (query.has("page")) {

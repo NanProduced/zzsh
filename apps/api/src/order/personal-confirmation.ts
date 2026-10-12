@@ -9,7 +9,8 @@ import { computeDeltaQuote, projectDeltaQuote, type InternalQuote, type QuoteInp
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
-import { isProductionConfirmationFundingReader } from "../supply/funding-authority";
+import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
+import { assertFinalConfirmationFunding, isProductionConfirmationFundingReader } from "../supply/funding-authority";
 import { EFFECTIVE_PUBLICATION_STATE_SQL, isEffectivePublicationState } from "../supply/listing-query";
 import { ensureOnlyFields, invalid, notFound } from "../supply/supply-util";
 import { assertFreshCreateAuthorization, type OrderUserContext } from "./order";
@@ -23,7 +24,7 @@ export type LegacyConfirmationFunding = ConfirmationFundingBase & {
   schema?:"personal-quote-v1";fullPayoutSelected:boolean;fullPayoutPolicyRef:string;fullPayoutFeeCents:string;
 };
 export type V2ConfirmationFunding = ConfirmationFundingBase & {
-  schema:"personal-quote-v2";fullPayoutPolicyRef:string;fullPayoutPolicyVersion:string;disclosureVersion:string;
+  schema:"personal-quote-v2";fullPayoutPolicyRef:string;fullPayoutPolicyVersion:string;disclosureVersion:string;fullPayoutTerms?:FullPayoutTerms;
 };
 export type ConfirmationFunding = LegacyConfirmationFunding | V2ConfirmationFunding;
 export type ConfirmationFundingReader = (client:PoolClient,account:PublishingAccount,version:ListingVersion)=>Promise<ConfirmationFunding|null>;
@@ -93,9 +94,10 @@ export function isControlledConfirmationFundingReader(reader:ConfirmationFunding
   return controlledFundingReaders.has(reader);
 }
 export function confirmationInput(body:Record<string,unknown>) {
-  ensureOnlyFields(body,["accountId","versionId","releaseId"]);
+  ensureOnlyFields(body,["accountId","versionId","releaseId","fullPayoutTermsAcceptance"]);
   for(const name of ["accountId","versionId","releaseId"])if(typeof body[name]!=="string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body[name] as string))throw invalid("Invalid confirmation reference",name);
-  return {accountId:body.accountId as string,versionId:body.versionId as string,releaseId:body.releaseId as string};
+  const terms=parseFullPayoutTermsAcceptance(body.fullPayoutTermsAcceptance);
+  return {accountId:body.accountId as string,versionId:body.versionId as string,releaseId:body.releaseId as string,...(terms?{fullPayoutTermsAcceptance:terms}:{})};
 }
 const unavailable=(message:string):never=>{throw new SecurityApiError(503,"CONFIRMATION_DEPENDENCY_UNAVAILABLE",message);};
 
@@ -142,6 +144,10 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
     if(f.schema==="personal-quote-v2" || typeof f.fullPayoutSelected!=="boolean" || typeof f.fullPayoutFeeCents!=="string"
       || f.fullPayoutSelected || f.fullPayoutFeeCents!=="0")unavailable("Legacy funding basis is unknown or contradictory");
   }
+  if(ownerDeclaration?.selected){
+    if(!v2Funding?.fullPayoutTerms)unavailable("Full-payout terms body is unavailable");
+    assertFullPayoutTermsAccepted(v2Funding!.fullPayoutTerms!,input.fullPayoutTermsAcceptance);
+  }else if(input.fullPayoutTermsAcceptance!==undefined)throw invalid("Full-payout terms do not apply to this quote","fullPayoutTermsAcceptance");
   const guarantee=await options.gate(client,account);
   if(typeof guarantee.reference!=="string" || !guarantee.reference.trim() || guarantee.occupancy!=="FREE" || !["SATISFIED","NOT_REQUIRED"].includes(guarantee.publisherBail) || (guarantee.publisherBail==="NOT_REQUIRED" && BigInt(f.publisherBailRequirementCents)>0n))unavailable("Account guarantee evidence is unavailable");
   const creditGuarantee=guarantee.creditGuarantee;
@@ -212,23 +218,29 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
     || priceVersionId!==release.id || termVersionId!==release.term_version_id)unavailable("Personal rule references cannot be verified");
   const guaranteeSnapshot = { status: guarantee.publisherBail, reference: guarantee.reference };
   const baseSnapshot=ownerDeclaration
-    ? {schema:"personal-quote-v2",userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
+    ? {schema:"personal-quote-v2" as const,userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
       fullPayoutDeclaration:ownerDeclaration,ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},
       guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,
         publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,
         disclosureVersion:v2Funding!.disclosureVersion,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote}
-    : {schema:"personal-quote-v1",listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
+    : {schema:"personal-quote-v1" as const,listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership.tier,version:membership.version,sourceRef:membership.sourceRef},guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
   const snapshot=growthExtension ? { ...baseSnapshot, schema: "personal-quote-v3", membershipGrowth: growthExtension } : baseSnapshot;
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
   return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection:{quote:projectDeltaQuote(quote,"public"),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),customerTier:membership.tier,depositWaived:quote.tenantDeposit?.amount === "0.00",
-    ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion}}:{})}};
+    ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion,...(v2Funding!.fullPayoutTerms?{terms:v2Funding!.fullPayoutTerms}:{})}}:{})}};
 }
 
 export async function issuePersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,options:PersonalConfirmationOptions) {
   requireConfirmationKey(options.key);
   const rebuilt=await rebuildPersonalConfirmation(client,context,input,options);
   const signed=signConfirmation(rebuilt.binding,rebuilt.now,options.key);
+  const snapshot=rebuilt.snapshot;
+  if (snapshot.schema !== "personal-quote-v1" && snapshot.accountId && snapshot.ownerUserId) {
+    await assertFinalConfirmationFunding(client,{accountId:snapshot.accountId,ownerUserId:snapshot.ownerUserId,
+      priceVersionId:snapshot.ruleRefs.priceVersionId,releaseId:snapshot.ruleRefs.releaseId,policyVersion:snapshot.funding.version,
+      reference:snapshot.guarantee.reference,status:snapshot.guarantee.status},options.fundingReader);
+  }
   return {...rebuilt.projection,confirmationId:signed.claims.confirmationId,listingHash:rebuilt.binding.listingHash,expiresAt:new Date(signed.claims.expiresAt*1000).toISOString(),confirmationToken:signed.token};
 }
 export async function verifyPersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,token:unknown,options:PersonalConfirmationOptions) {

@@ -51,6 +51,7 @@ test("v2 creation bounds the original credential body without pre-validating suc
 import { createControlledConfirmationFundingReader, issuePersonalConfirmation, rebuildPersonalConfirmation, verifyPersonalConfirmation } from "../src/order/personal-confirmation";
 import { computeContentHash, type ContentPayloadInput } from "../src/supply/content-hash";
 import { computeQuote } from "../src/supply/pricing";
+import { fundingPolicyFixture } from "./funding-authority-fixtures";
 import { evaluatePublication } from "../src/supply/publishing";
 import { withIdempotency } from "../src/supply/supply-util";
 
@@ -64,7 +65,9 @@ function personalRefsFixture(v2=true) {
   const version={id:input.versionId,account_id:input.accountId,origin:"NATIVE",review_state:"PUBLISHED",rule_release_id:input.releaseId,content_hash:computeContentHash(payload),payload,attributes:payload.declaration.attributes};
   const runId="11111111-1111-4111-8111-111111111111",allowed=new Map([[account.id,{runId,ownerUserId:"owner",listingVersionId:version.id,listingHash:version.content_hash}]]);
   const client={query:async(sql:string)=>{let rows:unknown[];
-    if(sql.includes('owner_user_id AS "ownerUserId"'))rows=[{ownerUserId:"owner",gameId:"game-1"}];
+    if(sql.includes("p.funding_policy AS policy") && sql.includes("a.id=$1 AND a.owner_user_id=$2"))rows=[{priceVersionId:"price-1",releaseId:input.releaseId,gameId:"game-1",status:"SEALED",policy:{...fundingPolicyFixture("NOT_REQUIRED"),policyVersion:`fixture:trb3b1:${runId}:funding-v1`}}];
+    else if(sql.includes("account_guarantee_proof"))rows=[];
+    else if(sql.includes('owner_user_id AS "ownerUserId"'))rows=[{ownerUserId:"owner",gameId:"game-1"}];
     else if(sql.includes('SELECT id FROM zzsh_auth_user.'))rows=[{id:"renter"},{id:"owner"}];
     else if(sql.includes('AS "accountStatus"'))rows=[{id:"renter",suspended:false,accountStatus:"ACTIVE",identityStatus:"VERIFIED",ageStatus:"ADULT"}];
     else if(sql.includes('zzsh_auth_user."session"'))rows=[{ok:1}];
@@ -88,7 +91,7 @@ function personalRefsFixture(v2=true) {
     else throw Error('Unexpected SQL: '+sql);return{rows,rowCount:rows.length};}} as never;
   const controlled=createControlledConfirmationFundingReader({config:{profile:"test",provider:"fake",testOperationsEnabled:true,database:{target:"local-compose",targetProfile:"test",host:"127.0.0.1",port:55432,name:"zzsh_test_order_trade_settlement",user:"zzsh_order_trade_settlement_r"}} as never,resourceSet:"trade_settlement",runId,allowedListings:allowed});
   const legacy=async()=>({version:"v1",sourceRef:"fixture",baseDepositCents:"30000",publisherBailRequirementCents:"0",vipWaiver:false,svipWaiver:false,fullPayoutSelected:false,fullPayoutPolicyRef:"legacy",fullPayoutFeeCents:"0"});
-  const options={key,gate:async()=>({publisherBail:"NOT_REQUIRED" as const,occupancy:"FREE" as const,reference:"fixture"}),fundingReader:v2?controlled:legacy};
+  const options={key,gate:async()=>({publisherBail:"NOT_REQUIRED" as const,occupancy:"FREE" as const,reference:v2?`policy:price-1:fixture:trb3b1:${runId}:funding-v1:NOT_REQUIRED`:"fixture"}),fundingReader:v2?controlled:legacy};
   const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash};
 }
 
@@ -148,3 +151,18 @@ test("accepted order receipt replay bypasses new confirmation rebuilding",async(
 
 
 
+
+test("final guarantee revocation after rebuild rejects issuance and first insertion, without consuming an order",async()=>{
+  {
+    const f=personalRefsFixture(true),transport=f.client as unknown as {query:(sql:string,values?:unknown[])=>Promise<any>};
+    const original=transport.query.bind(transport);let final=false;
+    transport.query=async(sql,values)=>{if(sql.includes("extract(epoch"))final=true;if(final && sql.includes("account_guarantee_proof"))return {rows:[{status:"REVOKED"}],rowCount:1};return original(sql,values);};
+    await assert.rejects(()=>issuePersonalConfirmation(f.client,f.context,f.input,f.options),(e:any)=>e.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+  }
+  {
+    const f=personalRefsFixture(true),issued=await issuePersonalConfirmation(f.client,f.context,f.input,f.options);
+    const transport=f.client as unknown as {query:(sql:string,values?:unknown[])=>Promise<any>},original=transport.query.bind(transport);let clocks=0,inserts=0;
+    transport.query=async(sql,values)=>{if(sql.includes("extract(epoch"))clocks++;if(clocks>=3 && sql.includes("account_guarantee_proof"))return {rows:[{status:"REVOKED"}],rowCount:1};if(sql.startsWith("INSERT INTO zzsh_order.rental_order"))inserts++;return original(sql,values);};
+    await assert.rejects(()=>createPersonalReservation(f.client,f.context,issued.confirmationToken,{...f.options,holdSeconds:600},"offline-final-proof"),(e:any)=>e.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");assert.equal(inserts,0);
+  }
+});

@@ -10,6 +10,7 @@ export const GENERIC_ADMIN_AUDIT_ACTIONS = [
   "admin.account.created",
   "admin.account.updated",
   "admin.permission.assigned",
+  "admin.game_scope.assigned",
   "admin.role.created",
   "admin.role.updated",
   "admin.frozen",
@@ -111,6 +112,14 @@ function parseCursor(value: string | undefined): [Date, string] | undefined {
   }
 }
 
+function parseTime(value: string | undefined, label: string): Date | undefined {
+  if (!value) return undefined;
+  if (value.length > 40) invalid(`${label} filter is invalid`);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) invalid(`${label} filter is invalid`);
+  return parsed;
+}
+
 async function auditEvents(
   request: AuthSecurityNodeRequest,
   response: AuthSecurityNodeResponse,
@@ -136,6 +145,11 @@ async function auditEvents(
   if (objectId && !ID_PATTERN.test(objectId)) invalid("Object id is invalid");
   const targetRequestId = queryValue(request, "requestId");
   if (targetRequestId && targetRequestId.length > 128) invalid("Request id is invalid");
+  const outcome = queryValue(request, "outcome");
+  if (outcome && outcome !== "SUCCESS" && outcome !== "FAILURE") invalid("Outcome filter is invalid");
+  const from = parseTime(queryValue(request, "from"), "From");
+  const to = parseTime(queryValue(request, "to"), "To");
+  if (from && to && from.getTime() > to.getTime()) invalid("Time range is invalid");
   const cursor = parseCursor(queryValue(request, "cursor"));
 
   const values: unknown[] = [limit + 1, [...GENERIC_ACTIONS], [...GENERIC_OBJECT_TYPES]];
@@ -153,6 +167,9 @@ async function auditEvents(
   if (actorUsername) conditions.push(`lower(COALESCE(u."username", '')) = $${values.push(actorUsername)}`);
   if (objectId) conditions.push(`e."object_id" = $${values.push(objectId)}`);
   if (targetRequestId) conditions.push(`e."request_id" = $${values.push(targetRequestId)}`);
+  if (outcome) conditions.push(`e."outcome" = $${values.push(outcome)}`);
+  if (from) conditions.push(`e."occurred_at" >= $${values.push(from)}`);
+  if (to) conditions.push(`e."occurred_at" <= $${values.push(to)}`);
   if (cursor) {
     values.push(cursor[0], cursor[1]);
     const timeParameter = values.length - 1;

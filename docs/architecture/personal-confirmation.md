@@ -15,7 +15,7 @@
 
 ## 个人确认
 
-`POST /api/v2/order-confirmations`及同源`/api/bff/user/order-confirmations`，Web入口`/api/order-confirmations`。输入仅`{accountId,versionId,releaseId}`；正式Cookie确定本人，拒绝客户端tier、金额或资格。响应no-store。
+`POST /api/v2/order-confirmations`及同源`/api/bff/user/order-confirmations`，Web入口`/api/order-confirmations`。输入为`{accountId,versionId,releaseId}`，选择包赔时另需实际适用的`fullPayoutTermsAcceptance={termsVersionId,termsDigest,disclosureVersion}`；正式Cookie确定本人，拒绝客户端tier、金额或资格。响应no-store。
 
 短事务按双方user ID→game→account锁序，复核会话/活性/成年实名/非本人、有效发布事实及当前公开版本、release/hash、占用及保证金依据。有效发布事实必须是 `PUBLISHED + OWNER_DIRECT` 或真实 `APPROVED + LEGACY_APPROVED`；会员修改锁同一user；重建仅使用锁内client，不另借连接。按同一封存release选四档价目，缺档/未知资格/不支持的旧规则档位均拒绝，不回退STANDARD，也不污染公开报价。
 
@@ -35,7 +35,7 @@
 
 ## 新版建单与唯一消费（PC-2B）
 
-`POST /api/v2/orders`输入仅`{confirmationToken}`并要求Idempotency-Key；API BFF为`/api/bff/user/orders-v2`，Web为`/api/v2/orders`。旧Web `/api/orders`仍使用v1三字段合同，不静默升级。列表、详情、取消继续使用既有v1订单读写接口，不复制v2整套路由。
+`POST /api/v2/orders`输入为`{confirmationToken}`，选择包赔时另携同一`fullPayoutTermsAcceptance`并要求Idempotency-Key；API BFF为`/api/bff/user/orders-v2`，Web为`/api/v2/orders`。旧Web `/api/orders`仍使用v1三字段合同，不静默升级。列表、详情、取消继续使用既有v1订单读写接口，不复制v2整套路由。
 
 幂等空间为user主体+`order.reservation.create.v2`+key，与v1隔离；请求指纹绑定完整原token/body。先执行有界类型/长度检查及回执查询，成功重放仅复核当前有效会话/活性/原订单归属，返回原回执。此时不检查旧token有效期或当前会员/规则/占用、hold/签名配置；异体同key仍409。重放回执是原创建结果，当前状态通过订单查询取得。
 
@@ -49,4 +49,4 @@
 
 订单renter/owner/admin投影继续白名单输出。个人订单的会员sourceRef、资金内部事实、token/签名不透传；租客与号主不获得个人订单内部保证金要求，价差仍限原专用管理权限。状态、排序/游标、取消与IM最小元数据合同不变；本实现不执行付款、群操作、退款或结算。
 
-部署须按正式迁移器应用目标版本的连续迁移前缀及runtime授权；v2守卫依赖0051纠正，有效直发布事实依赖0052，不能仅应用0040/0041即运行最新代码。正式政策/依据读取及核定依赖0053/0054；未合入的证明到期最终竞态守卫不能视为已生效。配置页面、推荐/披露接线与真实渠道仍未形成完整交易闭环；API/PG/协议级证据不等于浏览器业务或生产渠道验收。
+部署须按正式迁移器应用目标版本的连续迁移前缀及runtime授权；v2守卫依赖0051纠正，有效直发布事实依赖0052，不能仅应用0040/0041即运行最新代码。正式政策/依据读取及核定依赖0053/0054；独立包赔版本与接受列、证明到期最终INSERT检查须另行按连续前缀部署，不把未应用的SQL草案视为生效。签发和首次建单已有末端正式reader重核；成功重放不重核当前到期或补签条款。新包赔digest通过不可变条款引用及funding.sourceRef后缀绑定至既有v2/v3摘要，不改变旧快照字段/hash，也不在token中暴露资金内部事实。配置页面、推荐/披露接线与真实渠道仍未形成完整交易闭环；API/PG/协议级证据不等于浏览器业务或生产渠道验收。

@@ -615,6 +615,28 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal(invalidAuditFilter.response.status, 400, "generic audit must not accept approval actions");
     const invalidAuditObject = await bff(base, "/security/audit/events?objectType=approval_request", undefined, boss);
     assert.equal(invalidAuditObject.response.status, 400, "generic audit must not accept approval objects");
+    // 新增过滤：outcome 白名单与 from/to 时间范围，复用刚插入的 genericFixtureId 作判据。
+    const successOnly = await bff(base, "/security/audit/events?outcome=SUCCESS&limit=100", undefined, boss);
+    assert.equal(successOnly.response.status, 200);
+    assert.equal(successOnly.body?.events?.every((item: { outcome?: string }) => item.outcome === "SUCCESS"), true);
+    assert.equal(successOnly.body?.events?.some((item: { eventId?: string }) => item.eventId === genericFixtureId), true);
+    const failureOnly = await bff(base, "/security/audit/events?outcome=FAILURE&limit=100", undefined, boss);
+    assert.equal(failureOnly.response.status, 200);
+    assert.equal(failureOnly.body?.events?.some((item: { eventId?: string }) => item.eventId === genericFixtureId), false);
+    const invalidOutcome = await bff(base, "/security/audit/events?outcome=MAYBE", undefined, boss);
+    assert.equal(invalidOutcome.response.status, 400, "unknown outcome must be rejected");
+    const futureFrom = encodeURIComponent(new Date(Date.now() + 3_600_000).toISOString());
+    const pastTo = encodeURIComponent(new Date(Date.now() - 3_600_000).toISOString());
+    const afterFuture = await bff(base, `/security/audit/events?from=${futureFrom}&limit=100`, undefined, boss);
+    assert.equal(afterFuture.response.status, 200);
+    assert.equal(afterFuture.body?.events?.some((item: { eventId?: string }) => item.eventId === genericFixtureId), false, "from must exclude earlier events");
+    const beforePast = await bff(base, `/security/audit/events?to=${pastTo}&limit=100`, undefined, boss);
+    assert.equal(beforePast.response.status, 200);
+    assert.equal(beforePast.body?.events?.some((item: { eventId?: string }) => item.eventId === genericFixtureId), false, "to must exclude later events");
+    const reversedRange = await bff(base, `/security/audit/events?from=${futureFrom}&to=${pastTo}`, undefined, boss);
+    assert.equal(reversedRange.response.status, 400, "from after to must be rejected");
+    const invalidTime = await bff(base, "/security/audit/events?from=not-a-date", undefined, boss);
+    assert.equal(invalidTime.response.status, 400, "unparsable time must be rejected");
     const firstGenericPage = await bff(base, "/security/audit/events?limit=1", undefined, boss);
     assert.equal(firstGenericPage.response.status, 200);
     assert.equal(firstGenericPage.body?.events?.length, 1);

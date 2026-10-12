@@ -62,7 +62,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
   "membership-growth": { id: "membership-growth", title: "会员成长", path: "/membership-growth", closable: true, kind: "membership-growth" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
-  admins: { id: "admins", title: "管理员", path: "/admins", closable: true, kind: "admins" },
+  admins: { id: "admins", title: "管理员管理", path: "/admins", closable: true, kind: "admins" },
   roles: { id: "roles", title: "角色权限", path: "/roles", closable: true, kind: "roles" },
   approvals: { id: "approvals", title: "审批与审计", path: "/approvals", closable: true, kind: "approvals" },
   audit: { id: "audit", title: "账号与权限审计", path: "/audit", closable: true, kind: "audit" },

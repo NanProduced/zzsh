@@ -1,6 +1,7 @@
 import type { INestApplication } from "@nestjs/common";
 
 import { ADMIN_PERMISSION, hasPermission, requirePermission } from "./admin-authorization";
+import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "./admin-scope";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "./auth-security";
 import { normalizeMainlandPhone } from "./phone-number";
 import { sanitizeDetail } from "./admin-audit";
@@ -103,7 +104,7 @@ export async function handleUserDirectoryAdmin(
       await assertAdminContextInTransaction(client, context);
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
-      const gameScope = (await client.query<{ gameId: string }>(`SELECT game_id AS "gameId" FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 ORDER BY game_id`, [context.userId])).rows.map(row => row.gameId);
+      const gameScope = await readAdminGameScope(client, context.userId);
       const viewer = {
         adminId: context.userId,
         isBoss: access.isBoss,
@@ -111,12 +112,12 @@ export async function handleUserDirectoryAdmin(
         resourceRead: hasPermission(access, ADMIN_PERMISSION.supplyRentalAccountRead),
         orderRead: hasPermission(access, ADMIN_PERMISSION.orderRead),
         auditRead: hasPermission(access, ADMIN_PERMISSION.auditRead),
-        authorizationKey: sha256Hex(JSON.stringify([context.userId, context.sessionId, access.isBoss, [...access.permissions].sort(), gameScope])),
+        authorizationKey: sha256Hex(JSON.stringify([context.userId, context.sessionId, access.isBoss, [...access.permissions].sort(), gameScopeSignature(gameScope)])),
         legacyRead: false,
       };
       const enableLegacyRead=async()=>{viewer.legacyRead=(await client.query("SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS present")).rows[0]?.present===true;};
       const cursor = query.get("cursor") ?? undefined;
-      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);sendJson(response,200,await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!)),requestId);return;}
+      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);sendJson(response,200,await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!)),requestId);return;}
       const limit = parseLimit(query.get("limit"));
 
       if (path === "/" || lookup) {
@@ -181,12 +182,14 @@ export async function handleUserDirectoryAdmin(
       if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id = $1`, [userId])).rowCount) throw notFound();
       if (section === "rental-accounts") {
         requirePermission(access, ADMIN_PERMISSION.supplyRentalAccountRead);
+        assertGameScopeUsable(gameScope, access.isBoss);
         await enableLegacyRead();
         sendJson(response, 200, await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }), requestId);
         return;
       }
       if (section === "orders") {
         requirePermission(access, ADMIN_PERMISSION.orderRead);
+        assertGameScopeUsable(gameScope, access.isBoss);
         const roleRaw = query.get("role");
         if (roleRaw !== null && roleRaw !== "renter" && roleRaw !== "owner" && roleRaw !== "any") throw invalid("Role is invalid");
         const statusRaw = query.get("status");

@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction } from "../auth/user-identity";
 import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidate } from "./support-dispatch";
 import { createImScopeLease, lockTeamBinding, onLeaseConnection } from "./scope-lease";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityProvisioner } from "./identity-lifecycle";
@@ -71,8 +72,9 @@ async function assertBuildParticipants(c:PoolClient,p:Plan):Promise<void>{
   catch { throw new OrderTeamError("IDENTITY_PENDING"); }
   const access=await loadEffectiveAdminAccess(c,p.assigned_admin_id);
   const user=(await c.query(`SELECT suspended FROM zzsh_auth_admin."user" WHERE id=$1`,[p.assigned_admin_id])).rows[0];
+  const scoped=access?.isBoss===true||scopeAllowsGame(await readAdminGameScope(c,p.assigned_admin_id),false,p.game_id);
   if(!user||user.suspended||!hasPermission(access,"im.support.read")||!hasPermission(access,"im.support.accept")
-    ||(!access!.isBoss&&!(await c.query(`SELECT 1 FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`,[p.assigned_admin_id,p.game_id])).rowCount))throw new OrderTeamError("IDENTITY_PENDING");
+    ||!scoped)throw new OrderTeamError("IDENTITY_PENDING");
 }
 async function markWaiting(options:OrderTeamOptions,id:string,code:string):Promise<void>{
   await withTransaction(options.pool,async(c)=>{

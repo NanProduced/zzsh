@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
+import { gameScopeSql } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction } from "../auth/user-identity";
 import { normalizeQuote } from "../supply/content-hash";
@@ -639,9 +640,7 @@ export async function listAdminOrders(
   const rows = (
     await client.query<OrderRow>(
       `SELECT ${ORDER_FIELDS} ${ORDER_FROM}
-        WHERE ($1::boolean OR EXISTS (
-            SELECT 1 FROM zzsh_supply.admin_supply_scope s
-             WHERE s.admin_user_id = $2 AND s.game_id = o.game_id))
+        WHERE ${gameScopeSql("o.game_id", "$2", "$1")}
           AND ($3::text IS NULL OR o.status = $3)
           AND ($4::text IS NULL OR o.account_id = $4)
           AND ($5::text IS NULL OR o.game_id = $5)
@@ -704,8 +703,8 @@ export async function readOrderOccupancy(client: PoolClient, accountId: string):
 }
 
 export function composeSupplyGateWithOrderOccupancy(base: SupplyGateReader): SupplyGateReader {
-  return async (client, account) => {
-    const gate = await base(client, account);
+  return async (client, account, purpose) => {
+    const gate = await base(client, account, purpose);
     // Occupancy truth is order-derived only: no occupying order means FREE.
     // The publisher-bail seam stays independent (UNKNOWN fails closed until M5).
     const occupied = await readOrderOccupancy(client, account.id);

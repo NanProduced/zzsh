@@ -713,9 +713,12 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const seedCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_supply"."billable_item" WHERE "game_id" = $1 AND "code" LIKE 'seed_item%'`, [gameId]);
     assert.equal(seedCount.rows[0]?.count, "1");
 
+    await maintenanceDataPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'SELECTED_GAMES' WHERE admin_user_id = $1`, [operator.id]);
     await maintenanceDataPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id = $1 AND game_id = $2`, [operator.id, gameId]);
     const replayRevoked = await request(base, `/api/bff/admin/supply/games/${gameId}/items`, { code: "seed_item", name: "种子物品", unit: "PIECE" }, operator.jar, ADMIN_ORIGIN, "POST", { "idempotency-key": replayKey });
-    assert.equal(replayRevoked.response.status, 404, "R3 cached success must honor current scope");
+    assert.equal(replayRevoked.response.status, 403, "R3 cached success must honor current scope");
+    assert.equal(replayRevoked.body?.error?.code, "NO_GAME_SCOPE");
+    await maintenanceDataPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'ALL_GAMES' WHERE admin_user_id = $1`, [operator.id]);
     await runtimePool.query(`INSERT INTO zzsh_supply.admin_supply_scope (admin_user_id, game_id, granted_by_admin_id) VALUES ($1,$2,$3)`, [operator.id, gameId, boss.id]);
     const realmScope = (await runtimePool.query(`SELECT scope_key FROM zzsh_supply.idempotency_record WHERE key = $1`, [replayKey])).rows[0].scope_key;
     assert.equal(JSON.parse(realmScope)[0], "admin");
@@ -734,11 +737,14 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       while (!blocked && Date.now() < deadline) { await gate.query("SELECT pg_stat_clear_snapshot()"); blocked = (await gate.query(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked`, [gatePid])).rows[0].blocked; }
       assert.equal(blocked, true);
       await maintenanceDataPool.query(`INSERT INTO zzsh_supply.idempotency_record (scope_key,key,request_fingerprint,response_status,response_body) VALUES ($1,$2,$3,200,$4)`, [JSON.stringify(["admin", operator.id, "supply.catalog.items.create", gameId]), recoveryKey, fingerprintRequest("supply.catalog.items.create", gameId, recoveryBody), {id:"restricted-race-result"}]);
+      await maintenanceDataPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'SELECTED_GAMES' WHERE admin_user_id = $1`, [operator.id]);
       await maintenanceDataPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id = $1 AND game_id = $2`, [operator.id, gameId]);
       await gate.query("COMMIT");
-      assert.equal((await pending).response.status, 404, "23505 recovery must reject revoked scope");
+      assert.equal((await pending).response.status, 403, "23505 recovery must reject revoked scope");
+      assert.equal((await pending).body?.error?.code, "NO_GAME_SCOPE");
       assert.equal((await runtimePool.query(`SELECT count(*)::text AS count FROM zzsh_supply.billable_item WHERE code = 'recovery_race'`)).rows[0].count, "0", "losing business write rolled back");
     } finally { await gate.query("ROLLBACK"); gate.release(); }
+    await maintenanceDataPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'ALL_GAMES' WHERE admin_user_id = $1`, [operator.id]);
     await runtimePool.query(`INSERT INTO zzsh_supply.admin_supply_scope (admin_user_id, game_id, granted_by_admin_id) VALUES ($1,$2,$3)`, [operator.id, gameId, boss.id]);
 
     const concurrentKey = `idem_${randomUUID().replaceAll("-", "")}`;

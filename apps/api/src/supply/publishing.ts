@@ -1,3 +1,4 @@
+import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction } from "../auth/user-identity";
@@ -64,6 +65,7 @@ export type CreditGuaranteeGateSnapshot = {
 export type SupplyGateReader = (
   client: PoolClient,
   account: PublishingAccount,
+  purpose?: "READ" | "WRITE",
 ) => Promise<SupplyGate>;
 export const unknownSupplyGate: SupplyGateReader = async () => ({
   publisherBail: "UNKNOWN",
@@ -236,6 +238,7 @@ export async function publicationBlockers(
   a: PublishingAccount,
   v: ListingVersion,
   gate: SupplyGateReader,
+  purpose: "READ" | "WRITE" = "WRITE",
 ): Promise<string[]> {
   const reasons: string[] = [];
   const user = (
@@ -287,7 +290,7 @@ export async function publicationBlockers(
     reasons.push("ACCOUNT_NOT_PUBLISHABLE");
   let external: SupplyGate;
   try {
-    external = await gate(client, a);
+    external = await gate(client, a, purpose);
   } catch {
     external = await unknownSupplyGate(client, a);
   }
@@ -990,8 +993,14 @@ export async function acceptListingRules(
   await assertCurrentRelease(client, a, v);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可确认新申报草稿");
+  const selected=v.payload?.declaration.attributes.full_payout_declaration as {selected?:boolean}|undefined;
+  const policy=selected?.selected?await readFundingPolicyForRelease(client,v.rule_release_id!):null;
+  if(selected?.selected && !policy)throw conflict("包赔资金政策未提供");
+  const terms=selected?.selected?await readFullPayoutTerms(client,a.game_id,policy!,v.payload!.ruleRefs.priceVersionId):undefined;
+  const accepted=terms?assertFullPayoutTermsAccepted(terms,body.fullPayoutTermsAcceptance):undefined;
+  if(!terms && body.fullPayoutTermsAcceptance!==undefined)throw invalid("这份资料未选择包赔","fullPayoutTermsAcceptance");
   await client.query(
-    `INSERT INTO zzsh_supply.rule_acceptance(id,owner_user_id,account_id,listing_version_id,rule_release_id,accepted_content_hash) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(owner_user_id,listing_version_id,rule_release_id,accepted_content_hash) DO NOTHING`,
+    `INSERT INTO zzsh_supply.rule_acceptance(id,owner_user_id,account_id,listing_version_id,rule_release_id,accepted_content_hash,full_payout_terms_version_id,full_payout_terms_digest,full_payout_disclosure_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(owner_user_id,listing_version_id,rule_release_id,accepted_content_hash) DO NOTHING`,
     [
       newSupplyId("accept"),
       a.owner_user_id,
@@ -999,6 +1008,7 @@ export async function acceptListingRules(
       v.id,
       v.rule_release_id,
       v.content_hash,
+      accepted?.termsVersionId??null,accepted?.termsDigest??null,accepted?.disclosureVersion??null,
     ],
   );
   await bumpAccount(client, a);
@@ -1008,11 +1018,15 @@ async function assertAccepted(
   a: PublishingAccount,
   v: ListingVersion,
 ): Promise<void> {
+  const selected=(v.payload?.declaration.attributes.full_payout_declaration as {selected?:boolean}|undefined)?.selected===true;
+  const policy=selected?await readFundingPolicyForRelease(client,v.rule_release_id!):null;
+  if(selected && !policy)throw conflict("包赔资金政策未提供");
+  const terms=selected?await readFullPayoutTerms(client,a.game_id,policy!,v.payload!.ruleRefs.priceVersionId):undefined;
   if (
     !(
       await client.query(
-        `SELECT 1 FROM zzsh_supply.rule_acceptance WHERE account_id=$1 AND listing_version_id=$2 AND rule_release_id=$3 AND accepted_content_hash=$4 AND owner_user_id=$5`,
-        [a.id, v.id, v.rule_release_id, v.content_hash, a.owner_user_id],
+        `SELECT 1 FROM zzsh_supply.rule_acceptance WHERE account_id=$1 AND listing_version_id=$2 AND rule_release_id=$3 AND accepted_content_hash=$4 AND owner_user_id=$5${terms?" AND full_payout_terms_version_id=$6 AND full_payout_terms_digest=$7 AND full_payout_disclosure_version=$8":""}`,
+        [a.id, v.id, v.rule_release_id, v.content_hash, a.owner_user_id,...(terms?[terms.termsVersionId,terms.termsDigest,terms.disclosureVersion]:[])],
       )
     ).rowCount
   )
@@ -1214,8 +1228,9 @@ export async function evaluatePublication(
   a: PublishingAccount,
   v: ListingVersion,
   gate: SupplyGateReader,
+  purpose: "READ" | "WRITE" = "WRITE",
 ): Promise<string[]> {
-  const blockers = await publicationBlockers(client, a, v, gate);
+  const blockers = await publicationBlockers(client, a, v, gate, purpose);
   const publication = await readListingPublication(client, a, v);
   if (!isEffectivePublicationState(v.review_state, publication?.source)) blockers.push("PUBLICATION_REQUIRED");
   if (a.owner_paused) blockers.push("OWNER_PAUSED");
@@ -1252,7 +1267,7 @@ async function resolvePublicMediaRoute(
   } else if (publicAccount.current_version_id) {
     live = await readCurrentVersion(client, publicAccount);
     listingPublic =
-      (await evaluatePublication(client, publicAccount, live, gate)).length ===
+      (await evaluatePublication(client, publicAccount, live, gate, "READ")).length ===
       0;
     if (!listingPublic) live = null;
   }
@@ -1364,7 +1379,7 @@ export async function listingDetail(
     if (viewer === "public") throw notFound();
     return { account: a, version: null };
   }
-  const blockers = await evaluatePublication(client, a, v, gate);
+  const blockers = await evaluatePublication(client, a, v, gate, "READ");
   const publication = await readListingPublication(client, publicAccount, v);
   const quote = v.payload
     ? { ...projectDeltaQuote(

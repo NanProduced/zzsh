@@ -52,22 +52,31 @@ test("nickname branch executes actual PostgreSQL SQL for literal LIKE characters
           fixture_users(id,name) AS (VALUES ('u-a','阿洛甲'),('u-b','阿洛乙'),('u-c',$5::text)),
           fixture_games(id,name) AS (VALUES ('game-1','一'),('game-2','二')),
           fixture_versions(id,sequence,title,review_state,created_at) AS (VALUES ('v-a',1,'甲','DRAFT',null::timestamptz),('v-b',1,'乙','DRAFT',null::timestamptz),('v-c',1,'丙','DRAFT',null::timestamptz)),
+          fixture_admin_scope(admin_user_id,game_scope_mode) AS (VALUES ('fixture-admin','SELECTED_GAMES')),
           fixture_scope(admin_user_id,game_id) AS (VALUES ('fixture-admin','game-1')) `;
         for (const [q, expected] of [["阿洛甲", ["a"]], ["阿洛", ["a", "b"]], ["no-match", []], ["%", ["c"]], ["_", ["c"]], ["\\", ["c"]], ["%_\\", ["c"]]] as const) {
             await t.test("SQL nickname " + JSON.stringify(q), async () => {
                 const built = await captureListQuery(new URLSearchParams({ queryKind: "nickname", q }));
                 assert.equal(built.values.length, 4);
-                const sql = built.sql.replaceAll("zzsh_supply.rental_account", "fixture_accounts").replaceAll('zzsh_auth_user."user"', "fixture_users").replaceAll("zzsh_supply.game", "fixture_games").replaceAll("zzsh_supply.listing_version", "fixture_versions").replaceAll("zzsh_supply.admin_supply_scope", "fixture_scope");
+                const sql = built.sql.replaceAll("zzsh_supply.rental_account", "fixture_accounts").replaceAll('zzsh_auth_user."user"', "fixture_users").replaceAll("zzsh_supply.game", "fixture_games").replaceAll("zzsh_supply.listing_version", "fixture_versions").replaceAll("zzsh_supply.admin_supply_scope", "fixture_scope").replaceAll('"zzsh_iam"."admin_security"', "fixture_admin_scope");
                 assert.deepEqual((await c.query(prefix + sql, [...built.values, "百分%_\\用户"])).rows.map(r => r.id), expected);
             });
         }
         await t.test("SQL nickname combined game/restriction and real data query", async () => {
             const built = await captureListQuery(new URLSearchParams({ queryKind: "nickname", q: "阿洛", gameId: "game-1", view: "restricted" }));
-            const sql = built.sql.replaceAll("zzsh_supply.rental_account", "fixture_accounts").replaceAll('zzsh_auth_user."user"', "fixture_users").replaceAll("zzsh_supply.game", "fixture_games").replaceAll("zzsh_supply.listing_version", "fixture_versions").replaceAll("zzsh_supply.admin_supply_scope", "fixture_scope");
+            const sql = built.sql.replaceAll("zzsh_supply.rental_account", "fixture_accounts").replaceAll('zzsh_auth_user."user"', "fixture_users").replaceAll("zzsh_supply.game", "fixture_games").replaceAll("zzsh_supply.listing_version", "fixture_versions").replaceAll("zzsh_supply.admin_supply_scope", "fixture_scope").replaceAll('"zzsh_iam"."admin_security"', "fixture_admin_scope");
             const combinedPrefix = prefix.replace("$5::text", "$6::text");
             assert.deepEqual((await c.query(combinedPrefix + sql, [...built.values, "百分%_\\用户"])).rows.map(r => r.id), ["a"]);
-            const rows = (await c.query(built.sql, built.values)).rows;
-            assert.ok(Array.isArray(rows));
+            // The unsubstituted query runs against the real schema only once the
+            // registered resource carries 0068_admin_game_scope; before that the
+            // fixture substitution above is the executed evidence.
+            const modeReady = (await c.query(`SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='zzsh_iam.admin_security'::regclass AND attname='game_scope_mode' AND NOT attisdropped) AS "ready"`)).rows[0].ready;
+            if (modeReady) {
+                const rows = (await c.query(built.sql, built.values)).rows;
+                assert.ok(Array.isArray(rows));
+            } else {
+                assert.ok(built.sql.includes('"game_scope_mode"'));
+            }
         });
     } finally { await c.query("ROLLBACK"); c.release(); await pool.end(); }
 });

@@ -491,6 +491,20 @@
       "when": 1789490038000,
       "tag": "0069_legacy_read_snapshot_source_status",
       "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1789490039000,
+      "tag": "0070_admin_game_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1789490040000,
+      "tag": "0071_supply_backend_closeout",
+      "breakpoints": true
     }
   ]
 }

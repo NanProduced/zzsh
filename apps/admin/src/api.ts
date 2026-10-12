@@ -21,7 +21,26 @@ export type SessionSnapshot =
     };
 
 export type AdminStatus = "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN";
+export type AdminGameScopeMode = "ALL_GAMES" | "SELECTED_GAMES";
+export type AdminGameScope = { mode: AdminGameScopeMode; gameIds: string[] };
 export type AdminRoleSummary = { id?: string; code: string; name: string; status?: string };
+export type AdminActionEligibility = {
+  action: "update" | "assign" | "scope" | "freeze" | "unfreeze" | "force-logout";
+  allowed: boolean;
+  reasonCode:
+    | "OK"
+    | "ACTOR_INACTIVE"
+    | "PERMISSION_REQUIRED"
+    | "BOSS_ACTOR_REQUIRED"
+    | "BOSS_TARGET_NOT_CONFIGURABLE"
+    | "SELF_TARGET"
+    | "ALREADY_FROZEN"
+    | "NOT_FROZEN";
+  needsReauthentication: boolean;
+  /** 该写是全量替换，必须先完整读到当前集合。 */
+  needsFullGrantBaseline: boolean;
+};
+
 export type AdminDirectoryEntry = {
   id: string;
   username: string;
@@ -30,12 +49,48 @@ export type AdminDirectoryEntry = {
   isBoss?: boolean;
   createdAt?: string;
   lastFullAuthenticatedAt?: string | null;
+  /** 头像 URL；null/缺省回退姓名首字。 */
+  image?: string | null;
+  /** 会话事实摘要；与详情同形状，缺省表示当前运行版本未返回。 */
+  sessionSummary?: AdminSessionSummary;
   roles?: AdminRoleSummary[];
+  /** 个人允许/禁止条数，仅在持有 admin.permission.read 时返回。 */
+  personalGrantSummary?: { allows: number; denies: number };
+  /** 指定游戏数只在 SELECTED_GAMES 时给出；ALL_GAMES 不去数历史勾选。 */
+  scopeSummary?: { mode: AdminGameScopeMode; gameCount?: number };
+  securitySummary?: {
+    passwordChangeRequired: boolean;
+    /** null = 服务端未提供，不折算成"未启用"。 */
+    twoFactorEnabled: boolean | null;
+    bootstrapExpiresAt: string | null;
+    firstActivatedAt: string | null;
+  };
+  /** 服务端按写规则算出的操作资格预检；不是授权凭证，POST 仍在事务内重核。 */
+  actions?: AdminActionEligibility[];
+};
+export type AdminSecurityState = {
+  status: AdminStatus;
+  isBoss: boolean;
+  passwordChangeRequired: boolean;
+  /** null = 服务端未提供，不折算成"未启用"。 */
+  twoFactorEnabled: boolean | null;
+  bootstrapExpiresAt: string | null;
+  bootstrapUsedAt: string | null;
+  firstActivatedAt: string | null;
+};
+export type AdminSessionSummary = {
+  activeCount: number;
+  lockedCount: number;
+  /** 最近一条未过期会话的建立时间（服务端取会话表 MAX(createdAt)），语义不同于 lastFullAuthenticatedAt。 */
+  lastSessionCreatedAt: string | null;
 };
 export type AdminDirectoryDetail = AdminDirectoryEntry & {
   allowPermissions?: string[];
   denyPermissions?: string[];
   effectivePermissions?: string[];
+  scope?: AdminGameScope;
+  security?: AdminSecurityState;
+  sessionSummary?: AdminSessionSummary;
 };
 export type RestorableUserCandidate = {
   id: string;

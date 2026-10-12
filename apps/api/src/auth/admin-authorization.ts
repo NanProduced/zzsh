@@ -75,6 +75,13 @@ export const ADMIN_PERMISSION = {
 
 export const ADMIN_PERMISSION_CODES = Object.values(ADMIN_PERMISSION);
 
+/**
+ * Baseline business reads are available to every active administrator. They
+ * remain internal capability codes for existing route contracts, but are not
+ * role-assigned or individually denied in the effective access result.
+ */
+export const ADMIN_BASELINE_PERMISSION_CODES = [ADMIN_PERMISSION.orderRead] as const;
+
 export type AdminPermissionCode = (typeof ADMIN_PERMISSION_CODES)[number];
 export type AdminSecurityStatus = "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN";
 
@@ -105,6 +112,80 @@ export function requirePermission(access: EffectiveAdminAccess | null, code: str
   if (!hasPermission(access, code)) {
     throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Permission required");
   }
+}
+
+/**
+ * 管理员目录的治理写及其在事务内实际执行的前置条件。
+ *
+ * 这是**预检**，不是授权凭证：写接口仍在自身事务内 `lockActor` 后重新校验。
+ * 抽成纯函数的目的是让目录响应能说明"这个入口为什么不可用"，而不是让前端猜，
+ * 也避免 UI 与写规则各写一份判断后漂移。
+ */
+export const ADMIN_DIRECTORY_ACTIONS = ["update", "assign", "scope", "freeze", "unfreeze", "force-logout"] as const;
+export type AdminDirectoryAction = (typeof ADMIN_DIRECTORY_ACTIONS)[number];
+
+export type AdminActionEligibility = {
+  action: AdminDirectoryAction;
+  allowed: boolean;
+  reasonCode:
+    | "OK"
+    | "ACTOR_INACTIVE"
+    | "PERMISSION_REQUIRED"
+    | "BOSS_ACTOR_REQUIRED"
+    | "BOSS_TARGET_NOT_CONFIGURABLE"
+    | "SELF_TARGET"
+    | "ALREADY_FROZEN"
+    | "NOT_FROZEN";
+  /** 该写要求发起方当场再验证本人密码与动态码。 */
+  needsReauthentication: boolean;
+  /** 该写是全量替换，必须先完整读到当前集合才能安全提交。 */
+  needsFullGrantBaseline: boolean;
+};
+
+export function evaluateAdminDirectoryActions(input: {
+  actorId: string;
+  actorStatus: string;
+  actorIsBoss: boolean;
+  actorPermissions: ReadonlySet<string>;
+  targetId: string;
+  targetIsBoss: boolean;
+  targetStatus: string;
+}): AdminActionEligibility[] {
+  const active = input.actorStatus === "ACTIVE";
+  const self = input.actorId === input.targetId;
+  const build = (
+    action: AdminDirectoryAction,
+    permission: string | null,
+    options: { reauth?: boolean; fullBaseline?: boolean; bossMayNotTarget?: boolean; selfForbidden?: boolean } = {},
+  ): AdminActionEligibility => {
+    const eligibility: AdminActionEligibility = {
+      action,
+      allowed: false,
+      reasonCode: "OK",
+      needsReauthentication: options.reauth === true,
+      needsFullGrantBaseline: options.fullBaseline === true,
+    };
+    if (!active) eligibility.reasonCode = "ACTOR_INACTIVE";
+    else if (permission && !input.actorPermissions.has(permission)) eligibility.reasonCode = "PERMISSION_REQUIRED";
+    else if (action === "force-logout" && !input.actorIsBoss) eligibility.reasonCode = "BOSS_ACTOR_REQUIRED";
+    else if (options.bossMayNotTarget && input.targetIsBoss && !input.actorIsBoss) eligibility.reasonCode = "BOSS_ACTOR_REQUIRED";
+    else if (input.targetIsBoss && options.bossMayNotTarget === false) eligibility.reasonCode = "BOSS_TARGET_NOT_CONFIGURABLE";
+    else if (self && options.selfForbidden) eligibility.reasonCode = "SELF_TARGET";
+    else if (action === "freeze" && input.targetStatus === "FROZEN") eligibility.reasonCode = "ALREADY_FROZEN";
+    else if (action === "unfreeze" && input.targetStatus !== "FROZEN") eligibility.reasonCode = "NOT_FROZEN";
+    else eligibility.reasonCode = "OK";
+    eligibility.allowed = eligibility.reasonCode === "OK";
+    return eligibility;
+  };
+
+  return [
+    build("update", ADMIN_PERMISSION.accountUpdate, { bossMayNotTarget: true }),
+    build("assign", ADMIN_PERMISSION.permissionGrant, { fullBaseline: true, bossMayNotTarget: false }),
+    build("scope", ADMIN_PERMISSION.permissionGrant, { bossMayNotTarget: false }),
+    build("freeze", ADMIN_PERMISSION.accountFreeze, { reauth: true, bossMayNotTarget: true, selfForbidden: true }),
+    build("unfreeze", ADMIN_PERMISSION.accountUnfreeze, { reauth: true, bossMayNotTarget: true, selfForbidden: true }),
+    build("force-logout", null, { reauth: true, selfForbidden: true }),
+  ];
 }
 
 export async function loadEffectiveAdminAccess(
@@ -153,7 +234,9 @@ export async function loadEffectiveAdminAccess(
       )`,
     [userId],
   );
-  return { ...row, permissions: new Set(granted.rows.map((item) => item.permissionCode)) };
+  const permissions = new Set(granted.rows.map((item) => item.permissionCode));
+  for (const code of ADMIN_BASELINE_PERMISSION_CODES) permissions.add(code);
+  return { ...row, permissions };
 }
 
 export async function computeProposedPermissions(

@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { EffectiveAdminAccess } from "../auth/admin-authorization";
+import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { queryAdminReadOrders } from "../order/admin-order-read";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
@@ -39,9 +40,9 @@ export async function supervisionViewer(client: PoolClient, actor: {
     userId: string;
     sessionId: string;
 }, access: EffectiveAdminAccess): Promise<SupervisionViewer> {
-    const scope = (await client.query<{
-        gameId: string;
-    }>(`SELECT game_id AS "gameId" FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 ORDER BY game_id`, [actor.userId])).rows.map(r => r.gameId);
+    const gameScope = await readAdminGameScope(client, actor.userId);
+    assertGameScopeUsable(gameScope, access.isBoss);
+    const scope = gameScopeSignature(gameScope);
     return { adminId: actor.userId, sessionId: actor.sessionId, access, scope, contextKey: sha256Hex(JSON.stringify([actor.userId, actor.sessionId, access.isBoss, [...access.permissions].sort(), scope])) };
 }
 // Public listing cursors have a fixed public audience. Reuse their key validation,
@@ -111,7 +112,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     const binding = sha256Hex(JSON.stringify({ actor: viewer.contextKey, ...q, cursor: undefined })), after = q.cursor ? decodeSupervisionCursor(q.cursor, binding, key) : null;
     requireListingCursorKey(key);
     const values: unknown[] = [viewer.access.isBoss, viewer.adminId], p = (value: unknown) => "$" + values.push(value);
-    const where = [`($1::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$2 AND s.game_id=a.game_id))`];
+    const where = [gameScopeSql("a.game_id","$2","$1")];
     if (q.gameId)
         where.push(`a.game_id=${p(q.gameId)}`);
     if (q.view === "restricted")
@@ -148,7 +149,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         items.push({ ...row, accountId: a.id, displayNo: a.display_no, ownerId: a.owner_user_id, revision: a.revision, facts: await supervisionFacts(client, a, detail, gate) });
     }
     const last = visible.at(-1);
-    const games = (await client.query(`SELECT g.id,g.name FROM zzsh_supply.game g WHERE $1::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$2 AND s.game_id=g.id) ORDER BY g.name,g.id`, [viewer.access.isBoss, viewer.adminId])).rows;
+    const games = (await client.query(`SELECT g.id,g.name FROM zzsh_supply.game g ORDER BY g.name,g.id`)).rows;
     return { contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, query: { ...q, cursor: undefined }, games, items, nextCursor: rows.length > q.limit && last ? encodeSupervisionCursor({ at: last.sortAt, id: last.id }, binding, key) : null };
 }
 export async function readSupervision(client: PoolClient, a: PublishingAccount, viewer: SupervisionViewer, gate: SupplyGateReader, versionId: string | null) {
@@ -166,7 +167,7 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
     const originalRestrictionId = events.find(e => e.restricted === true)?.versionId;
     const originalRestriction: Record<string, any> | null = originalRestrictionId && history.some(h => h.id === originalRestrictionId) ? await listingDetail(client, { ...a, current_version_id: originalRestrictionId }, "admin", gate, quoteViewer, a) : null;
     const canOrder = viewer.access.permissions.has("order.read"), orders = canOrder ? await queryAdminReadOrders(client, { adminId: viewer.adminId, isBoss: viewer.access.isBoss, internalQuote: false, authorizationKey: viewer.contextKey }, { accountId: a.id, page: 1, pageSize: 5 }) : null;
-    const duplicateHints = (await client.query(`SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ($2 OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=related.game_id))`, [a.id, viewer.access.isBoss, viewer.adminId])).rows;
+    const duplicateHints = (await client.query(`SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`, [a.id, viewer.access.isBoss, viewer.adminId])).rows;
     const changes = previous?.version && detail.version ? { previousVersionId: previous.version.id, previousSequence: previous.version.sequence, changed: canonicalize(previous.version.declaration) !== canonicalize(detail.version.declaration) } : null;
     if (detail.version) {
         const media = detail.version.declaration.mediaBindings;

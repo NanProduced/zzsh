@@ -47,7 +47,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   const system: WorkspaceMenuItem[] = [];
   if (has("admin.account.read") || nav.isBoss) {
-    system.push({ label: "管理员", icon: UserRoundCogIcon, path: "/admins", kind: "admins" });
+    system.push({ label: "管理员管理", icon: UserRoundCogIcon, path: "/admins", kind: "admins" });
   }
   if (has("admin.role.read") || has("admin.permission.read")) {
     system.push({ label: "角色权限", icon: KeyRoundIcon, path: "/roles", kind: "roles" });
@@ -113,7 +113,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
 export function titleForPath(pathname: string): string {
   if (pathname.startsWith("/admins/")) return "管理员详情";
-  if (pathname === "/admins") return "管理员";
+  if (pathname === "/admins") return "管理员管理";
   if (pathname.startsWith("/roles/")) return "角色详情";
   if (pathname === "/roles") return "角色权限";
   if (pathname.startsWith("/approvals/")) return "审批详情";

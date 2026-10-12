@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 
+import { gameScopeSql } from "./admin-scope";
 import { conflict, forbidden, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { isEffectivePublicationState } from "../supply/listing-query";
@@ -263,12 +264,10 @@ export async function listUserDirectory(
               mig.legacy_id AS "migrationLegacyId", mig.source_created_at AS "migrationSourceCreatedAt",
               CASE WHEN $3::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
-                  AND ($1::boolean OR EXISTS (
-                    SELECT 1 FROM zzsh_supply.admin_supply_scope sc
-                     WHERE sc.admin_user_id = $2 AND sc.game_id = ra.game_id))) ELSE NULL END AS "resourceAccountCount",
+                  AND ${gameScopeSql("ra.game_id","$2","$1")}) ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
-                  AND ($1::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope sc WHERE sc.admin_user_id=$2 AND sc.game_id=o.game_id))) ELSE NULL END AS "currentOrderCount"
+                  AND ${gameScopeSql("o.game_id","$2","$1")}) ELSE NULL END AS "currentOrderCount"
          FROM zzsh_auth_user."user" u
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          ${MIGRATION_LATERAL}
@@ -338,12 +337,10 @@ export async function readUserDirectoryDetail(
               mig.evidence_ref AS "migrationEvidenceRef", mig.migrated_at AS "migratedAt",
               CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
-                  AND ($2::boolean OR EXISTS (
-                    SELECT 1 FROM zzsh_supply.admin_supply_scope sc
-                     WHERE sc.admin_user_id = $3 AND sc.game_id = ra.game_id))) ELSE NULL END AS "resourceAccountCount",
+                  AND ${gameScopeSql("ra.game_id","$3","$2")}) ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $5::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
-                  AND ($2::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope sc WHERE sc.admin_user_id=$3 AND sc.game_id=o.game_id))) ELSE NULL END AS "currentOrderCount"
+                  AND ${gameScopeSql("o.game_id","$3","$2")}) ELSE NULL END AS "currentOrderCount"
          FROM zzsh_auth_user."user" u
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          LEFT JOIN LATERAL (
@@ -458,9 +455,7 @@ export async function listUserRentalAccounts(
          LEFT JOIN zzsh_supply.listing_publication p ON p.version_id = v.id AND p.account_id = a.id
            AND p.owner_user_id=a.owner_user_id AND p.game_id=a.game_id AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash
         WHERE a.owner_user_id = $1
-          AND ($2::boolean OR EXISTS (
-            SELECT 1 FROM zzsh_supply.admin_supply_scope sc
-             WHERE sc.admin_user_id = $3 AND sc.game_id = a.game_id))
+          AND ${gameScopeSql("a.game_id","$3","$2")}
           AND ($4::timestamptz IS NULL OR a.created_at < $4::timestamptz OR (a.created_at = $4::timestamptz AND a.id < $5))
         ORDER BY a.created_at DESC, a.id DESC
         LIMIT $6`,
@@ -495,7 +490,7 @@ export async function readDirectoryRentalAccount(client:PoolClient,viewer:AdminD
   const account=(await client.query(`SELECT a.id AS "accountId",COALESCE(a.display_no,(SELECT l.legacy_account_no FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=a.id AND l.legacy_account_no IS NOT NULL ORDER BY l.imported_at DESC LIMIT 1)) AS "displayNo",
     a.owner_user_id AS "ownerUserId",u.name AS "ownerName",a.lifecycle,a.owner_paused AS "ownerPaused",a.staff_restricted AS "staffRestricted",a.legacy_hold AS "legacyHold",v.title,v.id AS "versionId",v.review_state AS "versionState",g.name AS "gameName",g.id AS "gameId"
     FROM zzsh_supply.rental_account a JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
-    WHERE a.id=$1 AND ($2::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=a.game_id))`,[accountId,viewer.isBoss,viewer.adminId])).rows[0];
+    WHERE a.id=$1 AND ${gameScopeSql("a.game_id","$3","$2")}`,[accountId,viewer.isBoss,viewer.adminId])).rows[0];
   if(!account)throw notFound();return {account,contextKey:viewer.authorizationKey};
 }
 
@@ -554,9 +549,7 @@ export async function listUserOrders(
   const values: unknown[] = [userId, viewer.isBoss, viewer.adminId];
   const conditions = [
     `(o.renter_user_id = $1 OR o.owner_user_id = $1)`,
-    `($2::boolean OR EXISTS (
-       SELECT 1 FROM zzsh_supply.admin_supply_scope sc
-        WHERE sc.admin_user_id = $3 AND sc.game_id = o.game_id))`,
+    gameScopeSql("o.game_id","$3","$2"),
   ];
   if (filter.role === "renter") conditions.push(`o.renter_user_id = $1`);
   if (filter.role === "owner") conditions.push(`o.owner_user_id = $1`);
@@ -632,7 +625,7 @@ export async function listUserOrders(
 
 async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,userId:string,filter:UserOrderFilter) {
   const key=sha256Hex(JSON.stringify({scope:'admin-user-read-orders',principal:viewer.adminId,authorizationKey:viewer.authorizationKey??null,userId,role:filter.role??'any',status:filter.status??null,limit:filter.limit}));
-  const cursor=parseKeysetCursor(filter.cursor,key),values:unknown[]=[userId,viewer.isBoss,viewer.adminId],where=[`(x.owner_user_id=$1 OR x.renter_user_id=$1)`,`($2::boolean OR EXISTS(SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=x.game_id))`];
+  const cursor=parseKeysetCursor(filter.cursor,key),values:unknown[]=[userId,viewer.isBoss,viewer.adminId],where=[`(x.owner_user_id=$1 OR x.renter_user_id=$1)`,gameScopeSql("x.game_id","$3","$2")];
   if(filter.role==='owner')where.push('x.owner_user_id=$1');if(filter.role==='renter')where.push('x.renter_user_id=$1');if(filter.status)where.push('x.status=$'+values.push(filter.status));
   const time='$'+values.push(cursor?.createdAt??null),id='$'+values.push(cursor?.id??null),limit='$'+values.push(filter.limit+1);
   where.push(`(${time}::timestamptz IS NULL OR COALESCE(x.created_at,'0001-01-01'::timestamptz)<${time}::timestamptz OR (COALESCE(x.created_at,'0001-01-01'::timestamptz)=${time}::timestamptz AND x.id<${id}))`);

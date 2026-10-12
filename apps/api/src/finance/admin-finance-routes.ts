@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
-import { loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
@@ -17,8 +17,8 @@ export async function authorizeAdminFinance(client: PoolClient, context: { userI
   await assertAdminContextInTransaction(client, context);
   const access = await loadEffectiveAdminAccess(client, context.userId);
   if (access?.passwordChangeRequired) throw new SecurityApiError(403, "FORBIDDEN", "Password change required");
-  const full = access?.status === "ACTIVE" && access.permissions.has("finance.read");
-  const documents = access?.status === "ACTIVE" && access.permissions.has("finance.document.read");
+  const full = access?.status === "ACTIVE" && access.permissions.has(ADMIN_PERMISSION.financeRead);
+  const documents = access?.status === "ACTIVE" && access.permissions.has(ADMIN_PERMISSION.financeDocumentRead);
   if (operation === "complete" ? !full : operation === "document" ? !documents : !full && !documents) throw new SecurityApiError(403, "FORBIDDEN", "Finance permission required");
   return { ...context, complete: full, authorizationKey: createHash("sha256").update(canonicalize([...access!.permissions].sort())).digest("hex") };
 }

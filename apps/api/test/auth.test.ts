@@ -1590,6 +1590,19 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(detail.body?.name, "只读员工已改名");
     assert.equal(detail.body?.id === readerCreate.body?.id, true);
     assert.equal("temporaryPassword" in (detail.body ?? {}), false);
+    // 安全摘要只出布尔与时间戳；status/isBoss 与顶层一致，不引入第二套同义枚举。
+    assert.equal(typeof detail.body?.security?.passwordChangeRequired, "boolean");
+    assert.equal(detail.body?.security?.status, detail.body?.status);
+    assert.equal(detail.body?.security?.isBoss, detail.body?.isBoss);
+    assert.equal("enrollmentState" in (detail.body?.security ?? {}), false);
+    assert.equal(typeof detail.body?.sessionSummary?.activeCount, "number");
+    assert.equal(typeof detail.body?.sessionSummary?.lockedCount, "number");
+    assert.equal(detail.body?.sessionSummary?.activeCount >= 0, true);
+    assert.equal(detail.body?.sessionSummary?.lockedCount <= detail.body?.sessionSummary?.activeCount, true);
+    const detailText = JSON.stringify(detail.body ?? {});
+    for (const leaked of ["temporaryPassword", "sessionToken", "pinHash", "recoveryToken", "totpSecret", "userAgent"]) {
+      assert.equal(detailText.includes(leaked), false, `detail must not expose ${leaked}`);
+    }
 
     const privilegedRole = await request(base, "/api/v1/admin/security/roles/create", {
       code: "privileged_ops",

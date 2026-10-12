@@ -14,8 +14,9 @@ import {
   type FundingPolicy,
   type OwnerDepositDeclaration,
 } from "./funding-policy";
+import { readFullPayoutTerms, fullPayoutTermsSourceSuffix } from "./full-payout-terms";
 import type { ConfirmationFunding, ConfirmationFundingReader } from "../order/personal-confirmation";
-import { readGuaranteeContextForGate as readCreditGuaranteeContext, type GuaranteeContext } from "../credit/credit-guarantee";
+import { readGuaranteeContext as readCreditGuaranteeContext, readGuaranteeContextForGate, type GuaranteeContext } from "../credit/credit-guarantee";
 import type { CreditGuaranteeGateSnapshot, ListingVersion, PublishingAccount, SupplyGate, SupplyGateReader } from "./publishing";
 
 type PolicyRow = { priceVersionId: string; policy: unknown | null; status: string; gameId: string; releaseId: string };
@@ -122,7 +123,7 @@ function proofFailureReasons(policy: FundingPolicy, priceVersionId: string, acco
   else if (!proof.valid) reasons.push("OUTSIDE_VALIDITY");
   if (policy.guaranteeRequirement.mode === "NOT_REQUIRED") {
     if (proof.status !== "NOT_REQUIRED" || proof.requiredCents !== "0" || proof.coveredCents !== "0" || proof.validUntil !== null) reasons.push("REQUIREMENT_MISMATCH");
-  } else if (proof.status !== "SATISFIED" || proof.requiredCents !== policy.guaranteeRequirement.requiredCents
+  } else if (proof.status !== "SATISFIED" || proof.validUntil === null || proof.requiredCents !== policy.guaranteeRequirement.requiredCents
     || BigInt(proof.coveredCents) < BigInt(policy.guaranteeRequirement.requiredCents)) {
     reasons.push("REQUIREMENT_MISMATCH");
   }
@@ -141,7 +142,7 @@ type FormalFundingContext = {
   creditGuarantee?: CreditGuaranteeGateSnapshot;
 };
 
-async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string, options: ProductionFundingAuthorityOptions = {}): Promise<FormalFundingContext | null> {
+async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string, options: ProductionFundingAuthorityOptions = {}, purpose: "READ" | "WRITE" = "WRITE"): Promise<FormalFundingContext | null> {
   const policyRow = versionId
     ? (await client.query<PolicyRow & { versionId: string; ownerUserId: string; accountId: string; contentHash: string | null; payload: ListingVersion["payload"]; currentVersionId: string | null; publicationSource: string | null }>(
       `SELECT p.id AS "priceVersionId",p.funding_policy AS policy,p.status,
@@ -163,7 +164,9 @@ async function readFormalContext(client: PoolClient, accountId: string, ownerUse
   const policy = validateFundingPolicy(policyRow.policy);
   if (options.creditGuaranteeEnabled) {
     let guaranteeContext: GuaranteeContext | null = null;
-    try { guaranteeContext = await readCreditGuaranteeContext(client, accountId, ownerUserId, versionId); } catch { /* capability stays UNKNOWN */ }
+    try {
+      guaranteeContext = await (purpose === "READ" ? readCreditGuaranteeContext : readGuaranteeContextForGate)(client, accountId, ownerUserId, versionId);
+    } catch { /* capability stays UNKNOWN */ }
     const creditGuarantee = creditGateSnapshot(guaranteeContext, {
       accountId, ownerUserId, gameId: policyRow.gameId, listingVersionId: versionId ?? null,
       priceVersionId: policyRow.priceVersionId, releaseId: policyRow.releaseId,
@@ -209,9 +212,9 @@ async function readFormalContext(client: PoolClient, accountId: string, ownerUse
 }
 
 export function createProductionSupplyGateReader(options: ProductionFundingAuthorityOptions = {}): SupplyGateReader {
-  return async (client, account) => {
+  return async (client, account, purpose = "WRITE") => {
     try {
-      const context = await readFormalContext(client, account.id, account.owner_user_id, undefined, options);
+      const context = await readFormalContext(client, account.id, account.owner_user_id, undefined, options, purpose);
       if (!context) return unknownGate();
       const publisherBail = context.guaranteeStatus === "REQUIRED_UNCOVERED" ? "PENDING" : context.guaranteeStatus === "UNKNOWN" ? "UNKNOWN" : context.guaranteeStatus;
       return { publisherBail, occupancy: "FREE" as const, reference: context.guaranteeReference || null, ...(context.creditGuarantee ? { creditGuarantee: context.creditGuarantee } : {}) };
@@ -223,6 +226,20 @@ export function createProductionSupplyGateReader(options: ProductionFundingAutho
 
 export const readFormalSupplyGate: SupplyGateReader = createProductionSupplyGateReader();
 const productionReaders = new WeakSet<ConfirmationFundingReader>();
+const productionReaderOptions = new WeakMap<ConfirmationFundingReader, ProductionFundingAuthorityOptions>();
+
+export async function assertFinalConfirmationFunding(client: PoolClient, expected: {
+  accountId: string; ownerUserId: string; priceVersionId: string; releaseId: string;
+  policyVersion: string; reference: string | null; status: string;
+}, reader?: ConfirmationFundingReader): Promise<void> {
+  const current = await readFormalContext(client, expected.accountId, expected.ownerUserId, undefined,
+    reader ? productionReaderOptions.get(reader) : undefined);
+  if (!current || current.priceVersionId !== expected.priceVersionId || current.releaseId !== expected.releaseId
+    || current.policy.policyVersion !== expected.policyVersion || current.guaranteeReference !== expected.reference
+    || current.guaranteeStatus !== expected.status) {
+    throw new SecurityApiError(503, "CONFIRMATION_DEPENDENCY_UNAVAILABLE", "Confirmation guarantee is no longer valid");
+  }
+}
 
 function fullPayout(value: unknown): { schema: "full-payout-declaration-v1"; selected: boolean } | null {
   if (value === undefined || value === null) return null;
@@ -250,21 +267,23 @@ export function createProductionConfirmationFundingReader(options: ProductionFun
     const selected = fullPayout(version.payload.declaration.attributes.full_payout_declaration);
     if (selected === null) return unavailable();
     validateOwnerDepositAmount(context.policy, declaration.amountCents, selected.selected);
+    const terms=selected.selected?await readFullPayoutTerms(client,account.game_id,context.policy,context.priceVersionId):undefined;
     const fundingBase = {
       version: context.policy.policyVersion,
-      sourceRef: `funding-policy:${context.priceVersionId}:${context.policy.policyVersion}:guarantee:${context.guaranteeReference}`,
+      sourceRef: `funding-policy:${context.priceVersionId}:${context.policy.policyVersion}:guarantee:${context.guaranteeReference}${terms?fullPayoutTermsSourceSuffix(terms):""}`,
       baseDepositCents: declaration.amountCents,
       publisherBailRequirementCents: context.publisherBailRequirementCents,
       vipWaiver: context.policy.vipWaiver,
       svipWaiver: context.policy.svipWaiver,
       fullPayoutPolicyRef: context.policy.fullPayoutPolicyRef,
     };
-    return { schema: "personal-quote-v2", ...fundingBase, fullPayoutPolicyVersion: context.policy.fullPayoutPolicyVersion, disclosureVersion: context.policy.disclosureVersion };
+    return { schema: "personal-quote-v2", ...fundingBase, fullPayoutPolicyVersion: context.policy.fullPayoutPolicyVersion, disclosureVersion: context.policy.disclosureVersion, ...(terms?{fullPayoutTerms:terms}:{}) };
     } catch {
       return unavailable();
     }
   };
   productionReaders.add(reader);
+  productionReaderOptions.set(reader, options);
   return reader;
 }
 

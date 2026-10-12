@@ -32,7 +32,8 @@ export class DirectorySqlFixture {
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql))return result([]);
-    if(sql.includes('"zzsh_iam"."admin_security"'))return result([{status:'ACTIVE',isBoss:this.isBoss,passwordChangeRequired:false}]);
+    if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':'SELECTED_GAMES',gameIds:this.isBoss?[]:this.gameIds}]);
+    if(sql.startsWith('SELECT "status", "is_boss"'))return result([{status:'ACTIVE',isBoss:this.isBoss,passwordChangeRequired:false}]);
     if(sql.includes('"zzsh_auth_admin"."session"'))return result([{locked:false,twoFactorEnabled:true,pinConfigured:true,createdAt:date,expiresAt:'2027-01-01T00:00:00Z'}]);
     if(sql.includes('WITH role_permissions'))return result(this.permissions.map(permissionCode=>({permissionCode})));
     if(sql.startsWith('SELECT game_id AS'))return result(this.gameIds.map(gameId=>({gameId})));

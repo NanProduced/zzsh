@@ -70,6 +70,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_workspace_layout" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_supply" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_supply" FROM ${runtimeUser};
+    -- ADM-SCOPE-1: the account-level scope writer replaces selected games, so it
+    -- needs DELETE on the scope table only; every other supply table stays append/update only.
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "zzsh_supply"."admin_supply_scope" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_content" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_content" FROM ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order" TO ${runtimeUser};
@@ -92,6 +95,11 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."user_identity_state" FROM ${runtimeUser};
   `);
   await configureSkinIdentityPrivileges(pool, runtimeRole);
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.full_payout_terms_version') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.full_payout_terms_version FROM ${runtimeUser};
+      GRANT INSERT(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser};
+      GRANT UPDATE(title,body,disclosure_version,digest,status,revision,updated_at,sealed_by_admin_id,sealed_at) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser}`);
+  }
   await pool.query(`GRANT USAGE, SELECT ON SEQUENCE "zzsh_iam"."admin_login_number_seq" TO ${runtimeUser}`);
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_supply.listing_filter_config TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_supply.listing_filter_config FROM ${runtimeUser}`);

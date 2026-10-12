@@ -8,6 +8,7 @@ import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingL
 import { DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 import { validateFundingPolicy } from "./funding-policy";
+import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
@@ -87,6 +88,7 @@ export async function listRules(
     termVersions: termVersions.rows,
     termOptions: termOptions.rows,
     agreementVersions: agreementVersions.rows,
+    fullPayoutTermsVersions: (await client.query(`SELECT id,policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt" FROM zzsh_supply.full_payout_terms_version WHERE game_id=$1 ORDER BY created_at DESC,id DESC LIMIT 20`,[gameId])).rows,
     items: items.rows,
   };
 }
@@ -95,7 +97,7 @@ async function lockDraftishVersion(
   client: PoolClient,
   adminUserId: string,
   isBoss: boolean,
-  table: "price_version" | "term_version" | "agreement_version",
+  table: "price_version" | "term_version" | "agreement_version" | "full_payout_terms_version",
   versionId: string,
 ): Promise<VersionRow> {
   const result = await client.query<VersionRow>(`SELECT * FROM "zzsh_supply"."${table}" WHERE "id" = $1 FOR UPDATE`, [versionId]);
@@ -215,20 +217,22 @@ export async function sealVersion(
   client: PoolClient,
   adminUserId: string,
   isBoss: boolean,
-  table: "price_version" | "term_version" | "agreement_version",
+  table: "price_version" | "term_version" | "agreement_version" | "full_payout_terms_version",
   versionId: string,
   expectedRevision: unknown,
 ): Promise<void> {
   const current = await lockDraftishVersion(client, adminUserId, isBoss, table, versionId);
   if (current.status !== "DRAFT") throw conflict("Version is already sealed");
   if (typeof expectedRevision !== "string" || current.revision !== expectedRevision) throw conflict("Version changed; refresh and retry");
-  if (table === "price_version" && current.funding_policy !== null && current.funding_policy !== undefined) validateFundingPolicy(current.funding_policy);
+  const terms=table === "price_version" && current.funding_policy !== null && current.funding_policy !== undefined
+    ? await readFullPayoutTerms(client,String(current.game_id),validateFundingPolicy(current.funding_policy)) : undefined;
+  if (table === "full_payout_terms_version") verifyFullPayoutTermsRow(current);
   await client.query(
     `UPDATE "zzsh_supply"."${table}"
         SET "status" = 'SEALED', "sealed_at" = clock_timestamp(), "sealed_by_admin_id" = $1,
-            "revision" = "revision" + 1, "updated_at" = clock_timestamp()
+            "revision" = "revision" + 1, "updated_at" = clock_timestamp()${terms?", full_payout_terms_version_id=$3, full_payout_terms_digest=$4, full_payout_disclosure_version=$5":""}
       WHERE "id" = $2`,
-    [adminUserId, versionId],
+    [adminUserId, versionId,...(terms?[terms.termsVersionId,terms.termsDigest,terms.disclosureVersion]:[])],
   );
 }
 
@@ -330,6 +334,26 @@ export async function updateAgreementDraft(
   );
 }
 
+export async function createFullPayoutTermsDraft(client: PoolClient, adminUserId: string, isBoss: boolean, gameId: string, body: Record<string, unknown>): Promise<{id: string}> {
+  await assertGameScope(client, adminUserId, isBoss, gameId);
+  const v=fullPayoutDraftFields(body),id=newSupplyId("payout");
+  await client.query(
+    `INSERT INTO zzsh_supply.full_payout_terms_version(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [id,gameId,v.policyRef,v.policyVersion,v.disclosureVersion,v.title,v.body,v.digest,adminUserId]);
+  return {id};
+}
+
+export async function updateFullPayoutTermsDraft(client: PoolClient, adminUserId: string, isBoss: boolean, id: string, body: Record<string, unknown>): Promise<void> {
+  const current=await lockDraftishVersion(client,adminUserId,isBoss,"full_payout_terms_version",id);
+  if(current.status!=="DRAFT")throw conflict("Sealed full-payout terms cannot be edited");
+  checkRevision(current,body.expectedRevision);
+  ensureOnlyFields(body,["expectedRevision","title","body","disclosureVersion"]);
+  if(!["title","body","disclosureVersion"].some(k=>Object.hasOwn(body,k)))throw invalid();
+  const v=fullPayoutDraftFields({policyRef:current.policy_ref,policyVersion:current.policy_version,
+    disclosureVersion:body.disclosureVersion===undefined?current.disclosure_version:body.disclosureVersion,title:body.title===undefined?current.title:body.title,body:body.body===undefined?current.body:body.body});
+  await client.query(`UPDATE zzsh_supply.full_payout_terms_version SET title=$1,body=$2,disclosure_version=$3,digest=$4,revision=revision+1,updated_at=clock_timestamp() WHERE id=$5`,[v.title,v.body,v.disclosureVersion,v.digest,id]);
+}
+
 export type ActivationResult = { releaseId: string; generation: string; affectedCount: number };
 
 export async function activateRelease(
@@ -361,7 +385,7 @@ export async function activateRelease(
   const pricePolicy = (await client.query<{ policy: unknown | null }>(
     `SELECT "funding_policy" AS policy FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
   )).rows[0]?.policy;
-  if (pricePolicy !== null && pricePolicy !== undefined) validateFundingPolicy(pricePolicy);
+  if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
   const nextGeneration = await client.query<{ generation: string }>(
     `SELECT (COALESCE(MAX("generation"), 0) + 1)::text AS "generation" FROM "zzsh_supply"."rule_release" WHERE "game_id" = $1`,
     [gameId],

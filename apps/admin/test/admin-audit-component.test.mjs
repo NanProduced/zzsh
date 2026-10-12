@@ -25,9 +25,11 @@ const { createRoot } = await import("react-dom/client");
 
 const vite = await createServer({
   root: adminRoot,
+  cacheDir: path.resolve(adminRoot, "../../tmp/admin-test-cache/admin-audit"),
+  configFile: false,
   plugins: [react()],
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
-  server: { middlewareMode: true, hmr: false },
+  server: { middlewareMode: true, hmr: false, ws: false, watch: null },
 });
 const { AdminAuditView } = await vite.ssrLoadModule("/src/views/admin-audit-view.tsx");
 
@@ -122,6 +124,19 @@ async function renderView(props = {}) {
   await render();
   return { rootNode, root, render, cleanup: async () => { await act(async () => root.unmount()); rootNode.remove(); } };
 }
+
+test("game scope action is selectable and carried into the audit read", async () => {
+  calls = [];
+  globalThis.fetch = mockFetch;
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: { action: "admin.game_scope.assigned" } });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.equal(calls[0].params.get("action"), "admin.game_scope.assigned");
+    const option = view.rootNode.querySelector('option[value="admin.game_scope.assigned"]');
+    assert.ok(option, "existing action picker must include game scope events");
+    assert.equal(option.selected, true);
+  } finally { await view.cleanup(); }
+});
 
 test("cursor stack paginates and safety details collapse by default", async () => {
   calls = [];

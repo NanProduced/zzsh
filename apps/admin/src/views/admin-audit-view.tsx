@@ -29,6 +29,7 @@ const actions = [
   "admin.account.created",
   "admin.account.updated",
   "admin.permission.assigned",
+  "admin.game_scope.assigned",
   "admin.role.created",
   "admin.role.updated",
   "admin.frozen",

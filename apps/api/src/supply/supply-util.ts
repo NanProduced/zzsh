@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { SecurityApiError } from "../auth/security-core";
+import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse } from "../auth/auth-security";
 
 export type SupplyNodeRequest = AuthSecurityNodeRequest & { ip?: string; socket?: { remoteAddress?: string } };
@@ -108,11 +109,9 @@ export function optionalNullableString(body: Record<string, unknown>, field: str
 
 export async function assertGameScope(client: PoolClient, adminUserId: string, isBoss: boolean, gameId: string): Promise<void> {
   if (isBoss) return;
-  const scoped = await client.query(
-    `SELECT 1 FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1 AND "game_id" = $2`,
-    [adminUserId, gameId],
-  );
-  if (scoped.rows.length === 0) throw notFound();
+  const scope = await readAdminGameScope(client, adminUserId);
+  assertGameScopeUsable(scope, false);
+  if (!scopeAllowsGame(scope, false, gameId)) throw notFound();
 }
 
 export async function assertGameExists(client: PoolClient, gameId: string): Promise<{ id: string; catalogRevision: string }> {

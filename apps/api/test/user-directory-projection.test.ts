@@ -81,7 +81,7 @@ test('technical trace is audit-authorized and does not change canonical dates or
 test('resources reuse effective publication facts and scope; no invented publication state',async()=>{
   const pool=new DirectorySqlFixture();const data:any=await listUserRentalAccounts(client(pool),viewer,'user_normal',{limit:20});
   assert.equal(data.items[0].publication.versionPublished,true);assert.equal(data.items[0].publication.source,'OWNER_DIRECT');
-  const sql=pool.queries.at(-1)!.sql;for(const predicate of ['admin_supply_scope','sc.game_id = a.game_id','p.content_hash=v.content_hash','p.rule_release_id=v.rule_release_id','p.owner_user_id=a.owner_user_id'])assert.ok(sql.includes(predicate));
+  const sql=pool.queries.at(-1)!.sql;for(const predicate of ['admin_supply_scope','sgame."game_id" = a.game_id','p.content_hash=v.content_hash','p.rule_release_id=v.rule_release_id','p.owner_user_id=a.owner_user_id'])assert.ok(sql.includes(predicate));
   pool.gameIds=[];const empty:any=await listUserRentalAccounts(client(pool),viewer,'user_normal',{limit:20});assert.deepEqual(empty.items,[]);
 });
 
@@ -93,7 +93,7 @@ test('order snapshots retain paid cancellation and missing paid timestamps; inte
   assert.equal(data.items[0].amounts.totalDue.amount,'160.00');assert.equal(data.items[0].amounts.totalDue.unit,'yuan');
   assert.deepEqual(new Set(data.items.map((row:any)=>row.role)),new Set(['renter','owner']));
   assert.ok(pool.queries.at(-1)!.sql.includes('(o.renter_user_id = $1 OR o.owner_user_id = $1)'));
-  assert.ok(pool.queries.at(-1)!.sql.includes('sc.game_id = o.game_id'));
+  assert.ok(pool.queries.at(-1)!.sql.includes('sgame."game_id" = o.game_id'));
 });
 
 test('audit retains existing Boss/self object scope and sensitive detail sanitation',async()=>{
@@ -103,10 +103,10 @@ test('audit retains existing Boss/self object scope and sensitive detail sanitat
   const boss:any=await listUserAuditEvents(client(pool),{...viewer,isBoss:true},'user_normal',{limit:20},sanitizeDetail);assert.equal(boss.scope,undefined);assert.equal(pool.queries.at(-1)!.sql.includes("e.actor_type = 'admin' AND e.actor_id"),false);
 });
 
-test('routes fail before domain queries; directory permission never grants supply or order',async()=>{
+test('directory permission does not grant supply/audit, while order core read is baseline',async()=>{
   const pool=new DirectorySqlFixture();pool.permissions=['user.directory.read','supply.review.read'];
-  for(const section of ['rental-accounts','orders','audit-events']) {const response=await route(`/api/v1/admin/users/user_normal/${section}`,pool);assert.equal(response.status,403);}
-  assert.equal(pool.queries.some(row=>row.sql.includes('SELECT 1 FROM zzsh_auth_user')),false);
+  for(const section of ['rental-accounts','audit-events']) {const response=await route(`/api/v1/admin/users/user_normal/${section}`,pool);assert.equal(response.status,403);}
+  assert.equal((await route('/api/v1/admin/users/user_normal/orders',pool)).status,200);
   const list=await route('/api/v1/admin/users',pool);assert.equal(list.status,200);assert.equal(list.body.items[0].resourceSummary.state,'denied');
 });
 

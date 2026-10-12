@@ -432,7 +432,9 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
     const createdGame = await request(base, "/api/bff/admin/supply/games", { code: "delta", name: "三角洲行动", description: "用户目录测试游戏" }, boss.jar, ADMIN_ORIGIN, "POST", orderKey());
     assert.equal(createdGame.response.status, 200, JSON.stringify(createdGame.body));
     const gameId = createdGame.body?.game?.id as string;
+    await runtimePool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`, [scopedViewer.id]);
     await runtimePool.query(`INSERT INTO zzsh_supply.admin_supply_scope (admin_user_id, game_id, granted_by_admin_id) VALUES ($1, $2, $3)`, [scopedViewer.id, gameId, boss.id]);
+    await runtimePool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`, [resourceViewer.id]);
     const createdAccount = await request(base, "/api/v1/supply/accounts", { gameId }, localJar, USER_ORIGIN, "POST", orderKey());
     assert.equal(createdAccount.response.status, 200, JSON.stringify(createdAccount.body));
     const accountId = createdAccount.body?.accountId as string;
@@ -558,8 +560,8 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
       assert.deepEqual((bossList.body?.items as any[]).map((item) => item.accountId), [accountId]);
       assert.equal((bossList.body?.items as any[])[0].game.name, "三角洲行动");
       const noScope = await request(base, `/api/v1/admin/users/${localUserId}/rental-accounts`, undefined, resourceViewer.jar, ADMIN_ORIGIN);
-      assert.equal(noScope.response.status, 200);
-      assert.deepEqual(noScope.body?.items, [], "non-Boss without the game scope sees no accounts");
+      assert.equal(noScope.response.status, 403, "non-Boss without a game scope gets a distinguishable no-scope result");
+      assert.equal(noScope.body?.error?.code, "NO_GAME_SCOPE");
       const scoped = await request(base, `/api/v1/admin/users/${localUserId}/rental-accounts`, undefined, scopedViewer.jar, ADMIN_ORIGIN);
       assert.deepEqual((scoped.body?.items as any[]).map((item) => item.accountId), [accountId]);
       const legacyAccounts = await request(base, `/api/v1/admin/users/${legacyUserId}/rental-accounts`, undefined, boss.jar, ADMIN_ORIGIN);

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Pool, PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
+import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { isAccountDisplayPubliclyEligible } from "./listing-query";
 import { assertGameScope, bumpCatalogRevision, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
@@ -430,6 +431,59 @@ export async function loadMediaAsset(
     [assetId],
   );
   return result.rows[0] ?? null;
+}
+
+/**
+ * Admin media review collection. Selected administrators with an explicit but
+ * empty game scope get NO_GAME_SCOPE here (collection entry), while a scoped
+ * administrator without a matching game simply gets an empty page.
+ */
+export async function listAdminMediaReviews(
+  client: PoolClient,
+  query: {
+    adminId: string;
+    isBoss: boolean;
+    state: string;
+    ownershipKind: string | null;
+    cursor: { createdAt: string; id: string } | null;
+    limit: number;
+  },
+): Promise<{ items: Record<string, unknown>[]; nextCursor: string | null; limit: number }> {
+  assertGameScopeUsable(await readAdminGameScope(client, query.adminId), query.isBoss);
+  const parameters: unknown[] = [query.state];
+  const conditions = [`a."review_state" = $1`];
+  if (query.ownershipKind) {
+    parameters.push(query.ownershipKind);
+    conditions.push(`a."ownership_kind" = $${parameters.length}`);
+  }
+  if (!query.isBoss) {
+    parameters.push(query.adminId);
+    conditions.push(gameScopeSql(`a."game_id"`, `$${parameters.length}`, "false"));
+  }
+  if (query.cursor) {
+    parameters.push(query.cursor.createdAt);
+    conditions.push(`(a."created_at", a."id") < ($${parameters.length}::timestamptz, $${parameters.length + 1})`);
+    parameters.push(query.cursor.id);
+  }
+  parameters.push(query.limit + 1);
+  const rows = await client.query(
+    `SELECT a."id", a."account_id" AS "accountId", a."game_id" AS "gameId", a."purpose", a."ownership_kind" AS "ownershipKind", a."owner_user_id" AS "ownerUserId",
+            a."uploaded_by_realm" AS "uploadedByRealm", a."uploaded_by_user_id" AS "uploadedByUserId", a."uploaded_by_admin_id" AS "uploadedByAdminId",
+            a."content_hash" AS "contentHash", a."mime", a."byte_size"::text AS "byteSize", a."width", a."height",
+            a."access_class" AS "accessClass", a."review_state" AS "reviewState", a."review_reason" AS "reviewReason", a."created_at" AS "createdAt"
+       FROM "zzsh_supply"."media_asset" a
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY a."created_at" DESC, a."id" DESC
+      LIMIT $${parameters.length}`,
+    parameters,
+  );
+  const hasMore = rows.rows.length > query.limit;
+  const items = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
+  const last = items[items.length - 1] as { createdAt: string; id: string } | undefined;
+  const nextCursor = hasMore && last
+    ? Buffer.from(JSON.stringify({ v: 1, state: query.state, ownershipKind: query.ownershipKind, createdAt: last.createdAt, id: last.id })).toString("base64url")
+    : null;
+  return { items, nextCursor, limit: query.limit };
 }
 
 async function lockMediaAsset(

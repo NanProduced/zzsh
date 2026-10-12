@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { SecurityApiError, recordAudit, withTransaction } from "../auth/security-core";
 import { assertAdminContextInTransaction } from "../auth/auth-security";
-import { loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { canonicalize } from "../supply/content-hash";
 import { financeSnapshot, readFinanceSourceVersion, type FinanceActor, type FinanceEntry, type FinanceFilters } from "./admin-finance-read";
 import type { AdminFinanceOptions } from "./admin-finance-routes";
@@ -43,7 +43,7 @@ export async function prepareAdminFinanceExport(options: AdminFinanceOptions, ac
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
     await assertAdminContextInTransaction(client, actor);
     const access = await loadEffectiveAdminAccess(client, actor.userId);
-    if (access?.status !== "ACTIVE" || access.passwordChangeRequired || !access.permissions.has("finance.read")) throw new SecurityApiError(403, "FORBIDDEN", "Finance permission required");
+    if (access?.status !== "ACTIVE" || access.passwordChangeRequired || !access.permissions.has(ADMIN_PERMISSION.financeRead)) throw new SecurityApiError(403, "FORBIDDEN", "Finance permission required");
     const authorizationKey = createHash("sha256").update(canonicalize([...access.permissions].sort())).digest("hex");
     const source = await readFinanceSourceVersion(client), facts = { ...source, entries:[],subjects:[],revisions:[],withdrawalsReady:source.ready.withdrawals };
     const snapshot = financeSnapshot(facts, filters, { ...actor, authorizationKey }, options.listingCursorKey, token);

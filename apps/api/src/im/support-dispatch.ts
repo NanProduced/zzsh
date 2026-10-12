@@ -6,7 +6,8 @@ import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lif
 export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[]; complaint: boolean };
 /** Transaction-local lock coverage, carried explicitly to every candidate read. */
 export type LockedSupportRoster = Readonly<{ client: PoolClient; appId: string; ids: readonly string[];
-  scopes: readonly { admin_user_id: string; game_id: string }[] }>;
+  scopes: readonly { admin_user_id: string; game_id: string }[];
+  scopeModes: readonly { admin_user_id: string; mode: string }[] }>;
 
 export async function lockDispatchGate(client: PoolClient, appId: string): Promise<void> {
   await client.query(`SET LOCAL lock_timeout = '750ms'`);
@@ -23,7 +24,7 @@ export async function lockSupportMutation(client: PoolClient, appId: string, use
   if (userIds.length) await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`, [userIds]);
   const ids = (await client.query<{ id: string }>(`SELECT admin_user_id AS id FROM zzsh_iam.im_support_presence WHERE app_id=$1
     UNION SELECT unnest($2::text[])`, [appId, adminIds])).rows.map((r) => r.id);
-  const security = await client.query<{ admin_user_id: string }>(`SELECT admin_user_id FROM zzsh_iam.admin_security WHERE admin_user_id=ANY($1::text[]) ORDER BY admin_user_id FOR SHARE NOWAIT`, [ids]);
+  const security = await client.query<{ admin_user_id: string; mode: string }>(`SELECT admin_user_id, game_scope_mode AS mode FROM zzsh_iam.admin_security WHERE admin_user_id=ANY($1::text[]) ORDER BY admin_user_id FOR SHARE NOWAIT`, [ids]);
   // IAM profile/freeze writes and assignment FKs share these subject rows.
   await client.query(`SELECT id FROM zzsh_auth_admin."user" WHERE id=ANY($1::text[]) ORDER BY id FOR SHARE NOWAIT`, [ids]);
   await client.query(`SELECT r.id FROM zzsh_iam.admin_role r WHERE EXISTS
@@ -37,7 +38,7 @@ export async function lockSupportMutation(client: PoolClient, appId: string, use
     ORDER BY admin_user_id,game_id FOR SHARE NOWAIT`, [ids]);
   const secured = new Set(security.rows.map((r) => r.admin_user_id));
   const mapped = new Set(mappings.rows.map((r) => r.platform_subject_id));
-  return { client, appId, ids: presence.rows.map((r) => r.admin_user_id).filter((id) => secured.has(id) && mapped.has(id)), scopes: scopes.rows };
+  return { client, appId, ids: presence.rows.map((r) => r.admin_user_id).filter((id) => secured.has(id) && mapped.has(id)), scopes: scopes.rows, scopeModes: security.rows };
 }
 
 /** Read only after lockSupportMutation. Mapping ownership is checked, not merely its status. */
@@ -58,7 +59,8 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
     const access = await loadEffectiveAdminAccess(client, row.adminUserId);
     if (![ADMIN_PERMISSION.imSupportRead, ADMIN_PERMISSION.imSupportAccept].every((p) => hasPermission(access, p))) continue;
     const scopes = locked.scopes.filter((s) => s.admin_user_id === row.adminUserId);
-    result.push({ ...row, allGames: access!.isBoss, gameIds: scopes.map((s) => s.game_id), complaint: hasPermission(access, ADMIN_PERMISSION.imSupportComplaint) });
+    const allGames = access!.isBoss || locked.scopeModes.some((s) => s.admin_user_id === row.adminUserId && s.mode === "ALL_GAMES");
+    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id), complaint: hasPermission(access, ADMIN_PERMISSION.imSupportComplaint) });
   }
   return result;
 }

@@ -8,11 +8,11 @@
 
 固定资源 `price_line.customerTier` 支持四档；同一物品的 owner 单价、单位数量与计价种类跨 tier 一致。缺某档价目不能回退。每行先按分 HALF_UP，再求两侧差额；六级子弹的60发/组沿既有单位合同；保险卡现有DAY实现与已确认按张规则的差异见下文，不作为新计价依据。
 
-价格草稿全量保存时，原规则或请求规则为 v2 的每一行必须显式包含 `customerTier`；缺失返回400且不改变规则、revision、价目或成功审计。仅v1保留省略tier表示STANDARD的兼容。当前Admin编辑器将v2或多档价目逐档只读展示，关闭保存、封存和旧版演算；v1编辑不变。
+价格草稿全量保存时，原规则或请求规则为 v2 的每一行必须显式包含 `customerTier`；缺失返回400且不改变规则、revision、价目或成功审计。仅v1保留省略tier表示STANDARD的兼容。当前Admin编辑器支持v1/v2与四档价目草稿维护；未知schema继续只读，SEALED版本不可编辑。v2模式参数和资金政策的完整表单接线仍需单独验证。
 
 发布与管理试算接口均由服务端指定 STANDARD，不接受客户端 tier。个人确认从服务端会员资格读取实际档位，缺对应价目不回退；DISCOUNT_USER 不引入免押。公开投影只含租客金额和 rentalMode，不含 owner 内价、平台利润或 pricingInputs。publishing-options 对 v2 返回 pricingSchema/rentalModes（只含启停与范围），不暴露 P/V。现有发布 UI 尚未提供 v2 模式编辑控件，不能将接口能力视为浏览器验收。
 
-旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员资格、个人确认凭据及新版建单已实现，见[个人确认合同](personal-confirmation.md)。正式声明、封存资金政策与保证金依据reader及核定API已接入；配置页面、推荐/披露接线、证明到期最终边界及独立包赔条款管理仍有缺口，缺依赖继续拒绝，不代表正式交易闭环已可用。
+旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员资格、个人确认凭据及新版建单已实现，见[个人确认合同](personal-confirmation.md)。正式声明、封存资金政策与保证金依据reader及核定API已接入；资金政策页面与推荐/披露接线仍有缺口；独立包赔正文版本及签发/首次建单末端检查已具备源码合同，对应新增数据库守卫与schema须部署并完成真实边界验收，缺依赖继续拒绝，不代表正式交易闭环已可用。
 
 用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。号主侧推荐押金由 `GET /accounts/{id}/deposit-recommendation` 按当前版本申报与正式 fundingPolicy 计算；成功时返回 `accountId/accountRevision/versionId/versionRevision/ruleReleaseId/priceVersionId` 与本次计算使用的规范化输入字段对象（`safeBoxCode/vitality/bear/dive/skinIds`），客户端必须与发起请求时的保存快照逐项比对，不匹配即标记过期且不提供采用；未配置政策或输入不足时返回 `available:false` 及原因，不返回猜测值。是否采用由号主决定，不会自动覆盖申报。Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:"full-payout-declaration-v1",selected:boolean}`，并参与现有内容 hash 与发布事实（历史审核流程保留真实决定）；字段缺省时继续省略，不改写旧 v1 hash。发布 UI 已提供普通/全额包赔申报控件（不自动勾选，最低金额以政策为准）；确认/账务的受控 test/fake 接线不代表正式配置或生产资金能力。
 

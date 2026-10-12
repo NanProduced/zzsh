@@ -141,11 +141,13 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         } finally { await c.query("ROLLBACK"); c.release(); }
       }
       assert.deepEqual(await withTransaction(pool,async(c)=>{const locked=await lockSupportMutation(c,"wrong-app");return readEligibleSupport(c,"wrong-app",locked);}),[]);
+      await ownerPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`,[a]);
       await ownerPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1`,[a]);
       const service=await createOrResumeUserConsultation(options,await user(),"SERVICE",null,`req_${run}_scope`);
       assert.equal(service.consultation.state,"ACTIVE");
       assert.equal((await group(f.orderId)).wait_reason,"NO_ELIGIBLE_STAFF");
       assert.equal((await o.api(`/api/v1/orders/${f.orderId}`)).body!.order.fulfillmentAssignment.waitingReason,"NO_ELIGIBLE_STAFF");
+      await pool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='ALL_GAMES' WHERE admin_user_id=$1`,[a]);
       await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[a,gameId]);
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.complaint'`,[a]);
       const complaint=await createOrResumeUserConsultation(options,await user(),"COMPLAINT",null,`req_${run}_denied_complaint`);

@@ -619,3 +619,55 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 
 .oc-trace p{overflow-wrap:anywhere}
+
+
+/* 角色权限页 Boss 身份卡。工作台的 --admin-accent 已被刻意改为 foreground
+   （纯中性强调系统，强调靠明度不靠色相），所以徽标沿用主按钮那套
+   实心 accent + accent-ink 配方；扫光只在 hover 播放一次，不做持续发光。 */
+.role-boss {
+  position: relative;
+  overflow: hidden;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--admin-accent) 45%, transparent);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--admin-accent) 9%, transparent);
+  transition: border-color 180ms ease-out, background-color 180ms ease-out;
+}
+.role-boss:hover {
+  border-color: color-mix(in oklab, var(--admin-accent) 78%, transparent);
+  background: color-mix(in oklab, var(--admin-accent) 14%, transparent);
+}
+.role-boss-mark {
+  display: inline-flex;
+  color: var(--admin-accent);
+  transition: transform 180ms ease-out;
+}
+.role-boss:hover .role-boss-mark { transform: translateY(-1px) scale(1.08); }
+.role-boss-badge {
+  border: 1px solid transparent;
+  background: var(--admin-accent);
+  color: var(--admin-accent-ink);
+}
+.role-boss-note { color: var(--admin-fg); }
+.role-boss::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(105deg, transparent 38%, color-mix(in oklab, var(--admin-accent) 16%, transparent) 50%, transparent 62%);
+}
+.role-boss:hover::after { animation: role-boss-sheen 720ms ease-out; }
+@keyframes role-boss-sheen {
+  from { transform: translateX(-100%); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .role-boss, .role-boss-mark { transition: none; }
+  .role-boss:hover .role-boss-mark { transform: none; }
+  .role-boss::after { display: none; }
+}
+
+/* 保留七列事实与可读表头，中小屏由 table-wrap 承接横向滚动。 */
+.admin-directory-table{min-width:1080px}

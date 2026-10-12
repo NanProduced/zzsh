@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
+import { gameScopeSql } from "../auth/admin-scope";
 import type { UserObligationReader } from "../auth/user-identity";
 import { canonicalize } from "../supply/content-hash";
 import { parseNonNegativeDecimal } from "../supply/decimal";
@@ -163,8 +164,8 @@ export async function readCreditSnapshot(client: PoolClient, userId: string, ini
             EXISTS(SELECT 1 FROM zzsh_credit.credit_event r WHERE r.reversal_of_id=e.id) AS reversed
        FROM zzsh_credit.credit_event e WHERE e.user_id=$1
          AND ($2::boolean IS NULL OR e.source_type NOT IN ('ACCOUNT','ORDER') OR $2::boolean OR
-           (e.source_type='ACCOUNT' AND EXISTS (SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.admin_supply_scope s ON s.game_id=a.game_id WHERE a.id=e.source_id AND s.admin_user_id=$3)) OR
-           (e.source_type='ORDER' AND EXISTS (SELECT 1 FROM zzsh_order.rental_order o JOIN zzsh_supply.admin_supply_scope s ON s.game_id=o.game_id WHERE o.id=e.source_id AND s.admin_user_id=$3)))
+           (e.source_type='ACCOUNT' AND EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.id=e.source_id AND ${gameScopeSql("a.game_id","$3","$2")})) OR
+           (e.source_type='ORDER' AND EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE o.id=e.source_id AND ${gameScopeSql("o.game_id","$3","$2")})))
        ORDER BY e.created_at DESC,e.id DESC`,
     [userId, scope ? scope.isBoss : null, scope?.adminId ?? null],
   )).rows;
@@ -591,7 +592,7 @@ type GuaranteeRefundHistoryRow = {
 };
 
 export async function readGuaranteeTransactions(client: PoolClient, userId: string, actor?: GuaranteeTransactionActor) {
-  const scoped = actor ? `AND ($2::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=a.game_id))` : "";
+  const scoped = actor ? `AND (${gameScopeSql("a.game_id","$3","$2")})` : "";
   const requirementParams = actor ? [userId, actor.isBoss, actor.userId] : [userId];
   const requirements = (await client.query(`SELECT r.id AS "requirementId",r.account_id AS "accountId",r.listing_version_id AS "listingVersionId",r.price_version_id AS "priceVersionId",r.base_cents::text AS "baseCents",r.required_cents::text AS "requiredCents",r.score_snapshot AS "scoreSnapshot",r.status AS "requirementStatus",r.created_at::text AS "requirementCreatedAt"
     FROM zzsh_order.owner_guarantee_requirement r

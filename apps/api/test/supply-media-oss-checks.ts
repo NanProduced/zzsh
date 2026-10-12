@@ -417,11 +417,14 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   // intentionally lacks DELETE on zzsh_supply tables.
   const revokedScopeBytes = await distinctBytes();
   const revokedScopeIntent = await createIntent(revokedScopeBytes.length);
+  await maintenance.query(`UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'SELECTED_GAMES' WHERE "admin_user_id" = $1`, [operator.id]);
   await maintenance.query(`DELETE FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1 AND "game_id" = $2`, [operator.id, gameId]);
   const writesBeforeRevokedScope = faults.writeCalls;
   const revokedScopeUpload = await uploadBytes(base, `/api/bff/admin/supply/media/uploads/${revokedScopeIntent.body?.intentId}`, operator.jar, revokedScopeIntent.body?.uploadToken as string, revokedScopeBytes, key("upload"));
-  assert.equal(revokedScopeUpload.status, 404, "a revoked game scope must be rejected before any object write");
+  assert.equal(revokedScopeUpload.status, 403, "a revoked game scope must be rejected before any object write");
+  assert.equal(revokedScopeUpload.body?.error?.code, "NO_GAME_SCOPE");
   assert.equal(faults.writeCalls, writesBeforeRevokedScope, "a revoked-scope request must perform zero storage writes");
+  await maintenance.query(`UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'ALL_GAMES' WHERE "admin_user_id" = $1`, [operator.id]);
   await maintenance.query(`INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`, [operator.id, gameId, boss.id]);
 
   const revokedPermissionIntent = await createIntent(revokedScopeBytes.length);
@@ -437,6 +440,7 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   const midRevocationIntent = await createIntent(midRevocationBytes.length);
   faults.afterWrite = async () => {
     faults.afterWrite = undefined;
+    await maintenance.query(`UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'SELECTED_GAMES' WHERE "admin_user_id" = $1`, [operator.id]);
     await maintenance.query(`DELETE FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1 AND "game_id" = $2`, [operator.id, gameId]);
   };
   const filesBeforeMidRevocation = await countMediaFiles(mediaDir);
@@ -448,9 +452,10 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
     midRevocationOrphans = captured.lines;
   } finally {
     faults.afterWrite = undefined;
+    await maintenance.query(`UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'ALL_GAMES' WHERE "admin_user_id" = $1`, [operator.id]);
     await maintenance.query(`INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`, [operator.id, gameId, boss.id]);
   }
-  assert.equal(midRevocationResult!.status, 404, "a revocation between the two phases must stop the final transaction");
+  assert.equal(midRevocationResult!.status, 403, "a revocation between the two phases must stop the final transaction");
   const midRevocationEntry = JSON.parse(midRevocationOrphans[0] ?? "null") as { intentId: string; storageKeys: string[]; phase: string } | null;
   assert.ok(midRevocationEntry, "the mid-revocation failure must record orphan candidates");
   assert.equal(midRevocationEntry!.intentId, midRevocationIntent.body?.intentId);

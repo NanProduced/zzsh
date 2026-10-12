@@ -360,18 +360,16 @@ type GameRow = {
   services: Array<{ id: string; serviceCode: GameServiceCode; enabled: boolean; revision: string; supported: boolean }>;
 };
 
-export async function listGames(client: PoolClient, adminUserId: string, isBoss: boolean): Promise<{ games: GameRow[] }> {
-  const scoped = isBoss
-    ? ""
-    : ` AND EXISTS (SELECT 1 FROM "zzsh_supply"."admin_supply_scope" s WHERE s."game_id" = g."id" AND s."admin_user_id" = $1)`;
+export async function listGames(client: PoolClient): Promise<{ games: GameRow[] }> {
+  // Game metadata is visible to every effective administrator (rule: scope
+  // filters business data, not the game picker); per-game reads stay scoped.
   const result = await client.query<GameRow>(
     `SELECT g."id", g."code", g."name", g."description", g."enabled",
             g."catalog_revision"::text AS "catalogRevision", g."current_release_id" AS "currentReleaseId",
             g."cover_media_id" AS "coverMediaId", g."created_at" AS "createdAt", g."updated_at" AS "updatedAt"
        FROM "zzsh_supply"."game" g
-      WHERE true${scoped}
+      WHERE true
       ORDER BY g."code"`,
-    isBoss ? [] : [adminUserId],
   );
   const serviceRows = await client.query<{
     id: string;
@@ -877,7 +875,7 @@ export async function readAdminCatalog(
     [gameId],
   );
   if (game.rows.length === 0) throw notFound();
-  const [items, rarities, categories, skins, entitlements, owners] = await Promise.all([
+  const [items, rarities, categories, skins, entitlements, owners, firearmOwners] = await Promise.all([
     client.query(
       `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "enabled",
               "sort_order" AS "sortOrder", "media_id" AS "mediaId", "source_field" AS "sourceField", "source_token" AS "sourceToken", "source_note" AS "sourceNote"
@@ -909,6 +907,7 @@ export async function readAdminCatalog(
       [gameId],
     ),
     client.query(`SELECT id,kind,code,name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 ORDER BY kind,code,id`, [gameId]),
+    client.query(`SELECT id,code,name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 ORDER BY sort_order,code,id`, [gameId]),
   ]);
   return {
     game: game.rows[0],
@@ -918,6 +917,7 @@ export async function readAdminCatalog(
     skins: skins.rows,
     entitlements: entitlements.rows,
     owners: owners.rows,
+    firearmOwners: firearmOwners.rows,
   };
 }
 import { DELTA_RESOURCE_UNITS } from "./delta-rental";

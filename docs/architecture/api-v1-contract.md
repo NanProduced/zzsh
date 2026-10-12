@@ -97,6 +97,20 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 - 保证金核定：管理 `GET/POST /api/v1/admin/supply/accounts/{id}/guarantee-proof`（同源BFF为 `/api/bff/admin/supply/...`）复用正式政策、声明与最新proof。读取需 `supply.guarantee.read` 和游戏范围；写入另需 `supply.guarantee.verify`，撤销需 `supply.guarantee.revoke`。POST绑定四个expected版本、status、evidenceRef/evidenceDigest和reason，追加不可变proof并审计；NOT_REQUIRED使用当前context返回的政策依据，不由旧payIs或未知金额推断豁免。SATISFIED核定材料也不是渠道到账通知。
 - 媒体接口不代表真实交易能力。正式资金政策/依据reader与保证金核定API已接入，完整配置/披露及真实资金渠道仍有缺口；订单与受控账务边界见下文及[结算合同](settlement-confirmation.md)。
 
+### 独立包赔条款与原操作恢复
+
+管理目录响应新增firearmOwners，仅含同游戏/同scope的id/code/name/enabled，不含改枪码、别名或私图，不产生gunsmith写权限。规则维护者可读取管理游戏索引，不必为索引取得目录或改枪码维护权。
+
+- 包赔正文独立于普通agreement：POST /api/v1/admin/supply/full-payout-terms-drafts 输入gameId/policyRef/policyVersion/disclosureVersion/title/body；PUT /full-payout-terms-drafts/{id} 输入expectedRevision和至少一个title/body/disclosureVersion；POST /full-payout-terms-drafts/{id}/seal 输入expectedRevision。均需supply.rules.edit、游戏scope及原事务幂等/审计。稳定身份/引用不可改，SEALED正文不可改或删除。创建初始revision为0，后续严格递增。
+- GET /full-payout-terms/{id}读取授权范围内单版正文；管理GET /games/{id}/rules增加fullPayoutTermsVersions摘要。资金政策新封存时在同一UPDATE绑定真实条款ID/digest/披露版本，生效核该绑定；旧封存价格不补绑，不按后来新增的同名正文追认。必须引用同游戏已封存版本；不向现行fundingPolicy严格schema追加digest字段。普通协议换版不自动改价格/保证金，不覆盖旧订单hash。
+- 公共GET /api/v1/supply/games/{id}/full-payout-terms可用releaseId绑定当前发布，返回releaseId/fullPayoutTerms（版本、正文、digest、披露版本），不返回资金内部参数。无适用资金政策时terms为null，不生成默认正文。正文不自动改变已确认8%等计算规则，生效仍由Boss审核规则发布。
+- 选择包赔的号主accept-rules和租客个人确认/首次建单显式提交fullPayoutTermsAcceptance={termsVersionId,termsDigest,disclosureVersion}。服务端匹配实际适用版本，缺项/错版拒绝；未选不接受该字段。号主接受记录与新订单实际资金依据绑定digest；正文永久保留，旧资料不补签/不重算。
+- GET /api/v1/admin/supply/operation-result?operation=...&resourceId=...&fingerprint=...（同源Admin BFF同路径）携带原Idempotency-Key，只恢复已列入白名单的目录、规则、平台目录媒体操作。resourceId必须与原幂等作用域一致（创建规则/意图时省略，目录词条创建使用gameId），不接受principalId/realm或任意操作。当前身份、原主体、操作/key/指纹及游戏scope均校验。
+- fingerprint沿既有UTF-8 SHA256(JSON.stringify([operation,resourceId??null,原请求JSON??null]))，保留原JSON字段表示。文件PUT沿既有`{intentId,token,contentHash:fingerprintRequest("bytes",intentId,文件base64)}`指纹合同；初次提交时计算并只保留最终指纹，不能持久化token/文件，也不能靠重传恢复。
+- 原记录存在返回receipt=RECORDED、responseStatus及必要白名单结果，不回吐整份缓存body、上传token/私证/金额。无原记录返回UNRESOLVED，可能仍在途，不能判未受理或发新key；回读401/403/404/5xx也不能作为原写失败。ACK后展示读取失败与未收到ACK分别保留。该GET不执行原业务写，请求有记录不代表文件公开或资金到账。
+
+独立条款schema、接受列及订单最终DB检查需要对应增量迁移。列表/详情显式READ用途使用无行锁的信用保证金投影；发布/确认/建单默认WRITE并保持锁内重核。应用签发及首次插单前重核最新有效proof/主体/版本；最终INSERT守卫还须用DB时钟核验。SQL源码或离线mock不代表这些数据库守卫已运行。
+
 ## 供给发布与审核（M3-C）
 
 核心前缀 `/api/v1/supply`，用户Cookie BFF为 `/api/bff/user/supply`（只适配传输，不重算业务）。管理审核核心前缀 `/api/v1/admin/supply/listing-reviews`，Admin BFF为 `/api/bff/admin/supply/listing-reviews`。

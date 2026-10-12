@@ -24,7 +24,7 @@ function clientFixture(row: Record<string, unknown> = legacy, options: { revisio
     else if (sql.includes('source_namespace COLLATE')) rows = options.sourceOccupied ? [{ id: "other_skin" }] : [];
     else if (sql.startsWith('SELECT name,enabled FROM')) rows = options.ownerGameMismatch ? [] : [{ name: "露娜", enabled: options.ownerEnabled ?? true }];
     else if (sql.includes('SELECT 1 FROM "zzsh_supply"."skin"')) rows = [];
-    else if (sql.includes('FROM "zzsh_supply"."admin_supply_scope"')) rows = [];
+    else if (sql.includes('"zzsh_supply"."admin_supply_scope"')) rows = sql.includes('"game_scope_mode"') ? [{ mode: "SELECTED_GAMES", gameIds: [] }] : [];
     else if (sql.includes('SELECT 1 FROM "zzsh_supply"."skin_category"') || sql.includes('SELECT 1 FROM "zzsh_supply"."game"')) rows = [{}];
     else if (!sql.startsWith('INSERT INTO zzsh_supply.')) throw new Error(`Unexpected query: ${sql}`);
     return { rows, rowCount: rows.length };
@@ -55,7 +55,7 @@ test("actual create writes a disabled pending draft and returns the terminal CAS
 
 test("actual writers reject stale revisions, foreign owner, source conflicts and failed terminal CAS", async () => {
   const unscoped = clientFixture();
-  await assert.rejects(createCatalogEntry(unscoped.client, "unscoped", false, "skins", "game_fixture", draft), /not found/);
+  await assert.rejects(createCatalogEntry(unscoped.client, "unscoped", false, "skins", "game_fixture", draft), /No game scope/);
   assert.ok(!unscoped.calls.some(c => c.sql.startsWith('INSERT')));
   const stale = clientFixture(legacy, { revision: "11" });
   await assert.rejects(createCatalogEntry(stale.client, "a", true, "skins", "game_fixture", draft), /Catalog changed/);

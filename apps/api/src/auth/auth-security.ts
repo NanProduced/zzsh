@@ -11,6 +11,7 @@ import {
 } from "./admin-authorization";
 import {
   assignAdministratorAccess,
+  assignAdministratorGameScope,
   createAdministrator,
   createRole,
   listAdministrators,
@@ -18,6 +19,7 @@ import {
   lockActor,
   nextAdminLogin,
   readAdministratorDetail,
+  readAdministratorGameScope,
   requireDirectoryPermission,
   updateAdministrator,
   updateRole,
@@ -1085,7 +1087,7 @@ async function forceLogoutAdmin(request: NodeRequest, response: NodeResponse, re
 async function listAdminDirectory(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
   const context = await readAdminContext(request, options);
   const access = await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
-  sendSuccess(response, await listAdministrators(options.pool, fieldAccessFrom(access)), requestId);
+  sendSuccess(response, await listAdministrators(options.pool, fieldAccessFrom(access), { ...access, id: context.userId }), requestId);
 }
 
 async function readAdminDirectoryDetail(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
@@ -1093,7 +1095,20 @@ async function readAdminDirectoryDetail(request: NodeRequest, response: NodeResp
   const access = await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
   const username = queryValue(request, "username");
   if (!username) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Administrator login is required");
-  sendSuccess(response, await readAdministratorDetail(options.pool, username, fieldAccessFrom(access)), requestId);
+  sendSuccess(response, await readAdministratorDetail(options.pool, username, fieldAccessFrom(access), { ...access, id: context.userId }), requestId);
+}
+
+async function readAdminGameScopeRoute(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
+  const username = queryValue(request, "username");
+  if (!username) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Administrator login is required");
+  sendSuccess(response, await readAdministratorGameScope(options.pool, username), requestId);
+}
+
+async function handleAssignAdministratorGameScope(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await assignAdministratorGameScope(context, bodyOf(request), requestId, options), requestId);
 }
 
 async function listAdminRoles(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
@@ -1432,6 +1447,7 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     if (request.method === "GET") {
       if (path === "/admins") return await listAdminDirectory(request, response, requestId, options);
       if (path === "/admins/detail") return await readAdminDirectoryDetail(request, response, requestId, options);
+      if (path === "/admins/scope") return await readAdminGameScopeRoute(request, response, requestId, options);
       if (path === "/roles") return await listAdminRoles(request, response, requestId, options);
       if (path === "/recovery/pending") return await listPendingRecovery(request, response, requestId, options);
       if (path === "/users/restore-candidates") return await listRestorableUserCandidates(request, response, requestId, options);
@@ -1455,6 +1471,7 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     if (path === "/admins/create") return await handleCreateAdministrator(request, response, requestId, options);
     if (path === "/admins/update") return await handleUpdateAdministrator(request, response, requestId, options);
     if (path === "/admins/assign") return await handleAssignAdministrator(request, response, requestId, options);
+    if (path === "/admins/scope") return await handleAssignAdministratorGameScope(request, response, requestId, options);
     if (path === "/roles/create") return await handleCreateRole(request, response, requestId, options);
     if (path === "/roles/update") return await handleUpdateRole(request, response, requestId, options);
     if (path === "/recovery/request") return await requestRecovery(request, response, requestId, options);

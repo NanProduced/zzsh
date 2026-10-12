@@ -63,6 +63,7 @@ const SECURITY_PATHS = new Map([
   ["/security/admins/force-logout", "/api/v1/admin/security/admins/force-logout"],
   ["/security/admins", "/api/v1/admin/security/admins"],
   ["/security/admins/detail", "/api/v1/admin/security/admins/detail"],
+  ["/security/admins/scope", "/api/v1/admin/security/admins/scope"],
   ["/security/admins/create", "/api/v1/admin/security/admins/create"],
   ["/security/admins/update", "/api/v1/admin/security/admins/update"],
   ["/security/admins/assign", "/api/v1/admin/security/admins/assign"],
@@ -91,6 +92,7 @@ const SECURITY_PATHS = new Map([
 const GET_SECURITY_PATHS = new Set([
   "/security/admins",
   "/security/admins/detail",
+  "/security/admins/scope",
   "/security/roles",
   "/security/recovery/pending",
   "/security/users/restore-candidates",

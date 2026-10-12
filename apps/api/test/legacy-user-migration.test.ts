@@ -100,7 +100,10 @@ class FakeClient {
       const row = this.idempotency.get(`${values[0]}|${values[1]}`);
       return { rows: row ? [row as T] : [], rowCount: row ? 1 : 0 };
     }
-    if (sql.includes("admin_security")) {
+    if (sql.startsWith('SELECT s."game_scope_mode"')) {
+      return { rows: [{ mode: this.scope ? "ALL_GAMES" : "SELECTED_GAMES", gameIds: [] } as T], rowCount: 1 };
+    }
+    if (sql.startsWith('SELECT "status", "is_boss"')) {
       return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false } as T], rowCount: 1 };
     }
     if (sql.includes("role_permissions") || sql.includes("admin_user_permission")) {

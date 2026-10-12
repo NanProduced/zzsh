@@ -300,9 +300,10 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
       const bossActor=await actor(boss,"admin");
       assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,bossActor,null,20))).items,[]);
       await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,bossActor,legacy.orderId)),{status:403});
+      await ownerPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`,[staff]);
       await ownerPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`,[staff,gameId]);
       try{assert.deepEqual((await withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20))).items,[]);await assert.rejects(withTransaction(pool,c=>readOrderTeamAccess(c,primary,legacy.orderId)),{status:403});}
-      finally{await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[staff,gameId]);}
+      finally{await pool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='ALL_GAMES' WHERE admin_user_id=$1`,[staff]);await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[staff,gameId]);}
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,[staff]);
       try{await assert.rejects(withTransaction(pool,c=>listJoinedOrderTeams(c,primary,null,20)),{status:403});}
       finally{await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='ALLOW' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,[staff]);}

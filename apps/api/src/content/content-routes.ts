@@ -422,10 +422,10 @@ async function handleAdminRead(
   }
   if (path === "/games") {
     const games = await withTransaction(options.pool, async (client) => {
-      const access = await requireAdminAccess(client, actor.id);
-      requirePermission(access, ADMIN_PERMISSION.contentRead);
-      const scoped = access.isBoss ? "" : ` AND EXISTS (SELECT 1 FROM "zzsh_supply"."admin_supply_scope" s WHERE s."game_id" = g."id" AND s."admin_user_id" = $1)`;
-      return (await client.query(`SELECT g."id", g."code", g."name" FROM "zzsh_supply"."game" g WHERE g."enabled"${scoped} ORDER BY g."code"`, access.isBoss ? [] : [actor.id])).rows;
+      await requireAdminAccess(client, actor.id);
+      // Game metadata is visible to every effective administrator; business
+      // content reads remain scoped through assertGameScope.
+      return (await client.query(`SELECT g."id", g."code", g."name" FROM "zzsh_supply"."game" g WHERE g."enabled" ORDER BY g."code"`)).rows;
     });
     sendJson(response, 200, { games }, requestId);
     return;

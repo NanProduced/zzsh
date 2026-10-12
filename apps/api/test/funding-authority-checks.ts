@@ -142,11 +142,13 @@ export async function runFundingAuthorityChecks(t: TestContext, o: {
       o.evidenceReadProbe.run = async () => { throw new Error("synthetic storage read unavailable"); };
       assert.equal((await readBytes(account, material.assetId)).status, 503);
     } finally { delete o.evidenceReadProbe.run; }
+    await o.ownerPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'SELECTED_GAMES' WHERE admin_user_id = $1`, [o.verifier.id]);
     await o.ownerPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id=$1 AND game_id=$2`, [o.verifier.id, o.gameId]);
     try {
-      assert.equal((await readBytes(account, material.assetId)).status, 404);
-      assert.equal((await write(account, b, o.verifier, idem)).response.status, 404);
+      assert.equal((await readBytes(account, material.assetId)).status, 403);
+      assert.equal((await write(account, b, o.verifier, idem)).response.status, 403);
     } finally {
+      await o.ownerPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'ALL_GAMES' WHERE admin_user_id = $1`, [o.verifier.id]);
       await o.ownerPool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$3)`, [o.verifier.id, o.gameId, o.boss.id]);
     }
   });

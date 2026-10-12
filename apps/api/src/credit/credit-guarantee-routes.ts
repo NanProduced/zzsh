@@ -2,6 +2,7 @@ import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
+import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
 import { assertUserContextInTransaction, readUserContext } from "../auth/user-identity";
 import { recordAudit, setAuditContext, withTransaction } from "../auth/security-core";
@@ -60,7 +61,7 @@ async function ownedGuarantees(client: PoolClient, userId: string) {
 }
 
 async function scopedGuarantees(client: PoolClient, userId: string, actor: { userId: string; isBoss: boolean }) {
-  const accounts = (await client.query(`SELECT id,display_no AS "displayNo",game_id AS "gameId" FROM zzsh_supply.rental_account WHERE owner_user_id=$1 AND ($2::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$3 AND s.game_id=rental_account.game_id)) ORDER BY id`, [userId, actor.isBoss, actor.userId])).rows as Array<{ id: string; displayNo: string | null; gameId: string }>;
+  const accounts = (await client.query(`SELECT id,display_no AS "displayNo",game_id AS "gameId" FROM zzsh_supply.rental_account WHERE owner_user_id=$1 AND ${gameScopeSql("rental_account.game_id","$3","$2")} ORDER BY id`, [userId, actor.isBoss, actor.userId])).rows as Array<{ id: string; displayNo: string | null; gameId: string }>;
   const items = [];
   for (const account of accounts) { const context = await readGuaranteeContext(client, account.id, userId); if (context) items.push({ ...context, displayNo: account.displayNo }); }
   return items.map(({ policy: _policy, ...item }) => item);
@@ -78,7 +79,9 @@ async function assertCreditSourceScope(client: PoolClient, actor: { userId: stri
 
 async function assertCreditUserScope(client: PoolClient, actor: { userId: string; isBoss: boolean }, userId: string): Promise<void> {
   if (actor.isBoss) return;
-  const scoped = await client.query(`SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id=$1 AND EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$2 AND s.game_id=a.game_id) UNION ALL SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id=$1 OR o.renter_user_id=$1) AND EXISTS (SELECT 1 FROM zzsh_supply.admin_supply_scope s WHERE s.admin_user_id=$2 AND s.game_id=o.game_id) LIMIT 1`, [userId, actor.userId]);
+  const scope = await readAdminGameScope(client, actor.userId);
+  assertGameScopeUsable(scope, false);
+  const scoped = await client.query(`SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id=$1 AND ${gameScopeSql("a.game_id","$2","$3")} UNION ALL SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id=$1 OR o.renter_user_id=$1) AND ${gameScopeSql("o.game_id","$2","$3")} LIMIT 1`, [userId, actor.userId, false]);
   if (!scoped.rowCount) throw notFound();
 }
 

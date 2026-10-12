@@ -382,6 +382,10 @@ test("M3 content foundation: announcements, news, carousel and platform media un
       `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3), ($4, $5, $3)`,
       [gameEditor.id, gameA, boss.id, supplyOperator.id, gameA],
     );
+    await runtimePool.query(
+      `UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'SELECTED_GAMES' WHERE "admin_user_id" = ANY($1::text[])`,
+      [[gameEditor.id, supplyOperator.id, unscopedEditor.id]],
+    );
 
     // ---------- 权限与范围 ----------
     const announcementWithGame = await request(base, "/api/bff/admin/content/items", { type: "ANNOUNCEMENT", gameId: gameA, title: "非法归属" }, platform.jar, ADMIN_ORIGIN, "POST", key());
@@ -389,7 +393,8 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     const gameEditorAnnouncement = await request(base, "/api/bff/admin/content/items", { type: "ANNOUNCEMENT", title: "越权公告" }, gameEditor.jar, ADMIN_ORIGIN, "POST", key());
     assert.equal(gameEditorAnnouncement.response.status, 403, "game content permission must not manage platform announcements");
     const unscopedNews = await request(base, "/api/bff/admin/content/items", { type: "NEWS", gameId: gameA, title: "无范围资讯" }, unscopedEditor.jar, ADMIN_ORIGIN, "POST", key());
-    assert.equal(unscopedNews.response.status, 404, "content permission without game scope must not create game news");
+    assert.equal(unscopedNews.response.status, 403, "content permission without game scope must not create game news");
+    assert.equal(unscopedNews.body?.error?.code, "NO_GAME_SCOPE");
     const crossGameNews = await request(base, "/api/bff/admin/content/items", { type: "NEWS", gameId: gameB, title: "跨游戏资讯" }, gameEditor.jar, ADMIN_ORIGIN, "POST", key());
     assert.equal(crossGameNews.response.status, 404, "scope for one game must not manage another game");
     const platformGameNews = await request(base, "/api/bff/admin/content/items", { type: "NEWS", gameId: gameA, title: "平台无游戏范围" }, platform.jar, ADMIN_ORIGIN, "POST", key());
@@ -399,7 +404,8 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     const gameEditorCarouselList = await request(base, "/api/bff/admin/content/carousel", undefined, gameEditor.jar, ADMIN_ORIGIN);
     assert.equal(gameEditorCarouselList.response.status, 403);
     const unscopedList = await request(base, `/api/bff/admin/content/items?scope=game&gameId=${gameA}`, undefined, unscopedEditor.jar, ADMIN_ORIGIN);
-    assert.equal(unscopedList.response.status, 404, "content list must check game scope");
+    assert.equal(unscopedList.response.status, 403, "content list must check game scope");
+    assert.equal(unscopedList.body?.error?.code, "NO_GAME_SCOPE");
     const platformOnlyGameList = await request(base, "/api/bff/admin/content/games", undefined, platform.jar, ADMIN_ORIGIN);
     assert.equal(platformOnlyGameList.response.status, 403, "game selector requires game content read");
 

@@ -22,6 +22,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { createRoot } = await import('react-dom/client');
 const vite = await createServer({
   root: rootPath,
+  cacheDir: path.resolve(rootPath, '../../tmp/admin-test-cache/workspace-origin-links'),
   configFile: false,
   plugins: [
     react(),
@@ -42,7 +43,8 @@ export default WorkbenchPage;`;
     },
   ],
   resolve: { alias: { '@': path.join(rootPath, 'src'), '@brand': path.resolve(rootPath, '../../assets/brand') } },
-  server: { middlewareMode: true, hmr: false },
+  optimizeDeps: { noDiscovery: true, include: [] },
+  server: { middlewareMode: true, hmr: false, ws: false, watch: null },
 });
 const { WorkspacePageContent } = await vite.ssrLoadModule('/src/workspace/page-content.tsx');
 after(async () => { await vite.close(); await browser.happyDOM.abort(); });
@@ -53,6 +55,11 @@ const order = { orderId: 'order_cancel', displayNo: 'TEST-1003', status: 'CANCEL
 
 globalThis.fetch = async (input) => {
   const url = new URL(String(input), browser.location.href);
+  const admin = { id: 'admin-fixture', username: 'ZZ00002', name: '测试运营', status: 'ACTIVE', isBoss: false, roles: [], createdAt: '2026-09-24T04:00:00Z' };
+  if (url.pathname.endsWith('/security/admins')) return json({ admins: [admin] });
+  if (url.pathname.endsWith('/security/admins/detail')) return json({ ...admin, allowPermissions: [], denyPermissions: [], effectivePermissions: ['order.read'] });
+  if (url.pathname.endsWith('/security/roles')) return json({ roles: [], permissions: [] });
+  if (url.pathname.endsWith('/supply/games')) return json({ games: [] });
   if (url.pathname === '/api/bff/admin/users/user_normal') return json({ user });
   if (url.pathname.endsWith('/orders')) return json({ items: [order], nextCursor: null });
   if (url.pathname.endsWith('/rental-accounts')) return json({ items: [], nextCursor: null });
@@ -122,4 +129,17 @@ test('order detail without an origin user or without user permission shows no re
   const noPermission = await mount(t, orderTab({ fromUserId: 'user_normal', fromUserSection: 'orders' }), snapshot(['order.read']));
   await settle(60);
   assert.equal(namedButton('返回来源用户'), undefined, 'without user.directory.read the return entry stays hidden');
+});
+
+test('admin list keeps its query filters inside the workspace tab without opening any dialog', async (t) => {
+  const query = { q: '测试', status: 'ACTIVE' };
+  const list = { id: 'admins', title: '管理员', path: '/admins', query, closable: true, kind: 'admins' };
+  const read = snapshot(['admin.account.read', 'admin.role.read', 'admin.permission.read']);
+  const h = await mount(t, list, read);
+  await waitFor(() => namedButton('测试运营'));
+  assert.equal(browser.document.querySelectorAll('tbody tr').length, 1, 'tab 查询里的筛选要真的生效');
+  assert.equal(browser.document.querySelector('[data-admin-detail]'), null, '列表挂载不自动打开信息弹窗');
+  assert.equal(h.opened.length, 0);
+  // 信息弹窗叠加在工作区之上的行为由组件套件与真实浏览器覆盖：
+  // happy-dom 在 workspace 样式表上重算弹窗会触发 RangeError，不是产品缺陷。
 });

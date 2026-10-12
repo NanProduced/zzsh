@@ -56,6 +56,8 @@ import { GAME_SERVICE, isSupportedGameService, requirePublicGameService, require
 import {
   activateRelease,
   createAgreementDraft,
+  createFullPayoutTermsDraft,
+  updateFullPayoutTermsDraft,
   createPriceDraft,
   createTermDraft,
   listRules,
@@ -65,6 +67,9 @@ import {
   updatePriceDraft,
   updateTermDraft,
 } from "./rules";
+import { readFullPayoutTerms } from "./full-payout-terms";
+import { readAdminSupplyOperationResult } from "./supply-operation-results";
+import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
 import {
   MAX_MEDIA_BYTES,
@@ -72,6 +77,7 @@ import {
   changeMediaVisibility,
   finalizeMediaUpload,
   createMediaUploadIntent,
+  listAdminMediaReviews,
   loadMediaAsset,
   logOrphanedMediaObjects,
   prepareMediaUpload,
@@ -475,6 +481,19 @@ export async function handleSupplyUserRoute(
         sendJson(response,200,{games: rows},requestId);
         return;
       }
+      const payoutMatch=/^\/games\/([^/]+)\/full-payout-terms$/.exec(path);
+      if(payoutMatch){
+        const gameId=decodeId(payoutMatch[1]!);
+        for(const name of query.keys())if(name!=="releaseId" || query.getAll(name).length!==1)throw invalid("Unsupported terms query");
+        const requestedReleaseId=query.has("releaseId")?decodeId(query.get("releaseId")!):undefined;
+        const result=await withPublicListingSnapshot(options.pool,async client=>{
+          await requirePublicGameService(client,gameId,GAME_SERVICE.ACCOUNT_RENTAL);
+          const row=(await client.query(`SELECT r.id,p.id AS "priceVersionId",p.funding_policy AS policy FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled AND p.status='SEALED'`,[gameId])).rows[0];
+          if(!row || (requestedReleaseId!==undefined && requestedReleaseId!==row.id))throw notFound();
+          return {releaseId:row.id,fullPayoutTerms:row.policy===null?null:await readFullPayoutTerms(client,gameId,validateFundingPolicy(row.policy),row.priceVersionId)};
+        });
+        sendJson(response,200,result,requestId);return;
+      }
       const catalogMatch = /^\/games\/([^/]+)\/(catalog|publishing-catalog)$/.exec(path);
       if (catalogMatch) {
         const gameId = decodeId(catalogMatch[1]!);
@@ -650,7 +669,7 @@ export async function handleSupplyAdminRoute(
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
 
     if (method === "GET") {
-      await handleAdminRead(response, options, requestId, path, query, context.userId, context.sessionId);
+      await handleAdminRead(response, options, requestId, path, query, context.userId, context.sessionId, headerValue(request.headers["idempotency-key"]));
       return;
     }
     if (method !== "POST" && method !== "PUT") throw notFound();
@@ -680,6 +699,7 @@ async function handleAdminRead(
   query: URLSearchParams,
   adminUserId: string,
   adminSessionId: string,
+  idempotencyKeyHeader?: string,
 ): Promise<void> {
   const guaranteeActor = { id: adminUserId, sessionId: adminSessionId };
   const evidenceMatch = /^\/accounts\/([^/]+)\/guarantee-evidence\/([^/]+)\/content$/.exec(path);
@@ -735,11 +755,19 @@ async function handleAdminRead(
     sendJson(response, 200, projected, requestId);
     return;
   }
+  if(path==="/operation-result"){
+    const result=await withTransaction(options.pool,async client=>{
+      await assertAdminContextInTransaction(client,{userId:adminUserId,sessionId:adminSessionId});
+      const access=await requireAdminAccess(client,adminUserId);
+      return readAdminSupplyOperationResult(client,adminUserId,access,query,idempotencyKeyHeader);
+    });sendJson(response,200,result,requestId);return;
+  }
   if (path === "/games") {
     const games = await withTransaction(options.pool, async (client) => {
+      // Game metadata is a baseline admin read: scope filters business rows,
+      // while the picker itself stays available to every active administrator.
       const access = await requireAdminAccess(client, adminUserId);
-      if (!hasPermission(access, ADMIN_PERMISSION.supplyCatalogManage)) requirePermission(access, ADMIN_PERMISSION.supplyGunsmithManage);
-      return listGames(client, adminUserId, access.isBoss);
+      return listGames(client);
     });
     sendJson(response, 200, games, requestId);
     return;
@@ -766,6 +794,15 @@ async function handleAdminRead(
     });
     sendJson(response, 200, result, requestId);
     return;
+  }
+  const payoutRead=/^\/full-payout-terms\/([^/]+)$/.exec(path);
+  if(payoutRead){
+    const id=decodeId(payoutRead[1]!);if([...query.keys()].length)throw invalid("Unsupported terms query");
+    const result=await withTransaction(options.pool,async client=>{
+      const access=await requireAdminAccess(client,adminUserId);requirePermission(access,ADMIN_PERMISSION.supplyRulesEdit);
+      const row=(await client.query(`SELECT id,game_id AS "gameId",policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,body,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt" FROM zzsh_supply.full_payout_terms_version WHERE id=$1`,[id])).rows[0];
+      if(!row)throw notFound();await assertGameScope(client,adminUserId,access.isBoss,row.gameId);return row;
+    });sendJson(response,200,result,requestId);return;
   }
   const rulesMatch = /^\/games\/([^/]+)\/rules$/.exec(path);
   if (rulesMatch) {
@@ -887,38 +924,7 @@ async function handleAdminRead(
         }
         cursorRow = { createdAt: decoded.createdAt, id: decoded.id };
       }
-      const parameters: unknown[] = [state];
-      const conditions = [`a."review_state" = $1`];
-      if (ownershipKind) {
-        parameters.push(ownershipKind);
-        conditions.push(`a."ownership_kind" = $${parameters.length}`);
-      }
-      if (!access.isBoss) {
-        parameters.push(adminUserId);
-        conditions.push(`EXISTS (SELECT 1 FROM "zzsh_supply"."admin_supply_scope" s WHERE s."game_id" = a."game_id" AND s."admin_user_id" = $${parameters.length})`);
-      }
-      if (cursorRow) {
-        parameters.push(cursorRow.createdAt);
-        conditions.push(`(a."created_at", a."id") < ($${parameters.length}::timestamptz, $${parameters.length + 1})`);
-        parameters.push(cursorRow.id);
-      }
-      parameters.push(limit + 1);
-      const rows = await client.query(
-        `SELECT a."id", a."account_id" AS "accountId", a."game_id" AS "gameId", a."purpose", a."ownership_kind" AS "ownershipKind", a."owner_user_id" AS "ownerUserId",
-                a."uploaded_by_realm" AS "uploadedByRealm", a."uploaded_by_user_id" AS "uploadedByUserId", a."uploaded_by_admin_id" AS "uploadedByAdminId",
-                a."content_hash" AS "contentHash", a."mime", a."byte_size"::text AS "byteSize", a."width", a."height",
-                a."access_class" AS "accessClass", a."review_state" AS "reviewState", a."review_reason" AS "reviewReason", a."created_at" AS "createdAt"
-           FROM "zzsh_supply"."media_asset" a
-          WHERE ${conditions.join(" AND ")}
-          ORDER BY a."created_at" DESC, a."id" DESC
-          LIMIT $${parameters.length}`,
-        parameters,
-      );
-      const hasMore = rows.rows.length > limit;
-      const items = hasMore ? rows.rows.slice(0, limit) : rows.rows;
-      const last = items[items.length - 1] as { createdAt: string; id: string } | undefined;
-      const nextCursor = hasMore && last ? Buffer.from(JSON.stringify({ v: 1, state, ownershipKind, createdAt: last.createdAt, id: last.id })).toString("base64url") : null;
-      return { items, nextCursor, limit };
+      return listAdminMediaReviews(client, { adminId: adminUserId, isBoss: access.isBoss, state, ownershipKind, cursor: cursorRow ?? null, limit });
     });
     sendJson(response, 200, result, requestId);
     return;
@@ -1267,6 +1273,20 @@ async function handleAdminWrite(
     }, "supply.catalog.entry_updated");
     return;
   }
+  if(path==="/full-payout-terms-drafts" && method==="POST"){
+    const body=bodyOf(request);ensureOnlyFields(body,["gameId","policyRef","policyVersion","disclosureVersion","title","body"]);
+    const gameId=decodeId(requiredString(body,"gameId",128));
+    await write("supply.rules.full_payout_terms_draft.create",undefined,ADMIN_PERMISSION.supplyRulesEdit,async()=>gameId,
+      async(client,access)=>({status:200,body:await createFullPayoutTermsDraft(client,actor.id,access.isBoss,gameId,body)}),"supply.rules.full_payout_terms_draft_created");return;
+  }
+  const payoutUpdate=/^\/full-payout-terms-drafts\/([^/]+)$/.exec(path);
+  if(payoutUpdate && method==="PUT"){
+    const id=decodeId(payoutUpdate[1]!),body=bodyOf(request);
+    await write("supply.rules.full_payout_terms_draft.update",id,ADMIN_PERMISSION.supplyRulesEdit,async client=>{
+      const row=(await client.query(`SELECT game_id AS "gameId" FROM zzsh_supply.full_payout_terms_version WHERE id=$1`,[id])).rows[0];
+      if(!row)throw notFound();return row.gameId;
+    },async(client,access)=>{await updateFullPayoutTermsDraft(client,actor.id,access.isBoss,id,body);return {status:200,body:{id}};},"supply.rules.full_payout_terms_draft_updated");return;
+  }
   if (path === "/price-drafts" && method === "POST") {
     const body = bodyOf(request);
     ensureOnlyFields(body, ["gameId", "mode"]);
@@ -1291,20 +1311,21 @@ async function handleAdminWrite(
     }, "supply.rules.price_draft_updated");
     return;
   }
-  const sealMatch = /^\/(price|term|agreement)-drafts\/([^/]+)\/seal$/.exec(path);
+  const sealMatch = /^\/(price|term|agreement|full-payout-terms)-drafts\/([^/]+)\/seal$/.exec(path);
   if (sealMatch && method === "POST") {
     const versionId = decodeId(sealMatch[2]!);
-    const table = sealMatch[1] === "price" ? "price_version" : sealMatch[1] === "term" ? "term_version" : "agreement_version";
+    const kind=sealMatch[1]==="full-payout-terms"?"full_payout_terms":sealMatch[1];
+    const table = kind === "price" ? "price_version" : kind === "term" ? "term_version" : kind === "agreement" ? "agreement_version" : "full_payout_terms_version";
     const body = bodyOf(request);
     ensureOnlyFields(body, ["expectedRevision"]);
-    await write(`supply.rules.${sealMatch[1]}_draft.seal`, versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
+    await write(`supply.rules.${kind}_draft.seal`, versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
       const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."${table}" WHERE "id" = $1`, [versionId]);
       if (!found.rows[0]) throw notFound();
       return found.rows[0].gameId;
     }, async (client, access) => {
       await sealVersion(client, actor.id, access.isBoss, table, versionId, body.expectedRevision);
       return { status: 200, body: { id: versionId, status: "SEALED" } };
-    }, `supply.rules.${sealMatch[1]}_draft_sealed`);
+    }, `supply.rules.${kind}_draft_sealed`);
     return;
   }
   if (path === "/term-drafts" && method === "POST") {

@@ -83,7 +83,8 @@ export function WorkspacePageContent({
         initialUsername={tab.objectId}
         objectOnly={tab.kind === "admin-object"}
         initialQuery={tab.query}
-        onOpenObject={(username, title) => onOpenPath(`/admins/${encodeURIComponent(username)}`, title)}
+        onOpenObject={(username, title) => { const query = new URLSearchParams(tab.query).toString(); onOpenPath(`/admins/${encodeURIComponent(username)}${query ? `?${query}` : ""}`, title); }}
+        onReturnToList={() => { const query = new URLSearchParams(tab.query).toString(); onOpenPath(`/admins${query ? `?${query}` : ""}`); }}
         onDirtyChange={onDirtyChange}
         onQueryChange={onQueryChange}
         refreshNonce={refreshNonce}
