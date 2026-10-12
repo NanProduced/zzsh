@@ -101,7 +101,7 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
     if (session.status !== "guest") {
       pendingRef.current = intent;
       setSessionReadFailed(session.status === "error");
-      if (session.status === "loading") session.revalidate();
+      if (session.status === "error") session.revalidate();
       return;
     }
     activateIntent(intent);

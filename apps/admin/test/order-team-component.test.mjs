@@ -6,6 +6,209 @@ import {Window} from 'happy-dom';
 import {act,createElement} from 'react';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
+
+// Real component + controlled SDK: receipts may arrive after switching orders or permissions.
+async function mountOrderSender(t, methods={}) {
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,ws:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const errors=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
+  const {ImLifecycleSupersededError}=await vite.ssrLoadModule('/packages/im-client/src/im-client-lifecycle.ts');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL,oldImage=globalThis.Image;
+  let imageNo=0;URL.createObjectURL=()=>`blob:sender-${++imageNo}`;URL.revokeObjectURL=()=>{};
+  class DecodedImage {naturalWidth=640;naturalHeight=360;set src(_url){queueMicrotask(()=>this.onload?.());}}
+  globalThis.Image=DecodedImage;
+  let canRead=true;
+  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[]});
+  const request=async url=>{
+    if(url.includes('/im?')){if(!canRead)throw Object.assign(new Error('forbidden'),{status:403});return access(url.includes('/a/')?'a':'b');}
+    return {items:['a','b'].map(id=>({id,title:`账号${id}`,displayNo:`ZZ-${id}`,status:'PAID',teamState:'READY'})),nextCursor:null};
+  };
+  const sent=(cid,text,id)=>({messageClientId:id,messageServerId:`server-${id}`,conversationId:cid,senderId:'viewer',createTime:10,text,messageType:0});
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},...methods};
+  const props={identity:'sender-review',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('sender review condition timed out');};
+  const render=async extra=>act(async()=>root.render(createElement(OrderTeamPanel,{...props,...extra})));
+  const click=async text=>{const button=[...node.querySelectorAll('button')].find(b=>b.textContent.includes(text));assert.ok(button,text);await act(async()=>button.click());};
+  const type=async value=>act(async()=>{const input=node.querySelector('textarea');assert.ok(input);Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  const submit=()=>act(async()=>node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  const stage=async count=>{
+    const input=node.querySelector('input[type=file]');Object.defineProperty(input,'files',{configurable:true,value:Array.from({length:count},(_,n)=>new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],`sender-${n}.png`,{type:'image/png'}))});
+    await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));await settle();
+  };
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;globalThis.Image=oldImage;await vite.close();browser.happyDOM.abort();});
+  await render();await until(()=>node.textContent.includes('ZZ-a'));await click('ZZ-a');await until(()=>node.querySelector('textarea'));
+  return {node,client,errors,ImLifecycleSupersededError,sent,render,settle,until,click,type,submit,stage,setRead:value=>{canRead=value;}};
+}
+
+test('image authorization cancelled by an order switch leaves a removable undispatched draft',async t=>{
+  let release,entered=false,dispatched=0;
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){entered=true;await new Promise(resolve=>{release=resolve;});await options.authorize({conversationId:cid,operation:'send'});dispatched++;return {...h.sent(cid,'','image'),messageType:1};}});
+  await h.stage(1);await h.submit();await h.until(()=>entered);await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单b');
+  await act(async()=>release());await h.settle();await h.click('ZZ-a');await h.until(()=>h.node.querySelector('.order-team-image-draft'));
+  const card=h.node.querySelector('.order-team-image-draft');assert.equal(dispatched,0);assert.equal(card.getAttribute('data-state'),'FAILED');
+  const remove=[...card.querySelectorAll('button')].find(button=>button.textContent==='移除');assert.equal(remove.disabled,false);
+  await act(async()=>remove.click());assert.equal(h.node.querySelector('.order-team-image-draft'),null);assert.equal(dispatched,0);
+});
+
+for(const reason of ['authorization denied','original id missing','SDK replaced'])test(`original image UNKNOWN survives retry rejection: ${reason}`,async t=>{
+  let sends=0,retries=0,retriedId,rejectRetry;
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});sends++;throw new h.errors.NimImageSendError('UNKNOWN','lost receipt',{messageClientId:'original-image'});},async retryImage(_cid,id){retries++;retriedId=id;if(reason==='SDK replaced')return new Promise((_resolve,reject)=>{rejectRetry=reject;});if(reason==='authorization denied')throw Object.assign(new Error('send authorization denied'),{status:403});throw new h.errors.NimImageSendError('FAILED','待重试的图片消息已不可用',{messageClientId:id});}});
+  await h.stage(1);await h.submit();await h.until(()=>h.node.querySelector('.order-team-image-draft[data-state=UNKNOWN]'));
+  await act(async()=>h.node.querySelector('.order-team-image-draft button').click());await h.until(()=>retries===1);
+  if(reason==='SDK replaced'){await h.render({client:{...h.client}});await act(async()=>rejectRetry(new h.ImLifecycleSupersededError()));}
+  await h.settle();const card=h.node.querySelector('.order-team-image-draft');assert.equal(card?.getAttribute('data-state'),'UNKNOWN');assert.equal(retriedId,'original-image');
+  assert.equal([...card.querySelectorAll('button')].find(button=>button.textContent==='移除').disabled,true);await h.submit();assert.equal(sends,1);assert.equal(retries,1,'ordinary submit cannot start another attempt');
+});
+
+for(const replaceClient of [false,true])test(`post-authorization image expiry stays UNKNOWN without an id: SDK replaced=${replaceClient}`,async t=>{
+  let rejectSend,dispatched=0;
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});dispatched++;return new Promise((_resolve,reject)=>{rejectSend=reject;});}});
+  await h.stage(1);await h.submit();await h.until(()=>dispatched===1);
+  if(replaceClient)await h.render({client:{...h.client}});else {await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单b');}
+  await act(async()=>rejectSend(replaceClient?new Error('old SDK is disposed'):new h.ImLifecycleSupersededError()));await h.settle();
+  if(!replaceClient){await h.click('ZZ-a');await h.until(()=>h.node.querySelector('.order-team-image-draft'));}
+  const card=h.node.querySelector('.order-team-image-draft');assert.equal(card?.getAttribute('data-state'),'UNKNOWN','missing id never proves lack of dispatch');
+  await act(async()=>card.querySelector('button').click());await h.submit();assert.equal(dispatched,1);assert.equal([...card.querySelectorAll('button')].find(button=>button.textContent==='移除').disabled,true);
+});
+
+test('pre-send cancellation cannot declare an old SDK attempt resolved after client replacement',async t=>{
+  let release,entered=false,dispatched=0;
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){entered=true;await new Promise(resolve=>{release=resolve;});await options.authorize({conversationId:cid,operation:'send'});dispatched++;return {...h.sent(cid,'','image'),messageType:1};}});
+  await h.stage(1);await h.submit();await h.until(()=>entered);await h.render({client:{...h.client}});
+  await act(async()=>release());await h.until(()=>h.node.querySelector('.order-team-image-draft[data-state=UNKNOWN]'));
+  assert.equal(dispatched,0);await h.submit();assert.equal(dispatched,0,'the UI cannot create a new message under the replacement SDK');
+});
+
+test('order sender keeps typing added while the original text is in flight',async t=>{
+  let release,calls=0;
+  const h=await mountOrderSender(t,{async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});calls++;return new Promise(resolve=>{release=()=>resolve(h.sent(cid,text,'typing'));});}});
+  await h.type('A');await h.submit();await h.until(()=>calls===1);await h.type('AB');
+  await act(async()=>release());await h.settle();
+  assert.equal(h.node.querySelector('textarea').value,'AB','edited draft survives the original receipt');
+});
+
+test('order sender text in flight remains locked after A to B to A and settles UNKNOWN with its original id',async t=>{
+  let reject,calls=0,retried;
+  const h=await mountOrderSender(t,{async sendText(cid,_text,authorize){await authorize({conversationId:cid,operation:'send'});calls++;return new Promise((_resolve,r)=>{reject=r;});},async retryText(cid,id,authorize){await authorize({conversationId:cid,operation:'send'});retried=id;return h.sent(cid,'A','original');}});
+  await h.type('A');await h.submit();await h.until(()=>calls===1);
+  await h.click('ZZ-b');await h.until(()=>h.node.querySelector('textarea')?.value==='');await h.click('ZZ-a');await h.until(()=>h.node.querySelector('textarea')?.value==='A');
+  assert.equal(h.node.querySelector('form button[type=submit]').disabled,true,'parent owns the original in-flight text');
+  await h.submit();assert.equal(calls,1);
+  await act(async()=>reject(new h.errors.NimTextSendError('UNKNOWN','未决',{messageClientId:'original'})));
+  await h.until(()=>h.node.textContent.includes('原消息重试'));await h.click('原消息重试');await h.until(()=>retried==='original');assert.equal(calls,1);
+});
+
+test('order sender preserves text UNKNOWN when its receipt arrives while another order is selected',async t=>{
+  let reject,calls=0,retried;
+  const h=await mountOrderSender(t,{async sendText(cid,_text,authorize){await authorize({conversationId:cid,operation:'send'});calls++;return new Promise((_resolve,r)=>{reject=r;});},async retryText(cid,id,authorize){await authorize({conversationId:cid,operation:'send'});retried=id;return h.sent(cid,'A','original-late');}});
+  await h.type('A');await h.submit();await h.until(()=>calls===1);await h.click('ZZ-b');await h.until(()=>h.node.querySelector('textarea')?.value==='');
+  await act(async()=>reject(new h.errors.NimTextSendError('UNKNOWN','未决',{messageClientId:'original-late'})));
+  await h.click('ZZ-a');await h.until(()=>h.node.querySelector('textarea')?.value==='A');
+  assert.match(h.node.textContent,/原消息重试/,'original UNKNOWN remains owned by A');await h.click('原消息重试');await h.until(()=>retried==='original-late');assert.equal(calls,1);
+});
+
+test('order sender without an UNKNOWN text id rejects a second text and image-only submit',async t=>{
+  let texts=0,images=0;
+  const h=await mountOrderSender(t,{async sendText(cid,_text,authorize){await authorize({conversationId:cid,operation:'send'});texts++;throw new h.errors.NimTextSendError('UNKNOWN','missing id');},async sendImage(){images++;return{};}});
+  await h.type('A');await h.submit();await h.until(()=>h.node.textContent.includes('未确认'));await h.submit();await h.settle();
+  assert.equal(texts,1,'missing original id cannot mint another message');
+  await h.stage(1);await h.type('');await h.submit();await h.settle();assert.equal(images,0,'UNKNOWN text blocks image-only submit');
+});
+
+test('order sender definite text rejection lets a new draft start without replaying the rejected text',async t=>{
+  const texts=[];let retries=0;
+  const h=await mountOrderSender(t,{async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});texts.push(text);if(texts.length===1)throw new h.errors.NimTextSendError('FAILED','rejected',{messageClientId:'rejected-A'});return h.sent(cid,text,'accepted-B');},async retryText(cid,_id,authorize){await authorize({conversationId:cid,operation:'send'});retries++;return h.sent(cid,'A','rejected-A');}});
+  await h.type('A');await h.submit();await h.until(()=>h.node.textContent.includes('发送失败'));await h.type('B');await h.submit();await h.settle();
+  assert.deepEqual(texts,['A','B'],'only UNKNOWN owns an unresolved ordinary submit');assert.equal(retries,0);
+});
+
+test('order sender owns its synchronous submit lock before React commits sending',async t=>{
+  let calls=0;
+  const h=await mountOrderSender(t,{async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});calls++;return h.sent(cid,text,`same-frame-${calls}`);}});
+  await h.type('A');await act(async()=>{const form=h.node.querySelector('form');for(let n=0;n<2;n++)form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});await h.settle();
+  assert.equal(calls,1,'same-frame submit cannot create two messages');
+});
+
+test('order sender pauses new images when only sendAllowed changes while preserving the first receipt',async t=>{
+  let release,calls=0;
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});calls++;if(calls===1)return new Promise(resolve=>{release=()=>resolve({...h.sent(cid,'','image-1'),messageType:1});});return {...h.sent(cid,'','image-2'),messageType:1};}});
+  await h.stage(2);await h.submit();await h.until(()=>calls===1);await h.render({sendAllowed:false});
+  await act(async()=>release());await h.settle();assert.equal(calls,1,'each new image rechecks current send capability');
+  assert.match(h.node.textContent,/sender-1.png/,'unsent image stays staged');
+});
+
+test('order sender image retry cannot bypass an UNKNOWN text and repeated text failures keep the original draft',async t=>{
+  let sends=0,retries=0,imageRetries=0;
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});throw new h.errors.NimImageSendError('FAILED','image failed',{messageClientId:'failed-image'});},async retryImage(){imageRetries++;return{};},async sendText(cid,_text,authorize){await authorize({conversationId:cid,operation:'send'});sends++;throw new h.errors.NimTextSendError('UNKNOWN','text unknown',{messageClientId:'original-text'});},async retryText(cid,_id,authorize){await authorize({conversationId:cid,operation:'send'});retries++;if(retries===1)throw new h.errors.NimTextSendError('UNKNOWN','still unknown',{messageClientId:'original-text'});return h.sent(cid,'A','original-text');}});
+  await h.stage(1);await h.submit();await h.until(()=>h.node.querySelector('.order-team-image-draft[data-state=FAILED]'));
+  await h.type('A');await h.submit();await h.until(()=>sends===1&&h.node.textContent.includes('未确认'));
+  await act(async()=>h.node.querySelector('.order-team-image-draft button').click());assert.equal(imageRetries,0,'image retry shares the text UNKNOWN gate');
+  await h.type('B');await h.submit();await h.until(()=>retries===1);await h.click('原消息重试');await h.until(()=>retries===2);
+  assert.equal(sends,1);assert.equal(h.node.querySelector('textarea').value,'B','retry failure must not adopt later typing as its original text');
+});
+
+test('order sender does not refill revoked read state with a late text receipt',async t=>{
+  let release,calls=0;
+  const h=await mountOrderSender(t,{async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});calls++;return new Promise(resolve=>{release=()=>resolve(h.sent(cid,text,'revoked-read'));});}});
+  await h.type('PRIVATE');await h.submit();await h.until(()=>calls===1);h.setRead(false);await h.click('刷新');await h.until(()=>!h.node.querySelector('textarea'));
+  await act(async()=>release());await h.settle();assert.doesNotMatch(h.node.textContent,/PRIVATE/);
+  h.setRead(true);await h.click('重新确认授权');await h.until(()=>h.node.querySelector('textarea'));assert.equal(h.node.querySelector('textarea').value,'','private draft is not restored after read revocation');
+});
+
+test('order sender retains the original image UNKNOWN across object read revocation without exposing its preview',async t=>{
+  let reject,sends=0,retries=0,retried;const revoked=[];
+  const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});sends++;return new Promise((_resolve,r)=>{reject=r;});},async retryImage(cid,id,options){await options.authorize({conversationId:cid,operation:'send'});retries++;retried=id;return {...h.sent(cid,'','original-image'),messageType:1};}});
+  URL.revokeObjectURL=url=>revoked.push(url);
+  await h.stage(1);await h.submit();await h.until(()=>sends===1);
+  const preview=h.node.querySelector('.order-team-image-draft img').getAttribute('src');
+  h.setRead(false);await h.click('刷新');await h.until(()=>!h.node.querySelector('textarea'));
+  assert.equal(h.node.querySelector('.order-team-image-draft'),null,'read denial hides private image and composer');assert.doesNotMatch(h.node.textContent,/sender-0.png/);
+  await act(async()=>reject(new h.errors.NimImageSendError('UNKNOWN','image unknown',{messageClientId:'original-image'})));
+  await h.settle();assert.equal(h.node.querySelector('.order-team-image-draft'),null);
+  h.setRead(true);await h.click('重新确认授权');await h.until(()=>h.node.querySelector('textarea'));
+  assert.ok(h.node.querySelector('.order-team-image-draft[data-state=UNKNOWN]'),'restored authorized view retains the original UNKNOWN image');assert.equal(revoked.includes(preview),false,'pending ownership survives denial and UNKNOWN');
+  await act(async()=>h.node.querySelector('.order-team-image-draft button').click());await h.until(()=>retries===1);
+  assert.equal(retried,'original-image');assert.equal(sends,1,'restoring read cannot create another sendImage');await h.until(()=>!h.node.querySelector('.order-team-image-draft'));assert.equal(revoked.filter(url=>url===preview).length,1,'successful original retry releases its preview once');
+});
+
+test('order sender settles the original text receipt after replacing the SDK client within the same identity',async t=>{
+  let release,calls=0;
+  const h=await mountOrderSender(t,{async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});calls++;return new Promise(resolve=>{release=()=>resolve(h.sent(cid,text,'reconnected'));});}});
+  await h.type('A');await h.submit();await h.until(()=>calls===1);await h.render({client:{...h.client}});
+  await act(async()=>release());await h.until(()=>h.node.querySelector('textarea')?.value==='');
+  assert.doesNotMatch(h.node.textContent,/发送中|原消息重试/,'known original receipt must release its responsibility');
+});
+
+test('parent image attempt lock rejects reentry and ignores stale receipts for the next image',()=>{
+  const source=readFileSync(new URL('../../../packages/ui/src/order-team-panel.tsx',import.meta.url),'utf8');
+  const ast=ts.createSourceFile('panel.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  const callbacks={};
+  function visit(node){if(ts.isVariableDeclaration(node)&&['beginPendingImage','settlePendingImage'].includes(node.name.getText(ast)))callbacks[node.name.getText(ast)]=node.initializer.getText(ast);ts.forEachChild(node,visit);}
+  visit(ast);
+  const imageAttempts={current:new Map()},textAttempts={current:new Map()},pendingTextByOrderRef={current:{}},identityRef={current:'user'},sendingClientRef={current:{}};let state={};const revoked=[];
+  const build=name=>new Function('useCallback','imageAttempts','textAttempts','pendingTextByOrderRef','identityRef','sendingClientRef','setPendingByOrder','URL','superseded','NimImageSendError',ts.transpileModule('const run='+callbacks[name],{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText+';return run;')(
+    fn=>fn,imageAttempts,textAttempts,pendingTextByOrderRef,identityRef,sendingClientRef,fn=>state=fn(state),{revokeObjectURL:url=>revoked.push(url)},()=>false,Error);
+  const begin=build('beginPendingImage'),settle=build('settlePendingImage'),key=JSON.stringify(['user','app','order','team']);
+  const a={file:{name:'same.png'},previewUrl:'blob:a'},b={file:{name:'same.png'},previewUrl:'blob:b'};
+  const first=begin(key,a);assert.ok(first);assert.equal(begin(key,b),null,'lock is synchronous');
+  settle(key,first,{success:true});assert.equal(state[key],null);
+  const second=begin(key,b);settle(key,first,{success:true});settle(key,first,{success:false,error:new Error('late')});
+  assert.equal(state[key].file,b.file);assert.equal(imageAttempts.current.get(key).draft,second);assert.deepEqual(revoked,['blob:a']);
+  settle(key,second,{success:true});assert.equal(state[key],null);assert.deepEqual(revoked,['blob:a','blob:b']);
+  identityRef.current='other';assert.equal(begin(key,a),null,'old identity cannot acquire an attempt');
+});
 
 test('order chat routes the normal send to the original message after an unknown text result',async(t)=>{
   const browser=new Window({url:'http://127.0.0.1:4311'});
@@ -41,6 +244,70 @@ test('order chat routes the normal send to the original message after an unknown
   assert.equal(sendCalls,1,'normal submit must not create a second message');
   assert.equal(retriedId,'text-client-1','retry keeps the original messageClientId');
   assert.equal(node.querySelector('textarea').value,'second','newer typing survives the original retry');
+  await until(()=>!node.textContent.includes('原消息重试'));
+});
+
+test('order chat text UNKNOWN with staged images keeps text retry, does not fail images or lose clientId',async(t)=>{
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const {NimTextSendError}=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  const oldCreate=globalThis.URL?.createObjectURL,oldRevoke=globalThis.URL?.revokeObjectURL;
+  let objectUrlsCreated=0;
+  globalThis.URL=globalThis.URL||{};
+  globalThis.URL.createObjectURL=()=>`blob:mock-${++objectUrlsCreated}`;
+  globalThis.URL.revokeObjectURL=()=>{};
+  const pendingImages=[];
+  class ControlledImage{naturalWidth=0;naturalHeight=0;onload=()=>{};onerror=()=>{};set src(value){this.value=value;pendingImages.push(this);}}
+  Object.defineProperty(globalThis,'Image',{value:ControlledImage,configurable:true});
+  Object.defineProperty(browser,'Image',{value:ControlledImage,configurable:true});
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;if(oldCreate)globalThis.URL.createObjectURL=oldCreate;if(oldRevoke)globalThis.URL.revokeObjectURL=oldRevoke;await vite.close();browser.happyDOM.abort();});
+  const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服甲',avatar:null,responsible:true}]};
+  const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
+  let sendTextCalls=0,sendImageCalls=0,retryTextCalls=0,retriedClientId=null;
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},
+    async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sendTextCalls++;throw new NimTextSendError('UNKNOWN','文字发送未决',{messageClientId:'order-text-unknown-1'});},
+    async retryText(cid,messageClientId,authorize){await authorize({conversationId:cid,operation:'send'});retryTextCalls++;retriedClientId=messageClientId;return{messageClientId,messageServerId:'srv-t1',conversationId:cid,senderId:'viewer',receiverId:'1',createTime:10,text:'msg',messageType:0};},
+    async sendImage(cid,file,options){await options.authorize({conversationId:cid,operation:'send'});sendImageCalls++;return{messageClientId:`img-${sendImageCalls}`,messageServerId:`srv-img-${sendImageCalls}`,conversationId:cid,senderId:'viewer',receiverId:'1',createTime:11,messageType:1};}
+  };
+  const props={identity:'identity-text-img-order',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('order text-img unknown condition timed out');};
+  const type=async value=>act(async()=>{const input=node.querySelector('textarea');Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());await until(()=>node.querySelector('textarea')&&!node.querySelector('textarea').disabled);
+  await type('hello with image');
+  const input=node.querySelector('input[type=file]');
+  const file=new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],'order-proof.png',{type:'image/png'});
+  Object.defineProperty(input,'files',{configurable:true,value:[file]});
+  await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));
+  await until(()=>pendingImages.length===1);
+  const decoder=pendingImages.shift();decoder.naturalWidth=640;decoder.naturalHeight=360;
+  await act(async()=>decoder.onload());
+  await until(()=>node.textContent.includes('order-proof.png'));
+  assert.equal(sendTextCalls,0);
+  assert.equal(sendImageCalls,0);
+  // Submit: text will fail with UNKNOWN
+  await act(async()=>node.querySelector('form button[type=submit]').click());
+  await until(()=>node.textContent.includes('原消息重试'));
+  assert.equal(sendTextCalls,1);
+  assert.equal(sendImageCalls,0,'image must not be sent when text is UNKNOWN');
+  assert.equal(node.textContent.includes('发送失败'),false,'image must not be labeled failed when text was unknown');
+  assert.ok(node.textContent.includes('待发送')||node.textContent.includes('order-proof.png'),'staged image remains staged');
+  // Click submit again: will retry text with original clientId, then proceed to send image
+  await act(async()=>node.querySelector('form button[type=submit]').click());
+  await until(()=>retryTextCalls===1&&sendImageCalls===1);
+  assert.equal(sendTextCalls,1,'did not start new text send');
+  assert.equal(retriedClientId,'order-text-unknown-1','retried exact messageClientId');
   await until(()=>!node.textContent.includes('原消息重试'));
 });
 
@@ -82,9 +349,15 @@ test('formal order panel isolates orders, authorization, drafts, late SDK work a
   const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
   const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('order component condition timed out');};
   const click=async text=>{const button=[...node.querySelectorAll('button')].find(b=>b.textContent.includes(text));assert.ok(button,text);await act(async()=>button.click());};
+  // 工具栏的重新读取按钮正常时叫「刷新」，只有在真的 401/403/423 失权后才是「重新确认授权」。
+  // 这里按契约取当前标签，并把标签本身当断言，避免"刷新"被当成授权动作。
+  const refreshControl=()=>[...node.querySelectorAll('.order-team-toolbar button')].find(b=>/^(刷新|重新确认授权)$/.test(b.textContent.trim()));
+  const clickRefresh=async expected=>{const button=refreshControl();assert.ok(button,'order panel refresh control');if(expected)assert.equal(button.textContent.trim(),expected);await act(async()=>button.click());};
   const type=async value=>act(async()=>{const input=node.querySelector('textarea');assert.ok(input);Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));
   assert.match(node.textContent,/待客服回应/);assert.match(node.textContent,/提醒节点/);assert.match(node.textContent,/接待跟踪未启用/);
+  // 正常读取下工具栏只有"刷新"，不能把日常重读说成需要用户重新授权。
+  assert.equal(refreshControl().textContent.trim(),'刷新','normal list refresh is not an authorization action');
   await click('ZZ-a');await until(()=>node.textContent.includes('历史a'));assert.equal(subscribes,1);
   assert.match(node.querySelector('.order-team-escalation').textContent,/待客服回应/);assert.match(node.querySelector('.order-team-escalation').textContent,/补派轮次\s*1/);
   const original=()=>[...node.querySelectorAll('.order-team-members li')].find(item=>item.textContent.includes('原客服'));
@@ -98,21 +371,26 @@ test('formal order panel isolates orders, authorization, drafts, late SDK work a
   assert.match(node.querySelector('.order-team-escalation').textContent,/接待跟踪未启用/);assert.doesNotMatch(node.querySelector('.order-team-escalation').textContent,/提醒节点|待人工/);
   await act(async()=>release());await settle();assert.equal(sendCalls,0);assert.doesNotMatch(node.textContent,/历史a|A草稿/);
   policy='ok';await click('ZZ-a');await until(()=>node.textContent.includes('历史a'));assert.equal(node.querySelector('textarea').value,'A草稿');
+  assert.doesNotMatch(node.textContent,/原消息重试/,'superseded pre-send authorization is not an UNKNOWN message');
+  assert.equal(node.querySelector('form button[type=submit]').disabled,false,'no SDK dispatch means no unresolved send responsibility');
   await act(async()=>root.render(createElement(OrderTeamPanel,{...props,active:false})));
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));
   await until(()=>node.textContent.includes('历史a'));assert.equal(node.querySelector('textarea').value,'A草稿');
-  policy='send-denied';await click('重新确认授权');await until(()=>[...node.querySelectorAll('button')].some(b=>b.textContent==='发送文字'&&b.disabled));
+  policy='send-denied';await clickRefresh();await until(()=>[...node.querySelectorAll('button')].some(b=>b.textContent==='发送文字'&&b.disabled));
   assert.match(node.textContent,/历史a/);assert.equal(node.querySelector('textarea').value,'A草稿');
-  policy='network';await click('重新确认授权');await until(()=>node.textContent.includes('检查网络'));assert.match(node.textContent,/历史a/);
-  policy='read-denied';const before=historyCalls;await click('重新确认授权');await until(()=>!node.querySelector('textarea'));assert.doesNotMatch(node.textContent,/历史a|A草稿/);assert.equal(historyCalls,before);
-  policy='ok';await click('重新确认授权');await until(()=>node.textContent.includes('历史a'));assert.equal(node.querySelector('textarea').value,'');
+  policy='network';await clickRefresh();await until(()=>node.textContent.includes('检查网络'));assert.match(node.textContent,/历史a/);
+  policy='read-denied';const before=historyCalls;await clickRefresh();await until(()=>!node.querySelector('textarea'));assert.doesNotMatch(node.textContent,/历史a|A草稿/);assert.equal(historyCalls,before);
+  // 真的被拒之后才升级成"重新确认授权"这个授权语义。
+  assert.equal(refreshControl().textContent.trim(),'重新确认授权','denied access surfaces an authorization action');
+  policy='ok';await clickRefresh();await until(()=>node.textContent.includes('历史a'));assert.equal(node.querySelector('textarea').value,'');
+  assert.equal(refreshControl().textContent.trim(),'刷新','recovered access drops the authorization wording');
   await type('身份草稿');await act(async()=>root.render(createElement(OrderTeamPanel,{...props,key:'identity-b',identity:'identity-b'})));await until(()=>node.textContent.includes('ZZ-a'));assert.equal(node.querySelector('textarea'),null);
-  for(const code of ['401','423']){policy=code;await click('ZZ-a');await until(()=>authErrors.includes(Number(code)));assert.equal(node.querySelector('textarea'),null);policy='ok';await click('重新确认授权');await until(()=>node.textContent.includes('ZZ-a'));await click('返回订单列表');}
+  for(const code of ['401','423']){policy=code;await click('ZZ-a');await until(()=>authErrors.includes(Number(code)));assert.equal(node.querySelector('textarea'),null);policy='ok';await clickRefresh();await until(()=>node.textContent.includes('ZZ-a'));await click('返回订单列表');}
   escalationB={firstResponseAt:null,remindDueAt:null,addRound:0,state:'EXHAUSTED',needsManualReview:true,noEligibleStaff:true};
-  await click('ZZ-b');await until(()=>node.textContent.includes('历史b'));await click('重新确认授权');await until(()=>node.querySelector('.order-team-escalation')?.textContent.includes('当前没有符合条件的客服'));
+  await click('ZZ-b');await until(()=>node.textContent.includes('历史b'));await clickRefresh();await until(()=>node.querySelector('.order-team-escalation')?.textContent.includes('当前没有符合条件的客服'));
   assert.match(node.querySelector('.order-team-escalation').textContent,/待人工处理/);
   escalationA={firstResponseAt:'2026-09-21T09:41:00.000Z',remindDueAt:null,addRound:1,state:'STOPPED',needsManualReview:false,noEligibleStaff:false};
-  await click('ZZ-a');await until(()=>node.textContent.includes('历史a'));await click('重新确认授权');await until(()=>node.querySelector('.order-team-escalation')?.textContent.includes('首响时间'));
+  await click('ZZ-a');await until(()=>node.textContent.includes('历史a'));await clickRefresh();await until(()=>node.querySelector('.order-team-escalation')?.textContent.includes('首响时间'));
   assert.match(node.querySelector('.order-team-escalation').textContent,/已收到客服回应/);assert.doesNotMatch(node.querySelector('.order-team-escalation').textContent,/提醒节点/);
   assert.doesNotMatch(node.querySelector('.order-team-escalation').textContent,/退款|结算确认/);
   assert.doesNotMatch(node.textContent,/private/);
@@ -437,4 +715,299 @@ test('admin fulfillment slot receives the frozen order inventory projection',asy
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));
   await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());await until(()=>node.textContent.includes('履约槽'));
   assert.deepEqual(seen.at(-1).frozenInventory,frozenInventory,'the admin slot carries the frozen inventory projection, never a fabricated settlement field');
+});
+
+async function checkReturningDuringImageSend(t, outcome){
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const {NimImageSendError}=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  const oldCreate=globalThis.URL?.createObjectURL,oldRevoke=globalThis.URL?.revokeObjectURL;
+  let objectUrlsCreated=0;
+  globalThis.URL=globalThis.URL||{};
+  globalThis.URL.createObjectURL=()=>`blob:mock-${++objectUrlsCreated}`;
+  globalThis.URL.revokeObjectURL=()=>{};
+  const pendingImages=[];
+  class ControlledImage{naturalWidth=0;naturalHeight=0;onload=()=>{};onerror=()=>{};set src(value){this.value=value;pendingImages.push(this);}}
+  Object.defineProperty(globalThis,'Image',{value:ControlledImage,configurable:true});
+  Object.defineProperty(browser,'Image',{value:ControlledImage,configurable:true});
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;if(oldCreate)globalThis.URL.createObjectURL=oldCreate;if(oldRevoke)globalThis.URL.revokeObjectURL=oldRevoke;await vite.close();browser.happyDOM.abort();});
+  const accessMap={
+    a:{orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服甲',avatar:null,responsible:true}]},
+    b:{orderId:'b',displayNo:'ZZ-b',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'2',name:'订单b',gameName:'三角洲行动',account:{id:'account-b',title:'账号b'},viewerAccountId:'viewer',conversationId:'viewer|2|2',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服乙',avatar:null,responsible:true}]},
+  };
+  const request=async url=>{
+    if(url.includes('/a/im?'))return accessMap.a;
+    if(url.includes('/b/im?'))return accessMap.b;
+    return {items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'},{id:'b',title:'账号b',displayNo:'ZZ-b',status:'PAID',teamState:'READY'}],nextCursor:null};
+  };
+  let sendImageCalls=0,retryImageCalls=0,retriedClientId=null,textCalls=0;
+  let inFlightReject=null,inFlightResolve=null;
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},
+    async sendText(){textCalls++;throw new Error('text must wait for image');},
+    async sendImage(cid,file,options){
+      await options.authorize({conversationId:cid,operation:'send'});
+      sendImageCalls++;
+      return new Promise((resolve,reject)=>{inFlightReject=reject;inFlightResolve=resolve;});
+    },
+    async retryImage(cid,messageClientId,options){
+      await options.authorize({conversationId:cid,operation:'send'});
+      retryImageCalls++;
+      retriedClientId=messageClientId;
+      return {messageClientId,messageServerId:'srv-retry-1',conversationId:cid,senderId:'viewer',receiverId:'1',createTime:20,messageType:1};
+    }
+  };
+  const props={identity:'identity-switch-order',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('switch order condition timed out');};
+  await act(async()=>root.render(createElement(OrderTeamPanel,props)));
+  await until(()=>node.textContent.includes('ZZ-a')&&node.textContent.includes('ZZ-b'));
+  // Select order a
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());
+  await until(()=>node.querySelector('input[type=file]')&&!node.querySelector('input[type=file]').disabled);
+  // Stage an image
+  const input=node.querySelector('input[type=file]');
+  const file=new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],'order-a-proof.png',{type:'image/png'});
+  Object.defineProperty(input,'files',{configurable:true,value:[file]});
+  await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));
+  await until(()=>pendingImages.length===1);
+  const decoder=pendingImages.shift();decoder.naturalWidth=640;decoder.naturalHeight=360;
+  await act(async()=>decoder.onload());
+  await until(()=>node.textContent.includes('order-a-proof.png'));
+  // Click send image
+  await act(async()=>node.querySelector('form button[type=submit]').click());
+  await until(()=>sendImageCalls===1&&inFlightReject!==null);
+  // Switch to order b while image send is in-flight
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-b')).click());
+  await until(()=>node.textContent.includes('账号b')||node.textContent.includes('ZZ-b'));
+  // Return BEFORE the first result: the new child must respect the parent flight.
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());
+  await until(()=>node.querySelector('.order-team-image-draft[data-state="SENDING"]'));
+  const card=node.querySelector('.order-team-image-draft[data-state="SENDING"]');
+  for(const button of card.querySelectorAll('button'))assert.equal(button.disabled,true,'in-flight retry and removal stay disabled after remount');
+  assert.equal(node.querySelector('form button[type=submit]').disabled,true);
+  const inputText=node.querySelector('textarea');
+  await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(inputText,'new text');inputText.dispatchEvent(new Event('input',{bubbles:true}));});
+  await act(async()=>node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  assert.equal(textCalls,0,'forced submit cannot bypass the parent flight');
+  assert.equal(sendImageCalls,1,'returning early cannot mint another image message');
+  if(outcome==='success'){
+    await act(async()=>inFlightResolve({messageClientId:'original-success',messageServerId:'srv-success',conversationId:'viewer|2|1',senderId:'viewer',createTime:20,messageType:1}));
+    await until(()=>!node.querySelector('.order-team-image-draft'));
+    assert.equal(retryImageCalls,0);
+    return;
+  }
+  // Now in-flight request settles with UNKNOWN
+  await act(async()=>inFlightReject(new NimImageSendError('UNKNOWN','结果未确认',{messageClientId:'img-client-unknown-1'})));
+  await settle();
+  await until(()=>node.textContent.includes('原消息重试'));
+  assert.equal(sendImageCalls,1,'must not have made additional sendImage calls');
+  assert.equal(node.textContent.includes('结果未确认'),true,'retained UNKNOWN status');
+  // Click retry
+  const retryBtn=[...node.querySelectorAll('button')].find(b=>b.textContent.includes('原消息重试'));
+  assert.ok(retryBtn);
+  await act(async()=>retryBtn.click());
+  await until(()=>retryImageCalls===1);
+  assert.equal(retriedClientId,'img-client-unknown-1','retried using original messageClientId rather than sending a new message');
+  await until(()=>!node.textContent.includes('原消息重试'));
+}
+
+test('returning to an order before image UNKNOWN cannot retry, remove or submit; receipt retains original id', t=>checkReturningDuringImageSend(t,'unknown'));
+test('returning to an order before image success keeps parent lock until its original receipt', t=>checkReturningDuringImageSend(t,'success'));
+
+test('closing window with visible=false pauses sequential image queue without dropping staged images',async(t)=>{
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  const oldCreate=globalThis.URL?.createObjectURL,oldRevoke=globalThis.URL?.revokeObjectURL;
+  let objectUrlsCreated=0;
+  globalThis.URL=globalThis.URL||{};
+  globalThis.URL.createObjectURL=()=>`blob:mock-${++objectUrlsCreated}`;
+  globalThis.URL.revokeObjectURL=()=>{};
+  const pendingImages=[];
+  class ControlledImage{naturalWidth=0;naturalHeight=0;onload=()=>{};onerror=()=>{};set src(value){this.value=value;pendingImages.push(this);}}
+  Object.defineProperty(globalThis,'Image',{value:ControlledImage,configurable:true});
+  Object.defineProperty(browser,'Image',{value:ControlledImage,configurable:true});
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;if(oldCreate)globalThis.URL.createObjectURL=oldCreate;if(oldRevoke)globalThis.URL.revokeObjectURL=oldRevoke;await vite.close();browser.happyDOM.abort();});
+  const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服甲',avatar:null,responsible:true}]};
+  const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
+  let sendImageCalls=0;
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},
+    async sendText(){throw new Error('text not used');},
+    async sendImage(cid,file,options){
+      await options.authorize({conversationId:cid,operation:'send'});
+      sendImageCalls++;
+      return {messageClientId:`sent-${sendImageCalls}`,messageServerId:`srv-${sendImageCalls}`,conversationId:cid,senderId:'viewer',receiverId:'1',createTime:sendImageCalls,messageType:1};
+    }
+  };
+  const renderPanel=v=>root.render(createElement(OrderTeamPanel,{identity:'identity-visible-pause',realm:'admin',client,connection:'CONNECTED',active:true,visible:v,request,onAuthError:()=>{}}));
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('visible pause condition timed out');};
+  await act(async()=>renderPanel(true));
+  await until(()=>node.textContent.includes('ZZ-a'));
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());
+  await until(()=>node.querySelector('input[type=file]')&&!node.querySelector('input[type=file]').disabled);
+  // Stage 2 images
+  const input=node.querySelector('input[type=file]');
+  const file1=new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],'p1.png',{type:'image/png'});
+  const file2=new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],'p2.png',{type:'image/png'});
+  Object.defineProperty(input,'files',{configurable:true,value:[file1,file2]});
+  await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));
+  await until(()=>pendingImages.length===2);
+  const d1=pendingImages.shift();d1.naturalWidth=640;d1.naturalHeight=360;await act(async()=>d1.onload());
+  const d2=pendingImages.shift();d2.naturalWidth=640;d2.naturalHeight=360;await act(async()=>d2.onload());
+  await until(()=>node.textContent.includes('p1.png')&&node.textContent.includes('p2.png'));
+  // Hide window
+  await act(async()=>renderPanel(false));
+  // Submit attempt: send loop should immediately break
+  await act(async()=>node.querySelector('form button[type=submit]').click());
+  await settle();
+  assert.equal(sendImageCalls,0,'nothing dispatched while visible is false');
+  // Re-open window
+  await act(async()=>renderPanel(true));
+  await until(()=>node.textContent.includes('p1.png')&&node.textContent.includes('p2.png'));
+  // Submit now: both should send sequentially
+  await act(async()=>node.querySelector('form button[type=submit]').click());
+  await until(()=>sendImageCalls===2);
+  assert.equal(sendImageCalls,2,'both images successfully dispatched after reopening');
+});
+
+test('async image decoding interleaving: selecting or removing during in-flight decode does not block remaining images',async(t)=>{
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  const oldCreate=globalThis.URL?.createObjectURL,oldRevoke=globalThis.URL?.revokeObjectURL;
+  let objectUrlsCreated=0;
+  globalThis.URL=globalThis.URL||{};
+  globalThis.URL.createObjectURL=()=>`blob:mock-${++objectUrlsCreated}`;
+  globalThis.URL.revokeObjectURL=()=>{};
+  const pendingImages=[];
+  class ControlledImage{naturalWidth=0;naturalHeight=0;onload=()=>{};onerror=()=>{};set src(value){this.value=value;pendingImages.push(this);}}
+  Object.defineProperty(globalThis,'Image',{value:ControlledImage,configurable:true});
+  Object.defineProperty(browser,'Image',{value:ControlledImage,configurable:true});
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;if(oldCreate)globalThis.URL.createObjectURL=oldCreate;if(oldRevoke)globalThis.URL.revokeObjectURL=oldRevoke;await vite.close();browser.happyDOM.abort();});
+  const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'viewer',accountId:'viewer',party:'STAFF',name:'客服甲',avatar:null,responsible:true}]};
+  const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
+  let sendImageCalls=0;
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return[];},
+    async sendText(){throw new Error('text not used');},
+    async sendImage(cid,file,options){
+      await options.authorize({conversationId:cid,operation:'send'});
+      sendImageCalls++;
+      return {messageClientId:`sent-${sendImageCalls}`,messageServerId:`srv-${sendImageCalls}`,conversationId:cid,senderId:'viewer',receiverId:'1',createTime:sendImageCalls,messageType:1};
+    }
+  };
+  const props={identity:'identity-decode-interleave',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('decode interleave condition timed out');};
+  await act(async()=>root.render(createElement(OrderTeamPanel,props)));
+  await until(()=>node.textContent.includes('ZZ-a'));
+  await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());
+  await until(()=>node.querySelector('input[type=file]')&&!node.querySelector('input[type=file]').disabled);
+  // Pick first batch of 2 images: a1 and a2
+  const input=node.querySelector('input[type=file]');
+  const a1=new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],'a1.png',{type:'image/png'});
+  const a2=new browser.File([new Uint8Array([0x89,0x50,0x4e,0x47])],'a2.png',{type:'image/png'});
+  Object.defineProperty(input,'files',{configurable:true,value:[a1,a2]});
+  await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));
+  await until(()=>pendingImages.length===2);
+  const decA2=pendingImages[1];
+  // While decA1 and decA2 are in flight, remove a1
+  const removeButtons=[...node.querySelectorAll('.order-team-image-draft button')].filter(b=>b.textContent==='移除');
+  assert.equal(removeButtons.length,2);
+  await act(async()=>removeButtons[0].click());
+  // Now decA2 completes decoding
+  decA2.naturalWidth=640;decA2.naturalHeight=360;
+  await act(async()=>decA2.onload());
+  await until(()=>!node.textContent.includes('正在检查')&&node.textContent.includes('a2.png'));
+  // Button should not be disabled due to decoding
+  const submit=node.querySelector('form button[type=submit]');
+  assert.equal(submit.disabled,false,'a2 is READY and submit is not blocked by removal of a1');
+  await act(async()=>submit.click());
+  await until(()=>sendImageCalls===1);
+  assert.equal(sendImageCalls,1,'a2 sent successfully');
+});
+
+test('zero accessible orders render one whole-area state and never a dead split, and the refresh control is not an authorization action',async(t)=>{
+  const browser=new Window({url:'http://127.0.0.1:4311'});
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const {createRoot}=await import('react-dom/client');
+  const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
+  const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
+  const interval=globalThis.setInterval,clear=globalThis.clearInterval;
+  globalThis.setInterval=(fn,ms)=>ms===5000?{fake:true}:interval(fn,ms);
+  globalThis.clearInterval=id=>{if(!id?.fake)clear(id);};
+  let mode='empty';
+  const listPaths=[];
+  const request=async url=>{
+    if(url.includes('/im?'))throw new Error('no order is selected in this scenario');
+    listPaths.push(url);
+    if(mode==='empty')return{items:[],nextCursor:null};
+    if(mode==='network')throw new TypeError('Failed to fetch');
+    throw Object.assign(new Error('forbidden'),{status:403});
+  };
+  const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},getMessageHistory:async()=>[],sendText:async()=>{}};
+  const props={identity:'identity-empty',realm:'admin',client,connection:'CONNECTED',active:true,request,onAuthError:()=>{}};
+  const settle=()=>act(async()=>{await new Promise(r=>setTimeout(r,5));});
+  const until=async predicate=>{for(let n=0;n<150;n++){if(predicate())return;await settle();}throw new Error('order empty-state condition timed out');};
+  t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;await vite.close();browser.happyDOM.abort();});
+  await act(async()=>root.render(createElement(OrderTeamPanel,props)));
+  await until(()=>node.querySelector('.order-team-empty'));
+  // 成功的零条只留一个整区空态；不能再同时出现"暂无订单"和"请选择订单"两半。
+  assert.equal(node.querySelector('.order-team-grid'),null,'zero orders do not render the two-column grid');
+  assert.equal(node.querySelectorAll('.order-team-empty').length,1,'exactly one empty state');
+  assert.match(node.querySelector('.order-team-empty').textContent,/暂无可访问的订单/);
+  assert.doesNotMatch(node.textContent,/选择订单查看群状态和沟通记录|暂无订单/);
+  assert.equal(node.querySelector('.order-team-empty').getAttribute('role'),'status','a successful empty list is not an error');
+  // 正常读取下工具栏不是授权语义。
+  const refresh=()=>[...node.querySelectorAll('.order-team-toolbar button')].find(b=>/^(刷新|重新确认授权)$/.test(b.textContent.trim()));
+  assert.equal(refresh().textContent.trim(),'刷新');
+
+  // 读取失败与失权分开表达，只有真的失权才出现"重新确认授权"。
+  mode='network';
+  await act(async()=>refresh().click());
+  await until(()=>node.querySelector('.order-team-empty[role=alert]'));
+  assert.match(node.querySelector('.order-team-empty').textContent,/订单列表读取失败/);
+  assert.equal(refresh().textContent.trim(),'刷新','a read failure is not an authorization problem');
+  assert.ok(node.querySelector('.order-team-empty button'),'a read failure offers a plain retry');
+
+  mode='forbidden';
+  await act(async()=>[...node.querySelectorAll('.order-team-empty button')][0].click());
+  await until(()=>refresh().textContent.trim()==='重新确认授权');
+  assert.match(node.querySelector('.order-team-empty').textContent,/暂时无法访问订单群/);
+
+  mode='empty';
+  await act(async()=>refresh().click());
+  await until(()=>node.querySelector('.order-team-empty')&&refresh().textContent.trim()==='刷新');
+  assert.match(node.querySelector('.order-team-empty').textContent,/暂无可访问的订单/);
 });

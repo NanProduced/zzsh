@@ -5,6 +5,22 @@ export function messageAccessPath(conversationId: string, operation: ImMessageOp
   return `/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}`;
 }
 
+/** 同源 HTTP 仅允许当前 origin；显式非法 rawUrl 不得回退到 imageId 绕过校验。 */
+export function supportedImageUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2048) return null;
+  if (/^\/api\/(?:im|bff\/admin\/im)\/images\/[A-Za-z0-9._:-]{1,128}$/.test(value)) return value;
+  try {
+    const parsed = new URL(value, typeof window === "undefined" ? "https://invalid.local" : window.location.origin);
+    const protocol = parsed.protocol.toLowerCase();
+    if (["blob:", "data:", "file:", "javascript:"].includes(protocol)) return null;
+    if (protocol === "https:") return parsed.href;
+    if (protocol === "http:" && typeof window !== "undefined" && parsed.origin === window.location.origin) return parsed.href;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function isCurrentImRequest(expected: ImRequestKey, current: ImRequestKey): boolean {
   return expected.generation === current.generation
     && expected.operator === current.operator

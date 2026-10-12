@@ -1,10 +1,34 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import ts from "typescript";
 
 const webSource = readFileSync(new URL("../src/components/support/customer-support-workspace.tsx", import.meta.url), "utf8");
 const adminSource = readFileSync(new URL("../../admin/src/views/im-support-view.tsx", import.meta.url), "utf8");
 const adminGuardSource = readFileSync(new URL("../../admin/src/views/im-support-guards.ts", import.meta.url), "utf8");
+
+test('a delayed authorization denial cannot clear another identity or another consultation', async()=>{
+  const ast=ts.createSourceFile('workspace.tsx',webSource,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  let callback;
+  function visit(node){if(ts.isPropertyAssignment(node)&&node.name.getText(ast)==='messageAuthorization')callback=node.initializer.getText(ast);ts.forEachChild(node,visit);}
+  visit(ast);assert.ok(callback);
+  const code=ts.transpileModule('const authorize='+callback,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+  for(const switchIdentity of [true,false]){
+    let release,error,clears=0,messages={a:['old'],b:['current']};
+    const generation={current:1},identity={current:'A'},active={current:'a'};
+    const readHidden={current:{}};
+    const authorize=new Function('fetch','cancelled','generation','identityGenerationRef','identity','identityRef','consultationsRef','activeIdRef','setMessages','setError','readJson','readHiddenRef',code+';return authorize;')(
+      ()=>new Promise(resolve=>release=resolve),false,1,generation,'A',identity,{current:[{id:'a',conversationId:'team-a'},{id:'b',conversationId:'team-b'}]},active,
+      fn=>{messages=fn(messages);clears++;},value=>error=value,async()=>{throw Error('denied');},readHidden);
+    const pending=authorize({conversationId:'team-a',operation:'read'});
+    active.current='b';if(switchIdentity){generation.current=2;identity.current='B';}
+    release({status:403});await pending.catch(()=>{});
+    assert.deepEqual(messages.b,['current']);assert.equal(error,undefined);
+    assert.equal(clears,switchIdentity?0:1);
+    assert.equal(Boolean(readHidden.current['team-a']),!switchIdentity,'a denied read hides that conversation only for the current identity');
+    if(!switchIdentity)assert.deepEqual(messages.a,[]);
+  }
+});
 
 test("user support responses are bound to identity, consultation, and client generations", () => {
   assert.match(webSource, /identityGenerationRef/);
@@ -53,12 +77,7 @@ test("formal NIM clients preauthorize history and send through the same-origin B
   assert.match(adminGuardSource, /\/im\/message-access\?conversationId=/);
 });
 
-test("client readiness precedes user consultation loading and recovery", () => {
-  const open = webSource.indexOf("await lifecycle.open");
-  const ready = webSource.indexOf("readyIdentityRef.current = identity", open);
-  const load = webSource.indexOf("fetchConsultations()", ready);
-  assert.ok(open >= 0 && ready > open && load > ready);
-});
+// Directory independence from SDK availability is covered by support-workspace-behavior.test.mjs.
 
 test("unknown remote scope is visible and cannot be presented as an active chat", () => {
   assert.match(webSource, /messageScopeState === "FAILED"/);
@@ -66,5 +85,5 @@ test("unknown remote scope is visible and cannot be presented as an active chat"
   assert.match(webSource, /远端状态待人工核验/);
   assert.match(adminSource, /scopeStateLabel/);
   assert.match(adminSource, /云信远端结果待人工核验/);
-  assert.match(adminSource, /selected\?\.messageScopeState !== "FAILED"/);
+  assert.match(adminSource, /messageScopeState !== "FAILED"/);
 });

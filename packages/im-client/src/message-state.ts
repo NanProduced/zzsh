@@ -43,3 +43,17 @@ export function mergeImMessages<T extends ImMessageStateItem>(current: readonly 
     return time || left.id.localeCompare(right.id);
   });
 }
+
+export type ImSystemNotice = { text: string };
+
+/**
+ * 云信 V2 通知消息（messageType 5）按 attachment.type 解码为中性系统行。
+ * type 0 = TEAM_INVITE（群拉人）；每次拉人不等于首次接待，所以文案只说成员变化。
+ * 非通知消息返回 null，交由调用方按普通消息渲染。
+ */
+export function decodeImSystemNotice(message: { messageType?: number; attachment?: unknown }): ImSystemNotice | null {
+  if (message.messageType !== 5) return null;
+  const attachment = message.attachment;
+  const type = attachment && typeof attachment === "object" && !Array.isArray(attachment) ? (attachment as { type?: unknown }).type : undefined;
+  return { text: type === 0 ? "成员已加入会话" : "会话信息已更新" };
+}

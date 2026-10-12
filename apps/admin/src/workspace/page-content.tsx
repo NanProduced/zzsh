@@ -73,7 +73,7 @@ export function WorkspacePageContent({
       />
     );
   }
-  if (tab.kind === "support") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} preview={tab.query.preview === "1"} initialSection={tab.query.section==="orders"?"orders":"consultation"} onRefresh={onRefresh} /></>;
+  if (tab.kind === "support") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} onRefresh={onRefresh} onOpenPath={onOpenPath} /></>;
   if (tab.kind === "membership-growth") return <MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (

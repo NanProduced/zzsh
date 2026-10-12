@@ -17,13 +17,17 @@ export function SupportRail(){
   const [preview,setPreview]=useState(false);
   const [orderParty,setOrderParty]=useState<"renter"|"owner"|undefined>();
   const [requestSerial,setRequestSerial]=useState(0);
-  useEffect(()=>{const open=(event:Event)=>{const party=(event as CustomEvent).detail?.party;if(party!=="renter"&&party!=="owner")return;lastSupportTriggerRef.current=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;setOrderParty(party);setRequestSerial(n=>n+1);setSupportOpen(true);};window.addEventListener("zzsh:order-groups",open);return()=>window.removeEventListener("zzsh:order-groups",open);},[]);
+  const [orderId,setOrderId]=useState<string>();
+  const [hasOpened,setHasOpened]=useState(false);
+  useEffect(()=>{const open=(event:Event)=>{const {party,orderId:id}=(event as CustomEvent).detail??{};if((party!=="renter"&&party!=="owner")||typeof id!=="string"||!id)return;lastSupportTriggerRef.current=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;auth.open(window.location.pathname+window.location.search,()=>{setOrderParty(party);setOrderId(id);setRequestSerial(n=>n+1);setHasOpened(true);setSupportOpen(true);});};window.addEventListener("zzsh:order-groups",open);return()=>window.removeEventListener("zzsh:order-groups",open);},[auth]);
   const lastSupportTriggerRef = useRef<HTMLButtonElement | null>(null);
   const requestSupport = (type: SupportType, trigger: HTMLButtonElement) => {
     lastSupportTriggerRef.current = trigger;
     auth.open(window.location.pathname + window.location.search, () => {
       setRequestedType(type);
       setOrderParty(undefined);
+      setOrderId(undefined);
+      setHasOpened(true);
       setRequestSerial(n => n + 1);
       setSupportOpen(true);
     });
@@ -33,14 +37,17 @@ export function SupportRail(){
     if (!open) requestAnimationFrame(() => lastSupportTriggerRef.current?.focus());
   };
   useEffect(()=>{
-    if(pathname === "/support") setSupportOpen(true);
+    if(pathname === "/support") { setHasOpened(true); setSupportOpen(true); }
     setPreview(new URLSearchParams(window.location.search).get("preview") === "1");
   },[pathname]);
+  // The window is non-modal, so Radix leaves focus on the entry button and Tab would walk
+  // the whole page before reaching the composer. Start the tab order inside the window.
+  useEffect(()=>{ if(supportOpen) document.querySelector<HTMLElement>(".support-dialog-content")?.focus(); },[supportOpen]);
   return <aside className="support-rail" aria-label="常驻工具">
     <Dialog.Root open={supportOpen} modal={false} onOpenChange={setSupportVisibility}>
-      <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>requestSupport("SERVICE",event.currentTarget)}><Headphones size={21}/><span>联系客服</span></button>
-      <Dialog.Portal forceMount><Dialog.Overlay className="modal-overlay support-dialog-overlay"/><Dialog.Content forceMount className="support-dialog-content" aria-describedby="support-dialog-description" onEscapeKeyDown={event=>{if(event.target instanceof HTMLElement&&event.target.closest(".order-team-image-viewer"))event.preventDefault();}} onPointerDownOutside={(event)=>{if(event.detail.originalEvent.target instanceof HTMLElement && event.detail.originalEvent.target.closest("[data-support-trigger], [data-auth-dialog]")) event.preventDefault();}}><Dialog.Title className="sr-only">站内客服</Dialog.Title><Dialog.Description id="support-dialog-description" className="sr-only">选择客服类型并开始站内咨询。</Dialog.Description><CustomerSupportWorkspace embedded preview={preview} initialType={requestedType} initialOrderParty={orderParty} requestSerial={requestSerial} onClose={()=>setSupportVisibility(false)} /></Dialog.Content></Dialog.Portal>
-      <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>requestSupport("COMPLAINT",event.currentTarget)}><MessageSquare size={21}/><span>投诉建议</span></button>
+      <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>requestSupport("SERVICE",event.currentTarget)}><Headphones size={21} className="pointer-events-none"/><span>联系客服</span></button>
+      <Dialog.Portal forceMount><Dialog.Overlay className="modal-overlay support-dialog-overlay"/><Dialog.Content forceMount className="support-dialog-content" aria-describedby="support-dialog-description" onEscapeKeyDown={event=>{if(event.target instanceof HTMLElement&&event.target.closest(".order-team-image-viewer"))event.preventDefault();}} onPointerDownOutside={(event)=>{const target = event.detail.originalEvent.target; if(target instanceof Element && target.closest("[data-support-trigger], [data-auth-dialog]")) event.preventDefault();}}><Dialog.Title className="sr-only">站内客服</Dialog.Title><Dialog.Description id="support-dialog-description" className="sr-only">选择客服类型并开始站内咨询。</Dialog.Description>{hasOpened ? <CustomerSupportWorkspace embedded visible={supportOpen} preview={preview} initialType={requestedType} initialOrderParty={orderParty} initialOrderId={orderId} requestSerial={requestSerial} onClose={()=>setSupportVisibility(false)} /> : null}</Dialog.Content></Dialog.Portal>
+      <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>requestSupport("COMPLAINT",event.currentTarget)}><MessageSquare size={21} className="pointer-events-none"/><span>投诉建议</span></button>
     </Dialog.Root>
     <Link href="/account?view=invite" className="rail-item"><Gift size={21}/><span>邀请码</span></Link>
     <ContactPopover kind="follow" side="left" className="rail-item"><Share2 size={21}/><span>关注我们</span></ContactPopover>

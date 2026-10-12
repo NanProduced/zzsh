@@ -103,6 +103,8 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [serviceConsultation] });
   if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
+  if (url.pathname.endsWith("/context")) return response({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-7", displayName: "测试用户甲", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
+  if (url.pathname.includes("/users/")) return response({ userId: "user-7", maskedPhone: "138****8000", accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, registeredAt: "2026-01-05T00:00:00.000Z" });
   if (url.pathname.endsWith("/im/messages")) {
     if (init.method === "POST") return pendingSend;
     return response({ messages: [historyMessage] });
@@ -139,7 +141,7 @@ test("support component preserves read state for send-only revoke and keeps sess
 
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(basePermissions), onRefresh })); });
   await waitFor(() => Boolean(rootNode.querySelector("textarea") && !rootNode.querySelector("textarea").disabled));
-  await waitFor(() => [...rootNode.querySelectorAll(".im-support-bubble")].some((element) => element.textContent === "保留的授权历史消息"));
+  await waitFor(() => [...rootNode.querySelectorAll(".im-wb-bub")].some((element) => element.textContent === "保留的授权历史消息"));
   const textarea = () => rootNode.querySelector("textarea");
   assert.ok(textarea());
   const tokenRequests = () => requests.filter((request) => request.path.endsWith("/im/token")).length;
@@ -164,18 +166,22 @@ test("support component preserves read state for send-only revoke and keeps sess
   });
   await settle();
   assert.equal(textarea().value, "撤权中的草稿");
-  assert.equal(rootNode.querySelector(".im-support-send").disabled, false);
+  assert.equal(rootNode.querySelector(".im-wb-send").disabled, false);
   await act(async () => { rootNode.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); await Promise.resolve(); });
   await settle();
-  assert.match(rootNode.querySelector(".im-support-send").textContent, /处理中/);
+  assert.match(rootNode.querySelector(".im-wb-send").textContent, /处理中/);
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(["im.support.read"]), onRefresh })); });
   await settle();
   resolvePendingSend(response({ message: { ...historyMessage, messageClientId: "message-send-a", messageServerId: "message-send-a", senderId: "admin-a", receiverId: "user-a", text: "撤权期间的响应", createTime: Date.parse("2026-09-17T00:02:00.000Z") } }));
   await settle();
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(basePermissions), onRefresh })); });
   await settle();
-  assert.doesNotMatch(rootNode.querySelector(".im-support-send").textContent, /处理中/);
-  assert.equal(textarea().value, "撤权中的草稿");
+  assert.doesNotMatch(rootNode.querySelector(".im-wb-send").textContent, /处理中/);
+  // 撤权只决定"还能不能发起新的外发"，不决定已经发出去那条的回执要不要收：这条提交在
+  // 撤权前就已经发出去了，回执成功后应该落成一条消息、清掉本次提交的原文，并且不补发。
+  assert.equal(textarea().value, "", "a converged send clears the text it actually submitted");
+  assert.equal([...rootNode.querySelectorAll(".im-wb-bub")].some((element) => element.textContent === "撤权期间的响应"), true, "the in-flight receipt lands as a message");
+  assert.doesNotMatch(rootNode.textContent, /发送结果未确认|发送失败/, "a successful send is not reported as unresolved");
 
   await act(async () => {
     const element = textarea();
@@ -192,7 +198,7 @@ test("support component preserves read state for send-only revoke and keeps sess
   assert.equal(textarea().disabled, true);
   assert.equal(textarea().value, "保留中的草稿");
   assert.equal(tokenRequests(), tokenRequestsBeforeSendOnlyRevoke);
-  assert.equal([...rootNode.querySelectorAll(".im-support-bubble")].some((element) => element.textContent === "保留的授权历史消息"), true);
+  assert.equal([...rootNode.querySelectorAll(".im-wb-bub")].some((element) => element.textContent === "保留的授权历史消息"), true);
 
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot([]), onRefresh })); });
   await settle();

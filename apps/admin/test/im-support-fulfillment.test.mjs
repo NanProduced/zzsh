@@ -12,6 +12,7 @@ const browser = new Window({ url: "http://127.0.0.1:4291/support" });
 globalThis.window = browser;
 globalThis.document = browser.document;
 globalThis.HTMLElement = browser.HTMLElement;
+globalThis.Element = browser.Element;
 globalThis.Node = browser.Node;
 globalThis.Event = browser.Event;
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
@@ -61,17 +62,26 @@ function mount() {
   return { host, root };
 }
 async function render(root, host, props = {}) {
+  // 右栏只留任务与入口；用例默认进入专用核对面板再操作数量与版本。
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", frozenInventory, ...props })); });
   await waitFor(() => Boolean(host.querySelector(".im-support-fulfillment")));
+  await openPanel(host);
 }
 function find(host, text) {
-  return [...host.querySelectorAll("button")].find((button) => button.textContent.includes(text));
+  return [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes(text));
 }
 async function click(host, text) {
   const button = find(host, text);
   assert.ok(button, `button available: ${text}`);
   await act(async () => { button.click(); });
   await settle();
+}
+// 数量与版本核对在专用面板里；右栏只留当前任务与入口。
+async function openPanel(host) {
+  const button = host.querySelector('[data-action="open-fulfillment-panel"]');
+  assert.ok(button, "task card offers the check panel entry");
+  await act(async () => { button.click(); });
+  await waitFor(() => Boolean(document.body.querySelector(".im-order-panel")));
 }
 
 test("first opening reads the slot's frozen inventory, not the settlement response", async (t) => {
@@ -87,16 +97,16 @@ test("first opening reads the slot's frozen inventory, not the settlement respon
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
 
-  const inputs = [...host.querySelectorAll(".im-support-fulfillment-lines input")];
+  const inputs = [...document.body.querySelectorAll(".im-support-fulfillment-lines input")];
   assert.equal(inputs.length, 2, "frozen inventory slot projection seeds the first opening");
   assert.equal(inputs[0].value, "5000");
-  assert.match(host.textContent, /哈夫币/);
+  assert.match(document.body.textContent, /哈夫币/);
   await click(host, "期初代录");
   const write = requests.find((request) => request.method === "POST");
   assert.ok(write, "opening write submitted");
   assert.deepEqual(JSON.parse(write.body), { lines: [{ itemId: "item_haff", quantity: "5000" }, { itemId: "item_ammo", quantity: "120" }] });
   assert.ok(String(write.headers["idempotency-key"] ?? "").startsWith("im_ful_record-opening_order-A_"), "stable intent key attached");
-  assert.match(host.textContent, /期初已提交/);
+  assert.match(document.body.textContent, /期初已提交/);
 });
 
 test("without the slot projection the section refuses to fake an opening", async (t) => {
@@ -104,8 +114,8 @@ test("without the slot projection the section refuses to fake an opening", async
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host, { frozenInventory: undefined });
-  assert.equal(host.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
-  assert.match(host.textContent, /未返回订单冻结库存投影/);
+  assert.equal(document.body.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+  assert.match(document.body.textContent, /未返回订单冻结库存投影/);
   assert.equal(find(host, "期初代录").disabled, true);
 });
 
@@ -122,7 +132,7 @@ test("an unknown write keeps the intent; an old identical opening and another ve
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   await click(host, "期初代录");
-  assert.match(host.textContent, /操作结果未确认/);
+  assert.match(document.body.textContent, /操作结果未确认/);
   const firstKey = requests.find((request) => request.method === "POST").headers["idempotency-key"];
   assert.equal(find(host, "期初代录").disabled, true, "primary write stays locked while the result is unknown");
 
@@ -134,7 +144,7 @@ test("an unknown write keeps the intent; an old identical opening and another ve
     throw new Error(`unexpected request ${url}`);
   };
   await click(host, "查看当前状态");
-  assert.doesNotMatch(host.textContent, /已在服务端确认完成/);
+  assert.doesNotMatch(document.body.textContent, /已在服务端确认完成/);
   assert.ok(find(host, "按原请求重放"), "identical historical projection does not resolve the unknown intent");
 
   // Another version's SUPPORT REVIEW is equally not a receipt for this key.
@@ -172,19 +182,19 @@ test("a replay precondition rejection never pretends the original request did no
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   await click(host, "期初代录");
-  assert.match(host.textContent, /操作结果未确认/);
+  assert.match(document.body.textContent, /操作结果未确认/);
   // 403 and a bare 409 CONFLICT come from the replay's own recheck: they say nothing about the original write.
   for (const [status, body] of [[403, { error: { code: "FORBIDDEN" } }], [409, { error: { code: "CONFLICT", message: "ORDER_NOT_SETTLEABLE" } }]]) {
     replayStatus = status; replayBody = body;
     await click(host, "按原请求重放");
-    assert.match(host.textContent, /不能证明原请求未执行/, `${status} keeps the unknown responsibility`);
+    assert.match(document.body.textContent, /不能证明原请求未执行/, `${status} keeps the unknown responsibility`);
     assert.ok(find(host, "按原请求重放"), `${status} does not release the intent`);
   }
   // The recorded receipt for the original key resolves it: a 409 carrying the original business reasons.
   replayStatus = 409;
   replayBody = { error: { code: "CONFLICT", message: "PAYMENT_BASIS_MISSING" }, reasons: ["PAYMENT_BASIS_MISSING"] };
   await click(host, "按原请求重放");
-  assert.match(host.textContent, /PAYMENT_BASIS_MISSING/);
+  assert.match(document.body.textContent, /PAYMENT_BASIS_MISSING/);
   assert.equal(find(host, "按原请求重放"), undefined, "the recorded receipt releases the intent");
 });
 
@@ -199,8 +209,8 @@ test("a business rejection is shown as blocked, not as success", async (t) => {
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   await click(host, "期初代录");
-  assert.match(host.textContent, /ORDER_NOT_PAID/);
-  assert.doesNotMatch(host.textContent, /期初已提交/);
+  assert.match(document.body.textContent, /ORDER_NOT_PAID/);
+  assert.doesNotMatch(document.body.textContent, /期初已提交/);
   assert.equal(find(host, "期初代录").disabled, false, "a definitive rejection releases the intent");
 });
 
@@ -223,8 +233,8 @@ test("an accepted write with a failed readback locks writes until the authoritat
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
   await click(host, "期初代录");
-  assert.match(host.textContent, /期初已提交/);
-  assert.match(host.textContent, /读取最新状态失败/);
+  assert.match(document.body.textContent, /期初已提交/);
+  assert.match(document.body.textContent, /读取最新状态失败/);
   assert.equal(find(host, "期初代录").disabled, true, "no fresh write while readback is pending");
   assert.equal(find(host, "按原请求重放"), undefined, "accepted writes are never replayed");
   assert.equal(requests.filter((request) => request.method === "POST").length, 1, "no second write after an accepted receipt");
@@ -261,8 +271,8 @@ test("accepted-marker storage failure keeps its warning through failed reads wit
   await click(host, "期初代录");
   assert.equal(acceptedStorageAttempts, 1, "the original intent persisted, only its accepted marker failed");
   const warning = () => {
-    assert.match(host.textContent, /请勿刷新或离开页面，先查看当前状态或联系维护处理/);
-    assert.doesNotMatch(host.textContent, /刷新后重试/);
+    assert.match(document.body.textContent, /请勿刷新或离开页面，先查看当前状态或联系维护处理/);
+    assert.doesNotMatch(document.body.textContent, /刷新后重试/);
     assert.equal(find(host, "按原请求重放"), undefined, "an accepted request remains GET-only");
     assert.equal(posts, 1);
   };
@@ -272,7 +282,7 @@ test("accepted-marker storage failure keeps its warning through failed reads wit
     readFailureStatus = status;
     await click(host, "查看当前状态");
     warning();
-    if (status !== 500) assert.equal(host.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+    if (status !== 500) assert.equal(document.body.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
   }
 });
 
@@ -291,8 +301,8 @@ test("an accepted receipt survives unmount and only a GET clears it", async (t) 
   let { host, root } = mount();
   await render(root, host);
   await click(host, "期初代录");
-  assert.match(host.textContent, /期初已提交/);
-  assert.match(host.textContent, /读取最新状态失败/);
+  assert.match(document.body.textContent, /期初已提交/);
+  assert.match(document.body.textContent, /读取最新状态失败/);
   assert.equal(find(host, "按原请求重放"), undefined);
   await act(async () => root.unmount());
   host.remove();
@@ -301,7 +311,7 @@ test("an accepted receipt survives unmount and only a GET clears it", async (t) 
   ({ host, root } = mount());
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  assert.match(host.textContent, /上次操作已受理/);
+  assert.match(document.body.textContent, /上次操作已受理/);
   assert.equal(find(host, "按原请求重放"), undefined, "accepted never offers replay after remount");
   assert.equal(find(host, "期初代录").disabled, true, "accepted keeps the write lock");
   assert.equal(posts, 1, "remount issues no second POST");
@@ -326,8 +336,8 @@ test("a 401/423 readback hides private projections and keeps the accepted receip
     let { host, root } = mount();
     await render(root, host);
     await click(host, "期初代录");
-    assert.doesNotMatch(host.textContent, /哈夫币/, `${status} hides the private projection immediately`);
-    assert.equal(host.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+    assert.doesNotMatch(document.body.textContent, /哈夫币/, `${status} hides the private projection immediately`);
+    assert.equal(document.body.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
     assert.ok(find(host, "查看当前状态"), `${status} keeps the accepted responsibility`);
     assert.equal(find(host, "按原请求重放"), undefined);
     await act(async () => root.unmount());
@@ -372,13 +382,13 @@ test("plain and observational reads also hide private projections on 401/423", a
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  assert.match(host.textContent, /哈夫币/, "initial read shows the private projection");
+  assert.match(document.body.textContent, /哈夫币/, "initial read shows the private projection");
   await click(host, "期初代录");
-  assert.match(host.textContent, /操作结果未确认/);
+  assert.match(document.body.textContent, /操作结果未确认/);
   await click(host, "查看当前状态");
-  assert.match(host.textContent, /哈夫币/, "a successful observation may show current facts");
+  assert.match(document.body.textContent, /哈夫币/, "a successful observation may show current facts");
   await click(host, "查看当前状态");
-  assert.doesNotMatch(host.textContent, /哈夫币/, "an observational 401 hides the private projection");
+  assert.doesNotMatch(document.body.textContent, /哈夫币/, "an observational 401 hides the private projection");
   assert.ok(find(host, "按原请求重放"), "the unknown responsibility survives the auth failure");
   assert.equal(posts, 1);
 });
@@ -397,10 +407,10 @@ test("a late settlement read never refills private data across an order switch",
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "A", viewerId: "admin-A", frozenInventory })); });
   await settle();
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-B", displayNo: "B", viewerId: "admin-A", frozenInventory })); });
-  await waitFor(() => host.textContent.includes("履约中 · 待结算"));
+  await waitFor(() => document.body.textContent.includes("履约中 · 等待结算"));
   await act(async () => { resolveA(response(paidNoOpening)); await settle(); });
-  assert.match(host.textContent, /履约中 · 待结算/, "the late order-A response cannot replace order-B facts");
-  assert.doesNotMatch(host.textContent, /待期初代录/);
+  assert.match(document.body.textContent, /履约中 · 等待结算/, "the late order-A response cannot replace order-B facts");
+  assert.doesNotMatch(document.body.textContent, /待核对期初/, "a superseded order's stage never refills the current card");
 });
 
 test("editing while the write is in flight cannot lose the original responsibility", async (t) => {
@@ -416,14 +426,14 @@ test("editing while the write is in flight cannot lose the original responsibili
   await render(root, host);
   await act(async () => { find(host, "期初代录").click(); });
   await settle();
-  const input = host.querySelector(".im-support-fulfillment-lines input");
+  const input = document.body.querySelector(".im-support-fulfillment-lines input");
   assert.equal(input.disabled, true, "edits are locked while sending");
   await act(async () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
     finish(response({ error: { code: "INTERNAL_ERROR" } }, 500));
   });
   await settle();
-  assert.match(host.textContent, /操作结果未确认/);
+  assert.match(document.body.textContent, /操作结果未确认/);
   assert.ok(find(host, "按原请求重放"), "late response still leaves the original responsibility");
   assert.equal(find(host, "期初代录").disabled, true);
 });
@@ -445,7 +455,7 @@ test("an unknown intent survives unmount and remounts under the same key", async
   ({ host, root } = mount());
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  assert.match(host.textContent, /未确认/);
+  assert.match(document.body.textContent, /未确认/);
   assert.equal(find(host, "期初代录").disabled, true, "remount cannot start a fresh write");
   await click(host, "按原请求重放");
   assert.equal(writes.length, 2);
@@ -468,8 +478,8 @@ test("auth failure keeps the intent for the same subject and is never consumed b
   let { host, root } = mount();
   await render(root, host);
   await click(host, "期初代录");
-  assert.match(host.textContent, /登录状态已变化/);
-  assert.doesNotMatch(host.textContent, /哈夫币/, "401/423 hides private projections immediately");
+  assert.match(document.body.textContent, /登录状态已变化/);
+  assert.doesNotMatch(document.body.textContent, /哈夫币/, "401/423 hides private projections immediately");
   assert.ok(find(host, "按原请求重放"), "401/423 keeps the original responsibility");
   await act(async () => root.unmount());
   host.remove();
@@ -508,19 +518,19 @@ test("preview shows named server amounts and editing invalidates the accepted ha
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  const select = host.querySelector(".im-support-fulfillment-controls select");
+  const select = document.body.querySelector(".im-support-fulfillment-controls select");
   await act(async () => {
     select.value = "TENANT_VOLUNTARY_EARLY";
     select.dispatchEvent(new Event("change", { bubbles: true }));
   });
   await settle();
   await click(host, "生成提前结算预览");
-  assert.match(host.textContent, /号主净额/);
-  assert.match(host.textContent, /123\.45 元/);
-  assert.match(host.textContent, /租客应退/);
+  assert.match(document.body.textContent, /号主净额/);
+  assert.match(document.body.textContent, /123\.45 元/);
+  assert.match(document.body.textContent, /租客应退/);
   const classify = find(host, "确认分类");
   assert.ok(classify && !classify.disabled, "classify enabled after a preview");
-  const input = host.querySelector(".im-support-fulfillment-lines input");
+  const input = document.body.querySelector(".im-support-fulfillment-lines input");
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set;
     setter.call(input, "10");
@@ -543,7 +553,7 @@ test("review binds the landed current version id and hash", async (t) => {
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  assert.match(host.textContent, /待客服复核/);
+  assert.match(document.body.textContent, /待客服复核/);
   await click(host, "确认复核");
   const write = requests.find((request) => request.method === "POST");
   assert.ok(write.url.endsWith("/settlements/settle_current/review"));
@@ -556,12 +566,12 @@ test("review stage exposes the current version quantities and amounts for cross-
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  assert.match(host.textContent, /待客服复核/);
-  const labels = [...host.querySelectorAll('[aria-label="当前版本数量"] label span')].map((node) => node.textContent);
+  assert.match(document.body.textContent, /待客服复核/);
+  const labels = [...document.body.querySelectorAll('[aria-label="当前版本数量"] label span')].map((node) => node.textContent);
   assert.deepEqual(labels, ["六级弹 · 发"], "current version lines are named from the frozen projection");
-  assert.match(host.textContent, /123\.45 元/);
-  assert.match(host.textContent, /12\.00 元/);
-  assert.doesNotMatch(host.textContent, /物资 · 件/);
+  assert.match(document.body.textContent, /123\.45 元/);
+  assert.match(document.body.textContent, /12\.00 元/);
+  assert.doesNotMatch(document.body.textContent, /物资 · 件/);
 });
 
 test("confirmed opening lines borrow names from the frozen projection instead of a placeholder", async (t) => {
@@ -569,7 +579,7 @@ test("confirmed opening lines borrow names from the frozen projection instead of
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  const labels = [...host.querySelectorAll(".im-support-fulfillment-lines label span")].map((node) => node.textContent);
+  const labels = [...document.body.querySelectorAll(".im-support-fulfillment-lines label span")].map((node) => node.textContent);
   assert.deepEqual(labels, ["哈夫币 · 哈夫币", "六级弹 · 发"]);
-  assert.doesNotMatch(host.textContent, /物资 · 件/);
+  assert.doesNotMatch(document.body.textContent, /物资 · 件/);
 });

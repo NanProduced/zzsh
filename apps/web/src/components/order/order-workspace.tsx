@@ -127,7 +127,7 @@ function NextStep({ order, party }: { order: Order; party: OrderParty }) {
     if (order.status !== "PENDING_PAYMENT") return null;
     return <section className="order-next-step" aria-label="下一步"><div><strong>下一步</strong><span>确认金额后在下方提交本地受控支付；订单信息以服务端记录为准。</span></div></section>;
   }
-  return <section className="order-next-step" aria-label="下一步"><div className="order-next-step-copy"><MessageCircle size={18} aria-hidden="true" /><span><strong>履约与沟通</strong><small>{fulfillmentText(assignment)}</small></span></div><button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button></section>;
+  return <section className="order-next-step" aria-label="下一步"><div className="order-next-step-copy"><MessageCircle size={18} aria-hidden="true" /><span><strong>履约与沟通</strong><small>{fulfillmentText(assignment)}</small></span></div><button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button></section>;
 }
 
 function MoneyFacts({ order, party }: { order: Order; party: OrderParty }) {

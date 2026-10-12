@@ -86,6 +86,8 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [waitingConsultation, activeConsultation] });
   if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
+  if (url.pathname.endsWith("/context")) return response({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-7", displayName: "测试用户甲", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
+  if (url.pathname.includes("/users/")) return response({ userId: "user-7", maskedPhone: "138****8000", accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, registeredAt: "2026-01-05T00:00:00.000Z" });
   if (url.pathname.endsWith("/im/messages")) return response({ messages: [] });
   if (url.pathname.endsWith("/im/transfer-targets")) return response({ targets: [{ adminUserId: "admin-b", displayName: "客服 B" }], transferReady: true });
   if (url.pathname.endsWith("/consultations/consultation-active/transfer")) {
@@ -116,34 +118,44 @@ test("support workbench groups the queue, marks local unread and runs the transf
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept", "im.support.transfer", "im.support.presence"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-support-queue-item").length === 2);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 1);
 
-  const groups = [...rootNode.querySelectorAll(".im-support-queue-group")].map((element) => element.textContent);
-  assert.ok(groups.some((label) => label.includes("待接入")), `queue groups the waiting item, got ${JSON.stringify(groups)}`);
-  assert.ok(groups.some((label) => label.includes("处理中")), `queue groups the active item, got ${JSON.stringify(groups)}`);
+  // The default filter lists only my own sessions; the waiting item is one tap away.
+  const filters = [...rootNode.querySelectorAll(".im-wb-filters button")].map((element) => element.textContent);
+  assert.ok(filters.some((label) => label.includes("待接待")), `queue offers the waiting filter, got ${JSON.stringify(filters)}`);
+  assert.ok(filters.some((label) => label.includes("我接待中")), `queue offers my own filter, got ${JSON.stringify(filters)}`);
+  assert.ok(rootNode.querySelector('.im-wb-filters button[aria-pressed="true"]').textContent.includes("我接待中"), "my own sessions is the default filter");
 
-  const unreadBadge = rootNode.querySelector('.im-support-queue-item[data-active="false"] .im-support-queue-meta b');
+  const unreadBadge = rootNode.querySelector('.im-wb-row[data-active="false"] .im-wb-unread');
   assert.ok(unreadBadge, "the unselected assigned conversation shows a local unread badge");
 
-  const activeItem = [...rootNode.querySelectorAll(".im-support-queue-item")].find((item) => item.textContent.includes("用户 A"));
+  // The unassigned consultation must be reachable through its filter, never silently dropped.
+  await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((b) => b.textContent.includes("待接待")).click(); });
+  await settle();
+  const waitingRow = rootNode.querySelector(".im-wb-row");
+  assert.ok(waitingRow && waitingRow.textContent.includes("用户 W"), "the waiting filter lists the unassigned consultation");
+  assert.match(waitingRow.textContent, /待接入/, "the waiting row states it awaits an agent");
+  await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((b) => b.textContent.includes("我接待中")).click(); });
+  await settle();
+  const activeItem = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes("用户 A"));
   await act(async () => { activeItem.click(); });
   await settle();
-  await act(async () => { rootNode.querySelector('[data-action="toggle-consultation-context"]').click(); });
-  await waitFor(() => rootNode.querySelector(".im-support-inspector"));
+  await act(async () => { rootNode.querySelector('[data-action="toggle-details"]').click(); });
+  await waitFor(() => rootNode.querySelector(".im-wb-details"));
   const transferButton = rootNode.querySelector('[data-action="open-transfer"]');
   assert.ok(transferButton && !transferButton.disabled, "transfer is enabled for the assigned READY consultation");
   await act(async () => { transferButton.click(); });
-  await waitFor(() => browser.document.querySelector(".im-support-dialog"));
+  await waitFor(() => browser.document.querySelector(".im-wb-dialog"));
   assert.ok(requests.some((request) => request.path.includes("/im/transfer-targets?consultationId=consultation-active")), "the dialog reads transfer targets for the selected consultation");
-  const target = [...browser.document.querySelectorAll(".im-support-dialog-list button")].find((button) => button.textContent.includes("客服 B"));
+  const target = [...browser.document.querySelectorAll(".im-wb-dialog-list button")].find((button) => button.textContent.includes("客服 B"));
   assert.ok(target, "eligible target is listed");
   await act(async () => { target.click(); });
   await settle();
   const transferRequest = requests.find((request) => request.path.endsWith("/consultations/consultation-active/transfer"));
   assert.ok(transferRequest, "the transfer command is submitted");
   assert.deepEqual(JSON.parse(transferRequest.body), { targetAdminId: "admin-b" });
-  assert.equal(browser.document.querySelector(".im-support-dialog"), null, "dialog closes after the transfer");
-  assert.match(rootNode.textContent, /已转交当前咨询/);
+  assert.equal(browser.document.querySelector(".im-wb-dialog"), null, "dialog closes after the transfer");
+  assert.match(rootNode.textContent, /已转交/);
   assert.match(rootNode.textContent, /客服 B/, "the queue reflects the new assignee");
 });
 
@@ -165,13 +177,13 @@ test("transfer dialog reports an unavailable service when the target route fails
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept", "im.support.transfer"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-support-queue-item").length === 2);
-  const activeItem = [...rootNode.querySelectorAll(".im-support-queue-item")].find((item) => item.textContent.includes("用户 A"));
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 1);
+  const activeItem = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes("用户 A"));
   await act(async () => { activeItem.click(); });
   await settle();
-  await act(async () => { rootNode.querySelector('[data-action="toggle-consultation-context"]').click(); });
+  await act(async () => { rootNode.querySelector('[data-action="toggle-details"]').click(); });
   await waitFor(() => rootNode.querySelector('[data-action="open-transfer"]'));
   await act(async () => { rootNode.querySelector('[data-action="open-transfer"]').click(); });
-  await waitFor(() => browser.document.querySelector(".im-support-dialog-error"));
-  assert.match(browser.document.querySelector(".im-support-dialog-error").textContent, /暂不可用/);
+  await waitFor(() => browser.document.querySelector(".im-wb-dialog-error"));
+  assert.match(browser.document.querySelector(".im-wb-dialog-error").textContent, /暂不可用/);
 });
