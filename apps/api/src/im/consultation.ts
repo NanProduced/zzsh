@@ -352,9 +352,13 @@ async function complaintExclusions(client: PoolClient, appId: string, userId: st
   return result.rows.map((r) => r.id);
 }
 
-async function storedComplaintExclusions(client: PoolClient, consultationId: string): Promise<string[]> {
+async function storedComplaintExclusions(client: PoolClient, consultationId: string, requireEvidence = false): Promise<string[]> {
   const row = (await client.query(`SELECT details FROM zzsh_iam.im_consultation_event WHERE consultation_id=$1 AND event_type='CREATED' ORDER BY created_at,id LIMIT 1`, [consultationId])).rows[0];
   const ids: unknown = row?.details?.excludedAdminIds;
+  // A new read projection must not expose complaint data when its exclusion evidence is missing or corrupt.
+  if (requireEvidence && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string" || !ID_PATTERN.test(id)))) {
+    throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+  }
   return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && ID_PATTERN.test(id)) : [];
 }
 async function decrementPresence(client: PoolClient, appId: string, adminUserId: string | null): Promise<void> {
@@ -1822,4 +1826,220 @@ export async function retryMessageScopeOperation(
   });
   await runScopeOperationNow(options, operationId);
   return readAdminConsultationView(options, context, consultationId);
+}
+
+
+/* ===================== right-hand context read projections =====================
+ * Read-only. Reuses the exact object-authorization predicate of listAdminConsultations
+ * so a caller cannot reach an event row the queue would not have shown them.
+ */
+
+const EVENT_PAGE_DEFAULT = 20;
+const EVENT_PAGE_MAX = 50;
+
+export function parseEventLimit(value: string | null): number {
+  if (value === null) return EVENT_PAGE_DEFAULT;
+  if (!/^[1-9]\d?$/.test(value)) throw invalid("Limit is invalid");
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > EVENT_PAGE_MAX) throw invalid("Limit is invalid");
+  return parsed;
+}
+
+/** Cursor is bound to the consultation so it cannot be replayed against another object. */
+export function encodeEventCursor(consultationId: string, createdAt: string, id: string): string {
+  return Buffer.from(JSON.stringify([consultationId, createdAt, id])).toString("base64url");
+}
+
+export function decodeEventCursor(consultationId: string, value: string): { createdAt: string; id: string } {
+  if (value.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw invalid("Cursor is invalid");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid("Cursor is invalid");
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 3 || typeof parsed[0] !== "string" || typeof parsed[1] !== "string" || typeof parsed[2] !== "string") {
+    throw invalid("Cursor is invalid");
+  }
+  if (parsed[0] !== consultationId) throw invalid("Cursor is invalid");
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,6}Z$/.test(parsed[1]) || !ID_PATTERN.test(parsed[2])) throw invalid("Cursor is invalid");
+  const date = new Date(`${parsed[1].slice(0, 19)}.000Z`);
+  if (parsed[1].startsWith("0000") || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== parsed[1].slice(0, 19)
+    || encodeEventCursor(consultationId, parsed[1], parsed[2]) !== value) throw invalid("Cursor is invalid");
+  return { createdAt: parsed[1], id: parsed[2] };
+}
+
+/**
+ * Same predicate as listAdminConsultations: own assignment, or unassigned rows this
+ * admin may claim for the given kind. CLOSED stays out of scope this round.
+ */
+async function readAuthorizedAdminConsultation(
+  client: PoolClient,
+  context: AdminContext,
+  appId: string,
+  consultationId: string,
+): Promise<ConsultationRow> {
+  const access = await loadEffectiveAdminAccess(client, context.userId);
+  if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+  const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+  const complaintQueue = serviceQueue && hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
+  const result = await client.query<ConsultationRow>(
+    `${CONSULTATION_SELECT}
+      WHERE c."app_id" = $1 AND c."id" = $2 AND c."state" <> 'CLOSED' AND (
+        c."assigned_admin_id" = $3
+        OR (c."assigned_admin_id" IS NULL AND c."kind" = 'SERVICE' AND $4::boolean)
+        OR (c."assigned_admin_id" IS NULL AND c."kind" = 'COMPLAINT' AND $5::boolean)
+      )`,
+    [appId, consultationId, context.userId, serviceQueue, complaintQueue],
+  );
+  const row = result.rows[0];
+  // Identical rejection for "does not exist", "other app", "closed" and "not yours":
+  // the projection must not confirm the existence of an object the caller cannot read.
+  if (!row) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+  if (row.kind === "COMPLAINT" && (await storedComplaintExclusions(client, row.id, true)).includes(context.userId)) {
+    throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+  }
+  return row;
+}
+
+const EVENT_TYPES = new Set(["CREATED", "ASSIGNED", "CLAIMED", "TRANSFERRED", "CLOSED", "REOPENED"]);
+
+export type ConsultationEventView = {
+  id: string;
+  type: string;
+  occurredAt: string;
+  actor: { kind: string; displayName: string };
+  from: { displayName: string } | null;
+  to: { displayName: string } | null;
+};
+
+export type ConsultationEventPage = { events: ConsultationEventView[]; nextCursor: string | null };
+
+const ADMIN_USER_RELATION = `"zzsh_auth_admin"."user"`;
+const AUTH_USER_RELATION = `"zzsh_auth_user"."user"`;
+
+async function displayNames(client: PoolClient, relation: string, ids: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (!ids.length) return names;
+  const rows = (await client.query<{ id: string; name: string | null; username: string | null }>(
+    `SELECT "id", "name", "username" FROM ${relation} WHERE "id" = ANY($1::text[])`,
+    [ids],
+  )).rows;
+  for (const row of rows) names.set(row.id, row.name?.trim() || row.username?.trim() || "");
+  return names;
+}
+
+export async function listConsultationEvents(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+  limitValue: string | null,
+  cursorValue: string | null,
+): Promise<ConsultationEventPage> {
+  const limit = parseEventLimit(limitValue);
+  if (!ID_PATTERN.test(consultationId)) throw invalid("Consultation identifier is invalid");
+  const cursor = cursorValue === null ? null : decodeEventCursor(consultationId, cursorValue);
+  return withTransaction(options.pool, async (client) => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    await readAuthorizedAdminConsultation(client, context, options.appId, consultationId);
+    // Newest page first, then flipped for display: the first screen must not be the oldest 20.
+    const rows = (await client.query<{
+      id: string; type: string; actorType: string; actorId: string | null; fromAdminId: string | null; toAdminId: string | null;
+      createdAt: string;
+    }>(
+      `SELECT "id", "event_type" AS "type", "actor_type" AS "actorType", "actor_id" AS "actorId",
+              "from_admin_id" AS "fromAdminId", "to_admin_id" AS "toAdminId",
+              to_char("created_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"
+         FROM "zzsh_iam"."im_consultation_event"
+        WHERE "consultation_id" = $1
+          AND ($2::text IS NULL OR ("created_at", "id") < ($3::timestamptz, $2::text))
+        ORDER BY "created_at" DESC, "id" DESC
+        LIMIT $4`,
+      [consultationId, cursor?.id ?? null, cursor?.createdAt ?? null, limit + 1],
+    )).rows;
+    const hasMore = rows.length > limit;
+    const page = (hasMore ? rows.slice(0, limit) : rows).reverse();
+    const adminIds = [...new Set([
+      ...page.filter((row) => row.actorType === "admin").map((row) => row.actorId).filter((id): id is string => Boolean(id)),
+      ...page.map((row) => row.fromAdminId).filter((id): id is string => Boolean(id)),
+      ...page.map((row) => row.toAdminId).filter((id): id is string => Boolean(id)),
+    ])];
+    const userIds = [...new Set(page.filter((row) => row.actorType === "user").map((row) => row.actorId).filter((id): id is string => Boolean(id)))];
+    // Batched: one lookup per identity table for the whole page, never per event row.
+    const adminNames = await displayNames(client, ADMIN_USER_RELATION, adminIds);
+    const userNames = await displayNames(client, AUTH_USER_RELATION, userIds);
+    const nameFor = (kind: string, id: string | null) => (id ? (kind === "admin" ? adminNames.get(id) : userNames.get(id)) : null) || (kind === "admin" ? "客服" : "平台用户");
+    return {
+      events: page.map((row) => ({
+        id: row.id,
+        // An unrecognised type must degrade neutrally rather than fail the whole panel.
+        type: EVENT_TYPES.has(row.type) ? row.type : "UNKNOWN",
+        occurredAt: row.createdAt,
+        actor: row.actorType === "system"
+          ? { kind: "system", displayName: "系统" }
+          : { kind: row.actorType, displayName: nameFor(row.actorType, row.actorId) },
+        from: row.fromAdminId ? { displayName: adminNames.get(row.fromAdminId) || "客服" } : null,
+        to: row.toAdminId ? { displayName: adminNames.get(row.toAdminId) || "客服" } : null,
+      })),
+      nextCursor: hasMore && page[0] ? encodeEventCursor(consultationId, page[0].createdAt, page[0].id) : null,
+    };
+  });
+}
+
+export type ConsultationSectionStatus = "available" | "absent" | "forbidden" | "unavailable" | "unresolved";
+
+export type ConsultationContextView = {
+  consultationId: string;
+  version: number;
+  service: { type: string; state: string; messageScopeState: string | null; handler: { id: string; displayName: string } | null };
+  user: { status: ConsultationSectionStatus; publicId?: string; displayName?: string; avatar: string | null };
+  subject: { status: ConsultationSectionStatus; reference?: string };
+  membership: { status: ConsultationSectionStatus; reason?: string };
+};
+
+export async function readConsultationContext(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+): Promise<ConsultationContextView> {
+  if (!ID_PATTERN.test(consultationId)) throw invalid("Consultation identifier is invalid");
+  return withTransaction(options.pool, async (client) => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    const row = await readAuthorizedAdminConsultation(client, context, options.appId, consultationId);
+    const subjectRef = row.subjectRef;
+    const image = (await client.query<{ image: string | null }>(
+      `SELECT "image" FROM "zzsh_auth_user"."user" WHERE "id" = $1`, [row.userId],
+    )).rows[0]?.image;
+    let avatar: string | null = null;
+    if (image && image.length <= 2048) {
+      try {
+        const url = new URL(image);
+        if ((url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password) avatar = url.href;
+      } catch { /* Invalid stored media is not a usable avatar. */ }
+    }
+    return {
+      consultationId: row.id,
+      version: numberValue(row.version),
+      service: {
+        type: row.kind,
+        state: row.state,
+        messageScopeState: row.messageScopeState ?? null,
+        handler: row.assignedAdminId ? { id: row.assignedAdminId, displayName: row.adminName?.trim() || "客服" } : null,
+      },
+      // Only what the consultation projection already authorises: stable subject id + name.
+      user: {
+        status: "available",
+        publicId: row.userId,
+        displayName: row.userName?.trim() || row.userUsername?.trim() || "平台用户",
+        avatar,
+      },
+      // subject_ref has no persisted kind: a bare reference is unresolved, never absent,
+      // and must not be typed by probing which table happens to contain the id.
+      subject: subjectRef ? { status: "unresolved", reference: subjectRef } : { status: "absent" },
+      // This tree carries no membership read dependency; absence is not "ordinary member".
+      membership: { status: "unavailable", reason: "membership_projection_not_integrated" },
+    };
+  });
 }

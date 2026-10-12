@@ -28,6 +28,8 @@ import {
   closeConsultation,
   createOrResumeUserConsultation,
   listAdminConsultations,
+  listConsultationEvents,
+  readConsultationContext,
   listTransferTargets,
   listUserConsultations,
   parseConsultationBody,
@@ -497,6 +499,27 @@ async function handleAdminConsultations(request: NodeRequest, response: NodeResp
   sendJson(response, 200, await transferConsultation(options.consultation, context, action.id, (body as { targetAdminId: string }).targetAdminId, requestId), requestId);
 }
 
+async function handleAdminConsultationEvents(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readAdminContext(request, options.security);
+  const query = routeQuery(request);
+  if ([...query.keys()].some((key) => key !== "limit" && key !== "cursor") || query.getAll("limit").length > 1 || query.getAll("cursor").length > 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Query is invalid");
+  sendJson(response, 200, await listConsultationEvents(options.consultation, context, consultationId, query.get("limit"), query.get("cursor")), requestId);
+}
+
+async function handleAdminConsultationContext(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readAdminContext(request, options.security);
+  if ([...routeQuery(request).keys()].length) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Query is invalid");
+  sendJson(response, 200, await readConsultationContext(options.consultation, context, consultationId), requestId);
+}
+
 async function handleAdminTransferTargets(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   if (!options.consultation) {
     sendUnavailable(response, requestId);
@@ -643,6 +666,16 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleAdminMessageAccess(request, response, requestId, options);
+      return;
+    }
+    const readMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(events|context)$/.exec(path);
+    if (readMatch) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      if (readMatch[2] === "events") await handleAdminConsultationEvents(request, response, requestId, options, readMatch[1]!);
+      else await handleAdminConsultationContext(request, response, requestId, options, readMatch[1]!);
       return;
     }
     const actionMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);

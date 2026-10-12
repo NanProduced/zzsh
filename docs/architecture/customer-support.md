@@ -1,5 +1,13 @@
 # 站内客服接入边界
 
+## 管理端咨询上下文只读接口
+
+`GET /api/v1/im/admin/consultations/:id/events` 与 `GET /api/v1/im/admin/consultations/:id/context` 经 `/api/bff/admin/im/consultations/:id/{events|context}` 转发，仅允许 GET。查询在同一只读、可重复读事务中重验管理会话/PIN、最新 `im.support.read` 和 App/咨询归属；基础范围为本人负责，或有该类型接待资格的未分配咨询，不要求 SDK 在线，也不建立云信身份。投诉额外检查 CREATED 事件保存的 `excludedAdminIds`：被排除者拒绝；缺少事件、缺字段、非数组或包含非法 ID 的证据也拒绝，不当空名单放行。CLOSED、跨 App、他人咨询、排除证据拒绝和不存在对象统一404。排除名单的来源类型与后续更新问题仍须独立处理，本次不更改旧目录或分配写逻辑。
+
+- `events` 接受 `limit`（默认20、1–50）和 `cursor`。首屏为最近一页、页内升序，`nextCursor` 指向更早页；游标绑定咨询并保留数据库微秒精度，按 `(created_at,id)` 翻页。非法/重复/未知参数返回400。仅输出 `id/type/occurredAt/actor{kind,displayName}/from/to`，不输出事件原始 details 或云信账号。系统事件显示“系统”，姓名为当前投影而非历史姓名快照，缺失管理员名降级“客服”。
+- `context` 不接受查询参数，输出 `consultationId/version/service/user/subject/membership`。用户仅包含本咨询已授权的主体 ID（`publicId`）、展示名和安全 HTTP(S) 头像；不含联系方式、证件或账户金额。无关联引用为 `subject.status=absent`；裸引用无可靠类型依据为 `unresolved`，不通过探测表猜测实体。本树会员投影未集成时返回 `membership.status=unavailable`，不能解释为普通会员。
+- 这些读取不产生业务事件、派单、建群或供应商调用。事件接口不是聊天历史归档或关闭操作结果查询；不能用目录缺席或事件缺席判断原关闭是否完成。实现不代表运行环境已装配或真实 PostgreSQL/Auth/HTTP 已验收。
+
 用户端通过全站共享客服容器进入在线客服或投诉咨询；管理员通过客服工作台处理受权队列。咨询与支付后的订单履约群是不同业务对象。订单群已有受控后端建群闭环及买家/号主/客服文字及图片入口，三方已完成local-fake浏览器联验；独立非生产App的订单群文字/图片与历史恢复已验证，完整履约及生产渠道尚未验收。
 
 订单付款接纳具备隔离受控入口：成功事实、PAID与按服务端App绑定的唯一WAITING记录同事务提交，不开放普通HTTP付款成功入口。本地派单可将WAITING转为ASSIGNED并记录负责人、时刻和审计；ASSIGNED与群READY分别表达，也不开始租用或首响计时。买卖双方IM身份尚未就绪不影响本地付款/分配事实。
