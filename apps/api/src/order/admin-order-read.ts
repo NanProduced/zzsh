@@ -3,11 +3,10 @@ import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { legacyMoneyCents } from "./legacy-order-read";
+import { legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string };
 export type OrderReadFilters = { page: number; pageSize: number; status?: string; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
-const LEGACY_STATE:Record<string,string>={"1":"待支付","2":"待上号","3":"进行中","4":"已完成","5":"已取消","6":"待验号","7":"待确认额外消耗","8":"待卖家确认","9":"待买家确认"};
 const utc=(column:string)=>`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 // Both sources are filtered and sorted together, before counting or pagination.
 export const ORDER_READ_RELATION = `
@@ -25,9 +24,7 @@ export const ORDER_READ_RELATION = `
  LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id
  UNION ALL
  SELECT l.id,l.source_created_at,l.game_id,l.owner_user_id,l.renter_user_id,l.account_id,l.original_order_no,
-  CASE WHEN l.source_order_status=5 THEN 'CANCELLED' WHEN l.source_order_status=4 THEN 'COMPLETED'
-   WHEN l.source_order_status=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'
-   WHEN l.source_order_status IN(2,3,6,7,8,9) AND l.source_pay_status=1 THEN 'PAID' ELSE 'UNKNOWN' END,
+  ${LEGACY_ORDER_STATUS_SQL},
   l.legacy_account_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text,
   to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
     'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc('l.source_completed_at')},
@@ -43,14 +40,14 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   return {...result,source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:null}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
- const status=r.source_order_status===5?'CANCELLED':r.source_order_status===4?'COMPLETED':r.source_order_status===1&&unpaid?'PENDING_PAYMENT':[2,3,6,7,8,9].includes(r.source_order_status)&&paid?'PAID':'UNKNOWN';
+ const state=legacyOrderReadState(r.source_order_status,r.source_pay_status),status=state.status;
  const goods=legacyMoneyCents(raw.goods_money),items=legacyMoneyCents(raw.expend_pay_money);
  return {id:r.id,displayNo:r.original_order_no,status,title:r.title??'资源资料待核',accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
   payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
-  source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:LEGACY_STATE[String(r.source_order_status)]??'源状态未知',originalPayStatus:r.source_pay_status},
+  source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status},
   legacyAmounts:{required:money(r.due_amount_cents),paid:paid?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
 }
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters){

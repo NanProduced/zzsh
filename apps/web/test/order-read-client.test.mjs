@@ -67,3 +67,15 @@ test("read failures preserve status and API error code without exposing write re
     globalThis.fetch = originalFetch;
   }
 });
+
+test("historical order client uses independent read routes and keeps failures visible", async () => {
+  const old = globalThis.fetch, calls = [];
+  globalThis.fetch = async (url, init) => { calls.push({ url:String(url), init }); return Response.json(String(url).includes("legacy_order") ? {order:{id:"legacy_order_a",readOnly:true}} : {items:[],page:2,pageSize:3,total:0}); };
+  try {
+    assert.equal((await orderApi.listLegacy({party:"owner",page:2,pageSize:3,status:"UNKNOWN"})).total,0);
+    assert.equal(calls[0].url,"/api/orders/legacy?party=owner&page=2&pageSize=3&status=UNKNOWN");assert.equal(calls[0].init.cache,"no-store");assert.equal(calls[0].init.credentials,"same-origin");
+    assert.equal((await orderApi.legacyDetail("legacy_order_a")).readOnly,true);
+    globalThis.fetch = async () => Response.json({error:{code:"NOT_FOUND",message:"未找到"}},{status:404});
+    await assert.rejects(()=>orderApi.legacyDetail("legacy_order_other"),e=>e instanceof OrderRequestError && e.status===404);
+  } finally { globalThis.fetch=old; }
+});

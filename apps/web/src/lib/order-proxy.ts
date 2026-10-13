@@ -14,7 +14,7 @@ const apiOrigin =
 const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
-const getPath = new RegExp(`^/(?:${id}(?:/(?:im|settlement|payment-requests))?)?$`);
+const getPath = new RegExp(`^/(?:legacy(?:/${id})?|${id}(?:/(?:im|settlement|payment-requests))?)?$`);
 const postPath = new RegExp(`^/(?:${id}/(?:cancel|payment-requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(

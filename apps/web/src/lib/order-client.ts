@@ -57,6 +57,18 @@ export type Order = {
   renterName?: string | null;
 };
 
+export type LegacyOrder = {
+  id: string; displayNo: string; status: OrderStatus | "UNKNOWN"; party: OrderParty; title: string; gameId: string;
+  source: { origin: "LEGACY"; ruleOrigin: "LEGACY_ORDER"; originalStatus: number; originalPayStatus: number; statusLabel: string };
+  createdAt: string | null; paidAt: string | null; cancelledAt: string | null; completedAt: string | null;
+  amounts: { rental: Money | null; deposit: Money | null; totalDue: Money | null; currency: "CNY" };
+  payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
+  legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; refund: Money | null; refundChannelState: "UNKNOWN" };
+  account: { id: string | null; displayNo: string | null; readable: boolean };
+  readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];
+};
+export type LegacyOrderPage = { items: LegacyOrder[]; page: number; pageSize: number; total: number };
+
 export type OrderPage = { items: Order[]; nextCursor: string | null; limit: number };
 
 export type PersonalRentalQuote = {
@@ -245,6 +257,14 @@ export function orderIntentKey(): string {
 }
 
 export const orderApi = {
+  listLegacy: (input: { party: OrderParty; page?: number; pageSize?: number; status?: OrderStatus | "UNKNOWN"; accountId?: string }, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ party: input.party, page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
+    if (input.status) query.set("status", input.status);
+    if (input.accountId) query.set("accountId", input.accountId);
+    return requestJson<LegacyOrderPage>(`/api/orders/legacy?${query.toString()}`, { signal });
+  },
+  legacyDetail: async (orderId: string, signal?: AbortSignal) =>
+    (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal })).order,
   list: (input: { party: OrderParty; status?: OrderStatus; accountId?: string; limit?: number; cursor?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams({ party: input.party, limit: String(input.limit ?? 20) });
     if (input.status) query.set("status", input.status);

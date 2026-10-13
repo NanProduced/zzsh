@@ -82,3 +82,14 @@ test('order BFF rejects non-JSON writes, bounds input and maps upstream failures
     assert.equal(calls,0);
   }finally{globalThis.fetch=old;}
 });
+
+test('historical order BFF forwards only GET list/detail and preserves authorization errors',async()=>{
+  const old=globalThis.fetch;let calls=0;
+  globalThis.fetch=async(url,init)=>{calls++;assert.match(String(url),/\/api\/bff\/user\/orders\/legacy/);assert.equal(init.method,'GET');return Response.json({error:{code:'NOT_FOUND',message:'未找到'}},{status:404});};
+  try{
+    assert.equal((await GET(input(['legacy','legacy_order_a']),ctx(['legacy','legacy_order_a']))).status,404);
+    assert.equal(calls,1);
+    assert.equal((await POST(input(['legacy','legacy_order_a'],{method:'POST',headers:{origin:'http://127.0.0.1:3100','content-type':'application/json'},body:'{}'}),ctx(['legacy','legacy_order_a']))).status,404);
+    assert.equal(calls,1);
+  }finally{globalThis.fetch=old;}
+});

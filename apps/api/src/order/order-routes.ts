@@ -2,6 +2,7 @@ import type { INestApplication } from "@nestjs/common";
 import type { OrderImSdkRouteBindings } from "../config/config";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 import { parseRfc3339Timestamp } from "../content/content";
+import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import { queryAdminReadOrders, getAdminReadOrder, type OrderReadFilters } from "./admin-order-read";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
@@ -100,6 +101,20 @@ export async function handleOrderUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    const legacyMatch = /^\/legacy(?:\/([A-Za-z0-9._:-]+))?$/.exec(path);
+    if (legacyMatch) {
+      if (method !== "GET") throw notFound();
+      const context = await readUserContext(request, options);
+      const orderId = legacyMatch[1];
+      if (orderId && query.size !== 0) throw invalid("Historical order detail does not accept query fields");
+      const filter = orderId ? null : parseLegacyUserOrderQuery(query);
+      const data = await withTransaction(options.pool, async client => {
+        await assertReplayAuthorization(client, context);
+        return orderId ? getUserLegacyOrder(client, context.userId, decodeId(orderId)) : listUserLegacyOrders(client, context.userId, filter!);
+      });
+      sendJson(response, 200, data, requestId);
+      return;
+    }
     if (await handleSettlementUserRoute(request, response, options)) return;
     if (method === "POST" && path === "/") {
       if (!requireOrigin(request, response, options, requestId)) return;
