@@ -22,12 +22,12 @@ type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetai
 type BackTarget = { href: string; label: string };
 
 function AccountDetailBanner() {
-  const desktop = getImageProps({ src: "/art/zhouzhou/account-detail-banner-d-desktop-final.png", width: 2141, height: 251, alt: "资源有据，租用有数；公开资料、费用构成与租赁规则", sizes: "100vw", loading: "eager" }).props;
   const mobile = getImageProps({ src: "/art/zhouzhou/account-detail-banner-a-mobile-v2.png", width: 2172, height: 724, alt: "三角洲行动账号租赁", sizes: "100vw", loading: "eager" }).props;
   return <section className="account-detail-banner" aria-label="三角洲行动账号租赁">
     <picture>
-      <source media="(max-width: 699px)" srcSet={mobile.srcSet} sizes={mobile.sizes} />
-      <img {...desktop} src={desktop.src} className="account-detail-banner-image" />
+      <source media="(max-width: 699px)" srcSet={mobile.srcSet ?? mobile.src} sizes={mobile.sizes} />
+      {/* The desktop fallback is inline so hidden banners make no image request. */}
+      <img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" width={2172} height={724} alt={mobile.alt} className="account-detail-banner-image" />
     </picture>
   </section>;
 }
