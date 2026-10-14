@@ -62,6 +62,6 @@ test("detail lookup binds both party columns and absence fails closed",async()=>
 
 test("historical party permission does not expose the current private account title",()=>{
   const hidden=projectUserLegacyOrder({...row,title:"PRIVATE_CURRENT_ACCOUNT_TITLE"},"renter");
-  assert.equal(hidden.title,"历史账号资料待核");assert.ok(!JSON.stringify(hidden).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
+  assert.equal(hidden.title,"账号资料暂未提供");assert.ok(!JSON.stringify(hidden).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
   const owned=projectUserLegacyOrder({...row,title:"MY_ACCOUNT_TITLE",accountReadable:true},"owner");assert.equal(owned.title,"MY_ACCOUNT_TITLE");
 });

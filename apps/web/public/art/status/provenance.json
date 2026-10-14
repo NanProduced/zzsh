@@ -1,0 +1,38 @@
+[
+  {
+    "file": "not-found-r1.webp",
+    "generator": "OpenAI built-in image_gen",
+    "date": "2026-10-14",
+    "reference": "Owner-approved Zhouzhou status-page composition",
+    "prompt": "Use case: stylized-concept. Production web illustration with genuine transparent alpha background, square canvas. Reference image is an approved website comp; recreate ONLY its left illustration as a clean isolated asset, no website, no UI, no text headings/buttons, no watermark, no backdrop. Preserve exact Zhouzhou mascot: adorable yellow skull face, huge amber eyes, small black triangle nose, black-gold headphones with white inner band, black tactical chibi suit with warm gold details, chunky boots, small backpack. Mascot standing reading a pale folded map, curious calm expression; small weathered 404 signpost to its left and tiny stones, small gold question mark near head. All character, sign and map fully within frame, centered group, 8% transparent margin. Polished detailed 3D render with restrained soft contact shadow, coherent light from upper left. Match approved reference character and pose closely. Only text allowed is 404 on the sign, omit invented brand logos. No floor plane, no white matte, no checkerboard pixels. Suitable on charcoal and white backgrounds.",
+    "processing": "960px WebP, alpha preserved",
+    "width": 960,
+    "height": 960,
+    "bytes": 146580,
+    "sha256": "59dac45008fe2d99a30cbbb112bc37f759eccb05d807aa612774ae7695f828a9"
+  },
+  {
+    "file": "unavailable-r1.webp",
+    "generator": "OpenAI built-in image_gen",
+    "date": "2026-10-14",
+    "reference": "Owner-approved Zhouzhou status-page composition",
+    "prompt": "Use case: stylized-concept. Production web illustration with genuine transparent alpha background, square canvas. Reference image is approved website comp; recreate ONLY its left illustration as a clean isolated asset, no website, no UI, no captions, no watermark, no backdrop. Preserve exact Zhouzhou mascot: adorable yellow skull face, huge amber eyes, small triangle nose, black-gold headphones with white inner band, black tactical chibi suit with warm gold details, chunky boots, small backpack. Mascot crouching examining an unplugged network cable held in right hand, looking focused and reassuring; compact open black-gold toolkit on left, small neutral network box on right, tidy short cable, two small gold attention marks. All parts fully within frame, centered group, 8% transparent margin. Polished detailed 3D render matching approved reference identity and pose, restrained soft contact shadow, coherent upper-left light. No writing or invented logos. No floor plane, white matte or checkerboard pixels. Suitable on charcoal and white backgrounds.",
+    "processing": "960px WebP, alpha preserved",
+    "width": 960,
+    "height": 960,
+    "bytes": 133526,
+    "sha256": "5cde709e2b617d4429ba306b54b1109b75b739cc225781915360fda968342dee"
+  },
+  {
+    "file": "forbidden-r1.webp",
+    "generator": "OpenAI built-in image_gen",
+    "date": "2026-10-14",
+    "reference": "Owner-approved Zhouzhou status-page composition",
+    "prompt": "Use case: stylized-concept. Production web illustration with genuine transparent alpha background, square canvas. Reference image is approved website comp; recreate ONLY its left illustration as a clean isolated asset, no website, no UI, no captions, no watermark, no backdrop. Preserve exact Zhouzhou mascot: adorable yellow skull face, huge amber eyes, small black triangle nose, black-gold headphones with white inner band, black tactical chibi suit with warm gold details, chunky boots, small backpack. Mascot standing facing viewer, friendly calm open hand guiding right; a simple freestanding pale gray closed door behind left with small neutral lock symbol and a narrow open pale doorframe behind right with a soft warm interior and simple right arrow. Keep architectural props minimal and compact to support mascot. Full character and doors within frame, 8% transparent margin. Polished detailed 3D render matching reference identity and pose; soft contact shadow. No walls, no floor plane, no white backdrop/matte, no checkerboard pixels. No writing, no invented logos. Suitable on charcoal and white backgrounds.",
+    "processing": "960px WebP, alpha preserved",
+    "width": 960,
+    "height": 960,
+    "bytes": 111604,
+    "sha256": "5a9693763a1aef995a401a7e0254faf18e2a0868f129776080bf0be0c12b19e5"
+  }
+]

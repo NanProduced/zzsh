@@ -95,3 +95,7 @@ test('production campaigns retain approved content without fabricated activity s
   assert.equal((html.match(/class="hero-poster-link"/g)||[]).length,3);
   for(const poster of ['delta','protection','accounts','market','invite']) assert.ok(html.includes(`poster-${poster}.webp`));
 });
+
+test('shared font distribution carries the canonical license', () => {
+ assert.deepEqual(readFileSync(resolve(web,'public/fonts/noto-sans-sc/LICENSE-NotoSansSC.txt')),readFileSync(resolve(web,'../../assets/fonts/noto-sans-sc/LICENSE-NotoSansSC.txt')));
+});

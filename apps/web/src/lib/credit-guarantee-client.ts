@@ -45,11 +45,11 @@ export type CreditGuarantee = {
   refundLedgerEntryRef?: string | null;
 };
 
-export type CreditRecoveryRequest = { id: string; status: "PENDING" | "APPROVED" | "REJECTED"; reason: string; scoreBefore: number; createdAt: string; decidedAt: string | null };
+export type CreditRecoveryRequest = { id: string; status: "PENDING" | "APPROVED" | "REJECTED"; reason: string; decisionReason: string | null; scoreBefore: number; createdAt: string; decidedAt: string | null };
 export type CreditPaymentAttempt = Record<string, unknown> & { id: string; requirementId: string; status: string; amountCents: string };
 export type CreditRefundAttempt = Record<string, unknown> & { id: string; requirementId: string; paymentId: string; status: string; amountCents: string };
 export type CreditTransaction = Record<string, unknown> & { requirementId: string; accountId: string; paymentHistory: CreditPaymentAttempt[]; refundHistory: CreditRefundAttempt[] };
-export type CreditOverview = { credit: { userId: string; score: number; revision: string; initializedAt: string; events: CreditEvent[] } | null; recoveryRequests: CreditRecoveryRequest[]; guarantees: CreditGuarantee[]; transactions: CreditTransaction[] };
+export type CreditOverview = { credit: { userId: string; score: number | null; revision: string; initializedAt: string; events: CreditEvent[] } | null; recoveryRequests: CreditRecoveryRequest[]; guarantees: CreditGuarantee[]; transactions: CreditTransaction[] };
 
 export class CreditRequestError extends Error {
   constructor(readonly status: number, readonly code: string, readonly unknownResult = false) { super(code); this.name = "CreditRequestError"; }
@@ -68,16 +68,20 @@ function cents(value: unknown): string {
   if (!/^(0|[1-9]\d{0,23})$/.test(result)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
   return result;
 }
+function score(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
+  return value;
+}
 function event(value: unknown): CreditEvent {
   const row = object(value);
   if (!["INITIALIZED", "BREACH_CONFIRMED", "BREACH_REVERSED", "RECOVERY_APPROVED"].includes(row.eventType)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
-  return { id: text(row.id), userId: text(row.userId), eventKey: text(row.eventKey), eventType: row.eventType, sourceType: text(row.sourceType), sourceId: text(row.sourceId), subjectRole: row.subjectRole === null ? null : row.subjectRole, deltaScore: Number(row.deltaScore), appliedDeltaScore: Number(row.appliedDeltaScore), scoreBefore: Number(row.scoreBefore), scoreAfter: Number(row.scoreAfter), visibleReason: text(row.visibleReason, 500), reversalOfId: row.reversalOfId ?? null, reversed: row.reversed === true, createdAt: text(row.createdAt, 40) };
+  return { id: text(row.id), userId: text(row.userId), eventKey: text(row.eventKey), eventType: row.eventType, sourceType: text(row.sourceType), sourceId: text(row.sourceId), subjectRole: row.subjectRole === null ? null : row.subjectRole, deltaScore: Number(row.deltaScore), appliedDeltaScore: Number(row.appliedDeltaScore), scoreBefore: score(row.scoreBefore), scoreAfter: score(row.scoreAfter), visibleReason: text(row.visibleReason, 500), reversalOfId: row.reversalOfId ?? null, reversed: row.reversed === true, createdAt: text(row.createdAt, 40) };
 }
 function guarantee(value: unknown): CreditGuarantee {
   const row = object(value);
   if (!["NOT_REQUIRED", "REQUIRED", "PAYMENT_PENDING", "SATISFIED", "REFUND_REQUESTED", "REFUND_PROCESSING", "REFUNDED", "FAILED", "UNKNOWN"].includes(row.state)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
   const optionalText = (value: unknown, max = 256) => value === null || value === undefined ? null : text(value, max);
-  return { accountId: text(row.accountId), displayNo: row.displayNo === null ? null : text(row.displayNo), gameId: text(row.gameId), versionId: row.versionId === null ? null : text(row.versionId), priceVersionId: text(row.priceVersionId), releaseId: text(row.releaseId), baseCents: row.baseCents === null ? null : cents(row.baseCents), requiredCents: cents(row.requiredCents), score: row.score === null ? null : Number(row.score), state: row.state, reference: row.reference === null ? null : text(row.reference), reasonCode: row.reasonCode, paymentId: optionalText(row.paymentId), paymentState: optionalText(row.paymentState), paymentProviderState: optionalText(row.paymentProviderState), paymentAmountCents: row.paymentAmountCents === null || row.paymentAmountCents === undefined ? null : cents(row.paymentAmountCents), paymentObservedAmountCents: row.paymentObservedAmountCents === null || row.paymentObservedAmountCents === undefined ? null : cents(row.paymentObservedAmountCents), paymentFinanceEventId: optionalText(row.paymentFinanceEventId), paymentLedgerEntryRef: optionalText(row.paymentLedgerEntryRef), refundId: optionalText(row.refundId), refundState: optionalText(row.refundState), refundProviderState: optionalText(row.refundProviderState), refundAmountCents: row.refundAmountCents === null || row.refundAmountCents === undefined ? null : cents(row.refundAmountCents), refundPolicyState: optionalText(row.refundPolicyState), refundFinanceEventId: optionalText(row.refundFinanceEventId), refundLedgerEntryRef: optionalText(row.refundLedgerEntryRef) };
+  return { accountId: text(row.accountId), displayNo: row.displayNo === null ? null : text(row.displayNo), gameId: text(row.gameId), versionId: row.versionId === null ? null : text(row.versionId), priceVersionId: text(row.priceVersionId), releaseId: text(row.releaseId), baseCents: row.baseCents === null ? null : cents(row.baseCents), requiredCents: cents(row.requiredCents), score: row.score === null ? null : score(row.score), state: row.state, reference: row.reference === null ? null : text(row.reference), reasonCode: row.reasonCode, paymentId: optionalText(row.paymentId), paymentState: optionalText(row.paymentState), paymentProviderState: optionalText(row.paymentProviderState), paymentAmountCents: row.paymentAmountCents === null || row.paymentAmountCents === undefined ? null : cents(row.paymentAmountCents), paymentObservedAmountCents: row.paymentObservedAmountCents === null || row.paymentObservedAmountCents === undefined ? null : cents(row.paymentObservedAmountCents), paymentFinanceEventId: optionalText(row.paymentFinanceEventId), paymentLedgerEntryRef: optionalText(row.paymentLedgerEntryRef), refundId: optionalText(row.refundId), refundState: optionalText(row.refundState), refundProviderState: optionalText(row.refundProviderState), refundAmountCents: row.refundAmountCents === null || row.refundAmountCents === undefined ? null : cents(row.refundAmountCents), refundPolicyState: optionalText(row.refundPolicyState), refundFinanceEventId: optionalText(row.refundFinanceEventId), refundLedgerEntryRef: optionalText(row.refundLedgerEntryRef) };
 }
 export type CreditWriteIntent = { version: 1; subject: string; path: string; body: Record<string, unknown>; key: string; generation: number; createdAt: number; persisted: boolean; phase: "unknown" | "readback" };
 const writeMemory = new Map<string, CreditWriteIntent>();
@@ -127,9 +131,13 @@ async function request(path: string, method: "GET" | "POST", body: Record<string
   return payload;
 }
 export async function readMyCredit(signal?: AbortSignal): Promise<CreditOverview> {
-  const payload = object(await request("", "GET", undefined, signal));
-  const credit = payload.credit === null ? null : (() => { const row = object(payload.credit); return { userId: text(row.userId), score: Number(row.score), revision: text(row.revision), initializedAt: text(row.initializedAt, 40), events: Array.isArray(row.events) ? row.events.map(event) : [] }; })();
-  const recoveryRequests = Array.isArray(payload.recoveryRequests) ? payload.recoveryRequests.map((value: unknown) => { const row = object(value); return { id: text(row.id), status: row.status, reason: text(row.reason, 500), scoreBefore: Number(row.scoreBefore), createdAt: text(row.createdAt, 40), decidedAt: row.decidedAt ?? null }; }) : [];
+  const payload = object(await request("/overview", "GET", undefined, signal));
+  const credit = payload.credit === null ? null : (() => { const row = object(payload.credit); return { userId: text(row.userId), score: row.score === null ? null : score(row.score), revision: text(row.revision), initializedAt: text(row.initializedAt, 40), events: Array.isArray(row.events) ? row.events.map(event) : [] }; })();
+  const recoveryRequests: CreditRecoveryRequest[] = Array.isArray(payload.recoveryRequests) ? payload.recoveryRequests.map((value: unknown) => {
+    const row = object(value);
+    if (!["PENDING", "APPROVED", "REJECTED"].includes(row.status)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
+    return { id: text(row.id), status: row.status, reason: text(row.reason, 500), decisionReason: row.decisionReason == null ? null : text(row.decisionReason, 500), scoreBefore: score(row.scoreBefore), createdAt: text(row.createdAt, 40), decidedAt: row.decidedAt == null ? null : text(row.decidedAt, 40) };
+  }) : [];
   const guarantees = Array.isArray(payload.guarantees) ? payload.guarantees.map(guarantee) : [];
   const transactions = Array.isArray(payload.transactions) ? payload.transactions.map((value: unknown) => { const row = object(value); const paymentHistory = Array.isArray(row.paymentHistory) ? row.paymentHistory.map((attempt: unknown) => { const item = object(attempt); return { ...item, id: text(item.id), requirementId: text(item.requirementId), status: text(item.status), amountCents: cents(item.amountCents) }; }) : []; const refundHistory = Array.isArray(row.refundHistory) ? row.refundHistory.map((attempt: unknown) => { const item = object(attempt); return { ...item, id: text(item.id), requirementId: text(item.requirementId), paymentId: text(item.paymentId), status: text(item.status), amountCents: cents(item.amountCents) }; }) : []; return { ...row, requirementId: text(row.requirementId), accountId: text(row.accountId), paymentHistory, refundHistory }; }) : [];
   return { credit, recoveryRequests, guarantees, transactions };

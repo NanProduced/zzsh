@@ -31,7 +31,7 @@ export type PublicQuote = {
   }>;
   unitAmountsInformational: boolean;
 };
-export type OwnerQuote = PublicQuote & {
+export type OwnerQuote = Omit<PublicQuote, "lines"> & {
   ownerTotal: Money;
   ownerHaffRatio?: string;
   publisherBailRequirement: Money | null;
@@ -385,6 +385,7 @@ export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
   }>;
 };
 export type MySupply = {
+  historicalRead?: null | { resourceNo: string; canCreateOrder: false; trade: "UNKNOWN"; historicalQuote: { haffRentYuan: string; goodsYuan: string; depositYuan: string; termDays: string; dailyHaffBase: string } };
   account: {
     id: string;
     game_id: string;
@@ -393,12 +394,21 @@ export type MySupply = {
     owner_paused: boolean;
     staff_restricted: boolean;
     restriction_reason: string | null;
+    /** Business account number. Nullable by design: the create/publish path does not assign one. */
+    display_no?: string | null;
+    lifecycle?: string | null;
+    legacy_hold?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
   };
   version: null | {
     id: string;
     schemaVersion: 1 | 2;
     sequence: string;
     revision?: string;
+    origin?: string | null;
+    /** When this version first went public. Not the account creation time. */
+    publication?: { publishedAt?: string | null; source?: string | null } | null;
     reviewState:
       | "DRAFT"
       | "SUBMITTED"
@@ -428,6 +438,17 @@ export type MySupply = {
   agreement?: PublishingOptions["agreement"] | null;
   available?: boolean;
   blockers?: string[];
+  /**
+   * Version records (read-only). The detail page renders sequence, review state, time and title
+   * only — internal ids, content hashes and rule release ids stay internal.
+   */
+  history?: Array<{
+    sequence: string | null;
+    review_state: string | null;
+    title: string | null;
+    created_at: string | null;
+    origin?: string | null;
+  }>;
   decisions?: Array<{
     id: string;
     version_id: string;

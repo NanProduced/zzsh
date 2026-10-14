@@ -62,3 +62,50 @@ test("missing or non-CNY amounts are explicit, never zero-filled", () => {
   assert.equal(rows.find((row) => row.label.includes("包赔费用")).value, "¥1.00");
   assert.equal(rows.find((row) => row.label === "哈夫币消耗（租客侧）").value, "—");
 });
+
+test("an effective posting is named as the settled result, never with the preview wording", () => {
+  const amounts = {
+    haffConsumedBuyer: yuan("224.00"), itemConsumedBuyer: yuan("24.00"), unusedHaffRefund: yuan("56.00"), unusedItemRefund: yuan("24.00"),
+    renterCharge: yuan("248.00"), renterRefund: yuan("280.00"), depositRefund: yuan("200.00"), feePayer: "OWNER",
+    haffConsumedOwner: yuan("168.00"), itemConsumedOwner: yuan("15.00"), ownerGross: yuan("183.00"), ownerNet: yuan("168.36"),
+  };
+  const renter = display.settlementAmountRows("renter", amounts, "effective");
+  const renterLabels = renter.map((row) => row.label);
+  assert.ok(renterLabels.includes("本次结算扣费"));
+  assert.ok(renterLabels.includes("最终应退"));
+  assert.ok(!renterLabels.includes("本次消耗合计"));
+  assert.ok(!renterLabels.includes("预计应退"));
+  assert.equal(renter.find((row) => row.label === "最终应退").value, "¥280.00");
+  assert.equal(renter.find((row) => row.label === "其中押金应退").value, "¥200.00");
+  const owner = display.settlementAmountRows("owner", amounts, "effective");
+  assert.equal(owner.find((row) => row.label === "本单净入账").value, "¥168.36");
+  assert.ok(!owner.some((row) => row.label === "号主净入账"));
+  // The default stays the estimate wording so a preview is never presented as a settled result.
+  assert.ok(display.settlementAmountRows("renter", amounts).some((row) => row.label === "预计应退"));
+});
+
+test("cents-suffixed postings keep the exact value and an unknown one stays unknown", () => {
+  assert.equal(display.moneyCents("16836"), "¥168.36 元");
+  assert.equal(display.moneyCents("0"), "¥0.00 元");
+  assert.equal(display.moneyCents("-150"), "-¥1.50 元");
+  assert.equal(display.moneyCents(null), "—");
+  assert.equal(display.moneyCents(undefined), "—");
+  assert.equal(display.moneyCents("168.36"), "—");
+});
+
+test("consumption rows read opening, remaining and consumed from the server projection only", () => {
+  const order = { quote: { lines: [{ itemId: "item_haff", name: "哈夫币", unit: "HAFF_BASE" }, { itemId: "item_piece", name: "弹药", unit: "ROUND" }] } };
+  const opening = { id: "o1", versionNo: "1", status: "CONFIRMED", lines: [{ itemId: "item_haff", quantity: "10000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO" }, { itemId: "item_piece", quantity: "600", unit: "ROUND", pricingKind: "FIXED_UNIT" }], acks: [] };
+  const version = { id: "v1", versionNo: "1", versionHash: "h", inputSnapshot: { lines: [{ itemId: "item_haff", openingQuantity: "10000000", remainingQuantity: "2000000" }, { itemId: "item_piece", openingQuantity: "600", remainingQuantity: "300" }] }, computation: { consumed: { haff: "8000000", items: [{ itemId: "item_piece", consumed: "300", remaining: "300" }] } } };
+  const rows = display.consumptionRows(order, opening, version);
+  assert.deepEqual(rows.map((row) => [row.itemId, row.opening, row.remaining, row.consumed]), [
+    ["item_haff", "10000000", "2000000", "8000000"],
+    ["item_piece", "600", "300", "300"],
+  ]);
+  assert.equal(rows[0].name, "哈夫币");
+  // Without a submitted or computed quantity the row stays unknown instead of defaulting to zero.
+  const bare = display.consumptionRows(order, opening, null);
+  assert.deepEqual(bare.map((row) => row.consumed), [null, null]);
+  assert.deepEqual(bare.map((row) => row.remaining), [null, null]);
+  assert.deepEqual(display.consumptionRows(order, null, version), []);
+});

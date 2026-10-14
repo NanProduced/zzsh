@@ -1,0 +1,78 @@
+/* 危险操作确认（Alert Dialog）。
+   弹层基座为 Base UI AlertDialog（modal、禁外部点击关闭、role=alertdialog）；
+   覆盖层复用全局 .modal-overlay，这里只补弹层排版、动作主次与克制危险色。 */
+
+.ui-alert-dialog-backdrop { z-index: 100; transition: opacity .16s ease; }
+.ui-alert-dialog-backdrop[data-starting-style] { opacity: 0; }
+
+.ui-alert-dialog {
+  position: fixed;
+  z-index: 101;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 14px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-lg);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  transition: opacity .16s ease, transform .16s ease;
+}
+
+/* 进入时轻微淡入＋位移；无 JS 动画，靠 Base UI 的 data-starting-style 钩子。 */
+.ui-alert-dialog[data-starting-style] { opacity: 0; transform: translate(-50%, calc(-50% + 6px)); }
+
+.ui-alert-dialog-title { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.5; }
+/* Base UI 可能把焦点放到弹层本身；标题不需要焦点圈。 */
+.ui-alert-dialog-title:focus { outline: none; }
+.ui-alert-dialog-description { margin: 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.8; }
+.ui-alert-dialog-consequences { margin: 0; padding-left: 18px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.9; }
+.ui-alert-dialog-consequences:empty { display: none; }
+
+.ui-alert-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px; }
+.ui-alert-dialog-actions .button { min-height: 42px; }
+
+/* 危险确认：描边＋文字，不用整块实心红；按钮文字本身写明后果动作，颜色只是辅助。 */
+.ui-alert-dialog-confirm[data-variant="danger"] {
+  border-color: color-mix(in srgb, var(--color-status-error) 52%, var(--color-border-default));
+  background: transparent;
+  color: var(--color-status-error);
+}
+.ui-alert-dialog-confirm[data-variant="danger"]:hover:not(:disabled) { background: color-mix(in srgb, var(--color-status-error) 12%, transparent); }
+.ui-alert-dialog-confirm[data-variant="danger"]:focus-visible { outline: 2px solid var(--color-status-error); outline-offset: 3px; }
+.ui-alert-dialog-confirm[data-variant="danger"]:active:not(:disabled) { background: color-mix(in srgb, var(--color-status-error) 18%, transparent); }
+.ui-alert-dialog-confirm[data-variant="danger"]:disabled { opacity: .55; cursor: not-allowed; }
+
+/* IM-01（t9 P1）：--color-status-error 浅色对白底仅 3.76:1，低于 AA 4.5:1（13px 不满足大文本豁免）。
+   危险确认及其 hover/focus/active 状态统一改用既有品牌危险 token --account-danger
+   （浅 #b91c1c 对白 ≈6.5:1、深 #fca5a5 对深底 ≈9.7:1），暗色可读性同步提升；
+   仍是描边＋文字的克制危险色，基础规则保留作 token 级降级，不新增任何字面色。 */
+.ui-alert-dialog-confirm[data-variant="danger"] {
+  border-color: color-mix(in srgb, var(--account-danger) 52%, var(--color-border-default));
+  color: var(--account-danger);
+}
+.ui-alert-dialog-confirm[data-variant="danger"]:hover:not(:disabled) { background: color-mix(in srgb, var(--account-danger) 12%, transparent); }
+.ui-alert-dialog-confirm[data-variant="danger"]:focus-visible { outline: 2px solid var(--account-danger); outline-offset: 3px; }
+.ui-alert-dialog-confirm[data-variant="danger"]:active:not(:disabled) { background: color-mix(in srgb, var(--account-danger) 18%, transparent); }
+
+@media (max-width: 600px) {
+  .ui-alert-dialog { padding: 20px; }
+  .ui-alert-dialog-actions { flex-direction: column-reverse; }
+  .ui-alert-dialog-actions .button { width: 100%; }
+}
+
+/* 组件自带 reduce-motion 兜底：不依赖全局规则，弹层与覆盖层不做淡入与位移。 */
+@media (prefers-reduced-motion: reduce) {
+  .ui-alert-dialog { transition: none; }
+  .ui-alert-dialog[data-starting-style] { opacity: 1; transform: translate(-50%, -50%); }
+  .ui-alert-dialog-backdrop { transition: none; }
+  .ui-alert-dialog-backdrop[data-starting-style] { opacity: 1; }
+}

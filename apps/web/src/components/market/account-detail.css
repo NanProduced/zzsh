@@ -1,4 +1,4 @@
-.functional-shell .account-detail { --color-text-primary:#292d34; --color-text-secondary:#636b76; --color-text-muted:#727a85; --color-delta-accent:var(--color-accent-brand); margin-top:24px; gap:24px; color:var(--color-text-primary); font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; font-kerning:normal; text-rendering:optimizeLegibility; -webkit-font-smoothing:antialiased; }
+.functional-shell .account-detail { --color-text-primary:#292d34; --color-text-secondary:#636b76; --color-text-muted:#727a85; --color-delta-accent:var(--color-accent-brand); margin-top:24px; gap:24px; color:var(--color-text-primary); font-family:var(--font-sans); font-kerning:normal; text-rendering:optimizeLegibility; -webkit-font-smoothing:antialiased; }
 html[data-theme="dark"] .account-detail { --color-text-primary:#e7eaf0; --color-text-secondary:#a7aeba; --color-text-muted:#959daa; }
 .functional-detail-trail { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .functional-detail-trail .functional-breadcrumb { margin:0; min-width:0; }
@@ -175,7 +175,6 @@ html[data-theme="dark"] .account-quote { background:color-mix(in srgb,#8d5b0b 10
   body:has(.account-detail) .support-rail .rail-item { width:50px; min-height:58px; gap:5px; }
 }
 @media(max-width:1099px) {
-  body:has(.account-detail) .support-rail { position:static; transform:none; margin:12px auto 100px; }
   .account-detail-top { grid-template-columns:minmax(0,1.35fr) minmax(300px,1fr); gap:20px; }
   .account-detail-title { font-size:26px; }
   .account-fact-groups { grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }
@@ -211,7 +210,8 @@ html[data-theme="dark"] .account-quote { background:color-mix(in srgb,#8d5b0b 10
   .rental-detail-confirm .rental-dock-price { display:grid; gap:4px; min-width:0; font-size:11px; color:var(--color-text-secondary); line-height:1.5; }
   .rental-dock-price strong { font-size:20px; line-height:1.3; color:var(--color-text-primary); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
   .account-quote .rental-confirm-primary { font-size:14px; }
-  body:has(.account-detail) .support-rail { position:static; transform:none; margin:12px auto 100px; }
+  /* The rental confirm bar owns the bottom edge here, so the shared support FAB sits clear of it. */
+  body:has(.account-detail) .support-rail { bottom:calc(88px + env(safe-area-inset-bottom)); }
   .account-stock { padding:20px 0; }
   .account-stock-table thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
   .account-stock-table,.account-stock-table tbody { display:block; }

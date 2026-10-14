@@ -1,0 +1,445 @@
+/* 六类信息表达组件。视觉取 Owner 已确认的 R2 克制表面，色值与文字角色用项目 token。
+   不使用 !important，不全局覆盖控件字体。 */
+
+.info-amount,
+.info-alert,
+.info-callout,
+.info-field,
+.info-local-retry,
+.info-record-status,
+.info-skeleton-wrap,
+.info-status-badge {
+  font-family: var(--font-sans);
+}
+
+.info-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------- 1. Field */
+
+.info-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.info-field-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--color-text-primary);
+  font-size: var(--type-label-size);
+  font-weight: 600;
+  line-height: var(--type-label-leading);
+}
+
+.info-field-required {
+  color: var(--account-danger);
+  font-size: var(--type-meta-size);
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.info-field-helper {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-helper-size);
+  line-height: var(--type-helper-leading);
+  overflow-wrap: anywhere;
+}
+
+.info-field-error {
+  margin: 0;
+  color: var(--account-danger);
+  font-size: var(--type-helper-size);
+  line-height: var(--type-helper-leading);
+  overflow-wrap: anywhere;
+}
+
+.info-field input[aria-invalid="true"],
+.info-field select[aria-invalid="true"],
+.info-field textarea[aria-invalid="true"] {
+  border-color: var(--account-danger);
+}
+
+/* --------------------------------------------------------------- 2. Callout */
+
+.info-callout {
+  padding: 16px 18px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-bg-card);
+}
+
+.info-callout[data-tone="info"] {
+  border-color: color-mix(in srgb, var(--color-status-info) 28%, var(--color-border-default));
+  background: color-mix(in srgb, var(--color-status-info) 6%, var(--color-bg-card));
+}
+
+.info-callout-body {
+  display: grid;
+  gap: 6px;
+}
+
+.info-callout-body > strong {
+  color: var(--color-text-primary);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-body-strong-weight);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.info-callout-copy {
+  color: var(--color-text-secondary);
+  font-size: var(--type-helper-size);
+  line-height: var(--type-helper-leading);
+  overflow-wrap: anywhere;
+}
+
+.info-callout-copy p {
+  margin: 0;
+}
+
+.info-callout-copy p + p {
+  margin-top: 8px;
+}
+
+/* -------------------------------------------------------- 3. Alert / Recovery */
+
+.info-alert {
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-bg-card);
+}
+
+.info-alert-body {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 12px;
+  padding: 20px;
+}
+
+.info-alert-body > svg {
+  margin-top: 3px;
+  color: var(--color-status-info);
+}
+
+.info-alert[data-tone="error"] {
+  border-color: color-mix(in srgb, var(--account-danger) 34%, var(--color-border-default));
+}
+
+.info-alert[data-tone="error"] .info-alert-body > svg {
+  color: var(--account-danger);
+}
+
+.info-alert[data-tone="unknown"] {
+  border-color: color-mix(in srgb, var(--color-status-warning) 34%, var(--color-border-default));
+}
+
+.info-alert[data-tone="unknown"] .info-alert-body > svg {
+  color: var(--color-status-warning);
+}
+
+.info-alert[data-tone="success"] .info-alert-body > svg {
+  color: var(--account-success);
+}
+
+.info-alert-copy h3 {
+  margin: 0 0 7px;
+  color: var(--color-text-primary);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-body-strong-weight);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.info-alert-copy p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-helper-size);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.info-alert-copy .info-alert-impact {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.info-alert-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 12px 20px;
+  background: var(--color-bg-elevated);
+}
+
+.info-alert-footer .button {
+  margin: 0;
+  min-height: 38px;
+  padding: 7px 14px;
+}
+
+.info-alert-footer details {
+  flex: 1;
+  min-width: 200px;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+}
+
+.info-alert-footer summary {
+  width: fit-content;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  cursor: pointer;
+}
+
+.info-alert-footer details p {
+  margin: 8px 0 0;
+}
+
+/* --------------------------------------------------- 4. Status / Inline status */
+
+.info-record-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  font-size: var(--type-meta-size);
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.info-record-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.info-record-status[data-tone="success"] {
+  color: var(--account-success);
+}
+
+.info-record-status[data-tone="info"] {
+  color: var(--color-status-info);
+}
+
+.info-record-status[data-tone="warning"] {
+  color: var(--color-status-warning);
+}
+
+.info-record-status[data-tone="error"] {
+  color: var(--account-danger);
+}
+
+.info-record-status[data-tone="unknown"]::before {
+  background: transparent;
+  border: 1px solid currentColor;
+}
+
+.info-record-status[data-tone="neutral"]::before {
+  width: 7px;
+  height: 1px;
+  border-radius: 0;
+}
+
+.info-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: var(--type-meta-size);
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.info-status-badge[data-tone="success"] {
+  color: var(--account-success);
+  background: color-mix(in srgb, var(--account-success) 12%, var(--color-bg-card));
+}
+
+.info-status-badge[data-tone="info"] {
+  color: var(--color-status-info);
+  background: color-mix(in srgb, var(--color-status-info) 12%, var(--color-bg-card));
+}
+
+.info-status-badge[data-tone="warning"] {
+  color: var(--color-status-warning);
+  background: color-mix(in srgb, var(--color-status-warning) 14%, var(--color-bg-card));
+}
+
+.info-status-badge[data-tone="error"] {
+  color: var(--account-danger);
+  background: color-mix(in srgb, var(--account-danger) 12%, var(--color-bg-card));
+}
+
+.info-status-badge[data-tone="unknown"] {
+  border-color: var(--color-border-default);
+  border-style: dashed;
+  background: transparent;
+}
+
+/* ------------------------------------------------ 5. Amount / Knowledge state */
+
+.info-amount {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.info-amount-label {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  line-height: var(--type-label-leading);
+}
+
+.info-amount-value {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--type-amount-row-size);
+  font-weight: var(--type-amount-row-weight);
+  line-height: var(--type-amount-row-leading);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.info-amount[data-size="block"] .info-amount-value {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.info-amount[data-size="hero"] .info-amount-value {
+  font-size: var(--type-amount-size);
+  font-weight: var(--type-amount-weight);
+  line-height: var(--type-amount-leading);
+}
+
+.info-amount-unit {
+  margin-right: 4px;
+  font-size: 0.55em;
+  font-weight: 600;
+}
+
+.info-amount[data-size="row"] .info-amount-unit {
+  font-size: 0.85em;
+}
+
+.info-amount[data-knowledge="UNKNOWN"] .info-amount-value,
+.info-amount[data-knowledge="FAILED"] .info-amount-value,
+.info-amount[data-knowledge="FORBIDDEN"] .info-amount-value {
+  color: var(--color-text-secondary);
+  font-weight: 550;
+}
+
+.info-amount[data-knowledge="FAILED"] .info-amount-value {
+  color: var(--account-danger);
+}
+
+.info-amount-note {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-helper-size);
+  line-height: var(--type-helper-leading);
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------- 6. Skeleton / Local retry */
+
+.info-skeleton-wrap[aria-busy="true"] {
+  min-width: 0;
+}
+
+.info-skeleton {
+  display: grid;
+  gap: 12px;
+}
+
+.info-skeleton-line {
+  display: block;
+  height: 13px;
+  border-radius: 4px;
+  background: var(--color-border-default);
+}
+
+.info-skeleton-line[data-size="lead"] {
+  height: 22px;
+  width: 42%;
+}
+
+.info-skeleton[data-variant="amount"] .info-skeleton-line[data-size="lead"] {
+  height: 32px;
+  width: 34%;
+}
+
+.info-skeleton[data-variant="text"] .info-skeleton-line {
+  width: 72%;
+}
+
+.info-skeleton[data-variant="text"] .info-skeleton-line[data-size="lead"] {
+  width: 46%;
+}
+
+.info-local-retry {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.info-local-retry-message {
+  margin: 0;
+  color: var(--account-danger);
+  font-size: var(--type-helper-size);
+  line-height: var(--type-helper-leading);
+  overflow-wrap: anywhere;
+}
+
+.info-local-retry-note {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 450px) {
+  .info-alert-body {
+    padding: 16px;
+  }
+
+  .info-alert-footer {
+    padding: 12px 16px;
+  }
+
+  .info-alert-footer details {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+}

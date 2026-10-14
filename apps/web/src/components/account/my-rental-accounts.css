@@ -1,0 +1,286 @@
+/* 出租账号列表：状态优先连续行、单一主导航链、已加载记录筛选；详情增量（资料修改记录 / 保证金两时点）
+   在文件末尾补少量规则，其余详情样式沿用现有 supply-* 规则。 */
+
+.mra-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 12px 0 14px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.mra-count {
+  font-family: var(--font-sans);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  line-height: var(--type-label-leading);
+  color: var(--color-text-primary);
+}
+.mra-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mra-chip {
+  min-height: 32px;
+  padding: 4px 13px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  cursor: pointer;
+}
+.mra-chip:hover { color: var(--color-text-primary); border-color: var(--color-border-strong); }
+/* t5 对比度修正：选中 chip 在深色底用金墨（原 --color-accent-brand-text 深墨对深底仅 1.41:1）；
+   浅色底保留深墨（品牌金底纹上仍达 AA）。 */
+.mra-chip[aria-pressed="true"] {
+  border-color: var(--color-accent-brand);
+  background: var(--color-accent-brand-muted);
+  color: var(--color-accent-brand);
+  font-weight: 600;
+}
+html[data-theme="light"] .mra-chip[aria-pressed="true"], html:not(.dark) .mra-chip[aria-pressed="true"] { color: var(--color-accent-brand-text); }
+.mra-scope-hint {
+  margin-left: auto;
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  color: var(--color-text-muted);
+}
+
+.mra-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.mra-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px 170px 96px;
+  align-items: start;
+  gap: 12px 16px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+/* 行结构：div 行容器 ＋ 标题区唯一主导航链（标题＋副行整体可点、单一焦点）＋ 装饰「查看详情 ›」。 */
+.mra-row-main {
+  display: block;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+.mra-row-title {
+  display: block;
+  max-width: 100%;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--type-label-size);
+  font-weight: 600;
+  line-height: 1.5;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.mra-row-main:hover .mra-row-title { color: var(--color-accent-brand); text-decoration: underline; }
+.mra-row-main:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; border-radius: 4px; }
+.mra-row-sub {
+  display: block;
+  margin-top: 5px;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+}
+.mra-row-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+/* 接单提示列：只承接服务端确定异常；正常行留空（不声称可接单）。 */
+.mra-row-avail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+.mra-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  white-space: nowrap;
+}
+/* t5 对比度修正：13px 状态文字直接用 --color-status-* 在浅色底仅 2.15–3.76:1（AA 需 4.5:1）。
+   成功/危险改用既有主题化 token --account-success/--account-danger（同 alert-dialog.css IM-01 做法）；
+   警告/信息在浅色底与正文色 color-mix 加深（#996b1d 4.69:1、#335c9f 6.62:1），不新增字面色；边框与文字同色。 */
+.mra-badge[data-tone="success"] { color: var(--account-success); border-color: var(--account-success); }
+.mra-badge[data-tone="error"] { color: var(--account-danger); border-color: var(--account-danger); }
+.mra-badge[data-tone="warning"] { color: var(--color-status-warning); border-color: var(--color-status-warning); }
+.mra-badge[data-tone="info"] { color: var(--color-status-info); border-color: var(--color-status-info); }
+html[data-theme="light"] .mra-badge[data-tone="warning"], html:not(.dark) .mra-badge[data-tone="warning"] {
+  color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-text-primary));
+  border-color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-text-primary));
+}
+html[data-theme="light"] .mra-badge[data-tone="info"], html:not(.dark) .mra-badge[data-tone="info"] {
+  color: color-mix(in srgb, var(--color-status-info) 55%, var(--color-text-primary));
+  border-color: color-mix(in srgb, var(--color-status-info) 55%, var(--color-text-primary));
+}
+.mra-badge[data-tone="unknown"] { color: var(--color-text-muted); border-style: dashed; }
+/* t5 对比度修正：锚链原用品牌深墨，深色主题对深底 1.01:1 基本不可见；深色改金墨（10.5:1），浅色保留深墨。 */
+.mra-row-anchor {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  color: var(--color-accent-brand);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  text-decoration: underline;
+}
+html[data-theme="light"] .mra-row-anchor, html:not(.dark) .mra-row-anchor { color: var(--color-accent-brand-text); }
+.mra-row-hint {
+  justify-self: end;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  white-space: nowrap;
+}
+/* 筛选后无匹配：不用插图，也不声称全量为空（S5）。 */
+.mra-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 18px 0 4px;
+}
+.mra-empty p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+}
+.mra-list-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 16px 0 4px;
+}
+.mra-list-foot .mra-meta {
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  color: var(--color-text-muted);
+}
+
+/* 1440/1024：稳定数据列（标题 / 资料状态 / 接单提示），只收起装饰性「查看详情 ›」。 */
+@media (max-width: 1024px) {
+  .mra-row { grid-template-columns: minmax(0, 1fr) 150px 160px; }
+  .mra-row-hint { display: none; }
+}
+/* 390：两段式堆叠——标题区＋资料状态在第一段，接单提示另起一段；不缩放、不横向滚动。 */
+@media (max-width: 640px) {
+  .mra-toolbar { gap: 8px 12px; }
+  .mra-scope-hint { margin-left: 0; width: 100%; }
+  .mra-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
+  .mra-row-state { justify-self: end; }
+  .mra-row-avail { grid-column: 1 / -1; }
+  .mra-row-hint { display: none; }
+}
+
+/* ---- 详情增量 ---------------------------------------------------------- */
+
+/* 冲突/阻塞/退回的锚点容器：仅提供 #blockers 落点与键盘焦点，不改变原有块样式。 */
+.supply-blockers-group:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 4px; border-radius: 6px; }
+/* 客服限制的服务端原因承接为限制文案的补充行。 */
+.supply-blocker-reason { display: block; margin-top: 3px; overflow-wrap: anywhere; }
+
+/* 保证金两时点①：报价记录行的时点副注。 */
+.supply-fee-list dd small {
+  display: block;
+  margin-top: 5px;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+/* 保证金两时点②：当前责任静态说明＋跳信用页（详情不取数，避免同一页面两份口径）。 */
+.supply-current-duty {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+}
+.supply-current-duty strong {
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  line-height: var(--type-label-leading);
+}
+.supply-current-duty p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+}
+.supply-duty-link { margin-top: 2px; }
+
+/* 资料修改记录（只读）：版本序号 · 审核状态 · 北京时间 · 标题；不输出内部 ID。 */
+.supply-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.supply-history-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--color-border-subtle);
+}
+.supply-history-list li:last-child { padding-bottom: 0; border-bottom: 0; }
+.supply-history-seq {
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+}
+.supply-history-title {
+  flex: 1 1 180px;
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  overflow-wrap: anywhere;
+}
+.supply-history-list time {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--type-meta-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

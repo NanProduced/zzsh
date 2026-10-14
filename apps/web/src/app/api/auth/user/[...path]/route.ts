@@ -55,6 +55,13 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   if (expectedSecurityMethod && method !== expectedSecurityMethod) return errorResponse(404, "NOT_FOUND", requestId);
   if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
   const headers = new Headers({ Origin: WEB_ORIGIN, "X-Request-Id": requestId });
+  // 只补转发浏览器自报的 User-Agent（客户端声明，不是服务端事实）：有界、去控制字符；
+  // 浏览器没带就不设（不伪造），也绝不转发其余请求头。会话创建读取 UA 的落库效果需正常认证窗口验证。
+  const userAgent = request.headers.get("user-agent");
+  if (userAgent) {
+    const sanitized = userAgent.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 512);
+    if (sanitized) headers.set("User-Agent", sanitized);
+  }
   const cookie = userCookies(request.headers.get("cookie"));
   if (cookie) headers.set("Cookie", cookie);
   const contentType = request.headers.get("content-type");

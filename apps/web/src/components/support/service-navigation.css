@@ -30,6 +30,9 @@
 .rail-item { width:54px; min-height:63px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:7px; font-size:10px; color:var(--color-text-secondary); border-radius:7px; }
 .rail-item:hover,.rail-item[data-state="open"] { color:var(--color-accent-brand); background:var(--color-bg-elevated); }
 .rail-top { border-top:1px solid var(--color-border-subtle); border-radius:0 0 7px 7px; }
+.rail-fab { display:none; align-items:center; justify-content:center; width:52px; height:52px; flex:0 0 auto; border-radius:50%; color:var(--color-accent-brand-text); background:var(--color-accent-brand); box-shadow:0 8px 20px rgb(0 0 0 / .22); }
+.rail-fab:hover { background:var(--color-accent-brand-hover); }
+.rail-fab:focus-visible,.rail-item:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:3px; }
 .complaint-panel label { display:block; font-size:13px; margin-top:20px; }
 .complaint-panel textarea { display:block; width:100%; background:var(--color-bg-canvas); border:1px solid var(--color-border-default); border-radius:5px; padding:12px; margin-top:8px; }
 .complaint-panel > p { margin-block:12px; font-size:12px; }
@@ -52,6 +55,8 @@
 .publish-actions span { font-size:12px; color:var(--color-text-secondary); }
 .account-guest { max-width:740px; padding:38px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-surface); }
 .account-guest .button { margin-top:20px; }
+.account-guest-actions { display:flex; flex-wrap:wrap; gap:12px; }
+.account-guest-actions .button { margin-top:0; }
 .account-tabs { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px; }
 .account-tabs a { padding:10px 15px; background:var(--color-bg-card); border-radius:5px; }
 .account-tabs a[aria-current] { color:var(--color-accent-brand); }
@@ -78,8 +83,14 @@
  .site-header[data-compact="true"] .mobile-menu { display:none; }
 }
 @media(max-width:1099px),(hover:none),(pointer:coarse) {
- .support-rail { top:auto; bottom:max(10px,env(safe-area-inset-bottom)); right:auto; left:50%; transform:translateX(-50%); flex-direction:row; width:min(380px,calc(100% - 24px)); padding:4px; }
- .support-rail .rail-item { width:auto; flex:1; min-width:0; min-height:54px; font-size:10px; }
+ /* Touch layouts fold the rail into one FAB so it never lies across page content; the tools stack
+    above the button only while it is open, and the column-reverse keeps the button in thumb reach. */
+ .support-rail { top:auto; right:max(14px,env(safe-area-inset-right)); bottom:max(14px,env(safe-area-inset-bottom)); left:auto; transform:none; flex-direction:column; align-items:center; gap:8px; width:auto; padding:0; border:0; background:none; box-shadow:none; }
+ /* order keeps the tools in their DOM/reading order and drops the toggle beneath them. */
+ .rail-fab { display:inline-flex; order:1; }
+ .support-rail .rail-item { display:none; width:54px; min-height:54px; }
+ .support-rail[data-expanded="true"] { padding:8px; border:1px solid var(--color-border-default); border-radius:16px; background:var(--color-bg-surface); box-shadow:0 8px 24px #0002; }
+ .support-rail[data-expanded="true"] .rail-item { display:flex; }
  .rail-top { border-top:0; }
  .portal-home,.portal-subpage { padding-bottom:85px; }
  .personal-workspace { display:block; }
@@ -195,7 +206,7 @@
 .supply-check { display:flex; align-items:flex-start; gap:9px; margin:12px 0 16px; color:var(--color-text-secondary); font-size:12px; line-height:1.6; }
 .supply-actions { flex-wrap:wrap; margin-top:24px; }
 .supply-actions > span { flex:1 1 250px; }
-.button.quiet { min-height:36px; padding:7px 10px; color:var(--color-text-secondary); background:transparent; border:1px solid transparent; border-radius:5px; font-size:12px; }
+.button.quiet { min-height:36px; padding:7px 10px; color:var(--color-text-secondary); background:transparent; border:1px solid transparent; border-radius:8px; font-size:12px; }
 .button.quiet:hover,.button.quiet:focus-visible { color:var(--color-text-primary); border-color:var(--color-border-default); }
 .my-accounts-panel { max-width:1100px; }
 .my-accounts-layout { display:grid; grid-template-columns:minmax(260px,.8fr) minmax(0,1.5fr); gap:18px; align-items:start; }

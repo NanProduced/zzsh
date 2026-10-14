@@ -1,4 +1,39 @@
-import type { MembershipGrowthData, MembershipGrowthViewState } from "../components/account/membership-growth-panel";
+export type GrowthTier = "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND" | "BLACK_GOLD" | "UNKNOWN";
+export type GrowthGraceState = "NONE" | "ACTIVE" | "RECOVERED" | "EXPIRED" | "UNKNOWN";
+export type EntitlementState = "PENDING" | "APPROVED_PENDING_EXECUTION" | "EXECUTED_PENDING_START" | "ACTIVE" | "EXPIRED" | "REPLACED" | "REVOKED" | "UNKNOWN";
+export type EntitlementKind = "FRIEND" | "PRESTIGE" | "UNKNOWN";
+
+export type MembershipGrowthData = {
+  tier: GrowthTier;
+  rollingPoints: string;
+  lifetimePoints: string;
+  asOf: string;
+  windowStart: string | null;
+  benefitsState: "CONFIGURED" | "NOT_CONFIGURED";
+  nextTier: { tier: Exclude<GrowthTier, "BLACK_GOLD" | "STANDARD" | "UNKNOWN">; threshold: string; remaining: string } | null;
+  grace: { state: GrowthGraceState; fromTier: GrowthTier | null; until: string | null; gapPoints: string | null };
+  nextExpiryAt: string | null;
+  benefits: Array<{ label: string; value: string; sourceVersion?: string }>;
+  comparison?: Array<{ tier: string; deposit: string; pricing: string }>;
+  entitlements: Array<{ id: string; kind: EntitlementKind; label: string; scope: string; startsAt: string; endsAt: string; state: EntitlementState; depositWaived: boolean }>;
+  contributions: Array<{ label: string; effectiveAt: string; amountCents: string; exitsAt: string; kind: "CONSUMPTION" | "CORRECTION" }>;
+  pendingCount: number;
+};
+
+export type MembershipPointEvent = {
+  id: string;
+  at: string;
+  reason: string;
+  rollingDelta: string;
+  lifetimeDelta: string;
+};
+
+export type MembershipGrowthViewState =
+  | { status: "loading" }
+  | { status: "error"; message: string; retryable?: boolean }
+  | { status: "permission"; message: string }
+  | { status: "unknown"; message: string }
+  | { status: "ready"; data: MembershipGrowthData };
 
 const TIERS = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND", "BLACK_GOLD", "UNKNOWN"] as const;
 const GRACE = ["NONE", "ACTIVE", "RECOVERED", "EXPIRED", "UNKNOWN"] as const;
@@ -38,19 +73,40 @@ function grace(value: unknown): MembershipGrowthData["grace"] {
   return { state: value.state as MembershipGrowthData["grace"]["state"], fromTier: value.fromTier === null ? null : tier(value.fromTier), until: value.until === null ? null : text(value.until, "grace.until"), gapPoints: value.gapPoints === null ? null : text(value.gapPoints, "grace.gapPoints") };
 }
 
+function requiredRecords(value: unknown, field: string): RecordValue[] {
+  if (!Array.isArray(value)) throw new MembershipGrowthRequestError(200, { error: { code: "MEMBERSHIP_CONTRACT_REQUIRED", message: `会员成长字段缺失：${field}` } });
+  if (value.some((item) => !isRecord(item))) throw new MembershipGrowthRequestError(200, { error: { code: "MEMBERSHIP_CONTRACT_REQUIRED", message: `会员成长字段无效：${field}` } });
+  return value as RecordValue[];
+}
+
 function asReady(body: RecordValue): MembershipGrowthData {
   const growth = isRecord(body.growth) ? body.growth : null;
   if (!growth || growth.schema !== "membership-growth-v1" || growth.knowledge !== "KNOWN") throw new MembershipGrowthRequestError(200, { error: { code: "MEMBERSHIP_CONTRACT_REQUIRED", message: "会员成长数据未闭合" } });
-  const entitlements = Array.isArray(body.entitlements) ? body.entitlements : [];
-  const benefits = Array.isArray(growth.benefits) ? growth.benefits : [];
-  const comparison = Array.isArray(growth.comparison) ? growth.comparison : [];
-  const contributions = Array.isArray(growth.contributions) ? growth.contributions : [];
+  const entitlements = requiredRecords(body.entitlements, "entitlements");
+  const benefits = requiredRecords(growth.benefits, "benefits");
+  const comparison = requiredRecords(growth.comparison, "comparison");
+  const contributions = requiredRecords(growth.contributions, "contributions");
   const next = growth.nextTier === null ? null : isRecord(growth.nextTier) ? { tier: tier(growth.nextTier.tier) as Exclude<MembershipGrowthData["tier"], "BLACK_GOLD" | "STANDARD" | "UNKNOWN">, threshold: text(growth.nextTier.threshold, "nextTier.threshold"), remaining: text(growth.nextTier.remaining, "nextTier.remaining") } : null;
   return {
-    tier: tier(growth.effectiveTier), rollingPoints: text(growth.rollingPoints, "rollingPoints"), lifetimePoints: text(growth.lifetimePoints, "lifetimePoints"), asOf: text(growth.asOfUtc, "asOfUtc"), nextTier: next, grace: grace(growth.grace), nextExpiryAt: growth.nextExpiryAtUtc === null ? null : text(growth.nextExpiryAtUtc, "nextExpiryAtUtc"),
+    tier: tier(growth.effectiveTier), rollingPoints: text(growth.rollingPoints, "rollingPoints"), lifetimePoints: text(growth.lifetimePoints, "lifetimePoints"), asOf: text(growth.asOfUtc, "asOfUtc"),
+    windowStart: typeof growth.windowStartUtc === "string" && growth.windowStartUtc ? growth.windowStartUtc : null,
+    benefitsState: growth.benefitsState === "CONFIGURED" ? "CONFIGURED" : "NOT_CONFIGURED",
+    nextTier: next, grace: grace(growth.grace), nextExpiryAt: growth.nextExpiryAtUtc === null ? null : text(growth.nextExpiryAtUtc, "nextExpiryAtUtc"),
     benefits: benefits.filter(isRecord).map((item) => ({ label: text(item.label, "benefits.label"), value: text(item.value, "benefits.value"), ...(typeof item.sourceVersion === "string" ? { sourceVersion: item.sourceVersion } : {}) })),
     comparison: comparison.filter(isRecord).map((item) => ({ tier: text(item.tier, "comparison.tier"), deposit: text(item.deposit, "comparison.deposit"), pricing: text(item.pricing, "comparison.pricing") })),
-    entitlements: entitlements.filter(isRecord).map((item) => ({ kind: item.kind === "PRESTIGE" ? "PRESTIGE" : "FRIEND", label: typeof item.label === "string" ? item.label : item.kind === "PRESTIGE" ? "尊享礼遇" : "挚友礼遇", scope: text(item.scopeKey, "entitlements.scopeKey"), endsAt: text(item.endsAtUtc, "entitlements.endsAtUtc"), state: ENTITLEMENT_STATES.includes(item.status as typeof ENTITLEMENT_STATES[number]) ? item.status as MembershipGrowthData["entitlements"][number]["state"] : "PENDING", depositWaived: item.depositWaived === true })),
+    entitlements: entitlements.filter(isRecord).map((item) => {
+      const kind: EntitlementKind = item.kind === "PRESTIGE" ? "PRESTIGE" : item.kind === "FRIEND" ? "FRIEND" : "UNKNOWN";
+      return {
+        id: text(item.id, "entitlements.id"),
+        kind,
+        label: typeof item.label === "string" && item.label ? item.label : "专属礼遇",
+        scope: text(item.scopeKey, "entitlements.scopeKey"),
+        startsAt: text(item.startsAtUtc, "entitlements.startsAtUtc"),
+        endsAt: text(item.endsAtUtc, "entitlements.endsAtUtc"),
+        state: (ENTITLEMENT_STATES as readonly string[]).includes(item.status as string) ? (item.status as EntitlementState) : "UNKNOWN",
+        depositWaived: item.depositWaived === true,
+      };
+    }),
     contributions: contributions.filter(isRecord).map((item) => ({ label: text(item.label, "contributions.label"), effectiveAt: text(item.effectiveAt, "contributions.effectiveAt"), amountCents: text(item.amountCents, "contributions.amountCents"), exitsAt: text(item.exitsAt, "contributions.exitsAt"), kind: item.kind === "CORRECTION" ? "CORRECTION" : "CONSUMPTION" })),
     pendingCount: typeof growth.pendingCount === "number" && Number.isInteger(growth.pendingCount) && growth.pendingCount >= 0 ? growth.pendingCount : 0,
   };

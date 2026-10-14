@@ -327,13 +327,17 @@ export function AccountCard({
   getReturnState,
   viewMode = "grid",
   imageLoading = "lazy",
+  coverRetry = false,
 }: {
   data: AccountCardData;
   getReturnState?: () => AccountReturnSnapshot;
   viewMode?: AccountCardViewMode;
   imageLoading?: "eager" | "lazy";
+  /** 收藏页需要封面失败后可重试；市场页默认保持原降级，不新增控件。 */
+  coverRetry?: boolean;
 }) {
   const [failedSrc, setFailedSrc] = useState<string>();
+  const [retryToken, setRetryToken] = useState(0);
   const [galleryOpen, setGalleryOpen] = useState(false);
   const galleryTriggerRef = useRef<HTMLButtonElement>(null);
   const missing = !data.imageUrl || failedSrc === data.imageUrl;
@@ -635,7 +639,25 @@ export function AccountCard({
   const visibleResourcePills = gridQuoteResources;
 
 
-  const gridThumb = (
+  // 封面失败只降级封面区：收藏页（coverRetry）给重试入口，其余页面保持原有降级，不新增控件。
+  const gridThumb = missing && coverRetry && data.imageUrl ? (
+    <div className="account-card-thumb is-cover-failed" role="status">
+      <div className="thumb-fallback">
+        <ImageOff size={24} aria-hidden="true" />
+        <span>图片加载失败</span>
+        <button
+          type="button"
+          className="button secondary button--sm"
+          onClick={() => {
+            setFailedSrc(undefined);
+            setRetryToken((value) => value + 1);
+          }}
+        >
+          重试
+        </button>
+      </div>
+    </div>
+  ) : (
     <button
       type="button"
       ref={galleryTriggerRef}
@@ -654,6 +676,7 @@ export function AccountCard({
         </div>
       ) : (
         <img
+          key={retryToken}
           src={data.imageUrl}
           alt={`${data.title}公开图片`}
           onError={() => setFailedSrc(data.imageUrl)}

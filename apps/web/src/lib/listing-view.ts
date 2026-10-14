@@ -63,7 +63,7 @@ export type ListingDetailData = ListingCardData & {
 };
 
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" };
-const CONDITION_LABELS: Record<string, string> = {
+export const CONDITION_LABELS: Record<string, string> = {
   safe_box_code: "安全箱",
   vit_level: "体力等级",
   bear_level: "负重等级",
@@ -191,6 +191,18 @@ export function conditionLines(
     if (daily) lines.push({ key: "daily_consumption", label: "每日消耗", value: daily });
   }
   return lines;
+}
+/**
+ * Per-item projection that may fail: a favorite record whose summary DTO is incomplete (for
+ * example a current listing without a quote) degrades to a single fault card. The strict
+ * `toListingCard` stays authoritative for callers that must not render an unpriced listing.
+ */
+export function previewListingCard(listing: PublicListing): { ok: true; card: ListingCardData } | { ok: false } {
+  try {
+    return { ok: true, card: toListingCard(listing) };
+  } catch {
+    return { ok: false };
+  }
 }
 export function toListingCard(listing: PublicListing): ListingCardData {
   if (listing.source === "LEGACY_READ_ONLY") return toHistoricalListingCard(listing);

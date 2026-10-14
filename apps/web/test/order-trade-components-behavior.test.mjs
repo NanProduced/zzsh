@@ -32,6 +32,9 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
     if (name === "@/components/session/identity-reset") return requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
     if (name === "@/components/order/order-trade-actions") return loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session);
+    if (name === "@/components/order/order-presentation") return loadComponent("apps/web/src/components/order/order-presentation.tsx", session);
+    if (name === "@/components/order/order-detail") return loadComponent("apps/web/src/components/order/order-detail.tsx", session);
+    if (name === "@/components/order/order-list") return loadComponent("apps/web/src/components/order/order-list.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
@@ -146,6 +149,9 @@ test("F3: blank and negative quantities are refused as unknown, never coerced to
     const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
     assert.ok(probe.host.textContent.includes("发起结束"));
+    // The ending input is a local, explicit entry: nothing is filled in and no preview is offered yet.
+    assert.equal(probe.buttons().some((text) => text.includes("预览结算金额")), false);
+    await probe.click("发起结束租用");
     const input = await probe.setInput("哈夫币 期末剩余数量", "");
     assert.equal(input.value, "");
     await probe.click("预览结算金额");
@@ -172,6 +178,8 @@ test("F3: editing after a preview invalidates it and a late preview response is 
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
+    await probe.click("发起结束租用");
+    await probe.setInput("哈夫币 期末剩余数量", "200");
     await probe.click("预览结算金额");
     await probe.setInput("测试物品 期末剩余数量", "7");
     pending.resolve(json(previewBody));
@@ -202,6 +210,9 @@ test("F2: an unknown settlement submit retries with the original key and body", 
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
+    await probe.click("发起结束租用");
+    await probe.setInput("哈夫币 期末剩余数量", "200");
+    await probe.setInput("测试物品 期末剩余数量", "7");
     await probe.click("预览结算金额");
     await probe.click("提交结算");
     assert.ok(probe.host.textContent.includes("结果未知"), probe.host.textContent.slice(0, 300));
@@ -225,7 +236,7 @@ test("F2: an unknown payment retries the original key and never double-charges",
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: pendingOrder, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
-    await probe.click("提交本地受控支付");
+    await probe.click("提交支付");
     assert.ok(probe.host.textContent.includes("支付结果未知"), probe.host.textContent.slice(0, 300));
     await probe.click("查询原请求结果");
     const pays = log.filter((entry) => entry.url.includes("payment-requests"));
@@ -611,6 +622,9 @@ test("R2: settlement unknown locks the form; payment and cancel lock each other"
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
+    await probe.click("发起结束租用");
+    await probe.setInput("哈夫币 期末剩余数量", "200");
+    await probe.setInput("测试物品 期末剩余数量", "7");
     await probe.click("预览结算金额");
     await probe.click("提交结算");
     assert.ok(probe.host.textContent.includes("结果未知"), probe.host.textContent.slice(0, 300));
@@ -625,7 +639,7 @@ test("R2: settlement unknown locks the form; payment and cancel lock each other"
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "PENDING_PAYMENT" }, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
-    await probe.click("提交本地受控支付");
+    await probe.click("提交支付");
     assert.ok(probe.host.textContent.includes("支付结果未知"), probe.host.textContent.slice(0, 300));
     const cancelButton = [...probe.host.querySelectorAll("button")].find((button) => button.textContent?.includes("取消订单"));
     assert.ok(cancelButton?.disabled, "cancel must be locked while payment is unknown");
@@ -657,7 +671,7 @@ test("R1: identity switch clears the private quote and resets order actions", as
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", mutable).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "PENDING_PAYMENT" }, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
-    await probe.click("提交本地受控支付");
+    await probe.click("提交支付");
     assert.ok(probe.host.textContent.includes("支付结果未知"));
     mutable.userId = "user_B";
     mutable.identityVersion = 2;
@@ -731,7 +745,7 @@ test("P1-B: a payment read without a record never releases the intent or reopens
     assert.ok(intents.loadIntent("user_A", "order.payment", "order_A"), "the payment intent must stay frozen");
     assert.ok(probe.host.textContent.includes("仍未取得确定回执"), probe.host.textContent.slice(0, 300));
     assert.ok(!probe.host.textContent.includes("原请求未生效"), "a missing record is not proof of non-occurrence");
-    const payButton = [...probe.host.querySelectorAll("button")].find((button) => button.textContent?.includes("提交本地受控支付"));
+    const payButton = [...probe.host.querySelectorAll("button")].find((button) => button.textContent?.includes("提交支付"));
     assert.ok(payButton?.disabled, "payment must stay locked while the original request is unresolved");
     await probe.dispose(() => intents.clearIntent("user_A", "order.payment", "order_A"));
   });
@@ -841,5 +855,575 @@ test("P1: decision recovery without a frozen version target blocks instead of us
     assert.ok(intents.loadIntent("user_A", "settlement.decision", "order_A"), "the intent stays frozen");
     assert.ok(probe.host.textContent.includes("缺少目标版本"), probe.host.textContent.slice(0, 400));
     await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A"));
+  });
+});
+
+const postedVersion = {
+  id: "v_posted", versionNo: "1", kind: "SYSTEM", early: false, versionHash: "h_posted", supersededAt: null,
+  inputSnapshot: { lines: [{ itemId: "item_haff", openingQuantity: "1000", remainingQuantity: "200" }, { itemId: "item_piece", openingQuantity: "10", remainingQuantity: "8" }] },
+  computation: { consumed: { haff: "800", items: [{ itemId: "item_piece", consumed: "2", remaining: "8" }] } },
+  decisions: [{ party: "RENTER", action: "CONFIRM", createdAt: "2026-10-12T04:29:00Z" }, { party: "OWNER", action: "CONFIRM", createdAt: "2026-10-12T04:30:00Z" }],
+};
+const postingAmounts = {
+  haffConsumedBuyer: money("224.00"), itemConsumedBuyer: money("24.00"), unusedHaffRefund: money("56.00"), unusedItemRefund: money("24.00"),
+  renterCharge: money("248.00"), renterRefund: money("280.00"), depositRefund: money("200.00"), feePayer: "OWNER", feeAmount: money("14.64"), feeRate: "0.08",
+  haffConsumedOwner: money("168.00"), itemConsumedOwner: money("15.00"), ownerGross: money("183.00"), ownerNet: money("168.36"),
+};
+const postedSettlement = {
+  orderId: "order_A", rentalStarted: true, openings: [opening], intakes: [], versions: [postedVersion],
+  currentRequest: { kind: "SETTLEMENT_VERSION", id: "v_posted", versionNo: "1" },
+  settlement: postedVersion,
+  posting: {
+    id: "posting_1", settlementVersionId: "v_posted", early: false, postedAt: "2026-10-12T04:30:00Z", refundDueAt: "2026-10-19T04:30:00Z",
+    capturedCents: "47000", compensationFeeCents: "1464", amounts: postingAmounts,
+    owner: { gross: money("183.00"), systemNetCents: "16836", availableCents: "16836" },
+    refund: { systemCents: "28000", payableCents: "28000", includesDeposit: money("200.00") },
+    manualAdjustment: null,
+  },
+  ready: true, reasons: [],
+};
+
+test("F5: a settled order shows the effective result, its records and no owner-side leak", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json(postedSettlement) }], log);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const renter = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "COMPLETED" }, party: "renter", onChanged() {} }, fetchImpl);
+    await renter.render();
+    assert.ok(renter.host.textContent.includes("结算已生效"), renter.host.textContent.slice(0, 300));
+    assert.ok(renter.host.textContent.includes("¥248.00"), "the settled charge renders");
+    assert.ok(renter.host.textContent.includes("¥280.00"), "the payable refund renders");
+    assert.ok(renter.host.textContent.includes("¥470.00 元"), "the captured amount is the reconciliation figure");
+    assert.ok(!renter.host.textContent.includes("预计应退"), "an effective posting is never shown as an estimate");
+    assert.ok(!renter.host.textContent.includes("¥168.36"), "the renter view must not carry owner-side internals");
+    assert.ok(renter.host.textContent.includes("800 哈夫币"), "consumption comes from the server computation");
+    assert.ok(renter.host.textContent.includes("租客已确认") && renter.host.textContent.includes("号主已确认"), "settlement records list both decisions");
+    assert.ok(renter.host.textContent.includes("退款到账结果待确认"), "the channel result stays unknown");
+    await renter.dispose();
+
+    const owner = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "COMPLETED" }, party: "owner", onChanged() {} }, fetchImpl);
+    await owner.render();
+    assert.ok(owner.host.textContent.includes("本单净入账"), owner.host.textContent.slice(0, 300));
+    assert.ok(owner.host.textContent.includes("¥168.36"), "the owner net renders");
+    assert.ok(owner.host.textContent.includes("包赔费（号主承担）"), "the fee payer comes from the server");
+    assert.ok(owner.host.textContent.includes("¥14.64"), "the server fee amount renders");
+    assert.ok(!owner.host.textContent.includes("最终应退"), "the owner view must not carry the renter's payable");
+    assert.ok(owner.host.textContent.includes("不代表钱包全部余额"), "the owner net is not presented as a wallet balance");
+    await owner.dispose();
+  });
+});
+
+test("F5: an effective manual adjustment shows the system-to-final pair with its reason", async () => {
+  await withDom(async (window) => {
+    const adjusted = {
+      ...postedSettlement,
+      posting: { ...postedSettlement.posting, manualAdjustment: { reason: "客服按复核结果调整", systemOwnerNetCents: "16836", postedOwnerNetCents: "16000", systemRenterRefundCents: "28000", postedRenterRefundCents: "28836" } },
+    };
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json(adjusted) }], []);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "COMPLETED" }, party: "owner", onChanged() {} }, fetchImpl);
+    await probe.render();
+    assert.ok(probe.host.textContent.includes("人工调整"), probe.host.textContent.slice(0, 300));
+    assert.ok(probe.host.textContent.includes("¥168.36 元 → ¥160.00 元"), "the adjustment shows the pair, not one overwritten figure");
+    assert.ok(probe.host.textContent.includes("客服按复核结果调整"), "the human-readable reason is shown");
+    assert.ok(!probe.host.textContent.includes("approvalPayloadHash"), "internal approval material is never exposed");
+    await probe.dispose();
+  });
+});
+
+test("a failed settlement read surfaces one recovery cluster, and nothing while it is still reading", async () => {
+  await withDom(async (window) => {
+    const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+    const pending = { resolve: () => {} };
+    let answerSettlement;
+    const held = new Promise((resolve) => { answerSettlement = resolve; });
+    const probe = createProbe(window, OrderDetail, { orderId: "order_paid", party: "renter", status: "", accountId: undefined, state: { status: "ready", order: { ...paidOrder, status: "COMPLETED" }, error: null }, onRetry() {}, onLogin() {}, onChanged() {} },
+      (input) => String(input).includes("/settlement") ? held.then(() => json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, 404)) : json({ order: paidOrder }));
+    await probe.render();
+    // Nothing is missing until the read has actually failed.
+    assert.equal(probe.host.querySelector(".order-attention"), null, "no gap is claimed while the read is still in flight");
+    await React.act(async () => { answerSettlement(); await new Promise(setImmediate); });
+    await new Promise(setImmediate);
+    const band = probe.host.querySelector(".order-attention");
+    assert.ok(band, "the failed read surfaces a recovery block");
+    assert.equal(probe.host.querySelector(".order-trade-panel"), null, "the parent recovery block replaces the failed panel");
+    assert.match(probe.host.querySelector(".order-amount-block").textContent, /结算金额暂时无法读取/);
+    assert.doesNotMatch(probe.host.textContent, /结算未确认/);
+    assert.match(band.querySelector(".order-attention-copy h2").textContent, /结算明细暂时读不到/);
+    // One cluster: talking to the person who fulfils the order leads, retrying is a link.
+    const actions = band.querySelector(".order-attention-actions");
+    assert.match(actions.textContent, /打开订单群列表/);
+    assert.match(actions.querySelector(".order-attention-link").textContent, /重试读取/);
+    assert.equal(actions.querySelectorAll("button.button, a.button").length, 1, "only one button competes for the primary action");
+    await probe.dispose();
+  });
+});
+
+test("F6: a settlement read that is not assembled states the gap instead of a result", async () => {
+  await withDom(async (window) => {
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, 404) }], []);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "COMPLETED" }, party: "renter", onChanged() {} }, fetchImpl);
+    await probe.render();
+    assert.ok(probe.host.textContent.includes("结算明细暂时无法读取"), probe.host.textContent.slice(0, 300));
+    // The retry belongs to the one recovery cluster the page owns; the panel states the gap without
+    // adding a second, near-identical button next to it.
+    assert.ok(!probe.host.textContent.includes("重试"), "the panel does not duplicate the retry the page already offers");
+    assert.ok(!/¥248\.00|¥280\.00|¥168\.36/.test(probe.host.textContent), "no mock settlement numbers may fill the gap");
+    assert.ok(!probe.host.textContent.includes("预计应退"), "no estimate stands in for the missing settlement");
+    await probe.dispose();
+  });
+});
+
+test("F5: a rejected version is not a confirmation and cannot be confirmed again", async () => {
+  await withDom(async (window) => {
+    const rejectedDecisions = [{ party: "RENTER", action: "REJECT", reason: "数量不符", createdAt: "2026-10-12T05:00:00Z" }, { party: "OWNER", action: "CONFIRM", createdAt: "2026-10-12T05:01:00Z" }];
+    const rejectedVersion = { ...postedVersion, id: "v_rejected", versionNo: "2", decisions: rejectedDecisions };
+    const rejected = {
+      ...postedSettlement,
+      versions: [rejectedVersion],
+      settlement: rejectedVersion,
+      currentRequest: { kind: "SETTLEMENT_VERSION", id: "v_rejected", versionNo: "2" },
+      posting: null, ready: false, reasons: ["SETTLEMENT_REJECTED"],
+    };
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json(rejected) }], []);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+    await probe.render();
+    assert.ok(probe.host.textContent.includes("你已拒绝第2版"), probe.host.textContent.slice(0, 400));
+    assert.ok(!probe.buttons().some((text) => text.includes("确认结算")), "a rejected version offers no new confirmation");
+    assert.ok(!probe.buttons().some((text) => text.includes("拒绝并说明")), "the same version cannot be rejected twice");
+    await probe.dispose();
+  });
+});
+
+test("F5: a settlement-version request without a status still opens the decision step", async () => {
+  await withDom(async (window) => {
+    const currentVersion = { ...postedVersion, id: "v_current", versionNo: "3", decisions: [] };
+    const pending = {
+      ...postedSettlement,
+      versions: [currentVersion],
+      settlement: currentVersion,
+      currentRequest: { kind: "SETTLEMENT_VERSION", id: "v_current", versionNo: "3" },
+      posting: null, ready: false, reasons: ["SETTLEMENT_REQUIRED"],
+    };
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json(pending) }], []);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+    await probe.render();
+    assert.ok(probe.host.textContent.includes("结算确认"), probe.host.textContent.slice(0, 400));
+    assert.ok(probe.host.textContent.includes("第3版"), "the version number is the user-facing identity");
+    assert.ok(probe.buttons().some((text) => text.includes("确认结算")), "a missing status must not be read as a failure");
+    assert.ok(!probe.buttons().some((text) => text.includes("确认提前结算")), "a normal version is not an early one");
+    await probe.dispose();
+  });
+});
+
+test("F3: an ending quantity above the opening quantity is refused before any preview request", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json(settlementBody) }], log);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+    await probe.render();
+    await probe.click("发起结束租用");
+    await probe.setInput("哈夫币 期末剩余数量", "1001");
+    await probe.setInput("测试物品 期末剩余数量", "10");
+    await probe.click("预览结算金额");
+    assert.ok(probe.host.textContent.includes("不能大于期初数量"), probe.host.textContent.slice(0, 400));
+    assert.equal(log.filter((entry) => entry.url.includes("settlement-preview")).length, 0, "an out-of-range quantity never reaches the server");
+    await probe.dispose();
+  });
+});
+
+test("F6: the ending input starts empty and a blank line is never read as no consumption", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    const fetchImpl = router([
+      { match: "/settlement", method: "GET", respond: () => json(settlementBody) },
+      { match: "settlement-preview", method: "POST", respond: () => json(previewBody) },
+    ], log);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+    await probe.render();
+    await probe.click("发起结束租用");
+    const haff = probe.host.querySelector('[aria-label="哈夫币 期末剩余数量"]');
+    assert.equal(haff.value, "", "the ending input starts empty instead of assuming no consumption");
+    await probe.setInput("哈夫币 期末剩余数量", "200");
+    await probe.click("预览结算金额");
+    assert.ok(probe.host.textContent.includes("留空表示未知"), "the blank line is refused as unknown");
+    assert.equal(log.filter((entry) => entry.url.includes("settlement-preview")).length, 0, "an incomplete quantity never reaches the server");
+    await probe.dispose();
+  });
+});
+
+// --- M3 review regressions: money disclosure, party facts and full-detail consistency ---
+
+const reviewAmounts = {
+  haffConsumedBuyer: money("224.00"), itemConsumedBuyer: money("24.00"), unusedHaffRefund: money("56.00"), unusedItemRefund: money("24.00"), earlyMakeup: money("0.00"),
+  ownerGross: money("183.00"), ownerNet: money("168.36"), renterRefund: money("280.00"), depositRefund: money("200.00"), renterCharge: money("248.00"),
+  haffConsumedOwner: money("168.00"), itemConsumedOwner: money("15.00"), feePayer: "OWNER", feeAmount: money("14.64"), feeRate: "0.08",
+};
+const manualVersion = {
+  id: "manual_v", versionNo: "2", kind: "MANUAL_ADJUSTMENT", early: false, versionHash: "h2", supersededAt: null,
+  systemOwnerNet: "16836", proposedOwnerNet: "16000", systemRenterRefund: "28000", proposedRenterRefund: "28836",
+  inputSnapshot: { reason: "复核调整", lines: [{ itemId: "item_haff", openingQuantity: "1000", remainingQuantity: "200" }] },
+  computation: { amounts: reviewAmounts }, decisions: [],
+};
+const manualPosting = {
+  id: "post", settlementVersionId: "manual_v", early: false, postedAt: "2026-10-12T02:00:00Z", capturedCents: "52800", compensationFeeCents: "1464",
+  amounts: reviewAmounts, owner: { gross: money("183.00"), systemNetCents: "16836", availableCents: "16000" },
+  refund: { systemCents: "28000", payableCents: "28836" },
+  manualAdjustment: { reason: "复核调整", systemOwnerNetCents: "16836", postedOwnerNetCents: "16000", systemRenterRefundCents: "28000", postedRenterRefundCents: "28836" },
+};
+const manualSettlement = { ...settlementBody, versions: [manualVersion], settlement: manualVersion, currentRequest: { kind: "SETTLEMENT_VERSION", id: "manual_v", versionNo: "2" } };
+
+async function tradeProbe(window, data, party = "owner") {
+  const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+  const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: data.posting ? "COMPLETED" : "PAID" }, party, onChanged() {} }, router([{ match: "/settlement", method: "GET", respond: () => json(data) }], []));
+  await probe.render();
+  return probe;
+}
+
+async function detailProbe(window, order, party, data = settlementBody) {
+  const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+  const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", accountId: undefined, state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, router([{ match: "/settlement", method: "GET", respond: () => json(data) }], []));
+  await probe.render();
+  return probe;
+}
+
+const tableRow = (host, label) => [...host.querySelectorAll("tr")].find((row) => row.querySelector("th")?.textContent === label);
+
+test("M3-F1: a manual version discloses the amount confirmation would settle", async () => {
+  await withDom(async (window) => {
+    const probe = await tradeProbe(window, manualSettlement, "owner");
+    const text = probe.host.textContent;
+    assert.ok(text.includes("本次将确认的净额"), text.slice(0, 400));
+    assert.match(tableRow(probe.host, "本次将确认的净额").textContent, /¥160\.00/, "the proposed net must be disclosed");
+    assert.match(tableRow(probe.host, "系统计算净额").textContent, /¥168\.36/, "the system value stays visible as the system value");
+    assert.ok(text.includes("复核调整"), "the adjustment reason is shown before confirmation");
+    assert.ok(text.includes("这一版含人工调整"), "the adjustment is called out before deciding");
+    await probe.dispose();
+  });
+});
+
+test("M3-F1: a manual version without a proposed value never presents the system value as what will be settled", async () => {
+  await withDom(async (window) => {
+    const probe = await tradeProbe(window, { ...manualSettlement, versions: [{ ...manualVersion, proposedOwnerNet: null }], settlement: { ...manualVersion, proposedOwnerNet: null } }, "owner");
+    const row = tableRow(probe.host, "本次将确认的净额");
+    assert.ok(row, "the proposed row still appears when the server omits the value");
+    assert.doesNotMatch(row.textContent, /¥168\.36/, "a missing proposal must not fall back to the system value");
+    assert.match(row.textContent, /—/);
+    assert.ok(row.textContent.includes("不能按系统值确认"), row.textContent);
+    await probe.dispose();
+  });
+});
+
+test("M3-F2: the posted breakdown uses the posting's final net and refund, not the system snapshot", async () => {
+  await withDom(async (window) => {
+    const owner = await tradeProbe(window, { ...manualSettlement, posting: manualPosting }, "owner");
+    const ownerRow = tableRow(owner.host, "本单净入账");
+    assert.match(ownerRow.textContent, /¥160\.00/, ownerRow.textContent);
+    assert.doesNotMatch(ownerRow.textContent, /¥168\.36/, "the system snapshot is not the final net");
+    await owner.dispose();
+
+    const renter = await tradeProbe(window, { ...manualSettlement, posting: manualPosting }, "renter");
+    const renterRow = tableRow(renter.host, "最终应退");
+    assert.match(renterRow.textContent, /¥288\.36/, renterRow.textContent);
+    assert.doesNotMatch(renterRow.textContent, /¥280\.00/);
+    assert.match(renterRow.textContent, /¥288\.36/, "the payable refund is the final column");
+    await renter.dispose();
+  });
+});
+
+test("M3-F2: the whole detail shows one final amount and labels the system snapshot as such", async () => {
+  await withDom(async (window) => {
+    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "owner", { ...manualSettlement, posting: manualPosting });
+    const summary = probe.host.querySelector(".order-trade-facts").textContent;
+    assert.match(summary, /本单净入账¥160\.00 元/, summary.slice(0, 200));
+    const row = tableRow(probe.host, "本单净入账");
+    assert.match(row.textContent, /¥160\.00/, "the summary and the breakdown must state the same final amount");
+    assert.doesNotMatch(row.textContent, /¥168\.36/);
+    const adjustment = probe.host.querySelector(".order-trade-sub").textContent;
+    assert.match(adjustment, /系统净额 → 最终净额/);
+    assert.match(adjustment, /¥168\.36 元 → ¥160\.00 元/, adjustment);
+    const postingBlock = probe.host.querySelector(".order-trade-facts").closest(".order-trade-block").textContent;
+    assert.ok(postingBlock.includes("不代表钱包全部余额"), "the owner net is not a wallet balance");
+    await probe.dispose();
+  });
+});
+
+test("M3-F3: the owner gross uses the Money object the API returns", async () => {
+  await withDom(async (window) => {
+    const probe = await tradeProbe(window, { ...manualSettlement, posting: manualPosting }, "owner");
+    const gross = [...probe.host.querySelectorAll("dt")].find((node) => node.textContent === "本次毛收入");
+    assert.ok(gross, "the gross row exists");
+    assert.match(gross.nextElementSibling.textContent, /¥183\.00/, "a Money object is formatted as yuan, never as cents");
+    assert.doesNotMatch(gross.nextElementSibling.textContent, /—/);
+    await probe.dispose();
+  });
+});
+
+test("M3-F4: each side reads only its own money, and an unpaid figure never claims a capture", async () => {
+  await withDom(async (window) => {
+    // The owner is quoted at listing time; what the renter actually pays is a different number (rental
+    // discounts apply), so the owner's card must not carry the renter's figure at all.
+    const ownerUnpaid = await detailProbe(window, { ...paidOrder, status: "PENDING_PAYMENT", paidAt: null }, "owner");
+    const ownerCard = ownerUnpaid.host.querySelector(".order-amount-block").textContent;
+    assert.match(ownerCard, /下单时号主报价/, "the owner reads their own listing quote");
+    assert.doesNotMatch(ownerCard, /租客已付|租客应付/, "the owner never sees the renter's payable or captured amount");
+    await ownerUnpaid.dispose();
+
+    // The renter's own card must separate "still owed" from "already captured".
+    const renterUnpaid = await detailProbe(window, { ...paidOrder, status: "PENDING_PAYMENT", paidAt: null }, "renter");
+    assert.match(renterUnpaid.host.querySelector(".order-amount-label").textContent, /待支付/, "an unpaid renter order reads as still payable");
+    assert.doesNotMatch(renterUnpaid.host.querySelector(".order-amount-block").textContent, /已付/, "an unpaid order never claims a capture");
+    await renterUnpaid.dispose();
+
+    const renterPaid = await detailProbe(window, { ...paidOrder, status: "COMPLETED", paidAt: "2026-10-12T01:00:00Z" }, "renter");
+    assert.ok([...renterPaid.host.querySelectorAll("dt")].some((node) => node.textContent === "租客已付"), "a captured payment is still named as paid");
+    await renterPaid.dispose();
+  });
+});
+
+test("M3-F4: only a renter with an open payment entry is invited to pay", async () => {
+  await withDom(async (window) => {
+    const OrderListPanel = loadComponent("apps/web/src/components/order/order-list.tsx", session("user_A")).OrderListPanel;
+    const listState = (order) => ({ page: { items: [order], nextCursor: null, limit: 20 }, loading: false, refreshing: false, loadingMore: false, error: null, moreError: null, notice: "" });
+    const props = (party, order) => ({ party, status: "", accountId: undefined, state: listState(order), onRefresh() {}, onRetryList() {}, onLoadMore() {}, onLogin() {}, onReauthorize() {}, onOpen() {} });
+    const noFetch = async () => { throw new Error("the list must not fetch while rendering"); };
+    const pending = { ...paidOrder, status: "PENDING_PAYMENT", expiredAwaitingCancel: false };
+
+    const owner = createProbe(window, OrderListPanel, props("owner", pending), noFetch);
+    await owner.render();
+    assert.ok(!owner.host.textContent.includes("查看并付款"), "the owner cannot pay for the renter");
+    assert.ok(owner.host.textContent.includes("查看订单"));
+    await owner.dispose();
+
+    const renter = createProbe(window, OrderListPanel, props("renter", pending), noFetch);
+    await renter.render();
+    assert.ok(renter.host.textContent.includes("查看并付款"), "the renter with an open entry is invited to pay");
+    await renter.dispose();
+
+    const expired = createProbe(window, OrderListPanel, props("renter", { ...pending, expiredAwaitingCancel: true, paymentOpen: false }), noFetch);
+    await expired.render();
+    assert.ok(!expired.host.textContent.includes("查看并付款"), "an expired payment entry is no longer offered");
+    await expired.dispose();
+  });
+});
+
+test("M3-F5: a rejected settlement never falls back to the renting stage", async () => {
+  await withDom(async (window) => {
+    const rejected = { ...manualVersion, decisions: [{ party: "RENTER", action: "REJECT", reason: "数量不符" }] };
+    const probe = await detailProbe(window, paidOrder, "renter", { ...settlementBody, versions: [rejected], settlement: rejected, currentRequest: { kind: "SETTLEMENT_VERSION", id: rejected.id, versionNo: rejected.versionNo } });
+    const headline = probe.host.querySelector(".order-attention-copy h2").textContent;
+    assert.match(headline, /拒绝/, `a rejected version must not read as 租用中: ${headline}`);
+    assert.match(headline, /第2版/);
+    // Nothing on the page may present the order as still renting or as settled while the rejection stands.
+    assert.doesNotMatch(probe.host.textContent, /租用中|结算已生效/);
+    assert.ok(probe.host.querySelector(".order-trade-panel").textContent.includes("你已拒绝第2版"), "the panel agrees with the attention block");
+    await probe.dispose();
+  });
+});
+
+test("M3-F6: a missing owner total stays unknown in the fee summary", async () => {
+  await withDom(async (window) => {
+    const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "owner");
+    const summary = probe.host.querySelector(".order-lines-summary").textContent;
+    assert.ok(!summary.includes("合计 170.00 元"), `the owner summary must not borrow the renter rental: ${summary}`);
+    assert.match(summary, /合计待确认/);
+    const renter = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "renter");
+    assert.match(renter.host.querySelector(".order-lines-summary").textContent, /合计 170.00 元/, "the renter keeps its own total");
+    await probe.dispose();
+    await renter.dispose();
+  });
+});
+
+test("M3-F7: a named resource keeps its unit and never repeats it", async () => {
+  await withDom(async (window) => {
+    const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED", quote: { lines: [{ itemId: "insurance", name: "保险卡", unit: "DAY", quantity: "10", buyerAmount: money("20.00") }] } }, "renter");
+    const quantity = probe.host.querySelector(".order-lines tbody tr td:nth-child(2)").textContent;
+    assert.match(quantity, /天/, `a DAY quantity must keep its unit: ${quantity}`);
+    assert.match(quantity, /10/);
+    const mixed = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "renter");
+    const cells = [...mixed.host.querySelectorAll(".order-lines tbody tr td:nth-child(2)")].map((node) => node.textContent);
+    assert.equal(cells[0], "1000", "a name that already carries the unit is not repeated");
+    assert.equal(cells[1], "10 件", "PIECE keeps its existing label");
+    await probe.dispose();
+    await mixed.dispose();
+  });
+});
+
+test("a closed order offers its next step instead of a payment prompt", async () => {
+  await withDom(async (window) => {
+    const renter = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "renter");
+    const next = renter.host.querySelector(".order-attention-actions a");
+    assert.ok(next, "a closed renter order points at the next step");
+    assert.equal(next.getAttribute("href"), "/accounts");
+    assert.doesNotMatch(renter.host.textContent, /提交支付前请核对金额|支付不等于交付或开租/);
+    await renter.dispose();
+
+    const owner = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "owner");
+    assert.equal(owner.host.querySelector(".order-attention-actions a").getAttribute("href"), "/account?view=accounts");
+    await owner.dispose();
+  });
+});
+
+const confirmLabel = (version) => (version.early ? "确认提前结算（待客服复核）" : "确认结算");
+
+/** Renders a manual version whose proposed value for the deciding party is whatever the code under test must judge. */
+async function decisionProbe(window, party, proposed) {
+  const version = party === "owner" ? { ...manualVersion, proposedOwnerNet: proposed } : { ...manualVersion, proposedRenterRefund: proposed };
+  const data = { ...settlementBody, versions: [version], settlement: version, currentRequest: { kind: "SETTLEMENT_VERSION", id: version.id, versionNo: version.versionNo } };
+  const log = [];
+  const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+  const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party, onChanged() {} },
+    router([{ match: "/settlement", method: "GET", respond: () => json(data) }, { match: "/decision", method: "POST", respond: () => json(settlementBody) }], log));
+  await probe.render();
+  return { probe, log, version };
+}
+
+const decisionPosts = (log) => log.filter((entry) => entry.method === "POST" && entry.url.includes("/decision"));
+
+test("R2-F1: an unreadable proposed amount disables a new confirmation and sends nothing", async () => {
+  await withDom(async (window) => {
+    for (const missing of [null, undefined, "invalid", "160.00", "", "-1", "1e3"]) {
+      const { probe, log, version } = await decisionProbe(window, "owner", missing);
+      try {
+        const button = [...probe.host.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes(confirmLabel(version)));
+        assert.ok(button, "the confirmation control stays visible with a stated reason");
+        assert.ok(button.disabled, `confirmation must be disabled while the proposed amount is ${JSON.stringify(missing)}`);
+        assert.ok(probe.host.textContent.includes("确认已暂时停用"), "the page states why confirmation is unavailable");
+        await probe.click(confirmLabel(version)).catch(() => undefined);
+        assert.equal(decisionPosts(log).length, 0, `no confirmation may be sent while the proposed amount is ${JSON.stringify(missing)}`);
+        assert.equal(intents.loadIntent("user_A", "settlement.decision", "order_A"), null, "nothing was frozen for a request that never should be sent");
+      } finally {
+        await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A"));
+      }
+    }
+  });
+});
+
+test("R2-F1: a readable proposed amount — including a legitimate zero — still confirms", async () => {
+  await withDom(async (window) => {
+    for (const [proposed, party] of [["16000", "owner"], ["0", "owner"], ["28836", "renter"], ["0", "renter"]]) {
+      const { probe, log, version } = await decisionProbe(window, party, proposed);
+      try {
+        const button = [...probe.host.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes(confirmLabel(version)));
+        assert.ok(!button.disabled, `a readable amount (${proposed}) must stay confirmable`);
+        assert.doesNotMatch(probe.host.textContent, /确认已暂时停用/);
+        await probe.click(confirmLabel(version));
+        const posts = decisionPosts(log);
+        assert.equal(posts.length, 1, `a readable amount (${proposed}) must reach the server`);
+        assert.equal(posts[0].body.action, "CONFIRM");
+        assert.ok(posts[0].key, "the frozen idempotency key is still used");
+      } finally {
+        await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A"));
+      }
+    }
+  });
+});
+
+test("R2-F1: rejecting and querying the frozen request stay available while confirmation is unavailable", async () => {
+  await withDom(async (window) => {
+    const frozenKey = "op_frozen_decision";
+    intents.saveIntent({ userId: "user_A", kind: "settlement.decision", resourceId: "order_A", key: frozenKey, body: { action: "CONFIRM", versionHash: "h_old" }, context: { versionId: "v_old", orderId: "order_A" } });
+    const version = { ...manualVersion, proposedOwnerNet: null };
+    const data = { ...settlementBody, versions: [version], settlement: version, currentRequest: { kind: "SETTLEMENT_VERSION", id: version.id, versionNo: version.versionNo } };
+    const log = [];
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "owner", onChanged() {} },
+      router([
+        { match: "/settlement", method: "GET", respond: () => json(data) },
+        { match: "/decision", method: "POST", respond: () => json({ error: { code: "CONFLICT", message: "版本已变化" } }, 409) },
+      ], log));
+    await probe.render();
+    try {
+      assert.ok(probe.host.textContent.includes("结算决定结果未知"), "the frozen request is still surfaced");
+      await probe.click("查询原请求结果");
+      const posts = decisionPosts(log);
+      assert.equal(posts.length, 1, "the recovery query still consumes the original frozen request");
+      assert.equal(posts[0].key, frozenKey, "recovery keeps the frozen key");
+      assert.ok(intents.loadIntent("user_A", "settlement.decision", "order_A"), "an unresolved request keeps its responsibility");
+      // Hand the panel a clean slate so the reject path is exercised without an unresolved lock.
+      intents.clearIntent("user_A", "settlement.decision", "order_A");
+
+      const rejectAfter = await decisionProbe(window, "owner", null);
+      await rejectAfter.probe.click("拒绝并说明");
+      await rejectAfter.probe.click("提交拒绝");
+      const rejected = decisionPosts(rejectAfter.log);
+      assert.equal(rejected.length, 1, "rejecting is not blocked by an unreadable proposed amount");
+      assert.equal(rejected[0].body.action, "REJECT");
+      await rejectAfter.probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A"));
+    } finally {
+      await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A"));
+    }
+  });
+});
+
+test("R2-F2: an adjusted posting names the charge as the pre-adjustment system computation in both places", async () => {
+  await withDom(async (window) => {
+    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", { ...manualSettlement, posting: manualPosting });
+    const summary = [...probe.host.querySelectorAll(".order-trade-facts dt")].map((node) => node.textContent);
+    assert.ok(summary.includes("系统计算扣费（调整前）"), `the summary must qualify the system charge: ${JSON.stringify(summary)}`);
+    assert.ok(!summary.includes("本次结算扣费"), "an adjusted posting must not present the system charge as the final one");
+    const charge = [...probe.host.querySelectorAll(".order-trade-facts dd")][summary.indexOf("系统计算扣费（调整前）")].textContent;
+    assert.match(charge, /¥248\.00/, charge);
+    const row = tableRow(probe.host, "系统计算扣费（调整前）");
+    assert.ok(row, "the breakdown uses the same label");
+    assert.match(row.textContent, /¥248\.00/);
+    const finalRow = tableRow(probe.host, "最终应退");
+    assert.match(finalRow.textContent, /¥288\.36/, "the final refund is still the posting column");
+    assert.doesNotMatch(summaryText(probe.host), /本次结算扣费¥248/, "no unqualified final charge is shown anywhere");
+
+    const plain = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", { ...manualSettlement, posting: { ...manualPosting, manualAdjustment: null, owner: { gross: money("183.00"), systemNetCents: "16836", availableCents: "16836" }, refund: { systemCents: "28000", payableCents: "28000" } } });
+    assert.ok([...plain.host.querySelectorAll(".order-trade-facts dt")].some((node) => node.textContent === "本次结算扣费"), "a normal posting keeps the plain wording");
+    await probe.dispose();
+    await plain.dispose();
+  });
+});
+
+const summaryText = (host) => [...host.querySelectorAll(".order-trade-facts dt")].map((node, index) => `${node.textContent}${[...host.querySelectorAll(".order-trade-facts dd")][index]?.textContent ?? ""}`).join(" | ");
+
+
+test("polish: expanded quote shows only own amounts and cancellation has one next step", async () => {
+  await withDom(async (window) => {
+    const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+    for (const party of ["owner", "renter"]) {
+      const money = (amount) => ({ amount, currency: "CNY" });
+      const order = { ...paidOrder, status: "CANCELLED", quote: { lines: [{ name: "保险卡", quantity: "10", unit: "DAY", buyerAmount: money("257.53"), ownerAmount: money("134.65") }], ownerTotal: money("134.65"), unitAmountsInformational: true } };
+      const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, async () => { throw new Error("cancelled detail must not fetch settlement"); });
+      try {
+        await probe.render();
+        const table = probe.host.querySelector(".order-lines table");
+        assert.equal(table.querySelectorAll("th").length, 3);
+        assert.ok(table.textContent.includes(party === "owner" ? "134.65 元" : "257.53 元"));
+        assert.ok(!table.textContent.includes(party === "owner" ? "257.53 元" : "134.65 元"));
+        assert.equal(probe.host.querySelectorAll(".order-trade-panel").length, 0);
+        assert.doesNotMatch(probe.host.textContent, /继续租用|服务端派生/);
+        assert.equal([...probe.host.querySelectorAll("a")].filter(a => a.textContent === (party === "owner" ? "管理出租账号" : "浏览可租账号")).length, 1);
+      } finally { await probe.dispose(); }
+    }
+  });
+});
+
+
+test("legacy orders remain read-only and only owners get authorized account navigation", async () => {
+  await withDom(async (window) => {
+    for (const party of ["owner", "renter"]) {
+      const row = { id: "legacy_1", displayNo: "OLD-1", title: "历史记录", party, status: "PAID", source: { origin: "LEGACY", statusLabel: "历史进行中" }, readOnly: true, actions: [], account: { id: "account_1", displayNo: "OLD-A", readable: party === "owner" }, legacyAmounts: { required: money("10.00"), paid: money("10.00"), deposit: null, refund: money("2.00") } };
+      const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
+      const log=[]; const fetchImpl=async (url,init={}) => {log.push(init.method??"GET");return json({order:row});};
+      const probe=createProbe(window,Legacy,{party,orderId:"legacy_1"},fetchImpl);
+      try { await probe.render();assert.match(probe.host.textContent,/到账待确认/);assert.equal(probe.host.querySelectorAll("button").length,0);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");assert.ok(log.every(m=>m==="GET")); } finally {await probe.dispose();}
+    }
+  });
+});
+
+test("legacy unauthorized detail is an error rather than an empty successful list", async () => {
+  await withDom(async window=>{
+    const Legacy=loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx",session("user_A")).LegacyOrderWorkspace;
+    const probe=createProbe(window,Legacy,{party:"renter",orderId:"other"},async()=>json({error:{code:"NOT_FOUND"}},404));
+    try {await probe.render();assert.match(probe.host.textContent,/不存在或当前身份无法查看/);assert.doesNotMatch(probe.host.textContent,/暂无历史订单记录/);}finally{await probe.dispose();}
   });
 });

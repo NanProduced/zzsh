@@ -495,7 +495,6 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const controllers = useRef(new Set<AbortController>());
   const pendingKeys = useRef(new Map<string, { fingerprint: string; key: string }>());
   const lastRetry = useRef<RetryTask | null>(null);
-  const redirectedGuest = useRef(false);
   const accountRef = useRef<string | undefined>(accountIdProp);
   const loadedAccountRef = useRef<string | undefined>(undefined);
   const routeAccountRef = useRef<string | undefined>(accountIdProp);
@@ -969,14 +968,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         return false;
       }
       setIdentityPhase("checking");
-      if (!redirectedGuest.current) {
-        redirectedGuest.current = true;
-        const target = window.location.pathname + window.location.search;
-        router.replace(`/login?next=${encodeURIComponent(target)}`);
-      }
       return false;
     }
-    redirectedGuest.current = false;
     const next = snapshot.userId;
     const previous = identityRef.current;
     identityRef.current = next;

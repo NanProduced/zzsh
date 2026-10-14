@@ -122,3 +122,60 @@ test("recovery keeps an unknown result locked on 403 and only restarts after a c
     expired = true; await p.click("重新确认结果"); assert.equal(p.host.querySelector("#auth-password"), null); assert.equal(p.host.querySelector("#auth-identifier").value, "13800138000"); assert.ok(!p.findButton("获取验证码").disabled); assert.equal(p.calls.filter(c => c.url.endsWith("/recovery/complete")).length, 1);
   } finally { await p.close(); }
 });
+
+test("both document names are keyboard-reachable reading links that neither tick consent nor submit", async () => {
+  const p = await mountAuthComponent(file, "AuthForm");
+  try {
+    const links = [...p.host.querySelectorAll(".auth-consent a")];
+    assert.equal(links.length, 2, "both document names must be real anchors");
+    for (const link of links) {
+      assert.equal(link.getAttribute("href").startsWith("/legal/"), true, "each name has its own public reading target");
+      assert.equal(link.getAttribute("target"), "_blank", "the document opens in its own tab");
+      assert.match(link.getAttribute("rel") ?? "", /noopener/, "the new tab gets a safe rel");
+      assert.match(link.getAttribute("aria-label") ?? "", /新窗口/, "the new window is announced");
+      assert.equal(link.tabIndex >= 0, true, "the link stays in the keyboard order");
+    }
+    assert.equal(p.host.querySelector("#auth-terms").checked, false, "consent starts unticked");
+    let submissions = 0;
+    p.host.querySelector("form").addEventListener("submit", () => { submissions += 1; });
+    await p.React.act(async () => { links[0].dispatchEvent(new p.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })); });
+    await p.settle();
+    assert.equal(p.host.querySelector("#auth-terms").checked, false, "reading a document never ticks consent");
+    assert.equal(submissions, 0, "reading a document never submits the form");
+    assert.equal(p.calls.length, 0, "reading a document sends nothing");
+    assert.equal(p.host.querySelector(".auth-policy-notice"), null, "the link is the reading path, not an in-form notice");
+  } finally { await p.close(); }
+});
+
+test("closing and reopening the form cannot launder an unknown identity write into a fresh retry", async () => {
+  const slot = { current: null };
+  const first = await mountAuthComponent(file, "AuthForm", { pendingWrite: slot }, {
+    fetch: async url => {
+      if (String(url).endsWith("/complete")) throw new Error("lost response");
+      return reply();
+    },
+  });
+  try {
+    await fillSms(first); await first.submit();
+    assert.match(first.host.textContent, /结果暂时无法确认/);
+    assert.equal(first.calls.filter(item => item.url.endsWith("/complete")).length, 1);
+    assert.equal(slot.current?.outcome, "unknown", "the receipt is kept by the owner of the dialog");
+  } finally { await first.close(); }
+
+  const second = await mountAuthComponent(file, "AuthForm", { pendingWrite: slot }, {
+    fetch: async url => {
+      if (String(url).endsWith("/get-session")) return Response.json({ user: { id: "user_A", phoneNumber: "13800138000" } });
+      return reply();
+    },
+  });
+  try {
+    assert.match(second.host.textContent, /结果暂时无法确认/, "the inherited receipt is restored after remounting");
+    assert.ok(second.findButton("重新确认结果"), "the only way forward is reading the result");
+    await second.submit();
+    assert.equal(second.calls.length, 0, "reopening must not start a second identity write");
+    await second.click("重新确认结果");
+    assert.equal(second.successes, 1, "the receipt resolves only after this subject is confirmed");
+    assert.equal(second.calls.filter(item => item.url.endsWith("/complete")).length, 0);
+    assert.equal(slot.current, null, "the responsibility is released once the server confirms it");
+  } finally { await second.close(); }
+});

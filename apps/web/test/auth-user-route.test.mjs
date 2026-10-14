@@ -161,3 +161,24 @@ test("an upstream response stream reset becomes a controlled 502", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("浏览器 User-Agent 有界转发：缺失不伪造、超长截断、其余请求头不转发", async () => {
+  const original = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (_url, init) => { seen = new Headers(init.headers); return Response.json({ status: true }); };
+  try {
+    await GET(request(["get-session"], { headers: { "user-agent": "Mozilla/5.0 (Test)", "x-custom": "should-not-forward" } }), routeContext(["get-session"]));
+    assert.equal(seen.get("User-Agent"), "Mozilla/5.0 (Test)", "有值时有界转发（客户端自报）");
+    assert.equal(seen.get("Origin"), WEB_ORIGIN);
+    assert.equal(seen.get("x-custom"), null, "不转发其余请求头");
+    assert.ok(seen.get("Cookie") === null || !seen.get("Cookie").includes("should-not-forward"));
+
+    const long = "ua-" + "x".repeat(600);
+    await GET(request(["get-session"], { headers: { "user-agent": long } }), routeContext(["get-session"]));
+    assert.equal(seen.get("User-Agent").length, 512, "超长截断到 512");
+
+    seen = null;
+    await GET(request(["get-session"]), routeContext(["get-session"]));
+    assert.equal(seen.get("User-Agent"), null, "缺失时不伪造 UA");
+  } finally { globalThis.fetch = original; }
+});

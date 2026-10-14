@@ -62,7 +62,7 @@ export type OrderRow = {
   renterName: string;
 };
 
-const ORDER_FIELDS = `
+export const ORDER_FIELDS = `
   o.id, o.display_no AS "displayNo", o.account_id AS "accountId", o.listing_version_id AS "versionId",
   o.owner_user_id AS "ownerUserId", o.renter_user_id AS "renterUserId", o.game_id AS "gameId",
   o.rule_release_id AS "releaseId", o.content_hash AS "contentHash", o.term_option_code AS "termOptionCode",
@@ -83,7 +83,7 @@ const ORDER_FIELDS = `
   o.revision::text AS "revision",
   (o.status = 'PENDING_PAYMENT' AND o.hold_until <= clock_timestamp()) AS "expiredAwaitingCancel",
   owner_u.name AS "ownerName", renter_u.name AS "renterName"`;
-const ORDER_FROM = `FROM zzsh_order.rental_order o
+export const ORDER_FROM = `FROM zzsh_order.rental_order o
   LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id
   JOIN zzsh_auth_user."user" owner_u ON owner_u.id = o.owner_user_id
   JOIN zzsh_auth_user."user" renter_u ON renter_u.id = o.renter_user_id`;

@@ -12,8 +12,12 @@ const { Window } = require("happy-dom");
 export function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
 export async function mountAuthComponent(relativePath, componentName, props = {}, options = {}) {
-  const window = new Window({ url: "http://127.0.0.1:4200/account" });
-  Object.assign(globalThis, { window, document: window.document, Node: window.Node, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, Element: window.Element, Event: window.Event, MouseEvent: window.MouseEvent, IS_REACT_ACT_ENVIRONMENT: true });
+  const startUrl = options.url ?? "http://127.0.0.1:4200/account";
+  const window = new Window({ url: startUrl });
+  const startLocation = new URL(startUrl);
+  const nav = { pathname: options.pathname ?? startLocation.pathname };
+  const router = { pushes: [], replaces: [], push: target => { router.pushes.push(target); }, replace: target => { router.replaces.push(target); } };
+  Object.assign(globalThis, { window, document: window.document, Node: window.Node, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, Element: window.Element, Event: window.Event, MouseEvent: window.MouseEvent, CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window), requestAnimationFrame: window.requestAnimationFrame.bind(window), cancelAnimationFrame: window.cancelAnimationFrame.bind(window), IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
   window.confirm = () => true;
   const originalFetch = globalThis.fetch;
@@ -25,9 +29,27 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   };
   const identity = { status: options.initialStatus ?? "guest", userId: options.initialStatus === "authenticated" ? "user_A" : null, identityVersion: 1 };
   let confirmations = 0, successes = 0;
-  const session = { ...identity, confirm: async () => { confirmations++; const status = options.confirm ? await options.confirm() : "authenticated"; identity.status = status; identity.userId = status === "authenticated" ? options.confirmUserId ?? "user_A" : null; return status; }, revalidate() { confirmations++; options.revalidate?.(); }, signOut: async () => { identity.status = "guest"; identity.userId = null; } };
+  const session = { get status() { return identity.status; }, get userId() { return identity.userId; }, get identityVersion() { return identity.identityVersion; }, confirm: async () => { confirmations++; const status = options.confirm ? await options.confirm() : "authenticated"; identity.status = status; identity.userId = status === "authenticated" ? options.confirmUserId ?? "user_A" : null; return status; }, revalidate() { confirmations++; options.revalidate?.(); }, signOut: async () => { identity.status = "guest"; identity.userId = null; } };
   const store = { getSnapshot: () => identity };
+  const DialogContext = React.createContext(null);
+  const dialogStub = {
+    Root: ({ open, onOpenChange, children }) => open ? React.createElement(DialogContext.Provider, { value: { onOpenChange } }, children) : null,
+    Trigger: ({ children }) => children,
+    Portal: ({ children }) => children,
+    Overlay: () => null,
+    Content: ({ children, onOpenAutoFocus, onCloseAutoFocus, ...rest }) => React.createElement("div", { ...rest, role: "dialog", "aria-modal": true }, children),
+    Title: ({ children }) => React.createElement("h2", null, children),
+    Description: ({ children, asChild }) => asChild ? children : React.createElement("p", null, children),
+    Close: ({ children, onClick, ...rest }) => {
+      const context = React.useContext(DialogContext);
+      return React.createElement("button", { ...rest, type: "button", onClick: (event) => { onClick?.(event); context?.onOpenChange?.(false); } }, children);
+    },
+  };
   const cache = new Map();
+  const resolveSource = specifier => {
+    const base = path.join(rootPath, "apps/web/src", specifier.slice(2));
+    return [base + ".tsx", base + ".ts"].find(candidate => fs.existsSync(candidate));
+  };
   const load = (file) => {
     if (cache.has(file)) return cache.get(file).exports;
     const code = ts.transpileModule(fs.readFileSync(file, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
@@ -35,7 +57,24 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     module.require = (name) => {
       if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
       if (name === "@/lib/web-auth-request") return load(path.join(rootPath, "apps/web/src/lib/web-auth-request.ts"));
-      if (name === "../auth/auth-form") return load(path.join(rootPath, "apps/web/src/components/auth/auth-form.tsx"));
+      if (name === "../auth/auth-form" || name === "./auth-form") return load(path.join(rootPath, "apps/web/src/components/auth/auth-form.tsx"));
+      // A test may stand in for the coordinator when it only exercises a consumer such as /login.
+      if (name === "@/components/auth/auth-overlay-provider") {
+        if (options.authOverlay) return options.authOverlay;
+        const provider = resolveSource(name);
+        if (provider) return load(provider);
+      }
+      if (name === "next/navigation") return {
+        useRouter: () => router,
+        usePathname: () => nav.pathname,
+        useSearchParams: () => new URLSearchParams(window.location.search),
+      };
+      // Real Radix cannot run here: its dismissable-layer dispatches an Event from a different realm
+      // than happy-dom's document. The dialog renders inline in tests; focus semantics are proven in a browser.
+      if (name === "@radix-ui/react-dialog") return dialogStub;
+      if (name === "next/link") return { __esModule: true, default: ({ href, children, ...rest }) => React.createElement("a", { ...rest, href: String(href) }, children) };
+      if (name.endsWith(".css")) return {};
+      if (name.startsWith("@/")) { const resolved = resolveSource(name); if (resolved) return load(resolved); }
       return require(name);
     };
     module._compile(code, file); return module.exports;
@@ -44,10 +83,13 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   const { createRoot } = require("react-dom/client");
   const host = window.document.createElement("div"); window.document.body.append(host); const root = createRoot(host);
   let currentProps = { onSuccess: () => successes++, ...props };
-  const render = async (changes = {}) => { currentProps = { ...currentProps, ...changes }; await React.act(async () => { root.render(React.createElement(Component, currentProps)); }); };
+  // Lets a test mount the coordinator with a real consumer (for example the legacy /login page)
+  // instead of a stub, so the composition itself is what gets asserted.
+  if (options.child) currentProps.children = React.createElement(load(path.join(rootPath, options.child.path))[options.child.name]);
+  const render = async (changes = {}) => { currentProps = { ...currentProps, ...changes }; await React.act(async () => { const element = React.createElement(Component, currentProps); root.render(options.strictMode ? React.createElement(React.StrictMode, null, element) : element); }); };
   await render();
   const settle = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
-  const findButton = text => { const button = [...host.querySelectorAll("button")].find(item => item.textContent === text); assert.ok(button, "button present: " + text); return button; };
+  const findButton = text => { const buttons = [...host.querySelectorAll("button")]; const button = buttons.find(item => item.textContent === text) ?? buttons.find(item => item.getAttribute("aria-label") === text); assert.ok(button, "button present: " + text); return button; };
   const click = async text => { await React.act(async () => findButton(text).click()); await settle(); };
   const input = async (id, value) => {
     const element = host.querySelector("#" + id); assert.ok(element, "input present: " + id);
@@ -57,5 +99,5 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     }); await settle();
   };
   const submit = async (selector = "form") => { const form = host.querySelector(selector); assert.ok(form); await React.act(async () => form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))); await settle(); };
-  return { host, window, calls, identity, session, store, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
+  return { host, window, calls, identity, session, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
 }

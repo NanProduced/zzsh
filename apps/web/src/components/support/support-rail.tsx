@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowUp, Gift, Headphones, MessageSquare, Share2 } from "lucide-react";
+import { ArrowUp, Gift, Headphones, MessageSquare, Share2, X } from "lucide-react";
 import { ContactPopover } from "./contact-popover";
 import { CustomerSupportWorkspace } from "./customer-support-workspace";
 import type { SupportType } from "@/lib/support-intent";
@@ -17,6 +17,7 @@ export function SupportRail(){
   const [preview,setPreview]=useState(false);
   const [orderParty,setOrderParty]=useState<"renter"|"owner"|undefined>();
   const [requestSerial,setRequestSerial]=useState(0);
+  const [toolsOpen,setToolsOpen]=useState(false);
   const [orderId,setOrderId]=useState<string>();
   const [hasOpened,setHasOpened]=useState(false);
   useEffect(()=>{const open=(event:Event)=>{const {party,orderId:id}=(event as CustomEvent).detail??{};if((party!=="renter"&&party!=="owner")||typeof id!=="string"||!id)return;lastSupportTriggerRef.current=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;auth.open(window.location.pathname+window.location.search,()=>{setOrderParty(party);setOrderId(id);setRequestSerial(n=>n+1);setHasOpened(true);setSupportOpen(true);});};window.addEventListener("zzsh:order-groups",open);return()=>window.removeEventListener("zzsh:order-groups",open);},[auth]);
@@ -43,7 +44,14 @@ export function SupportRail(){
   // The window is non-modal, so Radix leaves focus on the entry button and Tab would walk
   // the whole page before reaching the composer. Start the tab order inside the window.
   useEffect(()=>{ if(supportOpen) document.querySelector<HTMLElement>(".support-dialog-content")?.focus(); },[supportOpen]);
-  return <aside className="support-rail" aria-label="常驻工具">
+  return <aside
+    className="support-rail"
+    aria-label="常驻工具"
+    data-expanded={toolsOpen ? "true" : "false"}
+    onKeyDown={(event) => { if (event.key === "Escape" && toolsOpen) setToolsOpen(false); }}
+    onClick={(event) => { if (toolsOpen && (event.target as HTMLElement).closest(".rail-item")) setToolsOpen(false); }}
+  >
+    <button type="button" className="rail-fab" aria-expanded={toolsOpen} aria-label={toolsOpen ? "收起常用工具" : "展开常用工具"} onClick={() => setToolsOpen((open) => !open)}>{toolsOpen ? <X size={22} aria-hidden="true" /> : <Headphones size={22} aria-hidden="true" />}</button>
     <Dialog.Root open={supportOpen} modal={false} onOpenChange={setSupportVisibility}>
       <button type="button" className="rail-item" aria-haspopup="dialog" data-support-trigger onClick={(event)=>requestSupport("SERVICE",event.currentTarget)}><Headphones size={21} className="pointer-events-none"/><span>联系客服</span></button>
       <Dialog.Portal forceMount><Dialog.Overlay className="modal-overlay support-dialog-overlay"/><Dialog.Content forceMount className="support-dialog-content" aria-describedby="support-dialog-description" onEscapeKeyDown={event=>{if(event.target instanceof HTMLElement&&event.target.closest(".order-team-image-viewer"))event.preventDefault();}} onPointerDownOutside={(event)=>{const target = event.detail.originalEvent.target; if(target instanceof Element && target.closest("[data-support-trigger], [data-auth-dialog]")) event.preventDefault();}}><Dialog.Title className="sr-only">站内客服</Dialog.Title><Dialog.Description id="support-dialog-description" className="sr-only">选择客服类型并开始站内咨询。</Dialog.Description>{hasOpened ? <CustomerSupportWorkspace embedded visible={supportOpen} preview={preview} initialType={requestedType} initialOrderParty={orderParty} initialOrderId={orderId} requestSerial={requestSerial} onClose={()=>setSupportVisibility(false)} /> : null}</Dialog.Content></Dialog.Portal>

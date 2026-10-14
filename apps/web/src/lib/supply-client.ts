@@ -270,6 +270,19 @@ export async function supplyRequest<T>(
   return body as T;
 }
 const id = (value: string) => encodeURIComponent(value);
+/**
+ * `/me/accounts` pages by `after` (the previous page's last id). Older callers sent `cursor`,
+ * which this endpoint ignores — that silently repeated the first page instead of advancing.
+ * The name is normalized at this shared boundary so every caller (account list, credit summary)
+ * pages correctly; other cursor-based endpoints (favorites, market) keep their own contracts.
+ */
+export function myAccountsQuery(query: URLSearchParams): URLSearchParams {
+  const params = new URLSearchParams(query);
+  const cursor = params.get("cursor");
+  if (cursor !== null && !params.has("after")) params.set("after", cursor);
+  params.delete("cursor");
+  return params;
+}
 export const supplyApi = {
   games: (signal?: AbortSignal) =>
     supplyRequest<{ games: SupplyGame[] }>("/games", { signal }),
@@ -349,7 +362,7 @@ export const supplyApi = {
         owner_paused: boolean;
         staff_restricted: boolean;
       }>
-    >("/me/accounts?" + query, { signal }),
+    >("/me/accounts?" + myAccountsQuery(query), { signal }),
   createAccount: (gameId: string, key: string, signal?: AbortSignal) =>
     supplyRequest<{ accountId: string; gameId: string }>("/accounts", {
       method: "POST",

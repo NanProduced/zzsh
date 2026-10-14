@@ -21,6 +21,7 @@ export function authErrorMessage(error: unknown, context: "read" | "verify" | "l
   if (error.status === 429) return "操作太频繁，请稍候再试。";
   if (context === "login" && (error.status === 400 || error.status === 401)) return "手机号或密码不正确，请检查后再试。";
   if (error.status === 401) return "登录已失效或验证不正确，请重新确认。";
+  if (error.status === 403) return context === "read" ? "当前身份无法读取该信息。" : "当前身份无法执行该操作。";
   if (context === "read" && error.status >= 400 && error.status < 500) return "当前资料无法读取，请重新确认登录身份后刷新。";
   if (error.status === 409) return "联系方式已被使用或归属待核，请核对目标或联系客服；验证状态变化时重新验证。";
   if (error.status === 501) return "验证服务暂时不可用，请稍后再试。";

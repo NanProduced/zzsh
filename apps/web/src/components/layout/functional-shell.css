@@ -142,9 +142,10 @@
   transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
+/* The brand colour is already carried by the fill; a coloured glow under it is decoration, and the
+   brief rules out manufacturing emphasis with shadows. Depth comes from the palette, not from here. */
 .functional-shell .button.primary {
   border: 1px solid color-mix(in srgb, var(--color-accent-brand) 72%, white);
-  box-shadow: 0 5px 14px color-mix(in srgb, var(--color-accent-brand) 18%, transparent);
 }
 
 .functional-shell .button.secondary {

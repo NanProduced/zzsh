@@ -4,6 +4,7 @@ import { createRequire, Module } from "node:module";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadInformation } from "./information-module.mjs";
 
 const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const require = createRequire(`${tree}/package.json`);
@@ -11,6 +12,7 @@ const React = require("react");
 const { Window } = require("happy-dom");
 const ts = require("typescript");
 const client = require(`${tree}/apps/web/src/lib/personal-wallet-client.ts`);
+const information = loadInformation();
 const at = "2026-10-03T02:31:22.516000Z";
 const money = amountCents => ({ currency: "CNY", unit: "cent", knowledge: amountCents === null ? "UNKNOWN" : "KNOWN", amountCents });
 const wallet = (snapshotVersion = "snapshot_1", nativeWithdrawal) => ({ subjectId: "user_A", contractVersion: "personal-finance.read.v1", asOf: at, snapshotVersion, coverage: { knowledge: "KNOWN", origin: "RECONCILED_OPENING", coverageVersion: "1" }, ledgerRevision: "1", readRevision: snapshotVersion === "snapshot_1" ? "1" : "2", buckets: { available: money("123456"), reserved: money(null), restricted: money(null), pendingEarnings: money(null), refundPayable: money(null) }, withdrawable: { ...money(null), reasonCodes: ["POLICY_NOT_CONFIRMED"] }, nativeWithdrawal });
@@ -35,6 +37,7 @@ async function probe(fetcher) {
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store };
     if (name === "@/lib/personal-wallet-client") return client;
     if (name === "@/lib/controlled-withdrawal-client") return require(`${tree}/apps/web/src/lib/controlled-withdrawal-client.ts`);
+    if (name === "@/components/ui/information") return information;
     if (name === "next/link") return props => React.createElement("a", props);
     return require(name);
   };
@@ -83,5 +86,28 @@ test("debt blocks new actions but preserves original receipt recovery and availa
     await p.render(wallet("snapshot_1", nativeDebt()));
     assert.match(p.host.textContent, /¥3\.12.*邀请收益待追回/); assert.match(p.host.textContent, /¥1,234\.56/); assert(p.host.querySelector("button[type=submit]").disabled);
     const recover = [...p.host.querySelectorAll("button")].find(button => button.textContent === "查询原申请"); assert(recover); assert.equal(recover.disabled, false); assert(methods.every(method => method === "GET"));
+  } finally { await p.close(); }
+});
+
+test("R2: the amount field's helper is actually bound to the control it explains", async () => {
+  const p = await probe(async () => reply(localScope(nativeDebt("0"))));
+  try {
+    await p.render(wallet("snapshot_1", nativeDebt("0")));
+    const input = p.host.querySelector("#withdraw-amount");
+    assert(input, "#withdraw-amount 必须渲染");
+    const label = p.host.querySelector('label[for="withdraw-amount"]');
+    assert(label, "金额字段必须有 for 指向控件的 label");
+    const describedBy = input.getAttribute("aria-describedby");
+    assert(describedBy, "金额控件必须有 aria-describedby");
+    const ids = describedBy.split(/\s+/).filter(Boolean);
+    assert(ids.length >= 1, "aria-describedby 不能为空");
+    const targets = ids.map(id => p.host.querySelector(`[id="${id}"]`));
+    assert(targets.every(Boolean), "aria-describedby 必须指向真实存在的元素");
+    assert(targets.some(node => /当前可用余额/.test(node.textContent || "")), "说明必须包含余额口径");
+    assert(targets.some(node => node.textContent.includes("本轮每笔准入")), "说明必须包含每笔准入");
+    // 没有说明的目标字段不应留下悬空引用。
+    const destination = p.host.querySelector("#withdraw-destination");
+    assert(destination, "#withdraw-destination 必须渲染");
+    assert.equal(destination.getAttribute("aria-describedby"), null);
   } finally { await p.close(); }
 });

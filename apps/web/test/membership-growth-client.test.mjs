@@ -42,3 +42,50 @@ test("feature-off API stays a visible unknown state", async () => {
     globalThis.fetch = original;
   }
 });
+
+test("missing or malformed contract arrays fail closed instead of reading as empty", async () => {
+  const original = globalThis.fetch;
+  try {
+    const { entitlements, ...withoutEntitlements } = known;
+    globalThis.fetch = async () => new Response(JSON.stringify(withoutEntitlements), { status: 200 });
+    await assert.rejects(() => readMyMembershipGrowth(), /entitlements/);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      ...known,
+      growth: { ...known.growth, contributions: [{ label: "租赁结算消费" }] },
+    }), { status: 200 });
+    await assert.rejects(() => readMyMembershipGrowth(), /contributions/);
+
+    globalThis.fetch = async () => new Response(JSON.stringify(known), { status: 200 });
+    const ready = await readMyMembershipGrowth();
+    assert.equal(ready.status, "ready");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("entitlement identity, timing and unknown kinds survive client mapping", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      ...known,
+      entitlements: [
+        { id: "e9", kind: "MYTHIC", label: "未知礼遇", scopeKey: "game:x", startsAtUtc: "2027-01-01T00:00:00.000Z", endsAtUtc: "2027-06-01T00:00:00.000Z", status: "WEIRD", depositWaived: false },
+        { id: "e1", kind: "FRIEND", label: "挚友礼遇", scopeKey: "game:delta", startsAtUtc: "2026-10-01T00:00:00.000Z", endsAtUtc: "2026-10-20T00:00:00.000Z", status: "ACTIVE", depositWaived: false },
+      ],
+    }), { status: 200 });
+    const ready = await readMyMembershipGrowth();
+    assert.equal(ready.status, "ready");
+    if (ready.status === "ready") {
+      assert.equal(ready.data.entitlements[0].id, "e9");
+      assert.equal(ready.data.entitlements[0].kind, "UNKNOWN");
+      assert.equal(ready.data.entitlements[0].state, "UNKNOWN");
+      assert.equal(ready.data.entitlements[0].startsAt, "2027-01-01T00:00:00.000Z");
+      assert.equal(ready.data.entitlements[1].state, "ACTIVE");
+      assert.equal(ready.data.benefitsState, "CONFIGURED");
+      assert.equal(ready.data.windowStart, "2026-07-11T00:00:00.000Z");
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+});

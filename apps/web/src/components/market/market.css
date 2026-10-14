@@ -202,7 +202,7 @@
 .market-skin-confirm { min-height:34px; padding:4px 24px; border:1px solid var(--color-delta-accent-hover); border-radius:6px; color:var(--color-text-inverse); background:var(--color-delta-accent-hover); cursor:pointer; }
 .market-load-catalog { min-height:34px; margin-top:10px; padding:4px 10px; border:1px solid var(--color-border-default); border-radius:6px; cursor:pointer; }
 .market-skin-inline { flex:1 0 100%; min-width:0; margin-top:8px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-card); }
-.market-filter-controls,.market-skin-popover,.market-grade-panel,.market-region-popover { font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",sans-serif; line-height:1.5; }
+.market-filter-controls,.market-skin-popover,.market-grade-panel,.market-region-popover { font-family:var(--font-sans); line-height:1.5; }
 .market-filter-controls :is(input,button):focus-visible,.market-skin-popover :is(input,button):focus-visible,.market-grade-panel :is(input,button):focus-visible { outline:2px solid var(--color-delta-accent); outline-offset:-2px; }
 .market-filter-controls input::placeholder,.market-skin-popover input::placeholder { color:var(--color-text-secondary); opacity:1; }
 

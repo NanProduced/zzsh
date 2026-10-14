@@ -1,0 +1,111 @@
+{
+  "version": 2,
+  "urlPrefix": "/art/empty/",
+  "display": {
+    "desktop": [
+      240,
+      180
+    ],
+    "mobile": [
+      160,
+      120
+    ],
+    "compact": [
+      132,
+      99
+    ],
+    "fit": "contain"
+  },
+  "assets": [
+    {
+      "code": "A",
+      "file": "rental-discover-r1.png",
+      "webpFile": "rental-discover-r1.webp",
+      "width": 720,
+      "height": 540,
+      "pngPixel": "rgba",
+      "webpPixel": "yuva420p",
+      "sha256": "5e7bc3948f8e860cc3512ea0483c8438312a1ab5184dd58fa032e2d8952ace54",
+      "webpSha256": "1753a2a3e8ff5c4216d5107313f1926231adc59bbe7087a2ecc9ae6d254f26c7",
+      "source": "tmp/personal-center-membership-20261011/empty-art-review-20261012/rental-discover-r1.png",
+      "sourceWidth": 1448,
+      "sourceHeight": 1086,
+      "sourceSha256": "4ae3d9ed8da3c2ef2632b79c7403cc4d252485f1bad2e611a88beaa70815c2ff",
+      "use": "成功读取且全部状态下真实无租入订单（订单列表 240×180；总览摘要 132×99）"
+    },
+    {
+      "code": "B",
+      "file": "owner-orders-r1.png",
+      "webpFile": "owner-orders-r1.webp",
+      "width": 720,
+      "height": 540,
+      "pngPixel": "rgba",
+      "webpPixel": "yuva420p",
+      "sha256": "985f71b1d4c548a743c95bef4c7b88c383c86ef00870e273b4a03c5d0156069a",
+      "webpSha256": "593465b28734e76a64222ff331bf430e101b01fa62a6a84a4aa0b0dae6f514a7",
+      "source": "tmp/personal-center-membership-20261011/empty-art-review-20261012/owner-orders-r1.png",
+      "sourceWidth": 1448,
+      "sourceHeight": 1086,
+      "sourceSha256": "53d502991616d38db32acef9b487f7d019673d307c44f54760684a11cfb7b5e3",
+      "use": "成功读取且全部状态下真实无出租订单（订单列表 240×180；总览摘要 132×99）"
+    },
+    {
+      "code": "C",
+      "file": "account-prepare-r1.png",
+      "webpFile": "account-prepare-r1.webp",
+      "width": 720,
+      "height": 540,
+      "pngPixel": "rgba",
+      "webpPixel": "yuva420p",
+      "sha256": "2fc7af6ce8b988410f9a0349ddbf35407780eb74f9dd2ecb283c9fad3c0c05be",
+      "webpSha256": "99c1362352374155ffcb163fca374b260436bffdad60288c9dff891a67f4cd5a",
+      "source": "tmp/personal-center-membership-20261011/empty-art-review-20261012/account-prepare-r1.png",
+      "sourceWidth": 1448,
+      "sourceHeight": 1086,
+      "sourceSha256": "0658b3196805ceab7d89e54de6bd0acb7b24c4f797de89d73f46041b68b0b8ea",
+      "use": "成功读取本人出租账号且列表为空"
+    },
+    {
+      "code": "D",
+      "file": "favorites-r1.png",
+      "webpFile": "favorites-r1.webp",
+      "width": 720,
+      "height": 540,
+      "pngPixel": "rgba",
+      "webpPixel": "yuva420p",
+      "sha256": "136de5c22c96edd81db088c040ba067c28c082518cf4d544bc002321e0cd16e1",
+      "webpSha256": "2acb09347f53b1469dc60d2516dc62d66636c3000f74b79dba43973d907fdfe7",
+      "source": "tmp/personal-center-membership-20261011/empty-art-review-20261012/favorites-r1.png",
+      "sourceWidth": 1448,
+      "sourceHeight": 1086,
+      "sourceSha256": "3d8b3ccdf6ffc5a455840019df122e2dea4d2bdf45782e33a54a2012e7bf8d11",
+      "use": "成功读取且收藏列表为空"
+    }
+  ],
+  "notUsed": [
+    {
+      "area": "总览 · 待你处理",
+      "reason": "一行状态即可，不配人物"
+    },
+    {
+      "area": "会员中心 · 礼遇/积分",
+      "reason": "无礼遇是正常身份状态，不画成缺失"
+    },
+    {
+      "area": "钱包 · 余额/流水/提现",
+      "reason": "余额 0 不是空态；未确认状态不能用空图掩盖"
+    },
+    {
+      "area": "信用与保证金",
+      "reason": "空上下文不等于无需保证金"
+    },
+    {
+      "area": "邀请与佣金",
+      "reason": "读取未核定时不能用空图"
+    },
+    {
+      "area": "实名认证 / 账号安全",
+      "reason": "属于操作引导与恢复，不是列表空态"
+    }
+  ]
+}

@@ -1,50 +1,204 @@
+/* 租入／出租订单：连续清单 + 独立详情。清单按列对齐，详情为「阶段区 + 主内容 + 金额侧栏」。 */
+
 .order-workspace,
 .order-detail-view { display: grid; gap: 16px; }
 .order-workspace-heading,
 .order-list-heading,
 .order-detail-heading,
-.order-next-step { display: flex; justify-content: space-between; gap: 16px; }
+.order-trade-heading { display: flex; justify-content: space-between; gap: 16px; }
 .order-workspace-heading { align-items: center; }
+/* The shared account-module-heading rule stretches every direct child to half the row, which leaves
+   the actions floating in mid-content. Order headings own their widths, so they win here. */
+.account-center-main .order-workspace-heading > div:first-child { flex: 1 1 auto; }
+.account-center-main .order-workspace-heading > .order-workspace-actions { flex: 0 0 auto; }
 .order-workspace-heading h2 { margin: 0; font-size: 24px; }
 .order-workspace-heading p { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
-.order-list-toolbar { display: flex; align-items: end; gap: 16px; padding: 12px 0 15px; border-bottom: 1px solid var(--color-border-subtle); }
-.order-list-toolbar label { display: grid; gap: 6px; color: var(--color-text-secondary); font-size: 12px; }
-.order-list-toolbar select { min-width: 160px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--color-border-default); border-radius: 5px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 13px; }
-.order-list-toolbar select:focus-visible,
-.order-list-link:focus-visible,
+.order-workspace-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+.order-workspace .button:focus-visible,
+.order-detail-view .button:focus-visible,
+.order-filter:focus-visible,
+.order-row-title:focus-visible,
 .order-detail-back:focus-visible,
-.order-workspace .button:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; }
-.order-list-toolbar > span { padding-bottom: 11px; color: var(--color-text-muted); font-size: 12px; }
-.order-list-panel,
-.order-detail-card { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
-.order-list-heading { align-items: center; margin-bottom: 10px; }
+.order-copy-button:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; }
+
+/* ---------- 状态筛选 ---------- */
+.order-filter-bar { display: flex; align-items: center; gap: 4px; width: fit-content; max-width: 100%; padding: 5px; overflow-x: auto; border: 1px solid var(--color-border-subtle); border-radius: 11px; background: var(--color-bg-surface); }
+.order-filter { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 38px; padding: 0 16px; border-radius: 8px; color: var(--color-text-secondary); font-size: 13px; text-decoration: none; white-space: nowrap; }
+.order-filter:hover { color: var(--color-text-primary); }
+.order-filter[aria-current="page"] { color: var(--color-text-primary); background: var(--color-bg-elevated); font-weight: 600; }
+.account-filter-context { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--color-border-subtle); border-radius: 9px; color: var(--color-text-secondary); font-size: 12px; }
+.account-filter-context a { color: var(--account-accent, var(--color-accent-brand)); font-weight: 600; }
+
+/* ---------- 清单 ---------- */
+.order-list-panel { padding: 20px; }
+.order-list-heading { align-items: center; margin-bottom: 6px; }
 .order-list-heading h3 { margin: 0; font-size: 16px; }
 .order-list-heading span { color: var(--color-text-muted); font-size: 12px; }
-.order-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.order-list-item { border: 1px solid var(--color-border-subtle); border-radius: 8px; background: var(--color-bg-surface); }
-.order-list-link { display: flex; justify-content: space-between; gap: 20px; min-width: 0; padding: 14px; color: inherit; text-decoration: none; }
-.order-list-link:hover { border-color: var(--color-accent-brand); }
-.order-list-main,
-.order-list-side { display: grid; gap: 4px; min-width: 0; }
-.order-list-main { align-content: start; }
-.order-list-main > strong { color: var(--color-text-primary); font-size: 14px; overflow-wrap: anywhere; }
-.order-list-main > span:not(.order-kicker) { color: var(--color-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.order-list-person { display: flex; align-items: center; gap: 5px; }
-.order-list-side { flex: 0 0 190px; justify-items: end; align-content: start; text-align: right; }
-.order-list-side > strong { color: var(--color-text-primary); font-size: 15px; font-variant-numeric: tabular-nums; }
-.order-amount-caption { color: var(--color-text-muted); font-size: 11px; }
-.order-list-side .order-time-hint { justify-content: flex-end; text-align: right; }
-.order-status { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 9px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-secondary); background: var(--color-bg-card); font-size: 12px; line-height: 1.2; white-space: nowrap; }
-.order-status[data-state="pending"] { border-color: color-mix(in srgb, var(--color-accent-brand) 55%, var(--color-border-default)); color: var(--color-accent-brand); }
-.order-status[data-state="expired"] { border-color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-border-default)); color: var(--color-status-warning); }
-.order-status[data-state="paid"] { border-color: color-mix(in srgb, var(--color-status-success) 55%, var(--color-border-default)); color: var(--color-status-success); }
-.order-status[data-state="completed"] { border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); color: var(--color-accent-brand); }
-.order-status[data-state="cancelled"], .order-status[data-state="unknown"] { color: var(--color-text-muted); }
-.order-time-hint { display: flex; align-items: flex-start; gap: 5px; margin: 8px 0 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.55; }
-.order-time-hint svg { flex: 0 0 auto; margin-top: 1px; }
-.order-time-hint.is-warning { color: var(--color-status-warning); }
-.order-inline-notice { margin: 0; padding: 10px 12px; border: 1px solid var(--color-border-default); border-radius: 7px; color: var(--color-text-secondary); background: var(--color-bg-surface); font-size: 12px; line-height: 1.6; }
-.order-notice { display: flex; align-items: flex-start; gap: 9px; padding: 12px 13px; border: 1px solid var(--color-border-default); border-radius: 7px; font-size: 12px; line-height: 1.65; }
+.order-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.order-list-columns { display: none; }
+.order-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "account state" "amount action"; gap: 10px 14px; padding: 13px 6px; border-bottom: 1px solid var(--color-border-subtle); }
+.order-row:last-child { border-bottom: 0; }
+.order-row:hover { background: var(--color-bg-card-hover); }
+.order-row:focus-within { outline: 2px solid var(--color-accent-brand); outline-offset: -2px; }
+.order-row-account { grid-area: account; display: grid; gap: 3px; min-width: 0; align-content: start; }
+/* The title link is the row's only focusable target; its ::after turns the whole row into its click surface. */
+.order-row-title { color: var(--color-text-primary); font-size: 15px; font-weight: 650; line-height: 1.4; letter-spacing: -0.005em; text-decoration: none; overflow-wrap: anywhere; }
+.order-row-title::after { content: ""; position: absolute; inset: 0; }
+.order-row-title:hover { color: var(--color-accent-brand); }
+/* The account's resource signature: what actually distinguishes one order from the next. */
+.order-row-resources { margin: 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.order-row-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.order-row-meta svg { flex: 0 0 auto; }
+.order-row-no { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+/* Badge and explanation form one block so a taller account column never opens a gap under the badge. */
+.order-row-state { grid-area: state; display: grid; gap: 5px; align-content: start; justify-items: start; min-width: 0; }
+.order-row-hint { margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.5; }
+.order-row-amount { grid-area: amount; align-self: end; display: grid; gap: 3px; min-width: 0; }
+.order-row-amount strong { color: var(--color-text-primary); font-size: 17px; font-variant-numeric: tabular-nums; }
+.order-row-amount-label { color: var(--color-text-secondary); font-size: 12px; }
+.order-row-amount-sub { display: flex; flex-wrap: wrap; gap: 1px 7px; color: var(--color-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.order-row-amount-sub > span + span::before { content: "·"; margin-right: 7px; }
+.order-row-action { grid-area: action; align-self: end; justify-self: end; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 14px; border: 1px solid var(--color-border-default); border-radius: 10px; color: var(--color-text-primary); background: var(--color-bg-elevated); font-size: 13px; font-weight: 650; white-space: nowrap; }
+.order-row-action svg { flex: 0 0 auto; }
+.order-row-action.is-primary { border-color: transparent; color: var(--color-accent-brand-text); background: var(--color-accent-brand); }
+.order-row:hover .order-row-action { border-color: var(--color-accent-brand); }
+.order-row:hover .order-row-action.is-primary { border-color: transparent; background: var(--color-accent-brand-hover); }
+/* Status colour is semantic and never the brand accent: green is done, blue is in progress, orange is
+   "you have to act", red is an abnormal hold, grey is closed. The label and the dot carry the same
+   meaning, so colour is never the only code. Text mixes toward the theme foreground so each pair
+   clears 4.5:1 on both themes without a second palette. */
+.order-status { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 4px 11px; border: 1px solid transparent; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 1.2; white-space: nowrap; }
+.order-status::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }
+.order-status[data-state="pending"] { color: color-mix(in srgb, var(--color-status-warning) 58%, var(--color-text-primary)); background: color-mix(in srgb, var(--color-status-warning) 14%, transparent); border-color: color-mix(in srgb, var(--color-status-warning) 34%, transparent); }
+.order-status[data-state="expired"] { color: color-mix(in srgb, var(--color-status-error) 58%, var(--color-text-primary)); background: color-mix(in srgb, var(--color-status-error) 12%, transparent); border-color: color-mix(in srgb, var(--color-status-error) 32%, transparent); }
+.order-status[data-state="paid"] { color: color-mix(in srgb, var(--color-status-info) 58%, var(--color-text-primary)); background: color-mix(in srgb, var(--color-status-info) 12%, transparent); border-color: color-mix(in srgb, var(--color-status-info) 32%, transparent); }
+.order-status[data-state="completed"] { color: color-mix(in srgb, var(--color-status-success) 58%, var(--color-text-primary)); background: color-mix(in srgb, var(--color-status-success) 14%, transparent); border-color: color-mix(in srgb, var(--color-status-success) 34%, transparent); }
+.order-status[data-state="cancelled"] { color: var(--color-text-secondary); background: var(--color-bg-elevated); border-color: var(--color-border-default); }
+.order-status[data-state="unknown"] { color: var(--color-text-muted); background: transparent; border-color: var(--color-border-default); border-style: dashed; }
+.order-list-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--color-border-subtle); }
+.order-list-count, .order-list-end { color: var(--color-text-muted); font-size: 12px; }
+.order-list-footnote { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.6; }
+.order-list-footnote svg { flex: 0 0 auto; margin-top: 2px; }
+.order-list-empty { display: grid; justify-items: center; gap: 7px; padding: 28px 14px 32px; color: var(--color-text-secondary); text-align: center; }
+.order-list-empty h3 { margin: 6px 0 0; color: var(--color-text-primary); font-size: 18px; font-weight: 700; line-height: 1.4; }
+.order-list-empty p { max-width: 52ch; margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
+.order-empty-actions { margin-top: 10px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+/* account-center keeps a 230px floor so small blanks stay visible; a filter miss sizes to its own
+   copy instead of inheriting that floor. */
+.account-center-main .order-list-empty.order-list-empty { min-height: 0; }
+.order-more-error { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 14px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--color-status-warning) 52%, var(--color-border-default)); border-radius: 8px; color: var(--color-status-warning); font-size: 12px; line-height: 1.55; }
+.order-more-error span { flex: 1 1 220px; }
+.order-inline-notice { margin: 0; padding: 10px 12px; border: 1px solid var(--color-border-default); border-radius: 8px; color: var(--color-text-secondary); background: var(--color-bg-surface); font-size: 12px; line-height: 1.6; }
+.order-skeleton-list { display: grid; gap: 8px; }
+.order-skeleton-list span { display: block; height: 88px; border-radius: 10px; background: linear-gradient(90deg, var(--color-bg-surface), var(--color-bg-elevated), var(--color-bg-surface)); background-size: 200% 100%; animation: order-skeleton 1.2s ease-in-out infinite; }
+@keyframes order-skeleton { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* ---------- 错误与身份守卫 ---------- */
+.order-error-block { display: grid; justify-items: start; gap: 8px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius); color: var(--color-text-secondary); background: var(--color-bg-card); }
+.order-error-block svg { color: var(--color-status-warning); }
+.order-error-block h3, .order-error-block p { margin: 0; }
+.order-error-block h3 { color: var(--color-text-primary); font-size: 18px; }
+.order-error-block p { font-size: 13px; line-height: 1.7; }
+.order-session-guard { display: grid; justify-items: start; gap: 8px; max-width: 620px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius); color: var(--color-text-muted); background: var(--color-bg-card); }
+.order-session-guard h2, .order-session-guard p { margin: 0; }
+.order-session-guard h2 { color: var(--color-text-primary); font-size: 19px; }
+.order-session-guard p { color: var(--color-text-secondary); font-size: 13px; }
+.order-muted { margin: 0; color: var(--color-text-muted); font-size: 13px; line-height: 1.7; }
+
+/* ---------- 详情 ---------- */
+.order-detail-card { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
+.order-detail-back { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; width: fit-content; color: var(--color-text-secondary); font-size: 13px; text-decoration: none; }
+.order-detail-back:hover { color: var(--color-accent-brand); }
+/* Identity band. Type scale matches the account detail: title 26 / section 16 / body 14 / caption 12. */
+.order-detail-hero { display: flex; align-items: flex-start; gap: 20px; }
+.order-detail-hero-copy { min-width: 0; flex: 1 1 auto; }
+.order-detail-title { margin: 0; color: var(--color-text-primary); font-size: 26px; font-weight: 700; line-height: 1.25; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.order-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 10px 0 0; color: var(--color-text-secondary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.order-detail-meta > span + span::before { content: "·"; margin-right: 12px; }
+.order-detail-no { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-primary); font-weight: 600; }
+.order-detail-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 16px 0 0; }
+.order-copy-button { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 0 10px; border: 1px solid var(--color-border-default); border-radius: 10px; color: var(--color-text-secondary); background: var(--color-bg-surface); font-size: 11px; cursor: pointer; }
+.order-copy-button:hover { color: var(--color-accent-brand); border-color: var(--color-accent-brand); }
+.order-detail-loading { display: grid; gap: 12px; }
+.order-detail-loading span { display: block; height: 16px; border-radius: 4px; background: var(--color-bg-surface); animation: order-skeleton 1.2s ease-in-out infinite; }
+.order-detail-loading span:first-child { width: 58%; height: 32px; }
+.order-detail-loading span:last-child { width: 84%; height: 160px; }
+/* Two columns only when both can keep their width; below that the money rail drops under the content. */
+.order-detail-body { display: grid; gap: 32px; margin-top: 32px; align-items: start; }
+.order-detail-main { display: grid; gap: 32px; min-width: 0; }
+.order-detail-aside { display: grid; gap: 24px; min-width: 0; position: sticky; top: 24px; }
+.order-section-title { margin: 0; color: var(--color-text-primary); font-size: 16px; font-weight: 650; letter-spacing: -0.005em; }
+
+/* ---------- 待处理与异常 ---------- */
+/* Carries only what the reader still has to resolve, and the action that resolves it. The order's own
+   status is already stated once in the identity band, so it is never repeated here. */
+.order-attention { display: grid; gap: 14px; margin-top: 32px; padding: 18px 20px; border-radius: 12px; }
+.order-attention.is-info { border: 1px solid var(--color-border-default); background: var(--color-bg-surface); }
+.order-attention.is-warning { border: 1px solid color-mix(in srgb, var(--color-status-warning) 36%, var(--color-border-subtle)); background: color-mix(in srgb, var(--color-status-warning) 8%, var(--color-bg-surface)); }
+.order-attention-copy { min-width: 0; max-width: 64ch; }
+.order-attention-copy h2 { margin: 0; color: var(--color-text-primary); font-size: 16px; font-weight: 650; }
+.order-attention-copy p { max-width: 68ch; margin: 6px 0 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.75; }
+.order-attention-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; flex: 0 0 auto; }
+
+/* ---------- 订单进度 ---------- */
+.order-timeline { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.order-timeline li { position: relative; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: baseline; gap: 4px 12px; padding: 10px 0 10px 0; }
+.order-timeline li::before { content: ""; position: absolute; left: 5px; top: 24px; bottom: -2px; width: 1px; background: var(--color-border-subtle); }
+.order-timeline li:last-child::before { display: none; }
+.order-timeline-dot { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--color-border-default); background: var(--color-bg-card); }
+.order-timeline li[data-state="done"] .order-timeline-dot { border-color: var(--color-status-success); background: var(--color-status-success); }
+.order-timeline li[data-state="closed"] .order-timeline-dot { border-color: var(--color-border-default); background: var(--color-bg-elevated); }
+.order-timeline strong { color: var(--color-text-primary); font-size: 14px; font-weight: 600; }
+.order-timeline time { color: var(--color-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 详情侧栏 ---------- */
+.order-side-card { display: grid; gap: 12px; padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
+.order-amount-block { gap: 10px; }
+/* The outcome leads; the parts sit under it. A 30px order-time quote was stealing the page. */
+.order-amount-total { color: var(--color-text-primary); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.015em; overflow-wrap: anywhere; }
+.order-amount-total.is-unknown { color: var(--color-text-secondary); font-size: 21px; font-weight: 650; }
+.order-amount-label { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
+.order-amount-rows { margin-top: 4px; }
+/* The make-up of the total is indented under it, never set beside it as a second amount. */
+.order-amount-parts { margin: 0; padding-left: 14px; border-left: 1px solid var(--color-border-subtle); }
+.order-amount-parts dt { color: var(--color-text-muted); }
+.order-amount-parts dd { color: var(--color-text-secondary); font-weight: 500; }
+.order-amount-rows dd { font-variant-numeric: tabular-nums; }
+/* Block, not flex: an inline link inside a flex container is blockified and breaks mid-sentence. */
+.order-side-link { display: block; margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.7; }
+.order-side-link svg { display: inline-block; margin-right: 5px; vertical-align: -2px; }
+.order-side-link a { color: var(--color-accent-brand); font-weight: 600; }
+.order-side-link a:hover { text-decoration: underline; }
+.order-contact-copy { display: flex; align-items: flex-start; gap: 8px; margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
+.order-contact-copy svg { flex: 0 0 auto; margin-top: 2px; color: var(--color-accent-brand); }
+.order-contact-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+
+/* ---------- 订单资料 ---------- */
+.order-facts { display: grid; gap: 0; margin: 0; }
+.order-facts > div { display: flex; justify-content: space-between; gap: 20px; padding: 10px 0; border-bottom: 1px solid var(--color-border-subtle); }
+.order-facts > div:last-child { border-bottom: 0; padding-bottom: 0; }
+.order-facts > div:first-child { padding-top: 0; }
+.order-facts dt { color: var(--color-text-secondary); font-size: 12px; }
+.order-facts dd { max-width: 62%; margin: 0; color: var(--color-text-primary); font-size: 13px; text-align: right; overflow-wrap: anywhere; }
+.order-detail-section { display: grid; gap: 12px; }
+.order-lines > details > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 16px; padding: 13px 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); cursor: pointer; list-style: none; }
+.order-lines > details > summary::-webkit-details-marker { display: none; }
+/* Title and the toggle share one line; the long money summary wraps beneath them instead of squeezing
+   the title and the toggle into narrow vertical columns. */
+.order-lines > details > summary > h2 { grid-column: 1; grid-row: 1; }
+.order-lines > details > summary::after { grid-column: 2; grid-row: 1; content: "展开"; color: var(--color-text-muted); font-size: 11px; white-space: nowrap; }
+.order-lines > details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; }
+.order-lines > details[open] > summary::after { content: "收起"; }
+.order-lines-summary { grid-column: 1 / -1; grid-row: 2; color: var(--color-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.order-lines > details > *:not(summary) { padding: 0 18px 18px; border: 1px solid var(--color-border-subtle); border-top: 0; border-radius: 0 0 var(--functional-radius) var(--functional-radius); background: var(--color-bg-card); }
+.order-table-wrap { overflow-x: auto; }
+.order-table-wrap table { width: 100%; border-collapse: collapse; min-width: 480px; }
+.order-table-wrap th, .order-table-wrap td { padding: 10px 12px; border-bottom: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 12px; text-align: left; vertical-align: top; }
+.order-table-wrap th { color: var(--color-text-muted); font-weight: 500; background: var(--color-bg-surface); }
+.order-table-wrap td:nth-child(n+3) { color: var(--color-text-primary); font-variant-numeric: tabular-nums; text-align: right; }
+.order-table-wrap tr:last-child td { border-bottom: 0; }
+.order-lines-note { margin: 10px 0 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.6; }
+.order-notice { display: flex; align-items: flex-start; gap: 9px; padding: 12px 13px; border: 1px solid var(--color-border-default); border-radius: 9px; font-size: 12px; line-height: 1.65; }
 .order-notice svg { flex: 0 0 auto; margin-top: 2px; }
 .order-notice div { display: grid; gap: 3px; }
 .order-notice strong { color: var(--color-text-primary); font-weight: 600; }
@@ -52,104 +206,121 @@
 .order-notice.is-info { background: color-mix(in srgb, var(--color-accent-brand) 7%, transparent); }
 .order-notice.is-warning { color: var(--color-status-warning); background: color-mix(in srgb, var(--color-status-warning) 7%, transparent); }
 .order-notice.is-success { color: var(--color-status-success); background: color-mix(in srgb, var(--color-status-success) 7%, transparent); }
-.order-error-block { display: grid; justify-items: start; gap: 8px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius); color: var(--color-text-secondary); background: var(--color-bg-card); }
-.order-error-block svg { color: var(--color-status-warning); }
-.order-error-block h3, .order-error-block p { margin: 0; }
-.order-error-block h3 { color: var(--color-text-primary); font-size: 18px; }
-.order-error-block p { font-size: 13px; line-height: 1.7; }
-.order-detail-back { display: inline-flex; align-items: center; gap: 6px; width: fit-content; color: var(--color-text-secondary); font-size: 13px; text-decoration: none; }
-.order-detail-back:hover { color: var(--color-accent-brand); }
-.order-detail-heading { align-items: center; padding-bottom: 17px; border-bottom: 1px solid var(--color-border-subtle); }
-.order-detail-heading h2 { max-width: 48ch; margin: 4px 0 0; color: var(--color-text-primary); font-size: 22px; overflow-wrap: anywhere; }
-.order-detail-heading p:last-child { margin: 6px 0 0; color: var(--color-text-muted); font-size: 12px; }
-.order-kicker { margin: 0; color: var(--color-text-muted); font-size: 12px; }
-.order-facts { display: grid; gap: 0; margin: 18px 0 0; }
-.order-facts > div { display: flex; justify-content: space-between; gap: 20px; padding: 11px 0; border-bottom: 1px solid var(--color-border-subtle); }
-.order-facts dt { color: var(--color-text-secondary); font-size: 12px; }
-.order-facts dd { max-width: 70%; margin: 0; color: var(--color-text-primary); font-size: 13px; text-align: right; overflow-wrap: anywhere; }
-.order-money-facts { max-width: 620px; margin-top: 18px; }
-.order-money-facts dd { font-variant-numeric: tabular-nums; }
-.order-facts dd.order-total { font-size: 15px; font-weight: 700; }
-.order-next-step { align-items: center; margin-top: 18px; padding: 14px; border: 1px solid var(--color-border-subtle); border-radius: 8px; background: var(--color-bg-surface); }
-.order-next-step-copy { display: flex; align-items: flex-start; gap: 9px; }
-.order-next-step-copy svg { flex: 0 0 auto; margin-top: 2px; color: var(--color-accent-brand); }
-.order-next-step-copy span { display: grid; gap: 4px; }
-.order-next-step-copy strong, .order-next-step > div > strong { color: var(--color-text-primary); font-size: 13px; }
-.order-next-step-copy small, .order-next-step > div > span { color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
-.order-detail-section { margin-top: 24px; }
-.order-detail-section h3, .order-lines h3 { margin: 0; color: var(--color-text-primary); font-size: 15px; }
-.order-lines { margin-top: 24px; }
-.order-table-wrap { margin-top: 10px; overflow-x: auto; border: 1px solid var(--color-border-subtle); border-radius: 7px; }
-.order-table-wrap table { width: 100%; border-collapse: collapse; min-width: 520px; }
-.order-table-wrap th, .order-table-wrap td { padding: 10px 12px; border-bottom: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 12px; text-align: left; vertical-align: top; }
-.order-table-wrap th { color: var(--color-text-muted); font-weight: 500; background: var(--color-bg-surface); }
-.order-table-wrap td:nth-child(n+3) { color: var(--color-text-primary); font-variant-numeric: tabular-nums; text-align: right; }
-.order-table-wrap tr:last-child td { border-bottom: 0; }
-.order-lines-note, .order-muted { margin: 10px 0 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.6; }
-.order-list-empty { display: grid; justify-items: center; gap: 7px; padding: 34px 14px; color: var(--color-text-secondary); text-align: center; }
-.order-list-empty h3, .order-list-empty p { margin: 0; }
-.order-empty-actions { margin-top: 10px; }
-.order-list-empty p { color: var(--color-text-muted); font-size: 12px; }
-.order-more, .order-list-end { margin-top: 14px; }
-.order-list-end { color: var(--color-text-muted); font-size: 12px; text-align: center; }
-.order-more-error { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 14px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--color-status-warning) 52%, var(--color-border-default)); border-radius: 7px; color: var(--color-status-warning); font-size: 12px; line-height: 1.55; }
-.order-more-error span { flex: 1 1 220px; }
-.order-session-guard { display: grid; justify-items: start; gap: 8px; max-width: 620px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius); color: var(--color-text-muted); background: var(--color-bg-card); }
-.order-session-guard h2, .order-session-guard p { margin: 0; }
-.order-session-guard h2 { color: var(--color-text-primary); font-size: 19px; }
-.order-session-guard p { color: var(--color-text-secondary); font-size: 13px; }
-.order-skeleton-list { display: grid; gap: 8px; }
-.order-skeleton-list span { display: block; height: 88px; border: 1px solid var(--color-border-subtle); border-radius: 8px; background: linear-gradient(90deg, var(--color-bg-surface), var(--color-bg-elevated), var(--color-bg-surface)); background-size: 200% 100%; animation: order-skeleton 1.2s ease-in-out infinite; }
-.order-detail-loading { display: grid; gap: 12px; }
-.order-detail-loading span { display: block; height: 16px; border-radius: 4px; background: var(--color-bg-surface); animation: order-skeleton 1.2s ease-in-out infinite; }
-.order-detail-loading span:first-child { width: 58%; height: 32px; }
-.order-detail-loading span:last-child { width: 84%; height: 160px; }
-@keyframes order-skeleton { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
-@media (max-width: 599px) {
-  .order-workspace-heading { align-items: flex-start; }
-  .order-workspace-heading h2 { font-size: 21px; }
-  .order-list-toolbar { align-items: stretch; flex-direction: column; gap: 10px; }
-  .order-list-toolbar select { width: 100%; }
-  .order-list-toolbar > span { padding: 0; }
-  .order-list-link { flex-direction: column; gap: 12px; }
-  .order-list-side { flex-basis: auto; justify-items: start; text-align: left; }
-  .order-list-side .order-time-hint { justify-content: flex-start; text-align: left; }
-  .order-list-panel, .order-detail-card { padding: 16px; }
-  .order-detail-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .order-facts > div { gap: 10px; }
-  .order-facts dd { max-width: 62%; }
-  .order-next-step { align-items: stretch; flex-direction: column; }
-  .order-next-step .button { width: 100%; }
-  .order-more-error { align-items: stretch; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .order-skeleton-list span, .order-detail-loading span { animation: none; }
-}
 
-.order-trade-panel { display: grid; gap: 10px; }
-.order-trade-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.order-trade-block { display: grid; gap: 9px; padding: 13px 14px; border: 1px solid var(--color-border-subtle); border-radius: 8px; background: var(--color-bg-surface); }
-.order-trade-block h4 { margin: 0; color: var(--color-text-primary); font-size: 13px; }
-.order-trade-tag { margin-left: 6px; padding: 2px 8px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-muted); font-size: 11px; font-weight: 400; }
+/* ---------- 交易面板 ---------- */
+.order-trade-panel { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
+.order-trade-heading { align-items: center; }
+.order-trade-block { display: grid; gap: 10px; padding: 14px 15px; border: 1px solid var(--color-border-subtle); border-radius: 11px; background: var(--color-bg-surface); }
+.order-trade-block h3 { margin: 0; color: var(--color-text-primary); font-size: 14px; }
+.order-trade-sub { display: grid; gap: 8px; padding-top: 4px; }
+.order-trade-tag { margin-left: 6px; padding: 3px 9px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-muted); font-size: 11px; font-weight: 400; }
+.order-trade-tag.is-accent { border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); color: var(--color-accent-brand); }
 .order-trade-lines { width: 100%; border-collapse: collapse; }
-.order-trade-lines th, .order-trade-lines td { padding: 7px 9px; border-bottom: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 12px; text-align: left; }
+.order-trade-lines th, .order-trade-lines td { padding: 8px 10px; border-bottom: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 12px; text-align: left; }
 .order-trade-lines th { color: var(--color-text-muted); font-weight: 500; }
-.order-trade-lines input { width: 130px; min-height: 34px; padding: 6px 8px; border: 1px solid var(--color-border-default); border-radius: 5px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 12px; font-variant-numeric: tabular-nums; }
+.order-trade-lines td:nth-child(n+2) { color: var(--color-text-primary); font-variant-numeric: tabular-nums; }
+.order-trade-lines tr:last-child td { border-bottom: 0; }
+.order-trade-lines input { width: 100%; max-width: 220px; min-height: 38px; padding: 7px 9px; border: 1px solid var(--color-border-default); border-radius: 7px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 12px; font-variant-numeric: tabular-nums; }
 .order-trade-lines input:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 2px; }
-.order-trade-facts { margin-top: 0; }
+.order-trade-unit { margin-left: 6px; color: var(--color-text-muted); font-size: 11px; }
+.order-trade-facts { margin: 0; }
+.order-trade-facts dd { font-variant-numeric: tabular-nums; }
 .order-trade-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
 .order-trade-confirm, .order-trade-reject { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--color-text-secondary); font-size: 12px; }
-.order-trade-reject input { min-height: 34px; min-width: 240px; padding: 6px 9px; border: 1px solid var(--color-border-default); border-radius: 5px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 12px; }
-.order-trade-preview { display: grid; gap: 9px; }
-@media (max-width: 640px) {
-  .order-trade-lines input, .order-trade-reject input { width: 100%; min-width: 0; }
-}
-
-.order-trade-unit { margin-left: 6px; color: var(--color-text-muted); font-size: 11px; }
-.order-trade-input input { width: 180px; }
-.order-trade-amounts { width: 100%; margin-top: 4px; border-collapse: collapse; }
+.order-trade-reject input { min-height: 38px; min-width: 220px; padding: 7px 9px; border: 1px solid var(--color-border-default); border-radius: 7px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 12px; }
+.order-trade-preview { display: grid; gap: 10px; }
+.order-trade-note { margin: 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.6; }
+.order-trade-amounts { width: 100%; border-collapse: collapse; }
 .order-trade-amounts caption { padding: 6px 0; color: var(--color-text-muted); font-size: 11px; text-align: left; }
-.order-trade-amounts th, .order-trade-amounts td { padding: 7px 9px; border-bottom: 1px solid var(--color-border-subtle); font-size: 12px; text-align: left; }
+.order-trade-amounts th, .order-trade-amounts td { padding: 8px 9px; border-bottom: 1px solid var(--color-border-subtle); font-size: 12px; text-align: left; }
 .order-trade-amounts th { color: var(--color-text-secondary); font-weight: 500; }
 .order-trade-amounts td { color: var(--color-text-primary); font-variant-numeric: tabular-nums; text-align: right; }
 .order-trade-amounts td small { display: block; margin-top: 2px; color: var(--color-text-muted); font-size: 11px; font-weight: 400; }
+.order-records { display: grid; gap: 7px; }
+.order-records ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.order-records li { display: flex; align-items: center; gap: 7px; color: var(--color-text-secondary); font-size: 12px; }
+.order-record-mark { display: grid; place-items: center; color: var(--color-status-success); }
+.order-records time { margin-left: auto; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+.order-version-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.order-version-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 10px 12px; border: 1px solid var(--color-border-subtle); border-radius: 9px; color: var(--color-text-secondary); font-size: 12px; }
+.order-version-list li[data-state="current"] { border-color: color-mix(in srgb, var(--color-accent-brand) 40%, var(--color-border-subtle)); }
+.order-version-no { color: var(--color-text-primary); font-weight: 600; }
+.order-version-state, .order-version-reason, .order-version-readonly, .order-version-decisions { color: var(--color-text-muted); }
+.order-version-readonly { flex-basis: 100%; }
+
+@media (max-width: 1280px) {
+  /* Below the columnar layout the money basis stacks: the amount, what it is, then each breakdown
+     fact on its own line — never one run-on sentence and never a wrapped "·" leading a line. */
+  .order-row-amount { display: grid; gap: 2px; align-content: start; }
+  .order-row-amount-sub { display: grid; gap: 1px; }
+  .order-row-amount-sub > span + span::before { content: none; }
+}
+
+@media (min-width: 1440px) {
+  .order-detail-body { grid-template-columns: minmax(0, 1fr) 320px; }
+}
+@media (max-width: 1439px) {
+  .order-detail-aside { position: static; }
+}
+
+@media (min-width: 1281px) {
+  .order-list-columns { display: grid; grid-template-columns: minmax(0, 1fr) 190px 210px 148px; gap: 16px; padding: 0 6px 10px; border-bottom: 1px solid var(--color-border-default); color: var(--color-text-muted); font-size: 12px; }
+  .order-list-columns > span:nth-child(3), .order-list-columns > span:nth-child(4) { text-align: right; }
+  .order-row { grid-template-columns: minmax(0, 1fr) 190px 210px 148px; grid-template-areas: "account state amount action"; gap: 10px 16px; align-items: start; }
+  .order-row-state, .order-row-amount, .order-row-action { align-self: start; }
+  /* Money and the row action lock to the right edge so the column scans like a ledger. */
+  .order-row-amount { justify-items: end; text-align: right; }
+  .order-row-amount-sub { justify-content: flex-end; }
+  .order-row-action { justify-self: end; }
+}
+
+@media (max-width: 1080px) {
+  .order-filter { min-height: 44px; }
+  .order-row-action { min-height: 44px; }
+}
+
+@media (max-width: 599px) {
+  .order-workspace-heading { align-items: flex-start; flex-wrap: wrap; }
+  .order-workspace-heading h2 { font-size: 21px; }
+  .order-workspace-actions { width: 100%; justify-content: space-between; }
+  .order-list-panel, .order-detail-card, .order-trade-panel, .order-side-card { padding: 16px; }
+  /* Phone: the account block spans the full width so no metadata line is squeezed by the status pill. */
+  .order-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "account account" "state state" "amount action"; gap: 8px 12px; padding: 12px 2px; }
+  .order-row-amount strong { font-size: 16px; }
+  .order-empty-art { width: 120px; height: 90px; }
+  .order-row-action { min-height: 44px; }
+  .order-list-footer { align-items: stretch; flex-direction: column; }
+  .order-list-footer .button { width: 100%; }
+  .order-detail-heading { align-items: flex-start; flex-wrap: wrap; }
+  .order-detail-heading h2 { font-size: 19px; }
+  .order-amount-total { font-size: 26px; }
+  .order-lines > details > summary { padding: 12px 14px; }
+  .order-lines > details > *:not(summary) { padding: 0 14px 14px; }
+  .order-trade-lines input, .order-trade-reject input { max-width: none; min-width: 0; }
+  .order-trade-actions .button { flex: 1 1 auto; }
+  .order-contact-actions .button { flex: 1 1 auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .order-skeleton-list span, .order-detail-loading span { animation: none; }
+  .order-row, .order-row-action, .button { transition: none; }
+}
+
+/* A retry offered beside the primary action reads as a second button; as a link it stays available
+   without competing. */
+.order-attention-link { padding: 0; border: 0; background: none; color: var(--text-link, var(--color-accent-brand)); font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+.order-attention-link:hover { color: var(--color-accent-brand-hover); }
+.order-attention-link:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; }
+
+/* The fee note lives in the shared details body, whose padding is tuned for the table; it needs its
+   own breathing room above the text. */
+.order-lines > details > .order-lines-note { padding-top: 12px; }
+
+.order-source-nav { display: flex; gap: 8px; margin-bottom: 20px; }
+.order-source-nav [aria-current="page"] { color: var(--color-text-primary); background: var(--color-bg-elevated); border-color: var(--color-text-secondary); }
+.legacy-order-list { list-style: none; padding: 0; margin: 0 0 20px; }
+.legacy-order-list li + li { border-top: 1px solid var(--color-border-subtle); }
+.legacy-order-list a { display: grid; grid-template-columns: minmax(160px,1fr) minmax(140px,2fr) 120px 170px; gap: 16px; padding: 18px 0; color: var(--color-text-primary); text-decoration: none; }
+.legacy-order-list a:hover { background: var(--color-bg-elevated); }
+.legacy-order-list time { color: var(--color-text-secondary); font-size: 13px; }
+@media(max-width:1100px) { .legacy-order-list a { grid-template-columns: 1fr 1fr; gap: 8px; } }

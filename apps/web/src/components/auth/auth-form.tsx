@@ -9,42 +9,78 @@ function compactPhone(value: string): string {
   return compact.startsWith("+86") ? compact.slice(3) : compact.startsWith("0086") ? compact.slice(4) : compact;
 }
 export function maskPhone(value: string): string { const digits = compactPhone(value); return /^1[3-9]\d{9}$/.test(digits) ? digits.slice(0, 3) + "****" + digits.slice(-4) : "该手机号"; }
-type Props = { next?: string; contextLabel?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean };
 
-export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, onSuccess, autoFocus = true }: Props) {
+/**
+ * An accepted/unknown identity write plus the exact context needed to read its result. The dialog
+ * unmounts the form when it closes, so the owning provider keeps this record and the form restores
+ * it on remount; otherwise closing and reopening would let the same write be submitted twice or
+ * drop somebody else's receipt onto the next visitor.
+ */
+export type AuthPendingWrite = {
+  mode: "login" | "recover";
+  outcome: "accepted" | "unknown";
+  contact: string;
+  challengeId: string;
+  proofId: string;
+  subject: string;
+  userId: string | null;
+};
+
+type Props = { next?: string; contextLabel?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean; pendingWrite?: { current: AuthPendingWrite | null } };
+
+function unknownReceiptMessage(state: "accepted" | "unknown"): string {
+  return state === "accepted" ? "操作已接受，后续状态暂未读到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。";
+}
+
+export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, onSuccess, autoFocus = true, pendingWrite }: Props) {
   const session = useUserSession();
   const sessionStore = useUserSessionStore();
-  const [mode, setMode] = useState<"login" | "recover">("login");
+  const restored = pendingWrite?.current ?? null;
+  const [mode, setMode] = useState<"login" | "recover">(restored?.mode ?? "login");
   const [method, setMethod] = useState<"sms" | "password">("sms");
   const [channel, setChannel] = useState<"phone" | "email">("phone");
-  const [contact, setContact] = useState("");
+  const [contact, setContact] = useState(restored?.contact ?? "");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [inviteCode, setInviteCode] = useState(initialInviteCode ?? "");
-  const [challengeId, setChallengeId] = useState("");
-  const [proofId, setProofId] = useState("");
+  const [challengeId, setChallengeId] = useState(restored?.challengeId ?? "");
+  const [proofId, setProofId] = useState(restored?.proofId ?? "");
   const [sentFor, setSentFor] = useState("");
   const [cooldownUntil, setCooldownUntil] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
-  const [outcome, setOutcome] = useState<"idle" | "accepted" | "unknown">("idle");
+  const [outcome, setOutcome] = useState<"idle" | "accepted" | "unknown">(restored?.outcome ?? "idle");
   const [guestConfirmed, setGuestConfirmed] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<string | undefined>(restored ? unknownReceiptMessage(restored.outcome) : undefined);
   const [invalidField, setInvalidField] = useState<string>();
   const [notice, setNotice] = useState<string>();
-  const [policy, setPolicy] = useState<string>();
   const generation = useRef(0);
   const abort = useRef<AbortController | null>(null);
-  const writeLock = useRef(false);
-  const loginSubject = useRef<{ phone: string; userId: string | null } | null>(null);
+  const writeLock = useRef(Boolean(restored));
+  useEffect(() => { if (!writeLock.current) setInviteCode(initialInviteCode ?? ""); }, [initialInviteCode]);
+  const loginSubject = useRef<{ phone: string; userId: string | null } | null>(restored?.mode === "login" ? { phone: restored.subject, userId: restored.userId } : null);
   const formRef = useRef<HTMLFormElement | null>(null);
+  const restoredNext = useRef<string | undefined | null>(null);
   useEffect(() => { if (invalidField && !busy && !sending) formRef.current?.querySelector<HTMLElement>("#" + invalidField)?.focus(); }, [invalidField, busy, sending]);
   useEffect(() => () => { generation.current++; abort.current?.abort(); }, []);
-  useEffect(() => { generation.current++; abort.current?.abort(); setBusy(false); setSending(false); if (writeLock.current) { setOutcome("unknown"); setPassword(""); setCode(""); setConfirmation(""); } }, [next]);
+  const recordWrite = (state: "accepted" | "unknown") => {
+    if (!pendingWrite) return;
+    pendingWrite.current = { mode, outcome: state, contact, challengeId, proofId, subject: normalized(), userId: loginSubject.current?.userId ?? null };
+  };
+  const clearWrite = () => { writeLock.current = false; if (pendingWrite) pendingWrite.current = null; };
+  useEffect(() => {
+    generation.current++; abort.current?.abort(); setBusy(false); setSending(false);
+    // Restoring an inherited receipt on mount must not be read as a lost result; only a genuinely
+    // changed return intent discards a late callback.
+    if (restoredNext.current === null) { restoredNext.current = next; return; }
+    if (restoredNext.current === next) return;
+    restoredNext.current = next;
+    if (writeLock.current) { setOutcome("unknown"); recordWrite("unknown"); setPassword(""); setCode(""); setConfirmation(""); }
+  }, [next]);
   useEffect(() => { if (cooldownUntil <= Date.now()) return; const timer = window.setInterval(() => setNow(Date.now()), 250); return () => window.clearInterval(timer); }, [cooldownUntil]);
   const begin = () => { abort.current?.abort(); const controller = new AbortController(); abort.current = controller; return { id: ++generation.current, controller }; };
   const current = (id: number) => generation.current === id;
@@ -57,7 +93,7 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
     const status = await session.confirm();
     if (!current(id)) return;
     if (status !== "authenticated" || !loginSubject.current?.userId || sessionStore.getSnapshot().userId !== loginSubject.current.userId) throw new WebAuthError(503, "SESSION_NOT_CONFIRMED", true);
-    setPassword(""); setCode(""); setOutcome("idle"); writeLock.current = false;
+    setPassword(""); setCode(""); setOutcome("idle"); clearWrite();
     publishUserSessionChange(); await onSuccess?.();
   };
   const sendOtp = async () => {
@@ -83,7 +119,7 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
     if (mode === "login" && method === "sms" && inviteCode.trim() && !/^[A-Za-z0-9_-]{1,30}$/.test(inviteCode.trim())) { validationError("邀请码仅支持30位以内的字母、数字、下划线和连字符。", "auth-invite-code"); return; }
     if (mode === "recover" && proofId && (password.length < 12 || password.length > 128 || password !== confirmation)) { validationError("新密码需要 12–128 位，两次输入须完全一致。", password.length < 12 || password.length > 128 ? "auth-password" : "auth-password-confirm"); return; }
     const request = begin(); setBusy(true);
-    const writesIdentity = mode === "login" || Boolean(proofId); if (writesIdentity) writeLock.current = true;
+    const writesIdentity = mode === "login" || Boolean(proofId); if (writesIdentity) { writeLock.current = true; recordWrite("unknown"); }
     if (mode === "login") loginSubject.current = { phone: normalized(), userId: null };
     let accepted = false;
     try {
@@ -99,20 +135,20 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
         setPassword(""); setConfirmation(""); publishUserSessionChange(); await session.confirm();
         if (!current(request.id)) return;
         setProofId(""); setChallengeId(""); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setAcceptedTerms(false);
-        writeLock.current = false; setNotice("密码已重置，旧会话已退出。请使用手机号和新密码登录。");
+        clearWrite(); setNotice("密码已重置，旧会话已退出。请使用手机号和新密码登录。");
       } else {
         const result = await webAuthRequest<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}) } : { identifier: normalized(), password, kind: "phone" }, request.controller.signal);
         accepted = true; if (!current(request.id)) return; setOutcome("accepted");
         if (result.status !== true || typeof result.userId !== "string" || !result.userId) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED", true);
-        loginSubject.current = { phone: normalized(), userId: result.userId };
+        loginSubject.current = { phone: normalized(), userId: result.userId }; recordWrite("accepted");
         await confirmLogin(request.id);
       }
     } catch (failure) {
       if (!current(request.id)) return;
       const uncertain = writesIdentity && (accepted || failure instanceof WebAuthError && (failure.accepted || failure.status === 0 || failure.status >= 500));
-      if (uncertain) { const knownAccepted = accepted || failure instanceof WebAuthError && failure.accepted; setPassword(""); setConfirmation(""); setCode(""); setOutcome(knownAccepted ? "accepted" : "unknown"); setError(knownAccepted ? "操作已接受，后续状态暂未读到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。"); }
+      if (uncertain) { const knownAccepted = accepted || failure instanceof WebAuthError && failure.accepted; setPassword(""); setConfirmation(""); setCode(""); setOutcome(knownAccepted ? "accepted" : "unknown"); recordWrite(knownAccepted ? "accepted" : "unknown"); setError(knownAccepted ? "操作已接受，后续状态暂未读到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。"); }
       else {
-        writeLock.current = false;
+        clearWrite();
         const message = authErrorMessage(failure, mode === "login" && method === "password" ? "login" : "verify");
         if (failure instanceof WebAuthError && (failure.status === 400 || failure.status === 401) && (mode === "login" || !proofId)) validationError(message, mode === "login" && method === "password" ? "auth-password" : "phone-registration-code");
         else setError(message);
@@ -125,9 +161,9 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
       if (mode === "recover") {
         const result = await webAuthRequest<{ status: string }>("/security/operation", { operationId: proofId }, request.controller.signal);
         if (!current(request.id)) return;
-        if (result.status === "expired") { setOutcome("idle"); writeLock.current = false; clearProof(); setCooldownUntil(0); setNotice("服务端已确认原验证过期且重置未完成，请重新验证身份。"); return; }
+        if (result.status === "expired") { setOutcome("idle"); clearWrite(); clearProof(); setCooldownUntil(0); setNotice("服务端已确认原验证过期且重置未完成，请重新验证身份。"); return; }
         if (result.status !== "completed") { setError("结果仍未确认，请稍后再查询。验证在申请后 5 分钟失效，确认过期后可重新验证。"); return; }
-        setOutcome("idle"); writeLock.current = false; clearProof(); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setNotice("密码已重置，请使用手机号和新密码登录。"); publishUserSessionChange();
+        setOutcome("idle"); clearWrite(); clearProof(); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setNotice("密码已重置，请使用手机号和新密码登录。"); publishUserSessionChange();
       } else {
         const status = await session.confirm();
         if (!current(request.id)) return;
@@ -141,7 +177,7 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
             expected.userId = value.user.id;
           }
           if (sessionStore.getSnapshot().userId !== expected.userId) throw new Error("Login identity changed");
-          setOutcome("idle"); writeLock.current = false; setGuestConfirmed(false); publishUserSessionChange(); await onSuccess?.();
+          setOutcome("idle"); clearWrite(); setGuestConfirmed(false); publishUserSessionChange(); await onSuccess?.();
         }
         else if (status === "guest") { setGuestConfirmed(true); setError("当前没有登录会话，请获取新的验证码重新登录。"); }
         else throw new Error("Session unconfirmed");
@@ -165,11 +201,10 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
       {mode === "login" && method === "password" && <div className="auth-secondary-actions"><button type="button" disabled={locked} onClick={() => changeMode("recover")}>忘记密码</button></div>}
       <button type="submit" className="button primary auth-submit" disabled={locked} aria-busy={busy || undefined}>{busy ? "处理中…" : mode === "recover" ? proofId ? "重置密码" : "验证身份" : method === "sms" ? "登录 / 注册" : "登录"}</button>
       {mode === "recover" && <button type="button" className="button quiet" disabled={locked} onClick={() => changeMode("login")}>返回登录</button>}
-      {mode === "login" && <div className="auth-consent"><input id="auth-terms" aria-invalid={invalidField === "auth-terms" || undefined} name="terms" type="checkbox" checked={acceptedTerms} disabled={locked} onChange={event => setAcceptedTerms(event.target.checked)} /><div><label htmlFor="auth-terms">我已阅读并同意</label><button type="button" onClick={() => setPolicy("平台服务协议")}>《平台服务协议》</button>和<button type="button" onClick={() => setPolicy("用户隐私政策")}>《用户隐私政策》</button></div></div>}
-      {policy && <div className="auth-policy-notice" role="status"><strong>{policy}</strong><p>正式内容尚未提供，当前无法阅读或完成正式协议确认。</p><button type="button" onClick={() => setPolicy(undefined)}>收起说明</button></div>}
+      {mode === "login" && <div className="auth-consent"><input id="auth-terms" aria-invalid={invalidField === "auth-terms" || undefined} name="terms" type="checkbox" checked={acceptedTerms} disabled={locked} onChange={event => setAcceptedTerms(event.target.checked)} /><div><label htmlFor="auth-terms">我已阅读并同意</label><p className="auth-consent-docs"><a href="/legal/terms" target="_blank" rel="noopener noreferrer" aria-label="平台服务协议（在新窗口打开）">《平台服务协议》</a>和<a href="/legal/privacy" target="_blank" rel="noopener noreferrer" aria-label="用户隐私政策（在新窗口打开）">《用户隐私政策》</a></p></div></div>}
       {(error || notice) && <p id="auth-status" className={"auth-status " + (error ? "is-error" : "is-success")} role={error ? "alert" : "status"}>{error ?? notice}</p>}
       {outcome !== "idle" && <button type="button" className="button secondary" disabled={busy} onClick={() => void readResult()}>重新确认结果</button>}
-      {guestConfirmed && <button type="button" className="button secondary" disabled={busy} onClick={() => { clearProof(); setOutcome("idle"); writeLock.current = false; setGuestConfirmed(false); setMethod("sms"); }}>使用新的验证码登录</button>}
+      {guestConfirmed && <button type="button" className="button secondary" disabled={busy} onClick={() => { clearProof(); setOutcome("idle"); clearWrite(); setGuestConfirmed(false); setMethod("sms"); }}>使用新的验证码登录</button>}
     </form>
   </section>;
 }

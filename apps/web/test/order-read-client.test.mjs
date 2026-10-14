@@ -6,8 +6,8 @@ const { formatOrderMoney, formatOrderTime, mergeOrderItems, orderApi, OrderReque
 test("order times use the declared timezone and refuse missing or invalid dates", () => {
   assert.match(formatOrderTime("2026-10-01T00:30:00Z"), /08:30/);
   assert.match(formatOrderTime("2026-10-01T00:30:00Z"), /GMT\+08:00/);
-  assert.equal(formatOrderTime(undefined), "时间暂不可用");
-  assert.equal(formatOrderTime("not-a-date"), "时间暂不可用");
+  assert.equal(formatOrderTime(undefined), "待确认");
+  assert.equal(formatOrderTime("not-a-date"), "待确认");
 });
 
 test("money rendering preserves zero and refuses unknown values", () => {
@@ -15,6 +15,7 @@ test("money rendering preserves zero and refuses unknown values", () => {
   assert.equal(formatOrderMoney({ amount: "12.3", currency: "CNY" }), "待确认");
   assert.equal(formatOrderMoney({ amount: "12.30" }), "待确认");
   assert.equal(formatOrderMoney(null), "待确认");
+  assert.equal(formatOrderMoney({ amount: "12345678901234567890.01", currency: "CNY" }), "12,345,678,901,234,567,890.01 元");
 });
 
 test("cursor pages append by id while accepting the newest projection", () => {
@@ -78,4 +79,15 @@ test("historical order client uses independent read routes and keeps failures vi
     globalThis.fetch = async () => Response.json({error:{code:"NOT_FOUND",message:"未找到"}},{status:404});
     await assert.rejects(()=>orderApi.legacyDetail("legacy_order_other"),e=>e instanceof OrderRequestError && e.status===404);
   } finally { globalThis.fetch=old; }
+});
+
+test("unified browsing has its own read endpoint and never changes native recovery reads", async () => {
+ const before=globalThis.fetch;const calls=[];
+ globalThis.fetch=async url=>{calls.push(String(url));return Response.json({items:[],nextCursor:null,limit:20});};
+ try{await orderApi.listUnified({party:"renter"});await orderApi.list({party:"renter"});assert.deepEqual(calls,["/api/orders/unified?party=renter&limit=20","/api/orders?party=renter&limit=20"]);}finally{globalThis.fetch=before;}
+});
+test("order pagination retains equal ids from different internal sources", () => {
+ const current={id:"same",source:{origin:"NATIVE"}},old={id:"same",source:{origin:"LEGACY"},readOnly:true};
+ assert.equal(mergeOrderItems([current],[old]).length,2);
+ assert.equal(mergeOrderItems([current,old],[{...old,title:"updated"}]).length,2);
 });

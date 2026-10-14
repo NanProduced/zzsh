@@ -38,6 +38,10 @@ export type FulfillmentAssignment = {
 };
 
 export type Order = {
+  source?: { origin: "NATIVE" | "LEGACY"; statusLabel?: string };
+  readOnly?: boolean;
+  legacyAmounts?: LegacyOrder["legacyAmounts"];
+  payment?: LegacyOrder["payment"];
   id: string;
   displayNo?: string | null;
   status: string;
@@ -49,6 +53,9 @@ export type Order = {
   createdAt?: string | null;
   holdUntil?: string | null;
   expiredAwaitingCancel?: boolean;
+  /** Server-observed eligibility for the payment/cancel entries; never a substitute for server authorization. */
+  paymentOpen?: boolean;
+  cancelOpen?: boolean;
   paidAt?: string | null;
   cancelledAt?: string | null;
   cancelReason?: string | null;
@@ -88,6 +95,8 @@ export type SettlementOpening = {
   id: string;
   versionNo: string;
   status: string;
+  /** Authoritative "rental started" time for a confirmed opening; never inferred from payment or the client clock. */
+  confirmedAt?: string | null;
   createdAt?: string;
   lines: SettlementLine[];
   acks?: Array<{ party: string; createdAt?: string }>;
@@ -100,32 +109,51 @@ export type SettlementVersion = {
   early?: boolean;
   initiatorParty?: string | null;
   versionHash: string;
-  createdAt?: string | null;
+  /** Set once a newer version replaced this one; the user projection does not return a version creation time. */
+  supersededAt?: string | null;
   systemOwnerNet?: string | null;
   systemRenterRefund?: string | null;
   proposedOwnerNet?: string | null;
   proposedRenterRefund?: string | null;
-  inputSnapshot?: { lines?: Array<{ itemId: string; openingQuantity?: string; remainingQuantity?: string }>; endReason?: string | null } | null;
+  inputSnapshot?: { lines?: Array<{ itemId: string; openingQuantity?: string; remainingQuantity?: string }>; endReason?: string | null; reason?: string | null } | null;
   computation?: { ok?: boolean; reasons?: string[]; early?: boolean; consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> }; amounts?: Record<string, unknown> } | null;
   decisions?: Array<{ party: string; action: string; reason?: string | null; createdAt?: string }>;
 };
 export type SettlementPosting = {
   id: string;
+  settlementVersionId?: string;
+  early?: boolean;
   postedAt?: string;
   refundDueAt?: string | null;
+  /** Cash actually captured on this order; the reconciliation figure behind “原订单已付”. */
+  capturedCents?: string | null;
   compensationFeeCents?: string | null;
   amounts?: Record<string, unknown> | null;
-  owner?: { gross?: unknown; systemNetCents?: string; availableCents?: string } | null;
-  refund?: { systemCents?: string; payableCents?: string; includesDeposit?: boolean } | null;
+  /** `gross` is the yuan Money object from the posted snapshot; the Cents fields are the exact net/refund columns. */
+  owner?: { gross?: Money | null; systemNetCents?: string; availableCents?: string } | null;
+  /**
+   * `includesDeposit` is *not* a boolean in the current server projection: the backend assigns the
+   * depositRefund amount object (or null) to it. The deposit to refund is read from
+   * `amounts.depositRefund`, never from this field's truthiness.
+   */
+  refund?: { systemCents?: string; payableCents?: string; includesDeposit?: unknown } | null;
+  manualAdjustment?: {
+    reason?: string | null;
+    systemOwnerNetCents?: string;
+    postedOwnerNetCents?: string;
+    systemRenterRefundCents?: string;
+    postedRenterRefundCents?: string;
+  } | null;
 };
 export type OrderSettlement = {
   orderId: string;
   revision?: string;
   rentalStarted?: boolean;
   openings: SettlementOpening[];
-  intakes: Array<{ id: string; versionNo: string; status: string; initiatorParty?: string; lines?: Array<{ itemId: string; remainingQuantity: string }> }>;
+  intakes: Array<{ id: string; versionNo: string; status: string; initiatorParty?: string; settlementVersionId?: string | null; createdAt?: string; lines?: Array<{ itemId: string; remainingQuantity: string }> }>;
   versions: SettlementVersion[];
-  currentRequest?: { kind: string; id: string; versionNo: string; status: string } | null;
+  /** `status` is only present for an INTAKE request; a settlement-version request omits it entirely. */
+  currentRequest?: { kind: string; id: string; versionNo: string; status?: string } | null;
   settlement?: SettlementVersion | null;
   posting?: SettlementPosting | null;
   ready?: boolean;
@@ -149,24 +177,30 @@ export type SettlementPreview = {
   consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> } | null;
 };
 
-export function formatOrderTime(value: string | null | undefined): string {
-  if (!value) return "时间暂不可用";
+export function formatOrderTime(value: string | null | undefined, options: { timeZoneName?: boolean } = {}): string {
+  if (!value) return "待确认";
   const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "时间暂不可用";
-  return new Intl.DateTimeFormat("zh-CN", {
+  if (!Number.isFinite(date.getTime())) return "待确认";
+  // 订单时间默认带显式时区偏移；记录行传 timeZoneName:false 收敛逐行 GMT 噪声，时区在页面说明中一次性交代。
+  const base = {
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
-    timeZone: "Asia/Shanghai", timeZoneName: "longOffset", hourCycle: "h23",
-  }).format(date);
+    timeZone: "Asia/Shanghai", hourCycle: "h23",
+  } as const;
+  return new Intl.DateTimeFormat("zh-CN", options.timeZoneName === false ? base : { ...base, timeZoneName: "longOffset" }).format(date);
 }
 
 export function formatOrderMoney(value: { amount?: unknown; currency?: unknown } | null | undefined): string {
   if (!value || value.currency !== "CNY" || typeof value.amount !== "string" || !/^\d+\.\d{2}$/.test(value.amount)) return "待确认";
-  return `${value.amount} 元`;
+  const whole = value.amount.slice(0, -3);
+  const fraction = value.amount.slice(-2);
+  return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction} 元`;
 }
 
+export function orderItemKey(order: Order): string { return JSON.stringify([order.source?.origin ?? "NATIVE", order.id]); }
+
 export function mergeOrderItems(previous: Order[], incoming: Order[]): Order[] {
-  const merged = new Map(previous.map((item) => [item.id, item]));
-  for (const item of incoming) merged.set(item.id, item);
+  const merged = new Map(previous.map((item) => [orderItemKey(item), item]));
+  for (const item of incoming) merged.set(orderItemKey(item), item);
   return [...merged.values()];
 }
 
@@ -256,6 +290,15 @@ export function orderIntentKey(): string {
   return "op_" + crypto.randomUUID().replaceAll("-", "");
 }
 
+type OrderListInput = { party: OrderParty; status?: OrderStatus; accountId?: string; limit?: number; cursor?: string };
+function orderListQuery(input: OrderListInput): string {
+  const query = new URLSearchParams({ party: input.party, limit: String(input.limit ?? 20) });
+  if (input.status) query.set("status", input.status);
+  if (input.accountId) query.set("accountId", input.accountId);
+  if (input.cursor) query.set("cursor", input.cursor);
+  return query.toString();
+}
+
 export const orderApi = {
   listLegacy: (input: { party: OrderParty; page?: number; pageSize?: number; status?: OrderStatus | "UNKNOWN"; accountId?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams({ party: input.party, page: String(input.page ?? 1), pageSize: String(input.pageSize ?? 20) });
@@ -265,13 +308,10 @@ export const orderApi = {
   },
   legacyDetail: async (orderId: string, signal?: AbortSignal) =>
     (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal })).order,
-  list: (input: { party: OrderParty; status?: OrderStatus; accountId?: string; limit?: number; cursor?: string }, signal?: AbortSignal) => {
-    const query = new URLSearchParams({ party: input.party, limit: String(input.limit ?? 20) });
-    if (input.status) query.set("status", input.status);
-    if (input.accountId) query.set("accountId", input.accountId);
-    if (input.cursor) query.set("cursor", input.cursor);
-    return requestJson<OrderPage>(`/api/orders?${query.toString()}`, { signal });
-  },
+  list: (input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders?${orderListQuery(input)}`, { signal }),
+  listUnified: (input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal }),
   detail: (orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
   confirmRental: (input: { accountId: string; versionId: string; releaseId: string }, signal?: AbortSignal) =>

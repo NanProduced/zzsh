@@ -1,0 +1,91 @@
+.page :global(.functional-shell) { background: var(--color-bg-canvas); }
+.page :global(.functional-main) {
+  display: grid;
+  align-items: center;
+  min-height: calc(100svh - 300px);
+  padding-block: clamp(24px, 4vw, 64px);
+}
+.content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(24px, 5vw, 72px);
+  width: 100%;
+  max-width: 1120px;
+  margin-inline: auto;
+  color: var(--color-text-primary, #f3f6fa);
+  font-family: var(--font-sans, "Microsoft YaHei", sans-serif);
+}
+.visual { min-width: 0; }
+.visual img { display: block; width: 100%; height: auto; }
+.copy { min-width: 0; padding-block: 20px; }
+.code { margin: 0 0 10px; color: var(--color-text-secondary, #9aa7b8); font-size: 24px; font-weight: 650; }
+.copy h1 { margin: 0; font-family: inherit; font-size: clamp(28px, 2.8vw, 40px); font-weight: 750; line-height: 1.4; letter-spacing: -.025em; text-wrap: balance; }
+.description { margin: 22px 0 0; color: var(--color-text-secondary, #9aa7b8); font-size: 17px; line-height: 1.9; text-wrap: pretty; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+.primary, .secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 48px;
+  min-width: 144px;
+  padding: 12px 24px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-decoration: none;
+  cursor: pointer;
+}
+.primary { background: var(--color-accent-brand, #e5a93c); color: var(--color-accent-brand-text, #0d0f12); }
+.primary:hover { background: var(--color-accent-brand-hover, #f5b74c); }
+.secondary { background: transparent; color: var(--color-text-primary, #f3f6fa); border-color: var(--color-border-strong, #59616c); }
+.secondary:hover { background: var(--color-bg-elevated, #1d2533); }
+.help { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 22px; color: var(--color-text-secondary, #9aa7b8); font-size: 14px; text-decoration: underline; text-underline-offset: 5px; }
+.help:hover { color: var(--color-text-primary, #f3f6fa); }
+.primary:focus-visible, .secondary:focus-visible, .help:focus-visible, .brand:focus-visible { outline: 2px solid var(--color-focus-ring, #e5a93c); outline-offset: 4px; }
+.standalone {
+  --color-bg-canvas: #090b0e;
+  --color-focus-ring: #e5a93c;
+  --color-text-primary: #f3f6fa;
+  --color-text-secondary: #9aa7b8;
+  --color-bg-elevated: #1d2533;
+  --color-border-strong: #59616c;
+  margin: 0;
+  min-height: 100svh;
+  padding: 0 28px;
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans, "Microsoft YaHei", sans-serif);
+  color-scheme: dark;
+}
+.standalone, .standalone * { box-sizing: border-box; }
+:global(html[data-theme="light"]) .standalone {
+  --color-bg-canvas: #f5f7fa;
+  --color-focus-ring: #865200;
+  --color-text-primary: #111827;
+  --color-text-secondary: #4b5563;
+  --color-bg-elevated: #eef2f7;
+  --color-border-strong: #9ca3af;
+  color-scheme: light;
+}
+.standaloneHeader { max-width: 1120px; margin-inline: auto; padding-block: 24px; }
+.brand { color: inherit; font-size: 20px; font-weight: 700; text-decoration: none; }
+.standaloneMain { display: grid; align-items: center; min-height: calc(100svh - 96px); padding-block: 24px 64px; }
+@media (max-width: 699px) {
+  .page :global(.functional-main) { min-height: 0; padding-block: 20px 48px; }
+  .content { grid-template-columns: minmax(0, 1fr); gap: 10px; text-align: center; }
+  .visual { width: min(64vw, 250px); margin-inline: auto; }
+  .copy { padding-block: 0; }
+  .code { font-size: 18px; margin-bottom: 6px; }
+  .copy h1 { font-size: 27px; }
+  .description { margin-top: 14px; font-size: 15px; line-height: 1.85; }
+  .actions { justify-content: center; margin-top: 24px; gap: 10px; }
+  .primary, .secondary { min-width: 0; padding-inline: 18px; font-size: 15px; }
+  .help { margin-top: 14px; }
+  .standalone { padding-inline: 20px; }
+  .standaloneMain { min-height: 0; padding-top: 16px; }
+}

@@ -1,11 +1,11 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useRef } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { safeReturnTo } from "@/lib/safe-return";
 import { useUserSession } from "@/components/session/user-session-provider";
-import { AuthForm } from "@/components/auth/auth-form";
+import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { BrandLogo } from "@/components/brand/brand-logo";
 
 function safeLoginTarget(value: string | null): string | undefined {
@@ -13,31 +13,33 @@ function safeLoginTarget(value: string | null): string | undefined {
   return target && !target.startsWith("/login") ? target : undefined;
 }
 
-function intentLabel(target?: string): string | undefined {
-  const pathname = target?.split(/[?#]/, 1)[0];
-  if (pathname === "/publish" || pathname?.startsWith("/publish/")) return "登录后继续上架出租";
-  if (pathname === "/account" || pathname?.startsWith("/account/")) return "登录后继续查看个人中心";
-  return undefined;
-}
-
+/**
+ * Legacy `/login?next=…&inviteCode=…` entry. It stays reachable for old links but renders no form of
+ * its own: the shared IP dialog is the only presentation layer, so a guest forwarded here (for
+ * example from the personal centre) can never end up with two forms on screen.
+ */
 function LoginPageContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const returnTo = safeLoginTarget(searchParams.get("next"));
+  const inviteCode = searchParams.get("inviteCode") ?? undefined;
   const session = useUserSession();
-  const redirectedRef = useRef(false);
-
-  const redirectAfterAuth = useCallback(() => {
-    if (redirectedRef.current) return;
-    redirectedRef.current = true;
-    router.replace(returnTo ?? "/account?view=accounts");
-  }, [returnTo, router]);
+  const auth = useAuthOverlay();
+  const openedFor = useRef<string | null>(null);
+  const target = returnTo ?? "/account?view=accounts";
 
   useEffect(() => {
-    if (session.status === "authenticated") redirectAfterAuth();
-  }, [redirectAfterAuth, session.status]);
+    if (session.status === "loading" || session.status === "error") return;
+    const request = session.status + "|" + target + "|" + (inviteCode ?? "");
+    if (openedFor.current === request) return;
+    openedFor.current = request;
+    auth.open(target, undefined, { inviteCode, replace: true });
+  }, [auth, inviteCode, session.status, target]);
 
-  const formHidden = session.status === "loading" || session.status === "authenticated";
+  const openForm = () => auth.open(undefined, undefined, { inviteCode, replace: true });
+
+  const loading = session.status === "loading";
+  const failed = session.status === "error";
+  const confirmed = session.status === "authenticated";
   return <div className="auth-page">
     <header className="auth-page-header">
       <Link href="/" className="auth-page-brand" aria-label="洲洲商行首页"><BrandLogo height={36} /></Link>
@@ -46,12 +48,10 @@ function LoginPageContent() {
     <main className="auth-page-main">
       <section className="auth-page-card" aria-labelledby="login-page-title">
         <h1 id="login-page-title" className="sr-only">账户登录</h1>
-        {session.status === "loading" ? <div className="auth-page-session-state" role="status" aria-live="polite"><h2>正在准备登录…</h2><div className="auth-page-skeleton" aria-hidden="true"><span /><span /><span /></div></div> : null}
-        {session.status === "error" ? <div className="auth-page-session-state is-error" role="alert"><h2>暂时无法确认账号状态</h2><p>登录表单仍可使用；如果未能继续，请重试。</p><button type="button" className="button quiet" onClick={session.revalidate}>重试</button></div> : null}
-        <div hidden={formHidden} aria-hidden={formHidden}>
-          <AuthForm next={returnTo} contextLabel={intentLabel(returnTo)} inviteCode={searchParams.get("inviteCode") ?? undefined} onSuccess={redirectAfterAuth} />
-        </div>
-        {session.status === "authenticated" ? <div className="auth-page-session-state" role="status"><h2>登录成功</h2><p>正在进入个人中心…</p></div> : null}
+        {loading ? <div className="auth-page-session-state" role="status" aria-live="polite"><h2>正在准备登录…</h2><div className="auth-page-skeleton" aria-hidden="true"><span /><span /><span /></div></div> : null}
+        {failed ? <div className="auth-page-session-state is-error" role="alert"><h2>暂时无法确认账号状态</h2><p>登录窗口暂时无法打开；可以先重试账号状态确认，或直接打开登录表单。</p><div className="auth-page-session-actions"><button type="button" className="button secondary" onClick={session.revalidate}>重试</button><button type="button" className="button primary" onClick={openForm}>打开登录窗口</button></div></div> : null}
+        {confirmed ? <div className="auth-page-session-state" role="status"><h2>登录成功</h2><p>正在进入个人中心…</p></div> : null}
+        {!loading && !failed && !confirmed ? <div className="auth-page-session-state" role="status"><h2>正在打开登录窗口</h2><p>登录窗口内完成登录后会回到{returnTo ? "你原本要去的页面" : "个人中心"}。</p></div> : null}
       </section>
     </main>
     <footer className="auth-page-footer">洲洲商行 · 公开浏览无需登录</footer>
