@@ -24,6 +24,7 @@ export type SkinTag = {
 export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
+  sourceUpdatedAt?: string;
   id: string;
   gameId?: string;
   versionId?: string;
@@ -272,10 +273,6 @@ function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "ski
     })),
   };
 }
-function historicalCentsLabel(...amounts: string[]): string {
-  const cents = amounts.reduce((sum, amount) => sum + BigInt(amount.replace(".", "")), 0n);
-  return `¥${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
-}
 function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const history = listing.historicalQuote;
   if (!history || !listing.inventory || listing.quote !== null || listing.canCreateOrder !== false)
@@ -284,7 +281,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const subtotal = BigInt(history.haffRent.amount.replace(".", "")) + BigInt(history.goods.amount.replace(".", ""));
   const media = projectListingMedia(listing);
   return {
-    historicalReadOnly: true, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title,
+    historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title,
     imageUrl: media[0]?.url,
     media, resourceLines: listing.inventory.map(line => ({
       itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
@@ -294,10 +291,10 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
     resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,
     haffRentLabel: formatMoneyLabel(history.haffRent), itemResourceTotalLabel: formatMoneyLabel(history.goods),
     depositLabel: formatMoneyLabel(history.deposit),
-    payableTotalLabel: historicalCentsLabel(history.haffRent.amount, history.goods.amount, history.deposit.amount),
+    payableTotalLabel: null,
     termLabel: `${history.termDays} 天`, termOptionLabel: listing.termOption?.displayName ?? null,
     conditionLines: conditionLines(listing.attributes, listing), loginMethod: listing.attributeDisplay?.loginMethod ?? null,
-    ...projectListingSkins(listing), entitlementNames: [], rentalMode: null, unitAmountsInformational: false,
+    ...projectListingSkins(listing), entitlementNames: [], rentalMode: listing.rentalMode ?? null, unitAmountsInformational: false,
   };
 }
 export function toListingDetail(listing: PublicListing): ListingDetailData {

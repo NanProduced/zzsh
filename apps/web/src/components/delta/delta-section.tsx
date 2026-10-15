@@ -12,6 +12,7 @@ export type SupplyState = "unavailable" | "ready" | "loading" | "error";
 
 export interface DeltaSectionProps {
   accounts?: AccountCardData[];
+  historicalAccounts?: AccountCardData[];
   supplyState?: SupplyState;
   supplyMayHaveMore?: boolean;
   searchQuery?: string;
@@ -21,6 +22,7 @@ export interface DeltaSectionProps {
 
 export function DeltaSection({
   accounts = [],
+  historicalAccounts = [],
   supplyState = "unavailable",
   supplyMayHaveMore = false,
   searchQuery = "",
@@ -28,6 +30,7 @@ export function DeltaSection({
   onRetry,
 }: DeltaSectionProps) {
   const [viewportRef, emblaApi] = useEmblaCarousel({ align: "start", containScroll: "trimSnaps" });
+  const [historyViewportRef, historyApi] = useEmblaCarousel({ align: "start", containScroll: "trimSnaps" });
   const [canScrollPrev, setCanScrollPrev] = useState(false);
   const [canScrollNext, setCanScrollNext] = useState(false);
   const updateScrollState = useCallback((api: { canScrollPrev: () => boolean; canScrollNext: () => boolean }) => {
@@ -49,6 +52,7 @@ export function DeltaSection({
   useEffect(() => {
     emblaApi?.reInit();
   }, [emblaApi, accounts.length]);
+  useEffect(() => { historyApi?.reInit(); }, [historyApi,historicalAccounts.length]);
 
   return (
     <section
@@ -83,7 +87,7 @@ export function DeltaSection({
               <span>
                 “{searchQuery.trim()}”
                 {supplyState === "ready"
-                  ? ` · ${accounts.length} 个匹配账号`
+                  ? ` · ${accounts.length + historicalAccounts.length} 个匹配账号`
                   : " · 账号数据暂不可查询"}
                 <small>仅搜索当前已加载的账号编号与名称</small>
               </span>
@@ -128,7 +132,12 @@ export function DeltaSection({
           ) : (
             <AccountCardEmpty
               {...(supplyState === "ready"
-                ? searchQuery.trim()
+                ? historicalAccounts.length > 0
+                  ? {
+                      message: "暂无可在线租赁的账号",
+                      description: "已加载的历史账号在下方展示，仅供资料查阅。",
+                    }
+                  : searchQuery.trim()
                   ? {
                       message: "未找到匹配账号",
                       description:
@@ -154,6 +163,13 @@ export function DeltaSection({
                 : {})}
             />
           )}
+          {supplyState === "ready" && historicalAccounts.length > 0 ? <section aria-label="历史账号 · 只读">
+            <div className="supply-heading"><h3>历史账号 · 只读</h3><div className="supply-heading-actions">{historicalAccounts.length>3 ? <div className="account-carousel-controls" aria-label="切换历史账号"><button type="button" aria-label="向左查看历史账号" onClick={()=>historyApi?.scrollPrev()}><ChevronLeft size={16} aria-hidden="true"/></button><button type="button" aria-label="向右查看历史账号" onClick={()=>historyApi?.scrollNext()}><ChevronRight size={16} aria-hidden="true"/></button></div> : null}<Link href="/accounts">浏览账号市场 <ArrowUpRight size={14} aria-hidden="true" /></Link></div></div>
+            <p className="site-search-summary">保留历史资料与原金额，不支持在线租赁。{supplyMayHaveMore ? "此处仅展示首批结果，完整目录请进入账号市场。" : ""}</p>
+            <div className="account-carousel"><div className="account-carousel-viewport" ref={historyViewportRef} tabIndex={0} aria-label="历史账号横向列表，使用左右方向键浏览" onKeyDown={event=>{if(event.key==="ArrowLeft"||event.key==="ArrowRight"){event.preventDefault();if(event.key==="ArrowLeft")historyApi?.scrollPrev();else historyApi?.scrollNext();}}}><div className="account-carousel-container">
+              {historicalAccounts.map(data=><div className="account-carousel-slide" key={data.id}><AccountCard data={data}/></div>)}
+            </div></div></div>
+          </section> : null}
         </div>
       </div>
     </section>

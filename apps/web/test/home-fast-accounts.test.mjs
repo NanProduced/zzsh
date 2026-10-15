@@ -30,13 +30,76 @@ test('home fast shelf does not claim exhaustion when the bounded read limit is r
   assert.equal(result.hasMore, true);
 });
 
-test('home fast shelf stops after the display limit without reading an unnecessary page', async () => {
+test('home stops when both shelves are full without reading an unnecessary page', async () => {
   let reads = 0;
   const result = await collectFastAccounts(async () => {
     reads += 1;
-    return page(Array.from({ length: 8 }, (_, index) => listing(`fast-${index}`, 'fast')), 'next');
-  }, project);
-  assert.equal(reads, 1);
+    return page(Array.from({ length: 8 }, (_, index) => ({...listing(`shelf-${reads}-${index}`, 'fast'),historicalReadOnly:reads===2})), `next-${reads}`);
+  }, value=>value);
+  assert.equal(reads, 2);
   assert.equal(result.accounts.length, 8);
+  assert.equal(result.historicalAccounts.length, 8);
   assert.equal(result.hasMore, true);
+});
+
+test('a full historical shelf does not hide native fast accounts on the next page', async () => {
+  const cursors=[];
+  const result=await collectFastAccounts(async cursor=>{
+    cursors.push(cursor);
+    return cursor===null
+      ? page(Array.from({length:8},(_,i)=>({id:`history-${i}`,historicalReadOnly:true,rentalMode:null})), 'page-2')
+      : page([{id:'native-fast',rentalMode:'fast'}]);
+  }, value=>value);
+  assert.deepEqual(cursors,[null,'page-2']);
+  assert.equal(result.historicalAccounts.length,8);
+  assert.deepEqual(result.accounts.map(value=>value.id),['native-fast']);
+  assert.equal(result.hasMore,false);
+});
+
+test('a full native fast shelf does not hide historical accounts on the next page', async () => {
+  const cursors=[];
+  const result=await collectFastAccounts(async cursor=>{
+    cursors.push(cursor);
+    return cursor===null
+      ? page(Array.from({length:8},(_,i)=>listing(`fast-${i}`,'fast')), 'page-2')
+      : page([{id:'history',historicalReadOnly:true,rentalMode:'fast'}]);
+  }, value=>value);
+  assert.deepEqual(cursors,[null,'page-2']);
+  assert.equal(result.accounts.length,8);
+  assert.deepEqual(result.historicalAccounts.map(value=>value.id),['history']);
+  assert.equal(result.hasMore,false);
+});
+
+test('one full shelf still respects the page budget while the other remains empty', async () => {
+  let reads=0;
+  const result=await collectFastAccounts(async()=>{
+    reads++;
+    return page(Array.from({length:8},(_,i)=>listing(`fast-${reads}-${i}`,'fast')), `next-${reads}`);
+  },project,3);
+  assert.equal(reads,3);
+  assert.equal(result.accounts.length,8);
+  assert.equal(result.historicalAccounts.length,0);
+  assert.equal(result.hasMore,true);
+});
+
+test('one server cursor stream supplies read-only history and native fast shelves without a guessed mode or duplicate ids',async()=>{
+  const calls=[];
+  const projectHistory=l=>({id:l.id,rentalMode:l.rentalMode??null,historicalReadOnly:l.source==='LEGACY_READ_ONLY'});
+  const result=await collectFastAccounts(async cursor=>{
+    calls.push(cursor);
+    if(cursor===null) return page([{id:'legacy-unknown',source:'LEGACY_READ_ONLY'},listing('ordinary'),listing('fast','fast')],'p2');
+    return page([{id:'legacy-unknown',source:'LEGACY_READ_ONLY'},{id:'legacy-fast',source:'LEGACY_READ_ONLY',rentalMode:'fast'}]);
+  },projectHistory);
+  assert.deepEqual(calls,[null,'p2']);
+  assert.deepEqual(result.accounts.map(r=>r.id),['fast']);
+  assert.deepEqual(result.historicalAccounts.map(r=>r.id),['legacy-unknown','legacy-fast']);
+  assert.equal(result.historicalAccounts[0].rentalMode,null);
+  assert.equal(result.historicalAccounts[1].rentalMode,'fast');
+});
+
+test('home does not claim exhaustion after clipping the last page or seeing a repeated server cursor',async()=>{
+  const clipped=await collectFastAccounts(async()=>page(Array.from({length:10},(_,i)=>listing(String(i),'fast'))),project,4,8);
+  assert.equal(clipped.accounts.length,8); assert.equal(clipped.hasMore,true);
+  const loop=await collectFastAccounts(async()=>page([], 'same'),project);
+  assert.equal(loop.pages,2); assert.equal(loop.hasMore,true);
 });

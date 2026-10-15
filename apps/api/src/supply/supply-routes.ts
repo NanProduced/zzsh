@@ -1,3 +1,4 @@
+import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import { hasLegacyReadSnapshots } from "./legacy-listing-read";
 import { lockPublishingAccount, readPublishingAccount, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
@@ -111,7 +112,7 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 
-export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader; listingCursorKey?: ListingCursorKey };
+export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader; listingCursorKey?: ListingCursorKey; legacyPublicAdmission?: LegacyPublicAdmission };
 
 export type SupplyResponse = SupplyNodeResponse & {
   send?: (body: Buffer | string) => void;

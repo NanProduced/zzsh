@@ -19,22 +19,30 @@ export async function collectFastAccounts(
   displayLimit = HOME_FAST_DISPLAY_LIMIT,
 ) {
   const accounts: ListingCardData[] = [];
+  const historicalAccounts: ListingCardData[] = [];
+  const seenAccounts = new Set<string>();
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
   let pages = 0;
+  let truncated = false;
 
-  while (pages < maxPages && accounts.length < displayLimit) {
+  while (pages < maxPages && (accounts.length < displayLimit || historicalAccounts.length < displayLimit)) {
     const page = await readPage(cursor);
     pages += 1;
 
     for (const listing of page.items) {
       const account = project(listing);
-      if (!account || account.rentalMode !== "fast") continue;
-      accounts.push(account);
-      if (accounts.length >= displayLimit) break;
+      if (!account || seenAccounts.has(account.id)) continue;
+      seenAccounts.add(account.id);
+      if (account.historicalReadOnly) {
+        if(historicalAccounts.length<displayLimit) historicalAccounts.push(account); else truncated=true;
+      } else if(account.rentalMode === "fast") {
+        if(accounts.length<displayLimit) accounts.push(account); else truncated=true;
+      }
     }
 
     if (!page.nextCursor || seenCursors.has(page.nextCursor)) {
+      if(page.nextCursor) truncated=true;
       cursor = null;
       break;
     }
@@ -44,7 +52,8 @@ export async function collectFastAccounts(
 
   return {
     accounts,
+    historicalAccounts,
     pages,
-    hasMore: Boolean(cursor),
+    hasMore: Boolean(cursor) || truncated,
   };
 }

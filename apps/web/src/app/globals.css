@@ -631,6 +631,7 @@ html[data-theme="dark"] .account-list-title-rest {
   color: #94a3b8;
 }
 
+.account-history-badge { display:inline-block; max-width:100%; padding:2px 6px; border:1px solid var(--color-border-default); border-radius:6px; color:var(--color-text-primary); font-size:12px; line-height:1.5; }
 .account-list-deal-tag,.account-card-deal-tag {
   display: inline-flex;
   align-items: center;

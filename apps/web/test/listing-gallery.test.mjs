@@ -60,5 +60,11 @@ test('detail presentation keeps fields unique, copy bound to public number, and 
   data.id='other';await render();assert.equal(host.querySelector('.account-link-notice'),null);data.id='a';data.resourceTotalLabel=null;await render();assert.equal(host.querySelector('.account-reference-price').textContent,'待确认');data.resourceTotalLabel='¥295.91';
   data.displayNo='202610080194';await render();assert.equal(host.querySelector('[aria-label="复制账号编号"]').disabled,false);await React.act(async()=>host.querySelector('[aria-label="复制账号编号"]').click());assert.equal(copied,'202610080194');assert.match(host.querySelector('[role="status"]').textContent,/已复制/);
   data.id='b';data.displayNo=null;await render();assert.equal(host.querySelector('[aria-label="复制账号编号"]').disabled,true);assert.equal(host.querySelector('.account-copy-note'),null);
+  data.historicalReadOnly=true;data.rentalMode='fast';data.sourceUpdatedAt='2026-09-13T13:31:22.000Z';data.depositLabel='¥50.00';await render();
+  assert.ok(host.textContent.includes('历史来源记录 · 不支持在线租赁'));
+  assert.ok(host.textContent.includes('历史押金'));assert.ok(host.textContent.includes('¥50.00'));
+  assert.ok(host.textContent.includes('来源更新时间 2026-09-13 21:31'));
+  assert.equal(host.querySelector('.account-detail-deal'),null);
+  assert.ok(![...host.querySelectorAll('button')].some(b=>b.textContent==='本人报价'));
  } finally {await React.act(async()=>root.unmount());await window.happyDOM.abort();}
 });

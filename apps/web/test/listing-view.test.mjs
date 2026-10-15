@@ -478,7 +478,7 @@ test('skin presentation carries the stable owner, base name and media summary', 
 });
 
 
-test('historical listing keeps exact source amounts and derives the payable total from them', () => {
+test('historical listing keeps exact source amounts without inventing a current payable total', () => {
   const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
   const historical = { ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null,
     historicalQuote: { haffRent: money('2038.00'), goods: money('20.00'), deposit: money('50.00'), termDays: '102' },
@@ -487,7 +487,9 @@ test('historical listing keeps exact source amounts and derives the payable tota
   assert.equal(view.historicalReadOnly, true);
   assert.equal(view.haffRentLabel, '¥2038.00');
   assert.equal(view.resourceTotalLabel, '¥2058.00');
-  assert.equal(view.payableTotalLabel, '¥2108.00');
+  assert.equal(view.payableTotalLabel, null);
+  assert.equal(view.rentalMode, null);
+  assert.equal(toListingCard({...historical,rentalMode:'fast',displaySchema:'legacy-listing-display-v1'}).rentalMode,'fast');
   assert.equal(view.termLabel, '102 天');
   assert.doesNotMatch(view.termLabel, /旧站/);
   assert.equal(view.resourceLines[0].quantityLabel, '未确认');

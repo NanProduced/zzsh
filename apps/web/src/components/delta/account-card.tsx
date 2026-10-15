@@ -363,7 +363,7 @@ export function AccountCard({
 
   const gridTitle = composeGridTitle(data, haffQuantityText);
   const isPayableConfirmed = !isUnknownMoney(data.payableTotalLabel);
-  const isFastMode = data.rentalMode === "fast" || conditionValue(data, "rental_mode") === "fast";
+  const isFastMode = !data.historicalReadOnly && (data.rentalMode === "fast" || conditionValue(data, "rental_mode") === "fast");
   const mediaCount = data.media.length;
 
   const favorite = <FavoriteButton accountId={data.id} title={data.title} />;
@@ -487,7 +487,7 @@ export function AccountCard({
                 ) : null}
               </Link>
             </div>
-            <div className="account-list-subline-row">
+            <div className="account-list-subline-row">{data.historicalReadOnly ? <span className="account-history-badge">历史记录 · 不可下单</span> : null}
               {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
               <p className="account-list-subline">{sublineContent}</p>
               <CopyableAccountNumber displayNo={data.displayNo} compact />
@@ -579,7 +579,7 @@ export function AccountCard({
           <div className="account-list-rail">
             <div className="account-list-finance">
               <div className="finance-row">
-                <span className="finance-label">租金</span>
+                <span className="finance-label">{data.historicalReadOnly ? "历史租金" : "租金"}</span>
                 <span className={`finance-val ${moneyValue(data.haffRentLabel, "无租金") === "待确认" ? "finance-val--unconfirmed" : ""}`}>
                   {moneyValue(data.haffRentLabel, "无租金")}
                 </span>
@@ -597,13 +597,13 @@ export function AccountCard({
                 </span>
               </div>
               <div className="finance-total-row">
-                <span className="finance-total-label">总价</span>
+                <span className="finance-total-label">{data.historicalReadOnly ? "来源资源费用" : "总价"}</span>
                 <strong
                   className={`finance-total-val ${
-                    !isPayableConfirmed ? "finance-total-val--unconfirmed" : ""
+                    !data.historicalReadOnly && !isPayableConfirmed ? "finance-total-val--unconfirmed" : ""
                   }`}
                 >
-                  {moneyValue(data.payableTotalLabel, "无需支付")}
+                  {moneyValue(data.historicalReadOnly ? data.resourceTotalLabel : data.payableTotalLabel, "无需支付")}
                 </strong>
               </div>
             </div>
@@ -734,7 +734,7 @@ export function AccountCard({
                 </strong>
               </Link>
             </div>
-            <div className="account-card-meta-row">
+            <div className="account-card-meta-row">{data.historicalReadOnly ? <span className="account-history-badge">历史记录 · 不可下单</span> : null}
               {isFastMode ? <span className="account-card-deal-tag">特惠</span> : null}
               <CopyableAccountNumber displayNo={data.displayNo} compact />
             </div>
@@ -816,13 +816,13 @@ export function AccountCard({
                 </div>
               </div>
               <div className="breakdown-total-row">
-                <span className="breakdown-total-label">合计</span>
+                <span className="breakdown-total-label">{data.historicalReadOnly ? "来源资源费用" : "合计"}</span>
                 <strong
                   className={`breakdown-total-val ${
-                    !isPayableConfirmed ? "breakdown-total-val--unconfirmed" : ""
+                    !data.historicalReadOnly && !isPayableConfirmed ? "breakdown-total-val--unconfirmed" : ""
                   }`}
                 >
-                  {moneyValue(data.payableTotalLabel, "无需支付")}
+                  {moneyValue(data.historicalReadOnly ? data.resourceTotalLabel : data.payableTotalLabel, "无需支付")}
                 </strong>
               </div>
             </div>

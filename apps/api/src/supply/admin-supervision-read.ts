@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import type { PoolClient } from "pg";
 import type { EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
@@ -81,7 +82,7 @@ export function decodeSupervisionCursor(token: string, binding: string, key: Lis
     }
 }
 const sourceSql = `SELECT DISTINCT m.source_system AS "sourceSystem",m.source_entity AS "sourceEntity",m.legacy_id AS "sourceId",h.snapshot->>'resourceNo' AS "businessNo" FROM zzsh_supply.legacy_supply_map m LEFT JOIN zzsh_supply.legacy_listing_read_snapshot h ON h.account_id=m.account_id AND h.source_system=m.source_system AND h.source_entity=m.source_entity AND h.legacy_id=m.legacy_id WHERE m.account_id=$1 ORDER BY "sourceSystem","sourceEntity","sourceId"`;
-export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader) {
+export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission) {
     const sources = (await client.query(sourceSql, [a.id])).rows;
     const oldNumbers = (await client.query<{
         value: string;
@@ -89,7 +90,7 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const blockers: string[] = detail.version ? detail.blockers ?? [] : ["CURRENT_VERSION_MISSING"];
     let publicVisible: boolean | null = null, publicSource: string | null = null;
     try {
-        const publicRead = await readPublicListing(client, a, gate);
+        const publicRead = await readPublicListing(client, a, gate, admission);
         publicVisible = true;
         publicSource = publicRead.source === "LEGACY_READ_ONLY" ? "LEGACY_READ_ONLY" : "NATIVE_PUBLICATION";
     }
@@ -258,7 +259,7 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility },
     };
 }
-export async function listSupervision(client: PoolClient, viewer: SupervisionViewer, q: SupervisionQuery, gate: SupplyGateReader, key: ListingCursorKey | undefined) {
+export async function listSupervision(client: PoolClient, viewer: SupervisionViewer, q: SupervisionQuery, gate: SupplyGateReader, key: ListingCursorKey | undefined, admission?: LegacyPublicAdmission) {
     const canOrder = viewer.access.permissions.has("order.read");
     if ((q.view === "orders" || q.queryKind === "order" && q.q) && !canOrder)
         throw forbidden();
@@ -315,7 +316,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     };
     for (const row of visible) {
         const a = await readPublishingAccount(client, row.id), detail = await listingDetail(client, a, "admin", recordGate, quoteViewer);
-        const facts = await supervisionFacts(client, a, detail, recordGate);
+        const facts = await supervisionFacts(client, a, detail, recordGate, admission);
         const ownerSummary = owners.get(row.ownerId);
         items.push({ ...row, facts, summary: listingSummary(detail, facts, guarantees.get(row.id), gates.get(row.id), { accountCreatedAt: row.accountCreatedAt, accountUpdatedAt: row.accountUpdatedAt, versionCreatedAt: row.versionCreatedAt, refs: { ruleReleaseId: row.ruleReleaseId ?? null, priceVersionId: row.priceVersionId ?? null } }), ownerLink: canDirectory ? { state: "READY" as const } : { state: "DENIED" as const }, ...(ownerSummary ? { ownerSummary } : {}) });
     }
@@ -323,7 +324,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     const games = (await client.query(`SELECT g.id,g.name FROM zzsh_supply.game g ORDER BY g.name,g.id`)).rows;
     return { contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, query: { ...q, cursor: undefined }, games, items, nextCursor: rows.length > q.limit && last ? encodeSupervisionCursor({ at: last.sortAt, id: last.id }, binding, key) : null };
 }
-export async function readSupervision(client: PoolClient, a: PublishingAccount, viewer: SupervisionViewer, gate: SupplyGateReader, versionId: string | null) {
+export async function readSupervision(client: PoolClient, a: PublishingAccount, viewer: SupervisionViewer, gate: SupplyGateReader, versionId: string | null, admission?: LegacyPublicAdmission) {
     if (versionId && !idPattern.test(versionId))
         throw invalid("Invalid version ID");
     if (versionId && !(await client.query("SELECT 1 FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2", [versionId, a.id])).rowCount)
@@ -356,5 +357,5 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
         detail.available = false;
         detail.blockers = [...((detail.blockers as string[]) ?? []), "HISTORICAL_VERSION"];
     }
-    return { ...detail, contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { historical, facts: await supervisionFacts(client, a, live, gate), changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
+    return { ...detail, contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { historical, facts: await supervisionFacts(client, a, live, gate, admission), changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
 }

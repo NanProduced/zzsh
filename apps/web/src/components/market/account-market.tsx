@@ -582,12 +582,12 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     breadcrumbs={breadcrumbs} title={game ? `${game.name}账号租赁` : "三角洲行动账号租赁"}
     description=""
     initialQuery={filters.q ?? ""} onSearch={(value) => navigate(withFilterChange(filters, { q: normalizeListingQuery(value) }))}
-    searchLabel="在公开账号目录中搜索账号名称" searchInputLabel="搜索账号名称" searchPlaceholder="搜索账号名称">
+    searchLabel="在公开账号目录中搜索标题或编号" searchInputLabel="搜索标题或编号" searchPlaceholder="搜索标题或编号">
     <section className="game-section market-section" aria-label="公开账号市场">
       <div className="market-directory" id="account-list" tabIndex={-1}>
         {metadata.status === "loading" || games.status === "loading" ? <p className="market-state-note" role="status">正在读取当前游戏与可用筛选项…</p> : null}
         {metadata.status === "error" ? <div className="market-inline-state" role="alert"><p>筛选配置暂时不可用，账号目录尚未发起请求。</p><button type="button" className="button secondary" onClick={() => setMetadataAttempt((value) => value + 1)}><RotateCw size={15} />重试筛选配置</button></div> : null}
-        {metadata.status === "ready" && !available ? <div className="market-inline-state" role="status"><h3>当前游戏暂不可筛选</h3><p>服务端尚未开放此游戏的公开账号筛选配置。</p></div> : null}
+        {metadata.status === "ready" && !available ? <div className="market-inline-state" role="status"><h3>当前游戏暂不可筛选</h3><p>{activeMetadata?.reasonCode === "FILTERS_UNCONFIGURED" ? "公开展示配置尚未完成，暂时无法读取账号。" : "此游戏的账号目录暂不可用，请稍后重试。"}</p></div> : null}
 
         {activeMetadata && available && <>
           <div className="market-filter-mobile-row">
@@ -660,7 +660,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         </div>
 
 
-        {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · 由服务端按公开账号名称筛选<button type="button" onClick={() => navigate(withFilterChange(filters, { q: null }))}>清除搜索</button></div>}
+        {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · 由服务端按公开账号标题或编号筛选<button type="button" onClick={() => navigate(withFilterChange(filters, { q: null }))}>清除搜索</button></div>}
         <div className="market-results" aria-busy={feed.status === "loading" || feed.isLoadingMore}>
           {feed.status === "loading" ? <div className={`account-grid account-grid--${filters.viewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
           {feed.status === "error" && feed.items.length === 0 && currentError ? <div className="market-inline-state" role={currentError.kind === "adjust" ? "alert" : "status"}>

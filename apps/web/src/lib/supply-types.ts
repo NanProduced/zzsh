@@ -79,6 +79,8 @@ export type PublicListing = {
   };
   quote: PublicQuote | null;
   source?: "LEGACY_READ_ONLY";
+  rentalMode?: "ordinary" | "custom" | "fast" | null;
+  displaySchema?: "legacy-listing-display-v1";
   canCreateOrder?: false;
   sourceUpdatedAt?: string;
   historicalQuote?: { haffRent: Money; goods: Money; deposit: Money; termDays: string };

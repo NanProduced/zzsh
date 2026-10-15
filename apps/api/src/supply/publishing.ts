@@ -1,4 +1,5 @@
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
+import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction } from "../auth/user-identity";
@@ -1356,13 +1357,14 @@ export async function readPublicListing(
   client: PoolClient,
   a: PublishingAccount,
   gate: SupplyGateReader,
+  admission?: LegacyPublicAdmission,
 ): Promise<Record<string, unknown>> {
   const publication = await client.query(
     `SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`,
     [a.id],
   );
   if (publication.rowCount) return listingDetail(client, a, "public", gate);
-  return readLegacyListing(client, a.id);
+  return readLegacyListing(client, a.id, admission);
 }
 export async function listingDetail(
   client: PoolClient,

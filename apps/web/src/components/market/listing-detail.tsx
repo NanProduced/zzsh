@@ -146,7 +146,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   const rank = conditionValue(data, "grading_code");
   if (rank) titleParts.rest = titleParts.rest.replace(rank, `${rank}段位`);
   const title = [titleParts.haff, titleParts.rest].filter(Boolean).join(" · ");
-  const fast = data.rentalMode === "fast";
+  const fast = !data.historicalReadOnly && data.rentalMode === "fast";
   const copyLink = async () => {
     const accountId = data.id;
     try { await navigator.clipboard.writeText(new URL(accountHref(accountId), window.location.origin).href); setLinkState({ accountId, ok: true }); }
@@ -178,7 +178,8 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
     { label: "每日消耗", value: value("daily_consumption"), icon: Coins },
     { label: data.historicalReadOnly ? "来源租期" : "推算租期", value: data.termLabel, icon: CalendarDays },
   ];
-  const published = displayTime(data.publishedAt);
+  const displayedAt = data.historicalReadOnly ? data.sourceUpdatedAt : data.publishedAt;
+  const published = displayTime(displayedAt);
   const resources = orderedQuoteResources(data);
   const penalties = data.media.filter(item => item.category === "PENALTY");
   const skinGroups = new Map<string, ListingDetailData["skinTags"]>();
@@ -192,7 +193,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
           <div className="account-number-row"><span>账号编号</span><strong>{number ?? "未提供"}</strong>
             <button type="button" className="account-copy" disabled={!number} onClick={() => void copyNumber()} aria-label="复制账号编号">{copyState?.number === number && copyState.ok ? <Check size={16} /> : <Copy size={16} />}<span>复制</span></button>
           </div>
-          <div className="account-published"><Clock3 size={15} aria-hidden="true" />{published ? <time dateTime={data.publishedAt!}>发布时间 {published}</time> : <span>发布时间未提供</span>}</div>
+          <div className="account-published"><Clock3 size={15} aria-hidden="true" />{published ? <time dateTime={displayedAt!}>{data.historicalReadOnly ? "来源更新时间" : "发布时间"} {published}</time> : <span>{data.historicalReadOnly ? "来源时间未提供" : "发布时间未提供"}</span>}</div>
           {copyState?.number === number ? <p className="account-copy-note" role="status">{copyState.ok ? "账号编号已复制" : "暂时无法自动复制，请选中编号复制。"}</p> : null}
         </div>
         <div className="account-identity-actions"><FavoriteButton accountId={data.id} title={title} variant="inline" /><button type="button" className="button secondary account-share" onClick={() => void copyLink()}><Share2 size={16} aria-hidden="true" />{linkState?.accountId === data.id && linkState.ok ? "已复制链接" : "分享"}</button></div>
@@ -203,9 +204,9 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
           <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />来源资源费用 · 历史只读</h2></div>
           <p className="account-readonly-badge">历史来源记录 · 不支持在线租赁</p>
           <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
-          <dl className="account-fee-lines"><div><dt>哈夫币租金</dt><dd>{moneyValue(data.haffRentLabel)}</dd></div><div><dt>物资预付</dt><dd>{moneyValue(data.itemResourceTotalLabel)}</dd></div></dl>
+          <dl className="account-fee-lines"><div><dt>历史哈夫币租金</dt><dd>{moneyValue(data.haffRentLabel)}</dd></div><div><dt>历史物资预付</dt><dd>{moneyValue(data.itemResourceTotalLabel)}</dd></div><div><dt>历史押金</dt><dd>{moneyValue(data.depositLabel)}</dd></div></dl>
           <p className="detail-stage-note account-readonly">这笔费用来自历史来源记录，不是当前本人应付。</p>
-          <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回可租账号列表</Link>
+          <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回账号市场</Link>
          </> : <>
            <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} autoQuote reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
            <section className="account-process-panel account-process-panel--quote" aria-labelledby="account-process-title">

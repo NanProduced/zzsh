@@ -34,6 +34,7 @@ import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvi
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
+import { loadLegacyPublicAdmission, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, type LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
@@ -85,6 +86,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   localControlledPayments?: LocalControlledPaymentOptions;
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
+  legacyPublicAdmission?: LegacyPublicAdmission;
   testConfirmationFundingReader?: ConfirmationFundingReader;
   /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
   creditGuaranteeEnabled?: boolean;
@@ -593,6 +595,7 @@ export function loadAuthRuntimeConfig(
   }
   return {
     creditGuaranteeEnabled,
+    legacyPublicAdmission: loadLegacyPublicAdmission(env, workingDirectory),
     apiOrigin,
     ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
     ...(listingSecret===undefined?{}:{listingCursorKey:{keyId:listingKeyId!,secret:listingSecret}}),
@@ -616,6 +619,8 @@ export async function mountAuthHandlers(
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions> {
   assertLocalDistributionAssembly(options.distributionScope, options);
+  const legacyPublicAdmission=options.legacyPublicAdmission ? parseLegacyPublicAdmission(options.legacyPublicAdmission) : undefined;
+  if(legacyPublicAdmission) await assertLegacyPublicAdmissionTarget(options.pool,legacyPublicAdmission);
   await preflightCreditGuarantee(options.pool, options.creditGuaranteeEnabled === true);
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
@@ -917,7 +922,7 @@ export async function mountAuthHandlers(
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
-    supply: { ...securityOptions, mediaStorage, supplyGateReader,listingCursorKey:options.listingCursorKey },
+    supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
     ...(yunxinRuntime ? {
       yunxin: {
@@ -930,12 +935,13 @@ export async function mountAuthHandlers(
       },
     } : {}),
   });
-  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,listingCursorKey:options.listingCursorKey});
+  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,listingCursorKey:options.listingCursorKey});
   mountSupplyHandlers(app, {
     ...securityOptions,
     mediaStorage,
     supplyGateReader,
     listingCursorKey:options.listingCursorKey,
+    legacyPublicAdmission,
   });
   mountContentHandlers(app, {
     ...securityOptions,

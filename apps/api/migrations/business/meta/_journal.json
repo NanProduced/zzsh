@@ -505,6 +505,13 @@
       "when": 1789490040000,
       "tag": "0071_supply_backend_closeout",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1789490041000,
+      "tag": "0072_legacy_listing_display_snapshot",
+      "breakpoints": true
     }
   ]
 }

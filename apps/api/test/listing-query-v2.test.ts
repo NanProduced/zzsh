@@ -71,7 +71,7 @@ test("mixed candidates merge both sources once with native priority and one seek
   assert.match(sql.text,/WHERE \(sort_key < \$[0-9]+::timestamptz OR sort_key IS NULL OR \(sort_key=\$[0-9]+::timestamptz AND id>\$[0-9]+\)\)/);
   assert.match(sql.text,/ORDER BY sort_key DESC NULLS LAST,id ASC LIMIT 200/);
   assert.match(sql.text,/v\.payload#>.\{declaration,attributes\}'/);
-  assert.match(sql.text,/\(v\.attributes\)->>'safe_box_code'/);
+  assert.match(sql.text,/\(COALESCE\(d\.snapshot->'attributes',v\.attributes\)\)->>'safe_box_code'/);
   assert.match(sql.text,/NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication p WHERE p\.account_id=a\.id\)/);
   assert.match(sql.text,/v\.review_state='PUBLISHED' AND pub\.source='OWNER_DIRECT'/);
   const priced=parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=game&sort=resourceTotal"),"/listings");

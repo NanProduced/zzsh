@@ -78,7 +78,7 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
   const query: ListingQueryV2 = { ...baseQuery, q: "846M", filters: { resources: [{ itemId: "item_haff", minQuantity: "1000000000" }], regions: [{ province: "北京市", city: "丰台区" }] } };
   const { text, values } = buildLegacyListingCandidates(query, null);
   assert.match(text, /legacy_listing_read_snapshot/);
-  assert.match(text, /\(v\.attributes\)->>'region_province'/);
+  assert.match(text, /\(COALESCE\(d\.snapshot->'attributes',v\.attributes\)\)->>'region_province'/);
   assert.match(text, /l\.item_id=\$3 AND l\.quantity>=\$4/);
   assert.match(text, /v\.title ILIKE/);
   assert.deepEqual(values, ["game_x", "%846M%", "item_haff", "1000000000", "北京市", "丰台区"]);
@@ -93,7 +93,8 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
   assert.equal(legacyListingSortLabel("resourceTotal", "资源总价"), "资源费用");
   assert.equal(legacyListingSortLabel("coreQuantity", "核心数量"), "核心数量");
   assert.match(text, /h\.source_status=3/);
-  assert.match(text, /a\.legacy_hold='NONE'/);
+  assert.match(text, /a\.legacy_hold IN \('NONE','UNRESOLVED'\)/);
+  assert.match(text, /COALESCE\(us\.age_status,'UNKNOWN'\)='ADULT'/);
   assert.match(text, /NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication/);
   const mixed = buildMixedListingCandidates(query, null);
   assert.match(mixed.text, /h\.source_status=3/);

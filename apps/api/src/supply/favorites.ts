@@ -97,6 +97,7 @@ export async function handleFavorites(
               client,
               await readPublishingAccount(client, row.account_id),
               gate,
+              options.legacyPublicAdmission,
             );
           } catch (error) {
             if ((error as { status?: number }).status !== 404) throw error;
@@ -144,6 +145,7 @@ export async function handleFavorites(
           reader,
           await readPublishingAccount(reader, accountId),
           gate,
+          options.legacyPublicAdmission,
         ),
       );
       visible = true;

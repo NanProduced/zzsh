@@ -194,7 +194,7 @@ export async function handlePublishingRoute(
         options.pool,
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
-          const detail = await readPublicListing(client, a, gate);
+          const detail = await readPublicListing(client, a, gate, options.legacyPublicAdmission);
           if (!publicMatch[2]) return { detail };
           const asset = await loadMediaAsset(client, publicMatch[2]);
           const v = await readCurrentVersion(client, a);
@@ -388,11 +388,11 @@ export async function handlePublishingRoute(
       const data = await withPublicListingSnapshot(options.pool, async client => {
         const access = await authorize(client);
         const viewer = await supervisionViewer(client, context, access!);
-        if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
+        if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey, options.legacyPublicAdmission), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
         for (const key of query.keys()) if (!["queryVersion", "versionId"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported supervision detail query", key);
         const a = await readPublishingAccount(client, accountMatch[1]!);
         await authorize(client, a);
-        return readSupervision(client, a, viewer, gate, query.get("versionId"));
+        return readSupervision(client, a, viewer, gate, query.get("versionId"), options.legacyPublicAdmission);
       });
       sendJson(response, 200, data, requestId);
       return true;
