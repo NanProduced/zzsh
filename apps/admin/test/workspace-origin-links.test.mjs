@@ -32,9 +32,14 @@ const vite = await createServer({
       resolveId(id, importer) {
         const normalized = id.replaceAll("\\", "/");
         const fromPageContent = importer?.replaceAll("\\", "/").endsWith("/src/workspace/page-content.tsx");
+        if (fromPageContent && id === './settings-page') return '\0settings-preview-host-stub';
+        if (fromPageContent && id === './account-security-page') return '\0account-security-host-stub';
         return (normalized.endsWith("/src/workspace/workbench.tsx") || ((id === "./workbench" || id === "./workbench.tsx") && fromPageContent)) ? "\0origin-links-workbench-stub" : undefined;
       },
       load(id) {
+        // Routing tests keep leaf UI isolated; their behavior has dedicated component suites.
+        if (id === '\0settings-preview-host-stub') return 'import {createElement} from "react"; export function SettingsWorkspace(){return createElement("div",null,"本轮仅验收界面")}';
+        if (id === '\0account-security-host-stub') return 'import {createElement} from "react"; export function AccountSecurityPage(p){return createElement("section",null,"修改登录密码",createElement("button",{onClick:p.onLock},"立即锁定当前会话"))}';
         if (id !== "\0origin-links-workbench-stub") return undefined;
         return `import { createElement } from "react";
 export function WorkbenchPage() { return createElement("div", { "data-stub": "workbench" }); }
@@ -81,6 +86,7 @@ async function mount(t, initialTab, snap) {
   browser.document.body.appendChild(container);
   const root = createRoot(container);
   const opened = [];
+  let locks = 0;
   function Harness() {
     const [tab, setTab] = useState(initialTab);
     return createElement(WorkspacePageContent, {
@@ -88,7 +94,7 @@ async function mount(t, initialTab, snap) {
       snapshot: snap,
       idleMinutes: 10,
       onIdleMinutes: () => {},
-      onLock: () => {},
+      onLock: () => { locks += 1; },
       onRefresh: async () => snap,
       onRecoveryCompleted: () => {},
       onOpenPath: (path, title) => { opened.push({ path, title }); },
@@ -100,7 +106,7 @@ async function mount(t, initialTab, snap) {
   t.after(async () => { await act(async () => root.unmount()); container.remove(); await settle(); });
   await act(async () => root.render(createElement(Harness)));
   await settle();
-  return { opened };
+  return { opened, locks: () => locks };
 }
 
 const userTab = { id: 'user:user_normal', title: 'user_normal', path: '/users/user_normal', query: {}, closable: true, kind: 'user-object', objectType: 'user', objectId: 'user_normal' };
@@ -142,4 +148,27 @@ test('admin list keeps its query filters inside the workspace tab without openin
   assert.equal(h.opened.length, 0);
   // 信息弹窗叠加在工作区之上的行为由组件套件与真实浏览器覆盖：
   // happy-dom 在 workspace 样式表上重算弹窗会触发 RangeError，不是产品缺陷。
+});
+
+const accountTab = { id: 'account', title: '账号安全', path: '/account', query: {}, closable: true, kind: 'account' };
+test('normal environment preserves existing account security and its lock callback', async (t) => {
+  browser.location.href = 'http://127.0.0.1:3101/account';
+  const h = await mount(t, accountTab, snapshot([]));
+  assert.ok(browser.document.body.textContent.includes('修改登录密码'));
+  assert.equal(browser.document.body.textContent.includes('本轮仅验收界面'), false);
+  const lock = namedButton('立即锁定当前会话');
+  assert.ok(lock && !lock.disabled, 'normal security action must remain available');
+  await click(lock); assert.equal(h.locks(), 1);
+});
+test('new read-only security preview is restricted to the local 4381 environment', async (t) => {
+  browser.location.href = 'http://127.0.0.1:4381/account';
+  await mount(t, accountTab, snapshot([]));
+  assert.ok(browser.document.body.textContent.includes('本轮仅验收界面'));
+  assert.equal(namedButton('立即锁定当前会话'), undefined);
+});
+test('an external hostname on port 4381 retains the ordinary security page', async (t) => {
+  browser.location.href = 'http://example.invalid:4381/account';
+  await mount(t, accountTab, snapshot([]));
+  assert.equal(browser.document.body.textContent.includes('本轮仅验收界面'), false);
+  assert.ok(namedButton('立即锁定当前会话'));
 });

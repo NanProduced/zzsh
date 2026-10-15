@@ -92,6 +92,9 @@ export async function mountHarness(t, { permissions, isBoss = true, fetchImpl, i
     requestAnimationFrame: browser.requestAnimationFrame.bind(browser),
     cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser),
   });
+  for (const key of ["Element", "SVGElement", "HTMLInputElement", "HTMLButtonElement", "HTMLIFrameElement", "ShadowRoot", "DocumentFragment", "KeyboardEvent", "MouseEvent", "PointerEvent", "FocusEvent", "ResizeObserver", "MutationObserver", "DOMRect"]) {
+    if (browser[key] && !(key in globalThis && key.endsWith("Observer"))) globalThis[key] = browser[key];
+  }
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   const originalFetch = globalThis.fetch;
   const { createRoot } = await import("react-dom/client");
@@ -99,6 +102,7 @@ export async function mountHarness(t, { permissions, isBoss = true, fetchImpl, i
     configFile: false,
     root: fileURLToPath(new URL("..", import.meta.url)),
     plugins: [react()],
+    resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },
     optimizeDeps: { noDiscovery: true, include: [] },
     server: { middlewareMode: true, hmr: false, ws: false, watch: null },
   });
@@ -113,6 +117,7 @@ export async function mountHarness(t, { permissions, isBoss = true, fetchImpl, i
   browser.confirm = () => true;
   const { SupplyListingReviewView } = await vite.ssrLoadModule("/src/views/supply-listing-review-view.tsx");
   const el = browser.document.createElement("div");
+  el.className = "workspace-root";
   browser.document.body.append(el);
   const root = createRoot(el);
   const render = async (identity = "admin", nextPermissions = permissions, accountId = initialAccountId, query = initialQuery, nonce = 0) => act(async () => {

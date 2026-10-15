@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { listingDetail, publicationBlockers, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
 import { parseMediaReviewBinding, assertMediaReviewBinding } from "../src/supply/media";
+import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
 const publishing = require("../src/supply/publishing");
 const fixtureAccount: PublishingAccount = { id: "fixture-account", owner_user_id: "fixture-owner", game_id: "fixture-game", current_version_id: null, owner_paused: false, staff_restricted: false, restriction_reason: null, legacy_hold: "NONE", lifecycle: "ACTIVE", revision: "1", display_no: null };
@@ -45,13 +46,16 @@ test("nickname branch executes actual PostgreSQL SQL for literal LIKE characters
         const identity = (await c.query("SELECT oid,shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=current_database()")).rows[0];
         assert.equal(identity.oid, cred.database === "zzsh_test_order_admin_order_read" ? 836794 : 793252);
         assert.match(identity.marker, /^zzsh:/);
-        const prefix = `WITH fixture_accounts(id,owner_user_id,game_id,current_version_id,created_at,staff_restricted,owner_paused) AS (VALUES
-          ('a','u-a','game-1','v-a','2026-10-03T00:00:03Z'::timestamptz,true,false),
-          ('b','u-b','game-1','v-b','2026-10-03T00:00:02Z'::timestamptz,false,false),
-          ('c','u-c','game-2','v-c','2026-10-03T00:00:01Z'::timestamptz,true,false)),
+        const prefix = `WITH fixture_accounts(id,owner_user_id,game_id,current_version_id,created_at,updated_at,display_no,revision,staff_restricted,owner_paused) AS (VALUES
+          ('a','u-a','game-1','v-a','2026-10-03T00:00:03Z'::timestamptz,'2026-10-04T00:00:03Z'::timestamptz,'NO-A',7::bigint,true,false),
+          ('b','u-b','game-1','v-b','2026-10-03T00:00:02Z'::timestamptz,null::timestamptz,null,3::bigint,false,false),
+          ('c','u-c','game-2','v-c','2026-10-03T00:00:01Z'::timestamptz,'2026-10-03T00:00:01Z'::timestamptz,'NO-C',1::bigint,true,false)),
           fixture_users(id,name) AS (VALUES ('u-a','阿洛甲'),('u-b','阿洛乙'),('u-c',$5::text)),
           fixture_games(id,name) AS (VALUES ('game-1','一'),('game-2','二')),
-          fixture_versions(id,sequence,title,review_state,created_at) AS (VALUES ('v-a',1,'甲','DRAFT',null::timestamptz),('v-b',1,'乙','DRAFT',null::timestamptz),('v-c',1,'丙','DRAFT',null::timestamptz)),
+          fixture_versions(id,sequence,title,review_state,created_at,rule_release_id,payload) AS (VALUES
+            ('v-a',1,'甲','DRAFT',null::timestamptz,'release-a','{"ruleRefs":{"priceVersionId":"price-a"}}'::jsonb),
+            ('v-b',1,'乙','DRAFT',null::timestamptz,null::text,null::jsonb),
+            ('v-c',1,'丙','DRAFT',null::timestamptz,'release-c',null::jsonb)),
           fixture_admin_scope(admin_user_id,game_scope_mode) AS (VALUES ('fixture-admin','SELECTED_GAMES')),
           fixture_scope(admin_user_id,game_id) AS (VALUES ('fixture-admin','game-1')) `;
         for (const [q, expected] of [["阿洛甲", ["a"]], ["阿洛", ["a", "b"]], ["no-match", []], ["%", ["c"]], ["_", ["c"]], ["\\", ["c"]], ["%_\\", ["c"]]] as const) {
@@ -209,4 +213,145 @@ test("account route lets the owner read history and stops another user first", a
     assert.equal(saved?.sourceStatus, 4);
     assert.equal(saved?.sourceStatusPublicCandidate, false);
     assert.equal("publicRead" in (saved ?? {}), false);
+});
+
+/* ---------- API A：列表最小受权摘要 ---------- */
+
+const summaryRow = { id: "a-1", accountId: "a-1", displayNo: "A-1", ownerId: "u-1", revision: "3", sortAt: "2026-10-03T00:00:00.000000Z", accountCreatedAt: "2026-01-02T03:04:05.000000Z", accountUpdatedAt: null, versionId: "v-1", sequence: "2", title: "100M 不包赔账号", reviewState: "PUBLISHED", versionCreatedAt: "2026-02-02T02:02:02.000000Z", ruleReleaseId: "release-1", priceVersionId: "price-1", ownerName: "阿洛", gameName: "三角洲" };
+const summaryDetail = {
+    ownerName: "阿洛", available: false, blockers: ["PUBLISHER_BAIL_UNCONFIRMED"],
+    version: {
+        id: "v-1", sequence: "2", contentHash: "hash-1", releaseId: "release-1",
+        publication: { source: "OWNER_DIRECT", publishedAt: "2026-02-03T00:00:00.000Z" },
+        declaration: { attributes: {}, inventory: [{ itemId: "haff-unit-1", quantity: "12500000" }, { itemId: "bullets", quantity: "120" }] },
+        catalogItems: [{ id: "haff-unit-1", unit: "HAFF_BASE" }, { id: "bullets", unit: "ROUND" }],
+        quote: {
+            currency: "CNY", ruleReleaseId: "release-1", catalogRevision: "9",
+            resourceTotal: { amount: "212.77", currency: "CNY", unit: "yuan", scale: "2" },
+            tenantDeposit: { amount: "50.00", currency: "CNY", unit: "yuan", scale: "2" },
+            tenantPayableTotal: { amount: "262.77", currency: "CNY", unit: "yuan", scale: "2" },
+            ownerTotal: { amount: "190.00", currency: "CNY", unit: "yuan", scale: "2" },
+            publisherBailRequirement: { amount: "300.00", currency: "CNY", unit: "yuan", scale: "2" },
+        },
+    },
+};
+function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean } = {}) {
+    const sql: string[] = [];
+    const client = { query: async (text: string, values?: unknown[]) => {
+        sql.push(text);
+        if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
+        if (text.includes("p.funding_policy AS policy,p.status AS status")) {
+            if (options.policy === undefined) return { rows: [] };
+            return { rows: [{ accountId: "a-1", status: "SEALED", policy: options.policy }] };
+        }
+        if (text.includes("account_guarantee_proof")) return { rows: options.proof === undefined ? [] : [options.proof] };
+        if (text.includes('FROM zzsh_auth_user."user" WHERE id=ANY')) {
+            if (!options.users) throw Error("owner summary must not be read without user.directory.read");
+            return { rows: [{ id: "u-1", name: "阿洛", image: "https://cdn.example/avatar.png", phone: "13800138000" }, { id: "u-2", name: "阿洛乙", image: null, phone: null }] };
+        }
+        return { rows: [], rowCount: 0 };
+    }, } as never;
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(viewerPermissions) } };
+    return { sql, client, viewer };
+}
+
+/** Mirrors the real quote projection: a public viewer never receives internal owner amounts. */
+const publicOrAdminQuote = (quoteViewer: string) => quoteViewer === "admin" ? summaryDetail
+    : { ...summaryDetail, version: { ...summaryDetail.version, quote: { ...summaryDetail.version.quote, ownerTotal: undefined, publisherBailRequirement: undefined } } };
+
+/** publishing.publicationBlockers always asks the gate for the row; the mock must too. */
+const detailThatReadsGate = async (_c: unknown, account: PublishingAccount, _v: string, gate: unknown, quoteViewer: string) => {
+    if (typeof gate === "function") await (gate as (client: unknown, account: PublishingAccount) => Promise<unknown>)(null, account);
+    return publicOrAdminQuote(quoteViewer);
+};
+
+test("list summary reports only authoritative facts and keeps every missing fact unprovided", async t => {
+    t.mock.method(publishing, "readPublishingAccount", async (_c: unknown, id: string) => ({ ...fixtureAccount, id, owner_user_id: id === "a-1" ? "u-1" : "u-2", current_version_id: "v-1", revision: "3" }));
+    t.mock.method(publishing, "listingDetail", detailThatReadsGate);
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });
+    const { sql, client, viewer } = summaryHarness(["supply.review.read"]);
+    const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    assert.equal(page.items.length, 2);
+    const item = page.items[0] as Record<string, any>;
+    assert.equal(item.summary.haff.itemId, "haff-unit-1", "haff line comes from the catalog unit, not a fixed itemId");
+    assert.equal(item.summary.haff.quantity, "12500000");
+    assert.equal(item.summary.quote.resourceTotal.amount, "212.77", "amounts keep the interface decimal string");
+    assert.ok(!JSON.stringify(item.summary).includes("212.8"), "no rounding of frozen amounts");
+    assert.equal(item.summary.fullPayout, "NOT_DECLARED", "a title containing 包赔 never becomes a payout decision");
+    assert.equal(item.summary.baseDeposit, null);
+    assert.equal(item.summary.guarantee.requirement, null);
+    assert.equal(item.summary.guarantee.requirementSource, "UNAVAILABLE", "missing policy is not 不要求");
+    assert.equal(item.summary.guarantee.eligibility, "UNCONFIRMED", "gate blocker code is the only eligibility source");
+    assert.equal(item.summary.guarantee.recordedProof, null);
+    assert.equal(item.summary.timing.accountCreatedAt, summaryRow.accountCreatedAt);
+    assert.equal(item.summary.timing.accountUpdatedAt, null, "absent update time stays absent, never the sort time");
+    assert.equal(item.summary.timing.versionCreatedAt, summaryRow.versionCreatedAt);
+    assert.equal(item.ownerLink.state, "DENIED");
+    assert.equal("ownerSummary" in item, false, "no owner contact projection without directory read");
+    assert.equal(item.summary.quote.ownerTotal, null, "internal owner amount stays outside a public quote viewer");
+    assert.equal(item.summary.refs.priceVersionId, "price-1");
+    // 页级补读只跑一次，不随行数增长。
+    assert.equal(sql.filter(s => s.includes("account_guarantee_proof")).length, 1);
+    assert.equal(sql.filter(s => s.includes("p.funding_policy AS policy,p.status AS status")).length, 1);
+});
+
+test("list summary gates internal amounts and owner contact projection behind their own permissions", async t => {
+    t.mock.method(publishing, "readPublishingAccount", async (_c: unknown, id: string) => ({ ...fixtureAccount, id, owner_user_id: id === "a-1" ? "u-1" : "u-2", current_version_id: "v-1" }));
+    t.mock.method(publishing, "listingDetail", detailThatReadsGate);
+    t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
+    const internal = summaryHarness(["supply.review.read", "supply.quote.internal.read", "user.directory.read"], {
+        policy: fundingPolicyFixture("FIXED_CENTS"),
+        proof: { accountId: "a-1", id: "proof-1", versionNo: "2", ownerUserId: "u-1", priceVersionId: "price-1", policyVersion: "1", status: "SATISFIED", requiredCents: "30000", coveredCents: "30000", validUntil: "2026-12-01T00:00:00.000000Z", valid: true },
+        users: true,
+    });
+    const fixedPolicyGate = async () => ({ publisherBail: "SATISFIED" as const, occupancy: "FREE" as const, reference: "proof-1" });
+    const page = await listSupervision(internal.client, internal.viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), fixedPolicyGate, queryKey);
+    const first = page.items[0] as Record<string, any>, second = page.items[1] as Record<string, any>;
+    assert.equal(first.summary.quote.ownerTotal.amount, "190.00", "internal quote read exposes the frozen owner amount only to that permission");
+    assert.equal(first.summary.guarantee.requirement.mode, "FIXED_CENTS");
+    assert.equal(first.summary.guarantee.requirement.requiredCents, "3000");
+    assert.equal(first.summary.guarantee.requirementSource, "FIXED_FUNDING_POLICY", "without a credit snapshot the fixed policy is still authoritative, and says so");
+    assert.equal(first.summary.guarantee.recordedProof.status, "SATISFIED", "recorded proof stays a recorded fact");
+    assert.equal(first.ownerLink.state, "READY");
+    assert.equal(first.ownerSummary.maskedPhone, "138****8000", "only the existing masked projection leaves the server");
+    assert.equal(second.ownerSummary.maskedPhone, null);
+    assert.equal(second.summary.guarantee.requirement, null, "no policy row means 未提供, not 0");
+    assert.equal(second.summary.guarantee.requirementSource, "UNAVAILABLE");
+});
+
+test("R1 the guarantee requirement follows the enabled mechanism, never the stale fixed policy", async t => {
+    t.mock.method(publishing, "readPublishingAccount", async (_c: unknown, id: string) => ({ ...fixtureAccount, id, owner_user_id: "u-1", current_version_id: "v-1" }));
+    t.mock.method(publishing, "listingDetail", detailThatReadsGate);
+    t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
+    const waiver = fundingPolicyFixture("NOT_REQUIRED"), fixed = fundingPolicyFixture("FIXED_CENTS");
+    const fixedPolicyGate: SupplyGateReader = async () => ({ publisherBail: "SATISFIED", occupancy: "FREE", reference: "proof-1" });
+    const noGateAnswer: SupplyGateReader = async () => ({ publisherBail: "UNKNOWN", occupancy: "UNKNOWN", reference: null });
+    const creditGate = (status: "SATISFIED" | "NOT_REQUIRED" | "REQUIRED_UNCOVERED" | "UNKNOWN", requiredCents: string | null): SupplyGateReader => async () => ({
+        publisherBail: status === "NOT_REQUIRED" ? "NOT_REQUIRED" : status === "SATISFIED" ? "SATISFIED" : "PENDING",
+        occupancy: "FREE",
+        reference: "credit:price-1:1",
+        creditGuarantee: { status, accountId: "a-1", ownerUserId: "u-1", gameId: "fixture-game", listingVersionId: "v-1", priceVersionId: "price-1", releaseId: "release-1", creditRevision: "4", coverageRevision: null, requiredCents, reference: "credit:price-1:1" },
+    });
+    const cases: [string, unknown, SupplyGateReader, { requirement: { mode: "FIXED_CENTS" | "NOT_REQUIRED"; requiredCents: string } | null; requirementSource: string }][] = [
+        ["fixed policy still authoritative when no credit mechanism answers", fixed, fixedPolicyGate, { requirement: { mode: "FIXED_CENTS", requiredCents: "3000" }, requirementSource: "FIXED_FUNDING_POLICY" }],
+        ["credit requires payment while the legacy policy says NOT_REQUIRED", waiver, creditGate("REQUIRED_UNCOVERED", "500"), { requirement: { mode: "FIXED_CENTS", requiredCents: "500" }, requirementSource: "CREDIT_GUARANTEE" }],
+        ["credit waives it outright", fixed, creditGate("NOT_REQUIRED", "0"), { requirement: { mode: "NOT_REQUIRED", requiredCents: "0" }, requirementSource: "CREDIT_GUARANTEE" }],
+        ["credit context unknown fails closed instead of the old policy", waiver, creditGate("UNKNOWN", null), { requirement: null, requirementSource: "UNAVAILABLE" }],
+        ["no authoritative gate answer fails closed", waiver, noGateAnswer, { requirement: null, requirementSource: "UNAVAILABLE" }],
+    ];
+    for (const [label, policy, gate, expected] of cases) {
+        await t.test(label, async () => {
+            const harness = summaryHarness(["supply.review.read"], { policy });
+            const page = await listSupervision(harness.client, harness.viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), gate, queryKey);
+            const guarantee = (page.items[0] as Record<string, any>).summary.guarantee;
+            assert.deepEqual({ requirement: guarantee.requirement, requirementSource: guarantee.requirementSource }, expected);
+        });
+    }
+    // 要求与资格是两条独立轴：信用机制给出 500 分要求时，资格仍按 gate 阻塞码单独判定。
+    const strict = summaryHarness(["supply.review.read"], { policy: waiver, proof: { accountId: "a-1", id: "proof-9", versionNo: "1", ownerUserId: "u-1", priceVersionId: "price-1", policyVersion: "1", status: "NOT_REQUIRED", requiredCents: "0", coveredCents: "0", validUntil: null, valid: true } });
+    const strictPage = await listSupervision(strict.client, strict.viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), creditGate("REQUIRED_UNCOVERED", "500"), queryKey);
+    const axes = (strictPage.items[0] as Record<string, any>).summary.guarantee;
+    assert.equal(axes.requirement.requiredCents, "500");
+    assert.equal(axes.eligibility, "UNCONFIRMED", "the amount comes from the credit snapshot while eligibility stays its own gate fact");
+    assert.equal(axes.recordedProof.status, "NOT_REQUIRED", "a historical waiver proof record is reported as recorded material, not as today's requirement");
 });

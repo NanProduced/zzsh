@@ -4,7 +4,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { assertGameScope, invalid, notFound } from "./supply-util";
 
-type Definition = { table: string; permission: string; resultKey?: string; scopeIsTarget?: boolean; platformMedia?: boolean };
+type Definition = { table: string; permission: string; resultKey?: string; scopeIsTarget?: boolean; platformMedia?: boolean; bossOnly?: boolean };
 const operations = new Map<string, Definition>();
 for (const [kind, table] of Object.entries({ items: "billable_item", rarities: "skin_rarity", categories: "skin_category", skins: "skin", entitlements: "entitlement", skin_owners: "skin_owner" })) {
   operations.set(`supply.catalog.${kind}.create`, { table, permission: ADMIN_PERMISSION.supplyCatalogManage });
@@ -15,14 +15,23 @@ for (const kind of ["price", "term", "agreement", "full_payout_terms"]) {
     operations.set(`supply.rules.${kind}_draft.${action}`, { table: `${kind}_version`, permission: ADMIN_PERMISSION.supplyRulesEdit, scopeIsTarget: action !== "create" });
   }
 }
-operations.set("supply.rules.release.activate", { table: "rule_release", permission: ADMIN_PERMISSION.supplyRulesEdit, resultKey: "releaseId" });
-operations.set("supply.game.create", { table: "game", permission: ADMIN_PERMISSION.supplyCatalogManage });
+operations.set("supply.rules.release.activate", { table: "rule_release", permission: ADMIN_PERMISSION.supplyRulesActivate, resultKey: "releaseId", bossOnly: true });
+operations.set("supply.game.create", { table: "game", permission: ADMIN_PERMISSION.supplyCatalogManage, bossOnly: true });
 operations.set("supply.game.update", { table: "game", permission: ADMIN_PERMISSION.supplyCatalogManage, scopeIsTarget: true });
+// 封面写的真实回执只有 gameId；目标取自回执本身，调用方 resourceId 只用于定位原作用域。
+operations.set("supply.game.cover", { table: "game", permission: ADMIN_PERMISSION.supplyCatalogManage, resultKey: "gameId" });
+for (const [kind, table] of Object.entries({ classification: "firearm_classification", firearm: "firearm", alias: "firearm_alias", code: "gunsmith_code" })) {
+  operations.set(`supply.gunsmith.${kind}.create`, { table, permission: ADMIN_PERMISSION.supplyGunsmithManage });
+  operations.set(`supply.gunsmith.${kind}.update`, { table, permission: ADMIN_PERMISSION.supplyGunsmithManage, scopeIsTarget: true });
+}
+for (const action of ["withdraw", "restore"]) operations.set(`supply.gunsmith.code.${action}`, { table: "gunsmith_code", permission: ADMIN_PERMISSION.supplyGunsmithManage, scopeIsTarget: true });
 operations.set("supply.media.upload_intent.create", { table: "media_upload_intent", permission: ADMIN_PERMISSION.supplyCatalogManage, resultKey: "intentId", platformMedia: true });
 operations.set("supply.media.upload", { table: "media_upload_intent", permission: ADMIN_PERMISSION.supplyCatalogManage, scopeIsTarget: true, platformMedia: true });
-for (const operation of ["review", "visibility"]) operations.set(`supply.media.${operation}`, { table: "media_asset", permission: ADMIN_PERMISSION.supplyReviewDecide, scopeIsTarget: true, platformMedia: true });
+// review/visibility 走同一管理入口，USER_SUPPLY 的合法原回执同样必须可核对；
+// 这不是放开新审核能力，权限、对象范围与游戏范围仍按原写复核。
+for (const operation of ["review", "visibility"]) operations.set(`supply.media.${operation}`, { table: "media_asset", permission: ADMIN_PERMISSION.supplyReviewDecide, scopeIsTarget: true });
 
-const safeFields = ["id", "intentId", "assetId", "releaseId", "revision", "generation", "status", "technicalState", "reviewState", "accessClass", "visibility", "expiresAt", "noop"];
+const safeFields = ["id", "intentId", "assetId", "gameId", "releaseId", "revision", "generation", "status", "technicalState", "reviewState", "accessClass", "visibility", "expiresAt", "noop", "enabled"];
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 
 export async function readAdminSupplyOperationResult(client: PoolClient, actorId: string, access: EffectiveAdminAccess, query: URLSearchParams, keyHeader: string | undefined) {
@@ -30,6 +39,7 @@ export async function readAdminSupplyOperationResult(client: PoolClient, actorId
   const operation = query.get("operation") ?? "", definition = operations.get(operation);
   if (!definition) throw invalid("Operation does not support result recovery", "operation");
   requirePermission(access, definition.permission);
+  if (definition.bossOnly && !access.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Original operation is boss-only");
   const resourceId = query.has("resourceId") ? query.get("resourceId")! : undefined;
   if (resourceId !== undefined && !id(resourceId)) throw invalid("Invalid original resource", "resourceId");
   const fingerprint = query.get("fingerprint");

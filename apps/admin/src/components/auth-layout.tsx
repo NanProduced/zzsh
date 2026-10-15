@@ -6,7 +6,10 @@ import { AuthShell, type AuthShellVariant } from "./devl/auth-shell";
 type AuthLayoutProps = {
   children: ReactNode;
   theme: "dark" | "light";
-  onToggleTheme: () => void;
+  themeMode?: "light" | "dark" | "system";
+  onToggleTheme?: () => void;
+  onSelectThemeMode?: (mode: "light" | "dark" | "system") => void;
+  themeStorageError?: boolean;
   variant?: AuthShellVariant;
   forceMobile?: boolean;
 };
@@ -14,7 +17,10 @@ type AuthLayoutProps = {
 export function AuthLayout({
   children,
   theme,
+  themeMode,
   onToggleTheme,
+  onSelectThemeMode,
+  themeStorageError = false,
   variant = "welcome",
   forceMobile = false,
 }: AuthLayoutProps) {
@@ -42,7 +48,21 @@ export function AuthLayout({
       variant={variant}
       brandTag={brandTag}
       mobileBrandTag={mobileBrandTag}
-      topRight={<ThemeToggle theme={theme} onToggle={onToggleTheme} />}
+      topRight={
+        <div className="flex items-center gap-2">
+          {themeStorageError && (
+            <span className="inline-flex items-center rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-500 font-medium">
+              已临时应用，无法保存在此浏览器
+            </span>
+          )}
+          <ThemeToggle
+            theme={theme}
+            mode={themeMode}
+            onSelectMode={onSelectThemeMode}
+            onToggle={onToggleTheme}
+          />
+        </div>
+      }
     >
       {children}
     </AuthShell>

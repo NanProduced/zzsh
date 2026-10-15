@@ -7,6 +7,8 @@
  * 展示图以免审/受权恢复 + 技术就绪为公开资格,凭证始终私有。
  */
 
+import type { InlineStatusTone } from "../../components/ui/badge";
+
 export type QueueItem = {
   id: string;
   game_id: string;
@@ -45,7 +47,27 @@ export type MediaBinding = {
 export type SupplyWorkView = "all" | "changes" | "restricted" | "paused" | "orders";
 export type SupplyQueryKind = "account" | "legacy" | "owner" | "nickname" | "order" | "link";
 export type SupplyFacts = { publicVisible: boolean | null; publicSource: string | null; newOrders: boolean | null; reasons: string[]; primaryReasonCode?: string | null; ownerPaused: boolean; staffRestricted: boolean; occupancy: "FREE" | "OCCUPIED" | "UNKNOWN"; sources: Array<{ sourceSystem: string; sourceEntity: string; sourceId: string; businessNo: string | null }>; legacyNumbers: string[] };
-export type SupplyWorkItem = { id: string; accountId: string; displayNo: string | null; ownerId: string; ownerName: string; revision: string; gameName: string; versionId: string | null; sequence: string | null; title: string | null; reviewState: string | null; sortAt: string; facts: SupplyFacts };
+/** 列表最小受权摘要：金额保持接口原始十进制字符串，缺字段一律 null（未提供），不由前端补齐。 */
+export type SupplyQuoteAmount = { amount: string; currency: string | null; unit: string | null; scale: string | null } | null;
+export type SupplyListSummary = {
+  versionId: string | null;
+  sequence: string | null;
+  refs: { ruleReleaseId: string | null; priceVersionId: string | null; contentHash: string | null; catalogRevision: string | null; publicationSource: string | null; publishedAt: string | null };
+  timing: { accountCreatedAt: string; accountUpdatedAt: string | null; versionCreatedAt: string | null };
+  haff: { itemId: string; quantity: string | null; unit: "HAFF_BASE" } | null;
+  quote: { currency: string | null; resourceTotal: SupplyQuoteAmount; tenantDeposit: SupplyQuoteAmount; tenantPayableTotal: SupplyQuoteAmount; ownerTotal?: SupplyQuoteAmount; publisherBailRequirement?: SupplyQuoteAmount; frozen: boolean; personalised: boolean } | null;
+  baseDeposit: { amountCents: string } | null;
+  fullPayout: "SELECTED" | "NOT_SELECTED" | "NOT_DECLARED";
+  guarantee: {
+    requirement: { mode: "FIXED_CENTS" | "NOT_REQUIRED"; requiredCents: string } | null;
+    /** 要求轴的依据来源：启用信用机制时为权威快照，否则为固定资金政策；UNAVAILABLE 表示本次没有现行要求依据。 */
+    requirementSource: "CREDIT_GUARANTEE" | "FIXED_FUNDING_POLICY" | "UNAVAILABLE";
+    eligibility: "CONFIRMED" | "UNCONFIRMED" | null;
+    recordedProof: { id: string; versionNo: string; ownerUserId: string; priceVersionId: string; policyVersion: string; status: string; requiredCents: string; coveredCents: string; validUntil: string | null; valid: boolean } | null;
+  };
+};
+export type SupplyOwnerSummary = { name: string; image: string | null; maskedPhone: string | null };
+export type SupplyWorkItem = { id: string; accountId: string; displayNo: string | null; ownerId: string; ownerName: string; revision: string; gameName: string; versionId: string | null; sequence: string | null; title: string | null; reviewState: string | null; sortAt: string; facts: SupplyFacts; accountCreatedAt?: string; accountUpdatedAt?: string | null; versionCreatedAt?: string | null; summary?: SupplyListSummary | null; ownerLink?: { state: "READY" | "DENIED" }; ownerSummary?: SupplyOwnerSummary | null };
 export type SupplyWorkPage = { contractVersion: string; contextKey: string; items: SupplyWorkItem[]; nextCursor: string | null; stationOrigins: { admin: string; user: string }; games?: Array<{ id: string; name: string }> };
 export type RestrictionEvent = { id: string; reason: string | null; occurredAt: string; actorName: string | null; beforeRevision: string | null; afterRevision: string | null; versionId: string | null; restricted: boolean | null };
 export type SupplyWorkDetail = Omit<Detail, "version"> & {
@@ -211,6 +233,12 @@ const STATE_LABELS: Record<string, string> = {
   IMPORTED_UNVERIFIED: "导入未核实",
 };
 
+// 行内接单状态：标签与语气由领域给出；待核（读取未知）不等于不可接单。
+export function newOrdersStatus(facts: Pick<SupplyFacts, "newOrders">): { label: string; tone: InlineStatusTone } {
+  if (facts.newOrders === null) return { label: "待核", tone: "unknown" };
+  return facts.newOrders ? { label: "可接单", tone: "success" } : { label: "不可接单", tone: "warning" };
+}
+
 export function reviewStateLabel(state: string): string {
   return STATE_LABELS[state] ?? state;
 }
@@ -345,6 +373,13 @@ export function formatAmount(amount: string): string {
   const digits = negative ? integer.slice(1) : integer;
   const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${negative ? "-" : ""}${grouped}${fraction ? `.${fraction}` : ""}`;
+}
+
+// 资金政策金额单位是 cent 整数字符串：用字符串切片换算，不经浮点。
+export function formatFundingCents(cents: string | null | undefined): string {
+  if (!cents || !/^(0|[1-9]\d*)$/.test(cents)) return "未提供";
+  const padded = cents.padStart(3, "0");
+  return `¥${formatAmount(padded.slice(0, -2))}.${padded.slice(-2)}`;
 }
 
 export function formatTermDays(termSeconds: string): string {

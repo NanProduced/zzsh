@@ -323,3 +323,357 @@ test("StrictMode restores audit reads and unmount rejects late responses", async
     globalThis.fetch = undefined;
   }
 });
+
+test("initial loading shows skeleton and '正在读取…', never '0条' or empty state", async () => {
+  let releaseLoad;
+  globalThis.fetch = async () => new Promise((resolve) => {
+    releaseLoad = () => resolve(json({
+      events: [auditEvent("e1", "admin.account.updated", {})],
+      nextCursor: null,
+      scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+    }));
+  });
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    assert.match(view.rootNode.textContent, /正在读取…/);
+    assert.equal(view.rootNode.textContent.includes("0 条"), false, "never shows 0 条 while initial loading");
+    assert.equal(view.rootNode.textContent.includes("暂无"), false, "never shows 暂无 while initial loading");
+    const skeletons = view.rootNode.querySelectorAll('[data-slot="skeleton"]');
+    assert.ok(skeletons.length >= 5, "renders skeleton placeholder rows while loading");
+
+    releaseLoad();
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.match(view.rootNode.textContent, /1 条/);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("first page empty without filters shows '当前可见范围暂无账号与权限事件'", async () => {
+  globalThis.fetch = async () => json({ events: [], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" });
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("当前可见范围暂无账号与权限事件"));
+    assert.match(view.rootNode.textContent, /0 条/);
+    assert.equal(view.rootNode.textContent.includes("清除筛选"), false, "no clear filters button when query has no filters");
+    assert.equal(view.rootNode.textContent.includes("新建"), false, "no create action on audit records");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("first page empty with filters shows '当前筛选无匹配记录' and clear filters resets query", async () => {
+  calls = [];
+  const changes = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), browser.location.href);
+    calls.push({ path: url.pathname, params: url.searchParams });
+    if (url.searchParams.get("action") === "admin.frozen") {
+      return json({ events: [], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" });
+    }
+    return json({
+      events: [auditEvent("e1", "admin.account.updated", {})],
+      nextCursor: null,
+      scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+    });
+  };
+
+  const view = await renderView({
+    snapshot: snapshot(["admin.audit.read"]),
+    initialQuery: { action: "admin.frozen" },
+    onQueryChange: (q) => changes.push(q),
+  });
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("当前筛选无匹配记录"));
+    assert.match(view.rootNode.textContent, /0 条/);
+    const clearBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "清除筛选");
+    assert.ok(clearBtn, "shows clear filters button");
+
+    await click(clearBtn);
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.deepEqual(changes.at(-1), {}, "onQueryChange reports cleared query");
+    assert.equal(calls.at(-1).params.get("action"), null, "clear filters re-fetched without action");
+    assert.match(view.rootNode.textContent, /1 条/);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("non-first page empty shows '当前页暂无记录' with back and home buttons", async () => {
+  calls = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), browser.location.href);
+    calls.push({ path: url.pathname, params: url.searchParams });
+    if (url.searchParams.get("cursor") === "PAGE2") {
+      return json({ events: [], nextCursor: null, scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT" });
+    }
+    return json({
+      events: [auditEvent("e1", "admin.account.updated", {})],
+      nextCursor: "PAGE2",
+      scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+    });
+  };
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    const nextBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "下一页");
+    assert.ok(nextBtn && !nextBtn.disabled);
+    await click(nextBtn);
+
+    await waitFor(() => view.rootNode.textContent.includes("当前页暂无记录"));
+    assert.ok(!view.rootNode.textContent.includes("当前筛选无匹配记录"), "does not confuse empty page with empty query");
+
+    const prevBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "返回上一页");
+    assert.ok(prevBtn, "renders return to previous page button");
+    await click(prevBtn);
+
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.match(view.rootNode.textContent, /第 1 页/);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("initial read 500 displays failure empty state and retry recovers", async () => {
+  let attempt = 0;
+  globalThis.fetch = async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      return json({ error: { code: "INTERNAL_ERROR", requestId: "req-err-1" } }, 500);
+    }
+    return json({
+      events: [auditEvent("e1", "admin.account.updated", {})],
+      nextCursor: null,
+      scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+    });
+  };
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
+    assert.match(view.rootNode.textContent, /读取失败/);
+    assert.equal(view.rootNode.textContent.includes("0 条"), false, "error does not show 0 条");
+    assert.equal(view.rootNode.textContent.includes("没有更多记录"), false, "error does not show end of feed");
+
+    const retryBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "重试");
+    assert.ok(retryBtn, "retry button is available");
+
+    await click(retryBtn);
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.match(view.rootNode.textContent, /1 条/);
+    assert.equal(view.rootNode.textContent.includes("读取失败"), false);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("contract violation with missing events array throws and shows failure state", async () => {
+  globalThis.fetch = async () => json({ wrongField: "not-an-array" });
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
+    assert.match(view.rootNode.textContent, /缺少必需的 events 列表/);
+    assert.equal(view.rootNode.textContent.includes("0 条"), false, "malformed response does not masquerade as 0 results");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("same query refresh failure retains existing rows and shows warning alert", async () => {
+  let callCount = 0;
+  globalThis.fetch = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return json({
+        events: [auditEvent("e1", "admin.account.updated", {})],
+        nextCursor: null,
+        scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+      });
+    }
+    return json({ error: { code: "SERVICE_UNAVAILABLE", requestId: "req-down-1" } }, 503);
+  };
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.match(view.rootNode.textContent, /1 条/);
+
+    // Trigger a refresh with the same query via refreshNonce
+    await view.render({ refreshNonce: 1 });
+    await waitFor(() => view.rootNode.textContent.includes("数据未更新"));
+
+    // Previous row is still displayed!
+    assert.ok(tableText(view).includes("admin.account.updated"), "retains existing records on same-query refresh failure");
+    assert.match(view.rootNode.textContent, /1 条（未更新）/);
+    assert.match(view.rootNode.textContent, /刷新失败：当前展示为上次成功获取的内容（未能更新）/);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("query change failure does not retain old records from previous query", async () => {
+  let callCount = 0;
+  globalThis.fetch = async (input) => {
+    callCount += 1;
+    const url = new URL(String(input), browser.location.href);
+    if (url.searchParams.get("actorUsername") === "ZZ00009") {
+      return json({ error: { code: "INTERNAL_ERROR" } }, 500);
+    }
+    return json({
+      events: [auditEvent("e1", "admin.account.updated", {})],
+      nextCursor: null,
+      scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+    });
+  };
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+
+    // Submit new query with different actor
+    const actorInput = [...view.rootNode.querySelectorAll("form input")][0];
+    setInput(actorInput, "ZZ00009");
+    const form = view.rootNode.querySelector("form");
+    await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
+    await settle();
+
+    await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
+    assert.equal(tableText(view).includes("admin.account.updated"), false, "does not leak previous records into new failed query");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("end-of-feed badge is shown when nextCursor is null and hidden when nextCursor exists", async () => {
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.searchParams.get("cursor") === "PAGE2") {
+      return json({
+        events: [auditEvent("e2", "admin.frozen", {})],
+        nextCursor: null,
+        scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+      });
+    }
+    return json({
+      events: [auditEvent("e1", "admin.account.updated", {})],
+      nextCursor: "PAGE2",
+      scope: "BOSS_ALL_GENERIC_ADMIN_AUDIT",
+    });
+  };
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.equal(view.rootNode.textContent.includes("当前查询没有更多记录"), false, "no end-of-feed when nextCursor exists");
+
+    const nextBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "下一页");
+    await click(nextBtn);
+    await waitFor(() => tableText(view).includes("admin.frozen"));
+
+    assert.ok(view.rootNode.textContent.includes("当前查询没有更多记录"), "renders end-of-feed when nextCursor is null");
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("403 error or revoked permissions clears records and shows unauthorized state", async () => {
+  globalThis.fetch = async () => json({ error: { code: "FORBIDDEN" } }, 403);
+
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("当前账号没有账号与权限审计读取权限"));
+    assert.equal(tableText(view).includes("admin.account.updated"), false);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("F1: page-two failure retry replays target cursor instead of resetting to first page", async () => {
+  const seen = [];
+  globalThis.fetch = async (input) => {
+    const u = new URL(String(input), browser.location.href);
+    seen.push(u.searchParams.get("cursor"));
+    return seen.length === 2
+      ? json({ error: { message: "fixture fail" } }, 500)
+      : json({ events: [auditEvent("one", "admin.account.updated", {})], nextCursor: "AC1" });
+  };
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "下一页"));
+    await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
+    await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "重试"));
+    // Target was AC1, retry must replay AC1!
+    assert.deepEqual(seen, [null, "AC1", "AC1"]);
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("F1: new filter failure retry keeps new filter with cursor=null instead of mixing with previous page cursor", async () => {
+  const seen = [];
+  globalThis.fetch = async (input) => {
+    const u = new URL(String(input), browser.location.href);
+    seen.push({ cursor: u.searchParams.get("cursor"), actor: u.searchParams.get("actorUsername") });
+    return seen.length === 3
+      ? json({ error: { message: "fixture fail" } }, 500)
+      : json({ events: [auditEvent("one", "admin.account.updated", {})], nextCursor: "AC1" });
+  };
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
+  try {
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "下一页"));
+    await act(async () => setInput(view.rootNode.querySelector('input[placeholder="如 ZZ00001"]'), "ZZ00002"));
+    await act(async () => view.rootNode.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
+    await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "重试"));
+    // Attempt 3 was cursor: null, actor: ZZ00002 (failed).
+    // Attempt 4 (retry) must replay cursor: null, actor: ZZ00002 (NOT AC1)!
+    assert.deepEqual(seen[2], { cursor: null, actor: "ZZ00002" });
+    assert.deepEqual(seen[3], { cursor: null, actor: "ZZ00002" });
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("F2: successful refresh after 403 unlatches forbidden state and displays records", async () => {
+  let callCount = 0;
+  globalThis.fetch = async () => {
+    callCount += 1;
+    return callCount === 1
+      ? json({ error: { code: "FORBIDDEN", message: "temporarily denied" } }, 403)
+      : json({ events: [auditEvent("after-recovery", "admin.account.updated", {})], nextCursor: null });
+  };
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), refreshNonce: 0, initialQuery: {} });
+  try {
+    await waitFor(() => view.rootNode.textContent.includes("当前账号没有"));
+    assert.equal(tableText(view), "");
+
+    // Service recovers and user triggers workspace refresh via refreshNonce
+    await view.render({ refreshNonce: 1 });
+    await settle();
+    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    assert.equal(view.rootNode.textContent.includes("当前账号没有"), false);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});

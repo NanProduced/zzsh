@@ -24,6 +24,10 @@ globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 globalThis.requestAnimationFrame = browser.requestAnimationFrame.bind(browser);
 globalThis.cancelAnimationFrame = browser.cancelAnimationFrame.bind(browser);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+// 产品代码读写 globalThis.sessionStorage；显式绑定到本测试窗口的存储，
+// 不依赖 Node 某个启动环境是否默认提供 Web Storage。用例结束由 happyDOM.abort 回收。
+Object.defineProperty(globalThis, "sessionStorage", { value: browser.sessionStorage, configurable: true, writable: true });
+
 const { createRoot } = await import("react-dom/client");
 
 const vite = await createServer({
@@ -108,12 +112,40 @@ const auditEvent = (id, action, options = {}) => ({
 });
 
 let auditCalls = [];
+let candidateCalls = [];
+let recoveryCalls = [];
+let recoveryResponse = { knowledge: "UNRESOLVED", operation: "approval.request.execute", key: "idem_x", explanationCode: "RECEIPT_NOT_FOUND", resolution: "UNKNOWN_NOT_ABSENT" };
 
 async function mockFetch(input, init = {}) {
   const url = new URL(String(input), browser.location.href);
   if ((init.method ?? "GET") !== "GET") return json({});
   if (url.pathname.endsWith("/security/approvals/templates")) {
     return json({ templates: [{ id: "tpl-1", operationCode: "approval.test.execute", triggerCondition: "manual", version: 1, updatedAt: null, candidates: [{ username: "zz00001", name: "Boss", status: "ACTIVE", eligible: true }] }] });
+  }
+  if (url.pathname.endsWith("/security/approvals/operations")) {
+    return json({
+      operations: [
+        { operationCode: "membership.entitlement.grant", businessType: "membership", title: "发放会员礼遇权益", executionMode: "GENERIC_TRANSACTION", testOnly: false, initiation: { allowed: true, reasonCode: "OK", requiredPermission: "approval.request.create" }, triggers: [{ triggerCondition: "membership.entitlement.grant.requested", templateVersion: 1, candidateTotal: 2, candidateEligible: 1, blockingReasonCode: null }] },
+        { operationCode: "order.settlement.adjust", businessType: "settlement", title: "人工调整订单结算", executionMode: "SOURCE_BUSINESS", testOnly: false, initiation: { allowed: false, reasonCode: "INITIATED_FROM_SOURCE_BUSINESS", requiredPermission: "approval.request.create" }, triggers: [] },
+      ],
+      unregisteredOperationPolicy: "未知操作只读展示并给出原因，不进入通用执行器",
+      scope: "REGISTERED_OPERATIONS_FOR_CURRENT_ADMIN",
+      testOperationsEnabled: false,
+    });
+  }
+  if (url.pathname.endsWith("/security/approvals/candidate-options")) {
+    candidateCalls.push(url.search);
+    return json({
+      candidates: [{ username: "zz00002", displayUsername: "ZZ00002", name: "审批人", isBoss: false, eligible: true, reasonCode: "OK" }],
+      excludedByReason: { TWO_FACTOR_REQUIRED: 1 },
+      requesterExcluded: Boolean(url.searchParams.get("requestId")),
+      excludedFields: ["ip", "session", "credentials", "lastLoginAt"],
+      requiredPermission: "approval.template.configure",
+    });
+  }
+  if (url.pathname.endsWith("/security/approvals/recovery")) {
+    recoveryCalls.push(url.search);
+    return json(recoveryResponse);
   }
   if (url.pathname.endsWith("/security/admins")) {
     return json({ admins: [{ id: "admin-boss", username: "zz00001", name: "Boss", status: "ACTIVE" }] });
@@ -172,10 +204,14 @@ function setInput(element, value) {
   element.dispatchEvent(new browser.Event("input", { bubbles: true }));
 }
 
-function setSelect(element, value) {
-  const setValue = Object.getOwnPropertyDescriptor(browser.HTMLSelectElement.prototype, "value").set;
-  setValue.call(element, value);
-  element.dispatchEvent(new browser.Event("change", { bubbles: true }));
+/** 组件库 Select 的选项在弹层里，按 supply-controls.test.mjs 的既有做法点击触发器再点选项。 */
+async function chooseOption(trigger, label) {
+  await act(async () => trigger.click());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const option = [...browser.document.querySelectorAll('[role="option"]')].find((item) => item.textContent.trim() === label);
+  assert.ok(option, "option " + label);
+  await act(async () => option.click());
+  await settle();
 }
 
 function buttons(container) {
@@ -190,7 +226,8 @@ async function renderView(props = {}) {
   const rootNode = browser.document.createElement("div");
   browser.document.body.appendChild(rootNode);
   const root = createRoot(rootNode);
-  let latest = { snapshot: snapshot(), ...props };
+  // 默认页已改为「待我处理」；这些用例以「我的申请」为前提，显式声明而不是依赖默认。
+  let latest = { snapshot: snapshot(), initialTab: "mine", ...props };
   const render = async (extra = {}) => {
     latest = { ...latest, ...extra };
     await act(async () => {
@@ -220,15 +257,14 @@ test("audit tab filters reach the API, reset paging, render scope and sync the t
     assert.ok(view.rootNode.textContent.includes("Boss：全部审批与授权事件"), "scope label rendered");
 
     const form = buttonByText("查询审计").closest("form");
-    const [actionSelect, objectTypeSelect] = form.querySelectorAll("select");
-    const inputs = form.querySelectorAll("input");
-    setSelect(actionSelect, "approval.request.rejected");
-    setSelect(objectTypeSelect, "approval_request");
-    setInput(inputs[0], "ZZ00002");
-    setInput(inputs[1], "req-2");
+    const [actionSelect, objectTypeSelect] = form.querySelectorAll('[data-slot="select-trigger"]');
+    await chooseOption(actionSelect, "审批驳回");
+    await chooseOption(objectTypeSelect, "审批申请");
+    setInput(form.querySelector("#approval-audit-actor"), "ZZ00002");
+    setInput(form.querySelector("#approval-audit-request-id"), "req-2");
     await settle();
-    assert.equal(actionSelect.value, "approval.request.rejected", "action select applied");
-    assert.equal(objectTypeSelect.value, "approval_request", "objectType select applied");
+    assert.match(actionSelect.textContent, /审批驳回/, "action select applied");
+    assert.match(objectTypeSelect.textContent, /审批申请/, "objectType select applied");
     await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
     await settle();
     await waitFor(() => auditCalls.some((query) => query.includes("action=approval.request.rejected")));
@@ -290,7 +326,7 @@ test("detail renders supersede links that open the related requests", async () =
     const supersededNotice = view.rootNode.textContent.includes("本申请已被另一申请替代");
     assert.equal(supersededNotice, true, "superseded notice is visible without promising the terminal request");
     await click(buttonByText("查看被替代的原申请"));
-    assert.deepEqual(opened.at(-1), { id: "m0", title: "被替代的审批申请" });
+    assert.deepEqual(opened.at(-1), { id: "m0", title: "被替代的原申请" });
     await click(buttonByText("查看替代申请"));
     assert.deepEqual(opened.at(-1), { id: "m9", title: "替代本申请的审批申请" });
   } finally {
@@ -309,7 +345,7 @@ test("an external query change backfills the audit filters and reloads", async (
     await view.render({ initialQuery: { tab: "audit", actorUsername: "zz00001" } });
     await waitFor(() => auditCalls.length > before && auditCalls.at(-1).includes("actorUsername=zz00001"));
     const form = buttonByText("查询审计").closest("form");
-    assert.equal(form.querySelector("input").value, "zz00001", "filter form backfilled from the query");
+    assert.equal(form.querySelector("#approval-audit-actor").value, "zz00001", "filter form backfilled from the query");
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -323,7 +359,7 @@ test("Master: external URL matching an unsubmitted draft still reloads the appli
   try {
     await waitFor(() => auditCalls.some((query) => query.includes("actorUsername=zz00001")) && view.rootNode.querySelectorAll("tbody tr").length > 0);
     const form = buttonByText("查询审计").closest("form");
-    await act(async () => setInput(form.querySelector("input"), "zz00002"));
+    await act(async () => setInput(form.querySelector("#approval-audit-actor"), "zz00002"));
     await settle();
     const before = auditCalls.length;
     await view.render({ initialQuery: { tab: "audit", actorUsername: "zz00002" } });
@@ -331,7 +367,7 @@ test("Master: external URL matching an unsubmitted draft still reloads the appli
     await settle();
     assert.ok(auditCalls.length > before && auditCalls.at(-1).includes("actorUsername=zz00002"), "URL switched to zz00002 must reload the applied query instead of keeping zz00001 results");
     const appliedRows = [...view.rootNode.querySelectorAll("tbody tr")].map((row) => row.textContent).join("\n");
-    assert.ok(appliedRows.includes("审批拒绝"), "zz00002 results are now applied");
+    assert.ok(appliedRows.includes("审批驳回"), "zz00002 results are now applied");
     assert.ok(!appliedRows.includes("提交申请"), "zz00001 rows replaced");
   } finally {
     await view.cleanup();
@@ -353,7 +389,7 @@ test("Master: failed new filter cannot present previous rows as current results"
   try {
     await waitFor(() => view.rootNode.querySelectorAll("tbody tr").length > 0);
     const form = buttonByText("查询审计").closest("form");
-    await act(async () => setInput(form.querySelector("input"), "zz00002"));
+    await act(async () => setInput(form.querySelector("#approval-audit-actor"), "zz00002"));
     await click(buttonByText("查询审计"));
     await settle();
     const rows = [...view.rootNode.querySelectorAll("tbody tr")];
@@ -384,14 +420,14 @@ test("a late response from an older query cannot overwrite the newer results", a
   try {
     await waitFor(() => releaseOld !== null);
     const form = view.rootNode.querySelector("form");
-    await act(async () => setInput(form.querySelector("input"), "zz00002"));
+    await act(async () => setInput(form.querySelector("#approval-audit-actor"), "zz00002"));
     await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
-    await waitFor(() => [...view.rootNode.querySelectorAll("tbody tr")].some((row) => row.textContent.includes("审批拒绝")));
+    await waitFor(() => [...view.rootNode.querySelectorAll("tbody tr")].some((row) => row.textContent.includes("审批驳回")));
     releaseOld();
     await settle();
     await settle();
     const rows = [...view.rootNode.querySelectorAll("tbody tr")].map((row) => row.textContent).join("\n");
-    assert.ok(rows.includes("审批拒绝"), "newer zz00002 rows stay visible");
+    assert.ok(rows.includes("审批驳回"), "newer zz00002 rows stay visible");
     assert.ok(!rows.includes("提交申请"), "the stale zz00001 response was discarded");
     assert.equal([...view.rootNode.querySelectorAll("tbody tr")].length, 1, "only the newer response rows remain");
     assert.ok(view.rootNode.textContent.includes("第 1 页"), "paging follows the newer response");
@@ -415,15 +451,18 @@ test("audit rows lead with Chinese labels and the business narrative, technical 
     assert.ok(createdRow.textContent.includes("approval.request.created"), "raw action code kept as secondary trace");
     const outcomeCell = createdRow.querySelectorAll("td")[4];
     assert.equal(outcomeCell.textContent.trim(), "成功", "outcome renders in Chinese");
-    assert.ok(outcomeCell.querySelector("span").className.includes("whitespace-nowrap"), "outcome stays on one line");
-    assert.ok(outcomeCell.querySelector("span").className.includes("text-emerald-600"), "light-theme-readable success token");
-    assert.ok(outcomeCell.querySelector("span").className.includes("dark:text-emerald-400"), "dark-theme success token kept");
+    const outcomeStatus = outcomeCell.querySelector('[data-slot="inline-status"]');
+    assert.ok(outcomeStatus, "outcome uses the shared InlineStatus atom");
+    assert.ok(outcomeStatus.className.includes("whitespace-nowrap"), "outcome stays on one line");
+    assert.ok(outcomeStatus.className.includes("text-emerald-800"), "light-theme-readable success token from the shared tone table");
+    assert.ok(outcomeStatus.className.includes("dark:text-emerald-300"), "dark-theme success token kept");
+    assert.ok(outcomeStatus.querySelector('span[aria-hidden="true"]'), "outcome carries a non-colour marker so it is not colour-only");
     const fold = createdRow.querySelector("details");
     assert.ok(fold, "technical trace folded into details");
     assert.ok(fold.textContent.includes("payloadVersion"), "fold keeps the raw technical fields");
-    const rejectedRow = rows.find((row) => row.textContent.includes("审批拒绝"));
+    const rejectedRow = rows.find((row) => row.textContent.includes("审批驳回"));
     assert.equal(rejectedRow.querySelectorAll("td")[4].textContent.trim(), "失败", "failure outcome renders in Chinese");
-    assert.ok(rejectedRow.querySelectorAll("td")[4].querySelector("span").className.includes("text-rose-600"), "light-theme-readable failure token");
+    assert.ok(rejectedRow.querySelectorAll('td')[4].querySelector('[data-slot="inline-status"]').className.includes("text-destructive"), "failure uses the shared destructive token");
     assert.ok(rejectedRow.textContent.includes("资料与当前版本不符"), "reason leads the narrative when present");
     const linkCell = createdRow.querySelectorAll("td")[5];
     assert.ok(linkCell.className.includes("whitespace-nowrap"), "link column keeps the button on one line");

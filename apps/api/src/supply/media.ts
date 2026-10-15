@@ -434,6 +434,41 @@ export async function loadMediaAsset(
 }
 
 /**
+ * Page-batched binding counts.  Only the relations the review panel already
+ * consumes are counted, and the existing game scope predicate is reused per
+ * object so an out-of-scope binding cannot leak even as a number.  Counts are
+ * deliberately split into current versus historical version references.
+ */
+async function bindingSummaryBatch(client: PoolClient, assetIds: string[], adminId: string, isBoss: boolean) {
+  const result = new Map<string, { state: "KNOWN"; current: Record<string, number>; historical: Record<string, number> }>();
+  if (!assetIds.length) return result;
+  // Same convention as the queue itself: Boss carries no scope subquery.
+  const scope = isBoss ? "" : ` AND ${gameScopeSql('o."gameId"', "$2", "false")}`;
+  const rows = await client.query<{ assetId: string; objectType: string; current: boolean }>(
+    `SELECT o."assetId", o."objectType", o."current" FROM (
+       SELECT c."cover_media_id" AS "assetId", c."id" AS "gameId", 'game' AS "objectType", true AS "current" FROM "zzsh_supply"."game" c
+         UNION ALL SELECT s."media_id", s."game_id", 'skin', true FROM "zzsh_supply"."skin" s
+         UNION ALL SELECT b."media_id", b."game_id", 'billable_item', true FROM "zzsh_supply"."billable_item" b
+         UNION ALL SELECT f."media_id", f."game_id", 'firearm', true FROM "zzsh_supply"."firearm" f
+         UNION ALL SELECT m."asset_id", a."game_id", 'listing_version', v."id" = a."current_version_id"
+           FROM "zzsh_supply"."listing_media" m
+           JOIN "zzsh_supply"."listing_version" v ON v."id" = m."version_id"
+           JOIN "zzsh_supply"."rental_account" a ON a."id" = v."account_id"
+     ) o
+      WHERE o."assetId" = ANY($1::text[]) AND o."assetId" IS NOT NULL${scope}`,
+    isBoss ? [assetIds] : [assetIds, adminId],
+  );
+  for (const assetId of assetIds) result.set(assetId, { state: "KNOWN", current: {}, historical: {} });
+  for (const row of rows.rows) {
+    const summary = result.get(row.assetId);
+    if (!summary) continue;
+    const bucket = row.current ? summary.current : summary.historical;
+    bucket[row.objectType] = (bucket[row.objectType] ?? 0) + 1;
+  }
+  return result;
+}
+
+/**
  * Admin media review collection. Selected administrators with an explicit but
  * empty game scope get NO_GAME_SCOPE here (collection entry), while a scoped
  * administrator without a matching game simply gets an empty page.
@@ -470,7 +505,8 @@ export async function listAdminMediaReviews(
     `SELECT a."id", a."account_id" AS "accountId", a."game_id" AS "gameId", a."purpose", a."ownership_kind" AS "ownershipKind", a."owner_user_id" AS "ownerUserId",
             a."uploaded_by_realm" AS "uploadedByRealm", a."uploaded_by_user_id" AS "uploadedByUserId", a."uploaded_by_admin_id" AS "uploadedByAdminId",
             a."content_hash" AS "contentHash", a."mime", a."byte_size"::text AS "byteSize", a."width", a."height",
-            a."access_class" AS "accessClass", a."review_state" AS "reviewState", a."review_reason" AS "reviewReason", a."created_at" AS "createdAt"
+            a."access_class" AS "accessClass", a."review_state" AS "reviewState", a."review_reason" AS "reviewReason",
+            a."technical_state" AS "technicalState", a."technical_checked_at" AS "technicalCheckedAt", a."revision"::text AS "revision", a."created_at" AS "createdAt"
        FROM "zzsh_supply"."media_asset" a
       WHERE ${conditions.join(" AND ")}
       ORDER BY a."created_at" DESC, a."id" DESC
@@ -479,6 +515,8 @@ export async function listAdminMediaReviews(
   );
   const hasMore = rows.rows.length > query.limit;
   const items = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
+  const bindings = await bindingSummaryBatch(client, items.map(item => item.id), query.adminId, query.isBoss);
+  for (const item of items) item.binding = bindings.get(item.id) ?? { state: "UNAVAILABLE" };
   const last = items[items.length - 1] as { createdAt: string; id: string } | undefined;
   const nextCursor = hasMore && last
     ? Buffer.from(JSON.stringify({ v: 1, state: query.state, ownershipKind: query.ownershipKind, createdAt: last.createdAt, id: last.id })).toString("base64url")

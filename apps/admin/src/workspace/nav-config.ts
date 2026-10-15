@@ -134,6 +134,7 @@ export function titleForPath(pathname: string): string {
   if(pathname.startsWith("/finance/users/"))return "用户资金";
   if (pathname.startsWith("/orders/")) return "订单详情";
   if (pathname === "/orders") return "订单";
+  if (pathname === "/settings") return "设置";
   if (pathname === "/account") return "账号安全";
   if (pathname === "/support") return "客服工作台";
   if (pathname === "/membership-growth") return "会员成长";
@@ -144,6 +145,38 @@ export type SearchableWorkspacePage = {
   label: string;
   path: string;
   group: string;
+  keywords?: string[];
+};
+
+export function normalizeSearchString(str: string): string {
+  return str
+    .replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/\u3000/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
+  "/workbench": ["工作台", "首页", "workbench", "gzt"],
+  "/support": ["客服工作台", "客服", "履约", "消息", "im", "support", "kf", "ly"],
+  "/membership-growth": ["会员成长", "会员", "增长", "策略", "membership", "hy", "cz"],
+  "/admins": ["管理员管理", "管理员", "账号", "staff", "admins", "gly", "zh"],
+  "/roles": ["角色权限", "角色", "权限", "授权", "roles", "js", "qx"],
+  "/supply/catalog": ["目录维护", "商品", "目录", "货架", "皮肤", "catalog", "ml"],
+  "/supply/gunsmith": ["改枪码目录", "枪械", "改枪", "配装", "gunsmith", "qx", "pz"],
+  "/supply/rules": ["规则与价目", "规则", "价目", "定价", "价格", "收费", "rules", "pricing", "jg", "gz"],
+  "/supply/reviews": ["账号供给", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
+  "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
+  "/content": ["内容管理", "运营内容", "content", "nr"],
+  "/finance": ["资金查找", "资金", "流水", "finance", "zj"],
+  "/finance/period": ["期间核对", "对账", "核对", "period", "dz"],
+  "/orders": ["订单", "交易", "orders", "dd"],
+  "/users": ["用户管理", "用户", "users", "yh"],
+  "/users/restore": ["用户账号恢复", "账号恢复", "恢复", "restore", "hf"],
+  "/approvals": ["审批与审计", "审批", "待办", "工单", "approvals", "sp"],
+  "/audit": ["账号与权限审计", "审计", "操作日志", "安全日志", "audit", "sj", "rz"],
+  "/account": ["账号安全", "个人中心", "安全", "密码", "pin", "account", "gr", "aq"],
+  "/settings": ["设置", "外观", "主题", "偏好", "深色", "浅色", "appearance", "theme", "settings", "sz", "wg", "zt"],
 };
 
 export function searchableWorkspacePages(nav: NavPermission): SearchableWorkspacePage[] {
@@ -154,17 +187,79 @@ export function searchableWorkspacePages(nav: NavPermission): SearchableWorkspac
       group = item.label;
       continue;
     }
-    if (item.path) pages.push({ label: item.label, path: item.path, group });
+    if (item.path) {
+      pages.push({
+        label: item.label,
+        path: item.path,
+        group,
+        keywords: PAGE_SEARCH_KEYWORDS[item.path] ?? [],
+      });
+    }
   }
+  pages.push({
+    label: "设置",
+    path: "/settings",
+    group: "个人",
+    keywords: PAGE_SEARCH_KEYWORDS["/settings"],
+  });
   return pages;
 }
 
+export function scorePageMatch(page: SearchableWorkspacePage, query: string): number | null {
+  const normQ = normalizeSearchString(query);
+  if (!normQ) return 0;
+  const tokens = normQ.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return 0;
+
+  const labelNorm = normalizeSearchString(page.label);
+  const groupNorm = normalizeSearchString(page.group);
+  const pathNorm = normalizeSearchString(page.path);
+  const keywordsNorm = (page.keywords ?? []).map(normalizeSearchString);
+
+  // Multi-token AND logic: every token must match label, group, path or keywords
+  const allTokensMatch = tokens.every((token) => {
+    return (
+      labelNorm.includes(token) ||
+      groupNorm.includes(token) ||
+      pathNorm.includes(token) ||
+      keywordsNorm.some((k) => k.includes(token))
+    );
+  });
+
+  if (!allTokensMatch) return null;
+
+  // Transparent sorting:
+  // 1. Exact match on label or alias
+  if (labelNorm === normQ || keywordsNorm.some((k) => k === normQ)) return 1;
+  // 2. Prefix match on label
+  if (labelNorm.startsWith(normQ)) return 2;
+  // 3. Contains in label
+  if (labelNorm.includes(normQ)) return 3;
+  // 4. Keyword / Alias match
+  if (keywordsNorm.some((k) => k.startsWith(normQ) || k.includes(normQ))) return 4;
+  // 5. Group match
+  if (groupNorm.includes(normQ)) return 5;
+  // 6. Multi-token combination match
+  return 6;
+}
+
 export function filterSearchablePages(pages: SearchableWorkspacePage[], query: string): SearchableWorkspacePage[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return pages;
-  return pages.filter((page) =>
-    page.label.toLowerCase().includes(q)
-    || page.group.toLowerCase().includes(q)
-    || page.path.toLowerCase().includes(q)
-  );
+  const normQ = normalizeSearchString(query);
+  if (!normQ) return pages;
+
+  const scored: { page: SearchableWorkspacePage; score: number; index: number }[] = [];
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i]!;
+    const score = scorePageMatch(page, normQ);
+    if (score !== null) {
+      scored.push({ page, score, index: i });
+    }
+  }
+
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    return a.index - b.index;
+  });
+
+  return scored.map((item) => item.page);
 }

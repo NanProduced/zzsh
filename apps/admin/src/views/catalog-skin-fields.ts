@@ -1,3 +1,4 @@
+import { beijingCalendarDate } from "../workspace/beijing-time.ts";
 import type { AdminCatalogResponse, CatalogSkin, CatalogSkinOwner } from "../api";
 
 export const skinStates = { LEGACY: "旧词条（LEGACY）", PENDING: "待核草稿（PENDING）", VERIFIED: "身份已核（VERIFIED）" };
@@ -22,16 +23,17 @@ export function skinContractReady(catalog: AdminCatalogResponse | null): boolean
 }
 
 export function skinValues(skin?: CatalogSkin): Record<string, string> {
+  const today = beijingCalendarDate();
   return { aliases: skin?.aliases?.join("\n") ?? "", sourceNamespace: skin?.sourceNamespace ?? "", sourceField: skin?.sourceField ?? "", sourceToken: skin?.sourceToken ?? "",
-    mediaId: skin?.mediaId ?? "", changeSource: "false", ownerKind: skin?.ownerRef?.kind ?? "AGENT", ownerId: skin?.ownerRef?.id ?? "", baseName: skin?.baseName ?? "", reason: "", evidenceUrls: "", observedAt: "", region: "", note: "" };
+    mediaId: skin?.mediaId ?? "", changeSource: "false", ownerKind: skin?.ownerRef?.kind ?? "AGENT", ownerId: skin?.ownerRef?.id ?? "", baseName: skin?.baseName ?? "", reason: "", evidenceUrls: "", observedAt: today, region: "中国大陆", note: "" };
 }
 
 export function evidenceFields(values: Record<string, string>) {
   const urls = lines(values.evidenceUrls);
   if (urls.length < 1 || urls.length > 8) throw new Error("请填写1至8条证据链接，每行一条。");
-  const observedAt = values.observedAt ?? "";
+  const observedAt = values.observedAt || beijingCalendarDate();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(observedAt) || !Number.isFinite(Date.parse(observedAt)) || new Date(observedAt).toISOString().slice(0, 10) !== observedAt) throw new Error("请填写有效的证据核对日期。");
-  const region = text(values.region, "适用地区", 64), note = text(values.note, "证据说明", 500);
+  const region = text(values.region || "中国大陆", "适用地区", 64), note = text(values.note, "证据说明", 500);
   const evidenceRefs = urls.map(raw => {
     const url = text(raw, "证据链接", 2000);
     let parsed: URL; try { parsed = new URL(url); } catch { throw new Error("证据链接须为公开HTTPS地址。"); }

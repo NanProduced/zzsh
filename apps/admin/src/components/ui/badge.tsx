@@ -1,3 +1,4 @@
+import * as React from "react"
 import { mergeProps } from "@base-ui/react/merge-props"
 import { useRender } from "@base-ui/react/use-render"
 import { cva, type VariantProps } from "class-variance-authority"
@@ -57,4 +58,54 @@ function Badge({
   })
 }
 
-export { Badge, badgeVariants }
+const inlineStatusVariants = cva(
+  "inline-flex items-center gap-1.5 text-xs leading-relaxed font-medium whitespace-nowrap",
+  {
+    variants: {
+      tone: {
+        success: "text-emerald-800 dark:text-emerald-300",
+        warning: "text-amber-900 dark:text-amber-300",
+        info: "text-sky-900 dark:text-sky-300",
+        error: "text-destructive",
+        neutral: "text-muted-foreground",
+        unknown: "text-muted-foreground",
+      },
+    },
+    defaultVariants: {
+      tone: "neutral",
+    },
+  }
+)
+
+const inlineStatusMarkers: Record<InlineStatusTone, string> = {
+  success: "size-1.5 shrink-0 rounded-full bg-current",
+  warning: "size-1.5 shrink-0 rounded-full bg-current",
+  info: "size-1.5 shrink-0 rounded-full bg-current",
+  error: "size-1.5 shrink-0 rounded-full bg-current",
+  neutral: "h-px w-2 shrink-0 bg-current",
+  unknown: "size-1.5 shrink-0 rounded-full border border-current",
+}
+
+type InlineStatusTone = "success" | "warning" | "info" | "error" | "neutral" | "unknown"
+
+// 记录行内状态：点或短横加文字，tone 与标签由领域层给出；需要边界的筛选项继续用 Badge。
+function InlineStatus({
+  className,
+  tone = "neutral",
+  children,
+  ...props
+}: React.ComponentProps<"span"> & { tone?: InlineStatusTone }) {
+  return (
+    <span
+      data-slot="inline-status"
+      className={cn(inlineStatusVariants({ tone }), className)}
+      {...props}
+    >
+      <span aria-hidden="true" className={inlineStatusMarkers[tone]} />
+      {children}
+    </span>
+  )
+}
+
+export { Badge, badgeVariants, InlineStatus }
+export type { InlineStatusTone }

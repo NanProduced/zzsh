@@ -523,5 +523,7 @@
     "bytes": 112729,
     "note": "Google Fonts CSS2 API 原始响应（未解析），记录 101 条 @font-face 的 unicode-range 与 gstatic 来源。"
   },
-  "assetNote": "apps/web/src/app/noto-sans-sc.css 由该原始响应机械改写（URL 指向本站 /fonts/noto-sans-sc/，font-weight 合并为可变区间）。"
+  "assetNote": "apps/web/src/app/noto-sans-sc.css 由该原始响应机械改写（URL 指向本站 /fonts/noto-sans-sc/，font-weight 合并为可变区间）。",
+  "licenseSha256": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9",
+  "upstreamCommit": "66928797f271fed5ee428544e7229685e2d90127"
 }

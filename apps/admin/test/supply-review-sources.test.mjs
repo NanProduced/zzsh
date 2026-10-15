@@ -74,7 +74,7 @@ test('empty filtered view probes the all-view once and offers a switch hint', as
   assert.ok(!h.el.textContent.includes('视图下有匹配'), 'no query text means no probe and no hint');
   assert.equal(requested.length - before, 1, 'view switch issues exactly one list request');
 
-  const input = h.el.querySelector('input');
+  const input = h.el.querySelector('form.sa-search input:not([aria-hidden])');
   Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, 'value').set.call(input, 'TEST-X');
   input.dispatchEvent(new h.browser.Event('input', { bubbles: true }));
   await h.settle();
@@ -105,7 +105,7 @@ test('no probe without a query, and probe failure stays silent', async (t) => {
 
   await h.click(h.btn('运营限制'));
   await tick(h);
-  const input = h.el.querySelector('input');
+  const input = h.el.querySelector('form.sa-search input:not([aria-hidden])');
   Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, 'value').set.call(input, 'X');
   input.dispatchEvent(new h.browser.Event('input', { bubbles: true }));
   await h.settle();

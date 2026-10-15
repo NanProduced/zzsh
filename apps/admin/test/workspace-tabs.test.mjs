@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   canOpenKind,
+  changesSettingsContent,
   closeTabs,
   filterTabsByPermission,
   persistTabs,
@@ -10,11 +11,47 @@ import {
   sanitizeTabQuery,
   tabFromKeyboard,
   tabFromLocation,
+  tabPresentation,
   upsertTab,
 } from "../src/workspace/tab-model.ts";
 
 const nav = { isBoss: true, permissions: ["admin.account.read", "admin.role.read", "approval.request.read", "admin.audit.read", "user.account.restore"] };
 const limited = { isBoss: false, permissions: [] };
+
+test("settings section or preview switches require leave protection within the same tab", () => {
+  const profile = tabFromLocation("/settings", "?section=profile");
+  assert.equal(changesSettingsContent(profile, tabFromLocation("/settings", "?section=sessions")), true);
+  assert.equal(changesSettingsContent(profile, tabFromLocation("/settings", "?section=profile&preview=1")), true);
+  assert.equal(changesSettingsContent(profile, tabFromLocation("/settings", "?section=profile&action=x")), false);
+  assert.equal(changesSettingsContent(tabFromLocation("/users"), tabFromLocation("/users", "?q=x")), false);
+});
+
+test("detail presentation keeps module names plain and identifies unnamed objects without a visible type prefix", () => {
+  const module = tabFromLocation("/supply/reviews");
+  const detail = tabFromLocation("/supply/reviews/account-123");
+  assert.deepEqual(tabPresentation(module, [module, detail]), { type: undefined, label: "账号供给", description: "账号供给" });
+  assert.deepEqual(tabPresentation(detail, [module, detail]), { type: "供给账号", label: "account-123", description: "供给账号详情：account-123" });
+  const named = { ...detail, title: "旧来源号 202607210241" };
+  assert.equal(tabPresentation(named, [named]).label, named.title);
+  assert.equal(tabPresentation({ ...detail, title: "   " }, []).label, "account-123");
+});
+
+test("same-type names are disambiguated even when short ID suffixes collide; identity is unchanged", () => {
+  const a = { ...tabFromLocation("/users/owner-12345678"), title: "同名用户" };
+  const b = { ...tabFromLocation("/users/renter-12345678"), title: "同名用户" };
+  assert.equal(tabPresentation(a, [a, b]).label, "同名用户 · owner-12345678");
+  assert.equal(tabPresentation(b, [a, b]).label, "同名用户 · renter-12345678");
+  assert.equal(upsertTab([a, b], { ...a, title: "新名字" }).length, 2);
+  assert.equal(tabPresentation({ ...a, title: "新名字" }, [a, b]).label, "新名字");
+});
+
+test("left and right batch close bind the target rather than the active tab and always retain workbench", () => {
+  const tabs = [tabFromLocation("/workbench"), tabFromLocation("/admins"), tabFromLocation("/roles"), tabFromLocation("/account")];
+  assert.deepEqual(closeTabs(tabs, "account", "left", "roles").tabs.map(t => t.id), ["workbench", "roles", "account"]);
+  assert.equal(closeTabs(tabs, "account", "left", "roles").activeId, "account");
+  assert.deepEqual(closeTabs(tabs, "account", "right", "admins").tabs.map(t => t.id), ["workbench", "admins"]);
+  assert.ok(["workbench", "admins"].includes(closeTabs(tabs, "account", "right", "admins").activeId));
+});
 
 test("object tabs are de-duplicated by type and stable id", () => {
   const first = tabFromLocation("/admins/ZZ00001");

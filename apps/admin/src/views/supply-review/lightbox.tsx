@@ -1,10 +1,9 @@
-import { useEffect, useRef } from "react";
-
-import { lightboxKeyAction } from "./model";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /**
- * 页内图片放大:原生 <dialog> 模态——Tab/Shift+Tab 焦点约束、背景不可操作、
- * 单次 Escape 关闭、关闭后焦点回到触发按钮。仅放大已授权的同一 content 地址,不新增下载能力。
+ * 页内图片放大：现有 shadcn Dialog（Base UI）。关闭区在对话框内可达（手机可点），
+ * Escape 只关闭放大层并回母面板，焦点回到触发按钮由 Base UI 处理。
+ * 仅放大已授权的同一 content 地址，不新增下载能力。
  */
 export function Lightbox({
   src,
@@ -17,85 +16,22 @@ export function Lightbox({
   caption?: string;
   onClose: () => void;
 }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const previous = document.activeElement as HTMLElement | null;
-    if (!dialog.open) {
-      try {
-        dialog.showModal();
-      } catch {
-        // happy-dom 等环境未完整实现 showModal 时退化为 open 属性,焦点约束由下方 Tab 处理保证。
-        dialog.setAttribute("open", "");
-      }
-    }
-    closeRef.current?.focus();
-
-    const close = () => onClose();
-    const onCancel = (event: Event) => {
-      event.preventDefault();
-      close();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (lightboxKeyAction(event.key) === "close") {
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-        return;
-      }
-      if (event.key === "Tab") {
-        const focusables = [
-          ...dialog.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
-        ].filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
-        if (focusables.length === 0) {
-          event.preventDefault();
-          return;
-        }
-        const first = focusables[0]!;
-        const last = focusables[focusables.length - 1]!;
-        const active = document.activeElement;
-        if (event.shiftKey && (active === first || !dialog.contains(active))) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
-          event.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    dialog.addEventListener("cancel", onCancel);
-    dialog.addEventListener("keydown", onKeyDown);
-    return () => {
-      dialog.removeEventListener("cancel", onCancel);
-      dialog.removeEventListener("keydown", onKeyDown);
-      if (dialog.open) dialog.close();
-      previous?.focus?.({preventScroll:true});
-    };
-  }, [onClose]);
-
   return (
-    <dialog
-      ref={dialogRef}
-      aria-label={alt}
-      className="max-h-[92vh] max-w-[94vw] border-0 bg-transparent p-0 backdrop:bg-black/80"
-    >
-      <div className="relative grid place-items-center">
-        <button
-          ref={closeRef}
-          type="button"
-          onClick={onClose}
-          className="absolute -top-2 right-0 z-10 translate-y-[-100%] rounded-md border border-border bg-surface-raised px-3 py-1.5 text-xs text-foreground hover:bg-border/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          关闭 Esc
-        </button>
-        <img src={src} alt={alt} className="max-h-[82vh] max-w-[90vw] rounded-lg bg-surface-raised object-contain" />
-        <p className="mt-3 max-w-[80vw] text-center text-xs text-muted-foreground">
-          {caption ?? "放大核对只读取已授权图片,不新增下载能力。"}
-        </p>
-      </div>
-    </dialog>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      {/* Escape 仅关本层，不冒泡关掉母级 Sheet/Dialog。 */}
+      <DialogContent
+        className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] sm:max-w-3xl"
+        closeLabel="关闭放大图"
+        onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
+      >
+        <DialogHeader className="min-w-0 pr-12">
+          <DialogTitle className="min-w-0 break-all text-sm">{alt}</DialogTitle>
+          <DialogDescription className="break-words">{caption ?? "放大核对只读取已授权图片，不新增下载能力。"}</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 overflow-y-auto">
+          <img src={src} alt={alt} className="max-h-[70dvh] w-full rounded-lg bg-surface-raised object-contain" />
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

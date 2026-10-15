@@ -1,11 +1,22 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
+import { CircleAlert } from "lucide-react";
 
-import { AdminApiError, adminRequest, friendlyError, hasPermission, type CatalogItem, type PriceLineRecord, type PriceVersionRecord, type RulesResponse, type SessionSnapshot, type SupplyGame } from "../api";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { adminRequest, friendlyError, hasPermission, type CatalogItem, type PriceLineRecord, type PriceVersionRecord, type RulesResponse, type SessionSnapshot, type SupplyGame } from "../api";
+import { StatusMessage } from "../components/ui-elements";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { Field } from "../components/ui/field";
+import { Skeleton } from "../components/ui/skeleton";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
+import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
+import { SupplySelect } from "../components/supply/supply-select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { RulesOverview } from "./supply-rules/rules-overview";
+import { draftCommand, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
 
-const inputClass = "w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs";
-const selectClass = "w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs";
-const textareaClass = "w-full min-h-32 px-3 py-2 rounded border border-border bg-surface-raised text-xs font-mono";
+const inputClass = "h-9";
+const textareaClass = "min-h-32";
 
 const PRICE_TIERS = ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"] as const;
 type PriceTier = typeof PRICE_TIERS[number];
@@ -16,13 +27,44 @@ function requiresTierEditor(record: PriceVersionRecord): boolean {
   return record.haffRule?.schema !== undefined && !["haff-ratio-v1", "haff-ratio-v2"].includes(String(record.haffRule.schema));
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+type RulesOption = { value: string; label: string };
+
+function RulesSelect({ label, value, onChange, options, placeholder = "请选择", disabled, ...aria }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: RulesOption[];
+  placeholder?: string;
+  disabled?: boolean;
+  id?: string;
+  "aria-labelledby"?: string;
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean;
+}) {
   return (
-    <label className="space-y-1 text-xs block">
-      <span className="text-muted-foreground">{label}</span>
-      {children}
-    </label>
+    <SupplySelect label={label} value={value} onValueChange={onChange} options={value === "" ? [{ value: "", label: options.length ? placeholder : "暂无可选项" }, ...options] : options} disabled={disabled || options.length === 0} id={aria.id} aria-labelledby={aria["aria-labelledby"]} aria-describedby={aria["aria-describedby"]} aria-invalid={aria["aria-invalid"]} />
   );
+}
+
+// ui/button 没有 loading：在途时显式禁用 + aria-busy + 在途文案
+function BusyButton({ busy = false, busyText = "处理中…", disabled, children, ...props }: Omit<ComponentProps<typeof Button>, "children"> & { busy?: boolean; busyText?: string; children: ReactNode }) {
+  return <Button {...props} disabled={Boolean(disabled) || busy} aria-busy={busy || undefined}>{busy ? busyText : children}</Button>;
+}
+
+function EmptyHint({ children }: { children: ReactNode }) {
+  return <p role="status" className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">{children}</p>;
+}
+
+function modeLabel(mode: string): string {
+  return mode === "SPREAD" ? "差价" : mode === "PERCENT" ? "百分比" : mode;
+}
+
+function statusLabel(status: string): string {
+  return status === "SEALED" ? "已封存" : status === "DRAFT" ? "草稿" : status;
+}
+
+function kindLabel(kind: string): string {
+  return kind === "HAFF_RATIO" ? "按哈夫币规则推算" : kind === "FIXED_UNIT" ? "固定单价" : kind;
 }
 
 function latestSealed<T extends { id: string; status: string; sealedAt: string | null }>(versions: T[]): string {
@@ -56,34 +98,47 @@ export function SupplyRulesView({
   const [termOptions, setTermOptions] = useState<TermOptionDraft[]>([]);
   const [agreementTitle, setAgreementTitle] = useState("");
   const [agreementBody, setAgreementBody] = useState("");
-  const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
-  const [previewError, setPreviewError] = useState<string>();
-  const [previewInput, setPreviewInput] = useState({ safeBoxCode: "", vitLevel: "6", bearLevel: "6", pricingOptionCode: "standard", quantity: "60000000" });
-  const [activatePrice, setActivatePrice] = useState("");
-  const [activateTerm, setActivateTerm] = useState("");
-  const [activateAgreement, setActivateAgreement] = useState("");
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [overviewDirty, setOverviewDirty] = useState(false);
+  const [gamesLoaded, setGamesLoaded] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [haffRawOpen, setHaffRawOpen] = useState(false);
+  const gamesSeq = useRef(0), rulesSeq = useRef(0);
+  const readScope = useRef({ adminId: snapshot.adminUserId, sessionId: snapshot.session?.id, gameId });
+  readScope.current = { adminId: snapshot.adminUserId, sessionId: snapshot.session?.id, gameId };
+  const sameReadScope = (scope: typeof readScope.current, sequence: number) => sequence === rulesSeq.current && scope.adminId === readScope.current.adminId && scope.sessionId === readScope.current.sessionId && scope.gameId === readScope.current.gameId;
+  // 防双击：同一时刻只允许一个写操作在途
+  const busyRef = useRef(false), guardSeq = useRef(0);
+  useEffect(() => { ++guardSeq.current; busyRef.current = false; }, [snapshot.adminUserId, snapshot.session?.id, gameId]);
+  const guard = async (action: () => Promise<void>) => {
+    if (busyRef.current || command.locked) return;
+    const sequence = ++guardSeq.current;
+    busyRef.current = true;
+    try { await action(); } finally { if (sequence === guardSeq.current) busyRef.current = false; }
+  };
 
   useEffect(() => {
-    onDirtyChange(dirty);
-  }, [dirty, onDirtyChange]);
+    onDirtyChange(dirty || overviewDirty);
+  }, [dirty, overviewDirty, onDirtyChange]);
 
   const loadGames = useCallback(async () => {
+    const sequence = ++gamesSeq.current;
+    if (!canEdit) return;
     const result = await adminRequest<{ games: SupplyGame[] }>("/supply/games");
+    if (sequence !== gamesSeq.current) return;
     setGames(result.games);
-    setGameId((current) => (current && result.games.some((game) => game.id === current) ? current : result.games[0]?.id ?? ""));
-  }, []);
+    setGamesLoaded(true);
+    setGameId((current) => current && result.games.some(game => game.id === current) ? current : ((snapshot.security.isBoss ? result.games.find(game => game.enabled && game.code === "delta") : undefined) ?? result.games.find(game => game.enabled) ?? result.games[0])?.id ?? "");
+  }, [canEdit, snapshot.adminUserId, snapshot.session?.id, snapshot.security.isBoss]);
 
   const applyPrice = useCallback((record: PriceVersionRecord, allLines: PriceLineRecord[], items: CatalogItem[]) => {
     setPriceId(record.id);
     setPriceMode(record.mode);
     setCommissionRate(record.commissionRate ?? "");
     setHaffRuleText(record.haffRule ? JSON.stringify(record.haffRule, null, 2) : "");
-    setPreview(null);
-    setPreviewError(undefined);
     if (requiresTierEditor(record)) {
       setLines({});
       return;
@@ -94,7 +149,7 @@ export function SupplyRulesView({
     }
     for (const line of allLines.filter(line => line.priceVersionId === record.id)) {
       const customerTier = line.customerTier ?? "STANDARD";
-      next[line.itemId + ":" + customerTier] = { customerTier, itemId:line.itemId, pricingKind:line.pricingKind, unitQuantity:line.unitQuantity ?? "1", buyerUnitAmount:line.buyerUnitAmount ?? "", ownerUnitAmount:line.ownerUnitAmount ?? "" };
+      next[line.itemId + ":" + customerTier] = { customerTier, itemId:line.itemId, pricingKind:line.pricingKind, unitQuantity:line.unitQuantity ?? "", buyerUnitAmount:line.buyerUnitAmount ?? "", ownerUnitAmount:line.ownerUnitAmount ?? "" };
     }
     setPriceTier("STANDARD");
     setLines(next);
@@ -106,11 +161,15 @@ export function SupplyRulesView({
   }, []);
 
   const loadRules = useCallback(async (targetGameId: string) => {
+    const sequence = ++rulesSeq.current;
+    const scope = { ...readScope.current, gameId: targetGameId };
     if (!targetGameId) {
       setRules(null);
       return;
     }
     const result = await adminRequest<RulesResponse>(`/supply/games/${targetGameId}/rules`);
+    if (!sameReadScope(scope, sequence)) return;
+    if (result.game.id !== targetGameId) throw new Error("规则响应不属于当前游戏");
     setRules(result);
     const nextPrice = latestSealed(result.priceVersions) || result.priceVersions[0]?.id || "";
     if (nextPrice) {
@@ -124,43 +183,47 @@ export function SupplyRulesView({
     const agreement = result.agreementVersions.find((version) => version.id === nextAgreement);
     setAgreementTitle(agreement?.title ?? "");
     setAgreementBody(agreement?.body ?? "");
-    setActivatePrice(latestSealed(result.priceVersions));
-    setActivateTerm(latestSealed(result.termVersions));
-    setActivateAgreement(latestSealed(result.agreementVersions));
     setDirty(false);
   }, [applyPrice, applyTerm]);
 
   useEffect(() => {
+    let active = true;
     setError(undefined);
-    loadGames().catch((failure) => setError(friendlyError(failure)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshNonce]);
+    setRules(null); setGames([]); setGamesLoaded(false); setGameId(""); setDirty(false); setOverviewDirty(false);
+    loadGames().catch((failure) => { if (active) setError(friendlyError(failure)); });
+    return () => { active = false; ++gamesSeq.current; ++rulesSeq.current; };
+  }, [refreshNonce, loadGames]);
 
   useEffect(() => {
     if (!gameId) {
+      ++rulesSeq.current;
       setRules(null);
       return;
     }
+    let active = true;
     setLoading(true);
     loadRules(gameId)
-      .catch((failure) => setError(friendlyError(failure)))
-      .finally(() => setLoading(false));
+      .catch((failure) => { if (active) setError(friendlyError(failure)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; ++rulesSeq.current; };
   }, [gameId, loadRules, refreshNonce]);
 
   const reload = async (): Promise<RulesResponse | undefined> => {
     if (!gameId) return undefined;
-    const result = await adminRequest<RulesResponse>(`/supply/games/${gameId}/rules`);
+    const scope = { ...readScope.current }, sequence = ++rulesSeq.current;
+    const result = await adminRequest<RulesResponse>(`/supply/games/${encodeURIComponent(scope.gameId)}/rules`);
+    if (!sameReadScope(scope, sequence) || result.game.id !== scope.gameId) return undefined;
     setRules(result);
     setDirty(false);
     return result;
   };
+  const command = useRulesWrite(snapshot.adminUserId, gameId, reload, snapshot.session?.id ?? "");
 
   const selectedPrice = rules?.priceVersions.find((version) => version.id === priceId);
   const priceReadOnly = Boolean(selectedPrice && requiresTierEditor(selectedPrice));
   const selectedTerm = rules?.termVersions.find((version) => version.id === termId);
   const selectedAgreement = rules?.agreementVersions.find((version) => version.id === agreementId);
   const items = rules?.items ?? [];
-  const haffItem = items.find((item) => item.unit === "HAFF_BASE");
 
   const selectPrice = (id: string, source?: RulesResponse) => {
     const data = source ?? rules;
@@ -174,9 +237,9 @@ export function SupplyRulesView({
   const createPrice = async () => {
     setError(undefined);
     try {
-      const created = await adminRequest<{ id: string }>("/supply/price-drafts", { gameId, mode: priceMode });
-      const fresh = await reload();
-      selectPrice(created.id, fresh);
+      const result = await command.write(draftCommand(gameId, "price", "create", { gameId, mode: priceMode }));
+      if (!result) return;
+      selectPrice(result.receipt.id!, result.fresh);
       setSuccess("价格草稿已创建；草稿可继续修改，封存后才可生效。");
     } catch (failure) {
       setError(friendlyError(failure));
@@ -225,15 +288,15 @@ export function SupplyRulesView({
     setError(undefined);
     setLoading(true);
     try {
-      await adminRequest(`/supply/price-drafts/${selectedPrice.id}`, {
+      const result = await command.write(draftCommand(gameId, "price", "update", {
         expectedRevision: selectedPrice.revision,
         mode: priceMode,
         ...(priceMode === "PERCENT" ? { commissionRate } : {}),
         ...(haffRule === undefined ? {} : { haffRule }),
         roundingPolicy: selectedPrice.roundingPolicy,
         lines: builtLines,
-      }, "PUT");
-      await reload();
+      }, selectedPrice.id));
+      if (!result) return;
       setSuccess("价格草稿已保存。");
       setDirty(false);
     } catch (failure) {
@@ -253,11 +316,11 @@ export function SupplyRulesView({
     setError(undefined);
     setLoading(true);
     try {
-      await adminRequest(`/supply/term-drafts/${selectedTerm.id}`, {
+      const result = await command.write(draftCommand(gameId, "term", "update", {
         expectedRevision: selectedTerm.revision,
         options: termOptions.map((option) => ({ code: option.code, name: option.name, dailyConsumption: option.dailyConsumption, durationRounding: "CEIL_DAY" })),
-      }, "PUT");
-      await reload();
+      }, selectedTerm.id));
+      if (!result) return;
       setSuccess("租期草稿已保存；日消耗只用于推算预计租期，不表示每天必须消费。");
       setDirty(false);
     } catch (failure) {
@@ -277,8 +340,8 @@ export function SupplyRulesView({
     setError(undefined);
     setLoading(true);
     try {
-      await adminRequest(`/supply/agreement-drafts/${selectedAgreement.id}`, { expectedRevision: selectedAgreement.revision, title: agreementTitle, body: agreementBody }, "PUT");
-      await reload();
+      const result = await command.write(draftCommand(gameId, "agreement", "update", { expectedRevision: selectedAgreement.revision, title: agreementTitle, body: agreementBody }, selectedAgreement.id));
+      if (!result) return;
       setSuccess("协议草稿已保存。");
       setDirty(false);
     } catch (failure) {
@@ -290,9 +353,9 @@ export function SupplyRulesView({
 
   const createTerm = async () => {
     try {
-      const created = await adminRequest<{ id: string }>("/supply/term-drafts", { gameId });
-      await reload();
-      applyTerm(created.id, []);
+      const result = await command.write(draftCommand(gameId, "term", "create", { gameId }));
+      if (!result) return;
+      applyTerm(result.receipt.id!, result.fresh.termOptions);
     } catch (failure) {
       setError(friendlyError(failure));
     }
@@ -300,10 +363,10 @@ export function SupplyRulesView({
 
   const createAgreement = async () => {
     try {
-      const created = await adminRequest<{ id: string }>("/supply/agreement-drafts", { gameId, title: "出租协议草稿", body: "在此填写协议正文。" });
-      await reload();
-      const record = (await adminRequest<RulesResponse>(`/supply/games/${gameId}/rules`)).agreementVersions.find((version) => version.id === created.id);
-      setAgreementId(created.id);
+      const result = await command.write(draftCommand(gameId, "agreement", "create", { gameId, title: "出租协议草稿", body: "在此填写协议正文。" }));
+      if (!result) return;
+      const record = result.fresh.agreementVersions.find((version) => version.id === result.receipt.id);
+      setAgreementId(result.receipt.id!);
       setAgreementTitle(record?.title ?? "");
       setAgreementBody(record?.body ?? "");
     } catch (failure) {
@@ -316,9 +379,9 @@ export function SupplyRulesView({
     setError(undefined);
     setLoading(true);
     try {
-      await adminRequest(`/supply/${kind}-drafts/${id}/seal`, { expectedRevision: revision });
-      await reload();
-      setSuccess("版本已封存；封存后内容不可修改。");
+      const result = await command.write(draftCommand(gameId, kind, "seal", { expectedRevision: revision }, id));
+      if (!result) return;
+      setSuccess("已封存，尚未生效：内容不可再改，封存后由 Boss 选择并确认生效。如需修改，请新建草稿。");
     } catch (failure) {
       setError(friendlyError(failure));
     } finally {
@@ -326,265 +389,219 @@ export function SupplyRulesView({
     }
   };
 
-  const activate = async () => {
-    setError(undefined);
-    setLoading(true);
-    try {
-      const result = await adminRequest<{ releaseId: string; generation: string; affectedCount: number }>("/supply/releases", {
-        gameId,
-        priceVersionId: activatePrice,
-        termVersionId: activateTerm,
-        agreementVersionId: activateAgreement,
-        expectedGeneration: rules?.release?.generation ?? "0",
-      });
-      await reload();
-      setSuccess(`规则已原子生效：第 ${result.generation} 代；受影响账号 ${result.affectedCount} 个。切换后旧条件立即被后续调用方拒绝。`);
-    } catch (failure) {
-      setError(failure instanceof AdminApiError && failure.status === 409 ? "规则已被更新，请刷新当前页，核对版本后重新确认生效。" : friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const runPreview = async () => {
-    if (priceReadOnly) return;
-    if (!rules || !priceId || !termId || !haffItem) {
-      setPreviewError("需要价格草稿、租期草稿与一个 HAFF_BASE 计费物品才能演算。");
-      return;
-    }
-    setPreviewError(undefined);
-    setLoading(true);
-    try {
-      const result = await adminRequest<Record<string, unknown>>("/supply/quote-preview", {
-        priceVersionId: priceId,
-        termVersionId: termId,
-        accountId: "preview_account",
-        conditions: {
-          safeBoxCode: previewInput.safeBoxCode,
-          vitLevel: Number(previewInput.vitLevel),
-          bearLevel: Number(previewInput.bearLevel),
-          termOptionCode: termOptions[0]?.code ?? "",
-          pricingOptionCode: previewInput.pricingOptionCode,
-        },
-        inventory: [{ itemId: haffItem.id, quantity: previewInput.quantity }],
-      });
-      setPreview(result);
-    } catch (failure) {
-      setPreview(null);
-      setPreviewError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
   if (!canEdit) {
-    return <section className="section-panel"><StatusMessage error="当前账号没有规则草稿编辑权限；生效仅限 Boss。" /></section>;
+    return <section className="section-panel"><StatusMessage themeAware error="当前账号没有规则草稿编辑权限；生效仅限 Boss。" /></section>;
   }
 
   return (
     <div className="space-y-6">
       <section className="section-panel">
-        <div className="panel-heading">
-          <div>
-            <h3>规则与价目</h3>
-            <p>运营编辑草稿、封存版本；Boss 原子生效。当前 release 切换后，引用旧条件的后续调用立即被拒绝，不依赖批量改状态。未配置参数不生成可上线报价。</p>
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0 max-w-3xl">
+            <h2 className="text-2xl leading-9 font-semibold">规则与价目</h2>
+            <p className="mt-1 text-sm text-muted-foreground">查看当前计价、租期与协议，预览调整后的差异。封存与生效分开，缺配置不会按零报价。</p>
+          </div>
+          <div className="w-full sm:w-72">
+            <Field label="游戏" composite>
+              <RulesSelect label="游戏" value={gameId} onChange={setGameId} disabled={command.state.kind === "busy" || command.state.kind === "recovering" || dirty || overviewDirty} placeholder="暂无可维护游戏" options={games.map((game) => ({ value: game.id, label: `${game.name}（${game.code}）` }))} />
+            </Field>
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-          <Field label="游戏">
-            <select value={gameId} onChange={(event) => setGameId(event.target.value)} className={selectClass}>
-              {games.length === 0 ? <option value="">暂无可维护游戏</option> : null}
-              {games.map((game) => <option key={game.id} value={game.id}>{game.name}（{game.code}）</option>)}
-            </select>
-          </Field>
-          <Field label="当前 release">
-            <div className="h-9 flex items-center text-xs text-muted-foreground">
-              {rules?.release ? `第 ${rules.release.generation} 代 · ${rules.release.id}` : "尚未生效任何版本"}
-            </div>
-          </Field>
-        </div>
-        <StatusMessage error={error} success={success} className="mt-3" />
+        <StatusMessage themeAware error={error} success={success} className="mt-3" />
+        {command.locked ? (
+          <Alert variant="warning" role="status" className="mt-3">
+            <CircleAlert aria-hidden="true" />
+            <AlertTitle>{command.state.kind === "blocked" ? "规则写入已暂停" : command.pending?.receipt ? "已收到原写入回执，回读尚未完成" : command.state.kind === "busy" ? "规则请求正在提交" : "原规则写入结果尚未核清"}</AlertTitle>
+            <AlertDescription>
+              <p>{command.state.kind === "blocked" ? command.state.message : command.pending?.receipt ? command.state.message ?? "已收到原写入回执，规则回读尚未完成；不能再次提交。" : command.state.kind === "busy" ? "正在提交规则请求，原 key 与版本已保留。" : command.state.message ?? "原规则写入结果尚未核清，已保留原 key 与输入，暂停新的写入。"}</p>
+              {command.pending && command.pending.gameId !== gameId ? <p>原请求属于游戏 {command.pending.gameId}，请切回该游戏核对。</p> : null}
+            </AlertDescription>
+            <AlertAction><Button type="button" variant="outline" size="sm" disabled={!command.pending || command.pending.gameId !== gameId || ["busy", "recovering"].includes(command.state.kind)} onClick={() => void command.recover()}>核对原写入回执</Button></AlertAction>
+          </Alert>
+        ) : null}
+        {command.state.kind === "conflict" ? (
+          <Alert variant="danger" className="mt-3">
+            <CircleAlert aria-hidden="true" />
+            <AlertTitle>版本已变化（409）</AlertTitle>
+            <AlertDescription><p>输入已保留。请核对当前版本后再操作。</p></AlertDescription>
+          </Alert>
+        ) : command.state.kind === "error" ? (
+          <Alert variant="danger" className="mt-3">
+            <CircleAlert aria-hidden="true" />
+            <AlertTitle>请求被明确拒绝</AlertTitle>
+            <AlertDescription><p>{command.state.message}</p></AlertDescription>
+          </Alert>
+        ) : null}
+        {command.state.kind === "not_sent" ? <p role="status" className="mt-3 text-sm text-muted-foreground">{command.state.message}</p> : null}
+        {command.state.kind === "done" && command.state.operation !== RULES_RELEASE_OPERATION ? <p role="status" className="mt-3 text-sm text-muted-foreground">原草稿写入已收到回执并完成回读。</p> : null}
       </section>
 
-      {rules ? (
-        <>
+      {gamesLoaded && games.length === 0 ? (
+        <section className="section-panel"><EmptyHint>还没有可维护的游戏。请先在「目录维护」中创建游戏，再回到这里配置规则。</EmptyHint></section>
+      ) : null}
+      {!rules && loading ? (
+        <section className="section-panel space-y-3" aria-busy="true">
+          <p className="sr-only">正在读取规则…</p>
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-9 w-full max-w-sm" />
+          <div className="flex flex-wrap gap-x-8 gap-y-3 pt-1"><Skeleton className="h-10 w-32" /><Skeleton className="h-10 w-44" /><Skeleton className="h-10 w-36" /></div>
+        </section>
+      ) : null}
+
+      {rules && rules.game.id === gameId ? (
+        <div className="space-y-6">
+          <RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={canEdit} onDirtyChange={setOverviewDirty} />
+          <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="hidden" aria-hidden="true">
+          <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-start px-0 py-2 text-left whitespace-normal" />}><span className="grid min-w-0 gap-1 sm:flex sm:items-center sm:gap-2"><span className="shrink-0 text-base font-semibold">高级：按版本维护草稿</span><span className="text-sm font-normal text-muted-foreground">出租协议正文、首版建立与原始规则</span></span></CollapsibleTrigger>
+          <CollapsibleContent keepMounted><div className="mt-4 space-y-6">
+          <p className="text-xs text-muted-foreground">日常调价请用上方「编辑规则」。这里逐个版本维护草稿；封存后内容只读，才能被 Boss 选中生效。</p>
           <section className="section-panel">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-sm font-semibold">价格版本</h3>
-              <div className="flex items-center gap-2">
-                <select value={priceMode} onChange={(event) => setPriceMode(event.target.value as "SPREAD" | "PERCENT")} className={selectClass}>
-                  <option value="SPREAD">SPREAD 差价</option>
-                  <option value="PERCENT">PERCENT 百分比</option>
-                </select>
-                <Button type="button" size="sm" onClick={() => void createPrice()}>新建价格草稿</Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-44"><RulesSelect label="新草稿计价方式" value={priceMode} onChange={(value) => setPriceMode(value as "SPREAD" | "PERCENT")} options={[{ value: "SPREAD", label: "差价（SPREAD）" }, { value: "PERCENT", label: "百分比（PERCENT）" }]} /></div>
+                <BusyButton type="button" busy={loading} disabled={command.locked} onClick={() => void guard(createPrice)}>新建价格草稿</BusyButton>
               </div>
             </div>
-            <div className="flex items-center gap-2 mt-3">
-              <select value={priceId} onChange={(event) => selectPrice(event.target.value)} className={selectClass}>
-                {rules.priceVersions.map((version) => <option key={version.id} value={version.id}>{version.mode} · {version.status} · rev {version.revision}</option>)}
-              </select>
-              {selectedPrice?.status === "DRAFT" && !priceReadOnly ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void seal("price", selectedPrice.id, selectedPrice.revision)}>封存</Button> : null}
-            </div>
+            {rules.priceVersions.length === 0 ? (
+              <div className="mt-3"><EmptyHint>还没有价格版本。选择计价方式后点击「新建价格草稿」开始。</EmptyHint></div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <div className="w-full sm:w-80"><RulesSelect label="价格版本" value={priceId} onChange={(value) => selectPrice(value)} options={rules.priceVersions.map((version) => ({ value: version.id, label: `${modeLabel(version.mode)} · ${statusLabel(version.status)} · 修订 ${version.revision}` }))} /></div>
+                {selectedPrice?.status === "DRAFT" && !priceReadOnly ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="封存后由 Boss 选择并确认生效" busyText="封存中…" onClick={() => void guard(() => seal("price", selectedPrice.id, selectedPrice.revision))}>封存版本</BusyButton> : null}
+              </div>
+            )}
             {selectedPrice && priceReadOnly ? (
               <div className="mt-4 space-y-3">
                 <p role="status" className="text-xs text-muted-foreground">此规则版本尚不支持编辑，仅可查看。</p>
                 <pre className="overflow-auto text-xs">{JSON.stringify(selectedPrice.haffRule, null, 2)}</pre>
-                <div className="table-wrap"><table className="data-table">
-                  <thead><tr><th>物品</th><th>档位</th><th>计价方式</th><th>单位数量</th><th>租客单价</th><th>号主单价</th></tr></thead>
-                  <tbody>{rules.priceLines.filter((line) => line.priceVersionId === selectedPrice.id).map((line) => (
-                    <tr key={`${line.itemId}:${line.customerTier ?? "STANDARD"}`}>
-                      <td>{items.find((item) => item.id === line.itemId)?.name ?? line.itemId}</td>
-                      <td>{line.customerTier ?? "STANDARD"}</td><td>{line.pricingKind}</td>
-                      <td>{line.unitQuantity ?? "—"}</td><td>{line.buyerUnitAmount ?? "—"}</td><td>{line.ownerUnitAmount ?? "—"}</td>
-                    </tr>
-                  ))}</tbody>
-                </table></div>
+                <div className="rounded-md border border-border">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>物品</TableHead><TableHead>档位</TableHead><TableHead>计价方式</TableHead><TableHead>单位数量</TableHead><TableHead>租客单价</TableHead><TableHead>号主单价</TableHead></TableRow></TableHeader>
+                    <TableBody>{rules.priceLines.filter((line) => line.priceVersionId === selectedPrice.id).map((line) => (
+                      <TableRow key={`${line.itemId}:${line.customerTier ?? "STANDARD"}`}>
+                        <TableCell>{items.find((item) => item.id === line.itemId)?.name ?? line.itemId}</TableCell>
+                        <TableCell>{line.customerTier ?? "STANDARD"}</TableCell><TableCell>{kindLabel(line.pricingKind)}</TableCell>
+                        <TableCell>{line.unitQuantity ?? "未配置"}</TableCell><TableCell>{line.buyerUnitAmount ?? "未配置"}</TableCell><TableCell>{line.ownerUnitAmount ?? "未配置"}</TableCell>
+                      </TableRow>
+                    ))}</TableBody>
+                  </Table>
+                </div>
               </div>
             ) : null}
             {selectedPrice && !priceReadOnly ? (
-              <form onSubmit={savePrice} className="mt-4 space-y-3">
+              <form onSubmit={(event) => { event.preventDefault(); void guard(() => savePrice(event)); }} className="mt-4 space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <Field label="封存状态"><div className="h-9 flex items-center text-xs">{selectedPrice.status === "SEALED" ? "已封存（只读）" : "草稿"}</div></Field>
+                  <Field label="封存状态" composite><div className="h-9 flex items-center text-xs">{selectedPrice.status === "SEALED" ? "已封存（只读）" : "草稿（可修改）"}</div></Field>
                   {priceMode === "PERCENT" ? (
-                    <Field label="平台抽成 commission_rate（0–1）">
-                      <input value={commissionRate} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setCommissionRate(event.target.value); setDirty(true); }} className={inputClass} placeholder="0.2" />
+                    <Field label="平台抽成比例（0–1）">
+                      <Input value={commissionRate} disabled={selectedPrice.status === "SEALED" || command.locked} onChange={(event) => { setCommissionRate(event.target.value); setDirty(true); }} className={inputClass} placeholder="0.2" />
                     </Field>
                   ) : null}
+                  <Field label="价目档位" composite><RulesSelect label="价目档位" value={priceTier} onChange={(value) => setPriceTier(value as PriceTier)} options={PRICE_TIERS.map((tier) => ({ value: tier, label: tier }))} /></Field>
                 </div>
-                <Field label="哈夫币规则 JSON（保留原 schema；比例单位按该版本合同）">
-                  <textarea value={haffRuleText} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setHaffRuleText(event.target.value); setDirty(true); }} className={textareaClass} />
-                </Field>
-                <Field label="价目档位"><select aria-label="价目档位" value={priceTier} onChange={event => setPriceTier(event.target.value as PriceTier)} className={selectClass}>{PRICE_TIERS.map(tier => <option key={tier} value={tier}>{tier}</option>)}</select></Field>
-                <div className="table-wrap">
-                  <table className="data-table">
-                    <thead><tr><th>物品</th><th>计价方式</th><th>unit_quantity</th><th>买方单价</th><th>号主单价</th></tr></thead>
-                    <tbody>
+                <div className="rounded-md border border-border">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>物品</TableHead><TableHead>计价方式</TableHead><TableHead>单位数量</TableHead><TableHead>租客单价</TableHead><TableHead>号主单价</TableHead></TableRow></TableHeader>
+                    <TableBody>
                       {items.map((item) => {
                         const key = item.id + ":" + priceTier;
                         const line = lines[key];
                         if (!line) return null;
+                        const sealed = selectedPrice.status === "SEALED";
                         return (
-                          <tr key={item.id}>
-                            <td>{item.name}（{item.code}） · {priceTier}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" ? "HAFF_RATIO（按规则推算）" : "FIXED_UNIT"}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" ? "-" : <input value={line.unitQuantity} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [key]: { ...line, unitQuantity: event.target.value } }); setDirty(true); }} className={inputClass} />}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" ? "-" : <input value={line.buyerUnitAmount} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [key]: { ...line, buyerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2.5" />}</td>
-                            <td>{line.pricingKind === "HAFF_RATIO" || priceMode === "PERCENT" ? "-" : <input value={line.ownerUnitAmount} disabled={selectedPrice.status === "SEALED"} onChange={(event) => { setLines({ ...lines, [key]: { ...line, ownerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2" />}</td>
-                          </tr>
+                          <TableRow key={item.id}>
+                            <TableCell><span className="font-medium">{item.name}</span> <span className="text-[11px] text-muted-foreground">{item.code}</span></TableCell>
+                            <TableCell>{kindLabel(line.pricingKind)}</TableCell>
+                            <TableCell className="min-w-28">{line.pricingKind === "HAFF_RATIO" ? "—" : <Input aria-label={`${item.name} 单位数量`} value={line.unitQuantity} disabled={sealed || command.locked} onChange={(event) => { setLines({ ...lines, [key]: { ...line, unitQuantity: event.target.value } }); setDirty(true); }} className={inputClass} />}</TableCell>
+                            <TableCell className="min-w-28">{line.pricingKind === "HAFF_RATIO" ? "—" : <Input aria-label={`${item.name} 租客单价`} value={line.buyerUnitAmount} disabled={sealed || command.locked} onChange={(event) => { setLines({ ...lines, [key]: { ...line, buyerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2.5" />}</TableCell>
+                            <TableCell className="min-w-28">{line.pricingKind === "HAFF_RATIO" || priceMode === "PERCENT" ? "—" : <Input aria-label={`${item.name} 号主单价`} value={line.ownerUnitAmount} disabled={sealed || command.locked} onChange={(event) => { setLines({ ...lines, [key]: { ...line, ownerUnitAmount: event.target.value } }); setDirty(true); }} className={inputClass} placeholder="2" />}</TableCell>
+                          </TableRow>
                         );
                       })}
-                    </tbody>
-                  </table>
+                    </TableBody>
+                  </Table>
                 </div>
-                {selectedPrice.status === "DRAFT" ? <Button type="submit" size="sm" loading={loading}>保存价格草稿</Button> : null}
+                <Collapsible open={haffRawOpen} onOpenChange={setHaffRawOpen} className="rounded-md border border-border px-3 py-2">
+                  <CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm" className="h-auto justify-start px-0 py-2 text-left whitespace-normal" />}>高级：哈夫币规则（JSON，保留原 schema）</CollapsibleTrigger>
+                  <CollapsibleContent keepMounted><div className="mt-2">
+                    <Field label="哈夫币规则 JSON（比例单位按该版本合同）">
+                      <Textarea value={haffRuleText} disabled={selectedPrice.status === "SEALED" || command.locked} onChange={(event) => { setHaffRuleText(event.target.value); setDirty(true); }} className={textareaClass} />
+                    </Field>
+                  </div></CollapsibleContent>
+                </Collapsible>
+                {selectedPrice.status === "DRAFT" ? <BusyButton type="submit" busy={loading} disabled={command.locked} busyText="保存中…">保存价格草稿</BusyButton> : null}
               </form>
             ) : null}
           </section>
 
           <section className="section-panel">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-sm font-semibold">租期版本</h3>
-              <Button type="button" size="sm" onClick={() => void createTerm()}>新建租期草稿</Button>
+              <BusyButton type="button" busy={loading} disabled={command.locked} onClick={() => void guard(createTerm)}>新建租期草稿</BusyButton>
             </div>
-            <div className="flex items-center gap-2 mt-3">
-              <select value={termId} onChange={(event) => applyTerm(event.target.value, rules.termOptions)} className={selectClass}>
-                {rules.termVersions.map((version) => <option key={version.id} value={version.id}>{version.status} · rev {version.revision}</option>)}
-              </select>
-              {selectedTerm?.status === "DRAFT" ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void seal("term", selectedTerm.id, selectedTerm.revision)}>封存</Button> : null}
-            </div>
-            <form onSubmit={saveTerm} className="mt-4 space-y-3">
-              <div className="table-wrap">
-                <table className="data-table">
-                  <thead><tr><th>选项 code</th><th>名称</th><th>日消耗（基础哈夫币）</th><th /></tr></thead>
-                  <tbody>
-                    {termOptions.map((option, index) => (
-                      <tr key={index}>
-                        <td><input value={option.code} disabled={selectedTerm?.status === "SEALED"} onChange={(event) => { setTermOptions(termOptions.map((item, itemIndex) => itemIndex === index ? { ...item, code: event.target.value } : item)); setDirty(true); }} className={inputClass} /></td>
-                        <td><input value={option.name} disabled={selectedTerm?.status === "SEALED"} onChange={(event) => { setTermOptions(termOptions.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item)); setDirty(true); }} className={inputClass} /></td>
-                        <td><input value={option.dailyConsumption} disabled={selectedTerm?.status === "SEALED"} onChange={(event) => { setTermOptions(termOptions.map((item, itemIndex) => itemIndex === index ? { ...item, dailyConsumption: event.target.value } : item)); setDirty(true); }} className={inputClass} /></td>
-                        <td>{selectedTerm?.status === "DRAFT" ? <Button type="button" size="sm" variant="ghost" onClick={() => { setTermOptions(termOptions.filter((_, itemIndex) => itemIndex !== index)); setDirty(true); }}>删除</Button> : null}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {rules.termVersions.length === 0 ? (
+              <div className="mt-3"><EmptyHint>还没有租期版本。点击「新建租期草稿」，再添加租期档位。</EmptyHint></div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <div className="w-full sm:w-80"><RulesSelect label="租期版本" value={termId} onChange={(value) => applyTerm(value, rules.termOptions)} options={rules.termVersions.map((version) => ({ value: version.id, label: `${statusLabel(version.status)} · 修订 ${version.revision}` }))} /></div>
+                {selectedTerm?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="封存后由 Boss 选择并确认生效" busyText="封存中…" onClick={() => void guard(() => seal("term", selectedTerm.id, selectedTerm.revision))}>封存版本</BusyButton> : null}
               </div>
-              {selectedTerm?.status === "DRAFT" ? (
-                <div className="flex gap-2">
-                  <Button type="button" size="sm" variant="secondary" onClick={() => { setTermOptions([...termOptions, { code: `daily-${termOptions.length + 1}`, name: "新档位", dailyConsumption: "10000000" }]); setDirty(true); }}>添加档位</Button>
-                  <Button type="submit" size="sm" loading={loading}>保存租期草稿</Button>
+            )}
+            {selectedTerm ? (
+              <form onSubmit={(event) => { event.preventDefault(); void guard(() => saveTerm(event)); }} className="mt-4 space-y-3">
+                <div className="rounded-md border border-border">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>选项编码</TableHead><TableHead>名称</TableHead><TableHead>日消耗（基础哈夫币）</TableHead><TableHead><span className="sr-only">操作</span></TableHead></TableRow></TableHeader>
+                    <TableBody>
+                      {termOptions.length === 0 ? (
+                        <TableRow><TableCell colSpan={4} className="text-xs text-muted-foreground">还没有租期档位。{selectedTerm.status === "DRAFT" ? "点击「添加档位」后保存草稿。" : ""}</TableCell></TableRow>
+                      ) : termOptions.map((option, index) => (
+                        <TableRow key={index}>
+                          <TableCell><Input aria-label="选项编码" value={option.code} disabled={selectedTerm.status === "SEALED" || command.locked} onChange={(event) => { setTermOptions(termOptions.map((item, itemIndex) => itemIndex === index ? { ...item, code: event.target.value } : item)); setDirty(true); }} className={inputClass} /></TableCell>
+                          <TableCell><Input aria-label="名称" value={option.name} disabled={selectedTerm.status === "SEALED" || command.locked} onChange={(event) => { setTermOptions(termOptions.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item)); setDirty(true); }} className={inputClass} /></TableCell>
+                          <TableCell><Input aria-label="日消耗" value={option.dailyConsumption} disabled={selectedTerm.status === "SEALED" || command.locked} onChange={(event) => { setTermOptions(termOptions.map((item, itemIndex) => itemIndex === index ? { ...item, dailyConsumption: event.target.value } : item)); setDirty(true); }} className={inputClass} /></TableCell>
+                          <TableCell className="w-20">{selectedTerm.status === "DRAFT" ? <Button type="button" size="sm" variant="ghost" onClick={() => { setTermOptions(termOptions.filter((_, itemIndex) => itemIndex !== index)); setDirty(true); }}>删除</Button> : null}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
                 </div>
-              ) : null}
-            </form>
+                {selectedTerm.status === "DRAFT" ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="secondary" onClick={() => { setTermOptions([...termOptions, { code: `daily-${termOptions.length + 1}`, name: "新档位", dailyConsumption: "10000000" }]); setDirty(true); }}>添加档位</Button>
+                    <BusyButton type="submit" busy={loading} disabled={command.locked} busyText="保存中…">保存租期草稿</BusyButton>
+                  </div>
+                ) : null}
+              </form>
+            ) : null}
           </section>
 
           <section className="section-panel">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-sm font-semibold">协议版本</h3>
-              <Button type="button" size="sm" onClick={() => void createAgreement()}>新建协议草稿</Button>
+              <BusyButton type="button" busy={loading} disabled={command.locked} onClick={() => void guard(createAgreement)}>新建协议草稿</BusyButton>
             </div>
-            <div className="flex items-center gap-2 mt-3">
-              <select value={agreementId} onChange={(event) => { const record = rules.agreementVersions.find((version) => version.id === event.target.value); setAgreementId(event.target.value); setAgreementTitle(record?.title ?? ""); setAgreementBody(record?.body ?? ""); setDirty(false); }} className={selectClass}>
-                {rules.agreementVersions.map((version) => <option key={version.id} value={version.id}>{version.title} · {version.status} · rev {version.revision}</option>)}
-              </select>
-              {selectedAgreement?.status === "DRAFT" ? <Button type="button" size="sm" variant="secondary" loading={loading} onClick={() => void seal("agreement", selectedAgreement.id, selectedAgreement.revision)}>封存</Button> : null}
-            </div>
-            <form onSubmit={saveAgreement} className="mt-4 space-y-3">
-              <Field label="标题"><input value={agreementTitle} disabled={selectedAgreement?.status === "SEALED"} onChange={(event) => { setAgreementTitle(event.target.value); setDirty(true); }} className={inputClass} /></Field>
-              <Field label="正文（纯文本；服务端保存 digest）"><textarea value={agreementBody} disabled={selectedAgreement?.status === "SEALED"} onChange={(event) => { setAgreementBody(event.target.value); setDirty(true); }} className={textareaClass} /></Field>
-              {selectedAgreement?.status === "DRAFT" ? <Button type="submit" size="sm" loading={loading}>保存协议草稿</Button> : null}
-            </form>
+            {rules.agreementVersions.length === 0 ? (
+              <div className="mt-3"><EmptyHint>还没有出租协议版本。点击「新建协议草稿」后填写标题与正文。</EmptyHint></div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <div className="w-full sm:w-96"><RulesSelect label="协议版本" value={agreementId} onChange={(value) => { const record = rules.agreementVersions.find((version) => version.id === value); setAgreementId(value); setAgreementTitle(record?.title ?? ""); setAgreementBody(record?.body ?? ""); setDirty(false); }} options={rules.agreementVersions.map((version) => ({ value: version.id, label: `${version.title} · ${statusLabel(version.status)} · 修订 ${version.revision}` }))} /></div>
+                {selectedAgreement?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="封存后由 Boss 选择并确认生效" busyText="封存中…" onClick={() => void guard(() => seal("agreement", selectedAgreement.id, selectedAgreement.revision))}>封存版本</BusyButton> : null}
+              </div>
+            )}
+            {selectedAgreement ? (
+              <form onSubmit={(event) => { event.preventDefault(); void guard(() => saveAgreement(event)); }} className="mt-4 space-y-3">
+                <Field label="标题"><Input value={agreementTitle} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementTitle(event.target.value); setDirty(true); }} className={inputClass} /></Field>
+                <Field label="正文（纯文本）"><Textarea value={agreementBody} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementBody(event.target.value); setDirty(true); }} className={textareaClass} /></Field>
+                {selectedAgreement.status === "DRAFT" ? <BusyButton type="submit" busy={loading} disabled={command.locked} busyText="保存中…">保存协议草稿</BusyButton> : null}
+              </form>
+            ) : null}
           </section>
 
-          <section className="section-panel">
-            <h3 className="text-sm font-semibold">Boss 生效</h3>
-            <p className="text-xs text-muted-foreground mt-1">本次确认基于第 {rules.release?.generation ?? "0"} 代规则；期间有其他生效操作时，需刷新后重新确认。</p>
-            <p className="text-[11px] text-muted-foreground mt-1">只有已封存版本可被引用；同一游戏一次生效一个 release，切换在同事务完成并立即影响后续调用。</p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
-              <Field label="价格版本">
-                <select value={activatePrice} onChange={(event) => setActivatePrice(event.target.value)} className={selectClass}>
-                  <option value="">请选择</option>
-                  {rules.priceVersions.filter((version) => version.status === "SEALED").map((version) => <option key={version.id} value={version.id}>{version.mode} · rev {version.revision}</option>)}
-                </select>
-              </Field>
-              <Field label="租期版本">
-                <select value={activateTerm} onChange={(event) => setActivateTerm(event.target.value)} className={selectClass}>
-                  <option value="">请选择</option>
-                  {rules.termVersions.filter((version) => version.status === "SEALED").map((version) => <option key={version.id} value={version.id}>rev {version.revision}</option>)}
-                </select>
-              </Field>
-              <Field label="协议版本">
-                <select value={activateAgreement} onChange={(event) => setActivateAgreement(event.target.value)} className={selectClass}>
-                  <option value="">请选择</option>
-                  {rules.agreementVersions.filter((version) => version.status === "SEALED").map((version) => <option key={version.id} value={version.id}>{version.title}</option>)}
-                </select>
-              </Field>
-            </div>
-            <div className="flex items-center gap-3 mt-3">
-              <Button type="button" size="sm" loading={loading} disabled={!isBoss || !activatePrice || !activateTerm || !activateAgreement} onClick={() => void activate()}>原子生效</Button>
-              {!isBoss ? <span className="text-[11px] text-muted-foreground">当前账号不是 Boss，只能编辑草稿。</span> : null}
-            </div>
-          </section>
-
-          {canPreview && !priceReadOnly ? (
-            <section className="section-panel">
-              <h3 className="text-sm font-semibold">报价演算（内部投影）</h3>
-              <p className="text-[11px] text-muted-foreground mt-1">使用当前选中的价格/租期草稿与合成条件演算；押金策略未配置时以 null 返回，不会填 0.00。</p>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-3">
-                <Field label="安全箱 code"><input value={previewInput.safeBoxCode} onChange={(event) => setPreviewInput({ ...previewInput, safeBoxCode: event.target.value })} className={inputClass} placeholder="box-a" /></Field>
-                <Field label="体力等级"><input value={previewInput.vitLevel} onChange={(event) => setPreviewInput({ ...previewInput, vitLevel: event.target.value })} className={inputClass} /></Field>
-                <Field label="负重等级"><input value={previewInput.bearLevel} onChange={(event) => setPreviewInput({ ...previewInput, bearLevel: event.target.value })} className={inputClass} /></Field>
-                <Field label="计价选项 code"><input value={previewInput.pricingOptionCode} onChange={(event) => setPreviewInput({ ...previewInput, pricingOptionCode: event.target.value })} className={inputClass} /></Field>
-                <Field label="哈夫币数量"><input value={previewInput.quantity} onChange={(event) => setPreviewInput({ ...previewInput, quantity: event.target.value })} className={inputClass} /></Field>
-              </div>
-              <div className="flex items-center gap-3 mt-3">
-                <Button type="button" size="sm" loading={loading} onClick={() => void runPreview()}>演算</Button>
-                <span className="text-[11px] text-muted-foreground">租期选项：{termOptions[0]?.code ?? "未配置"}；皮肤不参与计价。</span>
-              </div>
-              <StatusMessage error={previewError} className="mt-3" />
-              {preview ? <pre className="mt-3 max-h-96 overflow-auto text-[11px] bg-surface-raised border border-border rounded-md p-3">{JSON.stringify(preview, null, 2)}</pre> : null}
-            </section>
-          ) : null}
-        </>
+          </div></CollapsibleContent>
+          </Collapsible>
+        </div>
       ) : null}
     </div>
   );

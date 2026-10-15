@@ -70,7 +70,7 @@ async function setup(t) {
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   const { createRoot } = await import("react-dom/client");
   const rootPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], server: { middlewareMode: true, hmr: false } });
+  const vite = await createServer({ configFile: false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, root: rootPath, plugins: [react()], server: { middlewareMode: true, hmr: false } });
   const { AdminOrdersView } = await vite.ssrLoadModule("/apps/admin/src/views/admin-orders-view.tsx");
   const { AdminOrderChainView, AdminResourceReadView } = await vite.ssrLoadModule("/apps/admin/src/views/admin-order-chain-view.tsx");
   const node = document.createElement("div");

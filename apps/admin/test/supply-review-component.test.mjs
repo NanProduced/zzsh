@@ -17,17 +17,17 @@ test('StrictMode discards an aborted old query after a work view changes',async 
 });
 test('UNKNOWN freezes original request and acknowledged write recovers by GET only',async t=>{
  let posted=false,attempt=0,failRead=false;const h=await prepare(t,async(url,init)=>{if(init.method==='POST'){if(++attempt===1)throw new Error('fixture unknown transport');posted=true;failRead=true;return json({accepted:true});}if(failRead){failRead=false;return failure(500);}return json(workDetail(posted));});
- await confirm(h);await tick(h);assert.equal(h.writes.length,1);assert.ok(h.el.textContent.includes('结果未确认'));assert.ok([...h.el.querySelectorAll('dialog textarea')].every(e=>e.disabled));
+ await confirm(h);await tick(h);assert.equal(h.writes.length,1);assert.ok(h.el.textContent.includes('结果未确认'));assert.ok([...h.el.querySelectorAll('[data-slot="dialog-content"] textarea')].every(e=>e.disabled));
  await confirm(h);await tick(h);assert.equal(h.writes.length,2);assert.equal(h.writes[0].key,h.writes[1].key);assert.equal(h.writes[0].rawBody,h.writes[1].rawBody);assert.equal(h.writes[0].path,h.writes[1].path);
- assert.ok(h.el.textContent.includes('只重读本次结果'));assert.equal(h.el.querySelectorAll('dialog').length,0);
+ assert.ok(h.el.textContent.includes('只重读本次结果'));assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"]').length,0);
  await h.click(h.btn('只重读本次结果'));await tick(h);assert.equal(h.writes.length,2);assert.ok(h.el.textContent.includes('解除影响'));
 });
 test('409 permanently invalidates the old confirmation and requires a new review',async t=>{
  const h=await prepare(t,async(url,init)=>init.method==='POST'?failure(409):json(workDetail()));await confirm(h);await tick(h);assert.equal(h.writes.length,1);
- assert.ok(h.btn('确认施加运营限制').disabled);await h.click(h.btn('返回核对（保留原因）'));await tick(h);assert.equal(h.el.querySelectorAll('dialog').length,0);assert.equal(h.writes.length,1);
+ assert.ok(h.btn('确认施加运营限制').disabled);await h.click(h.btn('返回核对（保留原因）'));await tick(h);assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"]').length,0);assert.equal(h.writes.length,1);
 });
 test('an identity/permission switch clears UNKNOWN and historical page stays zero-write',async t=>{
- const h=await prepare(t,async(url,init)=>init.method==='POST'?failure(500):json(workDetail()));await confirm(h);await tick(h);assert.ok(h.el.querySelector('dialog'));
- await h.render('different-admin',['supply.review.read'],'a',{context:'review'});await tick(h);assert.equal(h.el.querySelectorAll('dialog').length,0);assert.ok(!h.btn('核对后确认运营限制'));assert.equal(h.writes.length,1);
+ const h=await prepare(t,async(url,init)=>init.method==='POST'?failure(500):json(workDetail()));await confirm(h);await tick(h);assert.ok(h.el.querySelector('[data-slot="dialog-content"]'));
+ await h.render('different-admin',['supply.review.read'],'a',{context:'review'});await tick(h);assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"]').length,0);assert.ok(!h.btn('核对后确认运营限制'));assert.equal(h.writes.length,1);
  const old=workDetail(false,true);globalThis.fetch=async()=>json(old);await h.render('history-admin',permissions,'a',{context:'review',versionId:'v-old'});await tick(h);assert.ok(h.btn('核对后确认运营限制').disabled);await h.click(h.btn('核对后确认运营限制'));await tick(h);assert.equal(h.writes.length,1);
 });

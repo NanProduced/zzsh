@@ -24,6 +24,10 @@ globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 globalThis.requestAnimationFrame = browser.requestAnimationFrame.bind(browser);
 globalThis.cancelAnimationFrame = browser.cancelAnimationFrame.bind(browser);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+// 产品代码读写 globalThis.sessionStorage；显式绑定到本测试窗口的存储，
+// 不依赖 Node 某个启动环境是否默认提供 Web Storage。用例结束由 happyDOM.abort 回收。
+Object.defineProperty(globalThis, "sessionStorage", { value: browser.sessionStorage, configurable: true, writable: true });
+
 const { createRoot } = await import("react-dom/client");
 
 const vite = await createServer({
@@ -55,22 +59,72 @@ const permissions = [
   "admin.account.read",
 ];
 
+let sessionId = "session-1";
+
+/** 恢复类用例各自独立会话并清空责任存储，避免记录跨用例泄漏。 */
+function freshSession(tag) {
+  sessionId = "session-" + tag;
+  browser.sessionStorage.clear();
+}
+
 function snapshot(perms = permissions) {
   return {
     authenticated: true,
     adminUserId: "admin-boss",
     user: { name: "Boss", username: "zz00001", displayUsername: "ZZ00001", twoFactorEnabled: true },
     security: { status: "ACTIVE", isBoss: true, passwordChangeRequired: false },
-    session: { id: "session-1", locked: false, pinConfigured: true, createdAt: null, expiresAt: null },
+    session: { id: sessionId, locked: false, pinConfigured: true, createdAt: null, expiresAt: null },
     permissions: perms,
+  };
+}
+
+/**
+ * 动作资格夹具。前端只负责「服务端说什么就渲染什么」，因此这里直接给出
+ * evaluateApprovalActions 的输出形状，不在测试里复制服务端判定逻辑。
+ */
+function eligibility(action, allowed, reasonCode, extra = {}) {
+  return { action, allowed, reasonCode, requiredPermission: null, executionMode: "GENERIC_TRANSACTION", nextStepCode: null, ...extra };
+}
+
+function actionsFor(status) {
+  const pending = status === "PENDING";
+  const approved = status === "APPROVED";
+  return [
+    eligibility("approve", pending, pending ? "OK" : "STATUS_NOT_PENDING"),
+    eligibility("reject", pending, pending ? "OK" : "STATUS_NOT_PENDING"),
+    eligibility("execute", approved, approved ? "OK" : "STATUS_NOT_APPROVED", approved ? {} : { nextStepCode: "APPROVAL_DECISION_REQUIRED" }),
+    eligibility("addCandidate", pending, pending ? "OK" : "STATUS_NOT_PENDING"),
+    eligibility("replace", false, "REQUESTER_ONLY"),
+  ];
+}
+
+function membershipBusiness(requestId, summaryText) {
+  return {
+    requestId,
+    businessType: "membership",
+    businessTitle: "发放会员礼遇权益",
+    operationCode: "membership.entitlement.grant",
+    executionMode: "GENERIC_TRANSACTION",
+    summaryAvailable: true,
+    detailsAvailable: true,
+    changeSummary: summaryText,
+    summary: {
+      schemaVersion: 1, changeSummary: summaryText, payloadVersion: 1, payloadHash: "hash-" + requestId,
+      gameName: "三角洲行动", entitlementKind: "PRESTIGE", entitlementKindTitle: "尊享礼遇",
+      targetUserId: "user_fixt_7c2", scopeKey: "renter:order:fixt", reason: "活动补偿", depositWaived: false,
+    },
+    objectRefs: [{ type: "membership_game", id: "game_fixt_delta" }],
+    resultAvailability: "NOT_APPLICABLE",
+    pricingRestrictedReasonCode: "MEMBERSHIP_DETAIL_READ_REQUIRED",
   };
 }
 
 function summary(requestId, status, summaryText) {
   return {
     requestId,
-    operationCode: "approval.test.execute",
-    triggerCondition: "manual",
+    // 工作台不再面向普通运营提供测试操作入口，夹具代表已登记的正式业务。
+    operationCode: "membership.entitlement.grant",
+    triggerCondition: "membership.entitlement.grant.requested",
     payloadVersion: 1,
     payloadHash: "hash-" + requestId,
     summary: summaryText,
@@ -79,13 +133,16 @@ function summary(requestId, status, summaryText) {
     requester: { username: "zz00001", displayUsername: "ZZ00001", name: "Boss" },
     createdAt: "2026-09-24T00:00:00.000Z",
     expiresAt: "2026-09-25T00:00:00.000Z",
+    business: membershipBusiness(requestId, summaryText),
+    actions: actionsFor(status),
+    candidateAvailability: { total: 2, eligible: 1, blockingReasonCode: null },
   };
 }
 
 function detail(requestId, status, summaryText) {
   return {
     ...summary(requestId, status, summaryText),
-    operation: { code: "approval.test.execute", triggerCondition: "manual", payloadVersion: 1, payloadHash: "hash-" + requestId, payload: { outcome: "SUCCESS" } },
+    operation: { code: "membership.entitlement.grant", triggerCondition: "membership.entitlement.grant.requested", payloadVersion: 1, payloadHash: "hash-" + requestId, executionMode: "GENERIC_TRANSACTION" },
     template: { id: "tpl-1", version: 1 },
     requester: { username: "zz00002", displayUsername: "ZZ00002", name: "审批人", status: "ACTIVE" },
     decision: null,
@@ -114,6 +171,9 @@ const PENDING_SUMMARY = "分页与确认样本一";
 const APPROVED_SUMMARY = "已批准待执行样本内容";
 
 let writes = [];
+let candidateCalls = [];
+let recoveryCalls = [];
+let recoveryResponse = { knowledge: "UNRESOLVED", operation: "approval.request.execute", key: "idem_x", explanationCode: "RECEIPT_NOT_FOUND", resolution: "UNKNOWN_NOT_ABSENT" };
 let mineCall = 0;
 let holdFirstMine = false;
 let mineFresh = false;
@@ -132,6 +192,31 @@ async function mockFetch(input, init = {}) {
   }
   if (url.pathname.endsWith("/security/approvals/templates")) {
     return json({ templates: [{ id: "tpl-1", operationCode: "approval.test.execute", triggerCondition: "manual", version: 1, updatedAt: null, candidates: [{ username: "zz00001", name: "Boss", status: "ACTIVE", eligible: true }] }] });
+  }
+  if (url.pathname.endsWith("/security/approvals/operations")) {
+    return json({
+      operations: [
+        { operationCode: "membership.entitlement.grant", businessType: "membership", title: "发放会员礼遇权益", executionMode: "GENERIC_TRANSACTION", testOnly: false, initiation: { allowed: true, reasonCode: "OK", requiredPermission: "approval.request.create" }, triggers: [{ triggerCondition: "membership.entitlement.grant.requested", templateVersion: 1, candidateTotal: 2, candidateEligible: 1, blockingReasonCode: null }] },
+        { operationCode: "order.settlement.adjust", businessType: "settlement", title: "人工调整订单结算", executionMode: "SOURCE_BUSINESS", testOnly: false, initiation: { allowed: false, reasonCode: "INITIATED_FROM_SOURCE_BUSINESS", requiredPermission: "approval.request.create" }, triggers: [] },
+      ],
+      unregisteredOperationPolicy: "未知操作只读展示并给出原因，不进入通用执行器",
+      scope: "REGISTERED_OPERATIONS_FOR_CURRENT_ADMIN",
+      testOperationsEnabled: false,
+    });
+  }
+  if (url.pathname.endsWith("/security/approvals/candidate-options")) {
+    candidateCalls.push(url.search);
+    return json({
+      candidates: [{ username: "zz00002", displayUsername: "ZZ00002", name: "审批人", isBoss: false, eligible: true, reasonCode: "OK" }],
+      excludedByReason: { TWO_FACTOR_REQUIRED: 1 },
+      requesterExcluded: Boolean(url.searchParams.get("requestId")),
+      excludedFields: ["ip", "session", "credentials", "lastLoginAt"],
+      requiredPermission: "approval.template.configure",
+    });
+  }
+  if (url.pathname.endsWith("/security/approvals/recovery")) {
+    recoveryCalls.push(url.search);
+    return json(recoveryResponse);
   }
   if (url.pathname.endsWith("/security/admins")) {
     return json({ admins: [{ id: "admin-boss", username: "zz00001", name: "Boss", status: "ACTIVE" }, { id: "admin-staff", username: "zz00002", name: "审批人", status: "ACTIVE" }] });
@@ -183,7 +268,8 @@ async function click(element) {
 }
 
 function setInput(element, value) {
-  const setValue = Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set;
+  const proto = element.tagName === "TEXTAREA" ? browser.HTMLTextAreaElement.prototype : browser.HTMLInputElement.prototype;
+  const setValue = Object.getOwnPropertyDescriptor(proto, "value").set;
   setValue.call(element, value);
   element.dispatchEvent(new browser.Event("input", { bubbles: true }));
 }
@@ -196,20 +282,27 @@ function buttonByText(text) {
   return buttons(document.body).find((button) => button.textContent.trim() === text);
 }
 
+/** 列表行不再整行可点：打开详情走操作列的真实按钮，键盘与读屏同样可达。 */
+function rowOpenButton(rootNode, text) {
+  const row = [...rootNode.querySelectorAll("tbody tr")].find((item) => item.textContent.includes(text));
+  return row ? [...row.querySelectorAll("button")].find((button) => button.textContent.trim().startsWith("查看")) : undefined;
+}
+
 const dialog = () => document.querySelector('[data-slot="dialog-content"]');
 
 async function renderView(props = {}) {
   const rootNode = browser.document.createElement("div");
   browser.document.body.appendChild(rootNode);
   const root = createRoot(rootNode);
-  let latest = { snapshot: snapshot() };
+  // 默认页已改为「待我处理」；这些用例的前提是「我的申请」，显式声明而不是依赖默认。
+  let latest = { snapshot: snapshot(), initialTab: "mine", ...props };
   const render = async (extra = {}) => {
     latest = { ...latest, ...extra };
     await act(async () => {
       root.render(createElement(ApprovalAuditView, { snapshot: latest.snapshot, ...latest }));
     });
   };
-  await render(props);
+  await render();
   return { rootNode, root, render, cleanup: async () => { await act(async () => root.unmount()); rootNode.remove(); } };
 }
 
@@ -225,18 +318,17 @@ test("approval confirm levels: cancel writes nothing, reject reason gates before
     await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
 
     // 打开 PENDING 详情
-    const pendingRow = [...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY));
-    await click(pendingRow);
-    await waitFor(() => buttonByText("同意") !== undefined);
+    await click(rowOpenButton(view.rootNode, PENDING_SUMMARY));
+    await waitFor(() => buttonByText("批准") !== undefined);
 
     // L2 同意:对话框含对象摘要与后果,取消零写入
-    await click(buttonByText("同意"));
+    await click(buttonByText("批准"));
     await waitFor(() => dialog() !== null);
-    assert.match(dialog().textContent, /确认同意审批/);
+    assert.match(dialog().textContent, /确认批准/);
     assert.match(dialog().textContent, new RegExp(PENDING_SUMMARY));
-    assert.match(dialog().textContent, /审批同意不代表执行完成或资金到账/);
+    assert.match(dialog().textContent, /批准不代表执行完成或资金到账/);
     assert.equal(writes.length, 0, "opening the dialog must not write");
-    const confirmApprove = buttons(dialog()).find((button) => button.textContent.trim() === "确认同意");
+    const confirmApprove = buttons(dialog()).find((button) => button.textContent.trim() === "确认批准");
     assert.ok(confirmApprove);
     assert.equal(confirmApprove.disabled, false, "approve reason is optional");
     await click(buttons(dialog()).find((button) => button.textContent.trim() === "取消"));
@@ -244,22 +336,22 @@ test("approval confirm levels: cancel writes nothing, reject reason gates before
     assert.equal(writes.length, 0, "cancel must not write");
 
     // L2 拒绝:原因输入在按钮之前,不足 3 字禁用
-    await click(buttonByText("拒绝"));
+    await click(buttonByText("驳回"));
     await waitFor(() => dialog() !== null);
     const dialogButtons = buttons(dialog());
-    const confirmReject = dialogButtons.find((button) => button.textContent.trim() === "确认拒绝");
+    const confirmReject = dialogButtons.find((button) => button.textContent.trim() === "确认驳回");
     assert.ok(confirmReject, "reject confirm lives inside the dialog");
-    const reasonInput = dialog().querySelector("input");
+    const reasonInput = dialog().querySelector("textarea");
     assert.ok(reasonInput, "reason entry precedes the confirm buttons");
-    assert.ok([...dialog().querySelectorAll("input,button")].indexOf(reasonInput) < [...dialog().querySelectorAll("input,button")].indexOf(confirmReject), "reason input is before buttons");
+    assert.ok([...dialog().querySelectorAll("textarea,input,button")].indexOf(reasonInput) < [...dialog().querySelectorAll("textarea,input,button")].indexOf(confirmReject), "reason input is before buttons");
     assert.equal(confirmReject.disabled, true, "reject disabled below 3 chars");
     setInput(reasonInput, "ab");
     await settle();
-    assert.equal(buttons(dialog()).find((button) => button.textContent.trim() === "确认拒绝").disabled, true);
+    assert.equal(buttons(dialog()).find((button) => button.textContent.trim() === "确认驳回").disabled, true);
     setInput(reasonInput, "范围不符");
     await settle();
-    assert.equal(buttons(dialog()).find((button) => button.textContent.trim() === "确认拒绝").disabled, false);
-    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认拒绝"));
+    assert.equal(buttons(dialog()).find((button) => button.textContent.trim() === "确认驳回").disabled, false);
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认驳回"));
     await waitFor(() => writes.length === 1);
     assert.equal(writes[0].path.endsWith("/security/approvals/requests/decision"), true);
     assert.equal(writes[0].body.decision, "REJECT");
@@ -268,12 +360,11 @@ test("approval confirm levels: cancel writes nothing, reject reason gates before
     await waitFor(() => dialog() === null);
 
     // L3 执行:复述前 8 字匹配才可点
-    const approvedRow = [...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(APPROVED_SUMMARY));
-    await click(approvedRow);
-    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
-    await click(buttonByText("执行本地测试动作"));
+    await click(rowOpenButton(view.rootNode, APPROVED_SUMMARY));
+    await waitFor(() => buttonByText("执行") !== undefined);
+    await click(buttonByText("执行"));
     await waitFor(() => dialog() !== null);
-    assert.match(dialog().textContent, /确认执行本地测试动作/);
+    assert.match(dialog().textContent, /确认执行/);
     assert.match(dialog().textContent, /不可撤销/);
     const recallTarget = APPROVED_SUMMARY.slice(0, 8);
     assert.match(dialog().textContent, new RegExp(recallTarget));
@@ -321,11 +412,11 @@ test("cursor stack restores the previous page and tabs expose role=tab with aria
       assert.ok(tab.hasAttribute("aria-selected"));
     }
     assert.equal(tabs.find((tab) => tab.textContent.includes("我的申请")).getAttribute("aria-selected"), "true");
-    assert.equal(tabs.find((tab) => tab.textContent.includes("待我审批")).getAttribute("aria-selected"), "false");
-    await click(tabs.find((tab) => tab.textContent.includes("待我审批")));
+    assert.equal(tabs.find((tab) => tab.textContent.includes("待我处理")).getAttribute("aria-selected"), "false");
+    await click(tabs.find((tab) => tab.textContent.includes("待我处理")));
     await waitFor(() => view.rootNode.textContent.includes("待我审批样本"));
     const afterSwitch = [...view.rootNode.querySelector('[role="tablist"]').querySelectorAll("button")];
-    assert.equal(afterSwitch.find((tab) => tab.textContent.includes("待我审批")).getAttribute("aria-selected"), "true");
+    assert.equal(afterSwitch.find((tab) => tab.textContent.includes("待我处理")).getAttribute("aria-selected"), "true");
     assert.equal(afterSwitch.find((tab) => tab.textContent.includes("我的申请")).getAttribute("aria-selected"), "false");
     assert.deepEqual(tabChanges, ["pending"]);
     await click(afterSwitch.find((tab) => tab.textContent.includes("我的申请")));
@@ -419,6 +510,7 @@ test("sequence guard: a late list response cannot overwrite the refreshed data",
 });
 
 test("unknown writes replay the frozen original request and preserve the original key", async () => {
+  freshSession("replay");
   writes = [];
   mineCall = 0;
   let decisionAttempts = 0;
@@ -436,18 +528,18 @@ test("unknown writes replay the frozen original request and preserve the origina
   const view = await renderView();
   try {
     await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
-    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY)));
-    await waitFor(() => buttonByText("同意") !== undefined);
-    await click(buttonByText("同意"));
+    await click(rowOpenButton(view.rootNode, PENDING_SUMMARY));
+    await waitFor(() => buttonByText("批准") !== undefined);
+    await click(buttonByText("批准"));
     await waitFor(() => dialog() !== null);
-    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认批准"));
     await waitFor(() => view.rootNode.textContent.includes("请求结果未知"));
 
     const original = writes[0];
     assert.equal(writes.length, 1, "the lost response creates one original write intent");
     assert.match(original.headers["idempotency-key"], /^idem_/);
-    await click(buttonByText("模板配置"));
-    await waitFor(() => view.rootNode.querySelector('input[value="approval.test.execute"]') !== null);
+    await click(buttonByText("审计记录"));
+    await waitFor(() => view.rootNode.querySelectorAll("form input").length > 0);
     setInput(view.rootNode.querySelectorAll("form input")[0], "changed-after-unknown");
     await click(buttonByText("用原请求重试"));
     await waitFor(() => writes.length === 2);
@@ -462,6 +554,7 @@ test("unknown writes replay the frozen original request and preserve the origina
 });
 
 test("successful write with failed detail readback keeps success fact and exposes GET-only recovery", async () => {
+  freshSession("readback");
   writes = [];
   mineCall = 0;
   let detailReads = 0;
@@ -476,9 +569,9 @@ test("successful write with failed detail readback keeps success fact and expose
   const view = await renderView();
   try {
     await waitFor(() => view.rootNode.textContent.includes(APPROVED_SUMMARY));
-    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(APPROVED_SUMMARY)));
-    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
-    await click(buttonByText("执行本地测试动作"));
+    await click(rowOpenButton(view.rootNode, APPROVED_SUMMARY));
+    await waitFor(() => buttonByText("执行") !== undefined);
+    await click(buttonByText("执行"));
     await waitFor(() => dialog() !== null);
     setInput(dialog().querySelector("input"), APPROVED_SUMMARY.slice(0, 8));
     await settle();
@@ -486,10 +579,10 @@ test("successful write with failed detail readback keeps success fact and expose
     await waitFor(() => view.rootNode.textContent.includes("已成功，最新状态未确认"));
     assert.equal(writes.filter((entry) => entry.path.endsWith("/requests/execute")).length, 1);
     assert.ok(buttonByText("重试读取最新状态"), "readback recovery is GET-only");
-    assert.equal(buttonByText("执行本地测试动作"), undefined, "stale detail cannot drive another write");
+    assert.equal(buttonByText("执行"), undefined, "stale detail cannot drive another write");
 
     await click(buttonByText("重试读取最新状态"));
-    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
+    await waitFor(() => buttonByText("执行") !== undefined);
     assert.equal(writes.filter((entry) => entry.path.endsWith("/requests/execute")).length, 1, "readback recovery does not POST");
   } finally {
     await view.cleanup();
@@ -532,7 +625,8 @@ test("approval lists clear when actor and session context changes before the new
   }
 });
 
-test("permission loss clears an unknown recovery before the permission is restored", async () => {
+test("permission loss hides the recovery panel but the responsibility returns with the same identity", async () => {
+  freshSession("permloss");
   writes = [];
   mineCall = 0;
   globalThis.fetch = async (input, init = {}) => {
@@ -546,11 +640,11 @@ test("permission loss clears an unknown recovery before the permission is restor
   const view = await renderView();
   try {
     await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
-    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY)));
-    await waitFor(() => buttonByText("同意") !== undefined);
-    await click(buttonByText("同意"));
+    await click(rowOpenButton(view.rootNode, PENDING_SUMMARY));
+    await waitFor(() => buttonByText("批准") !== undefined);
+    await click(buttonByText("批准"));
     await waitFor(() => dialog() !== null);
-    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认批准"));
     await waitFor(() => view.rootNode.textContent.includes("请求结果未知"));
 
     await view.render({ snapshot: snapshot(permissions.filter((permission) => permission !== "approval.request.approve")), refreshNonce: 1 });
@@ -560,7 +654,9 @@ test("permission loss clears an unknown recovery before the permission is restor
 
     await view.render({ snapshot: snapshot(), refreshNonce: 2 });
     await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
-    assert.equal(view.rootNode.textContent.includes("用原请求重试"), false, "restoring permission does not resurrect the old intent");
+    // 失权只隐藏敏感投影；回到同身份同会话后责任必须重新出现，但不自动重放。
+    await waitFor(() => view.rootNode.textContent.includes("用原请求重试"), 3000);
+    assert.ok(view.rootNode.textContent.includes("责任记录里"), "面板说明责任保留而非清除");
     assert.equal(writes.length, 1, "permission restoration does not replay a write");
   } finally {
     await view.cleanup();
@@ -600,6 +696,7 @@ test("switching the approval object clears the old detail and drops its late res
 });
 
 test("repeated confirmation while a write is in flight cannot create a second write", async () => {
+  freshSession("doubleconfirm");
   writes = [];
   mineCall = 0;
   let releaseDecision = null;
@@ -614,11 +711,11 @@ test("repeated confirmation while a write is in flight cannot create a second wr
   const view = await renderView();
   try {
     await waitFor(() => view.rootNode.textContent.includes(PENDING_SUMMARY));
-    await click([...view.rootNode.querySelectorAll("tbody tr")].find((row) => row.textContent.includes(PENDING_SUMMARY)));
-    await waitFor(() => buttonByText("同意") !== undefined);
-    await click(buttonByText("同意"));
+    await click(rowOpenButton(view.rootNode, PENDING_SUMMARY));
+    await waitFor(() => buttonByText("批准") !== undefined);
+    await click(buttonByText("批准"));
     await waitFor(() => dialog() !== null);
-    const confirm = buttons(dialog()).find((button) => button.textContent.trim() === "确认同意");
+    const confirm = buttons(dialog()).find((button) => button.textContent.trim() === "确认批准");
     await act(async () => {
       confirm.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true }));
       confirm.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -627,7 +724,7 @@ test("repeated confirmation while a write is in flight cannot create a second wr
     assert.equal(writes.length, 1, "the second confirmation is ignored while the first write is pending");
     assert.ok(releaseDecision);
     releaseDecision();
-    await waitFor(() => view.rootNode.textContent.includes("已记录首个有效同意"));
+    await waitFor(() => view.rootNode.textContent.includes("已记录首个有效批准"));
   } finally {
     if (releaseDecision) releaseDecision();
     await view.cleanup();
@@ -654,7 +751,7 @@ test("StrictMode restores approval reads and unmount rejects late responses", as
   browser.document.body.appendChild(rootNode);
   const root = createRoot(rootNode);
   try {
-    await act(async () => root.render(createElement(StrictMode, null, createElement(ApprovalAuditView, { snapshot: snapshot() }))));
+    await act(async () => root.render(createElement(StrictMode, null, createElement(ApprovalAuditView, { snapshot: snapshot(), initialTab: "mine" }))));
     await waitFor(() => rootNode.textContent.includes("StrictMode 新列表"));
     assert.equal(rootNode.textContent.includes("StrictMode 旧列表"), false, "StrictMode cleanup drops the first setup response");
     releaseOld();
@@ -686,6 +783,7 @@ test("StrictMode restores approval reads and unmount rejects late responses", as
 });
 
 test("object and actor-session changes release only the new approval lifecycle", async () => {
+  freshSession("lifecycle");
   writes = [];
   mineCall = 0;
   let releaseWrite;
@@ -699,18 +797,18 @@ test("object and actor-session changes release only the new approval lifecycle",
   };
   const view = await renderView({ initialRequestId: "m1", objectOnly: true });
   try {
-    await waitFor(() => buttonByText("同意") !== undefined);
-    await click(buttonByText("同意"));
+    await waitFor(() => buttonByText("批准") !== undefined);
+    await click(buttonByText("批准"));
     await waitFor(() => dialog() !== null);
-    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认批准"));
     assert.ok(releaseWrite, "the original POST is in flight");
 
     await view.render({ initialRequestId: "m2", refreshNonce: 1 });
-    await waitFor(() => buttonByText("执行本地测试动作") !== undefined);
-    assert.equal(buttonByText("执行本地测试动作").disabled, false, "the new object is not held by the old POST");
+    await waitFor(() => buttonByText("执行") !== undefined);
+    assert.equal(buttonByText("执行").disabled, false, "the new object is not held by the old POST");
     releaseWrite();
     await settle();
-    assert.equal(buttonByText("执行本地测试动作").disabled, false, "the old finally cannot release a new object lock");
+    assert.equal(buttonByText("执行").disabled, false, "the old finally cannot release a new object lock");
   } finally {
     if (releaseWrite) releaseWrite();
     await view.cleanup();
@@ -719,6 +817,7 @@ test("object and actor-session changes release only the new approval lifecycle",
 });
 
 test("actor-session change during readback clears the old busy state", async () => {
+  freshSession("readbackswitch");
   writes = [];
   mineCall = 0;
   let detailCalls = 0;
@@ -737,10 +836,10 @@ test("actor-session change during readback clears the old busy state", async () 
   };
   const view = await renderView({ initialRequestId: "m1", objectOnly: true });
   try {
-    await waitFor(() => buttonByText("同意") !== undefined);
-    await click(buttonByText("同意"));
+    await waitFor(() => buttonByText("批准") !== undefined);
+    await click(buttonByText("批准"));
     await waitFor(() => dialog() !== null);
-    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认同意"));
+    await click(buttons(dialog()).find((button) => button.textContent.trim() === "确认批准"));
     await waitFor(() => releaseReadback !== undefined);
 
     await view.render({
@@ -748,11 +847,11 @@ test("actor-session change during readback clears the old busy state", async () 
       initialRequestId: "m1",
       refreshNonce: 1,
     });
-    await waitFor(() => buttonByText("同意") !== undefined);
-    assert.equal(buttonByText("同意").disabled, false, "the new actor-session is not held by old readback");
+    await waitFor(() => buttonByText("批准") !== undefined);
+    assert.equal(buttonByText("批准").disabled, false, "the new actor-session is not held by old readback");
     releaseReadback();
     await settle();
-    assert.equal(buttonByText("同意").disabled, false, "the old readback cannot clear the new actor-session state");
+    assert.equal(buttonByText("批准").disabled, false, "the old readback cannot clear the new actor-session state");
   } finally {
     if (releaseReadback) releaseReadback();
     await view.cleanup();

@@ -17,3 +17,7 @@ apps/api/migrations/business/0055_skin_identity_contract.sql -text !eol whitespa
 *.jpeg binary
 *.webp binary
 *.pdf binary
+# Keep the complete upstream font license and its SHA stable on every checkout.
+assets/fonts/noto-sans-sc/LICENSE-NotoSansSC.txt text eol=lf whitespace=-blank-at-eol
+apps/admin/public/fonts/noto-sans-sc/LICENSE-NotoSansSC.txt text eol=lf whitespace=-blank-at-eol
+apps/web/public/fonts/noto-sans-sc/LICENSE-NotoSansSC.txt text eol=lf whitespace=-blank-at-eol

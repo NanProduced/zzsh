@@ -1,6 +1,11 @@
 import { AdminFinanceView } from "../views/admin-finance-view";
 import { SupplyListingReviewView } from "../views/supply-listing-review-view";
-import type { SessionSnapshot } from "../api";
+import type { SessionSnapshot, Theme, ThemeMode } from "../api";
+import type { ThemeStorageStatus } from "../lib/theme";
+import { SettingsWorkspace } from "./settings-page";
+import { AccountSecurityPage } from "./account-security-page";
+import { SettingsView } from "../views/settings-view";
+import { isLocalSettingsPreview } from "./settings-preview";
 import { AdminAuditView } from "../views/admin-audit-view";
 import { AdminDirectoryView, UserRestorePanel } from "../views/admin-directory-view";
 import { UserDirectoryView } from "../views/user-directory/user-directory-view";
@@ -16,7 +21,6 @@ import { MembershipGrowthAdminHost } from "../views/membership-growth-admin-host
 
 import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
 
-import { AccountSecurityPage } from "./account-security-page";
 import type { WorkspaceTab } from "./tab-model";
 import { WorkbenchPage } from "./workbench";
 import { Button } from "../components/ui-elements";
@@ -33,6 +37,14 @@ export function WorkspacePageContent({
   onDirtyChange,
   onQueryChange,
   refreshNonce,
+  theme,
+  themeMode,
+  onSelectThemeMode,
+  onResetTheme,
+  themeStorageError,
+  themeStorageStatus,
+  urlTheme,
+  onExitPreview,
 }: {
   tab: WorkspaceTab;
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
@@ -45,6 +57,14 @@ export function WorkspacePageContent({
   onDirtyChange: (dirty: boolean) => void;
   onQueryChange: (query: Record<string, string>) => void;
   refreshNonce: number;
+  theme?: Theme;
+  themeMode?: ThemeMode;
+  onSelectThemeMode?: (mode: ThemeMode) => void;
+  onResetTheme?: () => void;
+  themeStorageError?: boolean;
+  themeStorageStatus?: ThemeStorageStatus;
+  urlTheme?: Theme | null;
+  onExitPreview?: () => void;
 }) {
   const fromSupply = tab.query.fromSupplyId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromSupplyId) && snapshot.permissions.includes("supply.review.read") ? tab.query.fromSupplyId : null;
   const supplyReturn = fromSupply ? <div className="wf-source-context"><Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(fromSupply)}?${new URLSearchParams({context:tab.query.fromSupplyContext??"situation",...(tab.query.fromSupplyVersionId?{versionId:tab.query.fromSupplyVersionId}:{})})}`)}>返回来源账号供给</Button></div> : null;
@@ -59,17 +79,40 @@ export function WorkspacePageContent({
   if (tab.kind === "workbench") {
     return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "account") {
+  // shortcut: new security adapters await schema/HTTP acceptance; preview only on local 4381.
+  const settingsPreview = import.meta.env.DEV && isLocalSettingsPreview();
+  if (tab.kind === "account" && !settingsPreview) {
+    return <AccountSecurityPage key={tab.id} snapshot={snapshot} idleMinutes={idleMinutes}
+      onIdleMinutes={onIdleMinutes} onLock={onLock} onRefresh={onRefresh}
+      onRecoveryCompleted={onRecoveryCompleted} onDirtyChange={onDirtyChange} />;
+  }
+  if (tab.kind === "settings" && !settingsPreview) {
+    return <SettingsView theme={theme ?? "dark"} themeMode={themeMode ?? "dark"}
+      onSelectThemeMode={onSelectThemeMode ?? (() => undefined)} onResetTheme={onResetTheme ?? (() => undefined)}
+      themeStorageError={themeStorageError} themeStorageStatus={themeStorageStatus}
+      urlTheme={urlTheme} onExitPreview={onExitPreview} onOpenPath={onOpenPath} />;
+  }
+  if (tab.kind === "settings" || tab.kind === "account") {
     return (
-      <AccountSecurityPage
+      <SettingsWorkspace
         key={tab.id}
+        query={tab.query}
+        legacyAccount={tab.kind === "account"}
         snapshot={snapshot}
         idleMinutes={idleMinutes}
         onIdleMinutes={onIdleMinutes}
-        onLock={onLock}
         onRefresh={onRefresh}
-        onRecoveryCompleted={onRecoveryCompleted}
         onDirtyChange={onDirtyChange}
+        onQueryChange={onQueryChange}
+        theme={theme ?? "dark"}
+        themeMode={themeMode ?? "dark"}
+        onSelectThemeMode={onSelectThemeMode ?? (() => undefined)}
+        onResetTheme={onResetTheme ?? (() => undefined)}
+        themeStorageError={themeStorageError}
+        themeStorageStatus={themeStorageStatus}
+        urlTheme={urlTheme}
+        onExitPreview={onExitPreview}
+        onOpenPath={onOpenPath}
       />
     );
   }

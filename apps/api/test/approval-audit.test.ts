@@ -250,14 +250,22 @@ async function readJson(response: Response): Promise<Record<string, any> | null>
   return text ? JSON.parse(text) as Record<string, any> : null;
 }
 
-async function request(base: string, path: string, body: Record<string, unknown> | undefined, jar: CookieJar, origin: string): Promise<{ response: Response; body: Record<string, any> | null }> {
+async function request(base: string, path: string, body: Record<string, unknown> | undefined, jar: CookieJar, origin: string, idempotencyKey?: string): Promise<{ response: Response; body: Record<string, any> | null }> {
   const response = await fetch(base + path, {
     method: body === undefined ? "GET" : "POST",
-    headers: { origin, ...(body === undefined ? {} : { "content-type": "application/json" }), ...(jar.header() ? { cookie: jar.header() } : {}) },
+    headers: {
+      origin,
+      ...(body === undefined ? {} : { "content-type": "application/json", "idempotency-key": idempotencyKey ?? newIdempotencyKey() }),
+      ...(jar.header() ? { cookie: jar.header() } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   jar.update(response);
   return { response, body: await readJson(response) };
+}
+
+function newIdempotencyKey(): string {
+  return "idem_" + randomUUID().replaceAll("-", "");
 }
 
 async function activate(base: string, username: string, temporaryPassword: string): Promise<Staff> {
@@ -276,21 +284,21 @@ async function activate(base: string, username: string, temporaryPassword: strin
   return { id: session.body?.adminUserId as string, username, jar, password, secret };
 }
 
-async function bff(base: string, path: string, body: Record<string, unknown> | undefined, actor: Staff): Promise<{ response: Response; body: Record<string, any> | null }> {
-  return request(base, "/api/bff/admin" + path, body, actor.jar, ADMIN_ORIGIN);
+async function bff(base: string, path: string, body: Record<string, unknown> | undefined, actor: Staff, idempotencyKey?: string): Promise<{ response: Response; body: Record<string, any> | null }> {
+  return request(base, "/api/bff/admin" + path, body, actor.jar, ADMIN_ORIGIN, idempotencyKey);
 }
 
-async function direct(base: string, path: string, body: Record<string, unknown> | undefined, actor: Staff): Promise<{ response: Response; body: Record<string, any> | null }> {
-  return request(base, "/api/v1/admin/security" + path, body, actor.jar, API_ORIGIN);
+async function direct(base: string, path: string, body: Record<string, unknown> | undefined, actor: Staff, idempotencyKey?: string): Promise<{ response: Response; body: Record<string, any> | null }> {
+  return request(base, "/api/v1/admin/security" + path, body, actor.jar, API_ORIGIN, idempotencyKey);
 }
 
-async function configure(base: string, actor: Staff, operation: string, trigger: string, candidates: string[]): Promise<number> {
-  const result = await bff(base, "/security/approvals/templates/update", { operationCode: operation, triggerCondition: trigger, candidateUsernames: candidates }, actor);
+async function configure(base: string, actor: Staff, operation: string, trigger: string, candidates: string[], idempotencyKey?: string): Promise<number> {
+  const result = await bff(base, "/security/approvals/templates/update", { operationCode: operation, triggerCondition: trigger, candidateUsernames: candidates }, actor, idempotencyKey);
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
   return result.body?.version as number;
 }
 
-async function createRequest(base: string, actor: Staff, operation: string, trigger: string, outcome: "SUCCESS" | "FAILURE", summary: string, supersedesRequestId?: string): Promise<string> {
+async function createRequest(base: string, actor: Staff, operation: string, trigger: string, outcome: "SUCCESS" | "FAILURE", summary: string, supersedesRequestId?: string, idempotencyKey?: string): Promise<string> {
   const result = await bff(base, "/security/approvals/requests", {
     operationCode: operation,
     triggerCondition: trigger,
@@ -298,22 +306,26 @@ async function createRequest(base: string, actor: Staff, operation: string, trig
     payload: { outcome },
     summary,
     ...(supersedesRequestId ? { supersedesRequestId } : {}),
-  }, actor);
+  }, actor, idempotencyKey);
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
   assert.ok(result.body?.requestId);
   return result.body.requestId as string;
+}
+
+async function createRequestRaw(base: string, actor: Staff, operation: string, trigger: string, summary: string, idempotencyKey: string): Promise<{ response: Response; body: Record<string, any> | null }> {
+  return bff(base, "/security/approvals/requests", { operationCode: operation, triggerCondition: trigger, payloadVersion: 1, payload: { outcome: "SUCCESS" }, summary }, actor, idempotencyKey);
 }
 
 async function detail(base: string, actor: Staff, requestId: string): Promise<{ response: Response; body: Record<string, any> | null }> {
   return bff(base, "/security/approvals/requests/detail?requestId=" + encodeURIComponent(requestId), undefined, actor);
 }
 
-async function decide(base: string, actor: Staff, requestId: string, decision: "APPROVE" | "REJECT", reason?: string): Promise<{ response: Response; body: Record<string, any> | null }> {
-  return bff(base, "/security/approvals/requests/decision", { requestId, decision, ...(reason ? { reason } : {}) }, actor);
+async function decide(base: string, actor: Staff, requestId: string, decision: "APPROVE" | "REJECT", reason?: string, idempotencyKey?: string): Promise<{ response: Response; body: Record<string, any> | null }> {
+  return bff(base, "/security/approvals/requests/decision", { requestId, decision, ...(reason ? { reason } : {}) }, actor, idempotencyKey);
 }
 
-async function execute(base: string, actor: Staff, requestId: string): Promise<{ response: Response; body: Record<string, any> | null }> {
-  return bff(base, "/security/approvals/requests/execute", { requestId }, actor);
+async function execute(base: string, actor: Staff, requestId: string, idempotencyKey?: string): Promise<{ response: Response; body: Record<string, any> | null }> {
+  return bff(base, "/security/approvals/requests/execute", { requestId }, actor, idempotencyKey);
 }
 
 test("M2-C approval and authorized audit query enforce the minimum workflow", async () => {
@@ -409,8 +421,8 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     const unfreeze = await request(base, "/api/v1/admin/security/unfreeze", { targetAdminId: candidateThree.id, password: boss.password, totpCode: totpCode(boss.secret), reason: "M2-C 无资格验证结束" }, boss.jar, ADMIN_ORIGIN);
     assert.equal(unfreeze.response.status, 200);
 
-    await configure(base, boss, "approval.concurrent", "manual", [candidateOne.username, candidateTwo.username]);
-    const concurrentId = await createRequest(base, requester, "approval.concurrent", "manual", "SUCCESS", "并发首个决定");
+    await configure(base, boss, "approval.test.execute", "concurrent", [candidateOne.username, candidateTwo.username]);
+    const concurrentId = await createRequest(base, requester, "approval.test.execute", "concurrent", "SUCCESS", "并发首个决定");
     const pendingForCandidate = await bff(base, "/security/approvals/requests/pending?limit=20", undefined, candidateOne);
     assert.equal(pendingForCandidate.response.status, 200);
     assert.ok(pendingForCandidate.body?.requests?.some((item: { requestId?: string }) => item.requestId === concurrentId));
@@ -438,9 +450,9 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal(newTemplateDetail.body?.candidates?.[0]?.username, candidateTwo.username.toLowerCase());
     assert.equal((await detail(base, requester, oldTemplateRequest)).body?.candidates?.[0]?.username, candidateOne.username.toLowerCase());
 
-    await configure(base, boss, "approval.payload.change", "manual", [candidateTwo.username]);
-    const payloadOld = await createRequest(base, requester, "approval.payload.change", "manual", "FAILURE", "旧载荷");
-    const payloadNew = await createRequest(base, requester, "approval.payload.change", "manual", "SUCCESS", "新载荷", payloadOld);
+    await configure(base, boss, "approval.test.execute", "payload-change", [candidateTwo.username]);
+    const payloadOld = await createRequest(base, requester, "approval.test.execute", "payload-change", "FAILURE", "旧载荷");
+    const payloadNew = await createRequest(base, requester, "approval.test.execute", "payload-change", "SUCCESS", "新载荷", payloadOld);
     const payloadOldDb = await runtimePool.query<{ status: string; supersededBy: string | null }>(
       "SELECT \"status\", \"superseded_by_request_id\" AS \"supersededBy\" FROM \"zzsh_iam\".\"approval_request\" WHERE \"id\" = $1",
       [payloadOld],
@@ -450,8 +462,8 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal((await decide(base, candidateTwo, payloadOld, "APPROVE")).response.status, 409);
     assert.equal((await detail(base, requester, payloadNew)).body?.status, "PENDING");
 
-    await configure(base, boss, "approval.append", "manual", [candidateOne.username]);
-    const appendRequest = await createRequest(base, requester, "approval.append", "manual", "SUCCESS", "追加合法审批人");
+    await configure(base, boss, "approval.test.execute", "append", [candidateOne.username]);
+    const appendRequest = await createRequest(base, requester, "approval.test.execute", "append", "SUCCESS", "追加合法审批人");
     const appendBefore = await detail(base, requester, appendRequest);
     assert.equal(appendBefore.body?.status, "PENDING");
     assert.equal(appendBefore.body?.decision, null);
@@ -482,8 +494,8 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.ok(appendDetail.body?.candidates?.some((item: { username?: string; source?: string }) => item.username === candidateOne.username.toLowerCase() && item.source === "TEMPLATE"));
     assert.ok(appendDetail.body?.candidates?.some((item: { username?: string; source?: string }) => item.username === candidateTwo.username.toLowerCase() && item.source === "APPENDED"));
 
-    await configure(base, boss, "approval.expired.pending", "manual", [candidateOne.username]);
-    const expiredPendingId = await createRequest(base, requester, "approval.expired.pending", "manual", "SUCCESS", "无关管理员不能使待审批过期");
+    await configure(base, boss, "approval.test.execute", "expired-pending", [candidateOne.username]);
+    const expiredPendingId = await createRequest(base, requester, "approval.test.execute", "expired-pending", "SUCCESS", "无关管理员不能使待审批过期");
     await migrationPool.query("UPDATE \"zzsh_iam\".\"approval_request\" SET \"expires_at\" = clock_timestamp() - interval '1 second' WHERE \"id\" = $1", [expiredPendingId]);
     const expiredPendingAuditBefore = await runtimePool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"object_type\" = 'approval_request' AND \"object_id\" = $1 AND \"action\" = 'approval.request.expired'",
@@ -505,8 +517,8 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal((await direct(base, "/approvals/requests/decision", { requestId: expiredPendingId, decision: "APPROVE" }, candidateOne)).response.status, 409);
     assert.equal((await runtimePool.query<{ status: string }>("SELECT \"status\" FROM \"zzsh_iam\".\"approval_request\" WHERE \"id\" = $1", [expiredPendingId])).rows[0]?.status, "EXPIRED");
 
-    await configure(base, boss, "approval.expired.approved", "manual", [candidateOne.username]);
-    const expiredApprovedId = await createRequest(base, requester, "approval.expired.approved", "manual", "SUCCESS", "无关管理员不能使已通过过期");
+    await configure(base, boss, "approval.test.execute", "expired-approved", [candidateOne.username]);
+    const expiredApprovedId = await createRequest(base, requester, "approval.test.execute", "expired-approved", "SUCCESS", "无关管理员不能使已通过过期");
     assert.equal((await decide(base, candidateOne, expiredApprovedId, "APPROVE")).response.status, 200);
     await migrationPool.query("UPDATE \"zzsh_iam\".\"approval_request\" SET \"expires_at\" = clock_timestamp() - interval '1 second' WHERE \"id\" = $1", [expiredApprovedId]);
     const expiredApprovedAuditBefore = await runtimePool.query<{ count: string }>(
@@ -648,6 +660,121 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal(deniedGeneric.response.status, 200);
     assert.equal((await bff(base, "/security/audit/events?limit=20", undefined, genericReader)).response.status, 403, "personal DENY must remain effective on audit query");
     assert.equal((await bff(base, "/security/audit/events", {}, boss)).response.status, 404, "generic audit is read-only");
+
+    const missingKey = await fetch(base + "/api/bff/admin/security/approvals/requests/execute", {
+      method: "POST",
+      headers: { origin: ADMIN_ORIGIN, "content-type": "application/json", cookie: requester.jar.header() },
+      body: JSON.stringify({ requestId: appendRequest }),
+    });
+    assert.equal(missingKey.status, 400, "an approval write without Idempotency-Key must be rejected");
+    assert.equal((await readJson(missingKey))?.error?.code, "MISSING_IDEMPOTENCY_KEY");
+
+    await configure(base, boss, "approval.idempotent.create", "manual", [candidateOne.username]);
+    const replayKey = newIdempotencyKey();
+    const firstCreate = await createRequestRaw(base, requester, "approval.idempotent.create", "manual", "同 key 同体重放", replayKey);
+    assert.equal(firstCreate.response.status, 200, JSON.stringify(firstCreate.body));
+    assert.equal(firstCreate.body?.idempotencyReplay, false);
+    assert.equal(firstCreate.body?.approvalRequestId, firstCreate.body?.requestId, "the receipt must name the business approval id");
+    const replayedCreate = await createRequestRaw(base, requester, "approval.idempotent.create", "manual", "同 key 同体重放", replayKey);
+    assert.equal(replayedCreate.response.status, 200, JSON.stringify(replayedCreate.body));
+    assert.equal(replayedCreate.body?.idempotencyReplay, true);
+    assert.equal(replayedCreate.body?.approvalRequestId, firstCreate.body?.approvalRequestId);
+    const replayRowCount = await runtimePool.query<{ count: string; audits: string }>(
+      "SELECT (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_request\" WHERE \"operation_code\" = 'approval.idempotent.create') AS count, (SELECT count(*)::text FROM \"zzsh_iam\".\"audit_event\" WHERE \"action\" = 'approval.request.created' AND \"details\" ->> 'operationCode' = 'approval.idempotent.create') AS audits",
+    );
+    assert.deepEqual(replayRowCount.rows[0], { count: "1", audits: "1" }, "a lost-ack retry must create one request and one creation audit");
+
+    const changedBody = await bff(base, "/security/approvals/requests", { operationCode: "approval.idempotent.create", triggerCondition: "manual", payloadVersion: 1, payload: { outcome: "FAILURE" }, summary: "同 key 同体重放" }, requester, replayKey);
+    assert.equal(changedBody.response.status, 409, JSON.stringify(changedBody.body));
+    assert.equal(changedBody.body?.error?.code, "IDEMPOTENCY_KEY_REUSED");
+
+    const concurrentKey = newIdempotencyKey();
+    const concurrentCreates = await Promise.all([
+      createRequestRaw(base, requester, "approval.idempotent.create", "manual", "并发同 key 提交", concurrentKey),
+      createRequestRaw(base, requester, "approval.idempotent.create", "manual", "并发同 key 提交", concurrentKey),
+      createRequestRaw(base, requester, "approval.idempotent.create", "manual", "并发同 key 提交", concurrentKey),
+    ]);
+    assert.equal(concurrentCreates.filter((item) => item.response.status === 200).length, 3, JSON.stringify(concurrentCreates.map((item) => item.body)));
+    const concurrentIds = new Set(concurrentCreates.map((item) => item.body?.approvalRequestId as string));
+    assert.equal(concurrentIds.size, 1, "concurrent identical submissions must converge on one approval request");
+    const concurrentCount = await runtimePool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"approval_request\" WHERE \"operation_code\" = 'approval.idempotent.create'",
+    );
+    assert.equal(concurrentCount.rows[0]?.count, "1");
+
+    const templateKey = newIdempotencyKey();
+    const templateFirst = await configure(base, boss, "approval.idempotent.template", "manual", [candidateOne.username], templateKey);
+    const templateReplay = await configure(base, boss, "approval.idempotent.template", "manual", [candidateOne.username], templateKey);
+    assert.equal(templateReplay, templateFirst, "a replayed template update must not bump the version");
+    const templateAudits = await runtimePool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"audit_event\" WHERE \"action\" = 'approval.template.configured' AND \"details\" ->> 'operationCode' = 'approval.idempotent.template'",
+    );
+    assert.equal(templateAudits.rows[0]?.count, "1", "a replayed template update must not append another audit");
+
+    const executeKey = newIdempotencyKey();
+    const replayExecutionId = await createRequest(base, requester, "approval.test.execute", "execute", "SUCCESS", "执行重放不重复", undefined);
+    assert.equal((await decide(base, candidateOne, replayExecutionId, "APPROVE")).response.status, 200);
+    const firstExecution = await execute(base, requester, replayExecutionId, executeKey);
+    assert.equal(firstExecution.response.status, 200, JSON.stringify(firstExecution.body));
+    const replayedExecution = await execute(base, requester, replayExecutionId, executeKey);
+    assert.equal(replayedExecution.response.status, 200, JSON.stringify(replayedExecution.body));
+    assert.equal(replayedExecution.body?.idempotencyReplay, true);
+    assert.equal(replayedExecution.body?.resultCode, firstExecution.body?.resultCode);
+    const replayExecutionDb = await runtimePool.query<{ status: string; executions: string; audits: string }>(
+      "SELECT r.\"status\", (SELECT count(*)::text FROM \"zzsh_iam\".\"approval_execution\" e WHERE e.\"request_id\" = r.\"id\") AS executions, (SELECT count(*)::text FROM \"zzsh_iam\".\"audit_event\" a WHERE a.\"action\" = 'approval.execution.completed' AND a.\"object_id\" = r.\"id\") AS audits FROM \"zzsh_iam\".\"approval_request\" r WHERE r.\"id\" = $1",
+      [replayExecutionId],
+    );
+    assert.deepEqual(replayExecutionDb.rows[0], { status: "EXECUTED", executions: "1", audits: "1" }, "replay must not repeat the business effect or the audit");
+
+    const recovery = await bff(base, "/security/approvals/recovery?operation=approval.request.create&key=" + encodeURIComponent(executeKey), undefined, requester);
+    assert.equal(recovery.response.status, 200, JSON.stringify(recovery.body));
+    assert.equal(recovery.body?.knowledge, "UNRESOLVED", "the create key belongs to a different command scope");
+    const createRecovery = await bff(base, "/security/approvals/recovery?operation=approval.request.create&key=" + encodeURIComponent(replayKey), undefined, requester);
+    assert.equal(createRecovery.body?.knowledge, "KNOWN");
+    assert.equal(createRecovery.body?.receipt?.approvalRequestId, firstCreate.body?.approvalRequestId);
+    assert.equal(JSON.stringify(createRecovery.body).includes("fixture"), false);
+    assert.equal(JSON.stringify(createRecovery.body).includes("operationPayload"), false, "recovery must not return the stored payload");
+    const foreignRecovery = await bff(base, "/security/approvals/recovery?operation=approval.request.create&key=" + encodeURIComponent(replayKey), undefined, candidateOne);
+    assert.equal(foreignRecovery.body?.knowledge, "UNRESOLVED", "another administrator must not read this principal's receipt");
+    assert.equal((await bff(base, "/security/approvals/recovery?operation=arbitrary.table&key=" + encodeURIComponent(replayKey), undefined, requester)).response.status, 400);
+    assert.equal((await bff(base, "/security/approvals/recovery?operation=approval.request.execute&key=" + encodeURIComponent(executeKey), undefined, requester)).response.status, 400, "target-scoped recovery must name its target");
+    const scopedRecovery = await bff(base, `/security/approvals/recovery?operation=approval.request.execute&key=${encodeURIComponent(executeKey)}&requestId=${encodeURIComponent(replayExecutionId)}`, undefined, requester);
+    assert.equal(scopedRecovery.body?.knowledge, "KNOWN");
+    assert.equal(scopedRecovery.body?.receipt?.executionStatus, "SUCCEEDED");
+    assert.equal(scopedRecovery.body?.receipt?.executionMode, "GENERIC_TRANSACTION");
+
+    const readback = await detail(base, requester, appendRequest);
+    assert.equal(readback.response.status, 200);
+    assert.equal(readback.body?.business?.businessType, "test");
+    assert.equal(readback.body?.business?.executionMode, "GENERIC_TRANSACTION");
+    const approveAction = readback.body?.actions?.find((item: { action?: string }) => item.action === "approve");
+    assert.equal(approveAction?.allowed, false, "the requester is not an eligible approver on its own request");
+    assert.equal(typeof approveAction?.reasonCode, "string");
+    const addCandidateAction = readback.body?.actions?.find((item: { action?: string }) => item.action === "addCandidate");
+    assert.equal(addCandidateAction?.allowed, true);
+    assert.ok(readback.body?.candidateAvailability?.total >= 1);
+
+    await configure(base, boss, "approval.read.contract", "manual", [candidateOne.username]);
+    const contractRequest = await createRequest(base, requester, "approval.read.contract", "manual", "SUCCESS", "读取合同样本");
+    const pendingView = await bff(base, "/security/approvals/requests/pending?limit=50", undefined, candidateOne);
+    assert.equal(pendingView.response.status, 200);
+    const pendingRow = pendingView.body?.requests?.find((item: { requestId?: string }) => item.requestId === contractRequest);
+    assert.ok(pendingRow, "the new request must appear for its candidate");
+    assert.equal(pendingRow?.actions?.find((item: { action?: string }) => item.action === "approve")?.allowed, true);
+    assert.equal(pendingRow?.business?.businessTitle, "本地非资金测试动作");
+    assert.equal(pendingRow?.payload, undefined, "the list must not expose the raw payload");
+    const operations = await bff(base, "/security/approvals/operations", undefined, boss);
+    assert.equal(operations.response.status, 200, JSON.stringify(operations.body));
+    const settlementOperation = operations.body?.operations?.find((item: { operationCode?: string }) => item.operationCode === "order.settlement.adjust");
+    assert.equal(settlementOperation?.executionMode, "SOURCE_BUSINESS");
+    assert.equal(settlementOperation?.initiation?.allowed, false);
+    assert.equal(settlementOperation?.initiation?.reasonCode, "INITIATED_FROM_SOURCE_BUSINESS");
+    const candidateOptions = await bff(base, "/security/approvals/candidate-options?requestId=" + encodeURIComponent(contractRequest), undefined, requester);
+    assert.equal(candidateOptions.response.status, 200, JSON.stringify(candidateOptions.body));
+    assert.equal(candidateOptions.body?.requesterExcluded, true);
+    assert.equal(candidateOptions.body?.candidates?.some((item: { username?: string }) => item.username === requester.username), false, "the original requester must not be offered as a self-approver");
+    assert.equal(candidateOptions.body?.candidates?.every((item: { eligible?: boolean }) => item.eligible === true), true);
+    assert.equal(JSON.stringify(candidateOptions.body).includes("last_full_authenticated"), false);
 
     await assert.rejects(
       () => runtimePool!.query("UPDATE \"zzsh_iam\".\"approval_request\" SET \"operation_code\" = 'tampered' WHERE \"id\" = $1", [appendRequest]),

@@ -30,12 +30,25 @@ import {
   EVENT_KEY,
   IDLE_KEY,
   type Theme,
+  type ThemeMode,
   type View,
   type SignalEvent,
   type SessionSnapshot,
   type AuthResponse,
   type EnrollmentResponse,
 } from "./api";
+import {
+  applyThemeToDom,
+  clearUrlTheme,
+  getSystemTheme,
+  readSavedThemeMode,
+  readUrlTheme,
+  resetThemeMode,
+  resolveInitialTheme,
+  saveThemeMode,
+  THEME_KEY,
+  type ThemeStorageStatus,
+} from "./lib/theme";
 import { createSessionRefreshCoordinator, type SessionRefreshCoordinator } from "./session-refresh";
 
 function useMobileLayout(): boolean {
@@ -103,14 +116,14 @@ function useIdleLock(
 
 
 function App() {
-  const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof window !== "undefined") {
-      const urlTheme = new URLSearchParams(window.location.search).get("theme");
-      if (urlTheme === "light" || urlTheme === "dark") return urlTheme;
-      if (window.localStorage.getItem("zzsh-admin-theme") === "light") return "light";
-    }
-    return "dark";
-  });
+  const [initialThemeState] = useState(() => resolveInitialTheme());
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeState.mode);
+  const [themeStorageStatus, setThemeStorageStatus] = useState<ThemeStorageStatus>(() => initialThemeState.status);
+  const [themeStorageError, setThemeStorageError] = useState(() => initialThemeState.status === "error");
+  const [urlTheme, setUrlTheme] = useState<Theme | null>(() => readUrlTheme());
+  const [systemTheme, setSystemTheme] = useState<Theme>(() => getSystemTheme());
+
+  const theme: Theme = urlTheme ?? (themeMode === "system" ? systemTheme : themeMode);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [view, setView] = useState<View>("login");
 
@@ -132,10 +145,33 @@ function App() {
   const shellRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    window.localStorage.setItem("zzsh-admin-theme", theme);
+    applyThemeToDom(theme);
   }, [theme]);
+
+  // Match system color scheme preference changes
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (event: MediaQueryListEvent) => {
+      setSystemTheme(event.matches ? "dark" : "light");
+    };
+    mediaQuery.addEventListener("change", onChange);
+    return () => mediaQuery.removeEventListener("change", onChange);
+  }, []);
+
+  // Cross-tab synchronization via storage event
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== THEME_KEY) return;
+      const raw = event.newValue;
+      const nextMode: ThemeMode = raw === "light" || raw === "dark" || raw === "system" ? raw : "dark";
+      setThemeMode(nextMode);
+      setThemeStorageError(false);
+      setThemeStorageStatus("saved");
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => {
     sessionIdRef.current = snapshot?.authenticated ? snapshot.session.id : undefined;
@@ -326,7 +362,32 @@ function App() {
     () => void lockSession()
   );
 
-  const toggleTheme = () => setTheme((c) => (c === "dark" ? "light" : "dark"));
+  const clearPreview = useCallback(() => {
+    clearUrlTheme();
+    setUrlTheme(null);
+  }, []);
+
+  const selectThemeMode = useCallback((mode: ThemeMode) => {
+    clearUrlTheme();
+    setUrlTheme(null);
+    const ok = saveThemeMode(mode);
+    setThemeStorageError(!ok);
+    setThemeStorageStatus(ok ? "saved" : "error");
+    setThemeMode(mode);
+  }, []);
+
+  const resetTheme = useCallback(() => {
+    clearUrlTheme();
+    setUrlTheme(null);
+    const ok = resetThemeMode();
+    setThemeStorageError(!ok);
+    setThemeStorageStatus(ok ? "saved" : "error");
+    setThemeMode("dark");
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    selectThemeMode(theme === "dark" ? "light" : "dark");
+  }, [theme, selectThemeMode]);
 
   const signOut = useCallback(async () => {
     const sessionId = sessionIdRef.current;
@@ -514,7 +575,13 @@ function App() {
   // 1. Routine Login
   if (view === "login") {
     return (
-      <AuthLayout theme={theme} onToggleTheme={toggleTheme}>
+      <AuthLayout
+        theme={theme}
+        themeMode={themeMode}
+        onToggleTheme={toggleTheme}
+        onSelectThemeMode={selectThemeMode}
+        themeStorageError={themeStorageError}
+      >
         <LoginView
           identifier={identifier}
           loading={loading}
@@ -535,9 +602,10 @@ function App() {
     return (
       <AuthLayout
         theme={theme}
+        themeMode={themeMode}
         onToggleTheme={toggleTheme}
-
-
+        onSelectThemeMode={selectThemeMode}
+        themeStorageError={themeStorageError}
       >
         <ChallengeView
           loading={loading}
@@ -569,10 +637,11 @@ function App() {
     return (
       <AuthLayout
         theme={theme}
+        themeMode={themeMode}
         onToggleTheme={toggleTheme}
+        onSelectThemeMode={selectThemeMode}
+        themeStorageError={themeStorageError}
         variant="onboarding"
-
-
       >
         <OnboardingView
           accountIdentifier={accountName}
@@ -600,9 +669,10 @@ function App() {
     return (
       <AuthLayout
         theme={theme}
+        themeMode={themeMode}
         onToggleTheme={toggleTheme}
-
-
+        onSelectThemeMode={selectThemeMode}
+        themeStorageError={themeStorageError}
       >
         <RecoveryView
           snapshot={snapshot?.authenticated ? snapshot : undefined}
@@ -625,7 +695,13 @@ function App() {
   // 5. Authenticated App Shell & Workspace
   if (!snapshot.authenticated) {
     return (
-      <AuthLayout theme={theme} onToggleTheme={toggleTheme}>
+      <AuthLayout
+        theme={theme}
+        themeMode={themeMode}
+        onToggleTheme={toggleTheme}
+        onSelectThemeMode={selectThemeMode}
+        themeStorageError={themeStorageError}
+      >
         <LoginView
           identifier={identifier}
           loading={loading}
@@ -644,7 +720,14 @@ function App() {
         <WorkspaceApp
           snapshot={snapshot}
           theme={theme}
+          themeMode={themeMode}
           onToggleTheme={toggleTheme}
+          onSelectThemeMode={selectThemeMode}
+          onResetTheme={resetTheme}
+          themeStorageError={themeStorageError}
+          themeStorageStatus={themeStorageStatus}
+          urlTheme={urlTheme}
+          onClearUrlTheme={clearPreview}
           idleMinutes={idleMinutes}
           onIdleMinutes={setIdle}
           onLock={() => void lockSession()}
@@ -668,18 +751,10 @@ function App() {
   );
 }
 
-const initialTheme = (() => {
-  if (typeof window !== "undefined") {
-    const urlTheme = new URLSearchParams(window.location.search).get("theme");
-    if (urlTheme === "light" || urlTheme === "dark") return urlTheme;
-    if (window.localStorage.getItem("zzsh-admin-theme") === "light") return "light";
-  }
-  return "dark";
-})();
+const { resolvedTheme: initialTheme } = resolveInitialTheme();
 
 if (typeof document !== "undefined") {
-  document.documentElement.dataset.theme = initialTheme;
-  document.documentElement.classList.toggle("dark", initialTheme === "dark");
+  applyThemeToDom(initialTheme);
 }
 
 const root = document.getElementById("root");

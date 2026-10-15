@@ -3,7 +3,8 @@ import { clearFinanceContexts } from "../views/admin-finance-view";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import type { SessionSnapshot, Theme } from "../api";
+import type { SessionSnapshot, Theme, ThemeMode } from "../api";
+import type { ThemeStorageStatus } from "../lib/theme";
 
 import { applyDirtyMap, clearDirtyForTabs, confirmDiscard } from "./dirty-state";
 import { searchableWorkspacePages } from "./nav-config";
@@ -14,6 +15,7 @@ import { WorkspaceTopbar } from "./topbar";
 import {
   WORKBENCH_TAB_ID,
   canOpenKind,
+  changesSettingsContent,
   clearTabs,
   closeTabs,
   filterTabsByPermission,
@@ -25,6 +27,7 @@ import {
   upsertTab,
   type NavPermission,
   type WorkspaceTab,
+  type TabCloseAction,
 } from "./tab-model";
 
 function navOf(snapshot: Extract<SessionSnapshot, { authenticated: true }>): NavPermission {
@@ -38,7 +41,14 @@ function currentLocationTab(): WorkspaceTab {
 export function WorkspaceApp({
   snapshot,
   theme,
+  themeMode,
   onToggleTheme,
+  onSelectThemeMode,
+  onResetTheme,
+  themeStorageError,
+  themeStorageStatus,
+  urlTheme,
+  onClearUrlTheme,
   idleMinutes,
   onIdleMinutes,
   onLock,
@@ -48,7 +58,14 @@ export function WorkspaceApp({
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   theme: Theme;
-  onToggleTheme: () => void;
+  themeMode?: ThemeMode;
+  onToggleTheme?: () => void;
+  onSelectThemeMode?: (mode: ThemeMode) => void;
+  onResetTheme?: () => void;
+  themeStorageError?: boolean;
+  themeStorageStatus?: ThemeStorageStatus;
+  urlTheme?: Theme | null;
+  onClearUrlTheme?: () => void;
   idleMinutes: number;
   onIdleMinutes: (value: number) => void;
   onLock: () => void;
@@ -122,7 +139,7 @@ export function WorkspaceApp({
       const next = currentLocationTab();
       const currentId = activeIdRef.current;
       const currentTab = tabsRef.current.find((tab) => tab.id === currentId);
-      if (currentTab && dirtyIdsRef.current[currentId] && next.id !== currentId) {
+      if (currentTab && dirtyIdsRef.current[currentId] && (next.id !== currentId || changesSettingsContent(currentTab, next))) {
         if (!confirmDiscard([currentTab.title])) {
           window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
           return;
@@ -167,29 +184,32 @@ export function WorkspaceApp({
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirtyIds]);
 
-  const openTab = useCallback((next: WorkspaceTab, replace = false) => {
-    if (!canOpenKind(next.kind, nav)) return;
-    if (next.id !== activeIdRef.current && !confirmLeave(activeIdRef.current)) return;
+  const openTab = useCallback((next: WorkspaceTab, replace = false): boolean => {
+    if (!canOpenKind(next.kind, nav)) return false;
+    const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
+    if ((next.id !== activeIdRef.current || (current && changesSettingsContent(current, next))) && !confirmLeave(activeIdRef.current)) return false;
     setTabs((current) => upsertTab(current, next));
     setActiveId(next.id);
     replaceUrl(next, replace);
+    return true;
   }, [confirmLeave, nav, replaceUrl]);
 
-  const openPath = useCallback((path: string, title?: string) => {
+  const openPath = useCallback((path: string, title?: string): boolean => {
     const [pathname, search = ""] = path.split("?");
     const tab = tabFromLocation(pathname || "/workbench", search);
-    openTab(title ? { ...tab, title } : tab);
+    return openTab(title ? { ...tab, title } : tab);
   }, [openTab]);
 
-  const activate = (tabId: string) => {
+  const activate = (tabId: string): boolean => {
     const tab = tabs.find((item) => item.id === tabId);
-    if (!tab) return;
-    if (tabId !== activeId && !confirmLeave(activeId)) return;
+    if (!tab || !canOpenKind(tab.kind, nav)) return false;
+    if (tabId !== activeId && !confirmLeave(activeId)) return false;
     setActiveId(tabId);
     replaceUrl(tab);
+    return true;
   };
 
-  const close = (action: "self" | "others" | "right", targetId: string) => {
+  const close = (action: TabCloseAction, targetId: string) => {
     const removed = tabsRemovedBy(tabs, action, targetId);
     const dirtyRemoved = removed.filter((tab) => dirtyIds[tab.id]);
     if (dirtyRemoved.length > 0 && !confirmDiscard(dirtyRemoved.map((tab) => tab.title))) return;
@@ -230,6 +250,48 @@ export function WorkspaceApp({
     onSignOut();
   };
 
+  const clearThemeFromTabs = useCallback(() => {
+    onClearUrlTheme?.();
+    setTabs((items) =>
+      items.map((tab) => {
+        if (tab.query && "theme" in tab.query) {
+          const nextQuery = { ...tab.query };
+          delete nextQuery.theme;
+          return { ...tab, query: nextQuery };
+        }
+        return tab;
+      }),
+    );
+    const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
+    if (current && current.query && "theme" in current.query) {
+      const nextQuery = { ...current.query };
+      delete nextQuery.theme;
+      replaceUrl({ ...current, query: nextQuery }, true);
+    }
+  }, [onClearUrlTheme, replaceUrl]);
+
+  const handleExitPreview = useCallback(() => {
+    clearThemeFromTabs();
+  }, [clearThemeFromTabs]);
+
+  const handleSelectThemeMode = useCallback(
+    (mode: ThemeMode) => {
+      onSelectThemeMode?.(mode);
+      clearThemeFromTabs();
+    },
+    [clearThemeFromTabs, onSelectThemeMode],
+  );
+
+  const handleResetTheme = useCallback(() => {
+    onResetTheme?.();
+    clearThemeFromTabs();
+  }, [clearThemeFromTabs, onResetTheme]);
+
+  const handleToggleTheme = useCallback(() => {
+    onToggleTheme?.();
+    clearThemeFromTabs();
+  }, [clearThemeFromTabs, onToggleTheme]);
+
   return (
     <div className={`workspace-root min-h-svh ${theme === "dark" ? "dark" : ""}`}>
       <SidebarProvider style={{ "--sidebar-width": "250px" } as CSSProperties}>
@@ -238,21 +300,28 @@ export function WorkspaceApp({
           <WorkspaceTopbar
             pathname={active.path}
             theme={theme}
-            onToggleTheme={onToggleTheme}
+            themeMode={themeMode}
+            onToggleTheme={handleToggleTheme}
+            onSelectThemeMode={handleSelectThemeMode}
             onRefresh={() => void refreshPage()}
             onLock={onLock}
             canLock={snapshot.security.status === "ACTIVE" && snapshot.session.pinConfigured && !snapshot.session.locked}
             refreshing={refreshing}
             pages={searchableWorkspacePages(nav)}
             onNavigate={openPath}
+            tabs={filterTabsByPermission(tabs, nav)}
+            activeTabId={activeId}
+            onActivateTab={activate}
+            adminUserId={snapshot.adminUserId}
+            sessionId={snapshot.session?.id}
+            isLocked={snapshot.session?.locked}
+            themeStorageError={themeStorageError}
           />
           <WorkspaceTabBar
             tabs={tabs}
             activeId={activeId}
             onActivate={activate}
-            onClose={(tabId) => close("self", tabId)}
-            onCloseOthers={(tabId) => close("others", tabId)}
-            onCloseRight={(tabId) => close("right", tabId)}
+            onClose={close}
           />
           <div className="workspace-page flex min-h-0 flex-1 flex-col overflow-auto px-4 py-4 sm:px-5 sm:py-5">
             <WorkspacePageContent
@@ -273,6 +342,14 @@ export function WorkspaceApp({
                 replaceUrl(next, true);
               }}
               refreshNonce={refreshNonce}
+              theme={theme}
+              themeMode={themeMode}
+              onSelectThemeMode={handleSelectThemeMode}
+              onResetTheme={handleResetTheme}
+              themeStorageError={themeStorageError}
+              themeStorageStatus={themeStorageStatus}
+              urlTheme={urlTheme}
+              onExitPreview={handleExitPreview}
             />
           </div>
         </SidebarInset>

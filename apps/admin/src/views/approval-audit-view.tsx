@@ -1,98 +1,54 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { ClipboardCheck } from "lucide-react";
 
 import { Icons } from "../components/icons";
 import { Button, StatusMessage } from "../components/ui-elements";
+import { Badge, InlineStatus } from "../components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Input } from "../components/ui/input";
+import { Checkbox } from "../components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { TooltipProvider } from "../components/ui/tooltip";
 import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogTitle,
+  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogTitle,
 } from "../components/ui/dialog";
 import {
-  AdminApiError,
-  adminRequest,
-  formatDate,
-  friendlyError,
-  hasPermission,
-  type AdminDirectoryEntry,
+  AdminApiError, adminRequest, formatDate, friendlyError, hasPermission,
   type SessionSnapshot,
 } from "../api";
+import {
+  AUDIT_ACTIONS, AUDIT_OBJECT_TYPES, auditActionLabel, auditNarrative, auditObjectLabel,
+  auditOutcomeView, auditScopeLabel, executionModeLabel, personLabel, receiptEnvelopeIssue,
+  recoveryOutcomeSummary, recoveryOutcomeUnconfirmedSummary, reasonLabel, relatedRequestIdOf,
+  type AuditEvent, type CandidateOptions, type OperationEntry, type ReadbackTarget, type RecoveryResult,
+  type RequestDetail, type RequestSummary, type Template,
+} from "./approval/contract";
+import {
+  APPROVAL_WRITE_PATHS, dropPendingWrite, findPendingWrites, inspectPending, pendingWriteSubject,
+  savePendingWrite, updatePendingWriteKind, type PendingApprovalWrite,
+} from "./approval/pending-writes";
+import { RequestDetail as RequestDetailPanel } from "./approval/request-detail";
+import { RequestList } from "./approval/request-list";
+import { RecoveryPanel, type RecoveryLookup } from "./approval/recovery-panel";
+import { Fact, FactGrid, FieldLabel, NotApplicable } from "./approval/atoms";
 
-type Candidate = {
-  username: string;
-  displayUsername?: string;
-  name: string;
-  status: string;
-  eligible?: boolean;
-  source?: string;
-};
-
-type Template = {
-  id: string;
-  operationCode: string;
-  triggerCondition: string;
-  version: number;
-  updatedAt: string | null;
-  candidates: Candidate[];
-};
-
-type RequestSummary = {
-  requestId: string;
-  operationCode: string;
-  triggerCondition: string;
-  payloadVersion: number;
-  payloadHash: string;
-  summary: string;
-  status: string;
-  statusReason: string | null;
-  requester: { username: string; displayUsername?: string; name: string };
-  createdAt: string | null;
-  expiresAt: string | null;
-};
-
-type AuditEvent = {
-  eventId: string;
-  actor: { username: string; displayUsername?: string; name: string };
-  action: string;
-  objectType: string;
-  objectId: string | null;
-  outcome: string;
-  reason: string | null;
-  requestId: string | null;
-  occurredAt: string | null;
-  details: Record<string, unknown>;
-};
-
-type RequestDetail = RequestSummary & {
-  operation: { code: string; triggerCondition: string; payloadVersion: number; payloadHash: string; payload?: Record<string, unknown> };
-  template: { id: string; version: number };
-  requester: { username: string; displayUsername?: string; name: string; status: string };
-  decision: { decision: string; reason: string | null; approver: { username: string; displayUsername?: string; name: string }; createdAt: string | null } | null;
-  execution: { status: string; resultCode: string; resultDetail: string | null; executor: { username: string; displayUsername?: string; name: string }; createdAt: string | null; completedAt: string | null } | null;
-  candidates: Candidate[];
-  history: AuditEvent[];
-  supersedesRequestId: string | null;
-  supersededByRequestId: string | null;
-};
-
+type Tab = "pending" | "mine" | "operations" | "templates" | "audit";
 type ListKey = "mine" | "pending" | "audit";
 type ListPage = { cursors: (string | null)[]; index: number; nextCursor: string | null };
 type AuditFilter = { action: string; objectType: string; actorUsername: string; requestId: string };
-type ConfirmKind = "approve" | "reject" | "execute" | "template";
-type ReadbackTarget =
-  | { kind: "templates" }
-  | { kind: "lists"; keys: ListKey[] }
-  | { kind: "detail-and-lists"; requestId: string; keys: ListKey[] };
 type WriteIntent = {
   actorId: string;
   sessionId: string;
+  /** 责任记录的目标分域：申请号，或模板写的 operationCode|triggerCondition。 */
+  target: string;
   objectKey: string;
   objectEpoch: number;
   contextKey: string;
   contextEpoch: number;
   path: string;
+  /** 恢复合同的操作白名单值；由 path 推出，target 型操作另带申请号。 */
+  operation: string;
+  targetRequestId: string | null;
   method: "POST";
   body: Record<string, unknown>;
   idempotencyKey: string;
@@ -100,16 +56,25 @@ type WriteIntent = {
   readback: ReadbackTarget;
   afterPost?: () => void;
 };
-type RecoveryState = { kind: "unknown" | "readback"; intent: WriteIntent };
+type RecoveryState = { kind: "unknown" | "readback" | "resolved"; intent: WriteIntent; persisted: boolean; receipt?: RecoveryResult };
 
-const statusLabels: Record<string, string> = {
-  PENDING: "待审批",
-  APPROVED: "已同意，待执行",
-  REJECTED: "已拒绝",
-  CANCELLED: "已终止",
-  EXPIRED: "已过期",
-  EXECUTED: "已执行",
-  EXECUTION_FAILED: "执行失败",
+const TABS: Tab[] = ["pending", "mine", "operations", "templates", "audit"];
+const ALL = "all";
+
+/** 恢复合同的操作白名单（approval-audit.ts:95-104）。target 型操作必须带申请号，非 target 型不能带。 */
+const TARGET_SCOPED_OPERATIONS = new Set(["approval.request.decide", "approval.request.add_candidate", "approval.request.execute"]);
+
+/**
+ * 已核实有发起入口的业务页（membership-growth-admin-host.tsx:122 政策发布、:128 礼遇发放）。
+ * 只用于导航，不参与任何授权判断；replace/revoke 尚未接入发起入口，见 operations 面板的缺口说明。
+ * 服务端 initiation 未返回入口提示，这一映射作为合同缺口登记给 Master。
+ */
+const INITIATION_ENTRY: Record<string, { label: string; path?: string }> = {
+  "membership.benefit.policy.publish": { label: "会员成长页 · 政策草稿提交审批", path: "/membership-growth" },
+  "membership.entitlement.grant": { label: "会员成长页 · 礼遇发放提交审批", path: "/membership-growth" },
+  "membership.entitlement.replace": { label: "尚未接入发起入口（会员礼遇页需补替换提交）" },
+  "membership.entitlement.revoke": { label: "尚未接入发起入口（会员礼遇明细需补撤销提交）" },
+  "order.settlement.adjust": { label: "由订单结算流程在结算事务内发起，审批页不可发起" },
 };
 
 function emptyPageMeta(): Record<ListKey, ListPage> {
@@ -135,67 +100,7 @@ function isUnknownWriteError(error: unknown): boolean {
   return error instanceof AdminApiError && (error.code === "NETWORK_ERROR" || error.status >= 500);
 }
 
-function statusLabel(value: string): string {
-  return statusLabels[value] ?? value;
-}
-
-function statusTone(value: string): string {
-  if (["EXECUTED", "APPROVED"].includes(value)) return "text-emerald-400";
-  if (["REJECTED", "CANCELLED", "EXPIRED", "EXECUTION_FAILED"].includes(value)) return "text-rose-400";
-  return "text-amber-300";
-}
-
-function personLabel(person: { name: string; displayUsername?: string; username: string }): string {
-  return person.name + "（" + (person.displayUsername ?? person.username) + "）";
-}
-
-function prettyDetails(details: Record<string, unknown>): string {
-  return Object.entries(details).map(([key, value]) => key + ": " + String(value)).join("；") || "无附加信息";
-}
-
 const emptyAuditFilter: AuditFilter = { action: "", objectType: "", actorUsername: "", requestId: "" };
-
-const approvalAuditActions = [
-  "approval.request.created",
-  "approval.request.approved",
-  "approval.request.rejected",
-  "approval.request.cancelled",
-  "approval.request.expired",
-  "approval.request.candidate_added",
-  "approval.execution.completed",
-  "approval.template.configured",
-];
-
-const approvalAuditObjectTypes: Record<string, string> = {
-  approval_request: "审批申请",
-  approval_template: "审批模板",
-};
-
-const approvalAuditActionLabels: Record<string, string> = {
-  "approval.request.created": "提交申请",
-  "approval.request.approved": "审批同意",
-  "approval.request.rejected": "审批拒绝",
-  "approval.request.cancelled": "申请终止",
-  "approval.request.expired": "申请过期",
-  "approval.request.candidate_added": "追加审批人",
-  "approval.execution.completed": "执行完成",
-  "approval.template.configured": "配置审批模板",
-};
-
-function approvalAuditActionLabel(action: string): string {
-  return approvalAuditActionLabels[action] ?? action;
-}
-
-function approvalAuditOutcomeLabel(outcome: string): string {
-  return outcome === "SUCCESS" ? "成功" : outcome === "FAILURE" ? "失败" : outcome;
-}
-
-function auditNarrative(event: AuditEvent): string {
-  if (event.reason) return event.reason;
-  const summary = event.details?.summary;
-  if (typeof summary === "string" && summary.trim()) return summary;
-  return "无附加说明";
-}
 
 function auditFilterFromQuery(query: Record<string, string> | undefined): AuditFilter {
   return {
@@ -210,20 +115,9 @@ function auditFilterKey(filter: AuditFilter): string {
   return JSON.stringify([filter.action, filter.objectType, filter.actorUsername.trim(), filter.requestId.trim()]);
 }
 
-function auditScopeLabel(scope: string | undefined): string {
-  if (scope === "BOSS_ALL_APPROVAL_EVENTS") return "Boss：全部审批与授权事件";
-  if (scope === "ACTOR_OR_REQUEST_SCOPE") return "当前账号：本人操作或本人相关申请的事件";
-  return "已按当前账号范围过滤";
-}
-
-function relatedRequestIdOf(event: AuditEvent): string | null {
-  // audit_event.request_id 是 HTTP 请求编号，不是审批申请；只有审批申请对象本身可跳转。
-  return event.objectType === "approval_request" ? event.objectId : null;
-}
-
 function PagePager({ page, busy, onPrev, onNext, onFirst }: { page: ListPage; busy: boolean; onPrev: () => void; onNext: () => void; onFirst: () => void }) {
   return (
-    <div className="flex items-center justify-end gap-2 mt-3">
+    <div className="mt-3 flex items-center justify-end gap-2">
       <span className="text-[11px] text-muted-foreground">第 {page.index + 1} 页</span>
       <Button type="button" size="sm" variant="secondary" disabled={busy || page.index === 0} onClick={onPrev}>上一页</Button>
       {page.index > 0 ? <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={onFirst}>回到首页</Button> : null}
@@ -239,29 +133,33 @@ export function ApprovalAuditView({
   initialQuery,
   objectOnly = false,
   onOpenObject,
+  onOpenPath,
   onTabChange,
   onQueryChange,
   refreshNonce = 0,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialRequestId?: string;
-  initialTab?: "mine" | "pending" | "templates" | "audit";
+  initialTab?: Tab;
   initialQuery?: Record<string, string>;
   objectOnly?: boolean;
   onOpenObject?: (requestId: string, title: string) => void;
-  onTabChange?: (tab: "mine" | "pending" | "templates" | "audit") => void;
+  /**
+   * 打开来源业务对象（订单、会员成长页等）。壳侧现有 onOpenObject 被硬编码成
+   * /approvals/:requestId，无法承担跨对象导航；page-content.tsx 作用域内已有同签名的
+   * onOpenPath，透传即可（见交付 brief 的壳 hunk）。未透传时相关入口退化为不可点标识。
+   */
+  onOpenPath?: (path: string, title: string) => void;
+  onTabChange?: (tab: Tab) => void;
   onQueryChange?: (query: Record<string, string>) => void;
   refreshNonce?: number;
 }) {
   const canTemplateRead = hasPermission(snapshot, "approval.template.read");
   const canTemplateConfigure = hasPermission(snapshot, "approval.template.configure");
-  const canCreate = hasPermission(snapshot, "approval.request.create");
   const canRead = hasPermission(snapshot, "approval.request.read");
   const canApprove = hasPermission(snapshot, "approval.request.approve");
   const canExecute = hasPermission(snapshot, "approval.request.execute");
-  const canAddApprover = hasPermission(snapshot, "approval.request.add_approver");
   const canAudit = hasPermission(snapshot, "approval.audit.read");
-  const canReadAdmins = hasPermission(snapshot, "admin.account.read");
   const contextKey = JSON.stringify([contextKeyOf(snapshot), initialRequestId ?? ""]);
   const contextKeyRef = useRef(contextKey);
   const contextEpochRef = useRef(0);
@@ -271,29 +169,40 @@ export function ApprovalAuditView({
   }
   const contextEpoch = contextEpochRef.current;
 
-  const [tab, setTab] = useState<"mine" | "pending" | "templates" | "audit">(initialTab ?? "mine");
+  // 默认页：有审批权限的人进「待我处理」，只有读取权限的人进「我的申请」。
+  // 注意壳侧 page-content.tsx 在 URL 没带 tab 时会把 initialTab 落成 "mine"，无法表达「未指定」，
+  // 因此该默认页要等壳改成透传原始 query.tab 才在浏览器里生效（见交付 brief 的壳 hunk）。
+  const urlTab = initialQuery?.tab;
+  const defaultTab: Tab = canApprove ? "pending" : canRead ? "mine" : canTemplateRead || canTemplateConfigure ? "templates" : canAudit ? "audit" : "operations";
+  const [tab, setTab] = useState<Tab>(
+    urlTab && (TABS as string[]).includes(urlTab)
+      ? (urlTab as Tab)
+      : initialTab && (TABS as string[]).includes(initialTab)
+        ? initialTab
+        : defaultTab,
+  );
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [admins, setAdmins] = useState<AdminDirectoryEntry[]>([]);
+  const [operations, setOperations] = useState<OperationEntry[]>();
+  const [operationsNote, setOperationsNote] = useState<string>();
+  const [candidateOptions, setCandidateOptions] = useState<CandidateOptions | null>(null);
+  const [candidateNote, setCandidateNote] = useState<string>();
+  const candidatesTriedRef = useRef(false);
   const [mine, setMine] = useState<RequestSummary[]>([]);
   const [pending, setPending] = useState<RequestSummary[]>([]);
   const [detail, setDetail] = useState<RequestDetail>();
   const [audit, setAudit] = useState<AuditEvent[]>([]);
-  const [operationCode, setOperationCode] = useState("approval.test.execute");
-  const [triggerCondition, setTriggerCondition] = useState("manual");
+  const [operationCode, setOperationCode] = useState("");
+  const [triggerCondition, setTriggerCondition] = useState("");
+  const [newTrigger, setNewTrigger] = useState("");
   const [candidateUsernames, setCandidateUsernames] = useState<string[]>([]);
-  const [summary, setSummary] = useState("");
-  const [outcome, setOutcome] = useState<"SUCCESS" | "FAILURE">("SUCCESS");
-  const [rejectReason, setRejectReason] = useState("");
-  const [appendUsername, setAppendUsername] = useState("");
-  const [reason, setReason] = useState("");
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [reading, setReading] = useState<Record<string, boolean>>({});
-  const [confirm, setConfirm] = useState<{ kind: ConfirmKind } | null>(null);
-  const [recall, setRecall] = useState("");
+  const [confirm, setConfirm] = useState<{ kind: "template" } | null>(null);
   const [detailFresh, setDetailFresh] = useState(false);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
+  const [lookup, setLookup] = useState<RecoveryLookup>({ state: "idle" });
   const [pageMeta, setPageMeta] = useState<Record<ListKey, ListPage>>(emptyPageMeta);
   const [auditFilter, setAuditFilter] = useState<AuditFilter>(() => auditFilterFromQuery(initialQuery));
   const [auditDraft, setAuditDraft] = useState<AuditFilter>(() => auditFilterFromQuery(initialQuery));
@@ -302,22 +211,88 @@ export function ApprovalAuditView({
   const pageMetaRef = useRef(pageMeta);
   const auditFilterRef = useRef(auditFilter);
   const previousAuditQueryKeyRef = useRef(auditFilterKey(auditFilterFromQuery(initialQuery)));
-  const seqRef = useRef<Record<ListKey | "detail" | "templates" | "admins", number>>({ mine: 0, pending: 0, audit: 0, detail: 0, templates: 0, admins: 0 });
+  const seqRef = useRef<Record<ListKey | "detail" | "templates" | "operations" | "candidates", number>>({ mine: 0, pending: 0, audit: 0, detail: 0, templates: 0, operations: 0, candidates: 0 });
   const mountedRef = useRef(true);
   const previousContextKeyRef = useRef(contextKey);
   const objectKeyRef = useRef(initialRequestId ?? "");
   const objectEpochRef = useRef(0);
   const writeInFlightRef = useRef(false);
   const readbackInFlightRef = useRef(false);
+  const lookupInFlightRef = useRef(false);
   const recoveryRef = useRef<RecoveryState | null>(null);
 
   const isCurrent = (epoch: number, key: string) => mountedRef.current && contextEpochRef.current === epoch && contextKeyRef.current === key;
   const isCurrentObject = (epoch: number, key: string) => objectEpochRef.current === epoch && objectKeyRef.current === key;
   const isCurrentIntent = (intent: WriteIntent) => isCurrent(intent.contextEpoch, intent.contextKey) && isCurrentObject(intent.objectEpoch, intent.objectKey);
+  const lookupSeqRef = useRef(0);
+  const [pendingOthers, setPendingOthers] = useState(0);
+
   const updateRecovery = (next: RecoveryState | null) => {
+    const previous = recoveryRef.current;
+    // 换成另一笔未决操作时，旧查询的迟到结果不得写回新面板。
+    if (next && previous && next.intent.idempotencyKey !== previous.intent.idempotencyKey) lookupSeqRef.current += 1;
     recoveryRef.current = next;
     setRecovery(next);
+    setLookup({ state: "idle" });
   };
+
+  const subjectOf = (intent: WriteIntent) => pendingWriteSubject(intent.actorId, intent.sessionId, intent.target, intent.operation);
+
+  /** 由责任记录重建未决面板；收起或切走后再次进入同一目标会走这里。 */
+  const hydrateFromRecord = (record: PendingApprovalWrite) => {
+    updateRecovery({
+      kind: record.kind,
+      persisted: record.persisted,
+      intent: {
+        actorId: record.actorId,
+        sessionId: record.sessionId,
+        target: record.target,
+        objectKey: objectKeyRef.current,
+        objectEpoch: objectEpochRef.current,
+        contextKey,
+        contextEpoch,
+        path: record.path,
+        operation: record.operation,
+        targetRequestId: TARGET_SCOPED_OPERATIONS.has(record.operation) && typeof record.body.requestId === "string" ? record.body.requestId : null,
+        method: "POST",
+        body: record.body,
+        idempotencyKey: record.idempotencyKey,
+        successMessage: record.successMessage,
+        readback: record.readback,
+      },
+    });
+  };
+
+  /** 恢复面板需要的当前权限；失权期间隐藏面板但记录保留。 */
+  const PERMISSION_FOR_OPERATION: Record<string, string> = {
+    "approval.request.decide": "approval.request.approve",
+    "approval.request.execute": "approval.request.execute",
+    "approval.request.add_candidate": "approval.request.add_approver",
+    "approval.request.create": "approval.request.create",
+    "approval.template.configure": "approval.template.configure",
+  };
+
+  /**
+   * 回到原身份+会话时从责任记录恢复未核清状态。记录不因切身份、切对象或收起面板而删除，
+   * 只有终态证据（读回核实、已知回执、首次提交被明确拒绝）才 drop。
+   */
+  const rehydrateRecovery = useCallback(() => {
+    if (recoveryRef.current) return;
+    const records = findPendingWrites(snapshot.adminUserId, snapshot.session.id);
+    if (records.length === 0) { setPendingOthers(0); return; }
+    const target = objectKeyRef.current;
+    const match = target ? records.find((record) => record.target === target) : records[records.length - 1];
+    if (!match) { setPendingOthers(records.length); return; }
+    const needed = PERMISSION_FOR_OPERATION[match.operation];
+    if (needed && !hasPermission(snapshot, needed)) {
+      setPendingOthers(records.length);
+      return;
+    }
+    setPendingOthers(records.filter((record) => record.subject !== match.subject).length);
+    hydrateFromRecord(match);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextEpoch, contextKey, snapshot.adminUserId, snapshot.session.id]);
+
 
   useEffect(() => {
     // React StrictMode re-runs effect setup after its first cleanup. Restore
@@ -338,10 +313,16 @@ export function ApprovalAuditView({
     pageMetaRef.current = emptyPageMeta();
     writeInFlightRef.current = false;
     readbackInFlightRef.current = false;
+    lookupInFlightRef.current = false;
     setLoading(false);
+    // 未核清的恢复责任属于原身份与原对象；切身份时清空投影，但不代表责任已核清。
     updateRecovery(null);
     setTemplates([]);
-    setAdmins([]);
+    setOperations(undefined);
+    setOperationsNote(undefined);
+    setCandidateOptions(null);
+    setCandidateNote(undefined);
+    candidatesTriedRef.current = false;
     setMine([]);
     setPending([]);
     setDetail(undefined);
@@ -357,30 +338,25 @@ export function ApprovalAuditView({
     previousAuditQueryKeyRef.current = auditFilterKey(emptyAuditFilter);
     setMessage(undefined);
     setConfirm(null);
-    setRecall("");
-    setRejectReason("");
-    setAppendUsername("");
-    setReason("");
-    setSummary("");
-    setOperationCode("approval.test.execute");
-    setTriggerCondition("manual");
+    setOperationCode("");
+    setTriggerCondition("");
+    setNewTrigger("");
     setCandidateUsernames([]);
   }, [contextKey]);
 
   const beginObject = (requestId?: string) => {
     const nextObjectKey = requestId ?? "";
     if (objectKeyRef.current === nextObjectKey) return;
+    // 只有真正的对象切换才隐藏面板；首次挂载要保留从责任记录恢复的状态。
+    const switching = objectKeyRef.current !== "";
     objectKeyRef.current = nextObjectKey;
     objectEpochRef.current += 1;
     writeInFlightRef.current = false;
     readbackInFlightRef.current = false;
+    lookupInFlightRef.current = false;
     setLoading(false);
-    updateRecovery(null);
+    if (switching) updateRecovery(null);
     setConfirm(null);
-    setRecall("");
-    setRejectReason("");
-    setAppendUsername("");
-    setReason("");
     setDetail(undefined);
     setDetailFresh(false);
     setError(undefined);
@@ -459,19 +435,59 @@ export function ApprovalAuditView({
     }
   }, [contextEpoch, contextKey]);
 
-  const loadAdmins = useCallback(async (): Promise<boolean> => {
+  const loadOperations = useCallback(async (): Promise<boolean> => {
     const requestEpoch = contextEpoch;
     const requestContextKey = contextKey;
     if (!isCurrent(requestEpoch, requestContextKey)) return false;
-    const seq = ++seqRef.current.admins;
+    const seq = ++seqRef.current.operations;
+    setReading((current) => ({ ...current, operations: true }));
     try {
-      const data = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
-      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current.admins !== seq) return false;
-      setAdmins(data.admins ?? []);
+      const data = await adminRequest<{ operations?: OperationEntry[]; unregisteredOperationPolicy?: string }>("/security/approvals/operations");
+      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current.operations !== seq) return false;
+      setOperations(data.operations ?? []);
+      setOperationsNote(data.unregisteredOperationPolicy);
       return true;
     } catch (failure) {
-      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.admins === seq) setError(friendlyError(failure));
+      // 运行中的 API 可能早于该接口：404 记为未接入，不当作页面级错误盖住其他面板。
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.operations === seq) {
+        setOperations(undefined);
+        setOperationsNote(failure instanceof AdminApiError && failure.status === 404
+          ? "业务登记读取未接入：当前 API 没有装配该接口。"
+          : failure instanceof AdminApiError && failure.status === 403
+            ? "业务登记读取当前需要审批申请读取权限，本岗位没有该权限；因此模板表单暂时列不出可配置的业务，这不是系统未部署。需要为模板配置岗位开放一项最小业务读取后才会可用。"
+            : friendlyError(failure));
+      }
       return false;
+    } finally {
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.operations === seq) setReading((current) => ({ ...current, operations: false }));
+    }
+  }, [contextEpoch, contextKey]);
+
+  /** 模板配置的候选人读取：审批专用接口，不要求全管理员目录权限。失败只影响该表单，不上升为整页错误。 */
+  const loadCandidateOptions = useCallback(async (): Promise<boolean> => {
+    const requestEpoch = contextEpoch;
+    const requestContextKey = contextKey;
+    if (!isCurrent(requestEpoch, requestContextKey)) return false;
+    const seq = ++seqRef.current.candidates;
+    setReading((current) => ({ ...current, candidates: true }));
+    try {
+      const data = await adminRequest<CandidateOptions>("/security/approvals/candidate-options");
+      if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current.candidates !== seq) return false;
+      setCandidateOptions(data);
+      setCandidateNote(undefined);
+      return true;
+    } catch (failure) {
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.candidates === seq) {
+        setCandidateOptions(null);
+        setCandidateNote(failure instanceof AdminApiError && failure.status === 404
+          ? "可选审批人能力暂未接入，无法列出可追加或可配置的审批人；请联系管理员确认接入进度。"
+          : failure instanceof AdminApiError && failure.status === 403
+            ? "当前账号没有读取可选审批人的权限，无法列出可追加或可配置的审批人。"
+            : friendlyError(failure));
+      }
+      return false;
+    } finally {
+      if (isCurrent(requestEpoch, requestContextKey) && seqRef.current.candidates === seq) setReading((current) => ({ ...current, candidates: false }));
     }
   }, [contextEpoch, contextKey]);
 
@@ -479,11 +495,11 @@ export function ApprovalAuditView({
     const tasks: Promise<boolean>[] = [];
     if (canTemplateRead) tasks.push(loadTemplates());
     if (canRead) tasks.push(loadList("mine"));
+    if (canRead || canTemplateConfigure) tasks.push(loadOperations());
     if (canApprove) tasks.push(loadList("pending"));
     if (canAudit) tasks.push(loadList("audit"));
-    if (canReadAdmins) tasks.push(loadAdmins());
     return (await Promise.all(tasks)).every(Boolean);
-  }, [canApprove, canAudit, canRead, canReadAdmins, canTemplateRead, loadAdmins, loadList, loadTemplates]);
+  }, [canApprove, canAudit, canRead, canTemplateRead, loadList, loadOperations, loadTemplates]);
 
   const loadDetail = useCallback(async (requestId: string): Promise<boolean> => {
     beginObject(requestId);
@@ -500,6 +516,7 @@ export function ApprovalAuditView({
       if (!isCurrent(requestEpoch, requestContextKey) || !isCurrentObject(requestObjectEpoch, requestObjectKey) || seqRef.current.detail !== seq) return false;
       setDetail(result);
       setDetailFresh(true);
+      rehydrateRecovery();
       return true;
     } catch (failure) {
       if (isCurrent(requestEpoch, requestContextKey) && isCurrentObject(requestObjectEpoch, requestObjectKey) && seqRef.current.detail === seq) {
@@ -520,19 +537,17 @@ export function ApprovalAuditView({
     else beginObject();
   }, [initialRequestId, loadDetail]);
 
+  // 声明在 loadDetail 之后：beginObject 会推进对象 epoch，恢复出的意图必须拿到推进后的 epoch。
   useEffect(() => {
-    const current = templates[0];
-    if (!current) return;
-    setOperationCode(current.operationCode);
-    setTriggerCondition(current.triggerCondition);
-    setCandidateUsernames(current.candidates.map((candidate) => candidate.username));
-  }, [templates]);
+    rehydrateRecovery();
+  }, [rehydrateRecovery, contextKey, initialRequestId]);
 
-  const allRequests = useMemo(() => {
-    const byId = new Map<string, RequestSummary>();
-    for (const item of [...mine, ...pending]) byId.set(item.requestId, item);
-    return [...byId.values()];
-  }, [mine, pending]);
+  useEffect(() => {
+    if (objectOnly || tab !== "templates" || !canTemplateConfigure) return;
+    if (candidatesTriedRef.current || reading.candidates) return;
+    candidatesTriedRef.current = true;
+    void loadCandidateOptions();
+  }, [tab, objectOnly, canTemplateConfigure, reading.candidates, loadCandidateOptions]);
 
   const navigate = (key: ListKey, action: "prev" | "next" | "first") => {
     const meta = pageMetaRef.current[key];
@@ -600,32 +615,80 @@ export function ApprovalAuditView({
   }, [auditQueryKey]);
 
   const performReadback = useCallback(async (target: ReadbackTarget): Promise<boolean> => {
-    if (target.kind === "templates") return loadTemplates();
+    if (target.kind === "templates") {
+      const tasks: Promise<boolean>[] = [loadTemplates()];
+      if (canTemplateConfigure) tasks.push(loadCandidateOptions());
+      if (canRead) tasks.push(loadOperations());
+      return (await Promise.all(tasks)).every(Boolean);
+    }
     if (target.kind === "lists") return (await Promise.all(target.keys.map((key) => loadList(key)))).every(Boolean);
     const detailOk = await loadDetail(target.requestId);
     const listOk = target.keys.length === 0 || (await Promise.all(target.keys.map((key) => loadList(key)))).every(Boolean);
     return detailOk && listOk;
-  }, [loadDetail, loadList, loadTemplates]);
+  }, [canRead, canTemplateConfigure, loadCandidateOptions, loadDetail, loadList, loadOperations, loadTemplates]);
 
-  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void): WriteIntent => ({
-    actorId: snapshot.adminUserId,
-    sessionId: snapshot.session.id,
-    objectKey: objectKeyRef.current,
-    objectEpoch: objectEpochRef.current,
-    contextKey,
-    contextEpoch,
-    path,
-    method: "POST",
-    body,
-    idempotencyKey: `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`,
-    successMessage,
-    readback,
-    afterPost,
-  }), [contextEpoch, contextKey, snapshot.adminUserId, snapshot.session.id]);
+  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void): WriteIntent => {
+    const operation = APPROVAL_WRITE_PATHS[path] ?? "";
+    const targetRequestId = typeof body.requestId === "string" ? body.requestId : null;
+    const target = targetRequestId
+      ?? (path === "/security/approvals/templates/update" ? String(body.operationCode ?? "") + "|" + String(body.triggerCondition ?? "") : "");
+    return {
+      actorId: snapshot.adminUserId,
+      sessionId: snapshot.session.id,
+      target,
+      objectKey: objectKeyRef.current,
+      objectEpoch: objectEpochRef.current,
+      contextKey,
+      contextEpoch,
+      path,
+      operation,
+      // 非 target 型操作带 requestId 会被恢复接口判为 400，因此这里按白名单语义裁剪。
+      targetRequestId: TARGET_SCOPED_OPERATIONS.has(operation) ? targetRequestId : null,
+      method: "POST",
+      body,
+      idempotencyKey: `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`,
+      successMessage,
+      readback,
+      afterPost,
+    };
+  }, [contextEpoch, contextKey, snapshot.adminUserId, snapshot.session.id]);
 
   const submitWrite = useCallback(async (intent: WriteIntent, recovering = false) => {
-    if (!isCurrentIntent(intent) || writeInFlightRef.current || readbackInFlightRef.current) return;
+    if (!isCurrentIntent(intent) || writeInFlightRef.current || readbackInFlightRef.current || lookupInFlightRef.current) return;
     if (recoveryRef.current && !recovering) return;
+    const subject = subjectOf(intent);
+    if (!recovering) {
+      const inspection = inspectPending(subject);
+      if (inspection.state === "unreadable") {
+        setError(inspection.reason === "corrupt"
+          ? "已有一条同类请求的记录读不出可信内容。为避免覆盖可能仍在途的原请求，本次未提交；请联系管理员按原请求标识核对。"
+          : "浏览器存储不可用，无法保留这笔请求的结果未知责任；为避免无法核对的重复写，本次未提交。");
+        return;
+      }
+      if (inspection.state === "valid") {
+        // 同一目标还有未核清的原请求：恢复它并阻止换新标识重发。
+        hydrateFromRecord(inspection.record);
+        setError("已有一笔未核清的同类请求。请先查询原结果或用原请求重试，不能换新标识重新提交。");
+        return;
+      }
+      // 责任记录先落盘并核读成功才允许发出请求。
+      const saved = savePendingWrite({
+        actorId: intent.actorId, sessionId: intent.sessionId, target: intent.target, operation: intent.operation,
+        path: intent.path, idempotencyKey: intent.idempotencyKey, body: intent.body, readback: intent.readback,
+        successMessage: intent.successMessage, kind: "unknown",
+      });
+      if (!saved.ok) {
+        if (saved.existing) {
+          hydrateFromRecord(saved.existing);
+          setError("已有一笔未核清的同类请求。请先查询原结果或用原请求重试，不能换新标识重新提交。");
+        } else {
+          setError(saved.reason === "corrupt-record"
+            ? "已有一条同类请求的记录读不出可信内容；本次未提交，请联系管理员核对。"
+            : "浏览器存储不可用，无法保留这笔请求的结果未知责任；本次未提交。");
+        }
+        return;
+      }
+    }
     writeInFlightRef.current = true;
     setError(undefined);
     setMessage(undefined);
@@ -637,20 +700,29 @@ export function ApprovalAuditView({
       const readbackOk = await performReadback(intent.readback);
       if (!isCurrentIntent(intent)) return;
       if (readbackOk) {
+        dropPendingWrite(subject, intent.idempotencyKey);
         updateRecovery(null);
         setMessage(intent.successMessage);
       } else {
-        updateRecovery({ kind: "readback", intent });
+        // 已受理之后只降级 kind；存储故障保留责任，不改成未提交。
+        const downgraded = updatePendingWriteKind(subject, intent.idempotencyKey, "readback");
+        updateRecovery({ kind: "readback", intent, persisted: downgraded?.persisted ?? false });
         setError(undefined);
         setMessage(`${intent.successMessage} 已成功，最新状态未确认。`);
       }
     } catch (failure) {
       if (!isCurrentIntent(intent)) return;
       if (isUnknownWriteError(failure)) {
-        updateRecovery({ kind: "unknown", intent });
+        updateRecovery({ kind: "unknown", intent, persisted: inspectPending(subject).state === "valid" ? (inspectPending(subject) as { record: PendingApprovalWrite }).record.persisted : false });
         setMessage(undefined);
-        setError("请求结果未知：服务端可能已处理；仅可使用原请求重试或放弃恢复。");
+        setError("请求结果未知：服务端可能已处理；仅可使用原请求重试或查询原结果，不要换新标识重试。");
+      } else if (recovering) {
+        // 重放被拒只说明这次重放不成立（例如提交后撤权），不能证明第一次写没有发生。
+        updateRecovery({ kind: "unknown", intent, persisted: inspectPending(subject).state === "valid" ? (inspectPending(subject) as { record: PendingApprovalWrite }).record.persisted : false });
+        setError(`${friendlyError(failure)} 重放被拒不代表第一次写没有发生；原结果仍未核清。`);
       } else {
+        // 首次提交被服务端明确拒绝是终态证据：这笔责任解除。
+        dropPendingWrite(subject, intent.idempotencyKey);
         updateRecovery(null);
         setError(friendlyError(failure));
       }
@@ -667,17 +739,17 @@ export function ApprovalAuditView({
     if (current?.kind === "unknown") void submitWrite(current.intent, true);
   };
 
-  const discardRecovery = () => {
-    if (recoveryRef.current?.kind !== "unknown") return;
+  /** 收起面板不等于核清责任：记录保留，回到原身份/对象时会重新出现。 */
+  const dismissRecovery = () => {
+    if (!recoveryRef.current) return;
     updateRecovery(null);
-    setDetail(undefined);
-    setDetailFresh(false);
     setError(undefined);
   };
 
   const retryReadback = async () => {
     const current = recoveryRef.current;
-    if (current?.kind !== "readback" || readbackInFlightRef.current) return;
+    // resolved 也走同一条 GET 读回：只读取最新状态，绝不 POST 重放已核清的命令。
+    if ((current?.kind !== "readback" && current?.kind !== "resolved") || readbackInFlightRef.current) return;
     if (!isCurrentIntent(current.intent)) return;
     readbackInFlightRef.current = true;
     setError(undefined);
@@ -686,11 +758,17 @@ export function ApprovalAuditView({
       const readbackOk = await performReadback(current.intent.readback);
       if (!isCurrentIntent(current.intent)) return;
       if (readbackOk) {
+        dropPendingWrite(subjectOf(current.intent), current.intent.idempotencyKey);
         updateRecovery(null);
-        setMessage(`${current.intent.successMessage} 最新状态已确认。`);
+        setMessage(current.kind === "resolved" && current.receipt
+          ? recoveryOutcomeSummary(current.receipt)
+          : `${current.intent.successMessage} 最新状态已读取，可按当前资格继续处理。`);
       } else {
         setError(undefined);
-        setMessage(`${current.intent.successMessage} 已成功，最新状态未确认。`);
+        // resolved 已有核实回执：读回仍失败时只补充「最新状态暂未读到」，不拼接原命令成功文案。
+        setMessage(current.kind === "resolved" && current.receipt
+          ? recoveryOutcomeUnconfirmedSummary(current.receipt)
+          : `${current.intent.successMessage} 已成功，最新状态未确认。`);
       }
     } finally {
       if (isCurrentIntent(current.intent)) {
@@ -700,10 +778,83 @@ export function ApprovalAuditView({
     }
   };
 
+  /** 原结果恢复：只回答「这把请求标识 → 原回执」，不改写业务状态，也不产生第二次写入。 */
+  const lookupRecovery = async () => {
+    const current = recoveryRef.current;
+    if (!current || lookupInFlightRef.current || writeInFlightRef.current || readbackInFlightRef.current) return;
+    const intent = current.intent;
+    if (!isCurrentIntent(intent)) return;
+    if (!intent.operation) {
+      setLookup({ state: "error", message: "这次请求没有对应的恢复操作白名单值，无法查询原结果。" });
+      return;
+    }
+    // 查询绑定发起时的那一笔意图；迟到或串笔的返回一律不写回当前面板。
+    const seq = ++lookupSeqRef.current;
+    const bound = { key: intent.idempotencyKey, operation: intent.operation, target: intent.targetRequestId };
+    const stillCurrent = () => lookupSeqRef.current === seq
+      && recoveryRef.current?.intent.idempotencyKey === bound.key
+      && recoveryRef.current?.intent.operation === bound.operation
+      && (recoveryRef.current?.intent.targetRequestId ?? null) === (bound.target ?? null);
+    lookupInFlightRef.current = true;
+    setLookup({ state: "loading" });
+    const params = new URLSearchParams({ operation: bound.operation, key: bound.key });
+    if (bound.target) params.set("requestId", bound.target);
+    try {
+      const result = await adminRequest<RecoveryResult>("/security/approvals/recovery?" + params.toString());
+      if (!stillCurrent()) return;
+      const matches = result.key === bound.key
+        && result.operation === bound.operation
+        && (result.targetRequestId ?? null) === (bound.target ?? null);
+      if (!matches) {
+        setLookup({ state: "error", message: "回执的标识、操作或目标与当前未决操作不一致；按读取失败处理，原责任保留。" });
+        return;
+      }
+      if (result.knowledge === "KNOWN") {
+        const issue = receiptEnvelopeIssue(result, bound);
+        if (issue) {
+          // 信封不完整或自相矛盾时不是终态证据：按读取失败处理，责任保留。
+          setLookup({ state: "error", message: `${issue}；不能据此判定原请求结果，责任保留。` });
+          return;
+        }
+        dropPendingWrite(subjectOf(intent), bound.key);
+        updateRecovery({ kind: "resolved", intent, persisted: true, receipt: result });
+        setLookup({ state: "known", result });
+        // 读回结果必须处理：成功就用最新 actions 继续办理并收起回执，失败则保留回执让刷新可重试。
+        const refreshed = await performReadback(intent.readback);
+        if (!isCurrentIntent(intent)) return;
+        if (refreshed) {
+          // StatusMessage 以 error 优先，必须先清掉未知写留下的错误，否则结果说明被盖住。
+          updateRecovery(null);
+          setError(undefined);
+          setMessage(recoveryOutcomeSummary(result));
+        } else {
+          // 与手动刷新共用同一判断：只陈述已核实的回执结果，不说成已读取最新状态。
+          setError(recoveryOutcomeUnconfirmedSummary(result));
+        }
+      } else {
+        setLookup({ state: "not_found", result });
+      }
+    } catch (failure) {
+      if (!stillCurrent()) return;
+      if (failure instanceof AdminApiError && failure.status === 403) {
+        setLookup({ state: "denied", message: friendlyError(failure) });
+      } else if (failure instanceof AdminApiError && failure.status === 404) {
+        setLookup({ state: "error", message: `${friendlyError(failure)}（目标申请读不到，恢复授权无法核对）` });
+      } else {
+        setLookup({ state: "error", message: friendlyError(failure) });
+      }
+    } finally {
+      if (lookupSeqRef.current === seq) lookupInFlightRef.current = false;
+    }
+  };
+
+  /** 选择已有触发条件时用其标识，新建时用输入值；两者互斥，提交与确认弹窗共用同一取值。 */
+  const effectiveTrigger = triggerCondition || newTrigger.trim();
+
   const saveTemplate = () => {
     void submitWrite(makeWriteIntent(
       "/security/approvals/templates/update",
-      { operationCode, triggerCondition, candidateUsernames: [...candidateUsernames] },
+      { operationCode, triggerCondition: effectiveTrigger, candidateUsernames: [...candidateUsernames] },
       "审批模板已保存；只影响之后新建的申请。在途申请保留原版本与名单快照。",
       { kind: "templates" },
     ));
@@ -711,43 +862,32 @@ export function ApprovalAuditView({
 
   const configure = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    openConfirm("template");
+    if (loading || recoveryRef.current) return;
+    setConfirm({ kind: "template" });
   };
 
-  const createRequest = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void submitWrite(makeWriteIntent(
-      "/security/approvals/requests",
-      { operationCode, triggerCondition, payloadVersion: 1, payload: { outcome }, summary },
-      "申请已提交。审批同意不代表执行完成或资金到账。",
-      { kind: "lists", keys: ["mine"] },
-      () => setSummary(""),
-    ));
-  };
-
-  const decide = (decision: "APPROVE" | "REJECT") => {
+  const decide = (decision: "APPROVE" | "REJECT", reason: string) => {
     const current = detail;
     if (!current) return;
-    const successMessage = decision === "APPROVE" ? "已记录首个有效同意。后续执行仍是独立步骤。" : "已拒绝；如需再次申请，请新建申请，不会复活原审批。";
+    const successMessage = decision === "APPROVE"
+      ? "已记录首个有效批准。执行仍是独立步骤，批准不代表执行完成或资金到账。"
+      : "已驳回；原申请关闭且不会复活，如需再次办理请由来源业务重新发起。";
     void submitWrite(makeWriteIntent(
       "/security/approvals/requests/decision",
-      { requestId: current.requestId, decision, ...(rejectReason.trim() ? { reason: rejectReason.trim() } : {}) },
+      { requestId: current.requestId, decision, ...(reason ? { reason } : {}) },
       successMessage,
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
-      () => setRejectReason(""),
     ));
   };
 
-  const append = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const append = (username: string, reason: string) => {
     const current = detail;
     if (!current) return;
     void submitWrite(makeWriteIntent(
       "/security/approvals/requests/add-candidate",
-      { requestId: current.requestId, username: appendUsername, reason },
+      { requestId: current.requestId, username, reason },
       "已追加当前仍具备审批资格的审批人；原配置名单未删除或跳过。",
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
-      () => { setAppendUsername(""); setReason(""); },
     ));
   };
 
@@ -757,104 +897,10 @@ export function ApprovalAuditView({
     void submitWrite(makeWriteIntent(
       "/security/approvals/requests/execute",
       { requestId: current.requestId },
-      "执行结果已单独记录；请以执行状态查看结果。",
+      "执行结果已单独记录；执行成功不代表业务对象已生效或资金已到账，请以领域结果为准。",
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
-      () => setRecall(""),
     ));
   };
-
-  const openConfirm = (kind: ConfirmKind) => {
-    if (loading || recoveryRef.current) return;
-    setRecall("");
-    if (kind === "approve" || kind === "reject") setRejectReason("");
-    setConfirm({ kind });
-  };
-
-  const recallTarget = detail?.summary.slice(0, 8) ?? "";
-  const confirmKind = confirm?.kind;
-  const confirmLabel = confirmKind === "approve" ? "确认同意"
-    : confirmKind === "reject" ? "确认拒绝"
-      : confirmKind === "execute" ? "确认执行" : "确认保存";
-  const confirmDisabled = confirmKind === "reject"
-    ? rejectReason.trim().length < 3
-    : confirmKind === "execute"
-      ? recall.trim() !== recallTarget
-      : false;
-
-  const onConfirm = () => {
-    const kind = confirm?.kind;
-    if (!kind) return;
-    setConfirm(null);
-    setRecall("");
-    if (kind === "approve") void decide("APPROVE");
-    else if (kind === "reject") void decide("REJECT");
-    else if (kind === "execute") void execute();
-    else void saveTemplate();
-  };
-
-  const confirmDialogTitle = confirmKind === "approve" ? "确认同意审批"
-    : confirmKind === "reject" ? "确认拒绝审批"
-      : confirmKind === "execute" ? "确认执行本地测试动作" : "确认保存审批模板";
-  const confirmConsequence = confirmKind === "approve"
-    ? "同意后申请进入“已同意，待执行”；审批同意不代表执行完成或资金到账。"
-    : confirmKind === "reject"
-      ? "拒绝后原申请关闭且不会复活；如需再次发起请新建申请。"
-      : confirmKind === "execute"
-        ? "执行为本地非资金测试动作，结果单独记录且不可撤销。"
-        : "模板只影响之后新建的申请；在途申请保留原版本与名单快照。";
-
-  const confirmDialog = (
-    <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) { setConfirm(null); setRecall(""); } }}>
-      <DialogContent>
-        <DialogTitle>{confirmDialogTitle}</DialogTitle>
-        <DialogDescription>{confirmConsequence}</DialogDescription>
-        <div className="space-y-3 text-xs">
-          <div className="rounded border border-border bg-surface-soft p-3 space-y-1">
-            <p className="text-muted-foreground">{confirmKind === "template" ? "模板配置" : "申请对象"}</p>
-            {confirmKind === "template" ? (
-              <>
-                <p><span className="text-muted-foreground">操作标识：</span><span className="font-mono">{operationCode}</span></p>
-                <p><span className="text-muted-foreground">触发条件：</span><span className="font-mono">{triggerCondition}</span></p>
-                <p><span className="text-muted-foreground">候选审批人：</span>{candidateUsernames.length} 人（{candidateUsernames.join("、") || "无"}）</p>
-              </>
-            ) : detail ? (
-              <>
-                <p><span className="text-muted-foreground">业务摘要：</span>{detail.summary}</p>
-                <p><span className="text-muted-foreground">操作：</span><span className="font-mono">{detail.operation.code}</span> / <span className="font-mono">{detail.operation.triggerCondition}</span></p>
-                <p><span className="text-muted-foreground">发起人：</span>{personLabel(detail.requester)}</p>
-              </>
-            ) : null}
-          </div>
-          {confirmKind === "approve" || confirmKind === "reject" ? (
-            <label className="space-y-1 text-xs block">
-              <span className="text-muted-foreground">{confirmKind === "reject" ? "拒绝原因（至少 3 字）" : "原因（可选）"}</span>
-              <input
-                value={rejectReason}
-                onChange={(event) => setRejectReason(event.target.value)}
-                className="w-full h-8 px-3 rounded border border-border bg-surface-raised text-xs"
-                placeholder={confirmKind === "reject" ? "拒绝原因（至少 3 字）" : "补充说明（可选）"}
-              />
-            </label>
-          ) : null}
-          {confirmKind === "execute" && detail ? (
-            <label className="space-y-1 text-xs block">
-              <span className="text-muted-foreground">输入申请摘要前 8 字以确认：{recallTarget}</span>
-              <input
-                value={recall}
-                onChange={(event) => setRecall(event.target.value)}
-                className="w-full h-8 px-3 rounded border border-border bg-surface-raised text-xs font-mono"
-                placeholder="复述摘要前 8 字"
-              />
-            </label>
-          ) : null}
-        </div>
-        <DialogFooter>
-          <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
-          <Button type="button" size="sm" variant={confirmKind === "reject" || confirmKind === "execute" ? "danger" : "primary"} disabled={confirmDisabled} onClick={onConfirm}>{confirmLabel}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
 
   const selectRequest = (requestId: string, title?: string) => {
     if (onOpenObject) {
@@ -865,178 +911,501 @@ export function ApprovalAuditView({
     void loadDetail(requestId);
   };
 
-  const actionRows = detail && detailFresh ? (
-    <div className="flex flex-wrap gap-2 mt-4">
-      {canApprove && detail.status === "PENDING" ? (
-        <>
-          <Button type="button" size="sm" disabled={loading || recovery !== null} onClick={() => openConfirm("approve")}>同意</Button>
-          <Button type="button" size="sm" variant="danger" disabled={loading || recovery !== null} onClick={() => openConfirm("reject")}>拒绝</Button>
-        </>
-      ) : null}
-      {canExecute && detail.status === "APPROVED" ? (
-        <Button type="button" size="sm" disabled={loading || recovery !== null} onClick={() => openConfirm("execute")}>执行本地测试动作</Button>
-      ) : null}
-    </div>
-  ) : null;
-
   const recoveryPanel = recovery ? (
-    <div className="flex flex-wrap items-center gap-2 mt-3 text-xs">
-      <Button type="button" size="sm" variant="secondary" loading={loading} onClick={recovery.kind === "unknown" ? retryUnknown : () => void retryReadback()}>
-        {recovery.kind === "unknown" ? "用原请求重试" : "重试读取最新状态"}
-      </Button>
-      {recovery.kind === "unknown" ? <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={discardRecovery}>放弃恢复</Button> : null}
-    </div>
+    <RecoveryPanel
+      kind={recovery.kind}
+      lookup={lookup}
+      busy={loading}
+      lookupBusy={lookup.state === "loading"}
+      onRetryWrite={retryUnknown}
+      onRetryReadback={() => void retryReadback()}
+      onLookup={() => void lookupRecovery()}
+      onDiscard={dismissRecovery}
+      others={pendingOthers}
+    />
   ) : null;
 
-  if (!canTemplateRead && !canCreate && !canRead && !canApprove && !canAudit) {
-    return <section className="section-panel"><StatusMessage error="当前账号没有审批或审批审计读取权限。" /></section>;
+  const availableTabs = useMemo(() => TABS.filter((item) => (
+    item === "pending" ? canApprove
+      : item === "mine" ? canRead
+        : item === "operations" ? canRead
+          : item === "templates" ? canTemplateRead || canTemplateConfigure
+            : canAudit
+  )), [canApprove, canAudit, canRead, canTemplateConfigure, canTemplateRead]);
+
+  if (availableTabs.length === 0) {
+    return (
+      <section className="section-panel">
+        <StatusMessage error={
+          canExecute
+            ? "你的账号持有审批执行权限，但没有审批读取权限：审批详情与待处理队列都要求 approval.request.read（待处理队列另要求 approval.request.approve）。因此本页无法显示可执行的事项，需要由来源业务深链进入并由管理员补齐读取授权。"
+            : "当前账号没有审批或审批审计读取权限。"
+        } />
+      </section>
+    );
   }
 
   if (objectOnly) {
     return (
-      <div className="space-y-6">
-        <StatusMessage error={error} success={message} />
-        {recoveryPanel}
-        {detail ? (
-          <section className="section-panel">
-            <div className="panel-heading"><div><h3>申请详情与历史</h3><p>申请载荷、模板版本、候选名单和决定历史均来自服务端快照。</p></div><span className={"text-sm font-medium " + statusTone(detail.status)}>{statusLabel(detail.status)}</span></div>
-          </section>
-        ) : <p className="text-xs text-muted-foreground">正在读取审批详情…</p>}
-        {detail ? (
-          <section className="section-panel">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-              <div className="space-y-2"><p><span className="text-muted-foreground">业务摘要：</span>{detail.summary}</p><p><span className="text-muted-foreground">发起人：</span>{personLabel(detail.requester)}</p><p><span className="text-muted-foreground">操作：</span><span className="font-mono">{detail.operation.code}</span> / <span className="font-mono">{detail.operation.triggerCondition}</span></p><p><span className="text-muted-foreground">载荷版本 / 哈希：</span>{detail.operation.payloadVersion} / <span className="font-mono break-all">{detail.operation.payloadHash}</span></p><p><span className="text-muted-foreground">模板快照版本：</span>{detail.template.version}</p><p><span className="text-muted-foreground">有效期：</span>{formatDate(detail.expiresAt)}</p>{detail.statusReason ? <p className="text-amber-300">{detail.statusReason}</p> : null}</div>
-              <div className="rounded border border-border bg-surface-soft p-3"><p className="text-muted-foreground mb-2">不可变测试载荷（不含资金字段）</p><pre className="font-mono text-[11px] whitespace-pre-wrap">{JSON.stringify(detail.operation.payload ?? {}, null, 2)}</pre></div>
-            </div>
-            {detail.supersedesRequestId || detail.supersededByRequestId ? (
-              <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-                {detail.supersedesRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersedesRequestId!, "被替代的审批申请")}>查看被替代的原申请</Button> : null}
-                {detail.supersededByRequestId ? <span className="text-amber-300">本申请已被另一申请替代，原申请不再推进。</span> : null}
-                {detail.supersededByRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersededByRequestId!, "替代本申请的审批申请")}>查看替代申请</Button> : null}
-              </div>
-            ) : null}
-            <div className="mt-5"><h4 className="text-xs font-semibold mb-2">候选审批人</h4><div className="flex flex-wrap gap-2">{detail.candidates.map((candidate) => <span key={candidate.username + "-" + (candidate.source ?? "template")} className={"status-badge " + (candidate.eligible ? "success" : "warning")}>{personLabel(candidate)} · {candidate.eligible ? "当前可审批" : candidate.status === "FROZEN" ? "已冻结" : "当前无资格"}{candidate.source === "APPENDED" ? " · 追加" : " · 模板"}</span>)}</div></div>
-            {detail.decision ? <p className="text-xs mt-4">决定：{detail.decision.decision === "APPROVED" ? "同意" : "拒绝"}，由 {personLabel(detail.decision.approver)} 于 {formatDate(detail.decision.createdAt)} 记录。{detail.decision.reason ? "原因：" + detail.decision.reason : ""}</p> : null}
-            {detail.execution ? <p className={"text-xs mt-2 " + (detail.execution.status === "SUCCEEDED" ? "text-emerald-400" : "text-rose-400")}>执行：{detail.execution.status === "SUCCEEDED" ? "成功" : "失败"}，结果码 {detail.execution.resultCode}；{detail.execution.resultDetail ?? "无附加说明"}</p> : null}
-            {actionRows}
-            {canAddApprover && detailFresh && detail.status === "PENDING" ? <form onSubmit={append} className="flex flex-wrap items-end gap-2 mt-5 pt-4 border-t border-border"><label className="space-y-1 text-xs"><span className="text-muted-foreground block">追加当前合格审批人</span><select value={appendUsername} onChange={(event) => setAppendUsername(event.target.value)} className="h-8 min-w-56 px-2 rounded border border-border bg-surface-raised text-xs" required><option value="">选择账号</option>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })}</option>)}</select></label><input value={reason} onChange={(event) => setReason(event.target.value)} className="h-8 min-w-56 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="追加原因" required /><Button type="submit" size="sm" variant="secondary" loading={loading} disabled={loading || recovery !== null || !appendUsername || reason.trim().length < 3}>追加审批人</Button></form> : null}
-            <div className="mt-5"><h4 className="text-xs font-semibold mb-2">状态历史</h4><div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>动作</th><th>账号</th><th>结果</th><th>说明</th></tr></thead><tbody>{detail.history.map((event) => <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td className="font-mono">{event.action}</td><td>{personLabel(event.actor)}</td><td>{event.outcome}</td><td>{event.reason ?? prettyDetails(event.details)}</td></tr>)}</tbody></table></div></div>
-          </section>
-        ) : null}
-        {confirmDialog}
-      </div>
+      <TooltipProvider>
+        <div className="space-y-6">
+          <StatusMessage error={error} success={message} />
+          {recoveryPanel}
+          {detail && detailFresh ? (
+            <section className="section-panel">
+              <RequestDetailPanel
+                detail={detail}
+                busy={loading}
+                blocked={recovery !== null && recovery.kind !== "resolved"}
+                onOpenRequest={selectRequest}
+                onOpenPath={onOpenPath}
+                onDecide={decide}
+                onExecute={execute}
+                onAppend={append}
+              />
+            </section>
+          ) : (
+            <p className="text-xs text-muted-foreground">{error ? "审批详情读取失败。" : "正在读取审批详情…"}</p>
+          )}
+        </div>
+      </TooltipProvider>
     );
   }
 
   const listKey: ListKey = tab === "pending" ? "pending" : "mine";
   const listItems = tab === "pending" ? pending : mine;
+  const auditActionItems = [{ value: "", label: "全部动作" }, ...AUDIT_ACTIONS.map((action) => ({ value: action, label: auditActionLabel(action) }))];
+  const auditObjectItems = [{ value: "", label: "全部对象" }, ...AUDIT_OBJECT_TYPES];
+  const selectedOperation = operations?.find((item) => item.operationCode === operationCode);
+  const triggerItems = selectedOperation
+    ? [{ value: "", label: "新建触发条件标识" }, ...selectedOperation.triggers.map((trigger) => ({ value: trigger.triggerCondition, label: `${trigger.triggerCondition}（模板 v${trigger.templateVersion}）` }))]
+    : [{ value: "", label: "新建触发条件标识" }];
+  const eligibleCandidates = candidateOptions?.candidates ?? [];
+  const excludedEntries = Object.entries(candidateOptions?.excludedByReason ?? {});
 
   return (
-    <div className="space-y-6">
-      <section className="section-panel">
-        <div className="panel-heading">
-          <div><h3>审批与授权审计</h3><p>仅覆盖明确配置的操作。审批决定、实际执行和审计记录彼此独立，页面不会把同意显示成资金到账。</p></div>
-          <Icons.ShieldCheck size={20} className="text-muted-foreground" />
-        </div>
-        <div className="flex flex-wrap gap-2 mt-4" role="tablist" aria-label="审批工作区">
-          {canRead ? <Button type="button" size="sm" role="tab" aria-selected={tab === "mine"} variant={tab === "mine" ? "primary" : "secondary"} onClick={() => { setTab("mine"); onTabChange?.("mine"); }}>我的申请</Button> : null}
-          {canApprove ? <Button type="button" size="sm" role="tab" aria-selected={tab === "pending"} variant={tab === "pending" ? "primary" : "secondary"} onClick={() => { setTab("pending"); onTabChange?.("pending"); }}>待我审批</Button> : null}
-          {canTemplateRead || canTemplateConfigure ? <Button type="button" size="sm" role="tab" aria-selected={tab === "templates"} variant={tab === "templates" ? "primary" : "secondary"} onClick={() => { setTab("templates"); onTabChange?.("templates"); }}>模板配置</Button> : null}
-          {canAudit ? <Button type="button" size="sm" role="tab" aria-selected={tab === "audit"} variant={tab === "audit" ? "primary" : "secondary"} onClick={() => { setTab("audit"); onTabChange?.("audit"); }}>审计记录</Button> : null}
-        </div>
-         <StatusMessage error={error} success={message} className="mt-4" />
-         {recoveryPanel}
-      </section>
-
-      {tab === "templates" ? (
-        <>
-          {canTemplateConfigure ? (
-            <section className="section-panel">
-              <div className="panel-heading"><div><h3>Boss 配置审批模板</h3><p>候选人至少一名；候选人可包含本人，但发起自己的申请时不能自审。触发条件是稳定标识，不接受金额阈值或表达式。</p></div></div>
-              <form onSubmit={configure} className="space-y-4" noValidate>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作标识</span><input value={operationCode} onChange={(event) => setOperationCode(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono" required /></label>
-                  <label className="space-y-1 text-xs"><span className="text-muted-foreground">触发条件标识</span><input value={triggerCondition} onChange={(event) => setTriggerCondition(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono" required /></label>
-                </div>
-                <label className="space-y-1 text-xs block"><span className="text-muted-foreground">候选审批人（可多选，显示账号与姓名）</span><select multiple size={Math.min(8, Math.max(3, admins.length || 3))} value={candidateUsernames} onChange={(event) => setCandidateUsernames(Array.from(event.currentTarget.selectedOptions, (option) => option.value))} className="w-full min-h-24 p-2 rounded border border-border bg-surface-raised text-xs" required>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })} · {admin.status === "ACTIVE" ? "正常" : admin.status === "FROZEN" ? "冻结" : "待激活"}</option>)}</select></label>
-                <Button type="submit" size="sm" loading={loading} disabled={!operationCode.trim() || !triggerCondition.trim() || candidateUsernames.length < 1}>保存模板</Button>
-              </form>
-            </section>
-          ) : null}
-          {canTemplateRead ? <section className="section-panel"><div className="panel-heading"><div><h3>当前模板</h3><p>模板版本只用于新申请；在途申请展示自己的快照版本。</p></div></div>{reading.templates ? <p className="text-xs text-muted-foreground mt-4">正在读取…</p> : null}{!reading.templates && templates.length === 0 ? <p className="text-xs text-muted-foreground mt-4">暂无模板配置。</p> : null}<div className="table-wrap"><table className="data-table"><thead><tr><th>操作</th><th>触发条件</th><th>版本</th><th>候选审批人</th></tr></thead><tbody>{templates.map((template) => <tr key={template.id}><td className="font-mono">{template.operationCode}</td><td className="font-mono">{template.triggerCondition}</td><td>{template.version}</td><td>{template.candidates.map((candidate) => personLabel(candidate)).join("、")}</td></tr>)}</tbody></table></div></section> : null}
-        </>
-      ) : null}
-
-      {tab === "mine" && canCreate ? (
+    <TooltipProvider>
+      <div className="space-y-6">
         <section className="section-panel">
-          <div className="panel-heading"><div><h3>新建申请</h3><p>本包的可执行演示动作是本地非资金测试动作；载荷保存为不可变版本与哈希。</p></div></div>
-          <form onSubmit={createRequest} className="space-y-4" noValidate>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作</span><input value={operationCode} onChange={(event) => setOperationCode(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono" required /></label>
-              <label className="space-y-1 text-xs"><span className="text-muted-foreground">触发条件</span><input value={triggerCondition} onChange={(event) => setTriggerCondition(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono" required /></label>
-              <label className="space-y-1 text-xs"><span className="text-muted-foreground">测试动作结果</span><select value={outcome} onChange={(event) => setOutcome(event.target.value as "SUCCESS" | "FAILURE")} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="SUCCESS">成功</option><option value="FAILURE">失败（可追溯）</option></select></label>
+          <div className="panel-heading">
+            <div>
+              <h3>审批中心</h3>
+              <p>申请要改变什么、你能否处理、批准后还需做什么、结果去哪里确认，分别独立呈现。批准不等于执行，执行成功不等于业务生效或资金到账。</p>
             </div>
-            <label className="space-y-1 text-xs block"><span className="text-muted-foreground">业务摘要</span><textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={2} className="w-full p-2.5 rounded border border-border bg-surface-raised text-xs" placeholder="说明本次明确操作，不填写内部 ID" required /></label>
-            <Button type="submit" size="sm" loading={loading} disabled={summary.trim().length < 3}>提交审批申请</Button>
-          </form>
-        </section>
-      ) : null}
-
-      {tab === "mine" || tab === "pending" ? (
-        <section className="section-panel">
-          <div className="panel-heading"><div><h3>{tab === "mine" ? "我的申请" : "待我审批"}</h3><p>{tab === "mine" ? "仅显示当前账号发起的申请，按创建时间倒序分页读取。" : "仅显示当前账号仍具备权限、未冻结且不属于自审的候选申请，按创建时间倒序分页读取。"}</p></div></div>
-          {reading[listKey] ? <p className="text-xs text-muted-foreground mt-4">正在读取…</p> : null}
-          <div className="table-wrap"><table className="data-table"><thead><tr><th>业务摘要</th><th>发起人</th><th>状态</th><th>创建时间</th><th>到期时间</th></tr></thead><tbody>{listItems.map((item) => <tr key={item.requestId} onClick={() => void selectRequest(item.requestId, item.summary)}><td><strong>{item.summary}</strong><div className="text-[11px] text-muted-foreground font-mono">{item.operationCode} · v{item.payloadVersion}</div></td><td>{personLabel(item.requester)}</td><td className={statusTone(item.status)}>{statusLabel(item.status)}{item.statusReason ? <div className="text-[11px] text-muted-foreground">{item.statusReason}</div> : null}</td><td>{formatDate(item.createdAt)}</td><td>{formatDate(item.expiresAt)}</td></tr>)}</tbody></table></div>
-          {!reading[listKey] && listItems.length === 0 ? <p className="text-xs text-muted-foreground mt-4">暂无记录。</p> : null}
-          <PagePager page={pageMeta[listKey]} busy={Boolean(reading[listKey])} onPrev={() => navigate(listKey, "prev")} onNext={() => navigate(listKey, "next")} onFirst={() => navigate(listKey, "first")} />
-        </section>
-      ) : null}
-
-      {detail && (tab === "mine" || tab === "pending") ? (
-        <section className="section-panel">
-          <div className="panel-heading"><div><h3>申请详情与历史</h3><p>申请载荷、模板版本、候选名单和决定历史均来自服务端快照。</p></div><span className={"text-sm font-medium " + statusTone(detail.status)}>{statusLabel(detail.status)}</span></div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-            <div className="space-y-2"><p><span className="text-muted-foreground">业务摘要：</span>{detail.summary}</p><p><span className="text-muted-foreground">发起人：</span>{personLabel(detail.requester)}</p><p><span className="text-muted-foreground">操作：</span><span className="font-mono">{detail.operation.code}</span> / <span className="font-mono">{detail.operation.triggerCondition}</span></p><p><span className="text-muted-foreground">载荷版本 / 哈希：</span>{detail.operation.payloadVersion} / <span className="font-mono break-all">{detail.operation.payloadHash}</span></p><p><span className="text-muted-foreground">模板快照版本：</span>{detail.template.version}</p><p><span className="text-muted-foreground">有效期：</span>{formatDate(detail.expiresAt)}</p>{detail.statusReason ? <p className="text-amber-300">{detail.statusReason}</p> : null}</div>
-            <div className="rounded border border-border bg-surface-soft p-3"><p className="text-muted-foreground mb-2">不可变测试载荷（不含资金字段）</p><pre className="font-mono text-[11px] whitespace-pre-wrap">{JSON.stringify(detail.operation.payload ?? {}, null, 2)}</pre></div>
+            <Icons.ShieldCheck size={20} className="text-muted-foreground" />
           </div>
-          {detail.supersedesRequestId || detail.supersededByRequestId ? (
-            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-              {detail.supersedesRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersedesRequestId!, "被替代的审批申请")}>查看被替代的原申请</Button> : null}
-              {detail.supersededByRequestId ? <span className="text-amber-300">本申请已被另一申请替代，原申请不再推进。</span> : null}
-              {detail.supersededByRequestId ? <Button type="button" size="sm" variant="secondary" onClick={() => selectRequest(detail.supersededByRequestId!, "替代本申请的审批申请")}>查看替代申请</Button> : null}
-            </div>
-          ) : null}
-          <div className="mt-5"><h4 className="text-xs font-semibold mb-2">候选审批人</h4><div className="flex flex-wrap gap-2">{detail.candidates.map((candidate) => <span key={candidate.username + "-" + (candidate.source ?? "template")} className={"status-badge " + (candidate.eligible ? "success" : "warning")}>{personLabel(candidate)} · {candidate.eligible ? "当前可审批" : candidate.status === "FROZEN" ? "已冻结" : "当前无资格"}{candidate.source === "APPENDED" ? " · 追加" : " · 模板"}</span>)}</div></div>
-          {detail.decision ? <p className="text-xs mt-4">决定：{detail.decision.decision === "APPROVED" ? "同意" : "拒绝"}，由 {personLabel(detail.decision.approver)} 于 {formatDate(detail.decision.createdAt)} 记录。{detail.decision.reason ? "原因：" + detail.decision.reason : ""}</p> : null}
-          {detail.execution ? <p className={"text-xs mt-2 " + (detail.execution.status === "SUCCEEDED" ? "text-emerald-400" : "text-rose-400")}>执行：{detail.execution.status === "SUCCEEDED" ? "成功" : "失败"}，结果码 {detail.execution.resultCode}；{detail.execution.resultDetail ?? "无附加说明"}</p> : null}
-          {actionRows}
-          {canAddApprover && detailFresh && detail.status === "PENDING" ? <form onSubmit={append} className="flex flex-wrap items-end gap-2 mt-5 pt-4 border-t border-border"><label className="space-y-1 text-xs"><span className="text-muted-foreground block">追加当前合格审批人</span><select value={appendUsername} onChange={(event) => setAppendUsername(event.target.value)} className="h-8 min-w-56 px-2 rounded border border-border bg-surface-raised text-xs" required><option value="">选择账号</option>{admins.map((admin) => <option key={admin.id} value={admin.username}>{personLabel({ name: admin.name, username: admin.username })}</option>)}</select></label><input value={reason} onChange={(event) => setReason(event.target.value)} className="h-8 min-w-56 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="追加原因" required /><Button type="submit" size="sm" variant="secondary" loading={loading} disabled={loading || recovery !== null || !appendUsername || reason.trim().length < 3}>追加审批人</Button></form> : null}
-          <div className="mt-5"><h4 className="text-xs font-semibold mb-2">状态历史</h4><div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>动作</th><th>账号</th><th>结果</th><th>说明</th></tr></thead><tbody>{detail.history.map((event) => <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td className="font-mono">{event.action}</td><td>{personLabel(event.actor)}</td><td>{event.outcome}</td><td>{event.reason ?? prettyDetails(event.details)}</td></tr>)}</tbody></table></div></div>
+          <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="审批工作区">
+            {availableTabs.map((item) => (
+              <Button
+                key={item} type="button" size="sm" role="tab" aria-selected={tab === item}
+                variant={tab === item ? "primary" : "secondary"}
+                onClick={() => { setTab(item); onTabChange?.(item); }}
+              >
+                {item === "pending" ? "待我处理" : item === "mine" ? "我的申请" : item === "operations" ? "审批业务" : item === "templates" ? "模板与规则" : "审计记录"}
+              </Button>
+            ))}
+          </div>
+          <StatusMessage error={error} success={message} className="mt-4" />
+          {recoveryPanel}
         </section>
-      ) : null}
 
-      {tab === "audit" && canAudit ? (
-        <section className="section-panel">
-          <div className="panel-heading"><div><h3>授权审批审计</h3><p>按当前读取权限和对象范围游标分页读取；敏感字段已在 API 层裁剪，只有追加记录，没有改删入口。</p></div></div>
-          <form onSubmit={submitAuditFilter} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
-            <label className="space-y-1 text-xs"><span className="text-muted-foreground">动作</span><select value={auditDraft.action} onChange={(event) => setAuditDraft({ ...auditDraft, action: event.target.value })} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{approvalAuditActions.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
-            <label className="space-y-1 text-xs"><span className="text-muted-foreground">对象类型</span><select value={auditDraft.objectType} onChange={(event) => setAuditDraft({ ...auditDraft, objectType: event.target.value })} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{Object.entries(approvalAuditObjectTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作者账号</span><input value={auditDraft.actorUsername} onChange={(event) => setAuditDraft({ ...auditDraft, actorUsername: event.target.value })} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="如 ZZ00001" /></label>
-            <label className="space-y-1 text-xs"><span className="text-muted-foreground">申请或请求编号（可选）</span><input value={auditDraft.requestId} onChange={(event) => setAuditDraft({ ...auditDraft, requestId: event.target.value })} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" /></label>
-            <Button type="submit" size="sm" loading={Boolean(reading.audit)}>查询审计</Button>
-          </form>
-          <p className="text-[11px] text-muted-foreground mt-3">查询范围：{auditScopeLabel(auditScope)}。审计按时间倒序分页，暂无时间区间筛选；精确追查请用动作、操作者或申请编号。</p>
-          {reading.audit ? <p className="text-xs text-muted-foreground mt-4">正在读取…</p> : null}
-          <div className="table-wrap"><table className="data-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th className="whitespace-nowrap">结果</th><th className="w-24">关联</th><th>业务说明</th></tr></thead><tbody>{audit.map((event) => {
-            const relatedRequestId = relatedRequestIdOf(event);
-            return <tr key={event.eventId}><td>{formatDate(event.occurredAt)}</td><td>{personLabel(event.actor)}</td><td>{approvalAuditActionLabel(event.action)}<span className="block font-mono text-[11px] text-muted-foreground">{event.action}</span></td><td className="font-mono text-[11px]">{approvalAuditObjectTypes[event.objectType] ?? event.objectType}{event.objectId ? <span className="block text-muted-foreground break-all" title={event.objectId}>{event.objectId}</span> : null}</td><td><span className={"whitespace-nowrap " + (event.outcome === "SUCCESS" ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>{approvalAuditOutcomeLabel(event.outcome)}</span></td><td className="whitespace-nowrap">{relatedRequestId ? <Button type="button" size="sm" variant="secondary" className="whitespace-nowrap" onClick={() => selectRequest(relatedRequestId, "审批详情")}>查看申请</Button> : <span className="text-muted-foreground text-[11px]">—</span>}</td><td>{auditNarrative(event)}<details className="text-[11px] text-muted-foreground"><summary className="cursor-pointer select-none">技术详情</summary><pre className="whitespace-pre-wrap break-words mt-1">{prettyDetails(event.details)}</pre></details></td></tr>;
-          })}</tbody></table></div>
-          {!reading.audit && !error && audit.length === 0 ? <p className="text-xs text-muted-foreground mt-4">暂无符合条件的授权审批审计。</p> : null}
-          <PagePager page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
-        </section>
-      ) : null}
-      {allRequests.length > 0 && detail && tab === "audit" ? <p className="text-xs text-muted-foreground">已有申请可在“我的申请”或“待我审批”中打开详情。</p> : null}
-      {confirmDialog}
-    </div>
+        {tab === "pending" || tab === "mine" ? (
+          <section className="section-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>{tab === "pending" ? "待我处理" : "我的申请"}</h3>
+                <p>{tab === "pending"
+                  ? "只呈现当前仍具备资格、未冻结且不属于自审的候选申请；已批准、已驳回与已过期记录在「我的申请」与审计记录中查看。"
+                  : "仅显示当前账号发起的申请，按创建时间倒序分页读取。"}</p>
+              </div>
+            </div>
+            <div className="mt-4">
+              <RequestList
+                items={listItems}
+                busy={Boolean(reading[listKey])}
+                emptyNote={tab === "pending" ? "当前没有等你处理的申请。" : "你还没有发起过审批申请。"}
+                onOpen={selectRequest}
+              />
+            </div>
+            <PagePager page={pageMeta[listKey]} busy={Boolean(reading[listKey])} onPrev={() => navigate(listKey, "prev")} onNext={() => navigate(listKey, "next")} onFirst={() => navigate(listKey, "first")} />
+          </section>
+        ) : null}
+
+        {tab === "pending" || tab === "mine" ? (
+          detail && detailFresh ? (
+            <section className="section-panel">
+              <RequestDetailPanel
+                detail={detail}
+                busy={loading}
+                blocked={recovery !== null && recovery.kind !== "resolved"}
+                onOpenRequest={selectRequest}
+                onOpenPath={onOpenPath}
+                onDecide={decide}
+                onExecute={execute}
+                onAppend={append}
+              />
+            </section>
+          ) : null
+        ) : null}
+
+        {tab === "operations" ? (
+          <section className="section-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>审批业务与发起入口</h3>
+                <p>哪些业务走审批、由谁在哪里发起、你当前能不能发起。审批页不代为提交正式业务申请。</p>
+              </div>
+              <ClipboardCheck size={20} className="text-muted-foreground" aria-hidden />
+            </div>
+            {reading.operations ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+            {operations === undefined ? (
+              <div className="mt-4">
+                <NotApplicable reason={operationsNote ?? "业务登记读取不可用。"} />
+              </div>
+            ) : (
+              <>
+                <ul className="mt-4 space-y-3">
+                  {operations.map((operation) => {
+                    const entry = INITIATION_ENTRY[operation.operationCode];
+                    return (
+                      <li key={operation.operationCode} className="rounded-md border border-border/60 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium text-foreground">{operation.title}</span>
+                          {operation.testOnly ? <Badge variant="unknown">仅测试</Badge> : null}
+                          <Badge variant="outline">{executionModeLabel(operation.executionMode)}</Badge>
+                          {operation.initiation.allowed
+                            ? <InlineStatus tone="success">当前可发起</InlineStatus>
+                            : <InlineStatus tone="neutral">{reasonLabel(operation.initiation.reasonCode)}</InlineStatus>}
+                        </div>
+                        <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                          发起入口：{entry?.label ?? "尚未接入发起入口，本页不代为提交。"}
+                          {entry?.path && onOpenPath ? (
+                            <Button type="button" size="sm" variant="ghost" className="ml-1.5" onClick={() => onOpenPath(entry.path!, operation.title)}>前往</Button>
+                          ) : entry?.path ? (
+                            <span className="ml-1.5">（工作区未提供跨对象导航，请从左侧导航进入）</span>
+                          ) : null}
+                        </p>
+                        {operation.triggers.length === 0 ? (
+                          <p className="mt-1.5 text-xs text-muted-foreground">尚未配置审批模板；该业务当前无法发起审批。</p>
+                        ) : (
+                          <ul className="mt-2 space-y-1">
+                            {operation.triggers.map((trigger) => (
+                              <li key={trigger.triggerCondition} className="text-xs text-muted-foreground">
+                                已配置 {trigger.templateVersion} 版模板，候选 {trigger.candidateTotal} 人，其中 {trigger.candidateEligible} 人具备通用资格
+                                {trigger.blockingReasonCode ? <span className="ml-1.5 text-foreground">（{reasonLabel(trigger.blockingReasonCode)}）</span> : null}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <details className="mt-2 text-[11px] text-muted-foreground">
+                          <summary className="cursor-pointer select-none">技术追溯</summary>
+                          <p className="mt-1 font-mono break-all">{operation.operationCode}</p>
+                          {operation.triggers.map((trigger) => (
+                            <p key={trigger.triggerCondition} className="font-mono break-all">{trigger.triggerCondition} · v{trigger.templateVersion}</p>
+                          ))}
+                        </details>
+                      </li>
+                    );
+                  })}
+                </ul>
+                {operationsNote ? <p className="mt-4 text-xs leading-relaxed text-muted-foreground">{operationsNote}</p> : null}
+                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                  「具备通用资格」只表示账号状态、双因素与通用审批权限；能不能处理某一单还取决于业务权限与游戏范围。
+                </p>
+                <Alert variant="warning" className="mt-4">
+                  <AlertTitle className="text-sm">待接：供给规则发布的审批绑定</AlertTitle>
+                  <AlertDescription className="text-xs leading-relaxed">
+                    供给规则发布尚未接入审批流程，接入前不能在此发起；接入范围与排期由管理员协调。本页不提供临时入口或占位按钮绕过。
+                  </AlertDescription>
+                </Alert>
+              </>
+            )}
+          </section>
+        ) : null}
+
+        {tab === "templates" ? (
+          <>
+            {canTemplateConfigure ? (
+              <section className="section-panel">
+                <div className="panel-heading">
+                  <div>
+                    <h3>配置审批模板</h3>
+                    <p>候选组内任一合格人的首个有效决定生效，不是逐级必签。模板更新只影响之后新建的申请，在途申请保留原版本与名单快照。</p>
+                  </div>
+                </div>
+                <form onSubmit={configure} className="mt-4 space-y-4" noValidate>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <label className="block min-w-0">
+                      <FieldLabel>业务操作</FieldLabel>
+                      {operations === undefined ? (
+                        <NotApplicable reason={operationsNote ?? "业务登记读取不可用，无法列出可配置的操作；不在此接受手填操作标识，以免为未登记业务建模板。"} />
+                      ) : (
+                        <Select
+                          value={operationCode}
+                          items={operations.map((operation) => ({ value: operation.operationCode, label: operation.title }))}
+                          onValueChange={(value) => { setOperationCode(value ?? ""); setTriggerCondition(""); setNewTrigger(""); }}
+                        >
+                          <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue placeholder="选择业务操作" /></SelectTrigger>
+                          <SelectContent>
+                            {operations.map((operation) => (
+                              <SelectItem key={operation.operationCode} value={operation.operationCode}>
+                                {operation.title}{operation.testOnly ? "（仅测试）" : ""}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </label>
+                    <label className="block min-w-0">
+                      <FieldLabel>触发条件</FieldLabel>
+                      <Select
+                        value={triggerCondition}
+                        items={triggerItems}
+                        onValueChange={(value) => { setTriggerCondition(value ?? ""); setNewTrigger(""); }}
+                        disabled={!operationCode}
+                      >
+                        <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue placeholder={operationCode ? "选择已有或新建触发条件" : "先选择业务操作"} /></SelectTrigger>
+                        <SelectContent>
+                          {triggerItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </label>
+                  </div>
+                  {operationCode && triggerCondition === "" ? (
+                    <label className="block max-w-md">
+                      <FieldLabel>新触发条件标识（稳定小写标识，不接受金额阈值或表达式）</FieldLabel>
+                      <Input value={newTrigger} onChange={(event) => setNewTrigger(event.target.value)} className="font-mono" placeholder="如 membership.entitlement.grant.requested" />
+                    </label>
+                  ) : null}
+                  <div>
+                    <FieldLabel>候选审批人（至少一名；只列出当前具备通用审批资格的人）</FieldLabel>
+                    {reading.candidates ? <p className="text-xs text-muted-foreground">正在读取可选审批人…</p> : null}
+                    {candidateOptions === null && !reading.candidates ? (
+                      <NotApplicable reason={candidateNote
+                        ? `${candidateNote} 候选人读取使用审批专用接口，不需要全管理员目录权限；读不到时此处不列出任何人。`
+                        : "读不到可选审批人。候选人读取使用审批专用接口，不需要全管理员目录权限；接口未装配或授权不足时此处不列出任何人。"} />
+                    ) : null}
+                    {candidateOptions ? (
+                      eligibleCandidates.length === 0 ? (
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          当前没有具备通用审批资格的人可选。
+                          {excludedEntries.length > 0 ? `另有 ${excludedEntries.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}，按合同不列出身份。` : ""}
+                        </p>
+                      ) : (
+                        <>
+                          <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                            {eligibleCandidates.map((candidate) => (
+                              <li key={candidate.username}>
+                                <label className="flex items-start gap-2 text-xs">
+                                  <Checkbox
+                                    checked={candidateUsernames.includes(candidate.username)}
+                                    onCheckedChange={(checked) => setCandidateUsernames((current) => checked === true
+                                      ? [...current, candidate.username]
+                                      : current.filter((value) => value !== candidate.username))}
+                                  />
+                                  <span className="min-w-0 break-words">
+                                    {personLabel(candidate)}
+                                    {candidate.isBoss ? <span className="ml-1.5 text-muted-foreground">系统旁路</span> : null}
+                                  </span>
+                                </label>
+                              </li>
+                            ))}
+                          </ul>
+                          {excludedEntries.length > 0 ? (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              另有 {excludedEntries.map(([code, count]) => `${count} 人${reasonLabel(code)}`).join("、")}，按合同不列出身份。通用资格不等于能审某一单。
+                            </p>
+                          ) : null}
+                        </>
+                      )
+                    ) : null}
+                  </div>
+                  <Button
+                    type="submit" size="sm" loading={loading}
+                    disabled={loading || recovery !== null || !operationCode || !effectiveTrigger || candidateUsernames.length < 1}
+                  >
+                    保存模板
+                  </Button>
+                </form>
+              </section>
+            ) : null}
+            {canTemplateRead ? (
+              <section className="section-panel">
+                <div className="panel-heading">
+                  <div>
+                    <h3>当前模板</h3>
+                    <p>模板版本只用于新申请；在途申请展示自己的快照版本。</p>
+                  </div>
+                </div>
+                {reading.templates ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+                {!reading.templates && templates.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无模板配置。</p> : null}
+                <div className="table-wrap">
+                  <table className="data-table min-w-[760px]">
+                    <caption className="sr-only">审批模板列表</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">业务操作</th>
+                        <th scope="col">触发条件</th>
+                        <th scope="col">版本</th>
+                        <th scope="col">更新时间</th>
+                        <th scope="col">候选审批人</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {templates.map((template) => {
+                        const title = operations?.find((operation) => operation.operationCode === template.operationCode)?.title;
+                        return (
+                          <tr key={template.id}>
+                            <td>{title ?? <InlineStatus tone="unknown">未登记业务</InlineStatus>}<span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{template.operationCode}</span></td>
+                            <td className="font-mono text-[11px] break-all">{template.triggerCondition}</td>
+                            <td className="whitespace-nowrap">v{template.version}</td>
+                            <td className="whitespace-nowrap">{formatDate(template.updatedAt)}</td>
+                            <td>
+                              <ul className="flex flex-wrap gap-1.5">
+                                {template.candidates.map((candidate) => (
+                                  <li key={`${candidate.username}-${candidate.source ?? "TEMPLATE"}`}>
+                                    <Badge variant={candidate.eligible === true ? "outline" : "unknown"}>
+                                      {personLabel(candidate)}
+                                      {candidate.eligible === true ? null : <span className="text-muted-foreground">· {candidate.status === "FROZEN" ? "已冻结" : "当前无通用资格"}</span>}
+                                    </Badge>
+                                  </li>
+                                ))}
+                              </ul>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  此处「当前无通用资格」只表示账号状态、双因素或通用审批权限不满足；某一单是否可审还取决于业务权限与游戏范围。
+                </p>
+              </section>
+            ) : null}
+          </>
+        ) : null}
+
+        {tab === "audit" && canAudit ? (
+          <section className="section-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>授权审批审计</h3>
+                <p>审计是追加记录，不是全量申请列表：只覆盖已发生的操作，不能用来枚举所有申请；没有改删入口。</p>
+              </div>
+            </div>
+            <form onSubmit={submitAuditFilter} className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4" noValidate>
+              <label className="block min-w-0">
+                <FieldLabel>动作</FieldLabel>
+                <Select value={auditDraft.action} items={auditActionItems} onValueChange={(value) => setAuditDraft({ ...auditDraft, action: value ?? "" })}>
+                  <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {auditActionItems.map((item) => <SelectItem key={item.value || ALL} value={item.value}>{item.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="block min-w-0">
+                <FieldLabel>对象类型</FieldLabel>
+                <Select value={auditDraft.objectType} items={auditObjectItems} onValueChange={(value) => setAuditDraft({ ...auditDraft, objectType: value ?? "" })}>
+                  <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {auditObjectItems.map((item) => <SelectItem key={item.value || ALL} value={item.value}>{item.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="block min-w-0">
+                <FieldLabel>操作者账号</FieldLabel>
+                <Input id="approval-audit-actor" value={auditDraft.actorUsername} onChange={(event) => setAuditDraft({ ...auditDraft, actorUsername: event.target.value })} className="h-9" placeholder="如 ZZ00001" />
+              </label>
+              <label className="block min-w-0">
+                <FieldLabel>申请或请求编号（可选）</FieldLabel>
+                <Input id="approval-audit-request-id" value={auditDraft.requestId} onChange={(event) => setAuditDraft({ ...auditDraft, requestId: event.target.value })} className="h-9 font-mono" />
+              </label>
+              <div className="flex items-end gap-2 md:col-span-2 xl:col-span-4">
+                <Button type="submit" size="sm" loading={Boolean(reading.audit)}>查询审计</Button>
+                <Button
+                  type="button" size="sm" variant="secondary"
+                  disabled={auditFilterKey(auditDraft) === auditFilterKey(emptyAuditFilter)}
+                  onClick={() => applyAuditFilter(emptyAuditFilter, true)}
+                >
+                  重置条件
+                </Button>
+              </div>
+            </form>
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              查询范围：{auditScopeLabel(auditScope)}。审计按时间倒序分页，服务端暂无时间区间筛选；精确追查请用动作、操作者或申请编号。
+            </p>
+            {reading.audit ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+            <div className="table-wrap">
+              <table className="data-table min-w-[900px]">
+                <caption className="sr-only">审批与授权审计事件</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">时间</th>
+                    <th scope="col">操作者</th>
+                    <th scope="col">动作</th>
+                    <th scope="col">对象</th>
+                    <th scope="col" className="whitespace-nowrap">结果</th>
+                    <th scope="col" className="w-24">关联</th>
+                    <th scope="col">业务说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {audit.map((event) => {
+                    const related = relatedRequestIdOf(event);
+                    const outcome = auditOutcomeView(event.outcome);
+                    return (
+                      <tr key={event.eventId}>
+                        <td className="whitespace-nowrap">{formatDate(event.occurredAt)}</td>
+                        <td className="whitespace-nowrap">{personLabel(event.actor)}</td>
+                        <td>{auditActionLabel(event.action)}<span className="block font-mono text-[11px] text-muted-foreground">{event.action}</span></td>
+                        <td>{auditObjectLabel(event.objectType)}{event.objectId ? <span className="block font-mono text-[11px] break-all text-muted-foreground">{event.objectId}</span> : null}</td>
+                        <td><InlineStatus tone={outcome.tone}>{outcome.label}</InlineStatus></td>
+                        <td className="whitespace-nowrap">
+                          {related
+                            ? <Button type="button" size="sm" variant="secondary" className="whitespace-nowrap" onClick={() => selectRequest(related, "审批详情")}>查看申请</Button>
+                            : <span className="text-[11px] text-muted-foreground">—</span>}
+                        </td>
+                        <td className="min-w-0">
+                          <span className="block break-words">{auditNarrative(event)}</span>
+                          <details className="text-[11px] text-muted-foreground">
+                            <summary className="cursor-pointer select-none">技术详情</summary>
+                            <pre className="mt-1 whitespace-pre-wrap break-words">{Object.entries(event.details ?? {}).map(([key, value]) => `${key}: ${String(value)}`).join("；") || "无附加信息"}</pre>
+                          </details>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {!reading.audit && !error && audit.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无符合条件的授权审批审计。</p> : null}
+            <PagePager page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
+          </section>
+        ) : null}
+
+        <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) setConfirm(null); }}>
+          <DialogContent>
+            <DialogTitle>确认保存审批模板</DialogTitle>
+            <DialogDescription>模板只影响之后新建的申请；在途申请保留原版本与候选名单快照。</DialogDescription>
+            <div className="space-y-3 text-xs">
+              <FactGrid>
+                <Fact label="业务操作" value={selectedOperation?.title ?? operationCode} />
+                <Fact label="操作标识" value={operationCode} mono />
+                <Fact label="触发条件" value={effectiveTrigger} mono />
+                <Fact label="候选审批人" value={`${candidateUsernames.length} 人（${candidateUsernames.join("、") || "无"}）`} />
+              </FactGrid>
+              <p className="leading-relaxed text-muted-foreground">
+                候选组内任一合格人的首个有效批准或驳回即生效；申请人不能审批自己发起的申请。
+              </p>
+            </div>
+            <DialogFooter>
+              <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
+              <Button type="button" size="sm" onClick={() => { setConfirm(null); saveTemplate(); }}>确认保存</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
+    </TooltipProvider>
   );
 }

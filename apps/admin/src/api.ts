@@ -5,6 +5,7 @@ export const IDLE_KEY = "zzsh-admin-idle-minutes";
 export const ADMIN_AUTH_FAILURE_EVENT = "zzsh-admin-auth-failure";
 
 export type Theme = "dark" | "light";
+export type ThemeMode = "light" | "dark" | "system";
 export type View = "login" | "challenge" | "onboarding" | "recovery" | "app";
 export type Signal = "locked" | "unlocked" | "logout" | "activity";
 export type SignalEvent = { type: Signal; sessionId?: string; at: number };
@@ -294,6 +295,7 @@ export type AdminCatalogResponse = {
   categories: CatalogSkinCategory[];
   skins: CatalogSkin[];
   owners: CatalogSkinOwner[];
+  firearmOwners?: Array<{ id: string; code: string; name: string; enabled: boolean }>;
   entitlements: CatalogEntitlement[];
 };
 
@@ -372,6 +374,53 @@ export type PriceLineRecord = {
   ownerUnitAmount: string | null;
 };
 
+// 服务端 funding-policy.ts 的严格 schema：根 11 键必填、未知键拒绝、金额一律 cent 十进制字符串。
+export type FundingPolicy = {
+  schema: "funding-policy-v1";
+  policyVersion: string;
+  recommendation: {
+    schema: string;
+    algorithm: string;
+    version: string;
+    currency: string;
+    unit: string;
+    inputSpec: Record<string, unknown>;
+    parameters: {
+      safeBoxWeightsByCode: Record<string, string>;
+      vitalityAtLeast7Cents: string;
+      bearAtLeast7Cents: string;
+      diveAtLeast3Cents: string;
+      skinGroupById: Record<string, "LEGACY_GOLD" | "LEGACY_AGENT" | "LEGACY_KNIFE" | "LEGACY_WEAPON" | "NONE">;
+      skinWeights: Record<string, { firstCents: string; subsequentCents: string }>;
+      rounding: Record<string, string>;
+      upperLimitCents: string;
+    };
+  };
+  ownerDepositRules: {
+    schema: string;
+    currency: string;
+    unit: string;
+    normal: { minCents: string; zeroAllowed: boolean };
+    fullPayoutSelected: { minCents: string; zeroAllowed: boolean };
+    capCents: string;
+  };
+  guaranteeRequirement: {
+    schema: string;
+    version: string;
+    scope: string;
+    currency: string;
+    unit: string;
+    mode: "FIXED_CENTS" | "NOT_REQUIRED";
+    requiredCents: string;
+  };
+  proofValidity: { schema: string; satisfiedMode: string; satisfiedDays: string };
+  vipWaiver: boolean;
+  svipWaiver: boolean;
+  fullPayoutPolicyRef: string;
+  fullPayoutPolicyVersion: string;
+  disclosureVersion: string;
+};
+
 export type PriceVersionRecord = {
   id: string;
   gameId: string;
@@ -381,6 +430,7 @@ export type PriceVersionRecord = {
   haffRule: Record<string, unknown> | null;
   roundingPolicy: string;
   compensationPolicyRef: string | null;
+  fundingPolicy?: FundingPolicy | null;
   revision: string;
   createdAt: string;
   sealedAt: string | null;
@@ -440,6 +490,13 @@ export type MediaAssetReview = {
   reviewState: "PENDING" | "APPROVED" | "REJECTED" | "QUARANTINED";
   reviewReason: string | null;
   createdAt: string;
+  /** API B：技术事实来自服务端队列投影，不由图片能否加载推导。 */
+  technicalState?: "UNKNOWN" | "READY" | "FAILED";
+  technicalCheckedAt?: string | null;
+  /** 素材修订，供后续对象版本保护合同接入。 */
+  revision?: string;
+  /** 受权绑定计数：区分当前有效引用与历史版本引用；缺投影时不填 0。 */
+  binding?: { state: "KNOWN" | "UNAVAILABLE"; current: Record<string, number>; historical: Record<string, number> };
 };
 
 export type MediaReviewPage = { items: MediaAssetReview[]; nextCursor: string | null; limit: number };
@@ -617,7 +674,7 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
       method: verb,
       credentials: "include",
       headers: verb === "GET"
-        ? undefined
+        ? (Object.keys(extraHeaders).length ? extraHeaders : undefined)
         : { "content-type": "application/json", ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}), ...extraHeaders },
       body: verb === "GET" ? undefined : JSON.stringify(body ?? {}),
       signal,

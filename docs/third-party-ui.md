@@ -21,3 +21,5 @@ OTP 动效组件位于 components/smoothui/，基于 input-otp 与 motion；准�
 用户端与管理端客服工作台的消息滚动行为使用 shadcn 官方 [@shadcn/react](https://github.com/shadcn-ui/ui/tree/main/packages/react) 0.3.1（MIT）的 `message-scroller` headless primitive；消息气泡、商品上下文和品牌样式由本仓库维护。未引入 AI Elements、assistant-ui 等绑定 AI 运行时的聊天套件。
 
 真实 NIM Web Core 使用 `nim-web-sdk-ng` 10.9.30（npm 元数据声明 ISC；包内未发现独立 LICENSE 文件），适配层位于 `apps/web/src/lib/nim-web-client.ts`：仅动态加载 V2 SDK，固定关闭云端会话并使用本地会话服务，登录状态由应用生命周期隔离层管理。适配层已接入动态 Token、登录/登出、断线状态、销毁闭环及文字消息收发与历史；咨询对端与消息作用域由服务端咨询接口下发，客户端不能自行指定。默认 `YUNXIN_ENABLED=false` 时不装配 provider、不签发 IM 凭据、不发起外部调用。远端结果未知时按失败关闭处理：消息作用域进入人工核验，不自动重建、不盲目重试，界面不冒充已结束或已撤权；真实云信通信与远端撤权仍未验收。
+
+管理端命令面板位于 `apps/admin/src/components/ui/command.tsx` 与 `workspace/page-search.tsx`，结构和视觉参考 ReUI 的 [Command with groups](https://reui.io/components/command/c-command-3) 与 [Recent and favorites](https://reui.io/components/command/c-command-8) 免费组件示例；未引入其整站或 Pro 模板。实际交互使用 `cmdk` 1.1.1（包内 MIT 许可，准确版本见锁文件）和本仓 Base UI Dialog；`cmdk` 包含 Radix 传递依赖，但此处不使用 `Command.Dialog` 挂载另一套弹窗。权限、工作区激活、会话内历史与搜索排序为本项目逻辑，未引入收藏或服务端全文搜索。

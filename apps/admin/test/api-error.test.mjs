@@ -24,3 +24,19 @@ test('request adapter passes business context, header reference and the auth fai
   await assert.rejects(adminRequest('/supply/reviews'),e=>{assert.match(friendlyError(e),/会话已失效.*header-read-401/);return true;});
   assert.equal(events.length,1);
 });
+
+test('result recovery GET forwards the original key without generating a new key or body', async t => {
+  const calls=[];
+  t.mock.method(globalThis,'fetch',async (url,init)=>{ calls.push({url,init}); return Response.json({receipt:'UNRESOLVED'}); });
+  const controller=new AbortController();
+  await adminRequest('/supply/operation-result?operation=supply.release.activate',undefined,'GET',{'idempotency-key':'original-command-key'},controller.signal);
+  assert.equal(calls[0].init.method,'GET');
+  assert.deepEqual(calls[0].init.headers,{'idempotency-key':'original-command-key'});
+  assert.equal(calls[0].init.body,undefined);
+  assert.equal(calls[0].init.credentials,'include');
+  assert.equal(calls[0].init.signal,controller.signal);
+  await adminRequest('/supply/games');
+  assert.equal(calls[1].init.headers,undefined);
+  await adminRequest('/supply/games',{},'POST',{'idempotency-key':'explicit-write-key'});
+  assert.equal(calls[2].init.headers['idempotency-key'],'explicit-write-key');
+});

@@ -44,12 +44,18 @@ class ScopeCollectionClient {
   mode: "ALL_GAMES" | "SELECTED_GAMES" = "SELECTED_GAMES";
   gameIds: string[] = [];
   listRows: unknown[] = [];
+  bindingRows: unknown[] = [];
   listSql = "";
+  bindingSql = "";
   async query(sql: string): Promise<{ rows: unknown[]; rowCount: number }> {
     if (sql.includes('"zzsh_auth_admin"."session"')) return { rows: [{ locked: false, twoFactorEnabled: true }], rowCount: 1 };
     if (sql.startsWith('SELECT "status", "is_boss"')) return { rows: [{ status: "ACTIVE", isBoss: this.isBoss, passwordChangeRequired: false }], rowCount: 1 };
     if (sql.includes("WITH role_permissions")) return { rows: [{ permissionCode: "im.support.read" }], rowCount: 1 };
     if (sql.startsWith('SELECT s."game_scope_mode"')) return { rows: [{ mode: this.mode, gameIds: this.gameIds }], rowCount: 1 };
+    if (sql.startsWith('SELECT o."assetId", o."objectType", o."current"')) {
+      this.bindingSql = sql;
+      return { rows: this.bindingRows, rowCount: this.bindingRows.length };
+    }
     if (sql.includes("FROM zzsh_order.im_order_member mm") || sql.includes('FROM "zzsh_supply"."media_asset" a')) {
       this.listSql = sql;
       return { rows: this.listRows, rowCount: this.listRows.length };
@@ -174,6 +180,40 @@ test("a scoped collection without a matching game returns an empty page, not an 
   const media = await listAdminMediaReviews(scoped as unknown as PoolClient, { adminId: "admin-fixture", isBoss: false, state: "PENDING", ownershipKind: null, cursor: null, limit: 20 });
   assert.deepEqual(media.items, []);
   assert.ok(scoped.listSql.includes("admin_supply_scope"), "non-Boss collection SQL keeps the shared scope predicate");
+  assert.equal(scoped.bindingSql, "", "an empty page reads no bindings at all");
+});
+
+test("media queue projects technical facts and scope-filtered binding counts split by currency", async () => {
+  const scoped = new ScopeCollectionClient();
+  scoped.gameIds = ["delta"];
+  scoped.listRows = [
+    { id: "row-1", technicalState: "READY", technicalCheckedAt: null, revision: "4", createdAt: "2026-10-03T00:00:00.000Z" },
+    { id: "row-2", technicalState: "UNKNOWN", technicalCheckedAt: null, revision: "1", createdAt: "2026-10-02T00:00:00.000Z" },
+  ];
+  scoped.bindingRows = [
+    { assetId: "row-1", objectType: "listing_version", current: true },
+    { assetId: "row-1", objectType: "listing_version", current: false },
+    { assetId: "row-1", objectType: "listing_version", current: false },
+    { assetId: "row-1", objectType: "firearm", current: true },
+  ];
+  const media = await listAdminMediaReviews(scoped as unknown as PoolClient, { adminId: "admin-fixture", isBoss: false, state: "PENDING", ownershipKind: null, cursor: null, limit: 20 });
+  assert.ok(scoped.listSql.includes('"technical_state" AS "technicalState"'), "technical state comes from the stored column, not the browser");
+  assert.ok(scoped.listSql.includes('"technical_checked_at" AS "technicalCheckedAt"'));
+  assert.ok(scoped.listSql.includes('"revision"::text AS "revision"'));
+  assert.equal(scoped.bindingSql.includes("admin_supply_scope"), true, "binding counts reuse the same game scope predicate");
+  const first = media.items[0] as Record<string, unknown>;
+  assert.deepEqual((first.binding as { current: Record<string, number> }).current, { listing_version: 1, firearm: 1 });
+  assert.deepEqual((first.binding as { historical: Record<string, number> }).historical, { listing_version: 2 }, "current and historical version references stay distinct");
+  const second = media.items[1] as Record<string, unknown>;
+  assert.deepEqual(second.binding, { state: "KNOWN", current: {}, historical: {} }, "a readable page with no binding row is an explicit empty count, not a missing field");
+  assert.equal(second.technicalState, "UNKNOWN");
+  const boss = new ScopeCollectionClient();
+  boss.isBoss = true;
+  boss.listRows = [{ id: "row-1", technicalState: "UNKNOWN", technicalCheckedAt: null, revision: "1", createdAt: "2026-10-03T00:00:00.000Z" }];
+  boss.bindingRows = [{ assetId: "row-1", objectType: "game", current: true }];
+  const bossPage = await listAdminMediaReviews(boss as unknown as PoolClient, { adminId: "admin-fixture", isBoss: true, state: "PENDING", ownershipKind: null, cursor: null, limit: 20 });
+  assert.equal(boss.bindingSql.includes("admin_supply_scope"), false, "Boss binding counts carry no extra scope predicate");
+  assert.deepEqual((bossPage.items[0] as Record<string, any>).binding.current, { game: 1 });
 });
 
 test("Boss bypasses the scope predicate on collection entries", async () => {

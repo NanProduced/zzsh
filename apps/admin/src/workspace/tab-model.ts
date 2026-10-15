@@ -9,6 +9,7 @@ export type WorkspaceRouteKind =
   | "support"
   | "membership-growth"
   | "account"
+  | "settings"
   | "admins"
   | "admin-object"
   | "roles"
@@ -46,6 +47,29 @@ export type WorkspaceTab = {
   objectId?: string;
 };
 
+const DETAIL_TAB_TYPES: Partial<Record<WorkspaceRouteKind, string>> = {
+  "admin-object": "管理员", "role-object": "角色", "approval-object": "审批",
+  "user-object": "用户", "listing-object": "供给账号", "order-object": "订单",
+  "resource-object": "资源账号", "finance-document": "资金单据", "finance-user": "用户资金",
+};
+const GENERIC_DETAIL_TITLES = new Set(["审批详情", "账号供给详情", "资源账号", "资金单据", "用户资金"]);
+
+export function tabPresentation(tab: WorkspaceTab, tabs: WorkspaceTab[]) {
+  const type = DETAIL_TAB_TYPES[tab.kind];
+  const name = (item: WorkspaceTab) => (!item.title.trim() || GENERIC_DETAIL_TITLES.has(item.title))
+    ? item.objectId || item.title : item.title;
+  let label = type ? name(tab) : tab.title;
+  if (type && tab.objectId) {
+    const siblings = tabs.filter((item) => item.kind === tab.kind && item.id !== tab.id && name(item) === label);
+    if (siblings.length) {
+      const shortId = tab.objectId.slice(-8);
+      const suffix = siblings.some((item) => item.objectId?.slice(-8) === shortId) ? tab.objectId : shortId;
+      label = `${label} · ${suffix}`;
+    }
+  }
+  return { type, label, description: type ? `${type}详情：${label}` : label };
+}
+
 export type PersistedWorkspaceTabs = {
   adminUserId: string;
   activeId: string;
@@ -62,6 +86,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
   "membership-growth": { id: "membership-growth", title: "会员成长", path: "/membership-growth", closable: true, kind: "membership-growth" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
+  settings: { id: "settings", title: "设置", path: "/settings", closable: true, kind: "settings" },
   admins: { id: "admins", title: "管理员管理", path: "/admins", closable: true, kind: "admins" },
   roles: { id: "roles", title: "角色权限", path: "/roles", closable: true, kind: "roles" },
   approvals: { id: "approvals", title: "审批与审计", path: "/approvals", closable: true, kind: "approvals" },
@@ -81,16 +106,23 @@ export function sanitizeTabQuery(query: Record<string, string> | URLSearchParams
   const source = query instanceof URLSearchParams ? Object.fromEntries(query.entries()) : query;
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (!key || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value) || NON_PERSISTED_ORDER_QUERY.test(key)) continue;
+    if (!key || (key.toLowerCase() === "theme" && value !== "light" && value !== "dark") || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value) || NON_PERSISTED_ORDER_QUERY.test(key)) continue;
     if (value.length > (key === "cursor" ? 2048 : key === "supplyCursorHistory" ? 8192 : 200)) continue;
     result[key] = value;
   }
   return result;
 }
 
+export function sanitizePersistedTabQuery(query: Record<string, string> | URLSearchParams): Record<string, string> {
+  const clean = sanitizeTabQuery(query);
+  delete clean.theme;
+  return clean;
+}
+
 export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind; objectType?: string; objectId?: string; tabId: string; path: string; title: string } {
   const path = pathname.replace(/\/+$/, "") || "/";
   if (path === "/" || path === "/workbench") return { kind: "workbench", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
+  if (path === "/settings") return { kind: "settings", tabId: "settings", path: "/settings", title: "设置" };
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
   if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
   if (path === "/membership-growth") return { kind: "membership-growth", tabId: "membership-growth", path: "/membership-growth", title: "会员成长" };
@@ -169,9 +201,16 @@ export function tabHref(tab: WorkspaceTab): string {
   return query ? `${tab.path}?${query}` : tab.path;
 }
 
+/** 设置分区和示例模式切换会卸载表单，即使仍是同一个工作区标签也须守护未保存输入。 */
+export function changesSettingsContent(current: WorkspaceTab, next: WorkspaceTab): boolean {
+  return current.kind === "settings" && next.kind === "settings" && current.id === next.id
+    && ((current.query.section ?? "appearance") !== (next.query.section ?? "appearance")
+      || (current.query.preview === "1") !== (next.query.preview === "1"));
+}
+
 export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boolean {
   const has = (code: string) => nav.permissions.includes(code);
-  if (kind === "workbench" || kind === "account") return true;
+  if (kind === "workbench" || kind === "account" || kind === "settings") return true;
   if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
@@ -209,18 +248,21 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
   return [...tabs, next];
 }
 
-export function tabsRemovedBy(tabs: WorkspaceTab[], action: "self" | "others" | "right", targetId: string): WorkspaceTab[] {
+export type TabCloseAction = "self" | "others" | "left" | "right";
+
+export function tabsRemovedBy(tabs: WorkspaceTab[], action: TabCloseAction, targetId: string): WorkspaceTab[] {
   const index = tabs.findIndex((tab) => tab.id === targetId);
   if (index < 0) return [];
   return tabs.filter((tab, tabIndex) => {
     if (!tab.closable) return false;
     if (action === "self") return tab.id === targetId;
     if (action === "others") return tab.id !== targetId;
+    if (action === "left") return tabIndex < index;
     return tabIndex > index;
   });
 }
 
-export function closeTabs(tabs: WorkspaceTab[], activeId: string, action: "self" | "others" | "right", targetId: string): { tabs: WorkspaceTab[]; activeId: string } {
+export function closeTabs(tabs: WorkspaceTab[], activeId: string, action: TabCloseAction, targetId: string): { tabs: WorkspaceTab[]; activeId: string } {
   const index = tabs.findIndex((tab) => tab.id === targetId);
   if (index < 0) return { tabs, activeId };
   const removed = new Set(tabsRemovedBy(tabs, action, targetId).map((tab) => tab.id));
@@ -244,7 +286,7 @@ export function persistTabs(adminUserId: string, state: { tabs: WorkspaceTab[]; 
   const payload: PersistedWorkspaceTabs = {
     adminUserId,
     activeId: state.activeId,
-    tabs: state.tabs.map((tab) => ({ ...tab, query: sanitizeTabQuery(tab.query) })),
+    tabs: state.tabs.map((tab) => ({ ...tab, query: sanitizePersistedTabQuery(tab.query) })),
   };
   sessionStorage.setItem(`${STORAGE_PREFIX}${adminUserId}`, JSON.stringify(payload));
 }
@@ -259,7 +301,7 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
     const tabs = filterTabsByPermission(
       parsed.tabs
         .filter((tab) => tab && typeof tab.id === "string" && typeof tab.path === "string")
-        .map((tab) => ({ ...tab, query: sanitizeTabQuery(tab.query ?? {}) })),
+        .map((tab) => ({ ...tab, query: sanitizePersistedTabQuery(tab.query ?? {}) })),
       nav,
     );
     const activeId = tabs.some((tab) => tab.id === parsed.activeId) ? parsed.activeId : WORKBENCH_TAB_ID;

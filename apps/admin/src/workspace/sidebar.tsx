@@ -1,4 +1,5 @@
-import { ChevronsUpDownIcon, LogOutIcon, ShieldIcon } from "lucide-react";
+import { isLocalSettingsPreview } from "./settings-preview";
+import { ChevronsUpDownIcon, LogOutIcon, SettingsIcon, ShieldIcon } from "lucide-react";
 
 import { BrandLogo } from "../components/brand-logo";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -95,9 +96,13 @@ export function WorkspaceSidebar({
                   </div>
                 </div>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => onNavigate("/account")}>
+                <DropdownMenuItem onClick={() => onNavigate("/settings")}>
+                  <SettingsIcon />
+                  <span>设置</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onNavigate(import.meta.env.DEV && isLocalSettingsPreview() ? "/settings?section=security" : "/account")}>
                   <ShieldIcon />
-                  <span>账号安全</span>
+                  <span>登录与安全</span>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={onSignOut}>

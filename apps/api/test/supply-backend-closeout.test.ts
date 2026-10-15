@@ -89,6 +89,21 @@ test("game recovery returns its stable identity without copying nested configura
   }
 });
 
+test("boss-only recovery rechecks the original action permission before reading receipts",async()=>{
+  for (const [operation,permissions,isBoss] of [
+    ["supply.rules.release.activate",new Set([ADMIN_PERMISSION.supplyRulesEdit]),true],
+    ["supply.rules.release.activate",new Set([ADMIN_PERMISSION.supplyRulesActivate]),false],
+    ["supply.game.create",new Set([ADMIN_PERMISSION.supplyCatalogManage]),false],
+  ] as const) {
+    const f=recoveryClient({releaseId:"release-1",game:{id:"game-1"}});
+    await assert.rejects(()=>readAdminSupplyOperationResult(f.client,"admin-1",{...access,isBoss,permissions},query(operation,"game-1"),key),(error:any)=>error.status===403);
+    assert.equal(f.sql.length,0);
+  }
+  const allowed=recoveryClient({releaseId:"release-1",generation:"2",affectedCount:10});
+  const result=await readAdminSupplyOperationResult(allowed.client,"admin-1",{...access,permissions:new Set([ADMIN_PERMISSION.supplyRulesActivate])},query("supply.rules.release.activate","game-1"),key);
+  assert.deepEqual(result.result,{releaseId:"release-1",generation:"2"});
+});
+
 test("missing/inflight or other actor receipt stays unresolved; fingerprint mismatch is a conflict",async()=>{
   for(const [body,scopeActor]of [[null,"admin-1"],[{id:"payout-1"},"other-admin"]] as const){
     const f=recoveryClient(body,scopeActor);assert.deepEqual(await readAdminSupplyOperationResult(f.client,"admin-1",access,query(),key),{receipt:"UNRESOLVED"});assert.equal(f.sql.length,1);
@@ -103,4 +118,85 @@ test("recovery is permission/object scoped and cannot retrieve user-supply or ar
   const userMedia=recoveryClient({intentId:"intent-1",uploadToken:"private"},"admin-1","USER_SUPPLY");
   await assert.rejects(()=>readAdminSupplyOperationResult(userMedia.client,"admin-1",access,query("supply.media.upload_intent.create"),key),(error:any)=>error.status===404);
   for(const q of [query("auth.admin.freeze"),new URLSearchParams("operation=supply.game.update&operation=supply.game.create&fingerprint="+fingerprint),new URLSearchParams({operation:"supply.game.update",fingerprint,principalId:"other"})]) await assert.rejects(()=>readAdminSupplyOperationResult(denied.client,"admin-1",access,q,key));
+});
+
+/* ---------- API C：本轮新增的原结果恢复登记 ---------- */
+
+function scopedRecoveryClient(body: Record<string, unknown> | null, scopeResource: string | null = null) {
+  const scopes: string[] = [];
+  return {
+    scopes, client: { query: async (text: string, values: unknown[]) => {
+      assert(!/\b(INSERT|UPDATE|DELETE)\b/.test(text));
+      if (text.includes("idempotency_record")) {
+        const scope = JSON.parse(values[0] as string); scopes.push(JSON.stringify(scope));
+        return { rows: body && scope[3] === scopeResource ? [{ requestFingerprint: fingerprint, responseStatus: 200, responseBody: body }] : [] };
+      }
+      return { rows: [{ gameId: "game-1", ownershipKind: "USER_SUPPLY" }] };
+    } } as never,
+  };
+}
+const gunsmithAccess = { ...access, permissions: new Set([ADMIN_PERMISSION.supplyGunsmithManage]) };
+
+test("gunsmith creates recover from the recorded receipt id and never accept a guessed resource", async () => {
+  const created = scopedRecoveryClient({ id: "code-1", gameId: "game-1", firearmId: "f-1", code: "secret_code_text", note: "operator free text", revision: "3", status: "ACTIVE" });
+  const result = await readAdminSupplyOperationResult(created.client, "admin-1", gunsmithAccess, query("supply.gunsmith.code.create"), key);
+  assert.equal(result.receipt, "RECORDED");
+  assert.deepEqual(result.result, { id: "code-1", gameId: "game-1", revision: "3", status: "ACTIVE" }, "code text, note and firearmId stay outside the receipt whitelist");
+  assert.equal(created.scopes[0], JSON.stringify(["admin", "admin-1", "supply.gunsmith.code.create", null]), "create scope must stay resource-less");
+  // 同一次创建若调用方自行补一个 resourceId，作用域就变了：只能是未找到，不能猜。
+  const guessed = scopedRecoveryClient({ id: "code-1", revision: "3" }, null);
+  assert.deepEqual(await readAdminSupplyOperationResult(guessed.client, "admin-1", gunsmithAccess, query("supply.gunsmith.code.create", "code-1"), key), { receipt: "UNRESOLVED" });
+});
+
+test("gunsmith updates and code withdraw/restore recheck the original resource scope", async () => {
+  for (const [operation, resourceId, body] of [
+    ["supply.gunsmith.classification.update", "class-1", { id: "class-1", revision: "2", enabled: false, name: "Private label" }],
+    ["supply.gunsmith.firearm.update", "f-1", { id: "f-1", revision: "5", enabled: true, mediaId: "media-1" }],
+    ["supply.gunsmith.alias.update", "alias-1", { id: "alias-1", revision: "1", name: "Alias text" }],
+    ["supply.gunsmith.code.withdraw", "code-1", { id: "code-1", revision: "4", status: "WITHDRAWN", code: "secret_code_text" }],
+    ["supply.gunsmith.code.restore", "code-1", { id: "code-1", revision: "6", status: "ACTIVE", code: "secret_code_text" }],
+  ] as const) {
+    const f = scopedRecoveryClient(body, resourceId);
+    const result: any = await readAdminSupplyOperationResult(f.client, "admin-1", gunsmithAccess, query(operation, resourceId), key);
+    assert.equal(result.receipt, "RECORDED", operation);
+    assert.equal(result.operation, operation, operation);
+    assert.equal(result.resourceId, resourceId, operation);
+    assert.ok(f.scopes[0]?.includes(resourceId), `${operation} must look up the original resource scope`);
+    assert.ok(!JSON.stringify(result.result).includes("secret_code_text"), operation);
+    assert.ok(!("name" in result.result) && !("mediaId" in result.result), operation);
+  }
+  // 成功后对象 revision 已再次变化也不影响恢复：读取不套首次写的版本前置。
+  const moved = scopedRecoveryClient({ id: "f-1", revision: "1", enabled: true }, "f-1");
+  const recovered = await readAdminSupplyOperationResult(moved.client, "admin-1", gunsmithAccess, query("supply.gunsmith.firearm.update", "f-1"), key);
+  assert.equal(recovered.receipt, "RECORDED");
+  assert.deepEqual(recovered.result, { id: "f-1", revision: "1", enabled: true });
+});
+
+test("gunsmith recovery requires the original manage permission before any read", async () => {
+  for (const permissions of [new Set<string>(), new Set([ADMIN_PERMISSION.supplyCatalogManage]), new Set([ADMIN_PERMISSION.supplyReviewDecide])] as const) {
+    const f = scopedRecoveryClient({ id: "code-1", revision: "2" });
+    await assert.rejects(() => readAdminSupplyOperationResult(f.client, "admin-1", { ...access, isBoss: false, permissions }, query("supply.gunsmith.code.create"), key), (error: any) => error.status === 403);
+    assert.equal(f.scopes.length, 0, "denied before the idempotency read");
+  }
+});
+
+test("game cover recovery resolves the recorded gameId and matches the write receipt shape", async () => {
+  const f = scopedRecoveryClient({ gameId: "game-1" }, "game-1");
+  const result = await readAdminSupplyOperationResult(f.client, "admin-1", access, query("supply.game.cover", "game-1"), key);
+  assert.deepEqual(result, { receipt: "RECORDED", operation: "supply.game.cover", resourceId: "game-1", responseStatus: 200, result: { id: "game-1", gameId: "game-1" } });
+  assert.ok(f.scopes[0]?.includes("supply.game.cover"), "cover scope keeps the original game resource");
+  // 回执体不含 gameId 时目标不可核对：404 只表示读不到可核对的原目标，不是原写未发生，也不能换 key 重提。
+  const empty = scopedRecoveryClient({ note: "unrelated body" }, "game-1");
+  await assert.rejects(() => readAdminSupplyOperationResult(empty.client, "admin-1", access, query("supply.game.cover", "game-1"), key), (error: any) => error.status === 404);
+});
+
+test("user-supply media review and visibility receipts stay recoverable; upload intents stay platform-only", async () => {
+  for (const operation of ["supply.media.review", "supply.media.visibility"] as const) {
+    const f = scopedRecoveryClient({ id: "asset-1", reviewState: "APPROVED", accessClass: "PRIVATE_REVIEW", storageKey: "private/object/key", uploadToken: "private-token", technicalState: "READY" }, "asset-1");
+    const result = await readAdminSupplyOperationResult(f.client, "admin-1", { ...access, permissions: new Set([ADMIN_PERMISSION.supplyReviewDecide]) }, query(operation, "asset-1"), key);
+    assert.equal(result.receipt, "RECORDED", operation);
+    assert.deepEqual(result.result, { id: "asset-1", technicalState: "READY", reviewState: "APPROVED", accessClass: "PRIVATE_REVIEW" }, `${operation} must not echo storage keys or tokens`);
+  }
+  const intent = scopedRecoveryClient({ intentId: "intent-1", uploadToken: "private-token" });
+  await assert.rejects(() => readAdminSupplyOperationResult(intent.client, "admin-1", access, query("supply.media.upload_intent.create"), key), (error: any) => error.status === 404);
 });

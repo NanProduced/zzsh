@@ -30,6 +30,7 @@ test("batch close inspects every tab that would actually close", () => {
   assert.deepEqual(tabsRemovedBy(tabs, "self", "admins").map((tab) => tab.id), ["admins"]);
   assert.deepEqual(tabsRemovedBy(tabs, "others", "admins").map((tab) => tab.id).sort(), ["account", "roles"]);
   assert.deepEqual(tabsRemovedBy(tabs, "right", "admins").map((tab) => tab.id), ["roles", "account"]);
+  assert.deepEqual(tabsRemovedBy(tabs, "left", "roles").map((tab) => tab.id), ["admins"]);
 });
 
 test("mounted dirty reporter does not re-render in a feedback loop", async () => {

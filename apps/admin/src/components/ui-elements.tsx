@@ -5,10 +5,12 @@ export function StatusMessage({
   error,
   success,
   className = "",
+  themeAware = false,
 }: {
   error?: string;
   success?: string;
   className?: string;
+  themeAware?: boolean;
 }) {
   if (!error && !success) return null;
   const isError = Boolean(error);
@@ -19,15 +21,15 @@ export function StatusMessage({
       aria-live="polite"
       className={`flex items-start gap-2.5 p-3 rounded-md text-xs leading-relaxed transition-all ${
         isError
-          ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-          : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+          ? themeAware ? "bg-destructive/10 text-destructive border border-destructive/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+          : themeAware ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
       } ${className}`}
     >
       <span className="shrink-0 mt-0.5">
         {isError ? (
-          <Icons.AlertCircle size={15} className="text-rose-400" />
+          <Icons.AlertCircle size={15} className={themeAware ? "text-destructive" : "text-rose-400"} />
         ) : (
-          <Icons.CheckCircle2 size={15} className="text-emerald-400" />
+          <Icons.CheckCircle2 size={15} className={themeAware ? "text-emerald-700 dark:text-emerald-400" : "text-emerald-400"} />
         )}
       </span>
       <span className="flex-1 break-words">{error ?? success}</span>
@@ -35,13 +37,68 @@ export function StatusMessage({
   );
 }
 
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { CheckIcon, LaptopIcon, MoonIcon, SunIcon } from "lucide-react";
+
 export function ThemeToggle({
   theme,
+  mode,
+  onSelectMode,
   onToggle,
 }: {
   theme: "dark" | "light";
-  onToggle: () => void;
+  mode?: "light" | "dark" | "system";
+  onSelectMode?: (mode: "light" | "dark" | "system") => void;
+  onToggle?: () => void;
 }) {
+  if (onSelectMode) {
+    const currentMode = mode ?? (theme === "dark" ? "dark" : "light");
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <button
+              type="button"
+              aria-label={`主题模式：${currentMode === "light" ? "浅色" : currentMode === "dark" ? "深色" : "跟随系统"}`}
+              title={`主题：${currentMode === "light" ? "浅色" : currentMode === "dark" ? "深色" : "跟随系统"}`}
+              className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-surface-raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {currentMode === "system" ? (
+                <LaptopIcon size={15} />
+              ) : theme === "dark" ? (
+                <MoonIcon size={15} />
+              ) : (
+                <SunIcon size={15} />
+              )}
+            </button>
+          }
+        />
+        <DropdownMenuContent align="end" className="w-36">
+          <DropdownMenuItem onClick={() => onSelectMode("light")}>
+            <SunIcon size={15} />
+            <span>浅色</span>
+            {currentMode === "light" ? <CheckIcon className="ms-auto size-4" /> : null}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onSelectMode("dark")}>
+            <MoonIcon size={15} />
+            <span>深色</span>
+            {currentMode === "dark" ? <CheckIcon className="ms-auto size-4" /> : null}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onSelectMode("system")}>
+            <LaptopIcon size={15} />
+            <span>跟随系统</span>
+            {currentMode === "system" ? <CheckIcon className="ms-auto size-4" /> : null}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
+
   return (
     <button
       type="button"

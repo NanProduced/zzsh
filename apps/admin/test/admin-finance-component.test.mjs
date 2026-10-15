@@ -22,7 +22,7 @@ async function setup(t, key, tabPath = "/finance", permissions = ["finance.read"
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   const { createRoot } = await import("react-dom/client");
   const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-  const vite = await createServer({ configFile: false, root: tree, cacheDir: "E:/zzsh/zzsh/tmp/admin-finance-read-20261003/implementation/component-vite-cache", plugins: [react()], server: { middlewareMode: true, hmr: false } });
+  const vite = await createServer({ configFile: false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, root: tree, cacheDir: "E:/zzsh/zzsh/tmp/admin-finance-read-20261003/implementation/component-vite-cache", plugins: [react()], server: { middlewareMode: true, hmr: false } });
   const { AdminFinanceView, clearFinanceContexts } = await vite.ssrLoadModule("/apps/admin/src/views/admin-finance-view.tsx");
   const node = browser.document.createElement("div"); browser.document.body.append(node); const root = createRoot(node);
   const opened = [], queries = [], props = { tab: { id: key, path: tabPath, kind: "unknown", title: "资金", query: {}, closable: true }, snapshot: { ...baseSnapshot, adminUserId: key, session: { ...baseSnapshot.session, id: key }, permissions }, onOpenPath: (...args) => opened.push(args), onQueryChange: query => queries.push(query), onRefresh: async () => props.snapshot, refreshNonce: 0 };
