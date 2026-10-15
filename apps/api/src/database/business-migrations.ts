@@ -210,9 +210,29 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   // Admission rows are provisioning facts: the runtime never reads or writes them directly.
   const nativeAdmission=(await pool.query("SELECT to_regclass('zzsh_order.native_origin_resource_admission') IS NOT NULL AS present")).rows[0];
   if(nativeAdmission?.present===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_origin_resource_admission FROM ${runtimeUser};`);
+  await configureAdminSecurityCommandPrivileges(pool, runtimeRole);
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
+}
+
+/** Optional schema (ADM-SECURITY-BACKEND-1): command identity rows never need UPDATE/DELETE;
+ *  backup-code generation is one row per admin whose UPSERT needs three specific columns only. */
+export async function configureAdminSecurityCommandPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const tables = ["zzsh_iam.admin_security_command", "zzsh_iam.admin_backup_code_generation"];
+  const found = (await pool.query("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [tables])).rows;
+  if (found.length !== tables.length) throw new Error("Security command schema inventory is incomplete");
+  if (found.every(row => row.present === false)) return;
+  if (found.some(row => row.present !== true)) throw new Error("Security command schema is partially deployed");
+  await pool.query(`
+    REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."admin_security_command" FROM ${role};
+    GRANT SELECT, INSERT ON TABLE "zzsh_iam"."admin_security_command" TO ${role};
+    REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."admin_backup_code_generation" FROM ${role};
+    REVOKE UPDATE ON TABLE "zzsh_iam"."admin_backup_code_generation" FROM ${role};
+    GRANT SELECT, INSERT ON TABLE "zzsh_iam"."admin_backup_code_generation" TO ${role};
+    GRANT UPDATE ("generation", "generation_id", "generated_at") ON TABLE "zzsh_iam"."admin_backup_code_generation" TO ${role};
+  `);
 }
 
 /** Kept separate so prefix migration and least-privilege branches can be checked offline. */

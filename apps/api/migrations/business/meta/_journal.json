@@ -512,6 +512,13 @@
       "when": 1789490041000,
       "tag": "0072_legacy_listing_display_snapshot",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1792085353599,
+      "tag": "0073_admin_self_security_commands",
+      "breakpoints": true
     }
   ]
 }

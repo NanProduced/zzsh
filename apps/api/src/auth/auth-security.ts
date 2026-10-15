@@ -39,6 +39,20 @@ import {
   type UserObligationReader,
 } from "./user-identity";
 import type { ImIdentityIntentRepository, ImIdentityProvisioner } from "../im/identity-lifecycle";
+import { assertAdminCommandAuthorizedInTransaction } from "./admin-auth-session";
+import {
+  AdminSecurityCommandError,
+  adminSecurityCommandFingerprint,
+  adminSecurityCommandId,
+  claimAdminSecurityCommand,
+  readAdminSecurityCommandReceipt,
+  recordAdminSecurityCommandRejection,
+  writeAdminSecurityCommandReceipt,
+  type AdminSecurityCommandAction,
+  type AdminSecurityCommandReceipt,
+  type AdminSecurityCommandRejection,
+  type AdminSecurityCommandScope,
+} from "./admin-security-commands";
 
 export { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 
@@ -131,6 +145,8 @@ export type AuthSecurityOptions = {
   notifyAdminSecurity?: (notification: AdminSecurityNotification) => Promise<void>;
   hashPassword: PasswordHasher;
   verifyPassword: PasswordVerifier;
+  /** HKDF 派生的命令指纹子密钥；缺省时本人安全命令退化为无命令身份（旧行为）。 */
+  adminSecurityCommandKey?: Buffer;
   rateLimitState: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget: { inFlight: number };
   realNameProvider: RealNameProvider;
@@ -314,7 +330,21 @@ function sendJson(response: NodeResponse, status: number, body: unknown, request
 }
 
 function sendError(response: NodeResponse, error: SecurityApiError, requestId: string): void {
-  sendJson(response, error.status, { error: { code: error.code, message: error.message, requestId } }, requestId);
+  // 稳定原因枚举（reason）是合同字段；SDK/数据库原始错误与秘密不外发。
+  const reason = (error as { reason?: unknown }).reason;
+  sendJson(
+    response,
+    error.status,
+    {
+      error: {
+        code: error.code,
+        message: error.message,
+        requestId,
+        ...(typeof reason === "string" && reason.length > 0 ? { reason } : {}),
+      },
+    },
+    requestId,
+  );
 }
 
 function sendInternalError(response: NodeResponse, requestId: string): void {
@@ -807,22 +837,111 @@ async function activateEnrollment(request: NodeRequest, response: NodeResponse, 
   sendSuccess(response, { status: "ACTIVE" }, requestId);
 }
 
+const SECURITY_COMMAND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/**
+ * 本人 PIN 命令绑定原会话：同一 (管理员, 命令标识) 的重复/并发请求由命令范围锁串行化，
+ * 回执只在业务事务内提交；仅完全缺失 Idempotency-Key 时保持旧调用。
+ */
+function securityCommandScope(
+  request: NodeRequest,
+  options: AuthSecurityOptions,
+  action: AdminSecurityCommandAction,
+  context: AdminContext,
+  fingerprintInput: readonly unknown[],
+): AdminSecurityCommandScope | undefined {
+  const commandId = adminSecurityCommandId(request.headers);
+  if (!commandId) return undefined;
+  if (options.adminSecurityCommandKey?.length !== 32) {
+    throw new AdminSecurityCommandError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Security command unavailable", "command_key_unavailable");
+  }
+  return {
+    adminUserId: context.userId,
+    commandId,
+    action,
+    target: { kind: "session", id: context.sessionId },
+    fingerprint: adminSecurityCommandFingerprint(options.adminSecurityCommandKey, fingerprintInput),
+  };
+}
+
+function rejectionEnvelopeOf(error: AdminSecurityCommandError): AdminSecurityCommandRejection {
+  return {
+    status: error.status,
+    code: error.code,
+    message: error.message,
+    ...(error.reason ? { reason: error.reason } : {}),
+  };
+}
+
+/** 重放"明确拒绝"必须原样复现首试的状态/code/message/reason，绝不包装成 SET/CHANGED 成功。 */
+function rejectionErrorOf(receipt: AdminSecurityCommandReceipt): AdminSecurityCommandError {
+  const rejection = receipt.rejection;
+  if (rejection) {
+    return new AdminSecurityCommandError(rejection.status, rejection.code, rejection.message, rejection.reason ?? receipt.reason);
+  }
+  return new AdminSecurityCommandError(409, API_V1_ERROR_CODES.CONFLICT, "Original command was rejected", receipt.reason ?? "rejected");
+}
+
+function commandReplayBody(receipt: AdminSecurityCommandReceipt, status: string): Record<string, unknown> {
+  if (receipt.status === "rejected") throw rejectionErrorOf(receipt);
+  return {
+    status,
+    replayed: true,
+    action: receipt.action,
+    commandId: receipt.commandId,
+    receipt: receipt.result ?? null,
+    createdAt: receipt.createdAt,
+  };
+}
+
+function commandAcceptedBody(status: string, scope: AdminSecurityCommandScope | undefined, result: Record<string, unknown>): Record<string, unknown> {
+  return { status, commandId: scope?.commandId ?? null, receipt: scope ? result : null };
+}
+
 async function setPin(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
   const context = await readAdminContext(request, options);
   const pin = pinField(bodyOf(request), "pin");
+  const scope = securityCommandScope(request, options, "pin.set", context, ["pin.set", context.sessionId, pin]);
   const pinHash = await options.hashPassword(pin);
-  await withTransaction(options.pool, async (client) => {
-    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
-    const session = await client.query<{ pinHash: string | null }>(
-      `SELECT "pinHash" FROM "zzsh_auth_admin"."session" WHERE "id" = $1 FOR UPDATE`,
-      [context.sessionId],
-    );
-    if (!session.rows[0]) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
-    if (session.rows[0].pinHash) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "PIN is already configured");
-    await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinHash" = $1, "pinFailures" = 0, "locked" = false, "updatedAt" = clock_timestamp() WHERE "id" = $2`, [pinHash, context.sessionId]);
-    await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.set", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId });
-  });
-  sendSuccess(response, { status: "SET" }, requestId);
+  const result = { pinConfigured: true, sessionId: context.sessionId } satisfies Record<string, unknown>;
+  let replay: AdminSecurityCommandReceipt | undefined;
+  try {
+    await withTransaction(options.pool, async (client) => {
+      await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+      // 事务内复核会话归属/有效期/撤销/锁态与 ACTIVE+2FA 准入，不信任事务前快照；
+      // 回执重放同样先过这道门，回执存在不构成权限凭证。
+      const guard = await assertAdminCommandAuthorizedInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
+      if (scope) {
+        const claim = await claimAdminSecurityCommand(client, scope);
+        if (claim.mode === "replay") { replay = claim.receipt; return; }
+      }
+      if (guard.pinHash) {
+        throw new AdminSecurityCommandError(409, API_V1_ERROR_CODES.CONFLICT, "PIN is already configured", "pin_already_configured");
+      }
+      await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinHash" = $1, "pinFailures" = 0, "locked" = false, "updatedAt" = clock_timestamp() WHERE "id" = $2`, [pinHash, context.sessionId]);
+      if (scope) await writeAdminSecurityCommandReceipt(client, scope, { status: "completed", result }, requestId);
+      await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.set", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId, details: { commandId: scope?.commandId ?? null } });
+    });
+  } catch (error) {
+    if (scope && error instanceof AdminSecurityCommandError) {
+      const rejection = rejectionEnvelopeOf(error);
+      await recordAdminSecurityCommandRejection(options.pool, scope, rejection, requestId, (client) => recordAudit(client, {
+        actorType: "admin",
+        actorId: context.userId,
+        sessionId: context.sessionId,
+        action: "admin.pin.set",
+        objectType: "admin_session",
+        objectId: context.sessionId,
+        outcome: "FAILURE",
+        requestId,
+        reason: rejection.reason ?? rejection.message,
+        details: { commandId: scope?.commandId ?? null },
+      }));
+    }
+    throw error;
+  }
+  if (replay) { sendSuccess(response, commandReplayBody(replay, "SET"), requestId); return; }
+  sendSuccess(response, commandAcceptedBody("SET", scope, result), requestId);
 }
 
 async function changePin(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
@@ -830,30 +949,64 @@ async function changePin(request: NodeRequest, response: NodeResponse, requestId
   const body = bodyOf(request);
   const currentPin = pinField(body, "currentPin");
   const nextPin = pinField(body, "newPin");
+  const scope = securityCommandScope(request, options, "pin.change", context, ["pin.change", context.sessionId, currentPin, nextPin]);
   const nextHash = await options.hashPassword(nextPin);
-  let failure: { status: number; message: string } | undefined;
-  await withTransaction(options.pool, async (client) => {
-    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
-    const session = await client.query<{ pinHash: string | null; pinFailures: number; locked: boolean }>(
-      `SELECT "pinHash", "pinFailures", "locked" FROM "zzsh_auth_admin"."session" WHERE "id" = $1 FOR UPDATE`,
-      [context.sessionId],
-    );
-    const row = session.rows[0];
-    if (!row || !row.pinHash) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "PIN is not configured");
-    if (row.locked) throw new SecurityApiError(423, API_V1_ERROR_CODES.FORBIDDEN, "Account locked");
-    if (!await options.verifyPassword(currentPin, row.pinHash)) {
-      const pinFailures = row.pinFailures + 1;
-      const locked = pinFailures >= 5;
-      await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinFailures" = $1, "locked" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $3`, [pinFailures, locked, context.sessionId]);
-      await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.change", objectType: "admin_session", objectId: context.sessionId, outcome: "FAILURE", requestId, reason: locked ? "pin_attempt_limit" : "invalid_pin", details: { pinFailures, locked } });
-      failure = { status: locked ? 423 : 401, message: locked ? "Account locked" : "PIN rejected" };
-      return;
+  const result = { pinChanged: true, sessionId: context.sessionId } satisfies Record<string, unknown>;
+  let failure: AdminSecurityCommandError | undefined;
+  let replay: AdminSecurityCommandReceipt | undefined;
+  try {
+    await withTransaction(options.pool, async (client) => {
+      await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+      const guard = await assertAdminCommandAuthorizedInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
+      if (scope) {
+        const claim = await claimAdminSecurityCommand(client, scope);
+        if (claim.mode === "replay") { replay = claim.receipt; return; }
+      }
+      if (!guard.pinHash) {
+        throw new AdminSecurityCommandError(409, API_V1_ERROR_CODES.CONFLICT, "PIN is not configured", "pin_not_configured");
+      }
+      if (!await options.verifyPassword(currentPin, guard.pinHash)) {
+        const pinFailures = guard.pinFailures + 1;
+        const locked = pinFailures >= 5;
+        const reason = locked ? "pin_attempt_limit" : "invalid_pin";
+        const envelope: AdminSecurityCommandRejection = {
+          status: locked ? 423 : 401,
+          code: locked ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.UNAUTHENTICATED,
+          message: locked ? "Account locked" : "PIN rejected",
+          reason,
+        };
+        await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinFailures" = $1, "locked" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $3`, [pinFailures, locked, context.sessionId]);
+        // 失败计次、拒绝回执与语义审计同事务提交：同命令重复不会二次扣次，新的真实尝试仍按原规则计次。
+        if (scope) await writeAdminSecurityCommandReceipt(client, scope, { status: "rejected", reason, rejection: envelope }, requestId);
+        await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.change", objectType: "admin_session", objectId: context.sessionId, outcome: "FAILURE", requestId, reason, details: { pinFailures, locked, commandId: scope?.commandId ?? null } });
+        failure = new AdminSecurityCommandError(envelope.status, envelope.code, envelope.message, envelope.reason);
+        return;
+      }
+      await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinHash" = $1, "pinFailures" = 0, "updatedAt" = clock_timestamp() WHERE "id" = $2`, [nextHash, context.sessionId]);
+      if (scope) await writeAdminSecurityCommandReceipt(client, scope, { status: "completed", result }, requestId);
+      await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.change", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId, details: { commandId: scope?.commandId ?? null } });
+    });
+  } catch (error) {
+    if (scope && error instanceof AdminSecurityCommandError) {
+      const rejection = rejectionEnvelopeOf(error);
+      await recordAdminSecurityCommandRejection(options.pool, scope, rejection, requestId, (client) => recordAudit(client, {
+        actorType: "admin",
+        actorId: context.userId,
+        sessionId: context.sessionId,
+        action: "admin.pin.change",
+        objectType: "admin_session",
+        objectId: context.sessionId,
+        outcome: "FAILURE",
+        requestId,
+        reason: rejection.reason ?? rejection.message,
+        details: { commandId: scope?.commandId ?? null },
+      }));
     }
-    await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinHash" = $1, "pinFailures" = 0, "updatedAt" = clock_timestamp() WHERE "id" = $2`, [nextHash, context.sessionId]);
-    await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.change", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId });
-  });
-  if (failure) throw new SecurityApiError(failure.status, failure.status === 423 ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.UNAUTHENTICATED, failure.message);
-  sendSuccess(response, { status: "CHANGED" }, requestId);
+    throw error;
+  }
+  if (replay) { sendSuccess(response, commandReplayBody(replay, "CHANGED"), requestId); return; }
+  if (failure) throw failure;
+  sendSuccess(response, commandAcceptedBody("CHANGED", scope, result), requestId);
 }
 
 async function lockPin(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
@@ -1433,6 +1586,20 @@ export async function verifyUserCredentialInTransaction(
     return "retry";
 }
 
+/**
+ * 本人安全命令的非敏感原结果读取：只按当前会话确定的管理员身份读取，
+ * 不重放命令、不签发会话、不返回密码/PIN/备份码明文，也不返回请求指纹。
+ * 未找到记录只说明无法确认，不证明命令没有执行。
+ */
+async function readSecurityOperation(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const commandId = stringField(bodyOf(request), "commandId", 128);
+  if (!SECURITY_COMMAND_ID_PATTERN.test(commandId)) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Command identifier is invalid");
+  }
+  sendSuccess(response, await readAdminSecurityCommandReceipt(options.pool, context.userId, commandId), requestId);
+}
+
 export async function handleAdminSecurity(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
@@ -1460,6 +1627,7 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     }
     if (path === "/bootstrap") return await bootstrapAdmin(request, response, requestId, options);
     if (path === "/enrollment/activate") return await activateEnrollment(request, response, requestId, options);
+    if (path === "/operation") return await readSecurityOperation(request, response, requestId, options);
     if (path === "/pin/set") return await setPin(request, response, requestId, options);
     if (path === "/pin/change") return await changePin(request, response, requestId, options);
     if (path === "/pin/lock") return await lockPin(request, response, requestId, options);

@@ -19,6 +19,7 @@ import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
 import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
+import { adminSecurityCommandId } from "../auth/admin-security-commands";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
 
 type ReadEvents = { once?: (event: string, listener: () => void) => unknown; off?: (event: string, listener: () => void) => unknown };
@@ -60,6 +61,7 @@ const AUTH_PATHS = new Map([
 
 const SECURITY_PATHS = new Map([
   ["/security/enrollment/activate", "/api/v1/admin/security/enrollment/activate"],
+  ["/security/operation", "/api/v1/admin/security/operation"],
   ["/security/pin/set", "/api/v1/admin/security/pin/set"],
   ["/security/pin/change", "/api/v1/admin/security/pin/change"],
   ["/security/pin/lock", "/api/v1/admin/security/pin/lock"],
@@ -167,6 +169,10 @@ function requestHeaders(request: NodeRequest, requestId: string, adminOrigin: st
   });
   const cookie = adminSessionCookie(request);
   if (cookie) headers.set("cookie", cookie);
+  // adminRequest 一直在发 Idempotency-Key；此前只透传 x-request-id，本人安全命令
+  // 因此拿不到命令身份。显式非法值必须拒绝，不能丢弃后作为无key命令执行。
+  const commandId = adminSecurityCommandId(request.headers);
+  if (commandId) headers.set("idempotency-key", commandId);
   return headers;
 }
 
@@ -222,7 +228,13 @@ async function forwardAuth(
   options: AdminBffOptions,
 ): Promise<void> {
   const method = (request.method ?? "GET").toUpperCase();
-  const headers = requestHeaders(request, requestId, options.adminOrigin);
+  let headers: Headers;
+  try { headers = requestHeaders(request, requestId, options.adminOrigin); }
+  catch (error) {
+    if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+    else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    return;
+  }
   const body = method === "GET" || method === "HEAD" ? undefined : JSON.stringify(request.body ?? {});
   if (body !== undefined) headers.set("content-type", "application/json");
   const rejection = await preflightAuthRealmSecurity(

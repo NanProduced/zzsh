@@ -52,24 +52,24 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const actor = await authorizeAdminFinance(client, context, operation);
       if (route === "lookup" && !actor.complete && !filters.q) throw invalid("A document lookup reference is required");
-      const facts = await loadAdminFinanceFacts(client,{filters,...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize}), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
+      const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize}), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
       const common = { contractVersion: ADMIN_FINANCE_VERSION, currency: "CNY", amountUnit: "CENT", timezone: "Asia/Shanghai", applied: filters, snapshot: snapshot.token, asOf: snapshot.asOf, contextKey: actor.authorizationKey, snapshotVersion: facts.version };
       if (route.startsWith("subjects/")) return { actor, body: { ...common, ...await readAdminFinanceSubject(client, facts, reference(route.slice(9)), snapshot.asOf) } };
       if (route.startsWith("documents/")) return { actor, body: { ...common, ...readAdminFinanceDocument(facts, reference(route.slice(10)), url.searchParams.get("entry")) } };
-      let entries = filterAdminFinanceEntries(facts, filters, filters.period);
-      if (route === "lookup" && !actor.complete && !filters.q.startsWith("ORDER_LINK:")) entries = entries.filter(entry => [entry.id, entry.subjectId, entry.subjectName, entry.documentRef, entry.documentNumber, entry.sourceId].includes(filters.q));
+      const entries = route === "lookup" ? [...facts.entries].sort((a,b)=>(b.occurredAt??"").localeCompare(a.occurredAt??"")||(a.id<b.id?1:a.id>b.id?-1:0)) : filterAdminFinanceEntries(facts, filters, filters.period);
       let documents = financeDocuments(entries);
       if (route === "lookup") {
-        let orderDocuments = financeOrderDocuments(facts, filters);
-        if (!actor.complete && !filters.q.startsWith("ORDER_LINK:")) orderDocuments = orderDocuments.filter(document => [document.ref, document.number, ...document.subjects.flatMap(subject => [subject.id, subject.name])].includes(filters.q));
-        documents = [...new Map([...orderDocuments, ...documents].map(document => [document.ref, document])).values()].sort((a, b) => (b.occurredAt ?? "").localeCompare(a.occurredAt ?? "") || (a.ref < b.ref ? 1 : -1));
+        const byRef = new Map([...financeOrderDocuments(facts, filters), ...documents].map(document => [document.ref, document]));
+        documents = facts.lookupPage!.refs.map(ref => {
+          const document=byRef.get(ref);if(!document)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Finance page projection unavailable");return document;
+        });
       }
       const start = (page - 1) * pageSize;
       if (route === "export") return { actor, generated: generateAdminFinanceCsv(entries, filters, snapshot.asOf, facts.version), token: snapshot.token, body: common };
       if (route === "lookup") {
         const query = filters.q.toLocaleLowerCase("zh-CN");
         const subjects = actor.complete && query ? facts.subjectCandidates??{items:[],total:0} : {items:[],total:0};
-        return { actor, body: { ...common, documents: documents.slice(start, start + pageSize), subjects: subjects.items, subjectCount: subjects.total, documentCount: documents.length, entryCount: entries.length, page, pageSize, hasMore: start + pageSize < documents.length || start + pageSize < subjects.total } };
+        return { actor, body: { ...common, documents, subjects: subjects.items, subjectCount: subjects.total, documentCount: facts.lookupPage!.documentCount, entryCount: facts.lookupPage!.entryCount, page, pageSize, hasMore: start + pageSize < facts.lookupPage!.documentCount || start + pageSize < subjects.total } };
       }
       return { actor, body: { ...common, entries: entries.slice(start, start + pageSize), documentCount: documents.length, entryCount: entries.length, page, pageSize, hasMore: start + pageSize < entries.length,
         reconciliation: financePeriodProjection(entries), gaps: ["PERIOD_BALANCE_PROOF_NOT_AVAILABLE", ...(!facts.withdrawalsReady ? ["WITHDRAWAL_SOURCE_NOT_AVAILABLE"] : []), "NATIVE_DISTRIBUTION_NOT_AVAILABLE", "CHANNEL_COST_NOT_AVAILABLE"] } };

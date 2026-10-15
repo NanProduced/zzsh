@@ -248,7 +248,7 @@ test("activity filters own actor/typed target/recovery before pagination, with s
     const next = await read(f, "/security-activity?limit=2&cursor=" + r.body.nextCursor, bff); assert.deepEqual(next.body.events.map((e: any) => e.eventId), ["own", "maintenance"]); assert.equal(next.body.nextCursor, null);
     assert.deepEqual(next.body.events[0].details, { revokedSessionCount: 4 }); assert.deepEqual(next.body.events[0].actor, { kind: "self", ref: null }); assert.deepEqual(next.body.events[1].actor, { kind: "system", ref: null });
     assert(!JSON.stringify([r.body, next.body]).includes("PRIVATE")); assert(!JSON.stringify([r.body.events, next.body.events]).includes(OTHER));
-    assert(SELF_ACTIVITY_READABLE_ACTIONS.includes("admin.password.changed")); assert(!next.body.coverage.recordedActions.includes("admin.password.changed")); assert(next.body.coverage.notRecorded.includes("sign_in"));
+    assert(SELF_ACTIVITY_READABLE_ACTIONS.includes("admin.password.changed")); assert(next.body.coverage.recordedActions.includes("admin.password.changed")); assert(!next.body.coverage.recordedActions.includes("admin.self.sessions.revoked")); assert(next.body.coverage.notRecorded.includes("sign_in"));
   }
 });
 test("activity projects each whitelisted details shape without raw JSON or credential fields", async () => {

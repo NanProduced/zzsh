@@ -27,6 +27,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { createAuthSchema } from "./auth-schema";
 import { normalizeMainlandPhone } from "./phone-number";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
+import { buildAdminSelfSecurityPlugin, ADMIN_SELF_SECURITY_MESSAGES } from "./admin-self-security-plugin";
+import { adminSecurityCommandId, deriveAdminSecurityCommandKey } from "./admin-security-commands";
 import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from "./user-auth-session";
 import { hasLegacyPhoneConflict, readUserPasswordState, type UserPasswordState } from "./legacy-login";
 import { buildUserSecurityPlugin, type UserSecurityDelivery } from "./user-security";
@@ -42,7 +44,7 @@ import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from 
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
-import { setAuditContext, withTransaction } from "./security-core";
+import { SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
 import { MessageScopeRecoveryLifecycle, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
 import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
@@ -268,11 +270,115 @@ function safeWebError(status: number, requestId: string): Response {
   });
 }
 
+/**
+ * 管理员本人安全命令在 realm 公共入口拦截：Admin BFF 的 forwardAuth 与直接 API
+ * 的 mountRealm 都经过 safeWebAuthHandler，因此这里改一次即可同时覆盖两条调用链，
+ * 白名单、Origin 与 preflightAuthRealmSecurity 仍按原路径执行。
+ * 只有改密与备份码重生成需要 SDK endpoint 上下文（会话换发 Cookie）；
+ * PIN 两条命令继续走 /api/v1/admin/security 的既有事务化处理器。
+ */
+const ADMIN_SELF_SECURITY_PATHS = new Map<string, "adminSelfChangePassword" | "adminSelfGenerateBackupCodes">([
+  ["/change-password", "adminSelfChangePassword"],
+  ["/two-factor/generate-backup-codes", "adminSelfGenerateBackupCodes"],
+]);
+
+const ADMIN_SELF_SECURITY_PREFIX = "/api/auth/admin";
+
+/** 本人安全命令成功响应允许下发的头；不含任何回显原始 token 的头（如 set-auth-token）。 */
+const SELF_SECURITY_SUCCESS_HEADERS = new Set(["content-type", "cache-control", "retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"]);
+
+function adminSelfSecurityPathOf(request: Request): string {
+  let pathname: string;
+  try {
+    pathname = new URL(request.url).pathname;
+  } catch {
+    return "";
+  }
+  if (pathname === ADMIN_SELF_SECURITY_PREFIX) return "/";
+  if (pathname.startsWith(`${ADMIN_SELF_SECURITY_PREFIX}/`)) return pathname.slice(ADMIN_SELF_SECURITY_PREFIX.length) || "/";
+  return pathname;
+}
+
+type AdminSelfSecurityApi = { handler?: (request: Request) => Promise<Response> };
+
+export function buildAdminSelfSecurityInterceptor(adminAuth: AdminSelfSecurityApi) {
+  const controlledMessages = ADMIN_SELF_SECURITY_MESSAGES;
+  const jsonError = (status: number, code: (typeof API_V1_ERROR_CODES)[keyof typeof API_V1_ERROR_CODES], message: string, requestId: string, reason?: string): Response =>
+    new Response(JSON.stringify({ error: { code, message, requestId, ...(reason ? { reason } : {}) } }), {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "x-request-id": requestId },
+    });
+  return async (request: Request, requestId: string): Promise<Response | null> => {
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return null;
+    const endpoint = ADMIN_SELF_SECURITY_PATHS.get(adminSelfSecurityPathOf(request));
+    if (!endpoint) return null;
+    const invoke = adminAuth.handler;
+    if (!invoke) return null;
+    let upstream: Response;
+    try {
+      adminSecurityCommandId(request.headers);
+      // Dispatch the original URL through the SDK HTTP router, including its limiter.
+      upstream = await invoke(request);
+    } catch (error) {
+      // F6：项目已知错误（SecurityApiError）经 SDK dispatch 不会被识别，必须在这里
+      // 按合同转换，否则会落进 500 兜底；未知异常仍回通用 500，不透出原始信息。
+      if (error instanceof SecurityApiError) {
+        const reason = (error as { reason?: unknown }).reason;
+        return jsonError(error.status, error.code, error.message, requestId, typeof reason === "string" && reason ? reason : undefined);
+      }
+      return jsonError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    if (upstream.status >= 200 && upstream.status < 300) {
+      // F7：成功响应只放行必要头；set-auth-token（bearer 插件会回显原始会话 token）
+      // 一律不下发，原始 token 只经 Set-Cookie 交付。
+      const headers = new Headers();
+      upstream.headers.forEach((value, key) => {
+        if (SELF_SECURITY_SUCCESS_HEADERS.has(key)) headers.append(key, value);
+      });
+      const withCookies = upstream.headers as Headers & { getSetCookie?: () => string[] };
+      for (const cookie of withCookies.getSetCookie?.() ?? []) headers.append("set-cookie", cookie);
+      return new Response(upstream.body, { status: upstream.status, headers });
+    }
+    // SDK 自身 APIError 已被 dispatch 转成响应；只回受控枚举原因。
+    let message = "Authentication request rejected";
+    let reason: string | undefined;
+    try {
+      const payload = JSON.parse(await upstream.text()) as { message?: unknown };
+      if (typeof payload.message === "string" && controlledMessages.has(payload.message)) {
+        message = payload.message;
+        reason = controlledMessages.get(payload.message);
+      }
+    } catch {
+      message = "Authentication request rejected";
+    }
+    const rejected = jsonError(upstream.status, authErrorCode(upstream.status), message, requestId, reason);
+    const retryAfter = upstream.headers.get("retry-after") ?? upstream.headers.get("x-retry-after");
+    if (retryAfter) rejected.headers.set("retry-after", retryAfter);
+    return rejected;
+  };
+}
+
+type AdminSelfSecurityInterceptor = (request: Request, requestId: string) => Promise<Response | null>;
+
 async function safeWebAuthHandler(
   handler: (request: Request) => Promise<Response>,
   request: Request,
+  selfSecurity?: AdminSelfSecurityInterceptor,
 ): Promise<Response> {
   const requestId = request.headers.get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
+  if (selfSecurity) {
+    let intercepted: Response | null = null;
+    try {
+      intercepted = await selfSecurity(request, requestId);
+    } catch {
+      return safeWebError(500, requestId);
+    }
+    if (intercepted) {
+      const interceptedHeaders = copyWebResponseHeaders(intercepted.headers);
+      interceptedHeaders.set("x-request-id", requestId);
+      return new Response(intercepted.body, { status: intercepted.status, statusText: intercepted.statusText, headers: interceptedHeaders });
+    }
+  }
   try {
     const response = await handler(request);
     const headers = copyWebResponseHeaders(response.headers);
@@ -638,6 +744,7 @@ export async function mountAuthHandlers(
     throw new ConfigurationError("User security outbox requires local test capability");
   }
   const userSecurityPlugin = await buildUserSecurityPlugin({ pool: options.pool, outbox: options.fakeUserSecurityOutbox, localMock: options.localSmsMock === true });
+  const adminSelfSecurityPlugin = await buildAdminSelfSecurityPlugin({ pool: options.pool, adminSecret: options.adminSecret });
   const adminSchema = createAuthSchema("zzsh_auth_admin");
   const userDatabase = drizzle(options.pool);
   const adminDatabase = drizzle(options.pool);
@@ -777,8 +884,11 @@ export async function mountAuthHandlers(
     secret: options.adminSecret,
     database: drizzleAdapter(adminDatabase, { provider: "pg", schema: adminSchema, transaction: true }),
     session: { ...common.session, expiresIn: ADMIN_SESSION_EXPIRES_IN_SECONDS },
-    emailAndPassword: { enabled: true, disableSignUp: true },
-    plugins: [username({ immutableUsername: true }), bearer(), twoFactor()],
+    // docs/architecture/authentication.md：新设置/重置密码至少 12 位，管理员不放宽。
+    // SDK create-context 默认 minPasswordLength=8，只覆盖用户 realm 会让管理员改密
+    // 比建档（auth-security passwordField 的 12 位）与恢复更宽松，这里在共同入口补齐。
+    emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 12, maxPasswordLength: 128 },
+    plugins: [username({ immutableUsername: true }), bearer(), twoFactor(), adminSelfSecurityPlugin],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_admin" },
      hooks: {
        before: createAuthMiddleware(async (ctx) => {
@@ -823,7 +933,8 @@ export async function mountAuthHandlers(
   });
 
   const userWebHandler = (request: Request) => safeWebAuthHandler(userAuth.handler, request);
-  const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request);
+  const adminSelfSecurityInterceptor = buildAdminSelfSecurityInterceptor(adminAuth as unknown as AdminSelfSecurityApi);
+  const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;
   const adminNodeHandler = toNodeHandler(adminWebHandler) as unknown as AuthHandler;
   const securityOptions: AuthSecurityOptions = {
@@ -839,6 +950,8 @@ export async function mountAuthHandlers(
       : undefined,
     hashPassword,
     verifyPassword: (password, hash) => verifyPassword({ password, hash }),
+    // 命令指纹子密钥由现有 admin realm secret 派生，不新增环境变量、不改动 secret。
+    adminSecurityCommandKey: deriveAdminSecurityCommandKey(options.adminSecret),
     // ponytail: process-local failure buckets are the minimum BFF guard; use a shared limiter before multi-instance rollout.
     rateLimitState: options.rateLimitState ?? new Map(),
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },

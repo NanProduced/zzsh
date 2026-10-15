@@ -6,7 +6,7 @@ import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet } from "./personal-finance-read";
 import { loadFinanceOrderFacts, matchFinanceOrderReference, type FinanceOrderFact } from "./admin-finance-order-read";
-import { scopedFinanceSql, financeVersionSql, type FinanceLoadScope } from "./admin-finance-query";
+import { scopedFinanceSql, financeVersionSql, financeLookupPageSql, type FinanceLoadScope } from "./admin-finance-query";
 
 export const ADMIN_FINANCE_VERSION = "admin-finance.read.v1";
 export const FINANCE_BUCKETS = ["AVAILABLE", "RESERVED", "REFUND_PAYABLE", "PENDING_EARNINGS", "PLATFORM", "CLEARING"] as const;
@@ -22,7 +22,7 @@ export type FinanceEntry = {
   reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>;
   related: { ref: string; label: string; path?: string }[];
 };
-export type FinanceFacts = { entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; asOf: string; version: string };
+export type FinanceFacts = { entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; asOf: string; version: string };
 const MAX_FACTS = 20_000;
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -127,15 +127,23 @@ export async function readFinanceSourceVersion(client: PoolClient) {
 }
 export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {}): Promise<FinanceFacts> {
   const {ready,version,asOf}=await readFinanceSourceVersion(client);
-  const ledgerQuery=scopedFinanceSql(ADMIN_FINANCE_LEDGER_SQL,"ledger",scope,MAX_FACTS+1,ready.withdrawals);
-  const historyQuery=scopedFinanceSql(ADMIN_FINANCE_OBSERVATION_SQL,"history",scope,MAX_FACTS+1,ready.withdrawals);
+  let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;
+  if(scope.lookup){
+    const query=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,ADMIN_FINANCE_OBSERVATION_SQL,ready,scope), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
+    if(!row||![row.document_count,row.entry_count].every(value=>Number.isSafeInteger(Number(value))&&Number(value)>=0))throw unavailable("Finance page evidence unavailable");
+    lookupPage={refs:rows.flatMap(row=>row.ref===null?[]:[String(row.ref)]),documentCount:Number(row.document_count),entryCount:Number(row.entry_count)};
+    entryScope={...scope,documentRefs:lookupPage.refs};
+  }
+  const ledgerQuery=scopedFinanceSql(ADMIN_FINANCE_LEDGER_SQL,"ledger",entryScope,MAX_FACTS+1,ready.withdrawals);
+  const historyQuery=scopedFinanceSql(ADMIN_FINANCE_OBSERVATION_SQL,"history",entryScope,MAX_FACTS+1,ready.withdrawals);
   const ledger=(await client.query(ledgerQuery.text,ledgerQuery.values)).rows,history=(await client.query(historyQuery.text,historyQuery.values)).rows;
   if(ledger.length+history.length>MAX_FACTS)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Matching finance result exceeds 20000; apply a narrower subject, period or query",[{path:"finance.matchingLimit.20000",code:"INVALID_FIELD"}]);
-  const orders=await loadFinanceOrderFacts(client,ready,scope,history);
+  const orderScope=lookupPage?{...scope,orderRefs:lookupPage.refs}:scope.documentRef||scope.filters?.q.startsWith("ORDER_LINK:")?scope:{...scope,orderRefs:[]};
+  const orders=await loadFinanceOrderFacts(client,ready,orderScope,history);
   const subjectIds=[...new Set([...ledger.map(row=>row.subject_id),...history.map(row=>row.subject_id),...orders.flatMap(order=>[order.ownerId,order.renterId]),scope.subjectId,scope.filters?.scope!=="ALL"?scope.filters?.scope:undefined].filter((id):id is string=>typeof id==="string"))];
   const subjects=(await client.query(`SELECT id,COALESCE(name,id) AS name FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C"`,[subjectIds])).rows.map(row=>({id:String(row.id),name:displayName(row.name,String(row.id))}));
   let subjectCandidates:FinanceFacts["subjectCandidates"];
-  if(!scope.documentRef&&!scope.subjectId&&scope.filters?.q&&!scope.filters.q.startsWith("ORDER_LINK:")){
+  if(scope.lookup&&!scope.lookup.exact&&scope.filters?.q&&!scope.filters.q.startsWith("ORDER_LINK:")){
     const search="%"+scope.filters.q.replace(/[\\%_]/g,value=>"\\"+value).toLocaleLowerCase("zh-CN")+"%",limit=scope.pageSize??20,offset=((scope.page??1)-1)*limit;
     const predicate=`lower(id) LIKE $1 ESCAPE '\\' OR lower(COALESCE(name,'')) LIKE $1 ESCAPE '\\'`;
     const count=(await client.query(`SELECT count(*)::text AS total FROM zzsh_auth_user."user" WHERE ${predicate}`,[search])).rows[0]?.total??"0";
@@ -166,7 +174,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
         if (intent.state !== operation.outcome) entry.reasonCodes.push("LOCAL_OPERATION_NOT_APPLIED"); }
     } else entry.reasonCodes.push("WITHDRAWAL_SOURCE_UNAVAILABLE");
   }
-  return {entries,subjects,revisions:[],orders,subjectCandidates,withdrawalsReady:ready.withdrawals,asOf,version};
+  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,withdrawalsReady:ready.withdrawals,asOf,version};
 }
 
 export function filterAdminFinanceEntries(facts: FinanceFacts, filter: FinanceFilters, period: boolean): FinanceEntry[] {

@@ -23,7 +23,7 @@ for (const disposition of ["PAYOUT_POSTED", "RELEASE_POSTED", "RESERVED"] as con
   const client = { query: async (sql: string) => {
     calls.push(sql);
     if (sql.startsWith("SELECT to_regclass")) return { rows: [{ ready: true, withdrawals: true }] };
-    if (sql.startsWith("SELECT md5")) return { rows: [{ finance_version: "conflict-version" }] };
+    if (sql.includes("AS finance_version")) return { rows: [{ finance_version: "conflict-version" }] };
     if (sql.includes("clock_timestamp()")) return { rows: [{ at: facts().asOf }] };
     if (sql.startsWith("WITH finance_scoped_rows")) return { rows: sql.includes("settlement_ledger_entry") ? rows : [] };
     if (sql.startsWith("SELECT id,COALESCE(name")) return { rows: [{ id: "u1", name: "test user" }] };

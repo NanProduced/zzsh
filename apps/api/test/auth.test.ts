@@ -523,6 +523,12 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     await runBusinessMigrations(migrationPool, { runtimeUser: resources.runtimeUser });
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
+    const selfSecuritySchema = await runtimePool.query<{ commands: string | null; generations: string | null }>(
+      `SELECT to_regclass('zzsh_iam.admin_security_command')::text AS commands,
+              to_regclass('zzsh_iam.admin_backup_code_generation')::text AS generations`,
+    );
+    assert.ok(selfSecuritySchema.rows[0]?.commands && selfSecuritySchema.rows[0]?.generations,
+      "ADM-SECURITY-BACKEND-1 requires its assigned formal migrations before auth tests, including legacy no-key backup generation; do not install tmp DDL here");
     await assert.rejects(() => assertBusinessMigrationIdentity(runtimePool!, resources!.migration), /separate DDL role/);
     await assert.rejects(() => assertBusinessRuntimeIdentity(migrationPool!, resources!.runtime), /non-owner runtime role/);
     const misconfiguredRuntime = {
@@ -975,11 +981,16 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       revokeOtherSessions: false,
     }, admin, ADMIN_ORIGIN);
     assert.equal(passwordChanged.response.status, 200);
-    assert.equal(typeof passwordChanged.body?.token, "string");
+    assert.equal(passwordChanged.body?.token, undefined, "F7 改密响应不再回显原始会话 token");
+    assertNoTokenHeaders(passwordChanged.response);
     const revokedAdminOther = await request(base, "/api/auth/admin/get-session", undefined, adminOther, ADMIN_ORIGIN);
     assert.equal(revokedAdminOther.response.status, 200);
     assert.equal(revokedAdminOther.body, null);
-    const adminBearer = passwordChanged.body?.token as string;
+    // F7：正文与输出头都不回显原始 token；Bearer 改由改密后的重新登录取得。
+    const adminRelogin = await request(base, "/api/auth/admin/sign-in/username", { username: adminUsername, password: BOSS_ONE_PASSWORD }, cookieJar(), ADMIN_ORIGIN);
+    assert.equal(adminRelogin.response.status, 200);
+    const adminBearer = adminRelogin.body?.token as string;
+    assert.ok(adminBearer);
     const oldPasswordRejected = await request(base, "/api/auth/admin/sign-in/username", { username: adminUsername, password: BOSS_ONE_TEMP_PASSWORD }, cookieJar(), ADMIN_ORIGIN);
     assert.ok([401, 403].includes(oldPasswordRejected.response.status));
     const bearerSession = await request(base, "/api/auth/admin/get-session", undefined, cookieJar(), ADMIN_ORIGIN, adminBearer);
@@ -1086,6 +1097,31 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const bffBackupCodes = await request(base, "/api/bff/admin/auth/two-factor/generate-backup-codes", { password: BOSS_ONE_PASSWORD }, bffAdmin, ADMIN_ORIGIN);
     assert.equal(bffBackupCodes.response.status, 200);
     assertNoTokenHeaders(bffBackupCodes.response);
+    // Real-PG contract: legacy and keyed writers share the generation state; replay is read-only.
+    const legacyGeneration = bffBackupCodes.body?.receipt?.generation;
+    assert.ok(Number.isSafeInteger(legacyGeneration) && legacyGeneration > 0);
+    const backupCommandId = `idem_auth_pg_${randomBytes(12).toString("hex")}`;
+    const backupAttempts = await Promise.all([0, 1].map(() => request(base,
+      "/api/bff/admin/auth/two-factor/generate-backup-codes", { password: BOSS_ONE_PASSWORD },
+      bffAdmin, ADMIN_ORIGIN, undefined, { "idempotency-key": backupCommandId })));
+    assert.ok(backupAttempts.every(attempt => attempt.response.status === 200));
+    const keyedBackup = backupAttempts.find(attempt => attempt.body?.replayed !== true)!;
+    const repeatBackup = backupAttempts.find(attempt => attempt.body?.replayed === true)!;
+    assert.ok(keyedBackup && repeatBackup, "concurrent backup command executes once and replays once");
+    assert.equal(keyedBackup.body?.receipt?.generation, legacyGeneration + 1);
+    assert.equal(repeatBackup.response.status, 200);
+    assert.equal(repeatBackup.body?.replayed, true);
+    assert.ok(!("backupCodes" in (repeatBackup.body ?? {})), "replay must not disclose backup codes");
+    assert.deepEqual(repeatBackup.body?.receipt, keyedBackup.body?.receipt);
+    const backupReceipt = await request(base, "/api/bff/admin/security/operation",
+      { commandId: backupCommandId }, bffAdmin, ADMIN_ORIGIN);
+    assert.equal(backupReceipt.response.status, 200);
+    assert.equal(backupReceipt.body?.status, "completed");
+    assert.equal(backupReceipt.body?.result?.generation, legacyGeneration + 1);
+    const storedGeneration = await runtimePool.query<{ generation: number }>(
+      `SELECT generation FROM zzsh_iam.admin_backup_code_generation WHERE admin_user_id=$1`, [adminId],
+    );
+    assert.equal(storedGeneration.rows[0]?.generation, legacyGeneration + 1);
     assert.equal((await request(base, "/api/bff/admin/security/pin/set", { pin: "246810" }, bffAdmin, ADMIN_ORIGIN)).response.status, 200);
     assert.equal((await request(base, "/api/bff/admin/security/pin/lock", {}, bffAdmin, ADMIN_ORIGIN)).response.status, 200);
     const bffLockedSession = await request(base, "/api/bff/admin/session", undefined, bffAdmin, ADMIN_ORIGIN);

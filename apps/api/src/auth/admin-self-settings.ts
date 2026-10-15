@@ -55,8 +55,11 @@ export const SELF_ACTIVITY_READABLE_ACTIONS = [
   ]),
 ];
 
-const UNMOUNTED_ACTIVITY_ACTIONS = ["admin.password.changed", "admin.password.change", "admin.backup_codes.generated", "admin.backup_codes.generate", "admin.self.sessions.revoked"];
-// Readable historical actions do not imply that their held writers are mounted in R0.
+// R1 已装配本人改密与备份码 writer（含带 key 拒绝回执审计）：admin.password.changed/.change 与
+// admin.backup_codes.generated/.generate 都有实际写入点，与可读历史动作分开记录。
+// 本人其他设备注销仍未实现；sign_in/sign_out 继续不在本投影内。
+const UNMOUNTED_ACTIVITY_ACTIONS = ["admin.self.sessions.revoked"];
+// Readable historical actions do not imply that every held writer is mounted.
 export const SELF_ACTIVITY_RECORDED_ACTIONS = SELF_ACTIVITY_READABLE_ACTIONS.filter(action => !UNMOUNTED_ACTIVITY_ACTIONS.includes(action));
 export const SELF_ACTIVITY_NOT_RECORDED = ["sign_in", "sign_out", ...UNMOUNTED_ACTIVITY_ACTIONS];
 
