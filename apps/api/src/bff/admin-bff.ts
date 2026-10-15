@@ -1,5 +1,6 @@
 import type { INestApplication } from "@nestjs/common";
 
+import { handleAdminSelfSettingsRoute } from "../auth/admin-self-settings";
 import { getWorkspaceLayout, saveWorkspaceLayout } from "../auth/admin-workspace-layout";
 import {
   getAdminSessionSnapshot,
@@ -20,12 +21,17 @@ import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
 
-type NodeRequest = AuthSecurityNodeRequest & {
+type ReadEvents = { once?: (event: string, listener: () => void) => unknown; off?: (event: string, listener: () => void) => unknown };
+
+type NodeRequest = AuthSecurityNodeRequest & ReadEvents & {
+  aborted?: boolean;
   ip?: string;
   socket?: { remoteAddress?: string };
 };
 
-type NodeResponse = AuthSecurityNodeResponse & {
+type NodeResponse = AuthSecurityNodeResponse & ReadEvents & {
+  writableFinished?: boolean;
+  destroyed?: boolean;
   send?: (body: unknown) => void;
 };
 
@@ -297,6 +303,7 @@ async function forwardSecurity(
   targetPath: string,
   requestId: string,
   options: AdminBffOptions,
+  handler = handleAdminSecurity,
 ): Promise<void> {
   const captured = captureResponse();
   const forwardedHeaders: Record<string, string | string[] | undefined> = { ...request.headers, "x-request-id": requestId };
@@ -310,9 +317,19 @@ async function forwardSecurity(
     url: rewrittenPath,
     originalUrl: rewrittenPath,
     headers: forwardedHeaders,
+    aborted: request.aborted,
+    once: request.once?.bind(request),
+    off: request.off?.bind(request),
   };
+  if (handler === handleAdminSelfSettingsRoute) {
+    Object.assign(captured, { once: response.once?.bind(response), off: response.off?.bind(response) });
+    Object.defineProperties(captured, {
+      writableFinished: { get: () => response.writableFinished },
+      destroyed: { get: () => response.destroyed },
+    });
+  }
   try {
-    await handleAdminSecurity(rewritten, captured as AuthSecurityNodeResponse, options.adminSecurityOptions);
+    await handler(rewritten, captured as AuthSecurityNodeResponse, options.adminSecurityOptions);
   } catch (error) {
     if (error instanceof SecurityApiError) {
       sendError(response, error.status, error.code, error.message, requestId);
@@ -321,6 +338,7 @@ async function forwardSecurity(
     }
     return;
   }
+  if (!captured.headersSent) return;
   for (const [name, value] of captured.headers) response.setHeader(name, value);
   response.setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store");
   response.status(captured.statusCode).json(sanitizeResponse(captured.body));
@@ -515,6 +533,10 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       return;
     }
     await forwardYunxin(request, response, `/api/v1/im/admin${path.slice("/im".length)}${requestQuery(request)}`, requestId, options);
+    return;
+  }
+  if (method === "GET" && ["/self/profile", "/self/sessions", "/self/security-activity"].includes(path)) {
+    await forwardSecurity(request, response, `/api/v1/admin${path}`, requestId, options, handleAdminSelfSettingsRoute);
     return;
   }
   const targetPath = AUTH_PATHS.get(path) ?? SECURITY_PATHS.get(path);

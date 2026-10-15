@@ -31,6 +31,7 @@ import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from ".
 import { hasLegacyPhoneConflict, readUserPasswordState, type UserPasswordState } from "./legacy-login";
 import { buildUserSecurityPlugin, type UserSecurityDelivery } from "./user-security";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
+import { mountAdminSelfSettingsHandlers } from "./admin-self-settings";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
@@ -869,6 +870,7 @@ export async function mountAuthHandlers(
   );
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);
+  mountAdminSelfSettingsHandlers(app, securityOptions);
   if (options.orderImEvents) {
     const orderImEvents = { pool: options.pool, appId: options.orderImEvents.appKey,
       appSecret: options.orderImEvents.appSecret,
