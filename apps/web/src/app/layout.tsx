@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   title: "洲洲商行 · 游戏服务与高价值账号租赁门户",
   description: "洲洲商行游戏服务门户。浏览三角洲行动资源账号，了解资源费用、押金、租期与真人客服履约流程。",
   icons: {
-    icon: "/brand/zzsh-logo-variant-01.png",
+    icon: { url: "/brand/zzsh-web-favicon.png", type: "image/png", sizes: "64x64" },
   },
 };
 
