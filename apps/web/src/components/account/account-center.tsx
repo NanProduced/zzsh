@@ -23,7 +23,8 @@ import { accountStatusLabel, identityStatusLabel, type UserIdentitySnapshot } fr
 import { MembershipGrowthRequestError, readMyMembershipGrowth, type GrowthTier, type MembershipGrowthViewState } from "@/lib/membership-growth-client";
 import { readMyCredit, CreditRequestError, type CreditOverview, type CreditGuarantee } from "@/lib/credit-guarantee-client";
 import { readMyWallet, walletMoney, WalletRequestError, type WalletRead } from "@/lib/personal-wallet-client";
-import { formatOrderTime, orderApi, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
+import { formatOrderTime, orderApi, orderItemKey, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
+import { orderUrl } from "@/components/order/order-presentation";
 import { EntitlementBadge, formatScopeName, GrowthMemberCardArt, GROWTH_TIER_LABELS, MembershipCenterView } from "./membership-center";
 import { NicknameEditEntry } from "./nickname-edit";
 import type { SecurityNicknameDraft, SecurityPendingWrite } from "./account-security-controls";
@@ -121,6 +122,7 @@ export function accountSectionHref(section: AccountView, current: AccountLocatio
 }
 
 function coreStatus(order: Order): string {
+  if (order.source?.origin === "LEGACY") return order.source.statusLabel ?? "历史状态待确认";
   if (order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel) return "已到期 · 取消处理中";
   if (order.status === "CANCELLED" && order.cancelReason === "TIMEOUT") return "已取消 · 到期未支付";
   if (order.status === "CANCELLED" && order.cancelReason === "USER") return "已取消 · 租客取消";
@@ -412,7 +414,7 @@ export function AccountOverviewStrip({
 
   const creditScore = !isCreditCurrent || creditState.loading
     ? "--"
-    : creditState.data?.credit
+    : typeof creditState.data?.credit?.score === "number"
     ? String(creditState.data.credit.score)
     : "--";
 
@@ -420,6 +422,8 @@ export function AccountOverviewStrip({
     ? "正在读取信用分…"
     : creditState.error
     ? creditState.error === "登录状态已变化" ? creditState.error : "请前往详情重新读取"
+    : creditState.data?.creditState === "NOT_INITIALIZED"
+    ? "信用档案尚未初始化"
     : formatGuaranteeSummary(creditState.data?.guarantees ?? []);
 
   const isVerified = identityPhase === "ready" && identity?.identityStatus === "VERIFIED";
@@ -567,7 +571,7 @@ export function AccountPendingTasks({
   const items: PendingTaskItem[] = [];
 
   for (const order of renterStatus === "ready" ? renterOrders : []) {
-    if (order.status === "PENDING_PAYMENT" && !order.expiredAwaitingCancel) {
+    if (!order.readOnly && order.source?.origin !== "LEGACY" && order.status === "PENDING_PAYMENT" && !order.expiredAwaitingCancel) {
       items.push({
         id: `renter-${order.id}`,
         type: "renter",
@@ -704,9 +708,9 @@ export function OrderSummaryCard({
     const controller = new AbortController();
     setState({ scope, status: "loading", page: null, error: null });
     onStatusChangeRef.current?.("loading", [], false);
-    orderApi.list({ party, limit: 3 }, controller.signal).then(
+    orderApi.listUnified({ party, limit: 3 }, controller.signal).then(
       (page) => {
-        if (current === sequence.current) {
+        if (!controller.signal.aborted && current === sequence.current) {
           setState({ scope, status: "ready", page, error: null });
           onStatusChangeRef.current?.("ready", page.items, Boolean(page.nextCursor));
         }
@@ -791,9 +795,9 @@ export function OrderSummaryCard({
         {state.status === "ready" && items.length > 0 ? (
           <div className="account-recent-orders-list">
             {items.map((order) => {
-              const orderHref = accountSectionHref(rental ? "rentals" : "leased", { view: rental ? "rentals" : "leased", orderId: order.id });
+              const orderHref = orderUrl(party, "", undefined, order.id, order.source?.origin);
               return (
-                <Link key={order.id} className="account-order-row" href={orderHref} scroll={false}>
+                <Link key={orderItemKey(order)} className="account-order-row" href={orderHref} scroll={false}>
                   <div className="account-order-row-main">
                     <strong className="account-order-row-title">{order.title ?? "账号信息暂不可用"}</strong>
                     <div className="account-order-row-meta">

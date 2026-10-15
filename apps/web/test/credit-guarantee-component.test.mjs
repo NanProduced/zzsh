@@ -37,7 +37,7 @@ function setupStorage(throws = false) {
   return values;
 }
 
-function overview() { return { credit: { userId: "user-A", score: 70, revision: "1", initializedAt: "2026-01-01", events: [] }, recoveryRequests: [], guarantees: [], transactions: [] }; }
+function overview() { return { creditState: "INITIALIZED", credit: { userId: "user-A", score: 70, revision: "1", initializedAt: "2026-01-01", events: [] }, recoveryRequests: [], guarantees: [], transactions: [] }; }
 function historyOverview() { return { ...overview(), transactions: [{ requirementId: "req-1", accountId: "account-1", paymentStatus: "CONFIRMED", refundStatus: "UNKNOWN", paymentFinanceEventId: "event-2", refundFinanceEventId: null, paymentHistory: [{ id: "pay-1", requirementId: "req-1", merchantOrderNo: "merchant-1", amountCents: "500", status: "FAILED", providerTransactionId: null, financeEventId: null, ledgerEntryRef: null }, { id: "pay-2", requirementId: "req-1", merchantOrderNo: "merchant-2", amountCents: "500", observedAmountCents: "500", status: "CONFIRMED", providerTransactionId: "provider-2", financeEventId: "event-2", ledgerEntryRef: "line-2" }], refundHistory: [{ id: "refund-1", requirementId: "req-1", paymentId: "pay-2", amountCents: "500", status: "FAILED", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }, { id: "refund-2", requirementId: "req-1", paymentId: "pay-2", amountCents: "500", status: "UNKNOWN", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }] }] }; }
 
 async function mount(fetchImpl) {
@@ -78,6 +78,27 @@ test("credit write library still refuses a POST when the original intent cannot 
   const client = loadTs(clientPath);
   const intent = client.makeCreditWriteIntent("user-A:1", "/recovery-requests", { reason: "申请说明" });
   await assert.rejects(client.submitCreditWrite(intent), error => error.code === "WRITE_INTENT_STORAGE_UNAVAILABLE");
+});
+
+test("credit read distinguishes explicit uninitialized state from legacy unknown and rejects contradictions", async () => {
+  const original = globalThis.fetch, client = loadTs(clientPath);
+  try {
+    const missing = { ...overview(), creditState: "NOT_INITIALIZED", credit: null };
+    globalThis.fetch = async (_url, init) => { assert.equal(init.method, "GET");return Response.json(missing); };
+    assert.equal((await client.readMyCredit()).creditState, "NOT_INITIALIZED");
+    const { creditState: _state, ...legacy } = missing;
+    globalThis.fetch = async () => Response.json(legacy);assert.equal((await client.readMyCredit()).creditState, "UNKNOWN");
+    for (const body of [{ ...overview(), creditState: "NOT_INITIALIZED" }, { ...missing, creditState: "INITIALIZED" }, { ...missing, creditState: "INVENTED" }]) {
+      globalThis.fetch = async () => Response.json(body);await assert.rejects(() => client.readMyCredit(), error => error.code === "CREDIT_CONTRACT_REQUIRED");
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test("credit page presents uninitialized state and does not submit any initialization or command", async () => {
+  const calls = [],mounted = await mount(async (url, init) => { calls.push({url:String(url),method:init?.method});return Response.json({ ...overview(), creditState: "NOT_INITIALIZED", credit: null }); });
+  try {
+    assert.match(mounted.host.textContent, /信用档案尚未初始化/);assert.equal(mounted.host.querySelector('[role="meter"]'),null);assert.ok(calls.every(call => call.method === "GET"));assert.doesNotMatch(mounted.host.textContent,/100分/);
+  } finally { await React.act(async () => mounted.root.unmount());await mounted.browser.happyDOM.abort(); }
 });
 
 test("read page preserves accepted intent across refresh and never replays or clears it", async () => {

@@ -1,8 +1,10 @@
 # 信用与号主保证金运行合同
 
-信用/保证金属于显式部署能力。`CREDIT_GUARANTEE_ENABLED`只接受`true`或`false`，默认`false`。关闭时不挂信用路由，不在新用户注册事务访问信用表，正式供给继续原有G0政策/proof门禁；这不表示既有保证金责任消失或可删除。读取/处理既有信用责任应使用已审schema就绪的受控启用环境，不能通过清库解除。
+信用/保证金纯读在正式认证应用中常态挂载。`CREDIT_GUARANTEE_ENABLED`只接受`true`或`false`，默认`false`；继续控制信用/保证金命令、新用户注册初始化及正式资金gate接线。关闭命令不隐藏既有读取，也不表示既有责任消失或可以清理；供给仍保留原G0政策/proof门禁。
 
-开启前必须完成正式迁移`0067_credit_guarantee_contract`和`applyRuntimePrivileges`。启动检查七张表可读、`zzsh_credit.runtime_contract_version()=1`及runtime不能CREATE该schema；缺失/部分部署/权限错误阻止启动。运行中依赖故障维持UNKNOWN并拒绝新发布/确认/建单，不退回免缴。仅设置开关不执行迁移、赋权或回填。
+正式应用必须已完成迁移`0067_credit_guarantee_contract`和`applyRuntimePrivileges`。启动始终检查七张表可读、`zzsh_credit.runtime_contract_version()=1`及runtime不能CREATE该schema；缺失/部分部署/权限错误阻止启动，不因命令关闭而跳过。运行中依赖故障维持UNKNOWN并拒绝新发布/确认/建单，不退回免缴；读取装配不执行迁移、赋权或回填。
+
+本人信用overview使用`readCreditSnapshot(...,false)`，不建立100分状态或INITIALIZED事件。返回`creditState=INITIALIZED|NOT_INITIALIZED`，缺档案时`credit=null`并保留原保证金/恢复申请/收退尝试的读取；不能据缺档案或空责任列表推断免缴、零信用或历史资金已清。客户端遇旧服务缺少creditState时保留UNKNOWN。读取保持身份、session、对象/游戏权限及原事务复核锁，不开放恢复申请、支付、退款或管理员决策；这些命令仍要求原部署能力与正式权限。
 
 新schema为已有用户建立100分初始状态和INITIALIZED事件，并定义四项管理权限，不给管理员自动授角色/游戏范围。启用后的新用户注册在原事务初始化信用；分销/原生钱包初始化顺序和独立准入边界保持。保证金沿既有经济根、finance_event与ledger记账，不增加第二总账。
 

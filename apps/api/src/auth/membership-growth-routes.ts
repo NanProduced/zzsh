@@ -52,7 +52,7 @@ function policyCatalog(policy: GrowthBenefitPolicy | null, priceVersionId: strin
 export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeRequest, response: SupplyResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
-    if (!membershipGrowthEnabled() || !originAllowed(request, options, true)) throw notFound();
+    if (!originAllowed(request, options, true) || (request.method !== "GET" && !membershipGrowthEnabled())) throw notFound();
     const path = (request.originalUrl ?? request.url ?? "").split("?", 1)[0] ?? "";
     const context = await readAdminContext(request, options);
     if (request.method === "POST" && path === "/api/v1/admin/membership-growth/backfill") {
@@ -125,7 +125,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
 export async function handleMembershipGrowthUser(request: SupplyNodeRequest, response: SupplyResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
-    if (!membershipGrowthEnabled() || request.method !== "GET" || (request.originalUrl ?? request.url ?? "").split("?", 1)[0] !== "/api/v1/users/me/membership-growth") throw notFound();
+    if (request.method !== "GET" || (request.originalUrl ?? request.url ?? "").split("?", 1)[0] !== "/api/v1/users/me/membership-growth") throw notFound();
     const context = await readUserContext(request, options);
     const result = await withTransaction(options.pool, async (client) => {
       await assertReplayAuthorization(client, context);
@@ -139,7 +139,7 @@ export async function handleMembershipGrowthUser(request: SupplyNodeRequest, res
 export async function handleMembershipGrowthAdmin(request: SupplyNodeRequest, response: SupplyResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
-    if (!membershipGrowthEnabled() || request.method !== "GET" || !originAllowed(request, options, true)) throw notFound();
+    if (request.method !== "GET" || !originAllowed(request, options, true)) throw notFound();
     const path = (request.originalUrl ?? request.url ?? "").split("?", 1)[0] ?? "";
     const match = /^\/api\/v1\/admin\/users\/([^/]+)\/membership-growth$/.exec(path);
     if (!match) throw notFound();

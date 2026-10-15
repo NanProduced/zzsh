@@ -33,11 +33,11 @@ test("membership growth client keeps known and unknown source states distinct", 
   }
 });
 
-test("feature-off API stays a visible unknown state", async () => {
+test("a missing formal read endpoint is a read error rather than source UNKNOWN", async () => {
   const original = globalThis.fetch;
   try {
     globalThis.fetch = async () => new Response(null, { status: 404 });
-    assert.deepEqual(await readMyMembershipGrowth(), { status: "unknown", message: "成长服务尚未接线" });
+    await assert.rejects(() => readMyMembershipGrowth(), error => error.status === 404);
   } finally {
     globalThis.fetch = original;
   }

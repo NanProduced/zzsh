@@ -6,6 +6,8 @@
 
 `zzsh_iam.user_rental_membership` 以user_id为主键。可报价档位为STANDARD/VIP/SVIP/DISCOUNT_USER；UNKNOWN仅表示资格未知。0040不回填已有用户；缺记录的读取结果为UNKNOWN、version="0"。新平台用户插入由数据库触发器在同一事务内建立STANDARD/version=1/source_ref=registration:v1，覆盖用户名与手机注册；初始化失败使用户插入一并失败。未来历史导入必须明确写入受权资格或UNKNOWN，不把新身份初始化当作旧会员映射。
 
+成长来源核验同时读取`user.legacy_owner.migrated`成功审计。该证明存在时，registration:v1不能表示旧成长为零，已有新原生结算也不能证明此前历史完整；来源继续BACKFILL_PENDING、积分/等级保持UNKNOWN，来源冲突仍单独返回SOURCE_CONFLICT。不重写迁移审计、insert proof或会员政策。真正原生registration:v1且无迁移证明仍沿原完整零成长语义；查询失败不推断为原生。用户及已授权Admin成长GET常态可达，来源未核/政策未配置作为结构状态返回；原报价应用、审批/发放、维护回填和结算贡献写开关仍独立保留。
+
 资格更新先锁目标user，再核expectedVersion，首次赋值为1、后续严格+1，DB负责更新时间。同一事务保存前后来源、原因、实际管理员与审计；失败不留资格或幂等成功记录。无有效注册来源或管理员归属的来源不用于报价，返回UNKNOWN。资格不存入客户端可写profile。
 
 - 管理读/改：`GET/PUT /api/v1/admin/users/{id}/rental-membership`，同源Admin BFF对应`/api/bff/admin/users/{id}/rental-membership`。读写均需`user.rental_membership.manage`；权限只注册，不默认授普通客服。写body严格为`{tier,expectedVersion,sourceRef,reason}`，要求Idempotency-Key，沿用现有成功重放/异体同key冲突合同。

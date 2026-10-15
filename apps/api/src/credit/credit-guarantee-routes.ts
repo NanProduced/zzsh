@@ -89,7 +89,7 @@ async function readRecoveryRequests(client: PoolClient, userId: string) {
   return (await client.query(`SELECT id,status,reason,score_before AS "scoreBefore",completed_orders AS "completedOrders",decision_reason AS "decisionReason",created_at::text AS "createdAt",decided_at::text AS "decidedAt" FROM zzsh_credit.credit_recovery_request WHERE user_id=$1 ORDER BY created_at DESC,id DESC`, [userId])).rows;
 }
 
-export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthSecurityOptions): void {
+export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthSecurityOptions, commandsEnabled = false): void {
   const express = app.getHttpAdapter().getInstance();
   const userPrefixes = ["/api/v1/users/me/credit", "/api/bff/user/credit"];
   for (const prefix of userPrefixes) {
@@ -99,13 +99,14 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
         originAllowed(request, options, false);
         const { path, url } = pathOf(request, prefix);
         const method = (request.method ?? "GET").toUpperCase();
+        if (method !== "GET" && !commandsEnabled) throw notFound();
         const context = await readUserContext(request, options);
         const body = await withTransaction(options.pool, async (client) => {
           await assertUserContextInTransaction(client, context);
           if (method === "GET" && (path === "/" || path === "/overview")) {
             if (url.search) throw notFound();
-            const credit = await readCreditSnapshot(client, context.userId, true);
-            return { credit: credit ? { ...credit, events: credit.events.map((event) => userEvent(event as unknown as Record<string, unknown>)) } : null, recoveryRequests: await readRecoveryRequests(client, context.userId), guarantees: await ownedGuarantees(client, context.userId), transactions: await readGuaranteeTransactions(client, context.userId) };
+            const credit = await readCreditSnapshot(client, context.userId, false);
+            return { creditState: credit ? "INITIALIZED" : "NOT_INITIALIZED", credit: credit ? { ...credit, events: credit.events.map((event) => userEvent(event as unknown as Record<string, unknown>)) } : null, recoveryRequests: await readRecoveryRequests(client, context.userId), guarantees: await ownedGuarantees(client, context.userId), transactions: await readGuaranteeTransactions(client, context.userId) };
           }
           if (method === "POST" && path === "/recovery-requests") {
             const input = bodyOf(request);
@@ -149,6 +150,8 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
       return safely(response, requestId, async () => {
         originAllowed(request, options, true);
         const { path, url } = pathOf(request, prefix);
+        const method = (request.method ?? "GET").toUpperCase();
+        if (method !== "GET" && !commandsEnabled) throw notFound();
         const context = await readAdminContext(request, options);
         const body = await withTransaction(options.pool, async (client) => {
           await assertAdminContextInTransaction(client, context);

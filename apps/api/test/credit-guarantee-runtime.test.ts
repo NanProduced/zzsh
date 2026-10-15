@@ -4,10 +4,10 @@ import { CREDIT_TABLES, preflightCreditGuarantee, readCreditGuaranteeEnabled } f
 import { configureCreditGuaranteePrivileges } from "../src/database/business-migrations";
 import { mountAuthHandlers } from "../src/auth/auth-runtime";
 
-test("credit capability defaults off, rejects ambiguous flags and never probes old schema while off", async () => {
+test("credit commands default off but formal reads still require schema and runtime privileges", async () => {
   assert.equal(readCreditGuaranteeEnabled({}),false);assert.equal(readCreditGuaranteeEnabled({CREDIT_GUARANTEE_ENABLED:"true"}),true);
   for(const value of ["1","yes","TRUE",""])assert.throws(()=>readCreditGuaranteeEnabled({CREDIT_GUARANTEE_ENABLED:value}));
-  await preflightCreditGuarantee({query:async()=>{throw Error("must not query");}} as never,false);
+  await assert.rejects(()=>preflightCreditGuarantee({query:async()=>{throw Error("schema absent");}} as never),/schema or runtime privileges/);
 });
 
 test("enabled deployment fails before mounting auth when schema/ACL/contract is incomplete",async()=>{
@@ -17,10 +17,11 @@ test("enabled deployment fails before mounting auth when schema/ACL/contract is 
       if(sql.includes("unnest"))return{rows:CREDIT_TABLES.map((name,i)=>({name,present:failure!=="absent"&&!(failure==="partial"&&i===1),readable:failure!=="unreadable"}))};
       return{rows:[{version:failure==="version"?2:1,schemaCreate:failure==="schema-owner"}]};
     }} as never;
-    await assert.rejects(()=>preflightCreditGuarantee(pool,true),/schema or runtime privileges/);
+    await assert.rejects(()=>preflightCreditGuarantee(pool),/schema or runtime privileges/);
     await assert.rejects(()=>mountAuthHandlers({} as never,{pool,creditGuaranteeEnabled:true} as never),/schema or runtime privileges/);
+    await assert.rejects(()=>mountAuthHandlers({} as never,{pool,creditGuaranteeEnabled:false} as never),/schema or runtime privileges/);
   }
-  await preflightCreditGuarantee({query:async(sql:string)=>({rows:sql.includes("unnest")?CREDIT_TABLES.map(name=>({name,present:true,readable:true})):[{version:1,schemaCreate:false}]})} as never,true);
+  await preflightCreditGuarantee({query:async(sql:string)=>({rows:sql.includes("unnest")?CREDIT_TABLES.map(name=>({name,present:true,readable:true})):[{version:1,schemaCreate:false}]})} as never);
 });
 
 test("credit ACL converges all columns without granting event/reconciliation updates or deletes",async()=>{

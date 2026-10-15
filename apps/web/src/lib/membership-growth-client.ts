@@ -123,7 +123,6 @@ export async function readMyMembershipGrowth(signal?: AbortSignal): Promise<Memb
   const body = await response.json().catch(() => null);
   if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
   if (response.status === 403) return { status: "permission", message: "当前身份没有查看成长档案的权限" };
-  if (response.status === 404) return { status: "unknown", message: "成长服务尚未接线" };
   if (response.status === 401) throw new MembershipGrowthRequestError(response.status, body);
   if (!response.ok || !isRecord(body)) throw new MembershipGrowthRequestError(response.status, body);
   const growth = isRecord(body.growth) ? body.growth : null;

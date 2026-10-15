@@ -89,6 +89,12 @@ function loadCenter(session) {
       identityStatusLabel: (status) => ({ VERIFIED: "实名已验证", UNVERIFIED: "尚未验证", REJECTED: "实名未通过", UNKNOWN: "暂无法确认" })[status],
     };
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
+    if (name === "@/components/order/order-presentation") {
+      const file = path.join(tree, "apps/web/src/components/order/order-presentation.tsx");
+      const child = new Module(file); child.filename = file; child.paths = Module._nodeModulePaths(tree); child.require = module.require;
+      child._compile(typescript.transpileModule(fs.readFileSync(file, "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
+      return child.exports;
+    }
     if (name === "@/lib/membership-client") return requireFromTree(path.join(tree, "apps/web/src/lib/membership-client.ts"));
     if (name === "@/lib/membership-growth-client") {
       const MockGrowthError = class MembershipGrowthRequestError extends Error {
@@ -178,7 +184,7 @@ async function createProbe(fetchImpl, options = {}) {
     if (authReply) return authReply;
     if (url.endsWith("/get-session")) return Promise.resolve(json({ user: { id: session.userId, phoneNumber: "13800138000" } }));
     if (url.endsWith("/identity/status")) return Promise.resolve(json({ accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", eligibleForProtectedTrade: true }));
-    if (url.includes("/api/account/credit") || url.includes("/credit/overview")) return Promise.resolve(json({ credit: { userId: session.userId, score: 100, revision: "1", initializedAt: "2026-09-01", events: [] }, recoveryRequests: [], guarantees: [], transactions: [] }));
+    if (url.includes("/api/account/credit") || url.includes("/credit/overview")) return Promise.resolve(json(options.credit ?? { creditState: "INITIALIZED", credit: { userId: session.userId, score: 100, revision: "1", initializedAt: "2026-09-01", events: [] }, recoveryRequests: [], guarantees: [], transactions: [] }));
     if (url.includes("/api/account/membership-growth")) {
       const growthReply = options.growthFetch?.(url);
       if (growthReply) return growthReply;
@@ -218,6 +224,42 @@ async function createProbe(fetchImpl, options = {}) {
 const emptyPage = { items: [], nextCursor: null, limit: 100 };
 const orderA = { id: "order_A", displayNo: "A-001", title: "PRIVATE_ORDER_A", status: "PENDING_PAYMENT" };
 const orderB = { id: "order_B", displayNo: "B-001", title: "PRIVATE_ORDER_B", status: "PAID" };
+
+for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read shows ${mode} records with safe detail links and native-only tasks`, async () => {
+  const old = { ...orderA, id: "same-id", title: "SYNTHETIC_OLD", source: { origin: "LEGACY", statusLabel: "历史待支付" }, readOnly: true, paymentOpen: false, cancelOpen: false };
+  const native = { ...orderA, id: "same-id", title: "SYNTHETIC_NATIVE", source: { origin: "NATIVE" }, readOnly: false };
+  const items = mode === "legacy" ? [old] : mode === "native" ? [native] : [old, native];
+  const calls = [];
+  const probe = await createProbe(async (input, init) => {
+    const url = new URL(String(input), "http://synthetic.invalid");calls.push(url);
+    assert.equal(init?.method ?? "GET", "GET");
+    if (url.pathname === "/api/orders/unified") return json({ items, nextCursor: "synthetic-more", limit: 3 });
+    return json(emptyPage);
+  });
+  try {
+    await probe.render(React.createElement(probe.center.AccountOverview, { scope: "user_A:1" }));
+    const reads = calls.filter(url => url.pathname.includes("/orders"));
+    assert.equal(reads.length, 2);assert.ok(reads.every(url => url.pathname === "/api/orders/unified" && url.searchParams.get("limit") === "3"));
+    assert.deepEqual(reads.map(url => url.searchParams.get("party")).sort(), ["owner", "renter"]);
+    const card = probe.host.querySelector("[data-testid=order-summary-renter]");
+    assert.equal(card.querySelectorAll(".account-order-row").length, items.length);assert.doesNotMatch(card.textContent, /暂无租入记录/);
+    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.title));
+    const links = [...card.querySelectorAll(".account-order-row")].map(node => new URL(node.href));
+    assert.deepEqual(links.map(url => url.searchParams.get("source")), items.map(item => item.readOnly ? "legacy" : null));
+    assert.ok(links.every(url => url.searchParams.get("orderId") === "same-id" && url.searchParams.get("view") === "rentals"));
+    assert.match(card.textContent, /还有更多订单/);
+    assert.equal(probe.host.querySelectorAll(".account-pending-row").length, mode === "legacy" ? 0 : 1);
+    if (mode !== "native") assert.match(card.textContent, /历史待支付/);
+  } finally { await probe.dispose(); }
+});
+
+test("overview explicitly uninitialized credit never displays a fabricated score", async () => {
+  const probe = await createProbe(async () => json(emptyPage), { credit: { creditState: "NOT_INITIALIZED", credit: null, recoveryRequests: [], guarantees: [], transactions: [] } });
+  try {
+    await probe.render(React.createElement(probe.center.AccountOverview, { scope: "user_A:1" }));
+    const card = probe.host.querySelector(".account-credit-preview");assert.match(card.textContent, /信用档案尚未初始化/);assert.equal(card.querySelector("[role=meter]"), null);assert.doesNotMatch(card.textContent, /100/);
+  } finally { await probe.dispose(); }
+});
 
 function json(body, status = 200) {
   return Response.json(body, { status });

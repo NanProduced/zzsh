@@ -621,7 +621,7 @@ export async function mountAuthHandlers(
   assertLocalDistributionAssembly(options.distributionScope, options);
   const legacyPublicAdmission=options.legacyPublicAdmission ? parseLegacyPublicAdmission(options.legacyPublicAdmission) : undefined;
   if(legacyPublicAdmission) await assertLegacyPublicAdmissionTarget(options.pool,legacyPublicAdmission);
-  await preflightCreditGuarantee(options.pool, options.creditGuaranteeEnabled === true);
+  await preflightCreditGuarantee(options.pool);
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
     import("@better-auth/drizzle-adapter"),
@@ -916,7 +916,7 @@ export async function mountAuthHandlers(
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
-  if (options.creditGuaranteeEnabled === true) mountCreditGuaranteeRoutes(app, securityOptions);
+  mountCreditGuaranteeRoutes(app, securityOptions, options.creditGuaranteeEnabled === true);
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,

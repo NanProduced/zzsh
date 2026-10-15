@@ -223,7 +223,11 @@ export async function readGrowthSourceCompleteness(client: PoolClient, userId: s
   if (expectedDetails.some((entry) => !entry.valid)) return { state: "SOURCE_CONFLICT", expectedSourceKeys: [], presentSourceKeys: [...new Set(contributions.filter((row) => row.status !== "PENDING").map((row) => row.sourceKey))].sort(), missingSourceKeys: [], reasons: ["FORMAL_SOURCE_SNAPSHOT_INVALID"] };
   const expectedSources = expectedDetails.flatMap((entry) => entry.sources);
   const expected = expectedSources.map((source) => source.sourceKey);
-  const proof = sourceRows.length > 0 ? "FORMAL_SETTLEMENTS" : registrationSourceRef === "registration:v1" ? "REGISTRATION_ZERO" : "UNKNOWN";
+  const provenance = (await client.query<{ migrated: boolean }>(
+    `SELECT EXISTS(SELECT 1 FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='user.legacy_owner.migrated' AND outcome='SUCCESS') AS migrated`, [userId],
+  )).rows[0];
+  if (typeof provenance?.migrated !== "boolean") throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Growth source proof is unavailable");
+  const proof = sourceRows.length > 0 ? "FORMAL_SETTLEMENTS" : !provenance.migrated && registrationSourceRef === "registration:v1" ? "REGISTRATION_ZERO" : "UNKNOWN";
   const assessed = assessGrowthSourceCompleteness(expected, contributions, proof);
   const rowsByKey = new Map<string, CompletenessContribution[]>();
   for (const row of contributions) {
@@ -251,7 +255,8 @@ export async function readGrowthSourceCompleteness(client: PoolClient, userId: s
   const expectedSet = new Set(expected);
   for (const row of contributions) if (row.status !== "PENDING" && !expectedSet.has(row.sourceKey) && !(row.correctionOf && expectedSet.has(row.correctionOf))) conflicts.push(row.sourceKey);
   if (conflicts.length > 0) return { ...assessed, state: "SOURCE_CONFLICT", reasons: [...(assessed.reasons ?? []), ...[...new Set(conflicts)].map((sourceKey) => `CONTRIBUTION_BINDING_INVALID:${sourceKey}`)] };
-  return assessed;
+  // Native settlements cannot prove the migrated subject's earlier growth history.
+  return provenance.migrated ? { ...assessed, state: "BACKFILL_PENDING", reasons: [...(assessed.reasons ?? []), "MIGRATED_SOURCE_NOT_PROVED"] } : assessed;
 }
 
 export type GrowthContributionWriteResult = {

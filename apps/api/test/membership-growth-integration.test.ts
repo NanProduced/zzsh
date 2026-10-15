@@ -235,7 +235,7 @@ function quoteInput(): QuoteInput {
   return { priceVersionId: "price-v1", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1", customerTier: "STANDARD", haffRule: compatRule(), lines: [{ itemId: "haff", quantity: "60000000", pricingKind: "HAFF_RATIO", unit: "HAFF_BASE", customerTier: "STANDARD" }], conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } }, termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" }, deposits: { tenantDepositCents: "30000", publisherBailRequirementCents: "0" } };
 }
 
-function growthReaderClient(state: { normalTier: string; effectiveTier: string; blackGoldState: string; lastTierDropAt: string | null }, contributions: GrowthContribution[], policy: GrowthBenefitPolicy, sourceAmount: string | null = "10000.00", sourceHash = "a".repeat(64)) {
+function growthReaderClient(state: { normalTier: string; effectiveTier: string; blackGoldState: string; lastTierDropAt: string | null }, contributions: GrowthContribution[], policy: GrowthBenefitPolicy, sourceAmount: string | null = "10000.00", sourceHash = "a".repeat(64), migrated = false) {
   const source = { settlementVersionId: "settlement-1", versionNo: 1, versionHash: sourceHash, userId: "user-1", gameId: "game-1", inputSnapshot: { schema: "settlement-version-v2", amounts: { ...(sourceAmount === null ? {} : { haffConsumedBuyer: sourceAmount }), itemConsumedBuyer: "0.00" } } };
   return { query: async (sql: string) => {
     if (sql.includes('SELECT id FROM zzsh_auth_user')) return { rows: [{ id: "user-1" }] };
@@ -243,6 +243,7 @@ function growthReaderClient(state: { normalTier: string; effectiveTier: string; 
     if (sql.includes('FROM zzsh_iam.user_rental_membership')) return { rows: [{ sourceRef: "legacy:manual" }] };
     if (sql.includes('FROM zzsh_iam.membership_growth_state')) return { rows: [state] };
     if (sql.includes('FROM zzsh_order.rental_order')) return { rows: [source] };
+    if (sql.includes("user.legacy_owner.migrated")) return { rows: [{ migrated }] };
     if (sql.includes('FROM zzsh_iam.membership_growth_policy')) return { rows: [{ id: "policy-1", version: "1", policyPayload: policy }] };
     if (sql.includes('FROM zzsh_iam.membership_entitlement')) return { rows: [] };
     throw new Error(`unexpected query: ${sql}`);
@@ -285,6 +286,17 @@ test("invalid, missing, wrong-amount and wrong-version formal sources fail close
   const badDigestRow = { ...validRow, sourceDigest: "wrong-digest" };
   assert.equal((await readGrowthSourceCompleteness(growthReaderClient(state, [badDigestRow], policy), "user-1", [badDigestRow], "legacy:manual")).state, "SOURCE_CONFLICT");
   assert.equal((await readGrowthSourceCompleteness(growthReaderClient(state, [validRow], policy, "10000.00", "b".repeat(64)), "user-1", [validRow], "legacy:manual")).state, "SOURCE_CONFLICT");
+});
+
+test("native settlement coverage cannot close a migrated subject's earlier unknown history", async () => {
+  const state = { normalTier: "STANDARD", effectiveTier: "STANDARD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const row = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-01T00:00:00.000Z", recordedAt: "2026-10-01T00:00:00.000Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const valid = { ...row, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", row) };
+  const client = growthReaderClient(state, [valid], readerPolicy(), "10000.00", "a".repeat(64), true);
+  const result = await readGrowthSourceCompleteness(client, "user-1", [valid], "registration:v1");
+  assert.equal(result.state, "BACKFILL_PENDING");assert.ok(result.reasons?.includes("MIGRATED_SOURCE_NOT_PROVED"));
+  const bad = { ...valid, sourceDigest: "wrong-digest" };
+  assert.equal((await readGrowthSourceCompleteness(growthReaderClient(state, [bad], readerPolicy(), "10000.00", "a".repeat(64), true), "user-1", [bad], "registration:v1")).state, "SOURCE_CONFLICT");
 });
 
 test("replacement locks and rejects a different recipient before any new row is inserted", async () => {

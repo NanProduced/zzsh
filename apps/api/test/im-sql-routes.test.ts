@@ -184,7 +184,7 @@ test("admin identity listing does not expose the provider marker", async () => {
 test("test IM seams fail closed without the explicit test capability", async () => {
   await assert.rejects(
     mountAuthHandlers({} as never, {
-      pool: {} as never,
+      pool: { query: async (sql: string, args: any[]) => ({ rows: sql.includes("unnest") ? args[0].map((name: string) => ({ name, present: true, readable: true })) : [{ version: 1, schemaCreate: false }] }) } as never,
       apiOrigin: "http://127.0.0.1:3102",
       userOrigin: "http://127.0.0.1:3100",
       adminOrigin: "http://127.0.0.1:3101",

@@ -49,7 +49,7 @@ export type CreditRecoveryRequest = { id: string; status: "PENDING" | "APPROVED"
 export type CreditPaymentAttempt = Record<string, unknown> & { id: string; requirementId: string; status: string; amountCents: string };
 export type CreditRefundAttempt = Record<string, unknown> & { id: string; requirementId: string; paymentId: string; status: string; amountCents: string };
 export type CreditTransaction = Record<string, unknown> & { requirementId: string; accountId: string; paymentHistory: CreditPaymentAttempt[]; refundHistory: CreditRefundAttempt[] };
-export type CreditOverview = { credit: { userId: string; score: number | null; revision: string; initializedAt: string; events: CreditEvent[] } | null; recoveryRequests: CreditRecoveryRequest[]; guarantees: CreditGuarantee[]; transactions: CreditTransaction[] };
+export type CreditOverview = { creditState: "INITIALIZED" | "NOT_INITIALIZED" | "UNKNOWN"; credit: { userId: string; score: number | null; revision: string; initializedAt: string; events: CreditEvent[] } | null; recoveryRequests: CreditRecoveryRequest[]; guarantees: CreditGuarantee[]; transactions: CreditTransaction[] };
 
 export class CreditRequestError extends Error {
   constructor(readonly status: number, readonly code: string, readonly unknownResult = false) { super(code); this.name = "CreditRequestError"; }
@@ -133,6 +133,8 @@ async function request(path: string, method: "GET" | "POST", body: Record<string
 export async function readMyCredit(signal?: AbortSignal): Promise<CreditOverview> {
   const payload = object(await request("/overview", "GET", undefined, signal));
   const credit = payload.credit === null ? null : (() => { const row = object(payload.credit); return { userId: text(row.userId), score: row.score === null ? null : score(row.score), revision: text(row.revision), initializedAt: text(row.initializedAt, 40), events: Array.isArray(row.events) ? row.events.map(event) : [] }; })();
+  const creditState = payload.creditState === undefined ? "UNKNOWN" : payload.creditState;
+  if (!["INITIALIZED", "NOT_INITIALIZED", "UNKNOWN"].includes(creditState) || (creditState === "INITIALIZED" && !credit) || (creditState === "NOT_INITIALIZED" && credit)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
   const recoveryRequests: CreditRecoveryRequest[] = Array.isArray(payload.recoveryRequests) ? payload.recoveryRequests.map((value: unknown) => {
     const row = object(value);
     if (!["PENDING", "APPROVED", "REJECTED"].includes(row.status)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
@@ -140,7 +142,7 @@ export async function readMyCredit(signal?: AbortSignal): Promise<CreditOverview
   }) : [];
   const guarantees = Array.isArray(payload.guarantees) ? payload.guarantees.map(guarantee) : [];
   const transactions = Array.isArray(payload.transactions) ? payload.transactions.map((value: unknown) => { const row = object(value); const paymentHistory = Array.isArray(row.paymentHistory) ? row.paymentHistory.map((attempt: unknown) => { const item = object(attempt); return { ...item, id: text(item.id), requirementId: text(item.requirementId), status: text(item.status), amountCents: cents(item.amountCents) }; }) : []; const refundHistory = Array.isArray(row.refundHistory) ? row.refundHistory.map((attempt: unknown) => { const item = object(attempt); return { ...item, id: text(item.id), requirementId: text(item.requirementId), paymentId: text(item.paymentId), status: text(item.status), amountCents: cents(item.amountCents) }; }) : []; return { ...row, requirementId: text(row.requirementId), accountId: text(row.accountId), paymentHistory, refundHistory }; }) : [];
-  return { credit, recoveryRequests, guarantees, transactions };
+  return { creditState, credit, recoveryRequests, guarantees, transactions };
 }
 export async function submitCreditWrite(intent: CreditWriteIntent | null, signal?: AbortSignal) { if (!intent?.persisted) throw new CreditRequestError(0, "WRITE_INTENT_STORAGE_UNAVAILABLE"); return request(intent.path, "POST", intent.body, signal, intent.key); }
 function implicitIntent(path: string, body: Record<string, unknown>): CreditWriteIntent | null { const subject = `implicit:${path}:${JSON.stringify(body)}`; return loadCreditWriteIntent(subject) ?? makeCreditWriteIntent(subject, path, body); }
