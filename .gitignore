@@ -42,13 +42,18 @@ playwright-report/
 .idea/
 .vscode/
 # Machine-local skills, installer metadata and Windows junctions
-/.agents/
 /skills-lock.json
-/.claude/skills/
 .DS_Store
 Thumbs.db
 __pycache__/
 *.pyc
+
+# AI configuration and state
+.agents/
+.agent-teams/
+.claude/
+.dsh/
+.dsh-tool-vision/
 
 # Serena project configuration and caches are machine-local
 .serena/

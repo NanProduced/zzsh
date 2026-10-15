@@ -20,11 +20,13 @@
 
 ## Serena 项目范围
 
-- 禁止在 monorepo 根目录或其父目录注册、创建配置或激活 Serena project。禁止 `activate_project(".")` 在根目录执行。
-- 仅注册三个项目：`zzsh-admin` → `apps/admin`、`zzsh-api` → `apps/api`、`zzsh-web` → `apps/web`。每次使用 Serena 前读 initial_instructions，并按当前任务 activate 对应项目；切换后确认名称和根路径。
+- 禁止在 monorepo 根目录或其父目录注册、创建配置或激活 Serena project。禁止 `activate_project(".")` 在根目录执行，也不要把 `D:\CodexWorktrees`、`E:\zzsh\worktrees` 或其他 worktree 容器注册为项目。
+- 对本 ZZSH 主检出，仅注册三个项目：`zzsh-admin` → `apps/admin`、`zzsh-api` → `apps/api`、`zzsh-web` → `apps/web`。Serena 的全局 registry 可以保留其他仓库项目，不因本规则删除它们。每次使用 Serena 前读 initial_instructions，并按当前任务 activate 对应项目；切换后用 get_current_config 确认名称、根路径和语言服务器状态。
+- Serena 1.7+ 的各项目 `project.yml` 使用 `language_servers`（不是旧的 `languages`），`ls_workspace_folders` 只指向当前子项目根；通过 MCP 配置启动时优先使用该子项目的显式 `--project` 路径，`--project-from-cwd` 只能从对应子项目目录启动。
 - 跨应用任务按步骤切换项目，再使用该项目内相对路径；不要并发切换同一个 Serena 会话，也不要沿用上一项目的符号结果。单项目引用结果不代表整个 monorepo 的引用已穷尽。
 - 修改共享 packages、根配置或文档时使用普通文件工具和受控 rg 搜索，跨端改动分别检查调用方；不得为方便把 Serena 根扩大到整个仓库。
-- `.serena` 项目配置、initial_prompt、缓存、日志和 memories 均为本机状态，由根 `.gitignore` 整体忽略；项目约束只以本文件和 `docs/serena.md` 为准，不提交工具自动生成或重写的配置。注册不等于完成 onboarding，不自动写入项目或全局 memories。
+- 各子项目必须显式配置 `ignored_paths` 排除本端构建产物、依赖和本地敏感数据；API 至少排除 `.secrets/**`、`dist/**`、`uploads/**`。ignored_paths 是索引/遍历边界，不是安全沙箱，不能替代权限控制。
+- `.serena` 项目配置、initial_prompt、缓存、日志和 memories 均为本机状态，由根 `.gitignore` 整体忽略；项目约束只以本文件和 `docs/serena.md` 为准，不提交工具自动生成或重写的配置。Serena 升级或配置变更后重启已有 MCP 会话，并用 `serena project health-check <子项目路径>` 报告实际结果。注册不等于完成 onboarding，不自动写入项目或全局 memories。
 - 具体映射与激活方式见 `docs/serena.md`。
 
 ## 架构与业务

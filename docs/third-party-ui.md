@@ -1,5 +1,7 @@
 # 第三方前端来源
 
+管理平台新增及优化页面优先复用已有成熟组件，缺口按需采用 [ReUI](https://reui.io/docs) 与 [shadcn/ui](https://ui.shadcn.com/docs/components)，沿当前 Base UI、主题及工作区浮层实现适配。专用能力允许采用其他来源。ReUI 公共仓库的组件示例、primitives 与 hooks 按其 [MIT 许可范围](https://reui.io/legal/license)使用并保留声明，Pro blocks/templates 不混作免费源码；采用时逐件登记出处和改造范围。此处记录选型原则，不代表所有候选已经进入正式产品；4291 展示候选仅供参考。
+
 站内客服的接口、配置及未验收边界见[客服接入说明](architecture/customer-support.md)。
 
 用户端 Header 滚动收缩适配自 Aceternity Resizable Navbar，Footer 适配自 SmoothUI footer-1。实际组件位于 `apps/web/src/components/layout/`；源码出处、改造范围及 SmoothUI MIT 原文见 [第三方说明](../apps/web/src/components/layout/THIRD_PARTY_NOTICES.md)。Aceternity 使用独立站点许可，不统一归为 MIT。两者复用已有 Motion，手机导航保留 Radix 抽屉，不安装整套上游站点或复制演示社交链接。

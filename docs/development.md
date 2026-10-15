@@ -1,5 +1,7 @@
 # 本地开发与验证
 
+测试选型、证据等级、必要性与重跑范围遵守[测试、验证与验收脚本规范](testing.md)。优先覆盖本次核心业务风险，不默认新增执行器或运行全平台检查。
+
 ## 环境
 
 启动、停止、重启和测试隔离先遵守[本地环境使用规则](local-environments.md)。主环境由Master或指定维护者管理；已有服务先检查并复用，不默认每个agent启动三端。
@@ -64,7 +66,9 @@ npm run test:auth -w @zzsh/api
 npm run migrate:business -w @zzsh/api
 ```
 
-check:offline 包括类型检查、API 单元测试、三端构建和 smoke；check 还包含本地真实数据库测试。test:auth 使用有标记的隔离库及专用角色，不使用开发业务库；缺失配置应失败，不静默跳过。管理员个人工作台布局测试使用独立库 `zzsh_test_m2_workspace_layout` 与锁 `805014`，不占用 M2 auth 套件的 `805002`。迁移身份与运行身份分离，runtime 无 DDL/角色继承和审计修改权限。管理员目录与操作权限依赖 business migration `0008_m2_admin_permissions`；未应用时管理会话快照会查询失败。具体环境变量见 apps/api/.env.example，禁止将本地秘密提交。
+check:offline 包括类型检查、显式API/Web/Admin测试、三端构建和会启动临时服务的smoke；fake readiness不代表真实依赖或业务通过。部分测试受环境变量控制进入PG，执行前核实际入口与继承环境。check增加test:db，但不自动覆盖所有专用资金/IM套件；例如order-reservation的深层验收依赖ORDER_TEST_RESOURCE_SET及具体资源分支，未进入须列NOT_RUN。不要把根命令或CI绿灯当作全部交易验收。
+
+test:auth 使用有标记的隔离库及专用角色，不使用开发业务库；缺失配置应失败，不静默跳过。管理员个人工作台布局测试使用独立库 `zzsh_test_m2_workspace_layout` 与锁 `805014`，不占用 M2 auth 套件的 `805002`。迁移身份与运行身份分离，runtime 无 DDL/角色继承和审计修改权限。管理员目录与操作权限依赖 business migration `0008_m2_admin_permissions`；未应用时管理会话快照会查询失败。具体环境变量见 apps/api/.env.example，禁止将本地秘密提交。
 
 test:readiness 会受控停止/恢复本项目依赖，不属于日常前端检查。禁止影响其它 Compose 项目。灾备命令 security:disaster-recovery 仅为 test/fake 验证入口，维护身份、线下确认及预登记通知必须配置，生产启用仍未验收。
 

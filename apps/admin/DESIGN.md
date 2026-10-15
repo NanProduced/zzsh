@@ -41,7 +41,7 @@
 
 | 能力 | 本轮决定 | 边界 |
 |---|---|---|
-| 管理壳与基础控件 | 引入 PaceUI Free Dashboard 实际源码并适配 React/Vite；shadcn/ui 按需采用 | 保留许可、记录采用范围；不复制 Pro 外链内容，不替换 Better Auth |
+| 管理壳与基础控件 | 保留 PaceUI 管理壳；新增与优化页面优先复用本仓成熟组件，再按需采用 ReUI 与 shadcn/ui 的 Base UI 组件 | 复用现有主题与依赖，保留许可及出处；专用能力可有界适配其他来源；不整套替换或复制 Pro 资源 |
 | 常规图表 | Bklit 图表 registry 作为主候选 | 只采用开源图表组件；Bklit Studio 为专有产品，不复制 Studio |
 | 高密度图表 | EvilCharts 按单个图表需要选择 Recharts 或 ECharts | 不同时为同一图表安装两套 engine；先用可读的常规实现，实测需要时再切 Canvas |
 | 普通表格 | shadcn 表格优先 | 先验证筛选、排序、分页、列对齐和行操作，不预装聚合表格 |
@@ -49,7 +49,9 @@
 | 审批可视化 | Approvals UI 只读结构参考 | 可借 React Flow 外壳，但不复制 quorum/串行策略语义，不首期建设拖拽策略编辑器 |
 | WebGL/shader | 登录/引导局部可选 | 懒加载、不可见时暂停、支持 reduced-motion 和静态降级；不作为全站依赖 |
 
-组件与许可参考：[Bklit](https://github.com/bklit/bklit-ui)、[EvilCharts](https://github.com/legions-developer/evilcharts)、[LyteNyte](https://www.1771technologies.com/docs/intro-installation)、[Approvals UI](https://github.com/DylanMerigaud/approvals-ui)。采用前仍需按实际版本和依赖清单复核，不把公开示例的存在当成性能或生产验收。
+2026-10-12 Owner 确认后续管理平台开发优先采用 ReUI 与 shadcn/ui。先复用真实页面中效果好的实现，4291 展示候选仅供参考；具体组件按当前业务任务、权限状态、包体与兼容性选择。普通表格继续复用现有 Table，不因组件库有 DataGrid 就新增数据引擎。
+
+组件与许可参考：[ReUI](https://reui.io/docs)、[shadcn/ui](https://ui.shadcn.com/docs/components)、[ReUI 许可](https://reui.io/legal/license)、[Bklit](https://github.com/bklit/bklit-ui)、[EvilCharts](https://github.com/legions-developer/evilcharts)、[LyteNyte](https://www.1771technologies.com/docs/intro-installation)、[Approvals UI](https://github.com/DylanMerigaud/approvals-ui)。采用前仍需按实际版本和依赖清单复核，不把公开示例的存在当成性能或生产验收。
 
 ## Representative Validation
 
