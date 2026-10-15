@@ -107,7 +107,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "审批与审计", isTitle: true }, ...audit);
   }
 
-  items.push({ label: "个人", isTitle: true }, { label: "账号安全", icon: ShieldIcon, path: "/account", kind: "account" });
+  items.push({ label: "个人", isTitle: true }, { label: "账号安全", icon: ShieldIcon, path: "/settings?section=security", kind: "settings" });
   return items;
 }
 
@@ -175,7 +175,7 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/users/restore": ["用户账号恢复", "账号恢复", "恢复", "restore", "hf"],
   "/approvals": ["审批与审计", "审批", "待办", "工单", "approvals", "sp"],
   "/audit": ["账号与权限审计", "审计", "操作日志", "安全日志", "audit", "sj", "rz"],
-  "/account": ["账号安全", "个人中心", "安全", "密码", "pin", "account", "gr", "aq"],
+  "/settings?section=security": ["账号安全", "个人中心", "安全", "密码", "pin", "account", "gr", "aq"],
   "/settings": ["设置", "外观", "主题", "偏好", "深色", "浅色", "appearance", "theme", "settings", "sz", "wg", "zt"],
 };
 

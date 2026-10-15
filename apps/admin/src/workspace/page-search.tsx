@@ -90,7 +90,7 @@ function getPageIcon(path: string): LucideIcon {
   if (path === "/approvals" || path.startsWith("/approvals/")) return ClipboardCheckIcon;
   if (path === "/audit") return ScrollTextIcon;
   if (path === "/settings") return SettingsIcon;
-  if (path === "/account") return ShieldIcon;
+  if (path === "/account" || path === "/settings?section=security") return ShieldIcon;
   return FileTextIcon;
 }
 

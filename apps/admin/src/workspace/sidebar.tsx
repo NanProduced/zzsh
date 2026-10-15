@@ -1,4 +1,3 @@
-import { isLocalSettingsPreview } from "./settings-preview";
 import { ChevronsUpDownIcon, LogOutIcon, SettingsIcon, ShieldIcon } from "lucide-react";
 
 import { BrandLogo } from "../components/brand-logo";
@@ -100,7 +99,7 @@ export function WorkspaceSidebar({
                   <SettingsIcon />
                   <span>设置</span>
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onNavigate(import.meta.env.DEV && isLocalSettingsPreview() ? "/settings?section=security" : "/account")}>
+                <DropdownMenuItem onClick={() => onNavigate("/settings?section=security")}>
                   <ShieldIcon />
                   <span>登录与安全</span>
                 </DropdownMenuItem>

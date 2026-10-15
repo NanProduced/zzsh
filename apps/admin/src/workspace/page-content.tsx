@@ -4,8 +4,6 @@ import type { SessionSnapshot, Theme, ThemeMode } from "../api";
 import type { ThemeStorageStatus } from "../lib/theme";
 import { SettingsWorkspace } from "./settings-page";
 import { AccountSecurityPage } from "./account-security-page";
-import { SettingsView } from "../views/settings-view";
-import { isLocalSettingsPreview } from "./settings-preview";
 import { AdminAuditView } from "../views/admin-audit-view";
 import { AdminDirectoryView, UserRestorePanel } from "../views/admin-directory-view";
 import { UserDirectoryView } from "../views/user-directory/user-directory-view";
@@ -79,29 +77,22 @@ export function WorkspacePageContent({
   if (tab.kind === "workbench") {
     return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
-  // shortcut: new security adapters await schema/HTTP acceptance; preview only on local 4381.
-  const settingsPreview = import.meta.env.DEV && isLocalSettingsPreview();
-  if (tab.kind === "account" && !settingsPreview) {
+  if (tab.kind === "account") {
     return <AccountSecurityPage key={tab.id} snapshot={snapshot} idleMinutes={idleMinutes}
       onIdleMinutes={onIdleMinutes} onLock={onLock} onRefresh={onRefresh}
       onRecoveryCompleted={onRecoveryCompleted} onDirtyChange={onDirtyChange} />;
   }
-  if (tab.kind === "settings" && !settingsPreview) {
-    return <SettingsView theme={theme ?? "dark"} themeMode={themeMode ?? "dark"}
-      onSelectThemeMode={onSelectThemeMode ?? (() => undefined)} onResetTheme={onResetTheme ?? (() => undefined)}
-      themeStorageError={themeStorageError} themeStorageStatus={themeStorageStatus}
-      urlTheme={urlTheme} onExitPreview={onExitPreview} onOpenPath={onOpenPath} />;
-  }
-  if (tab.kind === "settings" || tab.kind === "account") {
+  if (tab.kind === "settings") {
     return (
       <SettingsWorkspace
         key={tab.id}
         query={tab.query}
-        legacyAccount={tab.kind === "account"}
         snapshot={snapshot}
         idleMinutes={idleMinutes}
         onIdleMinutes={onIdleMinutes}
+        onLock={onLock}
         onRefresh={onRefresh}
+        onRecoveryCompleted={onRecoveryCompleted}
         onDirtyChange={onDirtyChange}
         onQueryChange={onQueryChange}
         theme={theme ?? "dark"}

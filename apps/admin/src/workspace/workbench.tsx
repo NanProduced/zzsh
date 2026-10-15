@@ -51,7 +51,7 @@ type ApprovalSummary = { requestId: string; summary: string; status: string; cre
 
 function ShortcutsWidget({ snapshot, onNavigate }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; onNavigate: (path: string) => void }) {
   const items = [
-    { path: "/account", label: "账号安全", show: true },
+    { path: "/settings?section=security", label: "账号安全", show: true },
     { path: "/admins", label: "管理员", show: hasPermission(snapshot, "admin.account.read") || snapshot.security.isBoss },
     { path: "/roles", label: "角色权限", show: hasPermission(snapshot, "admin.role.read") || hasPermission(snapshot, "admin.permission.read") },
     { path: "/approvals", label: "审批", show: ["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some((code) => hasPermission(snapshot, code)) },
@@ -74,7 +74,7 @@ function AccountSecurityWidget({ snapshot, onNavigate }: { snapshot: Extract<Ses
       <div className="workbench-status-row"><ShieldCheckIcon /><span>双因素验证</span><Badge variant="secondary">{snapshot.user.twoFactorEnabled ? "已启用" : "待完成"}</Badge></div>
       <div className="workbench-status-row"><KeyRoundIcon /><span>会话 PIN</span><Badge variant="outline">{snapshot.session.pinConfigured ? "已配置" : "未配置"}</Badge></div>
       <p className="text-sm text-muted-foreground">会话到期 · {formatDate(snapshot.session.expiresAt)}</p>
-      <Button variant="outline" size="sm" onClick={() => onNavigate("/account")}>管理账号安全<ArrowUpRightIcon /></Button>
+      <Button variant="outline" size="sm" onClick={() => onNavigate("/settings?section=security")}>管理账号安全<ArrowUpRightIcon /></Button>
     </div>
   );
 }

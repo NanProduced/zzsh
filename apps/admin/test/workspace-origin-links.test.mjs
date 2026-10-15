@@ -38,7 +38,7 @@ const vite = await createServer({
       },
       load(id) {
         // Routing tests keep leaf UI isolated; their behavior has dedicated component suites.
-        if (id === '\0settings-preview-host-stub') return 'import {createElement} from "react"; export function SettingsWorkspace(){return createElement("div",null,"本轮仅验收界面")}';
+        if (id === '\0settings-preview-host-stub') return 'import {createElement} from "react"; export function SettingsWorkspace(){return createElement("div",null,"新版设置五分区")}';
         if (id === '\0account-security-host-stub') return 'import {createElement} from "react"; export function AccountSecurityPage(p){return createElement("section",null,"修改登录密码",createElement("button",{onClick:p.onLock},"立即锁定当前会话"))}';
         if (id !== "\0origin-links-workbench-stub") return undefined;
         return `import { createElement } from "react";
@@ -151,24 +151,46 @@ test('admin list keeps its query filters inside the workspace tab without openin
 });
 
 const accountTab = { id: 'account', title: '账号安全', path: '/account', query: {}, closable: true, kind: 'account' };
-test('normal environment preserves existing account security and its lock callback', async (t) => {
+const settingsTab = { id: 'settings', title: '设置', path: '/settings', query: {}, closable: true, kind: 'settings' };
+test('normal environment keeps the legacy account security page and its lock callback', async (t) => {
   browser.location.href = 'http://127.0.0.1:3101/account';
   const h = await mount(t, accountTab, snapshot([]));
   assert.ok(browser.document.body.textContent.includes('修改登录密码'));
-  assert.equal(browser.document.body.textContent.includes('本轮仅验收界面'), false);
+  assert.equal(browser.document.body.textContent.includes('新版设置五分区'), false);
   const lock = namedButton('立即锁定当前会话');
   assert.ok(lock && !lock.disabled, 'normal security action must remain available');
   await click(lock); assert.equal(h.locks(), 1);
 });
-test('new read-only security preview is restricted to the local 4381 environment', async (t) => {
+test('the formal settings route mounts the five-section host regardless of environment', async (t) => {
+  for (const host of ['http://127.0.0.1:3101/settings', 'http://127.0.0.1:4381/settings']) {
+    browser.location.href = host;
+    await mount(t, settingsTab, snapshot([]));
+    assert.ok(browser.document.body.textContent.includes('新版设置五分区'), `settings mounts the new host on ${host}`);
+    assert.equal(namedButton('立即锁定当前会话'), undefined, 'settings no longer borrows the legacy account page');
+  }
+});
+test('account stays on the legacy page even on the isolated 4381 port', async (t) => {
   browser.location.href = 'http://127.0.0.1:4381/account';
   await mount(t, accountTab, snapshot([]));
-  assert.ok(browser.document.body.textContent.includes('本轮仅验收界面'));
-  assert.equal(namedButton('立即锁定当前会话'), undefined);
+  assert.ok(namedButton('立即锁定当前会话'), 'legacy account ability is preserved on every port');
+  assert.equal(browser.document.body.textContent.includes('新版设置五分区'), false);
 });
 test('an external hostname on port 4381 retains the ordinary security page', async (t) => {
   browser.location.href = 'http://example.invalid:4381/account';
   await mount(t, accountTab, snapshot([]));
-  assert.equal(browser.document.body.textContent.includes('本轮仅验收界面'), false);
+  assert.equal(browser.document.body.textContent.includes('新版设置五分区'), false);
   assert.ok(namedButton('立即锁定当前会话'));
+});
+test('formal settings wiring is not port-gated and the security entry targets the settings section', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = (name) => readFileSync(path.join(rootPath, 'src/workspace', name), 'utf8');
+  assert.match(source('sidebar.tsx'), /onNavigate\("\/settings\?section=security"\)/, 'security entry targets the formal settings section');
+  assert.doesNotMatch(source('sidebar.tsx'), /isLocalSettingsPreview/, 'security entry is not port-gated');
+  const page = source('page-content.tsx');
+  assert.doesNotMatch(page, /isLocalSettingsPreview|settingsPreview/, 'formal routes no longer depend on the preview port');
+  assert.match(page, /tab\.kind === "account"[\s\S]*AccountSecurityPage/, 'account keeps the legacy page');
+  const account = source('account-security-page.tsx');
+  for (const marker of ['FreezePanel', 'RecoveryView', 'PinPanel', 'PasswordChangePanel']) {
+    assert.ok(account.includes(marker), `legacy account page keeps ${marker}`);
+  }
 });

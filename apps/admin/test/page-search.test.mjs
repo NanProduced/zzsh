@@ -71,12 +71,13 @@ test("page search only lists implemented pages in the current permission set", (
     "/users/restore",
     "/approvals",
     "/audit",
-    "/account",
+    "/settings?section=security",
     "/settings",
   ]);
 
   const limited = searchableWorkspacePages({ isBoss: false, permissions: [] });
-  assert.deepEqual(limited.map((page) => page.path), ["/workbench", "/account", "/settings"]);
+  assert.deepEqual(limited.map((page) => page.path), ["/workbench", "/settings?section=security", "/settings"]);
+  assert.deepEqual(filterSearchablePages(limited, "PIN").map((page) => page.path), ["/settings?section=security"]);
   assert.equal(limited.some((page) => page.path === "/admins"), false);
   assert.equal(limited.some((page) => page.path === "/membership-growth"), false);
   for (const permission of ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"]) {

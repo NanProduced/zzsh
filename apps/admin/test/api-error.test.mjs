@@ -40,3 +40,16 @@ test('result recovery GET forwards the original key without generating a new key
   await adminRequest('/supply/games',{},'POST',{'idempotency-key':'explicit-write-key'});
   assert.equal(calls[2].init.headers['idempotency-key'],'explicit-write-key');
 });
+
+test('security command errors carry one controlled reason beside the existing envelope', async t => {
+  t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({error:{code:'FORBIDDEN',requestId:'req-9',reason:'invalid_pin'},reasons:['other']}),{status:403,headers:{'content-type':'application/json'}}));
+  await assert.rejects(adminRequest('/security/pin/change',{currentPin:'x',newPin:'y'}),e=>{
+    assert.ok(e instanceof AdminApiError);
+    assert.equal(e.reason,'invalid_pin');
+    assert.equal(e.code,'FORBIDDEN'); assert.equal(e.requestId,'req-9'); assert.deepEqual(e.reasons,['other']); assert.deepEqual(e.details,[]);
+    return true;
+  });
+  // 非受控短枚举的 reason 不进入客户端字段：页面不得按自由文本猜业务结果。
+  t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({error:{code:'CONFLICT',reason:'x'.repeat(65)}}),{status:409,headers:{'content-type':'application/json'}}));
+  await assert.rejects(adminRequest('/security/pin/set',{pin:'1'}),e=>{assert.equal(e.reason,undefined);return true;});
+});

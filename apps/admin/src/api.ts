@@ -639,7 +639,7 @@ export function hasPermission(snapshot: Extract<SessionSnapshot, { authenticated
 }
 
 export class AdminApiError extends Error {
-  constructor(readonly status: number, readonly code: string, readonly requestId?: string, readonly path?: string, readonly details: readonly {path:string;code:string}[] = [], readonly reasons: readonly string[] = []) {
+  constructor(readonly status: number, readonly code: string, readonly requestId?: string, readonly path?: string, readonly details: readonly {path:string;code:string}[] = [], readonly reasons: readonly string[] = [], readonly reason?: string) {
     super(code);
     this.name = "AdminApiError";
   }
@@ -697,7 +697,10 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
     // Business rejections (e.g. settlement 409) carry stable reasons beside error.
     const rawReasons=(payload as {reasons?:unknown}|null)?.reasons;
     const reasons=Array.isArray(rawReasons)?rawReasons.slice(0,16).filter((value):value is string=>typeof value==="string"&&value.length<=64):[];
-    throw new AdminApiError(response.status, error?.code ?? "INTERNAL_ERROR", error?.requestId ?? response.headers.get("x-request-id") ?? undefined, path, details, reasons);
+    // Security commands carry one controlled reason inside error; only short stable enums pass.
+    const rawReason=(payload as {error?:{reason?:unknown}}|null)?.error?.reason;
+    const reason=typeof rawReason==="string"&&rawReason.length>0&&rawReason.length<=64?rawReason:undefined;
+    throw new AdminApiError(response.status, error?.code ?? "INTERNAL_ERROR", error?.requestId ?? response.headers.get("x-request-id") ?? undefined, path, details, reasons, reason);
   }
   return payload as T;
 }
