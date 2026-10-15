@@ -127,6 +127,7 @@ export async function createApp(options: ApiAppOptions) {
     AppModule.register(options.health, options.database, options.orderSweep),
     { logger: ["error", "warn"], bodyParser: false, rawBody: true },
   );
+  if (options.database) app.get(ReadinessService).observeBusinessPool(options.database.pool);
   installImMessageBodyParser(app);
   (app as unknown as { useBodyParser: (parser: "json", options?: { limit?: string }) => void }).useBodyParser("json", { limit: "100kb" });
   installApiInfrastructure(app, options);

@@ -72,6 +72,11 @@ export class ReadinessService implements BeforeApplicationShutdown {
 
   private readonly timeoutMs: number;
   private readonly shutdownTimeoutMs: number;
+  private businessPool: Pool | undefined;
+
+  observeBusinessPool(pool: Pool): void {
+    this.businessPool = pool;
+  }
 
   get isStopping(): boolean {
     return this.stopping;
@@ -157,7 +162,10 @@ export class ReadinessService implements BeforeApplicationShutdown {
       withTimeout(this.dependencies.postgres.check(), this.timeoutMs, "postgres readiness timeout"),
       withTimeout(this.dependencies.redis.check(), this.timeoutMs, "redis readiness timeout"),
     ]);
-    const healthy = results.every((result) => result.status === "fulfilled");
+    const pool = this.businessPool;
+    const businessAvailable = !pool || (!pool.ending && !pool.ended && pool.waitingCount === 0
+      && (pool.totalCount < (pool.options.max ?? 10) || pool.idleCount > 0));
+    const healthy = businessAvailable && results.every((result) => result.status === "fulfilled");
     this.ready = healthy && !this.stopping;
     return this.ready;
   }

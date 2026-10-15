@@ -1,4 +1,5 @@
 // Offline SQL-boundary fixture. It records queries; it is not PostgreSQL execution evidence.
+import { EventEmitter } from 'node:events';
 import type { AuthSecurityOptions } from '../src/auth/auth-security';
 import { ADMIN_PERMISSION_CODES } from '../src/auth/admin-authorization';
 
@@ -20,18 +21,19 @@ export const fixtureOrderRows=[
   {id:'order_cancel',displayNo:'TEST-1003',status:'CANCELLED',role:'renter',paidAt:'2026-09-19T02:05:00.000000Z'},
 ].map(row=>({accountId:'account_fixture',accountDisplayNo:'资源账号01',title:'三角洲行动 · 隔离测试账号',gameId:'delta',rentalAmountCents:'6000',depositAmountCents:'10000',currency:'CNY',counterpartyName:'另一方样本',createdAt:date,holdUntil:date,cancelledAt:row.status==='CANCELLED'?date:null,cancelReason:row.status==='CANCELLED'?'支付后取消（测试）':null,expiredAwaitingCancel:false,...row}));
 
-export class DirectorySqlFixture {
+export class DirectorySqlFixture extends EventEmitter {
   actorId='admin-fixture';isBoss=false;
   permissions=[...ADMIN_PERMISSION_CODES] as string[];
   gameIds=['delta'];queries:{sql:string;values:unknown[]}[]=[];
   users=fixtureUserRows.map(row=>({...row}));
   scenario='normal';fault='';
   async connect(){return this;} release(){}
+  getTransactionStatus(){return "I" as const;}
   async query(sql:string,values:unknown[]=[]):Promise<any> {
     if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')"))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
-    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql))return result([]);
+    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)||sql.startsWith("SELECT set_config("))return result([]);
     if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':'SELECTED_GAMES',gameIds:this.isBoss?[]:this.gameIds}]);
     if(sql.startsWith('SELECT "status", "is_boss"'))return result([{status:'ACTIVE',isBoss:this.isBoss,passwordChangeRequired:false}]);
     if(sql.includes('"zzsh_auth_admin"."session"'))return result([{locked:false,twoFactorEnabled:true,pinConfigured:true,createdAt:date,expiresAt:'2027-01-01T00:00:00Z'}]);
@@ -59,9 +61,31 @@ export class DirectorySqlFixture {
       const from=parameter(/u\."createdAt" >= \$(\d+)/);if(from)rows=rows.filter(row=>Date.parse(row.localCreatedAt)>=Date.parse(String(from)));
       const to=parameter(/u\."createdAt" <= \$(\d+)/);if(to)rows=rows.filter(row=>Date.parse(row.localCreatedAt)<=Date.parse(String(to)));
       const lastTime=values.at(-3);const lastId=values.at(-2);
+      const cursorAt=(pattern:RegExp)=>{const match=sql.match(pattern);return match?values[Number(match[1])-1]:undefined;};
+      const timeBound=cursorAt(/u\."createdAt" < \$(\d+)::timestamptz/)??lastTime;
+      const idBound=cursorAt(/u\.id < \$(\d+)\)/)??lastId;
       rows.sort((a,b)=>b.localCreatedAt.localeCompare(a.localCreatedAt)||b.id.localeCompare(a.id));
-      if(lastTime)rows=rows.filter(row=>row.localCreatedAt<String(lastTime)||row.localCreatedAt===lastTime&&row.id<String(lastId));
-      return result(rows.slice(0,Number(values.at(-1))).map(row=>({...row,resourceAccountCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.resourceAccountCount,currentOrderCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.currentOrderCount})));
+      if(timeBound)rows=rows.filter(row=>row.localCreatedAt<String(timeBound)||row.localCreatedAt===String(timeBound)&&row.id<String(idBound));
+      const page=rows.slice(0,Number(values.at(-1))).map(row=>({...row,resourceAccountCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.resourceAccountCount,currentOrderCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.currentOrderCount}));
+      // Deferred shape: the page carries the whole row and the migration-audit expansion happens in the
+      // outer query, so the fixture must serve both projections from the same page rows.
+      if(/WITH page AS MATERIALIZED/i.test(sql)){
+        // The page query already applied the keyset/LIMIT; the outer query only projects the page rows.
+        return result(page.map(row=>({...row,
+          localCreatedAt:sql.includes('to_char(u."createdAt"')?row.localCreatedAt:undefined,
+          localUpdatedAt:sql.includes('to_char(u."updatedAt"')?row.localUpdatedAt:undefined,
+          ageStatus:sql.includes('AS "ageStatus"')?row.ageStatus:undefined,
+          accountStatus:sql.includes('AS "accountStatus"')?row.accountStatus:undefined,
+          identityStatus:sql.includes('AS "identityStatus"')?row.identityStatus:undefined,
+          provider:sql.includes('AS provider')?row.provider:undefined,
+          providerReference:sql.includes('AS "providerReference"')?row.providerReference:undefined,
+          migrationLegacyId:sql.includes('AS "migrationLegacyId"')?row.migrationLegacyId:null,
+          migrationSourceCreatedAt:sql.includes('AS "migrationSourceCreatedAt"')?row.migrationSourceCreatedAt:null,
+          resourceAccountCount:sql.includes('AS "resourceAccountCount"')?row.resourceAccountCount:undefined,
+          currentOrderCount:sql.includes('AS "currentOrderCount"')?row.currentOrderCount:undefined,
+        })));
+      }
+      return result(page);
     }
     if(sql.includes('FROM zzsh_supply.rental_account a')) {
       if(this.fault==='resources')throw new Error('Injected resource failure');

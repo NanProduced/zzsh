@@ -147,6 +147,12 @@ const ACCOUNT_STATUS_SQL = `CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
   WHEN s.account_status='DEACTIVATED' THEN 'DEACTIVATED'
   WHEN u.suspended THEN 'RESTRICTED'
   WHEN s.account_status='ACTIVE' THEN 'ACTIVE' ELSE 'UNKNOWN' END`;
+/**
+ * Three-state source classification. `mig.legacy_id` is the *latest* migration audit's legacy id and is
+ * nullable, so `IS NULL` distinguishes "no legacy id on the newest migration fact" from "has one". This
+ * predicate therefore always reads the latest-fact relation and is never re-expressed as an existence test:
+ * an existence test over all audit rows would treat any historical row as the newest one.
+ */
 const SOURCE_SQL = `CASE WHEN s.provider='${LEGACY_PROVIDER}' THEN 'MIGRATED'
   WHEN s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
 
@@ -180,16 +186,10 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer) {
   };
 }
 
-const MIGRATION_LATERAL = `
-  LEFT JOIN LATERAL (
-    SELECT e.details->>'legacyId' AS legacy_id,
-           e.details->>'sourceSystem' AS source_system,
-           e.details->>'sourceCreatedAt' AS source_created_at
-      FROM zzsh_iam.audit_event e
-     WHERE e.action = '${LEGACY_MIGRATION_ACTION}' AND e.object_type = 'user' AND e.object_id = u.id
-     ORDER BY e.occurred_at DESC, e.id DESC
-     LIMIT 1
-  ) mig ON true`;
+// Audit-dependent membership is decided before pagination; other reads batch audits for the page.
+function filterConsultsMigrationAudit(filter: UserDirectoryFilter): boolean {
+  return Boolean(filter.legacyId || filter.search || filter.source);
+}
 
 export async function listUserDirectory(
   client: PoolClient,
@@ -225,8 +225,8 @@ export async function listUserDirectory(
   const conditions: string[] = [];
   if (filter.userId) conditions.push(`u.id = $${values.push(filter.userId)}`);
   if (filter.legacyId) {
-    const parameter = values.push(filter.legacyId);
-    conditions.push(`(mig.legacy_id = $${parameter} OR (s.provider = '${LEGACY_PROVIDER}' AND substring(s.provider_reference from position(':' in s.provider_reference) + 1) = $${parameter}))`);
+    const parameter = `$${values.push(filter.legacyId)}::text`;
+    conditions.push(`(mig.legacy_id = ${parameter} OR (s.provider = '${LEGACY_PROVIDER}' AND substring(s.provider_reference from position(':' in s.provider_reference) + 1) = ${parameter}))`);
   }
   if (filter.identifier) {
     const parameter = values.push(`%${escapeLike(filter.identifier)}%`);
@@ -235,7 +235,7 @@ export async function listUserDirectory(
   if (filter.search) {
     const exact = values.push(filter.search);
     const like = values.push(`%${escapeLike(filter.search)}%`);
-    conditions.push(`(u.id=$${exact} OR mig.legacy_id=$${exact} OR (s.provider='${LEGACY_PROVIDER}' AND substring(s.provider_reference from position(':' in s.provider_reference)+1)=$${exact}) OR u.name ILIKE $${like} ESCAPE '\\' OR u.username ILIKE $${like} ESCAPE '\\' OR u."displayUsername" ILIKE $${like} ESCAPE '\\')`);
+    conditions.push(`(u.id=$${exact} OR mig.legacy_id=$${exact}::text OR (s.provider='${LEGACY_PROVIDER}' AND substring(s.provider_reference from position(':' in s.provider_reference)+1)=$${exact}::text) OR u.name ILIKE $${like} ESCAPE '\\' OR u.username ILIKE $${like} ESCAPE '\\' OR u."displayUsername" ILIKE $${like} ESCAPE '\\')`);
   }
   if (filter.phone) conditions.push(`u."phoneNumber" = $${values.push(filter.phone)}`);
   if (filter.accountStatus) conditions.push(`(${ACCOUNT_STATUS_SQL})=$${values.push(filter.accountStatus)}`);
@@ -252,31 +252,48 @@ export async function listUserDirectory(
   const cursorTime = values.length - 2;
   const cursorId = values.length - 1;
   const limitParameter = values.length;
-  conditions.push(`($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`);
+  const cursorCondition = `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
 
-  const rows = (
-    await client.query<UserListRow>(
-      `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
+  const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
-              to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", s.age_status AS "ageStatus",
-              s.account_status AS "accountStatus", s.identity_status AS "identityStatus",
-              s.provider, s.provider_reference AS "providerReference",
+              to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", ${ageStatusExpr} AS "ageStatus",
+              ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
+              ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
               mig.legacy_id AS "migrationLegacyId", mig.source_created_at AS "migrationSourceCreatedAt",
               CASE WHEN $3::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
                   AND ${gameScopeSql("ra.game_id","$2","$1")}) ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
-                  AND ${gameScopeSql("o.game_id","$2","$1")}) ELSE NULL END AS "currentOrderCount"
-         FROM zzsh_auth_user."user" u
+                  AND ${gameScopeSql("o.game_id","$2","$1")}) ELSE NULL END AS "currentOrderCount"`;
+
+  const consultsMigration = filterConsultsMigrationAudit(filter);
+  const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
+           e.details->>'legacyId' AS legacy_id,
+           e.details->>'sourceCreatedAt' AS source_created_at
+      FROM zzsh_iam.audit_event e
+      ${consultsMigration ? "" : "JOIN page candidate ON candidate.id = e.object_id"}
+     WHERE e.action = '${LEGACY_MIGRATION_ACTION}' AND e.object_type = 'user'
+     ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
+  const pageQuery = `SELECT u.id, u."createdAt"
+           FROM zzsh_auth_user."user" u
+           LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
+           ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
+          WHERE ${[...conditions, cursorCondition].join(" AND ")}
+          ORDER BY u."createdAt" DESC, u.id DESC
+          LIMIT $${limitParameter}`;
+  // Narrow keys avoid materialising full user/identity rows before the top-N operation.
+  const sql = `WITH ${consultsMigration
+      ? `migration AS MATERIALIZED (${migrationQuery}), page AS MATERIALIZED (${pageQuery})`
+      : `page AS MATERIALIZED (${pageQuery}), migration AS MATERIALIZED (${migrationQuery})`}
+       SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}
+         FROM page selected
+         JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
-         ${MIGRATION_LATERAL}
-        WHERE ${conditions.join(" AND ")}
-        ORDER BY u."createdAt" DESC, u.id DESC
-        LIMIT $${limitParameter}`,
-      values,
-    )
-  ).rows;
+         LEFT JOIN migration mig ON mig.object_id = u.id
+        ORDER BY u."createdAt" DESC, u.id DESC`;
+
+  const rows = (await client.query<UserListRow>(sql, values)).rows;
   const items = rows.slice(0, filter.limit);
   const hasMore = rows.length > filter.limit;
   const last = items.at(-1);

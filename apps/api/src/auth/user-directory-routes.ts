@@ -5,7 +5,7 @@ import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from ".
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "./auth-security";
 import { normalizeMainlandPhone } from "./phone-number";
 import { sanitizeDetail } from "./admin-audit";
-import { withTransaction } from "./security-core";
+import { withDirectoryRead, withDirectoryReadTransaction } from "./user-directory-read";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { decodeId, requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
 import { invalid, notFound, forbidden, sendJson, sha256Hex, type SupplyNodeRequest } from "../supply/supply-util";
@@ -99,8 +99,10 @@ export async function handleUserDirectoryAdmin(
       }
       if (!query.get("phone")) throw invalid("Phone is required");
     }
+    await withDirectoryRead(options.pool, request, response, async (signal) => {
     const context = await readAdminContext(request, options);
-    await withTransaction(options.pool, async (client) => {
+    let dataToSend: unknown;
+    await withDirectoryReadTransaction(options.pool, signal, async (client) => {
       await assertAdminContextInTransaction(client, context);
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
@@ -117,7 +119,7 @@ export async function handleUserDirectoryAdmin(
       };
       const enableLegacyRead=async()=>{viewer.legacyRead=(await client.query("SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS present")).rows[0]?.present===true;};
       const cursor = query.get("cursor") ?? undefined;
-      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);sendJson(response,200,await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!)),requestId);return;}
+      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);dataToSend = await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!));return;}
       const limit = parseLimit(query.get("limit"));
 
       if (path === "/" || lookup) {
@@ -161,7 +163,7 @@ export async function handleUserDirectoryAdmin(
           limit,
           ...(cursor !== undefined ? { cursor } : {}),
         });
-        sendJson(response, 200, data, requestId);
+        dataToSend = data;
         return;
       }
 
@@ -173,7 +175,7 @@ export async function handleUserDirectoryAdmin(
         await enableLegacyRead();
         const detail = await readUserDirectoryDetail(client, viewer, userId);
         if (!detail) throw notFound();
-        sendJson(response, 200, { user: detail }, requestId);
+        dataToSend = { user: detail };
         return;
       }
       if (section === "rental-accounts") requirePermission(access, ADMIN_PERMISSION.supplyRentalAccountRead);
@@ -184,7 +186,7 @@ export async function handleUserDirectoryAdmin(
         requirePermission(access, ADMIN_PERMISSION.supplyRentalAccountRead);
         assertGameScopeUsable(gameScope, access.isBoss);
         await enableLegacyRead();
-        sendJson(response, 200, await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }), requestId);
+        dataToSend = await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) });
         return;
       }
       if (section === "orders") {
@@ -195,16 +197,19 @@ export async function handleUserDirectoryAdmin(
         const statusRaw = query.get("status");
         if (statusRaw !== null && !["PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED"].includes(statusRaw)) throw invalid("Status is invalid");
         await enableLegacyRead();
-        sendJson(response, 200, await listUserOrders(client, viewer, userId, {
+        dataToSend = await listUserOrders(client, viewer, userId, {
           ...(roleRaw !== null ? { role: roleRaw as "renter" | "owner" | "any" } : {}),
           ...(statusRaw !== null ? { status: statusRaw as "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED" } : {}),
           limit,
           ...(cursor !== undefined ? { cursor } : {}),
-        }), requestId);
+        });
         return;
       }
       requirePermission(access, ADMIN_PERMISSION.auditRead);
-      sendJson(response, 200, await listUserAuditEvents(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }, sanitizeDetail), requestId);
+      dataToSend = await listUserAuditEvents(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }, sanitizeDetail);
+    });
+    signal.throwIfAborted();
+    sendJson(response, 200, dataToSend, requestId);
     });
   });
 }

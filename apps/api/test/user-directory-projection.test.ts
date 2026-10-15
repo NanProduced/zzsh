@@ -138,3 +138,71 @@ test('anonymous and foreign-origin requests cannot obtain directory facts',async
   assert.equal(output.result().status,401);assert.equal(pool.queries.length,0);
   assert.equal((await route('/api/bff/admin/users',pool,'GET',undefined,true,'https://untrusted.invalid')).status,403);
 });
+
+// PERF-READINESS-1: the migration-audit lateral used to sit below the LIMIT, so every page paid one
+// audit lookup per stored user. These cases pin the bounded shape and the filters that must stay
+// membership-deciding before the LIMIT.
+test('default page bounds narrow keys before one batched latest-audit relation',async()=>{
+  const pool=new DirectorySqlFixture();
+  const data:any=await listUserDirectory(client(pool),viewer,{limit:20});
+  assert.equal(pool.queries.length,1);
+  const sql=pool.queries[0]!.sql;
+  assert.ok(/WITH page AS MATERIALIZED/i.test(sql));
+  assert.ok(sql.includes('LIMIT $'),'page query must carry the bound LIMIT');
+  const pageEnd=sql.indexOf("migration AS MATERIALIZED");
+  assert.notEqual(pageEnd,-1,'deferred shape must have an outer projection query');
+  assert.equal(sql.slice(0,pageEnd).includes('zzsh_iam.audit_event'),false,'the page query must not consult the audit table');
+  assert.ok(sql.slice(pageEnd).includes("e.details->>'legacyId'"),'the audit expansion stays available for the returned page');
+  assert.ok(sql.includes('ORDER BY u."createdAt" DESC, u.id DESC'));
+  assert.equal(data.items.length,pool.users.length);
+  assert.equal(new Set(data.items.map((row:any)=>row.userId)).size,data.items.length);
+  assert.equal(data.items.find((row:any)=>row.userId==='user_legacy').source.legacyId,'88001');
+  assert.equal(data.items.find((row:any)=>row.userId==='user_legacy').source.kind,'MIGRATED');
+  assert.equal(data.items.find((row:any)=>row.userId==='user_normal').source.kind,'LOCAL');
+  assert.equal(data.items.find((row:any)=>row.userId==='user_unknown').source.kind,'UNKNOWN');
+  const short:any=await listUserDirectory(client(pool),viewer,{limit:1});
+  assert.equal(short.items.length,1);assert.ok(short.nextCursor);
+});
+
+test('keyword, legacy-id and source filters keep migration-audit membership before the LIMIT',async()=>{
+  const pool=new DirectorySqlFixture();
+  for(const filter of [{search:'88001'},{legacyId:'88001'},{source:'LOCAL'},{source:'MIGRATED'},{source:'UNKNOWN'}] as const){
+    await listUserDirectory(client(pool),viewer,{...filter,limit:20});
+    const sql=pool.queries.at(-1)!.sql;
+    assert.equal(/WITH page AS MATERIALIZED/i.test(sql),false,`${JSON.stringify(filter)} must decide membership before the page is bounded`);
+    assert.ok(sql.includes('ORDER BY u."createdAt" DESC, u.id DESC'));
+  }
+  await listUserDirectory(client(pool),viewer,{legacyId:'88001',limit:20});
+  assert.ok(pool.queries.at(-1)!.sql.includes('mig.legacy_id'),'the audit-derived legacy id stays a membership predicate');
+  await listUserDirectory(client(pool),viewer,{search:'88001',limit:20});
+  assert.ok(pool.queries.at(-1)!.sql.includes('mig.legacy_id'),'the keyword predicate still consults the audit-derived legacy id');
+  const found:any=await listUserDirectory(client(pool),viewer,{legacyId:'88001',limit:20});
+  assert.equal(found.items.length,pool.users.length);
+});
+
+test('source filter keeps the NULL test on the newest migration fact instead of an existence test',async()=>{
+  const pool=new DirectorySqlFixture();
+  await listUserDirectory(client(pool),viewer,{source:'LOCAL',limit:20});
+  const sql=pool.queries.at(-1)!.sql;
+  assert.ok(sql.includes('ORDER BY u."createdAt" DESC, u.id DESC'));
+  // The three-state classification reads the latest migration fact through the batch relation and tests
+  // its legacy id for NULL; an `EXISTS(...) IS NULL` form is always false and must never come back.
+  assert.ok(sql.includes('SELECT DISTINCT ON (e.object_id)'),'the source filter reads one latest fact per user');
+  assert.ok(sql.includes("s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL"),'LOCAL still means "newest migration fact carries no legacy id"');
+  assert.equal(/EXISTS\s*\([\s\S]*?\)\s*IS NULL/i.test(sql),false,'no existence test may stand in for the nullable newest value');
+  const local:any=await listUserDirectory(client(pool),viewer,{source:'LOCAL',limit:20});
+  assert.deepEqual([...local.items.map((row:any)=>row.userId)].sort(),
+    ['user_cancelled','user_dual','user_long','user_normal','user_restore','user_restricted']);
+});
+
+test('second page keeps the keyset bound inside the page query and does not repeat the first page',async()=>{
+  const pool=new DirectorySqlFixture();
+  const first:any=await listUserDirectory(client(pool),viewer,{limit:2});
+  const second:any=await listUserDirectory(client(pool),viewer,{limit:2,cursor:first.nextCursor});
+  assert.equal(pool.queries.length,2);
+  const sql=pool.queries[1]!.sql;
+  assert.ok(/WITH page AS MATERIALIZED/i.test(sql));
+  const ids=[...first.items,...second.items].map((row:any)=>row.userId);
+  assert.equal(new Set(ids).size,ids.length,'paging must not repeat a user');
+  assert.deepEqual(second.items.map((row:any)=>row.userId),['user_restore','user_normal']);
+});
