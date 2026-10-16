@@ -9,7 +9,7 @@ import react from "@vitejs/plugin-react";
 const rootPath = fileURLToPath(new URL("..", import.meta.url));
 const config = { schema: "distribution-policy.v1", scope: "LOCAL_CONTROLLED", enabled: false, participation: "ALL_USERS", depth: 1, selfRebate: false, accountModes: ["ordinary"], minimumAccrualCents: "1", settlementDelayDays: 7, levels: [{ code: "L1", rank: 1, default: true, renterPercent: "1.5", ownerPercent: "0.5", upgrade: null }] };
 const known = { knowledge: "KNOWN", policy: { versionId: "dp-1", revision: "3", digest: "d", config, createdAt: "2026-10-01T00:00:00.000Z" } };
-const snap = (perms, boss = false) => ({ authenticated: true, adminUserId: "a1", session: { id: "s1", locked: false, pinConfigured: true, createdAt: null, expiresAt: null }, security: { isBoss: boss }, permissions: perms, permissionCodes: perms });
+const snap = (perms, boss = false, who = "a1", sid = "s1") => ({ authenticated: true, adminUserId: who, session: { id: sid, locked: false, pinConfigured: true, createdAt: null, expiresAt: null }, security: { isBoss: boss, status: "ACTIVE" }, permissions: perms, permissionCodes: perms });
 
 test("E-GAP-014 admin distribution policy: real read, revision-guarded write, fail closed", async () => {
   const browser = new Window({ url: "http://127.0.0.1:3101/" });
@@ -52,5 +52,57 @@ test("E-GAP-014 admin distribution policy: real read, revision-guarded write, fa
     reply = () => new Response("{}", { status: 503, headers: { "content-type": "application/json" } });
     v = await mount(snap([], true));
     assert.match(v.host.textContent, /未就绪/); assert.doesNotMatch(v.host.textContent, /%/); v.root.unmount();
+  } finally { await vite.close(); }
+});
+
+test("E-R3-01 late GET after revocation and old PUT after identity switch never write the current page", async () => {
+  const browser = new Window({ url: "http://127.0.0.1:3101/" });
+  Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, getComputedStyle: browser.getComputedStyle.bind(browser), requestAnimationFrame: (cb) => setTimeout(() => cb(Date.now()), 0), cancelAnimationFrame: (id) => clearTimeout(id), IS_REACT_ACT_ENVIRONMENT: true });
+  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
+  try {
+    const m = await vite.ssrLoadModule("/src/views/distribution-policy-panel.tsx");
+    const { createRoot } = await import("react-dom/client");
+    const pending = [];
+    const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    globalThis.fetch = browser.fetch = (url, init = {}) => new Promise((resolve) => pending.push({ method: init.method ?? "GET", resolve }));
+    const settle = async () => act(async () => new Promise((r) => setTimeout(r, 20)));
+    const oldPolicy = { knowledge: "KNOWN", policy: { ...known.policy, versionId: "dp-old-scope" } };
+    // 1) GET pending, read permission revoked, old GET resolves late
+    const host = browser.document.createElement("div"); browser.document.body.append(host); const root = createRoot(host);
+    await act(async () => root.render(createElement(m.DistributionPolicyPanel, { snapshot: snap(["personal.distribution.policy.read"]) })));
+    assert.equal(pending.length, 1);
+    await act(async () => root.render(createElement(m.DistributionPolicyPanel, { snapshot: snap([]) })));
+    assert.match(host.textContent, /没有分销政策权限/);
+    await act(async () => pending[0].resolve(json(oldPolicy))); await settle();
+    assert.match(host.textContent, /没有分销政策权限/); assert.doesNotMatch(host.textContent, /dp-old-scope|1\.5%/);
+    // 1b) re-grant (same scope string again) must issue a fresh GET; the earlier one stays dead
+    await act(async () => root.render(createElement(m.DistributionPolicyPanel, { snapshot: snap(["personal.distribution.policy.read"]) })));
+    assert.equal(pending.length, 2);
+    await act(async () => pending[1].resolve(json(known))); await settle();
+    assert.match(host.textContent, /dp-1/);
+    await act(async () => root.unmount());
+    // 2) manager submits; PUT pending; identity switches to another manager; old PUT completes
+    pending.length = 0;
+    const host2 = browser.document.createElement("div"); browser.document.body.append(host2); const root2 = createRoot(host2);
+    await act(async () => root2.render(createElement(m.DistributionPolicyPanel, { snapshot: snap(["personal.distribution.policy.manage"], false, "a1", "s1") })));
+    await act(async () => pending[0].resolve(json(known))); await settle();
+    await act(async () => host2.querySelector("[aria-label='切换分销政策开关']").click());
+    const ta = host2.querySelector("textarea");
+    await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(ta, "旧身份原因"); ta.dispatchEvent(new browser.Event("input", { bubbles: true })); });
+    await act(async () => [...host2.querySelectorAll("button")].find((b) => b.textContent === "提交变更").click());
+    assert.equal(pending.at(-1).method, "PUT");
+    const put = pending.at(-1);
+    await act(async () => root2.render(createElement(m.DistributionPolicyPanel, { snapshot: snap(["personal.distribution.policy.manage"], false, "a2", "s9") })));
+    const newGet = pending.at(-1); assert.equal(newGet.method, "GET");
+    await act(async () => newGet.resolve(json(known))); await settle();
+    const ta2 = host2.querySelector("textarea");
+    await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(ta2, "新身份草稿"); ta2.dispatchEvent(new browser.Event("input", { bubbles: true })); });
+    const before = pending.length;
+    await act(async () => put.resolve(json({ ok: true }))); await settle();
+    assert.equal(pending.length, before, "old PUT completion must not trigger a reload for the new scope");
+    assert.equal(host2.querySelector("textarea").value, "新身份草稿");
+    assert.doesNotMatch(host2.textContent, /已提交|提交中/);
+    assert.equal(host2.querySelector("[aria-label='切换分销政策开关']").getAttribute("aria-pressed"), "false");
+    await act(async () => root2.unmount());
   } finally { await vite.close(); }
 });

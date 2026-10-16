@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, hasPermission, type SessionSnapshot } from "../api";
+import { directoryScopeOf } from "../workspace/admin-directory-read";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -42,46 +43,57 @@ export function saveDistributionPolicyAdmin(body: { expectedRevision: string; co
 const metricLabel: Record<string, string> = { LAST_PAID_AMOUNT: "最近一笔实付", TOTAL_PAID_AMOUNT: "累计实付", PAID_COUNT: "实付笔数", SETTLED_REFERRAL: "已结算邀请" };
 const failure = (e: unknown) => e instanceof AdminApiError ? (e.status === 403 ? "当前管理员没有分销政策权限" : e.status === 409 ? "政策已被他人修改，请重新读取后再提交" : e.status === 503 ? "分销政策资源未就绪，保持只读" : "分销政策读取或保存失败") : "分销政策读取或保存失败";
 
+type PanelView = { scope: string; status: "loading" | "ready" | "error"; read: DistributionPolicyRead | null; message: string; enabled: boolean; reason: string; busy: boolean; notice: string };
+const blank = (scope: string): PanelView => ({ scope, status: "loading", read: null, message: "", enabled: false, reason: "", busy: false, notice: "" });
+
 export function DistributionPolicyPanel({ snapshot }: { snapshot: Snapshot }) {
   const access = distributionPolicyAccess(snapshot);
-  const [state, setState] = useState<{ status: "loading" } | { status: "error"; message: string } | { status: "ready"; read: DistributionPolicyRead }>({ status: "loading" });
-  const [enabled, setEnabled] = useState(false);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  const scopeRef = useRef("");
-  const scope = JSON.stringify([snapshot.adminUserId, snapshot.session?.id ?? null, access.canRead, access.canManage]);
-  const load = async () => {
-    scopeRef.current = scope;
-    const owner = scope;
-    setState({ status: "loading" });
+  // E-R3-01: same authorization scope as the directory module (identity, session, status, boss, effective permissions).
+  // The ref advances during render, so a revocation/identity/session change invalidates in-flight GET/PUT immediately.
+  const scope = directoryScopeOf(snapshot);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const [stored, setView] = useState<PanelView>(() => blank(scope));
+  const view = stored.scope === scope ? stored : blank(scope);
+  /** Only the scope that issued a request may write its result; anything else is discarded. */
+  // Request generation: bumped when a scope instance retires (incl. A→B→A) or the panel unmounts.
+  const genRef = useRef(0);
+  const patch = (owner: string, next: Partial<PanelView>, gen = genRef.current) => { if (scopeRef.current === owner && genRef.current === gen) setView((prev) => ({ ...(prev.scope === owner ? prev : blank(owner)), ...next })); };
+  const load = async (owner: string, keepNotice = "") => {
+    const gen = genRef.current;
+    patch(owner, { status: "loading", notice: keepNotice }, gen);
     try {
       const read = await readDistributionPolicyAdmin();
-      if (scopeRef.current !== owner) return;
-      setState({ status: "ready", read });
-      setEnabled(read.knowledge === "KNOWN" ? read.policy.config.enabled : false);
-    } catch (e) { if (scopeRef.current === owner) setState({ status: "error", message: failure(e) }); }
+      patch(owner, { status: "ready", read, enabled: read.knowledge === "KNOWN" ? read.policy.config.enabled : false }, gen);
+    } catch (e) { patch(owner, { status: "error", message: failure(e) }, gen); }
   };
-  useEffect(() => { if (access.canRead) void load(); else setState({ status: "error", message: "当前管理员没有分销政策权限" }); }, [scope]);
-  if (state.status === "loading") return <p className="text-sm text-muted-foreground">正在读取分销政策…</p>;
-  if (state.status === "error") return <div className="space-y-2"><p role="alert" className="text-sm">{state.message}</p>{access.canRead ? <Button type="button" size="sm" variant="outline" onClick={() => void load().catch(() => undefined)}>重试</Button> : null}</div>;
-  const read = state.read;
+  useEffect(() => { if (access.canRead) void load(scope); return () => { genRef.current += 1; }; }, [scope]);
+  if (!access.canRead) return <div className="space-y-2"><p role="alert" className="text-sm">当前管理员没有分销政策权限</p></div>;
+  if (view.status === "loading") return <p className="text-sm text-muted-foreground">正在读取分销政策…</p>;
+  if (view.status === "error" || !view.read) return <div className="space-y-2"><p role="alert" className="text-sm">{view.message}</p><Button type="button" size="sm" variant="outline" onClick={() => void load(scope)}>重试</Button></div>;
+  const read = view.read;
   if (read.knowledge === "UNKNOWN") return <section className="space-y-2 text-sm"><h2 className="text-base font-semibold">分销政策</h2><p>当前未配置分销政策（{read.reason}），不按任何默认比例显示。</p></section>;
   const { config } = read.policy;
+  const { enabled, reason, busy, notice } = view;
   const dirty = enabled !== config.enabled;
   const submit = async () => {
+    const owner = scope;
+    const gen = genRef.current;
     if (!access.canManage || !dirty || reason.trim().length < 3 || busy) return;
-    setBusy(true); setNotice("");
-    try { await saveDistributionPolicyAdmin({ expectedRevision: read.policy.revision, config: { ...config, enabled }, reason: reason.trim() }); setReason(""); setNotice("已提交，正在重新读取当前版本"); await load(); }
-    catch (e) { setNotice(failure(e)); }
-    finally { setBusy(false); }
+    patch(owner, { busy: true, notice: "" }, gen);
+    try {
+      await saveDistributionPolicyAdmin({ expectedRevision: read.policy.revision, config: { ...config, enabled }, reason: reason.trim() });
+      if (scopeRef.current !== owner || genRef.current !== gen) return; // old PUT finished after identity/scope change: never touch the new page
+      patch(owner, { busy: false, reason: "" }, gen);
+      await load(owner, "已提交，正在重新读取当前版本");
+    } catch (e) { patch(owner, { busy: false, notice: failure(e) }, gen); }
   };
   return <section className="space-y-4 text-sm" aria-labelledby="distribution-policy-heading">
     <div><h2 id="distribution-policy-heading" className="text-base font-semibold">分销政策</h2><p className="text-muted-foreground">版本 {read.policy.versionId} · 修订 {read.policy.revision} · 本地受控政策（LOCAL_CONTROLLED），不代表正式全量政策</p></div>
     <dl className="grid grid-cols-2 gap-2"><dt>状态</dt><dd>{config.enabled ? "已开启" : "未开启"}</dd><dt>适用出租方式</dt><dd>{config.accountModes.map((m) => m === "ordinary" ? "普通出租" : "定制出租").join("、")}</dd><dt>结算后到账</dt><dd>{config.settlementDelayDays} 天</dd><dt>单笔最低（分）</dt><dd>{config.minimumAccrualCents}</dd></dl>
     <Table><TableHeader><TableRow><TableHead>等级</TableHead><TableHead>排序</TableHead><TableHead>邀请租客</TableHead><TableHead>邀请号主</TableHead><TableHead>升级条件</TableHead></TableRow></TableHeader>
       <TableBody>{config.levels.map((l) => <TableRow key={l.code}><TableCell>{l.code}{l.default ? "（默认）" : ""}</TableCell><TableCell>{l.rank}</TableCell><TableCell>{l.renterPercent}%</TableCell><TableCell>{l.ownerPercent}%</TableCell><TableCell>{l.upgrade ? `${l.upgrade.match === "ALL" ? "全部满足" : "任一满足"}：${l.upgrade.conditions.map((c) => `${metricLabel[c.metric] ?? c.metric} ≥ ${c.value}`).join("；")}` : "—"}</TableCell></TableRow>)}</TableBody></Table>
-    {access.canManage ? <div className="space-y-2 border-t pt-3"><div className="flex items-center gap-2"><span>变更后状态：{enabled ? "开启" : "关闭"}</span><Button type="button" size="sm" variant="outline" aria-pressed={enabled} aria-label="切换分销政策开关" disabled={busy} onClick={() => setEnabled((x) => !x)}>{enabled ? "改为关闭" : "改为开启"}</Button></div><Textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} placeholder="变更原因（必填，至少 3 个字）" disabled={busy} /><Button type="button" disabled={!dirty || reason.trim().length < 3 || busy} onClick={() => void submit()}>{busy ? "提交中…" : "提交变更"}</Button></div> : <p className="text-muted-foreground">只读：修改需要分销政策管理权限。</p>}
+    {access.canManage ? <div className="space-y-2 border-t pt-3"><div className="flex items-center gap-2"><span>变更后状态：{enabled ? "开启" : "关闭"}</span><Button type="button" size="sm" variant="outline" aria-pressed={enabled} aria-label="切换分销政策开关" disabled={busy} onClick={() => patch(scope, { enabled: !enabled })}>{enabled ? "改为关闭" : "改为开启"}</Button></div><Textarea value={reason} onChange={(e) => patch(scope, { reason: e.target.value })} maxLength={500} placeholder="变更原因（必填，至少 3 个字）" disabled={busy} /><Button type="button" disabled={!dirty || reason.trim().length < 3 || busy} onClick={() => void submit()}>{busy ? "提交中…" : "提交变更"}</Button></div> : <p className="text-muted-foreground">只读：修改需要分销政策管理权限。</p>}
     {notice ? <p role="status">{notice}</p> : null}
   </section>;
 }
