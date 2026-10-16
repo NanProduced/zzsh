@@ -79,6 +79,13 @@ test("selected full-payout survives as a true declaration for genuine owner acce
   assert.deepEqual((plan.draft?.attributes as Record<string, unknown>).full_payout_declaration, { schema: "full-payout-declaration-v1", selected: true });
   assert.equal(Object.hasOwn(plan.draft!, "fullPayoutTermsAcceptance"), false);
 });
+
+test("matching source proof cannot turn a non-string-0/1 payout flag into a formal false declaration",()=>{
+ for(const flag of [null,undefined,"2","",false,true,0,1]){
+  const input=fixture();input.isFullPayout=flag as LegacyTradeIntake["isFullPayout"];bindSource(input);
+  const plan=prepareLegacyTradeIntake(input,catalog());assert.equal(plan.admission,"BLOCKED",String(flag));assert(plan.reasons.includes("FUNDING_POLICY_UNKNOWN"),String(flag));assert.equal(plan.draft,null);
+ }
+});
 test("frozen batch pure plan closes every row into candidate/blocked/isolated and never publishes",()=>{
  const first=fixture(),second=fixture();second.source.legacyId="34";second.accountId="another_account";bindSource(second);delete second.insuranceCountEvidence;
  const plan=planLegacyTradeIntakeBatch([{legacyId:"33",accountId:first.accountId,intake:first,isolationReasons:[]},{legacyId:"34",accountId:second.accountId,intake:second,isolationReasons:[]},{legacyId:"35",accountId:null,intake:null,isolationReasons:["PARTY_UNMAPPED"]}],catalog());
@@ -105,7 +112,9 @@ test("actual maintenance chain saves and quotes formal native fields before publ
   const result=await takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate);assert.deepEqual(calls,selected?["save","quote"]:["save","quote","review"]);assert.equal((result.body as {state:string}).state,selected?"OWNER_ACCEPTANCE_REQUIRED":"PUBLISHED");
   assert.equal(queries.some(q=>q.includes("'LEGACY_TAKEOVER_AUTHORIZED'")),!selected);assert(!queries.some(q=>/INSERT INTO zzsh_order\.rental_order|ledger_entry/.test(q)));
   if(selected){const finalize={accountId:a.id,source:input.source,batchId:"fixture_batch",expectedRevision:"1",versionId:version.id,contentHash:version.content_hash!,releaseId:version.rule_release_id!};await assert.rejects(()=>finalizeLegacyTradeTakeover(client,actor,finalize,gate),/TERMS_ACCEPTANCE_REQUIRED/);assert.deepEqual(calls,["save","quote"]);accepted=true;assert.equal((await finalizeLegacyTradeTakeover(client,actor,finalize,gate)).status,200);assert.deepEqual(calls,["save","quote","review"]);}
-  calls.length=0;badDisplay=true;await assert.rejects(()=>takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate),/DISPLAY_SOURCE_BINDING_MISMATCH/);assert.deepEqual(calls,[]);
+  calls.length=0;
+  for(const flag of [null,undefined,"2","",false,true,0,1]){const invalid=structuredClone(input);invalid.isFullPayout=flag as LegacyTradeIntake["isFullPayout"];bindSource(invalid);await assert.rejects(()=>takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:invalid},gate),/FUNDING_POLICY_UNKNOWN/);assert.deepEqual(calls,[]);}
+  badDisplay=true;await assert.rejects(()=>takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate),/DISPLAY_SOURCE_BINDING_MISMATCH/);assert.deepEqual(calls,[]);
   t.mock.restoreAll();
  }
 });

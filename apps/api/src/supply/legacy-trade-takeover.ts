@@ -64,7 +64,7 @@ export function prepareLegacyTradeIntake(input: LegacyTradeIntake, catalog: read
   let depositCents: string | null = null;
   if (input.depositYuan === null) reasons.push("DEPOSIT_POLICY_VIOLATION");
   else { try { depositCents = legacyPlanYuanToCents(input.depositYuan); } catch { reasons.push("DEPOSIT_POLICY_VIOLATION"); } }
-  if (input.isFullPayout === null) reasons.push("FUNDING_POLICY_UNKNOWN");
+  if (input.isFullPayout !== "0" && input.isFullPayout !== "1") reasons.push("FUNDING_POLICY_UNKNOWN");
   if (!input.media.length || input.media.length > 20 || new Set(input.media.map(m => m.assetId)).size !== input.media.length || new Set(input.media.map(m => m.position)).size !== input.media.length
     || input.media.some(m => m.technicalState !== "READY" || m.accessClass !== "PUBLIC_DISPLAY" || !/^[a-f0-9]{64}$/.test(m.byteHash) || !Number.isSafeInteger(m.position) || m.position < 0 || m.position > 19)) reasons.push("MEDIA_UNAVAILABLE");
   if (!input.termOptionCode) reasons.push("TERM_OPTION_UNPROVEN");

@@ -40,8 +40,8 @@ export async function importLegacyHistoricalLiability(client: PoolClient, actor:
       if (!proof || !record || canonicalize(record) !== proof.canonical || sha256Hex(proof.canonical) !== proof.digest || record.order_id !== binding.legacyId || typeof record.id !== "string" || !/^[1-9]\d{0,23}$/.test(record.id)) throw conflict("REFUND_RECORD_EVIDENCE_MISSING");
     } else if (input.refundRecord) throw invalid("UNEXPECTED_REFUND_RECORD");
     let dutyId: string | null = null;
-    if (input.classification === "COMPLETED_UNREFUNDED" || input.classification === "POSTED_CONFISCATION") {
-      const refund = input.classification === "COMPLETED_UNREFUNDED", kind = refund ? "RENTER_REFUND" : "DEPOSIT_COMPENSATION";
+    if (input.classification === "COMPLETED_UNREFUNDED" || input.classification === "DETAINED" || input.classification === "POSTED_CONFISCATION") {
+      const refund = input.classification !== "POSTED_CONFISCATION", kind = refund ? "RENTER_REFUND" : "DEPOSIT_COMPENSATION";
       let amount: string;
       if (refund) {
         if (source.return_order_money === null || source.return_order_money === undefined) throw conflict("REFUND_AMOUNT_UNPROVEN");

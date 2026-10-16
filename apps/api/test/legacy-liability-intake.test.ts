@@ -17,10 +17,10 @@ function arrange(t:import("node:test").TestContext,classification:LegacyHistoric
  if(classification==="REFUND_RECORD_EXISTS"){const c=canonicalize({id:"92",order_id:"7",status:"SOURCE_UNKNOWN"});input.refundRecord={canonical:c,digest:sha256Hex(c)};}
  return {calls,client,input};
 }
-test("18 history creates exact net duty while one held fact, six legacy handled and 61 refund records keep distinct responsibility",async t=>{
+test("18 history and one held source retain exact net duties while six legacy handled and 61 refund records keep distinct responsibility",async t=>{
  for(const classification of ["COMPLETED_UNREFUNDED","DETAINED","POSTED_CONFISCATION","REFUND_RECORD_EXISTS"] as const){
   const p=arrange(t,classification);await importLegacyHistoricalLiability(p.client,actor,p.input);const duty=p.calls.find(c=>c.sql.includes("INSERT INTO zzsh_order.legacy_order_duty("));
-  if(classification==="COMPLETED_UNREFUNDED"){assert(duty);assert.equal(duty.v[2],"RENTER_REFUND");assert.equal(duty.v[5],"8200");assert.equal(duty.v[6],"PENDING");}
+  if(classification==="COMPLETED_UNREFUNDED"||classification==="DETAINED"){assert(duty);assert.equal(duty.v[2],"RENTER_REFUND");assert.equal(duty.v[5],"8200");assert.equal(duty.v[6],"PENDING");assert.equal(duty.v[7],classification);assert.equal(duty.v[9],null);}
   else if(classification==="POSTED_CONFISCATION"){assert(duty);assert.equal(duty.v[2],"DEPOSIT_COMPENSATION");assert.equal(duty.v[5],"5700");assert.equal(duty.v[6],"SETTLED");assert.equal(duty.v[9],"LEGACY_RECORDS");assert(!duty.sql.includes("settled_ref"));}
   else assert.equal(duty,undefined);
   const audit=p.calls.find(c=>c.sql.includes('"zzsh_iam"."audit_event"'));assert(audit);assert.equal(JSON.parse(String(audit.v[10])).channelState,"UNKNOWN");assert(!p.calls.some(c=>/settlement_ledger_entry|finance_event|rental_order\s*\(/.test(c.sql)));t.mock.restoreAll();

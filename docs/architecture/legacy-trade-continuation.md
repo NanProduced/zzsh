@@ -22,7 +22,7 @@ Web BFF沿 `/api/orders/legacy/…`，管理 BFF沿 `/api/bff/admin/orders/legac
 
 责任经济键为 `(order_id,kind,source_record_id)`。162在途佣金先PENDING、成熟为空；confirm按原逐条佣金证据重算终金额，时点为同一次服务端confirm时间+7天。208已完成父单佣金走独立不可变admission，保留原行canonical/digest、稳定受益映射、终金额、cutoff、原时间单位和UTC微秒；COMPLETED_AT加旧7天，MATURES_AT直接使用，双证据须一致，不要求旧账号分母或新head。
 
-历史18笔完成未退仅生成经核净额的退款责任；1笔暂扣仅登记事实；6笔旧侧没收保留LEGACY_RECORDS终态及空新财账ref，不再次支付；61笔退款记录仅作防重复依据，不等于到账。完整来源缺失逐行隔离，不能以0代替未知。
+历史18笔完成未退与1笔暂扣均保留经核净额的PENDING退款责任；暂扣由HELD阻断执行，解除后消费同一责任，保留detain且不追加退款。6笔旧侧没收保留LEGACY_RECORDS终态及空新财账ref，不再次支付；61笔退款记录仅作防重复依据，不等于到账。完整来源缺失逐行隔离，不能以0代替未知。
 
 共同占用读取新订单、旧519映射单有效head与1条隔离登记。OCCUPIED优先，其次UNKNOWN，再FREE；缺schema/查询异常不可回退FREE。供给/新建单与维护导入遵循用户→game→account前缀；续办与财务使用同一稳定mapped order advisory→head→按id排序duty。纯续办仅保持占用或释放，不复开终态；财务先锁全部资金受益人并在共同锁后复核集合，不能持head后补锁user/account。
 

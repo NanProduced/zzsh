@@ -28,6 +28,15 @@ test("frozen v4 validation binds separate sources and cannot reclassify old v3 o
  const s=selectPersonalGrowthOffer(known(),binding,asOf,quote()),expected={...binding,listingHash:"b".repeat(64)},personal={schema:"personal-quote-v4",...expected,membershipGrowth:s.growth};
  assert(frozenPersonalGrowthV4Valid(personal,expected,"0"));assert(!frozenPersonalGrowthV4Valid(personal,expected,"30000"));assert(!frozenPersonalGrowthV4Valid({...personal,schema:"personal-quote-v3"},expected,"0"));assert(!frozenPersonalGrowthV4Valid({...personal,membership:{tier:"STANDARD"}},expected,"0"));
 });
+test("T deposit provenance keeps a still-active same-millisecond waiver using normalized microseconds; E choice is an explicit fixture",t=>{
+ const shared:typeof import("../src/auth/membership-growth")=require("../src/auth/membership-growth");
+ const growth=quote("47","30000"),friend=quote("46","0");let active=true;
+ t.mock.method(shared,"chooseCompleteOffer",(plans:readonly import("../src/auth/membership-growth").GrowthOfferPlan[]):import("../src/auth/membership-growth").OfferChoice=>({knowledge:"KNOWN",selected:plans[0]!,priceBasis:"GROWTH",depositBasis:active?"FRIEND":"GROWTH",depositCents:active?"0":"30000"}));
+ for(const [until,valid] of [["2026-10-16T04:00:00.123900Z",true],["2026-10-16T12:00:00.123900+08:00",true],[asOf,false],["2026-10-16T04:00:00.123455Z",false]] as const){
+  active=valid;const data:GrowthConfirmationKnown={knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:asOf,policyVersion:"1",entitlementIds:["friend-1"],candidates:[{quote:growth,plan:quoteToGrowthOfferPlan(growth,{source:"GROWTH",benefitVersion:"1",binding})},{quote:friend,plan:quoteToGrowthOfferPlan(friend,{source:"FRIEND",benefitVersion:"2",binding,entitlementId:"friend-1",validUntil:until})}]};
+  const result=selectPersonalGrowthOffer(data,binding,asOf,growth);assert.equal(result.growth.depositCents,valid?"0":"30000");assert.equal(result.growth.depositEntitlementId,valid?"friend-1":null);assert.equal(result.growth.depositBenefitVersion,valid?"2":"1");assert.equal(result.benefits.priceSource,"GROWTH");
+ }
+});
 test("actual confirmation rebuild skips readRentalMembership when growth is configured and never exposes old customerTier",async t=>{
  const order:typeof import("../src/order/order")=require("../src/order/order"),publishing:typeof import("../src/supply/publishing")=require("../src/supply/publishing"),funding:typeof import("../src/supply/funding-authority")=require("../src/supply/funding-authority"),membership:typeof import("../src/auth/rental-membership")=require("../src/auth/rental-membership");
  t.mock.method(order,"assertFreshCreateAuthorization",async()=>({ownerUserId:"owner-1",gameId:"game-1"}));t.mock.method(publishing,"evaluatePublication",async()=>[]);t.mock.method(funding,"isProductionConfirmationFundingReader",()=>true);
