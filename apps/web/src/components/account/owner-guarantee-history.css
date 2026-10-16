@@ -1,0 +1,6 @@
+.guarantee-history-records{display:grid;gap:12px;margin-top:16px}
+.guarantee-history-records summary{display:flex;justify-content:space-between;gap:12px;cursor:pointer}
+.guarantee-history-records ol{display:grid;gap:12px;padding-left:22px}
+.guarantee-history-records li p{margin:5px 0}
+.owner-guarantee-history>.account-fact-list{margin-top:16px}
+@media(max-width:600px){.guarantee-history-records summary{flex-direction:column;gap:5px}.owner-guarantee-history .wallet-section-heading{align-items:flex-start}}

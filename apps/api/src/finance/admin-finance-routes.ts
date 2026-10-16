@@ -9,7 +9,7 @@ import { forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from "
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import type { ListingCursorKey } from "../supply/listing-cursor";
-import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, financePeriodProjection, readAdminFinanceSubject, readAdminFinanceDocument, type FinanceActor } from "./admin-finance-read";
+import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, financePeriodProjection,readAdminFinancePeriodBalances, readAdminFinanceSubject, readAdminFinanceDocument, type FinanceActor } from "./admin-finance-read";
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
 
 export type AdminFinanceOptions = AuthSecurityOptions & { listingCursorKey?: ListingCursorKey };
@@ -72,7 +72,7 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
         return { actor, body: { ...common, documents, subjects: subjects.items, subjectCount: subjects.total, documentCount: facts.lookupPage!.documentCount, entryCount: facts.lookupPage!.entryCount, page, pageSize, hasMore: start + pageSize < facts.lookupPage!.documentCount || start + pageSize < subjects.total } };
       }
       return { actor, body: { ...common, entries: entries.slice(start, start + pageSize), documentCount: documents.length, entryCount: entries.length, page, pageSize, hasMore: start + pageSize < entries.length,
-        reconciliation: financePeriodProjection(entries), gaps: ["PERIOD_BALANCE_PROOF_NOT_AVAILABLE", ...(!facts.withdrawalsReady ? ["WITHDRAWAL_SOURCE_NOT_AVAILABLE"] : []), "NATIVE_DISTRIBUTION_NOT_AVAILABLE", "CHANNEL_COST_NOT_AVAILABLE"] } };
+        reconciliation: financePeriodProjection(entries,await readAdminFinancePeriodBalances(client,filters)), gaps: ["CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY", ...(!facts.withdrawalsReady ? ["WITHDRAWAL_SOURCE_NOT_AVAILABLE"] : []), ...(!facts.nativeDistributionReady?["NATIVE_DISTRIBUTION_NOT_AVAILABLE"]:[]), "CHANNEL_COST_NOT_AVAILABLE"] } };
     });
     if (result.generated) {
       const receipt = await prepareAdminFinanceExport(options, result.actor, filters, result.token!, result.generated, requestId);

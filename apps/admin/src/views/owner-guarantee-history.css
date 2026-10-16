@@ -1,0 +1,8 @@
+.finance-guarantee-history{margin-top:20px;padding:16px;border:1px solid var(--border);border-radius:12px;min-width:0}
+.finance-guarantee-history>ul{list-style:none;padding:0;display:grid;gap:10px}
+.finance-guarantee-history details{padding:12px;border:1px solid var(--border);border-radius:8px;overflow-wrap:anywhere}
+.finance-guarantee-history summary{cursor:pointer;line-height:1.7}
+.finance-guarantee-history ol{padding-left:22px}
+.finance-guarantee-history ol li{display:grid;gap:4px;margin-block:10px}
+.finance-guarantee-history small{color:var(--muted-foreground)}
+@media(max-width:600px){.finance-guarantee-history{padding:12px}.finance-guarantee-history .ud-section-heading{align-items:flex-start;gap:12px}}

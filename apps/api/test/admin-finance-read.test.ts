@@ -4,12 +4,30 @@ import { parseAdminFinanceFilters, resolveFinanceLookup, projectAdminFinanceLedg
 import { generateAdminFinanceCsv } from "../src/finance/admin-finance-export";
 import { matchFinanceOrderReference, type FinanceOrderFact } from "../src/finance/admin-finance-order-read";
 import { loadAdminFinanceFacts } from "../src/finance/admin-finance-read";
+import {readAdminFinancePeriodBalances} from '../src/finance/admin-finance-read';
 import type { PoolClient } from "pg";
 
 const filters = parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03"));
 const line = (overrides: Record<string, unknown> = {}) => projectAdminFinanceLedger({ id: "a", account_code: "WALLET_AVAILABLE", subject_id: "u1", subject_name: "同昵称", delta: "-20000", at: "2026-10-03T00:00:00.000000Z", source_entity: "withdrawal_intent", source_id: "w1", event_kind: "RESERVE", ...overrides });
 const facts = (): FinanceFacts => ({ entries: [line()], subjects: [{ id: "u1", name: "同昵称" }], revisions: [], withdrawalsReady: true, asOf: "2026-10-03T10:00:00.000000Z", version: "a".repeat(64) });
 const actor = { userId: "admin1", sessionId: "session1", authorizationKey: "access1" }, key = { keyId: "read1", secret: "x".repeat(64) };
+
+test('native pending/settled/recovery uses the earning economic root and original state, not a withdrawal or generic settlement',()=>{
+ const row=projectAdminFinanceLedger({id:'earning-line',account_code:'WALLET_PENDING_EARNINGS',subject_id:'u1',subject_name:'用户一',delta:'1234',at:facts().asOf,event_kind:'EARNING_PENDING',source_kind:'NATIVE_RENTAL_REFERRAL',source_type:'NATIVE',source_entity:'rental_order',source_id:'native-order',economic_root_id:'earning-root',order_id:'native-order',earning_state:'RECOVERY_REQUIRED',earning_role:'RENTER_REFERRAL',earning_amount:'1234',earning_disposition:'SETTLED',earning_recovery:'1234',earning_version:'3',earning_due_at:facts().asOf});
+ assert.equal(row.documentRef,'DISTRIBUTION:earning-root');assert.equal(row.bucket,'PENDING_EARNINGS');assert.equal(row.kind,'DISTRIBUTION');assert.equal(row.state,'RECOVERY_REQUIRED');assert.equal(row.evidence.recoveryRequiredCents,'1234');assert(row.related.some(r=>r.ref==='ORDER:native-order'));
+});
+test('zero final duty is a typed final fact with no ledger or channel claim; guarantee held is a separate owner bucket',()=>{
+ const zero=projectAdminFinanceObservation({id:'zero_duty:one',observation_origin:'LEGACY_DUTY_ZERO',subject_id:'u1',subject_name:'用户一',source_kind:'LEGACY_CONTINUATION_DUTY',source_type:'LEGACY_CONTINUATION',source_system:'zzsh',source_entity:'legacy_order_duty',source_id:'duty-one',source_digest:'a'.repeat(64),amount:'0',action:'RENTER_REFUND',source_status:'SETTLED',reference_id:'legacy-order',at:facts().asOf,imported_at:facts().asOf});assert.equal(zero.documentRef,'LEGACY_DUTY:duty-one');assert.equal(zero.bucket,'REFUND_PAYABLE');assert.equal(zero.affectsCurrentLedger,false);assert.equal(zero.classification,'ZERO_FINALIZATION');
+ const held=line({account_code:'GUARANTEE_HELD',event_kind:'GUARANTEE_CAPTURE',source_kind:'NATIVE_GUARANTEE',source_entity:'owner_guarantee_payment',source_id:'payment-one',delta:'500'});assert.equal(held.bucket,'GUARANTEE_HELD');assert.equal(held.kind,'GUARANTEE');assert.equal(held.documentRef,'GUARANTEE_PAYMENT:payment-one');
+});
+test('period totals bind the same scope and filters, close exactly, and keep book proof distinct from legacy/channel coverage',async()=>{
+ const seen:any[]=[],client={query:async(sql:string,args:any[])=>{seen.push({sql,args});return sql.includes('finance period optional sources')?{rows:[{native_distribution:false,withdrawals:false}]}:{rows:[{bucket:'AVAILABLE',opening:'999999999999999999999990',closing:'999999999999999999999999',movement:'9'}]};}};
+ const selected={...filters,scope:'u1',bucket:'AVAILABLE' as const,q:'literal%_',kind:'SETTLEMENT'},balances=await readAdminFinancePeriodBalances(client as any,selected);
+ const entries=[line({source_entity:'settlement_posting',source_id:'p',delta:'9'})],result=financePeriodProjection(entries,balances).find(r=>r.bucket==='AVAILABLE')!;
+ assert.equal(result.openingBalance,'999999999999999999999990');assert.equal(result.closingBalance,'999999999999999999999999');assert.equal(result.difference,'0');assert.equal(result.knowledge,'KNOWN');assert.equal(result.scope,'CURRENT_LEDGER_ONLY');assert(result.reasonCodes.includes('CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY'));
+ const q=seen[1];assert(q.sql.includes('r.subject_id'));assert(q.args.includes('u1'));assert(q.args.includes('AVAILABLE'));assert(q.args.includes('SETTLEMENT'));assert(q.args.some((s:any)=>typeof s==='string'&&s.includes('literal')));assert(!/\b(INSERT|UPDATE|DELETE)\b/.test(q.sql));
+ assert.throws(()=>financePeriodProjection(entries,[{...balances[0]!,movement:'8'}]),(e:any)=>e.status===503);
+});
 
 for (const disposition of ["PAYOUT_POSTED", "RELEASE_POSTED", "RESERVED"] as const) test(`C1 ${disposition}: late conflict preserves original disposition across document, period and CSV`, async () => {
   const paid = disposition === "PAYOUT_POSTED", released = disposition === "RELEASE_POSTED";
