@@ -49,3 +49,20 @@ export async function bindLeader(userId:string,body:LeaderBindingBody,canAct:()=
 }
 /** An unresolved write never repeats POST: original receipt, then original relation read. */
 export async function recoverLeaderBinding(userId:string,canAct:()=>boolean){const p=pendingLeaderBinding(userId);if(!p||!canAct())return null;const b=await request('/bind/receipt?key='+encodeURIComponent(p.key));subject(b,userId);if(!['KNOWN','UNKNOWN'].includes(b.knowledge)||(b.knowledge==='KNOWN')!==(b.receipt!==null))throw bad();if(b.knowledge==='UNKNOWN')return null;const original=binding(object(b.receipt).relation,userId),read=await readMyInvitation(userId);if(read.leader.relation?.id!==original.id)throw bad();if(!canAct())throw new WalletRequestError(401,'IDENTITY_CHANGED');if(pendingLeaderBinding(userId)?.key!==p.key)throw new WalletRequestError(409,'WRITE_MARKER_CHANGED');localStorage.removeItem(markerKey(userId));return read;}
+
+/** GAP-014 self applicable terms (distribution-terms.self.v1). Strict: unknown stays unknown; no global level table. */
+export type MyDistributionTerms={schema:'distribution-terms.self.v1';subjectId:string;scope:'LOCAL_CONTROLLED';knowledge:'KNOWN'|'UNKNOWN';applicable:boolean|null;reason:string|null;policyVersion:string|null;participantPolicyVersion:string|null;level:null|{code:string;rank:number;renterPercent:string;ownerPercent:string};accountModes:('ordinary'|'custom')[]|null;minimumAccrualCents:string|null;settlementDelayDays:number|null};
+const PERCENT=/^(0|[1-9]\d{0,2})(?:\.\d{1,8})?$/;
+export function distributionTerms(value:unknown,userId:string):MyDistributionTerms{
+ const b=object(value);subject(b,userId);const keys=['schema','subjectId','scope','knowledge','applicable','reason','policyVersion','participantPolicyVersion','level','accountModes','minimumAccrualCents','settlementDelayDays'];
+ if(Object.keys(b).length!==keys.length||Object.keys(b).some(k=>!keys.includes(k))||b.schema!=='distribution-terms.self.v1'||b.scope!=='LOCAL_CONTROLLED'||!['KNOWN','UNKNOWN'].includes(b.knowledge))throw bad();
+ const opt=(v:any)=>v===null?null:text(v);const reason=opt(b.reason),policyVersion=opt(b.policyVersion),participantPolicyVersion=opt(b.participantPolicyVersion);
+ if(b.knowledge==='UNKNOWN'){if(b.applicable!==null||b.level!==null||b.accountModes!==null||b.minimumAccrualCents!==null||b.settlementDelayDays!==null||!reason)throw bad();return{schema:b.schema,subjectId:userId,scope:'LOCAL_CONTROLLED',knowledge:'UNKNOWN',applicable:null,reason,policyVersion,participantPolicyVersion,level:null,accountModes:null,minimumAccrualCents:null,settlementDelayDays:null};}
+ if(typeof b.applicable!=='boolean'||!policyVersion||(b.applicable===false)!==(reason!==null))throw bad();
+ let level:MyDistributionTerms['level']=null;if(b.level!==null){const l=object(b.level);if(!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(l.code)||!Number.isInteger(l.rank)||!PERCENT.test(l.renterPercent)||!PERCENT.test(l.ownerPercent))throw bad();level={code:l.code,rank:l.rank,renterPercent:l.renterPercent,ownerPercent:l.ownerPercent};}
+ if(b.applicable&&!level)throw bad();
+ const modes=b.accountModes===null?null:Array.isArray(b.accountModes)&&b.accountModes.length&&b.accountModes.every((m:any)=>m==='ordinary'||m==='custom')?b.accountModes:(()=>{throw bad();})();
+ if(level&&(modes===null||typeof b.minimumAccrualCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(b.minimumAccrualCents)||!Number.isInteger(b.settlementDelayDays)||b.settlementDelayDays<0))throw bad();
+ return{schema:b.schema,subjectId:userId,scope:'LOCAL_CONTROLLED',knowledge:'KNOWN',applicable:b.applicable,reason,policyVersion,participantPolicyVersion,level,accountModes:level?modes:null,minimumAccrualCents:level?b.minimumAccrualCents:null,settlementDelayDays:level?b.settlementDelayDays:null};
+}
+export async function readMyDistributionTerms(userId:string,signal?:AbortSignal){return distributionTerms(await request('/terms',undefined,undefined,signal),userId);}

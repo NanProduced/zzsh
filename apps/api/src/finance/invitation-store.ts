@@ -73,3 +73,27 @@ export async function bindMyDistributionLeader(pool:Pool,actor:Actor,body:Record
   const id='leader_relation_'+sha(canonicalize([actor.userId,code.user_id])).slice(0,40),sourceDigest=sha(canonicalize({codeId:code.id,parentUserId:code.user_id,policyVersion:policy.policy.versionId}));await c.query(`INSERT INTO zzsh_order.invitation_relation(id,type,child_user_id,parent_user_id,policy_version_id,source_type,source_ref,source_digest) VALUES($1,'DISTRIBUTION_LEADER',$2,$3,$4,'LOCAL_CONTROLLED',$5,$6)`,[id,actor.userId,code.user_id,policy.policy.versionId,'self-bind:'+key,sourceDigest]);const changed=await c.query("UPDATE zzsh_order.distribution_participant SET leader_knowledge='KNOWN_PARENT',revision=revision+1 WHERE user_id=$1 AND revision=$2",[actor.userId,body.expectedParticipantRevision]);if(changed.rowCount!==1)throw conflict('Participant CAS changed');await recordAudit(c,{actorType:'user',actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,action:'distribution.leader.bound',objectType:'invitation_relation',objectId:id,outcome:'SUCCESS',details:{sourceDigest,policyVersion:policy.policy.versionId}});await c.query('SET CONSTRAINTS ALL IMMEDIATE');return{status:200,body:{relation:{id,...planned.relation},replayed:false}};
  });
 });}
+
+/** GAP-014 self terms DTO: only the caller's own applicable level and policy version; never the full level table or money. */
+export type MyDistributionTermsReason='POLICY_NOT_CONFIGURED'|'PARTICIPANT_UNKNOWN'|'ELIGIBILITY_UNKNOWN'|'LEVEL_UNKNOWN'|'LEVEL_NOT_IN_CURRENT_POLICY'|'INELIGIBLE'|'COMMISSION_FROZEN'|'POLICY_DISABLED'|string;
+export type MyDistributionTerms={schema:'distribution-terms.self.v1';subjectId:string;scope:'LOCAL_CONTROLLED';knowledge:'KNOWN'|'UNKNOWN';applicable:boolean|null;reason:MyDistributionTermsReason|null;policyVersion:string|null;participantPolicyVersion:string|null;level:null|{code:string;rank:number;renterPercent:string;ownerPercent:string};accountModes:('ordinary'|'custom')[]|null;minimumAccrualCents:string|null;settlementDelayDays:number|null};
+type PolicyReadLike={knowledge:'KNOWN';policy:{versionId:string;config:import('./distribution-policy').DistributionPolicyConfig}}|{knowledge:'UNKNOWN';policy:null;reason?:string};
+type ParticipantRow={eligibility?:string|null;level_code?:string|null;commission_frozen?:boolean|null;policy_version_id?:string|number|null}|undefined;
+export function projectMyDistributionTerms(subjectId:string,policy:PolicyReadLike,p:ParticipantRow):MyDistributionTerms{
+ const base={schema:'distribution-terms.self.v1' as const,subjectId,scope:'LOCAL_CONTROLLED' as const,participantPolicyVersion:p?.policy_version_id==null?null:String(p.policy_version_id)};
+ const unknown=(reason:string,policyVersion:string|null=null):MyDistributionTerms=>({...base,knowledge:'UNKNOWN',applicable:null,reason,policyVersion,level:null,accountModes:null,minimumAccrualCents:null,settlementDelayDays:null});
+ if(policy.knowledge!=='KNOWN'||!policy.policy)return unknown(('reason' in policy&&policy.reason)||'POLICY_NOT_CONFIGURED');
+ const v=policy.policy.versionId,config=policy.policy.config;
+ if(!p)return unknown('PARTICIPANT_UNKNOWN',v);
+ if(p.eligibility!=='ELIGIBLE'&&p.eligibility!=='INELIGIBLE')return unknown('ELIGIBILITY_UNKNOWN',v);
+ const known=(applicable:boolean,reason:string|null,level:MyDistributionTerms['level']):MyDistributionTerms=>({...base,knowledge:'KNOWN',applicable,reason,policyVersion:v,level,accountModes:level?[...config.accountModes]:null,minimumAccrualCents:level?config.minimumAccrualCents:null,settlementDelayDays:level?config.settlementDelayDays:null});
+ if(!p.level_code)return p.eligibility==='INELIGIBLE'?known(false,'INELIGIBLE',null):unknown('LEVEL_UNKNOWN',v);
+ const own=config.levels.find(l=>l.code===p.level_code);if(!own)return unknown('LEVEL_NOT_IN_CURRENT_POLICY',v);
+ const level={code:own.code,rank:own.rank,renterPercent:own.renterPercent,ownerPercent:own.ownerPercent};
+ if(p.eligibility==='INELIGIBLE')return known(false,'INELIGIBLE',level);
+ if(p.commission_frozen===true)return known(false,'COMMISSION_FROZEN',level);
+ if(!config.enabled)return known(false,'POLICY_DISABLED',level);
+ return known(true,null,level);
+}
+/** Self read of applicable terms. Same user authorization and read gate as readMyInvitations; no write admission required. */
+export async function readMyDistributionTerms(pool:Pool,actor:Actor,binding?:LocalDistributionScope):Promise<MyDistributionTerms>{return withTransaction(pool,async c=>{await assertUserContextInTransaction(c,actor);await installed(c);const policy=await readInvitationPolicyInTransaction(c,binding),p=(await c.query('SELECT eligibility,level_code,commission_frozen,policy_version_id FROM zzsh_order.distribution_participant WHERE user_id=$1',[actor.userId])).rows[0];return projectMyDistributionTerms(actor.userId,policy as PolicyReadLike,p);});}

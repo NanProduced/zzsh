@@ -1,7 +1,7 @@
 "use client";
 import {PersonalEarnings} from './personal-earnings';import {useEffect,useRef,useState,type FormEvent} from 'react';import {Copy,RefreshCw,Users,Link2,Clock3} from 'lucide-react';
 import {useUserSession,useUserSessionStore} from '@/components/session/user-session-provider';import {formatOrderTime} from '@/lib/order-client';import {WalletRequestError} from '@/lib/personal-wallet-client';
-import {readMyInvitation,readMyInvitees,pendingLeaderBinding,bindLeader,recoverLeaderBinding,type InvitationRead} from '@/lib/invitation-client';import {WalletSummary} from './personal-wallet';import './personal-invitations.css';
+import {readMyInvitation,readMyInvitees,pendingLeaderBinding,bindLeader,recoverLeaderBinding,readMyDistributionTerms,type InvitationRead,type MyDistributionTerms} from '@/lib/invitation-client';import {WalletSummary} from './personal-wallet';import './personal-invitations.css';
 type Filter='ALL'|'INVITER'|'DISTRIBUTION_LEADER';type Page=Awaited<ReturnType<typeof readMyInvitees>>;
 const typeLabel={INVITER:'注册邀请',DISTRIBUTION_LEADER:'分销下级'};
 const errorText=(e:unknown)=>e instanceof WalletRequestError&&e.code==='PENDING_MARKER_UNREADABLE'?'本机保存的原绑定记录无法读取，暂时不能提交。请保留记录并联系支持。':e instanceof WalletRequestError&&e.status===401?'登录身份已变化，请重新确认登录。':e instanceof WalletRequestError&&e.status===403?'当前账号无法读取或修改邀请关系。':e instanceof WalletRequestError&&e.status===409?'关系或政策已变化，请重新读取。未确认的绑定先查询原记录。':'邀请记录暂时无法读取，请稍后重试。';
@@ -23,6 +23,7 @@ export function PersonalInvitations({scope}:{scope:string}){
  return <section className="personal-invitations account-section" aria-labelledby="invitation-heading" aria-busy={busy||undefined}>
   <div className="account-section-heading"><div><h2 id="invitation-heading">分销中心</h2><p>查看邀请关系，确认上级与收益记录。</p></div><button className="button secondary" type="button" disabled={busy} onClick={()=>void load()}><RefreshCw size={15} aria-hidden="true"/>重新读取</button></div>
   <WalletSummary scope={scope}/>
+  <DistributionTermsCard scope={scope}/>
   {error?<p className="invitation-error" role="alert">{error}</p>:null}{notice?<p className="invitation-notice" role="status">{notice}</p>:null}
   {pending?<section className="account-module-card invitation-pending"><Clock3 size={19} aria-hidden="true"/><div><h3>原绑定结果待确认</h3><p>已保留原请求。确认前无法提交新的绑定。</p><button type="button" className="button secondary" disabled={busy} onClick={()=>void recover()}>查询原绑定</button></div></section>:null}
   <div className="invitation-workbench"><section className="account-module-card invitation-code"><h3>我的邀请码</h3><strong>{value?.ownCode.code??(busy?'正在读取':'待核定')}</strong><p>{value?.ownCode.code?'邀请新用户时分享此码，注册来源与分销上级分别记录。':'邀请码归属尚未确认，暂时无法分享。'}</p><div className="invitation-actions"><button className="button secondary" type="button" disabled={!value?.ownCode.code||busy} onClick={()=>void copy(false)}><Copy size={15} aria-hidden="true"/>复制邀请码</button><button className="button secondary" type="button" disabled={!value?.ownCode.code||busy} onClick={()=>void copy(true)}><Link2 size={15} aria-hidden="true"/>复制邀请链接</button></div></section>
@@ -34,5 +35,26 @@ export function PersonalInvitations({scope}:{scope:string}){
    {list?.items.length?<ul>{list.items.map(item=><li key={item.id}><div><strong>{item.nickname}</strong><small>{item.boundAt===null?'原绑定时间未核定':formatOrderTime(item.boundAt)}</small></div><span>{typeLabel[item.type]}</span></li>)}</ul>:<p className="invitation-empty">{busy?'正在读取邀请记录…':list?.knowledge==='KNOWN'?'暂无已确认的邀请关系。':'邀请记录尚未完整核定，暂时无法确认数量。'}</p>}
    {list?.nextCursor?<button className="button secondary" type="button" disabled={busy} onClick={()=>void more()}>继续读取关系</button>:null}</section>
   <PersonalEarnings scope={scope}/>
+ </section>;
+}
+
+const TERMS_REASON:Record<string,string>={POLICY_NOT_CONFIGURED:'分佣政策尚未配置',PARTICIPANT_UNKNOWN:'分销参与资格尚未核定',ELIGIBILITY_UNKNOWN:'分销参与资格尚未核定',LEVEL_UNKNOWN:'分销等级尚未核定',LEVEL_NOT_IN_CURRENT_POLICY:'你的分销等级不在当前政策中，待核定',INELIGIBLE:'当前账号不参与分佣',COMMISSION_FROZEN:'分佣已暂停',POLICY_DISABLED:'分佣政策当前未开启',DISTRIBUTION_RESOURCE_NOT_ADMITTED:'分佣政策暂不可用'};
+const modeLabel={ordinary:'普通出租',custom:'定制出租'};
+const centsText=(c:string)=>'¥'+(BigInt(c)/100n).toString()+'.'+(BigInt(c)%100n).toString().padStart(2,'0');
+/** GAP-014: the caller's own applicable terms only. Independent read; failure here never hides relations or earnings. */
+export function DistributionTermsCard({scope}:{scope:string}){
+ const session=useUserSession(),store=useUserSessionStore(),userId=session.status==='authenticated'?session.userId:null;
+ const [state,setState]=useState<{scope:string;value:MyDistributionTerms|null;error:string}|null>(null);
+ useEffect(()=>{if(!userId)return;const abort=new AbortController();const owner=scope;setState(null);
+  readMyDistributionTerms(userId,abort.signal).then(value=>{const s=store.getSnapshot();if(!abort.signal.aborted&&s.status==='authenticated'&&s.userId===userId)setState({scope:owner,value,error:''});},e=>{if(abort.signal.aborted)return;if(e instanceof WalletRequestError&&e.status===401)session.revalidate();setState({scope:owner,value:null,error:e instanceof WalletRequestError&&e.status===403?'当前账号无法读取分佣条款。':'适用条款暂时无法读取，请稍后重试。'});});
+  return()=>abort.abort();},[scope,userId]);
+ const v=state?.scope===scope?state.value:null,error=state?.scope===scope?state.error:'';
+ return <section className="account-module-card invitation-terms" aria-labelledby="invitation-terms-heading"><h3 id="invitation-terms-heading">我的分佣条款</h3>
+  {error?<p role="alert">{error}</p>:!state||state.scope!==scope?<p>正在读取适用条款…</p>:!v||v.knowledge==='UNKNOWN'?<><strong>适用条款待核定</strong><p>{TERMS_REASON[v?.reason??'']??'适用条款尚未核定'}，不按默认等级或 0 显示。</p></>:<>
+   <strong>{v.level?`等级 ${v.level.code}`:'无适用等级'}</strong>
+   {v.applicable?null:<p>{TERMS_REASON[v.reason??'']??'当前不适用'}</p>}
+   {v.level?<dl className="invitation-terms-list"><div><dt>邀请租客下单</dt><dd>{v.level.renterPercent}%</dd></div><div><dt>邀请号主出租</dt><dd>{v.level.ownerPercent}%</dd></div><div><dt>适用出租方式</dt><dd>{(v.accountModes??[]).map(m=>modeLabel[m]).join('、')}</dd></div><div><dt>结算后到账</dt><dd>{v.settlementDelayDays} 天</dd></div><div><dt>单笔最低</dt><dd>{centsText(v.minimumAccrualCents??'0')}</dd></div></dl>:null}
+  </>}
+  {v?.policyVersion?<p className="invitation-source">政策版本 {v.policyVersion}{v.participantPolicyVersion&&v.participantPolicyVersion!==v.policyVersion?`（等级登记于版本 ${v.participantPolicyVersion}）`:''} · 本地受控政策，不代表正式全量政策。比例仅说明规则，不代表已产生的收益。</p>:null}
  </section>;
 }

@@ -81,3 +81,22 @@ test('binding recovery queries only the original principal receipt and rejects m
  const p=probe(),original=p.pool.connect.bind(p.pool);let scope='';const pool={connect:async()=>{const c=await original();return{release(){},query:async(sql:string,args?:any[])=>{if(sql.startsWith('SELECT response_body')){scope=args?.[0];return{rows:[{body:{relation:{id:'other_relation',childUserId:'other',type:'DISTRIBUTION_LEADER',parentUserId:'parent'}}}]};}return c.query(sql,args);}};}} as unknown as Pool;
  await assert.rejects(readMyLeaderBindingReceipt(pool,actor,'original-key'),e=>(e as {status?:number}).status===503);assert.equal(scope,JSON.stringify(['user','self','distribution.leader.bind',null]));assert(!p.queries.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q)));
 });
+
+test("GAP-014 self terms: only own level/version, unknown stays unknown, no full table or money", async () => {
+  const { projectMyDistributionTerms } = await import("../src/finance/invitation-store");
+  const config = { schema: "distribution-policy.v1", scope: "LOCAL_CONTROLLED", enabled: true, participation: "AUTO_AT_REGISTRATION", depth: 1, selfRebate: false, accountModes: ["ordinary"], minimumAccrualCents: "1", settlementDelayDays: 7, levels: [{ code: "L1", rank: 1, default: true, renterPercent: "1", ownerPercent: "1", upgrade: null }, { code: "L2", rank: 2, default: false, renterPercent: "3", ownerPercent: "2", upgrade: { match: "ANY", conditions: [{ metric: "PAID_COUNT", value: "5" }] } }] } as any;
+  const policy = { knowledge: "KNOWN" as const, policy: { versionId: "pv-2", config } };
+  const known = projectMyDistributionTerms("u1", policy, { eligibility: "ELIGIBLE", level_code: "L2", commission_frozen: false, policy_version_id: "pv-1" });
+  assert.deepEqual([known.knowledge, known.applicable, known.level, known.policyVersion, known.participantPolicyVersion], ["KNOWN", true, { code: "L2", rank: 2, renterPercent: "3", ownerPercent: "2" }, "pv-2", "pv-1"]);
+  const text = JSON.stringify(known);
+  assert.doesNotMatch(text, /"L1"|upgrade|levels|Cents":"\d+","amount/, "no other level, upgrade table or computed amount");
+  assert.equal(projectMyDistributionTerms("u1", { knowledge: "UNKNOWN", policy: null, reason: "POLICY_NOT_CONFIGURED" }, { eligibility: "ELIGIBLE", level_code: "L2" }).knowledge, "UNKNOWN");
+  assert.equal(projectMyDistributionTerms("u1", policy, undefined).reason, "PARTICIPANT_UNKNOWN");
+  assert.equal(projectMyDistributionTerms("u1", policy, { eligibility: "UNKNOWN", level_code: "L2" }).reason, "ELIGIBILITY_UNKNOWN");
+  assert.equal(projectMyDistributionTerms("u1", policy, { eligibility: "ELIGIBLE", level_code: null }).reason, "LEVEL_UNKNOWN");
+  const gone = projectMyDistributionTerms("u1", policy, { eligibility: "ELIGIBLE", level_code: "L9" });
+  assert.deepEqual([gone.knowledge, gone.reason, gone.level], ["UNKNOWN", "LEVEL_NOT_IN_CURRENT_POLICY", null], "never falls back to the default level");
+  assert.deepEqual(["INELIGIBLE", "COMMISSION_FROZEN"].map((r) => projectMyDistributionTerms("u1", policy, r === "INELIGIBLE" ? { eligibility: "INELIGIBLE", level_code: "L2" } : { eligibility: "ELIGIBLE", level_code: "L2", commission_frozen: true }).reason), ["INELIGIBLE", "COMMISSION_FROZEN"]);
+  const disabled = projectMyDistributionTerms("u1", { knowledge: "KNOWN", policy: { versionId: "pv-2", config: { ...config, enabled: false } } }, { eligibility: "ELIGIBLE", level_code: "L1" });
+  assert.deepEqual([disabled.applicable, disabled.reason], [false, "POLICY_DISABLED"]);
+});
