@@ -6,11 +6,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { readMigrationFiles } from "drizzle-orm/migrator";
+import { types } from "pg";
 import type { Pool, PoolClient } from "pg";
 import { BusinessMigrationAclError, runBusinessMigrations } from "../src/database/business-migrations";
 
 const sequence74 = "45124baf29a7e412b1df92e19afd6150eec95302a9e8270ef961a10373dd0852";
-const sequence80 = "12e6f3a890858fa953476e056490439ee9b6183f2b05509bfd776739da11f4ed";
+const sequence80 = "9eb306ec90b83e8a97b9132744048e75e4669caa7134fbf92b41cda6808f2627";
 const runnerSha = "f3f2e8ca4beeddd99c40f62cade11ed3af39272eb80079d9aeaff30b89688518";
 const seedCode = "order.legacy.continue";
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -66,11 +67,14 @@ const expectedDefinitionChanges = [
   "constraint:zzsh_supply.rule_acceptance:rule_acceptance_acceptance_kind_check",
   "constraint:zzsh_order.finance_economic_root:finance_root_enabled_source_shape",
   "constraint:zzsh_order.finance_event:finance_event_kind_check",
+  "constraint:zzsh_order.finance_event:legacy_duty_event_batch",
+  "constraint:zzsh_order.settlement_ledger_entry:legacy_duty_entry_batch",
   "constraint:zzsh_order.settlement_ledger_entry:settlement_ledger_accounts",
   "trigger:zzsh_supply.rule_acceptance:legacy_takeover_authorization_guard",
   "trigger:zzsh_order.personal_finance_observation:a_history_subject_lock",
   "trigger:zzsh_order.finance_economic_root:legacy_duty_root_guard",
   "trigger:zzsh_order.finance_event:legacy_duty_event_guard",
+  "trigger:zzsh_order.finance_event:legacy_duty_event_batch",
   "trigger:zzsh_order.finance_event:legacy_duty_wallet_revision",
   "trigger:zzsh_order.settlement_ledger_entry:legacy_duty_entry_guard",
   "trigger:zzsh_order.settlement_ledger_entry:legacy_duty_entry_batch",
@@ -197,7 +201,7 @@ async function rowProjection(c: PoolClient, o: MilestoneSchemaPgOptions, table: 
 
 async function capture(c: PoolClient, o: MilestoneSchemaPgOptions, chain: 74 | 80, before?: MilestoneSchemaSnapshot): Promise<MilestoneSchemaSnapshot> {
   await assertChain(c, o, chain);
-  const inventory = (await c.query(`SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) t(name)`, [[...existingTables, ...newTables]])).rows;
+  const inventory = (await c.query(`SELECT name,to_regclass(format('%I.%I',split_part(name,'.',1),split_part(name,'.',2))) IS NOT NULL AS present FROM unnest($1::text[]) t(name)`, [[...existingTables, ...newTables]])).rows;
   for (const name of existingTables) assert.equal(inventory.find(x => x.name === name)?.present, true, `missing74 prerequisite ${name}; use existing auth/domain setup`);
   for (const name of newTables) assert.equal(inventory.find(x => x.name === name)?.present, chain === 80);
   if (chain === 74) assertFixtures((await c.query<{ name: string; rows: string }>(Object.entries(requiredFixtures).map(([name, count]) =>
@@ -206,12 +210,12 @@ async function capture(c: PoolClient, o: MilestoneSchemaPgOptions, chain: 74 | 8
   const metadata = (await c.query(`SELECT n.nspname||'.'||t.relname AS name,t.relrowsecurity,t.relforcerowsecurity,
     t.relowner::text AS owner,t.relacl::text[] AS "tableAcl",a.attacl::text[] AS acl,a.attcollation::text AS collation,a.attidentity AS identity,a.attgenerated AS generated,
     a.attname AS column,format_type(a.atttypid,a.atttypmod) AS type,a.attnotnull AS "notNull",pg_get_expr(d.adbin,d.adrelid) AS default,
-    ARRAY(SELECT k.attname FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY x(num,ord)
+    ARRAY(SELECT k.attname::text FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY x(num,ord)
       JOIN pg_attribute k ON k.attrelid=t.oid AND k.attnum=x.num
       WHERE i.indrelid=t.oid AND i.indisprimary AND i.indisvalid AND i.indisready AND i.indimmediate ORDER BY x.ord) AS pk
     FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_attribute a ON a.attrelid=t.oid
     LEFT JOIN pg_attrdef d ON d.adrelid=t.oid AND d.adnum=a.attnum
-    WHERE t.oid=ANY(ARRAY(SELECT to_regclass(name) FROM unnest($1::text[]) x(name))) AND a.attnum>0 AND NOT a.attisdropped ORDER BY name,a.attnum`, [existingTables])).rows;
+    WHERE t.oid=ANY(ARRAY(SELECT to_regclass(format('%I.%I',split_part(name,'.',1),split_part(name,'.',2))) FROM unnest($1::text[]) x(name))) AND a.attnum>0 AND NOT a.attisdropped ORDER BY name,a.attnum`, [existingTables])).rows;
   for (const row of metadata) {
     assert.equal(row.relrowsecurity, false); assert.equal(row.relforcerowsecurity, false);
     assert.deepEqual(row.pk, primaryKeys[row.name] ?? ["id"]);
@@ -223,10 +227,10 @@ async function capture(c: PoolClient, o: MilestoneSchemaPgOptions, chain: 74 | 8
   }
   const definitions = Object.fromEntries((await c.query(`SELECT 'constraint:'||n.nspname||'.'||r.relname||':'||x.conname AS key,pg_get_constraintdef(x.oid,true) AS definition
     FROM pg_constraint x JOIN pg_class r ON r.oid=x.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
-    WHERE r.oid=ANY(ARRAY(SELECT to_regclass(name) FROM unnest($1::text[]) t(name)))
+    WHERE r.oid=ANY(ARRAY(SELECT to_regclass(format('%I.%I',split_part(name,'.',1),split_part(name,'.',2))) FROM unnest($1::text[]) t(name)))
     UNION ALL SELECT 'trigger:'||n.nspname||'.'||r.relname||':'||x.tgname,pg_get_triggerdef(x.oid,true)
     FROM pg_trigger x JOIN pg_class r ON r.oid=x.tgrelid JOIN pg_namespace n ON n.oid=r.relnamespace
-    WHERE NOT x.tgisinternal AND r.oid=ANY(ARRAY(SELECT to_regclass(name) FROM unnest($1::text[]) t(name))) ORDER BY key`, [existingTables])).rows.map(x => [x.key, x.definition]));
+    WHERE NOT x.tgisinternal AND r.oid=ANY(ARRAY(SELECT to_regclass(format('%I.%I',split_part(name,'.',1),split_part(name,'.',2))) FROM unnest($1::text[]) t(name))) ORDER BY key`, [existingTables])).rows.map(x => [x.key, x.definition]));
   const functions = (await c.query<FunctionDefinition>(`SELECT p.proname AS name,p.prosrc AS body,pg_get_functiondef(p.oid) AS definition,p.proowner::text AS owner,p.proacl::text[] AS acl,
     pg_get_function_result(p.oid) AS result,pg_get_function_identity_arguments(p.oid) AS arguments,p.prosecdef AS security,p.proisstrict AS strict,p.provolatile AS volatility,p.proconfig AS config,
     p.proparallel AS parallel,p.proleakproof AS leakproof,p.procost::text AS cost,p.prorows::text AS "resultRows"
@@ -275,7 +279,7 @@ function verifyDelta(before: MilestoneSchemaSnapshot, after: MilestoneSchemaSnap
     assert.equal(BigInt(after.rows["zzsh_iam.admin_permission"]!.rows), BigInt(before.rows["zzsh_iam.admin_permission"]!.rows) + 1n);
   }
   const changed = [...new Set([...Object.keys(before.definitions), ...Object.keys(after.definitions)])].filter(k => before.definitions[k] !== after.definitions[k]).sort();
-  assert.deepEqual(changed, expectedDefinitionChanges, "only the bound14 old-object definition deltas are allowed");
+  assert.deepEqual(changed, expectedDefinitionChanges, "only the bound17 old-object definition deltas are allowed");
   for (const f of before.functions) {
     const next = after.functions.find(n => n.name === f.name); assert(next);
     const { body: oldBody, definition: oldDefinition, ...oldMeta } = f;
@@ -295,7 +299,7 @@ async function assertNewTables(c: PoolClient, o: MilestoneSchemaPgOptions, initi
     FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace LEFT JOIN LATERAL (
       SELECT x.grantee,x.privilege_type FROM aclexplode(t.relacl) x
       UNION ALL SELECT x.grantee,x.privilege_type FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
-    ) acl ON true WHERE t.oid=ANY(ARRAY(SELECT to_regclass(name) FROM unnest($1::text[]) r(name)))`, [newTables, o.target.runtimeOid])).rows;
+    ) acl ON true WHERE t.oid=ANY(ARRAY(SELECT to_regclass(format('%I.%I',split_part(name,'.',1),split_part(name,'.',2))) FROM unnest($1::text[]) r(name)))`, [newTables, o.target.runtimeOid])).rows;
   assert.equal(new Set(grants.map(r => r.name)).size, 12);
   for (const row of grants) {
     assert.equal(row.owner, o.target.migrationOid); assert.equal(row.runtimeOwner, false);
@@ -435,7 +439,7 @@ export async function runMilestoneRuntimeAclProbes(o: MilestoneSchemaPgOptions):
 test("milestone PG helper has no implicit resource or credential fallback and validates the52+12 scope", () => {
   assert.equal(existingTables.length, 52); assert.equal(new Set(existingTables).size, 52); assert.equal(newTables.length, 12);
   assert(existingTables.includes("zzsh_iam.admin_permission")); assert(existingTables.includes("zzsh_supply.rule_acceptance"));
-  assert.equal(expectedDefinitionChanges.length, 14);
+  assert.equal(expectedDefinitionChanges.length, 17);
   let calls = 0;
   const o = { assertWindow() { calls++; throw new Error("WINDOW_NOT_APPROVED"); } } as unknown as MilestoneSchemaPgOptions;
   assert.throws(() => localMigrations(o), /WINDOW_NOT_APPROVED/); assert.equal(calls, 1);
@@ -444,6 +448,35 @@ test("milestone PG helper has no implicit resource or credential fallback and va
 test("missing/stale source folder cannot become a PG green skip", () => {
   const o = { apiRoot: ".", assertWindow() {}, target: { database: "zzsh_dev", oid: "931888" } } as MilestoneSchemaPgOptions;
   assert.throws(() => localMigrations(o));
+});
+
+test("catalog lookup quotes both identifiers before resolving mixed-case auth tables", async () => {
+  assert.equal(relation("zzsh_auth_admin.twoFactor"), '"zzsh_auth_admin"."twoFactor"');
+  assert.equal(relation("zzsh_auth_user.twoFactor"), '"zzsh_auth_user"."twoFactor"');
+  const lookup = "to_regclass(format('%I.%I',split_part(name,'.',1),split_part(name,'.',2)))";
+  const migrations = readMigrationFiles({ migrationsFolder: resolve("migrations/business") }).slice(0, 74);
+  const reachedMetadata = new Error("CATALOG_METADATA_REACHED"); let lookups = 0;
+  const c = { query: async (sql: string, params?: unknown[]) => {
+    if (sql.startsWith("SELECT hash,")) return { rows: migrations.map(m => ({ hash: m.hash, when: String(m.folderMillis) })) };
+    if (sql.includes("to_regclass")) {
+      assert(sql.includes(lookup)); lookups++;
+      if (sql.startsWith("SELECT name,")) return { rows: (params![0] as string[]).map(name => ({ name, present: existingTables.includes(name) })) };
+      throw reachedMetadata;
+    }
+    return { rows: Object.entries(requiredFixtures).map(([name, n]) => ({ name, rows: String(n) })) };
+  } } as unknown as PoolClient;
+  await assert.rejects(capture(c, { assertWindow() {} } as MilestoneSchemaPgOptions, 74), error => error === reachedMetadata);
+  assert.equal(lookups, 2);
+});
+
+test("installed pg parses text-array PKs while its name-array fallback reproduces the capture failure", () => {
+  const previous = Reflect.apply(types.getTypeParser, types, [1003])("{id}");
+  const textArray = Reflect.apply(types.getTypeParser, types, [1009]);
+  assert.equal(previous, "{id}");
+  assert.throws(() => assert.deepEqual(previous, ["id"]), error => error instanceof Error && hash(error.message) === "23f3f453f791fc4133bf10b3e3bbdbe747c6c9b8267aee204fb026f6aba62561");
+  assert.deepEqual(textArray("{id}"), ["id"]);
+  assert.deepEqual(textArray("{account_id,schema_version}"), ["account_id", "schema_version"]);
+  assert.throws(() => assert.deepEqual(textArray("{schema_version,account_id}"), primaryKeys["zzsh_supply.legacy_listing_display_snapshot"]));
 });
 
 test("bound function extraction uses the latest real migration body rather than an earlier version", () => {

@@ -111,7 +111,7 @@ BEGIN
   OR NOT COALESCE(b->>'fundsDisposition' IN('AVAILABLE','HELD','CONFISCATED','UNKNOWN'),false)
   OR p->>'dutyId' IS DISTINCT FROM d.id OR p->>'orderId' IS DISTINCT FROM d.order_id OR p->>'kind' IS DISTINCT FROM d.kind
   OR p->>'subjectId' IS DISTINCT FROM d.counterparty_user_id OR p->>'amountCents' IS DISTINCT FROM d.amount_cents::text OR p->>'currency' IS DISTINCT FROM 'CNY'
-  OR p->>'originalSourceSystem' IS DISTINCT FROM 'legacy_mysql_restore' OR p->>'originalSourceDigest' IS DISTINCT FROM CASE WHEN d.kind='COMMISSION' THEN NEW.source_record_digest ELSE NEW.parent_source_digest END
+  OR p->>'originalSourceSystem' IS DISTINCT FROM 'legacy_mysql_restore' OR p->>'originalSourceDigest' IS DISTINCT FROM (CASE WHEN d.kind='COMMISSION' THEN NEW.source_record_digest ELSE NEW.parent_source_digest END)
   OR p->>'finalEvidenceDigest' IS DISTINCT FROM NEW.effective_facts_digest OR p->>'coverageDecision' IS DISTINCT FROM 'NOT_PREVIOUSLY_CREDITED'
   OR p->>'sourceStatus' IS DISTINCT FROM 'CONFIRMED_UNPAID_LIABILITY' OR p->>'coverageEvidenceDigest' IS NULL OR (p->>'coverageEvidenceDigest')!~'^[a-f0-9]{64}$'
   OR p->>'evidenceRef' IS DISTINCT FROM b->>'evidenceId' OR NEW.facts_canonical IS DISTINCT FROM zzsh_order.canonical_finance_json(f)
@@ -126,7 +126,7 @@ BEGIN
   OR (b->>'sourceTime') IS NULL OR (b->>'sourceTime')::timestamptz>clock_timestamp()
  THEN RAISE EXCEPTION 'current head/time changed under common lock' USING ERRCODE='23514'; END IF;
  current_state:=CASE WHEN h.id IS NULL THEN o.source_snapshot->>'is_settle' ELSE e.facts#>>'{evidence,source,isSettle}' END;
- IF b->>'fundsDisposition' IS DISTINCT FROM CASE current_state WHEN '0' THEN 'AVAILABLE' WHEN '2' THEN 'HELD' WHEN '3' THEN 'CONFISCATED' ELSE 'UNKNOWN' END
+ IF b->>'fundsDisposition' IS DISTINCT FROM (CASE current_state WHEN '0' THEN 'AVAILABLE' WHEN '2' THEN 'HELD' WHEN '3' THEN 'CONFISCATED' ELSE 'UNKNOWN' END)
  THEN RAISE EXCEPTION 'current funds disposition source mismatch' USING ERRCODE='23514'; END IF;
  IF d.kind='COMMISSION' AND(d.status<>'MATURED' OR d.maturity_at IS NULL OR d.maturity_at>clock_timestamp()
   OR d.maturity_at IS DISTINCT FROM (b->>'maturityAt')::timestamptz) THEN RAISE EXCEPTION 'commission not matured' USING ERRCODE='23514'; END IF;
@@ -154,16 +154,16 @@ BEGIN
   THEN RAISE EXCEPTION 'historical unpaid refund raw admission missing' USING ERRCODE='23514'; END IF;
   SELECT (audit.details#>>'{settlementRecord,canonical}')::jsonb INTO historical_record FROM zzsh_iam.audit_event audit WHERE audit.id=b->>'evidenceId';
   IF NOT COALESCE(historical_record @> o.source_snapshot,false)
-    OR historical_record->>'is_settle' IS DISTINCT FROM CASE d.source_status WHEN 'DETAINED' THEN '2' WHEN 'COMPLETED_UNREFUNDED' THEN '0' END
+    OR historical_record->>'is_settle' IS DISTINCT FROM (CASE d.source_status WHEN 'DETAINED' THEN '2' WHEN 'COMPLETED_UNREFUNDED' THEN '0' END)
     OR NOT(historical_record?'detain_money') OR historical_record->>'return_order_money' IS NULL
    OR NEW.basis_facts_digest IS DISTINCT FROM NEW.source_record_digest OR h.id IS NULL AND NEW.effective_facts_digest IS DISTINCT FROM NEW.source_record_digest
   THEN RAISE EXCEPTION 'historical refund raw snapshot differs' USING ERRCODE='23514'; END IF;
   current_net:=((historical_record->>'return_order_money')::numeric-GREATEST(COALESCE((historical_record->>'detain_money')::numeric,0),0))*100;
   IF current_net IS DISTINCT FROM d.amount_cents THEN RAISE EXCEPTION 'historical net refund differs' USING ERRCODE='23514'; END IF;
  ELSE
-  IF b->>'kind' IS DISTINCT FROM CASE WHEN d.kind='DEPOSIT_COMPENSATION' THEN 'CONFISCATED_CONTINUATION' ELSE 'CONFIRMED_CONTINUATION' END
-   OR d.admission_id IS NOT NULL OR b->>'sourceTimeKind' IS DISTINCT FROM CASE WHEN d.kind='DEPOSIT_COMPENSATION' THEN 'DISPOSED_AT' ELSE 'CONFIRMED_AT' END
-   OR b->>'sourceRecordEntity' IS DISTINCT FROM CASE WHEN d.kind='COMMISSION' THEN 'la_distribution_order' ELSE 'legacy_continuation_version' END
+  IF b->>'kind' IS DISTINCT FROM (CASE WHEN d.kind='DEPOSIT_COMPENSATION' THEN 'CONFISCATED_CONTINUATION' ELSE 'CONFIRMED_CONTINUATION' END)
+   OR d.admission_id IS NOT NULL OR b->>'sourceTimeKind' IS DISTINCT FROM (CASE WHEN d.kind='DEPOSIT_COMPENSATION' THEN 'DISPOSED_AT' ELSE 'CONFIRMED_AT' END)
+   OR b->>'sourceRecordEntity' IS DISTINCT FROM (CASE WHEN d.kind='COMMISSION' THEN 'la_distribution_order' ELSE 'legacy_continuation_version' END)
    OR h.id IS NULL OR h.id IS DISTINCT FROM NEW.effective_head_id OR h.revision IS DISTINCT FROM NEW.effective_head_revision
    OR e.facts_digest IS DISTINCT FROM NEW.effective_facts_digest OR e.facts_digest IS DISTINCT FROM encode(sha256(convert_to(e.facts_canonical,'UTF8')),'hex')
    OR NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_continuation_version v JOIN zzsh_order.legacy_continuation_evidence original ON original.id=v.result_evidence_id
@@ -241,7 +241,7 @@ BEGIN
   (line_no=1 AND account_code=CASE WHEN f.kind='COMMISSION' THEN 'DISTRIBUTION_EXPENSE' ELSE 'LEGACY_LIABILITY_SOURCE' END AND debit_cents=f.amount_cents AND credit_cents=0 AND counterparty_user_id IS NULL)
   OR(line_no=2 AND account_code=positive_account AND debit_cents=0 AND credit_cents=f.amount_cents AND counterparty_user_id=f.subject_user_id AND id=f.ref_id))
  INTO line_count,debits,credits,good FROM zzsh_order.settlement_ledger_entry WHERE finance_event_id=f.event_id;
- IF line_count<>CASE WHEN f.amount_cents=0 THEN 0 ELSE 2 END OR debits<>f.amount_cents OR credits<>f.amount_cents OR good<>line_count
+ IF line_count<>(CASE WHEN f.amount_cents=0 THEN 0 ELSE 2 END) OR debits<>f.amount_cents OR credits<>f.amount_cents OR good<>line_count
   OR(f.amount_cents=0 AND(f.ref_type<>'FINANCE_EVENT' OR f.ref_id<>f.event_id)) OR(f.amount_cents>0 AND f.ref_type<>'LEDGER_ENTRY')
  THEN RAISE EXCEPTION 'legacy duty positive/zero complete batch mismatch' USING ERRCODE='23514'; END IF;
 END $$;
