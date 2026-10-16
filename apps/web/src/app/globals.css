@@ -591,6 +591,7 @@ html[data-theme="dark"] .account-list-thumb {
   flex-wrap: wrap;
   min-width: 0;
   max-width: 100%;
+  min-height: 24px;
   text-decoration: none;
   font-size: 14.5px;
   line-height: 20px;
@@ -1180,6 +1181,22 @@ html[data-theme="dark"] .account-list-fav .favorite:focus-visible {
   }
   .resources-side-title {
     font-size: 10.5px;
+  }
+}
+
+/* 320px 窄屏：物品资源侧栏再收窄、单元格内边距同步收紧，保证 8 个字的资源名
+   （如“顶级保险体验天数”）不被省略号截掉；更宽宽度下维持原布局。 */
+@media (max-width: 379px) {
+  .resources-table-side {
+    flex-basis: 56px;
+    width: 56px;
+    min-width: 56px;
+    max-width: 56px;
+    padding-inline: 4px;
+  }
+
+  .resources-cell {
+    padding-inline: 6px;
   }
 }
 
@@ -1784,12 +1801,16 @@ html[data-theme="dark"] .account-card--grid .breakdown-total-val--unconfirmed {
 .auth-password-row { position: relative; display: flex; align-items: center; }
 .auth-password-row input { padding-right: 64px; }
 .auth-password-toggle { position: absolute; right: 7px; min-height: 36px; padding: 4px 8px; border: 0; background: transparent; color: var(--color-accent-brand); font-size: 12px; font-weight: 700; }
-.auth-consent { display: grid; grid-template-columns: 20px minmax(0,1fr); align-items: start; gap: 10px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
-.auth-consent input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--color-accent-brand); }
-.auth-consent label { display: block; color: inherit; cursor: pointer; }
-.auth-consent a { color: var(--color-accent-brand); text-decoration: underline; text-underline-offset: 3px; }
+.auth-consent { display: grid; grid-template-columns: 24px minmax(0,1fr); align-items: start; gap: 10px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
+.auth-consent input { width: 24px; height: 24px; margin: 0; accent-color: var(--color-accent-brand); }
+.auth-consent label { display: flex; align-items: center; min-height: 44px; color: inherit; cursor: pointer; }
+.auth-consent a { color: var(--color-accent-brand-ink); text-decoration: underline; text-underline-offset: 3px; }
 .auth-consent .auth-field-help { display: block; margin-top: 4px; }
 .auth-consent-docs { margin: 0; }
+/* 未同意协议：主动作给明确的“还不可继续”状态，按钮仍可聚焦可点击以触发原校验与焦点引导。 */
+.auth-submit.is-consent-pending { background: var(--color-bg-elevated); color: var(--color-text-secondary); border-color: var(--color-border-default); }
+.auth-submit.is-consent-pending:hover { background: var(--color-bg-card-hover); color: var(--color-text-primary); }
+.auth-consent-hint { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
 .auth-status, .auth-recovery, .auth-unavailable { margin: 0; padding: 12px 13px; border: 1px solid; border-radius: 9px; font-size: 12px; line-height: 1.65; }
 .auth-status.is-error { border-color: color-mix(in srgb,var(--color-status-error) 55%,var(--color-border-default)); background: color-mix(in srgb,var(--color-status-error) 10%,var(--color-bg-surface)); color: var(--auth-error-text,#ffb4ad); }
 .auth-status.is-success { border-color: color-mix(in srgb,var(--color-status-success) 55%,var(--color-border-default)); background: color-mix(in srgb,var(--color-status-success) 10%,var(--color-bg-surface)); color: var(--color-text-primary); }

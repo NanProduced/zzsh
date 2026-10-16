@@ -61,10 +61,10 @@ function DeltaBanner() {
         </div>
       </div>
     </div>
-    {/* 原来的“玩家交流群 / 合作咨询”两张扫码图没有有效二维码（alt 已标“暂未配置”），
-        却仍引导用户扫码。未配置前整块不渲染，也不下载这两张素材；真实客服入口走
-        /support 与常驻工具。内容线提供经核实的二维码后，在此恢复 .market-contact-templates
-        与 .market-banner-layout 的右侧栏。 */}
+    <div className="market-contact-templates" aria-label="联系二维码">
+      <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 799px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
+      <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 799px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
+    </div>
   </div>;
 }
 

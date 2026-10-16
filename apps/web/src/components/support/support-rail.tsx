@@ -22,8 +22,8 @@ export function SupportRail(){
   const [hasOpened,setHasOpened]=useState(false);
   useEffect(()=>{const open=(event:Event)=>{const {party,orderId:id}=(event as CustomEvent).detail??{};if((party!=="renter"&&party!=="owner")||typeof id!=="string"||!id)return;lastSupportTriggerRef.current=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;auth.open(window.location.pathname+window.location.search,()=>{setOrderParty(party);setOrderId(id);setRequestSerial(n=>n+1);setHasOpened(true);setSupportOpen(true);});};window.addEventListener("zzsh:order-groups",open);return()=>window.removeEventListener("zzsh:order-groups",open);},[auth]);
   const lastSupportTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const requestSupport = (type: SupportType, trigger: HTMLButtonElement) => {
-    lastSupportTriggerRef.current = trigger;
+  const requestSupport = (type: SupportType, trigger?: HTMLButtonElement | null) => {
+    lastSupportTriggerRef.current = trigger ?? null;
     auth.open(window.location.pathname + window.location.search, () => {
       setRequestedType(type);
       setOrderParty(undefined);
@@ -38,9 +38,14 @@ export function SupportRail(){
     if (!open) requestAnimationFrame(() => lastSupportTriggerRef.current?.focus());
   };
   useEffect(()=>{
-    if(pathname === "/support") { setHasOpened(true); setSupportOpen(true); }
-    setPreview(new URLSearchParams(window.location.search).get("preview") === "1");
-  },[pathname]);
+    // 页面内的客服/投诉入口（如 /support）复用同一条触发链：先过登录门，再开窗，
+    // 关闭时焦点回到原触发钮。不自动开窗——落地页自己提供可阅读的入口。
+    const open=(event:Event)=>{const detail=(event as CustomEvent).detail??{};const type=detail.type==="COMPLAINT"?"COMPLAINT":"SERVICE";const trigger=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;requestSupport(type,trigger);};
+    window.addEventListener("zzsh:open-support",open);
+    return()=>window.removeEventListener("zzsh:open-support",open);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+  useEffect(()=>{ setPreview(new URLSearchParams(window.location.search).get("preview") === "1"); },[]);
   // The window is non-modal, so Radix leaves focus on the entry button and Tab would walk
   // the whole page before reaching the composer. Start the tab order inside the window.
   useEffect(()=>{ if(supportOpen) document.querySelector<HTMLElement>(".support-dialog-content")?.focus(); },[supportOpen]);

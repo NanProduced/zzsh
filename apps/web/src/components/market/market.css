@@ -5,16 +5,19 @@
 .market-pagination { display:flex; gap:10px; margin-top:16px; }
 .market-pagination .button { min-height:40px; }
 .functional-top-content { margin-block: 14px 0; }
-/* 单栏：没有经核实的联系二维码时只呈现专区海报，海报按自身 3:1 完整显示，
-   不被右侧栏的行高撑高后左右裁切。 */
-.market-banner-layout { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; align-items:start; }
-.market-banner-carousel,.market-banner-viewport,.market-banner-track,.market-banner-slide,.market-poster-link { display:block; min-width:0; width:100%; }
+/* 左海报 + 右两张联系卡，作为一个整体构图：两列都拉伸到同一行高，底边严格对齐。
+   联系卡列宽按容器比例取，使行高接近两张卡的自然高度，卡面因此几乎不变形；
+   卡用 object-fit:contain 保证文字与二维码区不被裁切。
+   海报用 object-fit:cover 吸收不足 3% 的行高差，海报文字与 CTA 都在安全区内。 */
+.market-banner-layout { display:grid; grid-template-columns:minmax(0,1fr) clamp(170px,calc(26.5% - 14px),360px); gap:16px; align-items:stretch; }
+.market-banner-carousel,.market-banner-viewport,.market-banner-track,.market-banner-slide,.market-poster-link { display:block; min-width:0; width:100%; height:100%; }
 .market-banner-carousel { overflow:hidden; border:1px solid color-mix(in srgb,var(--color-delta-accent) 26%,var(--color-border-default)); border-radius:14px; background:#10191c; box-shadow:0 12px 32px rgb(7 15 20 / 14%); }
-.market-banner-slide { aspect-ratio:3/1; }
-/* 超宽屏限制海报宽度，避免 3:1 全宽横幅把首屏内容推到太下面；仍保持 3:1 不裁切。 */
-@media (min-width:1280px) { .market-banner-carousel { max-width:1056px; margin-inline:auto; } }
-.market-poster-link { position:relative; overflow:hidden; }
-.market-poster-link img { display:block; width:100%; height:100%; object-fit:cover; }
+.market-banner-slide { height:100%; }
+.market-poster-link { position:relative; height:100%; overflow:hidden; }
+.market-poster-link img { display:block; width:100%; height:100%; object-fit:cover; object-position:center; }
+/* 联系卡：卡面是既有宣传图，按真实配置状态完整渲染。 */
+.market-contact-templates { display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:1fr 1fr; gap:12px; min-width:0; }
+.market-contact-templates img { display:block; width:100%; height:100%; min-height:0; object-fit:contain; object-position:center; border-radius:12px; }
 @media (min-width:1100px) and (max-width:1460px) and (hover:hover) and (pointer:fine) {
   .market-banner-layout { margin-right:64px; }
 }
@@ -421,7 +424,8 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
   .detail-hero { grid-template-columns:minmax(0,1fr); }
 }@media (max-width:799px) {
   .functional-top-content { margin-block:10px 0; }
-  .market-banner-layout { gap:10px; }
+  .market-banner-layout { grid-template-columns:minmax(0,1fr); gap:10px; }
+  .market-contact-templates { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .market-filter-details { display:none; }
   .market-filter-mobile-row { display:flex; min-height:54px; align-items:center; justify-content:space-between; gap:12px; border-block:1px solid var(--color-border-default); color:var(--color-text-secondary); font-size:12px; }
   .market-filter-mobile-row > span { min-width:0; overflow-wrap:anywhere; }

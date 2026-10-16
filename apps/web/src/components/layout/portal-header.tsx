@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { motion, useMotionValueEvent, useScroll } from "motion/react";
 import { Search, UserRound, X } from "lucide-react";
@@ -50,6 +50,9 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
   const [scrollPosition, setScrollPosition] = useState(0);
   const [desktop, setDesktop] = useState(false);
   const [navFocused, setNavFocused] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [searchPinned, setSearchPinned] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const preference=matchMedia("(prefers-reduced-motion: reduce)");
     const motionChange=()=>setReducedMotion(preference.matches);
@@ -63,7 +66,11 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
   }, []);
   useMotionValueEvent(scrollY, "change", (value) => setScrollPosition(value > 100 ? 101 : value > 0 ? 1 : 0));
   const compact = desktop && scrollPosition > 100 && !navFocused;
-  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || !home || navFocused}>
+  // 移动端滚动后把第二行搜索收成一颗图标钮，腾出视口；搜索/导航持有焦点、或用户主动
+  // 展开过时都不收起，输入内容随 input 一起保留。回顶部自动恢复两行。
+  const searchCollapsed = !desktop && scrollPosition > 100 && !searchFocused && !searchPinned && !navFocused;
+  const expandSearch = () => { setSearchPinned(true); requestAnimationFrame(() => searchRef.current?.focus()); };
+  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || !home || navFocused} data-search-collapsed={searchCollapsed}>
     <motion.div
       className="site-header-bar"
       initial={false}
@@ -92,24 +99,28 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
         <Search size={16} style={{ color: "var(--color-accent-brand)", opacity: 0.9, flexShrink: 0 }} aria-hidden="true" />
         <input
           type="search"
+          ref={searchRef}
           aria-label={searchInputLabel}
           placeholder={compact ? searchCompactPlaceholder : searchPlaceholder}
           maxLength={120}
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
+          onFocus={() => setSearchFocused(true)}
+          onBlur={() => { setSearchFocused(false); setSearchPinned(false); }}
         />
         {query && (
           <button className="site-search-clear" type="button" aria-label="清空搜索" onClick={() => onQueryChange("")}>
             <X size={14} />
           </button>
         )}
-        <button className="site-search-submit" type="submit">
+        <button className="site-search-submit" type="submit" onClick={() => setSearchPinned(false)}>
           <Search size={13} strokeWidth={2.5} />
           <span>搜索</span>
         </button>
       </form>
 
       <div className="site-header-actions">
+        <button type="button" className="icon-button site-search-toggle" aria-label="展开搜索" onClick={expandSearch}><Search size={20} aria-hidden="true" /></button>
         <SessionEntry />
         <ThemeToggle /><MobileNav />
       </div>

@@ -142,7 +142,8 @@
   .publish-reading-header { padding:20px 20px 16px; }
   .publish-dialog h2 { font-size:20px; }
   .publish-reading-body { padding:0 20px 4px; }
-  .publish-reading-footer { padding:16px 20px 20px; }
+  /* 正文内部滚动、操作条常驻可见；底部留出安全区，避免确认钮被 home 指示条压住。 */
+  .publish-reading-footer { padding:16px 20px max(20px,env(safe-area-inset-bottom)); }
   .publish-dialog-actions { flex-direction:column-reverse; }
 }
 
@@ -353,7 +354,7 @@
 .functional-shell--editor .publish-term-section-heading { margin-bottom:10px; }
 .functional-shell--editor .publish-term-row { gap:16px; padding:10px 0; grid-template-columns:112px minmax(0,1fr); }
 .publish-policy-disclosure { margin:12px 0 0 128px; color:var(--color-text-secondary); font-size:13px; line-height:1.65; }
-.publish-policy-disclosure summary { cursor:pointer; color:var(--color-text-primary); }
+.publish-policy-disclosure summary { display:flex; align-items:center; min-height:24px; cursor:pointer; color:var(--color-text-primary); }
 .publish-policy-disclosure p { max-width:70ch; }
 .functional-shell--editor .supply-recommend-btn { color:var(--color-text-primary); }
 .functional-shell--editor .publish-rail { display:flex; flex-direction:column; gap:12px; padding:20px; box-shadow:none; }

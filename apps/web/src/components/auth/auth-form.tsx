@@ -57,6 +57,7 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
   const [guestConfirmed, setGuestConfirmed] = useState(false);
   const [error, setError] = useState<string | undefined>(restored ? unknownReceiptMessage(restored.outcome) : undefined);
   const [invalidField, setInvalidField] = useState<string>();
+  const consentPending = mode === "login" && !acceptedTerms;
   const [notice, setNotice] = useState<string>();
   const generation = useRef(0);
   const abort = useRef<AbortController | null>(null);
@@ -199,9 +200,12 @@ export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, on
       {(mode === "login" && method === "password" || mode === "recover" && proofId) && <div className="auth-field"><label className="sr-only" htmlFor="auth-password">{mode === "recover" ? "新密码" : "现有密码"}</label><div className="auth-password-row"><input id="auth-password" aria-invalid={invalidField === "auth-password" || undefined} name="password" type={showPassword ? "text" : "password"} value={password} disabled={locked} autoComplete={mode === "recover" ? "new-password" : "current-password"} placeholder={mode === "recover" ? "新密码（12–128 位）" : "请输入现有密码"} onChange={event => setPassword(event.target.value)} aria-describedby={error ? "auth-status" : undefined} /><button type="button" className="auth-password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={locked} onClick={() => setShowPassword(value => !value)}>{showPassword ? "隐藏" : "显示"}</button></div></div>}
       {mode === "recover" && proofId && <div className="auth-field"><label className="sr-only" htmlFor="auth-password-confirm">确认新密码</label><input id="auth-password-confirm" aria-invalid={invalidField === "auth-password-confirm" || undefined} name="password-confirm" type="password" autoComplete="new-password" placeholder="再次输入新密码" value={confirmation} disabled={locked} onChange={event => setConfirmation(event.target.value)} aria-describedby={error ? "auth-status" : undefined} /></div>}
       {mode === "login" && method === "password" && <div className="auth-secondary-actions"><button type="button" disabled={locked} onClick={() => changeMode("recover")}>忘记密码</button></div>}
-      <button type="submit" className="button primary auth-submit" disabled={locked} aria-busy={busy || undefined}>{busy ? "处理中…" : mode === "recover" ? proofId ? "重置密码" : "验证身份" : method === "sms" ? "登录 / 注册" : "登录"}</button>
+      {/* 未同意协议时主动作给出明确的“还不可继续”状态与就近说明；按钮保持可聚焦可点击，
+          原有提交校验、aria-invalid 与焦点引导继续生效，不自动勾选也不静默同意。 */}
+      <button type="submit" className={`button primary auth-submit${consentPending ? " is-consent-pending" : ""}`} disabled={locked} aria-busy={busy || undefined} aria-describedby={consentPending ? "auth-consent-hint" : undefined}>{busy ? "处理中…" : mode === "recover" ? proofId ? "重置密码" : "验证身份" : method === "sms" ? "登录 / 注册" : "登录"}</button>
       {mode === "recover" && <button type="button" className="button quiet" disabled={locked} onClick={() => changeMode("login")}>返回登录</button>}
       {mode === "login" && <div className="auth-consent"><input id="auth-terms" aria-invalid={invalidField === "auth-terms" || undefined} name="terms" type="checkbox" checked={acceptedTerms} disabled={locked} onChange={event => setAcceptedTerms(event.target.checked)} /><div><label htmlFor="auth-terms">我已阅读并同意</label><p className="auth-consent-docs"><a href="/legal/terms" target="_blank" rel="noopener noreferrer" aria-label="平台服务协议（在新窗口打开）">《平台服务协议》</a>和<a href="/legal/privacy" target="_blank" rel="noopener noreferrer" aria-label="用户隐私政策（在新窗口打开）">《用户隐私政策》</a></p></div></div>}
+      {consentPending && <p id="auth-consent-hint" className="auth-consent-hint">请先阅读并同意《平台服务协议》和《用户隐私政策》。</p>}
       {(error || notice) && <p id="auth-status" className={"auth-status " + (error ? "is-error" : "is-success")} role={error ? "alert" : "status"}>{error ?? notice}</p>}
       {outcome !== "idle" && <button type="button" className="button secondary" disabled={busy} onClick={() => void readResult()}>重新确认结果</button>}
       {guestConfirmed && <button type="button" className="button secondary" disabled={busy} onClick={() => { clearProof(); setOutcome("idle"); clearWrite(); setGuestConfirmed(false); setMethod("sms"); }}>使用新的验证码登录</button>}

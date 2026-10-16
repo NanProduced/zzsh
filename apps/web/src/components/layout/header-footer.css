@@ -69,6 +69,13 @@
   .site-search { grid-column:1/-1; grid-row:2; width:100%; }
   .site-header-actions { justify-self:end; gap:8px; }
   .site-header .mobile-menu { display:inline-flex; }
+  /* 移动端滚动后收起第二行搜索：只留品牌、主题、菜单和一颗展开钮。
+     搜索持有焦点或用户主动展开时不收起，回顶部自动恢复。 */
+  .site-search-toggle { display:none; }
+  .site-header[data-search-collapsed="true"] { height:60px; }
+  .site-header[data-search-collapsed="true"] .site-header-bar { min-height:60px; }
+  .site-header[data-search-collapsed="true"] .site-search { display:none; }
+  .site-header[data-search-collapsed="true"] .site-search-toggle { display:inline-flex; }
   .site-footer-grid { grid-template-columns:1fr; gap:36px; }
   #account-list,#delta-section,#help,#rental-guide,#billing-guide,#publish-guide { scroll-margin-top:56px; }
 }
