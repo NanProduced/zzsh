@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { convertLegacyDisplayFields, legacyDisplayDigest, parseLegacyDisplaySnapshot } from "../src/supply/legacy-display-snapshot";
-import { recordLegacyDisplaySnapshot, readLegacyListing, buildLegacyListingCandidates, buildMixedListingCandidates } from "../src/supply/legacy-listing-read";
+import { recordLegacyDisplaySnapshot, readLegacyListing, buildLegacyListingCandidates, buildMixedListingCandidates, projectLegacyHistoricalRead, loadLegacyHistoricalRead, loadLegacyHistoricalReads, legacyHistoricalReadSql } from "../src/supply/legacy-listing-read";
 import { legacyAdmissionSql, parseLegacyPublicAdmission } from "../src/legacy-load/legacy-public-admission";
 import type { ListingQueryV2 } from "../src/supply/listing-filter-contract";
 
@@ -70,4 +70,73 @@ test("shared public projection exposes safe display facts with exact historical 
   assert.equal(result.attributeDisplay.loginMethod?.displayName,"微信扫码");
   assert.doesNotMatch(JSON.stringify(result),/highRiskOwner|banRecord|faceIsSelf|extractSha256|evidenceRef|sourceDigest|displayDigest|ownerUserId/);
   row.display_digest="c".repeat(64); await assert.rejects(()=>readLegacyListing(client as never,"a-1"),e=>(e as {status:number}).status===404);
+});
+
+function historicalRow(accountId = "a-1", legacyId = "1") {
+  const extra = { ...input(), evidenceRef: "legacy-display-v1:" + "a".repeat(64) + ":" + legacyId };
+  return {
+    account_id: accountId, source_status: 4, legacy_id: legacyId, owner_user_id: "owner-fixture",
+    observation_version_id: extra.observationVersionId, source_digest: extra.baseSourceDigest,
+    base_updated_at: new Date(extra.sourceUpdatedAt),
+    snapshot: { schema: "legacy-listing-read-v1", resourceNo: "SOURCE-" + legacyId, haffRentYuan: "12.30", goodsYuan: "0.40", depositYuan: "0.00", termDays: "2", dailyHaffBase: "1000000" },
+    display_account_id: accountId, display_version_id: extra.observationVersionId,
+    base_source_digest: extra.baseSourceDigest, extract_sha256: extra.extractSha256,
+    display_updated_at: new Date(extra.sourceUpdatedAt), display_evidence_ref: extra.evidenceRef,
+    display_snapshot: extra.snapshot, display_digest: legacyDisplayDigest(accountId, extra),
+  };
+}
+
+test("authorized private projection reuses frozen display facts without public visibility or private risk data", () => {
+  const result = projectLegacyHistoricalRead(historicalRow(), "a-1");
+  assert.equal(result.sourceStatus, 4);
+  assert.equal(result.quote, null);
+  assert.equal(result.canCreateOrder, false);
+  assert.equal(result.trade, "UNKNOWN");
+  assert.equal(result.display.state, "KNOWN");
+  if (result.display.state !== "KNOWN") return;
+  assert.equal(result.display.facts.resources[0]!.quantity, "30000000");
+  assert.equal(result.display.facts.resources[3]!.quantity, "0");
+  assert.equal(result.display.facts.attributeDisplay.loginMethod?.displayName, "微信扫码");
+  assert.deepEqual(result.historicalQuote, { haffRentYuan: "12.30", goodsYuan: "0.40", depositYuan: "0.00", termDays: "2", dailyHaffBase: "1000000" });
+  assert.doesNotMatch(JSON.stringify(result), /highRiskOwner|banRecord|faceIsSelf|ownerRatio|extractSha256|sourceDigest|displayDigest|evidenceRef|phone|contact/);
+  assert.doesNotMatch(legacyHistoricalReadSql(), /source_status=3|legacyAdmission|suspended|FOR UPDATE/);
+  assert.match(legacyHistoricalReadSql(), /d.schema_version=1/);
+});
+
+test("no base, no display and corrupt display remain distinct", async () => {
+  const calls: string[] = [];
+  const absent = await loadLegacyHistoricalRead({ query: async (sql: string) => { calls.push(sql); return { rows: [] }; } } as never, "a-1");
+  assert.equal(absent, null);
+  const row = historicalRow();
+  const withoutDisplay = { ...row, display_account_id: null, display_version_id: null, base_source_digest: null, extract_sha256: null, display_updated_at: null, display_evidence_ref: null, display_snapshot: null, display_digest: null };
+  assert.deepEqual(projectLegacyHistoricalRead(withoutDisplay).display, { state: "NOT_IMPORTED", facts: null });
+  const missingValue = historicalRow();
+  missingValue.display_snapshot.resources[0]!.quantity = null;
+  missingValue.display_digest = legacyDisplayDigest("a-1", { ...input(), snapshot: missingValue.display_snapshot });
+  const missing = projectLegacyHistoricalRead(missingValue);
+  assert.equal(missing.display.state === "KNOWN" && missing.display.facts.resources[0]!.quantity, null);
+  for (const patch of [
+    { display_account_id: "other" }, { account_id: "other" }, { display_version_id: "other-version" },
+    { base_source_digest: "c".repeat(64) }, { extract_sha256: "c".repeat(64) },
+    { display_digest: "c".repeat(64) }, { display_updated_at: new Date("2026-09-14T00:00:00.000Z") },
+    { display_snapshot: { ...row.display_snapshot, private: "injected" } }, { display_account_id: null },
+    { snapshot: { ...row.snapshot, depositYuan: 0 } },
+  ]) assert.throws(() => projectLegacyHistoricalRead({ ...row, ...patch }, "a-1"), { status: 503, code: "EVIDENCE_UNAVAILABLE" });
+  assert.equal(calls.length, 1);
+  assert(calls.every(sql => !/INSERT|UPDATE|DELETE|ensure/.test(sql)));
+});
+
+test("authorized page IDs load in one bounded batch and empty pages issue no historical query", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { query: async (sql: string, values: unknown[]) => { calls.push({ sql, values }); return { rows: [historicalRow(), historicalRow("a-2", "2")] }; } };
+  assert.equal((await loadLegacyHistoricalReads(client as never, [])).size, 0);
+  assert.equal(calls.length, 0);
+  const result = await loadLegacyHistoricalReads(client as never, ["a-1", "a-2"]);
+  assert.equal(result.size, 2);
+  assert.deepEqual(calls[0]!.values, [["a-1", "a-2"]]);
+  assert.match(calls[0]!.sql, /h.account_id = ANY/);
+  assert.equal(calls.length, 1);
+  const single = projectLegacyHistoricalRead(historicalRow(), "a-1");
+  assert.deepEqual(result.get("a-1"), single);
+  await assert.rejects(() => loadLegacyHistoricalReads(client as never, ["other"]), { status: 503, code: "EVIDENCE_UNAVAILABLE" });
 });

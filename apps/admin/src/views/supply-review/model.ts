@@ -8,6 +8,8 @@
  */
 
 import type { InlineStatusTone } from "../../components/ui/badge";
+import type { LegacyHistoricalRead } from "../../api";
+export type { LegacyHistoricalRead } from "../../api";
 
 export type QueueItem = {
   id: string;
@@ -46,7 +48,7 @@ export type MediaBinding = {
 
 export type SupplyWorkView = "all" | "changes" | "restricted" | "paused" | "orders";
 export type SupplyQueryKind = "account" | "legacy" | "owner" | "nickname" | "order" | "link";
-export type SupplyFacts = { publicVisible: boolean | null; publicSource: string | null; newOrders: boolean | null; reasons: string[]; primaryReasonCode?: string | null; ownerPaused: boolean; staffRestricted: boolean; occupancy: "FREE" | "OCCUPIED" | "UNKNOWN"; sources: Array<{ sourceSystem: string; sourceEntity: string; sourceId: string; businessNo: string | null }>; legacyNumbers: string[] };
+export type SupplyFacts = { publicVisible: boolean | null; publicSource: string | null; newOrders: boolean | null; reasons: string[]; primaryReasonCode?: string | null; ownerPaused: boolean; staffRestricted: boolean; occupancy: "FREE" | "OCCUPIED" | "UNKNOWN"; sources: Array<{ sourceSystem: string; sourceEntity: string; sourceId: string; businessNo: string | null }>; legacyNumbers: string[]; historicalRead?: LegacyHistoricalRead | null };
 /** 列表最小受权摘要：金额保持接口原始十进制字符串，缺字段一律 null（未提供），不由前端补齐。 */
 export type SupplyQuoteAmount = { amount: string; currency: string | null; unit: string | null; scale: string | null } | null;
 export type SupplyListSummary = {
@@ -441,12 +443,13 @@ function levelFact(label: string, raw: unknown): AttributeFact {
 }
 
 export function attributeFacts(version: Version): AttributeFact[] {
-  const attributes = version.declaration.attributes;
-  const display = version.attributeDisplay;
+  return attributeFactsFrom(version.declaration.attributes, version.attributeDisplay, version.termOption);
+}
+
+function attributeFactsFrom(attributes: Record<string, unknown>, display: AttributeDisplay | undefined, term: Version["termOption"]): AttributeFact[] {
   const region = [attributes.region_province, attributes.region_city]
     .filter((value) => value !== null && value !== undefined && value !== "")
     .join(" · ");
-  const term = version.termOption;
   return [
     codeFact("安全箱配置", display?.safeBox, attributes.safe_box_code),
     levelFact("体力等级", attributes.vit_level),
@@ -465,6 +468,30 @@ export function attributeFacts(version: Version): AttributeFact[] {
     },
     { label: "每日消耗", value: quantityText(term?.dailyConsumption?.quantity), unconfirmed: false },
   ];
+}
+
+export function historicalAttributeFacts(read: LegacyHistoricalRead): AttributeFact[] {
+  const facts = read.display?.state === "KNOWN" ? read.display.facts : null;
+  if (!facts?.attributes) return [];
+  return attributeFactsFrom(facts.attributes, facts.attributeDisplay, {
+    code: "legacy_source", displayName: read.historicalQuote.termDays + " 天（历史记录）",
+    dailyConsumption: { quantity: read.historicalQuote.dailyHaffBase, unit: "HAFF_BASE" },
+  }).map(fact => fact.value === "未申报" ? { ...fact, value: "来源未提供", unconfirmed: true } : fact);
+}
+
+export function historicalReadSummary(read: LegacyHistoricalRead | null | undefined): string | null {
+  if (!read) return null;
+  const prefix = "历史编号 " + read.resourceNo;
+  if (read.display?.state !== "KNOWN") return prefix + " · 扩展资料尚待接入";
+  const facts = read.display.facts;
+  if (!facts?.attributes || !Array.isArray(facts.resources)) return prefix + " · 历史扩展资料读取不完整";
+  const mode = ({ ordinary: "普通", custom: "定制", fast: "极速" } as Record<string, string>)[facts.rentalMode ?? ""] ?? "模式待核";
+  return prefix + " · " + mode + " · " + (facts.attributeDisplay?.safeBox?.displayName ?? "安全箱待核");
+}
+
+export function historicalResourceText(resource: { quantity: string | null; unit: string }): string {
+  if (resource.quantity === null || !/^[0-9]{1,24}$/.test(resource.quantity)) return "数量待核";
+  return resource.unit === "HAFF_BASE" ? quantityText(resource.quantity) : BigInt(resource.quantity).toLocaleString("zh-CN") + " " + unitText(resource.unit);
 }
 
 export type InventoryRow = {

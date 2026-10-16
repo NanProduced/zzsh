@@ -45,6 +45,11 @@ const read=readDistributionPolicyRowInTransaction;
 export async function readDistributionPolicy(pool:Pool,actor:Actor,binding?:LocalDistributionScope){return withTransaction(pool,async c=>{await authorize(c,actor);await resource(c,false,binding);return read(c);});}
 /** Domain-only current policy read; caller retains its own user/registration authorization. */
 export async function readActiveDistributionPolicyInTransaction(c:PoolClient,lockHead=false,binding?:LocalDistributionScope){await resource(c,false,binding);return read(c,lockHead);}
+/** Invitation reads do not require write admission; its capability still uses the original gate. */
+export async function readInvitationPolicyInTransaction(c:PoolClient,binding?:LocalDistributionScope){
+ if(!(await c.query("SELECT to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete")).rows[0]?.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution policy sources are not installed');
+ const writeResourceAdmitted=await resource(c,true,binding);return{...await readDistributionPolicyRowInTransaction(c),writeResourceAdmitted};
+}
 /** Registration remains available before distribution admission; policy reads/writes elsewhere stay strict. */
 export async function readRegistrationDistributionPolicyInTransaction(c:PoolClient,binding?:LocalDistributionScope){
  if(!await resource(c,true,binding))return{knowledge:'UNKNOWN' as const,policy:null,reason:'DISTRIBUTION_RESOURCE_NOT_ADMITTED'};

@@ -6,6 +6,7 @@ import { escapeLike } from "../supply/catalog";
 import { isEffectivePublicationState } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
 import { ORDER_READ_RELATION, projectAdminReadOrder } from "../order/admin-order-read";
+import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 
 export const USER_DIRECTORY_SOURCE = {
   LOCAL: "LOCAL",
@@ -482,6 +483,7 @@ export async function listUserRentalAccounts(
   const items = rows.slice(0, page.limit);
   const hasMore = rows.length > page.limit;
   const last = items.at(-1);
+  const historical = await loadLegacyHistoricalReads(client, items.map(row => row.id));
   return {
     items: items.map((row) => ({
       accountId: row.id,
@@ -496,6 +498,7 @@ export async function listUserRentalAccounts(
       publication: { versionState: row.versionState ?? null, source: row.publicationSource ?? null,
         versionPublished: isEffectivePublicationState(row.versionState, row.publicationSource) },
       createdAt: row.createdAt,
+      historicalRead: historical.get(row.id) ?? null,
     })),
     nextCursor: hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: last.createdAt, id: last.id }) : null,
     limit: page.limit,
@@ -508,7 +511,8 @@ export async function readDirectoryRentalAccount(client:PoolClient,viewer:AdminD
     a.owner_user_id AS "ownerUserId",u.name AS "ownerName",a.lifecycle,a.owner_paused AS "ownerPaused",a.staff_restricted AS "staffRestricted",a.legacy_hold AS "legacyHold",v.title,v.id AS "versionId",v.review_state AS "versionState",g.name AS "gameName",g.id AS "gameId"
     FROM zzsh_supply.rental_account a JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
     WHERE a.id=$1 AND ${gameScopeSql("a.game_id","$3","$2")}`,[accountId,viewer.isBoss,viewer.adminId])).rows[0];
-  if(!account)throw notFound();return {account,contextKey:viewer.authorizationKey};
+  if(!account)throw notFound();
+  return {account:{...account,historicalRead:await loadLegacyHistoricalRead(client,accountId)},contextKey:viewer.authorizationKey};
 }
 
 const USER_ORDER_ROLES = ["renter", "owner", "any"] as const;

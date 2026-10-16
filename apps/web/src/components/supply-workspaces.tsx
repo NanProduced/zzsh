@@ -20,7 +20,7 @@ import { PersonalInvitations } from "./account/personal-invitations";
 import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
-import { CONDITION_LABELS, termLabel, unitLabel } from "../lib/listing-view";
+import { CONDITION_LABELS, conditionLines, haffMillionsLabel, termLabel, unitLabel } from "../lib/listing-view";
 import { supplyApi, SupplyRequestError } from "../lib/supply-client";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import type { MySupply } from "../lib/supply-types";
@@ -94,7 +94,7 @@ function blockerText(code: string): string {
   } as Record<string, string>)[code] ?? "当前资料暂不能继续，请读取最新状态或稍后重试。";
 }
 
-type AccountRow = { id: string; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean };
+type AccountRow = { id: string; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean; historicalRead?: MySupply["historicalRead"] };
 /** 读取失败的归属作用域：决定顶部提示文案，避免把局部详情失败写成「账号不存在」。写动作仍回显服务端原文。 */
 type AccountErrorScope = "list" | "detail" | "action";
 function AccountActionError({ error, scope, onRetry }: { error: SupplyRequestError | null; scope: AccountErrorScope; onRetry?: () => void }) {
@@ -498,6 +498,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       review_state: next.version?.reviewState ?? null,
       owner_paused: next.account.owner_paused,
       staff_restricted: next.account.staff_restricted,
+      historicalRead: next.historicalRead === undefined ? row.historicalRead : next.historicalRead,
     } : row));
   }, []);
   const revokeList = useCallback(() => {
@@ -768,6 +769,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
         {visibleRows.map((row) => <div className="mra-row" role="listitem" key={row.id} data-account-row={row.id}>
           <Link className="mra-row-main" id={`account-row-title-${row.id}`} href={`/account?view=accounts&accountId=${encodeURIComponent(row.id)}`} scroll={false}>
             <strong className="mra-row-title">{row.title ?? "未命名草稿"}</strong>
+            {row.historicalRead ? <span className="mra-row-sub">历史编号 {row.historicalRead.resourceNo} · {row.historicalRead.display?.state === "KNOWN" ? "历史资料已读取" : "扩展资料尚待接入"}</span> : null}
             <span className="mra-row-sub">{row.game_name} · {row.sequence ? `版本 ${row.sequence}` : "尚无版本"}</span>
           </Link>
           <div className="mra-row-state">
@@ -887,11 +889,19 @@ function AccountMedia({ assetId, alt, className }: { assetId: string; alt: strin
   </div>;
 }
 
+function historicalQuantityText(quantity: string | null, unit: string): string {
+  if (quantity === null || !/^[0-9]{1,24}$/.test(quantity)) return "数量待核";
+  return unit === "HAFF_BASE" ? haffMillionsLabel(quantity) + " M 哈夫币" : BigInt(quantity).toLocaleString("zh-CN") + " " + unitLabel(unit);
+}
+
 function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction, onRefresh, onAdopt }: { detail: MySupply; gameName?: string | null; latest: MySupply | null; busy: string; identityReady: boolean; onAction: (action: "withdraw" | "pause" | "resume") => Promise<void>; onRefresh: () => void; onAdopt: () => void }) {
   const account = detail.account;
   const version = detail.version;
   // DTO 降级（S16）：historicalRead 缺子对象按「不渲染该块」处理，不整页崩。
   const historical = detail.historicalRead?.historicalQuote ? detail.historicalRead : null;
+  const savedDisplay = historical?.display?.state === "KNOWN" ? historical.display.facts : null;
+  const historicalDisplay = savedDisplay?.attributes && Array.isArray(savedDisplay.resources) ? savedDisplay : null;
+  const historicalConditions = historicalDisplay ? conditionLines(historicalDisplay.attributes, { attributeDisplay: historicalDisplay.attributeDisplay }) : [];
   const history = Array.isArray(detail.history) ? detail.history : [];
   // 列表「查看退回原因」锚链：详情异步插入后自行把 #blockers 滚入视野并接管焦点。
   const blockersRef = useRef<HTMLDivElement | null>(null);
@@ -961,6 +971,15 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
     </div>
 
     {historical ? <section className="supply-block account-module-card"><h2>历史账号资料</h2><p>历史记录仅供查阅，不表示当前可接新单。</p><dl className="order-facts"><div><dt>历史账号编号</dt><dd>{historical.resourceNo}</dd></div><div><dt>历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>历史哈夫币租金</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>历史物资金额</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>历史押金</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的历史出租订单</Link></section> : null}
+    {historical ? <section className="supply-block"><h2>历史属性与资源</h2>
+      {historicalDisplay ? <>
+        <p>来源记录更新于 {displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"} · 租赁模式：{({ ordinary: "普通", custom: "定制", fast: "极速" } as Record<string, string>)[historicalDisplay.rentalMode ?? ""] ?? "待核"}</p>
+        <dl className="order-facts">{historicalConditions.map(item => <div key={item.key}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>
+        {Object.values(historicalDisplay.attributes).some(value => value === null) ? <p role="status">部分历史属性未提供或尚待核实。</p> : null}
+        <ul>{historicalDisplay.resources.map(item => <li key={item.code}>{item.name}：{historicalQuantityText(item.quantity, item.unit)}</li>)}</ul>
+        <p>以上为历史显示记录，不替代当前资料申报、报价或可租资格。</p>
+      </> : <p role={historical.display?.state === "KNOWN" ? "alert" : "status"}>{historical.display?.state === "KNOWN" ? "历史扩展资料返回不完整，请重试读取。" : "历史扩展资料尚未接入，不能据此认定资源数量为零。"}</p>}
+    </section> : null}
     {/* 冲突/阻塞/退回：有则显示，无则不占位；#blockers 是列表「查看退回原因」的唯一锚点。 */}
     {latest || blockers.length || reasons.length ? <div className="supply-blockers-group" id="blockers" tabIndex={-1} ref={blockersRef}>
       {latest ? <div className="supply-conflict"><strong>资料状态已变化</strong><p>当前状态：{latest.version ? stateLabel(latest.version.reviewState) : "未创建草稿"}。</p><div className="supply-inline-actions"><button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={onRefresh}>重新读取</button><button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={onAdopt}>采用最新状态</button></div></div> : null}

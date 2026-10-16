@@ -3,6 +3,12 @@ import {invitationRead,inviteesPage,readMyInvitees,pendingLeaderBinding,bindLead
 const user='self',body={code:'FX0001',policyVersion:'policy',expectedParticipantRevision:'1'},relation={id:'relation',type:'DISTRIBUTION_LEADER',childUserId:user,parentUserId:'parent',policyVersion:'policy'};
 const unknown={scope:'LOCAL_CONTROLLED',subjectId:user,policyKnowledge:'UNKNOWN',policyVersion:null,policyEnabled:null,participant:{knowledge:'UNKNOWN',eligibility:'UNKNOWN',levelCode:null,revision:null},ownCode:{knowledge:'UNKNOWN',code:null},inviter:{knowledge:'UNKNOWN',relation:null},leader:{knowledge:'UNKNOWN',relation:null}};
 const linked={...unknown,leader:{knowledge:'KNOWN_PARENT',relation:{id:'relation',parentUserId:'parent',sourceType:'LOCAL_CONTROLLED',boundAt:'2026-10-04T02:00:00Z'}}};
+test('policy enabled is distinct from binding admission; old responses fail closed and capability must be consistent',()=>{
+ const ready={...unknown,policyKnowledge:'KNOWN',policyVersion:'policy',policyEnabled:true,participant:{knowledge:'KNOWN',eligibility:'INELIGIBLE',levelCode:null,revision:'1'},leader:{knowledge:'KNOWN_NONE',relation:null}};
+ assert.equal(invitationRead(ready,user).canBindLeader,false);assert.equal(invitationRead({...ready,canBindLeader:false},user).canBindLeader,false);assert.equal(invitationRead({...ready,canBindLeader:true},user).canBindLeader,true);
+ for(const canBindLeader of [null,'true',1])assert.throws(()=>invitationRead({...ready,canBindLeader},user));
+ for(const patch of [{policyEnabled:false},{participant:unknown.participant},{leader:unknown.leader}])assert.throws(()=>invitationRead({...ready,canBindLeader:true,...patch},user));
+});
 test('legacy parent DTO keeps original binding time unknown even when an older response supplies migration time',()=>{const r=invitationRead({...linked,leader:{...linked.leader,relation:{...linked.leader.relation,sourceType:'LEGACY_MYSQL'}}},user);assert.equal(r.leader.relation.boundAt,null);assert.equal(r.leader.relation.boundAtKnowledge,'UNKNOWN');});
 test('partial list contract retains mapped counts and hides legacy import timestamps; inconsistent partial sources reject',()=>{
  const partial={subjectId:user,knowledge:'UNKNOWN',type:'INVITER',snapshotVersion:'snapshot',count:null,mappedRelationCount:'2',nextCursor:'next',items:[{id:'r',type:'INVITER',nickname:'已确认用户',boundAt:'2026-10-04T00:00:00Z',sourceType:'LEGACY_MYSQL'}]};

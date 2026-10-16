@@ -81,7 +81,10 @@ test('technical trace is audit-authorized and does not change canonical dates or
 test('resources reuse effective publication facts and scope; no invented publication state',async()=>{
   const pool=new DirectorySqlFixture();const data:any=await listUserRentalAccounts(client(pool),viewer,'user_normal',{limit:20});
   assert.equal(data.items[0].publication.versionPublished,true);assert.equal(data.items[0].publication.source,'OWNER_DIRECT');
-  const sql=pool.queries.at(-1)!.sql;for(const predicate of ['admin_supply_scope','sgame."game_id" = a.game_id','p.content_hash=v.content_hash','p.rule_release_id=v.rule_release_id','p.owner_user_id=a.owner_user_id'])assert.ok(sql.includes(predicate));
+  const sql=pool.queries.find(query=>query.sql.includes('FROM zzsh_supply.rental_account a'))!.sql;for(const predicate of ['admin_supply_scope','sgame."game_id" = a.game_id','p.content_hash=v.content_hash','p.rule_release_id=v.rule_release_id','p.owner_user_id=a.owner_user_id'])assert.ok(sql.includes(predicate));
+  const history=pool.queries.filter(query=>query.sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'));
+  assert.equal(history.length,1);assert.deepEqual(history[0]!.values,[['account_fixture']]);
+  assert.equal(data.items[0].historicalRead,null);
   pool.gameIds=[];const empty:any=await listUserRentalAccounts(client(pool),viewer,'user_normal',{limit:20});assert.deepEqual(empty.items,[]);
 });
 

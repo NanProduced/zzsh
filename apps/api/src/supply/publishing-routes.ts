@@ -1,7 +1,7 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
-import { loadLegacyHistoricalRead } from "./legacy-listing-read";
+import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "./legacy-listing-read";
 import { listV2 } from "./listing-filter-routes";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
 import type { PoolClient } from "pg";
@@ -503,8 +503,9 @@ export async function handlePublishingRoute(
           ],
         )
       ).rows;
+      const historical = admin ? null : await loadLegacyHistoricalReads(client, rows.map(row => row.id));
       return {
-        items: rows,
+        items: historical ? rows.map(row => ({ ...row, historicalRead: historical.get(row.id) ?? null })) : rows,
         nextCursor: rows.length === limit ? rows[rows.length - 1]!.id : null,
       };
     });

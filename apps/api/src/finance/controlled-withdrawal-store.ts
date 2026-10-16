@@ -7,17 +7,18 @@ import {assertUserContextInTransaction,type UserContext} from '../auth/user-iden
 import {recordAudit,SecurityApiError,withTransaction} from '../auth/security-core';
 import {canonicalize} from '../supply/content-hash';
 import {conflict,forbidden,notFound,withIdempotency,fingerprintRequest} from '../supply/supply-util';
-import {readPersonalWallet} from './personal-finance-read';
+import {readPersonalWallet,encodeFinanceCursor,decodeFinanceCursor} from './personal-finance-read';
+import type {ListingCursorKey} from '../supply/listing-cursor';
 import {quoteControlledWithdrawal,ownerLocalWithdrawalPolicy,countLocalWithdrawalQuota,reserveControlledWithdrawal,claimControlledWithdrawal,finishControlledWithdrawal,localWithdrawalRequestKey,type ControlledWithdrawalIntent,type ControlledPayoutEvidence,type WithdrawalLedgerPlan} from './controlled-withdrawal';
 const sha=(v:string)=>createHash('sha256').update(v).digest('hex');
 const unavailable=(reason:string)=>new SecurityApiError(503,'EVIDENCE_UNAVAILABLE',reason);
 type Row=Record<string,any>;type Actor=UserContext & {requestId:string};
+const controlledResourceIdentities=[['zzsh_test_m2_auth_auth_compat',820148,'zzsh_m2_auth_compat_'],['zzsh_test_m2_auth_auth_compat_ui',833000,'zzsh_m2_auth_compat_ui_']] as const;
 export async function assertControlledWithdrawalResource(client:PoolClient,scope?:NativeWithdrawalScope){
  if(scope)return assertNativeWithdrawalResource(client,scope);
  const r=(await client.query(`SELECT current_database() AS name,current_user AS role,d.oid,shobj_description(d.oid,'pg_database') AS marker,
   to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_admission') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_destination') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NOT NULL AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()`)).rows[0];
- const identities=[['zzsh_test_m2_auth_auth_compat',820148,'zzsh_m2_auth_compat_'],['zzsh_test_m2_auth_auth_compat_ui',833000,'zzsh_m2_auth_compat_ui_']] as const;
- const expected=identities.find(([name,oid])=>r?.name===name&&Number(r.oid)===oid);
+ const expected=controlledResourceIdentities.find(([name,oid])=>r?.name===name&&Number(r.oid)===oid);
  if(!expected||r.marker!=='zzsh:m2-auth-test:v1'||![expected[2]+'r',expected[2]+'m'].includes(r.role))throw unavailable('CONTROLLED_RESOURCE_NOT_ADMITTED');
  if(!r.complete)throw unavailable('CONTROLLED_WITHDRAWAL_SCHEMA_UNAVAILABLE');return {name:r.name,oid:Number(r.oid),marker:r.marker};
 }
@@ -62,13 +63,32 @@ export async function createControlledWithdrawal(pool:Pool,actor:Actor,body:Reco
  });
  if(scope)await verifyNativeReceipt(client,scope,actor.userId,result.body);return result;
 });}
-export async function readControlledWithdrawals(pool:Pool,actor:Actor,id?:string,scope?:NativeWithdrawalScope){return withTransaction(pool,async client=>{
+export type ControlledWithdrawalReadPage={limit:number;cursor:string|null;state:string;key:ListingCursorKey|undefined};
+/** Only an unknown tuple is a read availability state; a broken known resource remains an error. */
+export async function isUnadmittedControlledWithdrawalRead(client:PoolClient,error:unknown){
+ if(!(error instanceof SecurityApiError)||error.status!==503||error.message!=='CONTROLLED_RESOURCE_NOT_ADMITTED')return false;
+ const row=(await client.query(`SELECT current_database() AS name,d.oid FROM pg_database d WHERE d.datname=current_database()`)).rows[0];
+ return Boolean(row)&&!controlledResourceIdentities.some(([name,oid])=>row.name===name&&Number(row.oid)===oid);
+}
+export async function readControlledWithdrawals(pool:Pool,actor:Actor,id?:string,scope?:NativeWithdrawalScope){return withTransaction(pool,client=>readControlledWithdrawalsInTransaction(client,actor,id,scope));}
+export async function readControlledWithdrawalsInTransaction(client:PoolClient,actor:Actor,id?:string,scope?:NativeWithdrawalScope,page?:ControlledWithdrawalReadPage){
  await assertControlledWithdrawalResource(client,scope);await assertUserContextInTransaction(client,actor);
  const bindings=scope?nativeWithdrawalBindings(scope,actor.userId):null,intentIds=bindings?.map(b=>b.intentId),admissionIds=bindings?.map(b=>b.admissionId),destinationIds=bindings?.map(b=>b.destinationId);
  if(id){const row=(await client.query('SELECT * FROM zzsh_order.withdrawal_intent WHERE id=$1 AND user_id=$2',[id,actor.userId])).rows[0];if(!row)throw notFound();if(scope)checkNativeIntent(scope,row);return{scope:'LOCAL_CONTROLLED',intent:publicIntent(row)};}
  const cohorts=(await client.query(`SELECT id,revision::text,admitted_at,expires_at,max_intents FROM zzsh_order.withdrawal_admission WHERE user_id=$1${scope?' AND id=ANY($2::text[])':''} ORDER BY admitted_at,id`,scope?[actor.userId,admissionIds]:[actor.userId])).rows;
  if(!cohorts.length)throw unavailable('CONTROLLED_LOCAL_ADMISSION_UNAVAILABLE');
- const rows=(await client.query(`SELECT * FROM zzsh_order.withdrawal_intent WHERE user_id=$1${scope?' AND id=ANY($2::text[])':''} ORDER BY accepted_at DESC,id`,scope?[actor.userId,intentIds]:[actor.userId])).rows;
+ let pagination:{asOf:string;snapshotVersion:string;mappedRecordCount:string;nextCursor:string|null}|undefined;
+ let rows:Row[];
+ if(page){
+  const aggregate=(await client.query(`SELECT count(*)::text AS count,md5(COALESCE(string_agg(id||':'||operation_version::text,',' ORDER BY id),'')) AS digest FROM zzsh_order.withdrawal_intent WHERE user_id=$1 AND($2::text[] IS NULL OR id=ANY($2)) AND($3='ALL' OR state=$3)`,[actor.userId,intentIds??null,page.state])).rows[0];
+  const snapshotVersion='controlled-withdrawals.read.v1:'+sha(canonicalize([aggregate.count,aggregate.digest,cohorts.map(r=>[r.id,r.revision,new Date(r.admitted_at).toISOString(),new Date(r.expires_at).toISOString()])]));
+  const binding={userId:actor.userId,sessionHash:sha(actor.sessionId),snapshotVersion,bucket:'PERSONAL_WITHDRAWALS:LOCAL_CONTROLLED:'+page.state};
+  const after=page.cursor?decodeFinanceCursor(page.cursor,binding,page.key):null;
+  const asOf=after?.asOf??(await client.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
+  const found=(await client.query(`SELECT *,to_char(accepted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_at FROM zzsh_order.withdrawal_intent WHERE user_id=$1 AND($2::text[] IS NULL OR id=ANY($2)) AND($3='ALL' OR state=$3) AND accepted_at<=$4::timestamptz AND($5::timestamptz IS NULL OR(accepted_at,id COLLATE "C")<($5::timestamptz,$6 COLLATE "C")) ORDER BY accepted_at DESC,id COLLATE "C" DESC LIMIT $7`,[actor.userId,intentIds??null,page.state,asOf,after?.position.at??null,after?.position.id??null,page.limit+1])).rows;
+  rows=found.slice(0,page.limit);const last=rows.at(-1);
+  pagination={asOf,snapshotVersion,mappedRecordCount:aggregate.count,nextCursor:found.length>page.limit&&last?encodeFinanceCursor({at:last.sort_at,id:last.id},asOf,binding,page.key):null};
+ }else rows=(await client.query(`SELECT * FROM zzsh_order.withdrawal_intent WHERE user_id=$1${scope?' AND id=ANY($2::text[])':''} ORDER BY accepted_at DESC,id`,scope?[actor.userId,intentIds]:[actor.userId])).rows;
  if(scope)for(const row of rows)checkNativeIntent(scope,row);
  const totals=(await client.query(`SELECT COALESCE(sum(l.credit_cents-l.debit_cents) FILTER(WHERE l.account_code='WALLET_RESERVED'),0)::text AS reserved,COALESCE(sum(l.credit_cents) FILTER(WHERE l.account_code='PAYOUT_CLEARING'),0)::text AS paid,COALESCE(sum(l.credit_cents) FILTER(WHERE l.account_code='WITHDRAW_FEE'),0)::text AS fee FROM zzsh_order.withdrawal_intent i JOIN zzsh_order.finance_event e ON e.economic_root_id=i.economic_root_id JOIN zzsh_order.settlement_ledger_entry l ON l.finance_event_id=e.id WHERE i.user_id=$1${scope?' AND i.id=ANY($2::text[])':''}`,scope?[actor.userId,intentIds]:[actor.userId])).rows[0];
  const targets=(await client.query(`SELECT d.id,d.kind,${scope?'d.admission_id,':''}d.display_mask AS mask,a.per_intent_cents::text,
@@ -81,8 +101,8 @@ export async function readControlledWithdrawals(pool:Pool,actor:Actor,id?:string
  if(scope)for(const d of targets)assertNativeWithdrawalDestination(scope,{userId:actor.userId,admissionId:d.admission_id,destinationId:d.id});
  const reservation=scope?await readNativeReservationStatus(client,actor.userId,scope):undefined;
  const destinations=targets.map(d=>({id:d.id,kind:d.kind,mask:d.mask,policyVersion:ownerLocalWithdrawalPolicy(d.kind,[actor.userId]).version,perIntentCents:d.per_intent_cents,canQuote:d.can_quote&&(!scope||reservation?.reservationState==='REQUIRES_CURRENT_QUOTE')}));
- return{scope:'LOCAL_CONTROLLED',subjectId:actor.userId,coverage:{knowledge:'KNOWN',cohorts:cohorts.map(r=>({id:r.id,revision:r.revision,start:new Date(r.admitted_at).toISOString(),end:new Date(r.expires_at).toISOString()})),meaning:'EXPLICIT_LOCAL_INTENTS_ONLY_NOT_TOTAL_HISTORICAL_WALLET'},items:rows.map(publicIntent),destinations,totals:{reservedCents:totals.reserved,payoutCents:totals.paid,feeCents:totals.fee},globalReserved:'UNKNOWN',...(scope?{nativeWithdrawal:reservation,globalWithdrawable:'UNKNOWN'}:{})};
-});}
+ return{scope:'LOCAL_CONTROLLED',subjectId:actor.userId,coverage:{knowledge:'KNOWN',cohorts:cohorts.map(r=>({id:r.id,revision:r.revision,start:new Date(r.admitted_at).toISOString(),end:new Date(r.expires_at).toISOString()})),meaning:'EXPLICIT_LOCAL_INTENTS_ONLY_NOT_TOTAL_HISTORICAL_WALLET'},items:rows.map(publicIntent),destinations,totals:{reservedCents:totals.reserved,payoutCents:totals.paid,feeCents:totals.fee},globalReserved:'UNKNOWN',...(scope?{nativeWithdrawal:reservation,globalWithdrawable:'UNKNOWN'}:{}),...(pagination?{pagination}:{})};
+}
 export async function recoverControlledWithdrawal(pool:Pool,actor:Actor,key:string,scope?:NativeWithdrawalScope){return withTransaction(pool,async client=>{await assertControlledWithdrawalResource(client,scope);await assertUserContextInTransaction(client,actor);if(scope)nativeWithdrawalBindings(scope,actor.userId);const row=(await client.query('SELECT response_body AS body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2',[JSON.stringify(['user',actor.userId,'controlled.withdrawal.reserve',null]),key])).rows[0];if(scope&&row)await verifyNativeReceipt(client,scope,actor.userId,row.body);return row?{scope:'LOCAL_CONTROLLED',knowledge:'KNOWN',receipt:row.body}:{scope:'LOCAL_CONTROLLED',knowledge:'UNKNOWN',receipt:null};});}
 
 /** Internal candidate worker only. No public route accepts outcome/lease tokens. */

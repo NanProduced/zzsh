@@ -9,6 +9,8 @@ import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, ty
 import { candidatePredicates, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD, type ListingPosition } from "./listing-candidates";
 import { evaluatePublicDisplayGuard, legacyAdmissionSql, legacyAdmissionRevision, type LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import type { ListingQueryV2 } from "./listing-filter-contract";
+import { SecurityApiError } from "../auth/security-core";
+import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 
 export type LegacyReadSnapshot = {
   schema: "legacy-listing-read-v1";
@@ -44,27 +46,87 @@ export function legacySnapshotReplaySql(): string {
 }
 
 /** Authorized admin or owner read. This is not the public VISIBLE predicate. */
-export function legacyHistoricalReadSql(): string {
-  return `SELECT h.source_status::int AS source_status, h.legacy_id, h.snapshot, a.owner_user_id
+export function legacyHistoricalReadSql(many = false): string {
+  return `SELECT h.account_id, h.observation_version_id, h.source_digest, h.source_updated_at AS base_updated_at,
+      h.source_status::int AS source_status, h.legacy_id, h.snapshot, a.owner_user_id,
+      d.account_id AS display_account_id, d.observation_version_id AS display_version_id,
+      d.base_source_digest, d.extract_sha256, d.source_updated_at AS display_updated_at,
+      d.evidence_ref AS display_evidence_ref, d.snapshot AS display_snapshot, d.display_digest
     FROM zzsh_supply.legacy_listing_read_snapshot h
     JOIN zzsh_supply.rental_account a ON a.id=h.account_id
-    WHERE h.account_id=$1`;
+    LEFT JOIN zzsh_supply.legacy_listing_display_snapshot d ON d.account_id=h.account_id AND d.schema_version=1
+    WHERE ${many ? "h.account_id = ANY($1::text[])" : "h.account_id=$1"}`;
 }
 
-export function projectLegacyHistoricalRead(row: { source_status: number | string; legacy_id: string; owner_user_id: string; snapshot: unknown }) {
-  const snapshot = parseLegacyReadSnapshot(row.snapshot);
+type HistoricalReadRow = {
+  source_status: number | string; legacy_id: string; owner_user_id: string; snapshot: unknown;
+  account_id?: string; observation_version_id?: string; source_digest?: string; base_updated_at?: Date;
+  display_account_id?: string | null; display_version_id?: string | null;
+  base_source_digest?: string | null; extract_sha256?: string | null; display_updated_at?: Date | null;
+  display_evidence_ref?: string | null; display_snapshot?: unknown; display_digest?: string | null;
+};
+
+function projectHistoricalDisplay(row: HistoricalReadRow, accountId?: string) {
+  if (row.display_account_id == null) {
+    if ([row.display_version_id, row.base_source_digest, row.extract_sha256, row.display_updated_at, row.display_evidence_ref, row.display_snapshot, row.display_digest].some(value => value != null)) throw invalid("Historical display binding is incomplete");
+    return { state: "NOT_IMPORTED" as const, facts: null };
+  }
+  if (!accountId || row.account_id !== accountId || row.display_account_id !== accountId
+    || !row.observation_version_id || row.display_version_id !== row.observation_version_id
+    || row.base_source_digest !== row.source_digest || !/^[a-f0-9]{64}$/.test(row.source_digest ?? "")
+    || !/^[a-f0-9]{64}$/.test(row.extract_sha256 ?? "") || !(row.display_updated_at instanceof Date)
+    || !Number.isFinite(row.display_updated_at.getTime())
+    || !(row.base_updated_at instanceof Date) || row.base_updated_at.getTime() !== row.display_updated_at.getTime()
+    || row.display_evidence_ref !== 'legacy-display-v1:' + row.extract_sha256 + ':' + row.legacy_id) throw invalid("Historical display source binding is invalid");
+  const snapshot = parseLegacyDisplaySnapshot(row.display_snapshot);
+  const sourceUpdatedAt = row.display_updated_at.toISOString();
+  if (row.display_digest !== legacyDisplayDigest(accountId, {
+    observationVersionId: row.display_version_id, baseSourceDigest: row.base_source_digest!,
+    extractSha256: row.extract_sha256!, sourceUpdatedAt, evidenceRef: row.display_evidence_ref, snapshot,
+  })) throw invalid("Historical display digest is invalid");
+  return { state: "KNOWN" as const, facts: {
+    schema: snapshot.schema, rentalMode: snapshot.rentalMode, attributes: snapshot.attributes,
+    resources: snapshot.resources.map(({ code, name, quantity, unit }) => ({ code, name, quantity, unit })),
+    attributeDisplay: projectPublicAttributeDisplay(snapshot.attributes), sourceUpdatedAt,
+  } };
+}
+
+export function projectLegacyHistoricalRead(row: HistoricalReadRow, accountId = row.account_id) {
+  let snapshot: LegacyReadSnapshot;
+  let display: ReturnType<typeof projectHistoricalDisplay>;
+  try {
+    if (row.account_id !== undefined && row.account_id !== accountId) throw invalid("Historical account binding is invalid");
+    snapshot = parseLegacyReadSnapshot(row.snapshot);
+    display = projectHistoricalDisplay(row, accountId);
+  } catch {
+    throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Historical account display is unavailable");
+  }
   const sourceStatus = Number(row.source_status);
   return {
     legacyId: row.legacy_id, sourceStatus, ownerUserId: row.owner_user_id, resourceNo: snapshot.resourceNo,
     historicalQuote: { haffRentYuan: snapshot.haffRentYuan, goodsYuan: snapshot.goodsYuan, depositYuan: snapshot.depositYuan, termDays: snapshot.termDays, dailyHaffBase: snapshot.dailyHaffBase },
-    canCreateOrder: false as const, trade: "UNKNOWN" as const,
+    quote: null, canCreateOrder: false as const, trade: "UNKNOWN" as const, display,
     sourceStatusPublicCandidate: sourceStatus === 3,
   };
 }
 
+export type LegacyHistoricalRead = ReturnType<typeof projectLegacyHistoricalRead>;
+
 export async function loadLegacyHistoricalRead(client: PoolClient, accountId: string) {
   const row = (await client.query(legacyHistoricalReadSql(), [accountId])).rows[0];
-  return row ? projectLegacyHistoricalRead(row) : null;
+  return row ? projectLegacyHistoricalRead(row, accountId) : null;
+}
+
+/** Callers already authorized this page's account IDs; this reader grants no access. */
+export async function loadLegacyHistoricalReads(client: PoolClient, accountIds: string[]) {
+  const result = new Map<string, LegacyHistoricalRead>();
+  if (!accountIds.length) return result;
+  const rows = (await client.query<HistoricalReadRow>(legacyHistoricalReadSql(true), [[...new Set(accountIds)]])).rows;
+  for (const row of rows) {
+    if (!row.account_id || !accountIds.includes(row.account_id)) throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Historical account binding is unavailable");
+    result.set(row.account_id, projectLegacyHistoricalRead(row, row.account_id));
+  }
+  return result;
 }
 
 export function legacySnapshotConflicts(old: {

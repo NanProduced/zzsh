@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
-import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, formatAmount, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, historicalReadSummary, formatAmount, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
 import {
   fullShanghaiTime,
   KIND_LABELS,
@@ -177,6 +177,7 @@ export function QuickViewAssetSummary({
 
   return (
     <div className="my-3 space-y-3.5">
+      {historicalReadSummary(detail?.supervision.facts.historicalRead ?? row.facts.historicalRead) ? <p className="text-xs text-muted-foreground">{historicalReadSummary(detail?.supervision.facts.historicalRead ?? row.facts.historicalRead)} · 历史显示记录，不代表当前报价或可租资格。</p> : null}
       <div>
         <div className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
           <span>核心游戏资产</span>

@@ -3,6 +3,9 @@ import { test } from "node:test";
 
 import {
   attributeFacts,
+  historicalAttributeFacts,
+  historicalReadSummary,
+  historicalResourceText,
   availabilityText,
   blockerLabel,
   cursorDelta,
@@ -171,4 +174,30 @@ test("finish F3: missing region never derives a skin statement", () => {
   }
   const version={declaration:{attributes:{region_province:"上海",region_city:"浦东"},skins:["skin-unmapped"]},presentation:{}};
   assert.equal(attributeFacts(version).find(fact=>fact.label==="地区").value,"上海 · 浦东");
+});
+
+test("historical display stays separate from native declarations, exact zero and unknown resources", () => {
+  const read = {
+    resourceNo: "SOURCE-1", canCreateOrder: false, trade: "UNKNOWN", quote: null,
+    historicalQuote: { haffRentYuan: "12.30", goodsYuan: "0.00", depositYuan: "0.00", termDays: "2", dailyHaffBase: "1000000" },
+    display: { state: "KNOWN", facts: {
+      schema: "legacy-listing-display-v1", rentalMode: "fast",
+      attributes: { safe_box_code: "safe_box_3x3", character_level: 0, region_province: null },
+      resources: [{ code: "haff_base", name: "哈夫币", quantity: "0", unit: "HAFF_BASE" }, { code: "coffee", name: "咖啡豆", quantity: null, unit: "PIECE" }],
+      attributeDisplay: { safeBox: { code: "safe_box_3x3", displayName: "顶级安全箱", mappingStatus: "CONFIRMED", issueCode: null }, grading: null, loginMethod: null, serviceWindow: null },
+      sourceUpdatedAt: "2026-09-13T00:00:00.000Z",
+    } },
+  };
+  const before = JSON.stringify(read);
+  assert.match(historicalReadSummary(read), /SOURCE-1.*极速.*顶级安全箱/);
+  assert.equal(historicalResourceText(read.display.facts.resources[0]), "0 M 哈夫币");
+  assert.equal(historicalResourceText(read.display.facts.resources[1]), "数量待核");
+  assert.equal(historicalResourceText({ quantity: "bad", unit: "ROUND" }), "数量待核");
+  assert.equal(historicalResourceText({ quantity: "0", unit: "ROUND" }), "0 发");
+  assert.equal(historicalAttributeFacts(read).find(f => f.label === "角色等级").value, "0 级");
+  assert.equal(historicalAttributeFacts(read).find(f => f.label === "地区").value, "来源未提供");
+  assert.equal(JSON.stringify(read), before);
+  assert.equal(historicalReadSummary(null), null);
+  assert.match(historicalReadSummary({ ...read, display: { state: "NOT_IMPORTED", facts: null } }), /尚待接入/);
+  assert.deepEqual(historicalAttributeFacts({ ...read, display: { state: "NOT_IMPORTED", facts: null } }), []);
 });

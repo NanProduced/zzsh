@@ -33,6 +33,7 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')"))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
+    if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return result([]);
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)||sql.startsWith("SELECT set_config("))return result([]);
     if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':'SELECTED_GAMES',gameIds:this.isBoss?[]:this.gameIds}]);
     if(sql.startsWith('SELECT "status", "is_boss"'))return result([{status:'ACTIVE',isBoss:this.isBoss,passwordChangeRequired:false}]);

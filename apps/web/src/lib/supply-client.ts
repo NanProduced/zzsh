@@ -361,6 +361,7 @@ export const supplyApi = {
         sequence: string | null;
         owner_paused: boolean;
         staff_restricted: boolean;
+        historicalRead?: MySupply["historicalRead"];
       }>
     >("/me/accounts?" + myAccountsQuery(query), { signal }),
   createAccount: (gameId: string, key: string, signal?: AbortSignal) =>

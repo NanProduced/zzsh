@@ -142,6 +142,18 @@ export type UserDirectoryDetail = Omit<UserDirectoryItem, "source"> & {
   localUpdatedAt: string;
 };
 
+type HistoricalDisplayCode = { code: string; displayName: string | null; mappingStatus: "CONFIRMED" | "UNCONFIRMED"; issueCode: string | null };
+export type LegacyHistoricalRead = {
+  resourceNo: string; canCreateOrder: false; trade: "UNKNOWN"; quote?: null;
+  historicalQuote: { haffRentYuan: string; goodsYuan: string; depositYuan: string; termDays: string; dailyHaffBase: string };
+  display?: { state: "NOT_IMPORTED"; facts: null } | { state: "KNOWN"; facts: {
+    schema: "legacy-listing-display-v1"; rentalMode: "ordinary" | "custom" | "fast" | null;
+    attributes: Record<string, string | number | boolean | null>;
+    resources: Array<{ code: string; name: string; quantity: string | null; unit: string }>;
+    attributeDisplay: { safeBox: HistoricalDisplayCode | null; grading: HistoricalDisplayCode | null; loginMethod: HistoricalDisplayCode | null; serviceWindow: { startMinute: number; endMinute: number; displayName: string } | null };
+    sourceUpdatedAt: string;
+  } };
+};
 export type UserRentalAccountItem = {
   accountId: string;
   displayNo: string | null;
@@ -154,6 +166,7 @@ export type UserRentalAccountItem = {
   currentVersionId: string | null;
   publication: { versionState: string | null; source: string | null; versionPublished: boolean };
   createdAt: string;
+  historicalRead?: LegacyHistoricalRead | null;
 };
 export type UserRentalAccountPage = { items?: UserRentalAccountItem[]; nextCursor?: string | null };
 

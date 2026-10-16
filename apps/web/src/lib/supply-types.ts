@@ -386,8 +386,23 @@ export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
     publiclyReadable?: boolean;
   }>;
 };
+export type LegacyHistoricalRead = {
+  resourceNo: string;
+  canCreateOrder: false;
+  trade: "UNKNOWN";
+  quote?: null;
+  historicalQuote: { haffRentYuan: string; goodsYuan: string; depositYuan: string; termDays: string; dailyHaffBase: string };
+  display?: { state: "NOT_IMPORTED"; facts: null } | { state: "KNOWN"; facts: {
+    schema: "legacy-listing-display-v1";
+    rentalMode: "ordinary" | "custom" | "fast" | null;
+    attributes: Record<string, string | number | boolean | null>;
+    resources: Array<{ code: string; name: string; quantity: string | null; unit: string }>;
+    attributeDisplay: PublicAttributeDisplay;
+    sourceUpdatedAt: string;
+  } };
+};
 export type MySupply = {
-  historicalRead?: null | { resourceNo: string; canCreateOrder: false; trade: "UNKNOWN"; historicalQuote: { haffRentYuan: string; goodsYuan: string; depositYuan: string; termDays: string; dailyHaffBase: string } };
+  historicalRead?: LegacyHistoricalRead | null;
   account: {
     id: string;
     game_id: string;

@@ -28,7 +28,7 @@ async function probe(fetcher) {
   Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
   const previousFetch = globalThis.fetch;
   globalThis.fetch = fetcher;
-  const session = { status: "authenticated", userId: "user_A", identityVersion: 1, revalidate() {} };
+  const session = { status: "authenticated", userId: "user_A", identityVersion: 1, revalidations: 0, revalidate() { this.revalidations++; } };
   const store = { getSnapshot: () => session };
   const module = new Module(`${tree}/wallet-withdrawal-probe.cjs`);
   module.filename = `${tree}/wallet-withdrawal-probe.cjs`;
@@ -46,10 +46,18 @@ async function probe(fetcher) {
   window.document.body.append(host);
   const root = require("react-dom/client").createRoot(host);
   const settle = async () => { for (let i = 0; i < 3; i++) await React.act(async () => { await new Promise(setImmediate); }); };
+  const commits = [];
+  function StableProbe({value}) {
+    const scope = `${session.userId}:${session.identityVersion}`;
+    React.useLayoutEffect(() => { commits.push({scope, detail:host.querySelector('[aria-label="历史提现记录详情"]')?.textContent??''}); });
+    return React.createElement(module.exports.ControlledWithdrawal,{wallet:value,scope,onWalletChanged(){}});
+  }
   return {
     host,
+    session,
+    commits,
     settle,
-    async render(value) { await React.act(async () => root.render(React.createElement(module.exports.ControlledWithdrawal, { wallet: value, scope: "user_A:1", onWalletChanged() {} }))); await settle(); },
+    async render(value) { await React.act(async () => root.render(React.createElement(StableProbe, { value }))); await settle(); },
     async fill(selector, value) { const target = host.querySelector(selector); assert(target); const proto = target.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype; await React.act(async () => { Object.getOwnPropertyDescriptor(proto, "value").set.call(target, value); target.dispatchEvent(new window.Event(target.tagName === "SELECT" ? "change" : "input", { bubbles: true })); }); await settle(); },
     async click(selector) { const target = host.querySelector(selector); assert(target); await React.act(async () => { target.dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await new Promise(setImmediate); }); await settle(); },
     async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = previousFetch; }
@@ -70,6 +78,25 @@ test("read-only wallet revision change reloads eligibility and invalidates a lat
     assert(scopeReads >= 2); assert.match(p.host.textContent, /邀请收益待追回/); assert.equal(p.host.querySelector(".wallet-withdraw-quote"), null); assert(p.host.querySelector("button[type=submit]").disabled);
   } finally { late.resolve(reply({})); await p.close(); }
 });
+
+const historyItem={id:'history:obs_A',source:'HISTORICAL_WITHDRAWAL',sourceReference:{type:'LEGACY_MYSQL',system:'restore',entity:'la_withdraw_apply',id:'PRIVATE_HISTORY_A'},sourceStatus:2,amountCents:'10000',netCents:'9900',feeCents:'100',occurredAt:at,importedAt:at,sourceDigest:'a'.repeat(64),includedInOpening:false,accountingEffect:'OBSERVATION_ONLY_NO_NEW_DEBIT',channelArrivalKnowledge:'UNKNOWN'};
+const historyRead=(user='user_A',items=[historyItem])=>({contractVersion:'personal-withdrawals.read.v1',subjectId:user,source:'ALL',state:'ALL',historical:{source:'HISTORICAL_WITHDRAWAL',availability:items.length?'AVAILABLE':'NOT_IMPORTED',coverage:{knowledge:'UNKNOWN',reason:'HISTORICAL_WITHDRAWAL_COVERAGE_NOT_CLOSED'},items,mappedRecordCount:String(items.length),count:null,asOf:at,snapshotVersion:'history-v1',nextCursor:null},controlled:{availability:'NOT_ADMITTED',reason:'CONTROLLED_RESOURCE_NOT_ADMITTED',data:null}});
+test('history remains readable without a wallet, keeps the raw source status and never enables a withdrawal form',async()=>{
+ let posts=0;const p=await probe(async(_url,options)=>{if(options.method==='POST')posts++;return reply(historyRead());});
+ try{await p.render(null);assert.match(p.host.querySelector('[data-testid="historical-withdrawals"]').textContent,/旧系统状态码 2|¥100\.00/);assert.doesNotMatch(p.host.textContent,/到账成功/);assert.equal(p.host.querySelector('.wallet-withdraw-form'),null);assert.equal(posts,0);assert.match(p.host.textContent,/渠道到账尚未核验/);}
+ finally{await p.close();}
+});
+test('new identity render cannot expose the old history detail before passive effects clear it',async()=>{
+ const late=deferred();let phase='A';const p=await probe(async url=>phase==='B'?late.promise:reply(String(url).includes('history%3A')?{contractVersion:'personal-withdrawals.read.v1',subjectId:'user_A',source:'HISTORICAL_WITHDRAWAL',item:historyItem}:historyRead()));
+ try{await p.render(null);await p.click('[data-testid="historical-withdrawals"] .wallet-withdraw-record button');assert.match(p.host.querySelector('[aria-label="历史提现记录详情"]').textContent,/PRIVATE_HISTORY_A/);phase='B';p.session.userId='user_B';p.session.identityVersion=2;const mark=p.commits.length;await p.render(null);const firstB=p.commits.slice(mark).find(commit=>commit.scope==='user_B:2');assert(firstB,'new-scope layout commit was observed');assert.doesNotMatch(firstB.detail,/PRIVATE_HISTORY_A/);late.resolve(reply(historyRead('user_B',[])));await p.settle();assert.doesNotMatch(p.host.textContent,/PRIVATE_HISTORY_A/);}
+ finally{late.resolve(reply(historyRead('user_B',[])));await p.close();}
+});
+test('revoked history detail clears prior private projection and does not retry a business command',async()=>{
+ let deny=false,posts=0;const p=await probe(async(url,options)=>{if(options.method==='POST')posts++;if(String(url).includes('history%3A'))return deny?reply({error:{code:'UNAUTHENTICATED'}},401):reply({contractVersion:'personal-withdrawals.read.v1',subjectId:'user_A',source:'HISTORICAL_WITHDRAWAL',item:historyItem});return reply(historyRead());});
+ try{await p.render(null);await p.click('[data-testid="historical-withdrawals"] .wallet-withdraw-record button');assert.match(p.host.textContent,/PRIVATE_HISTORY_A/);deny=true;await p.click('[data-testid="historical-withdrawals"] .wallet-withdraw-record button');assert.doesNotMatch(p.host.textContent,/PRIVATE_HISTORY_A/);assert.equal(p.session.revalidations,1);assert.equal(posts,0);}
+ finally{await p.close();}
+});
+test('unreadable original marker blocks new actions without hiding readable history or rewriting the marker',async()=>{let gets=0,posts=0;const p=await probe(async(_url,options)=>{if(options.method==='POST')posts++;else gets++;return reply(historyRead());});try{localStorage.setItem('zzsh.withdrawal.pending.v1:user_A','bad original marker');await p.render(null);assert(gets>0);assert.match(p.host.querySelector('[data-testid="historical-withdrawals"]').textContent,/旧系统状态码 2/);assert.match(p.host.textContent,/原申请结果待确认/);assert.equal(localStorage.getItem('zzsh.withdrawal.pending.v1:user_A'),'bad original marker');assert.equal(posts,0);}finally{await p.close();}});
 
 test("native debt parser rejects contradictory eligibility and unknown zero", () => {
   assert.equal(client.parseNativeReservation(undefined), undefined);

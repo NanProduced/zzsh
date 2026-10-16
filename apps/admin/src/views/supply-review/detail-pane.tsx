@@ -12,6 +12,9 @@ import {
   formatAmount,
   formatTermDays,
   inventoryRows,
+  historicalAttributeFacts,
+  historicalReadSummary,
+  historicalResourceText,
   isHistorical,
   mediaCanQuarantine,
   mediaCanRestore,
@@ -25,6 +28,7 @@ import {
   reviewStateLabel,
   skinsText,
   type Detail,
+  type LegacyHistoricalRead,
   type MediaBinding,
   type QueueItem,
   type ZoomTarget,
@@ -155,6 +159,7 @@ function MediaCard({
 
 export function SupplyDetailPane({
   detail,
+  historicalRead,
   loading,
   versionId,
   onSelectVersion,
@@ -175,6 +180,7 @@ export function SupplyDetailPane({
   tab, onTabChange, actions,
 }: {
   detail?: Detail;
+  historicalRead?: LegacyHistoricalRead | null;
   loading: boolean;
   versionId: string | null;
   onSelectVersion: (versionId: string | null) => void;
@@ -253,6 +259,16 @@ export function SupplyDetailPane({
         {([["data", "账号资料"], ["media", "图片与凭证"], ["history", "历史与记录"]] as const).map(([key, label]) => <TabsTrigger key={key} value={key} id={`supervision-tab-${key}`}>{label}</TabsTrigger>)}
       </TabsList>
       <TabsContent value="data" keepMounted id="supervision-panel-data" aria-labelledby="supervision-tab-data" hidden={tab !== "data"} className="supervision-sections min-w-0">
+      {historicalRead ? <Section title="历史来源资料">
+        <p>{historicalReadSummary(historicalRead)}</p>
+        {historicalRead.display?.state === "KNOWN" && historicalRead.display.facts?.attributes && Array.isArray(historicalRead.display.facts.resources) ? <>
+          <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">{historicalAttributeFacts(historicalRead).map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
+          <ul className="grid gap-2 text-sm sm:grid-cols-2">{historicalRead.display.facts.resources.map(resource => <li key={resource.code}>{resource.name}：{historicalResourceText(resource)}</li>)}</ul>
+          <p className="text-xs text-muted-foreground">来源记录更新于 {formatDate(historicalRead.display.facts.sourceUpdatedAt)}。历史显示量不替代本版申报或当前可租资格。</p>
+        </> : <p role={historicalRead.display?.state === "KNOWN" ? "alert" : "status"}>{historicalRead.display?.state === "KNOWN" ? "历史扩展资料返回不完整，请重试读取。" : "历史扩展资料尚待接入，未提供的资源数量不能按零处理。"}</p>}
+        <p className="text-sm">历史租金 {historicalRead.historicalQuote.haffRentYuan} 元 · 历史物资金额 {historicalRead.historicalQuote.goodsYuan} 元 · 历史押金 {historicalRead.historicalQuote.depositYuan} 元</p>
+        <p className="text-xs text-muted-foreground">以上为来源金额记录，不是当前报价、可用余额、保证金到账或退款结果。</p>
+      </Section> : null}
       <Section title={previous ? "资料与变化" : "申报说明"}>
         {previous ? (
           <div className="grid gap-4 text-sm sm:grid-cols-2">

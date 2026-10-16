@@ -656,3 +656,55 @@ test("adopting an account detail refresh updates cached review and availability 
     assert.equal(p.calls.myAccounts.length, 1);
   } finally { await p.close(); }
 });
+
+const historicalAccount = (known = true) => ({
+  resourceNo: "SOURCE-9", quote: null, canCreateOrder: false, trade: "UNKNOWN",
+  historicalQuote: { haffRentYuan: "12.30", goodsYuan: "0.00", depositYuan: "0.00", termDays: "2", dailyHaffBase: "1000000" },
+  display: known ? { state: "KNOWN", facts: {
+    schema: "legacy-listing-display-v1", rentalMode: "fast", sourceUpdatedAt: "2026-09-13T00:00:00.000Z",
+    attributes: { safe_box_code: "safe_box_3x3", login_method_code: "legacy_login_wechat", character_level: 0, region_city: null },
+    attributeDisplay: { safeBox: { code: "safe_box_3x3", displayName: "顶级安全箱", mappingStatus: "CONFIRMED", issueCode: null }, grading: null, loginMethod: { code: "legacy_login_wechat", displayName: "微信扫码", mappingStatus: "CONFIRMED", issueCode: null }, serviceWindow: null },
+    resources: [{ code: "haff_base", name: "哈夫币", quantity: "0", unit: "HAFF_BASE" }, { code: "coffee", name: "咖啡豆", quantity: null, unit: "PIECE" }],
+  } } : { state: "NOT_IMPORTED", facts: null },
+});
+
+test("historical account detail renders saved display facts and refreshes its list without writes or new requests", async () => {
+  const next = { ...detailOf("history-1"), historicalRead: historicalAccount() };
+  const p = await probe({ rows: [accountRow("history-1", { historicalRead: historicalAccount(false) })], detail: next });
+  try {
+    await p.render("accounts");
+    assert.match(p.host.textContent, /SOURCE-9.*扩展资料尚待接入/);
+    await p.render("accounts", "history-1");
+    assert.match(p.host.textContent, /历史属性与资源/);
+    assert.match(p.host.textContent, /微信扫码/);
+    assert.match(p.host.textContent, /0 M 哈夫币/);
+    assert.match(p.host.textContent, /咖啡豆：数量待核/);
+    assert.match(p.host.textContent, /不替代当前资料申报、报价或可租资格/);
+    assert.match(p.host.textContent, /部分历史属性未提供或尚待核实/);
+    await p.render("accounts");
+    assert.match(p.host.textContent, /历史资料已读取/);
+    assert.equal(p.calls.myAccounts.length, 1);
+    assert.equal(p.calls.mine.length, 1);
+    assert.equal(p.writes, 0);
+  } finally { await p.close(); }
+});
+
+test("missing base, missing display and a corrupt-source response never become zero resource facts", async () => {
+  for (const historicalRead of [null, historicalAccount(false)]) {
+    const p = await probe({ rows: [accountRow("history-1")], detail: { ...detailOf("history-1"), historicalRead } });
+    try {
+      await p.render("accounts", "history-1");
+      if (historicalRead) assert.match(p.host.textContent, /历史扩展资料尚未接入/);
+      else assert.doesNotMatch(p.host.textContent, /历史属性与资源/);
+      assert.doesNotMatch(p.host.textContent, /0 M 哈夫币/);
+      assert.equal(p.writes, 0);
+    } finally { await p.close(); }
+  }
+  const p = await probe({ rows: [accountRow("history-1")], mine: () => { throw new SupplyRequestError(503, { error: { code: "EVIDENCE_UNAVAILABLE", message: "source unavailable" } }); } });
+  try {
+    await p.render("accounts", "history-1");
+    assert.match(p.host.textContent, /账号资料读取失败/);
+    assert.doesNotMatch(p.host.textContent, /历史属性与资源|0 M 哈夫币/);
+    assert.equal(p.writes, 0);
+  } finally { await p.close(); }
+});
