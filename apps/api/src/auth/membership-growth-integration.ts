@@ -255,10 +255,16 @@ export async function readGrowthSourceCompleteness(client: PoolClient, userId: s
     }
   }
   const expectedSet = new Set(expected);
-  for (const row of contributions) if (row.status !== "PENDING" && !expectedSet.has(row.sourceKey) && !(row.correctionOf && expectedSet.has(row.correctionOf))) conflicts.push(row.sourceKey);
+  // Legacy la_order rows are written only by membership-growth-legacy with their own digest; they are not native expected sources.
+  const isLegacyRow = (row: CompletenessContribution) => /^legacy_mysql_restore:la_order:[1-9]\d{0,23}$/.test(row.correctionOf ? row.correctionOf.slice(row.correctionOf.indexOf(":") + 1) : row.sourceId);
+  const legacyPresent = contributions.some((row) => row.status !== "PENDING" && isLegacyRow(row));
+  for (const row of contributions) if (row.status !== "PENDING" && isLegacyRow(row) && !row.sourceDigest) conflicts.push(row.sourceKey);
+  for (const row of contributions) if (row.status !== "PENDING" && !isLegacyRow(row) && !expectedSet.has(row.sourceKey) && !(row.correctionOf && expectedSet.has(row.correctionOf))) conflicts.push(row.sourceKey);
   if (conflicts.length > 0) return { ...assessed, state: "SOURCE_CONFLICT", reasons: [...(assessed.reasons ?? []), ...[...new Set(conflicts)].map((sourceKey) => `CONTRIBUTION_BINDING_INVALID:${sourceKey}`)] };
   // Native settlements cannot prove the migrated subject's earlier growth history.
-  return provenance.migrated ? { ...assessed, state: "BACKFILL_PENDING", reasons: [...(assessed.reasons ?? []), "MIGRATED_SOURCE_NOT_PROVED"] } : assessed;
+  // Admitted legacy rows are partial history until a persisted coverage receipt exists (/root migration); never upgrade to COMPLETE here.
+  if (legacyPresent && !provenance.migrated) return { ...assessed, state: "SOURCE_CONFLICT", reasons: [...(assessed.reasons ?? []), "LEGACY_ROWS_ON_NON_MIGRATED_SUBJECT"] };
+  return provenance.migrated ? { ...assessed, state: "BACKFILL_PENDING", reasons: [...(assessed.reasons ?? []), "MIGRATED_SOURCE_NOT_PROVED", ...(legacyPresent ? ["LEGACY_COVERAGE_RECEIPT_NOT_PERSISTED"] : [])] } : assessed;
 }
 
 export type GrowthContributionWriteResult = {
