@@ -66,7 +66,7 @@ export function planLegacyDutyFinalization(duty:LegacyFinanceDuty,basis:LegacyDu
  if(basis.kind==='COMPLETED_COMMISSION_ADMISSION'){
   if(duty.kind!=='COMMISSION'||!basis.admissionId||basis.evidenceId!==basis.admissionId||basis.continuationVersionId!==null||!['COMPLETED_AT','MATURES_AT'].includes(basis.sourceTimeKind))throw conflict('COMPLETED_ADMISSION_CANNOT_REPLACE_CONFIRM');
  }else if(basis.kind==='HISTORICAL_UNREFUNDED_ADMISSION'){
-  if(duty.kind!=='RENTER_REFUND'||duty.source!=='LEGACY_IMPORT'||duty.sourceStatus!=='COMPLETED_UNREFUNDED'||basis.sourceTimeKind!=='SOURCE_COMPLETED_AT'
+  if(duty.kind!=='RENTER_REFUND'||duty.source!=='LEGACY_IMPORT'||!['COMPLETED_UNREFUNDED','DETAINED'].includes(duty.sourceStatus??'')||basis.sourceTimeKind!=='SOURCE_COMPLETED_AT'
    ||basis.admissionId!==null||basis.continuationVersionId!==null)throw conflict('HISTORICAL_UNPAID_REFUND_EVIDENCE_REQUIRED');
  }else if(!basis.effectiveHeadId||!basis.effectiveHeadRevision||!id.test(basis.effectiveHeadId)||!/^[1-9]\d{0,18}$/.test(basis.effectiveHeadRevision)
   ||basis.admissionId!==null||!basis.continuationVersionId||(basis.kind==='CONFISCATED_CONTINUATION')!==(duty.kind==='DEPOSIT_COMPENSATION')

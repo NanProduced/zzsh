@@ -17,6 +17,16 @@ test('refund is exactly net 87-5=82, with a positive payable line, never a cash/
  const p=planLegacyDutyFinalization(duty,basis,funding,input,due);assert.equal(p.lines[1]!.credit,'8200');assert.equal(p.lines[1]!.account,'RENTER_REFUND_PAYABLE');assert.equal(p.lines[0]!.account,'LEGACY_LIABILITY_SOURCE');assert.equal(verifyLegacyDutyFinalization(settled(duty,p),actual(p)),'POSTED_POSITIVE_REFUND');
  assert.throws(()=>planLegacyDutyFinalization({...duty,amountCents:'8700'},basis,funding,{...input,expectedAmountCents:'8700'},due));
 });
+
+test('reviewed historical DETAINED and original completed net refund both require AVAILABLE; held never becomes a new refund',()=>{
+ for(const sourceStatus of ['COMPLETED_UNREFUNDED','DETAINED']){
+  const d={...duty,source:'LEGACY_IMPORT',sourceStatus,sourceRecordId:'101',continuationVersionId:null},b={...basis,kind:'HISTORICAL_UNREFUNDED_ADMISSION' as const,sourceRecordId:'101',sourceRecordEntity:'la_order' as const,continuationVersionId:null,effectiveHeadId:null,effectiveHeadRevision:null,sourceTimeKind:'SOURCE_COMPLETED_AT' as const};
+  const p=planLegacyDutyFinalization(d,b,funding,input,due);assert.equal(p.lines[1]!.credit,'8200');assert.equal(p.lines[1]!.account,'RENTER_REFUND_PAYABLE');assert.equal(verifyLegacyDutyFinalization(settled(d,p),actual(p)),'POSTED_POSITIVE_REFUND');
+  for(const fundsDisposition of ['HELD','CONFISCATED','UNKNOWN'] as const)assert.throws(()=>planLegacyDutyFinalization(d,{...b,fundsDisposition},funding,input,due),/DUTY_FUNDS_DISPOSITION_NOT_PAYABLE/);
+  for(const patch of [{netRefundKnown:false},{currentNetRefundCents:null},{currentNetRefundCents:'8700'}])assert.throws(()=>planLegacyDutyFinalization(d,{...b,...patch},funding,input,due),/DUTY_FUNDS_DISPOSITION_NOT_PAYABLE/);
+  assert.throws(()=>planLegacyDutyFinalization({...d,sourceStatus:'REFUND_RECORD_EXISTS'},b,funding,input,due),/HISTORICAL_UNPAID_REFUND_EVIDENCE_REQUIRED/);
+ }
+});
 test('unknown, stale, held, legacy settled, wrong direction/source/subject/currency never become a posted final duty',()=>{
  for(const patch of [{revision:'3'},{currency:'USD'},{counterpartyUserId:null},{status:'SETTLED',settledBy:'LEGACY_RECORDS'},{status:'VOID'},{amountCents:'-1'}])assert.throws(()=>planLegacyDutyFinalization({...duty,...patch} as any,basis,funding,input,due));
  for(const patch of [{finalAmountKnown:false},{netRefundKnown:false},{fundsDisposition:'HELD'},{amountCents:'8700'},{subjectId:'owner'},{basisFactsDigest:'broken'},{kind:'COMPLETED_COMMISSION_ADMISSION'}])assert.throws(()=>planLegacyDutyFinalization(duty,{...basis,...patch} as any,funding,input,due));
