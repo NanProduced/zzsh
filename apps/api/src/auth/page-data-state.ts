@@ -21,11 +21,12 @@ export function creditPageData<T extends { score: number }>(input: { creditState
   return { state: "PENDING_SOURCE", reason: "CREDIT_NOT_INITIALIZED", value: null };
 }
 
-/** Membership growth: only COMPLETE source is READY; BACKFILL_PENDING keeps the projection but flags it partial. */
-export function growthPageData<T extends { growth: { sourceState?: string } }>(input: T | null): PageData<T> {
+/** Membership growth: only COMPLETE source + KNOWN projection is READY; BACKFILL_PENDING keeps the projection but flags it partial. */
+export function growthPageData<T extends { growth: { sourceState?: string; knowledge?: string } }>(input: T | null): PageData<T> {
   if (input === null) return { state: "PENDING_SOURCE", reason: "GROWTH_NOT_AVAILABLE", value: null };
   const s = input.growth?.sourceState;
-  if (s === "COMPLETE") return { state: "READY", reason: null, value: input };
+  // Source COMPLETE does not imply a known projection (e.g. negative net consumption): READY needs both.
+  if (s === "COMPLETE") return input.growth.knowledge === "KNOWN" ? { state: "READY", reason: null, value: input } : { state: "PENDING_SOURCE", reason: "PROJECTION_UNKNOWN", value: input };
   if (s === "BACKFILL_PENDING") return { state: "PENDING_SOURCE", reason: "BACKFILL_PENDING", value: input };
   if (s === "READ_FAILED" || s === "SOURCE_CONFLICT") return { state: "FAILED", reason: s, value: null };
   if (s === "NO_POLICY") return { state: "PENDING_SOURCE", reason: "NO_POLICY", value: input };
