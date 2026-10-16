@@ -1,5 +1,7 @@
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
+import type { ListingCursorKey } from "../supply/listing-cursor";
+import { readAdminOwnerGuaranteeHistory } from "../finance/owner-guarantee-history";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
@@ -89,7 +91,7 @@ async function readRecoveryRequests(client: PoolClient, userId: string) {
   return (await client.query(`SELECT id,status,reason,score_before AS "scoreBefore",completed_orders AS "completedOrders",decision_reason AS "decisionReason",created_at::text AS "createdAt",decided_at::text AS "decidedAt" FROM zzsh_credit.credit_recovery_request WHERE user_id=$1 ORDER BY created_at DESC,id DESC`, [userId])).rows;
 }
 
-export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthSecurityOptions, commandsEnabled = false): void {
+export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthSecurityOptions & { listingCursorKey?: ListingCursorKey }, commandsEnabled = false): void {
   const express = app.getHttpAdapter().getInstance();
   const userPrefixes = ["/api/v1/users/me/credit", "/api/bff/user/credit"];
   for (const prefix of userPrefixes) {
@@ -156,6 +158,13 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
         const body = await withTransaction(options.pool, async (client) => {
           await assertAdminContextInTransaction(client, context);
           const access = await requireAdminAccess(client, context.userId);
+          const historyMatch = /^\/users\/([^/]+)\/guarantee-history$/.exec(path);
+          if (method === "GET" && historyMatch) {
+            for (const key of url.searchParams.keys()) {
+              if (key !== "cursor" || url.searchParams.getAll(key).length !== 1) throw invalid("Only one history cursor is supported");
+            }
+            return readAdminOwnerGuaranteeHistory(client, context, decodeId(historyMatch[1]!), url.searchParams.get("cursor"), options.listingCursorKey, assertCreditUserScope);
+          }
           const userMatch = /^\/users\/([^/]+)$/.exec(path);
           if (request.method === "GET" && userMatch) {
             requirePermission(access, ADMIN_PERMISSION.creditRead);

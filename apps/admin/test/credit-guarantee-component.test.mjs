@@ -15,6 +15,10 @@ const Button = ({ children, ...props }) => React.createElement("button", props, 
 const Input = (props) => React.createElement("input", props);
 const Badge = ({ children }) => React.createElement("span", null, children);
 const data = { credit: { userId: "user-A", score: 70, revision: "1", events: [] }, recoveryRequests: [], guarantees: [], transactions: [{ requirementId: "req-1", accountId: "account-1", paymentStatus: "CONFIRMED", refundStatus: "UNKNOWN", merchantOrderNo: "merchant-2", paymentFinanceEventId: "event-2", refundFinanceEventId: null, paymentHistory: [{ id: "pay-1", status: "FAILED", amountCents: "500", merchantOrderNo: "merchant-1", providerTransactionId: null, financeEventId: null, ledgerEntryRef: null }, { id: "pay-2", status: "CONFIRMED", amountCents: "500", merchantOrderNo: "merchant-2", providerTransactionId: "provider-2", financeEventId: "event-2", ledgerEntryRef: "line-2" }], refundHistory: [{ id: "refund-1", paymentId: "pay-2", status: "FAILED", amountCents: "500", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }, { id: "refund-2", paymentId: "pay-2", status: "UNKNOWN", amountCents: "500", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }] }] };
+let creditResult = null;
+const historyProps = [];
+// F AdminOwnerGuaranteeHistory (84f8742) is exercised by its own F test; here it is a probe of the E host wiring.
+const AdminOwnerGuaranteeHistory = (props) => { historyProps.push(props); return React.createElement("section", { "data-probe": "owner-guarantee-history" }, props.canRead ? "HISTORY" : "HISTORY-DENIED"); };
 const permissions = ["credit.read", "credit.decide", "credit.guarantee.read", "credit.guarantee.manage"];
 
 function loadComponent() {
@@ -26,8 +30,9 @@ function loadComponent() {
     if (name === "@/components/ui/input") return { Input };
     if (name === "@/components/ui/badge") return { Badge };
     if (name === "@/api") return { AdminApiError };
+    if (name === "../owner-guarantee-history") return { AdminOwnerGuaranteeHistory };
     if (name === "./user-directory-data") return { CREDIT_GUARANTEE_PERMISSION: { read: "credit.guarantee.read", manage: "credit.guarantee.manage" }, PERMISSION: { credit: "credit.read", creditDecide: "credit.decide" } };
-    if (name === "./user-directory-shared") return { Message: ({ children, title }) => React.createElement("div", { role: "status" }, title, children), errorText: (error) => error?.message ?? "error", time: (value) => value, useDirectoryRequest: () => ({ result: { state: "ready", data }, retry: () => {} }) };
+    if (name === "./user-directory-shared") return { Message: ({ children, title }) => React.createElement("div", { role: "status" }, title, children), errorText: (error) => error?.message ?? "error", time: (value) => value, useDirectoryRequest: () => ({ result: creditResult ?? { state: "ready", data }, retry: () => {} }) };
     return native(name);
   };
   module._compile(typescript.transpileModule(fs.readFileSync(file, "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
@@ -41,7 +46,7 @@ async function render(adapter, user) {
   await React.act(async () => root.render(React.createElement(CreditPanel, { adapter, user, refreshNonce: 0 }))); await new Promise(setImmediate); return { browser, host, root, component: CreditPanel };
 }
 async function fill(element, value) { Object.getOwnPropertyDescriptor(element.tagName === "TEXTAREA" ? element.ownerDocument.defaultView.HTMLTextAreaElement.prototype : element.ownerDocument.defaultView.HTMLInputElement.prototype, "value").set.call(element, value); await React.act(async () => element.dispatchEvent(new element.ownerDocument.defaultView.Event("input", { bubbles: true }))); }
-function adapter({ readbackFails = false } = {}) { let readback = readbackFails; const calls = { decide: 0, read: 0 }; return { calls, snapshot: { adminUserId: "admin-A", session: { id: "session-A" } }, has: (permission) => permissions.includes(permission), hasCreditGuaranteeRead: () => true, hasCreditGuaranteeManage: () => true, credit: async () => { calls.read += 1; if (readback) { readback = false; throw new Error("READBACK_UNKNOWN"); } return data; }, creditDecide: async () => { calls.decide += 1; return {}; } }; }
+function adapter({ readbackFails = false } = {}) { let readback = readbackFails; const calls = { decide: 0, read: 0 }; return { calls, snapshot: { adminUserId: "admin-A", session: { id: "session-A", locked: false }, security: { status: "ACTIVE", passwordChangeRequired: false }, permissions }, has: (permission) => permissions.includes(permission), hasCreditGuaranteeRead: () => true, hasCreditGuaranteeManage: () => true, credit: async () => { calls.read += 1; if (readback) { readback = false; throw new Error("READBACK_UNKNOWN"); } return data; }, creditDecide: async () => { calls.decide += 1; return {}; } }; }
 
 test("CreditPanel storage failure refuses the POST", async () => {
   storage(true); const a = adapter(); const mounted = await render(a, { id: "user-A", name: "用户" });
@@ -75,4 +80,21 @@ test("CreditPanel renders every payment and refund attempt", async () => {
     assert.match(mounted.host.textContent, /merchant-1/);
     assert.match(mounted.host.textContent, /refund-2/);
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
+});
+
+test("E-F admin guarantee host: F history renders beside ready and failed credit reads with current subject/scope", async () => {
+  storage(); historyProps.length = 0; creditResult = null;
+  const ready = await render(adapter(), { id: "user-A" });
+  assert.equal(ready.host.querySelectorAll("[data-probe='owner-guarantee-history']").length, 1);
+  assert.match(ready.host.textContent, /HISTORY/);
+  assert.equal(historyProps.at(-1).subjectUserId, "user-A");
+  assert.equal(historyProps.at(-1).adminUserId, "admin-A");
+  assert.equal(historyProps.at(-1).canRead, true);
+  await React.act(async () => ready.root.unmount());
+  creditResult = { state: "error", error: new Error("CREDIT_DOWN") };
+  const failed = await render(adapter(), { id: "user-A" });
+  assert.match(failed.host.textContent, /信用与保证金读取失败/);
+  assert.equal(failed.host.querySelectorAll("[data-probe='owner-guarantee-history']").length, 1, "history stays visible when the main credit read fails");
+  await React.act(async () => failed.root.unmount());
+  creditResult = null;
 });
