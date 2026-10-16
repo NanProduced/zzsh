@@ -8,6 +8,7 @@ import { projectLegacyGrowthConsumption, type LegacyGrowthConsumptionInput, type
 import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex as sha } from "../src/supply/supply-util";
 import { legacyBinding } from "./legacy-continuation-fixture";
+import { replayGrowthProjection } from "../src/auth/membership-growth";
 
 // FIXTURE ONLY: synthetic la_order rows built through the REAL T projection (peer-b recipe). No DB, no real rows.
 const proof = (x: unknown) => { const canonical = canonicalize(x); return { canonical, digest: sha(canonical) }; };
@@ -21,10 +22,10 @@ function order(id: string, completedAt = IN_RANGE, recordedAt = "2026-10-17T02:0
   const binding = { ...legacyBinding, id: "legacy_order_" + sha(JSON.stringify(["legacy_mysql_restore", "la_order", id])).slice(0, 40), legacyId: id, sourceDigest: parent, sourceOrderStatus: 4, completedAt } as any;
   return { input: { binding, subjectUserId: SUBJECT, recordedAt, origin: { kind: "LEGACY_COMPLETED", parentSourceSnapshot: raw, sourceRecord, components } } as any, componentDigest: components.digest };
 }
-function correctionFor(src: Src, corrected = "800", recordedAt = "2026-10-17T03:00:00.000000Z"): LegacyCorrectionSource {
+function correctionFor(src: Src, corrected = "800", recordedAt = "2026-10-17T03:00:00.000000Z", previous?: string, revision = 2, sourceId = "93", which = 0): LegacyCorrectionSource {
   const p = projectLegacyGrowthConsumption(src.input, new Set([src.componentDigest]));
-  const base = p.facts[0]!, baseSourceKey = `${base.component}:${base.settlementId}`;
-  return { baseSourceKey, proof: proof({ schema: "legacy-growth-correction.v1", originalSourceKey: baseSourceKey, userId: SUBJECT, originalEffectiveAt: base.effectiveAt, previousAmountCents: base.amountCents, correctedAmountCents: corrected, classification: "EFFECTIVE_PRICE_CORRECTION", alreadyReflectedInGrossReturn: false, sourceSystem: "legacy_mysql_restore", sourceEntity: "fixture_price_correction", sourceId: "93", recordedAt, revision: 2 }) };
+  const base = p.facts[which]!, baseSourceKey = `${base.component}:${base.settlementId}`;
+  return { baseSourceKey, proof: proof({ schema: "legacy-growth-correction.v1", originalSourceKey: baseSourceKey, userId: SUBJECT, originalEffectiveAt: base.effectiveAt, previousAmountCents: previous ?? base.amountCents, correctedAmountCents: corrected, classification: "EFFECTIVE_PRICE_CORRECTION", alreadyReflectedInGrossReturn: false, sourceSystem: "legacy_mysql_restore", sourceEntity: "fixture_price_correction", sourceId, recordedAt, revision }) };
 }
 function receiptFor(expected: string[], refs: string[]): LegacyGrowthCoverageReceipt {
   return { subjectUserId: SUBJECT, cutoff: CUTOFF, fromExclusive: null, sourceExtractSha256: "b".repeat(64), sourceSetSha256: sha(canonicalize({ subjectUserId: SUBJECT, cutoff: CUTOFF, fromExclusive: null, expectedSourceKeys: [...expected].sort() })), expectedSourceKeys: expected, refundReviewEvidenceRefs: refs };
@@ -183,4 +184,38 @@ test("H3 reader: record proves only its factKeys; increments (later continuation
   assert.equal(assessLegacyCoverageRecord(p.record, [{ ...stored[0]!, sourceDigest: "d".repeat(64) }, ...stored.slice(1)]).state, "SOURCE_CONFLICT");
   assert.equal(assessLegacyCoverageRecord({ ...p.record, coverageState: "COMPLETE", missingSourceKeys: [key("99")] }, stored).state, "SOURCE_CONFLICT");
   assert.equal(assessLegacyCoverageRecord(null, stored).state, "BACKFILL_PENDING");
+});
+test("B-GROWTH-03: serial corrections chain on the previously verified amount/revision (1000 -> 800 -> 600, any input order)", async () => {
+  const c2 = correctionFor(A, "800", "2026-10-17T03:00:00.000000Z", "1000", 2, "93"), c3 = correctionFor(A, "600", "2026-10-17T04:00:00.000000Z", "800", 3, "94");
+  for (const order of [[c2, c3], [c3, c2]]) {
+    const p = ok(prepareLegacyGrowthBackfill(pkg({ expected: [key("7")], srcs: [A], corrections: order })));
+    assert.equal(p.coverageState, "COMPLETE"); assert.equal(verifyLegacyCoverageRecord(p.record), true);
+    const corr = p.rows.filter((r) => r.contribution.correctionOf).sort((a, b) => a.contribution.revision - b.contribution.revision);
+    assert.deepEqual(corr.map((r) => [r.contribution.revision, r.contribution.previousAmountCents, r.contribution.amountCents]), [[2, "1000", "800"], [3, "800", "600"]]);
+    assert.ok(corr.every((r) => r.contribution.correctionOf === c2.baseSourceKey && r.contribution.effectiveAt === IN_RANGE));
+    const g = replayGrowthProjection({ userId: SUBJECT, asOf: "2026-10-18T12:00:00.000000Z", contributions: p.rows.map((r) => r.contribution) });
+    assert.equal(g.rollingPoints, "9");
+  }
+});
+
+test("B-GROWTH-03: contradictory previous, same-revision fork and missing prior amount evidence reject before any write", () => {
+  const c2 = correctionFor(A, "800", "2026-10-17T03:00:00.000000Z", "1000", 2, "93");
+  // both claim previous=1000
+  rejected(prepareLegacyGrowthBackfill(pkg({ expected: [key("7")], srcs: [A], corrections: [c2, correctionFor(A, "600", "2026-10-17T04:00:00.000000Z", "1000", 3, "94")] })), /CORRECTION_PREVIOUS_MISMATCH/);
+  // same revision, different correction
+  rejected(prepareLegacyGrowthBackfill(pkg({ expected: [key("7")], srcs: [A], corrections: [c2, correctionFor(A, "700", "2026-10-17T04:00:00.000000Z", "1000", 2, "95")] })), /CORRECTION_REVISION_FORK/);
+  // second step claims previous=800 but the 800 step is absent from the package
+  rejected(prepareLegacyGrowthBackfill(pkg({ expected: [key("7")], srcs: [A], corrections: [correctionFor(A, "600", "2026-10-17T04:00:00.000000Z", "800", 3, "94")] })), /CORRECTION_PREVIOUS_MISMATCH/);
+});
+
+test("B-GROWTH-03 controls: single correction with first revision 3 (gap allowed) and independent chains on two economic sources pass", () => {
+  const single = ok(prepareLegacyGrowthBackfill(pkg({ expected: [key("7")], srcs: [A], corrections: [correctionFor(A, "800", undefined, "1000", 3)] })));
+  assert.equal(single.coverageState, "COMPLETE");
+  const ca = correctionFor(A, "800", undefined, "1000", 2, "93"), cb = correctionFor(B2, "900", undefined, "1000", 2, "96");
+  const two = ok(prepareLegacyGrowthBackfill(pkg({ expected: [key("7"), key("8")], srcs: [A, B2], corrections: [ca, cb] })));
+  assert.equal(two.rows.filter((r) => r.contribution.correctionOf).length, 2);
+  const m = correctionFor(A, "150", undefined, undefined, 2, "97", 1);
+  assert.notEqual(m.baseSourceKey, ca.baseSourceKey);
+  ok(prepareLegacyGrowthBackfill(pkg({ expected: [key("7")], srcs: [A], corrections: [ca, m] })));
+  replayGrowthProjection({ userId: SUBJECT, asOf: "2026-10-18T12:00:00.000000Z", contributions: two.rows.map((r) => r.contribution) });
 });

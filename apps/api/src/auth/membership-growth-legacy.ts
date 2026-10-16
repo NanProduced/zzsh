@@ -114,17 +114,39 @@ export function prepareLegacyGrowthBackfill(pkg: LegacyGrowthSourcePackage): Pre
   //    inside the old snapshot. A retroactive effectiveAt alone does not make a later correction part of the old source.
   const correctionProofDigests: string[] = [];
   const cutoffUs = micros(receipt.cutoff);
+  // B-GROWTH-03: corrections are chained per economic source key in explicit revision order; each step is checked by T
+  // against the previously verified amount/revision (original component, settlementId and effectiveAt are kept). Revision
+  // gaps are allowed (T accepts a first correction at revision 3); contradictory previous amounts, same-revision forks and a
+  // missing prior step reject before close/write.
+  const admittedCorrections = new Set(pkg.admitted.correctionDigests);
+  const chains = new Map<string, { c: LegacyCorrectionSource; revision: number }[]>();
   for (const c of pkg.corrections) {
     const listed = receipt.refundReviewEvidenceRefs.some((ref) => ref === c.proof?.digest || ref.endsWith(`:${c.proof?.digest}`));
     if (!listed) return bad("SOURCE_CONFLICT", "CORRECTION_NOT_IN_RECEIPT_LINEAGE");
-    const owner = projections.find((p) => p.facts.some((f) => `${f.component}:${f.settlementId}` === c.baseSourceKey && !f.correctionOf));
-    const base = owner?.facts.find((f) => `${f.component}:${f.settlementId}` === c.baseSourceKey && !f.correctionOf);
+    let revision: unknown;
+    try { revision = (JSON.parse(c.proof.canonical) as { revision?: unknown }).revision; } catch { return bad("SOURCE_CONFLICT", "CORRECTION_EVIDENCE_INVALID"); }
+    if (!Number.isSafeInteger(revision)) return bad("SOURCE_CONFLICT", "CORRECTION_BINDING_CONFLICT");
+    const list = chains.get(c.baseSourceKey) ?? [];
+    if (list.some((x) => x.revision === revision)) return bad("SOURCE_CONFLICT", "CORRECTION_REVISION_FORK");
+    list.push({ c, revision: revision as number }); chains.set(c.baseSourceKey, list);
+  }
+  for (const [baseSourceKey, list] of chains) {
+    const owner = projections.find((p) => p.facts.some((f) => `${f.component}:${f.settlementId}` === baseSourceKey && !f.correctionOf));
+    const base = owner?.facts.find((f) => `${f.component}:${f.settlementId}` === baseSourceKey && !f.correctionOf);
     if (!owner || !base) return bad("SOURCE_CONFLICT", "CORRECTION_BASE_NOT_IN_SOURCE");
-    let fact: SettledContributionFact;
-    try { fact = projectLegacyGrowthCorrection(base, c.proof, new Set(pkg.admitted.correctionDigests)); } catch (e) { return bad("SOURCE_CONFLICT", e instanceof Error && /^[A-Z_]{3,80}$/.test(e.message) ? e.message : "CORRECTION_EVIDENCE_INVALID"); }
-    if (micros(fact.recordedAt) > cutoffUs) return bad("SOURCE_CONFLICT", "CORRECTION_AFTER_SOURCE_CUTOFF");
-    owner.facts.push(fact);
-    correctionProofDigests.push(c.proof.digest);
+    let prior: SettledContributionFact = base;
+    for (const { c } of [...list].sort((a, b) => a.revision - b.revision)) {
+      let previous: unknown;
+      try { previous = (JSON.parse(c.proof.canonical) as { previousAmountCents?: unknown }).previousAmountCents; } catch { return bad("SOURCE_CONFLICT", "CORRECTION_EVIDENCE_INVALID"); }
+      if (previous !== prior.amountCents) return bad("SOURCE_CONFLICT", "CORRECTION_PREVIOUS_MISMATCH");
+      let fact: SettledContributionFact;
+      // chain base = original fact identity with the previously verified amount/revision
+      try { fact = projectLegacyGrowthCorrection({ ...base, amountCents: prior.amountCents, revision: prior.revision }, c.proof, admittedCorrections); } catch (e) { return bad("SOURCE_CONFLICT", e instanceof Error && /^[A-Z_]{3,80}$/.test(e.message) ? e.message : "CORRECTION_EVIDENCE_INVALID"); }
+      if (micros(fact.recordedAt) > cutoffUs) return bad("SOURCE_CONFLICT", "CORRECTION_AFTER_SOURCE_CUTOFF");
+      owner.facts.push(fact);
+      correctionProofDigests.push(c.proof.digest);
+      prior = fact;
+    }
   }
   // 3. T closure over the re-projected rows.
   const closed = closeLegacyGrowthCoverage(subjectUserId!, projections, receipt, new Set(pkg.admitted.receiptDigests));
