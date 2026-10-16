@@ -5,7 +5,7 @@ import { prepareLegacyTradeIntake, takeoverLegacyTrade, finalizeLegacyTradeTakeo
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { canonicalize, computeContentHash, normalizeContentPayload, type ContentDeclaration } from "../src/supply/content-hash";
 import { sha256Hex } from "../src/supply/supply-util";
-import {planLegacyTradeIntakeBatch} from "../src/supply/legacy-trade-intake-plan";
+import {planLegacyTradeIntakeBatch,assembleLegacyTradeIntakeBatch} from "../src/supply/legacy-trade-intake-plan";
 import {legacyDisplayDigest} from "../src/supply/legacy-display-snapshot";
 import {computeDeltaQuote} from "../src/supply/pricing";
 import {compatRule} from "./pricing-compat-fixture";
@@ -94,6 +94,40 @@ test("frozen batch pure plan closes every row into candidate/blocked/isolated an
  const broken=fixture();broken.sourceFieldEvidence.digest="0".repeat(64);assert(prepareLegacyTradeIntake(broken,catalog()).reasons.includes("SOURCE_FIELD_EVIDENCE_MISMATCH"));broken.media.push({...broken.media[0]!,position:1});assert(prepareLegacyTradeIntake(broken,catalog()).reasons.includes("MEDIA_UNAVAILABLE"));
 });
 
+test("batch assembly keeps old-12 and new-13 digests separate and isolates an unproven payout-flag binding",()=>{
+ const base=fixture(),mapped=base.source.sourceDigest;
+ const row=(over:Partial<Parameters<typeof assembleLegacyTradeIntakeBatch>[0][number]>={})=>({legacyId:"33",accountId:base.accountId,intake:base,projection:{old12Digest:mapped,new13Digest:"c".repeat(64)},isolationReasons:[],...over});
+ const [bound]=assembleLegacyTradeIntakeBatch([row()]);
+ assert(bound);assert.deepEqual(bound.isolationReasons,[]);assert.equal(bound.projection!.old12Digest,mapped);
+ for(const bad of [
+  {projection:{old12Digest:"b".repeat(64),new13Digest:"c".repeat(64)}},
+  {projection:{old12Digest:null,new13Digest:"c".repeat(64)}},
+  {projection:{old12Digest:mapped,new13Digest:null}},
+  {projection:null},
+  {projection:{old12Digest:"zz",new13Digest:"c".repeat(64)}},
+ ]) {
+  const [isolated]=assembleLegacyTradeIntakeBatch([row(bad)]);assert(isolated);
+  assert.deepEqual(isolated.isolationReasons,["FLAG_EXTRACTION_BINDING_UNPROVEN"],JSON.stringify(bad));
+  const plan=planLegacyTradeIntakeBatch([isolated],catalog());assert.equal(plan.counts.isolated,1,JSON.stringify(bad));
+ }
+ const illegal=fixture();illegal.isFullPayout="2" as LegacyTradeIntake["isFullPayout"];bindSource(illegal);
+ const illegalPlan=planLegacyTradeIntakeBatch(assembleLegacyTradeIntakeBatch([row({intake:illegal})]),catalog());
+ assert.equal(illegalPlan.items[0]!.admission,"BLOCKED");assert(illegalPlan.items[0]!.reasons.includes("FUNDING_POLICY_UNKNOWN"));
+ const missing=fixture();missing.isFullPayout=null;bindSource(missing);
+ const [noFlag]=assembleLegacyTradeIntakeBatch([{legacyId:"33",accountId:missing.accountId,intake:missing,projection:null,isolationReasons:[]}]);assert(noFlag);
+ assert.equal(noFlag.intake!.isFullPayout,null);assert.deepEqual(noFlag.isolationReasons,[]);
+ const missingPlan=planLegacyTradeIntakeBatch([noFlag],catalog());
+ assert.equal(missingPlan.counts.blocked,1);assert(missingPlan.items[0]!.reasons.includes("FUNDING_POLICY_UNKNOWN"));
+ const [missingBinding]=assembleLegacyTradeIntakeBatch([{legacyId:"34",accountId:null,intake:null,projection:null,isolationReasons:[]}]);assert(missingBinding);
+ assert.deepEqual(missingBinding.isolationReasons,["SOURCE_BINDING_MISSING"]);
+});
+test("one malformed extraction row isolates without failing the frozen batch and the batch digest stays computable",()=>{
+ const good=fixture();
+ const plan=planLegacyTradeIntakeBatch([{legacyId:"33",accountId:good.accountId,intake:good,isolationReasons:[]},{legacyId:"34",accountId:"broken",intake:{} as unknown as LegacyTradeIntake,isolationReasons:[]}],catalog());
+ assert.equal(plan.counts.total,2);assert.equal(plan.counts.isolated,1);
+ const broken=plan.items.find(i=>i.legacyId==="34")!;assert(broken.reasons.includes("SOURCE_SCHEMA_INVALID"));assert.equal(broken.sourceDigest,null);
+ assert.equal(plan.inputDigest.length,64);
+});
 test("actual maintenance chain saves and quotes formal native fields before publication; selected payout stops for genuine owner acceptance",async t=>{
  const p:typeof import("../src/supply/publishing")=require("../src/supply/publishing"),legacy:typeof import("../src/supply/legacy-observation")=require("../src/supply/legacy-observation"),auth:typeof import("../src/auth/auth-security")=require("../src/auth/auth-security"),access:typeof import("../src/auth/admin-authorization")=require("../src/auth/admin-authorization"),funding:typeof import("../src/supply/funding-authority")=require("../src/supply/funding-authority");
  const actor={id:"fixture_admin",sessionId:"fixture_session",requestId:"req_fixture"},gate:import("../src/supply/publishing").SupplyGateReader=async()=>({publisherBail:"NOT_REQUIRED",occupancy:"FREE",reference:"FIXTURE_ONLY"});

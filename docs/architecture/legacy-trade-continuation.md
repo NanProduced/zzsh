@@ -4,6 +4,8 @@
 
 供给承接复用 `takeoverLegacyTrade` → `resolveLegacyObservationToDraft` → `saveListingDraft` → `quoteListing` → `reviewListing`。完整 payload、版本 attributes、库存/媒体行和内容 hash 必须相等。普通承接授权不能代替号主包赔条款接受；选择包赔的草稿等待号主通过原接受流程确认，再按同一版本完成发布。历史保险 DAY 不能直接转为新保险卡张数。迁移媒体必须真实 READY/PUBLIC_DISPLAY。
 
+批量承接先走只读装配：`assembleLegacyTradeIntakeBatch` 把提取包行绑定到映射源摘要，再由 `planLegacyTradeIntakeBatch` 逐行给出 TRADE_CANDIDATE/BLOCKED/ISOLATED。提取包必须分列旧12投影摘要与新13（含包赔 flag）摘要；新 flag 缺同 backup/cutoff 证明的行整行隔离，缺值/非法值原样保留、不默认 0，也不产生正式报价或上架。
+
 旧订单不替换为新订单，不重新收款或新建订单群。业务命令只新增不可变版本和完整派生事实；导入即8/9可以由对方直接确认或驳回，无须先产生 head。
 
 | 路径（相对 `/api/v1/orders`；管理端相对 `/api/v1/admin/orders`） | 方法和用途 |
