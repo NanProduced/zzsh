@@ -71,3 +71,17 @@ test("B-R1-01 control: the old generated key shape is rejected by the real runne
   await assert.rejects(() => previewCreditInitialization(client, runnerInput(old, "d".repeat(64))), /batchKey must match credit-init:/);
   assert.equal(queries, 0);
 });
+test("B-CREDIT-01: ordinal width follows real batch count; longest final key must fit the runner (9999 ok / 10000 rejected with 91-char prefix)", () => {
+  const p91 = "x".repeat(91);
+  const ok9999 = buildCreditInitializationBatches(rows(9999), { batchKeyPrefix: p91, reason: "Fixture initial credit 100", denominator: 9999, maxBatch: 1 });
+  const last = ok9999.batches.at(-1)!;
+  assert.equal(last.package.batchKey.length - "credit-init:".length, 96);
+  assert.match(creditInitializationFingerprint(runnerInput(last.package, last.sha256)), /^[0-9a-f]{64}$/);
+  assert.match(creditInitializationFingerprint(runnerInput(ok9999.batches[0]!.package, ok9999.batches[0]!.sha256)), /^[0-9a-f]{64}$/);
+  assert.throws(() => buildCreditInitializationBatches(rows(10000), { batchKeyPrefix: p91, reason: "Fixture initial credit 100", denominator: 10000, maxBatch: 1 }), /BATCH_KEY_TOO_LONG/);
+  const p90 = buildCreditInitializationBatches(rows(10000), { batchKeyPrefix: "y".repeat(90), reason: "Fixture initial credit 100", denominator: 10000, maxBatch: 1 });
+  for (const b of [p90.batches[0]!, p90.batches.at(-1)!]) assert.match(creditInitializationFingerprint(runnerInput(b.package, b.sha256)), /^[0-9a-f]{64}$/);
+  assert.equal(p90.batches.at(-1)!.package.batchKey, `credit-init:${"y".repeat(90)}-10000`);
+  const d = buildCreditInitializationBatches(rows(1001), { batchKeyPrefix: "w1-fixture", reason: "Fixture initial credit 100", denominator: 1001 });
+  assert.deepEqual(d.batches.map((b) => b.package.batchKey), ["credit-init:w1-fixture-0001", "credit-init:w1-fixture-0002", "credit-init:w1-fixture-0003"], "default 500 packaging unchanged");
+});

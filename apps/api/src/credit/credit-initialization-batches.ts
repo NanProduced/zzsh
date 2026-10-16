@@ -38,10 +38,15 @@ export function buildCreditInitializationBatches(rows: readonly CreditPreviewRow
     else retained[r.category]!.push(r.userId);
   }
   eligible.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  // B-CREDIT-01: the ordinal width follows the real batch count; the LONGEST final key must fit the runner contract
+  // (credit-init:<8-96>). Reject the whole build instead of truncating or changing any key.
+  const batchCount = Math.ceil(eligible.length / max);
+  const width = Math.max(4, String(batchCount).length);
+  if (batchCount > 0 && `${opts.batchKeyPrefix}-${String(batchCount).padStart(width, "0")}`.length > 96) throw new Error("BATCH_KEY_TOO_LONG");
   const batches: CreditBatchArtifact[] = [];
   for (let i = 0; i < eligible.length; i += max) {
     const order = batches.length + 1;
-    const pkg: CreditBatchPackage = { schema: "credit-init-package-v1", batchKey: `credit-init:${opts.batchKeyPrefix}-${String(order).padStart(4, "0")}`, userIds: eligible.slice(i, i + max), approvedCategory: "ACTIVE", reason: opts.reason };
+    const pkg: CreditBatchPackage = { schema: "credit-init-package-v1", batchKey: `credit-init:${opts.batchKeyPrefix}-${String(order).padStart(width, "0")}`, userIds: eligible.slice(i, i + max), approvedCategory: "ACTIVE", reason: opts.reason };
     const bytes = creditPackageBytes(pkg), sha256 = createHash("sha256").update(bytes).digest("hex");
     batches.push({ order, package: pkg, bytes, sha256, approvalTemplate: {
       schema: "credit-init-approval-v1", status: "DRAFT_NOT_APPROVED", approvalRef: null, attempt: 1, mode: "PREVIEW", businessPackageSha256: sha256,
