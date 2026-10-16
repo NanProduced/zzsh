@@ -165,3 +165,33 @@ test("编辑权限撤销后，已有角色窗口立即只读且Enter提交拒发
   await act(async () => popup().querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })));
   assert.equal(view.posts.length, 0);
 });
+
+test("E-R1-01 directory read is scoped per identity/session/permission generation and old responses never land", async (t) => {
+  const pending = []; let directoryCalls = 0;
+  globalThis.fetch = async (input) => {
+    if (String(input).includes("/security/admins")) { directoryCalls += 1; return new Promise((resolve) => pending.push(resolve)); }
+    return json({ roles: ROLES, permissions: [] });
+  };
+  const container = browser.document.createElement("div"); browser.document.body.appendChild(container);
+  const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); await settle(); });
+  const snap = (adminUserId, sessionId, extra = []) => ({ ...SNAPSHOT, adminUserId, session: { ...SNAPSHOT.session, id: sessionId }, permissions: [...SNAPSHOT.permissions, "admin.account.read", ...extra] });
+  const admins = (bosses) => json({ admins: Array.from({ length: bosses }, (_, i) => ({ id: `b${i}`, username: `b${i}`, name: "x", status: "ACTIVE", isBoss: true, roles: [] })) });
+  await act(async () => root.render(createElement(RoleConfigView, { snapshot: snap("A", "s1") }))); await settle();
+  assert.equal(directoryCalls, 1);
+  // Identity switch while A is still in flight: B must start its own request.
+  await act(async () => root.render(createElement(RoleConfigView, { snapshot: snap("B", "s2") }))); await settle();
+  assert.equal(directoryCalls, 2, "a different identity never joins the other identity's in-flight read");
+  await act(async () => { pending[1](admins(1)); }); await settle();
+  await act(async () => { pending[0](admins(5)); }); await settle();
+  assert.match(container.textContent, /使用成员 1/);
+  assert.doesNotMatch(container.textContent, /使用成员 5/, "late response of the old identity must not overwrite the new page");
+  // Same person, new session; and same session with a permission generation change: both start new reads.
+  await act(async () => root.render(createElement(RoleConfigView, { snapshot: snap("B", "s3") }))); await settle();
+  assert.equal(directoryCalls, 3);
+  await act(async () => { pending[2](admins(2)); }); await settle();
+  await act(async () => root.render(createElement(RoleConfigView, { snapshot: snap("B", "s3", ["admin.account.freeze"]) }))); await settle();
+  assert.equal(directoryCalls, 4);
+  await act(async () => { pending[3](admins(3)); }); await settle();
+  assert.match(container.textContent, /使用成员 3/);
+});

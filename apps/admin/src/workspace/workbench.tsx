@@ -1,4 +1,4 @@
-import { readAdminDirectoryShared } from "./admin-directory-read";
+import { directoryScopeOf, readAdminDirectoryShared } from "./admin-directory-read";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDownIcon, ArrowLeftIcon, ArrowRightIcon, ArrowUpIcon, ArrowUpRightIcon, CheckCheckIcon, GripVerticalIcon, MoreHorizontalIcon, PlusIcon, ShieldCheckIcon, KeyRoundIcon, XIcon } from "lucide-react";
 import { GridStack, useGridStack } from "gridstack/dist/react";
@@ -132,7 +132,7 @@ function ApprovalInboxWidget({
     return (
       <div className="space-y-2">
         <StatusMessage error={error} />
-        {loadFailed ? <Button type="button" size="sm" variant="outline" onClick={() => void load().catch((failure) => setError(friendlyError(failure)))}>重试</Button> : null}
+        {loadFailed ? <Button type="button" size="sm" variant="outline" onClick={() => void load()}>重试</Button> : null}
       </div>
     );
   }
@@ -171,27 +171,39 @@ function ApprovalInboxWidget({
 }
 
 function AdminDirectoryWidget({
+  snapshot,
   onNavigate,
   refreshNonce,
 }: {
+  snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   onNavigate: (path: string) => void;
   refreshNonce: number;
 }) {
+  const scope = directoryScopeOf(snapshot);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   const [items, setItems] = useState<AdminDirectoryEntry[]>();
   const [error, setError] = useState<string>();
   const load = useCallback(async () => {
-    const result = await readAdminDirectoryShared();
-    setItems((result.admins ?? []).slice(0, 8));
-    setError(undefined);
+    const requested = scopeRef.current;
+    try {
+      const result = await readAdminDirectoryShared(requested);
+      if (scopeRef.current !== requested) return;
+      setItems((result.admins ?? []).slice(0, 8));
+      setError(undefined);
+    } catch (failure) {
+      if (scopeRef.current === requested) setError(friendlyError(failure));
+    }
   }, []);
   useEffect(() => {
-    void load().catch((failure) => setError(friendlyError(failure)));
-  }, [load, refreshNonce]);
+    setItems(undefined);
+    void load();
+  }, [load, refreshNonce, scope]);
   if (error) {
     return (
       <div className="space-y-2">
         <StatusMessage error={error} />
-        <Button type="button" size="sm" variant="outline" onClick={() => void load().catch((failure) => setError(friendlyError(failure)))}>重试</Button>
+        <Button type="button" size="sm" variant="outline" onClick={() => void load()}>重试</Button>
       </div>
     );
   }
@@ -239,7 +251,7 @@ function WidgetBody({
   if (id === "account-security") return <AccountSecurityWidget snapshot={snapshot} onNavigate={onNavigate} />;
   if (id === "permission-guide") return <PermissionGuideWidget snapshot={snapshot} />;
   if (id === "pending-approvals") return <ApprovalInboxWidget snapshot={snapshot} onNavigate={onNavigate} refreshNonce={refreshNonce} />;
-  if (id === "admin-directory") return <AdminDirectoryWidget onNavigate={onNavigate} refreshNonce={refreshNonce} />;
+  if (id === "admin-directory") return <AdminDirectoryWidget snapshot={snapshot} onNavigate={onNavigate} refreshNonce={refreshNonce} />;
   if (id === "user-restore") return <UserRestoreWidget onNavigate={onNavigate} />;
   return <p className="text-xs text-muted-foreground">未知组件已被过滤。</p>;
 }

@@ -1,5 +1,5 @@
-import { readAdminDirectoryShared } from "./admin-directory-read";
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { directoryScopeOf, readAdminDirectoryShared } from "./admin-directory-read";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
@@ -178,19 +178,25 @@ function FreezePanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authen
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
 
+  const scope = directoryScopeOf(snapshot);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   const loadAdmins = useCallback(async () => {
+    const requested = scopeRef.current;
     try {
-      const result = await readAdminDirectoryShared();
-      setAdmins(result.admins ?? []);
+      const result = await readAdminDirectoryShared(requested);
+      if (scopeRef.current === requested) setAdmins(result.admins ?? []);
     } catch (failure) {
-      setError(friendlyError(failure));
+      if (scopeRef.current === requested) setError(friendlyError(failure));
     }
   }, []);
 
   const canFreeze = hasPermission(snapshot, "admin.account.freeze") || hasPermission(snapshot, "admin.account.unfreeze");
   useEffect(() => {
+    setAdmins([]);
+    setTargetAdminId("");
     if (canFreeze) void loadAdmins();
-  }, [canFreeze, loadAdmins]);
+  }, [canFreeze, loadAdmins, scope]);
   if (!canFreeze) return null;
   const visibleAdmins = snapshot.security.isBoss ? admins : admins.filter((item) => !item.isBoss);
   const target = visibleAdmins.find((item) => item.id === targetAdminId);

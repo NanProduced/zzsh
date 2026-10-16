@@ -1,4 +1,4 @@
-import { readAdminDirectoryShared } from "../workspace/admin-directory-read";
+import { directoryScopeOf, readAdminDirectoryShared } from "../workspace/admin-directory-read";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -738,13 +738,18 @@ export function RoleConfigView({
   const [ready, setReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
+  const directoryScope = directoryScopeOf(snapshot);
+  const directoryScopeRef = useRef(directoryScope);
+  directoryScopeRef.current = directoryScope;
   const load = useCallback(async () => {
+    const requested = directoryScopeRef.current;
     const catalog = await adminRequest<{ roles?: AdminRoleRecord[]; permissions?: AdminPermissionCatalogEntry[] }>("/security/roles");
     setRoles(catalog.roles ?? []);
     setPermissions(catalog.permissions ?? []);
     if (canReadAccounts) {
       try {
-        const directory = await readAdminDirectoryShared();
+        const directory = await readAdminDirectoryShared(requested);
+        if (directoryScopeRef.current !== requested) return;
         const admins = directory.admins ?? [];
         const next = new Map<string, number>();
         for (const admin of admins) {
@@ -763,7 +768,7 @@ export function RoleConfigView({
     if (!canRead) return;
     setReady(false);
     void load().then(() => setReady(true)).catch((failure) => setError(friendlyError(failure)));
-  }, [canRead, load, refreshNonce, attempt]);
+  }, [canRead, load, refreshNonce, attempt, directoryScope]);
 
   useEffect(() => {
     const first = roles[0];

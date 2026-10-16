@@ -219,16 +219,18 @@ test("F5 列表边界用例已登记进标准前端测试入口", async () => {
   }
 });
 
-import { sharedInFlight } from "../src/lib/shared-inflight.ts";
+import { scopedInFlight } from "../src/lib/shared-inflight.ts";
 
-test("GAP-021 shared directory read coalesces concurrent callers and never serves a settled result", async () => {
-  let calls = 0; let release;
-  const read = sharedInFlight(() => { calls += 1; return new Promise((resolve) => { release = resolve; }); });
-  const a = read(); const b = read();
-  assert.equal(a, b); assert.equal(calls, 1);
-  release({ admins: [] }); assert.deepEqual(await a, { admins: [] });
-  const c = read(); assert.equal(calls, 2); release({ admins: [{ id: "x" }] }); await c;
-  const failing = sharedInFlight(() => { calls += 1; return Promise.reject(new Error("403")); });
-  await assert.rejects(failing(), /403/); await assert.rejects(failing(), /403/);
-  assert.equal(calls, 4, "a failed read is not cached");
+test("E-R1-01 scoped single-flight: same scope coalesces, other scope/session/generation never reuses, failure releases", async () => {
+  let calls = 0; const releases = [];
+  const read = scopedInFlight(() => { calls += 1; const n = calls; return new Promise((resolve, reject) => releases.push({ resolve: () => resolve({ subject: n }), reject })); });
+  const a1 = read("A|s1|g1"); const a2 = read("A|s1|g1");
+  assert.equal(a1, a2); assert.equal(calls, 1);
+  const b = read("B|s2|g1"); assert.notEqual(b, a1); assert.equal(calls, 2);
+  const aAgain = read("A|s1|g1"); assert.notEqual(aAgain, a1, "older scope is forgotten once another scope asked"); assert.equal(calls, 3);
+  read("A|s9|g1"); read("A|s9|g2"); assert.equal(calls, 5);
+  releases.forEach((r) => r.resolve());
+  assert.deepEqual(await b, { subject: 2 });
+  const f = scopedInFlight(() => { calls += 1; return Promise.reject(new Error("403")); });
+  await assert.rejects(f("A"), /403/); await assert.rejects(f("A"), /403/); assert.equal(calls, 7);
 });
