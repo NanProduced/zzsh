@@ -205,6 +205,9 @@ export type NewContentItemInput = {
   summary?: string;
   body?: string;
   coverMediaId?: string | null;
+  // Offline seed writers only: deterministic ids make seed re-runs idempotent.
+  // HTTP routes never populate this, so untrusted callers cannot mint ids.
+  ids?: { itemId: string; versionId: string };
 };
 
 export async function createContentItem(client: PoolClient, adminUserId: string, input: NewContentItemInput): Promise<{ item: ContentItemRow; version: ContentVersionRow }> {
@@ -214,8 +217,11 @@ export async function createContentItem(client: PoolClient, adminUserId: string,
     if (game.rows.length === 0) throw notFound();
   }
   if (input.coverMediaId) await requireContentMedia(client, input.coverMediaId);
-  const itemId = newSupplyId("cnt");
-  const versionId = newSupplyId("cntv");
+  if (input.ids !== undefined) {
+    if (!/^cnt_[0-9a-f]{32}$/.test(input.ids.itemId) || !/^cntv_[0-9a-f]{32}$/.test(input.ids.versionId)) throw invalid("Content ids are invalid");
+  }
+  const itemId = input.ids?.itemId ?? newSupplyId("cnt");
+  const versionId = input.ids?.versionId ?? newSupplyId("cntv");
   await client.query(
     `INSERT INTO "zzsh_content"."content_item" ("id", "type", "game_id", "created_by_admin_id") VALUES ($1, $2, $3, $4)`,
     [itemId, input.type, input.gameId, adminUserId],
@@ -470,7 +476,8 @@ export function carouselUpdateRequiresPublish(current: CarouselRow, input: Carou
   return CAROUSEL_PUBLIC_FIELDS.some((field) => input[field] !== undefined);
 }
 
-export async function createCarouselItem(client: PoolClient, adminUserId: string, slot: CarouselSlot, input: CarouselInput): Promise<CarouselRow> {
+export async function createCarouselItem(client: PoolClient, adminUserId: string, slot: CarouselSlot, input: CarouselInput, idOverride?: string): Promise<CarouselRow> {
+  if (idOverride !== undefined && !/^crl_[0-9a-f]{32}$/.test(idOverride)) throw invalid("Carousel id is invalid");
   if (!input.mediaId) throw invalid("mediaId is required");
   if (!input.title) throw invalid("title is required");
   if (!input.imageAlt) throw invalid("imageAlt is required");
@@ -487,7 +494,7 @@ export async function createCarouselItem(client: PoolClient, adminUserId: string
   const enabled = input.enabled ?? false;
   // Disabled entries may reference pending media; enabling is the publish act.
   if (enabled) await requirePublicContentMedia(client, input.mediaId, "Carousel media");
-  const id = newSupplyId("crl");
+  const id = idOverride ?? newSupplyId("crl");
   await client.query(
     `INSERT INTO "zzsh_content"."carousel_item"
       ("id", "slot_code", "media_id", "image_alt", "title", "description", "link_url", "enabled", "sort_order", "starts_at", "ends_at", "created_by_admin_id")

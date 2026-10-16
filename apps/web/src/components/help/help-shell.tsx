@@ -13,6 +13,25 @@ export function HelpShell({ children, breadcrumbs, title, description, initialQu
   initialQuery?: string;
 }) {
   const router = useRouter();
+  // "/" 或 Ctrl/⌘+K 聚焦帮助搜索框；输入控件内不拦截
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable='true']")) return;
+      const focusSearch = () => {
+        const input = document.querySelector<HTMLElement>('form.site-search input[type="search"]');
+        input?.focus({ preventScroll: true });
+      };
+      if (event.key === "/" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+        event.preventDefault();
+        focusSearch();
+      } else if ((event.key === "k" || event.key === "K") && (event.ctrlKey || event.metaKey) && !event.altKey) {
+        event.preventDefault();
+        focusSearch();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
   // 外壳的清空按钮只清输入框；在帮助模块内同步清掉已提交查询（q 参数），不动全站账号搜索语义
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
