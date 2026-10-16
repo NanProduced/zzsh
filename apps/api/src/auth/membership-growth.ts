@@ -1,9 +1,13 @@
 import { computeDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
 import { parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
+import { normalizeTime } from "../supply/content-hash";
 
 export const MEMBERSHIP_GROWTH_SCHEMA = "membership-growth-v1" as const;
 export const GROWTH_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
 export const GRACE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** E-R3-02: every instant comparison in this model runs on epoch microseconds (PG timestamptz precision, safe integer). */
+const GROWTH_WINDOW_US = GROWTH_WINDOW_MS * 1000;
+const GRACE_WINDOW_US = GRACE_WINDOW_MS * 1000;
 
 export const NORMAL_GROWTH_TIERS = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"] as const;
 export type NormalGrowthTier = (typeof NORMAL_GROWTH_TIERS)[number];
@@ -68,11 +72,36 @@ function fail(code: string, message: string): never {
   throw new GrowthRuleError(code, message);
 }
 
+/**
+ * Parses an RFC3339 UTC instant with at most microsecond precision (shared normalizeTime) into epoch microseconds.
+ * Millisecond and second inputs keep their old meaning; more than six fractional digits are rejected, never truncated.
+ */
 function parseInstant(value: string, field: string): number {
   if (typeof value !== "string" || value.length < 20 || !value.endsWith("Z")) fail("INVALID_INSTANT", `${field} must be an RFC3339 UTC instant`);
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) fail("INVALID_INSTANT", `${field} is invalid`);
-  return parsed;
+  let canonical: string | null;
+  try { canonical = normalizeTime(value); } catch { canonical = null; }
+  if (!canonical) fail("INVALID_INSTANT", `${field} is invalid or exceeds microsecond precision`);
+  const ms = Date.parse(`${canonical.slice(0, 23)}Z`);
+  if (!Number.isFinite(ms)) fail("INVALID_INSTANT", `${field} is invalid`);
+  const us = ms * 1000 + Number(canonical.slice(23, 26));
+  if (!Number.isSafeInteger(us)) fail("INVALID_INSTANT", `${field} is outside the supported range`);
+  return us;
+}
+
+/** Formats epoch microseconds; whole milliseconds keep the historical toISOString form (frozen v1–v3 facts unchanged). */
+function formatInstant(us: number): string {
+  const ms = Math.floor(us / 1000);
+  const iso = new Date(ms).toISOString();
+  const sub = us - ms * 1000;
+  return sub === 0 ? iso : `${iso.slice(0, 23)}${String(sub).padStart(3, "0")}Z`;
+}
+
+/** Canonical instant compare/format helpers shared with the integration layer (same microsecond model). */
+export function growthInstantMicros(value: string): number {
+  return parseInstant(value, "instant");
+}
+export function growthWindowStartAt(asOf: string): string {
+  return formatInstant(parseInstant(asOf, "asOf") - GROWTH_WINDOW_US);
 }
 
 function parseCents(value: string, field: string, signed = true): bigint {
@@ -181,7 +210,7 @@ function canonicalContributions(input: GrowthReplayInput, asOf: number): { rows:
     parseInstant(contribution.recordedAt, "recordedAt");
     parseCents(contribution.amountCents, "amountCents");
     if (!Number.isSafeInteger(contribution.revision) || contribution.revision < 0) fail("INVALID_REVISION", "revision is invalid");
-    const recordedAt = Date.parse(contribution.recordedAt);
+    const recordedAt = parseInstant(contribution.recordedAt, "recordedAt");
     if (recordedAt > asOf) continue;
     const list = grouped.get(contribution.sourceKey) ?? [];
     list.push(contribution);
@@ -237,7 +266,7 @@ function canonicalContributions(input: GrowthReplayInput, asOf: number): { rows:
     }
     const finalAmountCents = resolvedAmountCents!;
     const originalEffectiveAt = effectiveAt!;
-    const expiryAt = originalEffectiveAt + GROWTH_WINDOW_MS;
+    const expiryAt = originalEffectiveAt + GROWTH_WINDOW_US;
     const recordedAt = parseInstant(latest.recordedAt, "recordedAt");
     if (originalEffectiveAt > asOf) continue;
     rows.push({
@@ -292,9 +321,9 @@ export type GrowthProjection = {
 
 export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjection {
   const userId = parseId(input.userId, "userId");
-  const asOfMs = parseInstant(input.asOf, "asOf");
-  const asOf = new Date(asOfMs).toISOString();
-  const windowStartMs = asOfMs - GROWTH_WINDOW_MS;
+  const asOfMs = parseInstant(input.asOf, "asOf"); // epoch microseconds despite the historical name
+  const asOf = formatInstant(asOfMs);
+  const windowStartMs = asOfMs - GROWTH_WINDOW_US;
   const { rows, pending, excluded } = canonicalContributions(input, asOfMs);
   const active = rows.filter((row) => row.effectiveAt > windowStartMs && row.effectiveAt <= asOfMs);
   const lifetime = rows.filter((row) => row.effectiveAt <= asOfMs);
@@ -328,7 +357,7 @@ export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjecti
     timelineCents += delta;
     const nextTier = normalTierForPoints(roundHalfUpCents(timelineCents));
     if (normalRank(nextTier) < normalRank(priorTier)) {
-      if (graceAnchorAt === null || at >= graceAnchorAt + GRACE_WINDOW_MS) {
+      if (graceAnchorAt === null || at >= graceAnchorAt + GRACE_WINDOW_US) {
         graceAnchorAt = at;
         graceFromTier = priorTier;
       }
@@ -341,7 +370,7 @@ export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjecti
   const baselineTier = graceFromTier;
   const droppedAtMs = graceAnchorAt;
   const lowered = baselineTier !== null && normalRank(normalTier) < normalRank(baselineTier);
-  const graceUntilMs = droppedAtMs === null ? null : droppedAtMs + GRACE_WINDOW_MS;
+  const graceUntilMs = droppedAtMs === null ? null : droppedAtMs + GRACE_WINDOW_US;
   let graceState: GrowthGrace["state"] = "NONE";
   if (lowered && blackGold !== "QUALIFIED") {
     graceState = droppedAtMs === null ? "UNKNOWN" : asOfMs < graceUntilMs! ? "ACTIVE" : "EXPIRED";
@@ -355,13 +384,13 @@ export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjecti
       : normalTier;
   const threshold = baselineTier ? GROWTH_THRESHOLDS[baselineTier] : 0n;
   const gapPoints = lowered ? (threshold > rollingPoints ? threshold - rollingPoints : 0n) : null;
-  const activeView = active.map((row) => ({ sourceKey: row.sourceKey, amountCents: row.amountCents.toString(), effectiveAt: new Date(row.effectiveAt).toISOString(), expiresAt: new Date(row.expiryAt).toISOString() }));
+  const activeView = active.map((row) => ({ sourceKey: row.sourceKey, amountCents: row.amountCents.toString(), effectiveAt: formatInstant(row.effectiveAt), expiresAt: formatInstant(row.expiryAt) }));
   const nextExpiryAt = activeView.map((row) => row.expiresAt).sort()[0] ?? null;
   if (negativeNet) return {
     schema: MEMBERSHIP_GROWTH_SCHEMA,
     userId,
     asOf,
-    windowStart: new Date(windowStartMs).toISOString(),
+    windowStart: formatInstant(windowStartMs),
     rollingCents: rollingCents.toString(),
     rollingPoints: rollingPoints.toString(),
     lifetimeCents: lifetimeCents.toString(),
@@ -379,7 +408,7 @@ export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjecti
     schema: MEMBERSHIP_GROWTH_SCHEMA,
     userId,
     asOf,
-    windowStart: new Date(windowStartMs).toISOString(),
+    windowStart: formatInstant(windowStartMs),
     rollingCents: rollingCents.toString(),
     rollingPoints: rollingPoints.toString(),
     lifetimeCents: lifetimeCents.toString(),
@@ -390,8 +419,8 @@ export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjecti
     grace: {
       state: graceState,
       fromTier: baselineTier,
-      droppedAt: droppedAtMs === null ? null : new Date(droppedAtMs).toISOString(),
-      until: graceUntilMs === null ? null : new Date(graceUntilMs).toISOString(),
+      droppedAt: droppedAtMs === null ? null : formatInstant(droppedAtMs),
+      until: graceUntilMs === null ? null : formatInstant(graceUntilMs),
       gapPoints: gapPoints === null ? null : gapPoints.toString(),
     },
     nextExpiryAt,
@@ -622,7 +651,7 @@ export function validateEntitlementCandidate(candidate: EntitlementCandidate, _m
   if (candidate.reason.trim().length < 2 || candidate.reason.length > 500) errors.push("reason");
   const startsAt = parseInstant(candidate.startsAt, "startsAt");
   const endsAt = parseInstant(candidate.endsAt, "endsAt");
-  if (endsAt <= startsAt || endsAt - startsAt > GROWTH_WINDOW_MS) errors.push("duration");
+  if (endsAt <= startsAt || endsAt - startsAt > GROWTH_WINDOW_US) errors.push("duration");
   const cap = candidate.kind === "FRIEND" ? "GOLD" : "DIAMOND";
   const capConfig = policy.tiers[cap];
   const pricing = candidate.pricing;

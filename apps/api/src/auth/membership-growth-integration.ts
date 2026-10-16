@@ -21,6 +21,8 @@ import {
   type GrowthPricingContract,
   type GrowthProjection,
   type SettledContributionFact,
+  GrowthRuleError,
+  growthWindowStartAt,
 } from "./membership-growth";
 import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { canonicalize, normalizeTime } from "../supply/content-hash";
@@ -572,7 +574,7 @@ export function policyTierForGrowthProjection(projection: Pick<GrowthProjection,
 
 function dtoFromProjection(projection: GrowthProjection | null, asOfUtc: string, benefitsState: GrowthBenefitsState, sourceState: GrowthSourceState, known: boolean, policyPayload: Record<string, unknown> | null, policyVersion: string | null, rows: readonly StoredContribution[]): GrowthProjectionDto {
   if (!projection || !known) {
-    const windowStartUtc = new Date(Date.parse(asOfUtc) - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const windowStartUtc = growthWindowStartAt(asOfUtc);
     return { schema: "membership-growth-v1", knowledge: "UNKNOWN", sourceState, benefitsState, asOfUtc, windowStartUtc, rollingPoints: null, lifetimePoints: null, normalTier: null, effectiveTier: null, blackGold: null, grace: null, nextExpiryAtUtc: null, nextTier: null, benefits: [], comparison: [], contributions: [], pendingCount: projection?.pending.length ?? 0, pending: projection?.pending ?? [], excluded: projection?.excluded ?? [] };
   }
   const summaries = policySummaries(policyPayload, policyVersion, policyTierForGrowthProjection(projection), benefitsState);
@@ -629,11 +631,8 @@ const CANONICAL_MICRO_INSTANT = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/;
  * canonical form, so lexicographic order equals time order. Mirrors entitlementStateAt without Date.parse truncation.
  */
 export function entitlementStateAtMicro(entitlement: Pick<StoredEntitlement, "startsAt" | "endsAt" | "status">, asOfUtc: string): StoredEntitlement["status"] {
-  if (entitlement.status === "REVOKED" || entitlement.status === "REPLACED") return entitlement.status;
-  if (entitlement.status === "PENDING" || entitlement.status === "APPROVED_PENDING_EXECUTION") return entitlement.status;
-  if (entitlement.status === "EXECUTED_PENDING_START" && asOfUtc < entitlement.startsAt) return "EXECUTED_PENDING_START";
-  if (asOfUtc >= entitlement.endsAt) return "EXPIRED";
-  return entitlement.status === "EXPIRED" ? "EXPIRED" : "ACTIVE";
+  // E-R3-02: the core entitlementStateAt now compares epoch microseconds; keep one implementation.
+  return entitlementStateAt(entitlement, asOfUtc);
 }
 
 export type MembershipGrowthQuoteCandidatesInput = Parameters<MembershipGrowthConfirmationReader>[1] & { asOfUtc?: string };
@@ -644,8 +643,9 @@ export type MembershipGrowthQuoteCandidatesResult =
 /**
  * T personal-quote-v4 seam (membership-growth-consumption.md fdceac11…): one authoritative asOf for growth, grace,
  * entitlements and policy. Supported precision: asOf is microsecond (canonical 6 digits); entitlement/policy are evaluated
- * exactly at that microsecond. The growth projection evaluates at millisecond precision, so a sub-millisecond asOf is
- * accepted only when the projection is identical at both millisecond bounds; otherwise UNKNOWN (never a guessed tier).
+ * exactly at that microsecond, and (E-R3-02) so are growth facts, corrections, the 90-day window, grace and the shared
+ * chooseCompleteOffer validity. Stored instants come from PG ::text at full microsecond precision; an input with more
+ * than six fractional digits is AS_OF_INVALID / INVALID_INSTANT rather than truncated.
  * An applicable ACTIVE entitlement whose pricing is unusable is UNKNOWN, never silently dropped.
  */
 export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, input: MembershipGrowthQuoteCandidatesInput): Promise<MembershipGrowthQuoteCandidatesResult> {
@@ -653,15 +653,10 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   if (input.asOfUtc === undefined) asOfUtc = `${new Date().toISOString().slice(0, 23)}000Z`;
   else if (typeof input.asOfUtc !== "string" || !CANONICAL_MICRO_INSTANT.test(input.asOfUtc) || !Number.isFinite(Date.parse(input.asOfUtc))) return { knowledge: "UNKNOWN", reason: "AS_OF_INVALID" };
   else asOfUtc = input.asOfUtc;
-  const floorMs = `${asOfUtc.slice(0, 23)}Z`;
-  const growth = await readMembershipGrowth(client, input.userId, floorMs);
+  let growth: GrowthReaderResponse | null;
+  try { growth = await readMembershipGrowth(client, input.userId, asOfUtc); }
+  catch (error) { if (error instanceof GrowthRuleError) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc }; throw error; }
   if (!growth || growth.growth.knowledge !== "KNOWN" || !growth.growth.normalTier || !growth.growth.effectiveTier || !growth.growth.grace) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc };
-  if (asOfUtc.slice(23, 26) !== "000") {
-    const ceilMs = new Date(Date.parse(floorMs) + 1).toISOString();
-    const upper = await readMembershipGrowth(client, input.userId, ceilMs);
-    const same = upper && upper.growth.knowledge === "KNOWN" && upper.growth.normalTier === growth.growth.normalTier && upper.growth.effectiveTier === growth.growth.effectiveTier && upper.growth.grace?.state === growth.growth.grace.state && upper.growth.rollingPoints === growth.growth.rollingPoints;
-    if (!same) return { knowledge: "UNKNOWN", reason: "AS_OF_PRECISION_AMBIGUOUS", asOfUtc };
-  }
   const policyRow = (await client.query<{ version: string; policyPayload: GrowthBenefitPolicy }>(`SELECT version::text AS version, policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' AND effective_at <= $1 ORDER BY version DESC LIMIT 1`, [asOfUtc])).rows[0];
   if (!policyRow) return { knowledge: "UNKNOWN", reason: "POLICY_UNAVAILABLE", asOfUtc };
   const policy = policyRow.policyPayload;

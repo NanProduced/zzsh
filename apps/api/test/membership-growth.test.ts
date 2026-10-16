@@ -257,3 +257,51 @@ test("growth quote adapter calls the existing delta calculator for ordinary, cus
   ], "2026-10-10T00:00:00.000Z");
   assert.deepEqual(mismatch, { knowledge: "UNKNOWN", reason: "BINDING_MISMATCH" });
 });
+
+test("E-R3-02 one microsecond asOf drives facts, corrections, rolling window, grace and the shared offer choice", () => {
+  const at = (frac: string) => `2026-10-16T08:00:00.${frac}Z`;
+  const asOf = at("123456");
+  const replay = (asOfValue: string, rows: GrowthContribution[], extra: Record<string, unknown> = {}) => replayGrowthProjection({ userId: "user_1", asOf: asOfValue, contributions: rows, ...extra });
+  // Same-millisecond future fact (reviewer counterexample): not yet effective at .123456, effective from .123900.
+  const future = contribution({ effectiveAt: at("123900"), recordedAt: at("123900"), amountCents: "1000000" });
+  assert.equal(replay(asOf, [future]).rollingPoints, "0");
+  assert.equal(replay(asOf, [future]).normalTier, "STANDARD");
+  assert.equal(replay(at("123899"), [future]).rollingPoints, "0");
+  assert.equal(replay(at("123900"), [future]).rollingPoints, "10000");
+  assert.equal(replay(at("123900"), [future]).normalTier, "GOLD");
+  // Same-millisecond correction recorded after asOf is not applied yet.
+  const base = contribution({ effectiveAt: "2026-10-10T00:00:00.000000Z", recordedAt: "2026-10-10T00:00:00.000000Z", amountCents: "1000000" });
+  const corr = contribution({ effectiveAt: "2026-10-10T00:00:00.000000Z", recordedAt: at("123900"), amountCents: "0", revision: 1, correctionMode: "REPLACE", previousAmountCents: "1000000" });
+  assert.equal(replay(asOf, [base, corr]).rollingPoints, "10000");
+  assert.equal(replay(at("123900"), [base, corr]).rollingPoints, "0");
+  // 90-day rolling exit at microsecond precision.
+  const early = contribution({ effectiveAt: "2026-07-18T08:00:00.123456Z", recordedAt: "2026-07-18T08:00:00.123456Z", amountCents: "1000000" });
+  assert.equal(replay("2026-10-16T08:00:00.123455Z", [early]).rollingPoints, "10000");
+  assert.equal(replay("2026-10-16T08:00:00.123456Z", [early]).rollingPoints, "0");
+  assert.equal(replay("2026-10-16T08:00:00.123455Z", [early]).active[0]!.expiresAt, "2026-10-16T08:00:00.123456Z");
+  // Grace (keep-tier) ends exactly 7 days after the microsecond drop.
+  const drop = "2026-10-09T08:00:00.123456Z";
+  assert.equal(replay("2026-10-16T08:00:00.123455Z", [], { previousTier: "GOLD", lastTierDropAt: drop }).grace.state, "ACTIVE");
+  assert.equal(replay("2026-10-16T08:00:00.123455Z", [], { previousTier: "GOLD", lastTierDropAt: drop }).effectiveTier, "GOLD");
+  assert.equal(replay("2026-10-16T08:00:00.123456Z", [], { previousTier: "GOLD", lastTierDropAt: drop }).grace.state, "EXPIRED");
+  // Old millisecond/second inputs keep their historical output form; > 6 digits is rejected, never truncated.
+  assert.equal(replay("2026-10-01T00:00:00.000Z", []).asOf, "2026-10-01T00:00:00.000Z");
+  assert.equal(replay("2026-10-01T00:00:00Z", []).asOf, "2026-10-01T00:00:00.000Z");
+  assert.equal(replay(asOf, []).asOf, asOf);
+  assert.throws(() => replay("2026-10-01T00:00:00.1234567Z", []), /microsecond|invalid/i);
+  // Shared chooseCompleteOffer: a FRIEND waiver valid until .123900 is still valid at .123456 (deposit 0), not at/after .123900.
+  const binding = { userId: "u", accountId: "a", ownerUserId: "o", listingVersionId: "l", ruleReleaseId: "r", quantityDigest: "q" };
+  const growthPlan = { source: "GROWTH" as const, rentalTotalCents: "10000", depositCents: "30000", depositWaived: false, priceVersion: "p", benefitVersion: "1", binding };
+  const friend = { ...growthPlan, source: "FRIEND" as const, rentalTotalCents: "12000", depositCents: "0", depositWaived: true, entitlementId: "f", validUntil: at("123900") };
+  const live = chooseCompleteOffer([growthPlan, friend], asOf);
+  assert.equal(live.knowledge, "KNOWN");
+  if (live.knowledge === "KNOWN") assert.deepEqual([live.priceBasis, live.depositBasis, live.depositCents], ["GROWTH", "FRIEND", "0"]);
+  const atEnd = chooseCompleteOffer([growthPlan, friend], at("123900"));
+  if (atEnd.knowledge === "KNOWN") assert.deepEqual([atEnd.depositBasis, atEnd.depositCents], ["GROWTH", "30000"]); else assert.fail();
+  const after = chooseCompleteOffer([growthPlan, friend], at("123901"));
+  if (after.knowledge === "KNOWN") assert.equal(after.depositCents, "30000"); else assert.fail();
+  // Entitlement state at the same microsecond semantics.
+  assert.equal(entitlementStateAt({ startsAt: "2026-10-01T00:00:00Z", endsAt: at("123900"), status: "ACTIVE" }, asOf), "ACTIVE");
+  assert.equal(entitlementStateAt({ startsAt: "2026-10-01T00:00:00Z", endsAt: at("123456"), status: "ACTIVE" }, asOf), "EXPIRED");
+  assert.equal(entitlementStateAt({ startsAt: at("123900"), endsAt: "2026-10-20T00:00:00Z", status: "EXECUTED_PENDING_START" }, asOf), "EXECUTED_PENDING_START");
+});

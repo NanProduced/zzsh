@@ -372,3 +372,19 @@ test("T v4 seam: one asOf, effectiveTier/policyTier metadata, microsecond entitl
   if (bg.knowledge === "KNOWN") assert.deepEqual([bg.effectiveTier, bg.policyTier], ["BLACK_GOLD", "DIAMOND"]);
   else assert.fail(JSON.stringify(bg));
 });
+
+test("E-R3-02 quote seam: same-millisecond future consumption is not counted at a microsecond asOf", async () => {
+  const { readMembershipGrowthQuoteCandidatesAt } = await import("../src/auth/membership-growth-integration");
+  const asOfUtc = "2026-10-16T08:00:00.123456Z", futureAt = "2026-10-16T08:00:00.123900Z";
+  const row = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: futureAt, recordedAt: futureAt, amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const rows = [{ ...row, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", row) }];
+  const state = { normalTier: "STANDARD", effectiveTier: "STANDARD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const before = await readMembershipGrowth(growthReaderClient(state, rows, readerPolicy()), "user-1", asOfUtc);
+  assert.equal(before?.growth.rollingPoints, "0");
+  assert.equal(before?.growth.asOfUtc, asOfUtc);
+  const atFact = await readMembershipGrowth(growthReaderClient(state, rows, readerPolicy()), "user-1", futureAt);
+  assert.equal(atFact?.growth.rollingPoints, "10000");
+  const input = quoteInput(); const base = computeDeltaQuote(input); assert.equal(base.quotable, true); if (!base.quotable) return;
+  const result = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, rows, readerPolicy()), { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", gameId: "game-1", listingVersionId: "listing-1", listingHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-v1", quantityDigest: "quantity-1", baseQuote: base.quote, quoteInput: input, asOfUtc });
+  if (result.knowledge === "KNOWN") { assert.notEqual(result.effectiveTier, "GOLD"); assert.equal(result.asOfUtc, asOfUtc); }
+});
