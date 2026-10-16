@@ -78,6 +78,8 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
       AccountCenterFrame: ({ children }) => children,
       AccountOverview: () => null,
       resolveAccountView: (view) => view || "overview",
+      isKnownAccountView: (view) => ["", "overview", "membership", "rentals", "leased", "accounts", "credit", "identity", "favorites", "security", "wallet", "invite"].includes(view),
+      accountSectionHref: (section) => `/account?view=${section}`,
       accountSectionLabels: { wallet: "我的钱包", invite: "分销中心", credit: "信用与保证金" },
       accountViewTitle: (view) => ({ overview: "总览", membership: "会员中心", favorites: "我的收藏", rentals: "租入订单", leased: "出租订单", accounts: "出租账号", wallet: "我的钱包", credit: "信用与保证金", invite: "邀请与佣金", identity: "实名认证", security: "账号安全" }[view] ?? "总览"),
     };
@@ -706,5 +708,17 @@ test("missing base, missing display and a corrupt-source response never become z
     assert.match(p.host.textContent, /账号资料读取失败/);
     assert.doesNotMatch(p.host.textContent, /历史属性与资源|0 M 哈夫币/);
     assert.equal(p.writes, 0);
+  } finally { await p.close(); }
+});
+
+test("web.account.unsupported: an unknown view states it is missing and does not open orders or send business reads", async () => {
+  const p = await probe({});
+  try {
+    await p.render("no-such-view");
+    const node = p.host.querySelector("[data-account-view='unsupported']");
+    assert.ok(node);
+    assert.match(node.textContent, /不存在或已调整/);
+    assert.equal(node.querySelector("a").getAttribute("href"), "/account?view=overview");
+    assert.doesNotMatch(p.host.textContent, /待接入|暂未开放/);
   } finally { await p.close(); }
 });

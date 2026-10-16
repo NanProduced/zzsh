@@ -140,4 +140,11 @@ test("shell keeps session refresh discoverable after read permission removes sup
   const before = refreshCalls;
   await act(async () => { shellTimer.callback(); await Promise.resolve(); });
   assert.equal(refreshCalls, before + 1);
+  Object.defineProperty(browser.document, "visibilityState", { configurable: true, get: () => "hidden" });
+  try {
+    await act(async () => { shellTimer.callback(); await Promise.resolve(); });
+    assert.equal(refreshCalls, before + 1, "hidden tab must not poll the session");
+  } finally { delete browser.document.visibilityState; }
+  await act(async () => { shellTimer.callback(); await Promise.resolve(); });
+  assert.equal(refreshCalls, before + 2);
 });

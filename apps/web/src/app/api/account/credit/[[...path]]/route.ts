@@ -5,8 +5,9 @@ const apiOrigin = process.env.ZZSH_API_ORIGIN ?? "";
 const webOrigin = process.env.ZZSH_WEB_ORIGIN ?? "";
 const error = (status: number, code: string, requestId: string) => Response.json({ error: { code, message: "信用与保证金暂不可用", requestId } }, { status, headers: { "cache-control": "no-store", "x-request-id": requestId } });
 
+// GAP-012: GET mirrors the core user credit reader exactly (/ and /overview); /events and /guarantees have no core handler.
 function allowed(path: string[], method: string): boolean {
-  if (method === "GET") return path.length === 0 || path.length === 1 && ["overview", "events", "guarantees"].includes(path[0]!);
+  if (method === "GET") return path.length === 0 || path.length === 1 && path[0] === "overview";
   if (method !== "POST") return false;
   return path.length === 1 && path[0] === "recovery-requests"
     || path.length === 3 && path[0] === "accounts" && path[2] === "payment-intents"

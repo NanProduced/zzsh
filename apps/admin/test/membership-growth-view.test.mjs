@@ -102,3 +102,16 @@ test("policy approval uses immutable saved-draft metadata rather than the full p
     assert.throws(() => policyDraftApprovalPayload({ ...meta, payloadHash: "" }));
   } finally { await vite.close(); }
 });
+
+test("GAP-007 membership host gate matches nav/API read admission and hides writes from summary readers", async () => {
+  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
+  try {
+    const { membershipGrowthAccess } = await vite.ssrLoadModule("/src/views/membership-growth-admin-host.tsx");
+    const snap = (permissions, isBoss = false) => ({ authenticated: true, permissions, security: { isBoss } });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.growth.read.summary"])), { canRead: true, canDraft: false, canRequest: false });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.publish"])), { canRead: true, canDraft: false, canRequest: true });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.draft"])), { canRead: true, canDraft: true, canRequest: true });
+    assert.deepEqual(membershipGrowthAccess(snap([], true)), { canRead: true, canDraft: true, canRequest: true });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.growth.read.detail"])), { canRead: false, canDraft: false, canRequest: false });
+  } finally { await vite.close(); }
+});

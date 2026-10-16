@@ -105,10 +105,14 @@ export function accountViewTitle(view: AccountView): string {
 
 export type AccountLocation = { view: AccountView; accountId?: string; orderId?: string; status?: string };
 
+/** web.account.unsupported: a view outside the known sections is reported, never silently mapped to another business page. */
+export function isKnownAccountView(view: string): boolean {
+  return view === "" || view === "overview" || Object.hasOwn(accountSectionLabels, view);
+}
+
 export function resolveAccountView(view: string): AccountView {
-  if (view === "" || view === "overview") return "overview";
   if (Object.hasOwn(accountSectionLabels, view)) return view as AccountSection;
-  return "rentals";
+  return "overview";
 }
 
 export function accountSectionHref(section: AccountView, current: AccountLocation): string {

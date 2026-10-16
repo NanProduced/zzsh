@@ -272,7 +272,12 @@ test("missing account view opens the overview and order links keep the current o
   assert.equal(resolveAccountView(""), "overview");
   assert.equal(resolveAccountView("overview"), "overview");
   assert.equal(resolveAccountView("favorites"), "favorites");
-  assert.equal(resolveAccountView("unknown-view"), "rentals");
+  assert.equal(resolveAccountView("unknown-view"), "overview", "unknown views no longer masquerade as the rentals page");
+  const { isKnownAccountView } = loadCenter({});
+  assert.equal(isKnownAccountView(""), true);
+  assert.equal(isKnownAccountView("invite"), true);
+  assert.equal(isKnownAccountView("unknown-view"), false);
+  assert.equal(isKnownAccountView("constructor"), false);
   const href = accountSectionHref("rentals", { view: "rentals", accountId: "acc_1", orderId: "order_A", status: "PAID" });
   const query = new URLSearchParams(href.split("?")[1]);
   assert.equal(query.get("view"), "rentals");

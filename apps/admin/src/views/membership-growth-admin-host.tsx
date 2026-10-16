@@ -68,6 +68,15 @@ function subjectOf(response: SubjectResponse | null, subjectId: string | undefin
   return { subjectId, status: "LOADED", userLabel: subjectId, tier: response.growth.effectiveTier ?? "UNKNOWN", rollingPoints: response.growth.rollingPoints ?? undefined, lifetimePoints: response.growth.lifetimePoints ?? undefined };
 }
 
+/** GAP-007: nav entry and API GET /membership-growth/policy both admit summary readers; the host gate must match and only hide write actions. */
+export function membershipGrowthAccess(snapshot: Extract<SessionSnapshot, { authenticated: true }>) {
+  const boss = snapshot.security.isBoss;
+  const canDraft = boss || hasPermission(snapshot, "membership.policy.draft");
+  const canRequest = canDraft || hasPermission(snapshot, "membership.policy.publish");
+  const canRead = canRequest || hasPermission(snapshot, "membership.growth.read.summary");
+  return { canRead, canDraft, canRequest };
+}
+
 export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refreshNonce }: { tab: WorkspaceTab; snapshot: Extract<SessionSnapshot, { authenticated: true }>; onDirtyChange: (dirty: boolean) => void; refreshNonce: number }) {
   const subjectId = tab.query.userId;
   const gameId = tab.query.gameId;
@@ -77,7 +86,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const [subject, setSubject] = useState<AdminGrowthSubject>({ subjectId: subjectId ?? "", status: "NOT_LOADED" });
 
   useEffect(() => {
-    if (!hasPermission(snapshot, "membership.policy.draft") && !hasPermission(snapshot, "membership.policy.publish") && !snapshot.security.isBoss) {
+    if (!membershipGrowthAccess(snapshot).canRead) {
       setState({ status: "permission", message: "当前管理员没有会员成长配置权限" });
       return;
     }
@@ -108,6 +117,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   }, [refreshNonce, snapshot, subjectId]);
 
   if (state.status !== "ready") return <MembershipGrowthAdminView state={state} />;
+  const access = membershipGrowthAccess(snapshot);
   const ready = state;
   const saveDraft = async () => {
     if (!meta) return;
@@ -128,5 +138,5 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
     const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.entitlement.grant", triggerCondition: "membership.entitlement.grant.requested", payloadVersion: 1, payload: { userId: ready.subject.subjectId, gameId, kind: draft.kind, scopeKey: draft.scopeKey, startsAtUtc: draft.startsAtUtc, endsAtUtc: draft.endsAtUtc, policyId: meta.id, pricing: { mode: draft.pricingMode, priceVersionId: draft.priceVersionId, haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: draft.haffSchema, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef, baseBySafeBox: { [draft.safeBoxCode]: draft.haffBaseRatio } }, materials: { [draft.materialItemId]: { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: draft.materialItemId, unit: draft.materialUnit, unitQuantity: draft.materialUnitQuantity, buyerUnitAmount: draft.materialBuyerUnitAmount, ownerUnitAmount: draft.materialOwnerUnitAmount, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef } } }, depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇`, supersedesRequestId: null });
     setState({ ...ready, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } });
   };
-  return <MembershipGrowthAdminView state={ready} onPolicyChange={(policy) => { setSavedDraft(null); setState((current) => current.status === "ready" ? { ...current, policy } : current); onDirtyChange(true); }} onSavePolicyDraft={() => void saveDraft()} onSubmitPolicy={() => void submitApproval()} onEntitlementChange={(entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current)} onSubmitEntitlement={() => void submitEntitlement()} />;
+  return <MembershipGrowthAdminView state={ready} onPolicyChange={access.canDraft ? (policy) => { setSavedDraft(null); setState((current) => current.status === "ready" ? { ...current, policy } : current); onDirtyChange(true); } : undefined} onSavePolicyDraft={access.canDraft ? () => void saveDraft() : undefined} onSubmitPolicy={access.canRequest ? () => void submitApproval() : undefined} onEntitlementChange={access.canRequest ? (entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current) : undefined} onSubmitEntitlement={access.canRequest ? () => void submitEntitlement() : undefined} />;
 }

@@ -237,7 +237,8 @@ export function WorkspaceApp({
     if (hasSupportRead || active.kind === "support") return;
     let refreshing = false;
     const refreshSession = () => {
-      if (refreshing) return;
+      // GAP-020: a hidden tab does not poll; returning focus/visibility triggers the immediate refresh in main.tsx.
+      if (refreshing || document.visibilityState === "hidden") return;
       refreshing = true;
       void onRefresh().catch(() => undefined).finally(() => { refreshing = false; });
     };

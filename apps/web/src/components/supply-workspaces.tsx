@@ -14,7 +14,7 @@ import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { LegacyOrderWorkspace } from "./order/legacy-order-workspace";
 import { OrderWorkspace } from "./order/order-workspace";
-import { AccountCenterFrame, AccountMembershipCenter, AccountOverview, accountSectionLabels, accountViewTitle, resolveAccountView } from "./account/account-center";
+import { AccountCenterFrame, AccountMembershipCenter, AccountOverview, accountSectionHref, accountViewTitle, isKnownAccountView, resolveAccountView } from "./account/account-center";
 import { PersonalWallet } from "./account/personal-wallet";
 import { PersonalInvitations } from "./account/personal-invitations";
 import { CreditCenter } from "./account/credit-center";
@@ -107,15 +107,8 @@ function AccountActionError({ error, scope, onRetry }: { error: SupplyRequestErr
   return <div className="supply-notice is-error" role="alert"><AlertCircle size={17} /><span>{message}</span>{error.status === 0 && onRetry ? <button type="button" className="button quiet" onClick={onRetry}>重试</button> : null}</div>;
 }
 
-function AccountUnavailable({ label }: { label: string }) {
-  const detail =
-    label === "我的钱包"
-      ? "余额与流水功能正在准备中，目前无法查询余额、充值或提现。"
-      : label === "分销中心"
-      ? "邀请关系与分销收益功能正在准备中，目前尚未开放。"
-      : "这项功能正在准备中。";
-  const Icon = label === "我的钱包" ? CreditCard : Sparkles;
-  return <section className="account-module"><header className="account-module-heading"><div><h2>{label}</h2><p>功能接入中</p></div><span className="account-state-badge">待接入</span></header><div className="account-module-card account-empty-state"><Icon size={30} aria-hidden="true" /><h3>{label}暂未开放</h3><p>{detail}</p></div></section>;
+function AccountUnsupported({ view }: { view: string }) {
+  return <section className="account-module" data-account-view="unsupported"><header className="account-module-heading"><div><h2>页面不存在</h2><p>个人中心没有这个页面</p></div></header><div className="account-module-card account-empty-state" role="status"><Sparkles size={30} aria-hidden="true" /><h3>链接中的页面“{view.slice(0, 40)}”不存在或已调整</h3><p>没有为你打开其他页面，可以回到总览重新选择。</p><Link className="button secondary" href={accountSectionHref("overview", { view: "overview" })}>回到个人中心总览</Link></div></section>;
 }
 
 export function AccountWorkspace({ view, accountId, orderId, status, source, page }: { view: string; accountId?: string; orderId?: string; status?: string; source?: string; page?: string }) {
@@ -162,7 +155,7 @@ export function AccountWorkspace({ view, accountId, orderId, status, source, pag
   const detailOpen = (active === "accounts" && Boolean(accountId)) || ((active === "rentals" || active === "leased") && Boolean(orderId));
   return <ServiceShell {...accountShell} breadcrumbs={[]} title={title} headingInContent={detailOpen}>
     <AccountCenterFrame active={active} accountId={accountId} orderId={orderId} status={status} scope={identityScope} breadcrumbs={accountTrail}>
-      {active === "overview" ? <AccountOverview scope={identityScope} userId={session.userId ?? undefined} nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "membership" ? <AccountMembershipCenter scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} source={source} /> : <AccountUnavailable label={accountSectionLabels[active]} />}
+      {!isKnownAccountView(view) ? <AccountUnsupported view={view} /> : active === "overview" ? <AccountOverview scope={identityScope} userId={session.userId ?? undefined} nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "membership" ? <AccountMembershipCenter scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} source={source} /> : null}
     </AccountCenterFrame>
   </ServiceShell>;
 }
