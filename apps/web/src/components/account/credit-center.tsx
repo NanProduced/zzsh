@@ -8,6 +8,7 @@ import { Callout, RecoveryAlert, RecordStatus, SkeletonBlock } from "@/component
 import { supplyApi, SupplyRequestError } from "../../lib/supply-client";
 import { formatOrderTime } from "../../lib/order-client";
 import { CreditRequestError, creditMoney, loadCreditWriteIntent, readMyCredit, type CreditGuarantee, type CreditOverview, type CreditWriteIntent } from "../../lib/credit-guarantee-client";
+import { OwnerGuaranteeHistory } from "./owner-guarantee-history";
 import "./credit-center.css";
 
 /** 已获权账号摘要。用于给保证金责任提供可辨识名称；与信用主读取解耦，失败不阻塞。 */
@@ -210,5 +211,6 @@ export function CreditCenter({ scope }: { scope: string }) {
         </li>)}</ul> : <p className="credit-muted">暂无恢复申请记录。</p>}
       </section>
     </> : null}
+    <OwnerGuaranteeHistory scope={scope} />
   </section>;
 }
