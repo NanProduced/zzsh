@@ -89,7 +89,7 @@ export type MilestoneSchemaPgOptions = {
 };
 type RowDigest = { rows: string; digest: string };
 type Column = { name: string; type: string; notNull: boolean; default: string | null; owner?: string; tableAcl?: string[] | null; acl?: string[] | null; collation?: string; identity?: string; generated?: string };
-type FunctionDefinition = { name: string; body: string; definition: string; owner: string; result: string; arguments: string; security: boolean; strict: boolean; volatility: string; config: string[] | null; parallel?: string; leakproof?: boolean; cost?: string; resultRows?: string };
+type FunctionDefinition = { name: string; body: string; definition: string; owner: string; acl: string[] | null; result: string; arguments: string; security: boolean; strict: boolean; volatility: string; config: string[] | null; parallel?: string; leakproof?: boolean; cost?: string; resultRows?: string };
 export type MilestoneSchemaSnapshot = {
   chain: 74 | 80;
   target: MilestoneSchemaPgOptions["target"];
@@ -227,7 +227,7 @@ async function capture(c: PoolClient, o: MilestoneSchemaPgOptions, chain: 74 | 8
     UNION ALL SELECT 'trigger:'||n.nspname||'.'||r.relname||':'||x.tgname,pg_get_triggerdef(x.oid,true)
     FROM pg_trigger x JOIN pg_class r ON r.oid=x.tgrelid JOIN pg_namespace n ON n.oid=r.relnamespace
     WHERE NOT x.tgisinternal AND r.oid=ANY(ARRAY(SELECT to_regclass(name) FROM unnest($1::text[]) t(name))) ORDER BY key`, [existingTables])).rows.map(x => [x.key, x.definition]));
-  const functions = (await c.query<FunctionDefinition>(`SELECT p.proname AS name,p.prosrc AS body,pg_get_functiondef(p.oid) AS definition,p.proowner::text AS owner,
+  const functions = (await c.query<FunctionDefinition>(`SELECT p.proname AS name,p.prosrc AS body,pg_get_functiondef(p.oid) AS definition,p.proowner::text AS owner,p.proacl::text[] AS acl,
     pg_get_function_result(p.oid) AS result,pg_get_function_identity_arguments(p.oid) AS arguments,p.prosecdef AS security,p.proisstrict AS strict,p.provolatile AS volatility,p.proconfig AS config,
     p.proparallel AS parallel,p.proleakproof AS leakproof,p.procost::text AS cost,p.prorows::text AS "resultRows"
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='zzsh_order' AND p.proname=ANY($1::text[]) ORDER BY p.proname`, [touchedFunctions])).rows;
@@ -509,7 +509,7 @@ test("schema evidence verifier rejects altered old content, source definitions, 
     columns: Object.fromEntries(existingTables.map(n => [n, [{ name: "id", type: "text", notNull: true, default: null }]])),
     rows: Object.fromEntries(existingTables.map(n => [n, { rows: "0", digest: hash("") }])),
     definitions: Object.fromEntries(expectedDefinitionChanges.filter(k => /:(finance_root_enabled_source_shape|finance_event_kind_check|settlement_ledger_accounts|finance_entry_guard|finance_entry_batch_guard)$/.test(k)).map(k => [k, "old"])),
-    functions: touchedFunctions.map(name => ({ name, body: expectedBody(sqls.slice(0, 74), name), definition: "old", owner: "40001", result: "trigger", arguments: "", security: false, strict: false, volatility: "v", config: null })),
+    functions: touchedFunctions.map(name => ({ name, body: expectedBody(sqls.slice(0, 74), name), definition: "old", owner: "40001", acl: null, result: "trigger", arguments: "", security: false, strict: false, volatility: "v", config: null })),
     permissionExceptSeed: { rows: "0", digest: hash("") }, seed: null,
   };
   const after = structuredClone(before); after.chain = 80;
@@ -527,6 +527,7 @@ test("schema evidence verifier rejects altered old content, source definitions, 
     s => { s.seed = null; },
     s => { s.definitions["trigger:zzsh_order.finance_event:unapproved"] = "extra"; },
     s => { s.functions[0]!.owner = "40002"; },
+    s => { s.functions[0]!.acl = ["unexpected=X/unexpected"]; },
     s => { s.functions[0]!.body = "source mismatch"; },
   ];
   for (const change of changes) { const wrong = structuredClone(after); change(wrong); assert.throws(() => verifyDelta(before, wrong, sqls)); }
