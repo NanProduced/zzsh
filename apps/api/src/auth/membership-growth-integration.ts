@@ -621,44 +621,84 @@ export async function readMembershipGrowth(client: PoolClient, userId: string, a
   return { subjectId: userId, growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", sourceState, projectionKnown, policy?.policyPayload ?? null, policy?.version ?? null, rows), entitlements, sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length } };
 }
 
-export const readMembershipGrowthQuoteCandidates: MembershipGrowthConfirmationReader = async (client, input) => {
-  const asOfUtc = new Date().toISOString();
-  const growth = await readMembershipGrowth(client, input.userId, asOfUtc);
-  if (!growth || growth.growth.knowledge !== "KNOWN" || !growth.growth.normalTier) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN" };
+/** Canonical UTC instant with exactly six fractional digits (PG timestamptz microsecond precision). */
+const CANONICAL_MICRO_INSTANT = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/;
+
+/**
+ * Entitlement state at microsecond precision. Stored instants are normalized to the same fixed-width
+ * canonical form, so lexicographic order equals time order. Mirrors entitlementStateAt without Date.parse truncation.
+ */
+export function entitlementStateAtMicro(entitlement: Pick<StoredEntitlement, "startsAt" | "endsAt" | "status">, asOfUtc: string): StoredEntitlement["status"] {
+  if (entitlement.status === "REVOKED" || entitlement.status === "REPLACED") return entitlement.status;
+  if (entitlement.status === "PENDING" || entitlement.status === "APPROVED_PENDING_EXECUTION") return entitlement.status;
+  if (entitlement.status === "EXECUTED_PENDING_START" && asOfUtc < entitlement.startsAt) return "EXECUTED_PENDING_START";
+  if (asOfUtc >= entitlement.endsAt) return "EXPIRED";
+  return entitlement.status === "EXPIRED" ? "EXPIRED" : "ACTIVE";
+}
+
+export type MembershipGrowthQuoteCandidatesInput = Parameters<MembershipGrowthConfirmationReader>[1] & { asOfUtc?: string };
+export type MembershipGrowthQuoteCandidatesResult =
+  | { knowledge: "KNOWN"; policyVersion: string; candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote }>; entitlementIds: string[]; effectiveTier: NonNullable<GrowthProjectionDto["effectiveTier"]>; policyTier: NonNullable<ReturnType<typeof policyTierForGrowthProjection>>; asOfUtc: string }
+  | { knowledge: "UNKNOWN"; reason: string; asOfUtc?: string; entitlementId?: string };
+
+/**
+ * T personal-quote-v4 seam (membership-growth-consumption.md fdceac11…): one authoritative asOf for growth, grace,
+ * entitlements and policy. Supported precision: asOf is microsecond (canonical 6 digits); entitlement/policy are evaluated
+ * exactly at that microsecond. The growth projection evaluates at millisecond precision, so a sub-millisecond asOf is
+ * accepted only when the projection is identical at both millisecond bounds; otherwise UNKNOWN (never a guessed tier).
+ * An applicable ACTIVE entitlement whose pricing is unusable is UNKNOWN, never silently dropped.
+ */
+export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, input: MembershipGrowthQuoteCandidatesInput): Promise<MembershipGrowthQuoteCandidatesResult> {
+  let asOfUtc: string;
+  if (input.asOfUtc === undefined) asOfUtc = `${new Date().toISOString().slice(0, 23)}000Z`;
+  else if (typeof input.asOfUtc !== "string" || !CANONICAL_MICRO_INSTANT.test(input.asOfUtc) || !Number.isFinite(Date.parse(input.asOfUtc))) return { knowledge: "UNKNOWN", reason: "AS_OF_INVALID" };
+  else asOfUtc = input.asOfUtc;
+  const floorMs = `${asOfUtc.slice(0, 23)}Z`;
+  const growth = await readMembershipGrowth(client, input.userId, floorMs);
+  if (!growth || growth.growth.knowledge !== "KNOWN" || !growth.growth.normalTier || !growth.growth.effectiveTier || !growth.growth.grace) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc };
+  if (asOfUtc.slice(23, 26) !== "000") {
+    const ceilMs = new Date(Date.parse(floorMs) + 1).toISOString();
+    const upper = await readMembershipGrowth(client, input.userId, ceilMs);
+    const same = upper && upper.growth.knowledge === "KNOWN" && upper.growth.normalTier === growth.growth.normalTier && upper.growth.effectiveTier === growth.growth.effectiveTier && upper.growth.grace?.state === growth.growth.grace.state && upper.growth.rollingPoints === growth.growth.rollingPoints;
+    if (!same) return { knowledge: "UNKNOWN", reason: "AS_OF_PRECISION_AMBIGUOUS", asOfUtc };
+  }
   const policyRow = (await client.query<{ version: string; policyPayload: GrowthBenefitPolicy }>(`SELECT version::text AS version, policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' AND effective_at <= $1 ORDER BY version DESC LIMIT 1`, [asOfUtc])).rows[0];
-  if (!policyRow) return { knowledge: "UNKNOWN", reason: "POLICY_UNAVAILABLE" };
+  if (!policyRow) return { knowledge: "UNKNOWN", reason: "POLICY_UNAVAILABLE", asOfUtc };
   const policy = policyRow.policyPayload;
   const policyValidation = validateBenefitPolicy(policy);
-  if (!policyValidation.valid || !policyValidation.publishable) return { knowledge: "UNKNOWN", reason: "POLICY_NOT_PUBLISHABLE" };
-  const policyTier = policyTierForGrowthProjection({ normalTier: growth.growth.normalTier!, effectiveTier: growth.growth.effectiveTier!, grace: growth.growth.grace! });
-  if (!policyTier) return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN" };
+  if (!policyValidation.valid || !policyValidation.publishable) return { knowledge: "UNKNOWN", reason: "POLICY_NOT_PUBLISHABLE", asOfUtc };
+  const effectiveTier = growth.growth.effectiveTier;
+  const policyTier = policyTierForGrowthProjection({ normalTier: growth.growth.normalTier, effectiveTier, grace: growth.growth.grace });
+  if (!policyTier) return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN", asOfUtc };
   const tier = policy.tiers[policyTier];
   const rentalMode = input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary";
   const growthContract = tier?.pricing?.[rentalMode];
-  if (!configuredPricing(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE" };
-  const binding: OfferBinding = {
-    userId: input.userId,
-    accountId: input.accountId,
-    ownerUserId: input.ownerUserId,
-    listingVersionId: input.listingVersionId,
-    ruleReleaseId: input.ruleReleaseId,
-    quantityDigest: input.quantityDigest,
-  };
+  if (!configuredPricing(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
+  const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
   const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED");
-  if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE" };
-  const rows = (await client.query<StoredQuoteEntitlement>(`SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived", pricing_payload AS "pricingPayload" FROM zzsh_iam.membership_entitlement WHERE user_id=$1 AND game_id=$2 ORDER BY starts_at, id`, [input.userId, input.gameId])).rows.map(normalizeStoredEntitlement);
+  if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
+  let rows: StoredQuoteEntitlement[];
+  try {
+    rows = (await client.query<StoredQuoteEntitlement>(`SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived", pricing_payload AS "pricingPayload" FROM zzsh_iam.membership_entitlement WHERE user_id=$1 AND game_id=$2 ORDER BY starts_at, id`, [input.userId, input.gameId])).rows.map(normalizeStoredEntitlement);
+  } catch {
+    return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_READ_FAILED", asOfUtc };
+  }
   const candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote }> = [growthCandidate];
   const entitlementIds: string[] = [];
   for (const entitlement of rows) {
-    if (entitlementStateAt(entitlement, asOfUtc) !== "ACTIVE" || (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") || !configuredPricing(entitlement.pricingPayload)) continue;
+    const state = entitlementStateAtMicro(entitlement, asOfUtc);
+    if (state !== "ACTIVE") continue; // proven expired / revoked / replaced / pending / not started: excluded normally
+    if (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_KIND_UNKNOWN", asOfUtc, entitlementId: entitlement.id };
+    if (!configuredPricing(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt);
-    if (candidate) {
-      candidates.push(candidate);
-      entitlementIds.push(entitlement.id);
-    }
+    if (!candidate) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_QUOTE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
+    candidates.push(candidate);
+    entitlementIds.push(entitlement.id);
   }
-  return { knowledge: "KNOWN", policyVersion: policyRow.version, candidates, entitlementIds };
-};
+  return { knowledge: "KNOWN", policyVersion: policyRow.version, candidates, entitlementIds, effectiveTier, policyTier, asOfUtc };
+}
+
+export const readMembershipGrowthQuoteCandidates: MembershipGrowthConfirmationReader = readMembershipGrowthQuoteCandidatesAt;
 
 export function projectScopeDetail(rows: readonly StoredContribution[], gameIds: readonly string[]): { gameId: string; sourceKey: string; amountCents: string; effectiveAt: string }[] {
   const allowed = new Set(gameIds);

@@ -316,3 +316,59 @@ test('immutable contribution replay verifies original digest without requesting 
 });
 
 
+
+test("T v4 seam: one asOf, effectiveTier/policyTier metadata, microsecond entitlement bounds, ACTIVE entitlement failures are UNKNOWN", async () => {
+  const { readMembershipGrowthQuoteCandidatesAt } = await import("../src/auth/membership-growth-integration");
+  const now = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const asOfUtc = `${iso(now).slice(0, 23)}000Z`;
+  const row = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: iso(now - 86_400_000), recordedAt: iso(now - 86_400_000), amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const rows = [{ ...row, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", row) }];
+  const policy = readerPolicy();
+  const priced = policy.tiers.GOLD.pricing.ordinary;
+  const ent = (patch: Record<string, unknown>) => ({ id: "ent-1", kind: "FRIEND", scopeKey: "scope-1", startsAt: iso(now - 3_600_000), endsAt: iso(now + 3_600_000), status: "ACTIVE", depositWaived: false, pricingPayload: priced, ...patch });
+  const client = (entitlements: unknown[], state = { normalTier: "SILVER", effectiveTier: "SILVER", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null as string | null }) => {
+    const inner = growthReaderClient(state, rows, policy) as unknown as { query: (sql: string, args?: unknown[]) => Promise<unknown> };
+    return { query: async (sql: string, args?: unknown[]) => sql.includes("FROM zzsh_iam.membership_entitlement") && sql.includes("pricing_payload") ? { rows: entitlements } : inner.query(sql, args) } as never;
+  };
+  const input = quoteInput();
+  const base = computeDeltaQuote(input);
+  assert.equal(base.quotable, true); if (!base.quotable) return;
+  const common = { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", gameId: "game-1", listingVersionId: "listing-1", listingHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-v1", quantityDigest: "quantity-1", baseQuote: base.quote, quoteInput: input, asOfUtc };
+
+  const known = await readMembershipGrowthQuoteCandidatesAt(client([ent({})]), common);
+  assert.equal(known.knowledge, "KNOWN", JSON.stringify(known));
+  if (known.knowledge === "KNOWN") {
+    assert.equal(known.asOfUtc, asOfUtc, "asOf is echoed exactly so T can reject a mismatch");
+    assert.ok(known.effectiveTier && known.policyTier);
+    assert.deepEqual(known.candidates.map((c) => c.plan.source), ["GROWTH", "FRIEND"]);
+    assert.deepEqual(known.entitlementIds, ["ent-1"]);
+  }
+  // Original failure (pre-fix): an applicable ACTIVE entitlement with unusable pricing was silently skipped and KNOWN returned.
+  const notPriced = await readMembershipGrowthQuoteCandidatesAt(client([ent({ pricingPayload: { status: "NOT_PRICED", reason: "x" } })]), common);
+  assert.deepEqual([notPriced.knowledge, (notPriced as { reason?: string }).reason], ["UNKNOWN", "ENTITLEMENT_PRICE_UNAVAILABLE"]);
+  const badKind = await readMembershipGrowthQuoteCandidatesAt(client([ent({ kind: "VIP" })]), common);
+  assert.equal((badKind as { reason?: string }).reason, "ENTITLEMENT_KIND_UNKNOWN");
+  // Proven expired / revoked / replaced / not started are excluded normally and do not block.
+  const excluded = await readMembershipGrowthQuoteCandidatesAt(client([ent({ id: "e1", endsAt: iso(now - 1), pricingPayload: null }), ent({ id: "e2", status: "REVOKED", pricingPayload: null }), ent({ id: "e3", status: "REPLACED", pricingPayload: null }), ent({ id: "e4", status: "EXECUTED_PENDING_START", startsAt: iso(now + 60_000), pricingPayload: null })]), common);
+  assert.equal(excluded.knowledge, "KNOWN", JSON.stringify(excluded));
+  if (excluded.knowledge === "KNOWN") assert.deepEqual(excluded.entitlementIds, []);
+  // Microsecond precision: endsAt one microsecond after asOf is still ACTIVE; endsAt == asOf is EXPIRED.
+  const micro = `${asOfUtc.slice(0, 23)}001Z`;
+  const activeMicro = await readMembershipGrowthQuoteCandidatesAt(client([ent({ endsAt: micro, pricingPayload: { status: "NOT_PRICED", reason: "x" } })]), common);
+  assert.equal((activeMicro as { reason?: string }).reason, "ENTITLEMENT_PRICE_UNAVAILABLE", "1µs-later end is still applicable");
+  const expiredExact = await readMembershipGrowthQuoteCandidatesAt(client([ent({ endsAt: asOfUtc, pricingPayload: null })]), common);
+  assert.equal(expiredExact.knowledge, "KNOWN");
+  // asOf contract
+  for (const bad of ["2026-10-16T00:00:00Z", "2026-10-16T00:00:00.123Z", "not-a-time", "2026-10-16T00:00:00.1234567Z"]) {
+    const r = await readMembershipGrowthQuoteCandidatesAt(client([]), { ...common, asOfUtc: bad });
+    assert.equal((r as { reason?: string }).reason, "AS_OF_INVALID", bad);
+  }
+  const subMs = await readMembershipGrowthQuoteCandidatesAt(client([]), { ...common, asOfUtc: micro });
+  assert.equal(subMs.knowledge, "KNOWN", "stable projection across the millisecond bounds is accepted at µs asOf");
+  if (subMs.knowledge === "KNOWN") assert.equal(subMs.asOfUtc, micro);
+  // Black gold keeps BLACK_GOLD as effectiveTier and DIAMOND as pricing tier.
+  const bg = await readMembershipGrowthQuoteCandidatesAt(client([], { normalTier: "STANDARD", effectiveTier: "BLACK_GOLD", blackGoldState: "QUALIFIED", lastTierDropAt: null }), common);
+  if (bg.knowledge === "KNOWN") assert.deepEqual([bg.effectiveTier, bg.policyTier], ["BLACK_GOLD", "DIAMOND"]);
+  else assert.fail(JSON.stringify(bg));
+});
