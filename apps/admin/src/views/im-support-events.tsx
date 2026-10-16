@@ -39,7 +39,7 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   UNKNOWN: "未知类型",
 };
 
-type LoadStatus = "loading" | "ready" | "error" | "forbidden" | "missing";
+type LoadStatus = "loading" | "ready" | "error" | "forbidden" | "missing" | "expired";
 
 function statusOf(error: unknown): number | undefined {
   if (error instanceof AdminApiError) return error.status;
@@ -80,11 +80,18 @@ export function ConsultationEventsCard({ consultationId, request }: { consultati
         if (!active || generationRef.current !== generation) return;
         const code = statusOf(error);
         // 合同语义：403=缺 im.support.read；404=咨询已结束/不存在/跨端/他人/投诉排除名单
-        // （服务端统一 404，不确认对象存在）。两种拒绝都要明说，不能留白。
-        setStatus(code === 403 ? "forbidden" : code === 404 ? "missing" : "error");
+        // （服务端统一 404，不确认对象存在）。401=身份失效（全局重确认已由 adminRequest 触发）。
+        // 三种拒绝都要明说，不能留白。
+        setStatus(code === 403 ? "forbidden" : code === 404 ? "missing" : code === 401 ? "expired" : "error");
       });
     return () => { active = false; };
   }, [consultationId, attempt, request]);
+
+  const clearProjection = (next: LoadStatus) => {
+    setEvents([]);
+    setNextCursor(null);
+    setStatus(next);
+  };
 
   const loadEarlier = () => {
     if (!nextCursor || loadingEarlier) return;
@@ -99,9 +106,23 @@ export function ConsultationEventsCard({ consultationId, request }: { consultati
         setEvents((current) => [...asEvents(page?.events), ...current]);
         setNextCursor(typeof page?.nextCursor === "string" ? page.nextCursor : null);
       })
-      .catch(() => {
-        // 翻页失败不清掉已加载的记录，只把「加载更早」变成可重试的错误态。
-        if (generationRef.current === generation) setEarlierFailed(true);
+      .catch((error: unknown) => {
+        if (generationRef.current !== generation) return;
+        const code = statusOf(error);
+        if (code === 401) {
+          // 身份失效：全局身份重确认已由 adminRequest 触发；本地按撤敏规则清掉投影，
+          // 不再保留旧咨询的处理记录。
+          clearProjection("expired");
+          return;
+        }
+        if (code === 403 || code === 404) {
+          // 对象级拒绝（撤权/转交/结束/排除名单）：这不是网络抖动，旧投影与游标即刻清理，
+          // 显示与首屏一致的拒绝态。
+          clearProjection(code === 403 ? "forbidden" : "missing");
+          return;
+        }
+        // 网络/5xx：不清掉已加载的记录，只把「加载更早」变成可重试的错误态。
+        setEarlierFailed(true);
       })
       .finally(() => { if (generationRef.current === generation) setLoadingEarlier(false); });
   };
@@ -112,6 +133,7 @@ export function ConsultationEventsCard({ consultationId, request }: { consultati
       {status === "loading" ? <small>正在读取处理记录…</small> : null}
       {status === "forbidden" ? <p className="im-wb-events-note" data-tone="warn"><ShieldCheck size={13} />当前账号无权查看该咨询的处理记录。</p> : null}
       {status === "missing" ? <p className="im-wb-events-note" data-tone="warn"><ShieldCheck size={13} />处理记录不可读：该咨询已结束、不存在，或当前账号不在可查看范围。</p> : null}
+      {status === "expired" ? <p className="im-wb-events-note" data-tone="warn"><ShieldCheck size={13} />会话已失效，本地处理记录已清除；请重新登录后继续。</p> : null}
       {status === "error" ? <div className="im-wb-events-note" data-tone="error"><CircleAlert size={13} /><span>处理记录读取失败。</span><button type="button" className="im-wb-btn" data-action="retry-events" onClick={() => setAttempt((value) => value + 1)}>重新读取</button></div> : null}
       {status === "ready" && events.length === 0 ? <small>该咨询暂无处理记录。</small> : null}
       {events.length > 0 ? (

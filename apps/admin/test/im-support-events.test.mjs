@@ -225,3 +225,77 @@ test("events timeline: switching consultations drops a stale in-flight response"
   assert.doesNotMatch(rootNode.textContent, /用户 甲/, "a response for the previous consultation never paints into the new one");
   assert.equal(rootNode.querySelectorAll(".im-wb-event").length, 1);
 });
+
+// X-R1-03: 先有记录 → 下一页被拒绝。对象级 403/404 与身份 401 必须清掉旧投影
+// 与游标并按首屏拒绝态显示；只有网络/5xx 保留旧页可重试。
+for (const [status, snippet] of [[403, "当前账号无权查看该咨询的处理记录。"], [404, "处理记录不可读"], [401, "会话已失效"]]) {
+  test(`events timeline: a denied earlier page (${status}) clears the old projection and cursor`, async (t) => {
+    const rootNode = browser.document.createElement("div");
+    browser.document.body.appendChild(rootNode);
+    let root;
+    t.after(async () => { await act(async () => { root?.unmount(); }); });
+    const calls = [];
+    const request = async (path) => {
+      calls.push(path);
+      if (path.includes("cursor=")) throw new AdminApiError(status, status === 404 ? "NOT_FOUND" : status === 403 ? "FORBIDDEN" : "UNAUTHORIZED");
+      return { events: [eventRow({ id: "ev-first", type: "CREATED", actor: { kind: "user", displayName: "用户 甲" } })], nextCursor: "cursor-abc" };
+    };
+
+    root = createRoot(rootNode);
+    await act(async () => { root.render(createElement(ConsultationEventsCard, { consultationId: "consultation-deny", request })); });
+    await waitFor(() => rootNode.querySelectorAll(".im-wb-event").length === 1);
+    const button = rootNode.querySelector("[data-action='load-earlier-events']");
+    assert.ok(button, "pager exists while a cursor is available");
+    await act(async () => { button.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
+    await waitFor(() => rootNode.textContent.includes(snippet));
+    assert.equal(rootNode.querySelectorAll(".im-wb-event").length, 0, "denied page clears the old private projection");
+    assert.equal(rootNode.querySelector("[data-action='load-earlier-events']"), null, "cursor is dropped with the projection");
+    assert.ok(!rootNode.textContent.includes("更早记录读取失败，点击重试"), "object denial is not presented as a transient retry");
+    assert.equal(calls.filter((path) => path.includes("cursor=")).length, 1, "no automatic retry of a denied page");
+  });
+}
+
+test("events timeline: a 503 earlier page keeps rows and the cursor retryable (X-R1-03 control)", async (t) => {
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  let root;
+  t.after(async () => { await act(async () => { root?.unmount(); }); });
+  const request = async (path) => {
+    if (path.includes("cursor=")) throw new AdminApiError(503, "UNAVAILABLE");
+    return { events: [eventRow({ id: "ev-first", type: "CREATED", actor: { kind: "user", displayName: "用户 甲" } })], nextCursor: "cursor-abc" };
+  };
+
+  root = createRoot(rootNode);
+  await act(async () => { root.render(createElement(ConsultationEventsCard, { consultationId: "consultation-503", request })); });
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-event").length === 1);
+  await act(async () => { rootNode.querySelector("[data-action='load-earlier-events']").dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
+  await waitFor(() => rootNode.textContent.includes("更早记录读取失败，点击重试"));
+  assert.equal(rootNode.querySelectorAll(".im-wb-event").length, 1, "a transient failure keeps the loaded projection");
+});
+
+test("events timeline: a stale earlier-page response never paints into a newly selected consultation", async (t) => {
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  let root;
+  t.after(async () => { await act(async () => { root?.unmount(); }); });
+  let resolveEarlier;
+  const earlierPromise = new Promise((resolve) => { resolveEarlier = resolve; });
+  const request = (path) => {
+    if (path.includes("cursor=")) return earlierPromise;
+    if (path.startsWith("/im/consultations/consultation-old/")) {
+      return Promise.resolve({ events: [eventRow({ id: "ev-old", type: "CREATED", actor: { kind: "user", displayName: "旧咨询用户" } })], nextCursor: "cursor-old" });
+    }
+    return Promise.resolve({ events: [eventRow({ id: "ev-new", type: "CREATED", actor: { kind: "user", displayName: "新咨询用户" } })], nextCursor: null });
+  };
+
+  root = createRoot(rootNode);
+  await act(async () => { root.render(createElement(ConsultationEventsCard, { consultationId: "consultation-old", request })); });
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-event").length === 1);
+  await act(async () => { rootNode.querySelector("[data-action='load-earlier-events']").dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
+  await act(async () => { root.render(createElement(ConsultationEventsCard, { consultationId: "consultation-new", request })); });
+  await waitFor(() => rootNode.textContent.includes("新咨询用户"));
+  await act(async () => { resolveEarlier({ events: [eventRow({ id: "ev-stale", type: "CLOSED", actor: { kind: "admin", displayName: "迟到的旧页" } })], nextCursor: null }); await earlierPromise; });
+  await settle();
+  assert.doesNotMatch(rootNode.textContent, /迟到的旧页/, "a stale earlier page never writes into the new consultation");
+  assert.equal(rootNode.querySelectorAll(".im-wb-event").length, 1);
+});

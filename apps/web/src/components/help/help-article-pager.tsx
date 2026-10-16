@@ -4,10 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef } from "react";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import type { HelpNavArticle } from "./nav-data";
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable='true']") !== null;
-}
+import { isBackgroundKeyboardEvent } from "./keyboard-scope";
 
 /** 文章底部上一篇/下一篇：链接按帮助目录顺序，键盘 ←/→ 切换，跳转后焦点回正文标题 */
 export function HelpArticlePager({ prev, next }: { prev: HelpNavArticle | null; next: HelpNavArticle | null }) {
@@ -32,7 +29,7 @@ export function HelpArticlePager({ prev, next }: { prev: HelpNavArticle | null; 
   useEffect(() => {
     if (!prev && !next) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || isEditableTarget(event.target)) return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !isBackgroundKeyboardEvent(event)) return;
       if (event.key === "ArrowLeft" && prev) {
         event.preventDefault();
         router.push(`/help/${prev.slug}`);

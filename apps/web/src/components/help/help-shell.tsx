@@ -3,6 +3,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { ServiceShell, type BreadcrumbItem } from "@/components/layout/service-shell";
 import { stripHelpSearchQuery } from "./help-url";
+import { isBackgroundKeyboardEvent } from "./keyboard-scope";
 
 /** 帮助中心统一外壳：复用 ServiceShell，搜索切换为文档检索 */
 export function HelpShell({ children, breadcrumbs, title, description, initialQuery = "" }: {
@@ -13,10 +14,10 @@ export function HelpShell({ children, breadcrumbs, title, description, initialQu
   initialQuery?: string;
 }) {
   const router = useRouter();
-  // "/" 或 Ctrl/⌘+K 聚焦帮助搜索框；输入控件内不拦截
+  // "/" 或 Ctrl/⌘+K 聚焦帮助搜索框；输入控件、弹窗/菜单/浮层、已处理事件与输入法组合不拦截
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (!isBackgroundKeyboardEvent(event)) return;
       const focusSearch = () => {
         const input = document.querySelector<HTMLElement>('form.site-search input[type="search"]');
         input?.focus({ preventScroll: true });

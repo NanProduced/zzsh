@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import useEmblaCarousel from "embla-carousel-react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 type DefaultSlide = { kind: "default"; title: ReactNode; text: string; button: string; href: string; poster: string; subtitle?: string; label: string };
@@ -66,12 +66,22 @@ export function HeroCarousel() {
   }, [api]);
   const autoPlaying = playing && !reduced && !hovered && !focused && visible;
   const slides: Slide[] = apiSlides ?? DEFAULT_SLIDES;
-  const slideCount = slides.length;
+  // Rebuild only when the slide set actually arrives/changes (never on first
+  // mount): reInit alone preserves the old engine index (Embla reActivate keeps
+  // selectedScrollSnap as startIndex), which can also be out of the new range.
+  // Actually move the engine to the first slide, then mirror the engine's truth
+  // into React so aria-hidden/inert/dots all point at the same slide.
+  const slideSetMounted = useRef(false);
   useEffect(() => {
     if (!api) return;
+    if (!slideSetMounted.current) {
+      slideSetMounted.current = true;
+      return;
+    }
     api.reInit?.();
-    setCurrent(0);
-  }, [api, slideCount]);
+    api.scrollTo(0, true);
+    setCurrent(api.selectedScrollSnap());
+  }, [api, slides]);
   useEffect(() => {
     if (!api || !autoPlaying) return;
     const timer = setInterval(() => api.scrollNext(), 5500);

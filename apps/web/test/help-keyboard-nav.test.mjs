@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { allHelpArticles } from "../src/content/help/index.ts";
 import { buildHelpNavData, flattenHelpNavArticles, getHelpArticleNeighbors } from "../src/components/help/nav-data.ts";
 import { stripHelpSearchQuery } from "../src/components/help/help-url.ts";
+import * as keyboardScope from "../src/components/help/keyboard-scope.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -47,7 +48,10 @@ function setupPager({ prev, next, pathname = "/help/rental-getting-started" } = 
   const state = { pathname, reducedMotion: false };
   const refs = [];
   const exports = {};
-  class HTMLElementShim {}
+  class ElementShim {}
+  class HTMLElementShim extends ElementShim {}
+  globalThis.Element = ElementShim;
+  globalThis.HTMLElement = HTMLElementShim;
   new Function("require", "exports", "window", "document", "HTMLElement", code)(name => {
     if (name === "react") return {
       ...React,
@@ -55,6 +59,7 @@ function setupPager({ prev, next, pathname = "/help/rental-getting-started" } = 
       useRef: (value) => (refs[0] ??= { current: value }),
     };
     if (name === "next/navigation") return { useRouter: () => ({ push: (href) => pushes.push(href) }), usePathname: () => state.pathname };
+    if (name === "./keyboard-scope") return keyboardScope;
     return require(name);
   }, exports, {
     matchMedia: (query) => ({ matches: state.reducedMotion, media: query }),
@@ -153,13 +158,16 @@ function setupShell() {
   const focused = [];
   const pushes = [];
   const exports = {};
-  class HTMLElementShim {
-    constructor() {}
+  class ElementShim {}
+  class HTMLElementShim extends ElementShim {
     closest() { return null; }
   }
+  globalThis.Element = ElementShim;
+  globalThis.HTMLElement = HTMLElementShim;
   new Function("require", "exports", "window", "document", "HTMLElement", code)(name => {
     if (name === "react") return { ...React, useEffect: (fn) => effects.push(fn) };
     if (name === "next/navigation") return { useRouter: () => ({ push: (href) => pushes.push(href) }) };
+    if (name === "./keyboard-scope") return keyboardScope;
     if (name.startsWith("@/components/layout/service-shell")) return { ServiceShell: (props) => props.children };
     if (name === "./help-url") return { stripHelpSearchQuery };
     return require(name);
@@ -197,4 +205,46 @@ test("help shell focuses the search box on / and Ctrl+K without stealing editabl
   editable.closest = (sel) => (sel.includes("input") ? {} : null);
   assert.equal(s.fireKey({ key: "/", target: editable }), 0);
   assert.equal(s.focused.length, 3);
+});
+
+test("X-R1-02: pager arrows stay silent for handled, composing, editable and overlay events", () => {
+  const prev = { slug: "rental-check-before-order", title: "上一篇标题" };
+  const next = { slug: "rental-confirm-and-return", title: "下一篇标题" };
+  const p = setupPager({ prev, next });
+  p.render();
+  p.runEffects();
+  // 背景正文仍然有效（正向控制）
+  assert.equal(p.fireKey({ key: "ArrowRight" }), 1);
+  assert.deepEqual(p.pushes, ["/help/rental-confirm-and-return"]);
+  // 已被处理（defaultPrevented）的事件不再响应
+  assert.equal(p.fireKey({ key: "ArrowRight", defaultPrevented: true }), 0);
+  // 输入法组合中不响应
+  assert.equal(p.fireKey({ key: "ArrowRight", isComposing: true }), 0);
+  // 弹窗（role=dialog）内的操作不驱动背景文章切换
+  const dialogButton = new p.HTMLElementShim();
+  dialogButton.closest = (sel) => (sel.includes("dialog") ? {} : null);
+  assert.equal(p.fireKey({ key: "ArrowRight", target: dialogButton }), 0);
+  // 菜单/浮层同理
+  const menuItem = new p.HTMLElementShim();
+  menuItem.closest = (sel) => (sel.includes("menu") ? {} : null);
+  assert.equal(p.fireKey({ key: "ArrowLeft", target: menuItem }), 0);
+  assert.equal(p.pushes.length, 1, "only the genuine background keypress navigated");
+});
+
+test("X-R1-02: help shell / and Ctrl+K never steal overlay, handled or composing keys", () => {
+  const s = setupShell();
+  renderToStaticMarkup(s.tree);
+  s.effects.forEach((fn) => fn());
+  // 背景正文正向控制
+  assert.equal(s.fireKey({ key: "/" }), 1);
+  assert.equal(s.focused.length, 1);
+  // 弹窗内的 / 不抢焦点
+  const dialogTarget = new s.HTMLElementShim();
+  dialogTarget.closest = (sel) => (sel.includes("dialog") ? {} : null);
+  assert.equal(s.fireKey({ key: "/", target: dialogTarget }), 0);
+  assert.equal(s.fireKey({ key: "k", ctrlKey: true, target: dialogTarget }), 0);
+  // 已处理与输入法组合不响应
+  assert.equal(s.fireKey({ key: "/", defaultPrevented: true }), 0);
+  assert.equal(s.fireKey({ key: "k", ctrlKey: true, isComposing: true }), 0);
+  assert.equal(s.focused.length, 1);
 });
