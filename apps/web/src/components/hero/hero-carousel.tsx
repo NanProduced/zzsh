@@ -38,6 +38,8 @@ export function HeroCarousel() {
     setPlaying(false);
     if (direction < 0) api?.scrollPrev(reduced); else api?.scrollNext(reduced);
   };
+  // 轮播海报按呈现宽度提供 810w / 1215w 衍生图，超大屏仍可回落到原图。
+  const posterSrcSet = (poster: string) => `/art/zhouzhou/poster-${poster}@810.webp 810w, /art/zhouzhou/poster-${poster}@1215.webp 1215w, /art/zhouzhou/poster-${poster}.webp 1900w`;
   const slides = [
     { title: <>三角洲行动<br/><span>资源账号租赁</span></>, text: "按消耗计费 · 真人客服协助履约", button: "浏览三角洲资源账号", href: "#delta-section", poster:"delta", label:"三角洲资源账号租赁" },
     { title: <>未成年人<br/><span>禁止消费</span></>, text: "理性游戏 · 守护成长", button: "了解平台规则", href: "/help#protection", poster:"protection", label:"未成年人保护" },
@@ -60,7 +62,7 @@ export function HeroCarousel() {
       {slides.map((slide, index) => <div key={index} className={`hero-slide hero-slide-${index}`}
         role="group" aria-roledescription="幻灯片" aria-label={`${slide.label}，${index + 1} / ${slides.length}`}
         aria-hidden={index !== current} inert={index !== current}>
-        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={`/art/zhouzhou/poster-${slide.poster}.webp`} alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
+        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={`/art/zhouzhou/poster-${slide.poster}.webp`} srcSet={posterSrcSet(slide.poster)} sizes="(max-width: 599px) 92vw, (max-width: 1023px) 476px, 804px" alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
         {slide.subtitle && <p className="poster-subtitle" aria-hidden="true">{slide.subtitle}</p>}
         <p className="sr-only">{slide.title}</p><p className="sr-only">{slide.text}</p>
         {slide.href && <a className="hero-poster-link" href={slide.href} aria-label={slide.button}/>}

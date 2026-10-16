@@ -8,6 +8,7 @@ import {
   listingFilterKey,
   listingFiltersUrl,
   listingQuery,
+  listingUrlRejectedValues,
   listingRequestBudget,
   listingRequestTargets,
   normalizeListingQuery,
@@ -368,4 +369,28 @@ test('resource input validates canonical integer text and exact display bounds',
   assert.equal(validateResourceQuantityInput('0', { unit: 'PIECE' }, { min: '0', max: '9' }), '0');
   assert.equal(validateResourceQuantityInput('999999999999999999999999', { unit: 'PIECE' }, { min: '0', max: '999999999999999999999999' }), '999999999999999999999999');
   assert.throws(() => validateResourceQuantityInput('1000000000000000000000000', { unit: 'PIECE' }, { min: '0', max: '999999999999999999999999' }));
+});
+
+test('normalizing a URL only warns when a recognizable value was actually rejected', () => {
+  // 静默规范化：补默认游戏、补默认排序、省掉与默认值相同的 direction、忽略无法识别的多余 query。
+  assert.deepEqual(listingUrlRejectedValues({}, parseListingFilters({})), []);
+  assert.deepEqual(listingUrlRejectedValues({ game: 'game_4a3eebc1f36f40a5bbadc97e44f5023b' }, parseListingFilters({ game: 'game_4a3eebc1f36f40a5bbadc97e44f5023b' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ sort: 'latest' }, parseListingFilters({ sort: 'latest' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ direction: 'DESC' }, parseListingFilters({ direction: 'DESC' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ direction: 'ASC' }, parseListingFilters({ direction: 'ASC' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ q: 'awm' }, parseListingFilters({ q: 'awm' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ unknownParam: 'x', cursor: 'not-a-cursor' }, parseListingFilters({ unknownParam: 'x', cursor: 'not-a-cursor' })), []);
+
+  // 真的被拒绝/改写：形状非法的 sort、非法 direction、非法 game、空 q、无法解析的 filters。
+  // 注意：形状合法但服务端未启用的 sort（如 'bogus'）由 reconcileListingFilters 依 metadata
+  // 收敛，走 changed 分支的另一条提示，不归本函数判定。
+  assert.deepEqual(listingUrlRejectedValues({ sort: '!!' }, parseListingFilters({ sort: '!!' })), ['sort']);
+  assert.deepEqual(listingUrlRejectedValues({ sort: 'a'.repeat(65) }, parseListingFilters({ sort: 'a'.repeat(65) })), ['sort']);
+  assert.deepEqual(listingUrlRejectedValues({ sort: 'bogus' }, parseListingFilters({ sort: 'bogus' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ direction: 'sideways' }, parseListingFilters({ direction: 'sideways' })), ['direction']);
+  assert.deepEqual(listingUrlRejectedValues({ game: '!!' }, parseListingFilters({ game: '!!' })), ['game']);
+  assert.deepEqual(listingUrlRejectedValues({ q: '   ' }, parseListingFilters({ q: '   ' })), ['q']);
+  assert.deepEqual(listingUrlRejectedValues({ filters: 'not-json' }, parseListingFilters({ filters: 'not-json' })), ['filters']);
+  assert.deepEqual(listingUrlRejectedValues({ filters: '{"regions":[]}' }, parseListingFilters({ filters: '{"regions":[]}' })), ['filters']);
+  assert.deepEqual(listingUrlRejectedValues({ sort: '!!', direction: 'sideways' }, parseListingFilters({ sort: '!!', direction: 'sideways' })), ['sort', 'direction']);
 });

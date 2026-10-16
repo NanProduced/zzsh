@@ -44,7 +44,10 @@
 
 .functional-breadcrumb-list a,
 .functional-breadcrumb-list li > span:last-child {
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
+  min-height: 24px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

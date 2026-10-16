@@ -5,14 +5,16 @@
 .market-pagination { display:flex; gap:10px; margin-top:16px; }
 .market-pagination .button { min-height:40px; }
 .functional-top-content { margin-block: 14px 0; }
-.market-banner-layout { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:16px; align-items:stretch; }
-.market-banner-carousel,.market-banner-viewport,.market-banner-track,.market-banner-slide,.market-poster-link { display:block; min-width:0; width:100%; height:100%; }
+/* 单栏：没有经核实的联系二维码时只呈现专区海报，海报按自身 3:1 完整显示，
+   不被右侧栏的行高撑高后左右裁切。 */
+.market-banner-layout { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; align-items:start; }
+.market-banner-carousel,.market-banner-viewport,.market-banner-track,.market-banner-slide,.market-poster-link { display:block; min-width:0; width:100%; }
 .market-banner-carousel { overflow:hidden; border:1px solid color-mix(in srgb,var(--color-delta-accent) 26%,var(--color-border-default)); border-radius:14px; background:#10191c; box-shadow:0 12px 32px rgb(7 15 20 / 14%); }
 .market-banner-slide { aspect-ratio:3/1; }
+/* 超宽屏限制海报宽度，避免 3:1 全宽横幅把首屏内容推到太下面；仍保持 3:1 不裁切。 */
+@media (min-width:1280px) { .market-banner-carousel { max-width:1056px; margin-inline:auto; } }
 .market-poster-link { position:relative; overflow:hidden; }
 .market-poster-link img { display:block; width:100%; height:100%; object-fit:cover; }
-.market-contact-templates { display:grid; min-width:0; grid-template-rows:1fr 1fr; gap:12px; }
-.market-contact-templates img { display:block; width:100%; height:100%; min-height:0; object-fit:contain; border-radius:12px; }
 @media (min-width:1100px) and (max-width:1460px) and (hover:hover) and (pointer:fine) {
   .market-banner-layout { margin-right:64px; }
 }
@@ -416,13 +418,10 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
 .detail-price { font-size:17px; font-weight:700; color:var(--color-accent-brand); }
 .listing-unavailable { max-width:640px; }
 @media (max-width:1023px) {
-  .market-banner-layout { grid-template-columns:minmax(0,1fr) 250px; }
   .detail-hero { grid-template-columns:minmax(0,1fr); }
 }@media (max-width:799px) {
   .functional-top-content { margin-block:10px 0; }
-  .market-banner-layout { grid-template-columns:minmax(0,1fr); gap:10px; }
-  .market-contact-templates { grid-template-columns:repeat(2,minmax(0,1fr)); grid-template-rows:none; gap:10px; }
-  .market-contact-templates img { height:auto; aspect-ratio:1.9/1; }
+  .market-banner-layout { gap:10px; }
   .market-filter-details { display:none; }
   .market-filter-mobile-row { display:flex; min-height:54px; align-items:center; justify-content:space-between; gap:12px; border-block:1px solid var(--color-border-default); color:var(--color-text-secondary); font-size:12px; }
   .market-filter-mobile-row > span { min-width:0; overflow-wrap:anywhere; }
