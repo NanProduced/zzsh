@@ -164,3 +164,18 @@ test("E-R1-02 audit failure rolls back states, events and receipt; dry run write
   assert.deepEqual([preview.wouldApply, preview.alreadyInitialized], [["u1", "u3"], ["u2"]]);
   for (const bad of [{ batchKey: "x" }, { userIds: [] }, { userIds: ["u1", "u1"] }, { inputDigest: "zz" }, { resourceRef: " " }]) await assert.rejects(() => applyCreditInitializationBatch(client(world()), input(bad)));
 });
+import { readCreditInitializationRun } from "../src/credit/credit-initialization-cli";
+import { createHash as nodeHash } from "node:crypto";
+
+test("credit initialization runner requires opt-in, signed package digest and matching resource; defaults to preview", () => {
+  const bytes = Buffer.from(JSON.stringify({ batchKey: "credit-init:batch-0001", userIds: ["u1"], resourceRef: "pg-window-e-001", reason: "decided rule" }));
+  const digest = nodeHash("sha256").update(bytes).digest("hex");
+  const env = { CREDIT_INIT_ENABLED: "true", CREDIT_INIT_PACKAGE_FILE: "pkg.json", CREDIT_INIT_PACKAGE_SHA256: digest, CREDIT_INIT_ACTOR_ADMIN_ID: "boss", CREDIT_INIT_RESOURCE_REF: "pg-window-e-001" };
+  const run = readCreditInitializationRun(env, () => bytes);
+  assert.equal(run.mode, "PREVIEW");
+  assert.equal(run.input.inputDigest, digest);
+  assert.equal(readCreditInitializationRun({ ...env, CREDIT_INIT_MODE: "APPLY" }, () => bytes).mode, "APPLY");
+  assert.throws(() => readCreditInitializationRun({ ...env, CREDIT_INIT_ENABLED: "" }, () => bytes), /ENABLED/);
+  assert.throws(() => readCreditInitializationRun({ ...env, CREDIT_INIT_PACKAGE_SHA256: "0".repeat(64) }, () => bytes), /digest/);
+  assert.throws(() => readCreditInitializationRun({ ...env, CREDIT_INIT_RESOURCE_REF: "default-db" }, () => bytes), /resourceRef/);
+});
