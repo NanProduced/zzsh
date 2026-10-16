@@ -132,7 +132,7 @@ function ApprovalInboxWidget({
     return (
       <div className="space-y-2">
         <StatusMessage error={error} />
-        {loadFailed ? <Button type="button" size="sm" variant="outline" onClick={() => void load()}>重试</Button> : null}
+        {loadFailed ? <Button type="button" size="sm" variant="outline" onClick={() => void load().catch((failure) => setError(friendlyError(failure)))}>重试</Button> : null}
       </div>
     );
   }
