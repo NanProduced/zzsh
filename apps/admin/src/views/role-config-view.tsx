@@ -1,3 +1,4 @@
+import { readAdminDirectoryShared } from "../workspace/admin-directory-read";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -743,7 +744,7 @@ export function RoleConfigView({
     setPermissions(catalog.permissions ?? []);
     if (canReadAccounts) {
       try {
-        const directory = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
+        const directory = await readAdminDirectoryShared();
         const admins = directory.admins ?? [];
         const next = new Map<string, number>();
         for (const admin of admins) {

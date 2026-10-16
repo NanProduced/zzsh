@@ -1,3 +1,4 @@
+import { readAdminDirectoryShared } from "./admin-directory-read";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDownIcon, ArrowLeftIcon, ArrowRightIcon, ArrowUpIcon, ArrowUpRightIcon, CheckCheckIcon, GripVerticalIcon, MoreHorizontalIcon, PlusIcon, ShieldCheckIcon, KeyRoundIcon, XIcon } from "lucide-react";
 import { GridStack, useGridStack } from "gridstack/dist/react";
@@ -179,7 +180,7 @@ function AdminDirectoryWidget({
   const [items, setItems] = useState<AdminDirectoryEntry[]>();
   const [error, setError] = useState<string>();
   const load = useCallback(async () => {
-    const result = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
+    const result = await readAdminDirectoryShared();
     setItems((result.admins ?? []).slice(0, 8));
     setError(undefined);
   }, []);

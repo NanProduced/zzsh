@@ -1,3 +1,4 @@
+import { readAdminDirectoryShared } from "./admin-directory-read";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { Icons } from "../components/icons";
@@ -179,7 +180,7 @@ function FreezePanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authen
 
   const loadAdmins = useCallback(async () => {
     try {
-      const result = await adminRequest<{ admins?: AdminDirectoryEntry[] }>("/security/admins");
+      const result = await readAdminDirectoryShared();
       setAdmins(result.admins ?? []);
     } catch (failure) {
       setError(friendlyError(failure));

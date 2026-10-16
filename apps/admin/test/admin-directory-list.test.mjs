@@ -218,3 +218,17 @@ test("F5 列表边界用例已登记进标准前端测试入口", async () => {
     }
   }
 });
+
+import { sharedInFlight } from "../src/lib/shared-inflight.ts";
+
+test("GAP-021 shared directory read coalesces concurrent callers and never serves a settled result", async () => {
+  let calls = 0; let release;
+  const read = sharedInFlight(() => { calls += 1; return new Promise((resolve) => { release = resolve; }); });
+  const a = read(); const b = read();
+  assert.equal(a, b); assert.equal(calls, 1);
+  release({ admins: [] }); assert.deepEqual(await a, { admins: [] });
+  const c = read(); assert.equal(calls, 2); release({ admins: [{ id: "x" }] }); await c;
+  const failing = sharedInFlight(() => { calls += 1; return Promise.reject(new Error("403")); });
+  await assert.rejects(failing(), /403/); await assert.rejects(failing(), /403/);
+  assert.equal(calls, 4, "a failed read is not cached");
+});
