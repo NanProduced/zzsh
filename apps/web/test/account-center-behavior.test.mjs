@@ -1668,3 +1668,23 @@ test("T11-01: .sec-dialog 层叠高于全局 .modal-overlay，鼠标命中测试
   const alertCss = fs.readFileSync(path.join(tree, "apps/web/src/components/ui/alert-dialog.css"), "utf8");
   assert.match(alertCss, /\.ui-alert-dialog \{[^}]*z-index: 101;/s, "Alert Dialog 仍为 101");
 });
+
+test("E-R1-06 every in-repo /account?view= link is a known view, params survive, and no alias is guessed", async () => {
+  const { readFileSync, readdirSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const roots = ["src"];
+  const found = new Set();
+  const walk = (dir) => { for (const name of readdirSync(dir)) { const p = join(dir, name); if (statSync(p).isDirectory()) walk(p); else if (/\.(tsx?|mjs)$/.test(name)) for (const m of readFileSync(p, "utf8").matchAll(/account\?view=([a-z-]+)/g)) found.add(m[1]); } };
+  for (const root of roots) walk(new URL(`../${root}`, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  assert.ok(found.size > 0);
+  const { isKnownAccountView, resolveAccountView, accountSectionHref } = loadCenter({});
+  for (const view of found) {
+    assert.equal(isKnownAccountView(view), true, `linked view ${view} must be known`);
+    assert.equal(resolveAccountView(view), view === "overview" ? "overview" : view);
+  }
+  for (const guess of ["orders", "order", "rent", "deposit", "vip", "member", "distribution"]) assert.equal(isKnownAccountView(guess), false, `${guess} is not an evidenced alias`);
+  const acc = new URLSearchParams(accountSectionHref("accounts", { view: "accounts", accountId: "acc_9" }).split("?")[1]);
+  assert.equal(acc.get("accountId"), "acc_9");
+  const leased = new URLSearchParams(accountSectionHref("leased", { view: "leased", accountId: "acc_2", orderId: "order_B", status: "IN_SERVICE" }).split("?")[1]);
+  assert.deepEqual([leased.get("view"), leased.get("accountId"), leased.get("orderId"), leased.get("status")], ["leased", "acc_2", "order_B", "IN_SERVICE"]);
+});
