@@ -30,7 +30,7 @@ export function parseLegacyUserOrderQuery(query: URLSearchParams): LegacyUserOrd
 }
 
 export type LegacyUserOrderRow = {
-  id: string; displayNo: string; sourceOrderStatus: number; sourcePayStatus: number;
+  id: string; displayNo: string; sourceOrderStatus: number; sourcePayStatus: number; continuationStage?: number | null;
   ownerUserId: string; renterUserId: string; gameId: string; title: string | null;
   accountId: string; accountDisplayNo: string | null; accountReadable: boolean;
   createdAt: string | null; paidAt: string | null; cancelledAt: string | null; completedAt: string | null;
@@ -41,7 +41,7 @@ const money = (value: string | null) => value === null ? null : centsToYuan(valu
 export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) {
   const party = row.renterUserId === userId ? "renter" : row.ownerUserId === userId ? "owner" : null;
   if (!party) throw notFound();
-  const state = legacyOrderReadState(row.sourceOrderStatus, row.sourcePayStatus);
+  const state = legacyOrderReadState(row.continuationStage ?? row.sourceOrderStatus, row.sourcePayStatus);
   const goods = legacyMoneyCents(row.goodsYuan), items = legacyMoneyCents(row.itemsYuan);
   const paid = state.paymentState === "RECORDED_PAID" ? money(row.paidCents) : null;
   return {
@@ -57,13 +57,14 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) 
 }
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 // Only selected historical facts enter the user projection. No counterparty/contact/credential/audit JSON is loaded.
-export const LEGACY_USER_ORDER_FIELDS = `l.id,l.original_order_no AS "displayNo",l.source_order_status AS "sourceOrderStatus",l.source_pay_status AS "sourcePayStatus",
+export const LEGACY_USER_ORDER_FIELDS = `l.id,l.original_order_no AS "displayNo",l.source_order_status AS "sourceOrderStatus",l.source_pay_status AS "sourcePayStatus",h.stage AS "continuationStage",
  l.owner_user_id AS "ownerUserId",l.renter_user_id AS "renterUserId",l.game_id AS "gameId",CASE WHEN a.owner_user_id=$1 THEN v.title ELSE NULL END AS title,
  l.account_id AS "accountId",l.legacy_account_no AS "accountDisplayNo",COALESCE(a.owner_user_id=$1,false) AS "accountReadable",
- ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc("l.source_completed_at")} AS "completedAt",
+ ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc("COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)")} AS "completedAt",
  l.due_amount_cents::text AS "dueCents",l.recorded_paid_amount_cents::text AS "paidCents",l.deposit_amount_cents::text AS "depositCents",
  l.source_snapshot->>'goods_money' AS "goodsYuan",l.source_snapshot->>'expend_pay_money' AS "itemsYuan",l.source_snapshot->>'return_order_money' AS "refundYuan"`;
 export const LEGACY_USER_ORDER_FROM = `FROM zzsh_order.legacy_order_read_snapshot l LEFT JOIN zzsh_supply.rental_account a ON a.id=l.account_id
+ LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
  LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id`;
 
 export async function listUserLegacyOrders(client: PoolClient, userId: string, filter: LegacyUserOrderFilter) {

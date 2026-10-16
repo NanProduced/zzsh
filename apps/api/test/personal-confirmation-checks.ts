@@ -143,6 +143,7 @@ export async function runPersonalConfirmationChecks(o:Options,listing:any) {
       await lock.query("BEGIN");
       const holderPid=(await lock.query(`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
       const old=await rebuildPersonalConfirmation(lock,context,input,options);
+      assert("membership" in old.snapshot && old.snapshot.membership,"compatibility fixture must retain its original membership contract");
       const oldVersion=old.snapshot.membership.version;
       pending=call(membershipPath,{tier:"VIP",expectedVersion:oldVersion,sourceRef:"fixture:barrier",reason:"concurrent fixture"},o.boss,"PUT");
       let blocked=false;const deadline=Date.now()+5000;
@@ -151,6 +152,7 @@ export async function runPersonalConfirmationChecks(o:Options,listing:any) {
       assert.equal((await lock.query(`SELECT version::text FROM zzsh_iam.user_rental_membership WHERE user_id=$1`,[renter.id])).rows[0].version,oldVersion);
       await lock.query("COMMIT");assert.equal((await pending).status,200);
       const next=await withTransaction(o.pool,client=>rebuildPersonalConfirmation(client,context,input,options));
+      assert("membership" in next.snapshot && next.snapshot.membership,"compatibility fixture must retain its original membership contract");
       assert.equal(next.snapshot.membership.tier,"VIP");assert.equal(BigInt(next.snapshot.membership.version),BigInt(oldVersion)+1n);
     } finally {await lock.query("ROLLBACK");lock.release();if(pending)await pending;}
     const small=new Pool({...o.pool.options,password:o.pool.options.password,max:2});

@@ -10,7 +10,7 @@ import { supplyApi } from "@/lib/supply-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { RentalPriceSummary, type ReferenceFees } from "./rental-price-summary";
-import { moneyText } from "@/lib/order-display";
+import { moneyText,personalMembershipLabel,personalBenefitSources } from "@/lib/order-display";
 import { performGuardedWrite, type WriteOutcome } from "@/components/order/order-trade-actions";
 
 type AgreementInfo = { id: string; title: string; body: string; digest: string };
@@ -163,7 +163,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
     createKey.current = key;
     const context: StoredContext = {
       payable: quote.quote?.tenantPayableTotal?.amount,
-      tier: quote.customerTier,
+      tier: personalMembershipLabel(quote),
       deposit: quote.depositWaived ? undefined : quote.baseTenantDeposit?.amount,
       expiresAt: quote.expiresAt,
       ...(quote.compensationDisclosure ? { disclosure: quote.compensationDisclosure.disclosureVersion } : {}),
@@ -382,7 +382,8 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
     const expired = ["已过期", null].includes(countdown(quote.expiresAt, now));
     return <div className="rental-confirm rental-confirm--quote">
       {!reference ? <><div className="rental-confirm-head"><strong>个人报价确认</strong>
-        <span className="rental-confirm-tier">{quote.customerTier}{quote.depositWaived ? " · 已免租客押金" : ""}</span></div>
+        <span className="rental-confirm-tier">{personalMembershipLabel(quote)}{quote.depositWaived ? " · 已免租客押金" : ""}</span></div>
+      {personalBenefitSources(quote)?<p>{personalBenefitSources(quote)}</p>:null}
       <dl className="rental-confirm-facts">
         <div><dt>资源费用</dt><dd>{formatMoneyLabel(money.resourceTotal ?? null) ?? "—"}</dd></div>
         <div><dt>租客押金</dt><dd>{quote.depositWaived ? "已免押" : formatMoneyLabel(money.tenantDeposit ?? quote.baseTenantDeposit) ?? "—"}</dd></div>

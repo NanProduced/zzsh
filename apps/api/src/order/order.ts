@@ -14,6 +14,7 @@ import {
 } from "../supply/publishing";
 import { projectDeltaQuote, type InternalQuote, type QuoteAmount } from "../supply/pricing";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "../supply/supply-util";
+import { readLegacyAwareOrderOccupancy } from "./legacy-order-occupancy";
 
 export const ORDER_STATUS = {
   PENDING_PAYMENT: "PENDING_PAYMENT",
@@ -693,22 +694,13 @@ export async function getAdminOrder(
 }
 
 /** Real occupancy seam for the supply gate: an occupying order wins over the base reader. */
-export async function readOrderOccupancy(client: PoolClient, accountId: string): Promise<boolean> {
-  return (
-    ((await client.query(
-      `SELECT 1 FROM zzsh_order.rental_order WHERE account_id = $1 AND status IN ('PENDING_PAYMENT','PAID') LIMIT 1`,
-      [accountId],
-    )).rowCount ?? 0) > 0
-  );
-}
+export { readLegacyAwareOrderOccupancy as readOrderOccupancy } from "./legacy-order-occupancy";
 
 export function composeSupplyGateWithOrderOccupancy(base: SupplyGateReader): SupplyGateReader {
   return async (client, account, purpose) => {
     const gate = await base(client, account, purpose);
-    // Occupancy truth is order-derived only: no occupying order means FREE.
-    // The publisher-bail seam stays independent (UNKNOWN fails closed until M5).
-    const occupied = await readOrderOccupancy(client, account.id);
-    return { ...gate, occupancy: occupied ? "OCCUPIED" : "FREE" };
+    const occupancy = await readLegacyAwareOrderOccupancy(client, account.id);
+    return { ...gate, occupancy };
   };
 }
 

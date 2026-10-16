@@ -14,7 +14,8 @@ export type IntentKind =
   | "order.cancel"
   | "opening.confirm"
   | "settlement.submit"
-  | "settlement.decision";
+  | "settlement.decision"
+  | "legacy.continuation";
 
 export type PendingIntent = {
   version: 1;
@@ -61,6 +62,18 @@ export function loadIntent(userId: string, kind: IntentKind, resourceId: string)
   } catch {
     return null;
   }
+}
+
+/** Unreadable original bytes still own a pending responsibility; callers must never overwrite them. */
+export function inspectIntent(userId: string, kind: IntentKind, resourceId: string): { state: "NONE" | "VALID" | "UNREADABLE"; intent: PendingIntent | null } {
+  const storage = store();
+  if (!storage) return { state: "UNREADABLE", intent: null };
+  try {
+    const raw = storage.getItem(storageKey(userId, kind, resourceId));
+    if (raw === null) return { state: "NONE", intent: null };
+    const intent = loadIntent(userId, kind, resourceId);
+    return intent ? { state: "VALID", intent } : { state: "UNREADABLE", intent: null };
+  } catch { return { state: "UNREADABLE", intent: null }; }
 }
 
 /** Age only stops automatic replay; the intent must still be resolved with authority first. */

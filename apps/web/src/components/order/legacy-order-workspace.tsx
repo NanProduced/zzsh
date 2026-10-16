@@ -5,6 +5,7 @@ import { useUserSession } from "@/components/session/user-session-provider";
 import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type LegacyOrder, type LegacyOrderPage, type OrderParty, type OrderStatusFilter } from "@/lib/order-client";
 import { orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
+import { LegacyContinuationPanel } from "./legacy-continuation-panel";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
   const q = new URLSearchParams({ view: party === "owner" ? "leased" : "rentals", source: "legacy", page: String(page) });
@@ -41,7 +42,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   if (!current || current.loading) return <p role="status" aria-busy="true">正在读取订单…</p>;
   if (current.error || !current.data) return <section role="alert" className="order-error-block"><h2>订单暂不可用</h2><p>{current.error}</p><button className="button secondary" onClick={() => setReload(n => n + 1)}>重试读取</button></section>;
   const data = current.data;
-  const notice = <p className="order-muted">这笔订单目前仅支持查看。付款、退款或结算事项请联系客服；应退金额不代表已到账。</p>;
+  const notice = <p className="order-muted">原付款与金额记录保留；可办理事项以本单核定结果为准。应退金额不代表已到账。</p>;
   if ("items" in data) return <section className="order-detail-view">
     <header className="account-module-heading"><div><h2>{party === "owner" ? "出租" : "租入"}订单</h2><p>只读记录</p></div><button className="button secondary" onClick={() => setReload(n => n + 1)}>刷新</button></header>
     {notice}
@@ -64,6 +65,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts.deposit)}</dd></div>
       <div><dt>应退金额（到账待确认）</dt><dd>{formatOrderMoney(data.legacyAmounts.refund)}</dd></div>
     </dl></section>
+    <LegacyContinuationPanel orderId={data.id} party={party}/>
     <section className="account-module-card"><h3>订单信息</h3><dl className="order-facts">
       <div><dt>创建时间</dt><dd>{formatOrderTime(data.createdAt)}</dd></div><div><dt>支付记录时间</dt><dd>{formatOrderTime(data.paidAt)}</dd></div>
       <div><dt>完成时间</dt><dd>{formatOrderTime(data.completedAt)}</dd></div><div><dt>取消时间</dt><dd>{formatOrderTime(data.cancelledAt)}</dd></div>

@@ -36,6 +36,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/order/order-detail") return loadComponent("apps/web/src/components/order/order-detail.tsx", session);
     if (name === "@/components/order/order-list") return loadComponent("apps/web/src/components/order/order-list.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
+    if (name === "./legacy-continuation-panel") return {LegacyContinuationPanel:()=>null};
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name.endsWith(".css")) return {};

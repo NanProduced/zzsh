@@ -6,9 +6,10 @@ import { canonicalize } from "../supply/content-hash";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
 import { assertGameScope, conflict, ensureOnlyFields, fingerprintRequest, invalid, sha256Hex, withIdempotency } from "../supply/supply-util";
 
-export const LEGACY_ORDER_STATUS_SQL = `CASE WHEN l.source_order_status=5 THEN 'CANCELLED' WHEN l.source_order_status=4 THEN 'COMPLETED'
- WHEN l.source_order_status=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'
- WHEN l.source_order_status IN(2,3,6,7,8,9) AND l.source_pay_status=1 THEN 'PAID' ELSE 'UNKNOWN' END`;
+// Every consuming relation joins the unique current continuation head as h.
+export const LEGACY_ORDER_STATUS_SQL = `CASE WHEN COALESCE(h.stage,l.source_order_status)=5 THEN 'CANCELLED' WHEN COALESCE(h.stage,l.source_order_status)=4 THEN 'COMPLETED'
+ WHEN COALESCE(h.stage,l.source_order_status)=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'
+ WHEN COALESCE(h.stage,l.source_order_status) IN(2,3,6,7,8,9) AND l.source_pay_status=1 THEN 'PAID' ELSE 'UNKNOWN' END`;
 const LEGACY_STATE: Record<string,string> = {"1":"待支付","2":"待上号","3":"进行中","4":"已完成","5":"已取消","6":"待验号","7":"待确认额外消耗","8":"待卖家确认","9":"待买家确认"};
 export function legacyOrderReadState(status: number, payStatus: number) {
   const paymentState = payStatus === 1 ? "RECORDED_PAID" : payStatus === 0 ? "RECORDED_UNPAID" : "UNKNOWN";

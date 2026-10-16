@@ -3,8 +3,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createServer } from "vite";
-import react from "@vitejs/plugin-react";
+import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 import { installSupplyLockFixture } from "./supply-lock-fixture.mjs";
 
 test("actual price editor preserves every member tier in either row order and still saves v1", async () => {
@@ -14,7 +13,7 @@ test("actual price editor preserves every member tier in either row order and st
   Object.defineProperty(globalThis,"navigator",{value:browser.navigator,configurable:true});
   const originalFetch = globalThis.fetch;
   const {createRoot} = await import("react-dom/client");
-  const vite = await createServer({configFile:false,root:fileURLToPath(new URL("..",import.meta.url)),plugins:[react()],resolve:{alias:{"@":fileURLToPath(new URL("../src",import.meta.url))}},optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
+  const vite = await createOfflineAdminSource({root:fileURLToPath(new URL("..",import.meta.url))});
   let root;
   try {
     const {SupplyRulesView} = await vite.ssrLoadModule("/src/views/supply-rules-view.tsx");
@@ -59,7 +58,7 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   Object.defineProperty(browser, "innerWidth", { value: 1440, writable: true, configurable: true }); Object.defineProperty(browser, "innerHeight", { value: 900, writable: true, configurable: true });
   const originalFetch = globalThis.fetch, { createRoot } = await import("react-dom/client");
-  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("..", import.meta.url)), plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false, ws: false, watch: null } });
+  const vite = await createOfflineAdminSource({ root: fileURLToPath(new URL("..", import.meta.url)) });
   let root, el, View, model, writes, reads, policy, quotes, recovery, readResume;
   const snapshot = { authenticated: true, adminUserId: "admin-a", session: { id: "session-a" }, security: { isBoss: true, status: "ACTIVE" }, permissions: ["supply.rules.edit", "supply.quote.internal.read"] };
   const fresh = () => {
