@@ -17,7 +17,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   const startLocation = new URL(startUrl);
   const nav = { pathname: options.pathname ?? startLocation.pathname };
   const router = { pushes: [], replaces: [], push: target => { router.pushes.push(target); }, replace: target => { router.replaces.push(target); } };
-  Object.assign(globalThis, { window, document: window.document, Node: window.Node, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, Element: window.Element, Event: window.Event, MouseEvent: window.MouseEvent, CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window), requestAnimationFrame: window.requestAnimationFrame.bind(window), cancelAnimationFrame: window.cancelAnimationFrame.bind(window), IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { window, document: window.document, Node: window.Node, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, HTMLButtonElement: window.HTMLButtonElement, Element: window.Element, Event: window.Event, MouseEvent: window.MouseEvent, CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window), requestAnimationFrame: window.requestAnimationFrame.bind(window), cancelAnimationFrame: window.cancelAnimationFrame.bind(window), IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
   window.confirm = () => true;
   const originalFetch = globalThis.fetch;
@@ -29,7 +29,24 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   };
   const identity = { status: options.initialStatus ?? "guest", userId: options.initialStatus === "authenticated" ? "user_A" : null, identityVersion: 1 };
   let confirmations = 0, successes = 0;
-  const session = { get status() { return identity.status; }, get userId() { return identity.userId; }, get identityVersion() { return identity.identityVersion; }, confirm: async () => { confirmations++; const status = options.confirm ? await options.confirm() : "authenticated"; identity.status = status; identity.userId = status === "authenticated" ? options.confirmUserId ?? "user_A" : null; return status; }, revalidate() { confirmations++; options.revalidate?.(); }, signOut: async () => { identity.status = "guest"; identity.userId = null; } };
+  // The real provider hands out a memoised snapshot, so a closure created on an earlier render keeps
+  // the status that render saw. Mirror that: a fresh session object per render, never live getters,
+  // otherwise stale-closure bugs (a long-lived effect calling auth.open) stay invisible here.
+  let session = {
+    status: identity.status,
+    userId: identity.userId,
+    identityVersion: identity.identityVersion,
+    confirm: async () => { confirmations++; const status = options.confirm ? await options.confirm() : "authenticated"; identity.status = status; identity.userId = status === "authenticated" ? options.confirmUserId ?? "user_A" : null; return status; },
+    revalidate() { confirmations++; options.revalidate?.(); },
+    signOut: async () => { identity.status = "guest"; identity.userId = null; },
+  };
+  const syncSession = () => {
+    const next = { ...session };
+    next.status = identity.status;
+    next.userId = identity.userId;
+    next.identityVersion = identity.identityVersion;
+    session = next;
+  };
   const store = { getSnapshot: () => identity };
   const DialogContext = React.createContext(null);
   const dialogStub = {
@@ -58,6 +75,17 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
       if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
       if (name === "@/lib/web-auth-request") return load(path.join(rootPath, "apps/web/src/lib/web-auth-request.ts"));
       if (name === "../auth/auth-form" || name === "./auth-form") return load(path.join(rootPath, "apps/web/src/components/auth/auth-form.tsx"));
+      // The support rail's own children: the workspace pulls in Radix popover, the IM client and
+      // workspace packages that cannot run under happy-dom, and the contact popover is Radix too.
+      // Routing tests only need the rail's trigger chain, so both stand in as null renders.
+      if (name === "./contact-popover") return { ContactPopover: () => null };
+      if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: () => null };
+      // Sibling imports inside src/ resolve like a bundler would; the two stubs above still win.
+      if (name.startsWith("./") || name.startsWith("../")) {
+        const base = path.resolve(path.dirname(module.filename), name);
+        const candidate = [base + ".tsx", base + ".ts", path.join(base, "index.tsx"), path.join(base, "index.ts")].find(option => fs.existsSync(option));
+        if (candidate) return load(candidate);
+      }
       // A test may stand in for the coordinator when it only exercises a consumer such as /login.
       if (name === "@/components/auth/auth-overlay-provider") {
         if (options.authOverlay) return options.authOverlay;
@@ -86,7 +114,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   // Lets a test mount the coordinator with a real consumer (for example the legacy /login page)
   // instead of a stub, so the composition itself is what gets asserted.
   if (options.child) currentProps.children = React.createElement(load(path.join(rootPath, options.child.path))[options.child.name]);
-  const render = async (changes = {}) => { currentProps = { ...currentProps, ...changes }; await React.act(async () => { const element = React.createElement(Component, currentProps); root.render(options.strictMode ? React.createElement(React.StrictMode, null, element) : element); }); };
+  const render = async (changes = {}) => { syncSession(); currentProps = { ...currentProps, ...changes }; await React.act(async () => { const element = React.createElement(Component, currentProps); root.render(options.strictMode ? React.createElement(React.StrictMode, null, element) : element); }); };
   await render();
   const settle = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
   const findButton = text => { const buttons = [...host.querySelectorAll("button")]; const button = buttons.find(item => item.textContent === text) ?? buttons.find(item => item.getAttribute("aria-label") === text); assert.ok(button, "button present: " + text); return button; };
@@ -99,5 +127,5 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     }); await settle();
   };
   const submit = async (selector = "form") => { const form = host.querySelector(selector); assert.ok(form); await React.act(async () => form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))); await settle(); };
-  return { host, window, calls, identity, session, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
+  return { host, window, calls, identity, get session() { return session; }, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
 }

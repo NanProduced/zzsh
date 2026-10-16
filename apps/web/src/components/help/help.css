@@ -204,6 +204,14 @@
 }
 
 .help-article-section .help-section-anchor {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 图标仍是 15px，命中区给到 24px：章节锚点是键盘和触屏用户复制段链接的唯一入口。 */
+  width: 24px;
+  height: 24px;
+  margin-inline: -4px;
+  border-radius: 6px;
   color: var(--color-text-muted);
   text-decoration: none;
   opacity: 0;

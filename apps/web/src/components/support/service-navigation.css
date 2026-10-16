@@ -240,21 +240,3 @@
  .supply-account-row { flex-direction:column; }
  .supply-account-state { text-align:left; }
 }
-
-/* /support 落地页：先给可阅读的咨询类型入口，用户主动点击才开窗。 */
-.support-landing { max-width:760px; }
-.support-landing h2 { margin:0 0 8px; font-size:var(--type-section-title-size); font-weight:var(--type-section-title-weight); line-height:var(--type-section-title-leading); }
-.support-landing > p { margin:0; color:var(--color-text-secondary); font-size:var(--type-helper-size); line-height:var(--type-helper-leading); }
-.support-landing-entries { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin:22px 0 0; }
-.support-landing-entry { display:flex; align-items:center; gap:14px; min-height:76px; padding:16px; text-align:left; border:1px solid var(--color-border-default); border-radius:12px; background:var(--color-bg-card); color:var(--color-text-primary); cursor:pointer; transition:border-color .15s ease,background-color .15s ease; }
-.support-landing-entry:hover { border-color:var(--color-accent-brand); background:var(--color-bg-card-hover); }
-.support-landing-entry:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:3px; }
-.support-landing-entry-icon { display:grid; place-items:center; flex:0 0 auto; width:44px; height:44px; border-radius:10px; color:var(--color-accent-brand); background:var(--color-accent-brand-muted); }
-.support-landing-entry-copy { min-width:0; }
-.support-landing-entry-copy strong { display:block; font-size:15px; }
-.support-landing-entry-copy small { display:block; margin-top:4px; color:var(--color-text-secondary); font-size:12px; line-height:1.6; }
-.support-landing-hint { display:flex; align-items:flex-start; gap:8px; margin:20px 0 0 !important; color:var(--color-text-secondary); font-size:12px; line-height:1.6; }
-.support-landing-hint svg { flex:0 0 auto; margin-top:2px; }
-.support-landing-links { margin:10px 0 0 !important; font-size:12px !important; }
-.support-landing-links a { display:inline-flex; align-items:center; min-height:24px; color:var(--color-accent-brand-ink); }
-@media(max-width:599px) { .support-landing-entries { grid-template-columns:minmax(0,1fr); } }

@@ -1614,7 +1614,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const close=<button type="button" className="support-icon-button" aria-label="关闭客服窗口" onClick={onClose}><X size={18}/></button>;
   const retainedDirectory=directoryIdentity===currentIdentity&&(consultations.length>0||orders.length>0);
   if(!directoryReady&&!retainedDirectory)return <section className="support-welcome" aria-busy={directoryState==="loading"}><header>{brand}{close}</header><div role={directoryState==="error"?"alert":"status"}><h2>{directoryState==="error"?"暂时无法读取会话":"正在读取会话"}</h2><p>{directoryState==="error"?directoryError:"正在核对咨询、投诉和租入／出租订单群。"}</p>{directoryState==="error"?<button type="button" className="button secondary" onClick={()=>setDirectoryRevision(n=>n+1)}>重试读取</button>:null}</div></section>;
-  if(welcome)return <section className="support-welcome"><header>{brand}{close}</header><div><h2>你好，需要什么帮助？</h2><p>订单会话建立后，会自动出现在这里。</p>{actions}{error?<p role="alert">{error}</p>:null}</div><footer>关闭后可继续浏览，已有会话会保留。</footer></section>;
+  if(welcome)return <section className="support-welcome"><header>{brand}{close}</header><div><h2>你好，需要什么帮助？</h2><p>订单会话建立后，会自动出现在这里。</p>{actions}{error?<p role="alert">{error}</p>:null}</div><footer>关闭后可继续浏览，已有会话会保留。<br/>平台不会通过站内客服索要密码、验证码或要求线下转账。</footer></section>;
   return <div className="support-unified" data-view={panelView}>
     <nav className="support-directory" aria-label="全部会话">
       <header>{brand}<span className="support-mobile-close">{close}</span></header>{actions}<h2 tabIndex={-1}>会话</h2>

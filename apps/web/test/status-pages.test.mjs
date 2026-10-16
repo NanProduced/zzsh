@@ -26,8 +26,11 @@ test("read error retries only when requested, with no network or business write"
 test("forbidden state does not offer retry or demand another login", async () => {
   const p = await mountAuthComponent(source, "StatusContent", { kind: "forbidden" });
   try {
-    assert.deepEqual([...p.host.querySelectorAll("a")].map(a => a.getAttribute("href")), ["/account", "/support", "/help"]);
-    assert.equal(p.host.querySelector("button"), null);
+    // 联系客服不再是独立路由：它是右侧常驻工具列弹窗的入口，所以这里是 button 而不是 <a href="/support">。
+    assert.deepEqual([...p.host.querySelectorAll("a")].map(a => a.getAttribute("href")), ["/account", "/help"]);
+    const contact = [...p.host.querySelectorAll("button")].find(b => b.textContent.includes("联系客服"));
+    assert.ok(contact, "forbidden still offers a way to reach customer service");
+    assert.ok(![...p.host.querySelectorAll("button")].some(b => /重新加载|登录/.test(b.textContent)), "no retry, no login demand");
     assert.ok(!/登录|已删除|账号不存在/.test(p.host.textContent));
     assert.equal(p.calls.length, 0);
   } finally { await p.close(); }

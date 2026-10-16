@@ -5,6 +5,7 @@ import { helpAuxCategories, helpCategories, helpCategoryLabel, type AnyHelpCateg
 import { HelpNavAside, HelpNavDrawer } from "./help-nav";
 import { HelpShell } from "./help-shell";
 import { LegacyHashHandler } from "./help-article-extras";
+import { SupportContactButton } from "@/components/support/support-contact-button";
 import type { HelpArticleCard, HelpNavData } from "./nav-data";
 import "./help.css";
 
@@ -108,7 +109,7 @@ function SearchView({ query, hits }: { query: string; hits: HelpArticleCard[] })
           <p>换个关键词试试，例如「押金」「提前结束」「人脸」；也可以按分类浏览，或直接联系平台客服。</p>
           <div className="help-empty-actions">
             <Link className="help-contact-cta" href="/help">浏览全部帮助</Link>
-            <Link className="help-contact-cta" href="/support"><Headphones size={16} aria-hidden="true" /><span>联系平台客服</span></Link>
+            <SupportContactButton className="help-contact-cta"><Headphones size={16} aria-hidden="true" /><span>联系平台客服</span></SupportContactButton>
           </div>
         </div>
       )}

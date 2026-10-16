@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { HelpShell } from "@/components/help/help-shell";
+import { SupportContactButton } from "@/components/support/support-contact-button";
 import "@/components/help/help.css";
 
 export default function NotFound() {
@@ -14,7 +15,7 @@ export default function NotFound() {
           <p>链接可能已失效或文章已更新。你可以返回帮助中心按分类浏览，或搜索相关说明。</p>
           <div className="help-empty-actions">
             <Link className="help-contact-cta" href="/help">返回帮助中心</Link>
-            <Link className="help-contact-cta" href="/support">联系平台客服</Link>
+            <SupportContactButton className="help-contact-cta">联系平台客服</SupportContactButton>
           </div>
         </div>
       </div>

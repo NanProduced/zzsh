@@ -3,6 +3,7 @@ import { ChevronRight, Hash, Headphones } from "lucide-react";
 import { resolveRelated } from "@/content/help";
 import { audienceLabels, helpCategoryLabel, type HelpArticle, type HelpBlock } from "@/content/help/types";
 import { HelpCalloutIcon, HelpCopyLink, HelpToc } from "./help-article-extras";
+import { SupportContactButton } from "@/components/support/support-contact-button";
 import "./help.css";
 
 function HelpBlockView({ block }: { block: HelpBlock }) {
@@ -79,10 +80,10 @@ export function HelpArticleBody({ article }: { article: HelpArticle }) {
       ))}
       {article.contactCta ? (
         <div className="help-article-footer">
-          <Link className="help-contact-cta" href="/support">
+          <SupportContactButton className="help-contact-cta">
             <Headphones size={16} aria-hidden="true" />
             <span>联系平台客服</span>
-          </Link>
+          </SupportContactButton>
         </div>
       ) : null}
       {related.length > 0 ? (
