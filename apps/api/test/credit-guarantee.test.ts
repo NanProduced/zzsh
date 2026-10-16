@@ -84,12 +84,12 @@ test("actual payment-intent route restores its receipt even when current policy 
   assert.equal(response.statusCode,200);assert.equal(response.body.paymentId,'old-payment');assert.equal(response.body.duplicate,true);assert.equal(policy.mock.callCount(),0);assert.equal(calls.length,2);
 });
 
-import { applyCreditInitializationBatch, planCreditInitialization, previewCreditInitialization, readCreditInitializationReceipt, runCreditInitializationBatch, CreditInitializationOutcomeError } from "../src/credit/credit-initialization";
+import { applyCreditInitializationBatch, planCreditInitialization, previewCreditInitialization, readCreditInitializationReceipt, runCreditInitializationBatch, CreditInitializationOutcomeError, withReadOnlyTransaction, creditInitializationFingerprint }  from "../src/credit/credit-initialization";
 import { describeCreditInitializationFailure, readCreditInitializationRun } from "../src/credit/credit-initialization-cli";
 import { createHash as nodeHash } from "node:crypto";
 
 type Identity = "ACTIVE" | "CANCELLED" | "DEACTIVATED" | "RESTRICTED" | "MISSING";
-type World = { users: Map<string, Identity>; scores: Map<string, number>; events: string[]; receipts: Map<string, { fp: string; status: number; body: unknown }>; audits: number; admins: Map<string, { status: string; isBoss: boolean }>; sessions: Map<string, { userId: string; expiresAt: string; locked: boolean }>; dbNow: string; live: Record<string, unknown>; failAudit?: boolean; concurrentFor?: string; identityReads: number; writesSeen: string[]; failCommit?: "AFTER_DURABLE" };
+type World = { users: Map<string, Identity>; scores: Map<string, number>; events: string[]; receipts: Map<string, { fp: string; status: number; body: unknown }>; audits: number; admins: Map<string, { status: string; isBoss: boolean }>; sessions: Map<string, { userId: string; expiresAt: string; locked: boolean; suspended?: boolean; twoFactor?: boolean }>; dbNow: string; live: Record<string, unknown>; failAudit?: boolean; concurrentFor?: string; identityReads: number; writesSeen: string[]; failCommit?: "AFTER_DURABLE"; txStart?: string; clock?: string[]; commits?: number; sql?: string[] };
 const RESOURCE = { databaseName: "zzsh_window", databaseOid: "16384", owner: "zzsh_owner", runtimeRole: "zzsh_runtime", markerKey: "credit-init-window", markerTarget: "credit-init", markerVersion: 1 };
 function world(): World {
   return { users: new Map([["u1", "ACTIVE"], ["u2", "ACTIVE"], ["u3", "ACTIVE"], ["c1", "CANCELLED"], ["r1", "RESTRICTED"]]), scores: new Map([["u2", 80]]), events: [], receipts: new Map(), audits: 0,
@@ -101,12 +101,14 @@ const CATEGORY: Record<Identity, string> = { ACTIVE: "ACTIVE", CANCELLED: "CANCE
 function client(w: World) {
   return { query: async (sql: string, params: any[] = []) => {
     if (/^(BEGIN|BEGIN READ ONLY|ROLLBACK)$/.test(sql)) return { rows: [] };
-    if (sql === "COMMIT") { if (w.failCommit === "AFTER_DURABLE") throw new Error("connection terminated during COMMIT"); return { rows: [] }; }
+    w.sql?.push(sql);
+    if (sql === "COMMIT") { w.commits = (w.commits ?? 0) + 1; if (w.failCommit === "AFTER_DURABLE") throw new Error("connection terminated during COMMIT"); return { rows: [] }; }
     if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
     if (sql.includes(`"zzsh_iam"."admin_security"`)) { const a = w.admins.get(params[0]); return { rows: a ? [{ status: a.status, isBoss: a.isBoss, passwordChangeRequired: false }] : [] }; }
-    if (sql.includes(`"zzsh_auth_admin"."session"`)) { const s = w.sessions.get(params[0]); return { rows: s && s.userId === params[1] ? [{ locked: s.locked, pinHash: null, pinFailures: 0, expiresAt: new Date(s.expiresAt), suspended: false, twoFactorEnabled: true }] : [] }; }
+    if (sql.includes(`"zzsh_auth_admin"."session"`)) { const s = w.sessions.get(params[0]); const live = s && s.userId === params[1] && (!sql.includes("clock_timestamp()") || Date.parse(s.expiresAt) > Date.parse(w.dbNow)); return { rows: live ? [{ locked: s!.locked, pinHash: null, pinFailures: 0, expiresAt: new Date(s!.expiresAt), suspended: s!.suspended ?? false, twoFactorEnabled: s!.twoFactor ?? true }] : [] }; }
     if (sql.includes("role_permissions")) return { rows: [] };
-    if (sql.includes("credit-init-window")) return { rows: [{ dbNow: w.dbNow }] };
+    // PG semantics: now() is the transaction start, clock_timestamp() the actual current time.
+    if (sql.includes("credit-init-window")) return { rows: [{ dbNow: sql.includes("clock_timestamp()") ? (w.clock?.length ? w.clock.shift()! : w.dbNow) : (w.txStart ?? w.dbNow) }] };
     if (sql.includes("credit-init-resource")) return { rows: [w.live] };
     if (sql.includes("FROM zzsh_iam.user_identity_state WHERE user_id = ANY")) return { rows: [] };
     if (sql.includes("credit-init-category")) { w.identityReads += 1; return { rows: (params[0] as string[]).filter((id) => w.users.has(id)).map((id) => ({ id, category: CATEGORY[w.users.get(id)!] })) }; }
@@ -264,4 +266,70 @@ test("runner parser: two signed inputs, strict shapes, approved mode/window/reso
   assert.throws(() => runWith(approvalOf(), { CREDIT_INIT_APPROVAL_SHA256: "0".repeat(64) }), /approval digest/);
   assert.throws(() => runWith(approvalOf(), { CREDIT_INIT_ENABLED: "" }), /ENABLED/);
   assert.match(describeCreditInitializationFailure(new Error("x")), /not executed/);
+});
+
+/** Strict PostgreSQL READ ONLY fixture: row locks and writes are rejected exactly as PG does; reads pass through. */
+function readOnlyPool(w: World) {
+  return { connect: async () => { let readOnly = false; const inner = client(w); return { release() {}, query: async (sql: string, params?: any[]) => {
+    if (sql === "BEGIN READ ONLY") { readOnly = true; return { rows: [] }; }
+    if (readOnly && /\bFOR\s+(UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b/i.test(sql)) throw new Error("cannot execute SELECT FOR UPDATE in a read-only transaction");
+    if (readOnly && /^\s*(INSERT|UPDATE|DELETE)\b|\bINSERT INTO\b/i.test(sql)) throw new Error("cannot execute INSERT in a read-only transaction");
+    return inner.query(sql, params);
+  } }; } } as any;
+}
+
+test("E-R3-03 PREVIEW/RECOVER_READ run in a real READ ONLY shape with non-locking current-identity authorization", async () => {
+  const w = world();
+  await runCreditInitializationBatch(pool(w), input());
+  const ro = (target: World, over: Record<string, unknown> = {}, exec: Record<string, unknown> = {}) => withReadOnlyTransaction(readOnlyPool(target), (c) => readCreditInitializationReceipt(c, input(over, exec)));
+  assert.equal((await ro(w, {}, { approvalRef: "approval-credit-002", attempt: 2 })).state, "FOUND");
+  assert.equal((await ro(w, { userIds: ["u1"] })).state, "FINGERPRINT_MISMATCH");
+  assert.equal((await ro(world())).state, "NOT_FOUND");
+  const pw = world();
+  const preview = await withReadOnlyTransaction(readOnlyPool(pw), (c) => previewCreditInitialization(c, input({ userIds: ["u1", "c1"] })));
+  assert.deepEqual(preview.outsideApprovedCategory, [{ userId: "c1", category: "CANCELLED" }]);
+  assert.deepEqual(pw.writesSeen, []);
+  // Identity gates still apply on the read path.
+  const gates: Array<[string, (x: World) => void, RegExp]> = [
+    ["frozen admin", (x) => { x.admins.set("boss", { status: "FROZEN", isBoss: true }); }, /Access denied|unavailable/],
+    ["not boss", (x) => { x.admins.set("boss", { status: "ACTIVE", isBoss: false }); }, /active Boss/],
+    ["suspended", (x) => { x.sessions.get("sess-boss")!.suspended = true; }, /Authentication required/],
+    ["expired session", (x) => { x.sessions.get("sess-boss")!.expiresAt = "2026-10-20T00:59:59.000Z"; }, /Authentication required/],
+    ["no TOTP", (x) => { x.sessions.get("sess-boss")!.twoFactor = false; }, /Additional verification/],
+    ["locked session", (x) => { x.sessions.get("sess-boss")!.locked = true; }, /locked/i],
+    ["other actor session", (x) => { x.sessions.set("sess-boss", { userId: "boss2", expiresAt: "2099-01-01T00:00:00.000Z", locked: false }); }, /Authentication required/],
+  ];
+  for (const [label, mutate, pattern] of gates) {
+    const g = world(); mutate(g);
+    await assert.rejects(() => ro(g), pattern, label);
+    await assert.rejects(() => withReadOnlyTransaction(readOnlyPool(g), (c) => previewCreditInitialization(c, input())), pattern, label);
+  }
+  // APPLY keeps the locking write guard.
+  const aw = world(); aw.sql = [];
+  await runCreditInitializationBatch(pool(aw), input());
+  assert.ok(aw.sql.some((q) => q.includes('"admin_security"') && /FOR UPDATE/.test(q)), "APPLY still locks admin_security");
+  assert.ok(aw.sql.some((q) => q.includes('"session"') && /FOR UPDATE OF s/.test(q)), "APPLY still locks the session");
+});
+
+test("E-R3-04 the permit window uses the DB actual clock after locks and before COMMIT; an expired permit never sends COMMIT", async () => {
+  // Reviewer counterexample: transaction started inside the window, actual DB time already past it.
+  const late = world(); late.txStart = "2026-10-20T03:59:59.900000Z"; late.dbNow = "2026-10-20T04:00:02.000000Z";
+  await assert.rejects(() => runCreditInitializationBatch(pool(late), input()), (e: any) => e instanceof CreditInitializationOutcomeError && e.outcome === "NOT_COMMITTED" && /window is not open/.test(String((e.cause as any)?.message)));
+  assert.deepEqual([late.commits ?? 0, late.scores.size, late.receipts.size, late.audits], [0, 1, 0, 0]);
+  // Window open at authorization, closes while waiting for the object locks: no writes at all.
+  const lockWait = world(); lockWait.clock = ["2026-10-20T03:59:59.000000Z", "2026-10-20T04:00:00.000000Z"];
+  await assert.rejects(() => runCreditInitializationBatch(pool(lockWait), input()), (e: any) => e.outcome === "NOT_COMMITTED");
+  assert.deepEqual([lockWait.commits ?? 0, lockWait.writesSeen], [0, []]);
+  // Window closes during the batch: rolled back, COMMIT never sent, original key/body preserved for a new window.
+  const longBatch = world(); longBatch.clock = ["2026-10-20T03:59:58.000000Z", "2026-10-20T03:59:59.000000Z", "2026-10-20T04:00:00.000001Z"];
+  const error = await runCreditInitializationBatch(pool(longBatch), input()).then(() => null, (e) => e);
+  assert.ok(error instanceof CreditInitializationOutcomeError);
+  assert.deepEqual([error.outcome, error.rollbackAcknowledged, longBatch.commits ?? 0], ["NOT_COMMITTED", true, 0]);
+  assert.deepEqual([[...longBatch.scores.keys()], longBatch.receipts.size, longBatch.audits], [["u2"], 0, 0]);
+  assert.deepEqual([error.preserved.batchKey, error.preserved.fingerprint], ["credit-init:batch-0001", creditInitializationFingerprint(input())]);
+  // The same key/body applies in a newly approved window.
+  const again = await runCreditInitializationBatch(pool(longBatch), input({}, { approvalRef: "approval-credit-002", attempt: 2 }));
+  assert.equal(again.replayed, false);
+  // Inside the window throughout: one COMMIT, as before.
+  const ok = world(); await runCreditInitializationBatch(pool(ok), input()); assert.equal(ok.commits, 1);
 });

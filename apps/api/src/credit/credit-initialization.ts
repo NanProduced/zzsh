@@ -7,6 +7,7 @@ import { requireAdminAccess } from "../supply/supply-routes";
 import { invalid, sha256Hex, withIdempotency } from "../supply/supply-util";
 import { initializeCreditStateIfMissing } from "./credit-guarantee";
 import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-session";
+import { assertAdminContextInTransaction } from "../auth/auth-security";
 
 /**
  * Controlled credit initialization (E package, decided rule).
@@ -129,17 +130,29 @@ export function creditInitializationFingerprint(input: CreditInitializationInput
 function forbidden(message: string): SecurityApiError { return new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, message); }
 
 /**
- * Current-execution authorization, run inside the transaction on fresh apply, replay, preview and receipt recovery:
- * ACTIVE Boss (no new permission), the approved operator session still valid (existing admin command guard),
- * the DB clock inside the approved window, and the live database equal to the approved resource.
+ * E-R3-04: the maintenance permit is checked against the database's actual current time (clock_timestamp(), not the
+ * transaction-start now()), so time spent waiting for locks or running a long batch counts against the window.
+ * Called after authorization locks, after the category locks and immediately before COMMIT.
  */
-export async function authorizeCreditInitializationExecution(client: PoolClient, execution: CreditInitializationExecution): Promise<void> {
-  const access = await requireAdminAccess(client, execution.actorAdminId);
-  if (!access.isBoss) throw forbidden("Credit initialization requires an active Boss operator");
-  await assertAdminCommandAuthorizedInTransaction(client, { userId: execution.actorAdminId, sessionId: execution.actorSessionId });
-  const clock = (await client.query<{ dbNow: string }>(`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "dbNow" /* credit-init-window */`)).rows[0];
+export async function assertCreditInitializationWindowOpen(client: PoolClient, execution: CreditInitializationExecution): Promise<void> {
+  const clock = (await client.query<{ dbNow: string }>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "dbNow" /* credit-init-window */`)).rows[0];
   const now = clock ? Date.parse(clock.dbNow) : Number.NaN;
   if (!Number.isFinite(now) || now < Date.parse(execution.windowStartUtc) || now >= Date.parse(execution.windowEndUtc)) throw forbidden("Credit initialization execution window is not open");
+}
+
+/**
+ * Current-execution authorization: ACTIVE Boss (no new permission), the approved operator session still valid, the
+ * DB clock inside the approved window, and the live database equal to the approved resource.
+ * E-R3-03: "WRITE" (APPLY) keeps the locking command guard; "READ" (PREVIEW / RECOVER_READ, run in READ ONLY
+ * transactions where SELECT FOR UPDATE is not allowed) uses the existing non-locking admin context guard, which checks
+ * the same ACTIVE / FROZEN / suspended / session expiry (clock_timestamp) / TOTP / locked conditions.
+ */
+export async function authorizeCreditInitializationExecution(client: PoolClient, execution: CreditInitializationExecution, mode: "WRITE" | "READ" = "WRITE"): Promise<void> {
+  const access = await requireAdminAccess(client, execution.actorAdminId);
+  if (!access.isBoss) throw forbidden("Credit initialization requires an active Boss operator");
+  if (mode === "WRITE") await assertAdminCommandAuthorizedInTransaction(client, { userId: execution.actorAdminId, sessionId: execution.actorSessionId });
+  else await assertAdminContextInTransaction(client, { userId: execution.actorAdminId, sessionId: execution.actorSessionId });
+  await assertCreditInitializationWindowOpen(client, execution);
   const live = (await client.query<{ databaseName: string; databaseOid: string; owner: string; runtimeRole: string; markerTarget: string | null; markerVersion: number | null }>(
     `SELECT current_database() AS "databaseName", d.oid::text AS "databaseOid", pg_get_userbyid(d.datdba) AS owner, current_user AS "runtimeRole",
             m.target AS "markerTarget", m.marker_version AS "markerVersion" /* credit-init-resource */
@@ -173,7 +186,7 @@ function categoryMismatch(userIds: string[], rows: CategoryRow[], approved: Cred
 /** Dry run: current execution authorization + unlocked category recheck; no writes, no receipt, no audit. */
 export async function previewCreditInitialization(client: PoolClient, input: CreditInitializationInput): Promise<{ fingerprint: string; wouldApply: string[]; alreadyInitialized: string[]; outsideApprovedCategory: { userId: string; category: string }[] }> {
   const userIds = validated(input);
-  await authorizeCreditInitializationExecution(client, input.execution);
+  await authorizeCreditInitializationExecution(client, input.execution, "READ");
   const outside = categoryMismatch(userIds, await currentCategories(client, userIds, false), input.approvedCategory);
   const existing = new Set((await client.query<{ userId: string }>(`SELECT user_id AS "userId" FROM zzsh_credit.user_credit_state WHERE user_id = ANY($1::text[])`, [userIds])).rows.map((row) => row.userId));
   return { fingerprint: creditInitializationFingerprint(input), wouldApply: userIds.filter((id) => !existing.has(id)), alreadyInitialized: userIds.filter((id) => existing.has(id)), outsideApprovedCategory: outside };
@@ -196,6 +209,7 @@ export async function applyCreditInitializationBatch(client: PoolClient, input: 
     async () => {
       const outside = categoryMismatch(userIds, await currentCategories(client, userIds, true), input.approvedCategory);
       if (outside.length) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, `Approved object set changed: ${outside.length} user(s) are no longer ${input.approvedCategory}`);
+      await assertCreditInitializationWindowOpen(client, input.execution); // after the object locks, before any write
       const applied: string[] = [];
       const alreadyInitialized: string[] = [];
       for (const userId of userIds) {
@@ -223,7 +237,7 @@ export async function applyCreditInitializationBatch(client: PoolClient, input: 
 export async function readCreditInitializationReceipt(client: PoolClient, input: CreditInitializationInput): Promise<{ state: "FOUND"; receipt: CreditInitializationReceipt } | { state: "NOT_FOUND" } | { state: "FINGERPRINT_MISMATCH" }> {
   validated(input);
   const fingerprint = creditInitializationFingerprint(input);
-  await authorizeCreditInitializationExecution(client, input.execution);
+  await authorizeCreditInitializationExecution(client, input.execution, "READ");
   const scopeKey = JSON.stringify(["admin", input.execution.actorAdminId, CREDIT_INITIALIZATION_OPERATION, null]);
   const row = (await client.query<{ requestFingerprint: string; responseBody: unknown }>(`SELECT "request_fingerprint" AS "requestFingerprint", "response_body" AS "responseBody" FROM "zzsh_supply"."idempotency_record" WHERE "scope_key" = $1 AND "key" = $2 /* credit-init-recover */`, [scopeKey, input.batchKey])).rows[0];
   if (!row) return { state: "NOT_FOUND" };
@@ -258,6 +272,7 @@ export async function runCreditInitializationBatch(pool: Pool, input: CreditInit
   try {
     await client.query("BEGIN");
     const result = await applyCreditInitializationBatch(client, input);
+    await assertCreditInitializationWindowOpen(client, input.execution); // expired permit: never send COMMIT
     commitSent = true;
     await client.query("COMMIT");
     return result;
