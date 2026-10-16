@@ -594,7 +594,7 @@ export async function readMembershipGrowth(client: PoolClient, userId: string, a
   const oldMembership = (await client.query<{ sourceRef: string | null }>(`SELECT source_ref AS "sourceRef" FROM zzsh_iam.user_rental_membership WHERE user_id=$1`, [userId])).rows[0];
   let storedState: StoredGrowthState | null = null;
   try {
-    storedState = (await client.query<StoredGrowthState>(`SELECT normal_tier AS "normalTier", effective_tier AS "effectiveTier", black_gold_state AS "blackGoldState", last_tier_drop_at AS "lastTierDropAt" FROM zzsh_iam.membership_growth_state WHERE user_id=$1`, [userId])).rows[0] ?? null;
+    storedState = (await client.query<StoredGrowthState>(`SELECT normal_tier AS "normalTier", effective_tier AS "effectiveTier", black_gold_state AS "blackGoldState", last_tier_drop_at::text AS "lastTierDropAt" FROM zzsh_iam.membership_growth_state WHERE user_id=$1`, [userId])).rows[0] ?? null;
   } catch {
     storedState = null;
   }
@@ -604,7 +604,7 @@ export async function readMembershipGrowth(client: PoolClient, userId: string, a
     asOf: asOfUtc,
     contributions: rows,
     ...(previousTier ? { previousTier } : {}),
-    ...(storedState?.lastTierDropAt ? { lastTierDropAt: storedState.lastTierDropAt } : {}),
+    ...(storedState?.lastTierDropAt ? { lastTierDropAt: normalizeGrowthInstant(storedState.lastTierDropAt, "lastTierDropAt") } : {}),
     ...(storedState && (storedState.effectiveTier === "BLACK_GOLD" || storedState.blackGoldState === "QUALIFIED" || storedState.blackGoldState === "REVIEW_REQUIRED") ? { existingBlackGold: true } : {}),
   });
   let completeness: GrowthSourceCompleteness | null = null;
@@ -637,7 +637,7 @@ export function entitlementStateAtMicro(entitlement: Pick<StoredEntitlement, "st
 
 export type MembershipGrowthQuoteCandidatesInput = Parameters<MembershipGrowthConfirmationReader>[1] & { asOfUtc?: string };
 export type MembershipGrowthQuoteCandidatesResult =
-  | { knowledge: "KNOWN"; policyVersion: string; candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote }>; entitlementIds: string[]; effectiveTier: NonNullable<GrowthProjectionDto["effectiveTier"]>; policyTier: NonNullable<ReturnType<typeof policyTierForGrowthProjection>>; asOfUtc: string }
+  | { knowledge: "KNOWN"; policyVersion: string; candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote }>; entitlementIds: string[]; effectiveTier: Exclude<NonNullable<GrowthProjectionDto["effectiveTier"]>, "UNKNOWN">; policyTier: NonNullable<ReturnType<typeof policyTierForGrowthProjection>>; asOfUtc: string }
   | { knowledge: "UNKNOWN"; reason: string; asOfUtc?: string; entitlementId?: string };
 
 /**
@@ -664,7 +664,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   if (!policyValidation.valid || !policyValidation.publishable) return { knowledge: "UNKNOWN", reason: "POLICY_NOT_PUBLISHABLE", asOfUtc };
   const effectiveTier = growth.growth.effectiveTier;
   const policyTier = policyTierForGrowthProjection({ normalTier: growth.growth.normalTier, effectiveTier, grace: growth.growth.grace });
-  if (!policyTier) return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN", asOfUtc };
+  if (!policyTier || effectiveTier === "UNKNOWN") return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN", asOfUtc };
   const tier = policy.tiers[policyTier];
   const rentalMode = input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary";
   const growthContract = tier?.pricing?.[rentalMode];

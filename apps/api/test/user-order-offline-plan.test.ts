@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { canonicalize } from "../src/supply/content-hash";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
 import { legacyAccountId } from "../src/legacy-load/legacy-account-seam";
-import { binaryFlag, planBatchDigest, planLegacyOrder, planLegacyUser, planLegacyUserBatch, planSourceChain, projectIdentityStatus, publicSourceChain, publicUserPlan } from "../src/legacy-load/user-order-offline-plan";
+import { accountColumns, binaryFlag, planBatchDigest, planLegacyOrder, planLegacyUser, planLegacyUserBatch, planSourceChain, projectIdentityStatus, publicSourceChain, publicUserPlan } from "../src/legacy-load/user-order-offline-plan";
 import type { LegacyOrderReadInput } from "../src/order/legacy-order-read";
 
 const digest = "a".repeat(64);
@@ -125,6 +125,17 @@ const party = (legacyId: string, mobile: string) => ({
 });
 const accountRow = (overrides: Record<string, string> = {}) => ({
   id: "10", user_id: "30", game_id: "1", status: "3", is_delete: "0", no: "ACCTNO", price_tenant: "1.00", extra_goods_total_price_tenant: "2.00", deposit_amount: "3.00", rental_days: "1", default_consume_type: "1", update_time: "1", ...overrides,
+});
+test("historical display accepts exact old or payout-extended source shapes without defaulting the new fact", () => {
+  const old = accountRow();
+  assert.equal(accountColumns(old), null);
+  assert.equal(Object.hasOwn(old, "is_full_payout"), false);
+  for (const value of ["0", "1", "2", null]) {
+    const extended = { ...old, is_full_payout: value };
+    assert.equal(accountColumns(extended), null);
+    assert.equal(extended.is_full_payout, value);
+  }
+  assert.equal(accountColumns({ ...old, token: "not-an-allowed-source-field" }), "ACCOUNT_ROW_UNSUPPORTED");
 });
 function chainOrder(row = accountRow()) {
   const sourceRow = { id: "1", order_sn: "legacy-1", accounts_id: row.id, user_id: "20", sale_user_id: row.user_id, order_status: "5", pay_is: "1", need_pay_money: "1.00", pay_money: "1.00", deposit_amount: "0.00", return_order_money: "0.00", pay_time: "0", create_time: "1", cancel_time: "0", confirm_time: "0" };

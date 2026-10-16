@@ -41,9 +41,11 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "客户服务", isTitle: true }, { label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
   }
 
-  if (nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)) {
-    items.push({ label: "会员运营", isTitle: true }, { label: "会员成长", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
-  }
+  const membershipOps = nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has);
+  const distributionOps = nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
+  if (membershipOps || distributionOps) items.push({ label: "会员运营", isTitle: true });
+  if (membershipOps) items.push({ label: "会员成长", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
+  if (distributionOps) items.push({ label: "分销政策", icon: CrownIcon, path: "/distribution-policy", kind: "distribution-policy" });
 
   const system: WorkspaceMenuItem[] = [];
   if (has("admin.account.read") || nav.isBoss) {
@@ -138,6 +140,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/account") return "账号安全";
   if (pathname === "/support") return "客服工作台";
   if (pathname === "/membership-growth") return "会员成长";
+  if (pathname === "/distribution-policy") return "分销政策";
   return "工作台";
 }
 
@@ -159,6 +162,7 @@ export function normalizeSearchString(str: string): string {
 export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/workbench": ["工作台", "首页", "workbench", "gzt"],
   "/support": ["客服工作台", "客服", "履约", "消息", "im", "support", "kf", "ly"],
+  "/distribution-policy": ["分销政策", "分销", "邀请", "政策", "distribution", "fx"],
   "/membership-growth": ["会员成长", "会员", "增长", "策略", "membership", "hy", "cz"],
   "/admins": ["管理员管理", "管理员", "账号", "staff", "admins", "gly", "zh"],
   "/roles": ["角色权限", "角色", "权限", "授权", "roles", "js", "qx"],

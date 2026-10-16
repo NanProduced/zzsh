@@ -1,7 +1,7 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
 import {applyRuntimePrivileges,configureDistributionFinancialPrivileges,configureMembershipGrowthPrivileges} from '../src/database/business-migrations';
 function probe(present:boolean|boolean[]=true){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
- if(sql.startsWith('SELECT name,to_regclass'))return{rows:args[0].map((name:string,i:number)=>({name,present:Array.isArray(present)?present[i]:present}))};
+ if(sql.startsWith('SELECT name,to_regclass'))return{rows:args[0].map((name:string,i:number)=>({name,present:args[0].includes('zzsh_order.legacy_duty_finance_contract')?false:Array.isArray(present)?present[i]:present}))};
  if(sql.startsWith('SELECT attname FROM pg_attribute'))return{rows:['id','state','canonical_seed','unlisted_column'].map(attname=>({attname}))};
  if(sql.includes('native_user_insert_proof')&&sql.startsWith('SELECT'))return{rows:[{proof:false,initializer:false}]};
  if(sql.includes('count(*)'))return{rows:[{count:0,ready:false}]};
@@ -20,7 +20,7 @@ test('convergence clears every discovered column privilege before granting only 
 test('the real common authorization entry converges after broad order grants on every invocation',async()=>{
  const p=probe();await applyRuntimePrivileges(p.pool,'runtime_role');const first=[...p.seen];p.seen.length=0;await applyRuntimePrivileges(p.pool,'runtime_role');assert.deepEqual(p.seen,first);
  const broad=p.seen.findIndex(s=>s.includes('GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order"'));
- const narrow=p.seen.findIndex(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_order.distribution_order_admission'));assert(broad>=0&&narrow>broad);assert(p.seen.some(s=>s.includes('GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json')));assert(p.seen.at(-1)!.includes('GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version'));
+ const narrow=p.seen.findIndex(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_order.distribution_order_admission'));assert(broad>=0&&narrow>broad);assert(p.seen.some(s=>s.includes('GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json')));assert(p.seen.filter(s=>/^\s*(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES)/.test(s)).at(-1)!.includes('GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version'));
  // This checks dispatch/order and emitted grants, not PostgreSQL effective privileges.
 });
 

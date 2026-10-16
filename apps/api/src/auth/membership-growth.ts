@@ -385,7 +385,8 @@ export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjecti
   const threshold = baselineTier ? GROWTH_THRESHOLDS[baselineTier] : 0n;
   const gapPoints = lowered ? (threshold > rollingPoints ? threshold - rollingPoints : 0n) : null;
   const activeView = active.map((row) => ({ sourceKey: row.sourceKey, amountCents: row.amountCents.toString(), effectiveAt: formatInstant(row.effectiveAt), expiresAt: formatInstant(row.expiryAt) }));
-  const nextExpiryAt = activeView.map((row) => row.expiresAt).sort()[0] ?? null;
+  const nextExpiry = active.reduce<number | null>((next, row) => next === null || row.expiryAt < next ? row.expiryAt : next, null);
+  const nextExpiryAt = nextExpiry === null ? null : formatInstant(nextExpiry);
   if (negativeNet) return {
     schema: MEMBERSHIP_GROWTH_SCHEMA,
     userId,

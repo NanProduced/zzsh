@@ -36,7 +36,7 @@ async function context(client:PoolClient,b:TradeActivityBindings){
 }
 async function legacyCovered(client:PoolClient,b:TradeActivityBindings,asOf:string){
  const l=b.legacy;if(!l||l.sourceAsOf>asOf)return false;
- const r=(await client.query<{count:string;digest:string;outOfCutoff:boolean}>(`SELECT count(*)::text AS count,encode(public.digest(COALESCE(string_agg(legacy_id||':'||source_digest||':'||binding_digest,chr(10) ORDER BY legacy_id COLLATE "C"),''),'sha256'),'hex') AS digest,COALESCE(bool_or(source_created_at>$2::timestamptz OR source_completed_at>$2::timestamptz),false) AS "outOfCutoff" FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND NOT(legacy_id=ANY($1::text[])) /* public-activity-legacy-coverage */`,[b.testExclusions.legacyIds,l.sourceAsOf])).rows[0];
+ const r=(await client.query<{count:string;digest:string;outOfCutoff:boolean}>(`SELECT count(*)::text AS count,encode(sha256(convert_to(COALESCE(string_agg(legacy_id||':'||source_digest||':'||binding_digest,chr(10) ORDER BY legacy_id COLLATE "C"),''),'UTF8')),'hex') AS digest,COALESCE(bool_or(source_created_at>$2::timestamptz OR source_completed_at>$2::timestamptz),false) AS "outOfCutoff" FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND NOT(legacy_id=ANY($1::text[])) /* public-activity-legacy-coverage */`,[b.testExclusions.legacyIds,l.sourceAsOf])).rows[0];
  if(!r||!INTEGER.test(r.count)||!DIGEST.test(r.digest)||typeof r.outOfCutoff!=="boolean")throw new Error("PUBLIC_ACTIVITY_COVERAGE_RESULT_INVALID");
  return r.count===l.snapshotCount&&r.digest===l.snapshotDigest&&!r.outOfCutoff;
 }

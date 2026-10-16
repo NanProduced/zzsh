@@ -63,6 +63,7 @@ export const ADMIN_PERMISSION = {
   contentPlatformEdit: "content.platform.edit",
   contentPlatformPublish: "content.platform.publish",
   orderRead: "order.read",
+  orderLegacyContinue: "order.legacy.continue",
   orderSettlementWrite: "order.settlement.write",
   financeDocumentRead: "finance.document.read",
   financeRead: "finance.read",

@@ -43,3 +43,14 @@ test("strict statistics reads retain real DB/gate/media errors while normal publ
  let mediaError=false;const failure=Object.assign(new Error("media relation missing"),{code:"42P01"}),c={query:async(sql:string)=>{if(sql.includes("listing_media")){if(mediaError)throw failure;return {rows:[{id:"asset",purpose:"ACCOUNT_DISPLAY",ownership_kind:"USER_SUPPLY",review_state:"APPROVED",technical_state:"READY",public_storage_key:"public",access_class:"PUBLIC_DISPLAY"}],rowCount:1};}if(sql.includes("listing_publication"))return {rows:[{source:"OWNER_DIRECT"}],rowCount:1};if(sql.includes("rule_acceptance"))return {rows:[{}],rowCount:1};return {rows:sql.includes("suspended")?[{suspended:false,account_status:"ACTIVE",identity_status:"VERIFIED",age_status:"ADULT"}]:[{enabled:true,current_release_id:"r",catalog_revision:"1"}],rowCount:1};}} as unknown as PoolClient,gate:import("../src/supply/publishing").SupplyGateReader=async()=>({reference:"proof",publisherBail:"NOT_REQUIRED",occupancy:"FREE"});
  assert.deepEqual(await pub.evaluatePublication(c,a,v,gate,"READ",true),[]);mediaError=true;assert((await pub.evaluatePublication(c,a,v,gate,"READ")).includes("CONFIRMATION_OR_MEDIA_REQUIRED"));await assert.rejects(()=>pub.evaluatePublication(c,a,v,gate,"READ",true),e=>e===failure);mediaError=false;const failingGate=async()=>{throw failure;};assert((await pub.publicationBlockers(c,a,v,failingGate,"READ")).includes("OCCUPANCY_UNKNOWN"));await assert.rejects(()=>pub.publicationBlockers(c,a,v,failingGate,"READ",true),e=>e===failure);
 });
+
+test("coverage query reuses repository builtin sha256 without an unregistered pgcrypto function",async t=>{
+ const p=setup(t);
+ p.state.error=Object.assign(new Error("function public.digest(text, unknown) does not exist"),{code:"42883"});
+ p.state.failAt="public.digest(";
+ assert.equal((await p.readers.completedTransactions())?.value,2);
+ assert.deepEqual((await p.readers.recentDeals())?.items,[]);
+ const queries=p.events.filter(event=>event.sql.includes("public-activity-legacy-coverage"));
+ assert.equal(queries.length,2);
+ for(const query of queries){assert.doesNotMatch(query.sql,/public\.digest/);assert.match(query.sql,/encode\(sha256\(convert_to\(COALESCE\(string_agg/);assert.match(query.sql,/'UTF8'\)\),'hex'\)/);}
+});

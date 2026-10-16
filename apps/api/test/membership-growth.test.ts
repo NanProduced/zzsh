@@ -305,3 +305,15 @@ test("E-R3-02 one microsecond asOf drives facts, corrections, rolling window, gr
   assert.equal(entitlementStateAt({ startsAt: "2026-10-01T00:00:00Z", endsAt: at("123456"), status: "ACTIVE" }, asOf), "EXPIRED");
   assert.equal(entitlementStateAt({ startsAt: at("123900"), endsAt: "2026-10-20T00:00:00Z", status: "EXECUTED_PENDING_START" }, asOf), "EXECUTED_PENDING_START");
 });
+
+test("Q time adapter: next expiry compares numeric instants before mixed three/six-digit formatting", () => {
+  const rows = [
+    contribution({ sourceKey: "later", effectiveAt: "2026-10-15T00:00:00.123456Z", recordedAt: "2026-10-15T00:00:00.123456Z" }),
+    contribution({ sourceKey: "earlier", effectiveAt: "2026-10-15T00:00:00.123Z", recordedAt: "2026-10-15T00:00:00.123Z" }),
+  ];
+  const input = { userId: "user_1", asOf: "2026-10-16T00:00:00.000Z", contributions: rows };
+  const result = replayGrowthProjection(input);
+  assert.deepEqual(result.active.map((row) => row.expiresAt), ["2027-01-13T00:00:00.123456Z", "2027-01-13T00:00:00.123Z"]);
+  assert.equal(result.nextExpiryAt, "2027-01-13T00:00:00.123Z");
+  assert.equal(replayGrowthProjection({ ...input, contributions: [] }).nextExpiryAt, null);
+});

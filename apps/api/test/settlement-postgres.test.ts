@@ -1553,8 +1553,8 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   const unpostedId = await makePaid("结算未过账占用保留");
   const occupied = await pool.query<{ accountId: string }>(`SELECT account_id AS "accountId" FROM zzsh_order.rental_order WHERE id = $1`, [unpostedId]);
   const released = await pool.query<{ accountId: string }>(`SELECT account_id AS "accountId" FROM zzsh_order.rental_order WHERE id = $1`, [normalId]);
-  assert.equal(await withTransaction(pool, (client) => readOrderOccupancy(client, occupied.rows[0]!.accountId)), true);
-  assert.equal(await withTransaction(pool, (client) => readOrderOccupancy(client, released.rows[0]!.accountId)), false);
+  assert.equal(await withTransaction(pool, (client) => readOrderOccupancy(client, occupied.rows[0]!.accountId)), "OCCUPIED");
+  assert.equal(await withTransaction(pool, (client) => readOrderOccupancy(client, released.rows[0]!.accountId)), "FREE");
   assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_posting WHERE order_id IN ($1,$2,$3)`, [normalId, earlyId, concurrentPostId])).rows[0].n, 3);
   assert.equal((await pool.query(`SELECT count(DISTINCT payment_confirmation_id)::int AS n FROM zzsh_order.settlement_posting WHERE order_id IN ($1,$2,$3)`, [normalId, earlyId, concurrentPostId])).rows[0].n, 3);
   const reconciliation = await pool.query(`WITH selected AS (

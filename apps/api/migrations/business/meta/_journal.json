@@ -519,6 +519,48 @@
       "when": 1792085353599,
       "tag": "0073_admin_self_security_commands",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1792147352612,
+      "tag": "0074_legacy_trade_continuation",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1792147352613,
+      "tag": "0075_finance_history_coverage",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1792147352614,
+      "tag": "0076_finance_stored_opening",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1792147352615,
+      "tag": "0077_legacy_duty_finance",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1792147352616,
+      "tag": "0078_personal_quote_v4",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1792147352617,
+      "tag": "0079_owner_guarantee_history",
+      "breakpoints": true
     }
   ]
 }

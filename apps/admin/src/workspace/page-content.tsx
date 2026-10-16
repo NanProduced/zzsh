@@ -16,6 +16,7 @@ import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
 import { ImSupportView } from "../views/im-support-view";
 import { MembershipGrowthAdminHost } from "../views/membership-growth-admin-host";
+import { DistributionPolicyPanel } from "../views/distribution-policy-panel";
 
 import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
 
@@ -108,6 +109,7 @@ export function WorkspacePageContent({
     );
   }
   if (tab.kind === "support") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} onRefresh={onRefresh} onOpenPath={onOpenPath} /></>;
+  if (tab.kind === "distribution-policy") return snapshot.authenticated ? <DistributionPolicyPanel key={tab.id} snapshot={snapshot} /> : null;
   if (tab.kind === "membership-growth") return <MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (

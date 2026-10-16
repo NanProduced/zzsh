@@ -9,6 +9,7 @@ import { executeMembershipGrowthOperation } from "../src/auth/membership-growth-
 import { canonicalize } from "../src/supply/content-hash";
 import { createHash } from "node:crypto";
 import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
+import { types as pgTypes } from "pg";
 
 test("membership approval accepts ALL_GAMES and selected targets, rejects empty or unrelated scope before mutation", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
@@ -387,4 +388,33 @@ test("E-R3-02 quote seam: same-millisecond future consumption is not counted at 
   const input = quoteInput(); const base = computeDeltaQuote(input); assert.equal(base.quotable, true); if (!base.quotable) return;
   const result = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, rows, readerPolicy()), { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", gameId: "game-1", listingVersionId: "listing-1", listingHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-v1", quantityDigest: "quantity-1", baseQuote: base.quote, quoteInput: input, asOfUtc });
   if (result.knowledge === "KNOWN") { assert.notEqual(result.effectiveTier, "GOLD"); assert.equal(result.asOfUtc, asOfUtc); }
+});
+
+test("Q time adapter: PG text drop anchor preserves microsecond grace and a KNOWN quote", async () => {
+  const { readMembershipGrowthQuoteCandidatesAt } = await import("../src/auth/membership-growth-integration");
+  const dbText = "2026-10-09 08:00:00.123456+00", parsed = pgTypes.getTypeParser(1184, "text")(dbText);
+  assert.ok(parsed instanceof Date);
+  assert.equal(parsed.toISOString(), "2026-10-09T08:00:00.123Z", "an uncast timestamptz loses microseconds in the real pg parser");
+  const raw = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-07-11T08:00:00.123456Z", recordedAt: "2026-07-11T08:00:00.123456Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const rows = [{ ...raw, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", raw) }];
+  const state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const client = () => {
+    const inner = growthReaderClient(state, rows, readerPolicy()) as unknown as { query(sql: string, args?: unknown[]): Promise<unknown> };
+    return { query: async (sql: string, args?: unknown[]) => sql.includes("FROM zzsh_iam.membership_growth_state")
+      ? { rows: [{ ...state, lastTierDropAt: sql.includes("last_tier_drop_at::text") ? dbText : parsed }] }
+      : inner.query(sql, args) } as never;
+  };
+  const asOfUtc = "2026-10-16T08:00:00.123455Z", atEnd = "2026-10-16T08:00:00.123456Z";
+  const growth = await readMembershipGrowth(client(), "user-1", asOfUtc);
+  assert.equal(growth?.growth.knowledge, "KNOWN");
+  assert.deepEqual(growth?.growth.grace, { state: "ACTIVE", fromTier: "GOLD", droppedAt: "2026-10-09T08:00:00.123456Z", until: atEnd, gapPoints: "10000" });
+  assert.equal((await readMembershipGrowth(client(), "user-1", atEnd))?.growth.grace?.state, "EXPIRED");
+  const input = quoteInput(), base = computeDeltaQuote(input); assert.equal(base.quotable, true); if (!base.quotable) return;
+  const common = { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", gameId: "game-1", listingVersionId: "listing-1", listingHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-v1", quantityDigest: "quantity-1", baseQuote: base.quote, quoteInput: input };
+  const before = await readMembershipGrowthQuoteCandidatesAt(client(), { ...common, asOfUtc });
+  assert.equal(before.knowledge, "KNOWN");
+  if (before.knowledge === "KNOWN") assert.deepEqual([before.asOfUtc, before.effectiveTier, before.policyTier], [asOfUtc, "GOLD", "GOLD"]);
+  const after = await readMembershipGrowthQuoteCandidatesAt(client(), { ...common, asOfUtc: atEnd });
+  assert.equal(after.knowledge, "KNOWN");
+  if (after.knowledge === "KNOWN") assert.equal(after.effectiveTier, "STANDARD");
 });

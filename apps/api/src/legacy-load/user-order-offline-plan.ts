@@ -217,6 +217,7 @@ export function planBatchDigest(frozenBatchId: string, tuples: readonly (readonl
 }
 
 const ACCOUNT_COLUMNS = ["id", "user_id", "game_id", "status", "is_delete", "no", "price_tenant", "extra_goods_total_price_tenant", "deposit_amount", "rental_days", "default_consume_type", "update_time"] as const;
+const ACCOUNT_COLUMNS_WITH_PAYOUT = [...ACCOUNT_COLUMNS, "is_full_payout"] as const;
 const YUAN = /^(0|[1-9]\d{0,13})\.\d{2}$/;
 const DAY = /^[1-9]\d{0,17}$/;
 const ACCOUNT_IF_ABSENT = { "zzsh_supply.rental_account:insert": 1, "zzsh_iam.audit_event": 1, "zzsh_supply.idempotency_record": 1 };
@@ -295,8 +296,11 @@ function readyOwner(role: string, value: LegacyOwnerEvidence): ChainStep & { use
 
 export function accountColumns(row: Record<string, string | null>): string | null {
   const keys = Object.keys(row).sort().join(",");
-  if (keys !== [...ACCOUNT_COLUMNS].sort().join(",")) return "ACCOUNT_ROW_UNSUPPORTED";
+  const hasPayout = Object.hasOwn(row, "is_full_payout");
+  if (keys !== [...(hasPayout ? ACCOUNT_COLUMNS_WITH_PAYOUT : ACCOUNT_COLUMNS)].sort().join(",")) return "ACCOUNT_ROW_UNSUPPORTED";
   if (ACCOUNT_COLUMNS.some(column => typeof row[column] !== "string")) return "ACCOUNT_COLUMN_MISSING";
+  // Historical display keeps the old shape; formal takeover separately rejects missing or unverified payout facts.
+  if (hasPayout && row.is_full_payout !== null && typeof row.is_full_payout !== "string") return "ACCOUNT_COLUMN_MISSING";
   return null;
 }
 

@@ -7,7 +7,7 @@ import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 import {ModuleKind,ScriptTarget,transpileModule} from 'typescript';
 import {canonicalize} from '../src/supply/content-hash';
-const tree=resolve(__dirname,'../../../..'),path='apps/api/src/order/settlement-record.ts',requireHere=createRequire(resolve(__dirname,'../src/order/settlement-record.js'));
+const tree=execFileSync('git',['--no-optional-locks','rev-parse','--show-toplevel'],{cwd:process.cwd(),encoding:'utf8'}).trim(),path='apps/api/src/order/settlement-record.ts',requireHere=createRequire(resolve(__dirname,'../src/order/settlement-record.js'));
 // Exercise the real private frozen-basis function without adding test-only exports to the product module.
 function load(source:string){const exports:Record<string,any>={};runInNewContext(transpileModule(source+'\nexport const offlineFrozenBasis = basisOrReasons;\n',{compilerOptions:{module:ModuleKind.CommonJS,target:ScriptTarget.ES2022}}).outputText,{exports,require:requireHere});return exports.offlineFrozenBasis as (order:any,payment:any,opening:any)=>any;}
 const current=load(readFileSync(resolve(tree,path),'utf8')),baseline=load(execFileSync('git',['--no-optional-locks','show','b14238156b340c870812e0fba44c74eb452691f9:'+path],{cwd:tree,encoding:'utf8'}));

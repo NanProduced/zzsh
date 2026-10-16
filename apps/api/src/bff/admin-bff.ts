@@ -17,6 +17,8 @@ import { handleContentAdminRoute } from "../content/content-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
+import { handleDistributionPolicyAdmin } from "../finance/distribution-policy-routes";
+import type { LocalDistributionScope } from "../finance/distribution-policy-store";
 import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { adminSecurityCommandId } from "../auth/admin-security-commands";
@@ -43,6 +45,7 @@ export type AdminBffOptions = {
   adminOrigin: string;
   adminAuthHandler: WebAuthHandler;
   adminSecurityOptions: AuthSecurityOptions;
+  distributionScope?: LocalDistributionScope;
   supply: SupplyRuntimeOptions;
   order: OrderRuntimeOptions;
   yunxin?: YunxinRouteOptions;
@@ -427,6 +430,18 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleRentalMembershipAdmin(request,response,options.adminSecurityOptions);
     return;
   }
+  if (path === "/distribution/policy") {
+    if (method !== "GET" && method !== "PUT") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/distribution/policy${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleDistributionPolicyAdmin(request, response as never, { ...options.adminSecurityOptions, distributionScope: options.distributionScope });
+    return;
+  }
   const membershipGrowthPolicy = /^\/membership-growth\/(policy|policy-drafts|backfill)$/.test(path);
   if (membershipGrowthPolicy) {
     if ((path.endsWith("/policy") && method !== "GET") || (path.endsWith("/policy-drafts") && method !== "POST") || (path.endsWith("/backfill") && method !== "POST")) {
@@ -516,7 +531,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   if (path === "/orders" || path.startsWith("/orders/")) {
     const settlementPath = /^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(openings|settlements|settlement-preview|settlement)(\/|$)/.test(path);
-    if (method !== "GET" && !(method === "POST" && settlementPath)) {
+    const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void))$/.test(path);
+    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath))) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }

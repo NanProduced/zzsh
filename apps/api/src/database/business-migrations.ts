@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order"] as const;
@@ -19,9 +19,44 @@ export const BUSINESS_MIGRATION_CONFIG = {
   migrationsTable: "migrations",
 } as const;
 
+/** Schema migrations have already committed; this outcome describes the separate ACL transaction only. */
+export class BusinessMigrationAclError extends Error {
+  constructor(
+    readonly outcome: "ACL_NOT_COMMITTED" | "ACL_COMMIT_UNKNOWN",
+    readonly rollbackAcknowledged: boolean,
+    readonly cause: unknown,
+    readonly rollbackError?: unknown,
+  ) {
+    super(outcome === "ACL_COMMIT_UNKNOWN"
+      ? "Business schema migrations committed; runtime ACL COMMIT outcome is UNKNOWN; inspect privileges before retrying"
+      : "Business schema migrations committed; runtime ACL transaction was not committed");
+    this.name = "BusinessMigrationAclError";
+  }
+}
+
 export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: string; migrationsFolder?: string }): Promise<void> {
   await migrate(drizzle(pool), { ...BUSINESS_MIGRATION_CONFIG, ...(options.migrationsFolder ? { migrationsFolder: options.migrationsFolder } : {}) });
-  await applyRuntimePrivileges(pool, options.runtimeUser);
+  // Drizzle owns its migration transaction; all subsequent broad and narrow grants share this client.
+  let client: PoolClient;
+  try { client = await pool.connect(); }
+  catch (error) { throw new BusinessMigrationAclError("ACL_NOT_COMMITTED", false, error); }
+  let commitSent = false;
+  let broken = false;
+  try {
+    await client.query("BEGIN");
+    await applyRuntimePrivileges(client, options.runtimeUser);
+    commitSent = true;
+    await client.query("COMMIT");
+  } catch (error) {
+    if (commitSent) { broken = true; throw new BusinessMigrationAclError("ACL_COMMIT_UNKNOWN", false, error); }
+    let rolledBack = false;
+    let rollbackError: unknown;
+    try { await client.query("ROLLBACK"); rolledBack = true; }
+    catch (failure) { broken = true; rollbackError = failure; }
+    throw new BusinessMigrationAclError("ACL_NOT_COMMITTED", rolledBack, error, rollbackError);
+  } finally {
+    client.release(broken ? true : undefined);
+  }
 }
 
 /** Exact same post-migration ACL path; a reviewed rollback harness may own its transaction. */
@@ -214,6 +249,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
+  await configureContinuityFinancePrivileges(pool, runtimeRole);
 }
 
 /** Optional schema (ADM-SECURITY-BACKEND-1): command identity rows never need UPDATE/DELETE;
@@ -347,4 +383,65 @@ export async function configureMembershipGrowthPrivileges(pool: Pick<Pool, "quer
       ON zzsh_iam.membership_entitlement TO ${role};
     GRANT UPDATE(status,revoked_reason,replaced_by_id,updated_at) ON zzsh_iam.membership_entitlement TO ${role};
   `);
+}
+
+/** New continuity tables are narrowed after all broad/default grants. Exact role comes from migration config. */
+export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const profiles: { name: string; read: boolean; insert?: string[]; update?: string[] }[] = [
+    {"name":"zzsh_order.legacy_continuation_evidence","read":true,"insert":["id","order_id","evidence_version","source_kind","derived_from_command_version_id","source_as_of","evidence_ref","source_digest","parameter_digest","admission","reasons","facts","facts_canonical","facts_digest"]},
+    {"name":"zzsh_order.legacy_continuation_version","read":true,"insert":["id","order_id","revision","command","actor","input_evidence_id","result_evidence_id","stage","is_settle","is_advance_set","amounts","commission_revisions","assignments","plan_fingerprint","created_at"],"update":["superseded_at"]},
+    {"name":"zzsh_order.legacy_order_duty","read":true,"insert":["id","order_id","continuation_version_id","kind","source_record_id","counterparty_user_id","amount_cents","currency","status","source","source_status","level","ratio","maturity_at","source_digest"],"update":["amount_cents","maturity_at","revision","revised_at","revised_by","revision_reason","status","decided_at","decided_by","decision_reason","decision_evidence_ref"]},
+    {"name":"zzsh_order.legacy_order_duty_revision","read":true,"insert":["id","duty_id","revision","before_values","after_values","actor","source_command_version_id","reason"]},
+    {"name":"zzsh_order.legacy_order_duty_admission","read":true},
+    {"name":"zzsh_order.legacy_inflight_register","read":true},
+    {"name":"zzsh_order.personal_finance_observation_coverage","read":true},
+    {"name":"zzsh_order.finance_stored_opening_review","read":false},
+    {"name":"zzsh_order.legacy_duty_finance_contract","read":false},
+    {"name":"zzsh_order.legacy_duty_finance_fact","read":true},
+    {"name":"zzsh_order.legacy_owner_guarantee_observation","read":true},
+    {"name":"zzsh_order.legacy_owner_guarantee_coverage","read":true}
+  ];
+  const found = (await pool.query<{ name: string; present: boolean }>(
+    "SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [profiles.map(p => p.name)]
+  )).rows;
+  if (found.length !== profiles.length || new Set(found.map(r => r.name)).size !== profiles.length
+    || found.some(r => typeof r.present !== "boolean" || !profiles.some(p => p.name === r.name))) throw new Error("Continuity schema inventory is incomplete");
+  const v4 = (await pool.query("SELECT to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)') IS NOT NULL AS present")).rows[0];
+  if (typeof v4?.present !== "boolean") throw new Error("Continuity helper inventory is incomplete");
+  if (found.every(r => !r.present) && !v4.present) return;
+  const identity = (await pool.query<{ roleOid: string; superuser: boolean; ownerRights: boolean }>(`
+    /* continuity runtime role ownership */
+    SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,
+      EXISTS(SELECT 1 FROM (
+        SELECT c.relowner AS owner_id FROM pg_class c
+         WHERE c.oid IN(SELECT to_regclass(name) FROM unnest($2::text[]) AS t(name))
+        UNION SELECT p.proowner FROM pg_proc p
+         WHERE p.oid=to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)')
+      ) owners WHERE owners.owner_id=r.oid OR pg_has_role(r.oid,owners.owner_id,'MEMBER')) AS "ownerRights"
+    FROM pg_roles r WHERE r.rolname=$1
+  `, [runtimeRole, profiles.map(p => p.name)])).rows[0];
+  if (!identity || typeof identity.roleOid !== "string" || !/^[1-9]\d*$/.test(identity.roleOid) || identity.superuser !== false || identity.ownerRights !== false) {
+    throw new Error("Continuity runtime role must be a known non-owner non-superuser");
+  }
+  for (const profile of profiles) {
+    if (!found.find(r => r.name === profile.name)?.present) continue;
+    const table = profile.name.split(".").map(quoteIdentifier).join(".");
+    const columns = (await pool.query<{ name: string }>(
+      "SELECT attname AS name FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped ORDER BY attnum", [profile.name]
+    )).rows.map(r => r.name);
+    if (!columns.length || [...(profile.insert ?? []), ...(profile.update ?? [])].some(c => !columns.includes(c))) throw new Error("Continuity column inventory differs");
+    const allColumns = columns.map(quoteIdentifier).join(",");
+    const statements = [
+      `REVOKE ALL ON TABLE ${table} FROM ${role}`,
+      `REVOKE ALL (${allColumns}) ON TABLE ${table} FROM ${role}`,
+    ];
+    if (profile.read) statements.push(`GRANT SELECT ON TABLE ${table} TO ${role}`);
+    if (profile.insert?.length) statements.push(`GRANT INSERT (${profile.insert.map(quoteIdentifier).join(",")}) ON TABLE ${table} TO ${role}`);
+    if (profile.update?.length) statements.push(`GRANT UPDATE (${profile.update.map(quoteIdentifier).join(",")}) ON TABLE ${table} TO ${role}`);
+    await pool.query(statements.join(";\n") + ";");
+  }
+  if (v4.present) {
+    await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order) TO ${role}`);
+  }
 }

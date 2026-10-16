@@ -336,6 +336,6 @@ test("R0 wiring retains shared read/write transactions and introduces no command
   assert(!/admin-security-commands|admin-self-security-plugin|admin-auth-session|withTransaction|recordAudit|setAuditContext|FOR UPDATE/.test(source));
   assert.match(source, /withDirectoryReadTransaction\(options\.pool/); assert(!/withDirectoryRead\(/.test(source));
   assert.match(runtime, /mountAuthSecurityHandlers\(app, securityOptions\);\s+mountAdminSelfSettingsHandlers\(app, securityOptions\);/);
-  assert.match(runtime, /mountCreditGuaranteeRoutes\(app, securityOptions, options\.creditGuaranteeEnabled === true\)/);
+  assert.match(runtime, /mountCreditGuaranteeRoutes\(app, \{\s*\.\.\.securityOptions,\s*listingCursorKey: options\.listingCursorKey\s*\}, options\.creditGuaranteeEnabled === true\)/);
   assert.match(runtime, /mountMembershipGrowth/);
 });

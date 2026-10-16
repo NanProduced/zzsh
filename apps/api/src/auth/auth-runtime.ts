@@ -41,6 +41,8 @@ import { loadLegacyPublicAdmission, parseLegacyPublicAdmission, assertLegacyPubl
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
+import { createTradePublicActivityReaders, type TradeActivityBindings } from "../order/public-trade-activity";
+import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store";
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
@@ -90,6 +92,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   legacyPublicAdmission?: LegacyPublicAdmission;
+  /** Reviewed source/target coverage supplied by trusted startup, never by HTTP or environment defaults. */
+  publicTradeActivityBindings?: TradeActivityBindings;
   testConfirmationFundingReader?: ConfirmationFundingReader;
   /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
   creditGuaranteeEnabled?: boolean;
@@ -1025,18 +1029,20 @@ export async function mountAuthHandlers(
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
     orderHoldSeconds,
+    legacyDutyFinalizationReader: readLegacyDutyFinalization,
     supplyGateReader,
     settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
-  mountCreditGuaranteeRoutes(app, securityOptions, options.creditGuaranteeEnabled === true);
+  mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey }, options.creditGuaranteeEnabled === true);
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
+    distributionScope: options.distributionScope,
     supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
     ...(yunxinRuntime ? {
@@ -1062,6 +1068,9 @@ export async function mountAuthHandlers(
     ...securityOptions,
     mediaStorage,
     supplyGateReader,
+    publicActivity: options.publicTradeActivityBindings
+      ? createTradePublicActivityReaders({ pool: options.pool, gate: supplyGateReader, bindings: options.publicTradeActivityBindings })
+      : undefined,
   });
   if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
   mountOrderHandlers(app, orderOptions);
@@ -1071,8 +1080,10 @@ export async function mountAuthHandlers(
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope});
   mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope});
   mountMembershipGrowthRoutes(app, securityOptions);
-  const membershipGrowthReader = membershipGrowthEnabled() ? readMembershipGrowthQuoteCandidates : undefined;
-  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, ...(membershipGrowthReader ? { membershipGrowthReader } : {}) };
+  const membershipGrowthReader = membershipGrowthEnabled()
+    ? readMembershipGrowthQuoteCandidates
+    : async () => ({ knowledge: "UNKNOWN" as const, reason: "MEMBERSHIP_FEATURE_DISABLED" });
+  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, membershipGrowthReader };
   mountPersonalConfirmations(app, securityOptions, personalConfirmationOptions);
   mountPersonalOrders(app, securityOptions, { ...personalConfirmationOptions, holdSeconds: orderHoldSeconds });
   if (options.orderTeams) {
