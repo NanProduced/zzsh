@@ -39,7 +39,8 @@ export function SupportRail(){
   };
   useEffect(()=>{
     if(pathname === "/support") { setHasOpened(true); setSupportOpen(true); }
-    setPreview(new URLSearchParams(window.location.search).get("preview") === "1");
+    // 演示数据只允许在非生产环境用 ?preview=1 打开；生产构建忽略该参数。
+    setPreview(process.env.NODE_ENV !== "production" && new URLSearchParams(window.location.search).get("preview") === "1");
   },[pathname]);
   // The window is non-modal, so Radix leaves focus on the entry button and Tab would walk
   // the whole page before reaching the composer. Start the tab order inside the window.

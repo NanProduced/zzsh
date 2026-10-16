@@ -301,6 +301,50 @@
 .help-related a:hover { color: var(--color-accent-brand); background: var(--color-accent-brand-muted); }
 .help-related a svg { flex: 0 0 auto; color: var(--color-accent-brand); }
 
+/* ---------- 上一篇 / 下一篇 ---------- */
+
+.help-pager { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 34px; }
+
+.help-pager-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.help-pager-link:hover { border-color: var(--color-accent-brand); }
+
+.help-pager-link--next { justify-content: flex-end; text-align: right; }
+
+.help-pager-link--placeholder { visibility: hidden; }
+
+.help-pager-copy { display: grid; gap: 2px; min-width: 0; }
+
+.help-pager-dir { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-secondary); font-size: 12px; }
+
+.help-pager-dir kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.help-pager-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+
+.help-pager-arrow { flex: 0 0 auto; color: var(--color-accent-brand); }
+
+@media (max-width: 640px) {
+  .help-pager { grid-template-columns: 1fr; }
+}
+
 /* ---------- 右侧页内目录 ---------- */
 
 .help-toc { position: sticky; top: 116px; max-height: calc(100vh - 140px); overflow-y: auto; }

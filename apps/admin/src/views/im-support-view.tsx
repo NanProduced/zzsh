@@ -11,6 +11,7 @@ import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, support
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
 import { OrderWorkbenchPane } from "./im-support-orders";
 import { ConsultationUserCard } from "./im-support-user-card";
+import { ConsultationEventsCard } from "./im-support-events";
 import { dayKeyOf, dayLabelOf, formatBytes, formatTime, initialOf } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
@@ -65,7 +66,7 @@ const CLOSE_OUTCOME_UNKNOWN_NOTICE = "结束结果未确认：这次关闭可能
 
 // 「案件进度」stepper 与「下一步 / 轮到你回复」已移除：assignedAdmin + messageScopeState
 // 只能证明当前的接待关系与远端就绪状态，证明不了处理轮次，也证明不了历史阶段时间。
-// 处理记录时间线要等事件读投影（GET …/consultations/:id/events）落地后按真实事件渲染。
+// 处理记录时间线由 ConsultationEventsCard 按真实事件投影渲染，不再从当前状态推断。
 function typeLabel(type: SupportType): string { return type === "COMPLAINT" ? "投诉反馈" : "平台咨询"; }
 function stateLabel(state: ConsultationState): QueueRow["state"] { return state === "ACTIVE" ? "处理中" : state === "WAITING" ? "待接入" : "已结束"; }
 function scopeStateLabel(consultation: Consultation): QueueRow["state"] { return consultation.messageScopeState === "FAILED" ? "待核验" : stateLabel(consultation.state); }
@@ -1165,7 +1166,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       {!selected ? <p className="im-wb-details-empty">未选择会话</p> : <>
         {/* 只陈列可由现有字段证明的当前事实。此前的「案件进度」stepper 与「下一步 /
             轮到你回复」是从 assignedAdmin + READY 推断出来的，既证明不了轮次也证明不了
-            历史；处理记录时间线需要事件读投影，接口到位前不合成。 */}
+            历史；历史阶段时间一律以处理记录时间线里的真实事件为准。 */}
         <section className="im-wb-sec"><span><Info size={12} />本次服务</span>
           <dl><div><dt>{selected.type === "COMPLAINT" ? "沟通类型" : "咨询类型"}</dt><dd>{typeLabel(selected.type)}</dd></div>
             <div><dt>服务状态</dt><dd>{scopeStateLabel(selected)}</dd></div>
@@ -1173,6 +1174,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
             <div><dt>发起时间</dt><dd>{formatTime(selected.createdAt)}</dd></div></dl></section>
         <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
           request={adminRequest} scope={profileScope} onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
+        <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
 
         {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>
           <button type="button" className="im-wb-btn" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button></section> : null}
@@ -1216,7 +1218,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           <div><dt>{closeTarget.type === "COMPLAINT" ? "当前处理" : "当前接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
           <div><dt>关联对象</dt><dd>{closeTarget.subjectRef || "未关联商品或订单"}</dd></div>
         </dl> : null}
-        <p className="im-wb-dialog-hint">结束后本条咨询进入已结束，平台会解除该咨询的客服会话与发送范围；这是不可撤销动作，平台当前没有恢复入口。结束不会删除聊天记录，但已结束会话能否继续读取取决于云信历史服务，尚未接入前不承诺可恢复。</p>
+        <p className="im-wb-dialog-hint">结束后本条咨询进入已结束，平台会解除该咨询的客服会话与发送范围；这是不可撤销动作，平台当前没有恢复入口。结束不会删除聊天记录；但按现行授权规则，咨询结束后历史记录的读取随结束关闭，不能在本页恢复。</p>
         <div className="im-wb-dialog-actions">
           <button type="button" className="im-wb-btn" onClick={() => setCloseOpen(false)}>取消</button>
           <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-close-consultation" onClick={() => { if (closeTarget) void close(closeTarget.id); }} disabled={busy || !closeTarget || !canOperateSelected}>确认结束</button>

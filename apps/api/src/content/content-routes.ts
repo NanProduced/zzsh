@@ -41,6 +41,10 @@ import {
   type SupplyNodeRequest,
 } from "../supply/supply-util";
 import {
+  readPublicActivity,
+  type PublicActivityProviders,
+} from "./public-activity";
+import {
   CAROUSEL_SLOTS,
   carouselCreateRequiresPublish,
   carouselUpdateRequiresPublish,
@@ -71,7 +75,7 @@ import {
   type DraftInput,
 } from "./content";
 
-export type ContentRuntimeOptions = SupplyRuntimeOptions;
+export type ContentRuntimeOptions = SupplyRuntimeOptions & { publicActivity?: PublicActivityProviders };
 type ContentResponse = BaseSupplyResponse & { send?: (body: Buffer | string) => void };
 
 type ContentAction = "read" | "edit" | "publish";
@@ -265,6 +269,12 @@ export async function handleContentPublicRoute(
         mediaUrl: `/api/v1/content/media/${encodeURIComponent(String(item.mediaId))}/content`,
       }));
       sendJson(response, 200, { items, limit }, requestId, PUBLIC_CACHE);
+      return;
+    }
+    if (path === "/activity") {
+      if ([...query.keys()].length > 0) throw invalid("Query is invalid");
+      const result = await readPublicActivity(options.publicActivity ?? {});
+      sendJson(response, 200, result, requestId, "public, max-age=30");
       return;
     }
     const mediaMatch = /^\/media\/([^/]+)\/content$/.exec(path);

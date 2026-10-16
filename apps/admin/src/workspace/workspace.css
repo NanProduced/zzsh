@@ -666,6 +666,19 @@
 .workspace-root .im-wb-person b { color:var(--foreground); font-size:14px; font-weight:600; }
 .workspace-root .im-wb-person small { color:var(--muted-foreground); font-size:12px; }
 
+/* 处理记录时间线：事件读投影（GET …/consultations/:id/events）的只读渲染。 */
+.workspace-root .im-wb-events { display:grid; gap:8px; margin:4px 0 0; padding:0 0 0 4px; list-style:none; border-left:2px solid var(--border-strong); }
+.workspace-root .im-wb-event { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 8px; font-size:12px; line-height:1.6; }
+.workspace-root .im-wb-event-tag { flex:none; padding:0 7px; border-radius:999px; background:var(--im-accent-soft); color:var(--im-accent-strong); font-weight:600; }
+.workspace-root .im-wb-event[data-type="CLOSED"] .im-wb-event-tag { background:color-mix(in srgb, var(--destructive) 12%, transparent); color:var(--destructive); }
+.workspace-root .im-wb-event time { color:var(--muted-foreground); font-variant-numeric:tabular-nums; }
+.workspace-root .im-wb-event-actor { color:var(--foreground); font-weight:500; }
+.workspace-root .im-wb-event-move { color:var(--muted-foreground); overflow-wrap:anywhere; }
+.workspace-root .im-wb-events-note { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:0; color:var(--muted-foreground); font-size:12px; line-height:1.7; }
+.workspace-root .im-wb-events-note[data-tone="warn"] { color:var(--foreground); }
+.workspace-root .im-wb-events-note[data-tone="error"] { color:var(--destructive); }
+.workspace-root .im-wb-sec > .im-wb-btn { min-height:30px; padding:0 12px; }
+
 /* 会话详情里的用户档案卡：与订单段右栏同一套 Card/Item/Badge 语汇。 */
 .workspace-root .im-wb-details .im-wb-card { margin:12px 14px; border-radius:10px; box-shadow:none; }
 .workspace-root .im-wb-avatar { width:32px; height:32px; flex:none; border:0; border-radius:50%; background:var(--im-accent-soft); color:var(--im-accent); font-size:13px; font-weight:600; overflow:hidden; }

@@ -5,6 +5,7 @@ import {createRequire} from 'node:module';
 import ts from 'typescript';
 import React from 'react';
 import { mountAuthComponent } from './react-auth-harness.mjs';
+import * as legalDocuments from "../src/content/legal/documents.ts";
 const require=createRequire(import.meta.url);
 const code=ts.transpileModule(readFileSync(new URL('../src/components/auth/auth-overlay-provider.tsx',import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS}}).outputText;
 function probe(status,target){
@@ -345,6 +346,7 @@ test("legal page and metadata reject prototype keys through the same allowlist",
   if(name==="next/navigation")return {notFound(){throw Object.assign(new Error("Not found"),{status:404});}};
   if(name==="next/link")return ()=>null;
   if(name==="@/components/brand/brand-logo")return {BrandLogo:()=>null};
+  if(name==="@/content/legal/documents")return legalDocuments;
   return require(name);
  },exports);
  for(const doc of ["toString","constructor","__proto__","missing"]){

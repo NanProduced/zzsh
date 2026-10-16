@@ -16,6 +16,21 @@ export function buildHelpNavData(articles: readonly HelpArticle[]): HelpNavData 
   };
 }
 
+/** 按帮助目录展示顺序（主分类在前、协议与规则在后）拍平全部文章 */
+export function flattenHelpNavArticles(data: HelpNavData): HelpNavArticle[] {
+  return [...data.categories, ...data.aux].flatMap((group) => group.articles.map((article) => ({ ...article })));
+}
+
+/** 上一篇/下一篇：以上下篇导航的目录顺序为准；边界处为 null */
+export function getHelpArticleNeighbors(data: HelpNavData, slug: string): { prev: HelpNavArticle | null; next: HelpNavArticle | null } {
+  const articles = flattenHelpNavArticles(data);
+  const index = articles.findIndex((article) => article.slug === slug);
+  return {
+    prev: index > 0 ? articles[index - 1]! : null,
+    next: index >= 0 && index < articles.length - 1 ? articles[index + 1]! : null,
+  };
+}
+
 export type HelpArticleCard = {
   slug: string;
   title: string;
