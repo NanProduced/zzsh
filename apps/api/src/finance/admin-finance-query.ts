@@ -3,12 +3,13 @@ import { escapeLike } from "../supply/catalog";
 import { financeOrderSql } from "./admin-finance-order-read";
 
 export type FinanceLoadScope = { filters?: FinanceFilters; documentRef?: string; subjectId?: string; page?: number; pageSize?: number; lookup?: { exact: boolean }; documentRefs?: string[]; orderRefs?: string[] };
-export const FINANCE_LEDGER_BUCKET_SQL = `CASE WHEN r.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE') THEN 'AVAILABLE' WHEN r.account_code='WALLET_RESERVED' THEN 'RESERVED' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE' WHEN r.account_code LIKE 'PLATFORM_%' OR r.account_code='WITHDRAW_FEE' THEN 'PLATFORM' ELSE 'CLEARING' END`;
-const historyBucket = `CASE WHEN r.source_entity='la_distribution_order' THEN 'PENDING_EARNINGS' ELSE 'AVAILABLE' END`;
-const ledgerKind = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING' WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND' ELSE 'SETTLEMENT' END`;
-const historyKind = `CASE WHEN r.source_entity='la_log_earnings' THEN 'EARNINGS' WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' ELSE 'WITHDRAWAL' END`;
+export const FINANCE_LEDGER_BUCKET_SQL = `CASE WHEN r.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE') THEN 'AVAILABLE' WHEN r.account_code='WALLET_RESERVED' THEN 'RESERVED' WHEN r.account_code='GUARANTEE_HELD' THEN 'GUARANTEE_HELD' WHEN r.account_code='WALLET_PENDING_EARNINGS' THEN 'PENDING_EARNINGS' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE' WHEN r.account_code LIKE 'PLATFORM_%' OR r.account_code='WITHDRAW_FEE' THEN 'PLATFORM' ELSE 'CLEARING' END`;
+const historyBucket = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_HELD' WHEN r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='RENTER_REFUND' THEN 'REFUND_PAYABLE' WHEN r.source_entity='la_distribution_order' OR r.observation_origin='NATIVE_EARNING_ZERO' AND r.source_status='PENDING' THEN 'PENDING_EARNINGS' ELSE 'AVAILABLE' END`;
+const ledgerKind = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING' WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL' WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' OR r.source_kind='LEGACY_CONTINUATION_DUTY' AND r.beneficiary_role='COMMISSION' THEN 'DISTRIBUTION' WHEN r.source_kind='NATIVE_GUARANTEE' THEN 'GUARANTEE' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND' ELSE 'SETTLEMENT' END`;
+const historyKind = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE' WHEN r.observation_origin='NATIVE_EARNING_ZERO' OR r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='COMMISSION' THEN 'DISTRIBUTION' WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN CASE WHEN r.action='RENTER_REFUND' THEN 'REFUND' ELSE 'SETTLEMENT' END WHEN r.source_entity='la_log_earnings' THEN 'EARNINGS' WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' ELSE 'WITHDRAWAL' END`;
+const historyDocument=`CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_SOURCE:'||r.id WHEN r.observation_origin='NATIVE_EARNING_ZERO' THEN 'DISTRIBUTION:'||r.source_id WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN 'LEGACY_DUTY:'||r.source_id ELSE 'HISTORY_'||(${historyKind})||':'||r.id END`;
 const ledgerSubject = `COALESCE(r.subject_id,CASE WHEN (${FINANCE_LEDGER_BUCKET_SQL})='PLATFORM' THEN 'PLATFORM' ELSE 'SYSTEM' END)`;
-const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
+const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN 'DISTRIBUTION:'||r.economic_root_id WHEN r.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_DUTY:'||r.source_id WHEN r.source_entity='owner_guarantee_payment' THEN 'GUARANTEE_PAYMENT:'||r.source_id WHEN r.source_entity='owner_guarantee_refund' THEN 'GUARANTEE_REFUND:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
 
 /** The same scope is applied in SQL before the matched-result ceiling. Values never become SQL. */
 export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean) {
@@ -16,9 +17,9 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
   const bucket = family === "ledger" ? FINANCE_LEDGER_BUCKET_SQL : historyBucket;
   const kind = family === "ledger" ? ledgerKind : historyKind;
   const subject = family === "ledger" ? ledgerSubject : "r.subject_id";
-  const document = family === "ledger" ? ledgerDocument : `'HISTORY_'||(${historyKind})||':'||r.id`;
+  const document = family === "ledger" ? ledgerDocument : historyDocument;
   const number = family === "ledger" ? "COALESCE(r.display_no,CASE WHEN r.event_kind='OPENING' THEN r.basis_id ELSE r.source_id END,r.posting_id,r.id)" : "COALESCE(r.reference_no,r.source_id)";
-  const state = family === "history" ? "'HISTORICAL_OBSERVED'" : withdrawalsReady ? `CASE WHEN r.source_entity='withdrawal_intent' AND i.id IS NOT NULL THEN i.state WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END` : `CASE WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END`;
+  const state = family === "history" ? "CASE WHEN r.observation_origin IN('NATIVE_EARNING_ZERO','LEGACY_DUTY_ZERO') THEN r.source_status ELSE 'HISTORICAL_OBSERVED' END" : withdrawalsReady ? `CASE WHEN r.source_entity='withdrawal_intent' AND i.id IS NOT NULL THEN i.state WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN COALESCE(r.earning_state,'UNKNOWN') WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END` : `CASE WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN COALESCE(r.earning_state,'UNKNOWN') WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END`;
   if (scope.documentRefs) conditions.push(`(${document})=ANY(${bind(scope.documentRefs)}::text[])`);
   if (scope.documentRef) conditions.push(`(${document})=${bind(scope.documentRef)}`);
   else if (scope.subjectId) conditions.push(`(${subject})=${bind(scope.subjectId)}`);
@@ -44,7 +45,7 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
 }
 
 /** A DB-side digest, not a second ledger/version store. New rows outside a page also invalidate it. */
-export function financeVersionSql(ready: { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean }): string {
+export function financeVersionSql(ready: { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean;native_distribution?:boolean;history_coverage?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean }): string {
   const relations = [
     `SELECT id,name FROM zzsh_auth_user."user"`,
     `SELECT id,account_code,counterparty_user_id,credit_cents::text,debit_cents::text,posting_id,finance_event_id,created_at FROM zzsh_order.settlement_ledger_entry`,
@@ -57,6 +58,10 @@ export function financeVersionSql(ready: { withdrawals?: boolean; native_orders?
   ];
   if (ready.native_orders) relations.push(`SELECT id,revision::text,status FROM zzsh_order.rental_order`);
   if (ready.legacy_orders) relations.push(`SELECT id,source_digest,binding_digest FROM zzsh_order.legacy_order_read_snapshot`);
+  if (ready.native_distribution) relations.push(`SELECT id,version::text,state,funds_disposition,recovery_required_cents::text,seed_digest,beneficiary_user_id,beneficiary_role,amount_cents::text,order_id,created_at,due_at FROM zzsh_order.rental_referral_earning`);
+  if (ready.history_coverage) relations.push(`SELECT id,body_digest FROM zzsh_order.personal_finance_observation_coverage`);
+  if(ready.legacy_duty_finance)relations.push(`SELECT duty_id AS id,facts_digest,event_id,ref_type,ref_id FROM zzsh_order.legacy_duty_finance_fact`,`SELECT id,revision::text,status,settled_by,settled_ref_type,settled_ref_id,settled_ref_digest FROM zzsh_order.legacy_order_duty`);
+  if(ready.guarantee_history)relations.push(`SELECT id,body_digest FROM zzsh_order.legacy_owner_guarantee_coverage`,`SELECT id,source_digest,source_cutoff,imported_at FROM zzsh_order.legacy_owner_guarantee_observation`);
   if (ready.withdrawals) relations.push(`SELECT id,operation_version::text,state,funds_disposition,last_provider_fact_id FROM zzsh_order.withdrawal_intent`, `SELECT id,evidence_digest FROM zzsh_order.withdrawal_provider_fact`, `SELECT id,final_evidence_digest FROM zzsh_order.controlled_payout_operation`);
   return `SELECT md5(concat_ws('|',${relations.map(relation => `(SELECT md5(COALESCE(string_agg(md5(to_jsonb(v)::text),'' ORDER BY v.id COLLATE "C"),'')) FROM (${relation}) v)`).join(",")})) AS finance_version`;
 }
@@ -77,7 +82,7 @@ export function financeLookupPageSql(ledger: string, history: string, ready: { w
   return { text: `WITH finance_lookup_ledger AS (${ledgerSql}),finance_lookup_history AS (${historySql}),
     finance_lookup_entries AS (
       SELECT 'ledger:'||r.id AS id,${ledgerDocument} AS ref,r.at FROM finance_lookup_ledger r
-      UNION ALL SELECT 'history:'||r.id,'HISTORY_'||(${historyKind})||':'||r.id,r.at FROM finance_lookup_history r
+      UNION ALL SELECT 'history:'||r.id,${historyDocument},r.at FROM finance_lookup_history r
     ),finance_lookup_ranked AS (
       SELECT ref,at,row_number() OVER(PARTITION BY ref COLLATE "C" ORDER BY priority,at DESC NULLS LAST,id COLLATE "C" DESC) AS rank FROM (
         SELECT id,ref,at,0 AS priority FROM finance_lookup_entries

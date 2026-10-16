@@ -20,8 +20,8 @@ test('source universe explicitly closes complete zero, mapped observations and i
 function fixture(count=1){
  const plans=Array.from({length:count},(_,n)=>prepareOwnerGuaranteeHistory(source(String(101+n)))),digest=createHash('sha256').update(plans.slice().sort((a,b)=>a.sourceId<b.sourceId?-1:1).map(p=>p.sourceId+':'+p.sourceDigest).join('\n')).digest('hex');
  const rows=plans.map((p,n)=>({id:'guarantee_history_'+String(n).padStart(3,'0'),account_id:p.accountId,legacy_account_id:p.sourceId,source_canonical:p.sourceCanonical,source_digest:p.sourceDigest,at})).reverse();
- const state={installed:true,coverage:true,isolated:0,badDigest:false,badRow:false,queries:[] as {sql:string;args:any[]}[]};
- const c={query:async(sql:string,args:any[]=[])=>{state.queries.push({sql,args});if(sql.includes('owner guarantee history schema'))return{rows:[{ready:state.installed,native_ready:true}]};if(sql.includes('owner guarantee posted held'))return{rows:[{held:'500'}]};if(sql.includes('owner guarantee history coverage'))return{rows:state.coverage?[{id:'coverage-fixture',user_id:'owner',source_count:count+state.isolated,imported_count:count,isolated_count:state.isolated,body_digest:'d'.repeat(64),cutoff,actual_count:String(count),actual_digest:state.badDigest?'wrong':digest,imported_set_digest:digest}]:[]};if(sql.includes('owner guarantee history page'))return{rows:rows.filter(r=>!args[4]||r.id<args[4]).slice(0,21).map(r=>state.badRow?{...r,source_digest:'f'.repeat(64)}:r)};if(sql.startsWith('SELECT to_char'))return{rows:[{at}]};throw Error('Unexpected history read');}};
+ const state={installed:true,coverage:true,isolated:0,badDigest:false,badRow:false,held:'500',queries:[] as {sql:string;args:any[]}[]};
+ const c={query:async(sql:string,args:any[]=[])=>{state.queries.push({sql,args});if(sql.includes('owner guarantee history schema'))return{rows:[{ready:state.installed,native_ready:true}]};if(sql.includes('owner guarantee posted held'))return{rows:[{held:state.held}]};if(sql.includes('owner guarantee history coverage'))return{rows:state.coverage?[{id:'coverage-fixture',user_id:'owner',source_count:count+state.isolated,imported_count:count,isolated_count:state.isolated,body_digest:'d'.repeat(64),cutoff,actual_count:String(count),actual_digest:state.badDigest?'wrong':digest,imported_set_digest:digest}]:[]};if(sql.includes('owner guarantee history page'))return{rows:rows.filter(r=>!args[4]||r.id<args[4]).slice(0,21).map(r=>state.badRow?{...r,source_digest:'f'.repeat(64)}:r)};if(sql.startsWith('SELECT to_char'))return{rows:[{at}]};throw Error('Unexpected history read');}};
  return{state,c:c as any};
 }
 test('known full history, source-absent empty and partial isolation are distinct; no row creates guarantee credit or refund',async()=>{
@@ -31,6 +31,12 @@ test('known full history, source-absent empty and partial isolation are distinct
 });
 test('same-time history paging is source-version/session bound and preserves original source IDs',async()=>{
  const f=fixture(21),first=await readOwnerGuaranteeHistory(f.c,actor,null,key);assert.equal(first.items.length,20);assert(first.nextCursor);const next=await readOwnerGuaranteeHistory(f.c,actor,first.nextCursor,key);assert.equal(next.items.length,1);assert.notEqual(first.items[0]!.id,next.items[0]!.id);await assert.rejects(readOwnerGuaranteeHistory(f.c,{...actor,sessionId:'other'},first.nextCursor,key),(e:any)=>e.status===409);assert(f.state.queries.filter(q=>q.sql.includes('history page')).every(q=>q.args[0]==='owner'));
+});
+test('native held changes invalidate an otherwise unchanged history cursor before querying another page',async()=>{
+ const f=fixture(21),first=await readOwnerGuaranteeHistory(f.c,actor,null,key);assert(first.nextCursor);assert.equal((await readOwnerGuaranteeHistory(f.c,actor,first.nextCursor,key)).items.length,1);
+ const pages=f.state.queries.filter(q=>q.sql.includes('history page')).length;f.state.held='600';
+ await assert.rejects(readOwnerGuaranteeHistory(f.c,actor,first.nextCursor,key),(e:any)=>e.status===409);assert.equal(f.state.queries.filter(q=>q.sql.includes('history page')).length,pages);
+ const fresh=await readOwnerGuaranteeHistory(f.c,actor,null,key);assert.equal(fresh.postedHeld.amountCents,'600');assert.notEqual(fresh.snapshotVersion,first.snapshotVersion);assert.equal(fresh.items.length,20);assert(fresh.snapshotVersion!.length<=256);
 });
 test('bad target set, source canonical and DB failures do not become normal empty history',async()=>{
  const f=fixture();f.state.badDigest=true;await assert.rejects(readOwnerGuaranteeHistory(f.c,actor,null,key),(e:any)=>e.status===503);f.state.badDigest=false;f.state.badRow=true;await assert.rejects(readOwnerGuaranteeHistory(f.c,actor,null,key),(e:any)=>e.status===503);

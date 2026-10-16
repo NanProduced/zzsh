@@ -7,20 +7,23 @@ import {encodeFinanceCursor} from '../src/finance/personal-finance-read';
 import {readControlledWithdrawalsInTransaction} from '../src/finance/controlled-withdrawal-store';
 import {createNativeWithdrawalScope} from '../src/finance/native-withdrawal-resource';
 import {createHash} from 'node:crypto';
+import {prepareObservationCoverage} from '../src/finance/personal-finance-coverage';
 const at='2026-10-04T00:00:00.000000Z',actor={userId:'self',sessionId:'session',requestId:'req_read'},key={keyId:'read-test',secret:'x'.repeat(40)};
 const query={source:'ALL' as const,state:'ALL',limit:20,cursor:null};
 function observation(id='obs_z',status=2,user='self'){
  const snapshot={kind:'withdrawObservation',sourceId:id==='obs_z'?42:43,sourceUserId:'11',sourceStatus:status,amount:'100.00',net:'99.00',fee:'1.00',createdAt:Date.parse(at)/1000,payee:'PRIVATE_ACCOUNT'};
- const prepared=prepareHistoricalObservation(snapshot,{userId:user,legacyUserId:'11',sourceSystem:'restore',basisId:null});
- return{id,user_id:user,basis_id:null,legacy_user_id:'11',source_kind:'HISTORICAL_WITHDRAWAL',source_type:'LEGACY_MYSQL',source_system:'restore',source_entity:'la_withdraw_apply',source_id:String(snapshot.sourceId),source_digest:prepared.sourceDigest,source_canonical:prepared.sourceCanonical,snapshot,occurred_at:at,imported_at:at,included_in_opening:false};
+ const prepared=prepareHistoricalObservation(snapshot,{userId:user,legacyUserId:'11',sourceSystem:'legacy_mysql_restore',basisId:null});
+ return{id,user_id:user,basis_id:null,legacy_user_id:'11',source_kind:'HISTORICAL_WITHDRAWAL',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_withdraw_apply',source_id:String(snapshot.sourceId),source_digest:prepared.sourceDigest,source_canonical:prepared.sourceCanonical,snapshot,occurred_at:at,imported_at:at,included_in_opening:false};
 }
-function probe(options:{rows?:ReturnType<typeof observation>[];native?:boolean;resource?:Record<string,unknown>;databaseError?:boolean;active?:boolean}={}){
+function probe(options:{rows?:ReturnType<typeof observation>[];native?:boolean;resource?:Record<string,unknown>;databaseError?:boolean;active?:boolean;historyCoverage?:Record<string,unknown>}={}){
  const seen:{sql:string;args:any[]}[]=[],rows=options.rows??[],resource={name:'zzsh_test_read_unadmitted',oid:99999,role:'reader',marker:'not-admitted',complete:true,...options.resource};
  const client={release(){},async query(sql:string,args:any[]=[]){seen.push({sql,args});
   if(['BEGIN','COMMIT','ROLLBACK'].includes(sql))return{rows:[]};
   if(sql.startsWith('SELECT "suspended"'))return{rows:[{suspended:options.active===false}]};
   if(sql.includes('FROM "zzsh_iam"."user_identity_state"'))return{rows:[{accountStatus:'ACTIVE'}]};
   if(sql.startsWith('SELECT 1 FROM "zzsh_auth_user"."session"'))return{rows:[{}],rowCount:1};
+  if(sql.includes('finance history coverage installed'))return{rows:[{installed:options.historyCoverage!==undefined}]};
+  if(sql.includes('finance history coverage exact target'))return{rows:[options.historyCoverage]};
   if(sql.startsWith('SELECT to_regclass'))return{rows:[{history:true,native:true}]};
   if(sql.startsWith('SELECT EXISTS'))return{rows:[{complete:options.native===true}]};
   if(sql.startsWith('SELECT current_database()'))return{rows:[resource]};
@@ -56,6 +59,17 @@ test('known historical rows remain readable with unknown wallet/total coverage a
 });
 test('zero rows without full origin evidence stay unimported; only a proved nonlegacy native birth is known empty',async()=>{
  for(const native of [false,true]){const p=probe({native}),read=await readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL'},key);assert(read.historical?.coverage);assert.equal(read.historical.coverage.knowledge,native?'KNOWN':'UNKNOWN');assert.equal(read.historical.availability,native?'AVAILABLE':'NOT_IMPORTED');assert.equal(read.historical.count,native?'0':null);}
+});
+
+test('reviewed exact history coverage enables real populated and empty pages without granting withdrawal',async()=>{
+ for(const rows of [[],[observation()]]){
+  const p=prepareObservationCoverage({userId:'self',legacyUserId:'11',sourceSystem:'legacy_mysql_restore',sourceKind:'HISTORICAL_WITHDRAWAL',cutoff:'2026-10-04T00:00:00.000Z',inputSha256:'a'.repeat(64),identityDigest:'b'.repeat(64),sourceCount:rows.length,imported:rows.map(r=>({sourceId:r.source_id,sourceDigest:r.source_digest})),isolated:[]});
+  const f=probe({rows,historyCoverage:{id:p.id,source_count:rows.length,imported_count:rows.length,isolated_count:0,cutoff:p.cutoff,imported_set_digest:p.importedSetDigest,actual_count:String(rows.length),actual_digest:p.importedSetDigest,invalid_count:'0',outside_count:'0'}});
+  const r=await readPersonalWithdrawals(f.pool,actor,query,key);assert(r.historical);assert(r.historical.coverage);assert(r.controlled);
+  assert.equal(r.historical.coverage.knowledge,'KNOWN');assert.equal(r.historical.coverage.reason,'SOURCE_COMPLETE_THROUGH_CUTOFF');assert.equal(r.historical.count,String(rows.length));
+  assert.equal(r.historical.items.length,rows.length);assert.equal(r.controlled.availability,'NOT_ADMITTED');assert.equal(r.controlled.data,null);
+  assert(!f.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ }
 });
 test('signed history/source snapshot cursors reject session and source changes; details never switch source or subject',async()=>{
  const p=probe({rows:[observation('obs_z'),observation('obs_a'),observation('foreign',2,'other')]}),first=await readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL',limit:1},key);assert('historical' in first);const cursor=first.historical?.nextCursor;assert(cursor);

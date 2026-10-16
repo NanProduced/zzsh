@@ -12,6 +12,10 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
   ];
   const query = async (sql: string, values: unknown[] = []) => {
     state.statements.push(sql);
+    if(sql.includes('finance period complete ledger balances')){
+      if(financeSql)return financeSql.query(sql,values);
+      const fixture=new FinanceSqlFixture({ledger:ledgerRows(),subjects:state.subjects});try{return fixture.query(sql,values);}finally{fixture.close();}
+    }
     if(sql.includes("AS finance_version")){
       if(financeSql)return financeSql.query(state.versionSqlOverride??sql,values);
       const fixture=new FinanceSqlFixture({ledger:ledgerRows(),subjects:state.subjects,operations:state.operations});
@@ -26,7 +30,7 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
     if (sql.includes('SELECT s."locked"')) return { rows: [{ locked: state.locked, twoFactorEnabled: true }], rowCount: 1 };
     if (sql.includes('"zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: state.isBoss, passwordChangeRequired: state.passwordChangeRequired }], rowCount: 1 };
     if (sql.includes("WITH role_permissions")) return { rows: state.permissions.map(permissionCode => ({ permissionCode })), rowCount: state.permissions.length };
-    if (sql.includes("to_regclass")) return { rows: [{ ready: state.schemaReady, withdrawals: state.withdrawalsReady, native_orders: !!financeSql, legacy_orders: !!financeSql }], rowCount: 1 };
+    if (sql.includes("to_regclass")) return { rows: [{ ready: state.schemaReady, withdrawals: state.withdrawalsReady, native_orders: !!financeSql, legacy_orders: !!financeSql,native_distribution:false,history_coverage:false }], rowCount: 1 };
     if (sql.includes("FROM zzsh_order.withdrawal_intent i")) return { rows: [{ id: "w1", user_id: "u1", state: "UNKNOWN", funds_disposition: "RESERVED", gross_cents: "20000", net_cents: "19600", fee_cents: "400", policy_version: "local-rule1", accepted_at: "2026-10-03T01:00:00.000000Z", operation_version: "3" }], rowCount: 1 };
     if (sql.includes("FROM zzsh_order.withdrawal_provider_fact")) return { rows: [], rowCount: 0 };
     if (sql.includes("FROM zzsh_order.controlled_payout_operation")) return { rows: state.operations, rowCount: state.operations.length };
@@ -39,7 +43,7 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
     if (sql.includes("clock_timestamp() AT TIME ZONE")) return { rows: [{ at: "2026-10-03T10:00:00.000000Z" }], rowCount: 1 };
     if (sql.startsWith('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR SHARE')) {if(financeSql){const next=BigInt(financeSql.clusterSnapshot.split(":")[1]!)+1n;financeSql.clusterSnapshot=`${next}:${next}:`;}const rows=state.subjects.filter(subject=>subject.id===values[0]);return {rows,rowCount:rows.length};}
     if (sql.startsWith("SELECT c.origin,")||sql.startsWith('SELECT ledger_revision::text AS "ledgerRevision"')) return {rows:[],rowCount:0};
-    if (sql.startsWith("SELECT COALESCE(sum(credit_cents-debit_cents),0)::text AS available")) return {rows:[{available:"999"}],rowCount:1};
+    if (sql.includes('AS available')&&sql.includes('FROM zzsh_order.settlement_ledger_entry')) return {rows:[{available:"999",reserved:'0',pending:'0',refund:'0'}],rowCount:1};
     if (/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql)) return { rows: [], rowCount: 0 };
     throw Error("Unexpected query in boundary test");
   };
@@ -168,7 +172,7 @@ test("mixed lookup deduplicates funds/order refs, preserves source types and equ
  const exact=await request(env.options,"lookup","period=0&q=ORDER_LINK%3AL00");assert.equal(exact.status,200);assert.deepEqual(exact.json.documents.map((d:any)=>d.ref),["ORDER:L00","LEGACY_ORDER:L00"]);
  const detail=await request(env.options,"documents/LEGACY_ORDER%3AL00","period=0");assert.equal(detail.status,200);assert.equal(detail.json.evidence.recordedPaidCents,"9000");assert.equal(detail.json.entries.length,0);assert(detail.json.reasonCodes.includes("ORDER_RECORD_NOT_CHANNEL_RESULT"));
  const historical=await request(env.options,"documents/HISTORY_EARNINGS%3Aunknown","period=0");assert.equal(historical.status,200);assert(historical.json.related.some((r:any)=>r.ref==="LEGACY_ORDER:L01"));assert.equal(historical.json.entries[0].deltaCents,null);
- const period=await request(env.options,"period");assert.equal(period.status,200);assert.equal(period.json.entryCount,3);assert(period.json.reconciliation.every((r:any)=>r.knowledge==="UNKNOWN"));
+ const period=await request(env.options,"period");assert.equal(period.status,200);assert.equal(period.json.entryCount,3);assert(period.json.reconciliation.every((r:any)=>r.knowledge==="KNOWN"&&r.scope==='CURRENT_LEDGER_ONLY'));assert.equal(period.json.reconciliation.find((r:any)=>r.bucket==='AVAILABLE').closingBalance,'900719925474099312344');assert(period.json.gaps.includes('CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY'));
  const filtered=await request(env.options,"lookup","period=0&state=HISTORICAL_ORDER_RECORDED");assert.equal(filtered.status,200);assert.equal(filtered.json.documentCount,43);assert.equal(filtered.json.entryCount,0);
  const byBucket=await request(env.options,"lookup","period=0&bucket=AVAILABLE");assert.equal(byBucket.status,200);assert.equal(byBucket.json.documentCount,2);assert.equal(byBucket.json.entryCount,3);
 });

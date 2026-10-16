@@ -4,12 +4,13 @@ import { SecurityApiError } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
-import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet } from "./personal-finance-read";
+import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN } from "./personal-finance-read";
 import { loadFinanceOrderFacts, matchFinanceOrderReference, type FinanceOrderFact } from "./admin-finance-order-read";
-import { scopedFinanceSql, financeVersionSql, financeLookupPageSql, type FinanceLoadScope } from "./admin-finance-query";
+import { scopedFinanceSql, financeVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL, type FinanceLoadScope } from "./admin-finance-query";
+import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 
 export const ADMIN_FINANCE_VERSION = "admin-finance.read.v1";
-export const FINANCE_BUCKETS = ["AVAILABLE", "RESERVED", "REFUND_PAYABLE", "PENDING_EARNINGS", "PLATFORM", "CLEARING"] as const;
+export const FINANCE_BUCKETS = ["AVAILABLE", "RESERVED", "GUARANTEE_HELD", "REFUND_PAYABLE", "PENDING_EARNINGS", "PLATFORM", "CLEARING"] as const;
 export type FinanceBucket = typeof FINANCE_BUCKETS[number];
 export type FinanceFilters = { scope: string; from: string; to: string; period: boolean; bucket: FinanceBucket | "ALL"; kind: string; state: string; q: string };
 export type FinanceActor = { userId: string; sessionId: string; authorizationKey: string };
@@ -22,7 +23,7 @@ export type FinanceEntry = {
   reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>;
   related: { ref: string; label: string; path?: string }[];
 };
-export type FinanceFacts = { entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; asOf: string; version: string };
+export type FinanceFacts = { entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; asOf: string; version: string };
 const MAX_FACTS = 20_000;
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -44,7 +45,7 @@ export function parseAdminFinanceFilters(query: URLSearchParams, now = new Date(
   if (scope !== "ALL" && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(scope)) throw invalid("Invalid finance subject");
   if (bucket !== "ALL" && !(FINANCE_BUCKETS as readonly string[]).includes(bucket)) throw invalid("Invalid finance bucket");
   const kind = query.get("kind") ?? "ALL", state = query.get("state") ?? "ALL", q = (query.get("q") ?? "").trim();
-  if (!/^(ALL|OPENING|SETTLEMENT|WITHDRAWAL|REFUND|EARNINGS|DISTRIBUTION)$/.test(kind) || !["ALL", "POSTED", "RESERVED", "SUBMITTING", "PROCESSING", "UNKNOWN", "SUCCEEDED", "FAILED", "RECONCILIATION_REQUIRED", "HISTORICAL_OBSERVED", "ORDER_RECORDED", "HISTORICAL_ORDER_RECORDED", "REFUND_PAYABLE_RECORDED"].includes(state) || q.length > 512) throw invalid("Invalid finance query");
+  if (!/^(ALL|OPENING|SETTLEMENT|WITHDRAWAL|REFUND|EARNINGS|DISTRIBUTION|GUARANTEE)$/.test(kind) || !["ALL", "POSTED", "PENDING", "SETTLED", "REVOKED", "RECOVERY_REQUIRED", "RESERVED", "SUBMITTING", "PROCESSING", "UNKNOWN", "SUCCEEDED", "FAILED", "RECONCILIATION_REQUIRED", "HISTORICAL_OBSERVED", "ORDER_RECORDED", "HISTORICAL_ORDER_RECORDED", "REFUND_PAYABLE_RECORDED"].includes(state) || q.length > 512) throw invalid("Invalid finance query");
   const periodValue = query.get("period");
   if (periodValue !== null && !["0", "1"].includes(periodValue) || periodRequired && periodValue === "0") throw invalid("Invalid finance period mode");
   const period = periodRequired || periodValue === "1" || periodValue !== "0" && (query.has("from") || query.has("to"));
@@ -65,7 +66,9 @@ function signedSourceCents(value: unknown): string | null { try { return sourceS
 function displayName(value: unknown, fallback: string): string { return typeof value !== "string" ? fallback : /^1[3-9]\d{9}$/.test(value) ? value.slice(0, 3) + "****" + value.slice(-4) : value; }
 function bucketOf(code: string): FinanceBucket {
   if (["OWNER_AVAILABLE", "WALLET_AVAILABLE"].includes(code)) return "AVAILABLE";
-  if (code === "WALLET_RESERVED") return "RESERVED";
+  if (code==='WALLET_RESERVED') return "RESERVED";
+  if(code==='GUARANTEE_HELD')return'GUARANTEE_HELD';
+  if (code === "WALLET_PENDING_EARNINGS") return "PENDING_EARNINGS";
   if (code === "RENTER_REFUND_PAYABLE") return "REFUND_PAYABLE";
   if (code.startsWith("PLATFORM_") || code === "WITHDRAW_FEE") return "PLATFORM";
   return "CLEARING";
@@ -73,36 +76,77 @@ function bucketOf(code: string): FinanceBucket {
 export const ADMIN_FINANCE_LEDGER_SQL = `SELECT l.id,l.account_code,l.counterparty_user_id AS subject_id,
   COALESCE(u.name,l.counterparty_user_id,'平台') AS subject_name,(l.credit_cents-l.debit_cents)::text AS delta,
   ${utc("l.created_at")} AS at,l.posting_id,e.kind AS event_kind,r.source_kind,r.source_type,r.source_system,r.source_entity,r.source_id,r.source_digest,
-  r.basis_id,p.order_id,o.display_no,o.account_id,b.source_cutoff::text AS opening_cutoff,b.covered_count::text AS covered_count,
+  r.basis_id,r.id AS economic_root_id,r.beneficiary_role,COALESCE(p.order_id,re.order_id) AS order_id,o.display_no,o.account_id,b.source_cutoff::text AS opening_cutoff,b.covered_count::text AS covered_count,
+  re.state AS earning_state,re.beneficiary_role AS earning_role,re.amount_cents::text AS earning_amount,re.funds_disposition AS earning_disposition,re.recovery_required_cents::text AS earning_recovery,${utc("re.due_at")} AS earning_due_at,re.version::text AS earning_version,
   p.payment_confirmation_id,p.settlement_version_id,p.version_hash,p.captured_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,${utc("p.refund_due_at")} AS refund_due_at
   FROM zzsh_order.settlement_ledger_entry l LEFT JOIN zzsh_auth_user."user" u ON u.id=l.counterparty_user_id
   LEFT JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id LEFT JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
   LEFT JOIN zzsh_order.finance_opening_basis b ON b.id=r.basis_id
-  LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id LEFT JOIN zzsh_order.rental_order o ON o.id=p.order_id
+  LEFT JOIN zzsh_order.rental_referral_earning re ON re.economic_root_id=r.id AND r.source_kind='NATIVE_RENTAL_REFERRAL'
+  LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id LEFT JOIN zzsh_order.rental_order o ON o.id=COALESCE(p.order_id,re.order_id)
   ORDER BY l.id COLLATE "C" LIMIT $1`;
-export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_id,COALESCE(u.name,o.user_id) AS subject_name,o.source_kind,o.source_type,o.source_system,o.source_entity,o.source_id,o.source_digest,o.basis_id,o.included_in_opening,
+export function adminFinanceLedgerSql(nativeDistribution:boolean){return nativeDistribution?ADMIN_FINANCE_LEDGER_SQL:ADMIN_FINANCE_LEDGER_SQL
+ .replace('COALESCE(p.order_id,re.order_id) AS order_id','p.order_id AS order_id')
+ .replace(/re\.state AS earning_state,[\s\S]+?re\.version::text AS earning_version,/,"NULL::text AS earning_state,NULL::text AS earning_role,NULL::text AS earning_amount,NULL::text AS earning_disposition,NULL::text AS earning_recovery,NULL::text AS earning_due_at,NULL::text AS earning_version,")
+ .replace(/\s+LEFT JOIN zzsh_order\.rental_referral_earning re[^\n]+/,'')
+ .replace('o.id=COALESCE(p.order_id,re.order_id)','o.id=p.order_id');}
+export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_id,COALESCE(u.name,o.user_id) AS subject_name,o.source_kind,o.source_type,o.source_system,o.source_entity,o.source_id,o.source_digest,COALESCE(oa.basis_id,o.basis_id) AS basis_id,COALESCE(oa.included_in_opening,o.included_in_opening) AS included_in_opening,
   ${utc("o.source_event_at")} AS at,${utc("o.imported_at")} AS imported_at,
   o.snapshot->>'amount' AS amount,o.snapshot->>'action' AS action,o.snapshot->>'sourceStatus' AS source_status,
   o.snapshot->>'referenceId' AS reference_id,o.snapshot->>'referenceSn' AS reference_no,
-  o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after
-  FROM zzsh_order.personal_finance_observation o LEFT JOIN zzsh_auth_user."user" u ON u.id=o.user_id ORDER BY o.id COLLATE "C" LIMIT $1`;
+  o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after,'LEGACY_MYSQL'::text AS observation_origin,NULL::jsonb AS extra_evidence
+  FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} LEFT JOIN zzsh_auth_user."user" u ON u.id=o.user_id ORDER BY o.id COLLATE "C" LIMIT $1`;
+export function adminFinanceObservationSql(ready:{native_distribution?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean}){
+ if(!ready.native_distribution&&!ready.legacy_duty_finance&&!ready.guarantee_history)return ADMIN_FINANCE_OBSERVATION_SQL;
+ const history=ADMIN_FINANCE_OBSERVATION_SQL.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
+ const native=ready.native_distribution?` UNION ALL SELECT 'zero_earning:'||e.id,e.beneficiary_user_id,COALESCE(u.name,e.beneficiary_user_id),'NATIVE_RENTAL_REFERRAL','NATIVE','zzsh','rental_referral_earning',e.id,e.seed_digest,NULL::text,false,
+  ${utc('e.created_at')},${utc('e.created_at')},'0'::text,e.beneficiary_role,e.state,e.order_id,NULL::text,NULL::text,NULL::text,NULL::text,'NATIVE_EARNING_ZERO',jsonb_build_object('earningRole',e.beneficiary_role,'earningFundsDisposition',e.funds_disposition,'earningVersion',e.version::text,'dueAt',${utc('e.due_at')})
+  FROM zzsh_order.rental_referral_earning e LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id WHERE e.amount_cents=0`:'';
+ const legacy=ready.legacy_duty_finance?` UNION ALL SELECT 'zero_duty:'||f.duty_id,f.subject_user_id,COALESCE(u.name,f.subject_user_id),'LEGACY_CONTINUATION_DUTY','LEGACY_CONTINUATION','zzsh','legacy_order_duty',f.duty_id,f.facts_digest,NULL::text,false,
+  ${utc('f.created_at')},${utc('f.created_at')},'0'::text,f.kind,'SETTLED',f.order_id,NULL::text,NULL::text,NULL::text,NULL::text,'LEGACY_DUTY_ZERO',jsonb_build_object('zeroFinalReferenceType',f.ref_type,'zeroFinalReferenceId',f.ref_id,'finalFactsDigest',f.facts_digest)
+  FROM zzsh_order.legacy_duty_finance_fact f JOIN zzsh_order.finance_event e ON e.id=f.event_id AND e.economic_root_id=f.root_id AND e.kind='LEGACY_DUTY_SETTLED'
+  JOIN zzsh_order.legacy_order_duty d ON d.id=f.duty_id AND d.status='SETTLED' AND d.settled_by='FINANCE' AND d.settled_ref_type='FINANCE_EVENT' AND d.settled_ref_id=f.event_id AND d.settled_ref_digest=f.facts_digest
+  LEFT JOIN zzsh_auth_user."user" u ON u.id=f.subject_user_id WHERE f.amount_cents=0 AND f.zero_finalization AND NOT EXISTS(SELECT 1 FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=f.event_id)`:'';
+ const guarantee=ready.guarantee_history?` UNION ALL SELECT 'guarantee_source:'||g.id,g.user_id,COALESCE(u.name,g.user_id),'OWNER_GUARANTEE_HISTORY','LEGACY_MYSQL','legacy_mysql_restore','la_rental_accounts',g.legacy_account_id,g.source_digest,NULL::text,false,
+  NULL::text,${utc('g.imported_at')},NULL::text,'GUARANTEE_HISTORY','HISTORICAL_OBSERVED',NULL::text,g.legacy_account_id,NULL::text,NULL::text,NULL::text,'LEGACY_GUARANTEE_HISTORY',jsonb_build_object('canonical',g.source_canonical,'accountId',g.account_id)
+  FROM zzsh_order.legacy_owner_guarantee_observation g LEFT JOIN zzsh_auth_user."user" u ON u.id=g.user_id
+  WHERE jsonb_array_length(g.source_canonical::jsonb->'payOrders')>0 OR(g.source_canonical::jsonb->'source'->>'pay_money')::numeric>0`:'';
+ return`SELECT o.* FROM (${history}${native}${legacy}${guarantee}) o ORDER BY o.id COLLATE "C" LIMIT $1`;
+}
 type Raw = Record<string, any>;
 export function projectAdminFinanceLedger(row: Raw): FinanceEntry {
-  const opening = row.event_kind === "OPENING", withdrawal = row.source_entity === "withdrawal_intent";
-  const ref = opening ? `OPENING:${row.basis_id}` : withdrawal ? `WITHDRAWAL:${row.source_id}` : row.order_id ? `ORDER:${row.order_id}` : `POSTING:${row.posting_id ?? row.id}`;
-  const amount = cents(row.delta), type = opening ? "OPENING" : withdrawal ? "WITHDRAWAL" : bucketOf(row.account_code) === "REFUND_PAYABLE" ? "REFUND" : "SETTLEMENT";
+  const opening = row.event_kind === "OPENING", withdrawal = row.source_entity === "withdrawal_intent",earning=row.source_kind==='NATIVE_RENTAL_REFERRAL',duty=row.source_kind==='LEGACY_CONTINUATION_DUTY',guarantee=row.source_kind==='NATIVE_GUARANTEE';
+  const ref = opening ? `OPENING:${row.basis_id}` : withdrawal ? `WITHDRAWAL:${row.source_id}` : earning?`DISTRIBUTION:${row.economic_root_id}`:duty?`LEGACY_DUTY:${row.source_id}`:guarantee?`${row.source_entity==='owner_guarantee_payment'?'GUARANTEE_PAYMENT':'GUARANTEE_REFUND'}:${row.source_id}`:row.order_id ? `ORDER:${row.order_id}` : `POSTING:${row.posting_id ?? row.id}`;
+  const amount = cents(row.delta), type = opening ? "OPENING" : withdrawal ? "WITHDRAWAL" : earning||duty&&row.beneficiary_role==='COMMISSION'?'DISTRIBUTION':guarantee?'GUARANTEE':bucketOf(row.account_code) === "REFUND_PAYABLE" ? "REFUND" : "SETTLEMENT";
   return { id: `ledger:${row.id}`, documentRef: ref, documentNumber: row.display_no ?? (opening ? row.basis_id : row.source_id) ?? row.posting_id ?? row.id,
     subjectId: row.subject_id ?? (bucketOf(row.account_code) === "PLATFORM" ? "PLATFORM" : "SYSTEM"), subjectName: row.subject_id ? displayName(row.subject_name, row.subject_id) : bucketOf(row.account_code) === "PLATFORM" ? "平台" : "对照科目", bucket: bucketOf(row.account_code), direction: amount === null ? "UNKNOWN" : BigInt(amount) < 0n ? "OUT" : "IN",
-    deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind: type, state: type === "REFUND" ? "REFUND_PAYABLE_RECORDED" : "POSTED", classification: opening ? "OPENING" : "CURRENT_POSTED", affectsCurrentWallet: row.subject_id !== null && row.subject_id !== undefined, affectsCurrentLedger: true,
+    deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind: type, state: earning?row.earning_state??'UNKNOWN':type === "REFUND" ? "REFUND_PAYABLE_RECORDED" : "POSTED", classification: opening ? "OPENING" : "CURRENT_POSTED", affectsCurrentWallet: row.subject_id !== null && row.subject_id !== undefined, affectsCurrentLedger: true,
     occurredAt: row.at, importedAt: row.at, sourceType: row.source_type ?? "NATIVE", sourceSystem: row.source_system ?? "zzsh", sourceEntity: row.source_entity ?? "settlement_posting", sourceId: row.source_id ?? row.posting_id ?? row.id,
     sourceDigest: row.source_digest ?? null, basisId: row.basis_id ?? null, reasonCodes: [...(amount === null ? ["INVALID_EXACT_AMOUNT"] : []), ...(type === "REFUND" ? ["REFUND_PAYMENT_SOURCE_NOT_AVAILABLE"] : [])], accountCode: row.account_code,
     evidence: { eventKind: row.event_kind ?? null, openingCutoff: row.opening_cutoff ?? null, coveredCount: row.covered_count ?? null, postingId: row.posting_id ?? null,
       paymentConfirmationId: row.payment_confirmation_id ?? null, settlementVersionId: row.settlement_version_id ?? null, settlementVersionHash: row.version_hash ?? null,
       postingCapturedCents: cents(row.captured_cents),
-      refundPayableCents: cents(row.renter_refund_cents), refundDueAt: row.refund_due_at ?? null, ...(type === "REFUND" ? { refundPaidCents: null, refundPaymentReference: null } : {}), postedPlatformContributionCents: cents(row.platform_contribution_cents) },
+      refundPayableCents: cents(row.renter_refund_cents), refundDueAt: row.refund_due_at ?? null, ...(type === "REFUND" ? { refundPaidCents: null, refundPaymentReference: null } : {}), ...(earning?{earningRole:row.earning_role??null,earningAmountCents:cents(row.earning_amount),earningFundsDisposition:row.earning_disposition??null,recoveryRequiredCents:cents(row.earning_recovery),dueAt:row.earning_due_at??null,earningVersion:row.earning_version??null}:{}),postedPlatformContributionCents: cents(row.platform_contribution_cents) },
     related: [...(row.order_id ? [{ ref: `ORDER:${row.order_id}`, label: "原订单", path: `/orders/${encodeURIComponent(row.order_id)}` }] : []), ...(row.account_id ? [{ ref: row.account_id, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(row.account_id)}` }] : [])] };
 }
 export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
+ if(row.observation_origin==='LEGACY_GUARANTEE_HISTORY'){
+  let p:ReturnType<typeof prepareOwnerGuaranteeHistory>;try{p=prepareOwnerGuaranteeHistory(JSON.parse(row.extra_evidence?.canonical));}catch{throw unavailable('Guarantee historical source is inconsistent');}
+  if(p.userId!==row.subject_id||p.sourceId!==row.source_id||p.sourceDigest!==row.source_digest||p.sourceCanonical!==row.extra_evidence.canonical||p.accountId!==row.extra_evidence.accountId)throw unavailable('Guarantee source binding changed');
+  const rawTime=p.source.pay_time;let paidAt:string|null=null;if(rawTime!==null&&rawTime!==undefined&&rawTime!==''&&rawTime!=='0'){if(typeof rawTime!=='string'||!/^\d{1,10}$/.test(rawTime)||BigInt(rawTime)>4294967295n)throw unavailable('Guarantee source time is inconsistent');paidAt=new Date(Number(rawTime)*1000).toISOString();}
+  return{id:`history:${row.id}`,documentRef:`GUARANTEE_SOURCE:${row.id}`,documentNumber:typeof p.source.no==='string'&&p.source.no?p.source.no:p.sourceId,subjectId:row.subject_id,subjectName:displayName(row.subject_name,row.subject_id),
+   bucket:'GUARANTEE_HELD',direction:'UNKNOWN',deltaCents:null,knowledge:'UNKNOWN',kind:'GUARANTEE',state:'HISTORICAL_OBSERVED',classification:'HISTORICAL_GUARANTEE',affectsCurrentWallet:false,affectsCurrentLedger:false,
+   occurredAt:null,importedAt:row.imported_at,sourceType:'LEGACY_MYSQL',sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',sourceId:p.sourceId,sourceDigest:p.sourceDigest,basisId:null,
+   reasonCodes:['HISTORICAL_GUARANTEE_NOT_CURRENT_HELD','HISTORICAL_STATUS_NOT_CHANNEL_RESULT'],accountCode:null,evidence:{accountId:p.accountId,legacyAccountId:p.sourceId,sourcePaidRecordCents:p.paidRecordCents,sourcePaidRecordCount:p.paidRecordCount,accountFieldCents:p.accountFieldCents,sourcePaidMark:String(p.source.pay_is),sourceReturnMark:p.source.return_is===null?null:String(p.source.return_is),sourcePaidAt:paidAt,sourceClass:p.classification,sourceConflicts:p.conflicts.join(','),currentLiabilityCents:null,originalReference:null,originalNumber:null,channelArrival:'UNKNOWN'},related:[]};
+ }
+ if(['NATIVE_EARNING_ZERO','LEGACY_DUTY_ZERO'].includes(row.observation_origin)){
+  const legacy=row.observation_origin==='LEGACY_DUTY_ZERO',ref=legacy?`LEGACY_DUTY:${row.source_id}`:`DISTRIBUTION:${row.source_id}`;
+  if(row.amount!=='0'||!['PENDING','SETTLED','REVOKED'].includes(row.source_status)||legacy&&row.source_status!=='SETTLED')throw unavailable('Zero finance fact is inconsistent');
+  return{id:`history:${row.id}`,documentRef:ref,documentNumber:row.source_id,subjectId:row.subject_id,subjectName:displayName(row.subject_name,row.subject_id),
+   bucket:legacy&&row.action==='RENTER_REFUND'?'REFUND_PAYABLE':!legacy&&row.source_status==='PENDING'?'PENDING_EARNINGS':'AVAILABLE',direction:'IN',deltaCents:'0',knowledge:'KNOWN',kind:!legacy||row.action==='COMMISSION'?'DISTRIBUTION':row.action==='RENTER_REFUND'?'REFUND':'SETTLEMENT',state:row.source_status,classification:legacy?'ZERO_FINALIZATION':'ZERO_AMOUNT_FACT',affectsCurrentWallet:false,affectsCurrentLedger:false,
+   occurredAt:row.at,importedAt:row.imported_at,sourceType:row.source_type,sourceEntity:row.source_entity,sourceSystem:row.source_system,sourceId:row.source_id,sourceDigest:row.source_digest,basisId:null,reasonCodes:['ZERO_FACT_NO_LEDGER_OR_CHANNEL_PAYMENT'],accountCode:null,
+   evidence:{...(row.extra_evidence??{}),zeroAmount:'0',originalReference:row.reference_id,channelArrival:'UNKNOWN'},related:row.reference_id?[{ref:(legacy?'LEGACY_ORDER:':'ORDER:')+row.reference_id,label:'原订单',path:`/orders/${encodeURIComponent(row.reference_id)}`}]:[]};
+ }
   const earnings = row.source_entity === "la_log_earnings", distribution = row.source_entity === "la_distribution_order";
   const unsigned = cents(row.amount, true), direction = earnings ? row.action === "1" ? "IN" : row.action === "2" ? "OUT" : "UNKNOWN" : distribution ? "IN" : "OUT";
   const amount = unsigned === null || direction === "UNKNOWN" ? null : direction === "OUT" && unsigned !== "0" ? `-${unsigned}` : unsigned;
@@ -118,7 +162,9 @@ export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
 export async function readFinanceSourceVersion(client: PoolClient) {
   const ready = (await client.query(`SELECT to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AND to_regclass('zzsh_order.wallet_revision') IS NOT NULL AND to_regclass('zzsh_order.finance_economic_root') IS NOT NULL AND to_regclass('zzsh_order.finance_event') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AS ready,
     to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NOT NULL AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS withdrawals,
-    to_regclass('zzsh_order.rental_order') IS NOT NULL AS native_orders,to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS legacy_orders`)).rows[0];
+    to_regclass('zzsh_order.rental_order') IS NOT NULL AS native_orders,to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS legacy_orders,
+    to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS history_coverage,
+    to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,to_regclass('zzsh_order.legacy_owner_guarantee_coverage') IS NOT NULL AND to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS guarantee_history`)).rows[0];
   if (!ready?.ready) throw unavailable("Finance read foundation is not available");
   const version=(await client.query(financeVersionSql(ready))).rows[0]?.finance_version;
   if(typeof version!=="string")throw unavailable("Finance version evidence unavailable");
@@ -127,15 +173,15 @@ export async function readFinanceSourceVersion(client: PoolClient) {
 }
 export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {}): Promise<FinanceFacts> {
   const {ready,version,asOf}=await readFinanceSourceVersion(client);
-  let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;
+  let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;const ledgerSource=adminFinanceLedgerSql(ready.native_distribution===true),historySource=adminFinanceObservationSql(ready);
   if(scope.lookup){
-    const query=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,ADMIN_FINANCE_OBSERVATION_SQL,ready,scope), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
+    const query=financeLookupPageSql(ledgerSource,historySource,ready,scope), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
     if(!row||![row.document_count,row.entry_count].every(value=>Number.isSafeInteger(Number(value))&&Number(value)>=0))throw unavailable("Finance page evidence unavailable");
     lookupPage={refs:rows.flatMap(row=>row.ref===null?[]:[String(row.ref)]),documentCount:Number(row.document_count),entryCount:Number(row.entry_count)};
     entryScope={...scope,documentRefs:lookupPage.refs};
   }
-  const ledgerQuery=scopedFinanceSql(ADMIN_FINANCE_LEDGER_SQL,"ledger",entryScope,MAX_FACTS+1,ready.withdrawals);
-  const historyQuery=scopedFinanceSql(ADMIN_FINANCE_OBSERVATION_SQL,"history",entryScope,MAX_FACTS+1,ready.withdrawals);
+  const ledgerQuery=scopedFinanceSql(ledgerSource,"ledger",entryScope,MAX_FACTS+1,ready.withdrawals);
+  const historyQuery=scopedFinanceSql(historySource,"history",entryScope,MAX_FACTS+1,ready.withdrawals);
   const ledger=(await client.query(ledgerQuery.text,ledgerQuery.values)).rows,history=(await client.query(historyQuery.text,historyQuery.values)).rows;
   if(ledger.length+history.length>MAX_FACTS)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Matching finance result exceeds 20000; apply a narrower subject, period or query",[{path:"finance.matchingLimit.20000",code:"INVALID_FIELD"}]);
   const orderScope=lookupPage?{...scope,orderRefs:lookupPage.refs}:scope.documentRef||scope.filters?.q.startsWith("ORDER_LINK:")?scope:{...scope,orderRefs:[]};
@@ -174,7 +220,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
         if (intent.state !== operation.outcome) entry.reasonCodes.push("LOCAL_OPERATION_NOT_APPLIED"); }
     } else entry.reasonCodes.push("WITHDRAWAL_SOURCE_UNAVAILABLE");
   }
-  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,withdrawalsReady:ready.withdrawals,asOf,version};
+  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,withdrawalsReady:ready.withdrawals,nativeDistributionReady:ready.native_distribution===true,asOf,version};
 }
 
 export function filterAdminFinanceEntries(facts: FinanceFacts, filter: FinanceFilters, period: boolean): FinanceEntry[] {
@@ -221,14 +267,31 @@ export function financeOrderDocuments(facts: FinanceFacts, filter: FinanceFilter
     .map(order => ({ ref: order.ref, number: order.number, kind: order.kind, state: order.state, occurredAt: order.occurredAt, requestedAmountCents: null,
       subjects: [order.ownerId, order.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0, amounts: [] }));
 }
-export function financePeriodProjection(entries: FinanceEntry[]) {
+export type FinancePeriodBalance={bucket:FinanceBucket;opening:string;closing:string;movement:string};
+/** Complete DB-side ledger aggregates, scoped like the rows. These are book balances, not source/channel completeness. */
+export async function readAdminFinancePeriodBalances(client:PoolClient,filters:FinanceFilters){
+ const ready=(await client.query(`/* finance period optional sources */ SELECT to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AS withdrawals`)).rows[0];
+ if(typeof ready?.native_distribution!=='boolean'||typeof ready?.withdrawals!=='boolean')throw unavailable('Finance period source metadata unavailable');
+ const source=scopedFinanceSql(adminFinanceLedgerSql(ready.native_distribution),'ledger',{filters:{...filters,period:false}},null,ready.withdrawals),start=`${filters.from}T00:00:00+08:00`,end=new Date(Date.parse(`${filters.to}T00:00:00+08:00`)+86400000).toISOString();
+ const values=[...source.values,start,end],a='$'+(values.length-1),b='$'+values.length;
+ const rows=(await client.query(`/* finance period complete ledger balances */ WITH period_rows AS (${source.text}) SELECT ${FINANCE_LEDGER_BUCKET_SQL} AS bucket,
+  COALESCE(sum(r.delta::numeric) FILTER(WHERE r.at::timestamptz<${a}::timestamptz),0)::text AS opening,
+  COALESCE(sum(r.delta::numeric) FILTER(WHERE r.at::timestamptz<${b}::timestamptz),0)::text AS closing,
+  COALESCE(sum(r.delta::numeric) FILTER(WHERE r.at::timestamptz>=${a}::timestamptz AND r.at::timestamptz<${b}::timestamptz),0)::text AS movement
+  FROM period_rows r GROUP BY ${FINANCE_LEDGER_BUCKET_SQL}`,values)).rows;
+ const seen=new Set<string>();return rows.map(row=>{if(!(FINANCE_BUCKETS as readonly string[]).includes(row.bucket)||seen.has(row.bucket))throw unavailable('Finance period aggregate shape invalid');seen.add(row.bucket);const opening=exactCents(row.opening),closing=exactCents(row.closing),movement=exactCents(row.movement);if(BigInt(closing)-BigInt(opening)!==BigInt(movement))throw unavailable('Finance period ledger arithmetic does not close');return{bucket:row.bucket as FinanceBucket,opening,closing,movement};});
+}
+export function financePeriodProjection(entries: FinanceEntry[],balances?:FinancePeriodBalance[]) {
   return FINANCE_BUCKETS.map(bucket => {
     const lines = entries.filter(entry => entry.bucket === bucket), posted = lines.filter(entry => entry.affectsCurrentLedger);
     const known = posted.filter(entry => entry.deltaCents !== null), movements = known.filter(entry => entry.classification !== "OPENING");
-    return { bucket, knownInflows: movements.filter(entry => BigInt(entry.deltaCents!) >= 0n).reduce((sum, entry) => sum + BigInt(entry.deltaCents!), 0n).toString(),
+    const balance=balances?.find(b=>b.bucket===bucket)??(balances?{opening:'0',closing:'0',movement:'0'}:undefined);
+    const inflows=movements.filter(entry=>BigInt(entry.deltaCents!)>=0n).reduce((s,e)=>s+BigInt(e.deltaCents!),0n),outflows=movements.filter(entry=>BigInt(entry.deltaCents!)<0n).reduce((s,e)=>s-BigInt(e.deltaCents!),0n),migration=known.filter(entry=>entry.classification==='OPENING').reduce((s,e)=>s+BigInt(e.deltaCents!),0n);
+    if(balance&&BigInt(balance.movement)!==inflows-outflows+migration)throw unavailable('Finance period rows differ from complete ledger totals');
+    return { bucket, knownInflows: inflows.toString(),
       knownOutflows: movements.filter(entry => BigInt(entry.deltaCents!) < 0n).reduce((sum, entry) => sum - BigInt(entry.deltaCents!), 0n).toString(),
       migrationMovement: known.filter(entry => entry.classification === "OPENING").reduce((sum, entry) => sum + BigInt(entry.deltaCents!), 0n).toString(),
-      openingBalance: null, closingBalance: null, difference: null, knowledge: "UNKNOWN", reasonCodes: ["PERIOD_BALANCE_PROOF_NOT_AVAILABLE"],
+      openingBalance: balance?.opening??null, closingBalance: balance?.closing??null, difference: balance?'0':null, knowledge: balance?'KNOWN':'UNKNOWN',scope:'CURRENT_LEDGER_ONLY',reasonCodes: balance?["CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY","CHANNEL_ARRIVAL_NOT_PROVED"]:["PERIOD_BALANCE_PROOF_NOT_AVAILABLE"],
       unknownCount: posted.length - known.length, unknownTimeCount: lines.filter(entry => entry.occurredAt === null).length,
       coveredHistoricalCount: lines.filter(entry => entry.classification === "HISTORICAL_COVERED").length, uncoveredHistoricalCount: lines.filter(entry => entry.classification === "HISTORICAL_UNCOVERED").length };
   });
@@ -237,7 +300,7 @@ export async function readAdminFinanceSubject(client: PoolClient, facts: Finance
   const subject = facts.subjects.find(row => row.id === id); if (!subject) throw notFound();
   const wallet = await readPersonalWallet(client, id);
   return { subject, wallet: { ...wallet, asOf }, documents: financeDocuments(facts.entries.filter(entry => entry.subjectId === id)),
-    gaps: ["PERIOD_BALANCE_PROOF_NOT_AVAILABLE", "GLOBAL_RESERVED_AND_WITHDRAWABLE_NOT_ADMITTED"], sourcesReady: { withdrawals: facts.withdrawalsReady, nativeDistribution: false } };
+    gaps: ["PERIOD_BALANCE_PROOF_NOT_AVAILABLE", "GLOBAL_RESERVED_AND_WITHDRAWABLE_NOT_ADMITTED"], sourcesReady: { withdrawals: facts.withdrawalsReady, nativeDistribution: facts.nativeDistributionReady===true } };
 }
 export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entryId?: string | null) {
   const entries = facts.entries.filter(entry => entry.documentRef === ref);

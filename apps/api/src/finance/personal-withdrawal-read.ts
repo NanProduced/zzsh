@@ -8,6 +8,7 @@ import type {ListingCursorKey} from '../supply/listing-cursor';
 import type {NativeWithdrawalScope} from './native-withdrawal-resource';
 import {readControlledWithdrawalsInTransaction,isUnadmittedControlledWithdrawalRead} from './controlled-withdrawal-store';
 import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents,encodeFinanceCursor,decodeFinanceCursor} from './personal-finance-read';
+import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
 
 export const PERSONAL_WITHDRAWAL_READ_VERSION='personal-withdrawals.read.v1';
 const states=['RESERVED','SUBMITTING','PROCESSING','UNKNOWN','SUCCEEDED','FAILED','RECONCILIATION_REQUIRED'];
@@ -44,17 +45,19 @@ async function historicalRead(client:PoolClient,actor:Actor,query:PersonalWithdr
  const installed=(await client.query(`SELECT to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AS history,to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AND to_regclass('zzsh_order.native_user_insert_proof') IS NOT NULL AS native`)).rows[0];
  if(!installed?.history){if(detailId)throw unavailable();if(query.cursor)throw conflict('Withdrawal source changed; reload first page');return{source:'HISTORICAL_WITHDRAWAL' as const,availability:'NOT_INSTALLED' as const,coverage:{knowledge:'UNKNOWN' as const,reason:'HISTORICAL_WITHDRAWAL_NOT_INSTALLED'},items:[],mappedRecordCount:null,count:null,asOf:null,snapshotVersion:null,nextCursor:null};}
  // Wallet coverage alone is not proof that a legacy withdrawal history is complete.
- const native=installed.native===true?(await client.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.wallet_coverage c JOIN zzsh_order.finance_opening_basis b ON b.id=c.basis_id AND b.user_id=c.user_id JOIN zzsh_iam.user_identity_state s ON s.user_id=c.user_id JOIN zzsh_order.native_user_insert_proof p ON p.user_id=c.user_id WHERE c.user_id=$1 AND c.origin='NATIVE_GENESIS' AND b.source_kind='NATIVE_GENESIS' AND b.available_cents=0 AND b.covered_count=0 AND s.provider='none' AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=c.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS') AND NOT EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation h WHERE h.user_id=c.user_id AND h.source_kind='HISTORICAL_WITHDRAWAL')) AS complete`,[actor.userId])).rows[0]?.complete===true:false;
+ const native=installed.native===true?await hasProvedNativeHistoryAbsence(client,actor.userId,'HISTORICAL_WITHDRAWAL'):false;
  const aggregate=(await client.query(`SELECT count(*)::text AS count,md5(COALESCE(string_agg(o.id||':'||o.source_digest,',' ORDER BY o.id),'')) AS digest ${historyWhere} AND($2='ALL' OR o.snapshot->>'sourceStatus'=$2)`,[actor.userId,query.state])).rows[0];
- const complete=native&&aggregate.count==='0';
- const snapshotVersion='historical-withdrawals.read.v1:'+hash(canonicalize([aggregate.count,aggregate.digest,native]));
+ const nativeEmpty=native&&aggregate.count==='0';
+ const proof=nativeEmpty?null:await readObservationCoverage(client,actor.userId,'HISTORICAL_WITHDRAWAL');
+ const complete=nativeEmpty||proof?.knowledge==='KNOWN';
+ const snapshotVersion='historical-withdrawals.read.v1:'+hash(canonicalize([aggregate.count,aggregate.digest,native,proof?.version??null]));
  const binding={userId:actor.userId,sessionHash:hash(actor.sessionId),snapshotVersion,bucket:'PERSONAL_WITHDRAWALS:HISTORICAL:'+query.state};
  const after=query.cursor?decodeFinanceCursor(query.cursor,binding,key):null;
  const asOf=after?.asOf??(await client.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
  if(detailId){const row=(await client.query(historyProjection+historyWhere+' AND o.id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();return{source:'HISTORICAL_WITHDRAWAL' as const,item:historicalWithdrawalProjection(row),asOf,snapshotVersion};}
  const found=(await client.query(historyProjection+historyWhere+` AND o.imported_at<=$2::timestamptz AND($3='ALL' OR o.snapshot->>'sourceStatus'=$3) AND($4::timestamptz IS NULL OR(o.source_event_at,o.id COLLATE "C")<($4::timestamptz,$5 COLLATE "C")) ORDER BY o.source_event_at DESC,o.id COLLATE "C" DESC LIMIT $6`,[actor.userId,asOf,query.state,after?.position.at??null,after?.position.id??null,query.limit+1])).rows;
  const visible=found.slice(0,query.limit),last=visible.at(-1);
- return{source:'HISTORICAL_WITHDRAWAL' as const,availability:aggregate.count==='0'&&!complete?'NOT_IMPORTED' as const:'AVAILABLE' as const,coverage:{knowledge:complete?'KNOWN' as const:'UNKNOWN' as const,reason:complete?'PROVED_NATIVE_NO_LEGACY_HISTORY':'HISTORICAL_WITHDRAWAL_COVERAGE_NOT_CLOSED'},items:visible.map(historicalWithdrawalProjection),mappedRecordCount:aggregate.count,count:complete?'0':null,asOf,snapshotVersion,nextCursor:found.length>query.limit&&last?encodeFinanceCursor({at:last.occurred_at,id:last.id},asOf,binding,key):null};
+ return{source:'HISTORICAL_WITHDRAWAL' as const,availability:aggregate.count==='0'&&!complete?'NOT_IMPORTED' as const:'AVAILABLE' as const,coverage:{knowledge:complete?'KNOWN' as const:'UNKNOWN' as const,reason:nativeEmpty?'PROVED_NATIVE_NO_LEGACY_HISTORY':proof?.reason??'HISTORICAL_WITHDRAWAL_COVERAGE_NOT_CLOSED',cutoff:proof?.cutoff??null,version:proof?.version??null},items:visible.map(historicalWithdrawalProjection),mappedRecordCount:aggregate.count,count:complete?aggregate.count:null,asOf,snapshotVersion,nextCursor:found.length>query.limit&&last?encodeFinanceCursor({at:last.occurred_at,id:last.id},asOf,binding,key):null};
 }
 
 export async function readPersonalWithdrawals(pool:Pool,actor:Actor,query:PersonalWithdrawalQuery,key:ListingCursorKey|undefined,scope?:NativeWithdrawalScope,detailId?:string){

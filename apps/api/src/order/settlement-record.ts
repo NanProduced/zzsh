@@ -12,6 +12,7 @@ import { lockDispatchGate } from "../im/support-dispatch";
 import { CUSTOMER_TIERS, type CustomerTier } from "../supply/delta-rental";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
+import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
 import {
   computeSettlement,
   settlementConfirmationReady,
@@ -163,7 +164,7 @@ type Basis = {
   fundingPolicyRef: string;
   fundingPolicyVersion: string | null;
   disclosureVersion: string | null;
-  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3";
+  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3" | "personal-quote-v4";
   listingVersionId: string;
   listingHash: string;
   fullPayoutSelected: boolean;
@@ -176,16 +177,17 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
   const membership = personal?.membership as Record<string, unknown> | undefined;
   const guarantee = personal?.guarantee as Record<string, unknown> | undefined;
   const ruleRefs = personal?.ruleRefs as Record<string, unknown> | undefined;
-  if (!personal || !funding || !membership || !guarantee || !ruleRefs
+  const growthV4=personal?.schema==='personal-quote-v4';
+  if (!personal || !funding || !guarantee || !ruleRefs
     || personal.userId !== order.renterUserId || personal.listingHash !== order.contentHash
     || ruleRefs.releaseId !== order.ruleReleaseId || order.quote.ruleReleaseId !== order.ruleReleaseId
-    || typeof membership.version !== "string" || !membership.version.trim() || typeof membership.sourceRef !== "string" || !membership.sourceRef.trim()
-    || typeof membership.tier !== "string" || !CUSTOMER_TIERS.includes(membership.tier as CustomerTier)
+    || !growthV4&&(!membership||typeof membership.version !== "string" || !membership.version.trim() || typeof membership.sourceRef !== "string" || !membership.sourceRef.trim()
+    || typeof membership.tier !== "string" || !CUSTOMER_TIERS.includes(membership.tier as CustomerTier))
     || typeof guarantee.reference !== "string" || !guarantee.reference.trim() || !["SATISFIED", "NOT_REQUIRED"].includes(String(guarantee.status))
     || typeof funding.version !== "string" || !funding.version.trim() || typeof funding.sourceRef !== "string" || !funding.sourceRef.trim()
     || typeof funding.baseDepositCents !== "string" || !/^(0|[1-9]\d{0,17})$/.test(funding.baseDepositCents)
     || typeof funding.publisherBailRequirementCents !== "string" || !/^(0|[1-9]\d{0,17})$/.test(funding.publisherBailRequirementCents)
-    || typeof funding.vipWaiver !== "boolean" || typeof funding.svipWaiver !== "boolean"
+    || !growthV4&&(typeof funding.vipWaiver !== "boolean" || typeof funding.svipWaiver !== "boolean")
     || typeof funding.fullPayoutPolicyRef !== "string" || !funding.fullPayoutPolicyRef.trim()) {
     return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
   }
@@ -236,6 +238,15 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
     fullPayoutSelected = declaration.selected;
     fundingPolicyVersion = funding.fullPayoutPolicyVersion;
     disclosureVersion = funding.disclosureVersion;
+  } else if(personal.schema==='personal-quote-v4'){
+    const declaration=personal.fullPayoutDeclaration as Record<string,unknown>|undefined,growth=personal.membershipGrowth as Record<string,unknown>|undefined;
+    if(!declaration||Object.keys(declaration).sort().join(',')!=='schema,selected'||declaration.schema!=='full-payout-declaration-v1'||typeof declaration.selected!=='boolean'
+      ||Object.keys(personal).sort().join(',')!=='accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,ruleRefs,schema,userId'
+      ||Object.keys(funding).sort().join(',')!=='baseDepositCents,disclosureVersion,fullPayoutPolicyRef,fullPayoutPolicyVersion,publisherBailRequirementCents,sourceRef,version'
+      ||typeof funding.fullPayoutPolicyVersion!=='string'||!funding.fullPayoutPolicyVersion.trim()||typeof funding.disclosureVersion!=='string'||!funding.disclosureVersion.trim()
+      ||!growth||Object.keys(growth).sort().join(',')!=='binding,depositBenefitVersion,depositCents,depositEntitlementId,depositSource,depositValidUntil,effectiveTier,entitlementIds,policyTier,policyVersion,pricePlanDigest,schema,selectedBenefitVersion,selectedEntitlementId,selectedSource,selectedValidUntil'
+      ||!frozenPersonalGrowthV4Valid(personal,{userId:order.renterUserId,ownerUserId:order.ownerUserId,accountId:order.accountId,listingVersionId:order.listingVersionId,ruleReleaseId:order.ruleReleaseId,listingHash:order.contentHash},order.depositCents))return{reasons:['FULL_PAYOUT_UNKNOWN']};
+    personalQuoteSchema='personal-quote-v4';fullPayoutSelected=declaration.selected;fundingPolicyVersion=funding.fullPayoutPolicyVersion;disclosureVersion=funding.disclosureVersion;
   } else {
     return { reasons: ["FULL_PAYOUT_UNKNOWN"] };
   }
