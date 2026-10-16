@@ -1,7 +1,7 @@
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
-import { withTransaction } from "../auth/security-core";
+import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction } from "../auth/user-identity";
 import {
   computeContentHash,
@@ -240,6 +240,7 @@ export async function publicationBlockers(
   v: ListingVersion,
   gate: SupplyGateReader,
   purpose: "READ" | "WRITE" = "WRITE",
+  strictReadErrors = false,
 ): Promise<string[]> {
   const reasons: string[] = [];
   const user = (
@@ -279,7 +280,8 @@ export async function publicationBlockers(
           validateOwnerDepositAmount(policy, declaration.amountCents, (fullPayout as Record<string, unknown>).selected as boolean);
         }
       }
-    } catch {
+    } catch (error) {
+      if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
       reasons.push("FUNDING_UNKNOWN");
     }
   }
@@ -292,7 +294,8 @@ export async function publicationBlockers(
   let external: SupplyGate;
   try {
     external = await gate(client, a, purpose);
-  } catch {
+  } catch (error) {
+    if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
     external = await unknownSupplyGate(client, a);
   }
   if (
@@ -1230,8 +1233,9 @@ export async function evaluatePublication(
   v: ListingVersion,
   gate: SupplyGateReader,
   purpose: "READ" | "WRITE" = "WRITE",
+  strictReadErrors = false,
 ): Promise<string[]> {
-  const blockers = await publicationBlockers(client, a, v, gate, purpose);
+  const blockers = await publicationBlockers(client, a, v, gate, purpose, strictReadErrors);
   const publication = await readListingPublication(client, a, v);
   if (!isEffectivePublicationState(v.review_state, publication?.source)) blockers.push("PUBLICATION_REQUIRED");
   if (a.owner_paused) blockers.push("OWNER_PAUSED");
@@ -1239,10 +1243,15 @@ export async function evaluatePublication(
   try {
     await assertAccepted(client, a, v);
     await assertMediaReady(client, v);
-  } catch {
+  } catch (error) {
+    if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
     blockers.push("CONFIRMATION_OR_MEDIA_REQUIRED");
   }
   return blockers;
+}
+
+export function publicationHasUnknownFacts(blockers:readonly string[]):boolean {
+  return blockers.some(reason=>["FUNDING_UNKNOWN","OCCUPANCY_UNKNOWN","PUBLISHER_BAIL_UNCONFIRMED"].includes(reason));
 }
 
 function publicDisplayAssetIds(v: ListingVersion): Set<string> {
@@ -1358,12 +1367,13 @@ export async function readPublicListing(
   a: PublishingAccount,
   gate: SupplyGateReader,
   admission?: LegacyPublicAdmission,
+  strictReadErrors = false,
 ): Promise<Record<string, unknown>> {
   const publication = await client.query(
     `SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`,
     [a.id],
   );
-  if (publication.rowCount) return listingDetail(client, a, "public", gate);
+  if (publication.rowCount) return listingDetail(client, a, "public", gate, "public", a, strictReadErrors);
   return readLegacyListing(client, a.id, admission);
 }
 export async function listingDetail(
@@ -1373,6 +1383,7 @@ export async function listingDetail(
   gate: SupplyGateReader,
   quoteViewer: QuoteViewer = viewer,
   publicAccount: PublishingAccount = a,
+  strictReadErrors = false,
 ): Promise<Record<string, unknown>> {
   const v = a.current_version_id
     ? await readCurrentVersion(client, a)
@@ -1381,7 +1392,7 @@ export async function listingDetail(
     if (viewer === "public") throw notFound();
     return { account: a, version: null };
   }
-  const blockers = await evaluatePublication(client, a, v, gate, "READ");
+  const blockers = await evaluatePublication(client, a, v, gate, "READ", strictReadErrors);
   const publication = await readListingPublication(client, publicAccount, v);
   const quote = v.payload
     ? { ...projectDeltaQuote(
@@ -1393,6 +1404,7 @@ export async function listingDetail(
       ), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
     : null;
   if (viewer === "public") {
+    if (strictReadErrors && publicationHasUnknownFacts(blockers)) throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Public listing facts are incomplete");
     if (blockers.length) throw notFound();
     const attrs = v.payload!.declaration.attributes;
     const offer = projectPublicOffer({
