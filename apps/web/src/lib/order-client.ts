@@ -81,7 +81,9 @@ export type OrderPage = { items: Order[]; nextCursor: string | null; limit: numb
 export type PersonalRentalQuote = {
   quote: OrderQuote & { resourceTotal?: Money | null; tenantDeposit?: Money | null; tenantPayableTotal?: Money | null };
   baseTenantDeposit: Money | null;
-  customerTier: string;
+  /** Only frozen compatibility quotes carry the former tier enum. */
+  customerTier?: string;
+  membershipBenefits?: {schema:"membership-benefits-v1";effectiveTier:"STANDARD"|"SILVER"|"GOLD"|"PLATINUM"|"DIAMOND"|"BLACK_GOLD";policyTier:"STANDARD"|"SILVER"|"GOLD"|"PLATINUM"|"DIAMOND";priceSource:"GROWTH"|"FRIEND"|"PRESTIGE";depositSource:"GROWTH"|"FRIEND"|"PRESTIGE";policyVersion:string};
   depositWaived: boolean;
   compensationDisclosure?: { selected: boolean; disclosureVersion: string };
   confirmationId: string;
@@ -285,6 +287,8 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
   }
   return body as T;
 }
+
+export { requestJson as requestOrderJson, requestWrite as requestOrderWrite };
 
 export function orderIntentKey(): string {
   return "op_" + crypto.randomUUID().replaceAll("-", "");

@@ -35,6 +35,8 @@ import {
   type SupplyResponse,
 } from "../supply/supply-routes";
 import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
+import { handleLegacyContinuationRoute } from "./legacy-continuation-routes";
+import type { LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 import {
   assertFreshCreateAuthorization,
   assertReplayAuthorization,
@@ -49,6 +51,7 @@ import {
 } from "./order";
 
 export type OrderRuntimeOptions = AuthSecurityOptions & {
+  legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings;
@@ -102,6 +105,7 @@ export async function handleOrderUserRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleLegacyContinuationRoute(request, response, options, "user")) return;
     if (path === "/unified") {
       if (method !== "GET") throw notFound();
       const context = await readUserContext(request, options);
@@ -258,6 +262,7 @@ export async function handleOrderAdminRoute(
   const method = (request.method ?? "GET").toUpperCase();
 
   await safely(response, requestId, async () => {
+    if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
     if (method !== "GET") throw notFound();
     const context = await readAdminContext(request, options);

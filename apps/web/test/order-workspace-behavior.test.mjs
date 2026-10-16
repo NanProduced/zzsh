@@ -37,6 +37,7 @@ function loadWorkspace(session, router) {
       if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
       if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
       const local = name.match(/(?:^\.\/|@\/components\/order\/)([a-z-]+)$/)?.[1];
+      if (local === "legacy-continuation-panel") return { LegacyContinuationPanel: () => null };
       if (local && (ORDER_COMPONENTS.has(local) || local === "legacy-order-workspace")) {
         if (local === "order-trade-actions") return { OrderTradeActions: () => null };
         return loadOrderComponent(`${local}.tsx`);
@@ -456,7 +457,7 @@ test("one list includes both sources and old deep links return to the same filte
     assert.equal(new Set(links.map(a=>a.dataset.orderKey)).size,2);
     assert.ok(links.some(a=>a.href.includes("source=legacy")));
     await probe.render({status:"PAID",accountId:"acct_9",orderId:orderA.id,source:"legacy"});
-    assert.match(probe.host.textContent,/目前仅支持查看/);
+    assert.match(probe.host.textContent,/可办理事项以本单核定结果为准/);
     assert.doesNotMatch(probe.host.textContent,/历史|旧平台|新平台/);
     const back=[...probe.host.querySelectorAll("a")].find(a=>a.textContent==="返回订单列表");
     assert.equal(back.getAttribute("href"),"/account?view=rentals&status=PAID&accountId=acct_9");

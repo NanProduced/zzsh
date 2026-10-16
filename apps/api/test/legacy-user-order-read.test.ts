@@ -65,3 +65,6 @@ test("historical party permission does not expose the current private account ti
   assert.equal(hidden.title,"账号资料暂未提供");assert.ok(!JSON.stringify(hidden).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
   const owned=projectUserLegacyOrder({...row,title:"MY_ACCOUNT_TITLE",accountReadable:true},"owner");assert.equal(owned.title,"MY_ACCOUNT_TITLE");
 });
+test("effective continuation stage updates the list while original source status and recorded payment remain unchanged",()=>{
+ const result=projectUserLegacyOrder({...row,sourceOrderStatus:8,continuationStage:4,completedAt:"2026-10-16T00:00:00.123456Z"},"renter");assert.equal(result.status,"COMPLETED");assert.equal(result.source.originalStatus,8);assert.equal(result.payment.state,"RECORDED_PAID");assert.equal(result.completedAt,"2026-10-16T00:00:00.123456Z");assert.equal(result.legacyAmounts.refundChannelState,"UNKNOWN");
+});

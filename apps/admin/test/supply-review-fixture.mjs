@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { act, createElement, StrictMode } from "react";
-import { createServer } from "vite";
-import react from "@vitejs/plugin-react";
+import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 
 export const accountA = { id: "a", game_id: "game-1", revision: "7", owner_paused: false, staff_restricted: false, restriction_reason: null };
 export const accountB = { id: "b", game_id: "game-1", revision: "4", owner_paused: true, staff_restricted: false, restriction_reason: null };
@@ -98,14 +97,7 @@ export async function mountHarness(t, { permissions, isBoss = true, fetchImpl, i
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   const originalFetch = globalThis.fetch;
   const { createRoot } = await import("react-dom/client");
-  const vite = await createServer({
-    configFile: false,
-    root: fileURLToPath(new URL("..", import.meta.url)),
-    plugins: [react()],
-    resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },
-    optimizeDeps: { noDiscovery: true, include: [] },
-    server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-  });
+  const vite = await createOfflineAdminSource({ root: fileURLToPath(new URL("..", import.meta.url)) });
   const writes = [];
   const routes = [];
   globalThis.fetch = async (input, init = {}) => {

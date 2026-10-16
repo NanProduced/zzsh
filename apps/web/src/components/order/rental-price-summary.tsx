@@ -1,6 +1,6 @@
 import { CircleHelp, Coins, Info, Package, ShieldCheck } from "lucide-react";
 import type { PersonalRentalQuote } from "@/lib/order-client";
-import { moneyText } from "@/lib/order-display";
+import { moneyText,personalMembershipLabel,personalBenefitSources } from "@/lib/order-display";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export type ReferenceFees = { total: string; haff: string; items: string };
@@ -25,7 +25,7 @@ export function RentalPriceSummary({ reference, quote, pendingLabel }: { referen
   const deposit = quote ? moneyText(quote.quote.tenantDeposit) : "另行核对";
   const waived = Boolean(quote?.depositWaived && deposit === "¥0.00");
   const baseDeposit = quote ? moneyText(quote.baseTenantDeposit) : "—";
-  const tier = quote ? ({ STANDARD: "普通会员", VIP: "VIP会员", SVIP: "SVIP会员", DISCOUNT_USER: "特惠用户" } as Record<string, string>)[quote.customerTier] : null;
+  const tier = quote ? personalMembershipLabel(quote) : null;
   const total = quote ? moneyText(quote.quote.tenantPayableTotal) : pendingLabel ? "—" : reference.total;
   const note = quote ? "已按个人有效报价核定" : pendingLabel ? "个人报价待确认" : "公开参考费用";
   const noteDetail = quote
@@ -41,6 +41,7 @@ export function RentalPriceSummary({ reference, quote, pendingLabel }: { referen
     </div>
     <p className="account-reference-price" aria-live="polite">{total}</p>
     {waived ? <p className="rental-benefit-summary"><ShieldCheck size={15} aria-hidden="true" />本次免租客押金</p> : null}
+    {quote && personalBenefitSources(quote)?<p className="account-price-note">{personalBenefitSources(quote)}</p>:null}
     <dl className="account-fee-lines">
       <div><dt><Coins size={16} aria-hidden="true" />{quote ? "哈夫币租金" : "参考哈夫币租金"}</dt><dd>{fees?.haff ?? "待确认"}</dd></div>
       <div><dt><Package size={16} aria-hidden="true" />{quote ? "物资预付" : "参考物资预付"}</dt><dd>{fees?.items ?? "待确认"}</dd></div>

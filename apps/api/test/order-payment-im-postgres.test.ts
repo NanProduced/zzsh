@@ -211,7 +211,7 @@ export async function runPaymentAcceptance(t: TestContext, o: Options): Promise<
   });
 
   await t.test("P07 PAID API/occupancy/deactivation boundary; no HTTP injection or forged facts", async () => {
-    assert.equal(await withTransaction(pool, (c) => readOrderOccupancy(c, paid.accountId)), true);
+    assert.equal(await withTransaction(pool, (c) => readOrderOccupancy(c, paid.accountId)), "OCCUPIED");
     const gate = composeSupplyGateWithOrderOccupancy(async () => ({ occupancy: "FREE", publisherBail: "CONFIRMED" }) as never);
     assert.equal((await withTransaction(pool, (c) => gate(c, { id: paid.accountId } as never))).occupancy, "OCCUPIED");
     const detail = await o.api(`/api/v1/orders/${paid.orderId}`);

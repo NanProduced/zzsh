@@ -133,7 +133,7 @@ export function legacyResourceBaseQuantity(field: string, value: unknown, insura
   return { quantity, unit };
 }
 
-const DELTA_LEGACY_RESOURCES = [
+export const DELTA_LEGACY_RESOURCES = [
   ["haff", ["haff_base", "df_billable_haff"]],
   ["level6_bullet_num", ["level6_round", "df_billable_level6_bullet"]],
   ["awm_bullet_num", ["awm_round", "df_billable_awm_bullet"]],
@@ -334,7 +334,7 @@ export function normalizeLegacyObservationInput(
   };
 }
 
-function normalizeResolutionInput(input: LegacyDraftResolutionInput): LegacyDraftResolutionInput {
+export function normalizeResolutionInput(input: LegacyDraftResolutionInput): LegacyDraftResolutionInput {
   sourceReferenceFields(input);
   return {
     sourceSystem: input.sourceSystem,

@@ -1,4 +1,15 @@
-import type { Order, OrderParty, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import type { Order, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+
+export function personalMembershipLabel(quote:PersonalRentalQuote):string {
+  const b=quote.membershipBenefits;
+  if(b?.schema==="membership-benefits-v1")return ({STANDARD:"普通会员",SILVER:"银卡会员",GOLD:"金卡会员",PLATINUM:"铂金会员",DIAMOND:"钻石会员",BLACK_GOLD:"黑金会员·终身"} as Record<string,string>)[b.effectiveTier]??"会员权益待核";
+  return quote.customerTier ? "既有确认方案" : "会员权益待核";
+}
+export function personalBenefitSources(quote:PersonalRentalQuote):string|null {
+  const b=quote.membershipBenefits;if(!b)return null;
+  const names={GROWTH:"成长权益",FRIEND:"挚友礼遇",PRESTIGE:"尊享礼遇"};
+  return `价格：${names[b.priceSource]??"待核"}；押金：${names[b.depositSource]??"待核"}`;
+}
 
 /**
  * Server-observed entry eligibility for the two payment actions. The projection is authoritative when
