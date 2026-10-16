@@ -28,9 +28,11 @@ export function growthPageData<T extends { growth: { sourceState?: string; knowl
   // Source COMPLETE does not imply a known projection (e.g. negative net consumption): READY needs both.
   if (s === "COMPLETE") return input.growth.knowledge === "KNOWN" ? { state: "READY", reason: null, value: input } : { state: "PENDING_SOURCE", reason: "PROJECTION_UNKNOWN", value: input };
   if (s === "BACKFILL_PENDING") return { state: "PENDING_SOURCE", reason: "BACKFILL_PENDING", value: input };
-  if (s === "READ_FAILED" || s === "SOURCE_CONFLICT") return { state: "FAILED", reason: s, value: null };
+  // The state applies to the growth card only; the DTO (existing entitlement/benefit records, null points when unknown) is kept
+  // so independent real records are not hidden (readiness independentReadsRetained / decisions H2).
+  if (s === "READ_FAILED" || s === "SOURCE_CONFLICT") return { state: "FAILED", reason: s, value: input };
   if (s === "NO_POLICY") return { state: "PENDING_SOURCE", reason: "NO_POLICY", value: input };
-  return { state: "FAILED", reason: "SOURCE_STATE_UNKNOWN", value: null };
+  return { state: "FAILED", reason: "SOURCE_STATE_UNKNOWN", value: input };
 }
 
 /** Lists: an empty page is LEGAL_EMPTY only when the source is proved complete for that scope. */

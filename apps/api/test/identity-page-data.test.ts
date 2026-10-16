@@ -16,7 +16,8 @@ test("growth page: only COMPLETE is READY; pending keeps value flagged; conflict
   assert.equal(growthPageData({ growth: { sourceState: "COMPLETE", knowledge: "KNOWN" } }).state, "READY");
   assert.deepEqual([growthPageData({ growth: { sourceState: "COMPLETE", knowledge: "UNKNOWN" } }).state, growthPageData({ growth: { sourceState: "COMPLETE" } }).reason], ["PENDING_SOURCE", "PROJECTION_UNKNOWN"]);
   assert.deepEqual([growthPageData({ growth: { sourceState: "BACKFILL_PENDING" } }).state, growthPageData({ growth: { sourceState: "BACKFILL_PENDING" } }).reason], ["PENDING_SOURCE", "BACKFILL_PENDING"]);
-  assert.equal(growthPageData({ growth: { sourceState: "SOURCE_CONFLICT" } }).value, null);
+  const conflict = { growth: { sourceState: "SOURCE_CONFLICT", knowledge: "UNKNOWN", rollingPoints: null }, entitlements: [{ id: "e1" }] };
+  assert.deepEqual([growthPageData(conflict).state, growthPageData(conflict).value?.entitlements.length, (growthPageData(conflict).value?.growth as any).rollingPoints], ["FAILED", 1, null], "failure is card-scoped; existing entitlement records stay visible, unknown points stay null");
   assert.equal(growthPageData({ growth: {} }).state, "FAILED");
   assert.equal(growthPageData(null).state, "PENDING_SOURCE");
 });
