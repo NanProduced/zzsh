@@ -83,3 +83,44 @@ test("actual payment-intent route restores its receipt even when current policy 
   await handlers.get('/api/bff/user/credit')!({method:'POST',originalUrl:'/api/bff/user/credit/accounts/account-a/payment-intents',headers:{origin:'http://127.0.0.1:4200','idempotency-key':'original-intent-key'},body:{}},response);
   assert.equal(response.statusCode,200);assert.equal(response.body.paymentId,'old-payment');assert.equal(response.body.duplicate,true);assert.equal(policy.mock.callCount(),0);assert.equal(calls.length,2);
 });
+
+import { applyCreditInitializationBatch, planCreditInitialization } from "../src/credit/credit-initialization";
+
+function initClient(state: Set<string>, users: string[], log: string[]) {
+  return { query: async (sql: string, params: unknown[] = []) => {
+    log.push(sql.replace(/\s+/g, " ").trim().slice(0, 40));
+    if (sql.includes(`LEFT JOIN zzsh_credit.user_credit_state`)) { const after = params[0] as string | null; return { rows: users.filter((id) => !state.has(id) && (after === null || id > after)).slice(0, params[1] as number).map((id) => ({ id })) }; }
+    if (sql.includes("user_id = ANY")) return { rows: (params[0] as string[]).filter((id) => state.has(id)).map((userId) => ({ userId })) };
+    if (sql.startsWith("SELECT 1 FROM zzsh_credit.user_credit_state")) return { rows: [], rowCount: state.has(params[0] as string) ? 1 : 0 };
+    if (sql.includes(`FROM zzsh_auth_user."user" WHERE id=$1`)) return { rows: [{}], rowCount: users.includes(params[0] as string) ? 1 : 0 };
+    if (sql.includes("INSERT INTO zzsh_credit.user_credit_state")) { const id = params[0] as string; if (state.has(id)) return { rows: [] }; state.add(id); return { rows: [{ userId: id, score: 100, revision: "1", initializedAt: "t" }] }; }
+    if (sql.includes("INSERT INTO zzsh_credit.credit_event")) return { rows: [] };
+    if (sql.includes("FOR UPDATE")) return { rows: [{ userId: params[0], score: 90, revision: "3", initializedAt: "t" }] };
+    if (sql.includes("audit_event")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
+  } } as any;
+}
+
+test("credit initialization plan pages only users without state and never touches existing scores", async () => {
+  const state = new Set(["u2"]); const log: string[] = [];
+  const client = initClient(state, ["u1", "u2", "u3", "u4"], log);
+  assert.deepEqual(await planCreditInitialization(client, { limit: 2 }), { candidates: ["u1", "u3"], nextAfter: "u3" });
+  assert.deepEqual(await planCreditInitialization(client, { afterUserId: "u3", limit: 2 }), { candidates: ["u4"], nextAfter: null });
+  await assert.rejects(() => planCreditInitialization(client, { limit: 0 }), /limit/);
+  await assert.rejects(() => planCreditInitialization(client, { limit: 501 }), /limit/);
+});
+
+test("credit initialization dry-run writes nothing; apply is idempotent, audited once and reports existing users", async () => {
+  const state = new Set(["u2"]); const log: string[] = [];
+  const client = initClient(state, ["u1", "u2", "u3"], log);
+  const base = { batchKey: "credit-init:batch-0001", actorId: "operator", requestId: "req_1", reason: "decided rule: initial 100" };
+  const dry = await applyCreditInitializationBatch(client, { ...base, userIds: ["u1", "u2", "u3"], dryRun: true });
+  assert.deepEqual([dry.applied, dry.alreadyInitialized], [["u1", "u3"], ["u2"]]);
+  assert.equal(log.some((sql) => sql.startsWith("INSERT")), false);
+  const first = await applyCreditInitializationBatch(client, { ...base, userIds: ["u1", "u2", "u3"], dryRun: false });
+  assert.deepEqual([first.applied, first.alreadyInitialized], [["u1", "u3"], ["u2"]]);
+  assert.equal(log.filter((sql) => sql.includes("audit_event")).length, 1);
+  const replay = await applyCreditInitializationBatch(client, { ...base, userIds: ["u1", "u3"], dryRun: false });
+  assert.deepEqual([replay.applied, replay.alreadyInitialized], [[], ["u1", "u3"]]);
+  for (const bad of [{ batchKey: "x" }, { userIds: [] }, { userIds: ["u1", "u1"] }, { reason: " " }]) await assert.rejects(() => applyCreditInitializationBatch(client, { ...base, userIds: ["u1"], dryRun: false, ...bad } as any));
+});
