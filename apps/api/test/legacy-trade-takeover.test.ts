@@ -5,7 +5,7 @@ import { prepareLegacyTradeIntake, takeoverLegacyTrade, finalizeLegacyTradeTakeo
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { canonicalize, computeContentHash, normalizeContentPayload, type ContentDeclaration } from "../src/supply/content-hash";
 import { sha256Hex } from "../src/supply/supply-util";
-import {planLegacyTradeIntakeBatch,assembleLegacyTradeIntakeBatch} from "../src/supply/legacy-trade-intake-plan";
+import {planLegacyTradeIntakeBatch,assembleLegacyTradeIntakeBatch,stableFingerprint,type LegacyTradeExtractionOriginal} from "../src/supply/legacy-trade-intake-plan";
 import {legacyDisplayDigest} from "../src/supply/legacy-display-snapshot";
 import {computeDeltaQuote} from "../src/supply/pricing";
 import {compatRule} from "./pricing-compat-fixture";
@@ -94,39 +94,58 @@ test("frozen batch pure plan closes every row into candidate/blocked/isolated an
  const broken=fixture();broken.sourceFieldEvidence.digest="0".repeat(64);assert(prepareLegacyTradeIntake(broken,catalog()).reasons.includes("SOURCE_FIELD_EVIDENCE_MISMATCH"));broken.media.push({...broken.media[0]!,position:1});assert(prepareLegacyTradeIntake(broken,catalog()).reasons.includes("MEDIA_UNAVAILABLE"));
 });
 
-test("batch assembly keeps old-12 and new-13 digests separate and isolates an unproven payout-flag binding",()=>{
- const base=fixture(),mapped=base.source.sourceDigest;
- const row=(over:Partial<Parameters<typeof assembleLegacyTradeIntakeBatch>[0][number]>={})=>({legacyId:"33",accountId:base.accountId,intake:base,projection:{old12Digest:mapped,new13Digest:"c".repeat(64)},isolationReasons:[],...over});
- const [bound]=assembleLegacyTradeIntakeBatch([row()]);
- assert(bound);assert.deepEqual(bound.isolationReasons,[]);assert.equal(bound.projection!.old12Digest,mapped);
- for(const bad of [
-  {projection:{old12Digest:"b".repeat(64),new13Digest:"c".repeat(64)}},
-  {projection:{old12Digest:null,new13Digest:"c".repeat(64)}},
-  {projection:{old12Digest:mapped,new13Digest:null}},
-  {projection:null},
-  {projection:{old12Digest:"zz",new13Digest:"c".repeat(64)}},
- ]) {
-  const [isolated]=assembleLegacyTradeIntakeBatch([row(bad)]);assert(isolated);
-  assert.deepEqual(isolated.isolationReasons,["FLAG_EXTRACTION_BINDING_UNPROVEN"],JSON.stringify(bad));
-  const plan=planLegacyTradeIntakeBatch([isolated],catalog());assert.equal(plan.counts.isolated,1,JSON.stringify(bad));
+const accountRow=(over:Record<string,string|null>={})=>({id:"33",user_id:"11",game_id:"1",status:"0",is_delete:"0",no:"NO-33",price_tenant:"10.00",extra_goods_total_price_tenant:"0.00",deposit_amount:"300.00",rental_days:"1",default_consume_type:"1",update_time:"1760000000",is_full_payout:"0",...over});
+const row12=(full:Record<string,string|null>)=>{const{is_full_payout:_flag,...rest}=full;return rest;};
+test("batch assembly recomputes both digests from the reviewed 13-column original and rejects an unproven payout flag",()=>{
+ const original={sourceAsOf:"2026-09-13T13:31:22.000Z",extractSha256:"e".repeat(64),row:accountRow()};
+ const base=fixture();base.source.sourceDigest=sha256Hex(canonicalize(row12(original.row)));bindSource(base);
+ const extraction=(originalOverride:unknown)=>[{legacyId:"33",accountId:base.accountId,intake:base,isolationReasons:[],original:originalOverride as LegacyTradeExtractionOriginal|null}];
+ const [bound]=assembleLegacyTradeIntakeBatch(extraction(original),"2026-09-13T13:31:22.000Z");
+ assert(bound);assert.deepEqual(bound.isolationReasons,[]);
+ assert.equal(bound.projection!.old12Digest,base.source.sourceDigest);
+ assert.equal(bound.projection!.new13Digest,sha256Hex(canonicalize(original.row)));
+ assert.notEqual(bound.projection!.old12Digest,bound.projection!.new13Digest);
+ for(const[originalOverride,reason]of [
+  [null,"FLAG_EXTRACTION_SOURCE_MISSING"],
+  [{...original,sourceAsOf:"2026-09-13T00:00:00.000Z"},"FLAG_EXTRACTION_CUTOFF_MISMATCH"],
+  [{...original,extractSha256:"zz"},"FLAG_EXTRACTION_SOURCE_INVALID"],
+  [{...original,row:{...original.row,extra:"1"}},"FLAG_EXTRACTION_ROW_INVALID"],
+  [{...original,row:accountRow({id:"99"})},"FLAG_EXTRACTION_ROW_MISMATCH"],
+  [{...original,row:accountRow({is_full_payout:"1"})},"FLAG_EXTRACTION_FLAG_MISMATCH"],
+  [{...original,row:accountRow({no:"NO-CHANGED"})},"FLAG_EXTRACTION_DIGEST_MISMATCH"],
+ ] as const){
+  const [isolated]=assembleLegacyTradeIntakeBatch(extraction(originalOverride),"2026-09-13T13:31:22.000Z");
+  assert(isolated);assert.deepEqual(isolated.isolationReasons,[reason],JSON.stringify(originalOverride));
+  assert.equal(isolated.projection,null);assert.equal(planLegacyTradeIntakeBatch([isolated],catalog()).counts.isolated,1,reason);
  }
- const illegal=fixture();illegal.isFullPayout="2" as LegacyTradeIntake["isFullPayout"];bindSource(illegal);
- const illegalPlan=planLegacyTradeIntakeBatch(assembleLegacyTradeIntakeBatch([row({intake:illegal})]),catalog());
+ const declared=assembleLegacyTradeIntakeBatch(extraction({old12Digest:base.source.sourceDigest,new13Digest:"0".repeat(64)}));
+ assert.deepEqual(declared[0]!.isolationReasons,["FLAG_EXTRACTION_SOURCE_INVALID"]);assert.equal(declared[0]!.projection,null);
+ const illegal=fixture();illegal.source.sourceDigest=base.source.sourceDigest;illegal.isFullPayout="2" as LegacyTradeIntake["isFullPayout"];bindSource(illegal);
+ const illegalPlan=planLegacyTradeIntakeBatch(assembleLegacyTradeIntakeBatch([{legacyId:"33",accountId:illegal.accountId,intake:illegal,isolationReasons:[],original:{...original,row:accountRow({is_full_payout:"2"})}}],"2026-09-13T13:31:22.000Z"),catalog());
  assert.equal(illegalPlan.items[0]!.admission,"BLOCKED");assert(illegalPlan.items[0]!.reasons.includes("FUNDING_POLICY_UNKNOWN"));
  const missing=fixture();missing.isFullPayout=null;bindSource(missing);
- const [noFlag]=assembleLegacyTradeIntakeBatch([{legacyId:"33",accountId:missing.accountId,intake:missing,projection:null,isolationReasons:[]}]);assert(noFlag);
+ const [noFlag]=assembleLegacyTradeIntakeBatch([{legacyId:"33",accountId:missing.accountId,intake:missing,isolationReasons:[],original:null}]);assert(noFlag);
  assert.equal(noFlag.intake!.isFullPayout,null);assert.deepEqual(noFlag.isolationReasons,[]);
  const missingPlan=planLegacyTradeIntakeBatch([noFlag],catalog());
  assert.equal(missingPlan.counts.blocked,1);assert(missingPlan.items[0]!.reasons.includes("FUNDING_POLICY_UNKNOWN"));
- const [missingBinding]=assembleLegacyTradeIntakeBatch([{legacyId:"34",accountId:null,intake:null,projection:null,isolationReasons:[]}]);assert(missingBinding);
+ const [missingBinding]=assembleLegacyTradeIntakeBatch([{legacyId:"34",accountId:null,intake:null,isolationReasons:[],original:null}]);assert(missingBinding);
  assert.deepEqual(missingBinding.isolationReasons,["SOURCE_BINDING_MISSING"]);
 });
-test("one malformed extraction row isolates without failing the frozen batch and the batch digest stays computable",()=>{
- const good=fixture();
- const plan=planLegacyTradeIntakeBatch([{legacyId:"33",accountId:good.accountId,intake:good,isolationReasons:[]},{legacyId:"34",accountId:"broken",intake:{} as unknown as LegacyTradeIntake,isolationReasons:[]}],catalog());
- assert.equal(plan.counts.total,2);assert.equal(plan.counts.isolated,1);
+test("one malformed extraction row isolates without failing the frozen batch and modifying any other row or the catalog changes the batch fingerprint",()=>{
+ const good=fixture(),bad={legacyId:"34",accountId:"broken",intake:{contentHash:"legal-json-unrepresentable"} as unknown as LegacyTradeIntake,isolationReasons:[]};
+ const run=(catalogOverride?:TradeCatalogItem[])=>planLegacyTradeIntakeBatch([{legacyId:"33",accountId:good.accountId,intake:good,isolationReasons:[]},bad],catalogOverride??catalog());
+ const plan=run();
+ assert.equal(plan.counts.total,2);assert.equal(plan.counts.isolated,1);assert.equal(plan.counts.tradeCandidate,1);
  const broken=plan.items.find(i=>i.legacyId==="34")!;assert(broken.reasons.includes("SOURCE_SCHEMA_INVALID"));assert.equal(broken.sourceDigest,null);
- assert.equal(plan.inputDigest.length,64);
+ assert.equal(plan.inputDigest.length,64);assert.notEqual(plan.inputDigest,sha256Hex("UNREPRESENTABLE_ROW"));
+ assert.equal(run().inputDigest,plan.inputDigest);
+ good.title="DIFFERENT_TITLE";
+ const changed=run();
+ assert.notEqual(plan.inputDigest,changed.inputDigest);
+ assert.notEqual(plan.items[0]!.inputDigest,changed.items[0]!.inputDigest);
+ const otherCatalog=run([...catalog(),{id:"extra",code:"haff_base",unit:"HAFF_BASE",quantityScale:0}]);
+ assert.notEqual(plan.inputDigest,otherCatalog.inputDigest);
+ assert.equal(stableFingerprint({a:1}),stableFingerprint({a:1}));assert.notEqual(stableFingerprint({a:1}),stableFingerprint({a:2}));
 });
 test("actual maintenance chain saves and quotes formal native fields before publication; selected payout stops for genuine owner acceptance",async t=>{
  const p:typeof import("../src/supply/publishing")=require("../src/supply/publishing"),legacy:typeof import("../src/supply/legacy-observation")=require("../src/supply/legacy-observation"),auth:typeof import("../src/auth/auth-security")=require("../src/auth/auth-security"),access:typeof import("../src/auth/admin-authorization")=require("../src/auth/admin-authorization"),funding:typeof import("../src/supply/funding-authority")=require("../src/supply/funding-authority");
