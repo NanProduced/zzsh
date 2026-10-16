@@ -109,7 +109,11 @@ async function userExists(client: PoolClient, userId: string): Promise<void> {
   if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id=$1`, [userId])).rowCount) throw notFound();
 }
 
-export async function ensureCreditAccount(client: PoolClient, userId: string): Promise<CreditStateRow> {
+/**
+ * Creates the decided initial state (100 + INITIALIZED event) only when absent. Returns the row this call
+ * actually inserted, or null when another transaction/earlier run already created it; never re-scores.
+ */
+export async function initializeCreditStateIfMissing(client: PoolClient, userId: string): Promise<CreditStateRow | null> {
   id(userId, "userId");
   await userExists(client, userId);
   const inserted = (await client.query<CreditStateRow>(
@@ -135,6 +139,12 @@ export async function ensureCreditAccount(client: PoolClient, userId: string): P
     );
     return inserted;
   }
+  return null;
+}
+
+export async function ensureCreditAccount(client: PoolClient, userId: string): Promise<CreditStateRow> {
+  const inserted = await initializeCreditStateIfMissing(client, userId);
+  if (inserted) return inserted;
   const row = (await client.query<CreditStateRow>(
     `SELECT user_id AS "userId",score,revision::text,initialized_at AS "initializedAt"
        FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR UPDATE`,

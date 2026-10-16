@@ -84,43 +84,83 @@ test("actual payment-intent route restores its receipt even when current policy 
   assert.equal(response.statusCode,200);assert.equal(response.body.paymentId,'old-payment');assert.equal(response.body.duplicate,true);assert.equal(policy.mock.callCount(),0);assert.equal(calls.length,2);
 });
 
-import { applyCreditInitializationBatch, planCreditInitialization } from "../src/credit/credit-initialization";
+import { applyCreditInitializationBatch, planCreditInitialization, previewCreditInitialization, runCreditInitializationBatch } from "../src/credit/credit-initialization";
 
-function initClient(state: Set<string>, users: string[], log: string[]) {
-  return { query: async (sql: string, params: unknown[] = []) => {
-    log.push(sql.replace(/\s+/g, " ").trim().slice(0, 40));
-    if (sql.includes(`LEFT JOIN zzsh_credit.user_credit_state`)) { const after = params[0] as string | null; return { rows: users.filter((id) => !state.has(id) && (after === null || id > after)).slice(0, params[1] as number).map((id) => ({ id })) }; }
-    if (sql.includes("user_id = ANY")) return { rows: (params[0] as string[]).filter((id) => state.has(id)).map((userId) => ({ userId })) };
-    if (sql.startsWith("SELECT 1 FROM zzsh_credit.user_credit_state")) return { rows: [], rowCount: state.has(params[0] as string) ? 1 : 0 };
-    if (sql.includes(`FROM zzsh_auth_user."user" WHERE id=$1`)) return { rows: [{}], rowCount: users.includes(params[0] as string) ? 1 : 0 };
-    if (sql.includes("INSERT INTO zzsh_credit.user_credit_state")) { const id = params[0] as string; if (state.has(id)) return { rows: [] }; state.add(id); return { rows: [{ userId: id, score: 100, revision: "1", initializedAt: "t" }] }; }
-    if (sql.includes("INSERT INTO zzsh_credit.credit_event")) return { rows: [] };
-    if (sql.includes("FOR UPDATE")) return { rows: [{ userId: params[0], score: 90, revision: "3", initializedAt: "t" }] };
-    if (sql.includes("audit_event")) return { rows: [] };
+type World = { users: Set<string>; scores: Map<string, number>; events: string[]; receipts: Map<string, { fp: string; status: number; body: unknown }>; audits: number; admins: Map<string, { status: string; isBoss: boolean }>; failAudit?: boolean; concurrentFor?: string };
+function world(): World {
+  return { users: new Set(["u1", "u2", "u3"]), scores: new Map([["u2", 80]]), events: [], receipts: new Map(), audits: 0, admins: new Map([["boss", { status: "ACTIVE", isBoss: true }], ["staff", { status: "ACTIVE", isBoss: false }]]) };
+}
+function client(w: World) {
+  return { query: async (sql: string, params: any[] = []) => {
+    if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) return { rows: [] };
+    if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+    if (sql.includes(`"zzsh_iam"."admin_security"`)) { const a = w.admins.get(params[0]); return { rows: a ? [{ status: a.status, isBoss: a.isBoss, passwordChangeRequired: false }] : [] }; }
+    if (sql.includes("role_permissions")) return { rows: [] };
+    if (sql.includes(`FROM "zzsh_supply"."idempotency_record"`)) { const r = w.receipts.get(`${params[0]}|${params[1]}`); return { rows: r ? [{ requestFingerprint: r.fp, responseStatus: r.status, responseBody: r.body, publishRequired: false }] : [] }; }
+    if (sql.includes(`INSERT INTO "zzsh_supply"."idempotency_record"`)) { w.receipts.set(`${params[0]}|${params[1]}`, { fp: params[2], status: params[3], body: JSON.parse(params[4]) }); return { rows: [] }; }
+    if (sql.includes(`FROM zzsh_auth_user."user" WHERE id=$1`)) { if (w.concurrentFor === params[0]) w.scores.set(params[0], 100); return { rows: [{}], rowCount: w.users.has(params[0]) ? 1 : 0 }; }
+    if (sql.includes("INSERT INTO zzsh_credit.user_credit_state")) { if (w.scores.has(params[0])) return { rows: [] }; w.scores.set(params[0], 100); return { rows: [{ userId: params[0], score: 100, revision: "1", initializedAt: "t" }] }; }
+    if (sql.includes("INSERT INTO zzsh_credit.credit_event")) { w.events.push(params[1]); return { rows: [] }; }
+    if (sql.includes("user_id = ANY")) return { rows: (params[0] as string[]).filter((id) => w.scores.has(id)).map((userId) => ({ userId })) };
+    if (sql.includes("audit_event")) { if (w.failAudit) throw new Error("audit unavailable"); w.audits += 1; return { rows: [] }; }
+    if (sql.includes("LEFT JOIN zzsh_credit.user_credit_state c")) return { rows: [...w.users].filter((id) => !w.scores.has(id)).map((id) => ({ id, category: id === "u3" ? "RESTRICTED" : "ACTIVE" })) };
     throw new Error(`unexpected query: ${sql}`);
   } } as any;
 }
+/** Transactional fake pool: snapshot on BEGIN, restore on ROLLBACK. */
+function pool(w: World) {
+  return { connect: async () => { let saved: string | undefined; const inner = client(w); return { release() {}, query: async (sql: string, params?: any[]) => {
+    if (sql === "BEGIN") saved = JSON.stringify({ s: [...w.scores], e: w.events, r: [...w.receipts], a: w.audits });
+    if (sql === "ROLLBACK" && saved) { const s = JSON.parse(saved); w.scores = new Map(s.s); w.events = s.e; w.receipts = new Map(s.r); w.audits = s.a; }
+    return inner.query(sql, params);
+  } }; } } as any;
+}
+const input = (over: Record<string, unknown> = {}) => ({ actorAdminId: "boss", batchKey: "credit-init:batch-0001", userIds: ["u3", "u1", "u2"], inputDigest: "a".repeat(64), resourceRef: "pg-window-e-001", reason: "decided rule: initial 100", requestId: "req_1", ...over }) as any;
 
-test("credit initialization plan pages only users without state and never touches existing scores", async () => {
-  const state = new Set(["u2"]); const log: string[] = [];
-  const client = initClient(state, ["u1", "u2", "u3", "u4"], log);
-  assert.deepEqual(await planCreditInitialization(client, { limit: 2 }), { candidates: ["u1", "u3"], nextAfter: "u3" });
-  assert.deepEqual(await planCreditInitialization(client, { afterUserId: "u3", limit: 2 }), { candidates: ["u4"], nextAfter: null });
-  await assert.rejects(() => planCreditInitialization(client, { limit: 0 }), /limit/);
-  await assert.rejects(() => planCreditInitialization(client, { limit: 501 }), /limit/);
+test("credit initialization plan classifies missing users and never lists existing states", async () => {
+  const plan = await planCreditInitialization(client(world()), { limit: 10 });
+  assert.deepEqual(plan.candidates, [{ userId: "u1", category: "ACTIVE" }, { userId: "u3", category: "RESTRICTED" }]);
+  assert.equal(plan.byCategory.RESTRICTED, 1);
+  await assert.rejects(() => planCreditInitialization(client(world()), { limit: 501 }), /limit/);
 });
 
-test("credit initialization dry-run writes nothing; apply is idempotent, audited once and reports existing users", async () => {
-  const state = new Set(["u2"]); const log: string[] = [];
-  const client = initClient(state, ["u1", "u2", "u3"], log);
-  const base = { batchKey: "credit-init:batch-0001", actorId: "operator", requestId: "req_1", reason: "decided rule: initial 100" };
-  const dry = await applyCreditInitializationBatch(client, { ...base, userIds: ["u1", "u2", "u3"], dryRun: true });
-  assert.deepEqual([dry.applied, dry.alreadyInitialized], [["u1", "u3"], ["u2"]]);
-  assert.equal(log.some((sql) => sql.startsWith("INSERT")), false);
-  const first = await applyCreditInitializationBatch(client, { ...base, userIds: ["u1", "u2", "u3"], dryRun: false });
-  assert.deepEqual([first.applied, first.alreadyInitialized], [["u1", "u3"], ["u2"]]);
-  assert.equal(log.filter((sql) => sql.includes("audit_event")).length, 1);
-  const replay = await applyCreditInitializationBatch(client, { ...base, userIds: ["u1", "u3"], dryRun: false });
-  assert.deepEqual([replay.applied, replay.alreadyInitialized], [[], ["u1", "u3"]]);
-  for (const bad of [{ batchKey: "x" }, { userIds: [] }, { userIds: ["u1", "u1"] }, { reason: " " }]) await assert.rejects(() => applyCreditInitializationBatch(client, { ...base, userIds: ["u1"], dryRun: false, ...bad } as any));
+test("E-R1-02 replay: same key+body returns the original receipt after current authorization, no second audit or event", async () => {
+  const w = world();
+  const first = await applyCreditInitializationBatch(client(w), input());
+  assert.deepEqual([first.replayed, first.receipt.applied, first.receipt.alreadyInitialized], [false, ["u1", "u3"], ["u2"]]);
+  assert.equal(w.scores.get("u2"), 80, "existing score kept");
+  const replay = await applyCreditInitializationBatch(client(w), input());
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.receipt, first.receipt);
+  assert.equal(w.audits, 1);
+  assert.deepEqual(w.events, ["u1", "u3"]);
+  w.admins.set("boss", { status: "FROZEN", isBoss: true });
+  await assert.rejects(() => applyCreditInitializationBatch(client(w), input()), /Access denied/, "replay re-checks current authorization");
+});
+
+test("E-R1-02 conflict: same key with a different object set or digest is rejected; non-Boss is rejected", async () => {
+  const w = world();
+  await applyCreditInitializationBatch(client(w), input({ userIds: ["u1"] }));
+  await assert.rejects(() => applyCreditInitializationBatch(client(w), input({ userIds: ["u3"] })), /different request/);
+  await assert.rejects(() => applyCreditInitializationBatch(client(w), input({ userIds: ["u1"], inputDigest: "b".repeat(64) })), /different request/);
+  assert.equal(w.scores.has("u3"), false);
+  await assert.rejects(() => applyCreditInitializationBatch(client(world()), input({ actorAdminId: "staff" })), /Boss/);
+  await assert.rejects(() => applyCreditInitializationBatch(client(world()), input({ actorAdminId: "nobody" })), /Access denied/);
+});
+
+test("E-R1-02 concurrency: a state created by another transaction is reported alreadyInitialized, not applied", async () => {
+  const w = world(); w.concurrentFor = "u1";
+  const result = await applyCreditInitializationBatch(client(w), input());
+  assert.deepEqual(result.receipt.applied, ["u3"]);
+  assert.deepEqual(result.receipt.alreadyInitialized, ["u1", "u2"]);
+  assert.deepEqual(w.events, ["u3"]);
+});
+
+test("E-R1-02 audit failure rolls back states, events and receipt; dry run writes nothing", async () => {
+  const w = world(); w.failAudit = true;
+  await assert.rejects(() => runCreditInitializationBatch(pool(w), input()), /audit unavailable/);
+  assert.deepEqual([[...w.scores.keys()], w.events, w.receipts.size, w.audits], [["u2"], [], 0, 0]);
+  const preview = await previewCreditInitialization(client(world()), input());
+  assert.deepEqual([preview.wouldApply, preview.alreadyInitialized], [["u1", "u3"], ["u2"]]);
+  for (const bad of [{ batchKey: "x" }, { userIds: [] }, { userIds: ["u1", "u1"] }, { inputDigest: "zz" }, { resourceRef: " " }]) await assert.rejects(() => applyCreditInitializationBatch(client(world()), input(bad)));
 });
