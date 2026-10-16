@@ -44,7 +44,7 @@ export function createLegacyGrowthCoveragePort(): LegacyCoveragePort {
       decode({ canonical, digest: sha256Hex(canonical) });
       const inserted = (await client.query<StoredRecord>(`INSERT INTO ${TABLE}
         (id,subject_user_id,fingerprint,execution_key,receipt_digest,cutoff,from_exclusive,coverage_state,record,record_canonical,record_digest)
-        VALUES($1,$2,$3,$4,$5,$6::timestamptz,$7::timestamptz,$8,$9::jsonb,$9,$10)
+        VALUES($1,$2,$3,$4,$5,$6::timestamptz,$7::timestamptz,$8,$9::text::jsonb,$9::text,$10)
         ON CONFLICT DO NOTHING RETURNING record_canonical AS canonical,record_digest AS digest`,
       ["growth_coverage_" + sha256Hex(canonicalize([record.subjectUserId, record.fingerprint])).slice(0, 48), record.subjectUserId, record.fingerprint, record.executionKey, record.receiptDigest, record.cutoff, record.fromExclusive, record.coverageState, canonical, sha256Hex(canonical)])).rows[0];
       if (inserted) return decode(inserted)!;

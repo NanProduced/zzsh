@@ -66,6 +66,7 @@ test("coverage port persists exact canonical version on caller client; same key/
   assert.deepEqual(await port.persist(f.client, r), r); assert.equal(f.inserted(), 1);
   assert.deepEqual(await port.readByExecutionKey(f.client, subject, r.executionKey!), r);
   assert.deepEqual(await port.readByFingerprint(f.client, subject, r.fingerprint), r);
+  assert(f.trace.some(s => s.includes("$9::text::jsonb,$9::text")), "both bindings start from the original text; JSONB formatting must not replace canonical bytes");
   assert(!f.trace.some(s => /^(BEGIN|COMMIT|ROLLBACK)/.test(s)));
 });
 test("coverage conflict gives raced execution key precedence over another key's matching fingerprint", async () => {
