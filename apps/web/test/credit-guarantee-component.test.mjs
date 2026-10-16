@@ -30,6 +30,14 @@ const componentPath = path.join(tree, "apps/web/src/components/account/credit-ce
 const clientPath = path.join(tree, "apps/web/src/lib/credit-guarantee-client.ts");
 const supplyClientPath = path.join(tree, "apps/web/src/lib/supply-client.ts");
 const orderClientPath = path.join(tree, "apps/web/src/lib/order-client.ts");
+const walletClientPath = path.join(tree, "apps/web/src/lib/personal-wallet-client.ts");
+const historyClientPath = path.join(tree, "apps/web/src/lib/owner-guarantee-history-client.ts");
+const historyPath = path.join(tree, "apps/web/src/components/account/owner-guarantee-history.tsx");
+function loadHistory() {
+  const wallet = loadTs(walletClientPath);
+  const client = loadTs(historyClientPath, { "./personal-wallet-client.ts": wallet });
+  return loadTs(historyPath, { "@/components/session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "@/lib/owner-guarantee-history-client": client, "@/lib/personal-wallet-client": wallet, "@/lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "./owner-guarantee-history.css": {} });
+}
 
 function setupStorage(throws = false) {
   const values = new Map();
@@ -40,13 +48,14 @@ function setupStorage(throws = false) {
 function overview() { return { creditState: "INITIALIZED", credit: { userId: "user-A", score: 70, revision: "1", initializedAt: "2026-01-01", events: [] }, recoveryRequests: [], guarantees: [], transactions: [] }; }
 function historyOverview() { return { ...overview(), transactions: [{ requirementId: "req-1", accountId: "account-1", paymentStatus: "CONFIRMED", refundStatus: "UNKNOWN", paymentFinanceEventId: "event-2", refundFinanceEventId: null, paymentHistory: [{ id: "pay-1", requirementId: "req-1", merchantOrderNo: "merchant-1", amountCents: "500", status: "FAILED", providerTransactionId: null, financeEventId: null, ledgerEntryRef: null }, { id: "pay-2", requirementId: "req-1", merchantOrderNo: "merchant-2", amountCents: "500", observedAmountCents: "500", status: "CONFIRMED", providerTransactionId: "provider-2", financeEventId: "event-2", ledgerEntryRef: "line-2" }], refundHistory: [{ id: "refund-1", requirementId: "req-1", paymentId: "pay-2", amountCents: "500", status: "FAILED", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }, { id: "refund-2", requirementId: "req-1", paymentId: "pay-2", amountCents: "500", status: "UNKNOWN", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }] }] }; }
 
-async function mount(fetchImpl) {
+async function mount(fetchImpl, { history = false } = {}) {
   Object.assign(session, { status: "authenticated", userId: "user-A", identityVersion: 1 });
   currentSession = { status: "authenticated", userId: "user-A", identityVersion: 1 };
   const browser = new Window({ url: "http://127.0.0.1:3100/account" });
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, DOMException: browser.DOMException, IS_REACT_ACT_ENVIRONMENT: true });
-  globalThis.fetch = fetchImpl;
-  const module = loadTs(componentPath, { "lucide-react": icons, "next/link": ({ scroll, ...props }) => React.createElement("a", props), "./credit-center.css": {}, "../session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "../../lib/credit-guarantee-client": loadTs(clientPath), "../../lib/supply-client": loadTs(supplyClientPath), "../../lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }) });
+  // F owner-guarantee-history is an independent read; existing credit-call counting tests isolate it unless opted in.
+  globalThis.fetch = history ? fetchImpl : async (url, init) => String(url).includes("/api/account/wallet/guarantees") ? new Response(JSON.stringify({ error: { code: "GUARANTEE_HISTORY_UNAVAILABLE" } }), { status: 503 }) : fetchImpl(url, init);
+  const module = loadTs(componentPath, { "lucide-react": icons, "next/link": ({ scroll, ...props }) => React.createElement("a", props), "./credit-center.css": {}, "../session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "../../lib/credit-guarantee-client": loadTs(clientPath), "../../lib/supply-client": loadTs(supplyClientPath), "../../lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "./owner-guarantee-history": loadHistory() });
   const host = browser.document.createElement("div"); browser.document.body.append(host);
   const root = requireFromTree("react-dom/client").createRoot(host);
   await React.act(async () => root.render(React.createElement(module.CreditCenter, { scope: "user-A:1" })));
@@ -232,9 +241,9 @@ test("guarantee groups deduplicate account contexts without adding money or hidi
     assert.doesNotMatch(groups[1].textContent, /account-2/);
     assert.equal(groups[0].querySelector("a").getAttribute("href"), "/account?view=accounts&accountId=account-1");
     assert.match(groups[1].textContent, /当前责任无需缴纳，不代表已缴或已退/);
-    assert.equal(mounted.host.querySelectorAll("button").length, 1);
+    assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
     const headings = [...mounted.host.querySelectorAll("h3")].map(item => item.textContent);
-    assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "收款与原路退还进度", "我的信用恢复申请"]);
+    assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "收款与原路退还进度", "我的信用恢复申请", "号主上架保证金"], "F history section is hosted last and independent of credit readiness");
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -356,7 +365,7 @@ test("F1: account summary failure never blocks the credit read and stays silent"
     assert.match(mounted.host.textContent, /出租账号/);
     assert.match(mounted.host.textContent, /该账号暂无可显示的公开名称/);
     // 摘要失败不阻塞主读取，也不额外给出会误操作的入口。
-    assert.equal(mounted.host.querySelectorAll("button").length, 1);
+    assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -411,7 +420,7 @@ test("R1: a 403 on the account summary withdraws the name without blocking the c
     assert.doesNotMatch(mounted.host.textContent, /PREVIOUS_AUTHORIZED_TITLE/);
     // 摘要授权与信用读取是两种权限：信用主体仍在，只是名称降级。
     assert.match(mounted.host.textContent, /当前信用/);
-    assert.equal(mounted.host.querySelectorAll("button").length, 1);
+    assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
   } finally { await cleanup(mounted); }
 });
 
@@ -499,4 +508,22 @@ test("F1-t: 首页已覆盖所需账号即停，不继续翻页", async () => {
     assert.equal(reads.length, 1, "有界收集：覆盖即停，不做无用翻页");
     assert.equal(mounted.host.querySelector(".credit-guarantee-list a").textContent, "覆盖即停标题");
   } finally { await cleanup(mounted); }
+});
+
+test("E-F-016 owner guarantee history stays readable when the main credit read fails", async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  const history = { contractVersion: "owner-guarantee-history.read.v1", subjectId: "user-A", asOf: "2026-10-01T00:00:00Z", snapshotVersion: "snap-1", items: [], nextCursor: null, coverage: { knowledge: "UNKNOWN", count: null, mappedRecordCount: null, reason: "SOURCE_PENDING", cutoff: null }, postedHeld: { knowledge: "UNKNOWN", amountCents: null, scope: "POSTED_LEDGER_ONLY", reason: "NOT_POSTED" }, liability: { knowledge: "UNKNOWN", amountCents: null }, channelArrival: "UNKNOWN" };
+  try {
+    const { host, root } = await mount(async (url) => {
+      urls.push(String(url));
+      if (String(url).includes("/api/account/wallet/guarantees")) return new Response(JSON.stringify(history), { status: 200 });
+      return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "x" } }), { status: 500 });
+    }, { history: true });
+    await React.act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    assert.ok(urls.some((u) => u.includes("/api/account/wallet/guarantees")), "history read is issued independently");
+    assert.match(host.textContent, /号主上架保证金/);
+    assert.match(host.textContent, /待核定/, "unknown liability is shown as pending, not zero");
+    await React.act(async () => root.unmount());
+  } finally { globalThis.fetch = original; }
 });
