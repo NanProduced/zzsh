@@ -11,6 +11,7 @@ function fixture({ initialized=false,migrated=false,authenticated=true,active=tr
   const query=async(sql:string,args:unknown[]=[])=>{
     queries.push({sql,args});assert.match(sql.trimStart(),/^(SELECT|BEGIN|COMMIT|ROLLBACK)\b/,"a read must not initialize business facts");
     const rows=(values:unknown[])=>({rows:values,rowCount:values.length});
+    if(sql.includes("legacy-growth-schema"))return rows([{coverage:false,sources:false}]);
     if(["BEGIN","COMMIT","ROLLBACK"].includes(sql))return rows([]);
     if(sql.includes('COALESCE(s."account_status"'))return rows([{suspended:!active,accountStatus:active?"ACTIVE":"FROZEN"}]);
     if(sql.includes('SELECT "suspended"'))return rows([{suspended:!active}]);

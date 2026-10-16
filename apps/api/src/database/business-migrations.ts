@@ -247,6 +247,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if(nativeAdmission?.present===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_origin_resource_admission FROM ${runtimeUser};`);
   await configureAdminSecurityCommandPrivileges(pool, runtimeRole);
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
+  await configureLegacyGrowthCoveragePrivileges(pool, runtimeRole);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
   await configureContinuityFinancePrivileges(pool, runtimeRole);
@@ -383,6 +384,16 @@ export async function configureMembershipGrowthPrivileges(pool: Pick<Pool, "quer
       ON zzsh_iam.membership_entitlement TO ${role};
     GRANT UPDATE(status,revoked_reason,replaced_by_id,updated_at) ON zzsh_iam.membership_entitlement TO ${role};
   `);
+}
+
+/** The source coverage is owner-maintained; runtime only reads, including after inherited column grants. */
+export async function configureLegacyGrowthCoveragePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const name = "zzsh_iam.membership_growth_legacy_coverage", role = quoteIdentifier(runtimeRole);
+  const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [[name]])).rows;
+  if (found.length !== 1 || found[0]?.name !== name || typeof found[0].present !== "boolean") throw new Error("Legacy growth coverage inventory is incomplete");
+  if (!found[0].present) return;
+  await resetRuntimeTablePrivileges(pool, name, role);
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_iam.guard_legacy_growth_coverage() FROM ${role}`);
 }
 
 /** New continuity tables are narrowed after all broad/default grants. Exact role comes from migration config. */

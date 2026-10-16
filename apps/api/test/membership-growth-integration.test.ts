@@ -239,6 +239,7 @@ function quoteInput(): QuoteInput {
 function growthReaderClient(state: { normalTier: string; effectiveTier: string; blackGoldState: string; lastTierDropAt: string | null }, contributions: GrowthContribution[], policy: GrowthBenefitPolicy, sourceAmount: string | null = "10000.00", sourceHash = "a".repeat(64), migrated = false) {
   const source = { settlementVersionId: "settlement-1", versionNo: 1, versionHash: sourceHash, userId: "user-1", gameId: "game-1", inputSnapshot: { schema: "settlement-version-v2", amounts: { ...(sourceAmount === null ? {} : { haffConsumedBuyer: sourceAmount }), itemConsumedBuyer: "0.00" } } };
   return { query: async (sql: string) => {
+    if (sql.includes("legacy-growth-schema")) return { rows: [{ coverage: false, sources: false }] };
     if (sql.includes('SELECT id FROM zzsh_auth_user')) return { rows: [{ id: "user-1" }] };
     if (sql.includes('FROM zzsh_iam.membership_growth_contribution')) return { rows: contributions };
     if (sql.includes('FROM zzsh_iam.user_rental_membership')) return { rows: [{ sourceRef: "legacy:manual" }] };

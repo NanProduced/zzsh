@@ -561,6 +561,13 @@
       "when": 1792147352617,
       "tag": "0079_owner_guarantee_history",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1792147352618,
+      "tag": "0080_membership_growth_legacy_coverage",
+      "breakpoints": true
     }
   ]
 }

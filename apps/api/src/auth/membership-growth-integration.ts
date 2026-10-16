@@ -215,7 +215,7 @@ function expectedSourcesFromSettlement(row: StoredSettlementSource): { sources: 
 /** Result of membership-growth-legacy.assessLegacyCoverageRecord for this subject (Q wires the H3 record read). */
 export type LegacyCoverageAssessment = { state: "COMPLETE" | "BACKFILL_PENDING" | "SOURCE_CONFLICT"; reasons: string[] };
 
-export async function readGrowthSourceCompleteness(client: PoolClient, userId: string, contributions: readonly CompletenessContribution[], registrationSourceRef: string | null, legacyCoverage?: LegacyCoverageAssessment): Promise<GrowthSourceCompleteness> {
+export async function readGrowthSourceCompleteness(client: PoolClient, userId: string, contributions: readonly CompletenessContribution[], registrationSourceRef: string | null, legacyCoverage?: LegacyCoverageAssessment, asOfUtc?: string): Promise<GrowthSourceCompleteness> {
   const sourceRows = (await client.query<StoredSettlementSource>(
     `SELECT v.id AS "settlementVersionId", v.version_no AS "versionNo", v.version_hash AS "versionHash", o.renter_user_id AS "userId", o.game_id AS "gameId", v.input_snapshot AS "inputSnapshot"
        FROM zzsh_order.rental_order o
@@ -268,6 +268,11 @@ export async function readGrowthSourceCompleteness(client: PoolClient, userId: s
   // Admitted legacy rows are partial history until a persisted coverage receipt exists (/root migration); never upgrade to COMPLETE here.
   if (legacyPresent && !provenance.migrated) return { ...assessed, state: "SOURCE_CONFLICT", reasons: [...(assessed.reasons ?? []), "LEGACY_ROWS_ON_NON_MIGRATED_SUBJECT"] };
   if (!provenance.migrated) return assessed;
+  if (legacyCoverage === undefined) {
+    // The legacy writer reuses this module's digest helpers; load its store only after initialization.
+    const { readLegacyGrowthCoverageAssessment } = await import("./membership-growth-legacy-store");
+    legacyCoverage = await readLegacyGrowthCoverageAssessment(client, userId, contributions, asOfUtc);
+  }
   if (legacyCoverage?.state === "SOURCE_CONFLICT") return { ...assessed, state: "SOURCE_CONFLICT", reasons: [...(assessed.reasons ?? []), ...legacyCoverage.reasons] };
   // Native increments (after cutoff) keep their own completeness; legacy history is COMPLETE only via a valid persisted record.
   if (legacyCoverage?.state === "COMPLETE" && (assessed.state === "COMPLETE" || (sourceRows.length === 0 && assessed.reasons?.length === 1 && assessed.reasons[0] === "FORMAL_SOURCE_PROOF_MISSING"))) return { ...assessed, state: "COMPLETE", reasons: [] };
@@ -622,7 +627,7 @@ export async function readMembershipGrowth(client: PoolClient, userId: string, a
   });
   let completeness: GrowthSourceCompleteness | null = null;
   try {
-    completeness = await readGrowthSourceCompleteness(client, userId, rows, oldMembership?.sourceRef ?? null);
+    completeness = await readGrowthSourceCompleteness(client, userId, rows, oldMembership?.sourceRef ?? null, undefined, asOfUtc);
   } catch {
     completeness = null;
   }

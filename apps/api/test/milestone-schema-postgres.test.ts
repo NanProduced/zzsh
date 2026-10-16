@@ -615,11 +615,11 @@ test("an empty74 resource cannot pass the nonempty order/rule default upgrade fi
   }
 });
 
-test("the one proposed resource and frozen source validate locally without constructing a PG pool", () => {
+test("the frozen 80-chain window refuses the new 81-chain before constructing a PG pool", () => {
   let connections = 0;
   const target = { database: "zzsh_test_order_qf80_integration", oid: "40000", marker: "fixture", owner: "fixture", migrationRole: "zzsh_order_qf80_integration_m", migrationOid: "40001", runtimeRole: "zzsh_order_qf80_integration_r", runtimeOid: "40002" };
   const pool = (user: string) => ({ options: { host: "127.0.0.1", port: 55432, database: target.database, user, connectionTimeoutMillis: 3000 }, connect() { connections++; throw new Error("unexpected offline connection"); } });
   const o = { target, apiRoot: process.cwd(), limits: { pageRows: 4096, maxRowsPerPass: 2000000, maxPagesPerTable: 512, statementMs: 3000, lockMs: 500 }, assertWindow() {}, checkpoint() {}, migrationPool: pool(target.migrationRole), runtimePool: pool(target.runtimeRole) } as unknown as MilestoneSchemaPgOptions;
-  assert.equal(localMigrations(o).migrations.length, 80); assert.equal(connections, 0);
+  assert.throws(() => localMigrations(o), /81\s*!==\s*80/); assert.equal(connections, 0);
   assert.throws(() => localMigrations({ ...o, target: { ...target, database: "zzsh_test_order_another" } }));
 });

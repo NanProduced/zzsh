@@ -31,7 +31,7 @@ test('membership ACL is optional on old schema, rejects partial schema and unsaf
 });
 test('common ACL converges membership column grants without mutable facts or projection writes',async()=>{
  const p=probe();await applyRuntimePrivileges(p.pool,'runtime_role');const first=[...p.seen];p.seen.length=0;await applyRuntimePrivileges(p.pool,'runtime_role');assert.deepEqual(p.seen,first);
- const revokes=p.seen.filter(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_iam.membership_'));assert.equal(revokes.length,4);assert(revokes.every(s=>s.includes('UPDATE (')&&s.includes('"unlisted_column"')));
+ const revokes=p.seen.filter(s=>s.startsWith('REVOKE ALL ON TABLE zzsh_iam.membership_'));assert.equal(revokes.length,5);assert(revokes.some(s=>s.includes('membership_growth_legacy_coverage')));assert(revokes.every(s=>s.includes('UPDATE (')&&s.includes('"unlisted_column"')));
  const grants=p.seen.find(s=>s.includes('GRANT INSERT(id,version,status,effective_at'))!;assert(grants);assert.match(grants,/GRANT UPDATE\(status,revoked_reason,replaced_by_id,updated_at\) ON zzsh_iam.membership_entitlement/);
  assert.equal((grants.match(/GRANT UPDATE/g)||[]).length,1);assert(!grants.includes('membership_growth_state'));assert(!grants.includes('GRANT DELETE'));assert(!grants.includes('unlisted_column'));
 });
