@@ -14,13 +14,15 @@ import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-se
  * docs/architecture/credit-guarantee.md:9 and migration 0067 define a 100-point INITIALIZED state for every user.
  * Users created while the module was off still read NOT_INITIALIZED; GET never initializes. This is the only
  * formal path: a maintenance runner that is
- *  - authorized now (ACTIVE Boss admin re-checked inside the transaction, also on replay),
- *  - idempotent on (actor, operation, key) bound to the exact body fingerprint (object set, policy, resource,
- *    input digest, mode) via the existing supply idempotency record; same key + same body replays the original
+ *  - RUNNER_DRAFT; authorized for the current execution: ACTIVE Boss, approved operator session, DB clock inside the
+ *    approved window and live database equal to the approved resource, re-checked in the transaction and on replay,
+ *  - idempotent on (actor, operation, key) bound to the exact body fingerprint (object set, category, policy,
+ *    intent digest, reason; never the per-window approval) via the existing supply idempotency record; same key + same body replays the original
  *    receipt, same key + different body is 409,
  *  - exact under concurrency: "applied" comes from this call's own INSERT ... RETURNING, users are processed in
  *    sorted order, and existing scores/events are never touched,
- *  - atomic: plan check, inserts, receipt and the audit row share one transaction; any failure rolls back all.
+ *  - atomic: locked category recheck, inserts, receipt and audit share one transaction. A failure before COMMIT is
+ *    NOT_COMMITTED; a failure of COMMIT itself is COMMIT_UNKNOWN and is recovered only by a read-only receipt read.
  * It never unfreezes, restores or re-scores anyone and is not mounted on any HTTP route.
  */
 
