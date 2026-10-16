@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
-import {prepareFrozenFinanceObservation,prepareFrozenFinanceHistory,prepareStoredOpeningCandidate} from '../src/finance/legacy-finance-source-preparation';
+import {prepareFrozenFinanceObservation,previewFrozenFinanceObservation,prepareFrozenFinanceHistory,prepareStoredOpeningCandidate} from '../src/finance/legacy-finance-source-preparation';
 import {planFinanceObservations} from '../src/finance/personal-finance-observation-maintenance';
 const subject={userId:'fixture-user',legacyUserId:'11',identityDigest:'a'.repeat(64)},cutoff='2026-09-13T13:31:22.000Z',inputSha256='b'.repeat(64);
 const log={id:101,sn:'FIXTURE-LOG-NOT-BUSINESS-NUMBER',action:1,amount:'1.10',userId:11,sourceId:501,createdAt:1779469800,changeType:1001,leftAmount:'1.10'};
@@ -32,4 +32,16 @@ test('stored candidate uses original earnings and ordered old digest; money, dup
 test('completed distribution keeps original order type/level/status and never uses the pending subset as full coverage',()=>{
  const raw={id:'501',sn:'FIXTURE-DIST',user_id:'11',order_type:'1',order_id:'71',earnings:'1.10',level:'2',level_id:'1',ratio:'5.00',status:'2',settle_time:'1779469800',is_delete:'0',create_time:'1779460000',update_time:'1779469800'};
  const p=prepareFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',raw,subject);assert.equal(p.row.sourceStatus,2);assert.equal(p.row.level,2);assert.equal(p.row.orderId,71);assert.equal(p.row.sourceNumber,raw.sn);assert.equal(p.financialSource,'OBSERVATION_ONLY');assert.throws(()=>prepareFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',{...raw,level:'4'},subject));
+});
+
+test('source-only preview retains the exact numeric frozen distribution and missing ratio without inventing identity audit or import authority',()=>{
+ const mapped={userId:subject.userId,legacyUserId:subject.legacyUserId},raw={id:501,sn:'FIXTURE-DIST',user_id:11,order_type:1,order_id:71,earnings:'1.10',level:2,level_id:1,status:2,settle_time:1779469800,is_delete:0,create_time:1779460000,update_time:1779469800};
+ const p=previewFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',raw,mapped);assert.equal(p.row.sourceRatio,null);assert.equal(p.row.sourceStatus,2);assert.equal(p.row.amount,'1.10');assert.equal(p.executable,false);assert.equal(p.identityAudit,'UNBOUND');assert.equal((p.row.rawSource as any).canonical,canonicalize(raw));assert.equal((p.row.rawSource as any).digest,createHash('sha256').update(canonicalize(raw)).digest('hex'));
+ assert.throws(()=>planFinanceObservations(p as any));
+ const noAudit=mapped as typeof subject;assert.throws(()=>prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',log,noAudit),/identity binding/);assert.throws(()=>prepareFrozenFinanceHistory({subject:noAudit,sourceKind:'HISTORICAL_EARNINGS_LOG',inputSha256,cutoff,sourceCount:1,rows:[log],isolated:[]}),/identity binding/);
+ for(const changed of [{...raw,user_id:12},{...raw,id:9007199254740992},{...raw,password:'forbidden'},{...raw,earnings:'1.001'}])assert.throws(()=>previewFrozenFinanceObservation('HISTORICAL_DISTRIBUTION',changed,mapped));
+});
+test('source preview reuses original earnings and withdrawal conversion without guessing a credited economic root',()=>{
+ const mapped={userId:subject.userId,legacyUserId:subject.legacyUserId},p=previewFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',log,mapped),w=previewFrozenFinanceObservation('HISTORICAL_WITHDRAWAL',withdrawal,mapped);
+ assert.equal(p.row.referenceType,'UNRESOLVED_ECONOMIC_SOURCE');assert.equal(p.financialSource,'UNKNOWN');assert.equal(p.executable,false);assert.equal(w.row.amount,'5.00');assert.equal(w.row.net,'4.50');assert.equal(w.executable,false);assert.equal(w.identityAudit,'UNBOUND');
 });

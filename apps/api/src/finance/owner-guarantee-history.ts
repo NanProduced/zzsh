@@ -27,7 +27,7 @@ export function prepareOwnerGuaranteeHistory(value:LegacyGuaranteeHistoryInput){
  const payments=i.payOrders.map(p=>{ensureOnlyFields(p,paymentFields);if(!oldId.test(p.id??'')||p.order_id!==s.id||p.order_type!=='2'||!['0','1'].includes(p.pay_is??'')||seen.has(p.id!))throw invalid('Guarantee attempts must bind typed account source, not rental order');seen.add(p.id!);return{source:p,amount:sourceYuanToCents(p.pay_money),digest:sha(canonicalize(p))};});
  const paid=payments.filter(p=>p.source.pay_is==='1'),trace=s.pay_time!==null&&s.pay_time!==undefined&&s.pay_time!==''&&s.pay_time!=='0';
  const classification=s.return_is==='1'?(current==='0'?'ZERO_AMOUNT_RETURN_MARK':'SOURCE_RETURN_MARK_CHANNEL_UNKNOWN'):
-  current==='0'&&s.pay_is==='1'?'ZERO_AMOUNT_PAID_MARK':paid.length?(s.pay_is==='1'?'SOURCE_PAID_REFUND_UNKNOWN':'PAID_RECORD_RESET_REFUND_UNKNOWN'):
+  paid.length?(s.pay_is==='1'?'SOURCE_PAID_REFUND_UNKNOWN':'PAID_RECORD_RESET_REFUND_UNKNOWN'):current==='0'&&s.pay_is==='1'?'ZERO_AMOUNT_PAID_MARK':
   current!=='0'&&s.pay_is==='1'?'PAID_MARK_WITHOUT_PAY_ORDER_UNKNOWN':trace?'HISTORICAL_TRACE_UNKNOWN':'NO_PAYMENT_EVIDENCE_UNKNOWN';
  const conflicts=[...(paid.length>1?['MULTIPLE_PAID_ATTEMPTS']:[]),...(paid.some(p=>p.amount!==current)?['CURRENT_AMOUNT_DIFFERS_FROM_PAID_ATTEMPT']:[])];
  const canonical=canonicalize(i);

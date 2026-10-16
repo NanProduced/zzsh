@@ -8,14 +8,19 @@ import type {StoredOpeningInput} from './personal-finance-maintenance';
 
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),old=/^[1-9]\d{0,23}$/,digest=/^[a-f0-9]{64}$/,target=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 type Subject={userId:string;legacyUserId:string;identityDigest:string};
-function subject(s:Subject){if(!s||typeof s.userId!=='string'||!target.test(s.userId)||typeof s.legacyUserId!=='string'||!old.test(s.legacyUserId)||typeof s.identityDigest!=='string'||!digest.test(s.identityDigest))throw invalid('Exact existing identity binding required');}
+type PreviewSubject=Pick<Subject,'userId'|'legacyUserId'>;
+function previewSubject(s:PreviewSubject){if(!s||typeof s.userId!=='string'||!target.test(s.userId)||typeof s.legacyUserId!=='string'||!old.test(s.legacyUserId))throw invalid('Exact existing identity binding required');}
+function subject(s:Subject){previewSubject(s);if(typeof s.identityDigest!=='string'||!digest.test(s.identityDigest))throw invalid('Exact existing identity binding required');}
 function sourceId(v:unknown){const s=String(v);if(!old.test(s)||!Number.isSafeInteger(Number(s)))throw invalid('Historical source ID is not losslessly representable');return Number(s);}
 function integer(v:unknown){if(typeof v!=='number'||!Number.isSafeInteger(v))throw invalid('Original frozen integer required');return v;}
 function rawEvidence(entity:string,r:Record<string,unknown>){const canonical=canonicalize(r);return{entity,canonical,digest:sha(canonical)};}
 /** Only fields in the existing 20261006 frozen sections enter these previews. Log sn is never source_sn.
  * The unresolved label grants no financial source proof; it deliberately blocks a stored/posting candidate. */
 export function prepareFrozenFinanceObservation(kind:ObservationKind,raw:Record<string,unknown>,s:Subject){
- subject(s);let row:Record<string,unknown>;
+ subject(s);return frozenObservation(kind,raw,s);
+}
+function frozenObservation(kind:ObservationKind,raw:Record<string,unknown>,s:PreviewSubject){
+ let row:Record<string,unknown>;
  if(kind==='HISTORICAL_EARNINGS_LOG'){
   ensureOnlyFields(raw,['id','sn','action','amount','userId','sourceId','createdAt','changeType','leftAmount']);
   if(String(raw.userId)!==s.legacyUserId||![1,2].includes(integer(raw.action)))throw invalid('Original earnings direction/subject required');
@@ -36,6 +41,30 @@ export function prepareFrozenFinanceObservation(kind:ObservationKind,raw:Record<
  }else throw invalid('Supported frozen finance source kind required');
  const prepared=prepareHistoricalObservation(row,{userId:s.userId,legacyUserId:s.legacyUserId,sourceSystem:'legacy_mysql_restore',basisId:null});
  return{row,sourceId:prepared.sourceId,sourceDigest:prepared.sourceDigest,sourceEventAt:prepared.sourceEventAt,financialSource:kind==='HISTORICAL_EARNINGS_LOG'?'UNKNOWN' as const:'OBSERVATION_ONLY' as const};
+}
+
+export type FinanceObservationSourcePreview=ReturnType<typeof frozenObservation>&{executable:false;identityAudit:'UNBOUND'};
+/** Source-only preparation needs the frozen mapping, not a fabricated migration-audit digest. Import admission stays separate. */
+export function previewFrozenFinanceObservation(kind:ObservationKind,raw:Record<string,unknown>,s:PreviewSubject):FinanceObservationSourcePreview{
+ previewSubject(s);
+ let normalized=raw;
+ if(kind==='HISTORICAL_DISTRIBUTION'){
+  ensureOnlyFields(raw,['id','sn','user_id','order_type','order_id','earnings','level','level_id','ratio','status','settle_time','is_delete','create_time','update_time']);
+  normalized={...raw};
+  for(const key of ['id','user_id','order_type','order_id','level','level_id','status','settle_time','is_delete','create_time','update_time']){
+   const value=raw[key];if(typeof value==='number'&&!Number.isSafeInteger(value))throw invalid('Original frozen integer required');
+   if(typeof value!=='number'&&typeof value!=='string')throw invalid('Original frozen distribution field required');
+   normalized[key]=String(value);
+  }
+ }
+ const result=frozenObservation(kind,normalized,s);
+ if(kind==='HISTORICAL_DISTRIBUTION'){
+  result.row.rawSource=rawEvidence('la_distribution_order',raw);
+  result.row.sourceRatio=raw.ratio??null;
+  const prepared=prepareHistoricalObservation(result.row,{userId:s.userId,legacyUserId:s.legacyUserId,sourceSystem:'legacy_mysql_restore',basisId:null});
+  result.sourceDigest=prepared.sourceDigest;
+ }
+ return{...result,executable:false as const,identityAudit:'UNBOUND' as const};
 }
 
 /** Construct an exact observation/coverage body, without credentials, approval or a DB call. A zero source universe is explicit. */

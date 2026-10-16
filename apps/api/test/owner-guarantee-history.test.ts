@@ -7,6 +7,11 @@ const source=(id='101'):LegacyGuaranteeHistoryInput=>({userId:'owner',legacyUser
 test('CF3 zero/reset marks retain original paid attempts, amount mismatch and UNKNOWN liability/refund without creating held cash',()=>{
  const i=source();i.payOrders.push({...i.payOrders[0]!,id:'502'});const p=prepareOwnerGuaranteeHistory(i);assert.equal(p.accountFieldCents,'0');assert.equal(p.paidRecordCents,'1000');assert.equal(p.paidRecordCount,'2');assert.equal(p.classification,'ZERO_AMOUNT_RETURN_MARK');assert.deepEqual(p.conflicts,['MULTIPLE_PAID_ATTEMPTS','CURRENT_AMOUNT_DIFFERS_FROM_PAID_ATTEMPT']);assert.equal(p.payments[0]!.merchantOrderNumber,'ORIGINAL-MERCHANT-ORDER');assert.equal(p.payments[0]!.channelArrival,'UNKNOWN');assert.equal(p.liability.amountCents,null);assert.equal(p.refund.amountCents,null);
 });
+
+test('a zero current amount never hides an original typed paid attempt behind the zero-paid-mark classification',()=>{
+ const i=source();i.source.return_is=null;i.source.pay_is='1';const p=prepareOwnerGuaranteeHistory(i);assert.equal(p.classification,'SOURCE_PAID_REFUND_UNKNOWN');assert.equal(p.accountFieldCents,'0');assert.equal(p.paidRecordCents,'500');assert.equal(p.payments.length,1);assert.deepEqual(p.conflicts,['CURRENT_AMOUNT_DIFFERS_FROM_PAID_ATTEMPT']);assert.equal(p.liability.knowledge,'UNKNOWN');assert.equal(p.refund.knowledge,'UNKNOWN');assert.equal(p.channelArrival,'UNKNOWN');
+ i.payOrders=[];assert.equal(prepareOwnerGuaranteeHistory(i).classification,'ZERO_AMOUNT_PAID_MARK');
+});
 test('rental-order same numeric ID, foreign owner/account, duplicate attempts, secrets and invalid cents reject',()=>{
  for(const change of [(i:LegacyGuaranteeHistoryInput)=>i.payOrders[0]!.order_type='1',(i:LegacyGuaranteeHistoryInput)=>i.source.user_id='other',(i:LegacyGuaranteeHistoryInput)=>i.payOrders[0]!.order_id='other',(i:LegacyGuaranteeHistoryInput)=>i.payOrders.push({...i.payOrders[0]!}),(i:LegacyGuaranteeHistoryInput)=>i.source.pay_url='secret-link',(i:LegacyGuaranteeHistoryInput)=>i.payOrders[0]!.pay_money='5.001']){const i=source();change(i);assert.throws(()=>prepareOwnerGuaranteeHistory(i));}
 });
