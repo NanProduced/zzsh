@@ -69,6 +69,9 @@
   --color-accent-brand-active: #c78d26;
   --color-accent-brand-muted: rgba(229, 169, 60, 0.15);
   --color-accent-brand-text: #0d0f12;
+  /* 品牌色作正文/链接文字时的前景：金色在深色画布上可直接读，浅色画布需要更深一档，
+     两者都在各自主题下满足 4.5:1。作背景时仍用 --color-accent-brand 配 --color-accent-brand-text。 */
+  --color-accent-brand-ink: #f5ba54;
 
   /* 三角洲行动 · 战术灰绿局部色 (限定专区使用) */
   --color-delta-accent: #10b981;
@@ -115,6 +118,7 @@ html:not(.dark) {
   --color-accent-brand-active: #92400e;
   --color-accent-brand-muted: rgba(217, 119, 6, 0.12);
   --color-accent-brand-text: #ffffff;
+  --color-accent-brand-ink: #92400e;
 
   --color-delta-accent: #059669;
   --color-delta-accent-hover: #047857;
@@ -175,8 +179,8 @@ summary:focus-visible {
 
 
 @font-face { font-family: "Smiley Sans"; src: url("/fonts/SmileySans-Oblique.woff2") format("woff2"); font-display: swap; }
-:root { --color-text-muted: #9ca7b5; --color-accent-brand: #f5ba54; --color-accent-brand-text: #18130a; }
-html[data-theme="light"], html:not(.dark) { --color-text-muted: #5c6977; --color-accent-brand: #f3b64a; --color-accent-brand-hover: #e9a831; --color-accent-brand-text: #211809; }
+:root { --color-text-muted: #9ca7b5; --color-accent-brand: #f5ba54; --color-accent-brand-text: #18130a; --color-accent-brand-ink: #f5ba54; }
+html[data-theme="light"], html:not(.dark) { --color-text-muted: #5c6977; --color-accent-brand: #f3b64a; --color-accent-brand-hover: #e9a831; --color-accent-brand-text: #211809; --color-accent-brand-ink: #92400e; }
 html { scroll-padding-top: 88px; color-scheme: dark; scrollbar-color: #697181 #151b24; }
 html[data-theme="light"] { color-scheme: light; scrollbar-color: #85909b #eef2f7; }
 button, a, input { -webkit-tap-highlight-color: transparent; }
@@ -403,13 +407,13 @@ html[data-theme="dark"] .account-card:hover {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  color: #9ca3af;
+  color: var(--color-text-muted);
   font-size: 11px;
   background: #f1f5f9;
 }
 html[data-theme="dark"] .thumb-fallback {
   background: #1e293b;
-  color: #64748b;
+  color: #94a3b8;
 }
 /* 收藏圆钮 */
 .account-card-fav-wrap {
@@ -578,7 +582,7 @@ html[data-theme="dark"] .account-list-thumb {
 .account-card-number:hover,.account-card-number:focus-visible { color: var(--color-accent-brand, #ea580c); }
 .account-card-number--missing { cursor: default; color: var(--color-text-muted, #94a3b8); }
 .account-card-number--missing:hover { color: var(--color-text-muted, #94a3b8); }
-.account-card-number-action { color: var(--color-accent-brand, #ea580c); font-size: 10px; }
+.account-card-number-action { color: var(--color-accent-brand-ink, #92400e); font-size: 10px; }
 .account-card-number--compact { min-height: 18px; font-size: 10px; }
 
 .account-list-title-link {
@@ -608,7 +612,7 @@ html[data-theme="dark"] .account-list-title-identity {
 }
 
 .account-list-haff-lead {
-  color: #059669;
+  color: #047857;
   font-size: 14.5px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
@@ -857,7 +861,7 @@ html[data-theme="dark"] .resources-table-side {
   letter-spacing: 0;
   font-size: 11px;
   font-weight: 700;
-  color: #0284c7;
+  color: #0369a1;
   line-height: 1.2;
 }
 
@@ -955,7 +959,7 @@ html[data-theme="dark"] .resources-cell-name {
 .resources-cell-qty {
   font-size: 12px;
   font-weight: 700;
-  color: #0284c7;
+  color: #0369a1;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
   overflow: hidden;
@@ -1057,7 +1061,7 @@ html[data-theme="dark"] .account-list-finance .finance-total-label {
 .account-list-finance .finance-total-val {
   font-size: 18px;
   font-weight: 800;
-  color: #ea580c;
+  color: #c2410c;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1419,7 +1423,7 @@ html[data-theme="dark"] .account-card-login-pill {
   font-family: var(--font-sans);
 }
 .account-card--grid .account-grid-haff {
-  color: #059669;
+  color: #047857;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
 }
@@ -1700,7 +1704,7 @@ html[data-theme="dark"] .account-card--grid .breakdown-total-label {
 .account-card--grid .breakdown-total-val {
   font-size: 18px;
   font-weight: 800;
-  color: #ea580c;
+  color: #c2410c;
   font-variant-numeric: tabular-nums;
 }
 html[data-theme="dark"] .account-card--grid .breakdown-total-val {
