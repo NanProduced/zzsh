@@ -23,7 +23,8 @@ export function creditPackageBytes(pkg: CreditBatchPackage): string {
 export function buildCreditInitializationBatches(rows: readonly CreditPreviewRow[], opts: { batchKeyPrefix: string; reason: string; denominator: number | null; maxBatch?: number }): CreditBatchPlan {
   const max = opts.maxBatch ?? CREDIT_INITIALIZATION_MAX_BATCH;
   if (!Number.isInteger(max) || max < 1 || max > CREDIT_INITIALIZATION_MAX_BATCH) throw new Error("BATCH_SIZE_INVALID");
-  if (!/^[a-z0-9][a-z0-9-]{2,60}$/.test(opts.batchKeyPrefix) || opts.reason.trim().length < 8) throw new Error("PACKAGE_INPUT_INVALID");
+  // Existing runner contract: batchKey = credit-init:<8-96 of [A-Za-z0-9._-]>; prefix + "-NNNN" must fit it.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,90}$/.test(opts.batchKeyPrefix) || opts.reason.trim().length < 8) throw new Error("PACKAGE_INPUT_INVALID");
   const seen = new Set<string>();
   const retained: Record<string, string[]> = { EXISTING_PROFILE: [], RESTRICTED: [], CANCELLED: [], DEACTIVATED: [], UNKNOWN: [], EVENT_WITHOUT_STATE: [] };
   const eligible: string[] = [];
@@ -40,7 +41,7 @@ export function buildCreditInitializationBatches(rows: readonly CreditPreviewRow
   const batches: CreditBatchArtifact[] = [];
   for (let i = 0; i < eligible.length; i += max) {
     const order = batches.length + 1;
-    const pkg: CreditBatchPackage = { schema: "credit-init-package-v1", batchKey: `${opts.batchKeyPrefix}-${String(order).padStart(4, "0")}`, userIds: eligible.slice(i, i + max), approvedCategory: "ACTIVE", reason: opts.reason };
+    const pkg: CreditBatchPackage = { schema: "credit-init-package-v1", batchKey: `credit-init:${opts.batchKeyPrefix}-${String(order).padStart(4, "0")}`, userIds: eligible.slice(i, i + max), approvedCategory: "ACTIVE", reason: opts.reason };
     const bytes = creditPackageBytes(pkg), sha256 = createHash("sha256").update(bytes).digest("hex");
     batches.push({ order, package: pkg, bytes, sha256, approvalTemplate: {
       schema: "credit-init-approval-v1", status: "DRAFT_NOT_APPROVED", approvalRef: null, attempt: 1, mode: "PREVIEW", businessPackageSha256: sha256,
