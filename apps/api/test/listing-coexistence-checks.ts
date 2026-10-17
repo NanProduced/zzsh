@@ -167,7 +167,7 @@ export async function runListingCoexistenceChecks(o: {
     assert.equal(legacyItem.source, "LEGACY_READ_ONLY");
     assert.equal(legacyItem.canCreateOrder, false);
     assert.equal(legacyItem.quote, null);
-    assert.equal(legacyItem.displayNo, "R-coex-a");
+    assert.equal(legacyItem.displayNo, null);
     assert.deepEqual(legacyItem.historicalQuote, {
       haffRent: { currency: "CNY", unit: "yuan", amount: "120.00", scale: 2 },
       goods: { currency: "CNY", unit: "yuan", amount: "30.00", scale: 2 },

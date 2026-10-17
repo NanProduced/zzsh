@@ -261,7 +261,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   const resources=extra ? extra.resources.map(x=>({id:`legacy-display:${x.code}`,code:x.code,name:x.name,quantity:x.quantity,unit:x.unit})) : rows;
   const display=projectPublicAttributeDisplay(attrs);
   const amount=(v:string)=>({currency:"CNY",unit:"yuan",amount:v,scale:2});
-  return {id:r.id,versionId:r.version_id,displayNo:snapshot.resourceNo,title:r.title,description:r.description,
+  return {id:r.id,versionId:r.version_id,displayNo:null,title:r.title,description:r.description,
     game:{id:r.game_id,code:r.game_code,name:r.game_name},attributes:attrs,attributeDisplay:display,safeBox:display.safeBox,
     termOption:{code:"legacy_source",displayName:`${snapshot.termDays} 天`,dailyConsumption:{quantity:snapshot.dailyHaffBase,unit:"HAFF_BASE"}},
     source:"LEGACY_READ_ONLY" as const,canCreateOrder:false as const,sourceUpdatedAt:r.source_updated_at.toISOString(),

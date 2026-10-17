@@ -257,7 +257,7 @@ test("legacy public listing projection stays read only and leaks no private evid
   assert.equal(listing.source, "LEGACY_READ_ONLY");
   assert.equal(listing.canCreateOrder, false);
   assert.equal(listing.quote, null);
-  assert.equal(listing.displayNo, "A-1");
+  assert.equal(listing.displayNo, null);
   assert.deepEqual(listing.historicalQuote, {
     haffRent: { currency: "CNY", unit: "yuan", amount: "12.30", scale: 2 },
     goods: { currency: "CNY", unit: "yuan", amount: "0.40", scale: 2 },
@@ -286,7 +286,7 @@ test("legacy public read never chooses a private current native draft over its f
   } };
   const listing = await readLegacyListing(client as never, "account_1");
   assert.equal(listing.versionId, "version-1"); assert.equal(listing.title, observation.title);
-  assert.equal(listing.displayNo, "A-1"); assert.equal(listing.quote, null); assert.equal(listing.canCreateOrder, false);
+  assert.equal(listing.displayNo, null); assert.equal(listing.quote, null); assert.equal(listing.canCreateOrder, false);
   assert(!JSON.stringify(listing).includes("UNREVIEWED_PRIVATE_DRAFT"));
 });
 

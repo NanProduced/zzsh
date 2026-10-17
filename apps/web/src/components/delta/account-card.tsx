@@ -135,7 +135,7 @@ export function composeGridTitle(
     return { haff, rest: parts.join(" · ") };
   }
 
-  const rawTitle = data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号");
+  const rawTitle = data.historicalReadOnly ? (data.title?.trim() || "历史资料待核实") : (data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号"));
   if (!haffQuantityText) {
     return { haff: null, rest: rawTitle };
   }
@@ -148,7 +148,7 @@ export function composeGridTitle(
 }
 
 export function composeListTitle(
-  data: Pick<AccountCardData, "title" | "displayNo" | "conditionLines">,
+  data: Pick<AccountCardData, "title" | "displayNo" | "conditionLines" | "historicalReadOnly">,
   haffQuantityText: string | null
 ): { identity: string; haff: string | null; rest: string } {
   const haff = haffQuantityText ? `${haffQuantityText} 哈夫币` : null;
@@ -162,7 +162,7 @@ export function composeListTitle(
   if (rank) parts.push(rank);
 
   let identity = "";
-  if (data.displayNo?.trim()) {
+  if (!data.historicalReadOnly && data.displayNo?.trim()) {
     identity = `账号 ${data.displayNo.trim()}`;
   } else if (data.title?.trim()) {
     let t = data.title.trim();
@@ -491,7 +491,7 @@ export function AccountCard({
             <div className="account-list-subline-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "历史记录 · 不可下单"}{data.sourceAvailabilityLabel ? ` · ${data.sourceAvailabilityLabel}` : ""}</span> : null}
               {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
               <p className="account-list-subline">{sublineContent}</p>
-              <CopyableAccountNumber displayNo={data.displayNo} compact />
+              {data.historicalReadOnly ? null : <CopyableAccountNumber displayNo={data.displayNo} compact />}
             </div>
           </div>
 
@@ -737,7 +737,7 @@ export function AccountCard({
             </div>
             <div className="account-card-meta-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "历史记录 · 不可下单"}{data.sourceAvailabilityLabel ? ` · ${data.sourceAvailabilityLabel}` : ""}</span> : null}
               {isFastMode ? <span className="account-card-deal-tag">特惠</span> : null}
-              <CopyableAccountNumber displayNo={data.displayNo} compact />
+              {data.historicalReadOnly ? null : <CopyableAccountNumber displayNo={data.displayNo} compact />}
             </div>
 
             {gridAttrs.length > 0 ? (
