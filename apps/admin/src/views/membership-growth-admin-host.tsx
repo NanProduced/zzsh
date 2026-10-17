@@ -61,11 +61,19 @@ function initialEntitlement(policy: AdminGrowthPolicy): AdminEntitlementDraft {
   return { kind: "FRIEND", scopeKey: "", startsAtUtc: new Date().toISOString(), endsAtUtc: new Date(Date.now() + 7 * 86_400_000).toISOString(), pricingMode: "ordinary", priceVersionId: policy.catalog.priceVersions[0]?.id ?? "", haffSchema: "haff-ratio-v1", safeBoxCode: policy.selectedSafeBoxCode, haffBaseRatio: "", materialItemId: material?.id ?? "", materialUnit: material?.unit ?? "PIECE", materialUnitQuantity: "", materialBuyerUnitAmount: "", materialOwnerUnitAmount: "", costBasisRef: "", depositWaived: false, reason: "" };
 }
 
-function subjectOf(response: SubjectResponse | null, subjectId: string | undefined): AdminGrowthSubject {
+function subjectOf(response: SubjectResponse | null, subjectId: string | undefined, error: unknown = null): AdminGrowthSubject {
   if (!subjectId) return { subjectId: "", status: "NOT_LOADED", reason: "从用户详情打开会员成长后再读取对象" };
-  if (!response) return { subjectId, status: "UNKNOWN", reason: "用户成长来源暂未闭合" };
+  if (!response) return { subjectId, status: error instanceof AdminApiError && error.status === 403 ? "FORBIDDEN" : "UNKNOWN", reason: error instanceof AdminApiError ? `读取失败：${error.status}` : "用户成长来源暂未闭合" };
   if (response.growth?.knowledge !== "KNOWN") return { subjectId, status: "UNKNOWN", reason: `来源状态：${response.growth?.sourceState ?? "UNKNOWN"}` };
   return { subjectId, status: "LOADED", userLabel: subjectId, tier: response.growth.effectiveTier ?? "UNKNOWN", rollingPoints: response.growth.rollingPoints ?? undefined, lifetimePoints: response.growth.lifetimePoints ?? undefined };
+}
+
+/** A missing/failed policy read is reported on its own; it never erases an authorized subject read. */
+function policyFailure(error: unknown): string {
+  if (error instanceof AdminApiError && error.status === 403) return "当前管理员没有会员成长读取权限";
+  if (error instanceof AdminApiError && error.status === 404) return "会员成长功能尚未启用";
+  if (error instanceof AdminApiError) return "会员成长政策暂时无法读取";
+  return "尚未读取到会员政策；功能保持未启用或等待首个草稿";
 }
 
 /** GAP-007: nav entry and API GET /membership-growth/policy both admit summary readers; the host gate must match and only hide write actions. */
@@ -93,25 +101,22 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
     const controller = new AbortController();
     setState({ status: "loading" });
     setSavedDraft(null);
+    const settle = <T,>(request: Promise<T>) => request.then((value) => ({ value, error: null as unknown })).catch((error: unknown) => ({ value: null, error }));
     Promise.all([
-      adminRequest<PolicyResponse>("/membership-growth/policy", undefined, "GET", {}, controller.signal),
-      subjectId ? adminRequest<SubjectResponse>(`/users/${encodeURIComponent(subjectId)}/membership-growth`, undefined, "GET", {}, controller.signal) : Promise.resolve(null),
-    ]).then(([policyResponse, subjectResponse]) => {
+      settle(adminRequest<PolicyResponse>("/membership-growth/policy", undefined, "GET", {}, controller.signal)),
+      subjectId ? settle(adminRequest<SubjectResponse>(`/users/${encodeURIComponent(subjectId)}/membership-growth`, undefined, "GET", {}, controller.signal)) : Promise.resolve({ value: null, error: null as unknown }),
+    ]).then(([policyResult, subjectResult]) => {
       if (controller.signal.aborted) return;
-      const policy = asPolicy(policyResponse);
-      const nextSubject = subjectOf(subjectResponse, subjectId);
-      setMeta(policyResponse.meta);
-      setSavedDraft(policyResponse.meta?.status === "DRAFT" ? policyResponse.meta : null);
+      const policy = policyResult.value ? asPolicy(policyResult.value) : null;
+      const nextSubject = subjectOf(subjectResult.value, subjectId, subjectResult.error);
+      setMeta(policyResult.value?.meta ?? null);
+      setSavedDraft(policyResult.value?.meta?.status === "DRAFT" ? policyResult.value.meta : null);
       setSubject(nextSubject);
       if (!policy) {
-        setState({ status: "error", message: "尚未读取到会员政策；功能保持未启用或等待首个草稿" });
+        setState({ status: "error", message: policyFailure(policyResult.error), subject: nextSubject });
         return;
       }
       setState({ status: "ready", policy, preview: { status: "NOT_RUN", reason: "真实报价预览需在正式quote与主体快照接线后执行" }, subject: nextSubject, entitlement: initialEntitlement(policy), approval: { status: "NOT_REQUESTED" } });
-    }, (error: unknown) => {
-      if (controller.signal.aborted) return;
-      const failure = error instanceof AdminApiError && error.status === 403 ? "当前管理员没有会员成长读取权限" : error instanceof AdminApiError && error.status === 404 ? "会员成长功能尚未启用" : "会员成长配置暂时无法读取";
-      setState({ status: "error", message: failure });
     });
     return () => controller.abort();
   }, [refreshNonce, snapshot, subjectId]);

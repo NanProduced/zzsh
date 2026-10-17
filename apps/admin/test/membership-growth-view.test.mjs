@@ -76,6 +76,14 @@ test("admin membership view separates draft, local preview and approval executio
   assert.equal(host.querySelector('[data-state="loading"]')?.getAttribute("role"), "status");
   await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "error", message: "读取失败" } })));
   assert.equal(host.querySelector('[data-state="error"]')?.getAttribute("role"), "alert");
+  assert.doesNotMatch(host.textContent, /用户成长依据/);
+  // A missing policy must not hide the granted subject read (PC-READ-1 live defect).
+  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "error", message: "尚未读取到会员政策；功能保持未启用或等待首个草稿", subject: { subjectId: "user-1", status: "UNKNOWN", reason: "来源状态：BACKFILL_PENDING" } } })));
+  assert.match(host.textContent, /尚未读取到会员政策/);
+  assert.match(host.textContent, /用户成长依据/);
+  assert.match(host.textContent, /成长依据未知/);
+  assert.match(host.textContent, /来源状态：BACKFILL_PENDING/);
+  assert.doesNotMatch(host.textContent, /普通会员|0 分/);
   await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { ...state, subject: { subjectId: "user-b", status: "UNKNOWN", reason: "新对象未取得授权依据" } } })));
   assert.match(host.textContent, /成长依据未知/);
   assert.doesNotMatch(host.textContent, /用户甲/);

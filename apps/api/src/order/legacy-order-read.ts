@@ -6,6 +6,11 @@ import { canonicalize } from "../supply/content-hash";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
 import { assertGameScope, conflict, ensureOnlyFields, fingerprintRequest, invalid, sha256Hex, withIdempotency } from "../supply/supply-util";
 
+/** 0074 continuation capability. A chain that stops before 0074 has no continuation tables; every
+ *  relation that joins them must degrade to its pre-continuation shape instead of failing the read. */
+export async function legacyContinuationReady(client: Pick<PoolClient, "query">): Promise<boolean> {
+  return (await client.query<{ ready?: boolean }>(`SELECT to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL AS ready`)).rows[0]?.ready === true;
+}
 // Every consuming relation joins the unique current continuation head as h.
 export const LEGACY_ORDER_STATUS_SQL = `CASE WHEN COALESCE(h.stage,l.source_order_status)=5 THEN 'CANCELLED' WHEN COALESCE(h.stage,l.source_order_status)=4 THEN 'COMPLETED'
  WHEN COALESCE(h.stage,l.source_order_status)=1 AND l.source_pay_status=0 THEN 'PENDING_PAYMENT'

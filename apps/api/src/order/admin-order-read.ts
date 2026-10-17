@@ -3,13 +3,18 @@ import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string };
 export type OrderReadFilters = { page: number; pageSize: number; status?: string; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
 const utc=(column:string)=>`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+const CONTINUATION_JOIN = `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL`;
+/** Pre-0074 shape: same output columns, no continuation source (see api-change-request.md). */
+const ABSENT_CONTINUATION_JOIN = `LEFT JOIN (SELECT NULL::text AS order_id,NULL::int AS stage) h ON h.order_id=l.id`;
+const CONTINUATION_COMPLETED_AT = `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)`;
+
 // Both sources are filtered and sorted together, before counting or pagination.
-export const ORDER_READ_RELATION = `
+export function orderReadRelation(continuationReady: boolean): string { return `
  SELECT o.id,o.created_at,o.game_id,o.owner_user_id,o.renter_user_id,o.account_id,o.display_no,o.status,
   a.display_no AS account_no,NULL::text AS renter_no,NULL::text AS owner_no,ou.name AS owner_name,ru.name AS renter_name,
   ou.username AS owner_username,ru.username AS renter_username,'NATIVE'::text AS origin,
@@ -27,13 +32,13 @@ export const ORDER_READ_RELATION = `
   ${LEGACY_ORDER_STATUS_SQL},
   l.legacy_account_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text,
   to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
-    'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc("COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)")},
+    'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? CONTINUATION_COMPLETED_AT : "l.source_completed_at")},
     'continuation_stage',h.stage,
     'owner_name',ou.name,'renter_name',ru.name,'title',v.title) AS record
  FROM zzsh_order.legacy_order_read_snapshot l JOIN zzsh_auth_user."user" ou ON ou.id=l.owner_user_id
- LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
+ ${continuationReady ? CONTINUATION_JOIN : ABSENT_CONTINUATION_JOIN}
  JOIN zzsh_auth_user."user" ru ON ru.id=l.renter_user_id JOIN zzsh_supply.rental_account a ON a.id=l.account_id
- LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id`;
+ LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id`; }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
 export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:OrderReadViewer):Record<string,any>{
  if(origin==='NATIVE'){
@@ -64,10 +69,12 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
   where.push(filter.qKind==='renter'?party('renter'):filter.qKind==='owner'?party('owner'):`(${party('renter')} OR ${party('owner')})`);
  }}
  const pageSize='$'+values.push(filter.pageSize),offset='$'+values.push((filter.page-1)*filter.pageSize);
- const result=(await client.query<{total:string;items:Array<{origin:string;record:Record<string,any>}>}>(`WITH all_orders AS(${ORDER_READ_RELATION}),filtered AS(SELECT * FROM all_orders x WHERE ${where.map(w=>'('+w+')').join(' AND ')}),paged AS(SELECT * FROM filtered ORDER BY created_at DESC NULLS LAST,id DESC LIMIT ${pageSize} OFFSET ${offset}) SELECT (SELECT count(*)::text FROM filtered) AS total,COALESCE((SELECT jsonb_agg(jsonb_build_object('origin',p.origin,'record',p.record) ORDER BY p.created_at DESC NULLS LAST,p.id DESC) FROM paged p),'[]'::jsonb) AS items`,values)).rows[0]!;
+ const relation=orderReadRelation(await legacyContinuationReady(client));
+ const result=(await client.query<{total:string;items:Array<{origin:string;record:Record<string,any>}>}>(`WITH all_orders AS(${relation}),filtered AS(SELECT * FROM all_orders x WHERE ${where.map(w=>'('+w+')').join(' AND ')}),paged AS(SELECT * FROM filtered ORDER BY created_at DESC NULLS LAST,id DESC LIMIT ${pageSize} OFFSET ${offset}) SELECT (SELECT count(*)::text FROM filtered) AS total,COALESCE((SELECT jsonb_agg(jsonb_build_object('origin',p.origin,'record',p.record) ORDER BY p.created_at DESC NULLS LAST,p.id DESC) FROM paged p),'[]'::jsonb) AS items`,values)).rows[0]!;
  return {items:result.items.map(r=>projectAdminReadOrder(r.origin,r.record,viewer)),page:filter.page,pageSize:filter.pageSize,total:Number(result.total),contextKey:viewer.authorizationKey};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string){
- const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${ORDER_READ_RELATION}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=$1 AND ${gameScopeSql("x.game_id","$3","$2")}`,[id,viewer.isBoss,viewer.adminId])).rows[0];
+ const relation=orderReadRelation(await legacyContinuationReady(client));
+ const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${relation}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=$1 AND ${gameScopeSql("x.game_id","$3","$2")}`,[id,viewer.isBoss,viewer.adminId])).rows[0];
  if(!row)throw notFound();return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey};
 }

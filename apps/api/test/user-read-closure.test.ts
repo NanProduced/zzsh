@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mountCreditGuaranteeRoutes } from "../src/credit/credit-guarantee-routes";
+import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import { handleMembershipGrowthUser, handleMembershipGrowthPolicyAdmin, handleMembershipGrowthAdmin } from "../src/auth/membership-growth-routes";
 import { readGrowthSourceCompleteness, readMembershipGrowth } from "../src/auth/membership-growth-integration";
 
@@ -89,6 +90,45 @@ test("opening the existing admin growth read does not bypass its original permis
   t.mock.method(auth,"readAdminContext",async()=>({userId:"synthetic-admin",sessionId:"synthetic-admin-session"}));t.mock.method(auth,"assertAdminContextInTransaction",async()=>{});t.mock.method(authorization,"loadEffectiveAdminAccess",async()=>({isBoss:false,permissions:new Set()}));
   const f=fixture(),res=response();await handleMembershipGrowthAdmin({...request("/api/v1/admin/users/synthetic-other/membership-growth"),headers:{origin:f.options.adminOrigin}},res as never,f.options as never);assert.equal(res.statusCode,403);assert.ok(!f.queries.some(q=>q.sql.includes("membership_growth")));
 });
+test("order reads degrade before 0074 instead of failing on the missing continuation table",async()=>{
+  const { orderReadRelation }=require("../src/order/admin-order-read");
+  const { legacyUserOrderFields,legacyUserOrderFrom }=require("../src/order/legacy-user-order-read");
+  const { legacyContinuationReady }=require("../src/order/legacy-order-read");
+  assert.doesNotMatch(orderReadRelation(false),/legacy_continuation_version/,"74-chain relation must not reference 0074 tables");
+  assert.match(orderReadRelation(false),/NULL::int AS stage/);
+  assert.match(orderReadRelation(true),/LEFT JOIN zzsh_order\.legacy_continuation_version h/);
+  const fieldsOff=legacyUserOrderFields(false),fromOff=legacyUserOrderFrom(false);
+  assert.doesNotMatch(fieldsOff+fromOff,/legacy_continuation_version/);
+  assert.match(fieldsOff,/h\.stage AS "continuationStage"/);
+  assert.match(fromOff,/NULL::int AS stage/);
+  assert.match(legacyUserOrderFields(true)+legacyUserOrderFrom(true),/legacy_continuation_version/);
+  for(const ready of [true,false]){
+    const client={query:async(sql:string)=>({rows:[/to_regclass\('zzsh_order\.legacy_continuation_version'\)/.test(sql)?{ready}:{}]})};
+    assert.equal(await legacyContinuationReady(client as never),ready);
+  }
+});
+
+function adminBffCapture(){const state={statusCode:0,body:null as any,requestId:null as string|null,headersSent:false};const response={setHeader(name:string,value:unknown){if(String(name).toLowerCase()==="x-request-id")state.requestId=String(value);return response;},status(status:number){state.statusCode=status;return response;},json(body:unknown){state.body=body;state.headersSent=true;return response;},send(body:unknown){state.body=body;state.headersSent=true;return response;}};return{response,state};}
+function adminBffOptions():AdminBffOptions{return{adminOrigin:"http://127.0.0.1:4201",apiOrigin:"http://127.0.0.1:4202",adminSecurityOptions:{pool:{}} as never,adminAuthHandler:(async()=>new Response(null,{status:404})) as never,supply:{} as never,order:{} as never}as unknown as AdminBffOptions;}
+test("admin BFF forwards subject growth before the generic /users/:id directory branch",async t=>{
+  const auth=require("../src/auth/auth-security"),authorization=require("../src/auth/admin-authorization"),growth=require("../src/auth/membership-growth-routes");
+  t.mock.method(auth,"readAdminContext",async()=>({userId:"synthetic-admin",sessionId:"synthetic-admin-session"}));
+  t.mock.method(auth,"assertAdminContextInTransaction",async()=>{});
+  t.mock.method(authorization,"loadEffectiveAdminAccess",async()=>({isBoss:true,permissions:new Set()}));
+  let called=false;
+  const growthAdminMock=function(_request:any,response:any){called=true;response.status(200).json({subjectId:"synthetic-other"});};
+  t.mock.method(growth,"handleMembershipGrowthAdmin",growthAdminMock as any);
+  const ok=adminBffCapture();
+  await handleAdminBff({method:"GET",url:"/api/bff/admin/users/synthetic-other/membership-growth",originalUrl:"/api/bff/admin/users/synthetic-other/membership-growth",headers:{origin:"http://127.0.0.1:4201","x-request-id":"req_ok"}} as never,ok.response as never,adminBffOptions());
+  assert.equal(called,true,"the growth handler must own the route");
+  assert.equal(ok.state.statusCode,200);assert.deepEqual(ok.state.body,{subjectId:"synthetic-other"});
+  assert.equal(ok.state.requestId,"req_ok","the own handler must pass requestId instead of the outer BFF send");
+  const rejected=adminBffCapture();called=false;
+  await handleAdminBff({method:"POST",url:"/api/bff/admin/users/synthetic-other/membership-growth",originalUrl:"/api/bff/admin/users/synthetic-other/membership-growth",headers:{origin:"http://127.0.0.1:4201","x-request-id":"req_rejected"}} as never,rejected.response as never,adminBffOptions());
+  assert.equal(rejected.state.statusCode,404);assert.equal(called,false,"growth stays GET-only through the BFF");
+  assert.equal(rejected.state.requestId,"req_rejected","the outer BFF owns x-request-id on the rejected path");
+});
+
 test("credit and policy admin GETs still reject an authenticated admin without the original read permission",async t=>{
   const auth=require("../src/auth/auth-security"),authorization=require("../src/auth/admin-authorization");
   t.mock.method(auth,"readAdminContext",async()=>({userId:"synthetic-admin",sessionId:"synthetic-admin-session"}));t.mock.method(auth,"assertAdminContextInTransaction",async()=>{});t.mock.method(authorization,"loadEffectiveAdminAccess",async()=>({isBoss:false,permissions:new Set()}));

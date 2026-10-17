@@ -25,9 +25,15 @@ test("membership growth client keeps known and unknown source states distinct", 
       assert.equal(ready.data.contributions[0].amountCents, "12000");
     }
 
-    globalThis.fetch = async () => new Response(JSON.stringify({ growth: { schema: "membership-growth-v1", knowledge: "UNKNOWN" } }), { status: 200 });
+    globalThis.fetch = async () => new Response(JSON.stringify({ growth: { schema: "membership-growth-v1", knowledge: "UNKNOWN" }, entitlements: [] }), { status: 200 });
     const unknown = await readMyMembershipGrowth();
-    assert.deepEqual(unknown, { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分" });
+    assert.deepEqual(unknown, { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分", entitlements: [] });
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ growth: { schema: "membership-growth-v1", knowledge: "UNKNOWN" }, entitlements: known.entitlements }), { status: 200 });
+    const unknownWithEntitlements = await readMyMembershipGrowth();
+    assert.equal(unknownWithEntitlements.status, "unknown");
+    assert.equal(unknownWithEntitlements.entitlements[0].label, "挚友礼遇");
+    assert.equal(unknownWithEntitlements.entitlements[0].state, "ACTIVE");
   } finally {
     globalThis.fetch = original;
   }

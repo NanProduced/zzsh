@@ -178,7 +178,7 @@ export function AccountGrowthHeader({
   const safeTier = tier ?? "UNKNOWN";
   const tierClass = `tier-${safeTier.toLowerCase().replace("_", "-")}`;
 
-  const activeEntitlement = data?.entitlements?.find((e) => e.state === "ACTIVE");
+  const activeEntitlement = (data?.entitlements ?? (growthState.status === "unknown" ? growthState.entitlements ?? [] : [])).find((e) => e.state === "ACTIVE");
 
   return (
     <div className={`account-growth-header-wrap ${tierClass}`}>

@@ -385,9 +385,17 @@ test("benefits distinguish unpublished policy from read failures and unknown sta
 
     await view.render({ state: { status: "permission", message: "当前身份没有查看成长档案的权限" } });
     assert.match(view.host.textContent, /无法查看/);
-    await view.render({ state: { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分" } });
+    await view.render({ state: { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分", entitlements: [] } });
     assert.match(view.host.textContent, /消费来源尚未完成核验/);
     assert.doesNotMatch(view.host.textContent, /普通会员/);
+    await view.render({ state: { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分", entitlements: [{ id: "e1", kind: "FRIEND", label: "挚友礼遇", scope: "DELTA_ACCOUNT_RENTAL", startsAt: "2026-10-01T00:00:00.000Z", endsAt: "2026-10-20T00:00:00.000Z", state: "ACTIVE", depositWaived: false }] } });
+    assert.match(view.host.textContent, /消费来源尚未完成核验/);
+    assert.match(view.host.querySelector("[data-testid=membership-current-tier]").textContent, /当前：资格待确认/);
+    assert.doesNotMatch(view.host.querySelector("[data-testid=membership-current-tier]").textContent, /读取中/);
+    assert.match(view.host.textContent, /我的专属礼遇/);
+    assert.match(view.host.textContent, /挚友礼遇/);
+    assert.match(view.host.textContent, /生效中/);
+    assert.doesNotMatch(view.host.textContent, /0 分/);
     await view.render({ state: { status: "error", message: "会员成长暂时无法读取", retryable: true }, onRetry: () => {} });
     const retry = view.host.querySelector("[data-testid=retry-membership-center]");
     assert.ok(retry);

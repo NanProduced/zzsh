@@ -508,10 +508,12 @@ function EntitlementRow({ item, detailed }: { item: MembershipGrowthData["entitl
   );
 }
 
-function EntitlementSection({ data }: { data: MembershipGrowthData }) {
-  const active = data.entitlements.filter((item) => item.state === "ACTIVE");
-  const rest = data.entitlements.filter((item) => item.state !== "ACTIVE");
-  if (data.entitlements.length === 0) {
+/** 成长未知态只给礼遇事实，没有可比较的成长数据。 */
+function EntitlementSection({ data, entitlements }: { data?: MembershipGrowthData; entitlements?: MembershipGrowthData["entitlements"] }) {
+  const rows = data?.entitlements ?? entitlements ?? [];
+  const active = rows.filter((item) => item.state === "ACTIVE");
+  const rest = rows.filter((item) => item.state !== "ACTIVE");
+  if (rows.length === 0) {
     return (
       <section className="mc-section mc-section--quiet" id="mc-entitlements" aria-labelledby="mc-entitlements-heading">
         <h3 id="mc-entitlements-heading">我的专属礼遇</h3>
@@ -645,7 +647,7 @@ export function MembershipCenterView({ state, onRetry, pointEvents }: { state: M
         <div className="mc-head-actions">
           <span className="mc-current-chip" data-testid="membership-current-tier">
             <Crown size={14} aria-hidden="true" />
-            当前：{data ? GROWTH_TIER_LABELS[data.tier] : "读取中"}
+            当前：{data ? GROWTH_TIER_LABELS[data.tier] : state.status === "unknown" ? GROWTH_TIER_LABELS.UNKNOWN : "读取中"}
           </span>
           <Link className="mc-link-button" href="/help/membership-benefits">
             成长规则<ArrowRight size={14} aria-hidden="true" />
@@ -654,7 +656,10 @@ export function MembershipCenterView({ state, onRetry, pointEvents }: { state: M
       </header>
 
       {!data ? (
-        <StateMessage state={state as Exclude<MembershipGrowthViewState, { status: "ready" }>} onRetry={onRetry} />
+        <>
+          <StateMessage state={state as Exclude<MembershipGrowthViewState, { status: "ready" }>} onRetry={onRetry} />
+          {state.status === "unknown" ? <EntitlementSection entitlements={state.entitlements} /> : null}
+        </>
       ) : (
         <>
           <div className={`mc-hero account-growth-header-wrap ${tierClass(heroTier)}`} data-tier={heroTier}>

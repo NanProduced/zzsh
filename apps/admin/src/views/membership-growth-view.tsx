@@ -28,7 +28,8 @@ export type AdminApproval = { status: "NOT_REQUESTED" | "REQUESTED" | "APPROVED_
 
 export type MembershipGrowthAdminState =
   | { status: "loading" }
-  | { status: "error"; message: string }
+  // A missing/failed policy must not discard the granted subject read; the subject stays visible.
+  | { status: "error"; message: string; subject?: AdminGrowthSubject }
   | { status: "permission"; message: string }
   | { status: "ready"; policy: AdminGrowthPolicy; preview: AdminGrowthPreview; subject: AdminGrowthSubject; entitlement: AdminEntitlementDraft; approval: AdminApproval };
 
@@ -73,9 +74,19 @@ function approvalLabel(status: AdminApproval["status"]): string {
   return { NOT_REQUESTED: "未提交", REQUESTED: "审批中", APPROVED_PENDING_EXECUTION: "已批准，待执行", APPLIED: "已执行并生效", REJECTED: "已拒绝", UNKNOWN: "状态待确认" }[status];
 }
 
+function SubjectFacts({ subject }: { subject: AdminGrowthSubject }) {
+  return <>
+    {subject.status === "LOADED" ? <dl className="membership-admin-facts"><div><dt>对象</dt><dd>{subject.userLabel}</dd></div><div><dt>当前档位</dt><dd>{GROWTH_TIER_LABELS[subject.tier ?? ""] ?? subject.tier ?? "资格待确认"}</dd></div><div><dt>近90天积分</dt><dd>{subject.rollingPoints} 分</dd></div><div><dt>累计积分</dt><dd>{subject.lifetimePoints} 分</dd></div></dl> : <div className="membership-admin-empty"><strong>{subject.status === "FORBIDDEN" ? "当前身份无权查看" : subject.status === "UNKNOWN" ? "成长依据未知" : "尚未加载用户"}</strong><span>{subject.reason ?? "未知不显示为普通会员或0分。"}</span></div>}
+    {subject.evidence?.length ? <ul className="membership-admin-evidence">{subject.evidence.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+  </>;
+}
+
 function stateMessage(state: Exclude<MembershipGrowthAdminState, { status: "ready" }>) {
   const title = state.status === "loading" ? "正在读取会员成长配置" : state.status === "permission" ? "没有会员成长管理权限" : "会员成长模块暂不可用";
-  return <section className="membership-admin-view" data-state={state.status} role={state.status === "error" ? "alert" : "status"}><div className="membership-admin-state"><strong>{title}</strong><p>{state.status === "loading" ? "不会把未知数据显示为0或成功。" : state.message}</p></div></section>;
+  return <section className="membership-admin-view" data-state={state.status} role={state.status === "error" ? "alert" : "status"}>
+    <div className="membership-admin-state"><strong>{title}</strong><p>{state.status === "loading" ? "不会把未知数据显示为0或成功。" : state.message}</p></div>
+    {state.status === "error" && state.subject ? <section className="membership-admin-section" aria-labelledby="membership-admin-subject-heading"><div className="membership-admin-section-heading"><div><h3 id="membership-admin-subject-heading">用户成长依据</h3><p>政策缺失只影响配置区；已获准的对象读取继续显示，不用它推断档位或积分。</p></div></div><SubjectFacts subject={state.subject} /></section> : null}
+  </section>;
 }
 
 export function MembershipGrowthAdminView({ state, onPolicyChange, onSavePolicyDraft, onSubmitPolicy, onEntitlementChange, onSubmitEntitlement, onRevokeEntitlement }: {
@@ -130,8 +141,7 @@ export function MembershipGrowthAdminView({ state, onPolicyChange, onSavePolicyD
       </section>
       <section className="membership-admin-section" aria-labelledby="membership-admin-subject-heading">
         <div className="membership-admin-section-heading"><div><h3 id="membership-admin-subject-heading">用户成长依据</h3><p>查看授权范围内的消费来源、更正、90天退出和黑金证据。</p></div></div>
-        {subject.status === "LOADED" ? <dl className="membership-admin-facts"><div><dt>对象</dt><dd>{subject.userLabel}</dd></div><div><dt>当前档位</dt><dd>{GROWTH_TIER_LABELS[subject.tier ?? ""] ?? subject.tier ?? "资格待确认"}</dd></div><div><dt>近90天积分</dt><dd>{subject.rollingPoints} 分</dd></div><div><dt>累计积分</dt><dd>{subject.lifetimePoints} 分</dd></div></dl> : <div className="membership-admin-empty"><strong>{subject.status === "FORBIDDEN" ? "当前身份无权查看" : subject.status === "UNKNOWN" ? "成长依据未知" : "尚未加载用户"}</strong><span>{subject.reason ?? "未知不显示为普通会员或0分。"}</span></div>}
-        {subject.evidence?.length ? <ul className="membership-admin-evidence">{subject.evidence.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+        <SubjectFacts subject={subject} />
       </section>
     </div>
 

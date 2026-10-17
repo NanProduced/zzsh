@@ -34,7 +34,8 @@ for(const [state,round] of [["EXHAUSTED",3],["VERIFY_REQUIRED",2],["RUNNING",1],
   const expected={firstResponseAt,remindDueAt,addRound:round,state,needsManualReview:state==="EXHAUSTED"||state==="VERIFY_REQUIRED",noEligibleStaff:state==="EXHAUSTED"};
   assert.deepEqual(list.items[0]!.supportEscalation,expected);assert.deepEqual(detail.order,list.items[0]);
   assert.equal(list.items[0]!.quote.platformFullProfit,undefined);assert.equal(list.items[1]!.supportEscalation,undefined);
-  for(const sql of statements)for(const field of ["first_response_at","remind_due_at","add_round","escalation_state"])assert.ok(sql.includes(`to_jsonb(g)->>'${field}'`),`Missing group field ${field}`);
+  // The 0074 capability probe is a separate catalog read, not an order statement.
+  for(const sql of statements.filter(s=>s.includes("all_orders")))for(const field of ["first_response_at","remind_due_at","add_round","escalation_state"])assert.ok(sql.includes(`to_jsonb(g)->>'${field}'`),`Missing group field ${field}`);
  });
 }
 test("native absent or unready group does not expose support escalation",()=>{

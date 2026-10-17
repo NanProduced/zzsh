@@ -32,7 +32,8 @@ export type MembershipGrowthViewState =
   | { status: "loading" }
   | { status: "error"; message: string; retryable?: boolean }
   | { status: "permission"; message: string }
-  | { status: "unknown"; message: string }
+  // 成长来源未闭合时仍保留已获准的独立礼遇，避免未知状态连带隐藏有效权益。
+  | { status: "unknown"; message: string; entitlements: MembershipGrowthData["entitlements"] }
   | { status: "ready"; data: MembershipGrowthData };
 
 const TIERS = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND", "BLACK_GOLD", "UNKNOWN"] as const;
@@ -79,10 +80,27 @@ function requiredRecords(value: unknown, field: string): RecordValue[] {
   return value as RecordValue[];
 }
 
+function entitlementRecords(body: RecordValue): MembershipGrowthData["entitlements"] {
+  const entitlements = requiredRecords(body.entitlements, "entitlements");
+  return entitlements.filter(isRecord).map((item) => {
+    const kind: EntitlementKind = item.kind === "PRESTIGE" ? "PRESTIGE" : item.kind === "FRIEND" ? "FRIEND" : "UNKNOWN";
+    return {
+      id: text(item.id, "entitlements.id"),
+      kind,
+      label: typeof item.label === "string" && item.label ? item.label : "专属礼遇",
+      scope: text(item.scopeKey, "entitlements.scopeKey"),
+      startsAt: text(item.startsAtUtc, "entitlements.startsAtUtc"),
+      endsAt: text(item.endsAtUtc, "entitlements.endsAtUtc"),
+      state: (ENTITLEMENT_STATES as readonly string[]).includes(item.status as string) ? (item.status as EntitlementState) : "UNKNOWN",
+      depositWaived: item.depositWaived === true,
+    };
+  });
+}
+
 function asReady(body: RecordValue): MembershipGrowthData {
   const growth = isRecord(body.growth) ? body.growth : null;
   if (!growth || growth.schema !== "membership-growth-v1" || growth.knowledge !== "KNOWN") throw new MembershipGrowthRequestError(200, { error: { code: "MEMBERSHIP_CONTRACT_REQUIRED", message: "会员成长数据未闭合" } });
-  const entitlements = requiredRecords(body.entitlements, "entitlements");
+  const entitlements = entitlementRecords(body);
   const benefits = requiredRecords(growth.benefits, "benefits");
   const comparison = requiredRecords(growth.comparison, "comparison");
   const contributions = requiredRecords(growth.contributions, "contributions");
@@ -94,19 +112,7 @@ function asReady(body: RecordValue): MembershipGrowthData {
     nextTier: next, grace: grace(growth.grace), nextExpiryAt: growth.nextExpiryAtUtc === null ? null : text(growth.nextExpiryAtUtc, "nextExpiryAtUtc"),
     benefits: benefits.filter(isRecord).map((item) => ({ label: text(item.label, "benefits.label"), value: text(item.value, "benefits.value"), ...(typeof item.sourceVersion === "string" ? { sourceVersion: item.sourceVersion } : {}) })),
     comparison: comparison.filter(isRecord).map((item) => ({ tier: text(item.tier, "comparison.tier"), deposit: text(item.deposit, "comparison.deposit"), pricing: text(item.pricing, "comparison.pricing") })),
-    entitlements: entitlements.filter(isRecord).map((item) => {
-      const kind: EntitlementKind = item.kind === "PRESTIGE" ? "PRESTIGE" : item.kind === "FRIEND" ? "FRIEND" : "UNKNOWN";
-      return {
-        id: text(item.id, "entitlements.id"),
-        kind,
-        label: typeof item.label === "string" && item.label ? item.label : "专属礼遇",
-        scope: text(item.scopeKey, "entitlements.scopeKey"),
-        startsAt: text(item.startsAtUtc, "entitlements.startsAtUtc"),
-        endsAt: text(item.endsAtUtc, "entitlements.endsAtUtc"),
-        state: (ENTITLEMENT_STATES as readonly string[]).includes(item.status as string) ? (item.status as EntitlementState) : "UNKNOWN",
-        depositWaived: item.depositWaived === true,
-      };
-    }),
+    entitlements,
     contributions: contributions.filter(isRecord).map((item) => ({ label: text(item.label, "contributions.label"), effectiveAt: text(item.effectiveAt, "contributions.effectiveAt"), amountCents: text(item.amountCents, "contributions.amountCents"), exitsAt: text(item.exitsAt, "contributions.exitsAt"), kind: item.kind === "CORRECTION" ? "CORRECTION" : "CONSUMPTION" })),
     pendingCount: typeof growth.pendingCount === "number" && Number.isInteger(growth.pendingCount) && growth.pendingCount >= 0 ? growth.pendingCount : 0,
   };
@@ -126,7 +132,7 @@ export async function readMyMembershipGrowth(signal?: AbortSignal): Promise<Memb
   if (response.status === 401) throw new MembershipGrowthRequestError(response.status, body);
   if (!response.ok || !isRecord(body)) throw new MembershipGrowthRequestError(response.status, body);
   const growth = isRecord(body.growth) ? body.growth : null;
-  if (growth?.knowledge === "UNKNOWN") return { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分" };
+  if (growth?.knowledge === "UNKNOWN") return { status: "unknown", message: "消费来源尚未完成核验，暂不展示成长积分", entitlements: entitlementRecords(body) };
   try {
     return { status: "ready", data: asReady(body) };
   } catch (error) {

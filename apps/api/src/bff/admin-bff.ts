@@ -430,6 +430,26 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleRentalMembershipAdmin(request,response,options.adminSecurityOptions);
     return;
   }
+  // Subject-scoped growth must be matched before the generic /users/:id branch below,
+  // which otherwise consumes this path as user-directory detail and returns 404.
+  const membershipGrowthUser = /^\/users\/([^/]+)\/membership-growth$/.exec(path);
+  if (membershipGrowthUser) {
+    if (method !== "GET") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/users/${membershipGrowthUser[1]}/membership-growth${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleMembershipGrowthAdmin(request as AuthSecurityNodeRequest, response as AuthSecurityNodeResponse, options.adminSecurityOptions);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
   if (path === "/distribution/policy") {
     if (method !== "GET" && method !== "PUT") {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
@@ -471,24 +491,6 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.headers = { ...request.headers, "x-request-id": requestId };
     try {
       await handleUserDirectoryAdmin(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.adminSecurityOptions);
-    } catch (error) {
-      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
-      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
-    }
-    return;
-  }
-  const membershipGrowthUser = /^\/users\/([^/]+)\/membership-growth$/.exec(path);
-  if (membershipGrowthUser) {
-    if (method !== "GET") {
-      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
-      return;
-    }
-    const targetPath = `/api/v1/admin/users/${membershipGrowthUser[1]}/membership-growth${requestQuery(request)}`;
-    request.url = targetPath;
-    request.originalUrl = targetPath;
-    request.headers = { ...request.headers, "x-request-id": requestId };
-    try {
-      await handleMembershipGrowthAdmin(request as AuthSecurityNodeRequest, response as AuthSecurityNodeResponse, options.adminSecurityOptions);
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);

@@ -1,8 +1,8 @@
 import type { PoolClient } from "pg";
 import { conflict, invalid, sha256Hex } from "../supply/supply-util";
 import { ORDER_FIELDS, ORDER_FROM, projectOrder, type OrderRow } from "./order";
-import { LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
-import { LEGACY_USER_ORDER_FIELDS, LEGACY_USER_ORDER_FROM, projectUserLegacyOrder, type LegacyUserOrderRow } from "./legacy-user-order-read";
+import { legacyContinuationReady, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyUserOrderFields, legacyUserOrderFrom, projectUserLegacyOrder, type LegacyUserOrderRow } from "./legacy-user-order-read";
 
 type Filter = { party: "renter" | "owner"; status?: string; accountId?: string; limit: number; cursor?: string };
 type Cursor = { f: string; c: string | null; o: "NATIVE" | "LEGACY"; i: string };
@@ -40,6 +40,7 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
   const fingerprint = sha256Hex(JSON.stringify(["user-orders-v1", userId, filter.party, filter.status ?? null, filter.accountId ?? null, filter.limit]));
   const cursor = decodeCursor(filter.cursor, fingerprint);
   const owner = filter.party === "owner";
+  const continuationReady = await legacyContinuationReady(client);
   const rows = (await client.query<Row>(`
     WITH visible_orders AS (
       SELECT 'NATIVE'::text AS origin,n.id,n."createdAt",to_jsonb(n) AS record
@@ -48,7 +49,7 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
           AND ($2::text IS NULL OR o.status=$2) AND ($3::text IS NULL OR o.account_id=$3)) n
       UNION ALL
       SELECT 'LEGACY'::text AS origin,l.id,l."createdAt",to_jsonb(l) AS record
-      FROM (SELECT ${LEGACY_USER_ORDER_FIELDS} ${LEGACY_USER_ORDER_FROM}
+      FROM (SELECT ${legacyUserOrderFields(continuationReady)} ${legacyUserOrderFrom(continuationReady)}
         WHERE ${owner ? "l.owner_user_id" : "l.renter_user_id"}=$1
           AND ($2::text IS NULL OR (${LEGACY_ORDER_STATUS_SQL})=$2) AND ($3::text IS NULL OR l.account_id=$3)) l
     )

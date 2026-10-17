@@ -5,7 +5,8 @@ import { conflict, forbidden, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { isEffectivePublicationState } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
-import { ORDER_READ_RELATION, projectAdminReadOrder } from "../order/admin-order-read";
+import { orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
+import { legacyContinuationReady } from "../order/legacy-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 
 export const USER_DIRECTORY_SOURCE = {
@@ -255,6 +256,7 @@ export async function listUserDirectory(
   const limitParameter = values.length;
   const cursorCondition = `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
 
+  const orderCountRelation = viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
               to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", ${ageStatusExpr} AS "ageStatus",
@@ -264,7 +266,7 @@ export async function listUserDirectory(
               CASE WHEN $3::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
                   AND ${gameScopeSql("ra.game_id","$2","$1")}) ELSE NULL END AS "resourceAccountCount",
-              CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
+              CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM ${orderCountRelation ? "("+orderCountRelation+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
                   AND ${gameScopeSql("o.game_id","$2","$1")}) ELSE NULL END AS "currentOrderCount"`;
 
@@ -340,6 +342,7 @@ export async function readUserDirectoryDetail(
   viewer: AdminDirectoryViewer,
   userId: string,
 ): Promise<Record<string, unknown> | null> {
+  const detailOrderRelation = viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
   const row = (
     await client.query<UserDetailRow>(
       `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u."phoneNumberVerified",
@@ -356,7 +359,7 @@ export async function readUserDirectoryDetail(
               CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
                   AND ${gameScopeSql("ra.game_id","$3","$2")}) ELSE NULL END AS "resourceAccountCount",
-              CASE WHEN $5::boolean THEN (SELECT count(*)::int FROM ${viewer.legacyRead ? "("+ORDER_READ_RELATION+")" : "zzsh_order.rental_order"} o
+              CASE WHEN $5::boolean THEN (SELECT count(*)::int FROM ${detailOrderRelation ? "("+detailOrderRelation+")" : "zzsh_order.rental_order"} o
                 WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
                   AND ${gameScopeSql("o.game_id","$3","$2")}) ELSE NULL END AS "currentOrderCount"
          FROM zzsh_auth_user."user" u
@@ -650,7 +653,8 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
   if(filter.role==='owner')where.push('x.owner_user_id=$1');if(filter.role==='renter')where.push('x.renter_user_id=$1');if(filter.status)where.push('x.status=$'+values.push(filter.status));
   const time='$'+values.push(cursor?.createdAt??null),id='$'+values.push(cursor?.id??null),limit='$'+values.push(filter.limit+1);
   where.push(`(${time}::timestamptz IS NULL OR COALESCE(x.created_at,'0001-01-01'::timestamptz)<${time}::timestamptz OR (COALESCE(x.created_at,'0001-01-01'::timestamptz)=${time}::timestamptz AND x.id<${id}))`);
-  const rows=(await client.query(`WITH all_orders AS(${ORDER_READ_RELATION}) SELECT x.origin,x.record,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
+  const relation=orderReadRelation(await legacyContinuationReady(client));
+  const rows=(await client.query(`WITH all_orders AS(${relation}) SELECT x.origin,x.record,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
   const items=rows.slice(0,filter.limit),last=items.at(-1);
   return {items:items.map(row=>{const order=projectAdminReadOrder(row.origin,row.record,{adminId:viewer.adminId,isBoss:viewer.isBoss,internalQuote:false,authorizationKey:viewer.authorizationKey??''});return {orderId:order.id,displayNo:order.displayNo,status:order.status,role:row.role,...(viewer.resourceRead?{accountId:order.accountId,accountDisplayNo:order.accountDisplayNo}:{}),title:order.title,gameId:order.gameId,counterpartyName:row.role==='renter'?order.ownerName:order.renterName,amounts:order.amounts,createdAt:order.createdAt,paidAt:order.paidAt,cancelledAt:order.cancelledAt,holdUntil:order.holdUntil,expiredAwaitingCancel:order.expiredAwaitingCancel,payment:order.payment,source:order.source};}),nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit};
 }
