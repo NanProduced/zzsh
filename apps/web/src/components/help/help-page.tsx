@@ -12,7 +12,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
-import { helpAuxCategories, helpCategories, helpCategoryLabel, type AnyHelpCategoryId } from "@/content/help/types";
+import { helpCategories } from "@/content/help/types";
 import { HelpNavAside, HelpNavDrawer } from "./help-nav";
 import { HelpShell } from "./help-shell";
 import { LegacyHashHandler } from "./help-article-extras";
@@ -20,9 +20,9 @@ import { SupportContactButton } from "@/components/support/support-contact-butto
 import type { HelpArticleCard, HelpNavData } from "./nav-data";
 import "./help.css";
 
+/** 分类没有独立列表页：`/help?category=x` 在服务端 redirect 到该分类第一篇，分类入口直接指向文章。 */
 export type HelpPageView =
   | { kind: "home"; featured: HelpArticleCard[] }
-  | { kind: "category"; category: AnyHelpCategoryId; articles: HelpArticleCard[] }
   | { kind: "search"; query: string; hits: HelpArticleCard[] };
 
 type HelpPageProps = {
@@ -101,44 +101,6 @@ function HomeView({ featured, navData }: { featured: HelpArticleCard[]; navData:
   );
 }
 
-function CategoryView({ category, articles }: { category: AnyHelpCategoryId; articles: HelpArticleCard[] }) {
-  const meta = [...helpCategories, ...helpAuxCategories].find((c) => c.id === category);
-  return (
-    <section className="help-category-view" aria-labelledby="help-category-title">
-      <div className="help-category-header">
-        <h1 className="help-category-title" id="help-category-title">{meta?.label ?? "分类"}</h1>
-        {meta?.description ? <p className="help-category-desc">{meta.description}</p> : null}
-      </div>
-      <div className="help-category-divider" />
-      <ul className="help-category-article-list">
-        {articles.map((article) => (
-          <li key={article.slug} className="help-category-article-item">
-            <Link className="help-category-article-link" href={`/help/${article.slug}`}>
-              <div className="help-category-article-content">
-                <h2 className="help-category-article-title">{article.title}</h2>
-                <p className="help-category-article-summary">{article.summary}</p>
-              </div>
-              <ChevronRight size={18} className="help-category-article-arrow" aria-hidden="true" />
-            </Link>
-          </li>
-        ))}
-      </ul>
-      <div className="help-category-support-card">
-        <div className="help-category-support-icon">
-          <Headphones size={22} aria-hidden="true" />
-        </div>
-        <div className="help-category-support-info">
-          <h3>需要帮助？</h3>
-          <p>如果在{meta?.label ?? "平台使用"}过程中遇到问题，可以联系平台客服获取帮助。</p>
-        </div>
-        <SupportContactButton className="help-contact-cta">
-          <span>联系平台客服</span>
-        </SupportContactButton>
-      </div>
-    </section>
-  );
-}
-
 function SearchView({ query, hits }: { query: string; hits: HelpArticleCard[] }) {
   return (
     <section className="help-category-view" aria-labelledby="help-search-title">
@@ -204,11 +166,9 @@ function HelpHeroBanner() {
 
 export function HelpPage({ view, navData, query, legacyHashMap }: HelpPageProps) {
   const isHome = view.kind === "home";
-  const breadcrumbs = view.kind === "category"
-    ? [{ label: "首页", href: "/" }, { label: "帮助中心", href: "/help" }, { label: helpCategoryLabel(view.category) }]
-    : view.kind === "search"
-      ? [{ label: "首页", href: "/" }, { label: "帮助中心", href: "/help" }, { label: "搜索结果" }]
-      : [{ label: "首页", href: "/" }, { label: "帮助中心" }];
+  const breadcrumbs = view.kind === "search"
+    ? [{ label: "首页", href: "/" }, { label: "帮助中心", href: "/help" }, { label: "搜索结果" }]
+    : [{ label: "首页", href: "/" }, { label: "帮助中心" }];
 
   return (
     <HelpShell
@@ -227,16 +187,9 @@ export function HelpPage({ view, navData, query, legacyHashMap }: HelpPageProps)
         </div>
       ) : (
         <div className="help-layout help-layout--category">
-          <HelpNavAside
-            data={navData}
-            activeCategory={view.kind === "category" ? view.category : undefined}
-          />
+          <HelpNavAside data={navData} />
           <div className="help-main">
-            <HelpNavDrawer
-              data={navData}
-              activeCategory={view.kind === "category" ? view.category : undefined}
-            />
-            {view.kind === "category" ? <CategoryView category={view.category} articles={view.articles} /> : null}
+            <HelpNavDrawer data={navData} />
             {view.kind === "search" ? <SearchView query={view.query} hits={view.hits} /> : null}
           </div>
         </div>

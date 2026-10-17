@@ -3,6 +3,7 @@ import { ChevronRight, Hash, Headphones } from "lucide-react";
 import { resolveRelated } from "@/content/help";
 import { audienceLabels, helpCategoryLabel, type HelpArticle, type HelpBlock } from "@/content/help/types";
 import { HelpCalloutIcon, HelpCopyLink, HelpToc } from "./help-article-extras";
+import { isLongArticle } from "./nav-data";
 import { SupportContactButton } from "@/components/support/support-contact-button";
 import "./help.css";
 
@@ -37,9 +38,6 @@ function audienceText(article: HelpArticle): string {
   if (article.audience.includes("all")) return audienceLabels.all;
   return article.audience.map((a) => audienceLabels[a]).join(" · ");
 }
-
-import { articleBreadcrumb, isLongArticle } from "./nav-data.ts";
-export { articleBreadcrumb, isLongArticle };
 
 export function HelpArticleMeta({ article }: { article: HelpArticle }) {
   return (

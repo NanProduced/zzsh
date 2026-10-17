@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { allHelpArticles, getHelpArticle } from "@/content/help";
-import { buildHelpNavData } from "@/components/help/nav-data";
+import { buildHelpNavData, articleBreadcrumb, isLongArticle } from "@/components/help/nav-data";
 import { HelpShell } from "@/components/help/help-shell";
 import { HelpNavAside, HelpNavDrawer } from "@/components/help/help-nav";
-import { HelpArticleAsideToc, HelpArticleBody, articleBreadcrumb, isLongArticle } from "@/components/help/help-article";
+import { HelpArticleAsideToc, HelpArticleBody } from "@/components/help/help-article";
 
 export function generateStaticParams() {
   return allHelpArticles.map((article) => ({ slug: article.slug }));

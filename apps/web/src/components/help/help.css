@@ -577,48 +577,6 @@
 }
 
 /* 分类页底部客服卡片 */
-.help-category-support-card {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 20px 24px;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: 12px;
-  margin-top: 24px;
-}
-
-.help-category-support-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: var(--color-accent-brand-muted);
-  color: var(--color-accent-brand);
-  flex-shrink: 0;
-}
-
-.help-category-support-info {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.help-category-support-info h3 {
-  margin: 0 0 4px;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.help-category-support-info p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  line-height: 1.5;
-}
-
 .help-contact-cta {
   display: inline-flex;
   align-items: center;
@@ -1313,12 +1271,5 @@ details[open] .help-toc-inline-arrow {
   }
   .help-article-section {
     scroll-margin-top: 130px;
-  }
-  .help-category-support-card {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .help-category-support-card .help-contact-cta {
-    align-self: flex-start;
   }
 }
