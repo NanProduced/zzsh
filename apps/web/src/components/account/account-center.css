@@ -1471,7 +1471,8 @@ html:not(.dark) {
 .sec-card > .info-callout,
 .sec-card > .info-alert { margin-top: 16px; }
 .sec-recovery { margin-top: 14px; }
-.sec-hidden-desktop { display: none !important; }
+/* 桌面隐藏、移动端可见的控件（安全设置/账号资料刷新）：隐藏即彻底移出 Tab 序，不留可聚焦的隐形钮。 */
+@media (min-width: 1024px) { .sec-hidden-desktop { display: none !important; } }
 .sec-note-inline { display: inline-block; margin-left: 10px; font-size: 12px; }
 
 /* 登录与找回行：左侧图标 + 标题说明 + 状态Badge + 统一 outline 按钮 */
@@ -1749,9 +1750,6 @@ html:not(.dark) {
 .sec-link-action:hover {
   color: var(--color-text-primary);
 }
-.sec-record-chevron {
-  transition: transform 0.18s ease;
-}
 
 /* 当前网络模块 */
 .sec-network {
@@ -2028,6 +2026,8 @@ html:not(.dark) {
 }
 
 /* 分步弹窗与退出确认弹窗 */
+/* T11-01（t15 修复）：弹层必须高于全局 .modal-overlay(z-index:100)，否则鼠标命中测试落在遮罩上，
+   点击全部落空（键盘路径不受影响）。与 .ui-alert-dialog 同层 101。 */
 .sec-dialog { position: fixed; z-index: 101; left: 50%; top: 50%; transform: translate(-50%, -50%); display: grid; gap: 16px; width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; padding: 26px 26px 22px; border: 1px solid var(--account-border-card); border-radius: 14px; background: var(--color-bg-card); color: var(--color-text-primary); box-shadow: var(--account-card-shadow); font-family: var(--font-sans); }
 .sec-dialog h2 { margin: 0 32px 0 0; font-size: 19px; font-weight: 700; line-height: 1.4; }
 .sec-dialog > p, .sec-dialog .info-callout { margin: 0; }
@@ -2054,7 +2054,6 @@ html:not(.dark) {
 /* 会话行：当前会话保持轻强调；其他行提供“详情”展开。四列与动作列布局已并入基础段（见上方 F4 注释）。 */
 .sec-session-expand { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-secondary); white-space: nowrap; }
 .sec-session-expand::after { content: none; }
-.sec-session-expand .sec-record-chevron { flex: 0 0 auto; }
 .sec-session-expand[aria-expanded="true"] { color: var(--color-text-primary); }
 .sec-session-detail { grid-column: 1 / -1; margin-top: 6px; padding: 12px 14px; border: 1px dashed var(--color-border-default); border-radius: 8px; background: var(--color-bg-elevated); }
 .sec-session-detail[hidden] { display: none; }
@@ -2093,13 +2092,6 @@ html:not(.dark) {
 .sec-current-meta dd { margin: 2px 0 0; color: var(--color-text-primary); font-size: var(--type-label-size); font-variant-numeric: tabular-nums; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 
 /* 登录时记录折叠详情：缺值只说一次，不铺三列重复缺值。 */
-.sec-record { margin-top: 10px; padding-left: 42px; }
-/* 展开控件不是跳转动作：不带行动作的“→”，箭头与文案同排不折行。 */
-.sec-record-toggle { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.sec-record-toggle::after { content: none; }
-.sec-record-chevron { flex: 0 0 auto; transition: transform .16s ease; }
-.sec-record-chevron[data-open] { transform: rotate(180deg); }
-.sec-record-detail { margin-top: 8px; }
 .sec-session-detail .sec-record-missing { margin: 0; color: var(--color-text-secondary); font-size: var(--type-label-size); font-weight: 600; line-height: 1.6; }
 
 /* 当前网络一行：失败/未开通只降级本行，不阻塞页面，也不写任何估算值。 */
