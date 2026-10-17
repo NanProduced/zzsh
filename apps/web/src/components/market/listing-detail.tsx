@@ -125,7 +125,7 @@ function unitPriceText(line: ResourceLine): string {
 
 function InventoryArt({ code }: { code: string | null }) {
   // Reuse the publisher's existing artwork and stable codes; no new inventory images.
-  const art = ({ df_billable_awm_bullet: "awm-round", df_billable_level6_bullet: "level6-round", df_billable_barrett_bullet: "barrett-round", df_billable_level6_armor: "level6-armor", df_billable_level6_helmet: "level6-helmet", df_billable_coffee: "coffee-beans", top_insure_card_piece: "insurance-card", df_billable_top_insure_card_piece: "insurance-card" } as Record<string, string>)[canonicalResourceCode(code) ?? ""];
+  const art = ({ df_billable_awm_bullet: "awm-round", df_billable_level6_bullet: "level6-round", df_billable_barrett_bullet: "barrett-round", df_billable_level6_armor: "level6-armor", df_billable_level6_helmet: "level6-helmet", df_billable_coffee: "coffee-beans", df_billable_top_insure_card: "insurance-card", top_insure_card_piece: "insurance-card", df_billable_top_insure_card_piece: "insurance-card" } as Record<string, string>)[canonicalResourceCode(code) ?? ""];
   return <span className="account-resource-art" aria-hidden="true">{art ? <DetailImage src={`/art/zhouzhou/inventory-polished/${art}.webp`} alt="" /> : <Box size={22} />}</span>;
 }
 

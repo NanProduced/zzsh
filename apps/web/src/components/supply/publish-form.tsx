@@ -393,14 +393,18 @@ function LoginPlatformIcon({ code }: { code: string }) {
 
 function InventoryIcon({ code }: { code: string | null }) {
   const canonical = canonicalResourceCode(code);
-  const art = ({df_billable_awm_bullet:"awm-round",df_billable_level6_bullet:"level6-round",df_billable_barrett_bullet:"barrett-round",df_billable_level6_armor:"level6-armor",df_billable_level6_helmet:"level6-helmet",df_billable_coffee:"coffee-beans",top_insure_card_piece:"insurance-card",df_billable_top_insure_card_piece:"insurance-card"} as Record<string,string>)[canonical??""];
+  const art = ({df_billable_awm_bullet:"awm-round",df_billable_level6_bullet:"level6-round",df_billable_barrett_bullet:"barrett-round",df_billable_level6_armor:"level6-armor",df_billable_level6_helmet:"level6-helmet",df_billable_coffee:"coffee-beans",df_billable_top_insure_card:"insurance-card",top_insure_card_piece:"insurance-card",df_billable_top_insure_card_piece:"insurance-card"} as Record<string,string>)[canonical??""];
   if(art)return <img src={`/art/zhouzhou/inventory-polished/${art}.webp`} width={56} height={56} alt="" />;
   const Icon = canonical === "df_billable_coffee" ? Bean
     : canonical === "df_billable_level6_armor" ? Shield
     : canonical === "df_billable_level6_helmet" ? HardHat
     : canonical === "df_billable_level6_bullet" || canonical === "df_billable_awm_bullet" || code === "barrett_round" || code === "df_billable_barrett_bullet" ? Crosshair
-    : code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece" ? Ticket : Box;
+    : code === "df_billable_top_insure_card" || code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece" ? Ticket : Box;
   return <Icon size={22} aria-hidden="true" />;
+}
+
+function retiredInsuranceCode(code: string | null | undefined): boolean {
+  return code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece";
 }
 
 function numericChoiceOptions(current: string, values: number[], suffix = "级") {
@@ -2268,9 +2272,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const inventoryHaffId = (catalog?.items ?? []).find((item) => item.unit === "HAFF_BASE")?.id;
   const allInventoryRows = inventoryEditorRows(catalog, draft.inventory, supply?.version?.catalogItems, catalog ? "ready" : catalogAvailability);
   const haffInventoryRow = allInventoryRows.find((item) => item.unit === "HAFF_BASE" && (!inventoryHaffId || item.itemId === inventoryHaffId));
-  const inventoryRows = allInventoryRows.filter((item) => item !== haffInventoryRow).map(item=>({...item,code:catalog?.items.find(row=>row.id===item.itemId)?.code??supply?.version?.catalogItems?.find(row=>row.id===item.itemId)?.code??null}));
-  const missingResourceRows=catalog?[{code:"df_billable_barrett_bullet",name:"巴雷特子弹",unit:"ROUND"},{code:"top_insure_card_piece",name:"顶级保险卡",unit:"PIECE"}].filter(item=>!catalog.items.some(row=>canonicalResourceCode(row.code)===canonicalResourceCode(item.code))).map(item=>({...item,itemId:null,quantity:pendingResourceInputs[item.code]??null,priced:null,required:false,catalogState:"pending" as const})):[];
-  const resourceOrder = ["df_billable_level6_bullet", "df_billable_level6_armor", "df_billable_level6_helmet", "df_billable_awm_bullet", "df_billable_barrett_bullet", "top_insure_card_piece", "df_billable_coffee"];
+  const inventoryRows = allInventoryRows.filter((item) => item !== haffInventoryRow).map(item=>({...item,code:catalog?.items.find(row=>row.id===item.itemId)?.code??supply?.version?.catalogItems?.find(row=>row.id===item.itemId)?.code??null}))
+    .filter(item=>!retiredInsuranceCode(item.code)||draft.inventory.some(row=>row.itemId===item.itemId))
+    .map(item=>retiredInsuranceCode(item.code)?{...item,priced:false,required:false}:item);
+  const missingResourceRows=catalog?[{code:"df_billable_barrett_bullet",name:"巴雷特子弹",unit:"ROUND"},{code:"df_billable_top_insure_card",name:"顶级保险卡",unit:"DAY"}].filter(item=>!catalog.items.some(row=>canonicalResourceCode(row.code)===canonicalResourceCode(item.code))).map(item=>({...item,itemId:null,quantity:pendingResourceInputs[item.code]??null,priced:null,required:false,catalogState:"pending" as const})):[];
+  const resourceOrder = ["df_billable_level6_bullet", "df_billable_level6_armor", "df_billable_level6_helmet", "df_billable_awm_bullet", "df_billable_barrett_bullet", "df_billable_top_insure_card", "df_billable_coffee"];
   const resourcePosition = (code: string | null) => { const index = resourceOrder.indexOf(canonicalResourceCode(code) ?? ""); return index < 0 ? resourceOrder.length : index; };
   const resourceRows=[...inventoryRows,...missingResourceRows].sort((a,b)=>resourcePosition(a.code)-resourcePosition(b.code));
   const rarityNames = new Map((catalog?.rarities ?? []).map((item) => [item.code, item.name]));
@@ -2497,14 +2503,15 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               {resourcePreviewState ? <p className="publish-resource-read-state" role="status"><Info size={16} aria-hidden="true" />{resourcePreviewState}</p> : null}
               {resourceRows.length ? <div className="supply-resource-grid" role="list" aria-label="资源库存">{resourceRows.map((item) => {
                 const itemCode=item.code, key=item.itemId??itemCode!;
-                const itemName=canonicalResourceCode(itemCode)==="df_billable_coffee"?"咖啡豆":item.name;
+                const itemName=canonicalResourceCode(itemCode)==="df_billable_coffee"?"咖啡豆":itemCode==="df_billable_top_insure_card"?"顶级保险卡":item.name;
+                const retiredInsurance=retiredInsuranceCode(itemCode);
                 const quantity=draft.inventory.find(row=>row.itemId===item.itemId)?.quantity??item.quantity??"";
                 const grouped=canonicalResourceCode(itemCode)==="df_billable_level6_bullet";
                 const valid=/^(0|[1-9]\d{0,23})$/.test(quantity), remainder=grouped&&valid?BigInt(quantity)%60n:0n;
                 const inputValue=grouped&&valid?(BigInt(quantity)/60n).toString():quantity;
                 const inputUnit=grouped?"组":resourceUnitLabel(item.unit??"",itemCode);
                 const line=item.itemId&&resourcePreview?.available&&!resourcePreviewPending?resourcePreview.lines.find(row=>row.itemId===item.itemId):null;
-                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":itemCode==="top_insure_card_piece"||itemCode==="df_billable_top_insure_card_piece"?"填写可用顶级临时体验卡的张数，永久安全箱容量不算体验卡。":null;
+                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":itemCode==="df_billable_top_insure_card"?"填写可用顶级保险卡的天数，保存时保留原天数，不作数量换算。":null;
                 return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined}>
                   <div className="supply-resource-card-head">
                     <span className="supply-resource-art"><InventoryIcon code={itemCode} /></span>
@@ -2513,10 +2520,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   </div>
                   <div className="publish-owner-rate"><span>单价</span><strong>{line?`¥ ${line.ownerUnitAmount.amount} / ${inputUnit}`:!item.itemId?"待配置":resourcePreviewPending?"读取中…":"暂未取得"}</strong>{line?<FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp>:null}</div>
                   {!item.itemId ? <small className="publish-resource-state">此项暂存本页。填写后需等待目录配置，整份资料才能保存或核价。</small> : null}
-                  <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max={grouped?((999999999999999999999999n-remainder)/60n).toString():"999999999999999999999999"} disabled={formDisabled} invalid={quantity!==""&&!valid} onChange={raw=>{
+                  <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max={grouped?((999999999999999999999999n-remainder)/60n).toString():"999999999999999999999999"} disabled={formDisabled||retiredInsurance} invalid={quantity!==""&&!valid} onChange={raw=>{
                     const base=raw===""?"":grouped?(BigInt(raw)*60n+remainder).toString():raw;
                     if(item.itemId)changeInventory(item.itemId,base);else setPendingResourceInputs(previous=>({...previous,[itemCode!]:base}));
                   }} />
+                  {retiredInsurance?<small className="publish-resource-state">单位需核对，原数量保留，未换算为天数。</small>:null}
                   <div className="publish-resource-subtotal"><span>本项预估</span><output>{line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:quantity===""?"未填写":!item.itemId?"待资源配置":resourcePreviewPending?"计算中…":"预估暂不可用"}</output></div>
                   {!item.itemId ? <small className="publish-resource-state">目录待配置 · 数量暂存本页</small> : null}
                   {grouped?<small className="publish-resource-measure">1组 = 60发{remainder>0n?` · 已保留历史余量${remainder}发`:""}</small>:null}

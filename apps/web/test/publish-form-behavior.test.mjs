@@ -1095,23 +1095,39 @@ test("catalog changes invalidate a quote and consent without overwriting the dec
   try{await p.render();assert.match(p.text(),/报价已取得/);revision='2';await p.type('.skin-search-input','skin');const input=p.host.querySelector('.skin-search-input');await React.act(async()=>input.dispatchEvent(new p.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true})));await p.waitFor(()=>p.text().includes('报价已过期'));assert.match(p.text(),/报价已过期/);assert.equal(p.host.querySelector('#publish-description').value,'keep me');assert.equal(p.calls.length,0);}finally{await p.close();}
 });
 
-test("new Barrett/card inputs save their own IDs and an old DAY row is excluded only by explicit choice",async()=>{
-  const items=[...catalog.items,{id:'item_barrett',code:'df_billable_barrett_bullet',name:'巴雷特子弹',unit:'ROUND',quantityScale:0,required:false},{id:'item_card',code:'top_insure_card_piece',name:'顶级保险卡',unit:'PIECE',quantityScale:0,required:false}];
-  const original=declaration({inventory:[{itemId:'item_haff',quantity:'60000000'},{itemId:'old_day',quantity:'3'}]});
-  const saved=supplyOf(original);saved.version.catalogItems.push({id:'old_day',code:'df_billable_top_insure_card',name:'旧保险天数',unit:'DAY',priced:false});
+test("insurance uses the existing DAY identity once and saves unchanged base day quantities",async()=>{
+  const dayId='item_32489f25a1b148d9be19875c7123d312',pieceId='item_277e7b4df99c47faa95e8504601c7e15';
+  const items=[...catalog.items,{id:'item_barrett',code:'df_billable_barrett_bullet',name:'巴雷特子弹',unit:'ROUND',quantityScale:0,required:false},{id:dayId,code:'df_billable_top_insure_card',name:'旧保险天数',unit:'DAY',quantityScale:0,required:false},{id:pieceId,code:'top_insure_card_piece',name:'顶级保险卡',unit:'PIECE',quantityScale:0,required:false}];
+  const original=declaration({inventory:[{itemId:'item_haff',quantity:'60000000'},{itemId:dayId,quantity:'3'}]});
+  const saved=supplyOf(original);saved.version.catalogItems.push({id:dayId,code:'df_billable_top_insure_card',name:'旧保险天数',unit:'DAY',priced:false});
   const p=await probe({accountId:'account_1',catalogValue:{...catalog,items},mine:()=>saved});
   try{
     await p.render();
-    assert.match(p.text(),/旧保险天数/);
-    assert.equal(p.host.querySelector('#quantity-old_day').value,'3');
-    await p.type('#quantity-item_barrett','2');await p.type('#quantity-item_card','4');
-    await p.clickButton('不纳入本次申报');await p.clickButton('保存草稿');
+    const card=p.host.querySelector('[data-resource-code="df_billable_top_insure_card"]');
+    assert.ok(card);assert.match(card.textContent,/顶级保险卡/);assert.match(card.textContent,/天/);assert.doesNotMatch(card.textContent,/旧保险|张数/);
+    assert.match(card.querySelector('img').getAttribute('src'),/insurance-card\.webp$/);
+    assert.equal(p.host.querySelector('#quantity-'+pieceId),null);
+    assert.equal(p.host.querySelectorAll('[data-resource-code="df_billable_top_insure_card"]').length,1);
+    assert.equal(p.host.querySelector('#quantity-'+dayId).value,'3');
+    await p.type('#quantity-item_barrett','2');await p.type('#quantity-'+dayId,'4');
+    await p.clickButton('保存草稿');
     const body=p.calls.find(call=>call.op==='saveDraft').body;
     assert.equal(body.inventory.find(row=>row.itemId==='item_barrett').quantity,'2');
-    assert.equal(body.inventory.find(row=>row.itemId==='item_card').quantity,'4');
-    assert.equal(body.inventory.some(row=>row.itemId==='old_day'),false);
-    assert.equal(original.inventory.find(row=>row.itemId==='old_day').quantity,'3');
+    assert.equal(body.inventory.find(row=>row.itemId===dayId).quantity,'4');
+    assert.equal(body.inventory.some(row=>row.itemId===pieceId),false);
+    assert.equal(original.inventory.find(row=>row.itemId===dayId).quantity,'3');
   }finally{await p.close();}
+});
+
+test("insurance catalog absence offers only a DAY placeholder and no piece inventory input",async()=>{
+ const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration())});
+ try{await p.render();const row=p.host.querySelector('[data-resource-code="df_billable_top_insure_card"]');assert.ok(row);assert.match(row.textContent,/天/);assert.equal(p.host.querySelector('[data-resource-code="top_insure_card_piece"]'),null);assert.equal(p.calls.length,0);}finally{await p.close();}
+});
+
+test("a previously referenced wrong PIECE insurance row is retained read-only without becoming days",async()=>{
+ const id='wrong_piece',original=declaration({inventory:[{itemId:'item_haff',quantity:'60000000'},{itemId:id,quantity:'7'}]}),saved=supplyOf(original);saved.version.catalogItems.push({id,code:'top_insure_card_piece',name:'保险历史记录',unit:'PIECE',priced:false});
+ const p=await probe({accountId:'account_1',mine:()=>saved});
+ try{await p.render();const input=p.host.querySelector('#quantity-'+id);assert.equal(input.value,'7');assert.equal(input.disabled,true);assert.match(input.closest('article').textContent,/单位需核对/);assert.equal(p.host.querySelector('[data-resource-code="df_billable_top_insure_card"] input').value,'');assert.deepEqual(original.inventory,[{itemId:'item_haff',quantity:'60000000'},{itemId:id,quantity:'7'}]);assert.equal(p.calls.length,0);}finally{await p.close();}
 });
 
 test("gross owner income excludes declared deposits and never pre-deducts a flat payout fee",async()=>{
