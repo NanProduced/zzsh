@@ -3,7 +3,7 @@ import { assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
 import { canonicalize, normalizeDeclaration, computeContentHash, type ContentDeclaration } from "./content-hash";
-import { validateDeltaPublicationAttributes } from "./delta-rental";
+import { CUSTOMER_TIERS, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount } from "./funding-policy";
 import { DELTA_LEGACY_RESOURCES, lockLegacySource, normalizeResolutionInput, readLegacyMap, resolveLegacyObservationToDraft, type LegacyDraftResolutionInput } from "./legacy-observation";
@@ -65,8 +65,16 @@ export function prepareLegacyTradeIntake(input: LegacyTradeIntake, catalog: read
   if (input.depositYuan === null) reasons.push("DEPOSIT_POLICY_VIOLATION");
   else { try { depositCents = legacyPlanYuanToCents(input.depositYuan); } catch { reasons.push("DEPOSIT_POLICY_VIOLATION"); } }
   if (input.isFullPayout !== "0" && input.isFullPayout !== "1") reasons.push("FUNDING_POLICY_UNKNOWN");
-  if (!input.media.length || input.media.length > 20 || new Set(input.media.map(m => m.assetId)).size !== input.media.length || new Set(input.media.map(m => m.position)).size !== input.media.length
-    || input.media.some(m => m.technicalState !== "READY" || m.accessClass !== "PUBLIC_DISPLAY" || !/^[a-f0-9]{64}$/.test(m.byteHash) || !Number.isSafeInteger(m.position) || m.position < 0 || m.position > 19)) reasons.push("MEDIA_UNAVAILABLE");
+  // Each media dimension blocks separately so a review sees the real gap instead of one merged code.
+  if (!input.media.length) reasons.push("MEDIA_UNAVAILABLE");
+  else {
+    if (input.media.length > 20) reasons.push("MEDIA_ASSET_COUNT_INVALID");
+    if (new Set(input.media.map(m => m.assetId)).size !== input.media.length) reasons.push("MEDIA_ASSET_CONFLICT");
+    if (new Set(input.media.map(m => m.position)).size !== input.media.length || input.media.some(m => !Number.isSafeInteger(m.position) || m.position < 0 || m.position > 19)) reasons.push("MEDIA_POSITION_INVALID");
+    if (input.media.some(m => m.technicalState !== "READY")) reasons.push("MEDIA_NOT_READY");
+    if (input.media.some(m => m.accessClass !== "PUBLIC_DISPLAY")) reasons.push("MEDIA_VISIBILITY_NOT_PUBLIC");
+    if (input.media.some(m => !/^[a-f0-9]{64}$/.test(m.byteHash))) reasons.push("MEDIA_BYTE_HASH_INVALID");
+  }
   if (!input.termOptionCode) reasons.push("TERM_OPTION_UNPROVEN");
   const attributes = { ...snapshot.attributes,
     rentalPricing: { rentalMode, ...(rentalMode === "ordinary" ? {} : { ownerRatioB: input.ownerRatioB }) },
@@ -94,10 +102,19 @@ async function authorize(client: PoolClient, actor: TradeActor, a: PublishingAcc
   await assertGameScope(client, actor.id, access?.isBoss === true, a.game_id);
 }
 async function assertTierCoverage(client: PoolClient, a: PublishingAccount) {
+  // Publish readiness follows the formal confirmation tiers: a listing whose member tier has no
+  // price line would 503 at confirmation, so the takeover never publishes it.
   const missing = (await client.query(`SELECT 1 FROM zzsh_supply.listing_version v JOIN zzsh_supply.rule_release r ON r.id=v.rule_release_id
     CROSS JOIN unnest($2::text[]) AS tier(name) JOIN zzsh_supply.inventory_line i ON i.version_id=v.id
-    WHERE v.id=$1 AND NOT EXISTS(SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=r.price_version_id AND p.item_id=i.item_id AND p.customer_tier=tier.name) LIMIT 1`, [a.current_version_id, ["STANDARD"]])).rowCount;
+    WHERE v.id=$1 AND NOT EXISTS(SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=r.price_version_id AND p.item_id=i.item_id AND p.customer_tier=tier.name) LIMIT 1`, [a.current_version_id, [...CUSTOMER_TIERS]])).rowCount;
   if (missing) throw conflict("MEMBER_PRICE_LINE_MISSING");
+}
+async function assertMediaBindingSubject(client: PoolClient, a: PublishingAccount, versionId: string) {
+  // The batch file declares asset IDs; the database decides whether they really are this
+  // account's display images. A foreign or platform asset is never a legal account binding.
+  const media = (await client.query(`SELECT a.id,a.account_id,a.owner_user_id,a.purpose FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`, [versionId])).rows;
+  if (!media.length
+    || media.some(m => m.account_id !== a.id || m.owner_user_id !== a.owner_user_id || m.purpose !== "ACCOUNT_DISPLAY")) throw conflict("MEDIA_BINDING_SUBJECT_MISMATCH");
 }
 async function assertMaterialized(client: PoolClient, a: PublishingAccount, plan: LegacyTradePlan) {
   const v = await currentVersion(client, a);
@@ -108,6 +125,7 @@ async function assertMaterialized(client: PoolClient, a: PublishingAccount, plan
     if (canonicalize(declaration[key]) !== canonicalize(draft[key])) throw conflict("MATERIALIZATION_MISMATCH");
   }
   if (canonicalize(declaration.mediaBindings) !== canonicalize(plan.expectedMedia)) throw conflict("MATERIALIZATION_MEDIA_MISMATCH");
+  await assertMediaBindingSubject(client, a, v.id);
   await assertTierCoverage(client, a);
   const policy = await readFundingPolicyForRelease(client, v.rule_release_id!);
   if (!policy) throw conflict("FUNDING_POLICY_UNKNOWN");
@@ -118,6 +136,8 @@ async function publishTakenOverDraft(client: PoolClient, a: PublishingAccount, a
   const v = await currentVersion(client, a);
   await assertCurrentRelease(client, a, v);
   if (v.origin !== "NATIVE" || v.review_state !== "DRAFT" || !v.payload || !v.content_hash) throw conflict("TAKEOVER_DRAFT_REQUIRED");
+  // Re-checked at publish time: the owner-acceptance gap must not become a window to re-point media.
+  await assertMediaBindingSubject(client, a, v.id);
   const selected = (v.attributes.full_payout_declaration as { selected?: boolean })?.selected;
   if (typeof selected !== "boolean") throw conflict("FUNDING_POLICY_UNKNOWN");
   if (!selected) {
