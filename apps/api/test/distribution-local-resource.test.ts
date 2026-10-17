@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
 import type {INestApplication} from '@nestjs/common';
 import type {AppConfig} from '../src/config/config';
-import {createLocalDistributionScope,assertLocalDistributionAssembly,readActiveDistributionPolicyInTransaction,readRegistrationDistributionPolicyInTransaction,configureDistributionPolicy,type LocalDistributionScope} from '../src/finance/distribution-policy-store';
+import {createLocalDistributionScope,createLocalDistributionReadScope,assertLocalDistributionAssembly,assertReviewedDistributionMaintenanceResource,readDistributionPolicy,readActiveDistributionPolicyInTransaction,readRegistrationDistributionPolicyInTransaction,configureDistributionPolicy,type LocalDistributionScope} from '../src/finance/distribution-policy-store';
 import {initializeNewDistributionRegistration} from '../src/finance/distribution-registration';
 import {readMyInvitations,bindMyDistributionLeader} from '../src/finance/invitation-store';
 import {mountDistributionPolicyRoutes} from '../src/finance/distribution-policy-routes';
@@ -43,6 +43,7 @@ function probe(options:{identity?:Record<string,unknown>;shape?:Record<string,un
   if(sql.startsWith('INSERT INTO zzsh_order.distribution_participant')){participants.set(args[0],{user_id:args[0],eligibility:args[1],level_code:args[2],policy_version_id:args[3],revision:'1',inviter_knowledge:args[4],leader_knowledge:args[5]});return result([{}]);}
   if(sql.startsWith('INSERT INTO zzsh_order.distribution_invite_code'))return result([{id:args[0]}]);
   if(sql.startsWith('SELECT * FROM zzsh_order.distribution_participant'))return result([participants.get(args[0])??{user_id:'self',eligibility:'ELIGIBLE',level_code:'BATCH2',revision:'1',leader_knowledge:'KNOWN_NONE',inviter_knowledge:'KNOWN_NONE'}]);
+  if(sql.startsWith('SELECT eligibility,level_code'))return result([{eligibility:'ELIGIBLE',level_code:'BATCH2',commission_frozen:false,policy_version_id:'policy_test'}]);
   if(sql.startsWith('SELECT display_code'))return result([{display_code:'FX_SELF',source_type:'NATIVE_REGISTRATION'}]);
   if(sql.startsWith('SELECT * FROM zzsh_order.invitation_relation')||sql.startsWith('SELECT id,child_user_id'))return result();
   if(sql.startsWith('SELECT * FROM zzsh_order.distribution_invite_code'))return result([{id:'code_parent',user_id:'parent',display_code:'FX_PARENT',source_type:'NATIVE_REGISTRATION'}]);
@@ -55,6 +56,72 @@ function probe(options:{identity?:Record<string,unknown>;shape?:Record<string,un
  return{c,pool:{connect:async()=>c,query:c.query.bind(c)} as unknown as Pool,seen,participants};
 }
 const binding=()=>createLocalDistributionScope(config,receipt);
+// Expected local rehearsal identity in a fake client; no real resource is contacted by these tests.
+const milestoneReceipt={database:'zzsh_test_order_milestone_real_1',resourceOid:952624,owner:'zzsh',ownerOid:10,marker:'zzsh:order-reservation-test:v1',migrationRole:'zzsh_order_milestone_real_1_m',migrationRoleOid:952625,runtimeRole:'zzsh_order_milestone_real_1_r',runtimeRoleOid:952626};
+const milestoneConfig={...config,database:{...config.database,name:milestoneReceipt.database,user:milestoneReceipt.runtimeRole}} as AppConfig;
+const milestoneAssembly={...assembly,apiOrigin:'http://127.0.0.1:4222',userOrigin:'http://127.0.0.1:4220',adminOrigin:'http://127.0.0.1:4221'};
+const milestoneBinding=()=>createLocalDistributionScope(milestoneConfig,milestoneReceipt);
+const milestoneReadBinding=()=>createLocalDistributionReadScope({...milestoneConfig,testOperationsEnabled:false},milestoneReceipt);
+
+test('milestone read scope works with test writes off and admits no other resource or assembly',()=>{
+ assertLocalDistributionAssembly(milestoneReadBinding(),{...milestoneAssembly,testOperationsEnabled:false});
+ assert.throws(()=>createLocalDistributionScope({...milestoneConfig,testOperationsEnabled:false},milestoneReceipt));
+ assert.throws(()=>createLocalDistributionReadScope({...config,testOperationsEnabled:false},receipt));
+ for(const patch of [{resourceOid:952623},{ownerOid:11},{runtimeRoleOid:952625},{migrationRoleOid:952626},{runtimeRole:'zzsh'},{marker:'other'}])assert.throws(()=>createLocalDistributionReadScope({...milestoneConfig,testOperationsEnabled:false},{...milestoneReceipt,...patch}));
+ for(const patch of [{profile:'production'},{provider:'real'}])assert.throws(()=>createLocalDistributionReadScope({...milestoneConfig,testOperationsEnabled:false,...patch} as AppConfig,milestoneReceipt));
+ for(const patch of [{secureCookies:true},{apiOrigin:'http://127.0.0.1:3102'},{userOrigin:'http://127.0.0.1:3100'},{adminOrigin:'http://127.0.0.1:3101'}])assert.throws(()=>assertLocalDistributionAssembly(milestoneReadBinding(),{...milestoneAssembly,testOperationsEnabled:false,...patch}));
+ assert.throws(()=>assertLocalDistributionAssembly({kind:'LOCAL_CONTROLLED_DISTRIBUTION'},{...milestoneAssembly,testOperationsEnabled:false}));
+});
+
+test('read capability returns existing policy and participant facts but cannot bind or configure',async()=>{
+ const options={identity:{name:milestoneReceipt.database,oid:952624,role:milestoneReceipt.runtimeRole},shape:{ownerOid:10,roleOid:952626}},scope=milestoneReadBinding(),p=probe(options);
+ assert.equal((await readDistributionPolicy(p.pool,actor,scope)).knowledge,'KNOWN');const self=await readMyInvitations(p.pool,actor,scope);assert.equal(self.policyKnowledge,'KNOWN');assert.equal(self.participant.eligibility,'ELIGIBLE');assert.equal(self.canBindLeader,false);
+ const absent=await readDistributionPolicy(probe({...options,policy:false}).pool,actor,scope);assert.equal(absent.knowledge,'UNKNOWN');assert.equal(absent.policy,null);assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ for(const run of [()=>configureDistributionPolicy(p.pool,actor,{expectedRevision:'1',config:policyConfig,reason:'Read scope cannot write'},'read_scope_policy',scope),()=>bindMyDistributionLeader(p.pool,actor,{code:'FX_PARENT',policyVersion:'policy_test',expectedParticipantRevision:'1'},'read_scope_bind',scope),()=>initializeNewDistributionRegistration(p.c,{userId:'self',requestId:'req_read_registration'},scope),()=>readActiveDistributionPolicyInTransaction(p.c,false,scope),()=>readRegistrationDistributionPolicyInTransaction(p.c,scope),()=>assertReviewedDistributionMaintenanceResource(p.c,scope)])await assert.rejects(run(),e=>(e as {status:number}).status===503);
+ assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
+
+test('read capability still verifies actual owner, runtime role, schema and caller permissions',async()=>{
+ const options={identity:{name:milestoneReceipt.database,oid:952624,role:milestoneReceipt.runtimeRole},shape:{ownerOid:10,roleOid:952626}},scope=milestoneReadBinding();
+ for(const identity of [{name:'other'},{oid:931888},{role:milestoneReceipt.migrationRole},{role:'zzsh'},{marker:'other'},{complete:false}])await assert.rejects(readDistributionPolicy(probe({...options,identity:{...options.identity,...identity}}).pool,actor,scope));
+ for(const shape of [{ownerOid:11},{roleOid:952625},{rolsuper:true},{rolbypassrls:true},{complete:false}])await assert.rejects(readDistributionPolicy(probe({...options,shape:{...options.shape,...shape}}).pool,actor,scope));
+ await assert.rejects(readDistributionPolicy(probe({...options,permissions:[]}).pool,actor,scope),e=>(e as {status:number}).status===403);
+ await assert.rejects(readDistributionPolicy(probe(options).pool,actor,{kind:'LOCAL_CONTROLLED_DISTRIBUTION'}));
+});
+
+test('GET-only route assembly keeps PUT and bind on their original unadmitted scope',async()=>{
+ const p=probe({identity:{name:milestoneReceipt.database,oid:952624,role:milestoneReceipt.runtimeRole},shape:{ownerOid:10,roleOid:952626}}),handlers=new Map<string,Function>(),app={getHttpAdapter:()=>({getInstance:()=>({use:(path:string,fn:Function)=>handlers.set(path,fn)})})} as unknown as INestApplication;
+ const session=async()=>({user:{id:'self',twoFactorEnabled:true},session:{id:'test-session'}}),options={...milestoneAssembly,testOperationsEnabled:false,pool:p.pool,adminAuth:{api:{getSession:session}},userAuth:{api:{getSession:session}},distributionReadScope:milestoneReadBinding()} as unknown as AuthSecurityOptions&{distributionReadScope:LocalDistributionScope};mountDistributionPolicyRoutes(app,options);mountInvitationRoutes(app,options);
+ const call=async(prefix:string,method:string,url:string,origin:string,body?:unknown)=>{let status=0,result:any;const response:any={setHeader(){return this;},status(n:number){status=n;return this;},json(b:unknown){result=b;}};await handlers.get(prefix)!({method,originalUrl:url,headers:{origin,'x-request-id':'req_route_read_scope','idempotency-key':'read_route_key'},body},response);return{status,result};};
+ for(const [prefix,url,origin]of [['/api/v1/admin/distribution/policy','/api/v1/admin/distribution/policy',milestoneAssembly.adminOrigin],['/api/v1/users/me/distribution','/api/v1/users/me/distribution',milestoneAssembly.userOrigin],['/api/v1/users/me/distribution','/api/v1/users/me/distribution/terms',milestoneAssembly.userOrigin]])assert.equal((await call(prefix!,'GET',url!,origin!)).status,200);
+ assert.equal((await call('/api/v1/admin/distribution/policy','PUT','/api/v1/admin/distribution/policy',milestoneAssembly.adminOrigin,{expectedRevision:'1',config:policyConfig,reason:'Write not admitted'})).status,503);
+ assert.equal((await call('/api/v1/users/me/distribution','POST','/api/v1/users/me/distribution/bind',milestoneAssembly.userOrigin,{code:'FX_PARENT',policyVersion:'policy_test',expectedParticipantRevision:'1'})).status,503);assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
+
+test('the milestone copy requires its exact source receipt and fixed assembly, never any local test database',()=>{
+ assertLocalDistributionAssembly(milestoneBinding(),milestoneAssembly);
+ for(const patch of [{resourceOid:952623},{ownerOid:11},{runtimeRoleOid:952625},{migrationRoleOid:952626},{runtimeRole:'zzsh'},{marker:'other'}])assert.throws(()=>createLocalDistributionScope(milestoneConfig,{...milestoneReceipt,...patch}));
+ assert.throws(()=>createLocalDistributionScope({...milestoneConfig,provider:'real'} as AppConfig,milestoneReceipt));
+ assert.throws(()=>createLocalDistributionScope({...milestoneConfig,database:{...milestoneConfig.database,user:milestoneReceipt.migrationRole}} as AppConfig,milestoneReceipt));
+ assert.throws(()=>assertLocalDistributionAssembly(milestoneBinding(),assembly));assert.throws(()=>assertLocalDistributionAssembly(binding(),milestoneAssembly));
+});
+
+test('the milestone runtime read requires matching role and owner OIDs as well as resource names',async()=>{
+ const options={identity:{name:milestoneReceipt.database,oid:952624,role:milestoneReceipt.runtimeRole},shape:{ownerOid:10,roleOid:952626}};
+ assert.equal((await readActiveDistributionPolicyInTransaction(probe(options).c,false,milestoneBinding())).knowledge,'KNOWN');
+ for(const shape of [{ownerOid:11},{roleOid:952625},{rolsuper:true},{rolbypassrls:true}])await assert.rejects(readActiveDistributionPolicyInTransaction(probe({...options,shape:{...options.shape,...shape}}).c,false,milestoneBinding()));
+ await assert.rejects(readActiveDistributionPolicyInTransaction(probe({...options,identity:{...options.identity,role:'zzsh'}}).c,false,milestoneBinding()));
+ assert.equal((await readRegistrationDistributionPolicyInTransaction(probe(options).c)).reason,'DISTRIBUTION_RESOURCE_NOT_ADMITTED');
+});
+
+test('owner-only legacy maintenance uses the same opaque receipt while runtime and forged receipts cannot import',async()=>{
+ const options={identity:{name:milestoneReceipt.database,oid:952624,role:'zzsh'},shape:{ownerOid:10,roleOid:10,rolsuper:true,rolbypassrls:true}};
+ assert.equal(await assertReviewedDistributionMaintenanceResource(probe(options).c,milestoneBinding()),true);
+ for(const patch of [{role:milestoneReceipt.runtimeRole},{oid:931888},{name:'zzsh_test_order_other'}])await assert.rejects(assertReviewedDistributionMaintenanceResource(probe({...options,identity:{...options.identity,...patch}}).c,milestoneBinding()));
+ await assert.rejects(assertReviewedDistributionMaintenanceResource(probe({...options,shape:{...options.shape,roleOid:952626}}).c,milestoneBinding()));
+ await assert.rejects(assertReviewedDistributionMaintenanceResource(probe(options).c,{kind:'LOCAL_CONTROLLED_DISTRIBUTION'}));
+ await assert.rejects(assertReviewedDistributionMaintenanceResource(probe().c,binding()));
+});
 test('exact creation capability rejects foreign configuration, receipt, remote and real provider',()=>{
  assertLocalDistributionAssembly(binding(),assembly);
  for(const patch of [{profile:'production'},{provider:'real'},{testOperationsEnabled:false}])assert.throws(()=>createLocalDistributionScope({...config,...patch} as AppConfig,receipt));

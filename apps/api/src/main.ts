@@ -6,6 +6,9 @@ import {
 } from "./health/readiness";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
+import { createLocalDistributionReadScope } from "./finance/distribution-policy-store";
+// Root-accepted local copy identity. This capability only admits existing facts to GET.
+const milestoneDistributionReceipt={database:"zzsh_test_order_milestone_real_1",resourceOid:952624,owner:"zzsh",ownerOid:10,marker:"zzsh:order-reservation-test:v1",migrationRole:"zzsh_order_milestone_real_1_m",migrationRoleOid:952625,runtimeRole:"zzsh_order_milestone_real_1_r",runtimeRoleOid:952626};
 
 export async function bootstrap() {
   const config = loadConfig();
@@ -35,6 +38,7 @@ export async function bootstrap() {
             auth: {
               ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
               pool: businessPool,
+              ...(config.database.name===milestoneDistributionReceipt.database?{distributionReadScope:createLocalDistributionReadScope(config,milestoneDistributionReceipt)}:{}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret
                 ? {

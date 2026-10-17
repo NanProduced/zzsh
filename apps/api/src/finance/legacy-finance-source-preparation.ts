@@ -82,8 +82,54 @@ export function prepareFrozenFinanceHistory(input:{subject:Subject;sourceKind:Ob
 
 export type StoredSourceCandidate={legacyId:string;targetUserId:string|null;storedEarningsCents:string;storedMoneyCents:string;sourceDigest:string;admission:'IDENTITY_ISOLATED'|'DUPLICATE_SELECTED_SEPARATE_REVIEW'|'MAPPED_PENDING_BATCH_APPROVAL'};
 export type ReviewedEconomicSource={sourceKind:string;sourceEntity:string;sourceId:string;beneficiaryRole:string;sourceEventAt:string;sourceCanonical:string;sourceDigest:string};
+export type ReviewedOpeningLogBinding={observationId:string;observationDigest:string;sourceKind:string;sourceEntity:string;sourceId:string;beneficiaryRole:string;sourceDigest:string};
+/** A frozen log keeps its original unresolved DTO. This separate proof binds its exact bytes to one original economic source. */
+function matchesOpeningLogSource(r:ReviewedEconomicSource,log:Record<string,unknown>,legacyUserId:string){
+ try{
+  const source=JSON.parse(r.sourceCanonical) as Record<string,unknown>;
+  if(String(log.sourceId)!==r.sourceId||String(source.id)!==r.sourceId)return false;
+  const epoch=(value:unknown)=>{const text=String(value);return /^[1-9]\d{0,9}$/.test(text)&&BigInt(text)<=4294967295n?BigInt(text):null;};
+  let amount:string,eventAt:bigint|null,action:number;
+  if(r.sourceKind==='LEGACY_DISTRIBUTION_EARNING'&&r.sourceEntity==='la_distribution_order'){
+   if(String(source.user_id)!==legacyUserId||String(source.order_type)!=='1'||String(source.status)!=='2'||String(source.is_delete)!=='0'
+    ||r.beneficiaryRole!==({2:'RENTER_REFERRAL',3:'OWNER_REFERRAL'} as Record<string,string>)[String(source.level)]||log.changeType!==1001)return false;
+   amount=sourceYuanToCents(source.earnings);eventAt=epoch(source.settle_time);action=1;
+  }else if(r.sourceKind==='LEGACY_RENTAL_OWNER_INCOME'&&r.sourceEntity==='la_order'&&r.beneficiaryRole==='OWNER'){
+   if(String(source.sale_user_id)!==legacyUserId||String(source.order_status)!=='4'||String(source.pay_is)!=='1'||log.changeType!==1001)return false;
+   const net=BigInt(sourceYuanToCents(source.sale_earnings))-BigInt(sourceYuanToCents(source.full_payout_money));if(net<0n)return false;
+   amount=net.toString();eventAt=epoch(source.confirm_time);action=1;
+  }else if(r.sourceKind==='LEGACY_WITHDRAWAL'&&r.sourceEntity==='la_withdraw_apply'&&r.beneficiaryRole==='WALLET_HOLDER'){
+   if(String(source.userId)!==legacyUserId||String(source.status)!=='3'||log.changeType!==1002)return false;
+   amount=sourceYuanToCents(source.money);eventAt=epoch(source.create_time);action=2;
+  }else return false;
+  const logAt=epoch(log.createdAt);
+  return eventAt!==null&&logAt!==null&&logAt>=eventAt&&r.sourceEventAt===eventAt.toString()&&log.action===action&&sourceYuanToCents(log.amount)===amount;
+ }catch{return false;}
+}
+function reviewedOpeningLogBindings(input:{observations:Record<string,unknown>[];covered:ReviewedEconomicSource[];logBindings?:ReviewedOpeningLogBinding[]},s:Subject){
+ const unresolved=input.observations.filter(r=>r.kind==='earningsLog'&&r.referenceType==='UNRESOLVED_ECONOMIC_SOURCE');
+ if(input.logBindings!==undefined&&!Array.isArray(input.logBindings))throw invalid('Opening log proofs must be an array');
+ if(!input.logBindings?.length)return unresolved.length===0;
+ if(!Array.isArray(input.logBindings)||input.logBindings.length!==unresolved.length)throw invalid('Exact one-to-one opening log proofs required');
+ const logs=new Set<string>(),roots=new Set<string>();
+ for(const binding of input.logBindings){
+  ensureOnlyFields(binding,['observationId','observationDigest','sourceKind','sourceEntity','sourceId','beneficiaryRole','sourceDigest']);
+  if(!old.test(binding.observationId)||!old.test(binding.sourceId)||!digest.test(binding.observationDigest)||!digest.test(binding.sourceDigest)||logs.has(binding.observationId))throw invalid('Opening log proof is duplicate or invalid');logs.add(binding.observationId);
+  const row=unresolved.find(r=>String(r.sourceId)===binding.observationId);if(!row)throw invalid('Opening log proof has no original observation');
+  const observation=prepareHistoricalObservation(row,{userId:s.userId,legacyUserId:s.legacyUserId,sourceSystem:'legacy_mysql_restore',basisId:null});
+  const raw=row.rawSource as {entity?:unknown;canonical?:unknown;digest?:unknown}|undefined;
+  if(observation.sourceDigest!==binding.observationDigest||raw?.entity!=='la_log_earnings'||typeof raw.canonical!=='string'||typeof raw.digest!=='string'||sha(raw.canonical)!==raw.digest)throw invalid('Opening original log bytes differ');
+  const log=JSON.parse(raw.canonical) as Record<string,unknown>;ensureOnlyFields(log,['id','sn','action','amount','userId','sourceId','createdAt','changeType','leftAmount']);
+  if(canonicalize(log)!==raw.canonical||String(log.id)!==binding.observationId||String(log.userId)!==s.legacyUserId||String(log.sourceId)!==row.referenceId||log.amount!==row.amount||log.action!==row.action||log.createdAt!==row.createdAt||log.changeType!==row.legacyChangeType||log.leftAmount!==row.leftAmount)throw invalid('Opening log subject, amount or direction changed');
+  const candidates=input.covered.filter(r=>matchesOpeningLogSource(r,log,s.legacyUserId));
+  if(candidates.length!==1)throw invalid('Opening log economic source is missing or ambiguous');const root=candidates[0]!;
+  for(const key of ['sourceKind','sourceEntity','sourceId','beneficiaryRole','sourceDigest'] as const)if(binding[key]!==root[key])throw invalid('Opening log proof points to another economic source');
+  const key=canonicalize([root.sourceKind,root.sourceEntity,root.sourceId,root.beneficiaryRole]);if(roots.has(key))throw invalid('Opening economic source credited by more than one log');roots.add(key);
+ }
+ return true;
+}
 /** A preparation result is never a FinanceOpeningAdmission. The real writer still checks its opaque review/current audit/resource. */
-export function prepareStoredOpeningCandidate(input:{candidate:StoredSourceCandidate;subject:Subject;source:{id:string;earnings:string;money:string};inputSha256:string;cutoff:string;covered:ReviewedEconomicSource[];observations:Record<string,unknown>[];included:string[]}):{state:'REVIEW_REQUIRED';reason:string}|{state:'CANDIDATE';executable:false;input:StoredOpeningInput;sourceReviews:ReviewedEconomicSource[]}{
+export function prepareStoredOpeningCandidate(input:{candidate:StoredSourceCandidate;subject:Subject;source:{id:string;earnings:string;money:string};inputSha256:string;cutoff:string;covered:ReviewedEconomicSource[];observations:Record<string,unknown>[];included:string[];logBindings?:ReviewedOpeningLogBinding[]}):{state:'REVIEW_REQUIRED';reason:string}|{state:'CANDIDATE';executable:false;input:StoredOpeningInput;sourceReviews:ReviewedEconomicSource[]}{
  const {candidate:c,subject:s,source}=input;subject(s);ensureOnlyFields(source,['id','earnings','money']);
  if(c.admission!=='MAPPED_PENDING_BATCH_APPROVAL')return{state:'REVIEW_REQUIRED',reason:c.admission};
  if(c.legacyId!==s.legacyUserId||c.targetUserId!==s.userId||source.id!==s.legacyUserId||sha(JSON.stringify({id:source.id,earnings:source.earnings,money:source.money}))!==c.sourceDigest
@@ -107,7 +153,7 @@ export function prepareStoredOpeningCandidate(input:{candidate:StoredSourceCandi
   return{sourceEntity:p.sourceEntity,sourceId:p.sourceId,sourceDigest:p.sourceDigest,sourceEventAt:p.sourceEventAt,included:included.has(key)};
  });
  if(input.included.some(k=>!seen.has(k)))throw invalid('Included observation absent from reviewed set');
- if(input.observations.some(r=>r.kind==='earningsLog'&&r.referenceType==='UNRESOLVED_ECONOMIC_SOURCE'))return{state:'REVIEW_REQUIRED',reason:'ECONOMIC_SOURCE_REVIEW_INCOMPLETE'};
+ if(!reviewedOpeningLogBindings(input,s))return{state:'REVIEW_REQUIRED',reason:'ECONOMIC_SOURCE_REVIEW_INCOMPLETE'};
  const body:StoredOpeningInput={inputSha256:input.inputSha256,cutoff:input.cutoff,sourceCanonical:canonicalize(source),proof:{userId:s.userId,source:{sourceSystem:'legacy_mysql_restore',sourceEntity:'la_user',sourceId:s.legacyUserId,identityDigest:s.identityDigest},availableCents:c.storedEarningsCents,sourceDigest:c.sourceDigest,coveredCount:covered.length,coveredDigest:sha(covered.map(r=>JSON.stringify(r)).join('\n')),coveredSet:covered},observations:input.observations,admissions};
  return{state:'CANDIDATE',executable:false,input:body,sourceReviews:input.covered};
 }

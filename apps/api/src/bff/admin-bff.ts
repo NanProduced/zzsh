@@ -46,6 +46,7 @@ export type AdminBffOptions = {
   adminAuthHandler: WebAuthHandler;
   adminSecurityOptions: AuthSecurityOptions;
   distributionScope?: LocalDistributionScope;
+  distributionReadScope?: LocalDistributionScope;
   supply: SupplyRuntimeOptions;
   order: OrderRuntimeOptions;
   yunxin?: YunxinRouteOptions;
@@ -459,7 +460,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.url = targetPath;
     request.originalUrl = targetPath;
     request.headers = { ...request.headers, "x-request-id": requestId };
-    await handleDistributionPolicyAdmin(request, response as never, { ...options.adminSecurityOptions, distributionScope: options.distributionScope });
+    await handleDistributionPolicyAdmin(request, response as never, { ...options.adminSecurityOptions, distributionScope: options.distributionScope, distributionReadScope: options.distributionReadScope });
     return;
   }
   const membershipGrowthPolicy = /^\/membership-growth\/(policy|policy-drafts|backfill)$/.test(path);

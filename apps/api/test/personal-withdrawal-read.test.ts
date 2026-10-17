@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
 import type {Pool} from 'pg';
 import {historicalWithdrawalProjection,parsePersonalWithdrawalQuery,parsePersonalWithdrawalDetailPath,readPersonalWithdrawals} from '../src/finance/personal-withdrawal-read';
-import {prepareHistoricalObservation} from '../src/finance/personal-finance-read';
+import {prepareHistoricalObservation,OPENING_OBSERVATION_JOIN} from '../src/finance/personal-finance-read';
 import {encodeFinanceCursor} from '../src/finance/personal-finance-read';
 import {readControlledWithdrawalsInTransaction} from '../src/finance/controlled-withdrawal-store';
 import {createNativeWithdrawalScope} from '../src/finance/native-withdrawal-resource';
@@ -15,7 +15,8 @@ function observation(id='obs_z',status=2,user='self'){
  const prepared=prepareHistoricalObservation(snapshot,{userId:user,legacyUserId:'11',sourceSystem:'legacy_mysql_restore',basisId:null});
  return{id,user_id:user,basis_id:null,legacy_user_id:'11',source_kind:'HISTORICAL_WITHDRAWAL',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_withdraw_apply',source_id:String(snapshot.sourceId),source_digest:prepared.sourceDigest,source_canonical:prepared.sourceCanonical,snapshot,occurred_at:at,imported_at:at,included_in_opening:false};
 }
-function probe(options:{rows?:ReturnType<typeof observation>[];native?:boolean;resource?:Record<string,unknown>;databaseError?:boolean;active?:boolean;historyCoverage?:Record<string,unknown>}={}){
+type OpeningView={basisId:string;userId:string;admissions:{userId:string;legacyUserId:string;sourceSystem:string;sourceEntity:string;sourceId:string;sourceDigest:string;sourceEventAt:string;included:boolean}[]};
+function probe(options:{rows?:ReturnType<typeof observation>[];native?:boolean;resource?:Record<string,unknown>;databaseError?:boolean;active?:boolean;historyCoverage?:Record<string,unknown>;opening?:OpeningView}={}){
  const seen:{sql:string;args:any[]}[]=[],rows=options.rows??[],resource={name:'zzsh_test_read_unadmitted',oid:99999,role:'reader',marker:'not-admitted',complete:true,...options.resource};
  const client={release(){},async query(sql:string,args:any[]=[]){seen.push({sql,args});
   if(['BEGIN','COMMIT','ROLLBACK'].includes(sql))return{rows:[]};
@@ -30,8 +31,13 @@ function probe(options:{rows?:ReturnType<typeof observation>[];native?:boolean;r
   if(sql.startsWith('SELECT to_char'))return{rows:[{at}]};
   if(sql.includes('FROM zzsh_order.personal_finance_observation o')){
    if(options.databaseError)throw new Error('database read failed');
-   const own=rows.filter(row=>row.user_id===args[0]);
-   if(sql.includes(' AS count,md5')){const selected=own.filter(row=>args[1]==='ALL'||String(row.snapshot.sourceStatus)===args[1]);return{rows:[{count:String(selected.length),digest:selected.map(r=>r.id+':'+r.source_digest).join(',')}]};}
+   // SQL wiring seam only: shared admission join determines the view; stored rows stay unchanged.
+   const own=rows.filter(row=>row.user_id===args[0]).map(row=>{
+    if(!sql.includes(OPENING_OBSERVATION_JOIN)||!sql.includes('COALESCE(oa.included_in_opening'))return row;
+    const opening=options.opening,a=opening?.userId===row.user_id?opening.admissions.find(a=>a.userId===row.user_id&&a.legacyUserId===row.legacy_user_id&&a.sourceSystem===row.source_system&&a.sourceEntity===row.source_entity&&a.sourceId===row.source_id&&a.sourceDigest===row.source_digest&&a.sourceEventAt===row.occurred_at):undefined;
+    return a?{...row,basis_id:opening!.basisId,included_in_opening:a.included}:row;
+   });
+   if(sql.includes(' AS count,md5')){const selected=own.filter(row=>args[1]==='ALL'||String(row.snapshot.sourceStatus)===args[1]);return{rows:[{count:String(selected.length),digest:selected.map(r=>r.id+':'+r.source_digest+(sql.includes('COALESCE(oa.basis_id')?':'+(r.basis_id??'')+':'+String(r.included_in_opening):'')).join(',')}]};}
    if(sql.includes('AND o.id=$2'))return{rows:own.filter(row=>row.id===args[1])};
    return{rows:own.filter(row=>(args[2]==='ALL'||String(row.snapshot.sourceStatus)===args[2])&&(!args[4]||row.id<args[4])).sort((a,b)=>a.id>b.id?-1:1).slice(0,args[5])};
   }
@@ -78,6 +84,24 @@ test('signed history/source snapshot cursors reject session and source changes; 
  await assert.rejects(readPersonalWithdrawals(p.pool,actor,{...query,source:'LOCAL_CONTROLLED',cursor},key),(e:any)=>e.status===409);
  const detail=await readPersonalWithdrawals(p.pool,actor,query,key,undefined,'history:obs_z');assert('item' in detail);assert.equal(detail.item?.id,'history:obs_z');
  await assert.rejects(readPersonalWithdrawals(p.pool,actor,query,key,undefined,'history:foreign'),(e:any)=>e.status===404);
+});
+
+test('later opening admission overlays list and detail without rewriting imported withdrawal facts',async()=>{
+ const rows=[observation()],original=structuredClone(rows),r=rows[0]!,admission={userId:r.user_id,legacyUserId:r.legacy_user_id,sourceSystem:r.source_system,sourceEntity:r.source_entity,sourceId:r.source_id,sourceDigest:r.source_digest,sourceEventAt:r.occurred_at,included:true};
+ const options={rows,opening:{basisId:'reviewed-opening',userId:r.user_id,admissions:[admission]}},p=probe(options);
+ const page=await readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL'},key);assert(page.historical?.items);assert.equal(page.historical.items[0]?.includedInOpening,true);
+ const detail=await readPersonalWithdrawals(p.pool,actor,query,key,undefined,'history:'+r.id);assert('item' in detail);assert(detail.item&&detail.item.source==='HISTORICAL_WITHDRAWAL');assert.equal(detail.item.includedInOpening,true);assert.equal(detail.item.amountCents,'10000');assert.equal(detail.item.channelArrivalKnowledge,'UNKNOWN');assert.equal(detail.item.accountingEffect,'OBSERVATION_ONLY_NO_NEW_DEBIT');
+ assert.deepEqual(rows,original);assert(p.seen.filter(q=>q.sql.includes('FROM zzsh_order.personal_finance_observation o')).every(q=>q.sql.includes(OPENING_OBSERVATION_JOIN)));assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ for(const patch of [{userId:'other'},{sourceEntity:'la_order'},{sourceDigest:'0'.repeat(64)},{sourceEventAt:'2026-10-04T00:00:00.000001Z'},{legacyUserId:'other'},{sourceSystem:'other'}]){
+  options.opening.admissions=[{...admission,...patch}];const rejected=await readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL'},key);assert.equal(rejected.historical?.items?.[0]?.includedInOpening,false);
+ }
+});
+
+test('opening admission changes the historical cursor snapshot even when immutable source rows do not change',async()=>{
+ const rows=[observation('obs_z'),observation('obs_a')],options:{rows:typeof rows;opening?:OpeningView}={rows},p=probe(options),first=await readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL',limit:1},key),cursor=first.historical?.nextCursor;assert(cursor);
+ options.opening={basisId:'reviewed-opening',userId:'self',admissions:rows.map(r=>({userId:r.user_id,legacyUserId:r.legacy_user_id,sourceSystem:r.source_system,sourceEntity:r.source_entity,sourceId:r.source_id,sourceDigest:r.source_digest,sourceEventAt:r.occurred_at,included:true}))};
+ await assert.rejects(readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL',limit:1,cursor},key),(e:any)=>e.status===409);
+ const current=await readPersonalWithdrawals(p.pool,actor,{...query,source:'HISTORICAL',limit:1},key);assert.notEqual(current.historical?.snapshotVersion,first.historical?.snapshotVersion);assert.equal(current.historical?.items?.[0]?.includedInOpening,true);assert(rows.every(r=>r.basis_id===null&&!r.included_in_opening));
 });
 test('known tuple with broken role/marker, bad explicit scope and SQL errors propagate rather than become availability',async()=>{
  for(const patch of [{role:'zzsh',marker:'zzsh:m2-auth-test:v1'},{role:'zzsh_m2_auth_compat_r',marker:'wrong'}]){const p=probe({resource:{name:'zzsh_test_m2_auth_auth_compat',oid:820148,...patch}});await assert.rejects(readPersonalWithdrawals(p.pool,actor,query,key),(e:any)=>e.status===503);assert(p.seen.some(row=>row.sql==='ROLLBACK'));}

@@ -85,6 +85,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   nativeWithdrawalScope?: NativeWithdrawalScope;
   /** Exact local creation-receipt capability; absent in ordinary configuration. */
   distributionScope?: LocalDistributionScope;
+  distributionReadScope?: LocalDistributionScope;
   /** Explicit local assembly only; lets fresh registrations initialize a native zero origin on one exact resource. */
   nativeWalletOrigin?: NativeOriginResource;
   /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
@@ -733,6 +734,7 @@ export async function mountAuthHandlers(
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions> {
   assertLocalDistributionAssembly(options.distributionScope, options);
+  assertLocalDistributionAssembly(options.distributionReadScope, options);
   const legacyPublicAdmission=options.legacyPublicAdmission ? parseLegacyPublicAdmission(options.legacyPublicAdmission) : undefined;
   if(legacyPublicAdmission) await assertLegacyPublicAdmissionTarget(options.pool,legacyPublicAdmission);
   const legacyPublicAdmissionManifest=options.legacyPublicAdmissionManifest;
@@ -1049,6 +1051,7 @@ export async function mountAuthHandlers(
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
     distributionScope: options.distributionScope,
+    distributionReadScope: options.distributionReadScope,
     supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
     ...(yunxinRuntime ? {
@@ -1083,8 +1086,8 @@ export async function mountAuthHandlers(
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);
-  mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope});
-  mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope});
+  mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
+  mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope});
   mountMembershipGrowthRoutes(app, securityOptions);
   const membershipGrowthReader = membershipGrowthEnabled()

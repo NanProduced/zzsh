@@ -46,6 +46,60 @@ test('source preview reuses original earnings and withdrawal conversion without 
  assert.equal(p.row.referenceType,'UNRESOLVED_ECONOMIC_SOURCE');assert.equal(p.financialSource,'UNKNOWN');assert.equal(p.executable,false);assert.equal(w.row.amount,'5.00');assert.equal(w.row.net,'4.50');assert.equal(w.executable,false);assert.equal(w.identityAudit,'UNBOUND');
 });
 
+function openingLogFixture(){
+ const sha=(x:string)=>createHash('sha256').update(x).digest('hex');
+ const original={id:'501',sn:'DIST-ORIGINAL',user_id:'11',order_type:'1',order_id:'71',earnings:'1.10',level:'2',level_id:'2',ratio:'10',status:'2',settle_time:String(log.createdAt),is_delete:'0',create_time:'1779460000',update_time:String(log.createdAt)};
+ const economic={sourceKind:'LEGACY_DISTRIBUTION_EARNING',sourceEntity:'la_distribution_order',sourceId:'501',beneficiaryRole:'RENTER_REFERRAL',sourceEventAt:String(log.createdAt),sourceCanonical:canonicalize(original),sourceDigest:sha(canonicalize(original))};
+ const observed=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',log,subject),source={id:'11',earnings:'1.10',money:'0.00'};
+ const binding={observationId:observed.sourceId,observationDigest:observed.sourceDigest,sourceKind:economic.sourceKind,sourceEntity:economic.sourceEntity,sourceId:economic.sourceId,beneficiaryRole:economic.beneficiaryRole,sourceDigest:economic.sourceDigest};
+ return{subject,source,candidate:{legacyId:'11',targetUserId:subject.userId,storedEarningsCents:'110',storedMoneyCents:'0',sourceDigest:sha(JSON.stringify(source)),admission:'MAPPED_PENDING_BATCH_APPROVAL' as const},inputSha256,cutoff,covered:[economic],observations:[observed.row],included:['la_log_earnings:101'],logBindings:[binding]};
+}
+
+test('an exact separate economic binding closes the stored candidate without rewriting an already imported log',()=>{
+ const x=openingLogFixture(),original=canonicalize(x.observations[0]),p=prepareStoredOpeningCandidate(x);assert.equal(p.state,'CANDIDATE');
+ if(p.state==='CANDIDATE'){assert.equal(p.input.proof.availableCents,'110');assert.equal(p.input.proof.coveredCount,1);assert.equal(p.input.admissions[0]!.included,true);assert.equal(canonicalize(p.input.observations[0]),original);assert.equal(p.input.observations[0]!.referenceType,'UNRESOLVED_ECONOMIC_SOURCE');}
+ assert.equal(canonicalize(x.observations[0]),original);assert.equal(prepareStoredOpeningCandidate({...x,logBindings:[]}).state,'REVIEW_REQUIRED');
+});
+
+test('opening bindings reject changed original observation bytes, direction, source tuple, or duplicated proof',()=>{
+ for(const change of [
+  (x:ReturnType<typeof openingLogFixture>)=>x.logBindings[0]!.observationDigest='0'.repeat(64),
+  (x:ReturnType<typeof openingLogFixture>)=>x.logBindings[0]!.sourceDigest='0'.repeat(64),
+  (x:ReturnType<typeof openingLogFixture>)=>x.logBindings[0]!.sourceKind='LEGACY_ADMIN_LOG',
+  (x:ReturnType<typeof openingLogFixture>)=>x.observations[0]!.action=2,
+  (x:ReturnType<typeof openingLogFixture>)=>x.observations[0]!.sourceUserId=12,
+  (x:ReturnType<typeof openingLogFixture>)=>x.logBindings.push({...x.logBindings[0]!}),
+ ]){const x=openingLogFixture();change(x);assert.throws(()=>prepareStoredOpeningCandidate(x));}
+ assert.throws(()=>prepareStoredOpeningCandidate({...openingLogFixture(),logBindings:{} as never}));
+});
+
+test('rehashing a foreign, pending, wrongly valued or wrongly classified source cannot prove a stored credit',()=>{
+ for(const change of [
+  (r:Record<string,unknown>)=>r.user_id='12',
+  (r:Record<string,unknown>)=>r.earnings='2.20',
+  (r:Record<string,unknown>)=>r.status='1',
+  (r:Record<string,unknown>)=>r.level='3',
+  (r:Record<string,unknown>)=>r.settle_time='0',
+ ]){const x=openingLogFixture(),r=JSON.parse(x.covered[0]!.sourceCanonical);change(r);x.covered[0]!.sourceCanonical=canonicalize(r);x.covered[0]!.sourceDigest=createHash('sha256').update(canonicalize(r)).digest('hex');x.logBindings[0]!.sourceDigest=x.covered[0]!.sourceDigest;assert.throws(()=>prepareStoredOpeningCandidate(x));}
+ const admin=openingLogFixture();admin.covered[0]!.sourceKind='LEGACY_ADMIN_LOG';admin.covered[0]!.sourceEntity='la_log_earnings';admin.covered[0]!.beneficiaryRole='WALLET_HOLDER';Object.assign(admin.logBindings[0]!,{sourceKind:'LEGACY_ADMIN_LOG',sourceEntity:'la_log_earnings',beneficiaryRole:'WALLET_HOLDER'});assert.throws(()=>prepareStoredOpeningCandidate(admin));
+});
+
+test('multiple plausible roots and two original logs for one economic root remain rejected',()=>{
+ const ambiguous=openingLogFixture(),order={id:'501',sale_user_id:'11',order_status:'4',pay_is:'1',sale_earnings:'1.10',full_payout_money:'0.00',confirm_time:String(log.createdAt)};
+ ambiguous.covered.push({sourceKind:'LEGACY_RENTAL_OWNER_INCOME',sourceEntity:'la_order',sourceId:'501',beneficiaryRole:'OWNER',sourceEventAt:String(log.createdAt),sourceCanonical:canonicalize(order),sourceDigest:createHash('sha256').update(canonicalize(order)).digest('hex')});assert.throws(()=>prepareStoredOpeningCandidate(ambiguous),/missing or ambiguous/);
+ const duplicate=openingLogFixture(),second=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',{...log,id:102},subject);duplicate.observations.push(second.row);duplicate.included.push('la_log_earnings:102');duplicate.logBindings.push({...duplicate.logBindings[0]!,observationId:second.sourceId,observationDigest:second.sourceDigest});assert.throws(()=>prepareStoredOpeningCandidate(duplicate),/more than one log/);
+ const repeated=openingLogFixture();repeated.covered.push({...repeated.covered[0]!});assert.throws(()=>prepareStoredOpeningCandidate(repeated),/Duplicate economic root/);
+});
+
+test('a zero stored balance can cover original owner income and an already deducted withdrawal without a new debit',()=>{
+ const sha=(x:string)=>createHash('sha256').update(x).digest('hex'),base=openingLogFixture(),source={id:'11',earnings:'0.00',money:'0.00'};
+ const order={id:'501',sale_user_id:'11',order_status:'4',pay_is:'1',sale_earnings:'1.10',full_payout_money:'0.00',confirm_time:String(log.createdAt)};
+ const paidWithdrawal={...withdrawal,money:'1.10',status:3,left_money:'1.00',handling_fee:'0.10'},debit=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',{...log,id:102,sourceId:paidWithdrawal.id,action:2,changeType:1002,leftAmount:'0.00'},subject);
+ const covered=[{sourceKind:'LEGACY_RENTAL_OWNER_INCOME',sourceEntity:'la_order',sourceId:'501',beneficiaryRole:'OWNER',sourceEventAt:String(log.createdAt),sourceCanonical:canonicalize(order),sourceDigest:sha(canonicalize(order))},{sourceKind:'LEGACY_WITHDRAWAL',sourceEntity:'la_withdraw_apply',sourceId:String(paidWithdrawal.id),beneficiaryRole:'WALLET_HOLDER',sourceEventAt:String(paidWithdrawal.create_time),sourceCanonical:canonicalize(paidWithdrawal),sourceDigest:sha(canonicalize(paidWithdrawal))}];
+ const observations=[base.observations[0]!,debit.row],logBindings=covered.map((r,i)=>({observationId:String(observations[i]!.sourceId),observationDigest:sha(canonicalize(observations[i])),sourceKind:r.sourceKind,sourceEntity:r.sourceEntity,sourceId:r.sourceId,beneficiaryRole:r.beneficiaryRole,sourceDigest:r.sourceDigest}));
+ const p=prepareStoredOpeningCandidate({...base,source,candidate:{...base.candidate,storedEarningsCents:'0',sourceDigest:sha(JSON.stringify(source))},covered,observations,logBindings,included:['la_log_earnings:101','la_log_earnings:102']});assert.equal(p.state,'CANDIDATE');if(p.state==='CANDIDATE'){assert.equal(p.input.proof.availableCents,'0');assert.equal(p.input.proof.coveredCount,2);assert(p.input.admissions.every(a=>a.included));}
+});
+
 /* ---- FIN-ORDER-2: formal batch assembly + preflight, consumed only by the existing order commands ---- */
 import type {PoolClient as FoPoolClient} from 'pg';
 import {assembleLegacyLiabilityBatch as foLiability,assembleLegacyCompletedCommissionBatch as foCommission,type LegacyParentTargetFact as FoParent,type LegacyLiabilitySourceRow as FoLiabilityRow,type LegacyCommissionSourceRow as FoCommissionRow,type LegacyCurrentTargetFact as FoCurrent} from '../src/finance/legacy-finance-source-preparation';

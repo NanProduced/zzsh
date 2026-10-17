@@ -4,51 +4,67 @@ import {canonicalize} from '../supply/content-hash';import {ensureOnlyFields,inv
 import {validateDistributionPolicy,type DistributionPolicyConfig} from './distribution-policy';
 import {ConfigurationError,type AppConfig} from '../config/config';
 export type LocalDistributionScope=Readonly<{kind:'LOCAL_CONTROLLED_DISTRIBUTION'}>;
-type CreationReceipt={database:string;resourceOid:number;owner:string;marker:string;migrationRole:string;runtimeRole:string};
+type CreationReceipt={database:string;resourceOid:number;owner:string;marker:string;migrationRole:string;runtimeRole:string;ownerOid?:number;migrationRoleOid?:number;runtimeRoleOid?:number};
 const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_credit_admin_batch2_r',localMigration='zzsh_order_credit_admin_batch2_m',localMarker='zzsh:order-reservation-test:v1';
-const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt>>();
+const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
+const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean}>>();
 /** Explicit server assembly from the resource creation receipt; never HTTP or environment input. */
 export function createLocalDistributionScope(config:AppConfig,receipt:CreationReceipt):LocalDistributionScope{
- if(config.profile!=='test'||config.provider!=='fake'||!config.testOperationsEnabled
+ return createScope(config,receipt,false);
+}
+/** Exact milestone GET capability; it cannot admit registration, policy or relation writes. */
+export function createLocalDistributionReadScope(config:AppConfig,receipt:CreationReceipt):LocalDistributionScope{
+ return createScope(config,receipt,true);
+}
+function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):LocalDistributionScope{
+ const milestone=receipt.database===milestoneName,name=milestone?milestoneName:localName,runtime=milestone?milestoneRuntime:localRuntime,migration=milestone?milestoneMigration:localMigration;
+ if(config.profile!=='test'||config.provider!=='fake'||!readOnly&&!config.testOperationsEnabled||readOnly&&!milestone
   ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||config.database.port!==55432
-  ||config.database.name!==localName||config.database.user!==localRuntime
-  ||receipt.database!==localName||receipt.runtimeRole!==localRuntime||receipt.migrationRole!==localMigration
+  ||config.database.name!==name||config.database.user!==runtime
+  ||receipt.database!==name||receipt.runtimeRole!==runtime||receipt.migrationRole!==migration
   ||receipt.owner!=='zzsh'||receipt.marker!==localMarker||!Number.isSafeInteger(receipt.resourceOid)||receipt.resourceOid<=0||receipt.resourceOid>4294967295
+  ||milestone&&(receipt.resourceOid!==952624||receipt.ownerOid!==10||receipt.migrationRoleOid!==952625||receipt.runtimeRoleOid!==952626)
   ||[793252,878001,893390,881699,820148,833000,869754].includes(receipt.resourceOid))throw new ConfigurationError('Exact local test/fake distribution creation receipt required');
- const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt}));return value;
+ const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly}));return value;
 }
 export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string}){
  if(binding===undefined)return;
- if(!localProofs.has(binding)||!options.testOperationsEnabled||options.secureCookies||process.env.NODE_ENV==='production'
-  ||options.apiOrigin!=='http://127.0.0.1:4282'||options.userOrigin!=='http://127.0.0.1:4280'||options.adminOrigin!=='http://127.0.0.1:4281')throw new ConfigurationError('Local distribution scope requires its explicit test API assembly');
+ const receipt=localProofs.get(binding),port=receipt?.database===milestoneName?4220:4280;
+ if(!localProofs.has(binding)||!receipt?.readOnly&&!options.testOperationsEnabled||options.secureCookies||process.env.NODE_ENV==='production'
+  ||options.apiOrigin!==`http://127.0.0.1:${port+2}`||options.userOrigin!==`http://127.0.0.1:${port}`||options.adminOrigin!==`http://127.0.0.1:${port+1}`)throw new ConfigurationError('Local distribution scope requires its explicit test API assembly');
 }
 export const DISTRIBUTION_POLICY_PERMISSION={read:'personal.distribution.policy.read',manage:'personal.distribution.policy.manage'} as const;
 type Actor={userId:string;sessionId:string;requestId:string};const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),scope='LOCAL_CONTROLLED';
 async function authorize(c:PoolClient,actor:Actor,write=false){await assertAdminContextInTransaction(c,actor);const user=(await c.query('SELECT suspended FROM zzsh_auth_admin."user" WHERE id=$1',[actor.userId])).rows[0];if(!user||user.suspended)throw forbidden('Policy operator unavailable');const access=await loadEffectiveAdminAccess(c,actor.userId);if(write)requirePermission(access,DISTRIBUTION_POLICY_PERMISSION.manage);else if(!hasPermission(access,DISTRIBUTION_POLICY_PERMISSION.read)&&!hasPermission(access,DISTRIBUTION_POLICY_PERMISSION.manage))throw forbidden('Policy read permission required');}
-async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistributionScope){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
+async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistributionScope,maintenanceOwner=false,readOnly=false){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
  if(binding!==undefined){
   const proof=localProofs.get(binding);
-  if(!proof||!r||r.name!==proof.database||Number(r.oid)!==proof.resourceOid||r.marker!==proof.marker||![proof.runtimeRole,proof.migrationRole].includes(r.role)||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
-  const shape=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,r.rolsuper,r.rolbypassrls,
+  const roles=maintenanceOwner&&proof?.database===milestoneName?[proof.owner]:proof?proof.readOnly?[proof.runtimeRole]:[proof.runtimeRole,proof.migrationRole]:[];
+  if(!proof||proof.readOnly&&!readOnly||!r||maintenanceOwner&&proof.database!==milestoneName||r.name!==proof.database||Number(r.oid)!==proof.resourceOid||r.marker!==proof.marker||!roles.includes(r.role)||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
+  const shape=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",r.oid::int AS "roleOid",r.rolsuper,r.rolbypassrls,
    to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.distribution_invite_code') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete
    FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
-  if(!shape||shape.owner!==proof.owner||shape.rolsuper!==false||shape.rolbypassrls!==false||shape.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution schema or role unavailable');
+  const expectedRole=maintenanceOwner?proof.ownerOid:r.role===proof.runtimeRole?proof.runtimeRoleOid:proof.migrationRoleOid;
+  if(!shape||shape.owner!==proof.owner||!maintenanceOwner&&(shape.rolsuper!==false||shape.rolbypassrls!==false)||shape.complete!==true
+   ||proof.database===milestoneName&&(shape.ownerOid!==proof.ownerOid||shape.roleOid!==expectedRole))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution schema or role unavailable');
   return true;
  }
  const resources=[['zzsh_test_m2_auth_auth_compat',820148,'zzsh_m2_auth_compat_','zzsh:m2-auth-test:v1'],['zzsh_test_m2_auth_auth_compat_ui',833000,'zzsh_m2_auth_compat_ui_','zzsh:m2-auth-test:v1'],['zzsh_test_order_personal_finance',869754,'zzsh_order_personal_finance_','zzsh:order-reservation-test:v1']] as const;
  const expected=resources.find(([name,oid])=>r?.name===name&&Number(r.oid)===oid);if(!expected&&allowUnadmitted)return false;if(!expected||r.marker!==expected[3]||![expected[2]+'r',expected[2]+'m'].includes(r.role)||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution policy resource or schema unavailable');return true;}
+/** Internal historical migration only: the exact receipt admits owner10, never the runtime role or an arbitrary local database. */
+export async function assertReviewedDistributionMaintenanceResource(c:PoolClient,binding:LocalDistributionScope){return resource(c,false,binding,true);}
 
 function decode(row:Record<string,any>){if(sha(row.canonical_config)!==row.config_digest)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Policy digest differs');let config:DistributionPolicyConfig;try{config=validateDistributionPolicy(JSON.parse(row.canonical_config));if(canonicalize(config)!==row.canonical_config)throw Error();}catch{throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Policy schema is not valid');}return{versionId:row.id,revision:String(row.revision),digest:row.config_digest,config,createdAt:new Date(row.created_at).toISOString()};}
 /** Caller has verified its resource. Payment and relation writers may pin the immutable head. */
 export async function readDistributionPolicyRowInTransaction(c:PoolClient,lockHead=false){const row=(await c.query(`SELECT v.* FROM zzsh_order.distribution_policy_head h JOIN zzsh_order.distribution_policy_version v ON v.id=h.current_version_id AND v.scope=h.scope AND v.revision=h.revision WHERE h.scope=$1${lockHead?' FOR SHARE OF h':''}`,[scope])).rows[0];return row?{knowledge:'KNOWN' as const,policy:decode(row)}:{knowledge:'UNKNOWN' as const,policy:null,reason:'POLICY_NOT_CONFIGURED'};}
 const read=readDistributionPolicyRowInTransaction;
-export async function readDistributionPolicy(pool:Pool,actor:Actor,binding?:LocalDistributionScope){return withTransaction(pool,async c=>{await authorize(c,actor);await resource(c,false,binding);return read(c);});}
+export async function readDistributionPolicy(pool:Pool,actor:Actor,binding?:LocalDistributionScope){return withTransaction(pool,async c=>{await authorize(c,actor);await resource(c,false,binding,false,true);return read(c);});}
 /** Domain-only current policy read; caller retains its own user/registration authorization. */
 export async function readActiveDistributionPolicyInTransaction(c:PoolClient,lockHead=false,binding?:LocalDistributionScope){await resource(c,false,binding);return read(c,lockHead);}
 /** Invitation reads do not require write admission; its capability still uses the original gate. */
 export async function readInvitationPolicyInTransaction(c:PoolClient,binding?:LocalDistributionScope){
  if(!(await c.query("SELECT to_regclass('zzsh_order.distribution_policy_version') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AS complete")).rows[0]?.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution policy sources are not installed');
- const writeResourceAdmitted=await resource(c,true,binding);return{...await readDistributionPolicyRowInTransaction(c),writeResourceAdmitted};
+ const admitted=await resource(c,true,binding,false,true),writeResourceAdmitted=admitted&&(binding===undefined||localProofs.get(binding)?.readOnly!==true);return{...await readDistributionPolicyRowInTransaction(c),writeResourceAdmitted};
 }
 /** Registration remains available before distribution admission; policy reads/writes elsewhere stay strict. */
 export async function readRegistrationDistributionPolicyInTransaction(c:PoolClient,binding?:LocalDistributionScope){

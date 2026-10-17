@@ -7,7 +7,7 @@ import {canonicalize} from '../supply/content-hash';
 import type {ListingCursorKey} from '../supply/listing-cursor';
 import type {NativeWithdrawalScope} from './native-withdrawal-resource';
 import {readControlledWithdrawalsInTransaction,isUnadmittedControlledWithdrawalRead} from './controlled-withdrawal-store';
-import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents,encodeFinanceCursor,decodeFinanceCursor} from './personal-finance-read';
+import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents,encodeFinanceCursor,decodeFinanceCursor,OPENING_OBSERVATION_JOIN} from './personal-finance-read';
 import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
 
 export const PERSONAL_WITHDRAWAL_READ_VERSION='personal-withdrawals.read.v1';
@@ -39,14 +39,14 @@ export function historicalWithdrawalProjection(row:Record<string,any>){
   return{id:'history:'+row.id,source:'HISTORICAL_WITHDRAWAL' as const,sourceReference:{type:'LEGACY_MYSQL' as const,system:row.source_system,entity:'la_withdraw_apply' as const,id:row.source_id},sourceStatus:row.snapshot.sourceStatus as number,amountCents:sourceYuanToCents(row.snapshot.amount),netCents:sourceSignedYuanToCents(row.snapshot.net),feeCents:sourceSignedYuanToCents(row.snapshot.fee),occurredAt:row.occurred_at,importedAt:row.imported_at,sourceDigest:row.source_digest,includedInOpening:row.included_in_opening,accountingEffect:'OBSERVATION_ONLY_NO_NEW_DEBIT' as const,channelArrivalKnowledge:'UNKNOWN' as const};
  }catch{throw unavailable();}
 }
-const historyWhere=`FROM zzsh_order.personal_finance_observation o WHERE o.user_id=$1 AND o.source_kind='HISTORICAL_WITHDRAWAL' AND o.source_type='LEGACY_MYSQL' AND o.source_entity='la_withdraw_apply'`;
-const historyProjection=`SELECT o.*,to_char(o.source_event_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS occurred_at,to_char(o.imported_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS imported_at `;
+const historyWhere=`FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} WHERE o.user_id=$1 AND o.source_kind='HISTORICAL_WITHDRAWAL' AND o.source_type='LEGACY_MYSQL' AND o.source_entity='la_withdraw_apply'`;
+const historyProjection=`SELECT o.*,COALESCE(oa.basis_id,o.basis_id) AS basis_id,COALESCE(oa.included_in_opening,o.included_in_opening) AS included_in_opening,to_char(o.source_event_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS occurred_at,to_char(o.imported_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS imported_at `;
 async function historicalRead(client:PoolClient,actor:Actor,query:PersonalWithdrawalQuery,key:ListingCursorKey|undefined,detailId?:string){
  const installed=(await client.query(`SELECT to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AS history,to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AND to_regclass('zzsh_order.native_user_insert_proof') IS NOT NULL AS native`)).rows[0];
  if(!installed?.history){if(detailId)throw unavailable();if(query.cursor)throw conflict('Withdrawal source changed; reload first page');return{source:'HISTORICAL_WITHDRAWAL' as const,availability:'NOT_INSTALLED' as const,coverage:{knowledge:'UNKNOWN' as const,reason:'HISTORICAL_WITHDRAWAL_NOT_INSTALLED'},items:[],mappedRecordCount:null,count:null,asOf:null,snapshotVersion:null,nextCursor:null};}
  // Wallet coverage alone is not proof that a legacy withdrawal history is complete.
  const native=installed.native===true?await hasProvedNativeHistoryAbsence(client,actor.userId,'HISTORICAL_WITHDRAWAL'):false;
- const aggregate=(await client.query(`SELECT count(*)::text AS count,md5(COALESCE(string_agg(o.id||':'||o.source_digest,',' ORDER BY o.id),'')) AS digest ${historyWhere} AND($2='ALL' OR o.snapshot->>'sourceStatus'=$2)`,[actor.userId,query.state])).rows[0];
+ const aggregate=(await client.query(`SELECT count(*)::text AS count,md5(COALESCE(string_agg(o.id||':'||o.source_digest||':'||COALESCE(oa.basis_id,o.basis_id,'')||':'||COALESCE(oa.included_in_opening,o.included_in_opening)::text,',' ORDER BY o.id),'')) AS digest ${historyWhere} AND($2='ALL' OR o.snapshot->>'sourceStatus'=$2)`,[actor.userId,query.state])).rows[0];
  const nativeEmpty=native&&aggregate.count==='0';
  const proof=nativeEmpty?null:await readObservationCoverage(client,actor.userId,'HISTORICAL_WITHDRAWAL');
  const complete=nativeEmpty||proof?.knowledge==='KNOWN';
