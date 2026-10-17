@@ -3,7 +3,7 @@ import { assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
 import { canonicalize, normalizeDeclaration, computeContentHash, type ContentDeclaration } from "./content-hash";
-import { CUSTOMER_TIERS, validateDeltaPublicationAttributes } from "./delta-rental";
+import { validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount } from "./funding-policy";
 import { DELTA_LEGACY_RESOURCES, lockLegacySource, normalizeResolutionInput, readLegacyMap, resolveLegacyObservationToDraft, type LegacyDraftResolutionInput } from "./legacy-observation";
@@ -102,11 +102,13 @@ async function authorize(client: PoolClient, actor: TradeActor, a: PublishingAcc
   await assertGameScope(client, actor.id, access?.isBoss === true, a.game_id);
 }
 async function assertTierCoverage(client: PoolClient, a: PublishingAccount) {
-  // Publish readiness follows the formal confirmation tiers: a listing whose member tier has no
-  // price line would 503 at confirmation, so the takeover never publishes it.
+  // The new growth/benefit chain computes on the formal STANDARD base at confirmation (auth-runtime
+  // injects the growth reader; a closed switch returns UNKNOWN and never falls back to the retired
+  // legacy member tiers). Publish readiness therefore checks the STANDARD base lines only — the
+  // legacy VIP/SVIP/DISCOUNT_USER price lines are not a takeover precondition.
   const missing = (await client.query(`SELECT 1 FROM zzsh_supply.listing_version v JOIN zzsh_supply.rule_release r ON r.id=v.rule_release_id
     CROSS JOIN unnest($2::text[]) AS tier(name) JOIN zzsh_supply.inventory_line i ON i.version_id=v.id
-    WHERE v.id=$1 AND NOT EXISTS(SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=r.price_version_id AND p.item_id=i.item_id AND p.customer_tier=tier.name) LIMIT 1`, [a.current_version_id, [...CUSTOMER_TIERS]])).rowCount;
+    WHERE v.id=$1 AND NOT EXISTS(SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=r.price_version_id AND p.item_id=i.item_id AND p.customer_tier=tier.name) LIMIT 1`, [a.current_version_id, ["STANDARD"]])).rowCount;
   if (missing) throw conflict("MEMBER_PRICE_LINE_MISSING");
 }
 async function assertMediaBindingSubject(client: PoolClient, a: PublishingAccount, versionId: string) {

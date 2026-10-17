@@ -106,47 +106,83 @@ test("each media dimension blocks with its own reason instead of one merged code
  const count=fixture();for(let i=1;i<=20;i++)count.media.push({...count.media[0]!,position:i,assetId:"fixture_asset_"+i});assert(prepareLegacyTradeIntake(count,catalog()).reasons.includes("MEDIA_ASSET_COUNT_INVALID"));
 });
 
-test("media association gate separates original, reference, subject, bytes, purpose and visibility facts and never substitutes a default image",()=>{
- const evidence:LegacyTradeMediaByteEvidence[]=[{storageKey:"a".repeat(64),sha256:"a".repeat(64),issues:[]},{storageKey:"b".repeat(64),sha256:"b".repeat(64),issues:[{kind:"CORRUPT_BYTES"}]}];
- const asset=(over:Partial<NonNullable<LegacyTradeMediaAssemblyRow["targetAssets"]>[number]>={})=>({assetId:"asset_1",accountId:"acct_1",ownerUserId:"owner_1",purpose:"ACCOUNT_DISPLAY",accessClass:"PUBLIC_DISPLAY",technicalState:"READY",storageKey:"a".repeat(64),contentHash:"a".repeat(64),...over});
- const row=(over:Partial<LegacyTradeMediaAssemblyRow>={})=>({legacyId:"33",accountId:"acct_1",expectedOwnerUserId:"owner_1",sourceImageRefs:["legacy/img/1.png"],targetAssets:[asset()],...over});
- const ready=assembleLegacyTradeMediaGate([row()],evidence)[0]!;assert.equal(ready.ready,true);assert.deepEqual(ready.reasons,[]);assert.equal(ready.evidence.byteBoundAssets,1);
+test("media association gate proves original→asset→byte lineage and isolates bad rows instead of crashing",()=>{
+ const key="a".repeat(64),otherKey="b".repeat(64),corruptKey="c".repeat(64);
+ const evidence:LegacyTradeMediaByteEvidence[]=[{storageKey:key,sha256:key,issues:[]},{storageKey:corruptKey,sha256:corruptKey,issues:[{kind:"CORRUPT_BYTES"}]}];
+ const asset=(over:Partial<NonNullable<LegacyTradeMediaAssemblyRow["targetAssets"]>[number]>={})=>({assetId:"asset_1",accountId:"acct_1",ownerUserId:"owner_1",purpose:"ACCOUNT_DISPLAY",accessClass:"PUBLIC_DISPLAY",technicalState:"READY",storageKey:key,contentHash:key,...over});
+ const association=(over:Partial<NonNullable<LegacyTradeMediaAssemblyRow["associations"]>[number]>={})=>({sourceRef:"legacy/img/1.png",assetId:"asset_1",storageKey:key,contentHash:key,...over});
+ const row=(over:Partial<LegacyTradeMediaAssemblyRow>={})=>({legacyId:"33",accountId:"acct_1",expectedOwnerUserId:"owner_1",sourceImageRefs:["legacy/img/1.png"],targetAssets:[asset()],associations:[association()],...over});
+ const ready=assembleLegacyTradeMediaGate([row()],evidence)[0]!;assert.equal(ready.ready,true,ready.reasons.join(","));assert.deepEqual(ready.reasons,[]);assert.equal(ready.evidence.byteBoundAssets,1);assert.deepEqual(ready.provenAssets.map(p=>p.assetId),["asset_1"]);
  const reasons=(over:Partial<LegacyTradeMediaAssemblyRow>)=>assembleLegacyTradeMediaGate([{...row(),...over}],evidence)[0]!.reasons;
- assert(reasons({sourceImageRefs:null}).includes("MEDIA_SOURCE_REFERENCE_MISSING"));
- assert(reasons({sourceImageRefs:[]}).includes("MEDIA_SOURCE_REFERENCE_MISSING"));
+ // SM-01: two nulls are not a binding; an empty string is not an original; unproven lineage never passes.
+ const nullNull=assembleLegacyTradeMediaGate([{...row(),accountId:null,targetAssets:[asset({accountId:null})]}],evidence)[0]!;
+ assert.equal(nullNull.ready,false);assert(nullNull.reasons.includes("MEDIA_SUBJECT_UNPROVEN"));
+ assert(reasons({sourceImageRefs:[""]}).includes("MEDIA_SOURCE_REFERENCE_MISSING"));
+ assert(reasons({sourceImageRefs:["legacy/img/replaced.png"]}).includes("MEDIA_ASSOCIATION_UNPROVEN"));
+ assert(reasons({associations:null}).includes("MEDIA_ASSOCIATION_UNPROVEN"));
  assert(reasons({targetAssets:null}).includes("MEDIA_ASSET_REFERENCE_MISSING"));
- assert.deepEqual(reasons({targetAssets:[asset({ownerUserId:"someone_else"})]}),["MEDIA_SUBJECT_MISMATCH"]);
+ assert.deepEqual(assembleLegacyTradeMediaGate([{...row(),targetAssets:[asset({ownerUserId:"someone_else"})]}],evidence)[0]!.reasons,["MEDIA_SUBJECT_MISMATCH"]);
+ assert.deepEqual(assembleLegacyTradeMediaGate([{...row(),targetAssets:[asset({ownerUserId:null})]}],evidence)[0]!.reasons,["MEDIA_SUBJECT_UNPROVEN"]);
  assert(reasons({targetAssets:[asset({purpose:"ACCOUNT_EVIDENCE"})]}).includes("MEDIA_PURPOSE_INVALID"));
  assert(reasons({targetAssets:[asset({accessClass:"PRIVATE_REVIEW"})]}).includes("MEDIA_VISIBILITY_NOT_PUBLIC"));
  assert(reasons({targetAssets:[asset({technicalState:"PENDING"})]}).includes("MEDIA_NOT_READY"));
- assert(reasons({targetAssets:[asset({storageKey:"b".repeat(64)})]}).includes("MEDIA_BYTES_UNAVAILABLE"));
- assert.deepEqual(reasons({targetAssets:[asset({ownerUserId:null})]}),["MEDIA_SUBJECT_UNPROVEN"]);
+ assert(reasons({targetAssets:[asset({storageKey:corruptKey})],associations:[association({storageKey:corruptKey,contentHash:corruptKey})]}).includes("MEDIA_BYTES_UNAVAILABLE"));
+ // SM-01: conflicting byte facts for one storage key never last-win, whatever the order.
+ assert(assembleLegacyTradeMediaGate([row()],evidence.concat({storageKey:key,sha256:otherKey,issues:[]}))[0]!.reasons.includes("MEDIA_BYTES_CONFLICT"));
+ assert(assembleLegacyTradeMediaGate([row()],[{storageKey:key,sha256:otherKey,issues:[]},...evidence])[0]!.reasons.includes("MEDIA_BYTES_CONFLICT"));
+ // SM-01: a conflicting association set is a conflict, not a winner.
+ assert(reasons({associations:[association(),association({sourceRef:"legacy/img/other.png"})]}).includes("MEDIA_ASSOCIATION_CONFLICT"));
+ // SM-01: one malformed asset row isolates that row's result only; the batch keeps going.
+ const mixed=assembleLegacyTradeMediaGate([row(),{...row(),legacyId:"34",targetAssets:[null as never]}],evidence);
+ assert.equal(mixed.length,2);assert.equal(mixed[0]!.ready,true);assert(mixed[1]!.reasons.includes("MEDIA_ASSET_INVALID"));assert.equal(mixed[1]!.ready,false);
+ assert(assembleLegacyTradeMediaGate([null as never],evidence)[0]!.reasons.includes("MEDIA_ROW_INVALID"));
  const noEvidence=assembleLegacyTradeMediaGate([row()],[])[0]!;assert(noEvidence.reasons.includes("MEDIA_BYTES_UNAVAILABLE"));
  // A byte-clean platform/default file without an account binding is never usable as account media.
- const unbound=assembleLegacyTradeMediaGate([{...row(),targetAssets:[asset({accountId:null,ownerUserId:null})]}],evidence)[0]!;assert(unbound.reasons.includes("MEDIA_SUBJECT_MISMATCH"));assert(!unbound.ready);
+ const unbound=assembleLegacyTradeMediaGate([{...row(),targetAssets:[asset({accountId:null,ownerUserId:null})]}],evidence)[0]!;assert(unbound.reasons.includes("MEDIA_SUBJECT_UNPROVEN"));assert(!unbound.ready);
 });
 
-test("formal batch facts gate release, term, price lines, occupancy and media per row and keep absent fact families visibly unobserved",()=>{
+test("formal batch facts gate release, term, STANDARD base prices, occupancy and media per row and keep absent fact families visibly unobserved",()=>{
  const input=fixture(),row={legacyId:"33",accountId:input.accountId,intake:input,isolationReasons:[]};
- const mediaGate=assembleLegacyTradeMediaGate([{legacyId:"33",accountId:input.accountId,expectedOwnerUserId:input.source.expectedOwnerUserId,sourceImageRefs:null,targetAssets:null}]);
- const readyGate=assembleLegacyTradeMediaGate([{legacyId:"33",accountId:input.accountId,expectedOwnerUserId:input.source.expectedOwnerUserId,sourceImageRefs:["legacy/img/1.png"],targetAssets:[{assetId:"fixture_asset",accountId:input.accountId,ownerUserId:input.source.expectedOwnerUserId,purpose:"ACCOUNT_DISPLAY",accessClass:"PUBLIC_DISPLAY",technicalState:"READY",storageKey:"a".repeat(64),contentHash:"a".repeat(64)}]}],[{storageKey:"a".repeat(64),sha256:"a".repeat(64),issues:[]}]);
- const fullPrices=catalog().flatMap(item=>["STANDARD","VIP","SVIP","DISCOUNT_USER"].map(t=>({itemId:item.id,customerTier:t})));
- const facts={mediaGate:readyGate,releaseByGame:{fixture_game:{releaseId:"rel_1",priceVersionId:"price_1"}},termOptionCodesByGame:{fixture_game:["daily"]},priceLinesByGame:{fixture_game:fullPrices},occupancyByAccount:{[input.accountId]:"FREE" as const}};
- const base=planLegacyTradeIntakeBatch([row],catalog(),facts);assert.equal(base.counts.tradeCandidate,1,base.items[0]!.reasons.join(","));assert.deepEqual(base.unobservedFacts,[]);
+ const byteKey="b".repeat(64);
+ const mediaGate=assembleLegacyTradeMediaGate([{legacyId:"33",accountId:input.accountId,expectedOwnerUserId:input.source.expectedOwnerUserId,sourceImageRefs:null,targetAssets:null,associations:null}]);
+ const readyGate=assembleLegacyTradeMediaGate([{legacyId:"33",accountId:input.accountId,expectedOwnerUserId:input.source.expectedOwnerUserId,sourceImageRefs:["legacy/img/1.png"],
+   targetAssets:[{assetId:"fixture_asset",accountId:input.accountId,ownerUserId:input.source.expectedOwnerUserId,purpose:"ACCOUNT_DISPLAY",accessClass:"PUBLIC_DISPLAY",technicalState:"READY",storageKey:byteKey,contentHash:byteKey}],
+   associations:[{sourceRef:"legacy/img/1.png",assetId:"fixture_asset",storageKey:byteKey,contentHash:byteKey}]}],[{storageKey:byteKey,sha256:byteKey,issues:[]}]);
+ const standardPrices={priceVersionId:"price_1",lines:catalog().map(item=>({itemId:item.id,customerTier:"STANDARD"}))};
+ const facts={mediaGate:readyGate,releaseByGame:{fixture_game:{releaseId:"rel_1",priceVersionId:"price_1"}},termOptionCodesByGame:{fixture_game:{releaseId:"rel_1",codes:["daily"]}},priceLinesByGame:{fixture_game:standardPrices},occupancyByAccount:{[input.accountId]:"FREE" as const}};
+ const base=planLegacyTradeIntakeBatch([row],catalog(),facts);assert.equal(base.counts.tradeCandidate,1,base.items[0]!.reasons.join(","));assert.deepEqual(base.unobservedFacts,[]);assert.equal(base.stage,"FULL_ADMISSION");
  const reasons=(override:NonNullable<Parameters<typeof planLegacyTradeIntakeBatch>[2]>)=>planLegacyTradeIntakeBatch([row],catalog(),{...facts,...override}).items[0]!.reasons;
  assert(reasons({releaseByGame:{fixture_game:null}}).includes("RELEASE_NOT_BOUND"));
- assert(reasons({termOptionCodesByGame:{fixture_game:["other"]}}).includes("TERM_OPTION_UNPROVEN"));
- assert(reasons({priceLinesByGame:{fixture_game:fullPrices.filter(p=>p.customerTier==="STANDARD")}}).includes("PRICE_MEMBER_TIER_MISSING"));
- const missingStandard=fullPrices.filter(p=>!(p.customerTier==="STANDARD"&&p.itemId===catalog()[0]!.id));const tierReasons=reasons({priceLinesByGame:{fixture_game:missingStandard}});
- assert(tierReasons.includes("PRICE_LINE_MISSING"));assert(!tierReasons.includes("PRICE_MEMBER_TIER_MISSING"));
+ assert(reasons({termOptionCodesByGame:{fixture_game:{releaseId:"rel_old",codes:["daily"]}}}).includes("TERM_FACT_VERSION_MISMATCH"));
+ assert(reasons({termOptionCodesByGame:{fixture_game:{releaseId:"rel_1",codes:["other"]}}}).includes("TERM_OPTION_UNPROVEN"));
+ assert(reasons({priceLinesByGame:{fixture_game:{priceVersionId:"price_old",lines:standardPrices.lines}}}).includes("PRICE_FACT_VERSION_MISMATCH"));
+ const missingStandard={priceVersionId:"price_1",lines:standardPrices.lines.filter(p=>!(p.customerTier==="STANDARD"&&p.itemId===catalog()[0]!.id))};
+ assert(reasons({priceLinesByGame:{fixture_game:missingStandard}}).includes("PRICE_LINE_MISSING"));
+ // SM-03: the retired legacy member tiers are never a takeover precondition on top of the STANDARD base.
  assert(reasons({occupancyByAccount:{[input.accountId]:"UNKNOWN"}}).includes("OCCUPANCY_UNKNOWN"));
  assert(reasons({occupancyByAccount:{[input.accountId]:"OCCUPIED"}}).includes("OCCUPIED"));
  assert.deepEqual(reasons({occupancyByAccount:{}}),["OCCUPANCY_UNKNOWN"]);
  assert(reasons({mediaGate}).includes("MEDIA_SOURCE_REFERENCE_MISSING"));
- const none=planLegacyTradeIntakeBatch([row],catalog());assert.equal(none.counts.tradeCandidate,1);assert.equal(none.unobservedFacts.length,5);
+ const none=planLegacyTradeIntakeBatch([row],catalog());assert.equal(none.counts.tradeCandidate,1);assert.equal(none.unobservedFacts.length,5);assert.equal(none.stage,"INTAKE_PRECHECK");
+ // SM-02: a provided-but-empty media family is a missing row, not a satisfied one.
+ const emptyFamily=planLegacyTradeIntakeBatch([row],catalog(),{...facts,mediaGate:[]});assert.equal(emptyFamily.counts.tradeCandidate,0);assert(emptyFamily.items[0]!.reasons.includes("MEDIA_GATE_MISSING"));
+ // SM-02: ready=false with no reasons cannot pass either.
+ assert(planLegacyTradeIntakeBatch([row],catalog(),{...facts,mediaGate:[{legacyId:"33",accountId:input.accountId,ready:false,reasons:[],provenAssets:[],evidence:{sourceRefCount:0,observedAssetCount:0,byteBoundAssets:0}}]}).items[0]!.reasons.includes("MEDIA_GATE_INVALID"));
+ // SM-02: conflicting duplicate subject gates isolate; identical duplicates are the same fact.
+ const failingGate={...readyGate[0]!,ready:false,reasons:["MEDIA_BYTES_UNAVAILABLE"]};
+ assert.equal(planLegacyTradeIntakeBatch([row],catalog(),{...facts,mediaGate:[failingGate,readyGate[0]!]}).counts.isolated,1);
+ assert.equal(planLegacyTradeIntakeBatch([row],catalog(),{...facts,mediaGate:[readyGate[0]!,{...readyGate[0]!}]}).counts.tradeCandidate,1);
+ // SM-02: a gate proving another asset than the one the intake declares is not this row's proof.
+ const otherAssetGate=assembleLegacyTradeMediaGate([{legacyId:"33",accountId:input.accountId,expectedOwnerUserId:input.source.expectedOwnerUserId,sourceImageRefs:["legacy/img/1.png"],
+   targetAssets:[{assetId:"somebody_else_asset",accountId:input.accountId,ownerUserId:input.source.expectedOwnerUserId,purpose:"ACCOUNT_DISPLAY",accessClass:"PUBLIC_DISPLAY",technicalState:"READY",storageKey:byteKey,contentHash:byteKey}],
+   associations:[{sourceRef:"legacy/img/1.png",assetId:"somebody_else_asset",storageKey:byteKey,contentHash:byteKey}]}],[{storageKey:byteKey,sha256:byteKey,issues:[]}]);
+ assert(planLegacyTradeIntakeBatch([row],catalog(),{...facts,mediaGate:otherAssetGate}).items[0]!.reasons.includes("MEDIA_GATE_INTAKE_MISMATCH"));
  // Two rows claiming the same reviewed original digest are all isolated, never the first one kept.
  const twin={legacyId:"34",accountId:"acct_2",intake:{...input,accountId:"acct_2"},isolationReasons:[]};
  const dup=planLegacyTradeIntakeBatch([row,twin],catalog(),facts);assert.equal(dup.counts.isolated,2);assert(dup.items.every(i=>i.reasons.includes("DUPLICATE_SOURCE_OR_TARGET")));
+ // One malformed row isolates alone; other rows keep their result.
+ const malformed={legacyId:"35",accountId:"broken",intake:{contentHash:"legal-json-unrepresentable"} as never,isolationReasons:[]};
+ const mixed=planLegacyTradeIntakeBatch([row,malformed],catalog(),facts);assert.equal(mixed.counts.tradeCandidate,1);assert.equal(mixed.counts.isolated,1);assert(mixed.items[1]!.reasons.includes("SOURCE_SCHEMA_INVALID"));
 });
 
 const accountRow=(over:Record<string,string|null>={})=>({id:"33",user_id:"11",game_id:"1",status:"0",is_delete:"0",no:"NO-33",price_tenant:"10.00",extra_goods_total_price_tenant:"0.00",deposit_amount:"300.00",rental_days:"1",default_consume_type:"1",update_time:"1760000000",is_full_payout:"0",...over});
@@ -225,7 +261,7 @@ test("actual maintenance chain saves and quotes formal native fields before publ
   badDisplay=true;await assert.rejects(()=>takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate),/DISPLAY_SOURCE_BINDING_MISMATCH/);assert.deepEqual(calls,[]);
   // A foreign asset bound to the draft is a subject mismatch, not a publishable listing.
   badDisplay=false;foreignMedia=true;await assert.rejects(()=>takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate),/MEDIA_BINDING_SUBJECT_MISMATCH/);assert.deepEqual(calls,["save","quote"]);calls.length=0;foreignMedia=false;
-  // Publish readiness covers the formal confirmation tiers, not STANDARD alone.
+  // A missing STANDARD base line still blocks publish readiness (the retired legacy tiers do not).
   missingTier=true;await assert.rejects(()=>takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate),/MEMBER_PRICE_LINE_MISSING/);assert.deepEqual(calls,["save","quote"]);calls.length=0;missingTier=false;
   t.mock.restoreAll();
  }

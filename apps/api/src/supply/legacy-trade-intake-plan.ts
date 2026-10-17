@@ -1,10 +1,9 @@
 import {canonicalize} from "./content-hash";
 import {sha256Hex} from "./supply-util";
-import {CUSTOMER_TIERS} from "./delta-rental";
 import {accountColumns} from "../legacy-load/user-order-offline-plan";
 import {prepareLegacyTradeIntake,type LegacyTradeIntake,type TradeCatalogItem} from "./legacy-trade-takeover";
 
-const DIGEST=/^[a-f0-9]{64}$/,UTC=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3}|\.\d{6})Z$/,text=(value:unknown)=>typeof value==="string"&&value?value:null;
+const DIGEST=/^[a-f0-9]{64}$/,UTC=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3}|\.\d{6})?Z$/,text=(value:unknown)=>typeof value==="string"&&value?value:null;
 /** The reviewed extraction original: the same-batch 13-column la_rental_accounts row plus its batch/cutoff binding. Digests are recomputed from this body, never declared. */
 export type LegacyTradeExtractionOriginal={sourceAsOf:string;extractSha256:string;row:Record<string,string|null>};
 /** Computed by assembly: old12 is the frozen whitelist projection of the same row, new13 covers the payout flag. */
@@ -49,54 +48,102 @@ export function assembleLegacyTradeIntakeBatch(rows:readonly LegacyTradeExtracti
   return {legacyId:text(row.legacyId)??"",accountId:text(row.accountId),intake:row.intake??null,isolationReasons:[...reasons],projection};
  });
 }
-/** Media association assembly: account → legacy original media reference → observed target media_asset → local byte evidence. */
+/** Media association assembly: account → legacy original media reference → sealed original→asset association → observed target media_asset → local byte evidence. */
 export type LegacyTradeMediaAssetRef={assetId:string;accountId:string|null;ownerUserId:string|null;purpose:string|null;accessClass:string|null;technicalState:string|null;storageKey:string|null;contentHash:string|null};
+/** A sealed association record binding one real original reference to one target asset and its byte identity. */
+export type LegacyTradeMediaAssociation={sourceRef:string;assetId:string;storageKey:string;contentHash:string};
 export type LegacyTradeMediaAssemblyRow={legacyId:string;accountId:string|null;expectedOwnerUserId:string|null;
- /** Original media references in the reviewed legacy source row; null when the original row itself was not observed. */
+ /** Real original media references from the reviewed source row; only non-empty string values count, null when the original row itself was not observed. */
  sourceImageRefs:readonly string[]|null;
  /** Observed target media_asset rows for the account; null when no database observation exists for the row. */
- targetAssets:readonly LegacyTradeMediaAssetRef[]|null;};
+ targetAssets:readonly LegacyTradeMediaAssetRef[]|null;
+ /** Sealed original→asset→byte association records; without them no original lineage is proven, whatever the subject match says. */
+ associations:readonly LegacyTradeMediaAssociation[]|null;};
 export type LegacyTradeMediaByteEvidence={storageKey:string;sha256:string|null;issues:readonly {kind:string}[]};
-export type LegacyTradeMediaGateResult={legacyId:string;accountId:string|null;ready:boolean;reasons:string[];evidence:{sourceRefCount:number;observedAssetCount:number;byteBoundAssets:number}};
-/** Every dimension blocks separately: missing original, missing reference, wrong subject, unusable bytes, purpose/visibility/state. */
-export function assembleLegacyTradeMediaGate(rows:readonly LegacyTradeMediaAssemblyRow[],byteEvidence:readonly LegacyTradeMediaByteEvidence[]=[]):LegacyTradeMediaGateResult[]{
- const bytes=new Map(byteEvidence.map(e=>[e.storageKey,e]));
- return rows.map(row=>{
-  const reasons=new Set<string>(),refs=row.sourceImageRefs,assets=row.targetAssets;
-  if(!Array.isArray(refs)||refs.length===0)reasons.add("MEDIA_SOURCE_REFERENCE_MISSING");
-  let byteBoundAssets=0;
-  if(!Array.isArray(assets)||assets.length===0)reasons.add("MEDIA_ASSET_REFERENCE_MISSING");
-  else for(const asset of assets){
-   // Subject first: a byte-clean platform file is still not this account's asset, and no
-   // brand/default image is ever substituted for a missing account original.
-   if(asset.accountId!==row.accountId)reasons.add("MEDIA_SUBJECT_MISMATCH");
-   if(asset.ownerUserId===null||row.expectedOwnerUserId===null)reasons.add("MEDIA_SUBJECT_UNPROVEN");
-   else if(asset.ownerUserId!==row.expectedOwnerUserId)reasons.add("MEDIA_SUBJECT_MISMATCH");
-   if(asset.purpose!=="ACCOUNT_DISPLAY")reasons.add("MEDIA_PURPOSE_INVALID");
-   if(asset.accessClass!=="PUBLIC_DISPLAY")reasons.add("MEDIA_VISIBILITY_NOT_PUBLIC");
-   if(asset.technicalState!=="READY")reasons.add("MEDIA_NOT_READY");
-   const evidence=asset.storageKey?bytes.get(asset.storageKey):undefined;
-   if(!evidence||evidence.issues.length>0||!evidence.sha256||!asset.contentHash||evidence.sha256!==asset.contentHash)reasons.add("MEDIA_BYTES_UNAVAILABLE");
-   else byteBoundAssets++;
-  }
-  return {legacyId:text(row.legacyId)??"",accountId:text(row.accountId),ready:reasons.size===0,reasons:[...reasons],
-    evidence:{sourceRefCount:Array.isArray(refs)?refs.length:0,observedAssetCount:Array.isArray(assets)?assets.length:0,byteBoundAssets}};
+export type LegacyTradeMediaGateResult={legacyId:string;accountId:string|null;ready:boolean;reasons:string[];provenAssets:Array<{assetId:string;storageKey:string|null;contentHash:string|null}>;evidence:{sourceRefCount:number;observedAssetCount:number;byteBoundAssets:number}};
+/** Every dimension blocks separately: missing original, missing reference, unproven lineage, wrong subject, unusable bytes, purpose/visibility/state. */
+export function assembleLegacyTradeMediaGate(rows:readonly (LegacyTradeMediaAssemblyRow|null|undefined)[],byteEvidence:readonly LegacyTradeMediaByteEvidence[]=[]):LegacyTradeMediaGateResult[]{
+ // Conflicting byte facts for one storage key never last-win; exact duplicates are the same fact.
+ const bytes=new Map<string,LegacyTradeMediaByteEvidence>(),conflictingBytes=new Set<string>();
+ for(const entry of byteEvidence){
+  if(!entry||typeof entry!=="object"||typeof entry.storageKey!=="string")continue;
+  const prior=bytes.get(entry.storageKey);
+  if(prior===undefined)bytes.set(entry.storageKey,entry);
+  else if(stableFingerprint({sha256:prior.sha256,issues:prior.issues})!==stableFingerprint({sha256:entry.sha256,issues:entry.issues}))conflictingBytes.add(entry.storageKey);
+ }
+ return rows.map(raw=>{
+  if(!raw||typeof raw!=="object")return {legacyId:"",accountId:null,ready:false,reasons:["MEDIA_ROW_INVALID"],provenAssets:[],
+   evidence:{sourceRefCount:0,observedAssetCount:0,byteBoundAssets:0}};
+  const row:LegacyTradeMediaAssemblyRow=raw;
+  const legacyId=text(row.legacyId)??"",accountId=text(row.accountId);
+  try{
+   const reasons=new Set<string>();
+   const refs=Array.isArray(row.sourceImageRefs)?row.sourceImageRefs:null;
+   const validRefs=(refs??[]).filter((ref):ref is string=>typeof ref==="string"&&ref.length>0);
+   if(refs===null||validRefs.length===0)reasons.add("MEDIA_SOURCE_REFERENCE_MISSING");
+   else if(validRefs.length!==refs!.length)reasons.add("MEDIA_SOURCE_REFERENCE_INVALID");
+   if(!accountId)reasons.add("MEDIA_SUBJECT_UNPROVEN");
+   if(!text(row.expectedOwnerUserId))reasons.add("MEDIA_SUBJECT_UNPROVEN");
+   const assets=Array.isArray(row.targetAssets)?row.targetAssets:null;
+   let byteBoundAssets=0;
+   const provenAssets:LegacyTradeMediaGateResult["provenAssets"]=[];
+   if(assets===null||assets.length===0)reasons.add("MEDIA_ASSET_REFERENCE_MISSING");
+   else{
+    const associations=Array.isArray(row.associations)?row.associations.filter(a=>a&&typeof a==="object"):[];
+    const associationConflicts=new Set<string>();
+    const byAsset=new Map<string,LegacyTradeMediaAssociation[]>();
+    for(const association of associations){const key=String((association as {assetId?:unknown}).assetId);byAsset.set(key,[...(byAsset.get(key)??[]),association]);}
+    for(const [assetId,list] of byAsset)if(new Set(list.map(stableFingerprint)).size>1)associationConflicts.add(assetId);
+    for(const asset of assets){
+     // A null or scalar asset is a malformed row fact: it fails this row only, never the batch.
+     if(!asset||typeof asset!=="object"||!text(asset.assetId)){reasons.add("MEDIA_ASSET_INVALID");continue;}
+     const assetId=asset.assetId!;
+     // Subject first: two nulls are not a binding, and a byte-clean platform file is still not this account's asset.
+     if(!text(asset.accountId))reasons.add("MEDIA_SUBJECT_UNPROVEN");
+     else if(!accountId||asset.accountId!==row.accountId)reasons.add("MEDIA_SUBJECT_MISMATCH");
+     if(!text(asset.ownerUserId))reasons.add("MEDIA_SUBJECT_UNPROVEN");
+     else if(!text(row.expectedOwnerUserId)||asset.ownerUserId!==row.expectedOwnerUserId)reasons.add("MEDIA_SUBJECT_MISMATCH");
+     if(asset.purpose!=="ACCOUNT_DISPLAY")reasons.add("MEDIA_PURPOSE_INVALID");
+     if(asset.accessClass!=="PUBLIC_DISPLAY")reasons.add("MEDIA_VISIBILITY_NOT_PUBLIC");
+     if(asset.technicalState!=="READY")reasons.add("MEDIA_NOT_READY");
+     // Lineage: only a sealed association whose source reference is one of this row's real originals
+     // and whose byte identity matches the observed asset proves the original→asset→byte chain.
+     const lineage=byAsset.get(assetId)??[];
+     const proven=lineage.find(a=>validRefs.includes(a.sourceRef)&&a.storageKey===asset.storageKey&&a.contentHash===asset.contentHash);
+     if(associationConflicts.has(assetId))reasons.add("MEDIA_ASSOCIATION_CONFLICT");
+     else if(!proven)reasons.add("MEDIA_ASSOCIATION_UNPROVEN");
+     const storageKey=proven?.storageKey??asset.storageKey;
+     if(storageKey&&conflictingBytes.has(storageKey))reasons.add("MEDIA_BYTES_CONFLICT");
+     const evidence=storageKey?bytes.get(storageKey):undefined;
+     if(!evidence||evidence.issues.length>0||!evidence.sha256||!asset.contentHash||evidence.sha256!==asset.contentHash)reasons.add("MEDIA_BYTES_UNAVAILABLE");
+     else byteBoundAssets++;
+     if(proven)provenAssets.push({assetId,storageKey:asset.storageKey,contentHash:asset.contentHash});
+    }
+   }
+   return {legacyId,accountId,ready:reasons.size===0,reasons:[...reasons],provenAssets,
+    evidence:{sourceRefCount:validRefs.length,observedAssetCount:assets?.length??0,byteBoundAssets}};
+  }catch{return {legacyId,accountId,ready:false,reasons:["MEDIA_ROW_INVALID"],provenAssets:[],
+   evidence:{sourceRefCount:0,observedAssetCount:0,byteBoundAssets:0}};}
  });
 }
 /** Reviewed same-batch facts for the formal gates. An absent family stays visibly unobserved; it never defaults to pass. */
 export type LegacyTradeBatchFacts={
  mediaGate?:readonly LegacyTradeMediaGateResult[];
  releaseByGame?:Readonly<Record<string,{releaseId:string;priceVersionId:string}|null>>;
- termOptionCodesByGame?:Readonly<Record<string,readonly string[]|null>>;
- priceLinesByGame?:Readonly<Record<string,readonly {itemId:string;customerTier:string}[]|null>>;
+ termOptionCodesByGame?:Readonly<Record<string,{releaseId:string;codes:readonly string[]}|null>>;
+ priceLinesByGame?:Readonly<Record<string,{priceVersionId:string;lines:readonly {itemId:string;customerTier:string}[]}|null>>;
  occupancyByAccount?:Readonly<Record<string,"FREE"|"OCCUPIED"|"UNKNOWN">>;
 };
 export const LEGACY_TRADE_BATCH_FACTS_KEYS=["mediaGate","releaseByGame","termOptionCodesByGame","priceLinesByGame","occupancyByAccount"] as const;
-/** Pure review output for the frozen input file; not an importer and never a proof of live tradability. */
+/** Pure review output for the frozen input file; not an importer and never a proof of live tradability.
+ * A call without the full fact families is an intake precheck only (stage=INTAKE_PRECHECK);
+ * a formal batch must supply every family it relies on, and writeAllowed stays false regardless. */
 export function planLegacyTradeIntakeBatch(rows:readonly LegacyTradeBatchRow[],catalog:readonly TradeCatalogItem[],facts:LegacyTradeBatchFacts={}){
  const repeated=(key:(r:LegacyTradeBatchRow)=>string|null)=>{const counts=new Map<string,number>();for(const row of rows){const id=key(row);if(id!==null)counts.set(id,(counts.get(id)??0)+1);}return new Set([...counts].filter(([,n])=>n>1).map(([id])=>id));};
  const sourceDuplicates=repeated(r=>text(r.legacyId)),accountDuplicates=repeated(r=>text(r.accountId)),digestDuplicates=repeated(r=>text((r.intake as {source?:{sourceDigest?:unknown}}|undefined)?.source?.sourceDigest));
- const mediaByKey=new Map((facts.mediaGate??[]).map(g=>[g.legacyId+"\u0000"+text(g.accountId),g]));
+ // Identical gate facts for one subject dedupe; conflicting ones isolate the row instead of picking a winner.
+ const mediaGroups=new Map<string,LegacyTradeMediaGateResult[]>();
+ for(const gate of facts.mediaGate??[]){if(!gate||typeof gate!=="object")continue;const key=text(gate.legacyId)+"\u0000"+text(gate.accountId);mediaGroups.set(key,[...(mediaGroups.get(key)??[]),gate]);}
  const items=rows.map(row=>{
   const legacyId=text(row.legacyId),accountId=text(row.accountId),inputDigest=stableFingerprint(row);
   try{
@@ -106,23 +153,43 @@ export function planLegacyTradeIntakeBatch(rows:readonly LegacyTradeBatchRow[],c
    if(isolated.length)return {...base,admission:"ISOLATED" as const,reasons:[...new Set(isolated)]};
    if(row.intake!.accountId!==accountId || row.intake!.source.legacyId!==legacyId)return {...base,admission:"ISOLATED" as const,reasons:["SOURCE_BINDING_MISMATCH"]};
    const plan=prepareLegacyTradeIntake(row.intake!,catalog),extra:string[]=[];
-   const media=mediaByKey.get((legacyId??"")+"\u0000"+(accountId??""));
-   if(media&&!media.ready)extra.push(...media.reasons);
+   if(facts.mediaGate!==undefined){
+    const distinct=[...new Map((mediaGroups.get((legacyId??"")+"\u0000"+(accountId??""))??[]).map(g=>[stableFingerprint(g),g])).values()];
+    if(distinct.length===0)extra.push("MEDIA_GATE_MISSING");
+    else if(distinct.length>1)return {...base,admission:"ISOLATED" as const,reasons:["MEDIA_GATE_CONFLICT"]};
+    else{
+     const gate=distinct[0]!;
+     if(!gate.ready){if(!Array.isArray(gate.reasons)||gate.reasons.length===0)extra.push("MEDIA_GATE_INVALID");else extra.push(...gate.reasons);}
+     else{
+      // The gate must prove the exact assets this intake declares: another account asset's proof is not this row's proof.
+      const proven=new Map((gate.provenAssets??[]).map(p=>[p.assetId,p]));
+      const declared=row.intake!.media??[];
+      for(const media of declared){const asset=proven.get(media.assetId);if(!asset||asset.contentHash!==media.byteHash)extra.push("MEDIA_GATE_INTAKE_MISMATCH");}
+      for(const assetId of proven.keys())if(!declared.some(media=>media.assetId===assetId))extra.push("MEDIA_GATE_INTAKE_MISMATCH");
+     }
+    }
+   }
    const gameId=text(row.intake!.source.expectedGameId);
    if(facts.releaseByGame&&gameId){
     const release=facts.releaseByGame[gameId]??null;
     if(!release)extra.push("RELEASE_NOT_BOUND");
-    else if(facts.termOptionCodesByGame!==undefined){
-     const terms=facts.termOptionCodesByGame[gameId]??null;
-     if(!terms||!terms.includes(row.intake!.termOptionCode))extra.push("TERM_OPTION_UNPROVEN");
-    }
-   }
-   if(facts.priceLinesByGame&&gameId&&plan.draft){
-    const lines=facts.priceLinesByGame[gameId]??null;
-    if(!lines)extra.push("PRICE_LINE_MISSING");
     else{
-     const have=new Set(lines.map(l=>l.itemId+"|"+l.customerTier));
-     for(const tier of CUSTOMER_TIERS)for(const item of plan.draft.inventory as Array<{itemId:string}>)if(!have.has(item.itemId+"|"+tier))extra.push(tier==="STANDARD"?"PRICE_LINE_MISSING":"PRICE_MEMBER_TIER_MISSING");
+     const terms=facts.termOptionCodesByGame?.[gameId];
+     if(facts.termOptionCodesByGame!==undefined){
+      if(!terms||terms.releaseId!==release.releaseId)extra.push(terms?"TERM_FACT_VERSION_MISMATCH":"TERM_OPTION_UNPROVEN");
+      else if(!terms.codes.includes(row.intake!.termOptionCode))extra.push("TERM_OPTION_UNPROVEN");
+     }
+     if(facts.priceLinesByGame!==undefined){
+      const prices=facts.priceLinesByGame[gameId]??null;
+      // The new growth/benefit chain computes on the formal STANDARD base at confirmation; the
+      // retired legacy member tiers are never a publish precondition of this takeover gate.
+      if(!prices)extra.push("PRICE_LINE_MISSING");
+      else if(prices.priceVersionId!==release.priceVersionId)extra.push("PRICE_FACT_VERSION_MISMATCH");
+      else{
+       const standard=new Set(prices.lines.filter(l=>l.customerTier==="STANDARD").map(l=>l.itemId));
+       if(plan.draft)for(const item of plan.draft.inventory as Array<{itemId:string}>)if(!standard.has(item.itemId))extra.push("PRICE_LINE_MISSING");
+      }
+     }
     }
    }
    if(facts.occupancyByAccount){
@@ -134,5 +201,6 @@ export function planLegacyTradeIntakeBatch(rows:readonly LegacyTradeBatchRow[],c
  });
  const counts={total:items.length,tradeCandidate:items.filter(i=>i.admission==="TRADE_CANDIDATE").length,blocked:items.filter(i=>i.admission==="BLOCKED").length,isolated:items.filter(i=>i.admission==="ISOLATED").length};
  const unobservedFacts=LEGACY_TRADE_BATCH_FACTS_KEYS.filter(key=>facts[key]===undefined);
- return {schema:"legacy-trade-intake-plan.v1" as const,writeAllowed:false as const,inputDigest:stableFingerprint({rows,catalog,facts}),counts,items,unobservedFacts,realRuntime:"NOT_RUN" as const};
+ return {schema:"legacy-trade-intake-plan.v1" as const,stage:(unobservedFacts.length===0?"FULL_ADMISSION":"INTAKE_PRECHECK") as "FULL_ADMISSION"|"INTAKE_PRECHECK",
+  writeAllowed:false as const,inputDigest:stableFingerprint({rows,catalog,facts}),counts,items,unobservedFacts,realRuntime:"NOT_RUN" as const};
 }
