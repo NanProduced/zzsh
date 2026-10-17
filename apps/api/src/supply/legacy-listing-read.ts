@@ -234,16 +234,18 @@ export async function hasLegacyReadSnapshots(client: PoolClient, gameId: string)
 }
 
 export async function readLegacyListing(client: PoolClient, accountId: string, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
-  const effectiveAdmission=admissionForAccount(detailIndex,accountId)??admission;
+  // Status 3 keeps the single-file admission. A manifest hit replaces only the
+  // 4/5/6 branch, and only with the one matched record.
+  const detailAdmission=admissionForAccount(detailIndex,accountId)??(admission?.schema==="legacy-public-admission-v3"?admission:undefined);
   const values: unknown[]=[accountId];
   const param=(value:unknown)=>{values.push(value);return "$"+values.length;};
-  const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(effectiveAdmission,param)})${effectiveAdmission?.schema === "legacy-public-admission-v3" ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(effectiveAdmission,param,false)})` : ""})`;
+  const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(admission,param)})${detailAdmission ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(detailAdmission,param,false)})` : ""})`;
   const r=(await client.query(`SELECT a.id,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,
     d.snapshot AS display_snapshot,d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,d.source_updated_at AS display_updated_at,d.evidence_ref AS display_evidence_ref
     ${FROM} WHERE a.id=$1 AND ${VISIBLE_BASE} AND ${admitted}`,values)).rows[0];
   if(!r)throw notFound();
-  if(r.source_status!==3 && !(effectiveAdmission?.schema==="legacy-public-admission-v3" && [4,5,6].includes(r.source_status) &&
-    effectiveAdmission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
+  if(r.source_status!==3 && !(detailAdmission && [4,5,6].includes(r.source_status) &&
+    detailAdmission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
   // Shared runtime admission for list and detail: privacy-bearing text and
   // evidence outside the adjudicated batch fail closed without leaking facts.
   if(!evaluatePublicDisplayGuard({title:r.title,description:r.description,evidenceRef:r.evidence_ref}).ok)throw notFound();
