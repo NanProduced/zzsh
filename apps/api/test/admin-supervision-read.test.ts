@@ -367,3 +367,17 @@ test("admin supervision keeps the old businessNo while public projections drop i
     const facts = await supervisionFacts(client as never, fixtureAccount, { version: null }, gate);
     assert.deepEqual(facts.legacyNumbers, ["OLD-42"]);
 });
+
+test("admin supervision source SQL still reads the old resourceNo as businessNo (claim review r2)", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
+    const seen: string[] = [];
+    const client = { query: async (sql: string) => {
+        seen.push(sql);
+        if (sql.includes("legacy_supply_map") && /h\.snapshot->>'resourceNo' AS "businessNo"/.test(sql)) return { rows: [{ sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", sourceId: "34418", businessNo: "OLD-42" }] };
+        return { rows: [] };
+    } };
+    const gate: SupplyGateReader = async () => ({ occupancy: "FREE", publisherBail: "NOT_REQUIRED", reference: "fixture" });
+    const facts = await supervisionFacts(client as never, fixtureAccount, { version: null }, gate);
+    assert.ok(seen.some(sql => /h\.snapshot->>'resourceNo' AS "businessNo"/.test(sql)), "admin source query keeps the old number");
+    assert.deepEqual(facts.legacyNumbers, ["OLD-42"]);
+});

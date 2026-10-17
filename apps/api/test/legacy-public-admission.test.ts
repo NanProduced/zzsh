@@ -505,3 +505,82 @@ test("owner historical projection drops the old resource number", () => {
   assert.deepEqual(withoutLegacyResourceNo({ resourceNo: "A-1", sourceStatus: 4 }), { sourceStatus: 4 });
   assert.equal(withoutLegacyResourceNo(null), null);
 });
+
+// ---------- v3 detail manifest: claim review r2 ----------
+function capturingLegacyClient(row: Record<string, unknown>) {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const inner = legacyProjectionClient(row) as unknown as { query: (sql: string) => Promise<unknown> };
+  return { calls, client: { query: async (sql: string, values: unknown[] = []) => { calls.push({ sql, values }); return inner.query(sql); } } as unknown as PoolClient };
+}
+const jsonRecordParams = (values: unknown[]) => values.filter((value): value is string => typeof value === "string" && value.startsWith("["))
+  .map(value => JSON.parse(value) as Array<{ accountId: string }>);
+
+test("v3 detail SQL carries only the matched shard record and never replaces the status-3 admission", async () => {
+  const row = legacyProjectionRow({ source_status: 4 });
+  const shard = parseLegacyPublicAdmission(v3Admission([
+    v3Record("account_1", 4, { snapshot: row.snapshot, title: row.title }),
+    v3Record("account_2", 5), v3Record("account_3", 6),
+  ]));
+  const index = new Map(shard.records.map(record => [record.accountId, shard]));
+  const hit = capturingLegacyClient(row);
+  const listing = await readLegacyListing(hit.client, "account_1", undefined, index);
+  assert.equal(listing.sourceAvailabilityLabel, "已下架");
+  const detailCall = hit.calls.find(call => call.sql.includes("FROM zzsh_supply.legacy_listing_read_snapshot h"))!;
+  const params = jsonRecordParams(detailCall.values);
+  assert.equal(params.length, 1, "only the 4/5/6 branch receives admission JSON");
+  assert.deepEqual(params[0]!.map(record => record.accountId), ["account_1"], "one matched record, never the whole shard");
+  assert.match(detailCall.sql, /h\.source_status=3 AND \(a\.legacy_hold='NONE' AND d\.account_id IS NULL\)\)/, "status 3 stays on its own (absent) admission");
+  assert.match(detailCall.sql, /h\.source_status IN\(4,5,6\)/);
+  // A miss sends no 4/5/6 branch at all.
+  const miss = capturingLegacyClient(legacyProjectionRow({ id: "account_9", source_status: 4 }));
+  await assert.rejects(readLegacyListing(miss.client, "account_9", undefined, index), (e: any) => e.status === 404);
+  const missCall = miss.calls.find(call => call.sql.includes("FROM zzsh_supply.legacy_listing_read_snapshot h"))!;
+  assert.doesNotMatch(missCall.sql, /IN\(4,5,6\)/); assert.equal(jsonRecordParams(missCall.values).length, 0);
+});
+
+test("v3 public detail carries no old resource number anywhere in the response", async () => {
+  for (const status of [4, 5, 6] as const) {
+    const row = legacyProjectionRow({ source_status: status });
+    const shard = parseLegacyPublicAdmission(v3Admission([v3Record("account_1", status, { snapshot: row.snapshot, title: row.title })]));
+    const listing = await readLegacyListing(legacyProjectionClient(row), "account_1", undefined, new Map([["account_1", shard]]));
+    const body = JSON.stringify(listing);
+    assert.equal(listing.displayNo, null);
+    assert.doesNotMatch(body, /resourceNo/); assert.doesNotMatch(body, /"A-1"/);
+  }
+});
+
+test("list and mixed list SQL stay status-3 only even with a v3 admission carrying 4/5/6", () => {
+  const v3 = parseLegacyPublicAdmission(v3Admission([v3Record("account_4", 4), v3Record("account_5", 5), v3Record("account_6", 6)]));
+  for (const built of [buildLegacyListingCandidates(legacyQuery(), null, v3), buildMixedListingCandidates(legacyQuery(), null, v3)]) {
+    assert.match(built.text, /h\.source_status=3/);
+    assert.doesNotMatch(built.text, /source_status IN ?\(4,5,6\)/);
+    assert.doesNotMatch(built.text, /resourceNo/);
+  }
+});
+
+test("v3 manifest rejects malformed manifests, mixed resources and accepts exactly 5000 records", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-admission-r2-")), secrets = join(dir, ".secrets");
+  mkdirSync(secrets);
+  writeFileSync(join(secrets, "m.badschema.json"), JSON.stringify({ schema: "legacy-public-admission-manifest-v0", shards: [] }));
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("m.badschema.json"), dir), /INVALID/);
+  writeManifest(secrets, "m.empty.json", []);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("m.empty.json"), dir), /INVALID/);
+  writeFileSync(join(secrets, "m.notjson.json"), "{");
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("m.notjson.json"), dir), /INVALID/);
+  const a = writeAdmission(secrets, "a.json", v3Admission([v3Record("account_a", 4)]));
+  const other = v3Admission([v3Record("account_b", 5)]); other.resource = { ...other.resource, oid: 999 };
+  const b = writeAdmission(secrets, "b.json", other);
+  writeManifest(secrets, "m.mixed.json", [a, b]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("m.mixed.json"), dir), /INVALID/);
+  writeManifest(secrets, "m.badhex.json", [{ ...a, sha256: "Z".repeat(64) }]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("m.badhex.json"), dir), /INVALID/);
+  const exact = writeAdmission(secrets, "exact.json", v3Admission(Array.from({ length: 5000 }, (_, i) => v3Record("account_x" + i, 5))));
+  writeManifest(secrets, "m.exact.json", [exact]);
+  const loaded = loadLegacyPublicAdmissionManifest(manifestEnv("m.exact.json"), dir)!;
+  assert.equal(loaded.index.size, 5000);
+  assert.equal(admissionForAccount(loaded.index, "account_x4999")?.records.length, 1);
+  assert.equal(admissionForAccount(loaded.index, "account_missing"), undefined);
+  // The manifest itself must live in .secrets.
+  writeFileSync(join(dir, "m.outside.json"), JSON.stringify({ schema: "legacy-public-admission-manifest-v1", shards: [a] }));
+  assert.throws(() => loadLegacyPublicAdmissionManifest({ ...manifestEnv("x"), LEGACY_PUBLIC_ADMISSION_MANIFEST: "m.outside.json" }, dir), /PATH/);
+});
