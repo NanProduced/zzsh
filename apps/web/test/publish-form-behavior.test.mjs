@@ -260,6 +260,28 @@ test("availability stays undeclared until chosen, and help opens by click", asyn
   } finally { await p.close(); }
 });
 
+test('all real directory resources can be edited and saved while their missing prices remain explicit',async()=>{
+  const codes=['df_billable_haff','df_billable_level6_bullet','df_billable_level6_armor','df_billable_level6_helmet','df_billable_awm_bullet','df_billable_barrett_bullet','df_billable_coffee','df_billable_top_insure_card'];
+  const items=codes.map((code,n)=>({id:`catalog_${n}`,code,name:`目录物资${n}`,unit:n===0?'HAFF_BASE':n===1||n===4||n===5?'ROUND':n===7?'DAY':'PIECE',quantityScale:0,required:false,sortOrder:n,priced:n===0}));
+  const inventory=items.map((item,n)=>({itemId:item.id,quantity:n===1?'120':String(n)}));
+  const p=await probe({accountId:'account_1',catalogValue:{...catalog,items},mine:()=>supplyOf(declaration({inventory}))});
+  try{
+    await p.render();
+    for(const code of codes.slice(1))assert.ok(p.host.querySelector(`[data-resource-code="${code}"]`),code);
+    assert.equal(p.host.querySelectorAll('.publish-resource-state').length>0,true);
+    assert.match(p.text(),/可保存草稿，暂不能核价/);
+    assert.doesNotMatch(p.text(),/这份历史资源未进入当前价目/);
+    await p.type('#quantity-catalog_6','9');
+    await p.clickButton('保存草稿');
+    assert.ok(await p.waitFor(()=>p.calls.some(c=>c.op==='saveDraft')));
+    const saved=p.calls.find(c=>c.op==='saveDraft').body.inventory;
+    assert.equal(saved.length,8);
+    assert.equal(saved.find(i=>i.itemId==='catalog_6').quantity,'9');
+    assert.equal(saved.find(i=>i.itemId==='catalog_1').quantity,'120');
+    assert.equal(p.calls.some(c=>c.op==='quote'||c.op==='confirm'),false);
+  }finally{await p.close();}
+});
+
 test("skin picker renders the public summary, neutral missing-media state, and keyboard selection", async () => {
   const skinCatalog = {
     ...catalog,

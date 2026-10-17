@@ -765,9 +765,10 @@ export async function readPublicCatalog(
   const itemSearch = scope === "browse" ? filters.q : undefined;
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder",
-            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=i.media_id AND a.game_id=i.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='ITEM_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN i."media_id" ELSE NULL END AS "mediaId"
+            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=i.media_id AND a.game_id=i.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='ITEM_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN i."media_id" ELSE NULL END AS "mediaId"${scope === "publishing" ? `,
+            EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD') AS "priced"` : ""}
        FROM "zzsh_supply"."billable_item" i
-      WHERE "game_id" = $1 AND "enabled" = true${scope === "publishing" ? ` AND EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD')` : ""}${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
+      WHERE "game_id" = $1 AND "enabled" = true${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
       ORDER BY "sort_order", "code", "id"`,
     itemSearch ? [gameId, `%${escapeLike(itemSearch)}%`] : [gameId],
   );
@@ -847,7 +848,7 @@ export async function readPublicCatalog(
   const page = hasMore ? skins.rows.slice(0, limit) : skins.rows;
   const nextCursor = hasMore ? encodeCursor({ gameId, revision: gameRow.catalogRevision, filters }, page[page.length - 1]!.id) : null;
 
-  const missing = scope === "publishing" ? (await client.query(`SELECT id,name FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled AND required AND NOT (id=ANY($2::text[]))`,[gameId,items.rows.map(i=>i.id)])).rows : [];
+  const missing = scope === "publishing" ? (await client.query(`SELECT id,name FROM zzsh_supply.billable_item i WHERE game_id=$1 AND enabled AND required AND NOT EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD')`,[gameId])).rows : [];
   return {
     ...(scope === "publishing" ? {ready: Boolean(gameRow.currentReleaseId) && missing.length===0, blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}] : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
     game: gameRow,

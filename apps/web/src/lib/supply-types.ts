@@ -267,6 +267,7 @@ export type PublishingCatalog = {
     id: string;
     code: string;
     name: string;
+    priced: boolean;
     unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
     quantityScale: number;
     required: boolean;

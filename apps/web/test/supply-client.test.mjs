@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {groupForField,supplyRecovery,SupplyRequestError,supplyRequest,supplyApi,editableDeclaration,mergeInventory,inventoryEditorRows,inventoryPriceHint} from '../src/lib/supply-client.ts';
 test('draft inventory keeps exact quantities and shows unpriced lines',()=>{
-  const catalog={items:[{id:'priced',name:'哈夫币',unit:'HAFF_BASE',required:true}]};
+  const catalog={items:[{id:'priced',name:'哈夫币',unit:'HAFF_BASE',required:true,priced:true}]};
   const inventory=[{itemId:'priced',quantity:'0'},{itemId:'extra',quantity:'0'},{itemId:'unknown',quantity:null}];
   assert.deepEqual(mergeInventory({inventory},catalog),inventory);
   assert.deepEqual(mergeInventory({inventory:[]},catalog),[]);
@@ -13,6 +13,17 @@ test('draft inventory keeps exact quantities and shows unpriced lines',()=>{
     ['unknown','未确认（unknown）',null,false,null],
   ]);
   assert.equal(rows.some(row=>row.quantity==='0'&&row.itemId==='unknown'),false);
+});
+test('all catalog items remain editable when only one has a current price',()=>{
+  const catalog={items:Array.from({length:8},(_,n)=>({id:`item_${n}`,name:`物资${n}`,unit:n===0?'HAFF_BASE':'PIECE',priced:n===0}))};
+  const inventory=catalog.items.map((item,n)=>({itemId:item.id,quantity:n===1?'0':String(n+1)}));
+  const rows=inventoryEditorRows(catalog,inventory);
+  assert.equal(rows.length,8);
+  assert.deepEqual(rows.map(r=>r.priced),[true,false,false,false,false,false,false,false]);
+  assert.deepEqual(mergeInventory({inventory},catalog),inventory);
+  assert.deepEqual(rows.map(r=>r.quantity),inventory.map(i=>i.quantity));
+  assert.equal(inventoryPriceHint(rows[1]),'未进入当前可用价目，不可报价');
+  assert.equal(rows.every(r=>r.catalogState==='ready'),true);
 });
 test('current catalog membership overrides an older priced label and keeps unknown separate',()=>{
   const stale=[{id:'retained-stock',name:'先前读取的物品',unit:'PIECE',priced:true},{id:'kept',name:'旧名',unit:'ROUND',priced:false}];
@@ -28,13 +39,16 @@ test('current catalog membership overrides an older priced label and keeps unkno
   assert.deepEqual(failed.map(row=>[row.priced,row.catalogState]),[[null,'failed'],[null,'failed'],[null,'failed']]);
   assert.equal(inventoryPriceHint(pending[0]),'发布目录尚未加载，暂不能判断可否报价');
   assert.equal(inventoryPriceHint(failed[0]),'发布目录读取失败，暂不能判断可否报价');
-  const ready=inventoryEditorRows({items:[{id:'kept',name:'目录内物品',unit:'PIECE',required:true}]},inventory,stale.concat(labels));
+  const ready=inventoryEditorRows({items:[{id:'kept',name:'目录内物品',unit:'PIECE',required:true,priced:true}]},inventory,stale.concat(labels));
   assert.deepEqual(ready.map(row=>[row.itemId,row.name,row.unit,row.quantity,row.priced,row.catalogState]),[
     ['kept','目录内物品','PIECE','4',true,'ready'],
     ['zero','六级子弹','ROUND','0',false,'ready'],
     ['missing','六级头盔','PIECE',null,false,'ready'],
   ]);
   assert.equal(inventoryPriceHint(ready[0]),null);
+  const unknownPrice=inventoryEditorRows({items:[{id:'kept',name:'目录内物品',unit:'PIECE'}]},[{itemId:'kept',quantity:'4'}]);
+  assert.equal(unknownPrice[0].priced,null);
+  assert.equal(inventoryPriceHint(unknownPrice[0]),'当前价目状态尚未确认，暂不能报价');
 });
 test('supply recovery locates groups and never overwrites stale drafts',()=>{
   assert.equal(groupForField('inventory[2].quantity'),'inventory');assert.equal(groupForField('mediaBindings.0.assetId'),'media');assert.equal(groupForField('attributes.vit_level'),'basics');

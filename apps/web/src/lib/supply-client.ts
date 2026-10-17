@@ -67,26 +67,26 @@ export type InventoryEditorRow = {
 };
 
 export function inventoryEditorRows(
-  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean }> } | null,
+  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean; priced?: boolean }> } | null,
   inventory: DraftInput["inventory"],
   labels: Array<{ id: string; name: string; unit: string; priced?: boolean }> = [],
   availability: CatalogAvailability = catalog ? "ready" : "pending",
 ): InventoryEditorRow[] {
-  // A loaded publishing catalog decides current quotability. Detail labels only reuse name and unit.
+  // Directory membership and current pricing are separate; saved labels do not prove a price.
   const catalogState: CatalogAvailability = catalog ? "ready" : availability === "failed" ? "failed" : "pending";
   const labelById = new Map(labels.map((item) => [item.id, item]));
-  const pricedIds = new Set(catalogState === "ready" ? (catalog?.items ?? []).map((item) => item.id) : []);
+  const catalogIds = new Set(catalogState === "ready" ? (catalog?.items ?? []).map((item) => item.id) : []);
   const rows: InventoryEditorRow[] = (catalogState === "ready" ? catalog?.items ?? [] : []).map((item) => ({
     itemId: item.id,
     name: item.name,
     unit: item.unit,
     quantity: inventory.find((row) => row.itemId === item.id)?.quantity ?? null,
-    priced: true,
+    priced: typeof item.priced === "boolean" ? item.priced : null,
     required: Boolean(item.required),
     catalogState,
   }));
   for (const line of inventory) {
-    if (pricedIds.has(line.itemId)) continue;
+    if (catalogIds.has(line.itemId)) continue;
     const label = labelById.get(line.itemId);
     rows.push({
       itemId: line.itemId,
@@ -105,6 +105,7 @@ export function inventoryPriceHint(row: InventoryEditorRow): string | null {
   if (row.priced === false) return "未进入当前可用价目，不可报价";
   if (row.catalogState === "failed") return "发布目录读取失败，暂不能判断可否报价";
   if (row.catalogState === "pending") return "发布目录尚未加载，暂不能判断可否报价";
+  if (row.priced === null) return "当前价目状态尚未确认，暂不能报价";
   return null;
 }
 

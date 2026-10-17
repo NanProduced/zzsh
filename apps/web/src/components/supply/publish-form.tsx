@@ -2521,7 +2521,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   {!item.itemId ? <small className="publish-resource-state">目录待配置 · 数量暂存本页</small> : null}
                   {grouped?<small className="publish-resource-measure">1组 = 60发{remainder>0n?` · 已保留历史余量${remainder}发`:""}</small>:null}
                   {quantity!==""&&!valid?<FieldError text="请填写非负整数，或留空。"/>:null}
-                  {item.priced===false?<><small className="publish-resource-state">这份历史资源未进入当前价目。</small><button type="button" className="button quiet" disabled={formDisabled} onClick={()=>setDraft(previous=>({...previous,inventory:previous.inventory.filter(row=>row.itemId!==item.itemId)}))}>不纳入本次申报</button></>:null}
+                  {item.priced===false?<><small className="publish-resource-state">此资源尚未配置当前价目，可保存草稿，暂不能核价。</small><button type="button" className="button quiet" disabled={formDisabled} onClick={()=>setDraft(previous=>({...previous,inventory:previous.inventory.filter(row=>row.itemId!==item.itemId)}))}>不纳入本次申报</button></>:null}
                 </article>;
               })}</div>:null}
               {missingResourceRows.length?<p className="publish-resource-state">{missingResourceRows.map(item=>item.name).join("、")}的数量暂存本页，配置完成后可保存。</p>:null}
