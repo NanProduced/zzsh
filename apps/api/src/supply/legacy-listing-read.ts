@@ -196,16 +196,12 @@ export async function recordLegacyDisplaySnapshot(client: PoolClient, accountId:
   return {...result.body as {accountId:string;displayDigest:string;schemaVersion:number},replayed:result.replayed};
 }
 
-// `v` is the version the public read actually shows: the owner's current native
-// draft when it exists (the editable representation that carries supplemented
-// fields such as the service window, skins and test media), otherwise the
-// immutable source observation. Source identity and amounts always stay on `h`.
+// Public history stays on the frozen observation. A private current draft must
+// not replace it; a real publication later hands this account to native reads.
 const FROM = `FROM zzsh_supply.legacy_listing_read_snapshot h
  JOIN zzsh_supply.rental_account a ON a.id=h.account_id
  LEFT JOIN zzsh_supply.legacy_listing_display_snapshot d ON d.account_id=h.account_id AND d.schema_version=1
- JOIN zzsh_supply.listing_version ov ON ov.id=h.observation_version_id
- LEFT JOIN zzsh_supply.listing_version dv ON dv.id=a.current_version_id AND dv.origin='NATIVE' AND dv.review_state='DRAFT'
- JOIN zzsh_supply.listing_version v ON v.id=COALESCE(dv.id,ov.id)
+ JOIN zzsh_supply.listing_version v ON v.id=h.observation_version_id AND v.account_id=a.id AND v.origin='LEGACY_OBSERVATION'
  JOIN zzsh_supply.game g ON g.id=a.game_id
  JOIN zzsh_supply.game_service_operation gs ON gs.game_id=g.id AND gs.service_code='ACCOUNT_RENTAL'
  JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id

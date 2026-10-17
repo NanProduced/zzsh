@@ -10,14 +10,14 @@ type Proof={canonical:string;digest:string};
 type Confirm={id:string;revision:string;createdAt:string;inputEvidenceId:string;resultEvidenceId:string;planFingerprint:string;actor:LegacyContinuationActor};
 export type LegacyGrowthConsumptionInput={binding:LegacyOrderBinding;subjectUserId:string;recordedAt:string;origin:
   | {kind:"CONTINUATION_CONFIRM";command:Confirm;input:LegacyEvidenceRow;result:LegacyEvidenceRow;components?:Proof}
-  | {kind:"LEGACY_COMPLETED";parentSourceSnapshot:Record<string,string|null>;sourceRecord:Proof;components:Proof}};
+  | {kind:"LEGACY_COMPLETED"|"LEGACY_CANCELLED_UNCONSUMED";parentSourceSnapshot:Record<string,string|null>;sourceRecord:Proof;components:Proof}};
 export type LegacyGrowthProjection={sourceKey:string;orderId:string;knowledge:"KNOWN"|"UNKNOWN"|"EXCLUDED";reason:string|null;facts:SettledContributionFact[];
   evidence:{parentSourceDigest:string;basisDigest:string|null;basisRef:string|null;componentDigest:string|null};observedResourceChargeCents:string|null};
 const cents=(x:unknown)=>{if(typeof x!=="string" || !/^(0|[1-9]\d{0,23})$/.test(x))throw new Error("COMPONENT_AMOUNT_INVALID");return BigInt(x);};
 const parsedProof=(p:Proof)=>{if(!p || p.canonical.length>262144 || sha256Hex(p.canonical)!==p.digest)throw new Error("SOURCE_EVIDENCE_INVALID");const value=JSON.parse(p.canonical) as Record<string,unknown>;if(!value || typeof value!=="object" || Array.isArray(value) || canonicalize(value)!==p.canonical)throw new Error("SOURCE_EVIDENCE_INVALID");return value;};
 const sourceKey=(b:LegacyOrderBinding)=>`legacy_mysql_restore:la_order:${b.legacyId}`;
 /** Pure source projection. The E caller owns authority, admitted extraction receipts and all growth persistence. */
-export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInput,admittedComponentDigests?:ReadonlySet<string>):LegacyGrowthProjection{
+export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInput,admittedComponentDigests?:ReadonlySet<string>,receipt?:LegacyGrowthCoverageReceipt):LegacyGrowthProjection{
   const b=input.binding,base={sourceKey:sourceKey(b),orderId:b.id,evidence:{parentSourceDigest:b.sourceDigest,basisDigest:null as string|null,basisRef:null as string|null,componentDigest:null as string|null},observedResourceChargeCents:null as string|null};
   const unknown=(reason:string):LegacyGrowthProjection=>({...base,knowledge:"UNKNOWN",reason,facts:[]});
   try{
@@ -28,6 +28,41 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=sourceKey(b);return {...base,knowledge:"EXCLUDED",reason:"NOT_PAID",facts:[]};
     }
     if(b.sourcePayStatus!==1 || b.paidCents===null)return unknown("PAID_SOURCE_UNPROVEN");
+    if(input.origin.kind==="LEGACY_CANCELLED_UNCONSUMED"){
+      const o=input.origin,row=parsedProof(o.sourceRecord);
+      if(b.sourceOrderStatus!==5 || b.completedAt!==null || row.order_status!=="5" || row.pay_is!=="1"
+        || sha256Hex(canonicalize(o.parentSourceSnapshot))!==b.sourceDigest || Object.keys(o.parentSourceSnapshot).some(k=>row[k]!==o.parentSourceSnapshot[k])
+        || row.id!==b.legacyId || row.user_id!==b.legacyRenterId || row.accounts_id!==b.legacyAccountId || row.sale_user_id!==b.legacyOwnerId)return unknown("LEGACY_SOURCE_BINDING_CONFLICT");
+      if(!receipt || receipt.subjectUserId!==input.subjectUserId || !receipt.expectedSourceKeys.includes(base.sourceKey) || !Array.isArray(receipt.refundReviewEvidenceRefs))return unknown("CANCELLATION_SCOPE_UNPROVEN");
+      if(!admittedComponentDigests?.has(o.components.digest))return unknown("COMPONENT_EVIDENCE_NOT_ADMITTED");
+      const p=parsedProof(o.components),listed=(digest:string)=>receipt.refundReviewEvidenceRefs.some(ref=>ref===digest || ref.endsWith(`:${digest}`));
+      if(p.schema!=="legacy-consumption-exclusion.v1" || p.classification!=="PAID_CANCELLED_UNCONSUMED" || p.parentSourceDigest!==b.sourceDigest || p.basisDigest!==o.sourceRecord.digest
+        || p.legacyOrderId!==b.legacyId || p.subjectUserId!==input.subjectUserId || p.cutoff!==receipt.cutoff || typeof p.oldRuleEvidenceRef!=="string" || !p.oldRuleEvidenceRef || p.oldRuleEvidenceRef.length>512)return unknown("CANCELLATION_EVIDENCE_BINDING_CONFLICT");
+      if(!listed(o.components.digest))return unknown("CANCELLATION_NOT_IN_RECEIPT_LINEAGE");
+      const money=(v:unknown)=>{if(typeof v!=="string")throw new Error("CANCELLATION_AMOUNT_UNPROVEN");return cents(legacyPlanYuanToCents(v));};
+      // This is an explicit unfulfilled-source class; NULL measurement/return is never converted into a zero amount.
+      if(row.express_is!=="0" || row.is_settle!=="0" || row.express_time!==null&&row.express_time!=="0" || row.confirm_time!==null&&row.confirm_time!=="0"
+        || row.expend_haff!==null || row.return_order_money!==null || money(row.expend_pay_money)!==0n)return unknown("CANCELLATION_NOT_UNCONSUMED");
+      const paid=cents(b.paidCents);if(paid<=0n || money(row.pay_money)!==paid || money(row.need_pay_money)!==paid)return unknown("CANCELLATION_AMOUNT_CONFLICT");
+      const rows:Record<string,unknown>[]=[],digests:string[]=[];
+      for(const[field,entity]of [["payment","la_pay_order"],["refundRecord","la_refund_record"],["refundLog","la_refund_log"]] as const){
+        const source=p[field] as Record<string,unknown>|undefined;
+        if(!source || source.sourceSystem!=="legacy_mysql_restore" || source.sourceEntity!==entity || typeof source.extractSha256!=="string" || !/^[a-f0-9]{64}$/.test(source.extractSha256)
+          || !Array.isArray(source.records) || source.records.length!==1)return unknown("CANCELLATION_SOURCE_EVIDENCE_INVALID");
+        const proof=source.records[0] as Proof,record=parsedProof(proof);if(typeof record.id!=="string" || !/^[1-9]\d{0,23}$/.test(record.id))return unknown("CANCELLATION_SOURCE_EVIDENCE_INVALID");rows.push(record);digests.push(proof.digest);
+      }
+      const payment=rows[0]!,refund=rows[1]!,log=rows[2]!;
+      if(!listed(digests[1]!) || !listed(digests[2]!))return unknown("CANCELLATION_NOT_IN_RECEIPT_LINEAGE");
+      if(payment.order_type!=="1" || payment.pay_is!=="1" || payment.order_id!==b.legacyId || money(payment.pay_money)!==paid
+        || refund.order_type!=="order" || refund.refund_type!=="1" || refund.refund_status!=="1" || refund.order_id!==b.legacyId || refund.user_id!==b.legacyRenterId
+        || typeof row.order_sn!=="string" || !row.order_sn || refund.order_sn!==row.order_sn || log.record_id!==refund.id || log.user_id!==b.legacyRenterId || log.refund_status!=="1"
+        || money(refund.order_amount)!==paid || money(refund.refund_amount)!==paid || money(log.order_amount)!==paid || money(log.refund_amount)!==paid)return unknown("CANCELLATION_REFUND_LINEAGE_CONFLICT");
+      const instant=(v:unknown)=>{if(typeof v!=="string")throw new Error("CANCELLATION_TIME_UNPROVEN");const utc=legacyEpochTimestamp(v);if(!utc)throw new Error("CANCELLATION_TIME_UNPROVEN");return legacyTimeMicros(utc);};
+      const cutoff=legacyTimeMicros(receipt.cutoff),recorded=legacyTimeMicros(input.recordedAt),payAt=instant(row.pay_time),cancelAt=instant(row.cancel_time),times=[payAt,cancelAt,instant(payment.pay_time),instant(refund.create_time),instant(refund.update_time),instant(log.create_time),instant(log.update_time)];
+      if(cancelAt<payAt || instant(payment.pay_time)>cancelAt || times.some(t=>t>cutoff || t>recorded || t<payAt) || instant(refund.update_time)<instant(refund.create_time) || instant(log.update_time)<instant(log.create_time))return unknown("CANCELLATION_TIME_CONFLICT");
+      base.evidence.basisDigest=o.sourceRecord.digest;base.evidence.basisRef=base.sourceKey;base.evidence.componentDigest=o.components.digest;
+      return {...base,knowledge:"EXCLUDED",reason:"CANCELLED_UNCONSUMED",facts:[]};
+    }
     let paid:bigint,returned:bigint,items:bigint|null=null,rental:bigint|null=null,minimum=0n,effectiveAt:string,version:string,revision:number,proof:Proof|undefined;
     if(input.origin.kind==="CONTINUATION_CONFIRM"){
       const o=input.origin,c=o.command,before=readSealedLegacyFacts(o.input),result=readSealedLegacyFacts(o.result),role=c.actor.realm==="user"?(c.actor.userId===b.ownerUserId?"owner":c.actor.userId===b.renterUserId?"renter":"other"):"admin";

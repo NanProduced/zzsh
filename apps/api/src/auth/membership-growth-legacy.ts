@@ -105,7 +105,7 @@ export function prepareLegacyGrowthBackfill(pkg: LegacyGrowthSourcePackage): Pre
   const seen = new Set<string>();
   for (const input of pkg.inputs) {
     if (input?.subjectUserId !== subjectUserId) return bad("SOURCE_CONFLICT", "FACT_SUBJECT_MISMATCH");
-    const p = projectLegacyGrowthConsumption(input, new Set(pkg.admitted.componentDigests));
+    const p = projectLegacyGrowthConsumption(input, new Set(pkg.admitted.componentDigests), receipt);
     if (seen.has(p.sourceKey)) return bad("SOURCE_CONFLICT", "DUPLICATE_SOURCE_INPUT");
     seen.add(p.sourceKey);
     projections.push({ ...p, facts: [...p.facts] });
