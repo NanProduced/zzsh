@@ -13,7 +13,7 @@ test("mounts one persistent support rail and force-mounts the shared dialog port
   assert.match(rail, /<Dialog\.Root[^>]*modal=\{false\}/);
   assert.match(rail, /<Dialog\.Portal forceMount>/);
   assert.match(rail, /<Dialog\.Content forceMount/);
-  assert.match(rail, /usePathname/);
+  assert.match(rail, /window\.addEventListener\("zzsh:open-support",open\)/);
   assert.doesNotMatch(read("components/portal-home.tsx"), /SupportRail/);
   assert.doesNotMatch(read("components/layout/service-shell.tsx"), /SupportRail/);
 });
