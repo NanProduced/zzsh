@@ -8,7 +8,8 @@
  *   - 若兜底成功：仅返回可靠 IP（IP-only），隐藏详细信息；
  *   - 若兜底失败/无 IP：抛出 rate-limited 错误，UI 整块隐藏。
  * - 429 冷却：遵守 Retry-After 头；无有效头时保守冷却 24 小时。
- * - 普通失败冷却 1 分钟。
+ * - 普通失败不设冷却：下次进入该区块重新查一次（失败即整块隐藏，无需退避状态）。
+ * Owner 2026-10-17 确认：改用 ipwho.is 并展示近似地区/运营商/ASN（原 ipify 只返回 IP）为指定改动。
  */
 
 export const IPWHOIS_PROVIDER = "https://ipwho.is/?fields=success,message,ip,type,country,country_code,region,city,connection.isp,connection.org,connection.asn&lang=zh-CN";
@@ -16,7 +17,6 @@ export const IPIFY_PROVIDER = "https://api64.ipify.org?format=json";
 
 export const TIMEOUT_MS = 4_000;
 export const CACHE_TTL_MS = 2 * 60 * 1000; // 2 分钟
-export const FAILURE_COOLDOWN_MS = 60 * 1000; // 1 分钟
 export const RATE_LIMIT_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 小时
 
 export type NetworkDetails = {
@@ -44,13 +44,6 @@ export class NetworkInfoError extends Error {
     this.reason = reason;
   }
 }
-
-export const networkFailureCopy: Record<NetworkInfoFailure, string> = {
-  timeout: "读取超时，当前网络信息暂时无法获取。",
-  "rate-limited": "查询过于频繁，请稍后再试。",
-  unreachable: "网络服务暂时不可达，当前网络信息暂时无法获取。",
-  invalid: "返回的信息无法确认，当前网络信息暂时无法获取。",
-};
 
 const IPV4 = /^(\d{1,3})(\.\d{1,3}){3}$/;
 export function isIpLiteral(value: string): boolean {
@@ -95,14 +88,12 @@ function parseRetryAfter(header: string | null | undefined): number {
 let cachedRecord: { data: NetworkInfo; timestamp: number } | null = null;
 let lastKnownIpRecord: { ip: string; timestamp: number } | null = null;
 let rateLimitUntil = 0;
-let failureUntil = 0;
 let inFlight: Promise<NetworkInfo> | null = null;
 
 export function resetNetworkInfoCacheForTest() {
   cachedRecord = null;
   lastKnownIpRecord = null;
   rateLimitUntil = 0;
-  failureUntil = 0;
   inFlight = null;
 }
 
@@ -268,8 +259,6 @@ export async function readNetworkInfo(): Promise<NetworkInfo> {
       return completeInfo;
     } catch (err) {
       if (err instanceof NetworkInfoError && err.reason === "rate-limited") throw err;
-
-      failureUntil = Date.now() + FAILURE_COOLDOWN_MS;
 
       // 普通失败：若已有未过期 IP 则降级为 IP-only
       if (lastKnownIpRecord && Date.now() - lastKnownIpRecord.timestamp < CACHE_TTL_MS) {

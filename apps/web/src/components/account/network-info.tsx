@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { SkeletonBlock } from "@/components/ui/information";
-import { NetworkInfoError, readNetworkInfo, type NetworkInfo, type NetworkInfoFailure } from "@/lib/network-info-client";
+import { readNetworkInfo, type NetworkInfo } from "@/lib/network-info-client";
 
 /** 浏览器时区只读自本机 Intl，与公网 IP 分开呈现；它是本机设置，不是 IP 定位结果。 */
 export function browserTimezone(): string {
@@ -20,7 +20,7 @@ export function browserTimezone(): string {
  * - 额度耗尽 (429) 或降级：仅展示公网 IP 与查询时间；若无 IP 则整块隐藏，不留空白卡片或长期 Skeleton。
  */
 export function CurrentNetworkFields() {
-  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; info?: NetworkInfo; reason?: NetworkInfoFailure }>({ status: "loading" });
+  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; info?: NetworkInfo }>({ status: "loading" });
   const [copied, setCopied] = useState(false);
   const sequence = useRef(0);
   const copyTimer = useRef<number | null>(null);
@@ -33,9 +33,10 @@ export function CurrentNetworkFields() {
       if (sequence.current === id) {
         setState({ status: "ready", info });
       }
-    } catch (error) {
+    } catch {
       if (sequence.current !== id) return;
-      setState({ status: "error", reason: error instanceof NetworkInfoError ? error.reason : "unreachable" });
+      // 失败（含未知异常）都整块隐藏，不铺错误文案、不留长期 Skeleton。
+      setState({ status: "error" });
     }
   };
 
@@ -59,12 +60,10 @@ export function CurrentNetworkFields() {
     }
   };
 
-  const { status, info, reason } = state;
+  const { status, info } = state;
 
-  // 429 额度耗尽且无 IP，或彻底失败：整块隐藏，不留失效 ARIA 或空白卡片
-  if (status === "error" && (!info || !info.ip)) {
-    return null;
-  }
+  // 失败（含 429 兜底也没拿到 IP）：整块隐藏，不留失效 ARIA 或空白卡片
+  if (status === "error") return null;
 
   if (status === "loading") {
     return (
@@ -85,9 +84,7 @@ export function CurrentNetworkFields() {
     );
   }
 
-  if (!info || !info.ip) {
-    return null;
-  }
+  if (!info?.ip) return null;
 
   const hasDetails = Boolean(info.details && !info.isRateLimited);
   const details = info.details;
