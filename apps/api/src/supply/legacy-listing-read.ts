@@ -34,9 +34,9 @@ export function parseLegacyReadSnapshot(value: unknown): LegacyReadSnapshot {
   return x as LegacyReadSnapshot;
 }
 
-export const LEGACY_READ_SOURCE_STATUSES = [0, 3, 4, 5] as const;
+export const LEGACY_READ_SOURCE_STATUSES = [0, 3, 4, 5, 6] as const;
 
-/** Public history stays status 3. Other saved statuses are not a public read. */
+/** Saving a source status is not public authorization; non-3 view needs v3 admission. */
 export function legacyReadSourceAllowed(status: number, deleted: boolean): boolean {
   return deleted === false && LEGACY_READ_SOURCE_STATUSES.includes(status as (typeof LEGACY_READ_SOURCE_STATUSES)[number]);
 }
@@ -219,11 +219,12 @@ export const LEGACY_DISPLAY_HOLD_SQL = `a.legacy_hold IN ('NONE','UNRESOLVED')`;
 export const LEGACY_DISPLAY_IDENTITY_SQL = `COALESCE(us.age_status,'UNKNOWN')='ADULT'`;
 // Display is bound to the adjudicated frozen source batch; evidence outside it
 // fails closed (legacy-load/legacy-public-admission).
-const VISIBLE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND ${LEGACY_DISPLAY_HOLD_SQL} AND h.source_status=3 AND NOT a.owner_paused AND NOT a.staff_restricted
+const VISIBLE_BASE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND ${LEGACY_DISPLAY_HOLD_SQL} AND NOT a.staff_restricted
  AND NOT u.suspended AND COALESCE(us.account_status,'ACTIVE')='ACTIVE'
  AND ${LEGACY_DISPLAY_IDENTITY_SQL}
  AND (d.account_id IS NULL OR (d.snapshot#>>'{risk,highRiskOwner}'='false' AND d.observation_version_id=h.observation_version_id AND d.base_source_digest=h.source_digest))
  AND ${LEGACY_NATIVE_TAKEOVER_GUARD}`;
+const VISIBLE = `${VISIBLE_BASE} AND h.source_status=3 AND NOT a.owner_paused`;
 
 // Mode selection must not depend on the currently visible row count: an
 // enabled game with a valid configuration keeps its filters and returns an
@@ -234,11 +235,14 @@ export async function hasLegacyReadSnapshots(client: PoolClient, gameId: string)
 
 export async function readLegacyListing(client: PoolClient, accountId: string, admission?: LegacyPublicAdmission) {
   const values: unknown[]=[accountId];
-  const admitted=legacyAdmissionSql(admission,value=>{values.push(value);return "$"+values.length;});
-  const r=(await client.query(`SELECT a.id,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,
+  const param=(value:unknown)=>{values.push(value);return "$"+values.length;};
+  const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(admission,param)})${admission?.schema === "legacy-public-admission-v3" ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(admission,param,false)})` : ""})`;
+  const r=(await client.query(`SELECT a.id,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,
     d.snapshot AS display_snapshot,d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,d.source_updated_at AS display_updated_at,d.evidence_ref AS display_evidence_ref
-    ${FROM} WHERE a.id=$1 AND ${VISIBLE} AND ${admitted}`,values)).rows[0];
+    ${FROM} WHERE a.id=$1 AND ${VISIBLE_BASE} AND ${admitted}`,values)).rows[0];
   if(!r)throw notFound();
+  if(r.source_status!==3 && !(admission?.schema==="legacy-public-admission-v3" && [4,5,6].includes(r.source_status) &&
+    admission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
   // Shared runtime admission for list and detail: privacy-bearing text and
   // evidence outside the adjudicated batch fail closed without leaking facts.
   if(!evaluatePublicDisplayGuard({title:r.title,description:r.description,evidenceRef:r.evidence_ref}).ok)throw notFound();
@@ -261,6 +265,8 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     game:{id:r.game_id,code:r.game_code,name:r.game_name},attributes:attrs,attributeDisplay:display,safeBox:display.safeBox,
     termOption:{code:"legacy_source",displayName:`${snapshot.termDays} 天`,dailyConsumption:{quantity:snapshot.dailyHaffBase,unit:"HAFF_BASE"}},
     source:"LEGACY_READ_ONLY" as const,canCreateOrder:false as const,sourceUpdatedAt:r.source_updated_at.toISOString(),
+    availability:{state:r.owner_paused?"OFFLINE":"LEGACY_READ_ONLY"},
+    sourceAvailability:{state:r.source_status===3?"LISTED":r.source_status===4?"OFFLINE":r.source_status===5?"RENTED":r.source_status===6?"PENDING_PAYMENT":"UNKNOWN",asOfUtc:r.source_updated_at.toISOString()},
     ...(extra ? {rentalMode:extra.rentalMode,displaySchema:extra.schema} : {}),
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:resources.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),

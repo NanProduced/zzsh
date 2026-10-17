@@ -7,6 +7,7 @@ import { handleListingFilters } from "./listing-filter-routes";
 import type { ListingCursorKey } from "./listing-cursor";
 import type { SupplyGateReader } from "./publishing";
 import type { INestApplication } from "@nestjs/common";
+import { assignAccountNumber } from "./account-number";
 import type { Pool, PoolClient } from "pg";
 import { auditObjectType, auditSnapshot } from "./supply-audit";
 import { ContentHashError } from "./content-hash";
@@ -556,6 +557,7 @@ export async function handleSupplyUserRoute(
             `INSERT INTO "zzsh_supply"."rental_account" ("id", "owner_user_id", "game_id") VALUES ($1, $2, $3)`,
             [accountId, context.userId, gameId],
           );
+          const displayNo = await assignAccountNumber(client, accountId);
           await recordAudit(client, {
             actorType: "user",
             actorId: context.userId,
@@ -566,7 +568,7 @@ export async function handleSupplyUserRoute(
             outcome: "SUCCESS",
             requestId,
             reason: "supply.account.create",
-            details: { gameId, before: null, after: { accountId, gameId, revision: "1" }, result: "CREATED" },
+            details: { gameId, before: null, after: { accountId, displayNo, gameId, revision: "1" }, result: "CREATED" },
           });
           return { status: 200, body: { accountId, gameId } };
         },

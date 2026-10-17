@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { PoolClient } from "pg";
 import {
   LEGACY_DISPLAY_HOLD_STATES,
   classifyPublicDisplay,
@@ -232,12 +233,13 @@ function legacyProjectionClient(row: Record<string, unknown>) {
       if (sql.includes("FROM zzsh_supply.listing_media m")) return { rows: [], rowCount: 0 };
       throw Error(`Unexpected SQL: ${sql}`);
     },
-  } as never;
+  } as unknown as PoolClient;
 }
 
 function legacyProjectionRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "account_1", game_id: "game-1", game_code: "delta", game_name: "三角洲行动", version_id: "version-1",
+    source_status: 3, owner_paused: false,
     title: "历史资料待核实", description: null,
     attributes: {},
     snapshot: {
@@ -269,6 +271,43 @@ test("legacy public listing projection stays read only and leaks no private evid
   // Mode is unknown for legacy rows: it is dropped, never defaulted to ordinary/fast.
   assert.equal(Object.hasOwn(listing as Record<string, unknown>, "rentalMode"), false);
   assert.equal(wire.includes("rentalMode"), false);
+});
+
+test("legacy public read never chooses a private current native draft over its frozen observation", async () => {
+  const observation = legacyProjectionRow(), draft = { ...observation, version_id: "private-current-draft", title: "UNREVIEWED_PRIVATE_DRAFT" };
+  const observationClient = legacyProjectionClient(observation);
+  const client = { query: async (sql: string) => {
+    if (sql.includes("FROM zzsh_supply.legacy_listing_read_snapshot h")) {
+      // Model the two persisted versions; actual PostgreSQL join execution is a separate acceptance item.
+      const selected = sql.includes("COALESCE(dv.id,ov.id)") ? draft : observation;
+      return { rows: [selected], rowCount: 1 };
+    }
+    return observationClient.query(sql);
+  } };
+  const listing = await readLegacyListing(client as never, "account_1");
+  assert.equal(listing.versionId, "version-1"); assert.equal(listing.title, observation.title);
+  assert.equal(listing.displayNo, "A-1"); assert.equal(listing.quote, null); assert.equal(listing.canCreateOrder, false);
+  assert(!JSON.stringify(listing).includes("UNREVIEWED_PRIVATE_DRAFT"));
+});
+
+test("v3 binds each added source status; old capability versions never imply extra public states", async () => {
+  const row = legacyProjectionRow({ source_status: 4 });
+  const original = approvedFixture();
+  const v3 = { ...original, schema: "legacy-public-admission-v3", records: original.records.map(record => ({ ...record,
+    snapshot: row.snapshot, title: row.title, sourceUpdatedAt: row.source_updated_at.toISOString(), displayDigest: null, sourceStatus: 4 })) };
+  const admitted = parseLegacyPublicAdmission(v3);
+  const result = await readLegacyListing(legacyProjectionClient(row), "account_1", admitted);
+  assert.equal(result.canCreateOrder, false); assert.equal(result.quote, null); assert.equal(result.sourceAvailability.state, "OFFLINE");
+  assert.equal(result.availability.state, "LEGACY_READ_ONLY");
+  await assert.rejects(readLegacyListing(legacyProjectionClient(row), "account_1", parseLegacyPublicAdmission(original)), (e: any) => e.status === 404);
+  await assert.rejects(readLegacyListing(legacyProjectionClient(row), "account_1"), (e: any) => e.status === 404);
+  for (const status of [0, 1, 2, 7, undefined, "4"]) assert.throws(() => parseLegacyPublicAdmission({ ...v3, records: v3.records.map(record => ({ ...record, sourceStatus: status })) }));
+  assert.throws(() => parseLegacyPublicAdmission({ ...v3, schema: "legacy-public-admission-v2" }));
+  for (const sourceStatus of [4,5,6]) {
+    const capability = parseLegacyPublicAdmission({ ...v3, records: v3.records.map(record => ({ ...record, sourceStatus })) });
+    const listing = await readLegacyListing(legacyProjectionClient(legacyProjectionRow({ source_status: sourceStatus })), "account_1", capability);
+    assert.equal(listing.canCreateOrder, false); assert.equal(listing.quote, null); assert.equal(listing.availability.state, "LEGACY_READ_ONLY");
+  }
 });
 
 test("the shared legacy projection fails closed on privacy text and unbound evidence", async () => {

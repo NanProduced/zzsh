@@ -568,6 +568,13 @@
       "when": 1792147352618,
       "tag": "0080_membership_growth_legacy_coverage",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1792147352619,
+      "tag": "0081_account_public_numbers",
+      "breakpoints": true
     }
   ]
 }

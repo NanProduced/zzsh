@@ -14,7 +14,7 @@ import {
 } from "../supply/publishing";
 import { projectDeltaQuote, type InternalQuote, type QuoteAmount } from "../supply/pricing";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "../supply/supply-util";
-import { readLegacyAwareOrderOccupancy } from "./legacy-order-occupancy";
+import { readLegacyAwareOrderOccupancy, readAccountOccupancyFacts } from "./legacy-order-occupancy";
 
 export const ORDER_STATUS = {
   PENDING_PAYMENT: "PENDING_PAYMENT",
@@ -699,8 +699,9 @@ export { readLegacyAwareOrderOccupancy as readOrderOccupancy } from "./legacy-or
 export function composeSupplyGateWithOrderOccupancy(base: SupplyGateReader): SupplyGateReader {
   return async (client, account, purpose) => {
     const gate = await base(client, account, purpose);
-    const occupancy = await readLegacyAwareOrderOccupancy(client, account.id);
-    return { ...gate, occupancy };
+    const occupancy = await readAccountOccupancyFacts(client, account.id);
+    const { occupancyKind: _previousKind, ...fundingGate } = gate;
+    return { ...fundingGate, occupancy: occupancy.state, ...(occupancy.kind ? { occupancyKind: occupancy.kind } : {}) };
   };
 }
 

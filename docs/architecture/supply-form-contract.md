@@ -22,7 +22,7 @@
 
 历史公开版本只有能逐项匹配真实 `APPROVE` decision 的版本，才以 `LEGACY_APPROVED` 写入发布事实并继续保留 `APPROVED`、原审核人、原决定时间、hash 和 release。`SUBMITTED`、`REJECTED`、`IMPORTED_UNVERIFIED` 不因迁移或查询自动公开。暂停、运营限制、媒体隔离及恢复使用现有状态/审计，不新增发布事实，也不改变原 `publishedAt`；正文改版须重新报价、接受规则并发布新版本。
 
-公开列表、详情、个人确认与建单只接受两种有效组合：`PUBLISHED + OWNER_DIRECT` 或 `APPROVED + LEGACY_APPROVED`，并按入口继续核身份、实名/成年、保证金、规则/hash和占用；个人确认与建单另核租客会员及锁内验证。`ACCOUNT_DISPLAY` 仅要求服务端技术校验、所有权/用途绑定和公开衍生文件完整；`ACCOUNT_EVIDENCE` 始终私有，草稿、非当前绑定和隔离媒体不可由公开读取路径获取。技术合格不等于人工内容审核通过。
+公开资料只接受两种有真实publication的有效组合：`PUBLISHED + OWNER_DIRECT` 或 `APPROVED + LEGACY_APPROVED`，并按入口分别核资料公开与当前可租：默认列表、个人确认/建单仍核保证金、规则和空闲；详情、精确编号和收藏允许普通下架/占用时读取最后合法公开版本，canCreateOrder=false，不读未审核草稿。主体/隐私/hash/媒体安全不放宽，见[账号可见性](account-visibility.md)；个人确认与建单另核租客会员及锁内验证。`ACCOUNT_DISPLAY` 仅要求服务端技术校验、所有权/用途绑定和公开衍生文件完整；`ACCOUNT_EVIDENCE` 始终私有，草稿、非当前绑定和隔离媒体不可由公开读取路径获取。技术合格不等于人工内容审核通过。
 
 | 分组 | 数据/写入 | 校验与恢复 |
 |---|---|---|

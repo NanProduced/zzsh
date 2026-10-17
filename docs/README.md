@@ -17,6 +17,7 @@
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)
 - [开租与结算确认](architecture/settlement-confirmation.md)
 - [公开列表组合筛选与配置](architecture/listing-query.md)
+- [账号公开查看、可租状态与编号](architecture/account-visibility.md)
 - [认证与账号安全](architecture/authentication.md)
 - [开发与验证](development.md)
 - [测试、验证与验收脚本规范](testing.md)

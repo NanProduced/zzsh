@@ -137,8 +137,8 @@ test("coverage runtime ACL clears table and all stale column grants; broken inve
   const text = statements.join("\n"); assert.match(text, /REVOKE ALL ON TABLE zzsh_iam.membership_growth_legacy_coverage/); assert.match(text, /REVOKE SELECT \("id","record"\), INSERT/); assert.match(text, /GRANT SELECT ON TABLE/); assert(!/GRANT (INSERT|UPDATE|DELETE)/.test(text));
   await assert.rejects(configureLegacyGrowthCoveragePrivileges({ query: async () => ({ rows: [] }) } as never, "fixture_runtime"));
 });
-test("new chain appends one migration while the accepted 74/80 prefixes stay byte-identical", () => {
-  const migrations = readMigrationFiles({ migrationsFolder: resolve("migrations/business") }); assert.equal(migrations.length, 81);
+test("later migrations keep the growth addition and accepted 74/80 prefixes byte-identical", () => {
+  const migrations = readMigrationFiles({ migrationsFolder: resolve("migrations/business") }); assert(migrations.length >= 81);
   const digest = (n: number) => sha(JSON.stringify(migrations.slice(0, n).map(m => ({ hash: m.hash, when: String(m.folderMillis) }))));
   assert.equal(digest(74), "45124baf29a7e412b1df92e19afd6150eec95302a9e8270ef961a10373dd0852");
   assert.equal(digest(80), "9eb306ec90b83e8a97b9132744048e75e4669caa7134fbf92b41cda6808f2627");

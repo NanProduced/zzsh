@@ -3,6 +3,7 @@ import { DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "./legacy-listing-read";
 import { listV2 } from "./listing-filter-routes";
+import { lookupPublicListing, parseNumberLookupQuery } from "./public-listing-lookup";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
 import type { PoolClient } from "pg";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
@@ -189,6 +190,12 @@ export async function handlePublishingRoute(
   const accountMatch = admin
     ? ADMIN_ROUTE.exec(path)
     : ACCOUNT_ROUTE.exec(path);
+  if (!admin && method === "GET" && path === "/listings/lookup") {
+    const lookup = parseNumberLookupQuery(query);
+    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission));
+    sendJson(response, 200, result, requestId);
+    return true;
+  }
   const publicMatch = !admin
     ? /^\/listings\/([A-Za-z0-9._:-]+)(?:\/media\/([A-Za-z0-9._:-]+))?$/.exec(
         path,
@@ -202,8 +209,9 @@ export async function handlePublishingRoute(
           const a = await readPublishingAccount(client, publicMatch[1]!);
           const detail = await readPublicListing(client, a, gate, options.legacyPublicAdmission);
           if (!publicMatch[2]) return { detail };
+          if (!Array.isArray(detail.media) || !detail.media.some((media: { assetId?: string }) => media.assetId === publicMatch[2])) throw notFound();
           const asset = await loadMediaAsset(client, publicMatch[2]);
-          const v = await readCurrentVersion(client, a);
+          const v = await readCurrentVersion(client, { ...a, current_version_id: String(detail.versionId) });
           if (
             !asset ||
             asset.ownerUserId !== a.owner_user_id ||

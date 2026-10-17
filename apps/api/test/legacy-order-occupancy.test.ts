@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PoolClient } from "pg";
-import { readLegacyAwareOrderOccupancy, mergeOrderOccupancy } from "../src/order/legacy-order-occupancy";
+import { readAccountOccupancyFacts, readLegacyAwareOrderOccupancy, mergeOrderOccupancy } from "../src/order/legacy-order-occupancy";
+import { composeSupplyGateWithOrderOccupancy } from "../src/order/order";
 
 test("occupancy precedence and actual shared query include isolated liability and terminal head", async () => {
   assert.equal(mergeOrderOccupancy("FREE", "UNKNOWN", "OCCUPIED"), "OCCUPIED");
@@ -20,4 +21,15 @@ test("schema/DB failure and malformed query results cannot fall back FREE", asyn
   const failure = Object.assign(new Error("missing relation"), { code: "42P01" });
   await assert.rejects(readLegacyAwareOrderOccupancy({ query: async () => { throw failure; } } as unknown as PoolClient, "fixture"), error => error === failure);
   await assert.rejects(readLegacyAwareOrderOccupancy({ query: async () => ({ rows: [] }) } as unknown as PoolClient, "fixture"), /OCCUPANCY_UNKNOWN/);
+});
+test("public occupancy labels only use authoritative native states and never carry a stale funding-reader label", async () => {
+  for (const kind of ["PENDING_PAYMENT", "RENTED"] as const) {
+    const client = { query: async () => ({ rows: [{ state: "OCCUPIED", kind }] }) } as unknown as PoolClient;
+    assert.deepEqual(await readAccountOccupancyFacts(client, "fixture"), { state: "OCCUPIED", kind });
+  }
+  const unknownKind = { query: async () => ({ rows: [{ state: "OCCUPIED", kind: "UNRECOGNIZED" }] }) } as unknown as PoolClient;
+  assert.deepEqual(await readAccountOccupancyFacts(unknownKind, "fixture"), { state: "OCCUPIED", kind: "OCCUPIED" });
+  const free = { query: async () => ({ rows: [{ state: "FREE", kind: null }] }) } as unknown as PoolClient;
+  const gate = composeSupplyGateWithOrderOccupancy(async () => ({ publisherBail: "NOT_REQUIRED", reference: "fixture", occupancy: "OCCUPIED", occupancyKind: "RENTED" }));
+  assert.deepEqual(await gate(free, { id: "fixture" } as never), { publisherBail: "NOT_REQUIRED", reference: "fixture", occupancy: "FREE" });
 });

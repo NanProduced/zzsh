@@ -59,7 +59,7 @@ test("maintenance writer rejects malformed payload before any SQL and revoked ac
 });
 
 test("shared public projection exposes safe display facts with exact historical amounts and rejects corrupt supplemental bytes",async()=>{
-  const extra=input(), row={id:"a-1",game_id:"g-1",game_code:"delta",game_name:"三角洲行动",version_id:"v-1",title:"历史资料待核实",description:null,attributes:{},
+  const extra=input(), row={id:"a-1",game_id:"g-1",game_code:"delta",game_name:"三角洲行动",version_id:"v-1",title:"历史资料待核实",description:null,attributes:{},source_status:3,owner_paused:false,
     snapshot:{schema:"legacy-listing-read-v1",resourceNo:"A-1",haffRentYuan:"2038.00",goodsYuan:"20.00",depositYuan:"50.00",termDays:"102",dailyHaffBase:"10000000"},source_updated_at:new Date(extra.sourceUpdatedAt),evidence_ref:"legacy-migration-preflight-20261006:la_rental_accounts:1",
     display_snapshot:extra.snapshot,display_digest:legacyDisplayDigest("a-1",extra),display_version_id:extra.observationVersionId,base_source_digest:extra.baseSourceDigest,extract_sha256:extra.extractSha256,display_updated_at:new Date(extra.sourceUpdatedAt),display_evidence_ref:extra.evidenceRef};
   const client={query:async(sql:string)=>({rows:sql.startsWith("SELECT a.id,g.id game_id")?[row]:[],rowCount:1})};

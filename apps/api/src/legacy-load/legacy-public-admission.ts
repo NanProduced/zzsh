@@ -52,9 +52,10 @@ export type LegacyPublicRecord = {
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; evidenceRef: string; sourceUpdatedAt: string;
   snapshot: Record<string, unknown>; title: string; description: string | null; attributes: Record<string, unknown>;
   displayDigest?: string | null;
+  sourceStatus?: 3 | 4 | 5 | 6;
 };
 export type LegacyPublicAdmission = {
-  schema: "legacy-public-admission-v1" | "legacy-public-admission-v2"; sourceBatchSha256: string;
+  schema: "legacy-public-admission-v1" | "legacy-public-admission-v2" | "legacy-public-admission-v3"; sourceBatchSha256: string;
   resource: { database: string; oid: number; marker: string; runtimeRole: string };
   records: readonly LegacyPublicRecord[];
 };
@@ -64,7 +65,7 @@ export function parseLegacyPublicAdmission(value: unknown): LegacyPublicAdmissio
   function fail(): never { throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID"); }
   const object = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
   const text = (v: unknown, max = 128): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
-  if (!object(value) || !["legacy-public-admission-v1","legacy-public-admission-v2"].includes(String(value.schema)) || !/^[a-f0-9]{64}$/.test(String(value.sourceBatchSha256))) fail();
+  if (!object(value) || !["legacy-public-admission-v1","legacy-public-admission-v2","legacy-public-admission-v3"].includes(String(value.schema)) || !/^[a-f0-9]{64}$/.test(String(value.sourceBatchSha256))) fail();
   const resource = value.resource;
   if (!object(resource) || !text(resource.database) || !Number.isSafeInteger(resource.oid) || Number(resource.oid) <= 0 || !text(resource.marker, 256) || !text(resource.runtimeRole)) fail();
   if (!Array.isArray(value.records) || value.records.length === 0 || value.records.length > 5000) fail();
@@ -73,7 +74,8 @@ export function parseLegacyPublicAdmission(value: unknown): LegacyPublicAdmissio
     if (!object(r) || ![r.accountId, r.ownerUserId, r.gameId, r.observationVersionId, r.sourceSystem, r.sourceEntity, r.legacyId].every(v => text(v)) || !/^[a-f0-9]{64}$/.test(String(r.sourceDigest)) || !legacyEvidenceReferenceValid(r.evidenceRef) || !object(r.snapshot) || !object(r.attributes) || !text(r.title, 2000) || !(r.description === null || typeof r.description === "string" && r.description.length <= 20000)) fail();
     if (r.sourceEntity !== "la_rental_accounts" || !String(r.evidenceRef).endsWith(`:${r.legacyId}`) || !text(r.sourceUpdatedAt, 40) || !Number.isFinite(Date.parse(r.sourceUpdatedAt)) || ids.has(r.accountId as string)) fail();
     if (!evaluatePublicDisplayGuard({ title: r.title, description: r.description, evidenceRef: r.evidenceRef }).ok) fail();
-    if (value.schema === "legacy-public-admission-v2" ? !(r.displayDigest===null||typeof r.displayDigest==="string"&&/^[a-f0-9]{64}$/.test(r.displayDigest)) : r.displayDigest!==undefined&&r.displayDigest!==null) fail();
+    if (value.schema !== "legacy-public-admission-v1" ? !(r.displayDigest===null||typeof r.displayDigest==="string"&&/^[a-f0-9]{64}$/.test(r.displayDigest)) : r.displayDigest!==undefined&&r.displayDigest!==null) fail();
+    if (value.schema === "legacy-public-admission-v3" ? ![3,4,5,6].includes(r.sourceStatus as number) : r.sourceStatus !== undefined) fail();
     ids.add(r.accountId as string);
   }
   // Do not retain a mutable caller-owned object as an authorization capability.
@@ -105,16 +107,17 @@ export function legacyAdmissionRevision(admission: LegacyPublicAdmission): strin
   return createHash("sha256").update(canonicalize(admission)).digest("hex");
 }
 
-export function legacyAdmissionSql(admission: LegacyPublicAdmission | undefined, param: (value: unknown) => string): string {
-  if (!admission) return "(a.legacy_hold='NONE' AND d.account_id IS NULL)";
+export function legacyAdmissionSql(admission: LegacyPublicAdmission | undefined, param: (value: unknown) => string, includeBaseline = true): string {
+  if (!admission) return includeBaseline ? "(a.legacy_hold='NONE' AND d.account_id IS NULL)" : "FALSE";
   const records = param(JSON.stringify(admission.records));
-  return `((a.legacy_hold='NONE' AND d.account_id IS NULL) OR (a.legacy_hold IN ('NONE','UNRESOLVED') AND EXISTS (
-    SELECT 1 FROM jsonb_to_recordset(${records}::jsonb) approved("accountId" text,"ownerUserId" text,"gameId" text,"observationVersionId" text,"sourceSystem" text,"sourceEntity" text,"legacyId" text,"sourceDigest" text,"evidenceRef" text,"sourceUpdatedAt" timestamptz,snapshot jsonb,title text,description text,attributes jsonb,"displayDigest" text)
+  return `(${includeBaseline ? "(a.legacy_hold='NONE' AND d.account_id IS NULL) OR " : ""}(a.legacy_hold IN ('NONE','UNRESOLVED') AND EXISTS (
+    SELECT 1 FROM jsonb_to_recordset(${records}::jsonb) approved("accountId" text,"ownerUserId" text,"gameId" text,"observationVersionId" text,"sourceSystem" text,"sourceEntity" text,"legacyId" text,"sourceDigest" text,"evidenceRef" text,"sourceUpdatedAt" timestamptz,snapshot jsonb,title text,description text,attributes jsonb,"displayDigest" text,"sourceStatus" integer)
     WHERE approved."accountId"=a.id AND approved."ownerUserId"=a.owner_user_id AND approved."gameId"=a.game_id
       AND approved."observationVersionId"=h.observation_version_id AND v.id=h.observation_version_id
       AND approved."sourceSystem"=h.source_system AND approved."sourceEntity"=h.source_entity AND approved."legacyId"=h.legacy_id
       AND approved."sourceDigest"=h.source_digest AND approved."evidenceRef"=h.evidence_ref AND approved."sourceUpdatedAt"=h.source_updated_at AND approved.snapshot=h.snapshot
       AND approved.title IS NOT DISTINCT FROM v.title AND approved.description IS NOT DISTINCT FROM v.description AND approved.attributes=v.attributes
+      ${admission.schema === "legacy-public-admission-v3" ? 'AND approved."sourceStatus"=h.source_status' : ""}
       AND ((d.account_id IS NULL AND approved."displayDigest" IS NULL) OR (d.display_digest=approved."displayDigest" AND d.observation_version_id=h.observation_version_id AND d.base_source_digest=h.source_digest))
   )))`;
 }

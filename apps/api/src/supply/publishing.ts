@@ -44,10 +44,12 @@ import { GAME_SERVICE, readGameService, requireWritableGameService } from "./gam
 import { assertDeltaResourceUnit, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
+import { assignAccountNumber } from "./account-number";
 import { readLegacyListing } from "./legacy-listing-read";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
+  occupancyKind?: "PENDING_PAYMENT" | "RENTED" | "OCCUPIED";
   reference: string | null;
   creditGuarantee?: CreditGuaranteeGateSnapshot;
 };
@@ -1076,6 +1078,7 @@ async function assertMediaReady(
   v: ListingVersion,
   mode: "direct" | "review" = "direct",
   lockMedia = false,
+  account?: PublishingAccount,
 ): Promise<void> {
   const media = (
     await client.query(
@@ -1083,6 +1086,10 @@ async function assertMediaReady(
       [v.id],
     )
   ).rows;
+  if (account && media.some(m => m.purpose === "ACCOUNT_DISPLAY" &&
+    (m.ownership_kind !== "USER_SUPPLY" || m.owner_user_id !== account.owner_user_id || m.account_id !== account.id || m.game_id !== account.game_id ||
+      !v.payload?.declaration.mediaBindings.some(binding => binding.assetId === m.id && binding.byteHash === m.content_hash))))
+    throw notFound();
   if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY" && publicMediaCategory(v.attributes, m.id, m.source_note) === "SHOWCASE"))
     throw invalid("至少需要一张展示图", "mediaBindings");
   if (mode === "review") {
@@ -1121,6 +1128,7 @@ export async function submitListing(
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
   await assertMediaReady(client, v, "direct", true);
+  a.display_no = await assignAccountNumber(client, a.id);
   await client.query(
     `INSERT INTO zzsh_supply.listing_publication
       (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_user_id,published_at)
@@ -1170,6 +1178,7 @@ export async function reviewListing(
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
     await assertMediaReady(client, v, "review", true);
+    a.display_no = await assignAccountNumber(client, a.id);
   }
   await client.query(
     `INSERT INTO zzsh_supply.review_decision(id,version_id,release_id,content_hash,decision,reason,reviewer_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7)`,
@@ -1271,7 +1280,7 @@ export async function evaluatePublication(
   if (a.staff_restricted) blockers.push("STAFF_RESTRICTED");
   try {
     await assertAccepted(client, a, v);
-    await assertMediaReady(client, v);
+    await assertMediaReady(client, v, "direct", false, purpose === "READ" ? a : undefined);
   } catch (error) {
     if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
     blockers.push("CONFIRMATION_OR_MEDIA_REQUIRED");
@@ -1283,36 +1292,17 @@ export function publicationHasUnknownFacts(blockers:readonly string[]):boolean {
   return blockers.some(reason=>["FUNDING_UNKNOWN","OCCUPANCY_UNKNOWN","PUBLISHER_BAIL_UNCONFIRMED"].includes(reason));
 }
 
-function publicDisplayAssetIds(v: ListingVersion): Set<string> {
-  return new Set(
-    (v.payload?.declaration.mediaBindings ?? [])
-      .filter((m) => m.purpose === "ACCOUNT_DISPLAY")
-      .map((m) => m.assetId),
-  );
-}
-
 async function resolvePublicMediaRoute(
   client: PoolClient,
   publicAccount: PublishingAccount,
-  viewed: ListingVersion,
-  viewedBlockers: string[],
   gate: SupplyGateReader,
 ): Promise<PublicMediaRoute> {
-  let listingPublic = false;
-  let live: ListingVersion | null = null;
-  if (publicAccount.current_version_id === viewed.id) {
-    listingPublic = viewedBlockers.length === 0;
-    live = listingPublic ? viewed : null;
-  } else if (publicAccount.current_version_id) {
-    live = await readCurrentVersion(client, publicAccount);
-    listingPublic =
-      (await evaluatePublication(client, publicAccount, live, gate, "READ")).length ===
-      0;
-    if (!listingPublic) live = null;
-  }
+  let listing: Record<string, unknown> | null = null;
+  try { listing = await listingDetail(client, publicAccount, "public", gate, "public", publicAccount, false, "DETAIL"); }
+  catch (error) { if ((error as { status?: number }).status !== 404) throw error; }
   return {
-    listingPublic,
-    displayAssetIds: live ? publicDisplayAssetIds(live) : new Set(),
+    listingPublic: Boolean(listing),
+    displayAssetIds: new Set(Array.isArray(listing?.media) ? listing.media.map((media: { assetId: string }) => media.assetId) : []),
     ownerUserId: publicAccount.owner_user_id,
   };
 }
@@ -1386,23 +1376,34 @@ async function readOwnerDeclaration(
   };
 }
 
-// One authorized public read for the detail page, favorites and any other
-// consumer of a visible account: an account with a publication fact is owned by
-// the native listing and never falls back to its legacy snapshot (a blocked,
-// paused or rule-invalid native listing must 404, not resurrect old data);
-// accounts without any publication fact are read through the legacy snapshot.
+export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
+export type PublicListingReadMode = "RENTABLE" | "DETAIL";
+const READABLE_NON_RENTAL_BLOCKERS = new Set(["OWNER_PAUSED", "OCCUPIED", "OCCUPANCY_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "RULE_CHANGED", "CONFIRMATION_OR_MEDIA_REQUIRED"]);
+
+export function publicAvailability(blockers: readonly string[], current: boolean, gate: SupplyGate | null): PublicAvailabilityState {
+  if (!current || blockers.includes("OWNER_PAUSED")) return "OFFLINE";
+  if (blockers.includes("OCCUPIED")) return gate?.occupancyKind === "PENDING_PAYMENT" || gate?.occupancyKind === "RENTED" ? gate.occupancyKind : "OCCUPIED";
+  if (publicationHasUnknownFacts(blockers)) return "UNKNOWN";
+  return blockers.length ? "UNAVAILABLE" : "RENTABLE";
+}
+
+// Native publication owns the stable account even when it cannot take a new
+// order. Detail/favorites may show that approved version, never an old legacy
+// fallback or an unreviewed current draft.
 export async function readPublicListing(
   client: PoolClient,
   a: PublishingAccount,
   gate: SupplyGateReader,
   admission?: LegacyPublicAdmission,
   strictReadErrors = false,
+  mode: PublicListingReadMode = "DETAIL",
 ): Promise<Record<string, unknown>> {
   const publication = await client.query(
     `SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`,
     [a.id],
   );
-  if (publication.rowCount) return listingDetail(client, a, "public", gate, "public", a, strictReadErrors);
+  if (publication.rowCount) return listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode);
+  if (mode === "RENTABLE") throw notFound();
   return readLegacyListing(client, a.id, admission);
 }
 export async function listingDetail(
@@ -1413,15 +1414,31 @@ export async function listingDetail(
   quoteViewer: QuoteViewer = viewer,
   publicAccount: PublishingAccount = a,
   strictReadErrors = false,
+  mode: PublicListingReadMode = "RENTABLE",
 ): Promise<Record<string, unknown>> {
-  const v = a.current_version_id
+  let v = a.current_version_id
     ? await readCurrentVersion(client, a)
     : null;
+  if (viewer === "public" && mode === "DETAIL") {
+    const currentPublication = v ? await readListingPublication(client, a, v) : null;
+    if (!v || !isEffectivePublicationState(v.review_state, currentPublication?.source)) {
+      v = (await client.query<ListingVersion>(
+        `SELECT v.* FROM zzsh_supply.listing_version v JOIN zzsh_supply.listing_publication p ON p.version_id=v.id AND p.account_id=v.account_id
+         WHERE v.account_id=$1 AND p.owner_user_id=$2 AND p.game_id=$3 AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash
+          AND ((v.review_state='PUBLISHED' AND p.source='OWNER_DIRECT') OR (v.review_state='APPROVED' AND p.source='LEGACY_APPROVED'))
+         ORDER BY p.published_at DESC,v.sequence DESC,v.id LIMIT 1`, [a.id, a.owner_user_id, a.game_id],
+      )).rows[0] ?? null;
+    }
+  }
   if (!v) {
     if (viewer === "public") throw notFound();
     return { account: a, version: null };
   }
-  const blockers = await evaluatePublication(client, a, v, gate, "READ", strictReadErrors);
+  const observed = { gate: null as SupplyGate | null };
+  const blockers = await evaluatePublication(client, a, v, async (client, account, purpose) => {
+    observed.gate = await gate(client, account, purpose);
+    return observed.gate;
+  }, "READ", strictReadErrors);
   const publication = await readListingPublication(client, publicAccount, v);
   const quote = v.payload
     ? { ...projectDeltaQuote(
@@ -1433,8 +1450,15 @@ export async function listingDetail(
       ), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
     : null;
   if (viewer === "public") {
+    if (!v.payload || v.payload.accountId !== a.id || v.payload.gameId !== a.game_id || computeContentHash(v.payload) !== v.content_hash) throw notFound();
+    if (mode === "DETAIL" && !(await client.query(
+      `SELECT 1 FROM zzsh_supply.rule_acceptance WHERE account_id=$1 AND listing_version_id=$2 AND rule_release_id=$3 AND accepted_content_hash=$4 AND owner_user_id=$5`,
+      [a.id, v.id, v.rule_release_id, v.content_hash, a.owner_user_id],
+    )).rowCount) throw notFound();
     if (strictReadErrors && publicationHasUnknownFacts(blockers)) throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Public listing facts are incomplete");
-    if (blockers.length) throw notFound();
+    if ((mode === "RENTABLE" ? blockers : blockers.filter(reason => !READABLE_NON_RENTAL_BLOCKERS.has(reason))).length) throw notFound();
+    const availability = publicAvailability(blockers, publicAccount.current_version_id === v.id, observed.gate);
+    if (mode === "RENTABLE" && availability !== "RENTABLE") throw notFound();
     const attrs = v.payload!.declaration.attributes;
     const offer = projectPublicOffer({
       attributes: attrs,
@@ -1467,7 +1491,13 @@ export async function listingDetail(
         [a.game_id],
       )
     ).rows[0];
-    const publicMedia = v.payload!.declaration.mediaBindings.filter(m => m.purpose === "ACCOUNT_DISPLAY");
+    const currentMedia = (await client.query(
+      `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`, [v.id],
+    )).rows;
+    const publicMedia = v.payload!.declaration.mediaBindings.filter(binding => binding.purpose === "ACCOUNT_DISPLAY" && currentMedia.some(asset =>
+      asset.id === binding.assetId && asset.content_hash === binding.byteHash && asset.purpose === "ACCOUNT_DISPLAY" && asset.ownership_kind === "USER_SUPPLY" &&
+      asset.owner_user_id === a.owner_user_id && asset.account_id === a.id && asset.game_id === a.game_id && asset.technical_state === "READY" &&
+      mediaReviewAllowsPublication(asset.review_state) && asset.access_class === "PUBLIC_DISPLAY" && Boolean(asset.public_storage_key)));
     const legacyCategories = Object.hasOwn(attrs, "media_categories") ? [] : (await client.query<{assetId:string; category:string|null}>(
       `SELECT id AS "assetId",source_note AS category FROM zzsh_supply.media_asset WHERE id=ANY($1::text[])`,
       [publicMedia.map(m => m.assetId)],
@@ -1486,6 +1516,8 @@ export async function listingDetail(
       attributeDisplay,
       presentation,
       quote,
+      availability: { state: availability },
+      canCreateOrder: availability === "RENTABLE",
       publishedAt: publication?.published_at?.toISOString() ?? null,
       media: publicMedia.map((m) => ({
         assetId: m.assetId,
@@ -1498,8 +1530,6 @@ export async function listingDetail(
   const publicRoute = await resolvePublicMediaRoute(
     client,
     publicAccount,
-    v,
-    blockers,
     gate,
   );
   const decisions = (

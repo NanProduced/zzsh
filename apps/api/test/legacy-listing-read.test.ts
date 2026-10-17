@@ -102,8 +102,8 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
 });
 
 test("non-public source statuses stay out of public reads and conflict on replay", () => {
-  for (const status of [0, 3, 4, 5]) assert.equal(legacyReadSourceAllowed(status, false), true);
-  for (const status of [-1, 1, 2, 6, 3.5]) assert.equal(legacyReadSourceAllowed(status, false), false);
+  for (const status of [0, 3, 4, 5, 6]) assert.equal(legacyReadSourceAllowed(status, false), true);
+  for (const status of [-1, 1, 2, 7, 3.5]) assert.equal(legacyReadSourceAllowed(status, false), false);
   assert.equal(legacyReadSourceAllowed(3, true), false);
   assert.match(legacySnapshotReplaySql(), /source_status/);
   const old = {
