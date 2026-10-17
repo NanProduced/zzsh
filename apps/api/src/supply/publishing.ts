@@ -325,6 +325,11 @@ export async function publicationBlockers(
     reasons.push(
       external.occupancy === "OCCUPIED" ? "OCCUPIED" : "OCCUPANCY_UNKNOWN",
     );
+  // Publish/submit/review only. READ and evaluatePublication must keep a placeholder title visible.
+  if (purpose === "WRITE") {
+    const title = typeof v.title === "string" ? v.title : "";
+    if (!title.trim() || title.includes("历史资料待核实")) reasons.push("TITLE_REVIEW_REQUIRED");
+  }
   return reasons;
 }
 export async function assertEditable(

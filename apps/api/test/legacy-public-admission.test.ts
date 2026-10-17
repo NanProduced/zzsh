@@ -27,7 +27,7 @@ import {
   projectLegacyHistoricalRead,
   readLegacyListing,
 } from "../src/supply/legacy-listing-read";
-import { assertEditable, evaluatePublication } from "../src/supply/publishing";
+import { assertEditable, evaluatePublication, publicationBlockers } from "../src/supply/publishing";
 import { createReservation } from "../src/order/order";
 import type { ListingQueryV2 } from "../src/supply/listing-filter-contract";
 
@@ -322,6 +322,16 @@ function legacyTradeClient() {
   } as never;
 }
 const tradeGate = async () => ({ publisherBail: "NOT_REQUIRED" as const, occupancy: "FREE" as const, reference: "fixture" });
+
+test("a placeholder title blocks write publication and stays readable", async () => {
+  const version = { ...legacyVersion, title: "历史资料待核实" };
+  const read = await publicationBlockers(legacyTradeClient(), legacyAccount as never, version as never, tradeGate, "READ");
+  const write = await publicationBlockers(legacyTradeClient(), legacyAccount as never, version as never, tradeGate, "WRITE");
+  assert.equal(read.includes("TITLE_REVIEW_REQUIRED"), false, JSON.stringify(read));
+  assert.equal(write.includes("TITLE_REVIEW_REQUIRED"), true, JSON.stringify(write));
+  const visible = await evaluatePublication(legacyTradeClient(), legacyAccount as never, version as never, tradeGate, "READ");
+  assert.equal(visible.includes("TITLE_REVIEW_REQUIRED"), false, JSON.stringify(visible));
+});
 
 test("publish and edit entries keep rejecting a legacy held account", async () => {
   const blockers = await evaluatePublication(legacyTradeClient(), legacyAccount as never, legacyVersion as never, tradeGate);

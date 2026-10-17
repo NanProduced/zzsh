@@ -1,8 +1,9 @@
 import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 import { hasLegacyReadSnapshots } from "./legacy-listing-read";
-import { lockPublishingAccount, readPublishingAccount, withPublicListingSnapshot } from "./publishing";
+import { lockPublishingAccount, readPublishingAccount, unknownSupplyGate, withPublicListingSnapshot } from "./publishing";
 import { handleFavorites } from "./favorites";
 import { handlePublishingRoute } from "./publishing-routes";
+import { applyLegacyOrdinaryDraft, authorizeLegacyOrdinaryDraft, type LegacyTradeIntake } from "./legacy-trade-takeover";
 import { handleListingFilters } from "./listing-filter-routes";
 import type { ListingCursorKey } from "./listing-cursor";
 import type { SupplyGateReader } from "./publishing";
@@ -666,6 +667,11 @@ export async function handleSupplyAdminRoute(
     if (!requireOrigin(request, response, options, requestId)) return;
     if (await handleListingFilters(request,response,options,requestId,path,query,true)) return;
     if (await handlePublishingRoute(request,response,options,requestId,path,query,true)) return;
+    const legacyDraft = method === "POST" ? /^\/accounts\/([A-Za-z0-9._:-]+)\/legacy-draft$/.exec(path) : null;
+    if (legacyDraft) {
+      await handleLegacyOrdinaryDraft(request, response, options, requestId, legacyDraft[1]!, query);
+      return;
+    }
     const context = await readAdminContext(request, options);
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
 
@@ -676,6 +682,25 @@ export async function handleSupplyAdminRoute(
     if (method !== "POST" && method !== "PUT") throw notFound();
     await handleAdminWrite(request, response, options, requestId, method, path, actor);
   });
+}
+
+/** API only. No Admin BFF or page calls this. Operators use the HTTP API directly. */
+async function handleLegacyOrdinaryDraft(request: SupplyNodeRequest, response: SupplyResponse, options: SupplyRuntimeOptions, requestId: string, accountId: string, query: URLSearchParams) {
+  if ([...query.keys()].length) throw invalid("Unsupported query", [...query.keys()][0]);
+  const context = await readAdminContext(request, options);
+  const body = bodyOf(request);
+  ensureOnlyFields(body, ["expectedRevision", "batchId", "intake"]);
+  const expectedRevision = parseExpectedRevision(body);
+  if (typeof body.batchId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$/.test(body.batchId)) throw invalid("Invalid takeover batch", "batchId");
+  const batchId = body.batchId;
+  if (!body.intake || typeof body.intake !== "object" || Array.isArray(body.intake)) throw invalid("Request body is invalid", "intake");
+  const intake = body.intake as LegacyTradeIntake;
+  if (intake.accountId !== accountId) throw invalid("账号与路径不一致", "intake.accountId");
+  const actor = { id: context.userId, sessionId: context.sessionId, requestId };
+  const fingerprintBody = { expectedRevision, batchId, intake };
+  await runIdempotentWrite(options, request, response, requestId, { principalId: actor.id, operation: "supply.legacy.trade_draft_write", resourceId: accountId }, { realm: "admin", id: actor.id, sessionId: actor.sessionId }, fingerprintBody,
+    async (client) => { await authorizeLegacyOrdinaryDraft(client, actor, accountId, intake); },
+    (client) => applyLegacyOrdinaryDraft(client, actor, { accountId, batchId, expectedRevision, intake }, options.supplyGateReader ?? unknownSupplyGate));
 }
 
 async function authorizeGuarantee(client: PoolClient, actor: Pick<WriteActor, "id" | "sessionId">, accountId?: string, writePermission?: string) {

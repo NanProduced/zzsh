@@ -8,7 +8,7 @@ import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount } from "./funding-policy";
 import { DELTA_LEGACY_RESOURCES, lockLegacySource, normalizeResolutionInput, readLegacyMap, resolveLegacyObservationToDraft, type LegacyDraftResolutionInput } from "./legacy-observation";
 import { legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplaySnapshot } from "./legacy-display-snapshot";
-import { lockPublishingAccount, currentVersion, readDeclaration, saveListingDraft, quoteListing, reviewListing, assertCurrentRelease, type PublishingAccount, type SupplyGateReader } from "./publishing";
+import { lockPublishingAccount, currentVersion, readDeclaration, saveListingDraft, quoteListing, reviewListing, assertCurrentRelease, checkAccountRevision, type PublishingAccount, type SupplyGateReader } from "./publishing";
 import { assertGameScope, conflict, fingerprintRequest, invalid, newSupplyId, sha256Hex, withIdempotency } from "./supply-util";
 import { legacyPlanYuanToCents } from "../order/legacy-continuation-model";
 
@@ -168,6 +168,81 @@ async function publishTakenOverDraft(client: PoolClient, a: PublishingAccount, a
   await reviewListing(client, a, actor.id, { expectedRevision: a.revision, versionId: v.id, contentHash: v.content_hash, releaseId: v.rule_release_id, decision: "APPROVE", reason: "LEGACY_APPROVED_TAKEOVER:" + batchId }, gate);
   return { accountId: a.id, versionId: v.id, releaseId: v.rule_release_id, contentHash: v.content_hash, state: "PUBLISHED" as const };
 }
+const ORDINARY_DRAFT_FIELDS = ["title", "description", "attributes", "inventory", "skins", "entitlements", "termOptionCode", "pricingOptionCode"] as const;
+export const LEGACY_ORDINARY_DRAFT_OPERATION = "supply.legacy.trade_draft_write";
+
+async function lockResolveDraftIdempotency(client: PoolClient, actorId: string, accountId: string, source: LegacyTradeIntake["source"]) {
+  // The reused resolver acquires this same standard idempotency lock. Take it before account locks to avoid reversing its order.
+  const resolveOperation = "supply.legacy.resolve-draft", resolveKey = sha256Hex(JSON.stringify([resolveOperation, source.sourceSystem, source.sourceEntity, source.legacyId]));
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [JSON.stringify(["supply-idempotency", JSON.stringify(["admin", actorId, resolveOperation, accountId]), resolveKey])]);
+}
+async function assertLegacyTradeBindings(client: PoolClient, account: PublishingAccount, intake: LegacyTradeIntake) {
+  if (account.owner_user_id !== intake.source.expectedOwnerUserId || account.game_id !== intake.source.expectedGameId) throw conflict("SOURCE_BINDING_MISMATCH");
+  await lockLegacySource(client, intake.source);
+  const mapping = await readLegacyMap(client, intake.source);
+  if (!mapping || mapping.account_id !== account.id || mapping.source_digest !== intake.source.sourceDigest || mapping.version_id !== intake.source.expectedObservationVersionId) throw conflict("SOURCE_BINDING_MISMATCH");
+  const display = (await client.query(`SELECT observation_version_id,base_source_digest,extract_sha256,source_updated_at,evidence_ref,snapshot,display_digest
+        FROM zzsh_supply.legacy_listing_display_snapshot WHERE account_id=$1 AND schema_version=1`, [account.id])).rows[0];
+  if (!display || display.observation_version_id !== mapping.version_id || display.base_source_digest !== mapping.source_digest || !(display.source_updated_at instanceof Date)
+    || display.display_digest !== legacyDisplayDigest(account.id, { observationVersionId: display.observation_version_id, baseSourceDigest: display.base_source_digest,
+      extractSha256: display.extract_sha256, sourceUpdatedAt: display.source_updated_at.toISOString(), evidenceRef: display.evidence_ref, snapshot: display.snapshot })
+    || canonicalize(display.snapshot) !== canonicalize(intake.display)) throw conflict("DISPLAY_SOURCE_BINDING_MISMATCH");
+  assertLegacyTradeSourceFields(intake);
+  const observation = (await client.query(`SELECT title,description FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`, [mapping.version_id, account.id])).rows[0];
+  if (!observation || observation.title !== intake.title || observation.description !== intake.description) throw conflict("OBSERVATION_DECLARATION_MISMATCH");
+}
+function sameOrdinaryDeclaration(stored: Record<string, unknown>, draft: Record<string, unknown>) {
+  return ORDINARY_DRAFT_FIELDS.every((key) => canonicalize(stored[key]) === canonicalize(draft[key]));
+}
+/** Replay of the ordinary-draft command. Catalog manage only; does not require review.decide and does not write. */
+export async function authorizeLegacyOrdinaryDraft(client: PoolClient, actor: TradeActor, accountId: string, intake: LegacyTradeIntake) {
+  intake.source = normalizeResolutionInput(intake.source);
+  await lockResolveDraftIdempotency(client, actor.id, accountId, intake.source);
+  const account = await lockPublishingAccount(client, accountId);
+  await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+  const access = await loadEffectiveAdminAccess(client, actor.id);
+  requirePermission(access, "supply.catalog.manage");
+  await assertGameScope(client, actor.id, access?.isBoss === true, account.game_id);
+  if (account.owner_user_id !== intake.source.expectedOwnerUserId || account.game_id !== intake.source.expectedGameId) throw conflict("SOURCE_BINDING_MISMATCH");
+  return account;
+}
+export type LegacyOrdinaryDraftInput = { accountId: string; batchId: string; expectedRevision: string; intake: LegacyTradeIntake };
+/**
+ * One admin transaction, one ordinary NATIVE draft. Caller owns the transaction and the HTTP idempotency record.
+ * Does not quote, review, or publish.
+ */
+export async function applyLegacyOrdinaryDraft(client: PoolClient, actor: TradeActor, input: LegacyOrdinaryDraftInput, gate: SupplyGateReader) {
+  input = structuredClone(input);
+  if (input.accountId !== input.intake.accountId) throw invalid("账号与路径不一致", "intake.accountId");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$/.test(input.batchId)) throw invalid("Invalid takeover batch");
+  if (typeof input.intake.title !== "string") throw invalid("标题格式错误", "title");
+  const account = await authorizeLegacyOrdinaryDraft(client, actor, input.accountId, input.intake);
+  checkAccountRevision(account, input.expectedRevision);
+  await assertLegacyTradeBindings(client, account, input.intake);
+  const titleNormalized = !input.intake.title.trim();
+  const intake = titleNormalized ? { ...input.intake, title: `历史资料待核实-${input.accountId.slice(0, 8)}` } : input.intake;
+  const catalog = (await client.query<TradeCatalogItem>(`SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY id`, [account.game_id])).rows;
+  const built = buildLegacyTradeDeclaration(intake, catalog);
+  if (built.blockers.length) throw conflict(built.blockers.join(","));
+  const declaration = { ...built.declaration!, mediaBindings: [] as Array<{ assetId: string; position: number }> };
+  const version = account.current_version_id ? await currentVersion(client, account) : null;
+  if (!version) throw conflict("TAKEOVER_DRAFT_REQUIRED");
+  let saved = account, current = version;
+  if (version.origin === "LEGACY_OBSERVATION" && version.review_state === "IMPORTED_UNVERIFIED") {
+    await resolveLegacyObservationToDraft(client, account.id, intake.source, actor, gate);
+    saved = await lockPublishingAccount(client, account.id);
+    await saveListingDraft(client, saved, { ...declaration, expectedRevision: saved.revision }, gate);
+    current = await currentVersion(client, saved);
+  } else if (version.origin === "NATIVE" && version.review_state === "DRAFT") {
+    const stored = await readDeclaration(client, version);
+    if (!sameOrdinaryDeclaration(stored, declaration)) throw conflict("已有草稿与本次声明不一致");
+  } else throw conflict("TAKEOVER_DRAFT_REQUIRED");
+  const result = { accountId: saved.id, versionId: current.id, revision: saved.revision, state: "DRAFT" as const, deferred: built.deferred, inputDigest: sha256Hex(canonicalize(intake)), titleNormalized };
+  if (version.origin === "LEGACY_OBSERVATION") {
+    await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: LEGACY_ORDINARY_DRAFT_OPERATION, objectType: "rental_account", objectId: saved.id, outcome: "SUCCESS", reason: "LEGACY_ORDINARY_DRAFT", details: { batchId: input.batchId, source: intake.source, inputDigest: result.inputDigest, deferred: result.deferred, versionId: result.versionId, revision: result.revision, titleNormalized } });
+  }
+  return { status: 200 as const, body: result };
+}
 export type LegacyTradeTakeoverInput = { batchId: string; intake: LegacyTradeIntake };
 /** Reviewed per-account maintenance transaction. Never exposed as arbitrary customer JSON. */
 export async function takeoverLegacyTrade(client: PoolClient, actor: TradeActor, input: LegacyTradeTakeoverInput, gate: SupplyGateReader) {
@@ -177,23 +252,9 @@ export async function takeoverLegacyTrade(client: PoolClient, actor: TradeActor,
   let account: PublishingAccount;
   return withIdempotency(client, { realm: "admin", principalId: actor.id, operation, resourceId: intake.accountId }, sha256Hex(JSON.stringify([intake.accountId, intake.source.expectedObservationVersionId, sha256Hex(canonicalize(intake))])), fingerprintRequest(operation, intake.accountId, input),
     async () => {
-      // The reused resolver acquires this same standard idempotency lock. Take it before account locks to avoid reversing its order.
-      const resolveOperation="supply.legacy.resolve-draft", resolveKey=sha256Hex(JSON.stringify([resolveOperation,intake.source.sourceSystem,intake.source.sourceEntity,intake.source.legacyId]));
-      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,[JSON.stringify(["supply-idempotency",JSON.stringify(["admin",actor.id,resolveOperation,intake.accountId]),resolveKey])]);
+      await lockResolveDraftIdempotency(client, actor.id, intake.accountId, intake.source);
       account = await lockPublishingAccount(client, intake.accountId); await authorize(client, actor, account);
-      if (account.owner_user_id !== intake.source.expectedOwnerUserId || account.game_id !== intake.source.expectedGameId) throw conflict("SOURCE_BINDING_MISMATCH");
-      await lockLegacySource(client, intake.source);
-      const mapping = await readLegacyMap(client, intake.source);
-      if (!mapping || mapping.account_id !== account.id || mapping.source_digest !== intake.source.sourceDigest || mapping.version_id !== intake.source.expectedObservationVersionId) throw conflict("SOURCE_BINDING_MISMATCH");
-      const display = (await client.query(`SELECT observation_version_id,base_source_digest,extract_sha256,source_updated_at,evidence_ref,snapshot,display_digest
-        FROM zzsh_supply.legacy_listing_display_snapshot WHERE account_id=$1 AND schema_version=1`, [account.id])).rows[0];
-      if (!display || display.observation_version_id !== mapping.version_id || display.base_source_digest !== mapping.source_digest || !(display.source_updated_at instanceof Date)
-        || display.display_digest !== legacyDisplayDigest(account.id, { observationVersionId: display.observation_version_id, baseSourceDigest: display.base_source_digest,
-          extractSha256: display.extract_sha256, sourceUpdatedAt: display.source_updated_at.toISOString(), evidenceRef: display.evidence_ref, snapshot: display.snapshot })
-        || canonicalize(display.snapshot) !== canonicalize(intake.display)) throw conflict("DISPLAY_SOURCE_BINDING_MISMATCH");
-      assertLegacyTradeSourceFields(intake);
-      const observation = (await client.query(`SELECT title,description FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`, [mapping.version_id, account.id])).rows[0];
-      if (!observation || observation.title !== intake.title || observation.description !== intake.description) throw conflict("OBSERVATION_DECLARATION_MISMATCH");
+      await assertLegacyTradeBindings(client, account, intake);
     }, async () => {
       const a = account!;
       const catalog = (await client.query<TradeCatalogItem>(`SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY id`, [a.game_id])).rows;
