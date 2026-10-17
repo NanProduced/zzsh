@@ -48,7 +48,7 @@ export function SupportRail(){
     // 不自动开窗——客服只有一个容器，就是本 rail 的弹窗，没有独立 /support 路由。
     // 这些入口自己带 data-support-trigger，onPointerDownOutside 的既有豁免才会放过它们，
     // 否则真实的按下-抬起-点击序列会被当成“点了弹窗外面”而立刻把窗口关掉。
-    const open=(event:Event)=>{const detail=(event as CustomEvent).detail??{};const type=detail.type==="COMPLAINT"?"COMPLAINT":"SERVICE";const trigger=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;requestSupportRef.current(type,trigger);};
+    const open=(event:Event)=>{const detail=(event as CustomEvent).detail??{};const type=detail.type==="COMPLAINT"?"COMPLAINT":"SERVICE";const trigger=(detail.trigger instanceof HTMLButtonElement?detail.trigger:null)??(document.activeElement instanceof HTMLButtonElement?document.activeElement:null);requestSupportRef.current(type,trigger);};
     window.addEventListener("zzsh:open-support",open);
     return()=>window.removeEventListener("zzsh:open-support",open);
   // eslint-disable-next-line react-hooks/exhaustive-deps

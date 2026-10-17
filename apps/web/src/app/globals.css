@@ -2193,7 +2193,6 @@ html[data-theme="light"] .auth-brand-copy .brand-logo { filter:none; }
 .auth-dialog-form .auth-submit { margin-top:8px; }
 .auth-dialog-form .auth-consent { margin-top:auto; padding-top:12px; }
 .auth-dialog-form .auth-consent label { min-height:unset; line-height:1.4; }
-.auth-context { display:none; }
 .auth-status { order:0; }
 @media(max-width:699px) {
  .auth-dialog-layout { grid-template-columns:minmax(0,1fr); }

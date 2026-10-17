@@ -26,13 +26,13 @@ export type AuthPendingWrite = {
   userId: string | null;
 };
 
-type Props = { next?: string; contextLabel?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean; pendingWrite?: { current: AuthPendingWrite | null } };
+type Props = { next?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean; pendingWrite?: { current: AuthPendingWrite | null } };
 
 function unknownReceiptMessage(state: "accepted" | "unknown"): string {
   return state === "accepted" ? "操作已接受，后续状态暂未读到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。";
 }
 
-export function AuthForm({ next, contextLabel, inviteCode: initialInviteCode, onSuccess, autoFocus = true, pendingWrite }: Props) {
+export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoFocus = true, pendingWrite }: Props) {
   const session = useUserSession();
   const sessionStore = useUserSessionStore();
   const restored = pendingWrite?.current ?? null;

@@ -11,7 +11,8 @@ import type { SupportType } from "@/lib/support-intent";
  */
 export const SUPPORT_OPEN_EVENT = "zzsh:open-support";
 
-export function requestSupportDialog(type: SupportType): void {
+/** trigger 随事件传：Safari 点按钮不聚焦，靠 document.activeElement 拿不到原触发钮，关窗后焦点回不去。 */
+export function requestSupportDialog(type: SupportType, trigger?: HTMLElement | null): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(SUPPORT_OPEN_EVENT, { detail: { type } }));
+  window.dispatchEvent(new CustomEvent(SUPPORT_OPEN_EVENT, { detail: { type, trigger: trigger ?? null } }));
 }

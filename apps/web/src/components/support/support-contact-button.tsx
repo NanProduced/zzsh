@@ -20,7 +20,7 @@ export function SupportContactButton({
   children: ReactNode;
 }) {
   return (
-    <button type="button" data-support-trigger className={className} onClick={() => requestSupportDialog(type)}>
+    <button type="button" data-support-trigger className={className} onClick={(event) => requestSupportDialog(type, event.currentTarget)}>
       {children}
     </button>
   );
