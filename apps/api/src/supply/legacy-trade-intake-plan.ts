@@ -115,7 +115,7 @@ export function assembleLegacyTradeMediaGate(rows:readonly (LegacyTradeMediaAsse
      const storageKey=proven?.storageKey??asset.storageKey;
      if(storageKey&&conflictingBytes.has(storageKey))reasons.add("MEDIA_BYTES_CONFLICT");
      const evidence=storageKey?bytes.get(storageKey):undefined;
-     if(!evidence||evidence.issues.length>0||!evidence.sha256||!asset.contentHash||evidence.sha256!==asset.contentHash)reasons.add("MEDIA_BYTES_UNAVAILABLE");
+     if(!evidence||!Array.isArray(evidence.issues)||evidence.issues.length>0||typeof evidence.sha256!=="string"||!DIGEST.test(evidence.sha256)||evidence.sha256!==asset.contentHash)reasons.add("MEDIA_BYTES_UNAVAILABLE");
      else byteBoundAssets++;
      if(proven)provenAssets.push({assetId,storageKey:asset.storageKey,contentHash:asset.contentHash});
     }
@@ -139,17 +139,22 @@ export const LEGACY_TRADE_BATCH_FACTS_KEYS=["mediaGate","releaseByGame","termOpt
  * A call without the full fact families is an intake precheck only (stage=INTAKE_PRECHECK);
  * a formal batch must supply every family it relies on, and writeAllowed stays false regardless. */
 export function planLegacyTradeIntakeBatch(rows:readonly LegacyTradeBatchRow[],catalog:readonly TradeCatalogItem[],facts:LegacyTradeBatchFacts={}){
+ const invalidFacts=LEGACY_TRADE_BATCH_FACTS_KEYS.some(key=>{
+  const value=facts[key];
+  return value!==undefined&&(key==="mediaGate"?!Array.isArray(value):value===null||typeof value!=="object"||Array.isArray(value));
+ });
  const repeated=(key:(r:LegacyTradeBatchRow)=>string|null)=>{const counts=new Map<string,number>();for(const row of rows){const id=key(row);if(id!==null)counts.set(id,(counts.get(id)??0)+1);}return new Set([...counts].filter(([,n])=>n>1).map(([id])=>id));};
  const sourceDuplicates=repeated(r=>text(r.legacyId)),accountDuplicates=repeated(r=>text(r.accountId)),digestDuplicates=repeated(r=>text((r.intake as {source?:{sourceDigest?:unknown}}|undefined)?.source?.sourceDigest));
  // Identical gate facts for one subject dedupe; conflicting ones isolate the row instead of picking a winner.
  const mediaGroups=new Map<string,LegacyTradeMediaGateResult[]>();
- for(const gate of facts.mediaGate??[]){if(!gate||typeof gate!=="object")continue;const key=text(gate.legacyId)+"\u0000"+text(gate.accountId);mediaGroups.set(key,[...(mediaGroups.get(key)??[]),gate]);}
+ for(const gate of Array.isArray(facts.mediaGate)?facts.mediaGate:[]){if(!gate||typeof gate!=="object")continue;const key=text(gate.legacyId)+"\u0000"+text(gate.accountId);mediaGroups.set(key,[...(mediaGroups.get(key)??[]),gate]);}
  const items=rows.map(row=>{
   const legacyId=text(row.legacyId),accountId=text(row.accountId),inputDigest=stableFingerprint(row);
   try{
    const sourceDigest=text((row.intake as {source?:{sourceDigest?:unknown}}|undefined)?.source?.sourceDigest);
    const isolated=[...(Array.isArray(row.isolationReasons)?row.isolationReasons:[]),...(!accountId||!row.intake?["SOURCE_BINDING_MISSING"]:[]),...(legacyId&&sourceDuplicates.has(legacyId)||accountId&&accountDuplicates.has(accountId)||sourceDigest&&digestDuplicates.has(sourceDigest)?["DUPLICATE_SOURCE_OR_TARGET"]:[])];
    const base={legacyId:legacyId??"",accountId,sourceDigest:row.intake?.source.sourceDigest??null,inputDigest};
+   if(invalidFacts)return {...base,admission:"ISOLATED" as const,reasons:["SOURCE_SCHEMA_INVALID"]};
    if(isolated.length)return {...base,admission:"ISOLATED" as const,reasons:[...new Set(isolated)]};
    if(row.intake!.accountId!==accountId || row.intake!.source.legacyId!==legacyId)return {...base,admission:"ISOLATED" as const,reasons:["SOURCE_BINDING_MISMATCH"]};
    const plan=prepareLegacyTradeIntake(row.intake!,catalog),extra:string[]=[];
@@ -200,7 +205,7 @@ export function planLegacyTradeIntakeBatch(rows:readonly LegacyTradeBatchRow[],c
   }catch{return {legacyId:legacyId??"",accountId,sourceDigest:null,inputDigest,admission:"ISOLATED" as const,reasons:["SOURCE_SCHEMA_INVALID"]};}
  });
  const counts={total:items.length,tradeCandidate:items.filter(i=>i.admission==="TRADE_CANDIDATE").length,blocked:items.filter(i=>i.admission==="BLOCKED").length,isolated:items.filter(i=>i.admission==="ISOLATED").length};
- const unobservedFacts=LEGACY_TRADE_BATCH_FACTS_KEYS.filter(key=>facts[key]===undefined);
+ const unobservedFacts=LEGACY_TRADE_BATCH_FACTS_KEYS.filter(key=>facts[key]===undefined||facts[key]===null);
  return {schema:"legacy-trade-intake-plan.v1" as const,stage:(unobservedFacts.length===0?"FULL_ADMISSION":"INTAKE_PRECHECK") as "FULL_ADMISSION"|"INTAKE_PRECHECK",
   writeAllowed:false as const,inputDigest:stableFingerprint({rows,catalog,facts}),counts,items,unobservedFacts,realRuntime:"NOT_RUN" as const};
 }

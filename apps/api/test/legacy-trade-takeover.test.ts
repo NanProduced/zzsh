@@ -139,6 +139,12 @@ test("media association gate proves original→asset→byte lineage and isolates
  const noEvidence=assembleLegacyTradeMediaGate([row()],[])[0]!;assert(noEvidence.reasons.includes("MEDIA_BYTES_UNAVAILABLE"));
  // A byte-clean platform/default file without an account binding is never usable as account media.
  const unbound=assembleLegacyTradeMediaGate([{...row(),targetAssets:[asset({accountId:null,ownerUserId:null})]}],evidence)[0]!;assert(unbound.reasons.includes("MEDIA_SUBJECT_UNPROVEN"));assert(!unbound.ready);
+ for(const issues of [null,undefined,{},false,"",0]){
+  const invalid=assembleLegacyTradeMediaGate([row()],[{storageKey:key,sha256:key,issues:issues as never}])[0]!;
+  assert.equal(invalid.ready,false,JSON.stringify(issues));assert(invalid.reasons.includes("MEDIA_BYTES_UNAVAILABLE"));
+ }
+ const invalidHash=assembleLegacyTradeMediaGate([row({targetAssets:[asset({contentHash:"bad-hash"})],associations:[association({contentHash:"bad-hash"})]})],[{storageKey:key,sha256:"bad-hash",issues:[]}])[0]!;
+ assert.equal(invalidHash.ready,false);assert(invalidHash.reasons.includes("MEDIA_BYTES_UNAVAILABLE"));
 });
 
 test("formal batch facts gate release, term, STANDARD base prices, occupancy and media per row and keep absent fact families visibly unobserved",()=>{
@@ -151,6 +157,13 @@ test("formal batch facts gate release, term, STANDARD base prices, occupancy and
  const standardPrices={priceVersionId:"price_1",lines:catalog().map(item=>({itemId:item.id,customerTier:"STANDARD"}))};
  const facts={mediaGate:readyGate,releaseByGame:{fixture_game:{releaseId:"rel_1",priceVersionId:"price_1"}},termOptionCodesByGame:{fixture_game:{releaseId:"rel_1",codes:["daily"]}},priceLinesByGame:{fixture_game:standardPrices},occupancyByAccount:{[input.accountId]:"FREE" as const}};
  const base=planLegacyTradeIntakeBatch([row],catalog(),facts);assert.equal(base.counts.tradeCandidate,1,base.items[0]!.reasons.join(","));assert.deepEqual(base.unobservedFacts,[]);assert.equal(base.stage,"FULL_ADMISSION");
+ for(const key of Object.keys(facts) as Array<keyof typeof facts>)for(const value of [null,false,"",0,[]]){
+  if(key==="mediaGate"&&Array.isArray(value))continue;
+  const malformed={...facts,[key]:value} as unknown as NonNullable<Parameters<typeof planLegacyTradeIntakeBatch>[2]>;
+  const invalid=planLegacyTradeIntakeBatch([row],catalog(),malformed);
+  assert.equal(invalid.counts.tradeCandidate,0,key);assert.equal(invalid.counts.isolated,1,key);assert(invalid.items[0]!.reasons.includes("SOURCE_SCHEMA_INVALID"),key);
+  if(value===null){assert(invalid.unobservedFacts.includes(key));assert.equal(invalid.stage,"INTAKE_PRECHECK");}
+ }
  const reasons=(override:NonNullable<Parameters<typeof planLegacyTradeIntakeBatch>[2]>)=>planLegacyTradeIntakeBatch([row],catalog(),{...facts,...override}).items[0]!.reasons;
  assert(reasons({releaseByGame:{fixture_game:null}}).includes("RELEASE_NOT_BOUND"));
  assert(reasons({termOptionCodesByGame:{fixture_game:{releaseId:"rel_old",codes:["daily"]}}}).includes("TERM_FACT_VERSION_MISMATCH"));
