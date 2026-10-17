@@ -80,7 +80,10 @@ test("number/query shape remains exact text, rejects duplicate/mixed parameters 
   for (const value of ["number=A&number=B", "number=A&q=B", "number=A&cursor=x", "number=A&gameId=a&gameId=b"]) assert.throws(() => parseNumberLookupQuery(new URLSearchParams(value)));
 });
 test("account numbering appends its own migration without changing the accepted 81-chain", () => {
-  const migrations = readMigrationFiles({ migrationsFolder: "migrations/business" }); assert.equal(migrations.length, 82);
+  const migrations = readMigrationFiles({ migrationsFolder: "migrations/business" }); assert.ok(migrations.length >= 82, "the accepted 81-chain plus 0081 must stay registered");
   const prefix = JSON.stringify(migrations.slice(0, 81).map(m => ({ hash: m.hash, when: String(m.folderMillis) })));
   assert.equal(createHash("sha256").update(prefix).digest("hex"), "bacf5951e5ba9b01e883e62936f545e7d9f31947c81e3aab30a1f787e4d05151");
+  // Later companion migrations (e.g. 0082) may append after 0081; they never enter the accepted chain.
+  assert.equal(migrations[81]?.folderMillis, 1792147352619);
+  for (const migration of migrations.slice(82)) assert.ok(Number(migration.folderMillis) > 1792147352619);
 });

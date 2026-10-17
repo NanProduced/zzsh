@@ -575,6 +575,13 @@
       "when": 1792147352619,
       "tag": "0081_account_public_numbers",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1792252801803,
+      "tag": "0082_supply_pricing_compat_disabled_modes",
+      "breakpoints": true
     }
   ]
 }
