@@ -74,7 +74,21 @@ export type CreditInitializationIntent = {
 };
 
 /** Actual resource the approval names; every field is compared with the live connection inside the transaction. */
-export type CreditInitializationResource = { databaseName: string; databaseOid: string; owner: string; runtimeRole: string; markerKey: string; markerTarget: string; markerVersion: number };
+export type CreditInitializationTestMetadataResource = { databaseName: string; databaseOid: string; owner: string; runtimeRole: string; markerKey: string; markerTarget: string; markerVersion: number };
+export type CreditInitializationCommentResource = { databaseName: string; databaseOid: string; owner: string; runtimeRole: string; bindingKind: "DATABASE_COMMENT"; databaseComment: string };
+export type CreditInitializationResource = CreditInitializationTestMetadataResource | CreditInitializationCommentResource;
+
+/** The v1 test-table authority and explicitly approved v2 COMMENT authority never fall back to each other. */
+export function isCreditInitializationResource(value: unknown): value is CreditInitializationResource {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const r = value as Record<string, unknown>;
+  const text = (v: unknown): v is string => typeof v === "string" && Boolean(v.trim()) && !/[\x00-\x1f\x7f]/.test(v);
+  const common = ["databaseName", "databaseOid", "owner", "runtimeRole"];
+  if (!common.every(k => text(r[k])) || !/^[1-9]\d{0,9}$/.test(r.databaseOid as string) || BigInt(r.databaseOid as string) > 4294967295n) return false;
+  const exact = (keys: string[]) => Object.keys(r).length === keys.length && keys.every(k => Object.hasOwn(r, k));
+  if ("bindingKind" in r) return exact([...common, "bindingKind", "databaseComment"]) && r.bindingKind === "DATABASE_COMMENT" && text(r.databaseComment);
+  return exact([...common, "markerKey", "markerTarget", "markerVersion"]) && text(r.markerKey) && text(r.markerTarget) && Number.isSafeInteger(r.markerVersion) && (r.markerVersion as number) >= 1;
+}
 
 /** Per-window execution approval. Kept out of the fingerprint. */
 export type CreditInitializationExecution = {
@@ -116,8 +130,7 @@ function validated(input: CreditInitializationInput): string[] {
   const e = input.execution;
   if (!e || !e.actorAdminId?.trim() || !e.actorSessionId?.trim() || !REF.test(e.approvalRef ?? "") || !Number.isInteger(e.attempt) || e.attempt < 1 || !DIGEST.test(e.approvalDigest ?? "")) throw invalid("execution approval (actor, session, approvalRef, attempt, approvalDigest) is required");
   if (!UTC.test(e.windowStartUtc ?? "") || !UTC.test(e.windowEndUtc ?? "") || Date.parse(e.windowEndUtc) <= Date.parse(e.windowStartUtc)) throw invalid("execution window must be a valid UTC interval");
-  const r = e.resource;
-  if (!r || ![r.databaseName, r.databaseOid, r.owner, r.runtimeRole, r.markerKey, r.markerTarget].every((v) => typeof v === "string" && v.trim()) || !Number.isInteger(r.markerVersion)) throw invalid("execution resource binding is incomplete");
+  if (!isCreditInitializationResource(e.resource)) throw invalid("execution resource binding is incomplete");
   return [...input.userIds].sort();
 }
 
@@ -148,18 +161,25 @@ export async function assertCreditInitializationWindowOpen(client: PoolClient, e
  * the same ACTIVE / FROZEN / suspended / session expiry (clock_timestamp) / TOTP / locked conditions.
  */
 export async function authorizeCreditInitializationExecution(client: PoolClient, execution: CreditInitializationExecution, mode: "WRITE" | "READ" = "WRITE"): Promise<void> {
+  const r = execution.resource;
+  if (!isCreditInitializationResource(r)) throw invalid("execution resource binding is incomplete");
   const access = await requireAdminAccess(client, execution.actorAdminId);
   if (!access.isBoss) throw forbidden("Credit initialization requires an active Boss operator");
   if (mode === "WRITE") await assertAdminCommandAuthorizedInTransaction(client, { userId: execution.actorAdminId, sessionId: execution.actorSessionId });
   else await assertAdminContextInTransaction(client, { userId: execution.actorAdminId, sessionId: execution.actorSessionId });
   await assertCreditInitializationWindowOpen(client, execution);
-  const live = (await client.query<{ databaseName: string; databaseOid: string; owner: string; runtimeRole: string; markerTarget: string | null; markerVersion: number | null }>(
-    `SELECT current_database() AS "databaseName", d.oid::text AS "databaseOid", pg_get_userbyid(d.datdba) AS owner, current_user AS "runtimeRole",
+  const commentBinding = "bindingKind" in r;
+  const live = (await client.query<{ databaseName: string; databaseOid: string; owner: string; runtimeRole: string; databaseComment?: string | null; markerTarget?: string | null; markerVersion?: number | null }>(
+    commentBinding
+      ? `SELECT current_database() AS "databaseName", d.oid::text AS "databaseOid", pg_get_userbyid(d.datdba) AS owner, current_user AS "runtimeRole",
+            shobj_description(d.oid, 'pg_database') AS "databaseComment" /* credit-init-resource-comment */
+       FROM pg_database d WHERE d.datname = current_database()`
+      : `SELECT current_database() AS "databaseName", d.oid::text AS "databaseOid", pg_get_userbyid(d.datdba) AS owner, current_user AS "runtimeRole",
             m.target AS "markerTarget", m.marker_version AS "markerVersion" /* credit-init-resource */
        FROM pg_database d LEFT JOIN "zzsh_meta"."database_marker" m ON m.marker_key = $1
-      WHERE d.datname = current_database()`, [execution.resource.markerKey])).rows[0];
-  const r = execution.resource;
-  if (!live || live.databaseName !== r.databaseName || live.databaseOid !== r.databaseOid || live.owner !== r.owner || live.runtimeRole !== r.runtimeRole || live.markerTarget !== r.markerTarget || live.markerVersion !== r.markerVersion) throw forbidden("Connected database does not match the approved resource");
+      WHERE d.datname = current_database()`, commentBinding ? [] : [r.markerKey])).rows[0];
+  if (!live || live.databaseName !== r.databaseName || live.databaseOid !== r.databaseOid || live.owner !== r.owner || live.runtimeRole !== r.runtimeRole
+    || (commentBinding ? live.databaseComment !== r.databaseComment : live.markerTarget !== r.markerTarget || live.markerVersion !== r.markerVersion)) throw forbidden("Connected database does not match the approved resource");
 }
 
 type CategoryRow = { id: string; category: CreditInitializationCategory };

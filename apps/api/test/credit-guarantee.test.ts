@@ -135,6 +135,94 @@ function pool(w: World) {
 const execution = (over: Record<string, unknown> = {}) => ({ actorAdminId: "boss", actorSessionId: "sess-boss", approvalRef: "approval-credit-001", attempt: 1, approvalDigest: "c".repeat(64), windowStartUtc: "2026-10-20T00:00:00Z", windowEndUtc: "2026-10-20T04:00:00Z", resource: { ...RESOURCE }, ...over });
 const input = (over: Record<string, unknown> = {}, exec: Record<string, unknown> = {}) => ({ batchKey: "credit-init:batch-0001", userIds: ["u3", "u1", "u2"], approvedCategory: "ACTIVE", intentDigest: "a".repeat(64), reason: "decided rule: initial 100", requestId: "req_1", execution: execution(exec), ...over }) as any;
 
+const COMMENT_RESOURCE = { databaseName: "zzsh_window", databaseOid: "16384", owner: "zzsh_owner", runtimeRole: "zzsh_runtime", bindingKind: "DATABASE_COMMENT", databaseComment: "synthetic:credit-resource:v1" } as const;
+function commentWorld(): World {
+  const w = world();
+  // Actual catalog row is independent of the expected approval descriptor.
+  w.live = { databaseName: "zzsh_window", databaseOid: "16384", owner: "zzsh_owner", runtimeRole: "zzsh_runtime", databaseComment: "synthetic:credit-resource:v1" };
+  w.sql = [];
+  return w;
+}
+function commentClient(w: World) {
+  const inner = client(w);
+  return { query: async (sql: string, params: any[] = []) => {
+    if (sql.includes('"zzsh_meta"."database_marker"')) throw Object.assign(new Error("synthetic marker table absent"), { code: "42P01" });
+    if (sql.includes("credit-init-resource-comment")) {
+      assert.match(sql, /shobj_description\(d\.oid, 'pg_database'\)/);
+      assert.match(sql, /current_user AS "runtimeRole"/);
+      assert.deepEqual(params, []);
+    }
+    return inner.query(sql, params);
+  } } as any;
+}
+
+test("COMMENT authority reads the catalog without a test marker table; legacy v1 never falls back", async () => {
+  const w = commentWorld(), preview = await previewCreditInitialization(commentClient(w), input({}, { resource: COMMENT_RESOURCE }));
+  assert.deepEqual([preview.wouldApply, preview.alreadyInitialized], [["u1", "u3"], ["u2"]]);
+  assert.equal(preview.fingerprint, creditInitializationFingerprint(input()));
+  assert(!w.sql!.some(sql => sql.includes("zzsh_meta")));
+  assert.deepEqual(w.writesSeen, []);
+  await assert.rejects(() => previewCreditInitialization(commentClient(w), input()), (e: any) => e.code === "42P01");
+});
+
+test("COMMENT authority rejects every actual identity/marker drift, missing row and query error", async () => {
+  for (const patch of [{ databaseName: "other" }, { databaseOid: "16385" }, { owner: "other_owner" }, { runtimeRole: "other_role", session_user: "zzsh_runtime" }, { databaseComment: null }, { databaseComment: "" }, { databaseComment: "synthetic:credit-resource:v1-extra" }, { databaseComment: "synthetic:credit-resource:v1 " }, { databaseComment: "SYNTHETIC:credit-resource:v1" }]) {
+    const w = commentWorld(); Object.assign(w.live, patch);
+    await assert.rejects(() => previewCreditInitialization(commentClient(w), input({}, { resource: COMMENT_RESOURCE })), /approved resource/);
+    assert.deepEqual(w.writesSeen, []);
+  }
+  for (const code of [null, "42501"]) {
+    const w = commentWorld(), inner = commentClient(w);
+    const c = { query: (sql: string, params: any[]) => sql.includes("credit-init-resource-comment") ? code ? Promise.reject(Object.assign(new Error("synthetic catalog denial"), { code })) : Promise.resolve({ rows: [] }) : inner.query(sql, params) } as any;
+    await assert.rejects(() => previewCreditInitialization(c, input({}, { resource: COMMENT_RESOURCE })), code ? (e: any) => e.code === code : /approved resource/);
+  }
+});
+
+test("COMMENT PREVIEW, WRITE and RECOVER keep Boss/session/DB-clock guards", async () => {
+  const operations = [previewCreditInitialization, applyCreditInitializationBatch, readCreditInitializationReceipt];
+  for (const operation of operations) for (const deny of ["non-boss", "frozen", "suspended", "locked", "totp", "expired", "db-clock"] as const) {
+    const w = commentWorld();
+    if (deny === "non-boss") w.admins.get("boss")!.isBoss = false;
+    if (deny === "frozen") w.admins.get("boss")!.status = "FROZEN";
+    if (deny === "suspended") w.sessions.get("sess-boss")!.suspended = true;
+    if (deny === "locked") w.sessions.get("sess-boss")!.locked = true;
+    if (deny === "totp") w.sessions.get("sess-boss")!.twoFactor = false;
+    if (deny === "expired") w.sessions.get("sess-boss")!.expiresAt = "2000-01-01T00:00:00Z";
+    if (deny === "db-clock") w.dbNow = "2026-10-20T04:00:00.000000Z";
+    await assert.rejects(() => operation(commentClient(w), input({ userIds: ["u1"] }, { resource: COMMENT_RESOURCE })));
+    assert.deepEqual(w.writesSeen, []);
+  }
+});
+
+test("COMMENT COMMIT_UNKNOWN recovers and replays the original key/body under current authority", async () => {
+  const w = commentWorld(); w.failCommit = "AFTER_DURABLE";
+  const original = input({ userIds: ["u1"] }, { resource: COMMENT_RESOURCE });
+  await assert.rejects(() => runCreditInitializationBatch(pool(w), original), (e: any) => e instanceof CreditInitializationOutcomeError && e.outcome === "COMMIT_UNKNOWN" && !e.rollbackAcknowledged);
+  const audits = w.audits, later = input({ userIds: ["u1"] }, { resource: COMMENT_RESOURCE, approvalRef: "approval-new-window", attempt: 2 });
+  const recovered = await readCreditInitializationReceipt(commentClient(w), later); assert.equal(recovered.state, "FOUND");
+  const replay = await applyCreditInitializationBatch(commentClient(w), later); assert.equal(replay.replayed, true); assert.equal(w.audits, audits);
+  if (recovered.state === "FOUND") assert.deepEqual(replay.receipt, recovered.receipt);
+  await assert.rejects(() => applyCreditInitializationBatch(commentClient(w), input({ userIds: ["u3"] }, { resource: COMMENT_RESOURCE })), /different request/);
+  w.live.databaseComment = "changed-after-success";
+  await assert.rejects(() => readCreditInitializationReceipt(commentClient(w), later), /approved resource/);
+  assert(!w.sql!.some(sql => sql.includes("zzsh_meta")));
+});
+
+test("credit CLI v2 explicitly binds COMMENT; malformed/version-mixed resources reject before connecting", () => {
+  const bytes = Buffer.from(JSON.stringify({ schema: "credit-init-package-v1", batchKey: "credit-init:resource-0001", userIds: ["u1"], approvedCategory: "ACTIVE", reason: "synthetic resource approval" }));
+  const digest = (b: Buffer) => nodeHash("sha256").update(b).digest("hex"), packageSha = digest(bytes);
+  const parse = (over: Record<string, unknown> = {}, configured = { databaseName: "zzsh_window", databaseUser: "zzsh_runtime" }) => {
+    const approval = Buffer.from(JSON.stringify({ schema: "credit-init-approval-v2", status: "APPROVED", approvalRef: "synthetic-credit-comment", attempt: 1, mode: "PREVIEW", businessPackageSha256: packageSha, actor: { adminId: "boss", sessionId: "sess-boss" }, windowStartUtc: "2026-10-20T00:00:00Z", windowEndUtc: "2026-10-20T04:00:00Z", resource: COMMENT_RESOURCE, ...over }));
+    return readCreditInitializationRun({ CREDIT_INIT_ENABLED: "true", CREDIT_INIT_PACKAGE_FILE: "business", CREDIT_INIT_PACKAGE_SHA256: packageSha, CREDIT_INIT_APPROVAL_FILE: "approval", CREDIT_INIT_APPROVAL_SHA256: digest(approval), CREDIT_INIT_MODE: "PREVIEW" }, p => p === "business" ? bytes : approval, Date.parse("2026-10-20T01:00:00Z"), configured);
+  };
+  const fresh = parse(), legacy = parse({ schema: "credit-init-approval-v1", resource: RESOURCE });
+  assert.equal(creditInitializationFingerprint(fresh.input), creditInitializationFingerprint(legacy.input));
+  assert.equal(fresh.input.intentDigest, legacy.input.intentDigest); assert.notEqual(fresh.input.execution.approvalDigest, legacy.input.execution.approvalDigest);
+  for (const patch of [{ schema: "credit-init-approval-v1" }, { schema: "credit-init-approval-v3" }, { resource: RESOURCE }, { status: "DRAFT_NOT_APPROVED" }, { businessPackageSha256: "f".repeat(64) }, ...[undefined, false, 0, "", "TEST_METADATA"].map(bindingKind => ({ resource: { ...COMMENT_RESOURCE, bindingKind } })), { resource: { ...COMMENT_RESOURCE, markerKey: "hidden-metadata" } }, { resource: { ...COMMENT_RESOURCE, databaseComment: "" } }, { resource: { ...COMMENT_RESOURCE, databaseOid: "0" } }]) assert.throws(() => parse(patch));
+  assert.throws(() => parse({}, { databaseName: "other", databaseUser: "zzsh_runtime" }), /nothing was connected/);
+  assert.throws(() => parse({}, { databaseName: "zzsh_window", databaseUser: "other" }), /nothing was connected/);
+});
+
 test("credit initialization plan classifies missing users and never lists existing states", async () => {
   const plan = await planCreditInitialization(client(world()), { limit: 10 });
   assert.deepEqual(plan.byCategory, { ACTIVE: 2, RESTRICTED: 1, CANCELLED: 1, DEACTIVATED: 0, UNKNOWN: 0 });

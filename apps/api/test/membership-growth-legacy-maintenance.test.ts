@@ -38,11 +38,12 @@ type Idempotency = { requestFingerprint: string; responseStatus: number; respons
 type State = { contributions: Map<string, string>; coverage: Map<string, LegacyCoverageRecord>; idempotency: Map<string, Idempotency>; audits: number };
 const blank = (): State => ({ contributions: new Map(), coverage: new Map(), idempotency: new Map(), audits: 0 });
 const copy = (s: State): State => ({ contributions: new Map(s.contributions), coverage: new Map([...s.coverage].map(([k, v]) => [k, structuredClone(v)])), idempotency: new Map([...s.idempotency].map(([k, v]) => [k, structuredClone(v)])), audits: s.audits });
-function fixture(options: { failAudit?: boolean; failCoverage?: boolean; failContributionAt?: number; failCommit?: boolean } = {}) {
+function fixture(options: { failAudit?: boolean; failCoverage?: boolean; failContributionAt?: number; failCommit?: boolean; commentBinding?: boolean } = {}) {
   let committed = blank(), pending: State | null = null, readOnly = false, inserts = 0;
   const sqlLog: string[] = [], portLog: string[] = [];
   const auth = { status: "ACTIVE", isBoss: true, suspended: false, locked: false, twoFactorEnabled: true, expired: false, dbNow: "2026-10-17T12:00:00.123456Z", tableOwner: "maintenance_writer", tableMissing: false };
   const resource = { ...context().execution.resource }, state = () => pending ?? committed;
+  const commentRow = { databaseName: "synthetic_growth", databaseOid: "123", owner: "database_owner", runtimeRole: "maintenance_writer", databaseComment: "synthetic:growth-resource:v1" };
   let competingCoverageKey: string | null = null;
   const rawClient = {
     async query(sql: string, p: readonly unknown[] = []) {
@@ -51,10 +52,12 @@ function fixture(options: { failAudit?: boolean; failCoverage?: boolean; failCon
       if (sql === "ROLLBACK") { pending = null; readOnly = false; return { rows: [], rowCount: 0 }; }
       if (sql === "COMMIT") { if (pending) committed = pending; pending = null; readOnly = false; if (options.failCommit) throw new Error("SYNTHETIC_COMMIT_RESPONSE_LOST"); return { rows: [], rowCount: 0 }; }
       if (readOnly && (/^\s*(INSERT|UPDATE|DELETE)/.test(sql) || /FOR UPDATE/.test(sql))) throw new Error("SYNTHETIC_READ_ONLY_WRITE");
+      if (options.commentBinding && sql.includes('"zzsh_meta"."database_marker"')) throw Object.assign(new Error("SYNTHETIC_MARKER_TABLE_ABSENT"), { code: "42P01" });
       if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: auth.status, isBoss: auth.isBoss, passwordChangeRequired: false }], rowCount: 1 };
       if (sql.includes('FROM "zzsh_auth_admin"."session"')) return { rows: auth.expired && sql.includes('>clock_timestamp()') ? [] : [{ locked: auth.locked, suspended: auth.suspended, twoFactorEnabled: auth.twoFactorEnabled, pinHash: null, pinFailures: 0, expiresAt: auth.expired ? "2000-01-01T00:00:00.000Z" : "2099-01-01T00:00:00.000Z" }], rowCount: 1 };
       if (sql.includes("WITH role_permissions")) return { rows: [], rowCount: 0 };
       if (sql.includes("credit-init-window")) return { rows: [{ dbNow: auth.dbNow }], rowCount: 1 };
+      if (sql.includes("credit-init-resource-comment")) { assert(sql.includes("shobj_description(d.oid, 'pg_database')")); return { rows: [{ ...commentRow }], rowCount: 1 }; }
       if (sql.includes("credit-init-resource")) return { rows: [{ ...resource }], rowCount: 1 };
       if (sql.includes("set_config('zzsh.actor_type'")) return { rows: [{}], rowCount: 1 };
       if (sql.includes("legacy-growth-maintenance-owner")) return { rows: auth.tableMissing ? [] : [{ currentRole: resource.runtimeRole, tableOwner: auth.tableOwner }], rowCount: auth.tableMissing ? 0 : 1 };
@@ -84,8 +87,45 @@ function fixture(options: { failAudit?: boolean; failCoverage?: boolean; failCon
   };
   async function write<T>(action: () => Promise<T>): Promise<T> { await client.query("BEGIN"); try { const value = await action(); await client.query("COMMIT"); return value; } catch (error) { if (pending) await client.query("ROLLBACK"); throw error; } }
   const pool = { async connect() { return client; } } as unknown as Parameters<typeof withReadOnlyTransaction>[0];
-  return { client, port, auth, resource, sqlLog, portLog, write, read: <T>(action: () => Promise<T>) => withReadOnlyTransaction(pool, action), committed: () => committed, setCompetingKey: (key: string) => { competingCoverageKey = key; } };
+  return { client, port, auth, resource, commentRow, sqlLog, portLog, write, read: <T>(action: () => Promise<T>) => withReadOnlyTransaction(pool, action), committed: () => committed, setCompetingKey: (key: string) => { competingCoverageKey = key; } };
 }
+
+const COMMENT_RESOURCE = { databaseName: "synthetic_growth", databaseOid: "123", owner: "database_owner", runtimeRole: "maintenance_writer", bindingKind: "DATABASE_COMMENT", databaseComment: "synthetic:growth-resource:v1" } as const;
+function commentInput(key = "growth-comment-0001") {
+  const original = input(business(), key);
+  return prepareLegacyGrowthMaintenanceInput(original.businessPackageBytes, original.businessPackageSha256, { ...context(key), execution: { ...context(key).execution, resource: COMMENT_RESOURCE } });
+}
+
+test("COMMENT growth preview/apply/recover use actual catalog facts and preserve business identity", async () => {
+  const db = fixture({ commentBinding: true }), i = commentInput();
+  assert.equal(i.businessFingerprint, input().businessFingerprint);
+  const preview = await db.read(() => previewLegacyGrowthMaintenance(db.client, i, db.port));
+  assert.equal(preview.contributionCount, 3); assert.equal(preview.coverageState, "COMPLETE");
+  assert.equal(db.committed().audits, 0);
+  const first = await db.write(() => applyLegacyGrowthMaintenance(db.client, i, db.port)); assert.equal(first.receipt.inserted, 3);
+  const fresh = commentInput(); fresh.execution = { ...fresh.execution, approvalRef: "another-comment-window", attempt: 2 };
+  const replay = await db.write(() => applyLegacyGrowthMaintenance(db.client, fresh, db.port)); assert.equal(replay.replayed, true); assert.deepEqual(replay.receipt, first.receipt);
+  const recovered = await db.read(() => readLegacyGrowthMaintenanceReceipt(db.client, fresh, db.port)); assert.equal(recovered.state, "FOUND");
+  if (recovered.state === "FOUND") assert.deepEqual(recovered.receipt, first.receipt);
+  assert.equal(db.committed().audits, 1); assert(!db.sqlLog.some(sql => sql.includes("zzsh_meta")));
+});
+
+test("COMMENT growth still requires current authority and actual table ownership only on APPLY", async () => {
+  const db = fixture({ commentBinding: true }), i = commentInput();
+  db.auth.tableOwner = "other_table_owner";
+  assert.equal((await db.read(() => previewLegacyGrowthMaintenance(db.client, i, db.port))).contributionCount, 3);
+  await assert.rejects(() => db.write(() => applyLegacyGrowthMaintenance(db.client, i, db.port)), /table owner/);
+  assert.equal(db.committed().contributions.size, 0);
+  db.auth.tableOwner = "maintenance_writer"; await db.write(() => applyLegacyGrowthMaintenance(db.client, i, db.port));
+  db.commentRow.databaseComment = "changed-marker";
+  await assert.rejects(() => db.read(() => readLegacyGrowthMaintenanceReceipt(db.client, i, db.port)), /approved resource/);
+  await assert.rejects(() => db.write(() => applyLegacyGrowthMaintenance(db.client, i, db.port)), /approved resource/);
+  db.commentRow.databaseComment = "synthetic:growth-resource:v1";
+  db.auth.status = "FROZEN";
+  await assert.rejects(() => db.read(() => readLegacyGrowthMaintenanceReceipt(db.client, i, db.port)));
+  assert.equal(db.committed().audits, 1);
+  assert(!db.sqlLog.some(sql => sql.includes("zzsh_meta")));
+});
 
 test("factory binds original bytes and strict envelope/source/admitted shape; it never consumes caller prepared/coverage/true", () => {
   const valid = business(), text = JSON.stringify(valid), i = prepareLegacyGrowthMaintenanceInput(Buffer.from(text), sha256Hex(text), context());

@@ -8,6 +8,8 @@
 
 新schema为已有用户建立100分初始状态和INITIALIZED事件，并定义四项管理权限，不给管理员自动授角色/游戏范围。启用后的新用户注册在原事务初始化信用；分销/原生钱包初始化顺序和独立准入边界保持。保证金沿既有经济根、finance_event与ledger记账，不增加第二总账。
 
+信用初始化与旧消费成长维护沿业务原包＋独立执行批准两文件绑定。v1批准继续严格核测试metadata表；真实资源的v2批准须显式指定`DATABASE_COMMENT`，由同一业务连接核准确库名/OID/owner/current_user及数据库COMMENT，不因缺测试表自动回退或补建标记。当前Boss/会话、DB时钟、原权限和成长APPLY表owner守卫保持；更换执行批准不改变原业务包/key/指纹，UNKNOWN仍沿原身份与回执恢复。
+
 正式发布、个人确认和建单共用信用/coverage权威读取：credit state与存在的requirement通过同一业务PoolClient持FOR SHARE，写方FOR UPDATE；锁至事务提交/回滚释放。信用/coverage版本封入既有guarantee.reference摘要，个人ruleRefs仍严格五键，listingHash完整绑定原发布资料。启用状态变更应先处理未决责任，不静默换key或签名正文。
 
 原保证金支付意图先校主体/账号，再按原key读取冻结回执；当前政策/版本异常不能截断原回执恢复。只有没有原回执的新请求读取当前权威依据。Admin明细先按game scope筛requirement，支付/退款各自返回完整历史，不以最新摘要替代旧事实。

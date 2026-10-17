@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import {
-  authorizeCreditInitializationExecution, assertCreditInitializationWindowOpen,
+  authorizeCreditInitializationExecution, assertCreditInitializationWindowOpen, isCreditInitializationResource,
   type CreditInitializationExecution,
 } from "../credit/credit-initialization";
 import { canonicalize } from "../supply/content-hash";
@@ -67,8 +67,7 @@ function validateContext(context: LegacyGrowthMaintenanceContext): void {
   const e = context.execution;
   if (!e || typeof e.actorAdminId !== "string" || !e.actorAdminId.trim() || typeof e.actorSessionId !== "string" || !e.actorSessionId.trim() || typeof e.approvalRef !== "string" || !REF.test(e.approvalRef) || !Number.isInteger(e.attempt) || e.attempt < 1 || typeof e.approvalDigest !== "string" || !HEX.test(e.approvalDigest)) throw invalid("Execution approval binding is required");
   if (!UTC.test(e.windowStartUtc ?? "") || !UTC.test(e.windowEndUtc ?? "") || !Number.isFinite(Date.parse(e.windowStartUtc)) || !Number.isFinite(Date.parse(e.windowEndUtc)) || Date.parse(e.windowEndUtc) <= Date.parse(e.windowStartUtc)) throw invalid("Execution window is invalid");
-  const r = e.resource;
-  if (!r || ![r.databaseName, r.databaseOid, r.owner, r.runtimeRole, r.markerKey, r.markerTarget].every((v) => typeof v === "string" && v.trim()) || !Number.isInteger(r.markerVersion)) throw invalid("Execution resource binding is incomplete");
+  if (!isCreditInitializationResource(e.resource)) throw invalid("Execution resource binding is incomplete");
 }
 function parsePackage(bytes: string | Buffer, approvedSha256: string): { text: string; sha256: string; value: LegacyGrowthMaintenancePackage } {
   const raw = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;

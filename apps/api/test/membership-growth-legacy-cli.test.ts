@@ -29,6 +29,27 @@ function fixture(options: { mode?: LegacyGrowthMaintenanceMode; approval?: Recor
   const run = () => readLegacyGrowthMaintenanceRun(env, read, NOW, { databaseName: RESOURCE.databaseName, databaseUser: RESOURCE.runtimeRole });
   return { bytes, packageSha, approval, env, read, run };
 }
+const COMMENT_RESOURCE = { databaseName: "zzsh_test_growth_cli", databaseOid: "40000", owner: "fixture_owner", runtimeRole: "fixture_owner", bindingKind: "DATABASE_COMMENT", databaseComment: "synthetic:growth-cli:v1" } as const;
+
+test("growth v2 parser is explicit, preserves original business bytes and supports all approved modes", () => {
+  for (const mode of ["PREVIEW", "APPLY", "RECOVER_READ"] as const) {
+    const one = fixture({ mode }), two = fixture({ mode, approval: { schema: "legacy-growth-maintenance-approval-v2", resource: COMMENT_RESOURCE } });
+    const a = one.run(), b = two.run();
+    assert.equal(b.mode, mode); assert.equal(b.input.businessPackageBytes, a.input.businessPackageBytes); assert.equal(b.input.executionKey, a.input.executionKey);
+    assert.equal(b.input.businessFingerprint, a.input.businessFingerprint); assert.notEqual(b.input.execution.approvalDigest, a.input.execution.approvalDigest);
+  }
+});
+
+test("growth parser rejects unknown/mixed resource versions and falsey COMMENT kinds before configuration/pool", async t => {
+  const invalid = [{ schema: "legacy-growth-maintenance-approval-v1", resource: COMMENT_RESOURCE }, { schema: "legacy-growth-maintenance-approval-v3", resource: COMMENT_RESOURCE }, { schema: "legacy-growth-maintenance-approval-v2", resource: RESOURCE }, ...[undefined, false, 0, "", "TEST_METADATA"].map(bindingKind => ({ schema: "legacy-growth-maintenance-approval-v2", resource: { ...COMMENT_RESOURCE, bindingKind } })), { schema: "legacy-growth-maintenance-approval-v2", resource: { ...COMMENT_RESOURCE, markerKey: "extra" } }, { schema: "legacy-growth-maintenance-approval-v2", resource: { ...COMMENT_RESOURCE, databaseComment: "" } }, { schema: "legacy-growth-maintenance-approval-v2", resource: { ...COMMENT_RESOURCE, databaseOid: "0" } }];
+  const config = t.mock.method(configuration, "loadConfig", () => { throw Error("SHOULD_NOT_CONFIGURE"); });
+  const pool = t.mock.method(database, "createBusinessPool", () => { throw Error("SHOULD_NOT_CONNECT"); });
+  for (const approval of invalid) {
+    const f = fixture({ mode: "PREVIEW", approval }); assert.throws(f.run);
+    await assert.rejects(() => main(f.env, f.read, NOW));
+  }
+  assert.equal(config.mock.callCount(), 0); assert.equal(pool.mock.callCount(), 0);
+});
 const port = {} as LegacyCoveragePort;
 function resultFor(input: maintenance.LegacyGrowthMaintenanceInput): Awaited<ReturnType<typeof maintenance.applyLegacyGrowthMaintenance>> {
   return { replayed: false, receipt: { schema: "legacy-growth-maintenance-receipt-v1", operation: maintenance.LEGACY_GROWTH_MAINTENANCE_OPERATION, executionKey: input.executionKey, subjectUserId: input.subjectUserId, businessFingerprint: input.businessFingerprint, businessPackageSha256: input.businessPackageSha256, coverageFingerprint: "c".repeat(64), coverageExecutionKey: input.executionKey, sourceReceiptDigest: "d".repeat(64), coverageState: "COMPLETE", inserted: 0, replayed: 0, execution: { approvalRef: input.execution.approvalRef, attempt: input.execution.attempt } } };
@@ -45,6 +66,18 @@ function fakeDb(options: { commitError?: Error; rollbackError?: Error; expired?:
   const pool = { async connect() { connects++; return client; } } as unknown as Pool;
   return { pool, client, queries, releases, connects: () => connects };
 }
+
+test("v2 COMMENT approval preserves COMMIT_UNKNOWN and the original recovery identity", async t => {
+  const run = fixture({ approval: { schema: "legacy-growth-maintenance-approval-v2", resource: COMMENT_RESOURCE } }).run();
+  const db = fakeDb({ commitError: new Error("SYNTHETIC_COMMIT_LOST") });
+  t.mock.method(maintenance, "applyLegacyGrowthMaintenance", async (_client: PoolClient, input: maintenance.LegacyGrowthMaintenanceInput) => resultFor(input));
+  await assert.rejects(() => runLegacyGrowthMaintenanceApply(db.pool, run.input, port), error => {
+    assert(error instanceof LegacyGrowthMaintenanceOutcomeError); assert.equal(error.outcome, "COMMIT_UNKNOWN"); assert.equal(error.rollbackAcknowledged, false);
+    assert.equal(error.preserved.executionKey, KEY); assert.equal(error.preserved.businessFingerprint, run.input.businessFingerprint); assert.equal(error.preserved.businessPackageSha256, run.input.businessPackageSha256);
+    return true;
+  });
+  assert.deepEqual(db.queries, ["BEGIN", "WINDOW", "COMMIT"]); assert.deepEqual(db.releases, [true]);
+});
 
 test("two independently signed files bind actual bytes; renewal/recovery retain the business fingerprint", () => {
   const original = fixture(), run = original.run();

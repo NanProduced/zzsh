@@ -9,8 +9,10 @@ import {
   readCreditInitializationReceipt,
   runCreditInitializationBatch,
   withReadOnlyTransaction,
+  isCreditInitializationResource,
   type CreditInitializationInput,
-  type CreditInitializationResource,
+  type CreditInitializationTestMetadataResource,
+  type CreditInitializationCommentResource,
 } from "./credit-initialization";
 
 /**
@@ -28,7 +30,6 @@ import {
  */
 export type CreditInitializationPackage = { schema: "credit-init-package-v1"; batchKey: string; userIds: string[]; approvedCategory: "ACTIVE"; reason: string };
 export type CreditInitializationApproval = {
-  schema: "credit-init-approval-v1";
   status: "APPROVED";
   approvalRef: string;
   attempt: number;
@@ -37,8 +38,8 @@ export type CreditInitializationApproval = {
   actor: { adminId: string; sessionId: string };
   windowStartUtc: string;
   windowEndUtc: string;
-  resource: CreditInitializationResource;
-};
+} & ({ schema: "credit-init-approval-v1"; resource: CreditInitializationTestMetadataResource }
+  | { schema: "credit-init-approval-v2"; resource: CreditInitializationCommentResource });
 export type CreditInitializationMode = "PREVIEW" | "APPLY" | "RECOVER_READ";
 
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -73,8 +74,8 @@ export function readCreditInitializationRun(
   if (pkg.schema !== "credit-init-package-v1" || pkg.approvedCategory !== "ACTIVE" || !Array.isArray(pkg.userIds)) throw new ConfigurationError("business package must be credit-init-package-v1 with approvedCategory ACTIVE");
   const approval = exactKeys(JSON.parse(approvalBytes.toString("utf8")), ["schema", "status", "approvalRef", "attempt", "mode", "businessPackageSha256", "actor", "windowStartUtc", "windowEndUtc", "resource"], "execution approval") as unknown as CreditInitializationApproval;
   exactKeys(approval.actor, ["adminId", "sessionId"], "approval.actor");
-  exactKeys(approval.resource, ["databaseName", "databaseOid", "owner", "runtimeRole", "markerKey", "markerTarget", "markerVersion"], "approval.resource");
-  if (approval.schema !== "credit-init-approval-v1" || approval.status !== "APPROVED") throw new ConfigurationError("execution approval is not an APPROVED credit-init-approval-v1");
+  if (!["credit-init-approval-v1", "credit-init-approval-v2"].includes(approval.schema) || approval.status !== "APPROVED") throw new ConfigurationError("execution approval is not an APPROVED credit-init-approval-v1/v2");
+  if (!isCreditInitializationResource(approval.resource) || (approval.schema === "credit-init-approval-v2") !== ("bindingKind" in approval.resource)) throw new ConfigurationError("approval.resource does not match the approved schema");
   if (approval.businessPackageSha256 !== packageSha) throw new ConfigurationError("execution approval does not approve this business package");
   const mode = (env.CREDIT_INIT_MODE?.trim() || "PREVIEW") as CreditInitializationMode;
   if (!["PREVIEW", "APPLY", "RECOVER_READ"].includes(mode) || approval.mode !== mode) throw new ConfigurationError("CREDIT_INIT_MODE must equal the approved mode");

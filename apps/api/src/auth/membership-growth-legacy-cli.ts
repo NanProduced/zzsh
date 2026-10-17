@@ -4,7 +4,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { ConfigurationError, loadConfig } from "../config/config";
 import { createBusinessPool } from "../database/business";
-import { assertCreditInitializationWindowOpen, withReadOnlyTransaction, type CreditInitializationExecution, type CreditInitializationResource } from "../credit/credit-initialization";
+import { assertCreditInitializationWindowOpen, withReadOnlyTransaction, isCreditInitializationResource, type CreditInitializationExecution, type CreditInitializationTestMetadataResource, type CreditInitializationCommentResource } from "../credit/credit-initialization";
 import {
   LEGACY_GROWTH_MAINTENANCE_OPERATION, prepareLegacyGrowthMaintenanceInput, legacyGrowthMaintenanceFingerprint,
   previewLegacyGrowthMaintenance, applyLegacyGrowthMaintenance, readLegacyGrowthMaintenanceReceipt,
@@ -24,12 +24,13 @@ import type { LegacyCoveragePort } from "./membership-growth-legacy";
  */
 export type LegacyGrowthMaintenanceMode = "PREVIEW" | "APPLY" | "RECOVER_READ";
 export type LegacyGrowthMaintenanceApproval = {
-  schema: "legacy-growth-maintenance-approval-v1"; status: "APPROVED";
+  status: "APPROVED";
   approvalRef: string; attempt: number; mode: LegacyGrowthMaintenanceMode;
   businessPackageSha256: string; executionKey: string;
   actor: { adminId: string; sessionId: string };
-  windowStartUtc: string; windowEndUtc: string; resource: CreditInitializationResource;
-};
+  windowStartUtc: string; windowEndUtc: string;
+} & ({ schema: "legacy-growth-maintenance-approval-v1"; resource: CreditInitializationTestMetadataResource }
+  | { schema: "legacy-growth-maintenance-approval-v2"; resource: CreditInitializationCommentResource });
 export type LegacyGrowthMaintenanceRun = { mode: LegacyGrowthMaintenanceMode; input: LegacyGrowthMaintenanceInput };
 const HEX = /^[a-f0-9]{64}$/, REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/, KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -75,12 +76,12 @@ export function readLegacyGrowthMaintenanceRun(
   if (business.schema !== "legacy-growth-maintenance-package-v1" || !text(business.reason, 2000)) throw new ConfigurationError("business package must be legacy-growth-maintenance-package-v1 with a reason");
   const approval = exactKeys(json(approvalBytes, "execution approval"), ["schema", "status", "approvalRef", "attempt", "mode", "businessPackageSha256", "executionKey", "actor", "windowStartUtc", "windowEndUtc", "resource"], "execution approval") as unknown as LegacyGrowthMaintenanceApproval;
   exactKeys(approval.actor, ["adminId", "sessionId"], "approval.actor");
-  exactKeys(approval.resource, ["databaseName", "databaseOid", "owner", "runtimeRole", "markerKey", "markerTarget", "markerVersion"], "approval.resource");
-  if (approval.schema !== "legacy-growth-maintenance-approval-v1" || approval.status !== "APPROVED") throw new ConfigurationError("execution approval must be an APPROVED legacy-growth-maintenance-approval-v1");
+  if (!["legacy-growth-maintenance-approval-v1", "legacy-growth-maintenance-approval-v2"].includes(approval.schema) || approval.status !== "APPROVED") throw new ConfigurationError("execution approval must be an APPROVED legacy-growth-maintenance-approval-v1/v2");
+  if (!isCreditInitializationResource(approval.resource) || (approval.schema === "legacy-growth-maintenance-approval-v2") !== ("bindingKind" in approval.resource)) throw new ConfigurationError("approval resource does not match the approved schema");
   if (approval.businessPackageSha256 !== packageSha) throw new ConfigurationError("execution approval does not approve this business package");
   if (!REF.test(approval.approvalRef ?? "") || !Number.isSafeInteger(approval.attempt) || approval.attempt < 1 || !KEY.test(approval.executionKey ?? "") || !text(approval.actor.adminId) || !text(approval.actor.sessionId)) throw new ConfigurationError("approval actor, reference, attempt and execution key are invalid");
   const r = approval.resource;
-  if (![r.databaseName, r.owner, r.runtimeRole].every(v => typeof v === "string" && /^[a-z][a-z0-9_]{0,62}$/.test(v)) || typeof r.databaseOid !== "string" || !/^[1-9]\d{0,9}$/.test(r.databaseOid) || BigInt(r.databaseOid) > 4294967295n || !text(r.markerKey) || !text(r.markerTarget) || !Number.isSafeInteger(r.markerVersion) || r.markerVersion < 1) throw new ConfigurationError("approval resource binding is invalid");
+  if (![r.databaseName, r.owner, r.runtimeRole].every(v => typeof v === "string" && /^[a-z][a-z0-9_]{0,62}$/.test(v)) || (!("bindingKind" in r) && (!text(r.markerKey) || !text(r.markerTarget)))) throw new ConfigurationError("approval resource binding is invalid");
   const mode = (env.LEGACY_GROWTH_MODE?.trim() || "PREVIEW") as LegacyGrowthMaintenanceMode;
   if (!["PREVIEW", "APPLY", "RECOVER_READ"].includes(mode) || approval.mode !== mode) throw new ConfigurationError("LEGACY_GROWTH_MODE must equal the approved mode");
   const start = utc(approval.windowStartUtc), end = utc(approval.windowEndUtc);
