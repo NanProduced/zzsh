@@ -8,7 +8,7 @@ import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, Clipboar
 import { ServiceShell } from "./layout/service-shell";
 import { WebAuthError, webAuthRequest } from "./auth/auth-form";
 import { useAuthOverlay } from "./auth/auth-overlay-provider";
-import { accountStatusLabel, ageStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
+import { accountStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
 import { SkinMediaThumb } from "./supply/skin-media-thumb";
 import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
@@ -310,6 +310,7 @@ function AccountIdentityPanel() {
           <div className="sec-row-side" />
         </div>
 
+        {/* shortcut: 已核验姓名/证件号两行依赖 /identity/status 返回 realNameMasked/idCardMasked；当前 API 未提供时该两行不渲染，API 补齐后自动生效。 */}
         {identity?.realNameMasked ? (
           <div className="sec-row">
             <div className="sec-row-icon-cell">
@@ -414,7 +415,7 @@ function AccountSecurityPanel({ pendingWrite }: { pendingWrite?: SecurityPending
   return <section className="account-module" aria-labelledby="account-security-heading">
     <header className="account-module-heading">
       <div><h2 id="account-security-heading">账号安全</h2><p>管理登录方式与有效会话。</p></div>
-      <button type="button" className="button quiet sr-only" aria-label="刷新账号资料" disabled={loading || Boolean(busy)} onClick={() => void load()}><RefreshCw size={15} aria-hidden="true" />刷新</button>
+      <button type="button" className="button quiet sec-hidden-desktop" aria-label="刷新账号资料" disabled={loading || Boolean(busy)} onClick={() => void load()}><RefreshCw size={15} aria-hidden="true" />刷新</button>
     </header>
     {loading ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><LockKeyhole size={28} aria-hidden="true" /><h3>正在读取账号资料</h3><p>请稍候。</p></div> : error && !profile ? <div className="account-module-card account-empty-state" role="alert"><AlertCircle size={28} aria-hidden="true" /><h3>账号资料暂时无法读取</h3><p>{error}</p><button type="button" className="button secondary" onClick={() => void load()}>重试</button></div> : <>
       {error ? <p className="account-module-note is-error" role="alert">{error}</p> : null}

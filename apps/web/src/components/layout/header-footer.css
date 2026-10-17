@@ -194,6 +194,8 @@
   .site-header-bar { transition:min-height 250ms ease-out, padding 250ms ease-out, box-shadow 250ms ease-out; }
 }
 @media(max-width:1250px) { .site-header-bar { gap:16px; } .site-desktop-nav { gap:14px; } .site-header-actions { gap:6px; } .site-header .site-publish { padding-inline:10px; } }
+/* 展开搜索钮只在移动端折叠态出现：桌面端搜索框常驻，不显示第二颗搜索入口。 */
+.site-search-toggle { display:none; }
 @media(max-width:1099px),(hover:none),(pointer:coarse) {
   .site-header { height:120px; background:var(--color-bg-surface); border-bottom:0; }
   .site-header-bar { display:grid; grid-template-columns:auto 1fr; gap:8px 16px; min-height:120px; padding:8px 0; width:calc(100% - 40px); max-width:none!important; transform:none!important; border-radius:0!important; box-shadow:none!important; }
@@ -204,7 +206,6 @@
   .site-header .site-session { display:none; }
   /* 移动端滚动后收起第二行搜索：只留品牌、主题、菜单和一颗展开钮。
      搜索持有焦点或用户主动展开时不收起，回顶部自动恢复。 */
-  .site-search-toggle { display:none; }
   .site-header[data-search-collapsed="true"] { height:60px; }
   .site-header[data-search-collapsed="true"] .site-header-bar { min-height:60px; }
   .site-header[data-search-collapsed="true"] .site-search { display:none; }
