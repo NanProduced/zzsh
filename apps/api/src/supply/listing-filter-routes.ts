@@ -1,4 +1,4 @@
-import { legacyListingSortLabel, hasLegacyReadSnapshots } from "./legacy-listing-read";
+import { legacyListingSortLabel,listLegacyReadListings,buildMixedListingCandidates,mixedListingBinding,readLegacyListing,hasLegacyReadSnapshots } from "./legacy-listing-read";
 import { readAdminContext,assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION } from "../auth/admin-authorization";
 import { withTransaction,recordAudit,setAuditContext } from "../auth/security-core";
@@ -55,10 +55,27 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
   return withPublicListingSnapshot(options.pool,async client=>{
     const state=await readListingState(client,q.gameId);
     for(const k of ["filterRevision","catalogRevision","ruleReleaseId"] as const)if(q[k]!==null&&q[k]!==state[k])throw conflict("Listing metadata revision changed");
+    // Owner decision (2026-10-18): the public market keeps the old platform status=3
+    // "listed" rows visible as read-only historical data. They never become
+    // quotable or orderable; readLegacyListing owns those guards.
+    if(state.legacyReadOnly){
+      await validateListingQuery(client,q,state);
+      const configuredLabel=state.config!.sorts.find(s=>s.key===q.sort)?.label??null;
+      return listLegacyReadListings(client,q,options.listingCursorKey!,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,sortLabel:legacyListingSortLabel(q.sort,configuredLabel)},options.legacyPublicAdmission);
+    }
+    if(state.mixed){
+      const binding=mixedListingBinding(q,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId!},options.legacyPublicAdmission);
+      const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
+      await validateListingQuery(client,q,state);
+      const sql=buildMixedListingCandidates(q,after,options.legacyPublicAdmission),rows=(await client.query<{id:string;version_id:string;key:string|null;source:string}>(sql.text,sql.values)).rows;
+      const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;
+      for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(row.source==="legacy"?await readLegacyListing(client,row.id,options.legacyPublicAdmission):await listingDetail(client,await readPublishingAccount(client,row.id),"public",options.supplyGateReader??unknownSupplyGate));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
+      const more=scanned<rows.length||rows.length===200;
+      return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+    }
     const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"RENTABLE_ONLY",gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);
-    if(state.legacyReadOnly)return {queryVersion:2,items:[],nextCursor:null,sort:q.sort,direction:q.direction,sortLabel:legacyListingSortLabel(q.sort,state.config!.sorts.find(s=>s.key===q.sort)?.label??null),filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:null,scannedCount:0,scanBudget:200,scanBudgetReached:false,limit:q.limit};
     const sql=buildListingCandidates(q,after),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
     const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;
     for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(await listingDetail(client,await readPublishingAccount(client,row.id),"public",options.supplyGateReader??unknownSupplyGate));}catch(e){if((e as {status?:number}).status!==404)throw e;}}

@@ -211,7 +211,7 @@ export function previewListingCard(listing: PublicListing): { ok: true; card: Li
 }
 export function publicAvailabilityLabel(state: PublicAvailabilityState): string | null {
   return ({ RENTABLE: null, PENDING_PAYMENT: "待付款占用 · 不可下单", RENTED: "已租用 · 不可下单", OCCUPIED: "暂不可租 · 不可下单",
-    OFFLINE: "已下架 · 不可下单", UNKNOWN: "资格待确认 · 不可下单", UNAVAILABLE: "暂不可租 · 不可下单", LEGACY_READ_ONLY: "历史记录 · 不可下单" })[state] ?? "状态待确认 · 不可下单";
+    OFFLINE: "已下架 · 不可下单", UNKNOWN: "资格待确认 · 不可下单", UNAVAILABLE: "暂不可租 · 不可下单", LEGACY_READ_ONLY: "旧平台上架数据 · 暂不可自助下单" })[state] ?? "状态待确认 · 不可下单";
 }
 function listingVisibility(listing: PublicListing) {
   const historical = listing.source === "LEGACY_READ_ONLY";

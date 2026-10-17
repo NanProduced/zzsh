@@ -517,7 +517,7 @@ test('public native availability keeps readable occupied/offline cards distinct 
  }
  assert.throws(()=>toListingCard({...listing,availability:{state:'OFFLINE'},canCreateOrder:true}));
  const historical=toListingCard({...listing,source:'LEGACY_READ_ONLY',canCreateOrder:false,quote:null,historicalQuote:{haffRent:money('1.00'),goods:money('2.00'),deposit:money('3.00'),termDays:'1'},inventory:[],sourceAvailability:{state:'RENTED',asOfUtc:'2026-09-13T00:00:00Z'}});
- assert.equal(historical.canCreateOrder,false);assert.equal(historical.availabilityState,'LEGACY_READ_ONLY');assert.match(historical.sourceAvailabilityLabel,/来源时点/);
+ assert.equal(historical.canCreateOrder,false);assert.equal(historical.availabilityState,'LEGACY_READ_ONLY');assert.equal(historical.availabilityLabel,'旧平台上架数据 · 暂不可自助下单');assert.match(historical.sourceAvailabilityLabel,/来源时点/);
 });
 
 

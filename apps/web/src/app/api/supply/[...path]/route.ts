@@ -14,8 +14,10 @@ const apiOrigin =
 const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
+// Owner-approved explicit whitelist: exact public listing-number lookup is a read-only
+// passthrough distinct from the generic /listings/:id branch.
 const getPath = new RegExp(
-  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation)?|media/${id}/(?:access|content))$`,
+  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation)?|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
   `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents)$`,

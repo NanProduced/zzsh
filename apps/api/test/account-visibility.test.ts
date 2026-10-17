@@ -9,6 +9,7 @@ import { handleFavorites } from "../src/supply/favorites";
 import { handlePublishingRoute } from "../src/supply/publishing-routes";
 import { listV2 } from "../src/supply/listing-filter-routes";
 import * as filterConfig from "../src/supply/listing-filter-config";
+import * as legacyRead from "../src/supply/legacy-listing-read";
 
 function nativeFixture(id = "account-a", game = "game-a") {
   const priced = computeQuote({ priceVersionId: "price-a", mode: "PERCENT", commissionRate: "0.2", roundingPolicy: "HALF_UP_CENT_V1",
@@ -176,24 +177,43 @@ test("lookup route is matched before the generic listing-id branch and stays ano
     { pool: { connect: async () => client }, supplyGateReader: f.gate } as never, "req_lookup", "/listings/lookup", new URLSearchParams("number=0000123&gameId=game-a"), false);
   assert.equal(capture.result.status, 200); assert.equal(capture.result.body.id, f.account.id); assert.equal(capture.result.body.canCreateOrder, false);
 });
-test("default v2 never mixes historical read-only rows, and keeps title query/cursor scope separate", async t => {
+test("default v2 keeps old-platform status=3 rows visible as read-only and separates cursor scope", async t => {
   const f = nativeFixture(); const queries: string[] = [];
   const client = { query: async (sql: string, args: any[] = []) => {
     queries.push(sql);
     if (sql.startsWith("WITH candidates AS")) return { rows: [{ id: f.account.id, version_id: f.version.id, key: "2026-10-01T00:00:00.000000Z" }], rowCount: 1 };
+    if (sql.includes("FROM native UNION ALL SELECT * FROM legacy")) return { rows: [
+      { id: "legacy-1", version_id: "legacy-version", key: "2026-09-13T00:00:00.000000Z", source: "legacy" },
+      { id: f.account.id, version_id: f.version.id, key: "2026-10-01T00:00:00.000000Z", source: "native" }], rowCount: 2 };
     return f.client.query(sql, args);
   }, release() {} };
-  let legacyOnly = false;
-  t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: legacyOnly, mixed: true, config: { sorts: [{ key: "latest", label: "最新发布" }] }, filterRevision: "1", catalogRevision: "1", ruleReleaseId: legacyOnly ? null : "release-a" }) as never);
+  let legacyOnly = false, mixed = false;
+  t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: legacyOnly, mixed, config: { sorts: [{ key: "latest", label: "最新发布" }] }, filterRevision: "1", catalogRevision: "1", ruleReleaseId: legacyOnly ? null : "release-a" }) as never);
   t.mock.method(filterConfig, "validateListingQuery", async () => {});
-  const options = { pool: { connect: async () => client }, supplyGateReader: f.gate, listingCursorKey: { keyId: "fixture", secret: "x".repeat(32) } };
+  let legacyCalls = 0, legacyRevisions: unknown = null;
+  t.mock.method(legacyRead, "listLegacyReadListings", async (_client: unknown, _q: unknown, _key: unknown, revisions: unknown) => {
+    legacyCalls++; legacyRevisions = revisions;
+    return { queryVersion: 2, items: [{ id: "legacy-1", source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null }], nextCursor: null, sort: "latest", direction: "DESC", sortLabel: "更新时间", filterRevision: "1", catalogRevision: "1", ruleReleaseId: null, scannedCount: 1, scanBudget: 200, scanBudgetReached: false, limit: 20 };
+  });
+  t.mock.method(legacyRead, "mixedListingBinding", () => ({ queryVersion: 2, gameId: "game-a", queryHash: "x", sort: "latest", direction: "DESC", coreItemId: null, filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" }));
+  t.mock.method(legacyRead, "readLegacyListing", async () => ({ id: "legacy-1", source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null }));
+  const options = { pool: { connect: async () => client }, supplyGateReader: f.gate, listingCursorKey: { keyId: "fixture", secret: "x".repeat(32) }, legacyPublicAdmission: { schema: "legacy-public-admission-v2", records: [] } };
+  const pageOf = () => listV2({ url: "/listings?queryVersion=2&gameId=game-a" } as never, options as never, new URLSearchParams("queryVersion=2&gameId=game-a"));
   try {
-    const page = await listV2({ url: "/listings?queryVersion=2&gameId=game-a" } as never, options as never, new URLSearchParams("queryVersion=2&gameId=game-a"));
+    const page = await pageOf();
     assert.equal(page.items.length, 1); assert.equal((page.items[0] as any).canCreateOrder, true); assert(!queries.some(q => q.includes("UNION ALL SELECT * FROM legacy")));
-    f.facts.occupancy = "OCCUPIED"; assert.deepEqual((await listV2({ url: "/listings" } as never, options as never, new URLSearchParams("queryVersion=2&gameId=game-a"))).items, []);
-    legacyOnly = true; const before = queries.length;
-    const empty = await listV2({ url: "/listings" } as never, options as never, new URLSearchParams("queryVersion=2&gameId=game-a"));
-    assert.deepEqual(empty.items, []); assert.equal(empty.nextCursor, null); assert(!queries.slice(before).some(q => q.includes("legacy_listing_read_snapshot")));
+    f.facts.occupancy = "OCCUPIED"; assert.deepEqual((await pageOf()).items, []);
+    f.facts.occupancy = "FREE"; mixed = true; const beforeMixed = queries.length;
+    const mixedPage = await pageOf();
+    assert.equal(mixedPage.items.length, 2);
+    assert.equal((mixedPage.items[0] as any).source, "LEGACY_READ_ONLY"); assert.equal((mixedPage.items[0] as any).canCreateOrder, false);
+    assert.equal((mixedPage.items[1] as any).canCreateOrder, true);
+    assert(queries.slice(beforeMixed).some(q => q.includes("UNION ALL SELECT * FROM legacy")));
+    mixed = false; legacyOnly = true; const beforeLegacy = queries.length;
+    const legacyPage = await pageOf();
+    assert.equal(legacyCalls, 1); assert.deepEqual(legacyRevisions, { filterRevision: "1", catalogRevision: "1", sortLabel: "更新时间" });
+    assert.equal(legacyPage.items.length, 1); assert.equal((legacyPage.items[0] as any).source, "LEGACY_READ_ONLY"); assert.equal((legacyPage.items[0] as any).canCreateOrder, false);
+    assert(!queries.slice(beforeLegacy).some(q => q.startsWith("WITH candidates AS")));
   } finally { t.mock.restoreAll(); }
 });
 test("only occupied stays publicly readable and cannot create another order", async () => {
