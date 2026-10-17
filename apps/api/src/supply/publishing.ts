@@ -327,6 +327,11 @@ export async function publicationBlockers(
     reasons.push(
       external.occupancy === "OCCUPIED" ? "OCCUPIED" : "OCCUPANCY_UNKNOWN",
     );
+  // Publish/submit/review only. A missing title property is not a stored empty title.
+  // READ and evaluatePublication(READ) keep a placeholder title visible.
+  if (purpose === "WRITE" && typeof v.title === "string" && (!v.title.trim() || v.title.includes("历史资料待核实"))) {
+    reasons.push("TITLE_REVIEW_REQUIRED");
+  }
   return reasons;
 }
 export async function assertEditable(

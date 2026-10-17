@@ -2,7 +2,7 @@
 
 旧展示记录继续保留原金额和来源。旧号进入正式交易，必须完成逐行来源核定、合法目录和单位映射、真实媒体、当前 sealed 规则报价及接受、发布物化；个人确认与新建单继续走现有 v2 合同。历史报价不成为新单价格。
 
-供给承接复用 `takeoverLegacyTrade` → `resolveLegacyObservationToDraft` → `saveListingDraft` → `quoteListing` → `reviewListing`。完整 payload、版本 attributes、库存/媒体行和内容 hash 必须相等。普通承接授权不能代替号主包赔条款接受；选择包赔的草稿等待号主通过原接受流程确认，再按同一版本完成发布。历史保险 DAY 不能直接转为新保险卡张数。迁移媒体必须真实 READY/PUBLIC_DISPLAY。
+供给承接复用 `takeoverLegacyTrade` → `resolveLegacyObservationToDraft` → `saveListingDraft` → `quoteListing` → `reviewListing`。共同 `buildLegacyTradeDeclaration` 使用原 `df_billable_top_insure_card`/DAY 身份承接旧账号保险天数，不换算、不要求卡片张数证明。完整 payload、版本 attributes、库存/媒体行和内容 hash 必须相等。普通承接授权不能代替号主包赔条款接受；选择包赔的草稿等待号主通过原接受流程确认，再按同一版本完成发布。旧订单中保险数量依其原有字段语义核定，不直接当新期初库存。迁移媒体必须真实 READY/PUBLIC_DISPLAY。
 
 批量承接先走只读装配：`assembleLegacyTradeIntakeBatch` 由同一受审提取原件的13列行体（String/null 语义）重算旧12投影摘要与新13摘要，对照实际 flag 后才与映射源摘要绑定；缺行体、flag/行身份不符或旧12摘要漂移的行整行隔离。`planLegacyTradeIntakeBatch` 逐行给出 TRADE_CANDIDATE/BLOCKED/ISOLATED，批次与逐行指纹对任意合法 JSON 输入成立（不得常量回退）；缺值/非法值原样保留、不默认 0，也不产生正式报价或上架。
 

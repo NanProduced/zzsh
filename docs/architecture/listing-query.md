@@ -43,9 +43,9 @@ Web 客户端的预算校验与 `listingQuery` 共用序列化：分别计算 `/
 | skinGroups | `[{categoryId,ids,match:'ANY'或'ALL'}]`，组间 AND，皮肤必须属于当前可见分类或其子分类 |
 | serviceWindow | `{startMinute,endMinute,crossMidnight,timezone:'Asia/Shanghai'}`，账号时段完整覆盖请求时段 |
 
-资源上下限均包含边界；只填一端合法，两端相等表示精确数量，未提供的端点不施加约束。每个提供的端点按当前 metadata 对应资源的配置 min/max 校验；空条件不发送，只有 `itemId` 的行非法。资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit；0 有效，未知/缺失库存不能按 0 满足上限。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND；合法DAY资源不乘租期。保险卡业务数量已确认为仓库卡片张数，其现有DAY目录/报价/筛选仍待统一纠偏；客户端不能自行将天数解释为张数。金额只使用服务端 quote。
+资源上下限均包含边界；只填一端合法，两端相等表示精确数量，未提供的端点不施加约束。每个提供的端点按当前 metadata 对应资源的配置 min/max 校验；空条件不发送，只有 `itemId` 的行非法。资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit；0 有效，未知/缺失库存不能按 0 满足上限。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND。顶级保险卡统一沿原 `df_billable_top_insure_card`/DAY 身份，数量和筛选范围按天，不乘租期。金额只使用服务端 quote。
 
-`level6_round`和`df_billable_level6_bullet`两代稳定code共享60发/组展示与输入换算；URL和接口库存始终传基础发数。AWM、Barrett按原发数传递。新按张卡的独立PIECE身份展示“张”，历史DAY目录不复用为新卡，也不修改原筛选单位。目录与筛选配置均须实际更新后才提供新资源条件，旧revision/cursor依原契约失效。
+`level6_round`和`df_billable_level6_bullet`两代稳定code共享60发/组展示与输入换算；URL和接口库存始终传基础发数。AWM、Barrett按原发数传递。保险卡复用原 DAY 目录与实际 ID；错误 PIECE 记录应停用并保留引用，不转换为天数或删除历史。目录与筛选配置均须实际更新后才提供资源条件，旧revision/cursor依原契约失效。
 
 公开 metadata 的可选 `resourceQuantityRange` 能力仅在值为 `true` 时表示可提交 `maxQuantity`。`false` 或字段缺失代表兼容的 min-only 能力：客户端保留合法下限、剔除上限，并提示条件已按当前规则调整；上限单独存在时该资源条件移除。旧 v1 与旧 v2 min-only 请求及已有 `AND_MIN` 配置保持兼容。服务端按每个已提交端点校验配置，不为缺失端点补默认约束。
 
