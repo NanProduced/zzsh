@@ -418,3 +418,108 @@ test("deposit recommendation follows policy weights, skin groups, rounding and c
   const capped = { ...policy, recommendation: { parameters: { ...policy.recommendation.parameters, upperLimitCents: "60000" } } } as unknown as FundingPolicy;
   assert.equal(computeDepositRecommendation(capped, base), "60000");
 });
+
+// G3-ext Part1: a disabled haff-ratio-v2 mode may omit its lane and bounds,
+// while an enabled mode keeps every lane, bound and tier discount requirement.
+const assertCompatRejected = (rule: unknown, message: string) =>
+  assert.throws(() => validateDeltaHaffRule(rule, "SPREAD"), (error: any) => error.status === 400 && error.code === "INVALID_ARGUMENT", message);
+
+function patchCompatModes(patch: Record<string, unknown>): ReturnType<typeof compatRule> {
+  const rule = compatRule();
+  Object.assign(rule.compatibility!.modes as unknown as Record<string, unknown>, patch);
+  return rule;
+}
+
+function dropCompatLane(rule: ReturnType<typeof compatRule>, lane: "ordinary" | "fast"): ReturnType<typeof compatRule> {
+  delete (rule.compatibility as unknown as Record<string, unknown>)[lane];
+  return rule;
+}
+
+test("haff-ratio-v2 disabled fast mode may omit the fast lane and still quote", () => {
+  const rule = dropCompatLane(patchCompatModes({ fast: { enabled: false } }), "fast");
+  assert.equal(validateDeltaHaffRule(rule, "SPREAD").compatibility?.fast, undefined, "a disabled fast mode needs no lane");
+  const ordinary = quoteOf(computeQuote({ ...compatInput("47", { rentalMode: "ordinary" }), haffRule: rule }));
+  assert.equal(projectQuote(ordinary, "public").rentalMode, "ordinary");
+  assert.equal(projectQuote(ordinary, "owner").ownerHaffRatio, "47");
+  const custom = quoteOf(computeQuote({ ...compatInput("47", { rentalMode: "custom", ownerRatioB: "45" }), haffRule: rule }));
+  assert.equal(projectQuote(custom, "public").rentalMode, "custom");
+  assert.equal(projectQuote(custom, "owner").ownerHaffRatio, "45");
+});
+
+test("haff-ratio-v2 disabled modes treat partial or malformed bounds as omitted", () => {
+  for (const partial of [
+    { min: { base: "C", value: "-3" } },
+    { max: { base: "C", value: "-1" } },
+    { min: "not-a-bound" },
+    { min: { base: "C", value: -3 } },
+  ]) {
+    const custom = patchCompatModes({ custom: { enabled: false, ...partial } });
+    assert.equal(validateDeltaHaffRule(custom, "SPREAD").compatibility?.modes.custom.enabled, false);
+    const fast = dropCompatLane(patchCompatModes({ fast: { enabled: false, ...partial } }), "fast");
+    assert.equal(validateDeltaHaffRule(fast, "SPREAD").compatibility?.modes.fast.enabled, false);
+  }
+});
+
+test("haff-ratio-v2 enabled modes still require lanes, bounds and all four discounts", () => {
+  assertCompatRejected(dropCompatLane(compatRule(), "fast"), "an enabled fast mode requires its lane");
+  assertCompatRejected(patchCompatModes({ fast: { enabled: true, min: { base: "C", value: "6" } } }), "an enabled fast mode requires max");
+  assertCompatRejected(patchCompatModes({ custom: { enabled: true, max: { base: "C", value: "-1" } } }), "an enabled custom mode requires min");
+  const missingTier = compatRule();
+  missingTier.compatibility!.fast.discounts.SVIP = undefined as unknown as string;
+  assertCompatRejected(missingTier, "an enabled fast mode requires all four tier discounts");
+});
+
+test("haff-ratio-v2 enabled modes reject unsupported bound bases and non-decimal values", () => {
+  assertCompatRejected(patchCompatModes({ custom: { enabled: true, min: { base: "D", value: "-3" }, max: { base: "C", value: "-1" } } }), "bound base must be C or ABSOLUTE");
+  assertCompatRejected(patchCompatModes({ custom: { enabled: true, min: { base: "C", value: "abc" }, max: { base: "C", value: "-1" } } }), "bound value must be a signed decimal string");
+  assertCompatRejected(patchCompatModes({ custom: { enabled: true, min: { base: "C", value: -3 }, max: { base: "C", value: "-1" } } }), "bound value must not be a number");
+});
+
+test("custom owner ratios outside the configured ABSOLUTE bounds stay unquotable", () => {
+  const rule = patchCompatModes({ custom: { enabled: true, min: { base: "ABSOLUTE", value: "44" }, max: { base: "ABSOLUTE", value: "46" } } });
+  const quotable = (ownerRatioB: string) => computeQuote({ ...compatInput("47", { rentalMode: "custom", ownerRatioB }), haffRule: rule }).quotable;
+  assert.equal(quotable("44"), true);
+  assert.equal(quotable("46"), true);
+  assert.equal(quotable("43.99"), false);
+  assert.equal(quotable("46.01"), false);
+});
+
+test("the ordinary lane and at least one enabled mode remain mandatory", () => {
+  assertCompatRejected(dropCompatLane(patchCompatModes({ ordinary: { enabled: false } }), "ordinary"), "the ordinary lane is mandatory even when its mode is disabled");
+  assertCompatRejected(patchCompatModes({ ordinary: { enabled: false }, custom: { enabled: false }, fast: { enabled: false } }), "at least one pricing mode must stay enabled");
+});
+
+test("haff-ratio-v1 behavior is untouched by the v2 relaxation", () => {
+  const parsed = validateDeltaHaffRule(HAFF_RULE, "SPREAD");
+  assert.equal(parsed.schema, "haff-ratio-v1");
+  assert.equal(parsed.spreadDelta, "10");
+  const withoutSpread = { ...HAFF_RULE };
+  delete (withoutSpread as unknown as Record<string, unknown>).spreadDelta;
+  assertCompatRejected(withoutSpread, "v1 SPREAD still requires spreadDelta");
+});
+
+test("the G3 S1 price draft haffRule (fast disabled, no fast lane) validates and quotes", () => {
+  // Body copied verbatim from config-bodies.json S1-price-draft-after-g3-ext.
+  const rule = {
+    schema: "haff-ratio-v2",
+    baseBySafeBox: { safe_box_1x2: "60", safe_box_2x2: "57", safe_box_2x3: "53", safe_box_3x3: "49" },
+    vitalityDeltaByLevel: { "4": "0", "5": "0", "6": "0", "7": "-1" },
+    bearDeltaByLevel: { "4": "0", "5": "0", "6": "0", "7": "-1" },
+    dailyDeltaByTermOption: { legacy_daily_10m: "0", legacy_daily_20m: "2", legacy_daily_30m: "3", legacy_daily_40m: "4", legacy_daily_50m: "5" },
+    compatibility: {
+      ordinary: { spreadDelta: "8", discounts: { STANDARD: "0", VIP: "2", SVIP: "4", DISCOUNT_USER: "2" } },
+      modes: {
+        ordinary: { enabled: true },
+        custom: { enabled: true, min: { base: "C", value: "-3" }, max: { base: "C", value: "-1" } },
+        fast: { enabled: false },
+      },
+    },
+  };
+  assert.equal(validateDeltaHaffRule(rule, "SPREAD").schema, "haff-ratio-v2");
+  const quote = computeQuote({ priceVersionId: "s1-price-draft-fixture", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1", customerTier: "STANDARD",
+    haffRule: rule as unknown as HaffRatioRule,
+    conditions: { safeBoxCode: "safe_box_3x3", vitLevel: 7, bearLevel: 7, termOptionCode: "legacy_daily_10m", rentalPricing: { rentalMode: "custom", ownerRatioB: "45" } },
+    lines: [{ itemId: "haff", pricingKind: "HAFF_RATIO", customerTier: "STANDARD", quantity: "100000000" }],
+    termOption: { code: "legacy_daily_10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } });
+  assert.equal(quote.quotable, true, JSON.stringify(quote));
+});

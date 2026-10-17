@@ -131,7 +131,23 @@ export function validateDeltaHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"
     if (mode !== "SPREAD") throw invalid("Compatibility pricing requires SPREAD");
     const compatibility = rule.compatibility as DeltaCompatPricing;
     compatFields(compatibility, ["ordinary", "fast", "modes"]);
+    compatFields(compatibility.modes, ["ordinary", "custom", "fast"]);
+    for (const name of ["ordinary", "custom", "fast"] as const) {
+      const config = compatibility.modes[name];
+      compatFields(config, name === "ordinary" ? ["enabled"] : ["enabled", "min", "max"]);
+      if (typeof config.enabled !== "boolean") throw invalid("Mode enabled is required");
+      // A disabled mode is not forced to carry bounds: partial or malformed
+      // min/max on a disabled mode is treated as omitted (G3-ext fast stays off).
+      if (name !== "ordinary" && config.enabled) for (const bound of [config.min, config.max]) {
+        compatFields(bound, ["base", "value"]);
+        if (!bound || !["C", "ABSOLUTE"].includes(bound.base)) throw invalid("Invalid ratio bound");
+        compatDecimal(bound.value, true);
+      }
+    }
+    if (!Object.values(compatibility.modes).some((entry) => entry.enabled)) throw invalid("No enabled pricing mode");
     for (const lane of ["ordinary", "fast"] as const) {
+      // The ordinary lane stays mandatory; a disabled fast mode may omit the fast lane entirely.
+      if (lane === "fast" && compatibility.modes.fast.enabled !== true) continue;
       const config = compatibility[lane];
       compatFields(config, ["spreadDelta", "discounts"]);
       const p = compatDecimal(config.spreadDelta);
@@ -141,18 +157,6 @@ export function validateDeltaHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"
         if (subtractDecimal(p, v).value < 0n || (tier === "STANDARD" && v.value !== 0n)) throw invalid("Invalid tier discount");
       }
     }
-    compatFields(compatibility.modes, ["ordinary", "custom", "fast"]);
-    for (const name of ["ordinary", "custom", "fast"] as const) {
-      const config = compatibility.modes[name];
-      compatFields(config, name === "ordinary" ? ["enabled"] : ["enabled", "min", "max"]);
-      if (typeof config.enabled !== "boolean") throw invalid("Mode enabled is required");
-      if (name !== "ordinary") for (const bound of [config.min, config.max]) {
-        compatFields(bound, ["base", "value"]);
-        if (!bound || !["C", "ABSOLUTE"].includes(bound.base)) throw invalid("Invalid ratio bound");
-        compatDecimal(bound.value, true);
-      }
-    }
-    if (!Object.values(compatibility.modes).some((entry) => entry.enabled)) throw invalid("No enabled pricing mode");
     return {
       schema: DELTA_HAFF_COMPAT_SCHEMA,
       baseBySafeBox: parsePositiveDecimalMap(rule.baseBySafeBox, "Haff base ratios", false),
@@ -345,6 +349,8 @@ function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffConte
     const selection = normalizeRentalPricing(input.conditions.rentalPricing);
     const config = rule.compatibility!;
     const mode = config.modes[selection.rentalMode];
+    // This disabled check must stay before any lane/min/max read: G3-ext lets a
+    // disabled mode omit compatibility lanes and ratio bounds entirely.
     if (!mode.enabled) return failed;
     const c = input.conditions;
     const base = addDecimal(addDecimal(parseNonNegativeDecimal(rule.baseBySafeBox[c.safeBoxCode! ]!, 8, "base"), parseSignedDecimal(rule.vitalityDeltaByLevel[String(c.vitLevel)]!, 8, "vitality")), addDecimal(parseSignedDecimal(rule.bearDeltaByLevel[String(c.bearLevel)]!, 8, "bear"), parseSignedDecimal(rule.dailyDeltaByTermOption[c.termOptionCode!]!, 8, "daily")));
