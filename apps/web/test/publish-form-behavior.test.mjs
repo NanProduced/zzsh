@@ -498,7 +498,9 @@ test("entry notice requires five seconds, cannot escape early, and never accepts
     await React.act(async () => button.click());
     await p.waitFor(() => !p.window.document.querySelector('[data-slot="dialog-content"]'));
     assert.equal(p.calls.length,0,'reading does not save, quote or accept a contract');
-    assert.doesNotMatch(popup.textContent,/180%|10%的结算/);
+    assert.doesNotMatch(popup.textContent,/180%|10%的结算|保险卡按张|卡片库存/);
+    assert.match(popup.textContent,/顶级保险卡按天/);
+    assert.match(popup.textContent,/保险卡另填可用天数/);
   } finally { await p.close(); }
 });
 

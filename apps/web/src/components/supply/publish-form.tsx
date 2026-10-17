@@ -363,7 +363,7 @@ function PublishingNotice({ open, onClose, agreement }: { open: boolean; onClose
             <div><ShieldCheck size={20} aria-hidden="true" /><div><h3>绑定人脸须为号主本人</h3><p>解除人脸验证需准备双设备：两部手机，或手机与电脑。</p></div></div>
             <div><CreditCard size={20} aria-hidden="true" /><div><h3>目前仅支持银行卡提现</h3><p>请提前准备本人银行卡。</p></div></div>
           </div>
-          <section><h3>如实申报资料与库存</h3><ul><li>安全箱填写赛季永久容量，临时体验卡另填库存；有封禁记录时，需提供对应截图。</li><li>申报可出租的全量库存，留空与 0 含义不同。六级子弹 <strong>1 组 = 60 发</strong>，AWM、巴雷特按发，顶级保险卡按张；已激活的体验效果不计入卡片库存。</li></ul></section>
+          <section><h3>如实申报资料与库存</h3><ul><li>安全箱填写赛季永久容量，顶级保险卡另填可用天数；有封禁记录时，需提供对应截图。</li><li>申报可出租的全量库存，留空与 0 含义不同。六级子弹 <strong>1 组 = 60 发</strong>，AWM、巴雷特按发，顶级保险卡按天。</li></ul></section>
           <section><h3>核对报价、租期与收入</h3><ul><li>租期和金额由平台按本次规则计算；修改资料或规则变化后，需要重新核价。</li><li>预计收入为<strong>扣费前金额</strong>，最终按实际消耗与结束场景结算。押金不计入收入。</li></ul></section>
           <section><h3>确认上号配合与赔付方案</h3><p>请填写实际可协助上号的时间。全额包赔为可选方案，费率 <strong>8%</strong>、基础押金至少 <strong>300 元</strong>；收费基数、承担方及保障条件以本次有效条款为准。</p></section>
           <p className="publish-reading-tip"><Info size={16} aria-hidden="true" />备注向租客公开，请勿填写密码、验证码等敏感信息。</p>
@@ -2511,7 +2511,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 const inputValue=grouped&&valid?(BigInt(quantity)/60n).toString():quantity;
                 const inputUnit=grouped?"组":resourceUnitLabel(item.unit??"",itemCode);
                 const line=item.itemId&&resourcePreview?.available&&!resourcePreviewPending?resourcePreview.lines.find(row=>row.itemId===item.itemId):null;
-                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":itemCode==="df_billable_top_insure_card"?"填写可用顶级保险卡的天数，保存时保留原天数，不作数量换算。":null;
+                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":itemCode==="df_billable_top_insure_card"?"填写顶级保险卡的可用天数。":null;
                 return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined}>
                   <div className="supply-resource-card-head">
                     <span className="supply-resource-art"><InventoryIcon code={itemCode} /></span>
