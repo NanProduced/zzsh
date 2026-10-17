@@ -542,10 +542,10 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
               >
                 <MoreHorizontal size={15} aria-hidden="true" />
               </button>
-              <div className="sec-dropdown-menu" hidden={!moreMenuOpen} role="menu">
+              {/* 下拉是一组动作，不是下拉菜单栏：不用 role=menu（那需要方向键导航），按钮各自可 Tab 到。 */}
+              <div className="sec-dropdown-menu" hidden={!moreMenuOpen}>
                 <button
                   type="button"
-                  role="menuitem"
                   className="sec-dropdown-item is-danger"
                   disabled={locked}
                   onClick={() => {
@@ -714,10 +714,10 @@ function CurrentSessionSummary({ item }: { item: Session }) {
       <div className="sec-divider" />
 
       <div className="sec-current-bottom">
-        <div className="sec-current-meta">
+        <dl className="sec-current-meta">
           <div><dt>登录时间</dt><dd>{sessionTime(item.createdAt)}</dd></div>
           <div><dt>到期时间</dt><dd>{sessionTime(item.expiresAt)}</dd></div>
-        </div>
+        </dl>
       </div>
     </div>
   );
@@ -776,10 +776,9 @@ function SessionRow({ item, locked, onAsk }: { item: Session; locked: boolean; o
           >
             <MoreHorizontal size={15} aria-hidden="true" />
           </button>
-          <div className="sec-dropdown-menu" hidden={!menuOpen} role="menu">
+          <div className="sec-dropdown-menu" hidden={!menuOpen}>
             <button
               type="button"
-              role="menuitem"
               className="sec-dropdown-item sec-session-expand"
               aria-expanded={expanded}
               aria-controls={detailId}
@@ -793,7 +792,6 @@ function SessionRow({ item, locked, onAsk }: { item: Session; locked: boolean; o
             </button>
             <button
               type="button"
-              role="menuitem"
               className="sec-dropdown-item is-danger"
               disabled={locked}
               onClick={() => {
