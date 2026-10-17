@@ -302,6 +302,7 @@ export type PublishingOptions = {
   }>;
   safeBoxCodes: string[];
   safeBoxOptions?: PublicCodeLabel[];
+  pricingInputOptions?: { safeBoxCodes: string[]; vitalityLevels: number[]; bearLevels: number[] };
   gradingOptions?: PublicCodeLabel[];
   loginMethodOptions?: PublicCodeLabel[];
   vitalityLevels: number[];

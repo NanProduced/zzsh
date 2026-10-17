@@ -282,6 +282,21 @@ test('all real directory resources can be edited and saved while their missing p
   }finally{await p.close();}
 });
 
+test('real safe-box and lower-level declarations can be saved without claiming the current rule can price them',async()=>{
+  const codes=['safe_box_1x2','safe_box_2x2','safe_box_2x3','safe_box_3x3'];
+  const opts={...optionsV1,safeBoxCodes:codes,safeBoxOptions:codes.map((code,n)=>({code,displayName:['基础安全箱(1*2)','进阶安全箱(2*2)','高级安全箱(2*3)','顶级安全箱(3*3)'][n],mappingStatus:'CONFIRMED',issueCode:null})),vitalityLevels:[4,5,6,7],bearLevels:[4,5,6,7],pricingInputOptions:{safeBoxCodes:[],vitalityLevels:[6,7],bearLevels:[6,7]}};
+  const attrs={...declaration().attributes,safe_box_code:codes[0],vit_level:4,bear_level:5};
+  const p=await probe({accountId:'account_1',options:opts,mine:()=>supplyOf(declaration({attributes:attrs}))});
+  try{
+    await p.render();assert.match(p.text(),/基础安全箱\(1\*2\)/);assert.doesNotMatch(p.text(),/未确认（代码 safe_box_1x2）/);
+    await p.type('#publish-description','真实属性草稿');await p.clickButton('保存草稿');
+    assert.ok(await p.waitFor(()=>p.calls.some(c=>c.op==='saveDraft')));
+    const saved=p.calls.find(c=>c.op==='saveDraft').body.attributes;
+    assert.equal(saved.safe_box_code,codes[0]);assert.equal(saved.vit_level,4);assert.equal(saved.bear_level,5);
+    assert.equal(p.calls.some(c=>c.op==='quote'||c.op==='confirm'),false);
+  }finally{await p.close();}
+});
+
 test("skin picker renders the public summary, neutral missing-media state, and keyboard selection", async () => {
   const skinCatalog = {
     ...catalog,

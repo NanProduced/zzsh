@@ -1,5 +1,5 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
-import { deltaPublicationLevels } from "./delta-rental";
+import { DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "./legacy-listing-read";
 import { listV2 } from "./listing-filter-routes";
@@ -48,6 +48,7 @@ import {
   publicGradingOptions,
   publicLoginMethodOptions,
   publicSafeBoxOptions,
+  publicSafeBoxCodes,
 } from "./listing-query";
 import {
   acceptListingRules,
@@ -157,11 +158,16 @@ export async function handlePublishingRoute(
         releaseId: release.id,
         generation: release.generation,
         termOptions: terms,
-        vitalityLevels:deltaPublicationLevels(rule?.vitalityDeltaByLevel),
-        bearLevels:deltaPublicationLevels(rule?.bearDeltaByLevel),
+        vitalityLevels:[...DELTA_PUBLISH_LEVELS],
+        bearLevels:[...DELTA_PUBLISH_LEVELS],
         diveLevels:[0,1,2,3],
-        safeBoxCodes: Object.keys(rule?.baseBySafeBox ?? {}).sort(),
-        safeBoxOptions: publicSafeBoxOptions(Object.keys(rule?.baseBySafeBox ?? {}).sort()),
+        safeBoxCodes: publicSafeBoxCodes(),
+        safeBoxOptions: publicSafeBoxOptions(publicSafeBoxCodes()),
+        pricingInputOptions: {
+          safeBoxCodes: publicSafeBoxCodes().filter(code=>Object.hasOwn(rule?.baseBySafeBox??{},code)),
+          vitalityLevels: deltaPublicationLevels(rule?.vitalityDeltaByLevel),
+          bearLevels: deltaPublicationLevels(rule?.bearDeltaByLevel),
+        },
         gradingOptions: publicGradingOptions(),
         loginMethodOptions: publicLoginMethodOptions(),
         pricingOptionCodes: Object.entries(rule?.options ?? {})
