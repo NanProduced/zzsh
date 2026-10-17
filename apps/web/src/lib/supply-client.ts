@@ -308,6 +308,11 @@ export const supplyApi = {
     ),
   listing: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<PublicListing>("/listings/" + id(accountId), { signal }),
+  lookupListing: (number: string, gameId: string | null, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ number });
+    if (gameId) query.set("gameId", gameId);
+    return supplyRequest<PublicListing>("/listings/lookup?" + query, { signal });
+  },
   catalog: (
     gameId: string,
     query: URLSearchParams = new URLSearchParams(),

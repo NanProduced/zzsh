@@ -81,12 +81,15 @@ export type PublicListing = {
   source?: "LEGACY_READ_ONLY";
   rentalMode?: "ordinary" | "custom" | "fast" | null;
   displaySchema?: "legacy-listing-display-v1";
-  canCreateOrder?: false;
+  canCreateOrder?: boolean;
+  availability?: { state: PublicAvailabilityState };
+  sourceAvailability?: { state: "LISTED" | "OFFLINE" | "RENTED" | "PENDING_PAYMENT" | "UNKNOWN"; asOfUtc: string };
   sourceUpdatedAt?: string;
   historicalQuote?: { haffRent: Money; goods: Money; deposit: Money; termDays: string };
   inventory?: Array<{ itemId: string; quantity: string | null; unit: string }>;
   media: Array<{ assetId: string; position: number; url: string; category?: "SHOWCASE" | "PENALTY" }>;
 };
+export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
 export type Favorite = {
   accountId: string;
   savedAt: string;

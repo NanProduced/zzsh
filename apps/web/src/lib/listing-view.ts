@@ -1,4 +1,4 @@
-import type { Money, PublicListing, PublicQuote, PublicCodeLabel } from "./supply-types.ts";
+import type { Money, PublicListing, PublicQuote, PublicCodeLabel, PublicAvailabilityState } from "./supply-types.ts";
 import { canonicalResourceCode, resourceItemDisplayName, resourceUnitLabel } from "./listing-filters.ts";
 
 export type ResourceLine = {
@@ -24,6 +24,10 @@ export type SkinTag = {
 export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
+  canCreateOrder?: boolean;
+  availabilityState?: PublicAvailabilityState;
+  availabilityLabel?: string | null;
+  sourceAvailabilityLabel?: string | null;
   sourceUpdatedAt?: string;
   id: string;
   gameId?: string;
@@ -205,6 +209,20 @@ export function previewListingCard(listing: PublicListing): { ok: true; card: Li
     return { ok: false };
   }
 }
+export function publicAvailabilityLabel(state: PublicAvailabilityState): string | null {
+  return ({ RENTABLE: null, PENDING_PAYMENT: "待付款占用 · 不可下单", RENTED: "已租用 · 不可下单", OCCUPIED: "暂不可租 · 不可下单",
+    OFFLINE: "已下架 · 不可下单", UNKNOWN: "资格待确认 · 不可下单", UNAVAILABLE: "暂不可租 · 不可下单", LEGACY_READ_ONLY: "历史记录 · 不可下单" })[state] ?? "状态待确认 · 不可下单";
+}
+function listingVisibility(listing: PublicListing) {
+  const historical = listing.source === "LEGACY_READ_ONLY";
+  const state = listing.availability?.state ?? (historical ? "LEGACY_READ_ONLY" : listing.canCreateOrder === false ? "UNKNOWN" : "RENTABLE");
+  const canCreateOrder = !historical && state === "RENTABLE" && listing.canCreateOrder !== false;
+  if (listing.canCreateOrder === true && !canCreateOrder) throw new Error("Inconsistent public availability");
+  const source = listing.sourceAvailability?.state;
+  return { canCreateOrder, availabilityState: state, availabilityLabel: publicAvailabilityLabel(state),
+    sourceAvailabilityLabel: source ? ({ LISTED: "来源时点上架", OFFLINE: "来源时点已下架", RENTED: "来源时点已出租", PENDING_PAYMENT: "来源时点待付款", UNKNOWN: "来源状态待核" })[source] : null };
+}
+
 export function toListingCard(listing: PublicListing): ListingCardData {
   if (listing.source === "LEGACY_READ_ONLY") return toHistoricalListingCard(listing);
   if (!listing.quote) throw new Error("Current listing has no authoritative quote");
@@ -230,6 +248,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     ...["safe_box_code", "grading_code", "character_level"].map(key => conditions.find(line => line.key === key)?.value),
   ].filter(Boolean).join(" · ");
   return {
+    ...listingVisibility(listing),
     id: listing.id,
     gameId: listing.game?.id,
     versionId: listing.versionId,
@@ -281,6 +300,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const subtotal = BigInt(history.haffRent.amount.replace(".", "")) + BigInt(history.goods.amount.replace(".", ""));
   const media = projectListingMedia(listing);
   return {
+    ...listingVisibility(listing),
     historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title,
     imageUrl: media[0]?.url,
     media, resourceLines: listing.inventory.map(line => ({

@@ -34,6 +34,7 @@ import { toListingCard } from "@/lib/listing-view";
 import { SupplyRequestError, supplyApi } from "@/lib/supply-client";
 import type { PublicCatalog, PublicListingFilterMetadata, SupplyFieldError, SupplyGame } from "@/lib/supply-types";
 import { useListingFeed } from "./use-listing-feed";
+import { ExactAccountLookup } from "./exact-account-lookup";
 import "./market.css";
 
 type Directory<T> = { status: "idle" | "loading" | "ready" | "error"; data: T | null; error?: SupplyRequestError | null };
@@ -632,6 +633,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {recoveryNotice && <p className="market-recovery-note" role="status">{recoveryNotice}</p>}
         {catalog.status === "error" && activeMetadata ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
+        <ExactAccountLookup gameId={filters.game} initialNumber={filters.q ?? ""} />
         <div className="market-results-toolbar">
           <div><h2>账号列表</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">

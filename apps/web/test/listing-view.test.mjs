@@ -510,6 +510,16 @@ test('historical listing keeps exact source amounts without inventing a current 
   assert.throws(() => toListingCard({ ...listing, quote: null }));
 });
 
+test('public native availability keeps readable occupied/offline cards distinct from rentability',()=>{
+ const money=amount=>({currency:'CNY',unit:'yuan',amount,scale:2});
+ for(const state of ['PENDING_PAYMENT','RENTED','OCCUPIED','OFFLINE','UNKNOWN','UNAVAILABLE']){
+  const card=toListingCard({...listing,availability:{state},canCreateOrder:false});assert.equal(card.canCreateOrder,false);assert.equal(card.availabilityState,state);assert.ok(card.availabilityLabel);assert.equal(card.displayNo,listing.displayNo);
+ }
+ assert.throws(()=>toListingCard({...listing,availability:{state:'OFFLINE'},canCreateOrder:true}));
+ const historical=toListingCard({...listing,source:'LEGACY_READ_ONLY',canCreateOrder:false,quote:null,historicalQuote:{haffRent:money('1.00'),goods:money('2.00'),deposit:money('3.00'),termDays:'1'},inventory:[],sourceAvailability:{state:'RENTED',asOfUtc:'2026-09-13T00:00:00Z'}});
+ assert.equal(historical.canCreateOrder,false);assert.equal(historical.availabilityState,'LEGACY_READ_ONLY');assert.match(historical.sourceAvailabilityLabel,/来源时点/);
+});
+
 
 test('registered migration catalog codes use the existing card resource roles without name guessing', () => {
   assert.equal(accountCardExports.canonicalResourceCode('level6_round'), 'df_billable_level6_bullet');

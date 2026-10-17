@@ -754,7 +754,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       setDetail(next);
       setLatest(null);
       updateListFromDetail(next);
-       setNotice(action === "withdraw" ? "已撤回当前审核版本；修改请创建新草稿。" : action === "pause" ? "已暂停接单。" : "已恢复接单，资格检查已完成。");
+       setNotice(action === "withdraw" ? "已撤回当前审核版本；修改请创建新草稿。" : action === "pause" ? "已下架并停止接单，已获准公开的详情仍可查看。" : "已恢复接单，资格检查已完成。");
       lastActionRetry.current = null;
       lastRetry.current = null;
     } catch (failure) {

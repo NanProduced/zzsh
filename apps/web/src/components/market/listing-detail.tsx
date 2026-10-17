@@ -125,7 +125,7 @@ function unitPriceText(line: ResourceLine): string {
 
 function InventoryArt({ code }: { code: string | null }) {
   // Reuse the publisher's existing artwork and stable codes; no new inventory images.
-  const art = ({ df_billable_awm_bullet: "awm-round", df_billable_level6_bullet: "level6-round", df_billable_barrett_bullet: "barrett-round", df_billable_level6_armor: "level6-armor", df_billable_level6_helmet: "level6-helmet", df_billable_coffee: "coffee-beans", top_insure_card_piece: "insurance-card", df_billable_top_insure_card_piece: "insurance-card" } as Record<string, string>)[canonicalResourceCode(code) ?? ""];
+  const art = ({ df_billable_awm_bullet: "awm-round", df_billable_level6_bullet: "level6-round", df_billable_barrett_bullet: "barrett-round", df_billable_level6_armor: "level6-armor", df_billable_level6_helmet: "level6-helmet", df_billable_coffee: "coffee-beans", df_billable_top_insure_card: "insurance-card", top_insure_card_piece: "insurance-card", df_billable_top_insure_card_piece: "insurance-card" } as Record<string, string>)[canonicalResourceCode(code) ?? ""];
   return <span className="account-resource-art" aria-hidden="true">{art ? <DetailImage src={`/art/zhouzhou/inventory-polished/${art}.webp`} alt="" /> : <Box size={22} />}</span>;
 }
 
@@ -146,7 +146,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   const rank = conditionValue(data, "grading_code");
   if (rank) titleParts.rest = titleParts.rest.replace(rank, `${rank}段位`);
   const title = [titleParts.haff, titleParts.rest].filter(Boolean).join(" · ");
-  const fast = !data.historicalReadOnly && data.rentalMode === "fast";
+  const fast = !data.historicalReadOnly && data.canCreateOrder !== false && data.rentalMode === "fast";
   const copyLink = async () => {
     const accountId = data.id;
     try { await navigator.clipboard.writeText(new URL(accountHref(accountId), window.location.origin).href); setLinkState({ accountId, ok: true }); }
@@ -203,10 +203,18 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
         {data.historicalReadOnly ? <>
           <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />来源资源费用 · 历史只读</h2></div>
           <p className="account-readonly-badge">历史来源记录 · 不支持在线租赁</p>
+          {data.availabilityLabel && data.availabilityState !== "LEGACY_READ_ONLY" ? <p role="status">{data.availabilityLabel}</p> : null}
+          {data.sourceAvailabilityLabel ? <p>{data.sourceAvailabilityLabel}；这不是今天的占用结论。</p> : null}
           <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
           <dl className="account-fee-lines"><div><dt>历史哈夫币租金</dt><dd>{moneyValue(data.haffRentLabel)}</dd></div><div><dt>历史物资预付</dt><dd>{moneyValue(data.itemResourceTotalLabel)}</dd></div><div><dt>历史押金</dt><dd>{moneyValue(data.depositLabel)}</dd></div></dl>
           <p className="detail-stage-note account-readonly">这笔费用来自历史来源记录，不是当前本人应付。</p>
           <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回账号市场</Link>
+         </> : data.canCreateOrder === false ? <>
+           <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />公开版本资源费用参考</h2></div>
+           <p className="account-readonly-badge" role="status">{data.availabilityLabel ?? "暂不可租 · 不可下单"}</p>
+           <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
+           <p className="detail-stage-note account-readonly">已获准公开的资料仍可查看，当前不能创建新订单。这里是公开版本的资源费用参考，不是本人最终报价。</p>
+           <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回账号市场</Link>
          </> : <>
            <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} autoQuote reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
            <section className="account-process-panel account-process-panel--quote" aria-labelledby="account-process-title">
@@ -220,7 +228,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
          </>}
         <FavoriteNotice />
       </aside>
-      <div className="account-detail-gallery"><DetailGallery title={title} media={data.media} /><p className="account-media-caption">号主提供 · 点击图片查看大图</p>
+      <div className="account-detail-gallery"><DetailGallery title={title} media={data.media} /><p className="account-media-caption">{data.media.some(media => media.category !== "PENALTY") ? "号主提供 · 点击图片查看大图" : "当前没有可公开展示的图片"}</p>
       <dl className="account-summary-conditions">{summary.map(fact => { const Icon = fact.icon; return <div key={fact.label}><dt><Icon size={24} aria-hidden="true" />{fact.label}</dt><dd>{fact.value}</dd>{fact.note && fact.value !== "未提供" ? <span>{fact.note}</span> : null}</div>; })}</dl>
       </div>
       <section className="account-detail-notes account-owner-section">

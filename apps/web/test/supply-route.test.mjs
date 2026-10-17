@@ -4,6 +4,15 @@ process.env.NODE_ENV='test';
 const {GET,POST,PUT}=await import('../src/app/api/supply/[...path]/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={})=>new Request('http://127.0.0.1:3100/api/supply/'+path.join('/')+'?limit=2',{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
+
+test('exact number BFF forwards literal text and public read-only state without creating a private detail path',async()=>{
+ const old=globalThis.fetch;let seen;
+ globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({id:'account-a',displayNo:'0000123',availability:{state:'OFFLINE'},canCreateOrder:false});};
+ try{const req=new Request('http://127.0.0.1:3100/api/supply/listings/lookup?number=0000123&gameId=delta');const response=await GET(req,ctx(['listings','lookup']));
+  assert.equal(new URL(seen.url).pathname,'/api/bff/user/supply/listings/lookup');assert.equal(new URL(seen.url).searchParams.get('number'),'0000123');
+  assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');const body=await response.json();assert.equal(body.id,'account-a');assert.equal(body.canCreateOrder,false);assert.equal(body.availability.state,'OFFLINE');
+ }finally{globalThis.fetch=old;}
+});
 test('listing v2 BFF preserves encoded filters, rewrites metadata and bounds raw URLs',async()=>{
   const old=globalThis.fetch;let seen,calls=0;
   globalThis.fetch=async url=>{calls++;seen=String(url);return Response.json({skinCatalogUrl:'/api/v1/supply/games/delta/catalog'});};
