@@ -122,9 +122,13 @@ export function prepareStoredOpeningCandidate(input:{candidate:StoredSourceCandi
 export type LegacyParentTargetFact={legacyId:string;parentOrderId:string;sourceDigest:string;bindingDigest:string;sourceSnapshot:Record<string,string|null>|null;sourceCompletedAt:string|null;ownerUserId:string;renterUserId:string;accountId:string};
 export type LegacyCurrentDutyFact={id:string;kind:string;sourceRecordId:string;amountCents:string;status:string;counterpartyUserId:string|null;settledBy:string|null;admissionId?:string|null};
 /** Exact current read for one target order (root window). Absent means CURRENT_TARGET_UNREAD: never admitted, never 0. */
-export type LegacyCurrentTargetFact={orderId:string;readRef:string;headRevision:string|null;depositAmountCents:string|null;duties:LegacyCurrentDutyFact[]};
+export type LegacyCurrentAdmissionFact={id:string;dutyId:string;admissionDigest:string};
+export type LegacyCurrentIdempotencyFact={principalId:string;operation:string;resourceId:string;key:string;fingerprint:string;responseStatus:number};
+export type LegacyCurrentTargetFact={orderId:string;readRef:string;headRevision:string|null;depositAmountCents:string|null;duties:LegacyCurrentDutyFact[];
+ /** Undefined/null is unread. Empty records means an exact successful read for this actor, not another actor's missing receipt. */
+ idempotency?:{principalId:string;records:readonly LegacyCurrentIdempotencyFact[]}|null;admissions?:readonly LegacyCurrentAdmissionFact[]|null};
 export type LegacyBatchRowState='ADMISSION_CANDIDATE'|'ALREADY_APPLIED'|'MISSING_FACT'|'CONFLICT'|'LEGACY_TERMINAL'|'OBSERVE_ONLY';
-export type LegacyBatchCommand<B>={operation:string;resourceId:string;idempotencyKey:string;fingerprint:string;body:B;recovery:'REPLAY_SAME_ACTOR_KEY_BODY'};
+export type LegacyBatchCommand<B>={operation:string;resourceId:string;idempotencyKey:string;fingerprint:string;body:B;recovery:'REPLAY_SAME_ACTOR_KEY_BODY';recoveryPrincipalId?:string};
 export type LegacyBatchEffect={dutyId:string;kind:'RENTER_REFUND'|'DEPOSIT_COMPENSATION'|'COMMISSION';amountCents:string;beneficiaryUserId:string|null;status:'PENDING'|'SETTLED';settledBy:'LEGACY_RECORDS'|null;maturityAt?:string;maturedByCutoff?:boolean};
 export type LegacyBatchRow<B>={sourceKey:string;orderId:string|null;group:string;state:LegacyBatchRowState;admitted:boolean;reasons:string[];command:LegacyBatchCommand<B>|null;effect:LegacyBatchEffect|null};
 export type LegacyBatchAssembly<B>={schema:'legacy-finance-order-batch.v1';family:string;batchId:string;writeAllowed:false;inputDigest:string;rows:LegacyBatchRow<B>[];
@@ -148,7 +152,20 @@ function existingDutyState(cur:LegacyCurrentTargetFact|undefined,effect:LegacyBa
  if(keyed.length===0)return{state:null,reasons:[]};
  const d=keyed[0]!;
  if(keyed.length!==1||d.id!==effect.dutyId||d.kind!==effect.kind||d.sourceRecordId!==sourceRecordId||d.amountCents!==effect.amountCents||d.counterpartyUserId!==effect.beneficiaryUserId)return{state:'CONFLICT',reasons:['LIABILITY_ECONOMIC_KEY_CONFLICT']};
+ if(effect.settledBy==='LEGACY_RECORDS'&&(d.status!=='SETTLED'||d.settledBy!=='LEGACY_RECORDS'))return{state:'CONFLICT',reasons:['LEGACY_TERMINAL_SOURCE_CONFLICT']};
  return{state:'ALREADY_APPLIED',reasons:d.status===effect.status?['ORIGINAL_KEY_REPLAY_ONLY']:['DUTY_ALREADY_'+d.status,'ORIGINAL_KEY_REPLAY_ONLY']};
+}
+function currentReceipt<B>(cur:LegacyCurrentTargetFact,command:LegacyBatchCommand<B>):{state:'UNREAD'|'ABSENT'|'MATCH'|'CONFLICT';reason?:string}{
+ const read=cur.idempotency;
+ if(!read||!read.principalId||!Array.isArray(read.records))return{state:'UNREAD',reason:'IDEMPOTENCY_SCOPE_UNREAD'};
+ command.recoveryPrincipalId=read.principalId;
+ const rows=read.records.filter(r=>r.operation===command.operation&&r.resourceId===command.resourceId&&r.key===command.idempotencyKey);
+ if(rows.some(r=>r.principalId!==read.principalId))return{state:'CONFLICT',reason:'IDEMPOTENCY_SCOPE_MISMATCH'};
+ if(rows.length>1)return{state:'CONFLICT',reason:'IDEMPOTENCY_RECORD_CONFLICT'};
+ if(!rows.length)return{state:'ABSENT'};
+ if(rows[0]!.fingerprint!==command.fingerprint)return{state:'CONFLICT',reason:'IDEMPOTENCY_BODY_CONFLICT'};
+ if(rows[0]!.responseStatus!==200)return{state:'CONFLICT',reason:'IDEMPOTENCY_RESULT_NOT_SUCCESS'};
+ return{state:'MATCH'};
 }
 function summarize<B>(family:string,batchId:string,inputDigest:string,rows:LegacyBatchRow<B>[],sourceRows:number):LegacyBatchAssembly<B>{
  const counts=Object.fromEntries(STATES.map(s=>[s,0])) as Record<LegacyBatchRowState,number>,byGroup:LegacyBatchAssembly<B>['byGroup']={},pendingFacts:Record<string,number>={};
@@ -165,8 +182,9 @@ const SELECTED=['order_status','pay_is','is_settle','return_order_money','deposi
 /** 18/1 -> RENTER_REFUND net duty, 6 -> LEGACY_RECORDS terminal (not payable), 61 -> REFUND_SOURCE_RECORD_ONLY audit (no duty). */
 export function assembleLegacyLiabilityBatch(input:{batchId:string;parents:readonly LegacyParentTargetFact[];current:readonly LegacyCurrentTargetFact[]|null;rows:readonly LegacyLiabilitySourceRow[]}):LegacyBatchAssembly<LegacyHistoricalLiabilityInput>{
  const parents=indexParents(input.parents),current=indexCurrent(input.current),operation='order.legacy.liability.import';
- const counts=new Map<string,number>();for(const r of input.rows)counts.set(r.legacyOrderId,(counts.get(r.legacyOrderId)??0)+1);
- const rows=input.rows.map((r):LegacyBatchRow<LegacyHistoricalLiabilityInput>=>{
+ const counts=new Map<string,number>();for(const r of input.rows)if(r&&typeof r==='object'&&!Array.isArray(r))counts.set(r.legacyOrderId,(counts.get(r.legacyOrderId)??0)+1);
+ const rows=input.rows.map((r,index):LegacyBatchRow<LegacyHistoricalLiabilityInput>=>{
+  if(!r||typeof r!=='object'||Array.isArray(r))return{sourceKey:'invalid_row:'+index,orderId:null,group:'INVALID_SOURCE_ROW',admitted:false,command:null,effect:null,state:'CONFLICT',reasons:['SOURCE_SCHEMA_INVALID']};
   const base={sourceKey:'la_order:'+r.legacyOrderId,orderId:r.mappedOrderId??null,group:r.classification,admitted:false,command:null,effect:null};
   try{
    if(!['COMPLETED_UNREFUNDED','DETAINED','POSTED_CONFISCATION','REFUND_RECORD_EXISTS'].includes(r.classification)||!old.test(r.legacyOrderId)||!r.evidenceRef||r.evidenceRef.length>512)return{...base,state:'CONFLICT',reasons:['LIABILITY_SOURCE_INVALID']};
@@ -201,9 +219,17 @@ export function assembleLegacyLiabilityBatch(input:{batchId:string;parents:reado
     effect={dutyId:legacyEconomicDutyId(r.mappedOrderId,'RENTER_REFUND',r.legacyOrderId),kind:'RENTER_REFUND',amountCents:(gross-detain).toString(),beneficiaryUserId:parent!.renterUserId,status:'PENDING',settledBy:null};
    }
    if(r.nominated&&r.nominated.amountCents!==(effect?.amountCents??'0'))return{...base,state:'CONFLICT',reasons:['NOMINATED_AMOUNT_DRIFT'],effect};
-   const command={operation,resourceId:r.mappedOrderId,idempotencyKey:sha(r.mappedOrderId),fingerprint:fingerprintRequest(operation,r.mappedOrderId,body),body,recovery:'REPLAY_SAME_ACTOR_KEY_BODY' as const};
-   if(effect){const e=existingDutyState(current?.get(r.mappedOrderId),effect,r.legacyOrderId);if(e.state==='CONFLICT')return{...base,state:'CONFLICT',reasons:e.reasons,command,effect};if(e.state)return{...base,state:e.state,reasons:[...reasons,...e.reasons],command,effect};reasons.push(...e.reasons);}
-   else if(!current?.get(r.mappedOrderId))reasons.push('CURRENT_TARGET_UNREAD');
+   const command:LegacyBatchCommand<LegacyHistoricalLiabilityInput>={operation,resourceId:r.mappedOrderId,idempotencyKey:sha(r.mappedOrderId),fingerprint:fingerprintRequest(operation,r.mappedOrderId,body),body,recovery:'REPLAY_SAME_ACTOR_KEY_BODY'};
+   const cur=current?.get(r.mappedOrderId),existing=effect?existingDutyState(cur,effect,r.legacyOrderId):{state:null,reasons:cur?[]:['CURRENT_TARGET_UNREAD']};
+   if(existing.state==='CONFLICT')return{...base,state:'CONFLICT',reasons:existing.reasons,command,effect};
+   if(cur){
+    const receipt=currentReceipt(cur,command);
+    if(receipt.state==='CONFLICT')return{...base,state:'CONFLICT',reasons:[receipt.reason!],command,effect};
+    if(receipt.state==='UNREAD')return{...base,state:'MISSING_FACT',reasons:[...reasons,receipt.reason!],command,effect};
+    if(existing.state==='ALREADY_APPLIED')return{...base,state:receipt.state==='MATCH'?'ALREADY_APPLIED':'MISSING_FACT',reasons:[...reasons,...existing.reasons,...(receipt.state==='MATCH'?[]:['ORIGINAL_KEY_RECEIPT_MISSING'])],command,effect};
+    if(receipt.state==='MATCH')return{...base,state:effect?'CONFLICT':'ALREADY_APPLIED',reasons:effect?['RECEIPT_TARGET_MISSING']:[...reasons,'ORIGINAL_KEY_REPLAY_ONLY'],command,effect};
+   }
+   reasons.push(...existing.reasons);
    return{...base,state,admitted:!reasons.includes('CURRENT_TARGET_UNREAD')&&!reasons.includes('TARGET_DEPOSIT_CENTS_UNREAD'),reasons,command,effect};
   }catch(e){return{...base,state:'CONFLICT',reasons:[code(e)]};}
  });
@@ -217,8 +243,9 @@ export function assembleLegacyCompletedCommissionBatch(input:{batchId:string;cut
  const parents=indexParents(input.parents),current=indexCurrent(input.current),operation='order.legacy.commission.completed-import';
  if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(input.cutoff))throw invalid('Exact six-digit source cutoff required');legacyTimeMicros(input.cutoff);
  const verified=input.verifiedBeneficiaries===null?null:new Set(input.verifiedBeneficiaries);
- const ids=new Map<string,number>();for(const r of input.rows){const k=String(r.sourceRecord?.id);ids.set(k,(ids.get(k)??0)+1);}
- const rows=input.rows.map((r):LegacyBatchRow<LegacyCompletedCommissionImport>=>{
+ const ids=new Map<string,number>();for(const r of input.rows)if(r&&typeof r==='object'&&!Array.isArray(r)){const k=String(r.sourceRecord?.id);ids.set(k,(ids.get(k)??0)+1);}
+ const rows=input.rows.map((r,index):LegacyBatchRow<LegacyCompletedCommissionImport>=>{
+  if(!r||typeof r!=='object'||Array.isArray(r))return{sourceKey:'invalid_row:'+index,orderId:null,group:'INVALID_SOURCE_ROW',admitted:false,command:null,effect:null,state:'CONFLICT',reasons:['SOURCE_SCHEMA_INVALID']};
   const raw=r.sourceRecord??{},id=String(raw.id),base={sourceKey:'la_distribution_order:'+id,orderId:r.mappedOrderId??null,group:r.bucket,admitted:false,command:null,effect:null};
   try{
    if(!old.test(id)||raw.order_id!==r.parentLegacyOrderId||!r.evidenceRef||r.evidenceRef.length>512)return{...base,state:'CONFLICT',reasons:['COMMISSION_SOURCE_EVIDENCE_INVALID']};
@@ -244,14 +271,33 @@ export function assembleLegacyCompletedCommissionBatch(input:{batchId:string;cut
    const body:LegacyCompletedCommissionImport={orderId:r.mappedOrderId,sourceDigest,finalAmountEvidenceDigest:sha(finalAmountEvidenceCanonical),finalAmountEvidenceCanonical,timeEvidenceCanonical,evidenceRef:r.evidenceRef,cutoff:input.cutoff,time,sourceTimeValue:confirm,sourceTimeUnit:'UNIX_SECONDS',commission,sourceRecord};
    const dutyId=legacyEconomicDutyId(r.mappedOrderId,'COMMISSION',id),beneficiaryUserId=legacyOwnerUserId('legacy_mysql_restore','la_user',commission.beneficiaryId);
    const effect:LegacyBatchEffect={dutyId,kind:'COMMISSION',amountCents,beneficiaryUserId,status:'PENDING',settledBy:null,maturityAt:maturity.maturityAt,maturedByCutoff:maturity.maturedByCutoff};
-   const command={operation,resourceId:r.mappedOrderId,idempotencyKey:sha(id),fingerprint:fingerprintRequest(operation,r.mappedOrderId,body),body,recovery:'REPLAY_SAME_ACTOR_KEY_BODY' as const};
+   const command:LegacyBatchCommand<LegacyCompletedCommissionImport>={operation,resourceId:r.mappedOrderId,idempotencyKey:sha(id),fingerprint:fingerprintRequest(operation,r.mappedOrderId,body),body,recovery:'REPLAY_SAME_ACTOR_KEY_BODY'};
    const reasons:string[]=[];
    if(!verified||!verified.has(commission.beneficiaryId))reasons.push('BENEFICIARY_IDENTITY_UNVERIFIED');
    const admissionId='legacy_admission_'+sha(dutyId).slice(0,40),cur=current?.get(r.mappedOrderId);
-   if(cur){const d=cur.duties.find(x=>x.id===dutyId);if(d){if(d.kind!=='COMMISSION'||d.sourceRecordId!==id||d.amountCents!==amountCents||d.counterpartyUserId!==beneficiaryUserId||(d.admissionId??null)!==admissionId)return{...base,state:'CONFLICT',reasons:['COMMISSION_ADMISSION_CONFLICT'],command,effect};
-     return{...base,state:'ALREADY_APPLIED',reasons:d.status==='PENDING'?['ORIGINAL_KEY_REPLAY_ONLY']:['DUTY_ALREADY_'+d.status,'ORIGINAL_KEY_REPLAY_ONLY'],command,effect};}}
+   if(cur){
+    const existing=existingDutyState(cur,effect,id);
+    if(existing.state==='CONFLICT')return{...base,state:'CONFLICT',reasons:['COMMISSION_ADMISSION_CONFLICT'],command,effect};
+    const d=cur.duties.find(x=>x.id===dutyId);
+    if(d&&(d.admissionId??null)!==admissionId)return{...base,state:'CONFLICT',reasons:['COMMISSION_ADMISSION_CONFLICT'],command,effect};
+    if(!Array.isArray(cur.admissions))reasons.push('COMMISSION_ADMISSION_UNREAD');
+    else{
+     const admissions=cur.admissions.filter(a=>a.id===admissionId||a.dutyId===dutyId);
+     const expected=sha(canonicalize({schema:'legacy-completed-commission-admission.v1',...body,beneficiaryUserId,amountCents,maturityAt:maturity.maturityAt}));
+     if(admissions.length>1||admissions.some(a=>a.id!==admissionId||a.dutyId!==dutyId||a.admissionDigest!==expected)||Boolean(d)!==Boolean(admissions.length))return{...base,state:'CONFLICT',reasons:['COMMISSION_ADMISSION_CONFLICT'],command,effect};
+    }
+    const receipt=currentReceipt(cur,command);
+    if(receipt.state==='CONFLICT')return{...base,state:'CONFLICT',reasons:[receipt.reason!],command,effect};
+    if(receipt.state==='UNREAD')reasons.push(receipt.reason!);
+    if(d){
+     if(receipt.state==='ABSENT')reasons.push('ORIGINAL_KEY_RECEIPT_MISSING');
+     if(reasons.length)return{...base,state:'MISSING_FACT',reasons,command,effect};
+     return{...base,state:'ALREADY_APPLIED',reasons:existing.reasons,command,effect};
+    }
+    if(receipt.state==='MATCH')return{...base,state:'CONFLICT',reasons:['RECEIPT_TARGET_MISSING'],command,effect};
+   }
    else reasons.push('CURRENT_TARGET_UNREAD');
-   return{...base,state:reasons.includes('BENEFICIARY_IDENTITY_UNVERIFIED')?'MISSING_FACT':'ADMISSION_CANDIDATE',admitted:reasons.length===0,reasons,command,effect};
+   return{...base,state:reasons.some(r=>r!=='CURRENT_TARGET_UNREAD')?'MISSING_FACT':'ADMISSION_CANDIDATE',admitted:reasons.length===0,reasons,command,effect};
   }catch(e){return{...base,state:'CONFLICT',reasons:[code(e)]};}
  });
  return summarize('LEGACY_COMMISSION_370',input.batchId,sha(canonicalize(input as unknown as Record<string,unknown>)),rows,input.rows.length);

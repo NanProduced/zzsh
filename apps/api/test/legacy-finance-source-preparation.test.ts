@@ -81,7 +81,7 @@ test('FIN-ORDER-2 86 assembly: 18/1 net refund duty, 6 LEGACY_RECORDS terminal, 
  assert(a.rows.every(r=>!r.admitted));assert.equal(a.byGroup.COMPLETED_UNREFUNDED!.effectCents,'16400');assert.equal(a.byGroup.DETAINED!.effectCents,'8200');assert.equal(a.byGroup.REFUND_RECORD_EXISTS!.effectCents,'0');
  const terminal=a.rows.find(r=>r.group==='POSTED_CONFISCATION')!;assert.equal(terminal.effect!.status,'SETTLED');assert.equal(terminal.effect!.settledBy,'LEGACY_RECORDS');assert(terminal.reasons.includes('TARGET_DEPOSIT_CENTS_UNREAD'));
  for(const r of a.rows.filter(r=>r.group==='REFUND_RECORD_EXISTS')){assert.equal(r.effect,null);assert.deepEqual(r.reasons,['REFUND_SOURCE_RECORD_ONLY','CHANNEL_ARRIVAL_UNKNOWN','CURRENT_TARGET_UNREAD']);}
- const current:FoCurrent[]=parents.map(p=>({orderId:p.parentOrderId,readRef:'fixture-read',headRevision:null,depositAmountCents:'5700',duties:[]}));
+ const current:FoCurrent[]=parents.map(p=>({orderId:p.parentOrderId,readRef:'fixture-read',headRevision:null,depositAmountCents:'5700',duties:[],idempotency:{principalId:foActor.userId,records:[]}}));
  const b=foLiability({batchId:'fixture-86',parents,current,rows});assert.equal(b.writeAllowed,false);assert.equal(b.rows.filter(r=>r.admitted).length,6);assert.equal(b.pendingFacts.CURRENT_TARGET_UNREAD,undefined);
 });
 
@@ -95,8 +95,8 @@ test('FIN-ORDER-2 86 counterexamples: duplicate, drift, missing column/parent, z
  assert.equal(foLiability({batchId:'x',parents,current:null,rows:[foRow('101','DETAINED',{is_settle:'0'})]}).rows[0]!.state,'CONFLICT');
  assert.equal(foLiability({batchId:'x',parents,current:null,rows:[{...ok,nominated:{amountCents:'8700'}}]}).rows[0]!.reasons[0],'NOMINATED_AMOUNT_DRIFT');assert.equal(foLiability({batchId:'x',parents,current:null,rows:[{...ok,nominated:{amountCents:'8200'}}]}).rows[0]!.state,'ADMISSION_CANDIDATE');
  const narrow=foRow('101','COMPLETED_UNREFUNDED');delete narrow.originalOrder!.unrelated_column;assert.equal(foLiability({batchId:'x',parents,current:null,rows:[narrow]}).rows[0]!.state,'ADMISSION_CANDIDATE');delete narrow.originalOrder!.is_settle;assert.equal(foLiability({batchId:'x',parents,current:null,rows:[narrow]}).rows[0]!.reasons[0],'ORIGINAL_SELECTED_FIELDS_MISSING');
- const dutyId=foLiability({batchId:'x',parents,current:null,rows:[ok]}).rows[0]!.effect!.dutyId,renter=parents[0]!.renterUserId;
- const cur=(d:Partial<FoCurrent['duties'][number]>):FoCurrent[]=>[{orderId:foMapped('101'),readRef:'r',headRevision:'3',depositAmountCents:'5700',duties:[{id:dutyId,kind:'RENTER_REFUND',sourceRecordId:'101',amountCents:'8200',status:'PENDING',counterpartyUserId:renter,settledBy:null,...d}]}];
+ const original=foLiability({batchId:'x',parents,current:null,rows:[ok]}).rows[0]!,dutyId=original.effect!.dutyId,renter=parents[0]!.renterUserId,command=original.command!;
+ const cur=(d:Partial<FoCurrent['duties'][number]>):FoCurrent[]=>[{orderId:foMapped('101'),readRef:'r',headRevision:'3',depositAmountCents:'5700',duties:[{id:dutyId,kind:'RENTER_REFUND',sourceRecordId:'101',amountCents:'8200',status:'PENDING',counterpartyUserId:renter,settledBy:null,...d}],idempotency:{principalId:foActor.userId,records:[{principalId:foActor.userId,operation:command.operation,resourceId:command.resourceId,key:command.idempotencyKey,fingerprint:command.fingerprint,responseStatus:200}]}}];
  assert.deepEqual(foLiability({batchId:'x',parents,current:cur({}),rows:[ok]}).rows[0]!.reasons,['ORIGINAL_KEY_REPLAY_ONLY']);
  const done=foLiability({batchId:'x',parents,current:cur({status:'SETTLED'}),rows:[ok]}).rows[0]!;assert.equal(done.state,'ALREADY_APPLIED');assert(done.reasons.includes('DUTY_ALREADY_SETTLED'));
  for(const drift of [{amountCents:'8100'},{counterpartyUserId:parents[0]!.ownerUserId},{id:'other_duty'}])assert.equal(foLiability({batchId:'x',parents,current:cur(drift),rows:[ok]}).rows[0]!.reasons[0],'LIABILITY_ECONOMIC_KEY_CONFLICT');
@@ -126,8 +126,9 @@ test('FIN-ORDER-2 370 assembly: 208 use original amount + completion+7d against 
  assert.deepEqual(a.rows.map(r=>[r.state,r.reasons[0]]),[['CONFLICT','DUPLICATE_SOURCE_ROW'],['MISSING_FACT','TARGET_COMPLETED_AT_UNBOUND'],['CONFLICT','COMPLETED_TIME_SOURCE_MISMATCH'],['OBSERVE_ONLY','T_CONFIRM_RUNTIME'],['OBSERVE_ONLY','ALREADY_SETTLED_SOURCE'],['OBSERVE_ONLY','ALREADY_VOID_SOURCE'],['MISSING_FACT','CURRENT_PARENT_TARGET_MISSING'],['CONFLICT','DUPLICATE_SOURCE_ROW']]);assert.equal(a.conserved,true);assert.equal(a.writeAllowed,false);
  a=foCommission({batchId:'x',cutoff:foCutoff,parents,current:null,verifiedBeneficiaries:null,rows:[rows[0]!]});const r=a.rows[0]!;
  assert.equal(r.state,'MISSING_FACT');assert.deepEqual(r.reasons,['BENEFICIARY_IDENTITY_UNVERIFIED','CURRENT_TARGET_UNREAD']);assert.equal(r.effect!.amountCents,'1000');assert.equal(r.effect!.maturityAt,'2026-10-08T01:02:03.000000Z');assert.equal(r.effect!.maturedByCutoff,true);
- const cur=(d:Record<string,string|null>):FoCurrent[]=>[{orderId:foMapped('7'),readRef:'r',headRevision:null,depositAmountCents:null,duties:[{id:r.effect!.dutyId,kind:'COMMISSION',sourceRecordId:'91',amountCents:'1000',status:'PENDING',counterpartyUserId:r.effect!.beneficiaryUserId,settledBy:null,admissionId:'legacy_admission_'+foSha(r.effect!.dutyId).slice(0,40),...d}]}];
- const ok=foCommission({batchId:'x',cutoff:foCutoff,parents,current:[{orderId:foMapped('7'),readRef:'r',headRevision:null,depositAmountCents:null,duties:[]}],verifiedBeneficiaries:['44'],rows:[rows[0]!]}).rows[0]!;assert.equal(ok.state,'ADMISSION_CANDIDATE');assert.equal(ok.admitted,true);
+ const command=r.command!,admissionId='legacy_admission_'+foSha(r.effect!.dutyId).slice(0,40),admissionDigest=foSha(canonicalize({schema:'legacy-completed-commission-admission.v1',...command.body,beneficiaryUserId:r.effect!.beneficiaryUserId,amountCents:r.effect!.amountCents,maturityAt:r.effect!.maturityAt}));
+ const cur=(d:Record<string,string|null>):FoCurrent[]=>[{orderId:foMapped('7'),readRef:'r',headRevision:null,depositAmountCents:null,duties:[{id:r.effect!.dutyId,kind:'COMMISSION',sourceRecordId:'91',amountCents:'1000',status:'PENDING',counterpartyUserId:r.effect!.beneficiaryUserId,settledBy:null,admissionId,...d}],admissions:[{id:admissionId,dutyId:r.effect!.dutyId,admissionDigest}],idempotency:{principalId:foActor.userId,records:[{principalId:foActor.userId,operation:command.operation,resourceId:command.resourceId,key:command.idempotencyKey,fingerprint:command.fingerprint,responseStatus:200}]}}];
+ const ok=foCommission({batchId:'x',cutoff:foCutoff,parents,current:[{orderId:foMapped('7'),readRef:'r',headRevision:null,depositAmountCents:null,duties:[],admissions:[],idempotency:{principalId:foActor.userId,records:[]}}],verifiedBeneficiaries:['44'],rows:[rows[0]!]}).rows[0]!;assert.equal(ok.state,'ADMISSION_CANDIDATE');assert.equal(ok.admitted,true);
  assert.equal(foCommission({batchId:'x',cutoff:foCutoff,parents,current:cur({}),verifiedBeneficiaries:['44'],rows:[rows[0]!]}).rows[0]!.state,'ALREADY_APPLIED');
  for(const drift of [{amountCents:'999'},{counterpartyUserId:'other'},{admissionId:null}] as Record<string,string|null>[])assert.equal(foCommission({batchId:'x',cutoff:foCutoff,parents,current:cur(drift),verifiedBeneficiaries:['44'],rows:[rows[0]!]}).rows[0]!.reasons[0],'COMMISSION_ADMISSION_CONFLICT');
  assert.equal(foCommission({batchId:'x',cutoff:foCutoff,parents,current:null,verifiedBeneficiaries:['44'],rows:[foCommissionRow('91','7','COMPLETED_PARENT',{earnings:'10.001'})]}).rows[0]!.state,'CONFLICT');
@@ -147,4 +148,40 @@ test('FIN-ORDER-2 208 consumption: the assembled body passes the real completed-
  foMocks(t,[],false);k=client();await assert.rejects(()=>foImportCommission(k.client,foActor,row.command!.body));assert.equal(foDutyInsert(k.calls).length,0);t.mock.restoreAll();
  foMocks(t);k=client({fingerprint:row.command.fingerprint});const replay=await foImportCommission(k.client,foActor,row.command.body);assert.equal((replay as {replayed:boolean}).replayed,true);assert.equal(foDutyInsert(k.calls).length,0);t.mock.restoreAll();
  foMocks(t);k=client({fingerprint:'0'.repeat(64)});await assert.rejects(()=>foImportCommission(k.client,foActor,row.command!.body),(e:{status?:number})=>e.status===409);t.mock.restoreAll();
+});
+
+test('FIN-ORDER-2 root preflight binds economic tuple, admission digest and the exact actor original receipt',()=>{
+ const p=foParent('7',foDone,foCompletedAt),source=foCommissionRow('91','7','COMPLETED_PARENT');
+ const run=(current:FoCurrent[],verifiedBeneficiaries:string[]|null=['44'])=>foCommission({batchId:'root',cutoff:foCutoff,parents:[p],current,verifiedBeneficiaries,rows:[source]}).rows[0]!;
+ const row=foCommission({batchId:'root',cutoff:foCutoff,parents:[p],current:null,verifiedBeneficiaries:['44'],rows:[source]}).rows[0]!,effect=row.effect!,command=row.command!;
+ const admissionId='legacy_admission_'+foSha(effect.dutyId).slice(0,40),admissionDigest=foSha(canonicalize({schema:'legacy-completed-commission-admission.v1',...command.body,beneficiaryUserId:effect.beneficiaryUserId,amountCents:effect.amountCents,maturityAt:effect.maturityAt}));
+ const receipt={principalId:foActor.userId,operation:command.operation,resourceId:command.resourceId,key:command.idempotencyKey,fingerprint:command.fingerprint,responseStatus:200};
+ const complete:FoCurrent={orderId:p.parentOrderId,readRef:'root-fixture',headRevision:null,depositAmountCents:null,duties:[{id:effect.dutyId,kind:'COMMISSION',sourceRecordId:'91',amountCents:effect.amountCents,status:'PENDING',counterpartyUserId:effect.beneficiaryUserId,settledBy:null,admissionId}],admissions:[{id:admissionId,dutyId:effect.dutyId,admissionDigest}],idempotency:{principalId:foActor.userId,records:[receipt]}};
+ assert.equal(run([complete]).state,'ALREADY_APPLIED');assert.equal(run([complete]).command!.recoveryPrincipalId,foActor.userId);
+ const change=(edit:(target:FoCurrent)=>void)=>{const target=structuredClone(complete);edit(target);return run([target]);};
+ assert.equal(change(t=>{t.duties[0]!.id='legacy_duty_other';}).state,'CONFLICT');
+ assert.equal(change(t=>{t.admissions=[{id:admissionId,dutyId:effect.dutyId,admissionDigest:'0'.repeat(64)}];}).reasons[0],'COMMISSION_ADMISSION_CONFLICT');
+ assert.equal(change(t=>{t.idempotency!.records=[{...receipt,fingerprint:'0'.repeat(64)}];}).reasons[0],'IDEMPOTENCY_BODY_CONFLICT');
+ assert.equal(change(t=>{t.idempotency!.records=[{...receipt,principalId:'other_admin'}];}).reasons[0],'IDEMPOTENCY_SCOPE_MISMATCH');
+ assert.equal(change(t=>{t.idempotency!.records=[{...receipt,responseStatus:500}];}).reasons[0],'IDEMPOTENCY_RESULT_NOT_SUCCESS');
+ const noReceipt=change(t=>{t.idempotency!.records=[];});assert.equal(noReceipt.state,'MISSING_FACT');assert(noReceipt.reasons.includes('ORIGINAL_KEY_RECEIPT_MISSING'));
+ assert.equal(change(t=>{delete t.idempotency;}).state,'MISSING_FACT');
+ assert.equal(change(t=>{delete t.admissions;}).state,'MISSING_FACT');
+ assert.equal(change(t=>{t.duties=[];t.admissions=[];}).reasons[0],'RECEIPT_TARGET_MISSING');
+ const noIdentity=run([complete],null);assert.equal(noIdentity.state,'MISSING_FACT');assert(noIdentity.reasons.includes('BENEFICIARY_IDENTITY_UNVERIFIED'));
+ const empty:FoCurrent={...complete,duties:[],admissions:[],idempotency:{principalId:foActor.userId,records:[]}};
+ assert.equal(run([empty]).admitted,true);const unread={...empty,idempotency:null};assert.equal(run([unread]).admitted,false);
+ const terminalParent=foParent('8',foSnap.POSTED_CONFISCATION),terminalSource=foRow('8','POSTED_CONFISCATION');
+ const terminal=foLiability({batchId:'root',parents:[terminalParent],current:null,rows:[terminalSource]}).rows[0]!;
+ const wrongTerminal:FoCurrent={orderId:terminalParent.parentOrderId,readRef:'root-fixture',headRevision:null,depositAmountCents:'5700',duties:[{id:terminal.effect!.dutyId,kind:'DEPOSIT_COMPENSATION',sourceRecordId:'8',amountCents:'5700',status:'PENDING',counterpartyUserId:terminal.effect!.beneficiaryUserId,settledBy:null}]};
+ assert.equal(foLiability({batchId:'root',parents:[terminalParent],current:[wrongTerminal],rows:[terminalSource]}).rows[0]!.reasons[0],'LEGACY_TERMINAL_SOURCE_CONFLICT');
+});
+
+test('FIN-ORDER-2 root assembly isolates null/scalar/array rows and preserves the valid row and changing input digest',()=>{
+ const p=foParent('7',foSnap.COMPLETED_UNREFUNDED),source=foRow('7','COMPLETED_UNREFUNDED');
+ const liability={batchId:'root',parents:[p],current:null,rows:[source,null,42,[]] as unknown as FoLiabilityRow[]};
+ const result=foLiability(liability);assert.equal(result.rows.length,4);assert.equal(result.rows[0]!.state,'ADMISSION_CANDIDATE');assert(result.rows.slice(1).every(r=>r.state==='CONFLICT'&&r.reasons[0]==='SOURCE_SCHEMA_INVALID'));assert.equal(result.conserved,true);
+ assert.notEqual(foLiability({...liability,rows:[source,null,43,[]] as unknown as FoLiabilityRow[]}).inputDigest,result.inputDigest);
+ const commissions=foCommission({batchId:'root',cutoff:foCutoff,parents:[foParent('7',foDone,foCompletedAt)],current:null,verifiedBeneficiaries:null,rows:[foCommissionRow('91','7','COMPLETED_PARENT'),null,42,[]] as unknown as FoCommissionRow[]});
+ assert.equal(commissions.rows.length,4);assert.equal(commissions.rows[0]!.state,'MISSING_FACT');assert(commissions.rows.slice(1).every(r=>r.state==='CONFLICT'));assert.equal(commissions.conserved,true);
 });
