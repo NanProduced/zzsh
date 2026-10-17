@@ -4,6 +4,8 @@ export type UserIdentitySnapshot = {
   ageStatus: "UNKNOWN" | "ADULT" | "MINOR";
   provider: string;
   eligibleForProtectedTrade: boolean;
+  realNameMasked?: string | null;
+  idCardMasked?: string | null;
 };
 
 export function accountStatusLabel(status: UserIdentitySnapshot["accountStatus"]): string {

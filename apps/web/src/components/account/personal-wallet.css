@@ -26,8 +26,8 @@
 /* 钱包摘要：和个人中心其它卡片同一容器（边框/圆角/底色/阴影），
    金额、口径与 UNKNOWN 语义不变，只补缺失的容器布局。 */
 .account-wallet-preview { display: flex; align-items: flex-start; gap: 16px; padding: 20px; border: 1px solid var(--account-border-card); border-radius: 16px; background: var(--color-bg-card); box-shadow: var(--account-card-shadow); }
-.account-wallet-preview > div { min-width: 0; flex: 1 1 auto; }
-.account-wallet-mark { box-sizing: content-box; flex: 0 0 auto; padding: 12px; border-radius: 12px; color: var(--account-accent); background: var(--account-accent-muted); }
+.account-wallet-preview > div:not(.account-wallet-mark) { min-width: 0; flex: 1 1 auto; }
+.account-wallet-preview > .account-wallet-mark { flex: 0 0 auto; width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border-radius: 12px; color: var(--account-accent); background: var(--account-accent-muted); }
 .account-wallet-preview h2 { margin: 0; font-size: var(--type-section-title-size); font-weight: var(--type-section-title-weight); line-height: var(--type-section-title-leading); }
 .account-wallet-preview strong { display: block; margin-top: 6px; font-size: var(--type-amount-row-size); font-weight: var(--type-amount-row-weight); line-height: var(--type-amount-row-leading); }
 .account-wallet-preview p { margin: 4px 0 0; }

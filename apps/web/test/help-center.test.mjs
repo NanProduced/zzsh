@@ -93,3 +93,32 @@ test("article cards keep public fields only", () => {
     if (!article.game) assert.equal(card.game, undefined);
   }
 });
+
+test("featured questions match canonical 6 items from design spec", () => {
+  const expected = [
+    "rental-getting-started",
+    "rental-check-before-order",
+    "fees-early-end",
+    "fees-refund-status",
+    "publish-prepare",
+    "account-recovery",
+  ];
+  const featured = listFeaturedArticles().map((a) => a.slug);
+  assert.deepEqual(featured, expected);
+});
+
+test("long vs short article detection correctly distinguishes TOC requirements", async () => {
+  const { isLongArticle, articleBreadcrumb } = await import("../src/components/help/nav-data.ts");
+  const longArticle = getHelpArticle("rental-getting-started");
+  const shortArticle = getHelpArticle("minor-protection");
+  assert.ok(longArticle);
+  assert.ok(shortArticle);
+  assert.equal(isLongArticle(longArticle), true);
+  assert.equal(isLongArticle(shortArticle), false);
+
+  const crumbs = articleBreadcrumb(longArticle);
+  assert.equal(crumbs.length, 3);
+  assert.equal(crumbs[2].label, "租号与使用");
+  // Does not duplicate long article title in breadcrumb
+  assert.ok(!crumbs.some((c) => c.label === longArticle.title));
+});

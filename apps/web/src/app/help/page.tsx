@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 import { HelpPage, type HelpPageView } from "@/components/help/help-page";
 import { buildHelpNavData, toArticleCard } from "@/components/help/nav-data";
 import { allHelpArticles, listFeaturedArticles, listHelpArticlesByCategory } from "@/content/help";
@@ -22,15 +23,19 @@ export default async function Page({ searchParams }: { searchParams: Promise<Rec
   const categoryParam = typeof params.category === "string" ? params.category : "";
   const navData = buildHelpNavData(allHelpArticles);
 
-  let view: HelpPageView;
   if (query) {
-    view = { kind: "search", query, hits: searchHelpArticles(query).map((hit) => toArticleCard(hit.article)) };
-  } else if (knownCategories.has(categoryParam)) {
-    const category = categoryParam as AnyHelpCategoryId;
-    view = { kind: "category", category, articles: listHelpArticlesByCategory(category).map(toArticleCard) };
-  } else {
-    view = { kind: "home", featured: listFeaturedArticles().map(toArticleCard) };
+    const view: HelpPageView = { kind: "search", query, hits: searchHelpArticles(query).map((hit) => toArticleCard(hit.article)) };
+    return <HelpPage view={view} navData={navData} query={query} legacyHashMap={{ ...legacyHelpHashMap }} />;
   }
 
+  if (knownCategories.has(categoryParam)) {
+    const category = categoryParam as AnyHelpCategoryId;
+    const categoryArticles = listHelpArticlesByCategory(category);
+    if (categoryArticles[0]) {
+      redirect(`/help/${categoryArticles[0].slug}`);
+    }
+  }
+
+  const view: HelpPageView = { kind: "home", featured: listFeaturedArticles().map(toArticleCard) };
   return <HelpPage view={view} navData={navData} query={query} legacyHashMap={{ ...legacyHelpHashMap }} />;
 }

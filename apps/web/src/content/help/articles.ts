@@ -9,23 +9,23 @@ export const helpArticles: readonly HelpArticle[] = [
     id: "R01",
     slug: "rental-getting-started",
     title: "第一次租号，从哪里开始？",
-    summary: "从选号到起租的完整流程：浏览无需登录，下单前核对费用与条件，支付后由平台客服在每单独立群协助交付。",
+    summary: "了解选号、下单、交付与开始租用的流程。",
     category: "rental",
     audience: ["renter"],
     keywords: ["租号", "怎么租", "流程", "下单", "支付", "客服", "开始租用", "租号流程", "新人"],
     updatedAt: "2026-10-06",
-    related: ["rental-check-before-order", "rental-confirm-and-return", "issue-during-rental"],
-    contactCta: true,
+    related: ["rental-check-before-order", "rental-confirm-and-return"],
+    contactCta: false,
     sections: [
       {
         id: "steps",
         title: "租号的基本流程",
         blocks: [
           { type: "list", ordered: true, items: [
-            "在账号列表浏览公开账号，按游戏、资源和费用筛选；浏览和查看详情不需要登录。",
-            "选定账号后登录并完成下单确认，页面会展示按你本人情况计算的报价与费用明细。",
-            "完成支付后，平台客服会为这一笔订单建立独立的履约群，买家、号主和客服都在群内。",
-            "在群内配合完成账号交付，双方确认交付内容后正式起租。",
+            "浏览并选择账号：浏览账号详情，核对资源与费用。",
+            "核对订单并支付：确认本次报价、费用明细与租赁条件。",
+            "等待客服协助交付：支付后留意订单状态和客服消息。",
+            "确认交付，开始租用：按订单提示完成双方确认。",
           ] },
         ],
       },
@@ -33,9 +33,8 @@ export const helpArticles: readonly HelpArticle[] = [
         id: "after-payment",
         title: "支付之后会发生什么",
         blocks: [
-          { type: "paragraph", text: "付款成功后订单进入客服分配：分配成功即自动建立本单专属群，不需要再次点击或联系。" },
-          { type: "callout", tone: "info", text: "付款成功、进入群聊、确认交付、开始计费是四件不同的事。只有双方确认交付后才开始正式租用计时。" },
-          { type: "paragraph", text: "暂时没有可分配的客服时，订单会进入待匹配队列并提醒主管处理，不会虚构客服，也不会因此提前开始计费。" },
+          { type: "paragraph", text: "平台按订单流程安排客服协助交付。" },
+          { type: "callout", tone: "info", text: "付款成功不等于开始计时，以订单中的交付确认状态为准。" },
         ],
       },
       {
@@ -43,9 +42,8 @@ export const helpArticles: readonly HelpArticle[] = [
         title: "需要知道的边界",
         blocks: [
           { type: "list", items: [
-            "交易动作（下单、支付）需要登录，并完成平台要求的身份核验。",
-            "履约由真人客服在群内协助，平台不提供自动上号或自动交付。",
-            "订单群的沟通、提醒和已读状态都不等于结算确认或资金指令，一切以订单页面的状态为准。",
+            "实际费用与条件以订单页面为准。",
+            "遇到问题，通过订单群联系平台客服。",
           ] },
         ],
       },
@@ -53,7 +51,7 @@ export const helpArticles: readonly HelpArticle[] = [
         id: "next",
         title: "下一步",
         blocks: [
-          { type: "paragraph", text: "下单前建议先阅读「下单前需要核对哪些信息」；租用中遇到问题直接在订单群联系客服。" },
+          { type: "paragraph", text: "下单前建议核对账号信息并阅读须知，起租时核对期初清单。" },
         ],
       },
     ],
@@ -862,6 +860,7 @@ export const helpArticlesMore: readonly HelpArticle[] = [
     keywords: ["未成年", "未成年人", "防沉迷", "保护"],
     updatedAt: "2026-10-06",
     related: ["terms-and-privacy"],
+    contactCta: true,
     sections: [
       {
         id: "rule",

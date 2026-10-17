@@ -2176,8 +2176,8 @@ html[data-theme="light"] .auth-brand-copy .brand-logo { filter:none; }
 .auth-brand-panel { min-height:480px; }
 .auth-brand-copy { padding:30px 24px; }
 .auth-brand-copy p { font-size:27px; }
-.auth-dialog-form { padding:40px 34px 24px; }
-.auth-dialog-form .auth-form { gap:24px; min-height:416px; }
+.auth-dialog-form { padding:32px 34px 24px; }
+.auth-dialog-form .auth-form { gap:18px; min-height:100%; }
 .auth-methods { border:0; gap:24px; align-items:center; }
 .auth-methods button { font-size:16px; white-space:nowrap; padding:8px 0; }
 .auth-dialog-form .auth-fields { display:flex; flex-direction:column; gap:16px; }
@@ -2190,26 +2190,27 @@ html[data-theme="light"] .auth-brand-copy .brand-logo { filter:none; }
 .auth-secondary-actions { display:flex; justify-content:space-between; align-items:center; font-size:12px; }
 .auth-secondary-actions button { background:none; border:0; padding:0; color:var(--color-text-secondary); }
 .auth-secondary-actions .auth-switch-link { text-decoration:none; min-height:24px; }
-.auth-dialog-form .auth-submit { margin-top:14px; }
-.auth-consent { margin-top:auto; padding-top:20px; }
-.auth-context { margin:0; font-size:12px; color:var(--color-text-secondary); }
+.auth-dialog-form .auth-submit { margin-top:8px; }
+.auth-dialog-form .auth-consent { margin-top:auto; padding-top:12px; }
+.auth-dialog-form .auth-consent label { min-height:unset; line-height:1.4; }
+.auth-context { display:none; }
 .auth-status { order:0; }
 @media(max-width:699px) {
  .auth-dialog-layout { grid-template-columns:minmax(0,1fr); }
  .auth-dialog-content { width:calc(100vw - 24px); }
- .auth-dialog-form { padding:40px 24px 24px; }
- .auth-dialog-form .auth-form { min-height:380px; }
+ .auth-dialog-form { padding:32px 20px 20px; }
+ .auth-dialog-form .auth-form { min-height:360px; }
  .auth-methods { justify-content:space-between; gap:12px; }
  .auth-methods button { font-size:15px; }
 }
 html[data-theme="light"] .auth-code-row .button,html[data-theme="light"] .auth-password-toggle,html[data-theme="light"] .auth-consent a,html[data-theme="light"] .auth-page-links a,html[data-theme="light"] .auth-page-back:hover { color:#865200; }
 html[data-theme="light"] :focus-visible { outline-color:var(--color-focus-ring); }
 
-/* Tab changes never resize the dialog; only the form area scrolls. */
+/* Stable panel: form fits comfortably within container without scrollbars */
 .auth-dialog-content { height:min(520px,calc(100dvh - 32px)); max-height:none; overflow:hidden; }
 .auth-dialog-layout { height:100%; min-height:0; }
 .auth-brand-panel { min-height:0; height:100%; }
-.auth-dialog-form { min-height:0; height:100%; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.auth-dialog-form { min-height:0; height:100%; overflow-y:auto; overscroll-behavior:contain; }
 .auth-dialog-form .auth-form { min-height:100%; display:flex; flex-direction:column; }
 .auth-dialog-form .auth-fields { flex:1; }
 .auth-methods { flex-shrink:0; }

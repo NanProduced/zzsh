@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button, Drawer } from "@heroui/react";
 import useEmblaCarousel from "embla-carousel-react";
-import { LayoutGrid, List, RotateCw, SlidersHorizontal, X } from "lucide-react";
+import { LayoutGrid, List, QrCode, RotateCw, SlidersHorizontal, X } from "lucide-react";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
 import { AccountCardEmpty } from "@/components/delta/account-card-empty";
@@ -62,8 +62,20 @@ function DeltaBanner() {
       </div>
     </div>
     <div className="market-contact-templates" aria-label="联系二维码">
-      <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 799px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
-      <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 799px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
+      <div className="market-contact-card">
+        <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 799px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
+        <div className="market-qr-placeholder" aria-hidden="true">
+          <QrCode size={16} className="market-qr-placeholder-icon" />
+          <span>待配置</span>
+        </div>
+      </div>
+      <div className="market-contact-card">
+        <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 799px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
+        <div className="market-qr-placeholder" aria-hidden="true">
+          <QrCode size={16} className="market-qr-placeholder-icon" />
+          <span>待配置</span>
+        </div>
+      </div>
     </div>
   </div>;
 }

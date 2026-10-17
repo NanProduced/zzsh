@@ -13,7 +13,7 @@ function handler(options = {}) {
   const sessions = () => options.sessions === undefined ? defaultSessions : options.sessions;
   return async (url, body) => {
     // 第三方公网 IP 查询不是平台写入；不拦下会掉进末尾的通用写入记录器。
-    if (String(url).includes("ipify.org")) return response({ ip: "203.0.113.9" });
+    if (String(url).includes("ipify.org") || String(url).includes("ipwho.is")) return response({ ip: "203.0.113.9", success: true });
     if (url.endsWith("/overview")) { if (options.read) return options.read(); return response(overview); }
     if (url.endsWith("/security/sessions")) { const value = sessions(); return value instanceof Error || typeof value === "function" ? (typeof value === "function" ? value(url, body) : (() => { throw value; })()) : response({ sessions: value }); }
     if (url.endsWith("/challenge/send")) return response({ status: true, challengeId: (body.stage === "target" ? "b" : "a").repeat(32), cooldownUntil: new Date(Date.now() + 60_000).toISOString() });
@@ -656,8 +656,8 @@ test("会话展开控件是原生按钮并正确关联区域，键盘可达", as
   try {
     await p.settle();
     await localAgent(p, safariMac);
-    const toggles = [...p.host.querySelectorAll(".sec-record-toggle, .sec-session-expand")];
-    assert.ok(toggles.length >= 2, "当前会话与至少一条其他会话各有展开控件");
+    const toggles = [...p.host.querySelectorAll(".sec-session-expand")];
+    assert.ok(toggles.length >= 1, "其他有效会话具有展开详情控件");
     for (const toggle of toggles) {
       assert.equal(toggle.tagName, "BUTTON", "原生 button 才有键盘可达性");
       assert.equal(toggle.getAttribute("type"), "button");
@@ -668,12 +668,7 @@ test("会话展开控件是原生按钮并正确关联区域，键盘可达", as
       assert.ok(region, "展开区域真实存在");
       assert.ok(region.hidden, "默认收起");
     }
-    const current = p.host.querySelector(".sec-record-toggle");
-    await p.React.act(async () => { current.focus(); });
-    assert.equal(p.window.document.activeElement, current, "可聚焦");
-    await p.click("查看登录时记录");
-    assert.equal(p.host.querySelector(".sec-record-toggle").getAttribute("aria-expanded"), "true", "展开后状态同步");
-    assert.equal(p.host.querySelector(".sec-record-detail").hidden, false);
+    assert.equal(p.host.querySelector(".sec-record-toggle"), null, "当前会话卡片信息完整展示，不再重复展开冗余详情");
   } finally { await p.close(); }
 });
 
@@ -698,11 +693,12 @@ test("Owner §3 结构：登录与找回→当前会话→其他有效会话→�
   try {
     await p.settle();
     const root = p.host.querySelector(".account-security-controls");
-    const names = [...root.children].map(node => node.getAttribute("aria-labelledby") ?? node.className ?? "");
+    const sections = [...root.querySelectorAll("section[aria-labelledby]")];
+    const names = sections.map(node => node.getAttribute("aria-labelledby") ?? "");
     const at = (label) => names.findIndex(name => name.includes(label));
     assert.ok(at("sec-login-heading") !== -1, "登录与找回在最前");
-    assert.ok(at("sec-current-session-heading") !== -1, "当前会话独立成卡");
-    assert.ok(at("sec-other-sessions-heading") !== -1, "其他有效会话独立成卡");
+    assert.ok(at("sec-current-session-heading") !== -1, "当前会话存在");
+    assert.ok(at("sec-other-sessions-heading") !== -1, "其他有效会话存在");
     assert.ok(at("sec-login-heading") < at("sec-current-session-heading"), "顺序：登录与找回 → 当前会话");
     assert.ok(at("sec-current-session-heading") < at("sec-other-sessions-heading"), "顺序：当前会话 → 其他有效会话");
     const helpIndex = [...root.children].findIndex(node => node.classList.contains("sec-help"));
@@ -722,24 +718,17 @@ test("Owner §3 结构：登录与找回→当前会话→其他有效会话→�
     assert.match(meta.textContent, /登录时间/);
     assert.match(meta.textContent, /到期时间/);
     assert.doesNotMatch(card.querySelector(".sec-current-hero").textContent + meta.textContent, /未记录/, "主区不重复铺缺值");
-    await p.click("查看登录时记录");
-    const record = card.querySelector(".sec-record-detail");
-    assert.match(record.textContent, /Windows/, "登录时记录 UA 派生的系统");
-    assert.match(record.textContent, /Chrome/, "登录时记录 UA 派生的浏览器");
-    assert.match(record.textContent, /客户端类型/);
-    assert.doesNotMatch(record.textContent, /macOS/, "登录时记录不回填本机浏览器");
-    assert.match(record.textContent, /不构成可信设备证明/);
+    assert.equal(card.querySelector(".sec-record-toggle"), null, "当前会话不再提供冗余展开按钮");
+    assert.equal(card.querySelector(".sec-record-detail"), null, "当前会话卡片信息直接展示，不重复展开");
 
     // 当前网络一行内嵌当前会话；Owner 2026-10-14 批准后挂载即查询一次当前公网 IP，仍不造地区/运营商。
     const network = card.querySelector(".sec-network");
     assert.ok(network, "当前网络一行属于当前会话");
     assert.match(network.textContent, /当前公网 IP/);
     assert.match(network.textContent, /203\.0\.113\.9/, "展示查询到的当前出口 IP");
-    assert.match(network.textContent, /不是登录时的 IP/, "文案区分查询时出口与登录时记录");
-    assert.doesNotMatch(network.textContent, /地区|运营商|网络组织|估算时区/, "服务不返回地区/运营商，不得凭空补字段");
-    assert.ok(network.querySelector('button[aria-label="信息来源"]'), "信息来源入口");
+    assert.match(network.textContent, /基于当前网络出口查询|位置仅供参考|不是登录时的 IP/, "文案区分查询时出口与登录时记录");
     assert.equal(p.host.querySelector(".network-card"), null, "不再另放底部网络大卡");
-    assert.equal(p.calls.filter(item => String(item.url).includes("ipify.org")).length, 1, "当前会话只查询一次，不轮询");
+    assert.equal(p.calls.filter(item => String(item.url).includes("ipify.org") || String(item.url).includes("ipwho.is")).length, 1, "当前会话只查询一次，不轮询");
     // IM-09：刷新入口带业务作用域标注。
     assert.equal([...p.host.querySelectorAll("button")].find(node => node.textContent === "刷新").getAttribute("aria-label"), "刷新安全设置");
     assert.equal([...p.host.querySelectorAll("button")].find(node => node.getAttribute("aria-label") === "刷新会话列表").textContent, "刷新");
@@ -748,16 +737,16 @@ test("Owner §3 结构：登录与找回→当前会话→其他有效会话→�
     const othersCard = root.querySelector('[aria-labelledby="sec-other-sessions-heading"]');
     const columns = othersCard.querySelector(".sec-session-columns");
     assert.ok(columns, "桌面统一列头存在");
-    assert.deepEqual([...columns.querySelectorAll("span")].map(node => node.textContent), ["客户端与登录记录", "到期时间", "操作"]);
+    assert.deepEqual([...columns.querySelectorAll("span")].map(node => node.textContent), ["设备与浏览器", "登录时间", "操作"]);
     assert.equal(othersCard.querySelectorAll(".sec-session").length, 1, "其他会话列表不含当前会话行");
     assert.doesNotMatch(othersCard.textContent, /s_other/, "不暴露内部会话ID");
     assert.doesNotMatch(othersCard.textContent, /macOS · Safari/, "不把当前浏览器信息填给其他会话");
-    assert.match(othersCard.textContent, /登录于/, "保留登录记录");
-    assert.match(othersCard.textContent, /仍然有效，但不代表设备正在在线/);
+    assert.match(othersCard.textContent, /2026\.10\.11/, "保留登录记录");
+    assert.match(othersCard.textContent, /有效会话不代表设备当前在线/);
   } finally { await p.close(); }
 });
 
-test("当前会话的登录时记录缺失集中在详情，只表达一次未记录", async () => {
+test("当前会话展示本机真实可读系统与浏览器，不设冗余展开详情", async () => {
   const p = await mount({ sessions: [session("s_current", true, null), session("s_weird", false, "totally-unknown-agent")] });
   try {
     await p.settle();
@@ -766,12 +755,7 @@ test("当前会话的登录时记录缺失集中在详情，只表达一次未�
     const hero = card.querySelector(".sec-current-hero");
     assert.match(hero.textContent, /Windows · Chrome/, "主区展示本机真实可读的系统与浏览器");
     assert.doesNotMatch(hero.textContent + card.querySelector(".sec-current-meta").textContent, /未记录|未知/, "主区不铺缺值");
-    await p.click("查看登录时记录");
-    const record = card.querySelector(".sec-record-detail");
-    assert.match(record.textContent, /登录时未记录客户端信息/);
-    assert.equal(record.textContent.match(/登录时未记录/g).length, 1, "缺失只表达一次");
-    assert.equal(record.querySelectorAll("dt").length, 0, "缺值不铺系统/浏览器/客户端类型三列");
-    assert.doesNotMatch(record.textContent, /无法确认/);
+    assert.equal(card.querySelector(".sec-record-toggle"), null, "当前会话不再设冗余展开按钮");
     // 其他会话保留完整保守派生（含客户端未识别），不受当前会话去噪影响。
     const otherRow = p.host.querySelector(".sec-session");
     assert.equal(otherRow.querySelector(".sec-session-title strong").textContent, "客户端未识别");

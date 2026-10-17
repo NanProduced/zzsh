@@ -1,4 +1,4 @@
-import { helpAuxCategories, helpCategories, type AnyHelpCategoryId, type HelpArticle } from "../../content/help/types.ts";
+import { helpAuxCategories, helpCategories, helpCategoryLabel, type AnyHelpCategoryId, type HelpArticle } from "../../content/help/types.ts";
 
 export type HelpNavArticle = { slug: string; title: string };
 export type HelpNavCategory = { id: AnyHelpCategoryId; label: string; articles: HelpNavArticle[] };
@@ -37,3 +37,16 @@ export function toArticleCard(article: HelpArticle): HelpArticleCard {
     game: article.game,
   };
 }
+
+export function isLongArticle(article: HelpArticle): boolean {
+  return article.sections.length >= 3;
+}
+
+export function articleBreadcrumb(article: HelpArticle) {
+  return [
+    { label: "首页", href: "/" },
+    { label: "帮助中心", href: "/help" },
+    { label: helpCategoryLabel(article.category), href: `/help?category=${article.category}` },
+  ] as const;
+}
+

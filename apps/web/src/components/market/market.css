@@ -15,9 +15,13 @@
 .market-banner-slide { height:100%; }
 .market-poster-link { position:relative; height:100%; overflow:hidden; }
 .market-poster-link img { display:block; width:100%; height:100%; object-fit:cover; object-position:center; }
-/* 联系卡：卡面是既有宣传图，按真实配置状态完整渲染。 */
+/* 联系卡：卡面是既有宣传图，按真实配置状态完整渲染。未配置二维码时展示轻量占位 */
 .market-contact-templates { display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:1fr 1fr; gap:12px; min-width:0; }
-.market-contact-templates img { display:block; width:100%; height:100%; min-height:0; object-fit:contain; object-position:center; border-radius:12px; }
+.market-contact-card { position:relative; width:100%; height:100%; min-height:0; }
+.market-contact-templates img,.market-contact-card img { display:block; width:100%; height:100%; min-height:0; object-fit:contain; object-position:center; border-radius:12px; }
+.market-qr-placeholder { position:absolute; left:62%; top:21%; width:28%; height:62%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; border:1px dashed var(--color-border-default); border-radius:6px; background:color-mix(in srgb,var(--color-bg-surface) 85%,transparent); color:var(--color-text-muted); pointer-events:none; }
+.market-qr-placeholder span { font-size:10px; font-weight:500; line-height:1; }
+.market-qr-placeholder-icon { opacity:.75; }
 @media (min-width:1100px) and (max-width:1460px) and (hover:hover) and (pointer:fine) {
   .market-banner-layout { margin-right:64px; }
 }
@@ -467,18 +471,21 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
   .functional-top-content { margin-block:8px 0; }
   .market-banner-carousel { border-radius:10px; }
   .market-contact-templates { gap:7px; }
-  .market-contact-templates img { border-radius:8px; }
+  .market-contact-templates img,.market-contact-card img { border-radius:8px; }
+  .market-qr-placeholder { border-radius:4px; gap:2px; }
+  .market-qr-placeholder span { font-size:9px; }
   .functional-shell.functional-shell--browse .functional-page-heading { padding-block:8px; }
   .functional-shell.functional-shell--browse .functional-title-block h1 { font-size:24px; }
   .market-filter-summary-count { font-size:11px; }
   .market-filter-details > summary { padding-inline:11px; }
-  .market-sort-controls { gap:6px; }
+  .market-sort-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; width:100%; }
   .market-sort-field { gap:4px; }
   .market-ui-select--toolbar { max-width:135px; }
-  .market-results-toolbar { flex-direction:column; align-items:flex-start!important; }
-  .market-results-controls { width:100%; justify-content:space-between; }
-  .market-results-actions { width:100%; justify-content:flex-end; }
-  .market-toolbar-action { min-height:40px; }
+  .market-results-toolbar { flex-direction:column; align-items:flex-start!important; gap:10px; }
+  .market-results-controls { width:100%; display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+  .market-view-toggle { order:2; }
+  .market-results-actions { order:3; margin-left:auto; width:auto; }
+  .market-toolbar-action { min-height:36px; }
   .market-search-summary { align-items:flex-start; }
   .detail-gallery-main { min-height:180px; }
   .detail-table thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }

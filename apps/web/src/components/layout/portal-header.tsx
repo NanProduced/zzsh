@@ -70,7 +70,7 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
   // 展开过时都不收起，输入内容随 input 一起保留。回顶部自动恢复两行。
   const searchCollapsed = !desktop && scrollPosition > 100 && !searchFocused && !searchPinned && !navFocused;
   const expandSearch = () => { setSearchPinned(true); requestAnimationFrame(() => searchRef.current?.focus()); };
-  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || !home || navFocused} data-search-collapsed={searchCollapsed}>
+  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || navFocused} data-search-collapsed={searchCollapsed}>
     <motion.div
       className="site-header-bar"
       initial={false}

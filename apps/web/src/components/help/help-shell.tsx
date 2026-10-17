@@ -5,12 +5,24 @@ import { ServiceShell, type BreadcrumbItem } from "@/components/layout/service-s
 import { stripHelpSearchQuery } from "./help-url";
 
 /** 帮助中心统一外壳：复用 ServiceShell，搜索切换为文档检索 */
-export function HelpShell({ children, breadcrumbs, title, description, initialQuery = "" }: {
+export function HelpShell({
+  children,
+  breadcrumbs,
+  title,
+  description,
+  initialQuery = "",
+  showPageHeading = true,
+  headingInContent = false,
+  topContent,
+}: {
   children: ReactNode;
   breadcrumbs: readonly BreadcrumbItem[];
   title: string;
   description?: string;
   initialQuery?: string;
+  showPageHeading?: boolean;
+  headingInContent?: boolean;
+  topContent?: ReactNode;
 }) {
   const router = useRouter();
   // 外壳的清空按钮只清输入框；在帮助模块内同步清掉已提交查询（q 参数），不动全站账号搜索语义
@@ -33,6 +45,9 @@ export function HelpShell({ children, breadcrumbs, title, description, initialQu
       title={title}
       description={description}
       initialQuery={initialQuery}
+      showPageHeading={showPageHeading}
+      headingInContent={headingInContent}
+      topContent={topContent}
       onSearch={(value) => {
         const trimmed = value.trim();
         router.push(trimmed ? `/help?q=${encodeURIComponent(trimmed)}` : "/help");
