@@ -120,14 +120,14 @@ const QUANTITY_PATTERN = /^(0|[1-9]\d{0,23})$/;
 
 // Only source conversion uses the old 60-round group. Native inventory is
 // already in base units and must never pass through this function again.
-export function legacyResourceBaseQuantity(field: string, value: unknown, insuranceSemantic: "DAY" | "CARD_COUNT" | "UNKNOWN" = "UNKNOWN"): { quantity: string | null; unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY" | "UNKNOWN" } {
+export function legacyResourceBaseQuantity(field: string, value: unknown, insuranceSemantic: "DAY" = "DAY"): { quantity: string | null; unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY" | "UNKNOWN" } {
   const units: Record<string, "HAFF_BASE" | "ROUND" | "PIECE"> = { haff:"HAFF_BASE",level6_bullet_num:"ROUND",awm_bullet_num:"ROUND",barrett_bullet_num:"ROUND",level6_armor_num:"PIECE",level6_helmet_num:"PIECE",coffee_num:"PIECE" };
-  const unit = field === "top_insure_card_num" ? insuranceSemantic === "CARD_COUNT" ? "PIECE" : insuranceSemantic : units[field];
+  if (field === "top_insure_card_num" && insuranceSemantic !== "DAY") throw invalid("顶级保险卡基础单位为天");
+  const unit = field === "top_insure_card_num" ? "DAY" : units[field];
   if (!unit) throw invalid("Unknown legacy resource field");
   if (value === null || value === undefined || value === "") return { quantity:null, unit };
   const text = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : value;
   if (typeof text !== "string" || !QUANTITY_PATTERN.test(text)) throw invalid("Legacy quantity is invalid");
-  if (unit === "UNKNOWN") return { quantity:text, unit };
   const quantity = (BigInt(text) * (field === "level6_bullet_num" ? 60n : 1n)).toString();
   if (!QUANTITY_PATTERN.test(quantity)) throw invalid("Legacy quantity is out of range");
   return { quantity, unit };
@@ -155,8 +155,7 @@ export function convertLegacyDeltaInventory(
   const inventory: LegacyInventoryInput[] = [], pending: Array<{ field: string; quantity: string | null; unit: string; reason: string }> = [];
   for (const [field, codes] of DELTA_LEGACY_RESOURCES) {
     if (!Object.hasOwn(source.row, field)) { pending.push({field,quantity:null,unit:"UNKNOWN",reason:"SOURCE_FIELD_MISSING"}); continue; }
-    // The restored release's UI explicitly prices/displays this field per day.
-    // It must bind the separate historical DAY identity, never the new card.
+    // Old and new insurance share the original DAY identity and unchanged day quantity.
     const converted = legacyResourceBaseQuantity(field, source.row[field], "DAY");
     const matches = catalog.filter(item => (codes as readonly string[]).includes(item.code));
     if (matches.length !== 1) { pending.push({field,...converted,reason:matches.length ? "AMBIGUOUS_ITEM_ID" : "CATALOG_ITEM_MISSING"}); continue; }

@@ -29,9 +29,18 @@ export type DeltaCompatPricing = {
 };
 export const DELTA_HAFF_BASE_PER_MILLION = 1_000_000n;
 export const DELTA_ROUNDING_POLICY = "HALF_UP_CENT_V1";
-export const DELTA_RESOURCE_UNITS: Readonly<Record<string, "ROUND" | "PIECE" | "DAY">> = {
-  df_billable_barrett_bullet:"ROUND", top_insure_card_piece:"PIECE", df_billable_top_insure_card:"DAY",
+export const DELTA_RESOURCE_UNITS: Readonly<Record<string, "ROUND" | "DAY">> = {
+  df_billable_barrett_bullet:"ROUND", df_billable_top_insure_card:"DAY",
 };
+export function isRetiredDeltaInsurance(code: string): boolean {
+  return code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece";
+}
+// Current declarations/configuration only; frozen quotes keep their recorded units and amounts.
+export function assertDeltaResourceUnit(code: string, unit: string, quantityScale: unknown = 0): void {
+  if (isRetiredDeltaInsurance(code)) throw invalid("顶级保险卡基础单位为天，请使用现有按天资源", "unit");
+  const expected = DELTA_RESOURCE_UNITS[code];
+  if (expected && (unit !== expected || quantityScale !== 0)) throw invalid("该资源的基础单位与数量精度固定", "unit");
+}
 export const DELTA_PUBLISH_LEVELS = [4, 5, 6, 7] as const;
 
 export function deltaPublicationLevels(map: Record<string, unknown> | undefined): number[] {
