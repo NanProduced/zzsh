@@ -633,7 +633,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {catalog.status === "error" && activeMetadata ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
         <div className="market-results-toolbar">
-          <div><h2>可租账号</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>账号列表</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
             {activeMetadata && <div className="market-sort-controls" aria-label="账号排序">
               <div className="market-sort-field"><span>排序</span><MarketSelect
@@ -686,7 +686,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
           {feed.items.length > 0 && currentError ? <p className="market-inline-state market-inline-state--compact" role="alert"><strong>{currentError.title}</strong> {currentError.description}{currentError.kind === "retry" ? <button type="button" onClick={feed.loadMoreError ? feed.loadMore : feed.reload}>{feed.loadMoreError ? "重试加载" : "重试读取"}</button> : currentError.kind === "adjust" ? <button type="button" onClick={resetFilters}>清空筛选条件</button> : null}</p> : null}
           {feed.items.length > 0 ? <div className={`account-grid account-grid--${filters.viewMode}`}>
             {feed.items.map((listing, index) => <AccountCard key={listing.id} data={toListingCard(listing)} viewMode={filters.viewMode} imageLoading={index < (filters.viewMode === "grid" ? 8 : 4) ? "eager" : "lazy"} getReturnState={() => ({ scrollY: window.scrollY, pageCursors: feed.requestedCursors.length ? feed.requestedCursors : [null], filterKey, viewMode: filters.viewMode })} />)}
-          </div> : feed.status === "ready" && !feed.nextCursor ? <AccountCardEmpty message={filterCount > 0 ? "没有符合条件的账号" : "暂无可租账号"} description={filterCount > 0 ? "可以单项移除条件以逐步放宽范围，或重置全部条件：" : "当前没有可展示的号源，请稍后再来。"} onReset={filterCount > 0 ? resetFilters : undefined} onRetry={filterCount === 0 ? feed.reload : undefined}>
+          </div> : feed.status === "ready" && !feed.nextCursor ? <AccountCardEmpty message={filterCount > 0 ? "没有符合条件的账号" : "暂无可展示账号"} description={filterCount > 0 ? "可以单项移除条件以逐步放宽范围，或重置全部条件：" : "当前没有可展示的号源，请稍后再来。"} onReset={filterCount > 0 ? resetFilters : undefined} onRetry={filterCount === 0 ? feed.reload : undefined}>
             {activeTags.length > 0 && <div className="account-empty-filters" role="group" aria-label="当前已选筛选条件">
               <div className="account-empty-chips">
                 {activeTags.map((tag) => <button key={tag.id} type="button" className="market-filter-chip account-empty-chip" onClick={tag.onRemove} aria-label={`移除筛选：${tag.label}`}><span>{tag.label}</span><X size={12} aria-hidden="true" /></button>)}
