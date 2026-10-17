@@ -5,7 +5,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
 import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
-import { DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
+import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 import { validateFundingPolicy } from "./funding-policy";
 import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
@@ -199,6 +199,7 @@ export async function updatePriceDraft(
     for (const line of lines) {
       const item = itemById.get(line.itemId)!;
       if (item.gameId !== String(current.game_id)) throw invalid("Price line item belongs to another game");
+      assertDeltaResourceUnit(item.code, item.unit);
       if ((item.unit === "HAFF_BASE") !== (line.pricingKind === "HAFF_RATIO")) throw invalid("Haff items must use the haff ratio pricing kind");
       if (DELTA_RESOURCE_UNITS[item.code] && (line.pricingKind !== "FIXED_UNIT" || line.unitQuantity !== "1")) throw invalid("巴雷特每发、保险资源每基础数量计价，份量必须为1", "lines");
     }
@@ -467,13 +468,14 @@ export async function quotePreview(
 
   const lineRows = await client.query<{
     itemId: string;
+    code: string;
     unit: string;
     pricingKind: "FIXED_UNIT" | "HAFF_RATIO";
     unitQuantity: string | null;
     buyerUnitAmount: string | null;
     ownerUnitAmount: string | null;
   }>(
-    `SELECT l."item_id" AS "itemId", i."unit", l."pricing_kind" AS "pricingKind", l."unit_quantity"::text AS "unitQuantity",
+    `SELECT l."item_id" AS "itemId", i."code", i."unit", l."pricing_kind" AS "pricingKind", l."unit_quantity"::text AS "unitQuantity",
             l."buyer_unit_amount"::text AS "buyerUnitAmount", l."owner_unit_amount"::text AS "ownerUnitAmount"
        FROM "zzsh_supply"."price_line" l JOIN "zzsh_supply"."billable_item" i ON i."id" = l."item_id"
       WHERE l."price_version_id" = $1 AND l.customer_tier='STANDARD' ORDER BY l."item_id"`,
@@ -483,6 +485,7 @@ export async function quotePreview(
   for (const row of lineRows.rows) {
     const quantity = inventoryById.get(row.itemId);
     if (quantity === undefined) continue;
+    assertDeltaResourceUnit(row.code, row.unit);
     lines.push({
       customerTier: "STANDARD",
       itemId: row.itemId,

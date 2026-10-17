@@ -23,8 +23,6 @@ export type LegacyTradeIntake = {
   media: Array<{ assetId: string; byteHash: string; position: number; technicalState: string; accessClass: string }>;
   /** Reviewed extract row, kept in the batch file and the normal takeover audit, not a new runtime table. */
   sourceFieldEvidence: { canonical: string; digest: string; extractSha256: string; evidenceRef: string };
-  /** Old insurance is DAY. A separately audited card-count fact is never inferred from it. */
-  insuranceCountEvidence?: { quantity: string; canonical: string; digest: string; evidenceRef: string };
 };
 export function assertLegacyTradeSourceFields(input: LegacyTradeIntake) {
   const proof = input.sourceFieldEvidence;
@@ -35,36 +33,68 @@ export function assertLegacyTradeSourceFields(input: LegacyTradeIntake) {
     || row.deposit_amount !== input.depositYuan || row.is_full_payout !== input.isFullPayout || row.ownerRatioB !== input.ownerRatioB) throw conflict("SOURCE_FIELD_EVIDENCE_MISMATCH");
 }
 export type LegacyTradePlan = { admission: "TRADE_CANDIDATE" | "BLOCKED" | "ISOLATED"; reasons: string[]; draft: Record<string, unknown> | null; expectedMedia: ContentDeclaration["mediaBindings"]; inputDigest: string };
-export function prepareLegacyTradeIntake(input: LegacyTradeIntake, catalog: readonly TradeCatalogItem[]): LegacyTradePlan {
-  const reasons: string[] = [], snapshot = parseLegacyDisplaySnapshot(input.display);
-  try { normalizeResolutionInput(input.source); if (input.source.sourceSystem!=="legacy_mysql_restore" || input.source.sourceEntity!=="la_rental_accounts" || !/^[1-9]\d{0,23}$/.test(input.source.legacyId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.accountId)) throw invalid(); } catch { reasons.push("SOURCE_BINDING_MISMATCH"); }
-  try { assertLegacyTradeSourceFields(input); } catch { reasons.push("SOURCE_FIELD_EVIDENCE_MISMATCH"); }
-  if (!input.title.trim() || input.title.includes("历史资料待核实")) reasons.push("TITLE_REVIEW_REQUIRED");
+export type LegacyTradeDeclaration = {
+  /** Formal declaration body; null while the declaration itself cannot be constructed. */
+  declaration: Record<string, unknown> | null;
+  /** Declaration-fatal findings: the version must not be written at all. */
+  blockers: string[];
+  /** Findings owned by the publish/acceptance side (reviewed title).
+   * The formal takeover still requires full admission, so these stay enforced there; the ordinary
+   * draft chain keeps the old fact visible in the historical projection instead of inventing one. */
+  deferred: string[];
+  expectedMedia: ContentDeclaration["mediaBindings"];
+};
+/** Non-media declaration conversion shared by the batch planner, the formal takeover and the
+ * ordinary owner draft chain. Missing real media / reviewed title remain deferred facts;
+ * insurance keeps the original DAY identity and source quantity. */
+export function buildLegacyTradeDeclaration(input: LegacyTradeIntake, catalog: readonly TradeCatalogItem[]): LegacyTradeDeclaration {
+  const blockers: string[] = [], deferred: string[] = [], snapshot = parseLegacyDisplaySnapshot(input.display);
+  try { normalizeResolutionInput(input.source); if (input.source.sourceSystem!=="legacy_mysql_restore" || input.source.sourceEntity!=="la_rental_accounts" || !/^[1-9]\d{0,23}$/.test(input.source.legacyId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.accountId)) throw invalid(); } catch { blockers.push("SOURCE_BINDING_MISMATCH"); }
+  try { assertLegacyTradeSourceFields(input); } catch { blockers.push("SOURCE_FIELD_EVIDENCE_MISMATCH"); }
+  if (!input.title.trim() || input.title.includes("历史资料待核实")) deferred.push("TITLE_REVIEW_REQUIRED");
   const inventory: Array<{ itemId: string; quantity: string }> = [];
   for (const resource of snapshot.resources) {
     const entry = DELTA_LEGACY_RESOURCES.find(([field]) => field === resource.field)!;
-    const codes: readonly string[] = resource.field === "top_insure_card_num" ? ["top_insure_card_piece"] : entry[1];
+    const quantity = resource.quantity, unit = resource.unit;
+    const codes: readonly string[] = entry[1];
     const items = catalog.filter(item => codes.includes(item.code));
-    if (items.length !== 1) { reasons.push(items.length ? "AMBIGUOUS_ITEM_ID" : "CATALOG_ITEM_MISSING"); continue; }
+    if (items.length !== 1) { blockers.push(items.length ? "AMBIGUOUS_ITEM_ID" : "CATALOG_ITEM_MISSING"); continue; }
     const item = items[0]!;
-    let quantity = resource.quantity, unit = resource.unit;
-    if (resource.field === "top_insure_card_num") {
-      const proof = input.insuranceCountEvidence;
-      const expected = proof && canonicalize({ sourceSystem: input.source.sourceSystem, sourceEntity: input.source.sourceEntity, legacyId: input.source.legacyId, baseSourceDigest: input.source.sourceDigest, quantity: proof.quantity, unit: "PIECE" });
-      if (!proof || !/^(0|[1-9]\d{0,23})$/.test(proof.quantity) || proof.canonical !== expected || sha256Hex(proof.canonical) !== proof.digest || !proof.evidenceRef || proof.evidenceRef.length > 512) { reasons.push("INSURANCE_UNIT_PENDING"); continue; }
-      quantity = proof.quantity; unit = "PIECE";
-    }
-    if (quantity === null) { reasons.push("SOURCE_FIELD_MISSING"); continue; }
-    if (item.unit !== unit || item.quantityScale !== 0) { reasons.push("CATALOG_UNIT_MISMATCH"); continue; }
+    if (quantity === null) { blockers.push("SOURCE_FIELD_MISSING"); continue; }
+    if (item.unit !== unit || item.quantityScale !== 0) { blockers.push("CATALOG_UNIT_MISMATCH"); continue; }
     inventory.push({ itemId: item.id, quantity });
   }
-  if (new Set(inventory.map(item => item.itemId)).size !== inventory.length) reasons.push("AMBIGUOUS_ITEM_ID");
+  if (new Set(inventory.map(item => item.itemId)).size !== inventory.length) blockers.push("AMBIGUOUS_ITEM_ID");
   const rentalMode = snapshot.rentalMode;
-  if (rentalMode === null || rentalMode !== "ordinary" && (input.ownerRatioB === null || !/^[1-9]\d{0,9}(?:\.\d{1,8})?$/.test(input.ownerRatioB))) reasons.push("MODE_RATIO_UNPROVEN");
+  if (rentalMode === null || rentalMode !== "ordinary" && (input.ownerRatioB === null || !/^[1-9]\d{0,9}(?:\.\d{1,8})?$/.test(input.ownerRatioB))) blockers.push("MODE_RATIO_UNPROVEN");
   let depositCents: string | null = null;
-  if (input.depositYuan === null) reasons.push("DEPOSIT_POLICY_VIOLATION");
-  else { try { depositCents = legacyPlanYuanToCents(input.depositYuan); } catch { reasons.push("DEPOSIT_POLICY_VIOLATION"); } }
-  if (input.isFullPayout !== "0" && input.isFullPayout !== "1") reasons.push("FUNDING_POLICY_UNKNOWN");
+  if (input.depositYuan === null) blockers.push("DEPOSIT_POLICY_VIOLATION");
+  else { try { depositCents = legacyPlanYuanToCents(input.depositYuan); } catch { blockers.push("DEPOSIT_POLICY_VIOLATION"); } }
+  if (input.isFullPayout !== "0" && input.isFullPayout !== "1") blockers.push("FUNDING_POLICY_UNKNOWN");
+  const attributes = { ...snapshot.attributes,
+    rentalPricing: { rentalMode, ...(rentalMode === "ordinary" ? {} : { ownerRatioB: input.ownerRatioB }) },
+    owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: depositCents, declarationVersion: "legacy-trade-intake-v1" },
+    full_payout_declaration: { schema: "full-payout-declaration-v1", selected: input.isFullPayout === "1" } };
+  try { validateDeltaPublicationAttributes(attributes); } catch { blockers.push("LEVEL_OR_WINDOW_MISSING"); }
+  let body: Record<string, unknown> = { title: input.title, description: input.description, attributes, inventory: inventory.sort((a, b) => a.itemId.localeCompare(b.itemId)), skins: input.skins, entitlements: input.entitlements,
+    mediaBindings: input.media.map(m => ({ assetId: m.assetId, position: m.position })), termOptionCode: input.termOptionCode, pricingOptionCode: input.pricingOptionCode };
+  let expectedMedia: ContentDeclaration["mediaBindings"] = [];
+  if (!blockers.length) {
+    try {
+      const normalized = normalizeDeclaration({ title: input.title, description: input.description, attributes, inventory, skins: input.skins, entitlements: input.entitlements,
+        termOptionCode: input.termOptionCode, pricingOptionCode: input.pricingOptionCode, mediaBindings: input.media.map(m => ({ assetId: m.assetId, byteHash: m.byteHash, position: m.position, purpose: "ACCOUNT_DISPLAY" })) }, 2);
+      expectedMedia = normalized.mediaBindings;
+      body = { ...normalized, mediaBindings: normalized.mediaBindings.map(m => ({ assetId: m.assetId, position: m.position })) };
+    }
+    catch { blockers.push("FORMAL_DECLARATION_INVALID"); }
+  }
+  return { declaration: blockers.length ? null : body, blockers: [...new Set(blockers)], deferred: [...new Set(deferred)], expectedMedia };
+}
+/** Full admission for the formal trade: declaration facts plus the publish side (real media,
+ * reviewed title). Draft writing uses the same declaration rules,
+ * so a publish-grade gap is never a precondition of the legal draft write. */
+export function prepareLegacyTradeIntake(input: LegacyTradeIntake, catalog: readonly TradeCatalogItem[]): LegacyTradePlan {
+  const built = buildLegacyTradeDeclaration(input, catalog), reasons = [...built.blockers, ...built.deferred];
   // Each media dimension blocks separately so a review sees the real gap instead of one merged code.
   if (!input.media.length) reasons.push("MEDIA_UNAVAILABLE");
   else {
@@ -76,24 +106,7 @@ export function prepareLegacyTradeIntake(input: LegacyTradeIntake, catalog: read
     if (input.media.some(m => !/^[a-f0-9]{64}$/.test(m.byteHash))) reasons.push("MEDIA_BYTE_HASH_INVALID");
   }
   if (!input.termOptionCode) reasons.push("TERM_OPTION_UNPROVEN");
-  const attributes = { ...snapshot.attributes,
-    rentalPricing: { rentalMode, ...(rentalMode === "ordinary" ? {} : { ownerRatioB: input.ownerRatioB }) },
-    owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: depositCents, declarationVersion: "legacy-trade-intake-v1" },
-    full_payout_declaration: { schema: "full-payout-declaration-v1", selected: input.isFullPayout === "1" } };
-  try { validateDeltaPublicationAttributes(attributes); } catch { reasons.push("LEVEL_OR_WINDOW_MISSING"); }
-  let body: Record<string, unknown> = { title: input.title, description: input.description, attributes, inventory: inventory.sort((a, b) => a.itemId.localeCompare(b.itemId)), skins: input.skins, entitlements: input.entitlements,
-    mediaBindings: input.media.map(m => ({ assetId: m.assetId, position: m.position })), termOptionCode: input.termOptionCode, pricingOptionCode: input.pricingOptionCode };
-  let expectedMedia: ContentDeclaration["mediaBindings"] = [];
-  if (!reasons.length) {
-    try {
-      const normalized = normalizeDeclaration({ title: input.title, description: input.description, attributes, inventory, skins: input.skins, entitlements: input.entitlements,
-        termOptionCode: input.termOptionCode, pricingOptionCode: input.pricingOptionCode, mediaBindings: input.media.map(m => ({ assetId: m.assetId, byteHash: m.byteHash, position: m.position, purpose: "ACCOUNT_DISPLAY" })) }, 2);
-      expectedMedia = normalized.mediaBindings;
-      body = { ...normalized, mediaBindings: normalized.mediaBindings.map(m => ({ assetId: m.assetId, position: m.position })) };
-    }
-    catch { reasons.push("FORMAL_DECLARATION_INVALID"); }
-  }
-  return { admission: reasons.length ? "BLOCKED" : "TRADE_CANDIDATE", reasons: [...new Set(reasons)], draft: reasons.length ? null : body, expectedMedia, inputDigest: sha256Hex(canonicalize(input)) };
+  return { admission: reasons.length ? "BLOCKED" : "TRADE_CANDIDATE", reasons: [...new Set(reasons)], draft: reasons.length ? null : built.declaration, expectedMedia: built.expectedMedia, inputDigest: sha256Hex(canonicalize(input)) };
 }
 async function authorize(client: PoolClient, actor: TradeActor, a: PublishingAccount) {
   await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });

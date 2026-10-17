@@ -5,6 +5,7 @@ import { signConfirmation, verifyConfirmation } from "../src/order/confirmation-
 import { parseMembershipChange, membershipProjection, RENTAL_MEMBERSHIP_BENEFIT_POLICY } from "../src/auth/rental-membership";
 import { confirmationInput } from "../src/order/personal-confirmation";
 import { personalOrderInput, createPersonalReservation } from "../src/order/personal-order";
+import { createReservation } from "../src/order/order";
 
 const key={keyId:"fixture",secret:"isolated-fixture-only-not-production-key"};
 const binding={userId:"user-1",sessionId:"session-1",accountId:"account-1",versionId:"version-1",releaseId:"release-1",listingHash:"a".repeat(64),quoteDigest:"b".repeat(64)};
@@ -82,6 +83,7 @@ function personalRefsFixture(v2=true) {
     else if(sql.includes('user_identity_state'))rows=[{suspended:false,account_status:"ACTIVE",identity_status:"VERIFIED",age_status:"ADULT"}];
     else if(sql.includes('game_service_operation'))rows=[{id:"service-1",gameId:"game-1",gameCode:"delta",gameEnabled:true,serviceCode:"ACCOUNT_RENTAL",enabled:true,revision:"1"}];
     else if(sql.includes('p.funding_policy AS policy'))rows=[{policy:null}];
+    else if(sql.includes('/* current-trade-resources */'))rows=[{id:'haff',code:'haff_base',unit:'HAFF_BASE',enabled:true}];
     else if(sql.includes('zzsh_supply.game'))rows=[{enabled:true,current_release_id:input.releaseId,catalog_revision:"93"}];
     else if(sql.includes('user_rental_membership'))rows=[{tier:"STANDARD",version:"1",sourceRef:"registration:v1",updatedBy:null}];
     else if(sql.includes('SELECT p.id,p.status'))rows=[{id:"price-1",status:"SEALED",mode:"PERCENT",haff_rule:haffRule,commission_rate:"0.2",rounding_policy:"HALF_UP_CENT_V1",term_version_id:"term-1"}];
@@ -92,7 +94,7 @@ function personalRefsFixture(v2=true) {
   const controlled=createControlledConfirmationFundingReader({config:{profile:"test",provider:"fake",testOperationsEnabled:true,database:{target:"local-compose",targetProfile:"test",host:"127.0.0.1",port:55432,name:"zzsh_test_order_trade_settlement",user:"zzsh_order_trade_settlement_r"}} as never,resourceSet:"trade_settlement",runId,allowedListings:allowed});
   const legacy=async()=>({version:"v1",sourceRef:"fixture",baseDepositCents:"30000",publisherBailRequirementCents:"0",vipWaiver:false,svipWaiver:false,fullPayoutSelected:false,fullPayoutPolicyRef:"legacy",fullPayoutFeeCents:"0"});
   const options={key,gate:async()=>({publisherBail:"NOT_REQUIRED" as const,occupancy:"FREE" as const,reference:v2?`policy:price-1:fixture:trb3b1:${runId}:funding-v1:NOT_REQUIRED`:"fixture"}),fundingReader:v2?controlled:legacy};
-  const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash};
+  const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash,haffRule,term};
 }
 
 test("v2 five rule refs are signed and verified while catalog and listing hash stay intact; v1 stays compatible",async()=>{
@@ -108,6 +110,29 @@ test("v2 five rule refs are signed and verified while catalog and listing hash s
     assert.deepEqual(verified.snapshot,rebuilt.snapshot);assert.equal(verified.claims.listingHash,hash);assert.equal(rebuilt.snapshot.listingHash,hash);assert.deepEqual(f.payload,original);assert.equal(f.payload.ruleRefs.catalogRevision,v2?"93":undefined);
     f.payload.ruleRefs.agreementVersionId="agreement-2";f.rehash();await assert.rejects(()=>verifyPersonalConfirmation(f.client,f.context,f.input,issued.confirmationToken,f.options));
   }
+});
+
+test("published insurance uses the common fresh-WRITE gate while READ keeps original frozen amounts",async()=>{
+ for(const variant of ['DAY','RETIRED_PIECE','FROZEN_PIECE_ON_DAY','DISABLED_DAY','MISSING_ITEM'] as const){
+  const f=personalRefsFixture(),quote=computeQuote({priceVersionId:'price-1',mode:'PERCENT',commissionRate:'0.2',roundingPolicy:'HALF_UP_CENT_V1',haffRule:f.haffRule,conditions:{safeBoxCode:'a',vitLevel:6,bearLevel:6,termOptionCode:'d',pricingOptionCode:'s'},termOption:f.term,lines:[{itemId:'haff',quantity:'60000000',pricingKind:'HAFF_RATIO',customerTier:'STANDARD'},{itemId:'insurance',quantity:'3',pricingKind:'FIXED_UNIT',unit:variant==='RETIRED_PIECE'||variant==='FROZEN_PIECE_ON_DAY'?'PIECE':'DAY',unitQuantity:'1',buyerUnitAmount:'5'}]});assert(quote.quotable);
+  f.payload.quoteValues=quote.quote as unknown as Record<string,unknown>;f.rehash();const original=structuredClone(f.payload);
+  const base=(f.client as unknown as {query:(sql:string,values?:unknown[])=>Promise<{rows:unknown[];rowCount:number}>}).query,queries:string[]=[];
+  const client={query:async(sql:string,values?:unknown[])=>{queries.push(sql);if(sql.includes('/* current-trade-resources */')){const rows=[{id:'haff',code:'haff_base',unit:'HAFF_BASE',enabled:true},...(variant==='MISSING_ITEM'?[]:[{id:'insurance',code:variant==='RETIRED_PIECE'?'top_insure_card_piece':'df_billable_top_insure_card',unit:variant==='RETIRED_PIECE'?'PIECE':'DAY',enabled:variant!=='DISABLED_DAY'}])];return{rows,rowCount:rows.length};}if(sql.includes('AS "currentReleaseId"'))return{rows:[{id:f.account.game_id,enabled:true,currentReleaseId:f.input.releaseId}],rowCount:1};if(sql.includes('FROM zzsh_supply.price_line'))return{rows:[{item_id:'haff',pricing_kind:'HAFF_RATIO',unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null},{item_id:'insurance',pricing_kind:'FIXED_UNIT',unit_quantity:'1',buyer_unit_amount:'5',owner_unit_amount:null}],rowCount:2};return base(sql,values);}} as never;
+  assert.deepEqual(await evaluatePublication(client,f.account as never,f.version as never,f.options.gate,'READ'),[]);
+  assert.equal(queries.some(s=>s.includes('/* current-trade-resources */')),false,'READ must not reinterpret frozen insurance against current catalog');
+  const blockers=await evaluatePublication(client,f.account as never,f.version as never,f.options.gate,'WRITE');
+  assert.equal(blockers.includes('RULE_CHANGED'),variant!=='DAY',variant);assert(queries.some(s=>s.includes('/* current-trade-resources */')&&s.endsWith(' FOR SHARE')));
+  assert.deepEqual(f.payload,original,'WRITE rejection must not rewrite any frozen unit, quantity or amount');
+  if(variant!=='DAY'){
+   await assert.rejects(()=>rebuildPersonalConfirmation(client,f.context,f.input,f.options),(error:any)=>error.status===503&&error.code==='CONFIRMATION_DEPENDENCY_UNAVAILABLE');
+   await assert.rejects(()=>createReservation(client,{context:f.context,...f.input,ownerUserId:f.account.owner_user_id,gameId:f.account.game_id,holdSeconds:600,gate:f.options.gate,requestId:'req_insurance_gate'}),(error:any)=>error.status===404);
+   const oldSigned=signConfirmation({userId:f.context.userId,sessionId:f.context.sessionId,...f.input,listingHash:f.version.content_hash,quoteDigest:'b'.repeat(64)},1000,key);
+   await assert.rejects(()=>createPersonalReservation(client,f.context,oldSigned.token,{...f.options,holdSeconds:600},'req_insurance_gate'),(error:any)=>error.status===503&&error.code==='CONFIRMATION_DEPENDENCY_UNAVAILABLE');
+   assert.equal(queries.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)),false,'fresh rejection must happen before reservation writes');
+  }else{
+   const rebuilt=await rebuildPersonalConfirmation(client,f.context,f.input,f.options),line=rebuilt.snapshot.quote.lines.find(row=>row.itemId==='insurance');assert(line);assert.equal(line.unit,'DAY');assert.equal(line.quantity,'3');assert.equal(line.buyerAmount.amount,'15.00');
+  }
+ }
 });
 
 test("enabled credit snapshot is part of the existing quote digest and invalidates an old confirmation", async () => {

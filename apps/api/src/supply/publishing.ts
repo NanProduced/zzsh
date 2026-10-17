@@ -7,6 +7,7 @@ import {
   computeContentHash,
   normalizeContentPayload,
   normalizeDeclaration,
+  normalizeQuote,
   normalizeTime,
   humanText,
   type ContentDeclaration,
@@ -40,7 +41,7 @@ import {
   notFound,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
-import { normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
+import { assertDeltaResourceUnit, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import { readLegacyListing } from "./legacy-listing-read";
@@ -265,6 +266,23 @@ export async function publicationBlockers(
   if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
   if (!v.rule_release_id || game?.current_release_id !== v.rule_release_id)
     reasons.push("RULE_CHANGED");
+  if (purpose === "WRITE" && v.payload && v.origin === "NATIVE") {
+    const lines = normalizeQuote(v.payload.quoteValues).lines;
+    const ids = [...new Set(lines.map(line => line.itemId))];
+    const items = ids.length ? (await client.query<{ id: string; code: string; unit: string; enabled: boolean }>(
+      `SELECT id,code,unit,enabled /* current-trade-resources */ FROM zzsh_supply.billable_item WHERE game_id=$1 AND id=ANY($2::text[]) ORDER BY id FOR SHARE`,
+      [a.game_id, ids],
+    )).rows : [];
+    const byId = new Map(items.map(item => [item.id, item]));
+    let current = lines.length > 0 && byId.size === ids.length;
+    for (const line of lines) {
+      const item = byId.get(line.itemId);
+      if (!item?.enabled || item.unit !== line.unit) { current = false; continue; }
+      try { assertDeltaResourceUnit(item.code, item.unit); }
+      catch (error) { if (!(error instanceof SecurityApiError)) throw error; current = false; }
+    }
+    if (!current) reasons.push("RULE_CHANGED");
+  }
   if (v.rule_release_id && game?.current_release_id === v.rule_release_id) {
     try {
       const policy = await readFundingPolicyForRelease(client, v.rule_release_id);
@@ -525,6 +543,14 @@ export async function saveListingDraft(
       "entitlements",
     ),
     media = list(body.mediaBindings ?? [], "图片格式错误", "mediaBindings");
+  if (inventory.length) {
+    const items = (await client.query<{ id: string; code: string; unit: string; quantityScale: number }>(
+      `SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND id=ANY($2::text[])`,
+      [a.game_id, inventory.map(item => item.itemId)],
+    )).rows;
+    if (items.length !== inventory.length) throw invalid("库存物品不属于当前游戏", "inventory");
+    for (const item of items) assertDeltaResourceUnit(item.code, item.unit, item.quantityScale);
+  }
   for (const t of [
     "inventory_line",
     "listing_skin",
@@ -695,7 +721,9 @@ export async function readResourceIncomePreview(client: PoolClient, gameId: stri
   const lines=[],unpricedItemIds:string[]=[];let total=0n,declared=0;
   for(const item of items){
     const quantity=quantities.get(item.itemId)??null;
+    if(isRetiredDeltaInsurance(item.code)){if(quantity!==null)assertDeltaResourceUnit(item.code,item.unit);continue;}
     if(!item.enabled||item.pricingKind!=="FIXED_UNIT") {if(quantity!==null)unpricedItemIds.push(item.itemId);continue;}
+    assertDeltaResourceUnit(item.code,item.unit);
     try {
       const amounts=computeFixedUnitAmounts({...item,quantity:quantity??"0",...(item.ownerUnitAmount===null?{ownerUnitAmount:undefined}:{})},release.mode,commission);
       const ownerAmount=quantity===null?null:yuanAmountObject(amounts.ownerAmount.value);
@@ -748,6 +776,7 @@ export async function quoteListing(
   ).rows;
   if (!rows.length || rows.some((r) => !r.enabled || !r.pricingKind))
     throw invalid("申报物品不在当前可用价目中", "inventory");
+  for (const row of rows) assertDeltaResourceUnit(row.code, row.unit);
   const ents = (
     await client.query(
       `SELECT e.id AS "entitlementId",e.expiry_kind AS "expiryKind",e.value_kind,e.name,e.enabled,l.value,l.expiry_knowledge,CASE WHEN l.expires_at IS NULL THEN NULL ELSE to_char(l.expires_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "expiresAt" FROM zzsh_supply.listing_entitlement l JOIN zzsh_supply.entitlement e ON e.id=l.entitlement_id WHERE version_id=$1`,
