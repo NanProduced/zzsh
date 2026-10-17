@@ -30,3 +30,15 @@ test("missing detain column is not an implicit zero and drift from frozen select
  const p=arrange(t,"COMPLETED_UNREFUNDED");const raw=JSON.parse(p.input.settlementRecord.canonical);delete raw.detain_money;let canonical=canonicalize(raw);p.input.settlementRecord={canonical,digest:sha256Hex(canonical)};
  await assert.rejects(()=>importLegacyHistoricalLiability(p.client,actor,p.input),/LIABILITY_SOURCE_EVIDENCE_MISMATCH/);raw.detain_money="5.00";raw.return_order_money="88.00";canonical=canonicalize(raw);p.input.settlementRecord={canonical,digest:sha256Hex(canonical)};await assert.rejects(()=>importLegacyHistoricalLiability(p.client,actor,p.input),/LIABILITY_SOURCE_EVIDENCE_MISMATCH/);assert(!p.calls.some(q=>q.sql.includes("INSERT INTO zzsh_order.legacy_order_duty(")));
 });
+
+test("FIN-ORDER-2: a cancelled refund-record row must carry the original positive return; zero/absent return is not the 61 class",async t=>{
+ for(const value of ["0.00",null]){
+  const p=arrange(t,"REFUND_RECORD_EXISTS"),source={...JSON.parse(p.input.settlementRecord.canonical),return_order_money:value};delete source.detain_money;
+  const snapshot=Object.fromEntries(Object.entries(source));const parentSourceDigest=sha256Hex(canonicalize(snapshot));
+  t.mock.method(e,"readLegacyContinuationBinding",async()=>({...legacyBinding,sourceOrderStatus:5,sourceDigest:parentSourceDigest}));
+  const client={query:async(sql:string,v:unknown[]=[])=>{p.calls.push({sql,v});return {rows:sql.includes("source_snapshot AS source")?[{source:snapshot,deposit:"5700"}]:[],rowCount:0};}} as unknown as PoolClient;
+  const canonical=canonicalize({...snapshot,detain_money:"5.00"});
+  await assert.rejects(()=>importLegacyHistoricalLiability(client,actor,{...p.input,parentSourceDigest,settlementRecord:{canonical,digest:sha256Hex(canonical)}}),/LIABILITY_CLASSIFICATION_MISMATCH/);
+  assert(!p.calls.some(c=>c.sql.includes('"zzsh_iam"."audit_event"')));t.mock.restoreAll();
+ }
+});

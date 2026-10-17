@@ -32,7 +32,9 @@ export async function importLegacyHistoricalLiability(client: PoolClient, actor:
     const detained = source.is_settle;
     const expected = input.classification === "COMPLETED_UNREFUNDED" ? detained === "0" && binding.sourceOrderStatus === 4
       : input.classification === "DETAINED" ? detained === "2" && binding.sourceOrderStatus === 4
-      : input.classification === "POSTED_CONFISCATION" ? detained === "3" : binding.sourceOrderStatus === 5;
+      : input.classification === "POSTED_CONFISCATION" ? detained === "3"
+      // 61 = cancelled with a positive original return AND a refund record (cancelledPositiveReturn); zero/absent return is another class.
+      : binding.sourceOrderStatus === 5 && typeof source.return_order_money === "string" && BigInt(legacyPlanYuanToCents(source.return_order_money)) > 0n;
     if (!expected) throw conflict("LIABILITY_CLASSIFICATION_MISMATCH");
     if (input.classification === "REFUND_RECORD_EXISTS") {
       const proof = input.refundRecord; let record: Record<string, unknown> | null = null;
