@@ -1,7 +1,7 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
-import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "./legacy-listing-read";
+import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, withoutLegacyResourceNo } from "./legacy-listing-read";
 import { listV2 } from "./listing-filter-routes";
 import { lookupPublicListing, parseNumberLookupQuery } from "./public-listing-lookup";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
@@ -192,7 +192,7 @@ export async function handlePublishingRoute(
     : ACCOUNT_ROUTE.exec(path);
   if (!admin && method === "GET" && path === "/listings/lookup") {
     const lookup = parseNumberLookupQuery(query);
-    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission));
+    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail));
     sendJson(response, 200, result, requestId);
     return true;
   }
@@ -207,7 +207,7 @@ export async function handlePublishingRoute(
         options.pool,
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
-          const detail = await readPublicListing(client, a, gate, options.legacyPublicAdmission);
+          const detail = await readPublicListing(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail);
           if (!publicMatch[2]) return { detail };
           if (!Array.isArray(detail.media) || !detail.media.some((media: { assetId?: string }) => media.assetId === publicMatch[2])) throw notFound();
           const asset = await loadMediaAsset(client, publicMatch[2]);
@@ -402,11 +402,11 @@ export async function handlePublishingRoute(
       const data = await withPublicListingSnapshot(options.pool, async client => {
         const access = await authorize(client);
         const viewer = await supervisionViewer(client, context, access!);
-        if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey, options.legacyPublicAdmission), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
+        if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
         for (const key of query.keys()) if (!["queryVersion", "versionId"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported supervision detail query", key);
         const a = await readPublishingAccount(client, accountMatch[1]!);
         await authorize(client, a);
-        return readSupervision(client, a, viewer, gate, query.get("versionId"), options.legacyPublicAdmission);
+        return readSupervision(client, a, viewer, gate, query.get("versionId"), options.legacyPublicAdmission, options.legacyPublicAdmissionDetail);
       });
       sendJson(response, 200, data, requestId);
       return true;
@@ -478,9 +478,10 @@ export async function handlePublishingRoute(
               )
             ).rows[0]
           : null;
+        const historicalRead = await loadLegacyHistoricalRead(client, a.id);
         return {
           ...detail,
-          historicalRead: await loadLegacyHistoricalRead(client, a.id),
+          historicalRead: admin ? historicalRead : withoutLegacyResourceNo(historicalRead),
           history,
           previousDeclaration:
             admin && old ? await readDeclaration(client, old) : null,
@@ -519,7 +520,7 @@ export async function handlePublishingRoute(
       ).rows;
       const historical = admin ? null : await loadLegacyHistoricalReads(client, rows.map(row => row.id));
       return {
-        items: historical ? rows.map(row => ({ ...row, historicalRead: historical.get(row.id) ?? null })) : rows,
+        items: historical ? rows.map(row => ({ ...row, historicalRead: withoutLegacyResourceNo(historical.get(row.id) ?? null) })) : rows,
         nextCursor: rows.length === limit ? rows[rows.length - 1]!.id : null,
       };
     });

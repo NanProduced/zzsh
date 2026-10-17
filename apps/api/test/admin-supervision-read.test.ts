@@ -355,3 +355,15 @@ test("R1 the guarantee requirement follows the enabled mechanism, never the stal
     assert.equal(axes.eligibility, "UNCONFIRMED", "the amount comes from the credit snapshot while eligibility stays its own gate fact");
     assert.equal(axes.recordedProof.status, "NOT_REQUIRED", "a historical waiver proof record is reported as recorded material, not as today's requirement");
 });
+
+test("admin supervision keeps the old businessNo while public projections drop it", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
+    const client = { query: async (sql: string) => {
+        assert.match(sql, /^\s*SELECT/);
+        if (sql.includes("legacy_supply_map")) return { rows: [{ sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", sourceId: "34418", businessNo: "OLD-42" }] };
+        return { rows: [] };
+    } };
+    const gate: SupplyGateReader = async () => ({ occupancy: "FREE", publisherBail: "NOT_REQUIRED", reference: "fixture" });
+    const facts = await supervisionFacts(client as never, fixtureAccount, { version: null }, gate);
+    assert.deepEqual(facts.legacyNumbers, ["OLD-42"]);
+});

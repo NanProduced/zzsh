@@ -37,7 +37,7 @@ import { mountAdminSelfSettingsHandlers } from "./admin-self-settings";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
-import { loadLegacyPublicAdmission, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, type LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
+import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, assertLegacyPublicAdmissionManifestTarget, type LegacyPublicAdmission, type LegacyPublicAdmissionManifest } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
@@ -92,6 +92,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   legacyPublicAdmission?: LegacyPublicAdmission;
+  /** Optional v3 detail manifest; its index is the only READ detail path for statuses 4/5/6. */
+  legacyPublicAdmissionManifest?: LegacyPublicAdmissionManifest;
   /** Reviewed source/target coverage supplied by trusted startup, never by HTTP or environment defaults. */
   publicTradeActivityBindings?: TradeActivityBindings;
   testConfirmationFundingReader?: ConfirmationFundingReader;
@@ -707,6 +709,7 @@ export function loadAuthRuntimeConfig(
   return {
     creditGuaranteeEnabled,
     legacyPublicAdmission: loadLegacyPublicAdmission(env, workingDirectory),
+    legacyPublicAdmissionManifest: loadLegacyPublicAdmissionManifest(env, workingDirectory),
     apiOrigin,
     ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
     ...(listingSecret===undefined?{}:{listingCursorKey:{keyId:listingKeyId!,secret:listingSecret}}),
@@ -732,6 +735,9 @@ export async function mountAuthHandlers(
   assertLocalDistributionAssembly(options.distributionScope, options);
   const legacyPublicAdmission=options.legacyPublicAdmission ? parseLegacyPublicAdmission(options.legacyPublicAdmission) : undefined;
   if(legacyPublicAdmission) await assertLegacyPublicAdmissionTarget(options.pool,legacyPublicAdmission);
+  const legacyPublicAdmissionManifest=options.legacyPublicAdmissionManifest;
+  if(legacyPublicAdmissionManifest) await assertLegacyPublicAdmissionManifestTarget(options.pool,legacyPublicAdmissionManifest);
+  const legacyPublicAdmissionDetail=legacyPublicAdmissionManifest?.index;
   await preflightCreditGuarantee(options.pool);
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
@@ -1043,7 +1049,7 @@ export async function mountAuthHandlers(
     adminAuthHandler: adminWebHandler,
     adminSecurityOptions: securityOptions,
     distributionScope: options.distributionScope,
-    supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,listingCursorKey:options.listingCursorKey },
+    supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
     ...(yunxinRuntime ? {
       yunxin: {
@@ -1056,13 +1062,14 @@ export async function mountAuthHandlers(
       },
     } : {}),
   });
-  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,listingCursorKey:options.listingCursorKey});
+  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey});
   mountSupplyHandlers(app, {
     ...securityOptions,
     mediaStorage,
     supplyGateReader,
     listingCursorKey:options.listingCursorKey,
     legacyPublicAdmission,
+    legacyPublicAdmissionDetail,
   });
   mountContentHandlers(app, {
     ...securityOptions,

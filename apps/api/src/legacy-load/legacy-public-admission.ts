@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { canonicalize } from "../supply/content-hash";
@@ -96,6 +96,100 @@ export function loadLegacyPublicAdmission(env: NodeJS.ProcessEnv, workingDirecto
   const bytes = readFileSync(target);
   if (bytes.length > 8 * 1024 * 1024 || createHash("sha256").update(bytes).digest("hex") !== digest) throw new Error("LEGACY_PUBLIC_ADMISSION_DIGEST");
   return parseLegacyPublicAdmission(JSON.parse(bytes.toString("utf8")));
+}
+
+/** Runtime-only index of v3 shards for READ details. Never used by list reads. */
+export type LegacyPublicAdmissionDetailIndex = ReadonlyMap<string, LegacyPublicAdmission>;
+export type LegacyPublicAdmissionManifest = {
+  schema: "legacy-public-admission-manifest-v1";
+  shards: readonly LegacyPublicAdmission[];
+  index: LegacyPublicAdmissionDetailIndex;
+};
+
+const MANIFEST_MAX_SHARD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Loads the explicit v3 detail manifest. This is a local reviewed-file
+ * capability like the status-3 single file: only APP_PROFILE=test and a
+ * non-production process may use it, and every shard must stay inside
+ * `.secrets`. The loader does not raise the 5000-row/8-MiB parser limits.
+ */
+export function loadLegacyPublicAdmissionManifest(
+  env: NodeJS.ProcessEnv,
+  workingDirectory: string,
+): LegacyPublicAdmissionManifest | undefined {
+  const file = env.LEGACY_PUBLIC_ADMISSION_MANIFEST;
+  if (!file) return undefined;
+  if (env.APP_PROFILE !== "test" || env.NODE_ENV === "production") {
+    throw new Error("LEGACY_PUBLIC_ADMISSION_LOCAL_ONLY");
+  }
+  const base = realpathSync(resolve(workingDirectory, ".secrets"));
+  const manifestPath = realpathSync(resolve(workingDirectory, file));
+  const manifestRel = relative(base, manifestPath);
+  if (!manifestRel || manifestRel.startsWith("..") || isAbsolute(manifestRel)) {
+    throw new Error("LEGACY_PUBLIC_ADMISSION_PATH");
+  }
+  if (statSync(manifestPath).size > MANIFEST_MAX_SHARD_BYTES) {
+    throw new Error("LEGACY_PUBLIC_ADMISSION_SIZE");
+  }
+  const manifestBytes = readFileSync(manifestPath);
+  let manifest: unknown;
+  try { manifest = JSON.parse(manifestBytes.toString("utf8")); } catch { throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID"); }
+  const entry = manifest as { schema?: unknown; shards?: unknown };
+  if (!entry || typeof entry !== "object" || Array.isArray(entry) || entry.schema !== "legacy-public-admission-manifest-v1"
+    || !Array.isArray(entry.shards) || entry.shards.length === 0) {
+    throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+  }
+  const index = new Map<string, LegacyPublicAdmission>();
+  const shards: LegacyPublicAdmission[] = [];
+  let resourceKey: string | undefined;
+  for (const raw of entry.shards) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+    const shard = raw as { path?: unknown; sha256?: unknown };
+    if (typeof shard.path !== "string" || !/^[a-f0-9]{64}$/.test(String(shard.sha256))) {
+      throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+    }
+    // Shard paths are relative to the manifest (and therefore inside .secrets).
+    const target = realpathSync(resolve(dirname(manifestPath), shard.path));
+    const rel = relative(base, target);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error("LEGACY_PUBLIC_ADMISSION_PATH");
+    if (statSync(target).size > MANIFEST_MAX_SHARD_BYTES) throw new Error("LEGACY_PUBLIC_ADMISSION_SIZE");
+    const bytes = readFileSync(target);
+    if (bytes.length > MANIFEST_MAX_SHARD_BYTES) throw new Error("LEGACY_PUBLIC_ADMISSION_SIZE");
+    if (createHash("sha256").update(bytes).digest("hex") !== shard.sha256) throw new Error("LEGACY_PUBLIC_ADMISSION_DIGEST");
+    let parsed: LegacyPublicAdmission;
+    try { parsed = parseLegacyPublicAdmission(JSON.parse(bytes.toString("utf8"))); } catch { throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID"); }
+    if (parsed.schema !== "legacy-public-admission-v3") throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+    const currentResource = canonicalize(parsed.resource);
+    if (resourceKey === undefined) resourceKey = currentResource;
+    else if (resourceKey !== currentResource) throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+    for (const record of parsed.records) {
+      if (record.sourceStatus === 3 || index.has(record.accountId)) throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+      index.set(record.accountId, parsed);
+    }
+    shards.push(parsed);
+  }
+  return { schema: "legacy-public-admission-manifest-v1", shards, index };
+}
+
+/** Resolve the one detail record/shard for an account; never used for list SQL. */
+export function admissionForAccount(
+  index: LegacyPublicAdmissionDetailIndex | undefined,
+  accountId: string,
+): LegacyPublicAdmission | undefined {
+  const shard = index?.get(accountId);
+  const record = shard?.records.find(item => item.accountId === accountId);
+  if (!shard || !record) return undefined;
+  return { ...shard, records: [record] };
+}
+
+export async function assertLegacyPublicAdmissionManifestTarget(
+  pool: Pick<Pool, "query">,
+  manifest: LegacyPublicAdmissionManifest,
+): Promise<void> {
+  const first = manifest.shards[0];
+  if (!first) throw new Error("LEGACY_PUBLIC_ADMISSION_INVALID");
+  await assertLegacyPublicAdmissionTarget(pool, first);
 }
 
 export async function assertLegacyPublicAdmissionTarget(pool: Pick<Pool, "query">, admission: LegacyPublicAdmission): Promise<void> {

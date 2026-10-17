@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PoolClient } from "pg";
@@ -15,6 +15,8 @@ import {
   parseLegacyPublicAdmission,
   assertLegacyPublicAdmissionTarget,
   loadLegacyPublicAdmission,
+  loadLegacyPublicAdmissionManifest,
+  admissionForAccount,
   legacyHoldDisplayable,
   publicTextPrivacyIssues,
   type PublicDisplayCaseInput,
@@ -27,6 +29,7 @@ import {
   parseLegacyReadSnapshot,
   projectLegacyHistoricalRead,
   readLegacyListing,
+  withoutLegacyResourceNo,
 } from "../src/supply/legacy-listing-read";
 import { assertEditable, evaluatePublication, publicationBlockers } from "../src/supply/publishing";
 import { createReservation } from "../src/order/order";
@@ -196,11 +199,12 @@ test("legacy public SQL widens hold display only and keeps every other guard", (
   assert.match(mixed, /a\.legacy_hold='NONE'/);
   assert.match(mixed, /DISTINCT ON \(id\)/);
   assert.match(mixed, /priority/);
-  // Legacy search matches the displayed historical number as well as the title.
+  // Public search no longer matches or exposes the old resource number.
   const legacySearched = buildLegacyListingCandidates(legacyQuery({ q: "A-1" }), null).text;
   const mixedSearched = buildMixedListingCandidates(legacyQuery({ q: "A-1" }), null).text;
-  assert.match(legacySearched, /h\.snapshot->>'resourceNo' ILIKE/);
-  assert.match(mixedSearched, /h\.snapshot->>'resourceNo' ILIKE/);
+  assert.doesNotMatch(legacySearched, /resourceNo/);
+  assert.doesNotMatch(mixedSearched, /resourceNo/);
+  assert.match(legacySearched, /h\.source_status=3/);
   assert.match(legacySearched, /v\.title ILIKE/);
 });
 
@@ -420,4 +424,84 @@ test("the real order creation entry rejects a legacy account server side", async
     (error: { status?: number }) => error.status === 404,
     "legacy held account must not become orderable through the create entry",
   );
+});
+
+// ---------- v3 detail manifest ----------
+const sampleV3Dir = join(process.cwd(), "test/fixtures/legacy-v3-admission-sample");
+function v3Record(accountId: string, sourceStatus: 3 | 4 | 5 | 6, overrides: Record<string, unknown> = {}) {
+  return { accountId, ownerUserId: "owner_1", gameId: "game-1", observationVersionId: "version-1",
+    sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: "34418",
+    sourceDigest: "b".repeat(64), evidenceRef: EVIDENCE, sourceUpdatedAt: "2026-01-01T00:00:00.000Z",
+    snapshot: { resourceNo: "A-1" }, title: "历史资料", description: null, attributes: {},
+    displayDigest: null, sourceStatus, ...overrides };
+}
+function v3Admission(records: Array<Record<string, unknown>>) {
+  return { schema: "legacy-public-admission-v3", sourceBatchSha256: "a".repeat(64),
+    resource: { database: "review_db", oid: 123, marker: "review", runtimeRole: "review_r" }, records };
+}
+function writeAdmission(dir: string, name: string, value: unknown) {
+  const bytes = Buffer.from(JSON.stringify(value));
+  writeFileSync(join(dir, name), bytes);
+  return { path: name, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+function writeManifest(dir: string, name: string, shards: Array<{ path: string; sha256: string }>) {
+  writeFileSync(join(dir, name), JSON.stringify({ schema: "legacy-public-admission-manifest-v1", shards }));
+}
+function manifestEnv(file: string) { return { APP_PROFILE: "test", NODE_ENV: "test", LEGACY_PUBLIC_ADMISSION_MANIFEST: ".secrets/" + file }; }
+
+test("v3 detail manifest is local-only, integrity/size/cap/status/duplicate bound, and accepts the generator sample", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-admission-")), secrets = join(dir, ".secrets");
+  mkdirSync(secrets);
+  for (const name of readdirSync(sampleV3Dir)) copyFileSync(join(sampleV3Dir, name), join(secrets, name));
+  const loaded = loadLegacyPublicAdmissionManifest(manifestEnv("manifest.json"), dir);
+  assert.equal(loaded?.shards.length, 4); assert.equal(loaded?.index.size, 90);
+  const one = admissionForAccount(loaded!.index, "account_sample_001");
+  assert.equal(one?.records.length, 1); assert.equal(one?.records[0]!.sourceStatus, 4);
+  assert.equal(loadLegacyPublicAdmissionManifest({ APP_PROFILE: "test", NODE_ENV: "test" }, dir), undefined);
+  assert.throws(() => loadLegacyPublicAdmissionManifest({ ...manifestEnv("manifest.json"), APP_PROFILE: "dev" }, dir), /LOCAL_ONLY/);
+  assert.throws(() => loadLegacyPublicAdmissionManifest({ ...manifestEnv("manifest.json"), NODE_ENV: "production" }, dir), /LOCAL_ONLY/);
+  const sample = JSON.parse(readFileSync(join(secrets, "manifest.json"), "utf8"));
+  sample.shards[0].sha256 = "0".repeat(64);
+  writeFileSync(join(secrets, "manifest.bad-sha.json"), JSON.stringify(sample));
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.bad-sha.json"), dir), /DIGEST/);
+  const s3 = writeAdmission(secrets, "s3.json", v3Admission([v3Record("account_s3", 3)]));
+  writeManifest(secrets, "manifest.s3.json", [s3]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.s3.json"), dir), /INVALID/);
+  const dup = writeAdmission(secrets, "dup.json", v3Admission([v3Record("account_dup", 4)]));
+  writeManifest(secrets, "manifest.dup.json", [dup, { ...dup, path: "dup.json" }]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.dup.json"), dir), /INVALID/);
+  const v2 = v3Admission([v3Record("account_v2", 4)]);
+  delete (v2.records[0] as Record<string, unknown>).sourceStatus; (v2 as { schema: string }).schema = "legacy-public-admission-v2";
+  const f2 = writeAdmission(secrets, "v2.json", v2); writeManifest(secrets, "manifest.v2.json", [f2]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.v2.json"), dir), /INVALID/);
+  const huge = writeAdmission(secrets, "huge.json", v3Admission([v3Record("account_huge", 4, { snapshot: { resourceNo: "A-1", pad: "x".repeat(8 * 1024 * 1024) } })]));
+  writeManifest(secrets, "manifest.huge.json", [huge]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.huge.json"), dir), /SIZE/);
+  const many = v3Admission(Array.from({ length: 5001 }, (_, i) => v3Record("account_" + i, 4)));
+  const fm = writeAdmission(secrets, "many.json", many); writeManifest(secrets, "manifest.many.json", [fm]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.many.json"), dir), /INVALID/);
+  const outside = writeAdmission(dir, "outside.json", v3Admission([v3Record("account_out", 4)]));
+  writeManifest(secrets, "manifest.outside.json", [{ path: "../outside.json", sha256: outside.sha256 }]);
+  assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.outside.json"), dir), /PATH/);
+});
+
+test("v3 detail only sees the matched shard record and labels 4/5/6 without an old number", async () => {
+  const record = (status: 4 | 5 | 6) => v3Record("account_1", status, { snapshot: legacyProjectionRow({ source_status: status }).snapshot, title: legacyProjectionRow({ source_status: status }).title });
+  const labels: Record<number, string> = { 4: "已下架", 5: "已出租", 6: "待支付占位" };
+  for (const status of [4, 5, 6] as const) {
+    const admission = parseLegacyPublicAdmission(v3Admission([record(status)]));
+    const index = new Map([["account_1", admission]]);
+    const listing = await readLegacyListing(legacyProjectionClient(legacyProjectionRow({ source_status: status })), "account_1", undefined, index);
+    assert.equal(listing.displayNo, null); assert.equal(listing.canCreateOrder, false);
+    assert.equal(listing.sourceAvailabilityLabel, labels[status]);
+  }
+  const admitted = parseLegacyPublicAdmission(v3Admission([record(4)]));
+  const index = new Map([["account_1", admitted]]);
+  await assert.rejects(readLegacyListing(legacyProjectionClient(legacyProjectionRow({ source_status: 4 })), "account_other", undefined, index), (e: any) => e.status === 404);
+  await assert.rejects(readLegacyListing(legacyProjectionClient(legacyProjectionRow({ source_status: 5 })), "account_1", undefined, index), (e: any) => e.status === 404);
+});
+
+test("owner historical projection drops the old resource number", () => {
+  assert.deepEqual(withoutLegacyResourceNo({ resourceNo: "A-1", sourceStatus: 4 }), { sourceStatus: 4 });
+  assert.equal(withoutLegacyResourceNo(null), null);
 });

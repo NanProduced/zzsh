@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
+import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import { accountNumberCandidates, parseAccountNumber } from "./account-number";
 import { readPublicListing, readPublishingAccount, type SupplyGateReader } from "./publishing";
 import { conflict, invalid, notFound } from "./supply-util";
@@ -13,7 +13,7 @@ export function parseNumberLookupQuery(query: URLSearchParams) {
   return { number: parseAccountNumber(query.get("number")), gameId };
 }
 
-export async function lookupPublicListing(client: PoolClient, query: { number: string; gameId: string | null }, gate: SupplyGateReader, admission?: LegacyPublicAdmission) {
+export async function lookupPublicListing(client: PoolClient, query: { number: string; gameId: string | null }, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
   if (query.gameId) await requirePublicGameService(client, query.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
   const candidates = await accountNumberCandidates(client, query.number, query.gameId);
   // Public visibility can change; it must not silently resolve an ambiguous old
@@ -21,5 +21,5 @@ export async function lookupPublicListing(client: PoolClient, query: { number: s
   if (candidates.length > 1) throw conflict("账号编号暂无法唯一核定");
   const accountId = candidates[0];
   if (!accountId) throw notFound();
-  return readPublicListing(client, await readPublishingAccount(client, accountId), gate, admission);
+  return readPublicListing(client, await readPublishingAccount(client, accountId), gate, admission, false, "DETAIL", detailIndex);
 }

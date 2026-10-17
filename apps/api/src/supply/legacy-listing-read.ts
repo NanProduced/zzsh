@@ -7,7 +7,7 @@ import { assertGameScope, conflict, fingerprintRequest, invalid, notFound, sha25
 import { legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplayInput } from "./legacy-display-snapshot";
 import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, type ListingCursorKey } from "./listing-cursor";
 import { candidatePredicates, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD, type ListingPosition } from "./listing-candidates";
-import { evaluatePublicDisplayGuard, legacyAdmissionSql, legacyAdmissionRevision, type LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
+import { admissionForAccount, evaluatePublicDisplayGuard, legacyAdmissionSql, legacyAdmissionRevision, type LegacyPublicAdmission, type LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { ListingQueryV2 } from "./listing-filter-contract";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
@@ -233,16 +233,17 @@ export async function hasLegacyReadSnapshots(client: PoolClient, gameId: string)
   return Boolean((await client.query(`SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h JOIN zzsh_supply.rental_account a ON a.id=h.account_id WHERE a.game_id=$1 LIMIT 1`,[gameId])).rowCount);
 }
 
-export async function readLegacyListing(client: PoolClient, accountId: string, admission?: LegacyPublicAdmission) {
+export async function readLegacyListing(client: PoolClient, accountId: string, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
+  const effectiveAdmission=admissionForAccount(detailIndex,accountId)??admission;
   const values: unknown[]=[accountId];
   const param=(value:unknown)=>{values.push(value);return "$"+values.length;};
-  const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(admission,param)})${admission?.schema === "legacy-public-admission-v3" ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(admission,param,false)})` : ""})`;
+  const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(effectiveAdmission,param)})${effectiveAdmission?.schema === "legacy-public-admission-v3" ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(effectiveAdmission,param,false)})` : ""})`;
   const r=(await client.query(`SELECT a.id,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,
     d.snapshot AS display_snapshot,d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,d.source_updated_at AS display_updated_at,d.evidence_ref AS display_evidence_ref
     ${FROM} WHERE a.id=$1 AND ${VISIBLE_BASE} AND ${admitted}`,values)).rows[0];
   if(!r)throw notFound();
-  if(r.source_status!==3 && !(admission?.schema==="legacy-public-admission-v3" && [4,5,6].includes(r.source_status) &&
-    admission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
+  if(r.source_status!==3 && !(effectiveAdmission?.schema==="legacy-public-admission-v3" && [4,5,6].includes(r.source_status) &&
+    effectiveAdmission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
   // Shared runtime admission for list and detail: privacy-bearing text and
   // evidence outside the adjudicated batch fail closed without leaking facts.
   if(!evaluatePublicDisplayGuard({title:r.title,description:r.description,evidenceRef:r.evidence_ref}).ok)throw notFound();
@@ -267,6 +268,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     source:"LEGACY_READ_ONLY" as const,canCreateOrder:false as const,sourceUpdatedAt:r.source_updated_at.toISOString(),
     availability:{state:r.owner_paused?"OFFLINE":"LEGACY_READ_ONLY"},
     sourceAvailability:{state:r.source_status===3?"LISTED":r.source_status===4?"OFFLINE":r.source_status===5?"RENTED":r.source_status===6?"PENDING_PAYMENT":"UNKNOWN",asOfUtc:r.source_updated_at.toISOString()},
+    sourceAvailabilityLabel:r.source_status===4?"已下架":r.source_status===5?"已出租":r.source_status===6?"待支付占位":null,
     ...(extra ? {rentalMode:extra.rentalMode,displaySchema:extra.schema} : {}),
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:resources.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),
@@ -287,7 +289,7 @@ export function legacyListingSortLabel(sort:string,configuredLabel:string|null):
 function legacySearchPredicate(q: string | null, p: (value: unknown) => string): string[] {
   if (q === null) return [];
   const pattern = p(listingSearchPattern(q));
-  return [`(v.title ILIKE ${pattern} ESCAPE '\\' OR h.snapshot->>'resourceNo' ILIKE ${pattern} ESCAPE '\\')`];
+  return [`v.title ILIKE ${pattern} ESCAPE '\\'`];
 }
 
 export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingPosition|null,admission?:LegacyPublicAdmission) {
@@ -338,4 +340,11 @@ export async function listLegacyReadListings(client: PoolClient,q:ListingQueryV2
   for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(await readLegacyListing(client,row.id,admission));}catch(error){if((error as {status?:number}).status!==404)throw error;}}
   const more=scanned<rows.length||rows.length===200;
   return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,key):null,sort:q.sort,direction:q.direction,sortLabel:revisions.sortLabel,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:null,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+}
+
+/** Owner/user projections never expose the old resource number; admin reads keep it. */
+export function withoutLegacyResourceNo<T extends Record<string, unknown>>(row: T | null): Omit<T, "resourceNo"> | null {
+  if (!row) return null;
+  const { resourceNo: _hidden, ...rest } = row;
+  return rest;
 }

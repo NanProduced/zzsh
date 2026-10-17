@@ -47,7 +47,7 @@ test("old admission cannot authorize an added display snapshot; new digest binds
     const sql=build(q,null,approved); assert.match(sql.text,/d\.display_digest=approved\."displayDigest"/);
     assert.match(sql.text,/risk,highRiskOwner/); assert.match(sql.text,/COALESCE\(d\.snapshot->'attributes',v\.attributes\)/);
     assert.match(sql.text,/NOT u\.suspended/); assert.match(sql.text,/h\.source_status=3/);
-    assert.match(sql.text,/resourceNo/); assert.match(sql.text,/NOT EXISTS.*listing_publication/);
+    assert.doesNotMatch(sql.text,/resourceNo/); assert.match(sql.text,/NOT EXISTS.*listing_publication/);
   }
 });
 test("maintenance writer rejects malformed payload before any SQL and revoked actor before any insert",async()=>{

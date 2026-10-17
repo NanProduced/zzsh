@@ -220,7 +220,7 @@ function listingVisibility(listing: PublicListing) {
   if (listing.canCreateOrder === true && !canCreateOrder) throw new Error("Inconsistent public availability");
   const source = listing.sourceAvailability?.state;
   return { canCreateOrder, availabilityState: state, availabilityLabel: publicAvailabilityLabel(state),
-    sourceAvailabilityLabel: source ? ({ LISTED: "来源时点上架", OFFLINE: "来源时点已下架", RENTED: "来源时点已出租", PENDING_PAYMENT: "来源时点待付款", UNKNOWN: "来源状态待核" })[source] : null };
+    sourceAvailabilityLabel: source ? ({ LISTED: "来源时点上架", OFFLINE: "已下架", RENTED: "已出租", PENDING_PAYMENT: "待支付占位", UNKNOWN: "来源状态待核" })[source] : null };
 }
 
 export function toListingCard(listing: PublicListing): ListingCardData {
