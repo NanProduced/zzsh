@@ -50,7 +50,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   const store = { getSnapshot: () => identity };
   const DialogContext = React.createContext(null);
   const dialogStub = {
-    Root: ({ open, onOpenChange, children }) => open ? React.createElement(DialogContext.Provider, { value: { onOpenChange } }, children) : null,
+    Root: ({ open, onOpenChange, children }) => open || options.forceDialogMount ? React.createElement(DialogContext.Provider, { value: { onOpenChange } }, children) : null,
     Trigger: ({ children }) => children,
     Portal: ({ children }) => children,
     Overlay: () => null,

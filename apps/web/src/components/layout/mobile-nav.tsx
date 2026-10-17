@@ -24,26 +24,28 @@ const TIER_LABELS: Record<string, string> = {
   PLATINUM: "铂金会员",
   DIAMOND: "钻石会员",
   BLACK_GOLD: "黑金会员 · 终身",
-  UNKNOWN: "普通会员",
+  UNKNOWN: "资格待确认",
 };
 
 function MobileSessionEntry({ onSignIn }: { onSignIn: () => void }) {
   const session = useUserSession();
-  const [growth, setGrowth] = useState<MembershipGrowthViewState>({ status: "loading" });
+  const scope = JSON.stringify([session.status, session.userId, session.identityVersion]);
+  const [snapshot, setSnapshot] = useState<{ scope: string; state: MembershipGrowthViewState } | null>(null);
+  const growth: MembershipGrowthViewState = snapshot?.scope === scope ? snapshot.state : { status: "loading" };
 
   useEffect(() => {
     if (session.status !== "authenticated") return;
     const controller = new AbortController();
     readMyMembershipGrowth(controller.signal).then(
       (res) => {
-        if (!controller.signal.aborted) setGrowth(res);
+        if (!controller.signal.aborted) setSnapshot({ scope, state: res });
       },
       () => {
-        if (!controller.signal.aborted) setGrowth({ status: "unknown", message: "" });
+        if (!controller.signal.aborted) setSnapshot({ scope, state: { status: "error", message: "会员信息暂时无法读取" } });
       }
     );
     return () => controller.abort();
-  }, [session.status, session.userId, session.identityVersion]);
+  }, [scope, session.status]);
 
   if (session.status === "loading" || session.status === "error") {
     return (
@@ -70,7 +72,10 @@ function MobileSessionEntry({ onSignIn }: { onSignIn: () => void }) {
   const monogram = firstWord ? Array.from(firstWord).slice(0, 2).join("").toUpperCase() : null;
 
   const tier: GrowthTier = growth.status === "ready" ? growth.data.tier : "UNKNOWN";
-  const tierLabel = growth.status === "ready" ? (TIER_LABELS[growth.data.tier] ?? "普通会员") : growth.status === "loading" ? "会员读取中…" : "普通会员";
+  const tierLabel = growth.status === "ready" ? (TIER_LABELS[growth.data.tier] ?? TIER_LABELS.UNKNOWN)
+    : growth.status === "loading" ? "会员读取中…"
+    : growth.status === "permission" ? "资格读取受限"
+    : growth.status === "error" ? "资格暂时无法读取" : TIER_LABELS.UNKNOWN;
   const rollingPoints = growth.status === "ready" ? growth.data.rollingPoints : null;
 
   return (
