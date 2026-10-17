@@ -1,9 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Info } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { SkeletonBlock } from "@/components/ui/information";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { NetworkInfoError, networkFailureCopy, readNetworkInfo, type NetworkInfo, type NetworkInfoFailure } from "@/lib/network-info-client";
+import { readNetworkInfo, type NetworkInfo } from "@/lib/network-info-client";
 
 /** 浏览器时区只读自本机 Intl，与公网 IP 分开呈现；它是本机设置，不是 IP 定位结果。 */
 export function browserTimezone(): string {
@@ -15,77 +14,144 @@ export function browserTimezone(): string {
 }
 
 /**
- * 「当前会话」内的当前公网 IP：打开本区域时向第三方查询一次，表示此刻的网络出口，
- * 不是登录时记录的 IP，不写回后端，也不用于认证、授权或安全判断。
- * 查询失败只降级本行，不触碰会话事实与本机浏览器字段，也不阻塞页面其余操作。
+ * 「当前会话」内的当前网络模块：
+ * - 默认查询第三方网络出口信息（公网 IP、近似地区、运营商、网络归属等）。
+ * - 位置仅供参考，不写入后端，不用于授权或安全判断。
+ * - 额度耗尽 (429) 或降级：仅展示公网 IP 与查询时间；若无 IP 则整块隐藏，不留空白卡片或长期 Skeleton。
  */
 export function CurrentNetworkFields() {
-  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; info?: NetworkInfo; reason?: NetworkInfoFailure }>({ status: "loading" });
-  // 每次读取领一个序号；卸载时序号自增，在途的迟到结果因此自我作废，不会写回已卸载的组件。
+  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; info?: NetworkInfo }>({ status: "loading" });
+  const [copied, setCopied] = useState(false);
   const sequence = useRef(0);
-  // StrictMode 重放 effect 时复用本组件在途读取，不跨组件或会话缓存 IP。
-  const pending = useRef<Promise<NetworkInfo> | null>(null);
+  const copyTimer = useRef<number | null>(null);
 
   const load = async () => {
     const id = ++sequence.current;
     setState({ status: "loading" });
-    const request = pending.current ??= readNetworkInfo();
     try {
-      const info = await request;
-      if (sequence.current === id) setState({ status: "ready", info });
-    } catch (error) {
+      const info = await readNetworkInfo();
+      if (sequence.current === id) {
+        setState({ status: "ready", info });
+      }
+    } catch {
       if (sequence.current !== id) return;
-      setState({ status: "error", reason: error instanceof NetworkInfoError ? error.reason : "unreachable" });
-    } finally {
-      if (pending.current === request) pending.current = null;
+      // 失败（含未知异常）都整块隐藏，不铺错误文案、不留长期 Skeleton。
+      setState({ status: "error" });
     }
   };
 
   useEffect(() => {
     void load();
-    return () => { sequence.current += 1; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      sequence.current += 1;
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+    };
   }, []);
 
-  const { status, info, reason } = state;
-  const note = status === "error"
-    ? networkFailureCopy[reason ?? "unreachable"]
-    : status === "ready"
-      ? "这是打开本区域时查询到的当前网络出口，不是登录时的 IP，也不用于安全校验。"
-      : null;
-  return (
-    <div className="sec-network">
-      <div className="sec-network-row">
-        <span className="sec-network-label">当前公网 IP</span>
-        {status === "loading" ? (
-          <span className="sec-network-value"><SkeletonBlock label="正在读取当前公网 IP" lines={1} variant="text" /></span>
-        ) : (
-          <span className={"sec-network-value" + (status === "error" ? " is-pending" : "")}>{status === "ready" ? info?.ip : "暂不可用"}</span>
-        )}
-        <NetworkSourceTip />
+  const handleCopy = async (text: string) => {
+    if (!text || typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore clipboard error
+    }
+  };
+
+  const { status, info } = state;
+
+  // 失败（含 429 兜底也没拿到 IP）：整块隐藏，不留失效 ARIA 或空白卡片
+  if (status === "error") return null;
+
+  if (status === "loading") {
+    return (
+      <div className="sec-network" role="status" aria-label="正在查询当前网络">
+        <div className="sec-network-head">
+          <h4 className="sec-network-title">当前网络</h4>
+          <p className="sec-network-desc">基于当前网络出口查询，位置仅供参考。</p>
+        </div>
+        <div className="sec-network-grid">
+          <div className="sec-network-item">
+            <span className="sec-network-k"><span className="sr-only">当前</span>公网 IP</span>
+            <span className="sec-network-v sec-network-value">
+              <SkeletonBlock label="正在查询当前网络出口" lines={1} variant="text" />
+            </span>
+          </div>
+        </div>
       </div>
-      {note ? <p className="sec-network-note">{note}</p> : null}
-      {status === "error" ? <button type="button" className="button quiet button--xs network-retry" onClick={() => void load()}>重试</button> : null}
+    );
+  }
+
+  if (!info?.ip) return null;
+
+  const hasDetails = Boolean(info.details && !info.isRateLimited);
+  const details = info.details;
+  const affiliation = details?.org && details?.asn
+    ? `${details.org} / ${details.asn}`
+    : (details?.org || details?.asn || null);
+
+  return (
+    <div className="sec-network" data-rate-limited={info.isRateLimited ? "true" : undefined}>
+      <div className="sec-network-head">
+        <h4 className="sec-network-title">当前网络</h4>
+        <p className="sec-network-desc">基于当前网络出口查询，位置仅供参考。</p>
+      </div>
+
+      <div className="sec-network-grid">
+        <div className="sec-network-item">
+          <span className="sec-network-k"><span className="sr-only">当前</span>公网 IP</span>
+          <span className="sec-network-v">
+            <span className="sec-network-ip-val">{info.ip}</span>
+            <button
+              type="button"
+              className="sec-network-copy-btn"
+              aria-label="复制当前公网 IP"
+              title="复制公网 IP"
+              onClick={() => void handleCopy(info.ip)}
+            >
+              {copied ? <Check size={13} className="text-emerald-600" aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+            </button>
+            {copied ? <span className="sec-copy-feedback" role="status">已复制</span> : null}
+          </span>
+        </div>
+
+        {hasDetails && affiliation ? (
+          <div className="sec-network-item">
+            <span className="sec-network-k">网络归属</span>
+            <span className="sec-network-v">{affiliation}</span>
+          </div>
+        ) : null}
+
+        {hasDetails && details?.location ? (
+          <div className="sec-network-item">
+            <span className="sec-network-k">近似地区</span>
+            <span className="sec-network-v">{details.location}</span>
+          </div>
+        ) : null}
+
+        {hasDetails && details?.type ? (
+          <div className="sec-network-item">
+            <span className="sec-network-k">IP 类型</span>
+            <span className="sec-network-v">{details.type}</span>
+          </div>
+        ) : null}
+
+        {hasDetails && details?.isp ? (
+          <div className="sec-network-item">
+            <span className="sec-network-k">运营商</span>
+            <span className="sec-network-v">{details.isp}</span>
+          </div>
+        ) : null}
+
+        {info.queryTime ? (
+          <div className="sec-network-item">
+            <span className="sec-network-k">查询时间</span>
+            <span className="sec-network-v">{info.queryTime}</span>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
-}
-
-/** 「信息来源」：只解释这一行数据从哪来、不是什么，不写工程口径。 */
-function NetworkSourceTip() {
-  const [open, setOpen] = useState(false);
-  return <span className="sec-info">
-    <TooltipProvider delayDuration={180} skipDelayDuration={100}>
-      <Tooltip open={open} onOpenChange={setOpen}>
-        <TooltipTrigger asChild>
-          <button type="button" className="sec-info-trigger" aria-label="信息来源" onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}>
-            <Info size={13} aria-hidden="true" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="sec-info-content">
-          <strong>信息来源</strong>
-          <p>当前公网 IP 由第三方查询服务在您打开本区域时返回，只表示此刻的网络出口，不会保存到平台账号，也不作为安全凭据。该服务只提供 IP，不提供地区与运营商。浏览器时区来自您当前的浏览器设置。</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  </span>;
 }

@@ -30,6 +30,7 @@ test('header becomes opaque on first scroll but shrinks only beyond 100px',()=>{
  for(const [stage,solid,compact] of [[0,false,false],[1,true,false],[101,true,true]]){
   const {html}=render(stage);assert.ok(html.includes(`data-scrolled="${solid}"`));assert.ok(html.includes(`data-compact="${compact}"`));
  }
- assert.ok(render(0,false).html.includes('data-scrolled="true"'));
+ assert.ok(render(0,false).html.includes('data-scrolled="false"'));
+ assert.ok(render(1,false).html.includes('data-scrolled="true"'));
  const probe=render(0);for(const y of [0,1,99,100,101,500,0])probe.listener(y);assert.deepEqual(probe.updates,[0,1,1,1,101,101,0]);
 });

@@ -1,16 +1,28 @@
 "use client";
 import Link from "next/link";
-import { ChevronRight, Headphones } from "lucide-react";
-import { helpAuxCategories, helpCategories, helpCategoryLabel, type AnyHelpCategoryId } from "@/content/help/types";
+import {
+  ChevronRight,
+  Coins,
+  FileText,
+  Gamepad2,
+  Headphones,
+  MessageSquare,
+  ScrollText,
+  Shield,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
+import { helpCategories } from "@/content/help/types";
 import { HelpNavAside, HelpNavDrawer } from "./help-nav";
 import { HelpShell } from "./help-shell";
 import { LegacyHashHandler } from "./help-article-extras";
+import { SupportContactButton } from "@/components/support/support-contact-button";
 import type { HelpArticleCard, HelpNavData } from "./nav-data";
 import "./help.css";
 
+/** 分类没有独立列表页：`/help?category=x` 在服务端 redirect 到该分类第一篇，分类入口直接指向文章。 */
 export type HelpPageView =
   | { kind: "home"; featured: HelpArticleCard[] }
-  | { kind: "category"; category: AnyHelpCategoryId; articles: HelpArticleCard[] }
   | { kind: "search"; query: string; hits: HelpArticleCard[] };
 
 type HelpPageProps = {
@@ -20,87 +32,96 @@ type HelpPageProps = {
   legacyHashMap: Record<string, string>;
 };
 
-function ArticleCard({ article }: { article: HelpArticleCard }) {
-  return (
-    <li>
-      <Link className="help-article-item-link" href={`/help/${article.slug}`}>
-        <h3>{article.title}</h3>
-        <p>{article.summary}</p>
-        <span className="help-article-tags">
-          <span className="help-tag">{helpCategoryLabel(article.category)}</span>
-          {article.audience.map((a) => <span key={a} className="help-tag">{a}</span>)}
-          {article.game ? <span className="help-tag help-tag--accent">适用：{article.game}</span> : null}
-        </span>
-      </Link>
-    </li>
-  );
-}
+const homeCategoryIcons: Record<string, LucideIcon> = {
+  rental: Gamepad2,
+  publish: FileText,
+  fees: Coins,
+  account: Shield,
+  "after-sale": Headphones,
+  membership: Users,
+  agreement: ScrollText,
+};
 
-function HomeView({ featured }: { featured: HelpArticleCard[] }) {
+function HomeView({ featured, navData }: { featured: HelpArticleCard[]; navData: HelpNavData }) {
+  const agreementSlug = navData.aux.find((c) => c.id === "agreement")?.articles[0]?.slug ?? "terms-and-privacy";
+
   return (
-    <>
-      <section aria-labelledby="help-featured-title">
-        <h2 className="help-section-title" id="help-featured-title">推荐问题</h2>
-        <p className="help-section-desc">人工挑选的代表问题，也可以在顶部直接搜索帮助文档。</p>
-        <ul className="help-featured">
+    <div className="help-home">
+      {/* 6 分类入口网格：点击直接进入该分类首篇文档，三栏布局直接展示文章内容 */}
+      <nav className="help-home-categories-panel" aria-label="帮助分类">
+        {helpCategories.map((category) => {
+          const Icon = homeCategoryIcons[category.id] ?? Gamepad2;
+          const targetSlug = navData.categories.find((c) => c.id === category.id)?.articles[0]?.slug;
+          const targetHref = targetSlug ? `/help/${targetSlug}` : `/help?category=${category.id}`;
+          return (
+            <Link key={category.id} className="help-home-category-card" href={targetHref}>
+              <div className="help-home-category-icon">
+                <Icon size={20} aria-hidden="true" />
+              </div>
+              <div className="help-home-category-info">
+                <h2 className="help-home-category-title">{category.label}</h2>
+                <p className="help-home-category-desc">{category.description}</p>
+              </div>
+              <ChevronRight size={16} className="help-home-category-arrow" aria-hidden="true" />
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* 常见问题 */}
+      <section className="help-home-section" aria-labelledby="help-featured-title">
+        <div className="help-home-section-header">
+          <h2 className="help-home-section-title" id="help-featured-title">常见问题</h2>
+          <p className="help-home-section-desc">以下是大家最关心的问题，点击查看相关说明。</p>
+        </div>
+        <div className="help-home-faq-panel">
           {featured.map((article) => (
-            <li key={article.slug}>
-              <Link className="help-featured-link" href={`/help/${article.slug}`}>
-                <ChevronRight size={14} className="help-link-arrow" aria-hidden="true" />
-                <span>{article.title}<small>{article.summary}</small></span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      </section>
-      <section aria-labelledby="help-categories-title">
-        <h2 className="help-section-title" id="help-categories-title">按任务浏览</h2>
-        <p className="help-section-desc">选择与你当前任务最接近的分类。</p>
-        <div className="help-category-grid">
-          {helpCategories.map((category) => (
-            <Link key={category.id} className="help-category-card" href={`/help?category=${category.id}`}>
-              <h3>{category.label}</h3>
-              <p>{category.description}</p>
+            <Link key={article.slug} className="help-home-faq-card" href={`/help/${article.slug}`}>
+              <span className="help-home-faq-title">{article.title}</span>
+              <ChevronRight size={16} className="help-home-faq-arrow" aria-hidden="true" />
             </Link>
           ))}
         </div>
       </section>
-      <section aria-labelledby="help-agreement-title" style={{ marginTop: 34 }}>
-        <h2 className="help-section-title" id="help-agreement-title">协议与规则</h2>
-        <div className="help-category-grid">
-          {helpAuxCategories.map((category) => (
-            <Link key={category.id} className="help-category-card" href={`/help?category=${category.id}`}>
-              <h3>{category.label}</h3>
-              <p>{category.description}</p>
-            </Link>
-          ))}
-        </div>
-      </section>
-    </>
-  );
-}
 
-function CategoryView({ category, articles }: { category: AnyHelpCategoryId; articles: HelpArticleCard[] }) {
-  const meta = [...helpCategories, ...helpAuxCategories].find((c) => c.id === category);
-  return (
-    <section aria-labelledby="help-category-title">
-      <h2 className="help-section-title" id="help-category-title">{meta?.label ?? "分类"}</h2>
-      <p className="help-section-desc">{meta?.description ?? ""}</p>
-      <ul className="help-article-list">
-        {articles.map((article) => <ArticleCard key={article.slug} article={article} />)}
-      </ul>
-    </section>
+      {/* 底部协议与客服入口 */}
+      <div className="help-home-bottom-panel">
+        <Link className="help-home-bottom-card" href={`/help/${agreementSlug}`}>
+          <FileText size={18} className="help-home-bottom-icon" aria-hidden="true" />
+          <span className="help-home-bottom-title">协议与规则</span>
+          <ChevronRight size={16} className="help-home-bottom-arrow" aria-hidden="true" />
+        </Link>
+        <SupportContactButton className="help-home-bottom-card help-home-bottom-card--support">
+          <MessageSquare size={18} className="help-home-bottom-icon" aria-hidden="true" />
+          <span className="help-home-bottom-title">联系平台客服</span>
+          <ChevronRight size={16} className="help-home-bottom-arrow" aria-hidden="true" />
+        </SupportContactButton>
+      </div>
+    </div>
   );
 }
 
 function SearchView({ query, hits }: { query: string; hits: HelpArticleCard[] }) {
   return (
-    <section aria-labelledby="help-search-title">
-      <h2 className="help-section-title" id="help-search-title">搜索结果</h2>
-      <p className="help-result-summary">与 <strong>{query}</strong> 相关的帮助文档{hits.length > 0 ? `（${hits.length} 篇）` : ""}</p>
+    <section className="help-category-view" aria-labelledby="help-search-title">
+      <div className="help-category-header">
+        <h1 className="help-category-title" id="help-search-title">搜索结果</h1>
+        <p className="help-category-desc">与 <strong>{query}</strong> 相关的帮助文档{hits.length > 0 ? `（${hits.length} 篇）` : ""}</p>
+      </div>
+      <div className="help-category-divider" />
       {hits.length > 0 ? (
-        <ul className="help-article-list">
-          {hits.map((article) => <ArticleCard key={article.slug} article={article} />)}
+        <ul className="help-category-article-list">
+          {hits.map((article) => (
+            <li key={article.slug} className="help-category-article-item">
+              <Link className="help-category-article-link" href={`/help/${article.slug}`}>
+                <div className="help-category-article-content">
+                  <h2 className="help-category-article-title">{article.title}</h2>
+                  <p className="help-category-article-summary">{article.summary}</p>
+                </div>
+                <ChevronRight size={18} className="help-category-article-arrow" aria-hidden="true" />
+              </Link>
+            </li>
+          ))}
         </ul>
       ) : (
         <div className="help-empty">
@@ -108,7 +129,10 @@ function SearchView({ query, hits }: { query: string; hits: HelpArticleCard[] })
           <p>换个关键词试试，例如「押金」「提前结束」「人脸」；也可以按分类浏览，或直接联系平台客服。</p>
           <div className="help-empty-actions">
             <Link className="help-contact-cta" href="/help">浏览全部帮助</Link>
-            <Link className="help-contact-cta" href="/support"><Headphones size={16} aria-hidden="true" /><span>联系平台客服</span></Link>
+            <SupportContactButton className="help-contact-cta">
+              <Headphones size={16} aria-hidden="true" />
+              <span>联系平台客服</span>
+            </SupportContactButton>
           </div>
         </div>
       )}
@@ -116,30 +140,60 @@ function SearchView({ query, hits }: { query: string; hits: HelpArticleCard[] })
   );
 }
 
-export function HelpPage({ view, navData, query, legacyHashMap }: HelpPageProps) {
-  const breadcrumbs = view.kind === "category"
-    ? [{ label: "首页", href: "/" }, { label: "帮助中心", href: "/help" }, { label: helpCategoryLabel(view.category) }]
-    : view.kind === "search"
-      ? [{ label: "首页", href: "/" }, { label: "帮助中心", href: "/help" }, { label: "搜索结果" }]
-      : [{ label: "首页", href: "/" }, { label: "帮助中心" }];
+function HelpHeroBanner() {
   return (
-    <HelpShell breadcrumbs={breadcrumbs} title="帮助中心" description="查找租号、出租、费用与账号相关的说明。" initialQuery={query}>
-      {view.kind === "home" ? <LegacyHashHandler map={legacyHashMap} /> : null}
-      <div className="help-layout">
-        <HelpNavAside
-          data={navData}
-          activeCategory={view.kind === "category" ? view.category : undefined}
+    <div className="help-hero-banner" role="region" aria-label="帮助中心视觉横幅">
+      <picture>
+        <source
+          media="(max-width: 640px)"
+          srcSet="/images/help/help-hero-banner-mobile.png 1x, /images/help/help-hero-banner-mobile@2x.png 2x"
+          width={640}
+          height={180}
         />
-        <div className="help-main">
-          <HelpNavDrawer
-            data={navData}
-            activeCategory={view.kind === "category" ? view.category : undefined}
-          />
-          {view.kind === "home" ? <HomeView featured={view.featured} /> : null}
-          {view.kind === "category" ? <CategoryView category={view.category} articles={view.articles} /> : null}
-          {view.kind === "search" ? <SearchView query={view.query} hits={view.hits} /> : null}
+        <img
+          src="/images/help/help-hero-banner.png"
+          srcSet="/images/help/help-hero-banner.png 1x, /images/help/help-hero-banner@2x.png 2x"
+          alt="帮助中心：租号、出租与账号问题，在这里找到答案。"
+          width={1280}
+          height={220}
+          className="help-hero-banner-img"
+          loading="eager"
+        />
+      </picture>
+    </div>
+  );
+}
+
+export function HelpPage({ view, navData, query, legacyHashMap }: HelpPageProps) {
+  const isHome = view.kind === "home";
+  const breadcrumbs = view.kind === "search"
+    ? [{ label: "首页", href: "/" }, { label: "帮助中心", href: "/help" }, { label: "搜索结果" }]
+    : [{ label: "首页", href: "/" }, { label: "帮助中心" }];
+
+  return (
+    <HelpShell
+      breadcrumbs={breadcrumbs}
+      title="帮助中心"
+      description={isHome ? "租号、出租与账号问题，在这里找到答案。" : undefined}
+      initialQuery={query}
+      showPageHeading={false}
+      headingInContent={!isHome}
+      topContent={isHome ? <HelpHeroBanner /> : undefined}
+    >
+      {isHome ? <LegacyHashHandler map={legacyHashMap} /> : null}
+      {isHome ? (
+        <div className="help-layout help-layout--home">
+          <HomeView featured={view.featured} navData={navData} />
         </div>
-      </div>
+      ) : (
+        <div className="help-layout help-layout--category">
+          <HelpNavAside data={navData} />
+          <div className="help-main">
+            <HelpNavDrawer data={navData} />
+            {view.kind === "search" ? <SearchView query={view.query} hits={view.hits} /> : null}
+          </div>
+        </div>
+      )}
     </HelpShell>
   );
 }

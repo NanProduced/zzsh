@@ -8,7 +8,7 @@
 .site-desktop-nav a[aria-current] { color:var(--color-text-primary); }
 .site-desktop-nav a[aria-current]::after { content:""; position:absolute; bottom:2px; left:0; right:0; height:3px; border-radius:2px; background:var(--color-accent-brand); }
 .site-search { display:flex; align-items:center; flex:1; min-width:210px; min-height:42px; gap:8px; padding-left:10px; padding-right:4px; border-radius:6px; background:var(--color-bg-canvas); border:1px solid var(--color-border-strong); box-shadow:inset 0 1px 0 rgba(255, 255, 255, 0.05); transition:all 0.2s ease; }
-.site-search:focus-within { border-color:var(--color-focus-ring); box-shadow:0 0 0 1px var(--color-focus-ring), inset 0 1px 0 rgba(255, 255, 255, 0.08); }
+.site-search:focus-within { border-color:var(--color-focus-ring); box-shadow:0 0 0 2px var(--color-focus-ring), inset 0 1px 0 rgba(255, 255, 255, 0.08); }
 .site-search input { width:100%; min-width:0; flex:1; background:transparent; border:0; outline:none; color:var(--color-text-primary); font-size:14px; font-family:inherit; padding-block:8px; }
 .site-search input::placeholder { color:var(--color-text-secondary); font-size:14px; opacity:1; }
 .site-search input::-webkit-search-cancel-button { display:none; }
@@ -29,9 +29,141 @@
 .sheet-session-account { margin-top:12px; display:flex; flex-direction:column; gap:10px; }
 .sheet-session-actions { display:flex; flex-wrap:wrap; gap:10px; }
 .sheet-session-actions .button { flex:1 1 auto; }
+
+/* 抽屉个人信息卡片（连续面板规范） */
+.sheet-user-card {
+  margin: 14px 0 4px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sheet-user-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sheet-user-avatar {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-accent-brand);
+  background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--color-accent-brand) 25%, var(--color-border-subtle));
+}
+
+.sheet-user-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.sheet-user-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sheet-user-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-user-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sheet-user-tier-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--header-accent, #c99436);
+  background: color-mix(in srgb, var(--header-accent, #c99436) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--header-accent, #c99436) 24%, transparent);
+}
+
+.sheet-user-uid {
+  font-size: 11px;
+  color: var(--color-text-muted, var(--color-text-secondary));
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-user-points {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-user-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sheet-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 50%;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sheet-action-btn:hover {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-text-secondary);
+}
+
+.sheet-action-primary {
+  background: var(--color-bg-card);
+  font-weight: 600;
+}
+
+.sheet-action-signout {
+  color: var(--color-text-secondary);
+}
+
+.sheet-action-signout:hover {
+  color: var(--account-danger, #dc2626);
+  border-color: color-mix(in srgb, var(--account-danger, #dc2626) 30%, var(--color-border-default));
+}
 .site-header .site-publish { min-height:44px; padding-inline:14px; white-space:nowrap; }
 .site-header .mobile-menu { display:none; width:44px; height:44px; }
-.site-header[data-compact="true"] .site-header-bar { min-height:64px; padding-block:8px; box-shadow:0 10px 35px #0003; }
+.site-header[data-compact="true"] .site-header-bar { min-height:64px; padding-block:8px; background:var(--color-bg-surface); border:1px solid var(--color-border-subtle); box-shadow:0 10px 35px #0003; }
 .site-header[data-compact="true"] .site-desktop-nav { display:none; }
 .site-header[data-compact="true"] .mobile-menu { display:inline-flex; }
 .site-menu-login { margin-top:18px; }
@@ -62,6 +194,8 @@
   .site-header-bar { transition:min-height 250ms ease-out, padding 250ms ease-out, box-shadow 250ms ease-out; }
 }
 @media(max-width:1250px) { .site-header-bar { gap:16px; } .site-desktop-nav { gap:14px; } .site-header-actions { gap:6px; } .site-header .site-publish { padding-inline:10px; } }
+/* 展开搜索钮只在移动端折叠态出现：桌面端搜索框常驻，不显示第二颗搜索入口。 */
+.site-search-toggle { display:none; }
 @media(max-width:1099px),(hover:none),(pointer:coarse) {
   .site-header { height:120px; background:var(--color-bg-surface); border-bottom:0; }
   .site-header-bar { display:grid; grid-template-columns:auto 1fr; gap:8px 16px; min-height:120px; padding:8px 0; width:calc(100% - 40px); max-width:none!important; transform:none!important; border-radius:0!important; box-shadow:none!important; }
@@ -69,13 +203,20 @@
   .site-search { grid-column:1/-1; grid-row:2; width:100%; }
   .site-header-actions { justify-self:end; gap:8px; }
   .site-header .mobile-menu { display:inline-flex; }
+  .site-header .site-session { display:none; }
+  /* 移动端滚动后收起第二行搜索：只留品牌、主题、菜单和一颗展开钮。
+     搜索持有焦点或用户主动展开时不收起，回顶部自动恢复。 */
+  .site-header[data-search-collapsed="true"] { height:60px; }
+  .site-header[data-search-collapsed="true"] .site-header-bar { min-height:60px; }
+  .site-header[data-search-collapsed="true"] .site-search { display:none; }
+  .site-header[data-search-collapsed="true"] .site-search-toggle { display:inline-flex; }
   .site-footer-grid { grid-template-columns:1fr; gap:36px; }
   #account-list,#delta-section,#help,#rental-guide,#billing-guide,#publish-guide { scroll-margin-top:56px; }
 }
 @media(max-width:599px) {
   .site-header-bar { width:calc(100% - 28px); }
   .site-header .brand-logo { width:114px!important; height:38px!important; }
-  .site-header .site-publish,.site-header .site-login { display:none; }
+  .site-header .site-publish, .site-header .site-login, .site-header .site-session { display:none; }
   .site-search input { font-size:16px; }
   .site-search-clear { width:44px; }
   .site-footer { margin-top:32px; }

@@ -33,4 +33,11 @@
 .personal-invitations .invitation-error { margin:0; color:var(--account-danger); }
 .invitation-notice { margin:0; }
 .personal-invitations :is(input,button,a):focus-visible { outline:2px solid var(--account-accent); outline-offset:3px; }
+/* 分区页头：标题与说明在左、操作在右，和个人中心其它分区同一层次。
+   这里只补容器布局，不改邀请/收益的读取、口径与业务条件。 */
+.account-section-heading { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:14px; }
+.account-section-heading>div { min-width:0; }
+.account-section-heading h2 { margin:0; color:var(--color-text-primary); font-size:var(--type-section-title-size); font-weight:var(--type-section-title-weight); line-height:var(--type-section-title-leading); }
+.account-section-heading p { margin:6px 0 0; max-width:64ch; }
 @media(max-width:700px) { .invitation-workbench { grid-template-columns:minmax(0,1fr); gap:14px; }.personal-invitations { gap:20px; }.invitation-actions .button { flex:1 1 140px; }.invitation-code>strong { font-size:23px; }.invitation-earnings-link .button { width:100%; } }
+@media(max-width:599px) { .account-section-heading { flex-direction:column; align-items:stretch; }.account-section-heading .button { width:100%; } }

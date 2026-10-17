@@ -1543,7 +1543,7 @@ test("credit gauge displays only known in-range scores, including zero", async (
   }
 });
 
-test("F6: breadcrumb sits at the top of the right content column, not above both columns", async () => {
+test("continuous panel: breadcrumb sits across the full width of the main panel above sidebar and content", async () => {
   const probe = await createProbe(async () => json(emptyPage));
   try {
     const { AccountCenterFrame } = probe.center;
@@ -1553,12 +1553,12 @@ test("F6: breadcrumb sits at the top of the right content column, not above both
       breadcrumbs: [{ label: "首页", href: "/" }, { label: "个人中心", href: "/account" }, { label: "账号安全" }],
     }, React.createElement("div", { className: "account-module" }, "security content")));
 
-    const main = probe.host.querySelector(".account-center-main");
-    assert.ok(main);
-    const crumb = main.querySelector(".account-breadcrumb");
-    assert.ok(crumb, "面包屑必须由内容列自己渲染");
-    assert.equal(main.firstElementChild, crumb, "面包屑必须是右侧内容列的第一个元素，位于统一标题/操作页头之上");
-    assert.equal(probe.host.querySelector(".account-center > .account-breadcrumb"), null, "面包屑不得再停留在双栏容器顶部");
+    const center = probe.host.querySelector(".account-center");
+    assert.ok(center);
+    const crumb = center.querySelector(".account-breadcrumb");
+    assert.ok(crumb, "面包屑必须位于连续主面板顶部");
+    assert.equal(center.firstElementChild, crumb, "面包屑必须是连续主面板的第一个元素，横跨整个面板宽度");
+    assert.equal(probe.host.querySelector(".account-center-main > .account-breadcrumb"), null, "右侧正文列不再单独渲染面包屑");
     assert.equal(probe.host.querySelectorAll(".account-breadcrumb").length, 1, "同页只允许一条面包屑");
 
     const items = [...crumb.querySelectorAll("li")];

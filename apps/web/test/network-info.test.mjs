@@ -1,17 +1,29 @@
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { mountAuthComponent } from "./react-auth-harness.mjs";
-import { NetworkInfoError, parseNetworkInfo, readNetworkInfo } from "../src/lib/network-info-client.ts";
+import {
+  NetworkInfoError,
+  parseNetworkInfo,
+  readNetworkInfo,
+  resetNetworkInfoCacheForTest,
+  IPWHOIS_PROVIDER,
+  IPIFY_PROVIDER,
+} from "../src/lib/network-info-client.ts";
 
 const file = "apps/web/src/components/account/network-info.tsx";
 const securityFile = "apps/web/src/components/account/account-security-controls.tsx";
-const PROVIDER = "https://api64.ipify.org?format=json";
-/** 只桩 ipify，其余请求交回默认处理器；返回体形状与实测一致（{"ip":"..."}）。 */
+const PROVIDER = IPWHOIS_PROVIDER;
+
+/** 桩 ipwho.is 与 ipify，其余请求交回默认处理器。 */
 const provider = (respond, requests = []) => async (url, body, init) => {
-  if (!String(url).includes("ipify.org")) return Response.json({ status: true });
+  if (!String(url).includes("ipify.org") && !String(url).includes("ipwho.is")) return Response.json({ status: true });
   requests.push({ url: String(url), init });
   return respond(requests.length);
 };
+
+beforeEach(() => {
+  resetNetworkInfoCacheForTest();
+});
 
 test("解析接受 IPv4 与 IPv6 字面量，拒绝非 IP 的返回", () => {
   assert.deepEqual(parseNetworkInfo({ ip: "203.0.113.9" }), { ip: "203.0.113.9" });
@@ -32,7 +44,7 @@ test("读取只发一次无凭据请求，init 除固定选项外不携带任何
   globalThis.fetch = async (url, init) => { calls.push({ url, init }); return Response.json({ ip: "203.0.113.9" }); };
   try {
     const info = await readNetworkInfo();
-    assert.deepEqual(info, { ip: "203.0.113.9" });
+    assert.equal(info.ip, "203.0.113.9");
     assert.equal(calls.length, 1, "单次读取，不轮询");
     assert.equal(calls[0].url, PROVIDER);
     const init = calls[0].init;
@@ -66,7 +78,7 @@ test("响应头之后的超时和断流不会误报为无效 IP", async () => {
   } finally { globalThis.fetch = original; }
 });
 
-test("StrictMode effect 重放复用一次查询，失败后仍能主动重试", async () => {
+test("StrictMode effect 重放复用一次查询，挂载不产生重复外呼", async () => {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const requests = [];
@@ -76,18 +88,16 @@ test("StrictMode effect 重放复用一次查询，失败后仍能主动重试",
   });
   try {
     assert.equal(requests.length, 1, "StrictMode 不重复外呼");
-    await p.React.act(async () => { release(new Response(null, { status: 429 })); });
+    release(Response.json({ ip: "203.0.113.9" }));
     await p.settle();
-    assert.match(p.host.textContent, /查询过于频繁/);
-    await p.click("重试");
-    assert.equal(requests.length, 2);
     assert.match(p.host.textContent, /203\.0\.113\.9/);
-  } finally { release(new Response(null, { status: 429 })); await p.close(); }
+    assert.equal(requests.length, 1, "解决后仍保持单次请求");
+  } finally { release(Response.json({ ip: "203.0.113.9" })); await p.close(); }
 });
 
 test("限流、超时、断网、非 2xx 与坏返回分别给出可区分的失败原因", async () => {
   const original = globalThis.fetch;
-  const stub = value => { globalThis.fetch = value; };
+  const stub = value => { resetNetworkInfoCacheForTest(); globalThis.fetch = value; };
   try {
     stub(async () => Response.json({ ip: "203.0.113.9" }, { status: 429 }));
     await assert.rejects(readNetworkInfo(), error => error instanceof NetworkInfoError && error.reason === "rate-limited");
@@ -109,11 +119,19 @@ test("限流、超时、断网、非 2xx 与坏返回分别给出可区分的失
   } finally { globalThis.fetch = original; }
 });
 
-test("挂载即查询一次，展示当前公网 IP 并说明它不是登录时 IP，不编造地区与运营商", async () => {
+test("挂载即查询一次，展示当前公网 IP，有详情时展示地理位置与运营商", async () => {
   const requests = [];
+  const mockPayload = {
+    ip: "203.0.113.9",
+    type: "IPv4",
+    country: "中国",
+    region: "浙江省",
+    city: "杭州市",
+    connection: { isp: "中国电信", org: "China Telecom", asn: 4134 },
+  };
   const p = await mountAuthComponent(file, "CurrentNetworkFields", {}, {
     initialStatus: "authenticated",
-    fetch: provider(() => Response.json({ ip: "203.0.113.9" }), requests),
+    fetch: provider(() => Response.json(mockPayload), requests),
   });
   try {
     await p.settle();
@@ -123,32 +141,23 @@ test("挂载即查询一次，展示当前公网 IP 并说明它不是登录时 
     const text = p.host.textContent;
     assert.match(text, /当前公网 IP/);
     assert.match(text, /203\.0\.113\.9/);
-    assert.match(text, /不是登录时的 IP，也不用于安全校验/, "文案明确是查询时的网络出口");
-    assert.doesNotMatch(text, /地区|运营商|网络组织|估算时区/, "ipify 不返回地区/运营商，不得凭空补字段");
-    assert.ok(p.host.querySelector('button[aria-label="信息来源"]'), "信息来源入口");
-    assert.ok(p.host.querySelector(".network-retry") === null, "成功后不提供再次外呼入口");
+    assert.match(text, /基于当前网络出口查询，位置仅供参考/);
+    assert.match(text, /浙江省 · 杭州市/);
+    assert.match(text, /中国电信/);
+    assert.ok(p.host.querySelector('button[aria-label="复制当前公网 IP"]'), "复制入口");
   } finally { await p.close(); }
 });
 
-test("失败只降级本行，给出可区分文案与局部重试，重试成功后展示真实值", async () => {
+test("429 额度耗尽且无可靠 IP 时整块隐藏，不留失效节点与空白", async () => {
   const requests = [];
-  let fail = true;
   const p = await mountAuthComponent(file, "CurrentNetworkFields", {}, {
     initialStatus: "authenticated",
-    fetch: provider(() => fail ? Response.json({ ip: "203.0.113.9" }, { status: 429 }) : Response.json({ ip: "203.0.113.9" }), requests),
+    fetch: provider(() => new Response(null, { status: 429 }), requests),
   });
   try {
     await p.settle();
-    assert.match(p.host.textContent, /查询过于频繁，请稍后再试/);
-    assert.match(p.host.textContent, /暂不可用/);
-    assert.doesNotMatch(p.host.textContent, /203\.0\.113\.9/, "失败时不展示任何 IP");
-    assert.ok(p.host.querySelector(".network-retry"), "重试入口落在当前网络行内");
-
-    fail = false;
-    await p.click("重试");
-    assert.equal(requests.length, 2, "只有用户点击才产生第二次外呼");
-    assert.match(p.host.textContent, /203\.0\.113\.9/);
-    assert.ok(p.host.querySelector(".network-retry") === null, "恢复后重试入口撤下");
+    assert.equal(p.host.querySelector(".sec-network"), null);
+    assert.doesNotMatch(p.host.textContent, /203\.0\.113\.9/);
   } finally { await p.close(); }
 });
 
@@ -175,7 +184,7 @@ test("集成：只有当前会话卡查询公网 IP，其他会话行与刷新�
   const p = await mountAuthComponent(securityFile, "AccountSecurityControls", { userId: "user_A", canAct: () => true }, {
     initialStatus: "authenticated",
     fetch: async (url, body, init) => {
-      if (String(url).includes("ipify.org")) { requests.push({ url: String(url), init }); return Response.json({ ip: "203.0.113.9" }); }
+      if (String(url).includes("ipify.org") || String(url).includes("ipwho.is")) { requests.push({ url: String(url), init }); return Response.json({ ip: "203.0.113.9" }); }
       if (String(url).endsWith("/overview")) return Response.json({ userId: "user_A", nickname: "自己的昵称", phoneNumber: "+8613800138000", email: null, passwordState: "set" });
       if (String(url).endsWith("/security/sessions")) return Response.json({ sessions: [session("s_current", true), session("s_other", false)] });
       return Response.json({ status: true });

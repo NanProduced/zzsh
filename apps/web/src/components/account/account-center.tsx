@@ -1071,6 +1071,27 @@ export function AccountCenterFrame({
 
   return (
     <div className="account-center">
+      {/* 连续面板规范：面板顶部为横跨整个面板宽度、左右区域共用的面包屑行 */}
+      {breadcrumbs.length > 0 ? (
+        <nav className="account-breadcrumb" aria-label="当前位置">
+          <ol>
+            {breadcrumbs.map((item, index) => {
+              const isCurrent = index === breadcrumbs.length - 1;
+              return (
+                <li key={`${item.label}-${index}`} aria-current={isCurrent ? "page" : undefined}>
+                  {index > 0 ? <span className="account-breadcrumb-separator" aria-hidden="true">/</span> : null}
+                  {item.href && !isCurrent ? (
+                    <Link href={item.href} scroll={false}>{item.label}</Link>
+                  ) : (
+                    <span>{item.label}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </nav>
+      ) : null}
+
       <nav className="account-mobile-tabs" aria-label="移动端个人中心导航">
         <div className="account-mobile-tabs-grid">
           <Link
@@ -1078,7 +1099,7 @@ export function AccountCenterFrame({
             href={accountSectionHref("overview", current)}
             scroll={false}
             onClick={() => onTabClick("overview")}
-            aria-current={active === "overview" ? "page" : undefined}
+            aria-current={!mobileMoreOpen && !isMoreActive && active === "overview" ? "page" : undefined}
           >
             <House size={18} aria-hidden="true" />
             <span>总览</span>
@@ -1088,7 +1109,7 @@ export function AccountCenterFrame({
             href={accountSectionHref("membership", current)}
             scroll={false}
             onClick={() => onTabClick("membership")}
-            aria-current={active === "membership" ? "page" : undefined}
+            aria-current={!mobileMoreOpen && active === "membership" ? "page" : undefined}
           >
             <Crown size={18} aria-hidden="true" />
             <span>会员中心</span>
@@ -1098,14 +1119,14 @@ export function AccountCenterFrame({
             href={accountSectionHref("rentals", current)}
             scroll={false}
             onClick={() => onTabClick("rentals")}
-            aria-current={active === "rentals" ? "page" : undefined}
+            aria-current={!mobileMoreOpen && active === "rentals" ? "page" : undefined}
           >
             <FileText size={18} aria-hidden="true" />
             <span>租入订单</span>
           </Link>
           <button
             type="button"
-            className={`account-mobile-tab-btn ${isMoreActive ? "is-active-parent" : ""}`}
+            className={`account-mobile-tab-btn ${isMoreActive || mobileMoreOpen ? "is-active-parent" : ""}`}
             aria-expanded={mobileMoreOpen}
             aria-controls="account-mobile-more-menu"
             onClick={() => setMobileMoreOpen((prev) => !prev)}
@@ -1186,26 +1207,6 @@ export function AccountCenterFrame({
       </aside>
 
       <div className="account-center-main">
-        {/* F6：面包屑位于右侧内容列顶部，其下是各模块统一的“标题/说明＋右侧操作”页头。 */}
-        {breadcrumbs.length > 0 ? (
-          <nav className="account-breadcrumb" aria-label="当前位置">
-            <ol>
-              {breadcrumbs.map((item, index) => {
-                const isCurrent = index === breadcrumbs.length - 1;
-                return (
-                  <li key={`${item.label}-${index}`} aria-current={isCurrent ? "page" : undefined}>
-                    {index > 0 ? <span className="account-breadcrumb-separator" aria-hidden="true">/</span> : null}
-                    {item.href && !isCurrent ? (
-                      <Link href={item.href} scroll={false}>{item.label}</Link>
-                    ) : (
-                      <span>{item.label}</span>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-          </nav>
-        ) : null}
         {children}
       </div>
     </div>

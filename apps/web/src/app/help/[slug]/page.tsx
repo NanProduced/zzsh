@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { allHelpArticles, getHelpArticle } from "@/content/help";
-import { buildHelpNavData, getHelpArticleNeighbors } from "@/components/help/nav-data";
+import { buildHelpNavData, articleBreadcrumb, isLongArticle, getHelpArticleNeighbors } from "@/components/help/nav-data";
 import { HelpShell } from "@/components/help/help-shell";
 import { HelpNavAside, HelpNavDrawer } from "@/components/help/help-nav";
-import { HelpArticleAsideToc, HelpArticleBody, articleBreadcrumb } from "@/components/help/help-article";
+import { HelpArticleAsideToc, HelpArticleBody } from "@/components/help/help-article";
 import { HelpArticlePager } from "@/components/help/help-article-pager";
 
 export function generateStaticParams() {
@@ -24,16 +24,23 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
   if (!article) notFound();
   const navData = buildHelpNavData(allHelpArticles);
   const { prev, next } = getHelpArticleNeighbors(navData, article.slug);
+  const isLong = isLongArticle(article);
   return (
-    <HelpShell title={article.title} description={article.summary} breadcrumbs={articleBreadcrumb(article)}>
-      <div className="help-layout help-layout--article">
+    <HelpShell
+      title={article.title}
+      description={article.summary}
+      breadcrumbs={articleBreadcrumb(article)}
+      showPageHeading={false}
+      headingInContent={true}
+    >
+      <div className={`help-layout ${isLong ? "help-layout--article-long" : "help-layout--article-short"}`}>
         <HelpNavAside data={navData} activeCategory={article.category} activeSlug={article.slug} />
         <div className="help-main">
           <HelpNavDrawer data={navData} activeCategory={article.category} activeSlug={article.slug} />
           <HelpArticleBody article={article} />
           <HelpArticlePager prev={prev} next={next} />
         </div>
-        <HelpArticleAsideToc article={article} />
+        {isLong ? <HelpArticleAsideToc article={article} /> : null}
       </div>
     </HelpShell>
   );

@@ -40,21 +40,31 @@ type NavProps = {
 
 function NavGroup({ group, activeCategory, activeSlug, onNavigate }: { group: HelpNavCategory; activeCategory?: AnyHelpCategoryId; activeSlug?: string; onNavigate?: () => void }) {
   const Icon = categoryIcons[group.id] ?? ListTree;
-  const expanded = activeCategory === group.id;
+  const isCurrentCategory = activeCategory === group.id;
+  // 文章列表仅在具体文章页展开；分类页仅展示分类层级，避免与正文文章列表重复
+  const shouldExpandArticles = Boolean(activeSlug) && isCurrentCategory;
+  const targetHref = group.articles[0] ? `/help/${group.articles[0].slug}` : `/help?category=${group.id}`;
   return (
     <li className="help-nav-category">
       <Link
         className="help-nav-category-link"
-        href={`/help?category=${group.id}`}
-        aria-current={expanded && !activeSlug ? "page" : undefined}
-        aria-expanded={group.articles.length > 0 ? expanded : undefined}
+        href={targetHref}
+        aria-current={isCurrentCategory && !activeSlug ? "page" : undefined}
+        aria-expanded={group.articles.length > 0 ? shouldExpandArticles : undefined}
         onClick={onNavigate}
       >
         <Icon size={17} className="help-nav-icon" aria-hidden="true" />
         <span>{group.label}</span>
-        {group.articles.length > 0 ? <ChevronRight size={14} className="help-nav-chevron" aria-hidden="true" style={expanded ? { transform: "rotate(90deg)" } : undefined} /> : null}
+        {group.articles.length > 0 ? (
+          <ChevronRight
+            size={14}
+            className="help-nav-chevron"
+            aria-hidden="true"
+            style={shouldExpandArticles ? { transform: "rotate(90deg)" } : undefined}
+          />
+        ) : null}
       </Link>
-      {expanded && group.articles.length > 0 ? (
+      {shouldExpandArticles && group.articles.length > 0 ? (
         <ul className="help-nav-articles">
           {group.articles.map((article) => (
             <li key={article.slug}>

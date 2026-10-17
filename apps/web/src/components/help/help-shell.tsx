@@ -6,12 +6,24 @@ import { stripHelpSearchQuery } from "./help-url";
 import { isBackgroundKeyboardEvent } from "./keyboard-scope";
 
 /** 帮助中心统一外壳：复用 ServiceShell，搜索切换为文档检索 */
-export function HelpShell({ children, breadcrumbs, title, description, initialQuery = "" }: {
+export function HelpShell({
+  children,
+  breadcrumbs,
+  title,
+  description,
+  initialQuery = "",
+  showPageHeading = true,
+  headingInContent = false,
+  topContent,
+}: {
   children: ReactNode;
   breadcrumbs: readonly BreadcrumbItem[];
   title: string;
   description?: string;
   initialQuery?: string;
+  showPageHeading?: boolean;
+  headingInContent?: boolean;
+  topContent?: ReactNode;
 }) {
   const router = useRouter();
   // "/" 或 Ctrl/⌘+K 聚焦帮助搜索框；输入控件、弹窗/菜单/浮层、已处理事件与输入法组合不拦截
@@ -53,6 +65,9 @@ export function HelpShell({ children, breadcrumbs, title, description, initialQu
       title={title}
       description={description}
       initialQuery={initialQuery}
+      showPageHeading={showPageHeading}
+      headingInContent={headingInContent}
+      topContent={topContent}
       onSearch={(value) => {
         const trimmed = value.trim();
         router.push(trimmed ? `/help?q=${encodeURIComponent(trimmed)}` : "/help");

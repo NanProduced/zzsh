@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button, Drawer } from "@heroui/react";
 import useEmblaCarousel from "embla-carousel-react";
-import { LayoutGrid, List, RotateCw, SlidersHorizontal, X } from "lucide-react";
+import { LayoutGrid, List, QrCode, RotateCw, SlidersHorizontal, X } from "lucide-react";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
 import { AccountCardEmpty } from "@/components/delta/account-card-empty";
@@ -18,6 +18,7 @@ import {
   listingFiltersUrl,
   listingRequestBudget,
   listingRequestBudgetMessage,
+  listingUrlRejectedValues,
   parseListingFilters,
   reconcileListingFilters,
   resourceInputFromBase,
@@ -54,15 +55,27 @@ function DeltaBanner() {
         <div className="market-banner-track">
           <div className="market-banner-slide" role="group" aria-roledescription="幻灯片" aria-label="三角洲行动资源账号租赁">
             <Link className="market-poster-link" href="#account-list" aria-label="浏览三角洲资源账号">
-              <img src="/art/zhouzhou/delta-section-banner-poster-v3.png" alt="" fetchPriority="high" />
+              <img src="/art/zhouzhou/delta-section-banner-poster-v3@1080.webp" srcSet="/art/zhouzhou/delta-section-banner-poster-v3@1080.webp 1080w, /art/zhouzhou/delta-section-banner-poster-v3@1620.webp 1620w, /art/zhouzhou/delta-section-banner-poster-v3.png 2172w" sizes="(max-width: 599px) 92vw, (max-width: 1023px) 96vw, 1056px" alt="" fetchPriority="high" />
             </Link>
           </div>
         </div>
       </div>
     </div>
     <div className="market-contact-templates" aria-label="联系二维码">
-      <img src="/art/zhouzhou/group-qr-card-v3.png" alt="玩家交流群二维码暂未配置" />
-      <img src="/art/zhouzhou/cooperation-qr-card-v3.png" alt="合作咨询二维码暂未配置" />
+      <div className="market-contact-card">
+        <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 799px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
+        <div className="market-qr-placeholder" aria-hidden="true">
+          <QrCode size={16} className="market-qr-placeholder-icon" />
+          <span>待配置</span>
+        </div>
+      </div>
+      <div className="market-contact-card">
+        <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 799px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
+        <div className="market-qr-placeholder" aria-hidden="true">
+          <QrCode size={16} className="market-qr-placeholder-icon" />
+          <span>待配置</span>
+        </div>
+      </div>
     </div>
   </div>;
 }
@@ -304,8 +317,11 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
       initialRestoreDone.current = true;
       const address = listingFiltersUrl(reconciled);
       const budget = listingRequestBudget(reconciled, metadata.data, null);
+      // 只有真的丢掉/改写了用户显式指定的可识别参数时才提示；补默认游戏、补默认排序、
+      // 省掉与默认值相同的 sort/direction 都属静默规范化，不能误报“参数不可用”。
+      const rejected = listingUrlRejectedValues(searchParamsRecord(window.location.search), filters);
       if (budget) setRecoveryNotice(listingRequestBudgetMessage(budget));
-      else if (window.location.pathname + window.location.search !== address && !changed) setRecoveryNotice("链接中的部分参数不可用，已保留仍合法的筛选条件。");
+      else if (rejected.length > 0) setRecoveryNotice("链接中的部分参数不可用，已保留仍合法的筛选条件。");
       if (window.location.pathname === "/accounts" && window.location.pathname + window.location.search !== address) window.history.replaceState(window.history.state, "", address);
       const snapshot = consumeAccountReturnSnapshot(address, listingFilterKey(reconciled, metadata.data));
       if (snapshot) setReturnSnapshot(snapshot);

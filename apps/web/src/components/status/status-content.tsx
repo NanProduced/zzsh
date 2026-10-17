@@ -1,8 +1,9 @@
 "use client";
 
 import { useId } from "react";
-import { ArrowRight, RotateCw } from "lucide-react";
+import { ArrowRight, Headphones, RotateCw } from "lucide-react";
 import styles from "./status-page.module.css";
+import { SupportContactButton } from "@/components/support/support-contact-button";
 
 export type StatusKind = "not-found" | "unavailable" | "forbidden";
 
@@ -44,9 +45,9 @@ export function StatusContent({ kind, onRetry }: { kind: StatusKind; onRetry?: (
         {kind === "not-found" ? <a className={styles.primary} href="/accounts">浏览账号</a>
           : kind === "forbidden" ? <a className={styles.primary} href="/account">返回个人中心</a>
             : onRetry ? <button type="button" className={styles.primary} onClick={onRetry}><RotateCw size={18} aria-hidden="true" />重新加载</button> : null}
-        <a className={styles.secondary} href={kind === "forbidden" ? "/support" : "/"}>
-          {kind === "forbidden" ? "联系客服" : "返回首页"}
-        </a>
+        {kind === "forbidden"
+          ? <SupportContactButton className={styles.secondary}><Headphones size={17} aria-hidden="true" />联系客服</SupportContactButton>
+          : <a className={styles.secondary} href="/">返回首页</a>}
       </div>
       <a className={styles.help} href="/help">{kind === "not-found" ? "前往帮助中心" : "查看帮助"}<ArrowRight size={17} aria-hidden="true" /></a>
     </div>

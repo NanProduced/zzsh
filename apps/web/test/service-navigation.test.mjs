@@ -19,11 +19,12 @@ test('mobile sign-in waits for the sheet to release focus and returns to its tri
   const code = ts.transpileModule(readFileSync(new URL('../src/components/layout/mobile-nav.tsx', import.meta.url), 'utf8'), { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
   const refs = [], events = [], exports = {};
   new Function('require', 'exports', code)(name => {
-    if (name === 'react') return { ...React, useState: () => [true, () => {}], useRef: value => { const ref = { current: value }; refs.push(ref); return ref; } };
+    if (name === 'react') return { ...React, useState: () => [true, () => {}], useEffect: () => {}, useRef: value => { const ref = { current: value }; refs.push(ref); return ref; } };
     if (name === '@radix-ui/react-dialog') return Object.fromEntries(['Root', 'Trigger', 'Portal', 'Overlay', 'Content', 'Close', 'Title', 'Description'].map(key => [key, key]));
     if (name.includes('auth-overlay-provider')) return { useAuthOverlay: () => ({ open: () => events.push('auth-open') }) };
     if (name.includes('user-session-provider')) return { useUserSession: () => ({ status: 'guest' }) };
     if (name.includes('service-navigation')) return { serviceLinks };
+    if (name.includes('membership-growth-client')) return { readMyMembershipGrowth: () => Promise.resolve({ status: 'unknown' }) };
     if (name.includes('brand-logo')) return { BrandLogo: () => null };
     if (name === 'next/link') return { default: () => null };
     return require(name);

@@ -173,6 +173,36 @@ function conditionsFromUrl(value: string | null): ListingFilterConditions {
   }
 }
 
+/**
+ * 规范化是否真的丢掉了用户显式指定的可识别参数值。
+ *
+ * 只回答“有没有东西被拒绝/改写”，不回答“地址要不要补默认值”：
+ * 补默认游戏、补默认排序、把与默认值相同的 direction/sort 从地址里省掉、
+ * 以及忽略无法识别的多余 query，都不算拒绝——这些情况应当静默完成。
+ * 真正被拒绝或改写的值（非法 sort/direction/game、无法解析的 filters 等）
+ * 才会出现在返回值里，供界面给出准确提示。
+ */
+export function listingUrlRejectedValues(
+  input: Record<string, string | string[] | undefined>,
+  filters: ListingFilters,
+): string[] {
+  const rejected: string[] = [];
+  const raw = (key: string) => text(input[key]);
+  const game = raw("game");
+  if (game && filters.game !== game) rejected.push("game");
+  const sort = raw("sort");
+  if (sort && filters.sort !== sort) rejected.push("sort");
+  const direction = raw("direction");
+  if (direction && filters.direction !== direction) rejected.push("direction");
+  const coreItemId = raw("coreItemId");
+  if (coreItemId && filters.coreItemId !== coreItemId) rejected.push("coreItemId");
+  const q = raw("q");
+  if (q && filters.q !== q) rejected.push("q");
+  const conditions = raw("filters");
+  if (conditions && Object.keys(filters.filters).length === 0) rejected.push("filters");
+  return rejected;
+}
+
 export function parseListingFilters(input: Record<string, string | string[] | undefined>): ListingFilters {
   const game = text(input.game);
   const cursor = text(input.cursor);

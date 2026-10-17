@@ -28,7 +28,7 @@ test('carousel keeps automatic rotation and manual controls without play/pause b
  for(const state of [{0:true},{4:true},{5:true},{6:false},{1:false}]){const q=setup(state);q.effects.forEach(fn=>fn());assert.equal(q.timers.length,0);}
 });
 
-test("five complete posters keep correct copy and remove legacy foregrounds",()=>{ const html=renderToStaticMarkup(setup().tree); assert.equal((html.match(/class="poster-sheet"/g)||[]).length,5); assert.ok(!html.includes("hero-character")); assert.ok(html.includes("洲洲商行 · 游戏账号服务")); assert.ok(html.includes("5 / 5")); });
+test("five complete posters keep correct copy and responsive default images",()=>{ const html=renderToStaticMarkup(setup().tree); assert.equal((html.match(/class="poster-sheet"/g)||[]).length,5); assert.ok(!html.includes("hero-character")); assert.ok(html.includes("洲洲商行 · 游戏账号服务")); assert.ok(html.includes("5 / 5")); assert.ok(html.includes("poster-delta@810.webp 810w")); assert.ok(html.includes('sizes="(max-width: 599px) 92vw, (max-width: 1023px) 476px, 804px"')); });
 
 // X-R1-01: when the public carousel API arrives after manual navigation, the
 // rebuilt engine and the React projection must agree (reviewer probe used the
@@ -67,6 +67,8 @@ test('X-R1-01: late API slides rebuild to a consistent engine/React index after 
   assert.equal(fixture.selected,0,'engine actually moved to the first API slide');
   assert.equal(carousel.getAttribute('data-current-slide'),'1','React mirrors the engine');
   assert.equal(carousel.getAttribute('data-source'),'api');
+  assert.equal(host.querySelector('.poster-sheet').getAttribute('srcset'),null,'API media must not borrow a brand poster srcset');
+  assert.equal(host.querySelector('.poster-sheet').getAttribute('sizes'),null);
   const slides=[...host.querySelectorAll('.hero-slide')];
   assert.equal(slides[0].getAttribute('aria-hidden'),'false');assert.equal(slides[0].hasAttribute('inert'),false);
   assert.equal(slides[1].getAttribute('aria-hidden'),'true');assert.equal(slides[1].hasAttribute('inert'),true);

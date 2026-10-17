@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Check, Info, Link2, TriangleAlert } from "lucide-react";
+import { Check, ChevronRight, Info, Link2, ListTree, TriangleAlert } from "lucide-react";
 
 /** 页内目录：滚动同步选中当前章节；桌面右栏与中屏内联两处复用 */
 export function HelpToc({ sections, variant }: { sections: readonly { id: string; title: string }[]; variant: "aside" | "inline" }) {
@@ -23,31 +23,34 @@ export function HelpToc({ sections, variant }: { sections: readonly { id: string
   }, [sections]);
 
   const list = (
-    <ol>
-      {sections.map((section, index) => (
+    <ul className="help-toc-list">
+      {sections.map((section) => (
         <li key={section.id}>
           <a href={`#${section.id}`} aria-current={current === section.id ? "true" : undefined}>
-            {index + 1}. {section.title}
+            {section.title}
           </a>
         </li>
       ))}
-    </ol>
+    </ul>
   );
 
   if (variant === "inline") {
     return (
       <details className="help-toc-inline">
-        <summary>本页目录</summary>
-        <nav aria-label="本页目录">{list}</nav>
+        <summary className="help-toc-inline-summary">
+          <ListTree size={15} aria-hidden="true" />
+          <span>本文目录</span>
+          <ChevronRight size={14} className="help-toc-inline-arrow" aria-hidden="true" />
+        </summary>
+        <nav aria-label="本文目录">{list}</nav>
       </details>
     );
   }
   return (
-    <div className="help-toc">
+    <aside className="help-toc">
       <h2 className="help-toc-heading">本页内容</h2>
-      <nav aria-label="本页目录">{list}</nav>
-      <HelpCopyLink />
-    </div>
+      <nav aria-label="本页内容">{list}</nav>
+    </aside>
   );
 }
 

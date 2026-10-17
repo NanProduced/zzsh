@@ -335,7 +335,7 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
           <div className="auth-dialog-heading"><Dialog.Close className="icon-button" aria-label="关闭认证窗口"><X size={20} /></Dialog.Close></div>
           <div className="auth-dialog-layout">
             <aside className="auth-brand-panel" aria-label="洲洲品牌"><img className="auth-brand-scene auth-art-light" src="/art/zhouzhou/auth-light.webp" alt="洲洲陪你一起游戏"/><img className="auth-brand-scene auth-art-dark" src="/art/zhouzhou/auth-dark.webp" alt="洲洲在这里等你"/><div className="auth-brand-copy"><BrandLogo height={32}/><p>玩得更远，<br/>一直有洲洲</p></div></aside>
-            <div className="auth-dialog-form"><AuthForm next={next} contextLabel={intentLabel(next)} inviteCode={inviteCode} pendingWrite={pendingWrite} onSuccess={finish} /></div>
+            <div className="auth-dialog-form"><AuthForm next={next} inviteCode={inviteCode} pendingWrite={pendingWrite} onSuccess={finish} /></div>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

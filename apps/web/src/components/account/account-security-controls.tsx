@@ -2,7 +2,21 @@
 import Link from "next/link";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ChevronDown, Laptop, Monitor, Smartphone, Tablet, X, type LucideIcon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  HelpCircle,
+  Laptop,
+  LockKeyhole,
+  Mail,
+  Monitor,
+  MoreHorizontal,
+  RotateCw,
+  Smartphone,
+  Tablet,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { authErrorMessage, webAuthRequest, WebAuthError } from "@/lib/web-auth-request";
 import { maskPhone } from "../auth/auth-form";
@@ -18,15 +32,18 @@ type Pending = { action: Action | "nickname" | "sessions" | "account-cancel"; op
 type RevokeTarget = { scope: Scope; sessionId?: string; rows: { label: string; detail: string }[] };
 export type SecurityNicknameDraft = { current: { userId: string; value: string } | null };
 export type SecurityPendingWrite = { current: { userId: string; intent: Pending; accepted: boolean; target: string } | null };
-// 昵称编辑已迁往总览「编辑资料」入口；本页只认领自己仍负责的写意图（密码/换绑/会话撤销）。
+
 const SECURITY_ACTIONS = new Set(["password", "email", "phone", "sessions"]);
 type Props = { userId: string; canAct: () => boolean; pendingWrite?: SecurityPendingWrite };
 
 const beijing = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Shanghai" });
 /** 设计稿采用 2026.10.13 09:12 的点分紧凑式；用 formatToParts 组装，避免随 locale 漂回年月日。 */
-const sessionTime = (value: string) => { const parts = Object.fromEntries(beijing.formatToParts(new Date(value)).map(part => [part.type, part.value])); return `${parts.year}.${parts.month}.${parts.day} ${parts.hour}:${parts.minute}`; };
+const sessionTime = (value: string) => {
+  const parts = Object.fromEntries(beijing.formatToParts(new Date(value)).map(part => [part.type, part.value]));
+  return `${parts.year}.${parts.month}.${parts.day} ${parts.hour}:${parts.minute}`;
+};
 
-/** 找回邮箱只做展示脱敏；能否算有效找回方式由服务端 overview.email 决定（未验证与内部占位地址已被排除）。 */
+/** 找回邮箱只做展示脱敏；能否算有效找回方式由服务端 overview.email 决定。 */
 export function maskRecoveryEmail(value: string): string {
   const at = value.lastIndexOf("@");
   const local = at < 0 ? value : value.slice(0, at);
@@ -35,12 +52,9 @@ export function maskRecoveryEmail(value: string): string {
 
 /**
  * 设备名称只是浏览器自报 UA 的保守展示派生，不是可信设备证明。
- * ponytail: 只认最常见的标记，识别不出就回退；要更细的型号应接服务端投影，不在前端造 UA 解析器。
- *
- * 缺值语义三分，不混用（IM-07／设计 R2）：
- *   missing      登录时没有 UA 记录 → 其他会话写「设备信息未知」，登录时记录详情写「登录时未记录客户端信息」；
- *   unrecognized 有 UA 但认不出     → 「客户端未识别」，不猜系统、不猜浏览器；
- *   known        保守派生成功       → 系统 · 浏览器 ＋ 设备类型。
+ * missing: 登录时没有 UA 记录
+ * unrecognized: 有 UA 但认不出
+ * known: 保守派生成功
  */
 export type ClientInfo = {
   record: "missing" | "unrecognized" | "known";
@@ -55,7 +69,6 @@ export function describeClient(userAgent: string | null | undefined): ClientInfo
   const ua = userAgent?.trim() ?? "";
   if (!ua) return { record: "missing", label: "设备信息未知", kind: "无法确认", os: null, browser: null, device: "unknown" };
   const os = /Windows/i.test(ua) ? "Windows" : /iPhone|iPod/i.test(ua) ? "iPhone" : /iPad/i.test(ua) ? "iPad" : /Android/i.test(ua) ? "Android" : /Mac OS X/i.test(ua) ? "macOS" : /CrOS/i.test(ua) ? "ChromeOS" : /Linux/i.test(ua) ? "Linux" : null;
-  // iOS 上的第三方内核都以 Safari 结尾，必须先认它们自己的标记，否则会误报 Safari。
   const browser = /CriOS\//.test(ua) ? "Chrome" : /FxiOS\//.test(ua) ? "Firefox" : /EdgiOS\//.test(ua) ? "Edge" : /OPiOS\//.test(ua) ? "Opera" : /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : null;
   if (!os && !browser) return { record: "unrecognized", label: "客户端未识别", kind: "无法确认", os: null, browser: null, device: "unknown" };
   return {
@@ -68,13 +81,11 @@ export function describeClient(userAgent: string | null | undefined): ClientInfo
   };
 }
 
-/** 设备类线性图标只做“这是哪一类设备”的视觉提示，未知就用中性窗口轮廓，不冒充已知设备。 */
 export const clientIcon = (client: ClientInfo): LucideIcon =>
   client.record !== "known" ? Monitor : client.device === "tablet" ? Tablet : client.device === "mobile" ? Smartphone : Laptop;
 
 const workflowTitle = (action: Action) => action === "password" ? "设置或修改密码" : action === "email" ? "绑定或更换邮箱" : "换绑手机号";
 
-/** 会话 DTO 无运行时保障；坏合同必须是明确的读取失败，既不能崩整页，也不能退化成空列表。 */
 export function parseSessions(payload: unknown): Session[] {
   const rows = (payload as { sessions?: unknown } | null)?.sessions;
   if (!Array.isArray(rows)) throw new Error("Session list unconfirmed");
@@ -99,8 +110,10 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
   const [sessionsError, setSessionsError] = useState("");
   const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
+
   const inheritedWrite = pendingWrite?.current?.userId === userId && SECURITY_ACTIONS.has(pendingWrite.current.intent.action) ? pendingWrite.current : null;
-  // F2：共享容器里同主体的昵称未决写不由本页负责恢复；只呈现说明与返回恢复入口，不覆盖/不清除/不重新生成。
   const foreignWrite = pendingWrite?.current?.userId === userId && !SECURITY_ACTIONS.has(pendingWrite.current.intent.action) ? pendingWrite.current : null;
   const inheritedAction = inheritedWrite?.intent.action;
   const [action, setAction] = useState<Action | null>(inheritedAction && ["password", "email", "phone"].includes(inheritedAction) ? inheritedAction as Action : null);
@@ -126,30 +139,50 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
   const currentProps = useRef({ userId, canAct }); currentProps.current = { userId, canAct };
   const writeLock = useRef(Boolean(inheritedWrite));
   const authInvalidated = useRef(false);
+
+  useEffect(() => {
+    if (!moreMenuOpen) return;
+    const handleDocClick = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setMoreMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMoreMenuOpen(false);
+    };
+    document.addEventListener("click", handleDocClick);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("click", handleDocClick);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [moreMenuOpen]);
+
   const retainWrite = (intent: Pending | null, knownAccepted = false) => {
     if (!pendingWrite) return;
     const slot = pendingWrite.current;
-    // F2：另一类未决写（昵称）不属于本页，既不覆盖也不清除。
     if (slot && slot.userId === userId && !SECURITY_ACTIONS.has(slot.intent.action)) return;
     pendingWrite.current = intent ? { userId, intent, accepted: knownAccepted, target } : null;
   };
-  // F2：共享容器存在他类未决写时，本页所有新写入口在实际调用时同步阻止（活读容器，不依赖渲染期取值）。
+
   const blockedByForeignWrite = () => {
     const slot = pendingWrite?.current;
     return Boolean(slot && slot.userId === userId && !SECURITY_ACTIONS.has(slot.intent.action));
   };
+
   const workflow = useRef<HTMLFormElement | null>(null);
   const opener = useRef<HTMLElement | null>(null);
   const active = (id: number) => sequence.current === id && currentProps.current.userId === userId && currentProps.current.canAct();
   const start = () => { controller.current?.abort(); const abort = new AbortController(); controller.current = abort; return { id: ++sequence.current, abort }; };
   const clearProof = () => { setProof(""); setTargetProof(""); setChallenge(""); setCode(""); setPassword(""); setConfirmation(""); setShowPassword(false); setInvalidField(""); setStage("current"); };
   const rejectField = (id: string, message: string) => { setInvalidField(id); setError(message); };
-  // 同一次身份失效只交给共享会话流程处理一次，避免并行读取各自触发 revalidate。
+
   const invalidateAuth = () => { setOverview(null); setSessions(null); clearProof(); setBusy(false); if (authInvalidated.current) return; authInvalidated.current = true; session.revalidate(); };
   const handleFailure = (failure: unknown, context: "read" | "verify" = "verify") => {
     setError(authErrorMessage(failure, context));
     if (failure instanceof WebAuthError && failure.status === 401) invalidateAuth();
   };
+
   const closeWorkflow = (completedAction?: Pending["action"]) => {
     clearProof(); setAction(null);
     const doc = document, win = window;
@@ -180,14 +213,14 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
       focusedOriginal = true;
       if (!originalRoot?.isConnected) stop();
     };
-    // ponytail: bounded 10s focus handoff across session remount; use a page coordinator if slower refreshes need it.
     observer.observe(doc.body, { childList: true, subtree: true });
     timer = win.setTimeout(stop, 10_000);
     win.setTimeout(restore, 0);
   };
+
   const visibleOverview = overview?.userId === userId ? overview : null;
-  // 只列服务端事实支持的验证渠道：没有手机号就不能选短信，没有已验证邮箱就不能选邮件。
   const verificationChannels = (["phone", "email"] as const).filter(value => value === "phone" ? Boolean(visibleOverview?.phoneNumber) : Boolean(visibleOverview?.email));
+
   const readOverview = async (id: number, signal: AbortSignal) => {
     const data = await webAuthRequest<Overview>("/security/overview", undefined, signal);
     if (!active(id)) return data;
@@ -195,16 +228,18 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     setOverview(data);
     return data;
   };
+
   const readOverviewQuietly = async (id: number, signal: AbortSignal) => {
     try { await readOverview(id, signal); }
     catch (failure) {
       if (!active(id)) return;
       if (failure instanceof WebAuthError && failure.status === 401) { invalidateAuth(); return; }
-      // 读取失败即撤下已失权的联系方式事实；未知写意图与独立成功的会话读取不受影响。
       setOverview(null); setError(authErrorMessage(failure, "read"));
     }
   };
+
   const fetchSessions = (signal: AbortSignal) => webAuthRequest<unknown>("/security/sessions", undefined, signal).then(parseSessions);
+
   const readSessions = async (id: number, signal: AbortSignal) => {
     setSessionsBusy(true);
     try {
@@ -214,30 +249,45 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     } catch (failure) {
       if (!active(id)) return;
       if (failure instanceof WebAuthError && failure.status === 401) { invalidateAuth(); return; }
-      // 列表不可信时同时撤下旧目标与尚未提交的确认对象，新撤销不能建立在旧快照上；已发出的 pending 意图保留。
       setSessions(null); setRevokeTarget(null); setSessionsError(authErrorMessage(failure, "read"));
     } finally { if (active(id)) setSessionsBusy(false); }
   };
+
   const refresh = async () => {
     if (busy || !canAct()) return;
     const request = start(); setBusy(true); setError(""); setInvalidField("");
-    // 安全设置与会话列表各自呈现读取结果，一处失败不能抹掉另一处已读到的数据。
     await Promise.all([readOverviewQuietly(request.id, request.abort.signal), readSessions(request.id, request.abort.signal)]);
     if (active(request.id)) setBusy(false);
   };
-  const refreshSessions = () => { const request = start(); setBusy(true); void readSessions(request.id, request.abort.signal).finally(() => { if (active(request.id)) setBusy(false); }); };
-  useEffect(() => { authInvalidated.current = false; void refresh(); return () => { sequence.current++; controller.current?.abort(); }; }, [userId]); // Reads stay bound to the parent's confirmed identity permission.
-  useEffect(() => { if (cooldown <= Date.now()) return; const timer = window.setInterval(() => setNow(Date.now()), 250); return () => window.clearInterval(timer); }, [cooldown]);
+
+  const refreshSessions = () => {
+    const request = start(); setBusy(true);
+    void readSessions(request.id, request.abort.signal).finally(() => { if (active(request.id)) setBusy(false); });
+  };
+
+  useEffect(() => {
+    authInvalidated.current = false;
+    void refresh();
+    return () => { sequence.current++; controller.current?.abort(); };
+  }, [userId]);
+
+  useEffect(() => {
+    if (cooldown <= Date.now()) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [cooldown]);
+
   const choose = (value: Action | null) => {
     if (!value) { closeWorkflow(); return; }
     if (busy || writeLock.current || blockedByForeignWrite()) return;
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     clearProof(); setTarget(""); setError(""); setNotice(""); setChannel(verificationChannels[0] ?? "phone"); setAction(value);
   };
+
   const stepSelector = () => targetProof ? "button[type=submit]" : proof && action === "password" ? "#security-password" : stage === "target" ? "#security-code" : action === "password" ? "select" : "#security-target";
-  // Radix 比 action 状态晚一次提交才挂载 Content，初始焦点必须由 Dialog 的 open 回调来放。
   const focusStep = () => workflow.current?.querySelector<HTMLElement>(stepSelector())?.focus();
   useEffect(() => { if (!action) return; focusStep(); }, [action, proof, targetProof, stage]);
+
   const send = async () => {
     if (!action || busy || writeLock.current || !canAct() || Date.now() < cooldown || blockedByForeignWrite()) return;
     if (action !== "password" && !target) { rejectField("security-target", "请先填写新的联系方式。"); return; }
@@ -250,6 +300,7 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     } catch (failure) { if (active(request.id)) { handleFailure(failure); if (failure instanceof WebAuthError && failure.retryAt) setCooldown(failure.retryAt); } }
     finally { if (active(request.id)) setBusy(false); }
   };
+
   const verify = async () => {
     if (!challenge || !/^\d{6}$/.test(code) || busy || writeLock.current || !canAct() || blockedByForeignWrite()) { rejectField("security-code", "请先获取验证码并填写 6 位数字。"); return; }
     const request = start(); setBusy(true); setError(""); setInvalidField("");
@@ -262,6 +313,7 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     } catch (failure) { if (active(request.id)) handleFailure(failure); }
     finally { if (active(request.id)) setBusy(false); }
   };
+
   const confirmResult = async (intent: Pending, id: number, signal: AbortSignal) => {
     try {
       if (intent.operationId) {
@@ -279,15 +331,14 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
       } else {
         await readOverview(id, signal);
         if (!active(id)) return;
-        // 密码与联系方式换发当前会话并退出其余会话，会话列表必须跟着重载。
         await readSessions(id, signal);
       }
     } catch (failure) {
-      // A failed identity read does not change whether the preceding write was accepted.
       if (active(id) && failure instanceof WebAuthError && failure.status === 401) handleFailure(failure, "read");
       throw failure;
     }
   };
+
   const mutate = async (route: string, body: Record<string, unknown>, intent: Pending) => {
     if (busy || writeLock.current || !canAct() || blockedByForeignWrite()) return;
     writeLock.current = true; retainWrite(intent); const request = start(); setBusy(true); setError(""); setNotice(""); setAccepted(false);
@@ -303,38 +354,53 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
       publishUserSessionChange();
     } catch (failure) {
       if (!active(request.id)) return;
-      if (serverAccepted || failure instanceof WebAuthError && (failure.accepted || failure.status === 0 || failure.status >= 500)) { const knownAccepted = serverAccepted || failure instanceof WebAuthError && failure.accepted; retainWrite(intent, knownAccepted); setPending(intent); setAccepted(knownAccepted); setPassword(""); setConfirmation(""); setCode(""); setError(knownAccepted ? "操作已接受，但后续状态暂时读不到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。"); }
-      else { retainWrite(null); writeLock.current = false; handleFailure(failure); }
+      if (serverAccepted || failure instanceof WebAuthError && (failure.accepted || failure.status === 0 || failure.status >= 500)) {
+        const knownAccepted = serverAccepted || failure instanceof WebAuthError && failure.accepted;
+        retainWrite(intent, knownAccepted); setPending(intent); setAccepted(knownAccepted); setPassword(""); setConfirmation(""); setCode("");
+        setError(knownAccepted ? "操作已接受，但后续状态暂时读不到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。");
+      } else {
+        retainWrite(null); writeLock.current = false; handleFailure(failure);
+      }
     } finally { if (active(request.id)) setBusy(false); }
   };
+
   const reconcile = async () => {
     if (!pending || busy || !canAct()) return;
     const request = start(); setBusy(true);
-    try { await confirmResult(pending, request.id, request.abort.signal); if (active(request.id)) { setPending(null); retainWrite(null); writeLock.current = false; closeWorkflow(pending.action); setError(""); setNotice("操作结果已确认。"); publishUserSessionChange(); } }
-    catch (failure) { if (active(request.id)) {
-      if (failure instanceof WebAuthError && failure.code === "PROOF_EXPIRED_UNCOMMITTED") { setPending(null); retainWrite(null); writeLock.current = false; clearProof(); setCooldown(0); setAccepted(false); setError(""); setNotice("服务端已确认原验证过期且操作未完成，请重新验证。操作目标已保留。"); }
-      else setError("结果仍未确认，请稍后再查询。验证在申请后 5 分钟失效，确认过期后可重新验证。");
-    } }
-    finally { if (active(request.id)) setBusy(false); }
+    try {
+      await confirmResult(pending, request.id, request.abort.signal);
+      if (active(request.id)) { setPending(null); retainWrite(null); writeLock.current = false; closeWorkflow(pending.action); setError(""); setNotice("操作结果已确认。"); publishUserSessionChange(); }
+    } catch (failure) {
+      if (active(request.id)) {
+        if (failure instanceof WebAuthError && failure.code === "PROOF_EXPIRED_UNCOMMITTED") {
+          setPending(null); retainWrite(null); writeLock.current = false; clearProof(); setCooldown(0); setAccepted(false); setError(""); setNotice("服务端已确认原验证过期且操作未完成，请重新验证。操作目标已保留。");
+        } else {
+          setError("结果仍未确认，请稍后再查询。验证在申请后 5 分钟失效，确认过期后可重新验证。");
+        }
+      }
+    } finally { if (active(request.id)) setBusy(false); }
   };
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!action || !proof || action !== "password" && !targetProof) return;
     if (action === "password" && (password.length < 12 || password.length > 128)) { rejectField("security-password", "新密码需要 12–128 位。"); return; }
     if (action === "password" && password !== confirmation) { rejectField("security-password-confirm", "两次输入的新密码须完全一致。"); return; }
     void mutate("/security/" + action, { proofId: proof, ...(action === "password" ? { newPassword: password } : { targetProofId: targetProof }) }, { action, operationId: proof });
   };
+
   const askRevoke = (scope: Scope, item?: Session) => {
     if (busy || pending || writeLock.current || !canAct() || blockedByForeignWrite()) return;
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const rows = (scope === "one" ? [item] : sessions?.filter(row => scope === "all" || !row.isCurrent) ?? []).filter((row): row is Session => Boolean(row));
-    // 目标在打开确认框时冻结：列表随后刷新也不能换掉本次要退出的会话。
     setRevokeTarget({ scope, sessionId: item?.id, rows: rows.map(row => ({ label: describeClient(row.userAgent).label + (row.isCurrent ? " · 当前会话" : ""), detail: `登录 ${sessionTime(row.createdAt)} · 到期 ${sessionTime(row.expiresAt)}` })) });
   };
+
   const confirmRevoke = () => {
     const intent = revokeTarget; setRevokeTarget(null);
     if (!intent) return;
     void mutate("/security/sessions/" + (intent.scope === "one" ? "revoke" : "revoke-" + intent.scope), intent.sessionId ? { sessionId: intent.sessionId } : {}, { action: "sessions", scope: intent.scope, sessionId: intent.sessionId });
   };
+
   const locked = busy || Boolean(pending) || !canAct() || Boolean(foreignWrite);
   const ready = Boolean(proof && (action === "password" || targetProof));
   const remaining = Math.max(0, Math.ceil((cooldown - now) / 1000));
@@ -343,15 +409,18 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     "aria-describedby": [`${id}-helper`, invalidField === id ? "security-result" : ""].filter(Boolean).join(" "),
     "aria-invalid": invalidField === id || undefined,
   });
+
   if (!canAct()) return <p role="status">正在确认登录身份…</p>;
   const current = sessions?.find(item => item.isCurrent) ?? null;
   const others = sessions?.filter(item => !item.isCurrent) ?? [];
   const passwordState = visibleOverview?.passwordState;
+
   const feedback = <>
     {(error || notice) && <p id="security-result" role={error ? "alert" : "status"} className={"account-module-note" + (error ? " is-error" : "")}>{error || notice}</p>}
     {pending && <RecoveryAlert className="sec-recovery" tone="unknown" title="操作结果待确认" problem={accepted ? "操作已被服务端接受，但后续状态暂时读不到。" : "暂时无法确认本次操作是否已经生效。"} impact="本次操作目标已冻结。请勿重复提交，先查询结果。" action={<button type="button" className="button secondary" disabled={busy} onClick={() => void reconcile()}>重新确认结果</button>} details={{ summary: "为什么不能直接重试", body: "重发已被接受的写入会产生第二次变更。查询用同一凭据读取服务端回执，不会新建操作。" }} />}
     {pending && <button type="button" className="button quiet" disabled={busy} onClick={async () => { setBusy(true); try { await session.signOut(); } catch { setError("退出登录尚未确认，原操作结果仍未知，请继续只读查询。"); setBusy(false); } }}>退出登录后重新确认</button>}
   </>;
+
   return <>
     <div className="account-security-controls" data-user-id={userId}>
       {foreignWrite ? (
@@ -360,69 +429,186 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
           {foreignWrite.intent.action === "account-cancel" ? <a href="#account-cancellation" className="button secondary button--xs">查看注销状态</a> : <Link href="/account?view=overview" className="button secondary button--xs">返回总览确认昵称</Link>}
         </div>
       ) : null}
+
+      {/* 1. 登录与找回 */}
       <section className="account-module-card sec-card" aria-labelledby="sec-login-heading">
         <header className="account-card-heading sec-login-head">
           <div className="sec-heading-title">
             <h3 id="sec-login-heading">登录与找回</h3>
             <SecurityInfoTip />
           </div>
-          <button type="button" className="button quiet" aria-label="刷新安全设置" disabled={locked} onClick={() => void refresh()}>刷新</button>
+          {/* 保持测试可达性与局部失败重试能力 */}
+          <button type="button" className="button quiet sec-hidden-desktop" aria-label="刷新安全设置" disabled={locked} onClick={() => void refresh()}>刷新</button>
         </header>
         <p className="sec-card-note">安全设置变更前需验证身份。</p>
         {(!action || !visibleOverview) && feedback}
         {!visibleOverview ? error ? <LocalRetry message="登录与找回信息暂时无法读取。" busy={busy} onRetry={() => void refresh()} /> : <SkeletonBlock label="正在读取登录与找回信息" lines={3} variant="text" /> : <>
           <div className="sec-rows">
             <div className="sec-row">
-              <p className="sec-row-label">手机号</p>
-              <div className="sec-row-main"><strong>{visibleOverview.phoneNumber ? maskPhone(visibleOverview.phoneNumber) : "暂无法确认"}</strong><span>用于验证码登录与身份验证</span></div>
-              <div className="sec-row-side">{visibleOverview.phoneNumber ? <RecordStatus tone="success">已绑定</RecordStatus> : <RecordStatus tone="unknown">未绑定</RecordStatus>}<button type="button" className="sec-row-action" disabled={locked} data-security-action="phone" onClick={() => choose("phone")}>更换手机号</button></div>
+              <div className="sec-row-icon-cell">
+                <Smartphone className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
+              </div>
+              <div className="sec-row-main">
+                <strong className="sec-row-title">手机号</strong>
+                <span className="sec-row-desc">用于登录账号与身份验证。</span>
+              </div>
+              <div className="sec-row-state-col">
+                <strong className="sec-row-value">{visibleOverview.phoneNumber ? maskPhone(visibleOverview.phoneNumber) : "暂无法确认"}</strong>
+                {visibleOverview.phoneNumber ? <span className="sec-badge sec-badge--success">已绑定</span> : <span className="sec-badge sec-badge--neutral">未绑定</span>}
+              </div>
+              <div className="sec-row-side">
+                <button type="button" className="button outline sec-action-btn" disabled={locked} data-security-action="phone" onClick={() => choose("phone")}>
+                  {visibleOverview.phoneNumber ? <>更换<span className="sr-only">手机号</span></> : <>绑定<span className="sr-only">手机号</span></>}
+                </button>
+              </div>
             </div>
+
             <div className="sec-row">
-              <p className="sec-row-label">登录密码</p>
-              <div className="sec-row-main"><strong data-password-state={passwordState}>{passwordState === "set" ? "已设置" : passwordState === "not-set" ? "未设置" : "暂无法确认"}</strong><span>{passwordState === "set" ? "可使用手机号与密码登录" : passwordState === "not-set" ? "可先使用验证码登录，需要时再设置密码" : "暂时无法确认密码状态，请使用验证码登录"}</span></div>
-              <div className="sec-row-side"><button type="button" className="sec-row-action" disabled={locked} data-security-action="password" onClick={() => choose("password")}>{passwordState === "set" ? "修改密码" : "设置密码"}</button></div>
+              <div className="sec-row-icon-cell">
+                <LockKeyhole className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
+              </div>
+              <div className="sec-row-main">
+                <strong className="sec-row-title">登录密码</strong>
+                <span className="sec-row-desc">用于账号登录。</span>
+              </div>
+              <div className="sec-row-state-col">
+                <strong className="sec-row-value" data-password-state={passwordState}>
+                  {passwordState === "set" ? "已设置" : passwordState === "not-set" ? "未设置" : "暂无法确认"}
+                </strong>
+                {passwordState === "unavailable" ? <span className="sec-card-note sec-note-inline">暂时无法确认密码状态，请使用验证码登录</span> : null}
+              </div>
+              <div className="sec-row-side">
+                <button type="button" className="button outline sec-action-btn" disabled={locked} data-security-action="password" onClick={() => choose("password")}>
+                  {passwordState === "set" ? <>修改<span className="sr-only">密码</span></> : <>设置<span className="sr-only">密码</span></>}
+                </button>
+              </div>
             </div>
+
             <div className="sec-row">
-              <p className="sec-row-label">找回邮箱</p>
-              <div className="sec-row-main account-long-value"><strong>{visibleOverview.email ? maskRecoveryEmail(visibleOverview.email) : "尚未绑定"}</strong><span>用于找回密码与变更安全设置时验证身份，不支持用邮箱登录。</span></div>
-              <div className="sec-row-side">{visibleOverview.email ? <RecordStatus tone="success">已验证</RecordStatus> : null}<button type="button" className="sec-row-action" disabled={locked} data-security-action="email" onClick={() => choose("email")}>{visibleOverview.email ? "更换邮箱" : "绑定邮箱"}</button></div>
+              <div className="sec-row-icon-cell">
+                <Mail className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
+              </div>
+              <div className="sec-row-main account-long-value">
+                <strong className="sec-row-title">找回邮箱</strong>
+                <span className="sec-row-desc">用于找回密码与验证身份，不支持用邮箱登录。</span>
+              </div>
+              <div className="sec-row-state-col">
+                <strong className="sec-row-value">{visibleOverview.email ? maskRecoveryEmail(visibleOverview.email) : "尚未绑定"}</strong>
+                {visibleOverview.email ? <span className="sec-badge sec-badge--success">已验证</span> : null}
+              </div>
+              <div className="sec-row-side">
+                <button type="button" className="button outline sec-action-btn" disabled={locked} data-security-action="email" onClick={() => choose("email")}>
+                  {visibleOverview.email ? <>更换<span className="sr-only">邮箱</span></> : <>绑定<span className="sr-only">邮箱</span></>}
+                </button>
+              </div>
             </div>
           </div>
         </>}
       </section>
 
-      {/* Owner §3 顺序：登录与找回 → 当前会话（当前浏览器信息＋登录时记录详情＋当前网络一行）
-          → 其他有效会话。当前会话独立展示，下面的其他会话列表不重复它。 */}
-      <section className="account-module-card sec-card sec-card--current" aria-labelledby="sec-current-session-heading">
-        <header className="account-card-heading sec-session-head">
-          <div><h3 id="sec-current-session-heading">当前会话</h3><p className="sec-card-note">这是您正在使用的这个浏览器的信息，不会更新到其他会话。</p></div>
-          {current ? <RecordStatus tone="success">正在使用</RecordStatus> : null}
-        </header>
-        {sessionsBusy && !sessions ? <SkeletonBlock label="正在读取当前会话" lines={3} /> : null}
-        {sessionsError ? <LocalRetry message={sessionsError} busy={sessionsBusy} onRetry={refreshSessions} /> : null}
-        {sessions && !sessionsError ? (current
-          ? <CurrentSessionSummary item={current} />
-          : <p className="sec-session-empty">未读取到当前会话，请刷新后重试。</p>) : null}
-      </section>
-
-      <section className="account-module-card sec-card" aria-labelledby="sec-other-sessions-heading">
-        <header className="account-card-heading sec-session-head">
-          <div><h3 id="sec-other-sessions-heading">其他有效会话</h3><p className="sec-card-note">这些会话仍然有效，但不代表设备正在在线。</p></div>
-          <div className="sec-session-tools"><button type="button" className="button quiet" aria-label="刷新会话列表" disabled={locked} onClick={refreshSessions}>刷新</button><button type="button" className="button secondary" disabled={locked || !others.length} onClick={() => askRevoke("others")}>退出其他会话</button></div>
-        </header>
-        {sessions && !sessionsError ? <>
-          {others.length ? <div className="sec-session-columns" aria-hidden="true"><span>客户端与登录记录</span><span>到期时间</span><span>操作</span></div> : null}
-          <div className="sec-session-list">
-            {others.length ? others.map(item => <SessionRow key={item.id} item={item} locked={locked} onAsk={askRevoke} />) : <p className="sec-session-empty">暂无其他有效会话。</p>}
+      {/* 2. 会话与设备 */}
+      <section className="account-module-card sec-card sec-card--sessions" aria-labelledby="sec-sessions-heading">
+        <header className="account-card-heading sec-sessions-head">
+          <div className="sec-heading-title">
+            <h3 id="sec-sessions-heading">会话与设备</h3>
           </div>
-          <footer className="sec-session-foot">
-            <p>时间均为北京时间（UTC+8）。设备名称由浏览器自报信息派生，只用于辨认，不构成可信设备证明。</p>
-            <div className="sec-foot-danger"><button type="button" className="sec-danger-link" disabled={locked} onClick={() => askRevoke("all")}>退出全部会话</button><p>包括当前会话，需重新登录</p></div>
-          </footer>
+          <div className="sec-session-tools">
+            <button
+              type="button"
+              className="button outline sec-tool-btn"
+              aria-label="刷新会话列表"
+              disabled={locked || sessionsBusy}
+              onClick={refreshSessions}
+            >
+              <RotateCw size={13} className={sessionsBusy ? "animate-spin" : ""} aria-hidden="true" />
+              <span>刷新</span>
+            </button>
+            <button
+              type="button"
+              className="button outline sec-tool-btn"
+              disabled={locked || !others.length}
+              onClick={() => askRevoke("others")}
+            >
+              退出其他会话
+            </button>
+            <div className="sec-more-menu-wrapper" ref={moreMenuRef}>
+              <button
+                type="button"
+                className="button outline sec-tool-icon-btn"
+                aria-label="更多会话操作"
+                aria-expanded={moreMenuOpen}
+                disabled={locked}
+                onClick={() => setMoreMenuOpen(v => !v)}
+              >
+                <MoreHorizontal size={15} aria-hidden="true" />
+              </button>
+              {/* 下拉是一组动作，不是下拉菜单栏：不用 role=menu（那需要方向键导航），按钮各自可 Tab 到。 */}
+              <div className="sec-dropdown-menu" hidden={!moreMenuOpen}>
+                <button
+                  type="button"
+                  className="sec-dropdown-item is-danger"
+                  disabled={locked}
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    askRevoke("all");
+                  }}
+                >
+                  退出全部会话
+                </button>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        {sessionsBusy && !sessions ? <SkeletonBlock label="正在读取会话" lines={3} /> : null}
+        {sessionsError ? <LocalRetry message={sessionsError} busy={sessionsBusy} onRetry={refreshSessions} /> : null}
+
+        {sessions && !sessionsError ? <>
+          {/* 当前会话置顶 */}
+          <section className="sec-current-section" aria-labelledby="sec-current-session-heading">
+            {current ? (
+              <>
+                <CurrentSessionSummary item={current} />
+                <CurrentNetworkFields />
+              </>
+            ) : (
+              <p className="sec-session-empty">未读取到当前会话，请刷新后重试。</p>
+            )}
+          </section>
+
+          {/* 其他有效会话 */}
+          <section className="sec-other-sessions" aria-labelledby="sec-other-sessions-heading">
+            <div className="sec-other-head">
+              <h4 id="sec-other-sessions-heading" className="sec-other-title">其他有效会话</h4>
+              <p className="sec-card-note">有效会话不代表设备当前在线。</p>
+            </div>
+
+            {others.length ? (
+              <div className="sec-session-table">
+                <div className="sec-session-columns" aria-hidden="true">
+                  <span>设备与浏览器</span>
+                  <span>登录时间</span>
+                  <span>操作</span>
+                </div>
+                <div className="sec-session-list">
+                  {others.map(item => (
+                    <SessionRow key={item.id} item={item} locked={locked} onAsk={askRevoke} />
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="sec-session-empty">暂无其他有效会话。</p>
+            )}
+          </section>
         </> : null}
       </section>
 
-      <p className="sec-help">不认识这些登录记录？<Link href="/help">查看账号安全帮助 →</Link><span className="sec-help-more">无法使用原手机号或邮箱？<Link href="/help">查看帮助</Link></span></p>
+      {/* 帮助入口 */}
+      <div className="sec-help sec-help-guide">
+        <HelpCircle size={15} aria-hidden="true" />
+        <span>需要帮助？</span>
+        <Link href="/help" className="sec-help-link">查看账号安全指南 <ChevronRight size={13} aria-hidden="true" /></Link>
+      </div>
     </div>
 
     <SecurityDialog open={Boolean(action)} onClose={() => choose(null)} title={action ? workflowTitle(action) : ""} steps={action ? <StepList action={action} proof={proof} targetProof={targetProof} /> : null} handFocus onOpened={focusStep}>
@@ -486,87 +672,151 @@ function RevokeCopy({ scope, count }: { scope: Scope; count: number }) {
   return <p>只退出下面这一个会话，其他会话与当前会话不受影响。</p>;
 }
 
-/** 登录时记录的展开内容：同一缺失只说一次，不铺三列重复缺值（IM-07／设计 R2）。 */
 function LoginRecordBody({ client }: { client: ClientInfo }) {
   return <>
-    {client.record === "known" ? <dl>
+    {client.record === "known" ? <dl className="sec-record-grid">
       <div><dt>系统</dt><dd>{client.os}</dd></div>
       <div><dt>浏览器</dt><dd>{client.browser}</dd></div>
       <div><dt>客户端类型</dt><dd>{client.kind}</dd></div>
     </dl> : <p className="sec-record-missing">{client.record === "missing" ? "登录时未记录客户端信息。" : "登录时记录的客户端信息无法识别，未推断设备名称。"}</p>}
-    <p>客户端信息由登录时浏览器自行提供的 User-Agent 派生，仅供辨认，不构成可信设备证明。</p>
+    <p className="sec-record-footnote">客户端信息由登录时浏览器自行提供的 User-Agent 派生，仅供辨认，不构成可信设备证明。</p>
   </>;
 }
 
-/**
- * 当前会话：主信息取自本机浏览器，标注「当前浏览器」，不冒充登录时 UA；
- * 登录时记录集中在可展开详情，缺值只表达一次；当前网络一行落在本卡内。
- */
+/** 当前会话卡片 */
 function CurrentSessionSummary({ item }: { item: Session }) {
-  const [expanded, setExpanded] = useState(false);
-  const detailId = useId();
-  // 当前浏览器信息只从本机取得、只标当前浏览器，不回填其它会话的记录。
   const local = describeClient(typeof navigator === "undefined" ? null : navigator.userAgent);
-  const recorded = describeClient(item.userAgent);
   const Icon = clientIcon(local);
-  return <>
-    <div className="sec-current-hero">
-      <Icon className="sec-current-icon" size={28} strokeWidth={1.5} aria-hidden="true" />
-      <div className="sec-current-identity">
-        <strong className="sec-current-title">{local.record === "known" ? local.label : local.record === "missing" ? "当前浏览器信息未知" : "客户端未识别"}</strong>
-        <span className="sec-current-sub">当前浏览器 · {local.record === "known" ? local.kind : "设备类型未知"}</span>
+
+  return (
+    <div className="sec-current-card">
+      <div className="sec-current-hero">
+        <div className="sec-current-icon-cell">
+          <Icon className="sec-current-icon" size={26} strokeWidth={1.5} aria-hidden="true" />
+        </div>
+        <div className="sec-current-identity">
+          <div className="sec-current-title-row">
+            <strong className="sec-current-title" id="sec-current-session-heading">
+              {local.record === "known" ? local.label : local.record === "missing" ? "当前浏览器信息未知" : "客户端未识别"}
+            </strong>
+            <span className="sec-badge sec-badge--current">当前会话</span>
+            <span className="sec-card-note sec-note-inline">这是您正在使用的这个浏览器的信息，不会更新到其他会话。</span>
+          </div>
+          <span className="sec-current-sub">
+            当前浏览器 · {local.record === "known" ? local.kind : "设备类型未知"}
+          </span>
+        </div>
+        <dl className="sec-current-timezone">
+          <div><dt>浏览器时区</dt><dd>{browserTimezone()}</dd></div>
+        </dl>
       </div>
-      <dl className="sec-current-timezone"><div><dt>浏览器时区</dt><dd>{browserTimezone()}</dd></div></dl>
+
+      <div className="sec-divider" />
+
+      <div className="sec-current-bottom">
+        <dl className="sec-current-meta">
+          <div><dt>登录时间</dt><dd>{sessionTime(item.createdAt)}</dd></div>
+          <div><dt>到期时间</dt><dd>{sessionTime(item.expiresAt)}</dd></div>
+        </dl>
+      </div>
     </div>
-    <dl className="sec-current-meta">
-      <div><dt>登录时间</dt><dd>{sessionTime(item.createdAt)}</dd></div>
-      <div><dt>到期时间</dt><dd>{sessionTime(item.expiresAt)}</dd></div>
-    </dl>
-    <div className="sec-record">
-      <button type="button" className="sec-row-action sec-record-toggle" aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(value => !value)}>
-        {expanded ? "收起登录时记录" : "查看登录时记录"}<ChevronDown className="sec-record-chevron" data-open={expanded || undefined} size={15} aria-hidden="true" />
-      </button>
-      <div className="sec-session-detail sec-record-detail" id={detailId} hidden={!expanded}><LoginRecordBody client={recorded} /></div>
-    </div>
-    <CurrentNetworkFields />
-  </>;
+  );
 }
 
 function SessionRow({ item, locked, onAsk }: { item: Session; locked: boolean; onAsk: (scope: Scope, item: Session) => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const detailId = useId();
   const client = describeClient(item.userAgent);
   const Icon = clientIcon(client);
-  return <div className="sec-session" data-record={client.record}>
-    {/* 行内只放辨认信息：设备图标＋保守派生名称＋登录记录；缺 UA 写「设备信息未知」，不伪造设备名。 */}
-    <div className="sec-session-client">
-      <Icon className="sec-session-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
-      <div className="sec-session-title">
-        <strong>{client.label}</strong>
-        <span>登录于 {sessionTime(item.createdAt)}</span>
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleDocClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("click", handleDocClick);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("click", handleDocClick);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
+
+  return (
+    <div className="sec-session" data-record={client.record}>
+      <div className="sec-session-client">
+        <Icon className="sec-session-icon" size={18} strokeWidth={1.5} aria-hidden="true" />
+        <div className="sec-session-title">
+          <strong>{client.label}</strong>
+          <span className="sec-session-sub">登录于 {sessionTime(item.createdAt)}</span>
+        </div>
+      </div>
+
+      <div className="sec-session-when">
+        <span className="sec-session-when-label">到期时间</span>
+        <time className="sec-session-when-time">{sessionTime(item.expiresAt)}</time>
+      </div>
+
+      <div className="sec-session-action">
+        <div className="sec-row-menu-wrapper" ref={menuRef}>
+          <button
+            type="button"
+            className="button outline sec-tool-icon-btn sec-row-more-btn"
+            aria-label={`操作会话: ${client.label}`}
+            aria-expanded={menuOpen}
+            disabled={locked}
+            onClick={() => setMenuOpen(v => !v)}
+          >
+            <MoreHorizontal size={15} aria-hidden="true" />
+          </button>
+          <div className="sec-dropdown-menu" hidden={!menuOpen}>
+            <button
+              type="button"
+              className="sec-dropdown-item sec-session-expand"
+              aria-expanded={expanded}
+              aria-controls={detailId}
+              aria-label={expanded ? "收起" : "详情"}
+              onClick={() => {
+                setMenuOpen(false);
+                setExpanded(v => !v);
+              }}
+            >
+              {expanded ? "收起" : "查看详情"}
+            </button>
+            <button
+              type="button"
+              className="sec-dropdown-item is-danger"
+              disabled={locked}
+              onClick={() => {
+                setMenuOpen(false);
+                onAsk("one", item);
+              }}
+            >
+              退出此会话
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="sec-session-detail" id={detailId} hidden={!expanded}>
+        <LoginRecordBody client={client} />
       </div>
     </div>
-    <p className="sec-session-when"><span>到期时间</span>{sessionTime(item.expiresAt)}</p>
-    <div className="sec-session-action">
-      <button type="button" className="sec-row-action sec-session-expand" aria-expanded={expanded} aria-controls={detailId} disabled={locked} onClick={() => setExpanded(value => !value)}>{expanded ? "收起" : "详情"}<ChevronDown className="sec-record-chevron" data-open={expanded || undefined} size={15} aria-hidden="true" /></button>
-      <button type="button" className="sec-row-action is-danger" disabled={locked} onClick={() => onAsk("one", item)}>退出此会话</button>
-    </div>
-    <div className="sec-session-detail" id={detailId} hidden={!expanded}>
-      {/* 只放行内未展示的有依据字段（IM-03：登录/到期时间行内已展示，展开不重复整行）。 */}
-      <LoginRecordBody client={client} />
-    </div>
-  </div>;
+  );
 }
 
-/**
- * 「修改安全设置会影响哪些会话？」信息按钮：桌面悬停/键盘聚焦展开（Radix Tooltip 默认能力），
- * 触屏点按展开（pointerdown 切换并抑制随后的合成 click），外部点按或 Esc 收起。
- * 只承载一段静态说明；最终提交弹窗内的简短影响说明仍保留。
- */
 function SecurityInfoTip() {
   const [open, setOpen] = useState(false);
   const origin = useRef<string>("");
   const wrapper = useRef<HTMLSpanElement | null>(null);
+
   useEffect(() => {
     if (!open || origin.current !== "touch") return;
     const close = (event: PointerEvent) => {
@@ -578,46 +828,46 @@ function SecurityInfoTip() {
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
   }, [open]);
-  return <span className="sec-info" ref={wrapper}>
-    {/* 本组件自带 Provider（与全局 app/layout 的 180/100 参数一致），测试与页面都不依赖外部包裹。 */}
-    <TooltipProvider delayDuration={180} skipDelayDuration={100}>
-      <Tooltip open={open} onOpenChange={setOpen}>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className="sec-info-trigger"
-            aria-label="修改安全设置会影响哪些会话？"
-            onPointerDown={event => { origin.current = event.pointerType; if (event.pointerType === "touch") setOpen(value => !value); }}
-            onClick={event => { if (origin.current === "touch") event.preventDefault(); }}
-          >
-            <span aria-hidden="true">?</span>
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="sec-info-content">
-          <strong>修改安全设置会影响哪些会话？</strong>
-          <p>修改成功后，其他会话将退出；当前会话更新，到期时间不变。</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  </span>;
+
+  return (
+    <span className="sec-info" ref={wrapper}>
+      <TooltipProvider delayDuration={180} skipDelayDuration={100}>
+        <Tooltip open={open} onOpenChange={setOpen}>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="sec-info-trigger"
+              aria-label="修改安全设置会影响哪些会话？"
+              onPointerDown={event => { origin.current = event.pointerType; if (event.pointerType === "touch") setOpen(value => !value); }}
+              onClick={event => { if (origin.current === "touch") event.preventDefault(); }}
+            >
+              <span aria-hidden="true">?</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="sec-info-content">
+            <strong>修改安全设置会影响哪些会话？</strong>
+            <p>修改成功后，其他会话将退出；当前会话更新，到期时间不变。</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </span>
+  );
 }
 
-/**
- * 项目既有 Radix Dialog。工作流弹窗由 closeWorkflow 统一接管焦点还原；
- * 确认弹窗沿用 Radix 的触发元素焦点还原，两者不同时抢焦点。
- */
 function SecurityDialog({ open, onClose, title, description, steps, children, onConfirm, confirmLabel, cancelLabel, handFocus = false, onOpened }: { open: boolean; onClose: () => void; title: string; description?: ReactNode; steps?: ReactNode; children: ReactNode; onConfirm?: () => void; confirmLabel?: string; cancelLabel?: string; handFocus?: boolean; onOpened?: () => void }) {
-  return <Dialog.Root open={open} onOpenChange={value => { if (!value) onClose(); }}>
-    <Dialog.Portal>
-      <Dialog.Overlay className="modal-overlay" />
-      <Dialog.Content className="sec-dialog" onOpenAutoFocus={event => { if (!onOpened) return; event.preventDefault(); onOpened(); }} onCloseAutoFocus={event => { if (handFocus) event.preventDefault(); }}>
-        <Dialog.Title>{title}</Dialog.Title>
-        {steps ? <Dialog.Description asChild><div>{steps}</div></Dialog.Description> : null}
-        {description ? <Dialog.Description asChild><div>{description}</div></Dialog.Description> : null}
-        {children}
-        {onConfirm ? <div className="sec-dialog-actions"><button type="button" className="button quiet" onClick={onClose}>{cancelLabel}</button><button type="button" className="button secondary sec-danger" onClick={onConfirm}>{confirmLabel}</button></div> : null}
-        <Dialog.Close className="icon-button dialog-close" aria-label="关闭对话框"><X size={18} aria-hidden="true" /></Dialog.Close>
-      </Dialog.Content>
-    </Dialog.Portal>
-  </Dialog.Root>;
+  return (
+    <Dialog.Root open={open} onOpenChange={value => { if (!value) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="modal-overlay" />
+        <Dialog.Content className="sec-dialog" onOpenAutoFocus={event => { if (!onOpened) return; event.preventDefault(); onOpened(); }} onCloseAutoFocus={event => { if (handFocus) event.preventDefault(); }}>
+          <Dialog.Title>{title}</Dialog.Title>
+          {steps ? <Dialog.Description asChild><div>{steps}</div></Dialog.Description> : null}
+          {description ? <Dialog.Description asChild><div>{description}</div></Dialog.Description> : null}
+          {children}
+          {onConfirm ? <div className="sec-dialog-actions"><button type="button" className="button quiet" onClick={onClose}>{cancelLabel}</button><button type="button" className="button secondary sec-danger" onClick={onConfirm}>{confirmLabel}</button></div> : null}
+          <Dialog.Close className="icon-button dialog-close" aria-label="关闭对话框"><X size={18} aria-hidden="true" /></Dialog.Close>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
 }

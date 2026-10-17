@@ -91,6 +91,7 @@ export function HeroCarousel() {
     setPlaying(false);
     if (direction < 0) api?.scrollPrev(reduced); else api?.scrollNext(reduced);
   };
+  const posterSrcSet = (poster: string) => `/art/zhouzhou/poster-${poster}@810.webp 810w, /art/zhouzhou/poster-${poster}@1215.webp 1215w, /art/zhouzhou/poster-${poster}.webp 1900w`;
   return <div className="hero-carousel" role="region" aria-roledescription="轮播" aria-label="平台指南轮播"
     tabIndex={0} data-current-slide={current + 1} data-autoplay={autoPlaying} data-source={apiSlides ? "api" : "default"}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
@@ -106,7 +107,7 @@ export function HeroCarousel() {
       {slides.map((slide, index) => <div key={slide.kind === "api" ? slide.id : index} className={`hero-slide hero-slide-${index}`}
         role="group" aria-roledescription="幻灯片" aria-label={`${slide.label}，${index + 1} / ${slides.length}`}
         aria-hidden={index !== current} inert={index !== current}>
-        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={slide.kind === "api" ? slide.mediaUrl : `/art/zhouzhou/poster-${slide.poster}.webp`} alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
+        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={slide.kind === "api" ? slide.mediaUrl : `/art/zhouzhou/poster-${slide.poster}.webp`} srcSet={slide.kind === "default" ? posterSrcSet(slide.poster) : undefined} sizes={slide.kind === "default" ? "(max-width: 599px) 92vw, (max-width: 1023px) 476px, 804px" : undefined} alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
         {slide.kind === "default" && slide.subtitle && <p className="poster-subtitle" aria-hidden="true">{slide.subtitle}</p>}
         {slide.kind === "api" && <div className="hero-copy"><h1>{slide.title}</h1>{slide.description && <p>{slide.description}</p>}</div>}
         <p className="sr-only">{slide.title}</p>{slide.kind === "default" && <p className="sr-only">{slide.text}</p>}

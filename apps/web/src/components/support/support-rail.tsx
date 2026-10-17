@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowUp, Gift, Headphones, MessageSquare, Share2, X } from "lucide-react";
@@ -10,7 +9,6 @@ import { CustomerSupportWorkspace } from "./customer-support-workspace";
 import type { SupportType } from "@/lib/support-intent";
 import "./service-navigation.css";
 export function SupportRail(){
-  const pathname = usePathname();
   const auth = useAuthOverlay();
   const [supportOpen,setSupportOpen]=useState(false);
   const [requestedType,setRequestedType]=useState<SupportType>("SERVICE");
@@ -22,8 +20,8 @@ export function SupportRail(){
   const [hasOpened,setHasOpened]=useState(false);
   useEffect(()=>{const open=(event:Event)=>{const {party,orderId:id}=(event as CustomEvent).detail??{};if((party!=="renter"&&party!=="owner")||typeof id!=="string"||!id)return;lastSupportTriggerRef.current=document.activeElement instanceof HTMLButtonElement?document.activeElement:null;auth.open(window.location.pathname+window.location.search,()=>{setOrderParty(party);setOrderId(id);setRequestSerial(n=>n+1);setHasOpened(true);setSupportOpen(true);});};window.addEventListener("zzsh:order-groups",open);return()=>window.removeEventListener("zzsh:order-groups",open);},[auth]);
   const lastSupportTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const requestSupport = (type: SupportType, trigger: HTMLButtonElement) => {
-    lastSupportTriggerRef.current = trigger;
+  const requestSupport = (type: SupportType, trigger?: HTMLButtonElement | null) => {
+    lastSupportTriggerRef.current = trigger ?? null;
     auth.open(window.location.pathname + window.location.search, () => {
       setRequestedType(type);
       setOrderParty(undefined);
@@ -37,11 +35,23 @@ export function SupportRail(){
     setSupportOpen(open);
     if (!open) requestAnimationFrame(() => lastSupportTriggerRef.current?.focus());
   };
+  // 常驻监听必须走当次渲染的触发链。auth.open 里的会话状态是当次渲染的快照；沿用首帧那份
+  // 会把意图挂在“等会话确认”上，而会话往往在用户点击前就已确认完、状态不再变化，于是那个
+  // 挂起的意图永远没人接手，窗口开不出来。ref 每次渲染都更新，监听因此始终拿到最新链。
+  const requestSupportRef = useRef(requestSupport);
+  requestSupportRef.current = requestSupport;
   useEffect(()=>{
-    if(pathname === "/support") { setHasOpened(true); setSupportOpen(true); }
-    // 演示数据只允许在非生产环境用 ?preview=1 打开；生产构建忽略该参数。
-    setPreview(process.env.NODE_ENV !== "production" && new URLSearchParams(window.location.search).get("preview") === "1");
-  },[pathname]);
+    // 页面内的客服/投诉入口（帮助中心、403 页）复用同一条触发链：先过登录门，再开窗，
+    // 关闭时焦点回到原触发钮。事件名与 support-dialog-request.ts 的 SUPPORT_OPEN_EVENT 一致。
+    // 不自动开窗——客服只有一个容器，就是本 rail 的弹窗，没有独立 /support 路由。
+    // 这些入口自己带 data-support-trigger，onPointerDownOutside 的既有豁免才会放过它们，
+    // 否则真实的按下-抬起-点击序列会被当成“点了弹窗外面”而立刻把窗口关掉。
+    const open=(event:Event)=>{const detail=(event as CustomEvent).detail??{};const type=detail.type==="COMPLAINT"?"COMPLAINT":"SERVICE";const trigger=(detail.trigger instanceof HTMLButtonElement?detail.trigger:null)??(document.activeElement instanceof HTMLButtonElement?document.activeElement:null);requestSupportRef.current(type,trigger);};
+    window.addEventListener("zzsh:open-support",open);
+    return()=>window.removeEventListener("zzsh:open-support",open);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+  useEffect(()=>{ setPreview(process.env.NODE_ENV !== "production" && new URLSearchParams(window.location.search).get("preview") === "1"); },[]);
   // The window is non-modal, so Radix leaves focus on the entry button and Tab would walk
   // the whole page before reaching the composer. Start the tab order inside the window.
   useEffect(()=>{ if(supportOpen) document.querySelector<HTMLElement>(".support-dialog-content")?.focus(); },[supportOpen]);

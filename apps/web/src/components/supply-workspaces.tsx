@@ -8,7 +8,7 @@ import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, Clipboar
 import { ServiceShell } from "./layout/service-shell";
 import { WebAuthError, webAuthRequest } from "./auth/auth-form";
 import { useAuthOverlay } from "./auth/auth-overlay-provider";
-import { accountStatusLabel, ageStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
+import { accountStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
 import { SkinMediaThumb } from "./supply/skin-media-thumb";
 import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
@@ -244,21 +244,104 @@ function useAccountIdentityRead(errorMessage: string) {
 
 function AccountIdentityPanel() {
   const { profile, identity, loading, error, load } = useAccountIdentityRead("实名认证信息暂时无法读取，请重试。");
+  const isVerified = identity?.identityStatus === "VERIFIED";
   const summary = identity ? { UNVERIFIED: "尚未完成实名认证", VERIFIED: "实名认证已验证", REJECTED: "实名认证未通过", UNKNOWN: "实名状态暂无法确认" }[identity.identityStatus] : "实名状态暂无法确认";
   return <section className="account-module" aria-labelledby="account-identity-heading">
-    <header className="account-module-heading"><div><h2 id="account-identity-heading">实名认证</h2><p>查看已有认证结果与年龄状态。</p></div><button type="button" className="button quiet" disabled={loading} onClick={() => void load()}><RefreshCw size={15} aria-hidden="true" />刷新</button></header>
-    {loading ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><ShieldCheck size={28} aria-hidden="true" /><h3>正在读取认证状态</h3><p>请稍候。</p></div> : error && !profile ? <div className="account-module-card account-empty-state" role="alert"><AlertCircle size={28} aria-hidden="true" /><h3>认证信息暂时无法读取</h3><p>{error}</p><button type="button" className="button secondary" onClick={() => void load()}>重试</button></div> : <section className="account-module-card account-verification-card">
-      {error ? <p className="account-module-note is-error" role="alert">{error}</p> : null}
-      <div className="account-verification-summary" data-state={identity?.identityStatus === "VERIFIED" && identity.provider !== "fake" ? "verified" : "pending"}>
-        <span className="account-state-icon" aria-hidden="true"><ShieldCheck size={30} strokeWidth={1.5} /></span>
-        <div><h3>{summary}</h3><p>{identity?.provider === "none" ? "线上实名服务暂未开放，当前无法提交新的认证。" : "认证结果与年龄信息会影响部分交易操作。"}</p></div>
+    <header className="account-module-heading">
+      <div>
+        <h2 id="account-identity-heading">实名认证</h2>
+        <p>查看已有实名认证结果。</p>
       </div>
-      <dl className="account-fact-list">
-        <div><dt>实名认证</dt><dd>{identity ? identityStatusLabel(identity.identityStatus) : "暂无法确认"}</dd></div>
-        <div><dt>年龄状态</dt><dd>{identity ? ageStatusLabel(identity.ageStatus) : "暂无法确认"}</dd></div>
-      </dl>
-      <p className="account-module-note">本页展示已有状态，暂不提供证件提交或认证资料修改。</p>
-      {identity?.provider === "fake" ? <p className="account-module-note">当前为本地测试结果，不代表真实身份核验。</p> : null}
+      <button
+        type="button"
+        className="button outline sec-tool-btn"
+        disabled={loading}
+        onClick={() => void load()}
+        aria-label="刷新实名认证状态"
+      >
+        <RefreshCw size={13} className={loading ? "animate-spin" : ""} aria-hidden="true" />
+        <span>刷新</span>
+      </button>
+    </header>
+    {loading ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><ShieldCheck size={28} aria-hidden="true" /><h3>正在读取认证状态</h3><p>请稍候。</p></div> : error && !profile ? <div className="account-module-card account-empty-state" role="alert"><AlertCircle size={28} aria-hidden="true" /><h3>认证信息暂时无法读取</h3><p>{error}</p><button type="button" className="button secondary" onClick={() => void load()}>重试</button></div> : <section className="account-module-card sec-card sec-identity-card">
+      {error ? <p className="account-module-note is-error" role="alert">{error}</p> : null}
+      <div className="sec-identity-summary" data-state={isVerified ? "verified" : "pending"}>
+        <div className="sec-identity-summary-icon" aria-hidden="true"><ShieldCheck size={28} strokeWidth={1.5} /></div>
+        <div className="sec-identity-summary-body">
+          <div className="sec-identity-summary-title-row">
+            <h3 className="sec-identity-summary-title">{summary}</h3>
+            {isVerified ? (
+              <span className="sec-badge sec-badge--success">已验证</span>
+            ) : identity?.identityStatus === "UNVERIFIED" ? (
+              <span className="sec-badge sec-badge--neutral">待认证</span>
+            ) : identity?.identityStatus === "REJECTED" ? (
+              <span className="sec-badge sec-badge--danger">未通过</span>
+            ) : (
+              <span className="sec-badge sec-badge--neutral">待确认</span>
+            )}
+          </div>
+          <p className="sec-identity-summary-desc">{identity?.provider === "none" ? "线上实名服务暂未开放，当前无法提交新的认证。" : "认证结果会影响部分受保护交易操作。"}</p>
+        </div>
+      </div>
+      <div className="sec-rows sec-identity-rows">
+        <div className="sec-row">
+          <div className="sec-row-icon-cell">
+            <ShieldCheck className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
+          </div>
+          <div className="sec-row-main">
+            <strong className="sec-row-title">实名认证</strong>
+            <span className="sec-row-desc">用于确认账号主体身份与受保护交易资格。</span>
+          </div>
+          <div className="sec-row-state-col">
+            <strong className="sec-row-value">{identity ? identityStatusLabel(identity.identityStatus) : "暂无法确认"}</strong>
+            {isVerified ? (
+              <span className="sec-badge sec-badge--success">已验证</span>
+            ) : (
+              <span className="sec-badge sec-badge--neutral">未完成</span>
+            )}
+          </div>
+          <div className="sec-row-side" />
+        </div>
+
+        {/* shortcut: 已核验姓名/证件号两行依赖 /identity/status 返回 realNameMasked/idCardMasked；当前 API 未提供时该两行不渲染，API 补齐后自动生效。 */}
+        {identity?.realNameMasked ? (
+          <div className="sec-row">
+            <div className="sec-row-icon-cell">
+              <UserRound className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
+            </div>
+            <div className="sec-row-main">
+              <strong className="sec-row-title">真实姓名</strong>
+              <span className="sec-row-desc">已核验的实名信息。</span>
+            </div>
+            <div className="sec-row-state-col">
+              <strong className="sec-row-value">{identity.realNameMasked}</strong>
+              <span className="sec-badge sec-badge--success">已核验</span>
+            </div>
+            <div className="sec-row-side" />
+          </div>
+        ) : null}
+
+        {identity?.idCardMasked ? (
+          <div className="sec-row">
+            <div className="sec-row-icon-cell">
+              <CreditCard className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
+            </div>
+            <div className="sec-row-main">
+              <strong className="sec-row-title">证件号码</strong>
+              <span className="sec-row-desc">二代居民身份证。</span>
+            </div>
+            <div className="sec-row-state-col">
+              <strong className="sec-row-value">{identity.idCardMasked}</strong>
+              <span className="sec-badge sec-badge--success">已核验</span>
+            </div>
+            <div className="sec-row-side" />
+          </div>
+        ) : null}
+      </div>
+      <div className="sec-identity-notes">
+        <p className="account-module-note">本页展示已有状态，暂不提供证件提交或认证资料修改。</p>
+        {identity?.provider === "fake" ? <p className="account-module-note">当前为本地测试结果，不代表真实身份核验。</p> : null}
+      </div>
     </section>}
   </section>;
 }
@@ -323,13 +406,14 @@ function AccountSecurityPanel({ pendingWrite }: { pendingWrite?: SecurityPending
   };
 
   return <section className="account-module" aria-labelledby="account-security-heading">
-    <header className="account-module-heading"><div><h2 id="account-security-heading">账号安全</h2><p>管理登录方式与有效会话。</p></div><button type="button" className="button quiet" aria-label="刷新账号资料" disabled={loading || Boolean(busy)} onClick={() => void load()}><RefreshCw size={15} aria-hidden="true" />刷新</button></header>
+    <header className="account-module-heading">
+      <div><h2 id="account-security-heading">账号安全</h2><p>管理登录方式与有效会话。</p></div>
+      <button type="button" className="button quiet sec-hidden-desktop" aria-label="刷新账号资料" disabled={loading || Boolean(busy)} onClick={() => void load()}><RefreshCw size={15} aria-hidden="true" />刷新</button>
+    </header>
     {loading ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><LockKeyhole size={28} aria-hidden="true" /><h3>正在读取账号资料</h3><p>请稍候。</p></div> : error && !profile ? <div className="account-module-card account-empty-state" role="alert"><AlertCircle size={28} aria-hidden="true" /><h3>账号资料暂时无法读取</h3><p>{error}</p><button type="button" className="button secondary" onClick={() => void load()}>重试</button></div> : <>
       {error ? <p className="account-module-note is-error" role="alert">{error}</p> : null}
       {notice ? <p className="account-module-note" role="status">{notice}</p> : null}
-      {/* Owner §3 最终顺序：登录与找回 → 当前会话（已整合当前浏览器与当前网络信息，不再另放底部网络大卡）
-          → 其他有效会话 → 帮助入口 → 必要的异常账号说明 → 危险操作区注销（永远最底部，后面不再有普通模块）。
-          正常账号不占状态卡；仅异常或无法确认时按需出现状态卡。 */}
+      {/* 顺序：登录与找回 → 会话与设备（含当前会话、当前网络、其他有效会话）→ 账号注销 */}
       {proof ? <AccountSecurityControls key={proof.scope} userId={proof.userId} canAct={() => isAuthorized(proof)} pendingWrite={pendingSlot} /> : null}
       {!identity || identity.accountStatus !== "ACTIVE" ? (
         <section className="account-module-card account-status-card" data-testid="security-account-status" data-state={!identity ? "unknown" : "abnormal"}>
@@ -339,15 +423,17 @@ function AccountSecurityPanel({ pendingWrite }: { pendingWrite?: SecurityPending
           {!identity ? <p className="account-module-note">读取到的身份信息不完整，暂不能确认账号状态。</p> : null}
         </section>
       ) : null}
-      <section id="account-cancellation" className="account-module-card account-danger-zone">
-        <div>
-          <h3>注销账号</h3>
-          <p>注销会退出当前登录并匿名化普通资料。这与“退出登录”不同：退出登录不会注销账号。请先处理未完成订单等事项。</p>
+      <section id="account-cancellation" className="account-module-card account-danger-zone sec-card sec-cancellation-card">
+        <div className="sec-cancellation-main">
+          <h3 className="sec-cancellation-title">账号注销</h3>
+          <p className="sec-card-note">查看注销账号条件与处理说明。</p>
           {cancelUnknown ? <p className="account-module-note is-error" role="alert">注销结果尚未确认，可能已生效。可刷新账号状态；状态未变不代表原操作失败，请勿重复提交。</p> : null}
         </div>
-        {cancelUnknown
-          ? <button type="button" className="button secondary" data-testid="cancel-refresh" disabled={Boolean(busy)} onClick={() => { void load(); }}>{busy === "cancel" ? "处理中…" : "刷新确认结果"}</button>
-          : <button type="button" className="button secondary" data-testid="cancel-account" disabled={cancelEntryLocked || !proof || !profile} onClick={() => { if (!proof || !isAuthorized(proof) || cancelEntryLocked) return; setCancelOpen(true); }}>{busy === "cancel" ? "处理中…" : "注销账号"}</button>}
+        <div className="sec-cancellation-side">
+          {cancelUnknown
+            ? <button type="button" className="button outline sec-action-btn" data-testid="cancel-refresh" disabled={Boolean(busy)} onClick={() => { void load(); }}>{busy === "cancel" ? "处理中…" : "刷新确认结果"}</button>
+            : <button type="button" className="button outline sec-action-btn" data-testid="cancel-account" disabled={cancelEntryLocked || !proof || !profile} onClick={() => { if (!proof || !isAuthorized(proof) || cancelEntryLocked) return; setCancelOpen(true); }}>查看</button>}
+        </div>
       </section>
       {/* §3.4：注销确认为正式 Alert Dialog；默认焦点与危险色由 ui/alert-dialog 保证，结果确定前弹窗不自行关闭。 */}
       <ConfirmAlertDialog
