@@ -10,15 +10,17 @@ import {
   type LegacyObservationInput,
 } from "../src/supply/legacy-observation";
 
-test("legacy resource conversion keeps unknown, zero, ammunition groups and insurance generations separate", () => {
+test("legacy resource conversion preserves unknown/zero and uses original insurance days without conversion", () => {
   assert.deepEqual(legacyResourceBaseQuantity("level6_bullet_num","2"),{quantity:"120",unit:"ROUND"});
   for(const field of ["awm_bullet_num","barrett_bullet_num"]) assert.deepEqual(legacyResourceBaseQuantity(field,"2"),{quantity:"2",unit:"ROUND"});
   assert.deepEqual(legacyResourceBaseQuantity("coffee_num","0"),{quantity:"0",unit:"PIECE"});
   assert.deepEqual(legacyResourceBaseQuantity("coffee_num",null),{quantity:null,unit:"PIECE"});
-  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3"),{quantity:"3",unit:"UNKNOWN"});
-  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","0"),{quantity:"0",unit:"UNKNOWN"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3"),{quantity:"3",unit:"DAY"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","0"),{quantity:"0",unit:"DAY"});
+  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num",null),{quantity:null,unit:"DAY"});
   assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3","DAY"),{quantity:"3",unit:"DAY"});
-  assert.deepEqual(legacyResourceBaseQuantity("top_insure_card_num","3","CARD_COUNT"),{quantity:"3",unit:"PIECE"});
+  assert.throws(()=>legacyResourceBaseQuantity("top_insure_card_num","3","CARD_COUNT" as never),/基础单位为天/);
+  assert.throws(()=>legacyResourceBaseQuantity("top_insure_card_num","3","UNKNOWN" as never),/基础单位为天/);
   for(const value of ["-5","1.5","01",1.5]) assert.throws(()=>legacyResourceBaseQuantity("level6_bullet_num",value));
   assert.deepEqual(legacyResourceBaseQuantity("level6_bullet_num","2"),legacyResourceBaseQuantity("level6_bullet_num","2"));
 });

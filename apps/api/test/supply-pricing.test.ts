@@ -107,7 +107,7 @@ test("PC1 four tiers, bounds, invalid inputs, resource units and projection", ()
 
 import { computeQuote, projectQuote, type HaffRatioRule, type InternalQuote } from "../src/supply/pricing";
 
-test("synthetic four-tier resource vectors freeze per-card/per-round/per-60 quantities without multiplying by rental days",()=>{
+test("synthetic four-tier resource vectors freeze per-day/per-round/per-60 quantities without multiplying by rental days",()=>{
   for(const tier of ["STANDARD","VIP","SVIP","DISCOUNT_USER"] as const){
     const input=compatInput("47",{rentalMode:"ordinary"});
     const fixed=[

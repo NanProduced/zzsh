@@ -3,10 +3,11 @@ import test from "node:test";
 import { assertCurrentRelease, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
+import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS } from "../src/supply/delta-rental";
 
 test("resource income preview uses authoritative fixed prices, exact group quantity and unknown semantics without writes",async()=>{
   const queries:string[]=[];
-  const rows=[{itemId:"barrett",code:"df_billable_barrett_bullet",name:"巴雷特",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"0.5",ownerUnitAmount:"0.2"},{itemId:"card",code:"top_insure_card_piece",name:"保险卡",unit:"PIECE",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"5",ownerUnitAmount:"3"},{itemId:"six",code:"level6_round",name:"六级",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"8",ownerUnitAmount:"4"},{itemId:"day",code:"legacy_day",name:"旧天",unit:"DAY",enabled:false,pricingKind:null}];
+  const rows=[{itemId:"barrett",code:"df_billable_barrett_bullet",name:"巴雷特",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"0.5",ownerUnitAmount:"0.2"},{itemId:"card",code:"df_billable_top_insure_card",name:"保险卡",unit:"DAY",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"5",ownerUnitAmount:"3"},{itemId:"six",code:"level6_round",name:"六级",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"8",ownerUnitAmount:"4"},{itemId:"day",code:"legacy_day",name:"旧天",unit:"DAY",enabled:false,pricingKind:null}];
   const client={query:async(sql:string)=>{queries.push(sql);return {rows:sql.includes('commission_rate')?[{releaseId:"release",generation:"2",priceVersionId:"price",catalogRevision:"92",mode:"SPREAD",commissionRate:null,roundingPolicy:"HALF_UP_CENT_V1"}]:rows};}};
   const binding={releaseId:"release",catalogRevision:"92"};
   const empty=await readResourceIncomePreview(client as never,"game",[],binding);assert.equal(empty.available,true);assert.equal(empty.ownerTotal,null);
@@ -25,11 +26,31 @@ test("Barrett and insurance catalog identities reject incorrect units and fracti
   for(const body of [{code:'df_billable_barrett_bullet',unit:'PIECE'}, {code:'top_insure_card_piece',unit:'DAY'}, {code:'df_billable_top_insure_card',unit:'PIECE'}, {code:'top_insure_card_piece',unit:'PIECE',quantityScale:1}]) await assert.rejects(()=>createCatalogEntry(client as never,'admin',true,'items','g',{name:'resource',...body}),/基础单位/);
 });
 
-test("resource price configuration refuses a grouped price for per-round Barrett and per-card insurance",async()=>{
-  for(const code of ['df_billable_barrett_bullet','top_insure_card_piece']){
-    const client={query:async(sql:string)=>sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'i',code,unit:code==='top_insure_card_piece'?'PIECE':'ROUND',gameId:'g'}]}:{rows:[],rowCount:0}};
+test("resource price configuration refuses a grouped price for per-round Barrett and per-day insurance",async()=>{
+  for(const code of ['df_billable_barrett_bullet','df_billable_top_insure_card']){
+    const client={query:async(sql:string)=>sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'i',code,unit:code==='df_billable_top_insure_card'?'DAY':'ROUND',gameId:'g'}]}:{rows:[],rowCount:0}};
     await assert.rejects(()=>updatePriceDraft(client as never,'admin',true,'p',{expectedRevision:'1',lines:[{itemId:'i',pricingKind:'FIXED_UNIT',unitQuantity:'60',buyerUnitAmount:'5',ownerUnitAmount:'3'}]}),/份量必须为1/);
   }
+});
+
+test("only original DAY insurance is a current resource; generic PIECE items and historical projections remain intact",()=>{
+ assert.equal(DELTA_RESOURCE_UNITS.df_billable_top_insure_card,'DAY');assert.equal(DELTA_RESOURCE_UNITS.top_insure_card_piece,undefined);
+ assert.doesNotThrow(()=>assertDeltaResourceUnit('df_billable_top_insure_card','DAY',0));
+ for(const code of ['top_insure_card_piece','df_billable_top_insure_card_piece'])for(const unit of ['PIECE','DAY'])assert.throws(()=>assertDeltaResourceUnit(code,unit),/基础单位为天/);
+ assert.throws(()=>assertDeltaResourceUnit('df_billable_top_insure_card','PIECE'),/基础单位/);assert.throws(()=>assertDeltaResourceUnit('df_billable_top_insure_card','DAY',1),/基础单位/);
+ assert.doesNotThrow(()=>assertDeltaResourceUnit('coffee','PIECE'));assert.doesNotThrow(()=>assertDeltaResourceUnit('level6_armor','PIECE'));
+});
+
+test("retired insurance cannot acquire a new price or income projection even with an enabled stale catalog row",async()=>{
+ for(const code of ['top_insure_card_piece','df_billable_top_insure_card_piece']){
+  const row={itemId:'wrong',code,name:'保险卡',unit:'PIECE',enabled:true,pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:'5',ownerUnitAmount:'3'};
+  const client={query:async(sql:string)=>({rows:sql.includes('commission_rate')?[{releaseId:'r',generation:'1',priceVersionId:'p',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1'}]:[row]})};
+  const empty=await readResourceIncomePreview(client as never,'g',[],{releaseId:'r',catalogRevision:'1'});assert.deepEqual(empty.lines,[]);assert.equal(empty.ownerTotal,null);
+  await assert.rejects(()=>readResourceIncomePreview(client as never,'g',[{itemId:'wrong',quantity:'3'}],{releaseId:'r',catalogRevision:'1'}),/基础单位为天/);
+  const queries:string[]=[],priceClient={query:async(sql:string)=>{queries.push(sql);return sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'wrong',code,unit:'PIECE',gameId:'g'}]}:{rows:[],rowCount:0};}};
+  await assert.rejects(()=>updatePriceDraft(priceClient as never,'admin',true,'p',{expectedRevision:'1',lines:[{itemId:'wrong',pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:'5',ownerUnitAmount:'3'}]}),/基础单位为天/);
+  assert.equal(queries.some(sql=>/^(INSERT INTO|DELETE FROM) "zzsh_supply"."price_line"/.test(sql)),false);
+ }
 });
 
 test("referenced inventory units cannot be changed in place even when renaming remains legal", async()=>{
