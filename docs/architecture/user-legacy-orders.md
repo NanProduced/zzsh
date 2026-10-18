@@ -8,8 +8,10 @@
 
 详情返回order。服务端从正常user session核身份与冻结状态，并按快照owner/renter二次核归属；未认证401，无归属/不存在404，非法查询400。不暴露另一方身份/联系方式、凭据、source_snapshot或审计材料。
 
-DTO保留稳定id、订单原单号displayNo、source.origin=LEGACY、原状态与历史时间。amounts/payment/legacyAmounts复用精确Money字符串；缺证为null，refundChannelState固定UNKNOWN。已付取消可保留支付事实，历史应退不表示到账。基础历史投影为readOnly=true、paymentOpen/cancelOpen=false、continuationCount=0、actions=[]，不会因读取成功开放业务写入。
+DTO保留稳定id、订单原单号displayNo、source.origin=LEGACY、原状态与历史时间。amounts/payment/legacyAmounts复用精确Money字符串；缺证为null，refundChannelState固定UNKNOWN。legacyAmounts.refund是原单退款金额记录，不是当前净应退或未结责任，也不代表渠道到账；已核责任由续办投影单独读取。已付取消仍保留支付事实。基础历史投影为readOnly=true、paymentOpen/cancelOpen=false、continuationCount=0、actions=[]，不会因读取成功开放业务写入。
 
-订单号与账号号分开。account.displayNo只取已持久分配的canonical新AC号，不回退旧账号号或内部ID；只有当前user仍是关联账号号主，基础历史投影才返回account.id、readable=true及当前标题。其他主体的readable=false、account.id/displayNo为null，标题显示资料未提供；历史当事关系不能授予当前私有账号资料权限。公开详情另按[账号可见性](account-visibility.md)核验。
+订单号与账号号分开。account.displayNo只取已持久分配的canonical号（日期ZZ号及兼容既有AC号），不回退旧账号号或内部ID；只有当前user仍是关联账号号主，基础历史投影才返回account.id、readable=true及真实当前标题。无真实标题时title=null，不把系统占位文案写入该字段。其他主体的readable=false、account.id/displayNo和title为null；历史当事关系不能授予当前私有账号资料权限。公开详情另按[账号可见性](account-visibility.md)核验。
+
+orderFacts只读投影本单冻结资源、实际租赁截止及来源事实。列表、总览和详情无可读真实标题时可显示明确标注的“订单资源”摘要；没有冻结事实则显示资料未提供，不推算租期或补数量。资源数量与单位不重解释（顶级保险卡保持天），该摘要不是当前账号库存、公开资格或新报价。
 
 续办使用独立的`/legacy/:id/continuation`读取与命令接口，另核原来源、当前证据、阶段、身份/对象权限及幂等；基础订单只读DTO不代表续办未实现，也不证明该单已经具备续办条件。详见[旧交易续办与责任边界](legacy-trade-continuation.md)。旧金额、原单号及原始快照保持，不能因账号资料不全而删除或重算订单。
