@@ -239,3 +239,10 @@ html[data-theme="dark"] .account-quote { background:color-mix(in srgb,#8d5b0b 10
 .account-skin-card-media img { width:100%; height:100%; object-fit:contain; }
 .account-skin-card-media-fallback { width:100%; height:100%; display:grid; place-items:center; gap:5px; }
 .account-skin-card-media { overflow:hidden; }
+.account-skin-card-media-btn { display:block; width:100%; padding:0; border:0; background:transparent; cursor:pointer; border-radius:6px; }
+.account-skin-card-media-btn:focus-visible { outline:2px solid var(--color-delta-accent); outline-offset:2px; }
+.account-skin-preview-content { max-width:min(900px,calc(100vw - 32px)); }
+.account-skin-preview-body { display:flex; flex-direction:column; align-items:center; max-width:100%; }
+.account-skin-preview-meta { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:8px; margin-top:12px; font-size:13px; color:var(--color-text-secondary); }
+.account-skin-preview-meta strong { color:var(--color-text-primary); }
+.account-skin-preview-caption { color:var(--color-text-muted); font-size:12px; }

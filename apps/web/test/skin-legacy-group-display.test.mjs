@@ -72,7 +72,7 @@ test('SK7-R1-01 detail never groups by the retired red/gold category', () => {
   for (const key of ['oldNative', 'explicitNull']) {
     const html = renderDetail(fixtures[key]);
     assert.equal(html.includes(OLD), false, `${key} must not show the old group`);
-    assert.deepEqual(heading(html), ['类型未标注'], `${key} falls back to a neutral group`);
+    assert.deepEqual(heading(html), ['类型待核'], `${key} falls back to a neutral group`);
     assert.ok(html.includes(fixtures[key].name), `${key} keeps the skin's own name`);
   }
   const known = renderDetail(fixtures.verifiedAgent);
@@ -90,3 +90,51 @@ test('SK7-R1-01 owner workspace facet shows only verified type/quality, never th
   assert.equal(facet(renderOwner(fixtures.verifiedAgent), 'SKIN_AGENT'), '干员外观');
   assert.equal(facet(renderOwner({ ...fixtures.verifiedAgent, rarityName: '测试品质' }), 'SKIN_AGENT'), '干员外观 · 测试品质');
 });
+
+test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, uses verified type only', () => {
+  function renderCard(skin) {
+    const data = freeze({
+      id: 'ACCOUNT_SYNTHETIC',
+      gameId: 'GAME_SYNTHETIC',
+      versionId: 'VERSION_SYNTHETIC',
+      releaseId: 'RELEASE_SYNTHETIC',
+      title: '测试账号',
+      publicTitle: '测试账号',
+      displayNo: 'ZZ202610180000002',
+      conditionLines: [],
+      resourceLines: [],
+      skinTags: [structuredClone(skin)],
+      skinNames: [skin.name],
+      skinLabels: [skin.name],
+      media: [],
+      entitlementNames: [],
+      termLabel: '1天',
+      termOptionLabel: null,
+      payableTotalLabel: null,
+      loginMethod: null,
+      resourceTotalLabel: '待核定',
+      haffRentLabel: null,
+      itemResourceTotalLabel: null,
+      depositLabel: null,
+      canCreateOrder: false,
+      unitAmountsInformational: false,
+    });
+    const bytes = JSON.stringify(data);
+    const html = renderToStaticMarkup(React.createElement(card.AccountCard, { data, viewMode: 'list' }));
+    assert.equal(JSON.stringify(data), bytes, 'card payload unchanged');
+    return html;
+  }
+
+  for (const key of ['oldNative', 'explicitNull']) {
+    const html = renderCard(fixtures[key]);
+    assert.equal(html.includes(OLD), false, `${key} list card chip must not show retired category`);
+    assert.equal(html.includes('[干员金皮（旧分组）]'), false, `${key} list card must not show bracketed old group`);
+    assert.equal(html.includes('skin-chip-cat'), false, `${key} list card chip must omit unknown type badge`);
+    assert.ok(html.includes(fixtures[key].name), `${key} keeps skin name`);
+  }
+
+  const agentHtml = renderCard(fixtures.verifiedAgent);
+  assert.equal(agentHtml.includes(OLD), false);
+  assert.ok(agentHtml.includes('[干员外观]'), 'verified agent skin renders verified type label in list card chip');
+});
+

@@ -8,7 +8,7 @@ import { FavoriteButton } from "@/components/favorites/favorite-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThumbnailCarousel } from "@/components/ui/thumbnail-carousel";
 import { rememberAccountReturn, type AccountReturnSnapshot } from "@/lib/account-return";
-import { haffRatioLabel, resourceQuantityLabel, skinQualityLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
+import { haffRatioLabel, resourceQuantityLabel, skinQualityLabel, skinTypeLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
 import { LoginMethodIcon } from "./login-method-icon";
 import { canonicalResourceCode } from "@/lib/listing-filters";
 export { canonicalResourceCode } from "@/lib/listing-filters";
@@ -559,11 +559,12 @@ export function AccountCard({
               <>
                 {data.skinTags.slice(0, 3).map((tag, idx) => {
                   const tone = skinChipTone(tag);
+                  const typeLabel = skinTypeLabel(tag.ownerKind);
                   return (
                     <span key={`${tag.id}-${idx}`} className={`account-skin-chip account-skin-chip--${tone}`} data-skin-id={tag.id}>
-                      {tag.categoryName ? (
+                      {typeLabel ? (
                         <span className="skin-chip-cat" style={{ opacity: 0.85, marginRight: "3px" }}>
-                          [{tag.categoryName}]
+                          [{typeLabel}]
                         </span>
                       ) : null}
                       <span className="skin-chip-name" title={tag.name}>{tag.name}</span>

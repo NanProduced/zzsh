@@ -15,7 +15,7 @@ import { detailBreadcrumbs, haffRatioLabel, resourceQuantityLabel, skinQualityLa
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
 import { useUserSession } from "@/components/session/user-session-provider";
-import { SkinMediaThumb, skinCardTitle } from "@/components/supply/skin-media-thumb";
+import { SkinMediaThumb, skinCardTitle, skinMediaSource } from "@/components/supply/skin-media-thumb";
 import "./account-detail.css";
 
 type DetailState = { status: "loading" } | { status: "ready"; data: ListingDetailData; gameCode?: string } | { status: "unavailable" } | { status: "error" };
@@ -192,8 +192,9 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   const resources = orderedQuoteResources(data);
   const penalties = data.media.filter(item => item.category === "PENALTY");
   const skinGroups = new Map<string, ListingDetailData["skinTags"]>();
+  const [previewSkin, setPreviewSkin] = useState<ListingDetailData["skinTags"][number] | null>(null);
   // Group only by the verified skin type; the retired category label stays in the snapshot as a trace and is never shown as a group.
-  for (const tag of data.skinTags) { const category = skinTypeLabel(tag.ownerKind) ?? "类型未标注"; skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
+  for (const tag of data.skinTags) { const category = skinTypeLabel(tag.ownerKind) ?? "类型待核"; skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
   return <article className="listing-detail account-detail">
     <div className="account-detail-top">
       <section className="account-detail-info" aria-label="账号摘要">
@@ -245,7 +246,32 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
           <div className="account-cosmetics"><h3><Shirt size={17} aria-hidden="true" />皮肤与权益</h3>
             {withheldSkinsNote(data.skinsWithheld) ? <p className="account-note-source">{withheldSkinsNote(data.skinsWithheld)}</p> : null}
             {data.skinTags.length || data.entitlementNames.length ? <>
-              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.id}:${i}`} className="account-skin-card" data-skin-id={tag.id}><SkinMediaThumb mediaId={tag.mediaId ?? null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /><strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong>{skinQualityLabel(tag) ? <span className="account-skin-card-quality">{skinQualityLabel(tag)}</span> : null}</article>)}</div></section>)}</div>
+              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.id}:${i}`} className="account-skin-card" data-skin-id={tag.id}>{tag.mediaId ? <button type="button" className="account-skin-card-media-btn" aria-label={`放大查看 ${skinCardTitle(tag)} 皮肤宣传图`} onClick={() => setPreviewSkin(tag)}><SkinMediaThumb mediaId={tag.mediaId} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /></button> : <SkinMediaThumb mediaId={null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} />}<strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong>{skinQualityLabel(tag) ? <span className="account-skin-card-quality">{skinQualityLabel(tag)}</span> : null}</article>)}</div></section>)}</div>
+              <Dialog.Root open={Boolean(previewSkin)} onOpenChange={(open) => { if (!open) setPreviewSkin(null); }}>
+                <Dialog.Portal>
+                  <Dialog.Overlay className="modal-overlay" />
+                  <Dialog.Content className="detail-preview-content account-skin-preview-content" aria-describedby={undefined}>
+                    <Dialog.Title className="sr-only">{previewSkin ? `${skinCardTitle(previewSkin)} 大图预览` : "皮肤大图预览"}</Dialog.Title>
+                    <Dialog.Close className="icon-button detail-preview-close" aria-label="关闭预览"><X size={18} aria-hidden="true" /></Dialog.Close>
+                    {previewSkin?.mediaId ? (
+                      <div className="account-skin-preview-body">
+                        <DetailImage
+                          src={skinMediaSource(previewSkin.mediaId) ?? ""}
+                          alt={`${skinCardTitle(previewSkin)} 宣传图`}
+                          className="detail-preview-image"
+                          loading="eager"
+                        />
+                        <div className="account-skin-preview-meta">
+                          <strong>{skinCardTitle(previewSkin)}</strong>
+                          <span>{skinTypeLabel(previewSkin.ownerKind) ?? "类型待核"}</span>
+                          {skinQualityLabel(previewSkin) ? <span>· {skinQualityLabel(previewSkin)}</span> : null}
+                          <span className="account-skin-preview-caption">（宣传图）</span>
+                        </div>
+                      </div>
+                    ) : null}
+                  </Dialog.Content>
+                </Dialog.Portal>
+              </Dialog.Root>
               <div className="account-entitlement-list">{data.entitlementDetails?.length ? data.entitlementDetails.map(item => <div key={item.id} className="account-entitlement-item"><strong>{item.name}</strong><span>{entitlementExpiryLabel(item)}</span></div>) : data.entitlementNames.map((name, index) => <div key={`${name}:${index}`} className="account-entitlement-item"><strong>{name}</strong><span>权益详情以个人确认时为准</span></div>)}</div>
             </> : <p className="account-empty-note">暂无皮肤或权益的公开申报。</p>}
           </div>

@@ -728,7 +728,7 @@ export function SupplyCatalogView({
           <img
             src={`/api/v1/supply/media/${mediaId}/content`}
             alt=""
-            className="h-full w-full object-cover rounded transition-transform group-hover:scale-105"
+            className="h-full w-full object-contain rounded transition-transform group-hover:scale-105"
             loading="lazy"
             onError={(event) => {
               event.currentTarget.style.display = "none";
