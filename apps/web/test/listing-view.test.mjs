@@ -474,7 +474,7 @@ test('skin presentation carries the stable owner, base name and media summary', 
       skins: [{ ...listing.presentation.skins[0], ownerName: '骇爪', baseName: '维什戴尔', mediaId: 'asset_skin' }],
     },
   });
-  assert.deepEqual(view.skinTags, [{ name: 'M4A1 金色', categoryCode: null, categoryName: '武器', ownerName: '骇爪', baseName: '维什戴尔', mediaId: 'asset_skin' }]);
+  assert.deepEqual(view.skinTags, [{ id: 'skin_1', name: 'M4A1 金色', categoryCode: null, categoryName: '武器', ownerName: '骇爪', baseName: '维什戴尔', mediaId: 'asset_skin' }]);
 });
 
 
@@ -503,7 +503,11 @@ test('historical listing keeps exact source amounts without inventing a current 
   assert.equal(view.imageUrl, '/api/supply/listings/account_1/media/asset_a');
   assert.deepEqual(view.skinNames, ['M4A1 金色']);
   assert.deepEqual(view.skinLabels, ['武器 · M4A1 金色']);
-  assert.deepEqual(view.skinTags, [{ name: 'M4A1 金色', categoryCode: null, categoryName: '武器' }]);
+  assert.deepEqual(view.skinTags, [{ id: 'skin_1', name: 'M4A1 金色', categoryCode: null, categoryName: '武器' }]);
+  assert.equal(Object.hasOwn(view, 'skinsWithheld'), false);
+  const withheld = toListingCard({ ...historical, presentation: { ...listing.presentation, skinsWithheld: 2 } });
+  assert.equal(withheld.skinsWithheld, 2, 'pending declared skins stay visible as a count instead of an empty declaration');
+  for (const bad of [0, -1, 1.5, '2', null]) assert.equal(Object.hasOwn(toListingCard({ ...historical, presentation: { ...listing.presentation, skinsWithheld: bad } }), 'skinsWithheld'), false);
   const empty = toListingCard({ ...historical, media: [], presentation: { ...listing.presentation, skins: [] } });
   assert.equal(empty.media.length, 0);
   assert.equal(empty.imageUrl, undefined);

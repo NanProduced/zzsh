@@ -590,3 +590,30 @@ test("v3 manifest rejects malformed manifests, mixed resources and accepts exact
   writeFileSync(join(dir, "m.outside.json"), JSON.stringify({ schema: "legacy-public-admission-manifest-v1", shards: [a] }));
   assert.throws(() => loadLegacyPublicAdmissionManifest({ ...manifestEnv("x"), LEGACY_PUBLIC_ADMISSION_MANIFEST: "m.outside.json" }, dir), /PATH/);
 });
+
+// SKIN-CATALOG-INTEGRATION-6: migrated accounts read the same public skin summary as
+// catalog pages and publish snapshots; non-public declared references are counted, not named.
+test("legacy account skins carry the shared public summary and count withheld references", async () => {
+  const seen: string[] = [];
+  const skinRows = [
+    { id: "skin_luna", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", mediaId: "asset_public", categoryCode: "df_skin_category_agent", categoryName: "干员外观", visible: true },
+    { id: "skin_pending", name: "PENDING_PRIVATE_TOKEN", baseName: null, ownerName: null, mediaId: null, categoryCode: "df_skin_category_knife", categoryName: "近战外观", visible: false },
+  ];
+  const base = legacyProjectionClient(legacyProjectionRow());
+  const client = { query: async (sql: string) => {
+    if (sql.includes("FROM zzsh_supply.listing_skin ls")) { seen.push(sql); return { rows: skinRows, rowCount: skinRows.length }; }
+    return base.query(sql);
+  } } as unknown as PoolClient;
+  const listing = await readLegacyListing(client, "account_1");
+  assert.deepEqual(listing.presentation.skins, [{ id: "skin_luna", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", mediaId: "asset_public", categoryCode: "df_skin_category_agent", categoryName: "干员外观" }]);
+  assert.equal((listing.presentation as { skinsWithheld?: number }).skinsWithheld, 1);
+  assert.equal(JSON.stringify(listing).includes("PENDING_PRIVATE_TOKEN"), false);
+  assert.match(seen[0]!, /purpose='SKIN_MEDIA' AND a\.review_state='APPROVED' AND a\.access_class='PUBLIC_DISPLAY' AND a\.public_storage_key IS NOT NULL/);
+  assert.doesNotMatch(seen[0]!, /WHERE ls\.version_id=\$1 AND s\.enabled/, "withheld references are counted, not silently filtered");
+
+  skinRows.pop();
+  const complete = await readLegacyListing(client, "account_1");
+  assert.equal(Object.hasOwn(complete.presentation, "skinsWithheld"), false);
+  assert.equal(complete.canCreateOrder, false);
+  assert.equal(complete.quote, null);
+});

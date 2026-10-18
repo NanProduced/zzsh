@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { confirmLegacySkinIdentity, importLegacySkinOwner, legacyCatalogRecordDigest } from "../src/supply/catalog";
+import { buildLegacySkinIndex, declarableLegacySkinIds, LEGACY_SKIN_FIELD_TYPE_HINT, mapLegacySkinHolding, splitLegacySkinColumn } from "../src/legacy-load/legacy-skin-holdings";
 
 const NAMESPACE = "legacy_mysql_restore";
 const ARTIFACT = "delta-skin-catalog/candidate-standard.json";
@@ -118,4 +119,66 @@ test("legacy catalog record digest is canonical across key order", () => {
   assert.equal(left, right);
   assert.match(left, /^[a-f0-9]{64}$/);
   assert.notEqual(left, legacyCatalogRecordDigest({ namespace: NAMESPACE, kind: "MELEE_TYPE", code: "c", name: "n" }));
+});
+
+// SKIN-CATALOG-INTEGRATION-6: old four holding columns -> skin ids, per account.
+const holdingCatalog = [
+  { skinId: "skin_luna", gameId: "g", sourceField: "agent_skin", sourceToken: "天际线", namingState: "VERIFIED" as const, enabled: true, formVisible: true },
+  { skinId: "skin_gu", gameId: "g", sourceField: "gold_skin", sourceToken: "蛊-不羁人生", namingState: "VERIFIED" as const, enabled: true, formVisible: true },
+  { skinId: "skin_claw", gameId: "g", sourceField: "knife_skin", sourceToken: "赤霄（爪刀）", namingState: "PENDING" as const, enabled: false, formVisible: false },
+  { skinId: "skin_m7", gameId: "g", sourceField: "weapon_skin", sourceToken: "M7棱镜攻势", namingState: "PENDING" as const, enabled: false, formVisible: false },
+  { skinId: "skin_deep", gameId: "g", sourceField: "gold_skin", sourceToken: "深蓝- 不破誓约", namingState: "VERIFIED" as const, enabled: true, formVisible: true },
+  { skinId: "skin_other", gameId: "other", sourceField: "agent_skin", sourceToken: "狂怒", namingState: "VERIFIED" as const, enabled: true, formVisible: true },
+];
+const holdingRules = [
+  { field: "weapon_skin" as const, token: "0", decision: "INVALID" as const },
+  { field: "knife_skin" as const, token: "赤霄", decision: "PENDING_DECISION" as const },
+  { field: "knife_skin" as const, token: "M7棱镜攻势", decision: "HISTORICAL" as const },
+];
+
+test("legacy holding columns split on comma, keep inner spaces and never infer quality", () => {
+  assert.deepEqual(splitLegacySkinColumn(null), []);
+  assert.deepEqual(splitLegacySkinColumn(" , "), []);
+  assert.deepEqual(splitLegacySkinColumn("天际线, 天际线,深蓝- 不破誓约"), ["天际线", "深蓝- 不破誓约"]);
+  assert.throws(() => splitLegacySkinColumn(7 as never));
+  assert.deepEqual(LEGACY_SKIN_FIELD_TYPE_HINT, { knife_skin: "MELEE_TYPE", agent_skin: "AGENT", weapon_skin: "FIREARM", gold_skin: "AGENT" });
+});
+
+test("legacy holding maps only exact source tuples and keeps every unresolved token visible", () => {
+  const index = buildLegacySkinIndex(holdingCatalog, holdingRules);
+  const full = mapLegacySkinHolding({ accountKey: "acct-1", gameId: "g", columns: { agent_skin: "天际线", gold_skin: "蛊-不羁人生,深蓝- 不破誓约" } }, index, "139");
+  assert.deepEqual(full.mappedSkinIds, ["skin_deep", "skin_gu", "skin_luna"]);
+  assert.equal(full.complete, true);
+  assert.deepEqual(declarableLegacySkinIds(full), ["skin_deep", "skin_gu", "skin_luna"]);
+
+  const partial = mapLegacySkinHolding({ accountKey: "acct-2", gameId: "g", columns: {
+    knife_skin: "赤霄,赤霄（爪刀）,M7棱镜攻势", weapon_skin: "0,M7棱镜攻势,不存在", agent_skin: "狂怒,天际线，水墨云图", gold_skin: "" } }, index, "139");
+  assert.deepEqual(partial.mappedSkinIds, []);
+  assert.deepEqual(partial.pending.map((p) => p.skinId), ["skin_claw", "skin_m7"]);
+  assert.deepEqual(partial.unresolved.map((u) => `${u.field}:${u.token}:${u.reason}`), [
+    "knife_skin:赤霄:PENDING_DECISION",
+    "knife_skin:M7棱镜攻势:HISTORICAL_ONLY",
+    "agent_skin:狂怒:CROSS_GAME",
+    "agent_skin:天际线，水墨云图:AMBIGUOUS_SEPARATOR",
+    "weapon_skin:0:INVALID_TOKEN",
+    "weapon_skin:不存在:NOT_IN_CATALOG",
+  ]);
+  assert.equal(partial.complete, false);
+  assert.equal(declarableLegacySkinIds(partial), null, "unresolved holdings are never written as an empty or partial declaration");
+  // The same token in another column is a different source tuple, not a synonym.
+  assert.equal(partial.tokens.filter((t) => t.token === "M7棱镜攻势").length, 2);
+
+  const empty = mapLegacySkinHolding({ accountKey: "acct-3", gameId: "g", columns: {} }, index, "139");
+  assert.equal(empty.complete, true);
+  assert.deepEqual(empty.tokens, []);
+  assert.notEqual(empty.digest, mapLegacySkinHolding({ accountKey: "acct-3", gameId: "g", columns: {} }, index, "140").digest, "digest binds the catalog revision");
+});
+
+test("legacy holding index rejects duplicate tuples, conflicting rules and unknown columns", () => {
+  assert.throws(() => buildLegacySkinIndex([...holdingCatalog, { ...holdingCatalog[0]!, skinId: "dup" }]), /Duplicate/);
+  assert.throws(() => buildLegacySkinIndex(holdingCatalog, [{ field: "agent_skin", token: "天际线", decision: "INVALID" }]), /Conflicting/);
+  assert.throws(() => buildLegacySkinIndex(holdingCatalog, [{ field: "knife_skin", token: "赤霄", decision: "ALIAS_OF", targetField: "knife_skin", targetToken: "missing" }]), /Alias target/);
+  const alias = buildLegacySkinIndex(holdingCatalog, [{ field: "knife_skin", token: "赤霄", decision: "ALIAS_OF", targetField: "knife_skin", targetToken: "赤霄（爪刀）" }]);
+  assert.deepEqual(mapLegacySkinHolding({ accountKey: "a", gameId: "g", columns: { knife_skin: "赤霄" } }, alias, "1").pending.map((p) => p.skinId), ["skin_claw"]);
+  assert.throws(() => mapLegacySkinHolding({ accountKey: "a", gameId: "g", columns: { skin: "x" } as never }, alias, "1"), /Unexpected/);
 });

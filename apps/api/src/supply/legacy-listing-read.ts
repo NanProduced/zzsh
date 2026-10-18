@@ -12,6 +12,7 @@ import type { ListingQueryV2 } from "./listing-filter-contract";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { publicAccountNumber } from "./account-number";
+import { publicSkinMediaIdSql, publicSkinOwnerNameSql } from "./catalog";
 
 export type LegacyReadSnapshot = {
   schema: "legacy-listing-read-v1";
@@ -254,9 +255,15 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   const extra=r.display_snapshot ? parseLegacyDisplaySnapshot(r.display_snapshot) : null;
   if(extra && r.display_digest!==legacyDisplayDigest(r.id,{observationVersionId:r.display_version_id,baseSourceDigest:r.base_source_digest,extractSha256:r.extract_sha256,sourceUpdatedAt:r.display_updated_at.toISOString(),evidenceRef:r.display_evidence_ref,snapshot:extra})) throw notFound();
   const rows=(await client.query(`SELECT i.id,i.code,i.name,i.unit,l.quantity::text quantity FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id WHERE l.version_id=$1 ORDER BY i.sort_order,i.id`,[r.version_id])).rows;
-  const skins=(await client.query<{id:string;name:string;categoryCode:string|null;categoryName:string|null}>(`SELECT s.id,s.name,c.code AS "categoryCode",c.name AS "categoryName"
+  // Same public summary as catalog/publish snapshots. A declared reference whose
+  // skin is not public (pending identity, disabled) is withheld by count only, so
+  // the page can say "pending" instead of rendering an empty declaration.
+  const declaredSkins=(await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;visible:boolean}>(`SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",${publicSkinMediaIdSql("s")} AS "mediaId",
+    c.code AS "categoryCode",c.name AS "categoryName",(s.enabled AND s.form_visible) AS visible
     FROM zzsh_supply.listing_skin ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
-    WHERE ls.version_id=$1 AND s.enabled AND s.form_visible ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[r.version_id])).rows;
+    WHERE ls.version_id=$1 ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[r.version_id])).rows;
+  const skins=declaredSkins.filter(x=>x.visible===true);
+  const skinsWithheld=declaredSkins.length-skins.length;
   const media=(await client.query<{assetId:string;position:number}>(`SELECT m.asset_id AS "assetId",m.position
     FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id
     WHERE m.version_id=$1 AND a.purpose='ACCOUNT_DISPLAY' AND a.review_state IN ('PENDING','APPROVED') AND a.technical_state='READY' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL
@@ -275,7 +282,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     ...(extra ? {rentalMode:extra.rentalMode,displaySchema:extra.schema} : {}),
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:resources.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),
-    presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(x=>({id:x.id,name:x.name,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})})),entitlements:[]},
+    presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(x=>({id:x.id,name:x.name,baseName:x.baseName??null,ownerName:x.ownerName??null,mediaId:x.mediaId??null,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})})),...(skinsWithheld>0?{skinsWithheld}:{}),entitlements:[]},
     media:media.map(m=>({assetId:m.assetId,position:m.position,url:`/api/v1/supply/listings/${r.id}/media/${m.assetId}`})),publishedAt:null};
 }
 
