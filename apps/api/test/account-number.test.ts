@@ -118,3 +118,9 @@ test("a generated canonical collision stops without writing or choosing another 
  await assert.rejects(assignAccountNumber(f.client,'native-a'),(e:any)=>e.status===409);
  assert.equal(f.sequence(),1);assert.equal(f.writes.length,0);assert.equal(f.rows.get('native-a')!.display_no,null);
 });
+
+test("an empty conditional update never returns an unpersisted generated number",async()=>{
+ const f=numberClient(),client={query:async(sql:string,args:unknown[])=>sql.startsWith('UPDATE zzsh_supply.rental_account')?{rows:[],rowCount:0}:f.client.query(sql,args)} as unknown as PoolClient;
+ await assert.rejects(assignAccountNumber(client,'native-a'),(e:any)=>e.status===409);
+ assert.equal(f.sequence(),1);assert.equal(f.rows.get('native-a')!.display_no,null);assert.equal(f.writes.length,0);
+});
