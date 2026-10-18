@@ -564,6 +564,43 @@ test("F4: missing agreement evidence blocks creation instead of accepting a vers
   });
 });
 
+test("D8-R1: StrictMode replaces an aborted terms read without accepting or posting", async () => {
+  await withDom(async (window) => {
+    const reads = [], log = [];
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, {
+      fullPayoutTerms: (gameId, releaseId, signal) => {
+        const result = deferred();
+        reads.push({ gameId, releaseId, signal, result });
+        return result.promise;
+      },
+    });
+    const probe = createProbe(window, Panel, { ...detailPanelProps, fullPayoutSelected: true }, router([], log), { strict: true });
+    try {
+      await probe.render();
+      assert.equal(reads.length, 2, "StrictMode's replacement effect starts a fresh read");
+      assert.equal(reads[0].signal.aborted, true);
+      assert.equal(reads[1].signal.aborted, false);
+      await React.act(async () => {
+        reads[0].result.resolve({ releaseId: "release_1", fullPayoutTerms: { ...fullPayoutTerms, termsDigest: "f".repeat(64) } });
+        await tick();
+      });
+      assert.equal(probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]'), null, "the cancelled response stays ignored");
+      await React.act(async () => {
+        reads[1].result.resolve({ releaseId: "release_1", fullPayoutTerms });
+        await tick();
+      });
+      const checkbox = probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
+      assert.ok(checkbox);
+      assert.equal(checkbox.checked, false, "reading the replacement terms never accepts them");
+      const terms = probe.host.querySelector('[aria-label="全额包赔条款"]');
+      assert.match(terms.textContent, /包赔条款正文/);
+      assert.doesNotMatch(terms.textContent, /条款版本|摘要/);
+      assert.ok([...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"))?.disabled);
+      assert.equal(log.length, 0, "no confirmation or order is posted before consent");
+    } finally { await probe.dispose(); }
+  });
+});
+
 test("D1: a declared full-payout listing reads the sealed terms and binds the same acceptance to quote, order and recovery", async () => {
   await withDom(async (window) => {
     const log = [];

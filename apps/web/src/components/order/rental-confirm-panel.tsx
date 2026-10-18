@@ -74,7 +74,6 @@ function PayoutTerms({ state, accepted, locked, onAccept }: { state: PayoutState
         <div className="rental-confirm-agreement" role="region" aria-label="全额包赔条款全文">
           <p><strong>{state.terms.title}</strong></p>
           <pre>{state.terms.body}</pre>
-          <p className="rental-confirm-terms-meta">条款版本 {state.terms.termsVersionId} · 摘要 {state.terms.termsDigest.slice(0, 16)}…</p>
         </div>
       </details>
       <label className="rental-confirm-payout-accept">
@@ -93,7 +92,6 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
   const createKey = useRef<string | null>(null);
   const autoQuotedContext = useRef<string | null>(null);
   const quoteGeneration = useRef(0);
-  const payoutRequested = useRef<string | null>(null);
   const [payout, setPayout] = useState<PayoutState | null>(fullPayoutSelected ? { status: "loading" } : null);
   const [payoutAccepted, setPayoutAccepted] = useState(false);
   const quoteTarget = JSON.stringify([accountId, gameId, versionId, releaseId]);
@@ -116,8 +114,6 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
   const payoutTarget = `${gameId ?? ""}:${releaseId ?? ""}`;
   useEffect(() => {
     if (!fullPayoutSelected || !gameId || !releaseId) { setPayout(null); return; }
-    if (payoutRequested.current === payoutTarget) return;
-    payoutRequested.current = payoutTarget;
     setPayoutAccepted(false);
     setPayout({ status: "loading" });
     const controller = new AbortController();
