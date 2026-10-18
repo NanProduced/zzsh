@@ -58,7 +58,7 @@ export function useListingFeed(
 ): ListingFeed {
   const enabled = options.enabled ?? true;
   const replayKey = options.replayCursors ? JSON.stringify(options.replayCursors) : "";
-  const filterKey = listingFilterKey(filters, metadata);
+  const filterKey = listingFilterKey(filters, exactAccountLookupQuery(filters.q) ? null : metadata);
   const [state, setState] = useState<FeedState>(EMPTY);
   const stateRef = useRef(state);
   const sequence = useRef(0);

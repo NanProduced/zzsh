@@ -364,6 +364,8 @@ function ResourceQuantityInput({ item, bounds, committed, rangeSupported, onComm
   const errorId = `${id}-quantity-error`;
   const unit = resourceUnitShort(item, mode);
   const unitHint = resourceUnitHint(item, mode);
+  const hintId = `${id}-quantity-hint`;
+  const describedBy = [unitHint ? hintId : null, error ? errorId : null].filter(Boolean).join(" ") || undefined;
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -411,16 +413,17 @@ function ResourceQuantityInput({ item, bounds, committed, rangeSupported, onComm
     {showLabel ? <span className="market-resource-name">{displayName}</span> : null}
     <div className="market-resource-range" title={unitHint ?? undefined}>
       <input type="text" inputMode="numeric" value={minDraft} maxLength={32} placeholder="最低"
-        aria-label={`${displayName}数量下限（${unit}）`} aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined}
+        aria-label={`${displayName}数量下限（${unit}）`} aria-invalid={Boolean(error)} aria-describedby={describedBy}
         onChange={(event) => change(event.target.value, maxDraft)} onBlur={flush} />
       {rangeSupported ? <>
         <span className="market-range-separator" aria-hidden="true">–</span>
         <input type="text" inputMode="numeric" value={maxDraft} maxLength={32} placeholder="最高"
-          aria-label={`${displayName}数量上限（${unit}）`} aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined}
+          aria-label={`${displayName}数量上限（${unit}）`} aria-invalid={Boolean(error)} aria-describedby={describedBy}
           onChange={(event) => change(minDraft, event.target.value)} onBlur={flush} />
       </> : null}
       <span className="market-resource-unit">{unit}</span>
     </div>
+    {unitHint ? <small className="market-resource-hint" id={hintId}>{unitHint}</small> : null}
     {error ? <small className="market-inline-error" id={errorId} role="alert">{error}</small> : null}
   </div>;
 }

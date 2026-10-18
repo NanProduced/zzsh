@@ -41,7 +41,7 @@ async function mount(t,options={}) {
     const address=new URL(String(url),browser.location.href);calls.push({url:String(url),method:init.method??'GET',body:init.body?JSON.parse(init.body):undefined,signal:init.signal});
     if(options.fetch)return options.fetch(address,init);
     if(address.pathname==='/api/bff/admin/users'||address.pathname.endsWith('/lookup'))return json({items:options.empty?[]:[{...user,...(snapshot.permissions.includes('supply.rental_account.read')?{}:{resourceSummary:{state:'denied',permission:'supply.rental_account.read'}}),...(snapshot.permissions.includes('order.read')?{}:{orderSummary:{state:'denied',permission:'order.read'}})}],nextCursor:options.next?'NEXT':null,limit:20});
-    if(address.pathname.endsWith('/orders'))return options.ordersError?failure(503):json({items:[order,{...order,orderId:'order_paid',status:'PAID',paidAt:null,role:'owner'},{...order,orderId:'order_complete',status:'COMPLETED',paidAt:null}],nextCursor:null});
+    if(address.pathname.endsWith('/orders'))return options.ordersError?failure(503):json({items:options.orders??[order,{...order,orderId:'order_paid',status:'PAID',paidAt:null,role:'owner'},{...order,orderId:'order_complete',status:'COMPLETED',paidAt:null}],nextCursor:null});
     if(address.pathname.endsWith('/rental-accounts'))return json({items:[],nextCursor:null});
     if(address.pathname.endsWith('/audit-events'))return json({items:[],nextCursor:null});
     if(address.pathname==='/api/bff/admin/security/users/restore'){if(options.restore==='pending')throw new Error('Injected response loss');if(typeof options.restore==='number')return failure(options.restore);restored=true;return json({status:'ACTIVE'});}
@@ -91,6 +91,12 @@ test('orders retain cancelled payment, PAID/COMPLETED missing-time warning and p
   await mount(t,{path:'/users/user_normal?section=orders'});await waitFor(()=>browser.document.querySelector('[data-order-id="order_cancel"]'));
   assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('10:05'));for(const id of ['order_paid','order_complete'])assert.ok(browser.document.querySelector(`[data-order-id="${id}"]`).textContent.includes('支付时间待确认'));
   assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('本单租用方'));assert.ok(browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('本单资源归属方'));
+});
+
+test('user order records label old account sources and preserve denied resource information',async t=>{
+  const cases=[['0000123','旧来源号 0000123'],['ZZ20261018000001','账号 ZZ20261018000001'],['AC9000000000002','账号 AC9000000000002'],[null,'资源账号信息受限'],['','账号编号待核']];
+  await mount(t,{path:'/users/user_normal?section=orders',orders:cases.map(([value],i)=>({...order,orderId:'number-'+i,accountDisplayNo:value}))});await waitFor(()=>browser.document.querySelector('[data-order-id="number-4"]'));
+  cases.forEach(([,label],i)=>assert(browser.document.querySelector(`[data-order-id="number-${i}"]`).textContent.includes(label),label));
 });
 
 test('canonical registration is distinct from old-source trace, with five sections and no membership',async t=>{

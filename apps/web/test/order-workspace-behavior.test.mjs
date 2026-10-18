@@ -453,7 +453,7 @@ test("one list includes both sources and old deep links return to the same filte
     await probe.render({status:"PAID",accountId:"acct_9"});
     assert.equal(probe.host.querySelectorAll(".order-row").length,2);
     assert.doesNotMatch(probe.host.textContent,/历史订单|当前订单|旧平台|新平台|统一入口尚未完成/);
-    assert.match(probe.host.textContent,/订单资源：六级子弹 60 · 顶级保险卡 7 天/);
+    assert.match(probe.host.textContent,/订单资源：6级子弹 60 · 顶级保险卡 7 天/);
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the historical refund figure is labelled as the original record in the list row.
     assert.match(probe.host.textContent,/原退款金额记录/);

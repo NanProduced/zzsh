@@ -375,7 +375,7 @@ export function SecuritySelfView({
       <div className="flex flex-col gap-4 border-b pb-5 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="text-muted-foreground mb-1 font-mono text-[11px] tracking-wider uppercase">设置 · 安全</div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">登录与安全</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">账号安全</h1>
           <p className="text-muted-foreground mt-1 text-sm">管理本人的登录密码、身份验证器、会话锁定与应急恢复入口。</p>
           <p className="text-muted-foreground mt-0.5 text-xs">当前管理员：{accountLabel}</p>
         </div>

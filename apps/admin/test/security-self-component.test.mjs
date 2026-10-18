@@ -4,8 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createServer } from "vite";
-import react from "@vitejs/plugin-react";
+import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 
 const adminRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const browser = new Window({ url: "http://127.0.0.1:4381/settings" });
@@ -23,19 +22,11 @@ globalThis.cancelAnimationFrame = browser.cancelAnimationFrame.bind(browser);
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const { createRoot } = await import("react-dom/client");
-const vite = await createServer({
-  root: adminRoot,
-  configFile: false,
-  cacheDir: path.resolve(adminRoot, "../../tmp/admin-test-cache/security-self-component"),
-  plugins: [react()],
-  resolve: { alias: { "@": path.join(adminRoot, "src") } },
-  optimizeDeps: { noDiscovery: true, include: [] },
-  server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-});
-const { SecuritySelfView } = await vite.ssrLoadModule("/src/views/security-self/security-self-view.tsx");
+const source = await createOfflineAdminSource({ root: path.resolve(adminRoot, "../..") });
+const { SecuritySelfView } = await source.ssrLoadModule("/apps/admin/src/views/security-self/security-self-view.tsx");
 
 after(async () => {
-  await vite.close();
+  await source.close();
   await browser.happyDOM.abort();
 });
 
@@ -266,7 +257,7 @@ test("1. default facts are rendered truthfully with honest status copy", async (
   const { props } = baseProps();
   const h = await mount(props, t);
   const text = h.el.textContent;
-  assert.ok(text.includes("登录与安全"));
+  assert.equal(h.el.querySelector("h1")?.textContent, "账号安全", "与侧栏同一账号安全分区保持一致");
   assert.ok(text.includes("账号状态：正常"));
   assert.equal(text.includes("安全状态正常"), false);
   assert.ok(text.includes("已启用"));

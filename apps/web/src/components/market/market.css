@@ -81,7 +81,7 @@
 .market-filter-row--resource .market-filter-row-options { width:100%; }
 .market-filter-row-count { font-size:12px; color:var(--color-delta-accent-hover); font-weight:600; }
 .market-resource-grid { display:grid; width:100%; grid-template-columns:repeat(auto-fill,minmax(265px,1fr)); gap:10px 20px; }
-.market-resource-quantity { display:flex; align-items:center; gap:8px; min-width:0; }
+.market-resource-quantity { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
 .market-resource-name { width:7.2em; min-width:7.2em; text-align:left; color:var(--color-text-secondary); font-size:13px; line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex-shrink:0; }
 .market-resource-range { display:inline-flex; align-items:center; gap:6px; flex-shrink:0; color:var(--color-text-muted); text-align:center; }
 .market-resource-range input { width:58px; min-width:0; height:28px; padding:2px 6px; border:1px solid var(--color-border-default); border-radius:6px; color:var(--color-text-primary); background:var(--color-bg-card); font-size:12px; font-variant-numeric:tabular-nums; text-align:center; transition:border-color 140ms ease; }
@@ -92,6 +92,7 @@
 .market-range-separator { color:var(--color-text-muted); font-size:12px; user-select:none; }
 .market-resource-unit { width:2em; min-width:2em; text-align:left; color:var(--color-text-muted); font-size:12px; white-space:nowrap; flex-shrink:0; }
 .market-resource-quantity .market-inline-error { flex-basis:100%; width:100%; font-size:11px; margin-top:2px; }
+.market-resource-hint { flex-basis:100%; font-size:12px; line-height:1.5; color:var(--color-text-secondary); }
 .market-haff-filter { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; min-width:0; }
 
 /* Region picker */

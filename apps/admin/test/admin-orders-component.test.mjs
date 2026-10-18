@@ -343,3 +343,43 @@ test('resource read uses human labels and returns to the exact originating user 
   await act(async()=>buttonNamed(node,'返回来源订单').click());assert.equal(opened.at(-1),'/orders/source-order');
 });
 
+test('order account labels distinguish legacy source numbers in lists, detail and related resource tabs', async t => {
+  const {root,node,AdminOrderChainView,AdminResourceReadView}=await setup(t),opened=[];
+  const cases=[
+    {value:'0000123',expected:'旧来源号 0000123'},
+    {value:'ZZ20261018000001',expected:'账号 ZZ20261018000001',origin:'NATIVE'},
+    {value:'AC9000000000002',expected:'账号 AC9000000000002'},
+    {value:null,expected:'账号编号待核'},
+    {value:'not-a-canonical-number',expected:'账号编号待核'},
+  ];
+  const items=cases.map((c,i)=>({...chainOrder,id:'number-'+i,displayNo:'ORDER-NUMBER-'+i,accountDisplayNo:c.value,source:{origin:c.origin??'LEGACY'}}));
+  const props={...chainProps('number-list'),snapshot:{...snapshotFor('number-list'),permissions:['order.read','user.directory.read','supply.rental_account.read']},onOpenPath:(path,title)=>opened.push({path,title})};
+  globalThis.fetch=async()=>response(chainPage(items,{total:items.length}));
+  await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.querySelectorAll('.oc-table tbody tr').length===items.length);
+  cases.forEach((c,i)=>assert(node.querySelectorAll('.oc-table tbody tr')[i].textContent.includes(c.expected),c.expected));
+  assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[0].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['历史租客','历史号主']);
+  assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[1].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['租客','号主']);
+  assert.equal(node.querySelector('.oc-table').textContent.includes('账号 0000123'),false);
+  await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent===cases[0].expected).click());
+  assert.equal(opened.at(-1).title,cases[0].expected);assert(opened.at(-1).path.includes('/supply/accounts/'));
+  globalThis.fetch=async()=>response({order:items[0]});
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,objectOnly:true,initialOrderId:items[0].id})));await until(()=>node.textContent.includes('关联核对'));
+  assert(node.querySelector('.oc-heading p').textContent.includes(cases[0].expected));
+  const resourceLink=[...node.querySelectorAll('.oc-related button')].find(b=>b.textContent===cases[0].expected);assert(resourceLink);
+  await act(async()=>resourceLink.click());assert.equal(opened.at(-1).title,cases[0].expected);
+  globalThis.fetch=async()=>response({account:{accountId:'account-1',displayNo:cases[0].value,ownerName:'当前号主',lifecycle:'ACTIVE',legacyHold:'NONE',versionState:'DRAFT'}});
+  await act(async()=>root.render(createElement(AdminResourceReadView,{snapshot:props.snapshot,accountId:'account-1',onOpenPath:()=>{},refreshNonce:0})));await until(()=>node.querySelector('h1')?.textContent===cases[0].expected);
+});
+
+test('order party history labels follow order origin for both renter and owner', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  for(const origin of ['LEGACY','NATIVE']){
+    const item={...chainOrder,id:'party-'+origin,displayNo:'ORDER-PARTY-'+origin,source:{origin}};
+    globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:item}):response({error:{code:'NOT_FOUND'}},404);
+    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('party-'+origin),objectOnly:true,initialOrderId:item.id})));await until(()=>node.textContent.includes(item.displayNo)&&node.textContent.includes('关联核对'));
+    const labels=[...node.querySelectorAll('.oc-related-person small')].map(e=>e.textContent),prefix=origin==='LEGACY'?'历史':'';
+    assert(labels.includes(prefix+'租客 · 编号 U-RENTER'));assert(labels.includes(prefix+'号主 · 编号 U-OWNER'));
+    if(origin==='NATIVE')assert(labels.every(label=>!label.includes('历史租客')&&!label.includes('历史号主')));
+  }
+});
+

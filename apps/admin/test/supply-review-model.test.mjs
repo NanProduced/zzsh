@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   attributeFacts,
+  accountNumberLabel,
   historicalAttributeFacts,
   historicalReadSummary,
   historicalResourceText,
@@ -29,6 +30,13 @@ import {
   skinsText,
   supplyObjectLabel,
 } from "../src/views/supply-review/model.ts";
+
+test("mixed account numbers keep canonical ZZ/AC separate from numeric legacy sources", () => {
+  assert.equal(accountNumberLabel("ZZ20261018000001"), "账号 ZZ20261018000001");
+  assert.equal(accountNumberLabel("AC9000000000002"), "账号 AC9000000000002");
+  assert.equal(accountNumberLabel("0000123"), "旧来源号 0000123");
+  for (const value of [null, undefined, "", "ZZ20261018", "AC1", "not-a-number", " 0000123", "AC"+"1".repeat(127)]) assert.equal(accountNumberLabel(value), "账号编号待核");
+});
 
 test("supervision views, sources and state labels are explicit", () => {
   assert.equal(reviewStateLabel("PUBLISHED"), "已发布(直发)");

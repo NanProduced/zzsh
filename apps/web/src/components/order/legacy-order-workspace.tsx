@@ -6,7 +6,7 @@ import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type Le
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
-import { orderAccountTitle, orderAmountFacts, orderUsesResourceSummary } from "@/lib/order-display";
+import { orderAccountTitle, orderAmountFacts, orderResourceLines, orderUsesResourceSummary } from "@/lib/order-display";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
   const q = new URLSearchParams({ view: party === "owner" ? "leased" : "rentals", source: "legacy", page: String(page) });
@@ -63,6 +63,9 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     <Link href={orderUrl(party, status, accountId)} scroll={false}>返回订单列表</Link>
     <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><p>{orderTermLabel(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
     {orderUsesResourceSummary(data) ? <p className="order-muted">账号摘要按本单资源记录整理，不是原账号标题；数量沿原订单单位，保险按天。</p> : null}
+    {orderResourceLines(data).length ? <section className="account-module-card"><h3>本单资源记录</h3><dl className="order-facts">
+      {orderResourceLines(data).map(resource => <div key={resource.code}><dt>{resource.name}</dt><dd>{resource.value}</dd></div>)}
+    </dl></section> : null}
     {notice}
     <section className="account-module-card"><h3>金额记录</h3>{party === "owner" ? <p className="order-muted">以下是租客订单金额，不是号主结算收入。</p> : null}<dl className="order-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts.required)}</dd></div>

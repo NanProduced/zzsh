@@ -137,9 +137,9 @@ export function haffRatioLabel(quantity: string, costAmount: string | null): str
   const ratio = (2n * ratioNumerator + ratioDenominator) / (2n * ratioDenominator);
   return ratio > 0n ? `${ratio}万/元` : "待确认";
 }
-function quantityLabel(unit: string, quantity: string, code: string | undefined, unitQuantity: string): string {
+function quantityLabel(unit: string, quantity: string, code: string | undefined): string {
   if (unit === "HAFF_BASE") return `${haffMillionsLabel(quantity)} M`;
-  if (unit === "ROUND" && canonicalResourceCode(code ?? null) === "df_billable_level6_bullet" && unitQuantity === "60" && /^\d+$/.test(quantity)) {
+  if (unit === "ROUND" && canonicalResourceCode(code ?? null) === "df_billable_level6_bullet" && /^\d+$/.test(quantity)) {
     const rounds = BigInt(quantity);
     if (rounds % 60n === 0n) return `${rounds / 60n}组（${rounds}发）`;
   }
@@ -234,7 +234,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     code: items.get(line.itemId)?.code ?? null,
     name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
     quantity: line.quantity,
-    quantityLabel: quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, line.unitQuantity),
+    quantityLabel: quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code),
     unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code),
     costAmount: line.buyerAmount.amount,
     costLabel: formatMoneyLabel(line.buyerAmount),
@@ -301,7 +301,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const media = projectListingMedia(listing);
   const resourceLines: ResourceLine[] = listing.inventory.map(line => ({
     itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
-    quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
+    quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code),
     unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: null, costLabel: null, unitPriceLabel: null,
   }));
   const conditions = conditionLines(listing.attributes, listing);

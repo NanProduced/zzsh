@@ -209,7 +209,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   }, []);
 
   useEffect(() => {
-    if (games.status === "ready" && !filters.game && games.data?.length === 1) navigate({ ...filters, game: games.data[0]!.id });
+    if (!lookupNumber && games.status === "ready" && !filters.game && games.data?.length === 1) navigate({ ...filters, game: games.data[0]!.id });
   }, [filters, games, navigate]);
 
   useEffect(() => {
@@ -643,7 +643,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {catalog.status === "error" && activeMetadata && !lookupNumber ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
         <div className="market-results-toolbar">
-          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? lookupNumber && feed.error?.status === 400 ? "编号格式未被接受" : "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
             {activeMetadata && !lookupNumber && <div className="market-sort-controls" aria-label="账号排序">
               <div className="market-sort-field"><span>排序</span><MarketSelect

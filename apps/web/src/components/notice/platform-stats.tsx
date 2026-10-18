@@ -11,7 +11,7 @@ export function RollingNumber({value,reduced,fontSize=24}:{value:number|null;red
   const formatted=value.toLocaleString("en-US");
   if(reduced)return <span className="rolling-number" style={{fontSize}}>{formatted}</span>;
   const groups=formatted.split(",");
-  return <span className="rolling-number reactbits-number" aria-label={formatted}><span aria-hidden="true" className="counter-groups">{groups.map((group,i)=><span className="counter-group" key={groups.length-i}>{i>0&&<span>,</span>}<Counter value={Number(group)} places={[...group].map((_,j)=>10**(group.length-j-1))} fontSize={fontSize} gap={0} horizontalPadding={0} gradientHeight={0}/></span>)}</span></span>;
+  return <span className="rolling-number reactbits-number"><span className="sr-only">{formatted}</span><span aria-hidden="true" className="counter-groups">{groups.map((group,i)=><span className="counter-group" key={groups.length-i}>{i>0&&<span>,</span>}<Counter value={Number(group)} places={[...group].map((_,j)=>10**(group.length-j-1))} fontSize={fontSize} gap={0} horizontalPadding={0} gradientHeight={0}/></span>)}</span></span>;
 }
 export function PlatformStats({data,deals=[],isDemo=false}:{data?:PlatformStatsData;deals?:PublicDeal[];isDemo?:boolean}) {
   const [index,setIndex]=useState(0);

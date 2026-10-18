@@ -128,11 +128,25 @@ test("frozen legacy order resources form a labelled summary without a private ti
       { code: "df_billable_coffee", quantity: "1", unit: null },
     ], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" },
   };
-  assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 六级子弹 60 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle(order), "订单资源：哈夫币 12.50 · 六级子弹 60 · 顶级保险卡 7 天");
+  assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
+  assert.equal(display.orderAccountTitle(order), "订单资源：哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
   assert.equal(display.orderUsesResourceSummary(order), true);
   assert.ok(!display.orderAccountTitle(order).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
   assert.equal(display.orderAccountTitle({ ...order, account: { readable: true } }), "PRIVATE_CURRENT_ACCOUNT_TITLE");
+});
+
+test("a short order summary names omitted nonzero resources and detail retains every frozen quantity", () => {
+  const order = { orderFacts: { resources: [
+    { code: 'df_billable_haff', quantity: '64.00', unit: null },
+    { code: 'df_billable_awm_bullet', quantity: '46', unit: null },
+    { code: 'df_billable_level6_helmet', quantity: '4', unit: null },
+    { code: 'df_billable_level6_armor', quantity: '7', unit: null },
+    { code: 'df_billable_coffee', quantity: '0', unit: null },
+  ] } };
+  assert.equal(display.orderResourceSummary(order), '哈夫币 64.00 · AWM子弹 46 · 6级头盔 4 · +1项');
+  assert.deepEqual(display.orderResourceLines(order).map(({name, value}) => [name, value]), [
+    ['哈夫币', '64.00'], ['AWM子弹', '46'], ['6级头盔', '4'], ['6级护甲', '7'], ['咖啡豆', '0'],
+  ]);
 });
 
 test("legacy amount facts share renter evidence across parties and never rename it as owner income", () => {

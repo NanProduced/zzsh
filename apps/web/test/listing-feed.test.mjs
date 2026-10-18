@@ -654,10 +654,13 @@ async function lookupProbe(lookupListing, initialQuery = "AC0000000001") {
   const root = require("react-dom/client").createRoot(host);
   let latestFeed;
   let updateFilters;
+  let updateMetadata;
   function Consumer() {
     const [current, update] = useState(filters);
+    const [metadata, setMetadata] = useState(null);
     updateFilters = update;
-    latestFeed = useListingFeed(current, null, { enabled: true });
+    updateMetadata = setMetadata;
+    latestFeed = useListingFeed(current, metadata, { enabled: true });
     return createElement("output", null, `${latestFeed.status}:${latestFeed.items.map((item) => item.id).join(",")}:${latestFeed.error?.status ?? ""}`);
   }
   await act(async () => root.render(createElement(Consumer)));
@@ -673,6 +676,9 @@ async function lookupProbe(lookupListing, initialQuery = "AC0000000001") {
     async setQuery(query) {
       await act(async () => updateFilters({ ...filters, q: query }));
     },
+    async setMetadata(metadata) {
+      await act(async () => updateMetadata(metadata));
+    },
     async close() {
       await act(async () => root.unmount());
       browser.happyDOM.abort();
@@ -686,6 +692,19 @@ async function lookupProbe(lookupListing, initialQuery = "AC0000000001") {
     },
   };
 }
+
+test("exact lookup ignores metadata revisions while a new number still starts a new request", async () => {
+  const probe=await lookupProbe(async number=>({id:number}),'ZZ20261018000001');
+  try {
+    await probe.waitFor('ready:ZZ20261018000001:');
+    await probe.setMetadata({filterRevision:'1',catalogRevision:'139'});
+    await probe.setMetadata({filterRevision:'2',catalogRevision:'140'});
+    assert.equal(probe.calls.lookup.length,1,'metadata is not an input to exact lookup');
+    await probe.setQuery('ZZ20261018000002');
+    await probe.waitFor('ready:ZZ20261018000002:');
+    assert.equal(probe.calls.lookup.length,2);
+  } finally {await probe.close();}
+});
 
 test("exact lookup covers rentable, rented, pending-payment and ordinary-offline public details", async () => {
   for (const state of ["RENTABLE", "RENTED", "PENDING_PAYMENT", "OFFLINE"]) {

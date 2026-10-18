@@ -107,6 +107,13 @@ export function restrictionConditions(detail: SupplyWorkDetail): string[] {
     ...(facts.publicVisible === null || facts.newOrders === null ? ["公开或新单资格仍有待核依据，处置后须重新读取。"] : []),
   ];
 }
+// Mixed order projections may carry an old source number instead of a registered account number.
+export function accountNumberLabel(value?: string | null): string {
+  if (typeof value !== "string") return "账号编号待核";
+  if (value.length <= 128 && /^(?:AC[0-9]{10,}|ZZ[0-9]{14})$/.test(value)) return `账号 ${value}`;
+  if (/^[0-9]+$/.test(value)) return `旧来源号 ${value}`;
+  return "账号编号待核";
+}
 export function supplyObjectLabel(item: { id?: string; displayNo?: string | null; accountId?: string; facts?: SupplyFacts }): string {
   if (item.displayNo) return item.displayNo;
   if (item.facts?.legacyNumbers.length === 1) return `旧来源号 ${item.facts.legacyNumbers[0]}`;

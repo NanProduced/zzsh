@@ -247,7 +247,7 @@ for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read sh
     assert.deepEqual(reads.map(url => url.searchParams.get("party")).sort(), ["owner", "renter"]);
     const card = probe.host.querySelector("[data-testid=order-summary-renter]");
     assert.equal(card.querySelectorAll(".account-order-row").length, items.length);assert.doesNotMatch(card.textContent, /暂无租入记录/);
-    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.source?.origin === "LEGACY" ? "订单资源：六级子弹 60 · 顶级保险卡 7 天" : item.title));
+    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.source?.origin === "LEGACY" ? "订单资源：6级子弹 60 · 顶级保险卡 7 天" : item.title));
     const links = [...card.querySelectorAll(".account-order-row")].map(node => new URL(node.href));
     assert.deepEqual(links.map(url => url.searchParams.get("source")), items.map(item => item.readOnly ? "legacy" : null));
     assert.ok(links.every(url => url.searchParams.get("orderId") === "same-id" && url.searchParams.get("view") === "rentals"));

@@ -156,6 +156,24 @@ test('resource labels use catalog code and quoted unit quantity', () => {
   assert.equal(resourceQuantityLabel(detail.resourceLines[2]), '3天');
 });
 
+test('legacy inventory expresses level6 rounds in groups without a current price line', () => {
+  for (const code of ['level6_round', 'df_billable_level6_bullet']) {
+    for (const quantity of ['0', '120', '121']) {
+      const source = {
+        ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null,
+        historicalQuote: { haffRent: { currency: 'CNY', unit: 'yuan', amount: '1.00', scale: 2 }, goods: { currency: 'CNY', unit: 'yuan', amount: '1.00', scale: 2 }, deposit: { currency: 'CNY', unit: 'yuan', amount: '0.00', scale: 2 }, termDays: 1 },
+        presentation: { items: [{ id: 'level6', code, name: '6级子弹', unit: 'ROUND' }], skins: [], entitlements: [] },
+        inventory: [{ itemId: 'level6', quantity, unit: 'ROUND' }],
+      };
+      for (const project of [toListingCard, toListingDetail]) {
+        const line = project(source).resourceLines[0];
+        assert.equal(line.quantity, quantity, 'the stored rounds are unchanged');
+        assert.equal(resourceQuantityLabel(line), quantity === '121' ? '121发' : `${BigInt(quantity) / 60n}组（${quantity}发）`);
+      }
+    }
+  }
+});
+
 test('card and detail share code-first resource names and only use Delta legacy fallback', () => {
   const line = { itemId: 'item_bullet', quantity: '180', unit: 'ROUND', unitQuantity: '60', buyerUnitAmount: { currency: 'CNY', unit: 'yuan', amount: '10.00000000', scale: 8 }, buyerAmount: { currency: 'CNY', unit: 'yuan', amount: '30.00', scale: 2 } };
   const project = (item, game = { id: 'game_delta', code: 'delta', name: '三角洲行动' }) => ({

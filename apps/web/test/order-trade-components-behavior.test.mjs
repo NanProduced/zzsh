@@ -1428,3 +1428,14 @@ test("legacy unauthorized detail is an error rather than an empty successful lis
     try {await probe.render();assert.match(probe.host.textContent,/不存在或当前身份无法查看/);assert.doesNotMatch(probe.host.textContent,/暂无历史订单记录/);}finally{await probe.dispose();}
   });
 });
+
+test("legacy detail exposes the complete frozen resource record after the short summary", async () => {
+  await withDom(async window=>{
+    const row={id:'legacy_resources',displayNo:'OLD-R',title:null,party:'renter',status:'COMPLETED',source:{origin:'LEGACY',statusLabel:'已完成'},readOnly:true,account:{id:null,displayNo:null,readable:false},legacyAmounts:{required:money('1.00'),paid:money('1.00'),deposit:null,refund:null},orderFacts:{resources:[
+      {code:'df_billable_haff',quantity:'64.00',unit:null},{code:'df_billable_awm_bullet',quantity:'46',unit:null},{code:'df_billable_level6_helmet',quantity:'4',unit:null},{code:'df_billable_level6_armor',quantity:'7',unit:null},{code:'df_billable_top_insure_card',quantity:'0',unit:'DAY'},
+    ],rentalDeadlineAt:null}};
+    const Legacy=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
+    const methods=[];const probe=createProbe(window,Legacy,{party:'renter',orderId:row.id},async(url,init={})=>{methods.push(init.method??'GET');return json({order:row});});
+    try{await probe.render();const section=[...probe.host.querySelectorAll('section')].find(node=>node.querySelector(':scope > h3')?.textContent==='本单资源记录');assert.ok(section,'the detail has a full resource section');assert.deepEqual([...section.querySelectorAll('dt')].map(node=>node.textContent),['哈夫币','AWM子弹','6级头盔','6级护甲','顶级保险卡']);assert.deepEqual([...section.querySelectorAll('dd')].map(node=>node.textContent),['64.00','46','4','7','0 天']);assert.match(probe.host.textContent,/\+1项/);assert.ok(methods.every(method=>method==='GET'));}finally{await probe.dispose();}
+  });
+});

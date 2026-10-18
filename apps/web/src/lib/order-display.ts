@@ -23,23 +23,29 @@ export function paymentEntryOpen(order: Order): boolean {
 const LEGACY_RESOURCE_NAMES: Record<string, string> = {
   df_billable_haff: "哈夫币",
   df_billable_awm_bullet: "AWM子弹",
-  df_billable_level6_bullet: "六级子弹",
-  df_billable_level6_helmet: "六级头盔",
-  df_billable_level6_armor: "六级护甲",
+  df_billable_level6_bullet: "6级子弹",
+  df_billable_level6_helmet: "6级头盔",
+  df_billable_level6_armor: "6级护甲",
   df_billable_top_insure_card: "顶级保险卡",
   df_billable_barrett_bullet: "巴雷特子弹",
-  df_billable_coffee: "咖啡",
+  df_billable_coffee: "咖啡豆",
 };
+
+export function orderResourceLines(order: Pick<Order, "orderFacts">) {
+  return (order.orderFacts?.resources ?? []).flatMap((resource) => {
+    const name = LEGACY_RESOURCE_NAMES[resource.code];
+    if (!name) return [];
+    const unit = resource.unit === "DAY" ? " 天" : "";
+    return [{ ...resource, name, value: `${resource.quantity}${unit}` }];
+  });
+}
 
 /** A natural order summary from frozen order facts; no current account title or legacy alias is consulted. */
 export function orderResourceSummary(order: Pick<Order, "orderFacts">, limit = 3): string | null {
-  const labels = (order.orderFacts?.resources ?? []).flatMap((resource) => {
-    const name = LEGACY_RESOURCE_NAMES[resource.code];
-    if (!name || /^0+(?:\.0+)?$/.test(resource.quantity)) return [];
-    const unit = resource.unit === "DAY" ? " 天" : "";
-    return [`${name} ${resource.quantity}${unit}`];
-  });
-  return labels.length ? labels.slice(0, Math.max(1, limit)).join(" · ") : null;
+  const labels = orderResourceLines(order).filter(resource => !/^0+(?:\.0+)?$/.test(resource.quantity)).map(resource => `${resource.name} ${resource.value}`);
+  if (!labels.length) return null;
+  const visible = labels.slice(0, Math.max(1, limit));
+  return [...visible, ...(labels.length > visible.length ? [`+${labels.length - visible.length}项`] : [])].join(" · ");
 }
 
 /** System placeholder text is not a real current title and must never block the frozen resource summary. */

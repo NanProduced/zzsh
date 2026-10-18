@@ -9,6 +9,29 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import ts from 'typescript';
 
+test('group quantity inputs render a visible conversion hint linked to both bounds',()=>{
+  const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
+  const require=createRequire(path.join(tree,'package.json')),React=require('react');
+  const file=path.join(tree,'apps/web/src/components/market/market-filter-controls.tsx');
+  const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(tree);
+  module.require=name=>{
+    if(name==='@/lib/listing-filters')return listingFilters;
+    if(name.startsWith('@heroui/'))return {};
+    return require(name);
+  };
+  module._compile(ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
+  const filters={game:'delta',q:null,filters:{},sort:'latest',direction:'DESC',limit:20,cursor:null,viewMode:'list'};
+  const metadata={fields:[{key:'resources',enabled:true,label:'资源数量',items:[{itemId:'six',min:'0',max:'6000'}]}],items:[{id:'six',code:'level6_round',name:'6级子弹',unit:'ROUND'}],resourceQuantityRange:true};
+  const html=require('react-dom/server').renderToStaticMarkup(React.createElement(module.exports.MarketFilterControls,{filters,metadata,catalog:null,catalogStatus:'idle',skinSearch:'',activeSkinCategoryId:'',skinSearchCatalog:null,skinSearchStatus:'idle',onChange:()=>{},onRetryCatalog:()=>{},onRetrySkinSearch:()=>{},onSkinSearchChange:()=>{},onSkinCategoryChange:()=>{},onLoadMoreSkins:()=>{},loadingMoreSkins:false}));
+  const browser=new (require('happy-dom').Window)();browser.document.body.innerHTML=html;
+  try {
+    const inputs=[...browser.document.querySelectorAll('.market-resource-range input')];assert.equal(inputs.length,2);
+    for(const input of inputs){const ids=(input.getAttribute('aria-describedby')??'').split(/\s+/).filter(Boolean);assert.ok(ids.some(id=>browser.document.getElementById(id)?.textContent==='1 组 = 60 发'));}
+    const hint=browser.document.querySelector('.market-resource-quantity small');assert.equal(hint.textContent,'1 组 = 60 发');assert.notEqual(hint.getAttribute('aria-hidden'),'true');
+    assert.equal(listingFilters.validateResourceQuantityInput('2',metadata.items[0],{min:'0',max:'6000'}),'120');
+  } finally {browser.happyDOM.abort();}
+});
+
 test('actual list and grid render Barrett and piece-count insurance even after the original four resources',()=>{
   const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
   const require=createRequire(path.join(tree,'package.json')),React=require('react');

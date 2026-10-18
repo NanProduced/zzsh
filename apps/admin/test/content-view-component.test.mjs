@@ -3,8 +3,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createServer } from "vite";
-import react from "@vitejs/plugin-react";
+import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 
 const PLATFORM_PERMS = ["content.platform.read", "content.platform.edit", "content.platform.publish"];
 
@@ -141,15 +140,8 @@ async function mountHarness(t, { fetchImpl, perms }) {
     }
     return fetchImpl(url, init, browser);
   };
-  const vite = await createServer({
-    configFile: false,
-    root: fileURLToPath(new URL("..", import.meta.url)),
-    plugins: [react()],
-    resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },
-    optimizeDeps: { noDiscovery: true, include: [] },
-    server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-  });
-  const { ContentView } = await vite.ssrLoadModule("/src/views/content-view.tsx");
+  const source = await createOfflineAdminSource({ root: fileURLToPath(new URL("../../../", import.meta.url)) });
+  const { ContentView } = await source.ssrLoadModule("/apps/admin/src/views/content-view.tsx");
   const el = browser.document.createElement("div");
   el.className = "workspace-root";
   browser.document.body.append(el);
@@ -189,7 +181,7 @@ async function mountHarness(t, { fetchImpl, perms }) {
   const cleanup = async () => {
     await act(async () => root.unmount());
     globalThis.fetch = originalFetch;
-    await vite.close();
+    await source.close();
     await browser.happyDOM.abort();
   };
   t.after(cleanup);
@@ -253,6 +245,28 @@ test("公告 tab：请求 scope=platform&type=ANNOUNCEMENT&limit=20；渲染标�
   assert.ok(h.textOf().includes("十月例行维护公告"), "重试后恢复内容");
   assert.ok(!h.textOf().includes("服务暂时无法完成请求"), "重试成功后错误清除");
   assert.equal(h.writes.length, 0, "读取流程无写请求");
+});
+
+test("新建公告和资讯标题由可见原生标签关联，读取不发出写请求", async (t) => {
+  const h = await mountHarness(t, {
+    perms: PLATFORM_PERMS,
+    fetchImpl: router([
+      { match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) },
+    ]),
+  });
+  for (const [tab, title] of [["announcement", "公告"], ["news", "资讯"]]) {
+    await h.render(1, PLATFORM_PERMS, { tab });
+    await h.settle();
+    const input = h.el.querySelector("input");
+    assert.ok(input);
+    assert.equal(input.labels.length, 1, "原生 label 隐式关联输入框");
+    const label = input.labels[0];
+    assert.equal(label.control, input);
+    assert.equal(label.textContent.trim(), `新建${title}标题（可留空后编辑）`);
+    assert.equal(label.closest('[aria-hidden="true"], [hidden]'), null);
+    assert.equal(input.disabled, false);
+  }
+  assert.equal(h.writes.length, 0);
 });
 
 test("详情：点击条目请求 /content/items/:id；渲染版本历史与操作；详情失败显示错误", async (t) => {
