@@ -5,21 +5,22 @@ import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SidebarMenuButton, SidebarMenuItem, SidebarMenuSub } from "@/components/ui/sidebar";
 
+import { activeNavPath, navItemPaths, type NavLocation } from "./nav-path";
 import type { WorkspaceMenuItem } from "./nav-config";
 
 export function WorkspaceNavItem({
   item,
-  pathname,
+  location,
   onNavigate,
 }: {
   item: WorkspaceMenuItem;
-  pathname: string;
+  location: NavLocation;
   onNavigate: (path: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const active =
-    (item.path != null && (pathname === item.path || pathname.startsWith(`${item.path}/`))) ||
-    item.items?.some((child) => child.path != null && (pathname === child.path || pathname.startsWith(`${child.path}/`))) === true;
+  // 同一时刻只有一个入口点亮：带 query 的入口优先于同路径的普通入口（例如 /settings?section=security）。
+  const activePath = activeNavPath(item.items?.length ? navItemPaths(item.items) : [item.path], location);
+  const active = activePath !== null;
 
   useEffect(() => {
     if (active) setOpen(true);
@@ -68,7 +69,7 @@ export function WorkspaceNavItem({
           <CollapsibleContent>
             <SidebarMenuSub className="group/menu-sub me-0 gap-0.5 ps-2 pe-0">
               {item.items.map((child) => (
-                <WorkspaceNavItem key={child.label} item={child} pathname={pathname} onNavigate={onNavigate} />
+                <WorkspaceNavItem key={child.label} item={child} location={location} onNavigate={onNavigate} />
               ))}
             </SidebarMenuSub>
           </CollapsibleContent>

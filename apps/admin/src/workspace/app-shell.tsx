@@ -8,6 +8,7 @@ import type { ThemeStorageStatus } from "../lib/theme";
 
 import { applyDirtyMap, clearDirtyForTabs, confirmDiscard } from "./dirty-state";
 import { searchableWorkspacePages } from "./nav-config";
+import type { NavLocation } from "./nav-path";
 import { WorkspacePageContent } from "./page-content";
 import { WorkspaceSidebar } from "./sidebar";
 import { WorkspaceTabBar } from "./tab-bar";
@@ -96,6 +97,14 @@ export function WorkspaceApp({
   dirtyIdsRef.current = dirtyIds;
 
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0] ?? tabFromLocation("/workbench");
+  // 侧栏唯一活动入口按真实地址（含 query）判定：/settings?section=security 只点亮账号安全。
+  // 前进/后退后 tab 可能还没有本轮 query，故用 revision 触发重算。
+  const [locationRevision, bumpLocationRevision] = useState(0);
+  const locateInWindow = (revision: number): NavLocation => {
+    void revision;
+    return { pathname: window.location.pathname, search: window.location.search };
+  };
+  const activeLocation = locateInWindow(locationRevision);
 
   const replaceUrl = useCallback((tab: WorkspaceTab, replace = false) => {
     const href = tabHref(tab);
@@ -136,6 +145,7 @@ export function WorkspaceApp({
 
   useEffect(() => {
     const onPop = () => {
+      bumpLocationRevision((value) => value + 1);
       const next = currentLocationTab();
       const currentId = activeIdRef.current;
       const currentTab = tabsRef.current.find((tab) => tab.id === currentId);
@@ -296,7 +306,7 @@ export function WorkspaceApp({
   return (
     <div className={`workspace-root min-h-svh ${theme === "dark" ? "dark" : ""}`}>
       <SidebarProvider style={{ "--sidebar-width": "250px" } as CSSProperties}>
-        <WorkspaceSidebar snapshot={snapshot} pathname={active.path} onNavigate={openPath} onSignOut={signOutAndClear} />
+        <WorkspaceSidebar snapshot={snapshot} location={activeLocation} onNavigate={openPath} onSignOut={signOutAndClear} />
         <SidebarInset>
           <WorkspaceTopbar
             pathname={active.path}

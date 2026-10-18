@@ -23,16 +23,17 @@ import type { SessionSnapshot } from "../api";
 
 import { workspaceMenuItems } from "./nav-config";
 import { WorkspaceNavItem } from "./nav-item";
+import type { NavLocation } from "./nav-path";
 import type { NavPermission } from "./tab-model";
 
 export function WorkspaceSidebar({
   snapshot,
-  pathname,
+  location,
   onNavigate,
   onSignOut,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
-  pathname: string;
+  location: NavLocation;
   onNavigate: (path: string) => void;
   onSignOut: () => void;
 }) {
@@ -62,7 +63,7 @@ export function WorkspaceSidebar({
       <SidebarContent>
         <SidebarMenu className="mt-2 mb-2 gap-0.5 px-2">
           {workspaceMenuItems(nav).map((item) => (
-            <WorkspaceNavItem key={`${item.label}-${item.path ?? "title"}`} item={item} pathname={pathname} onNavigate={onNavigate} />
+            <WorkspaceNavItem key={`${item.label}-${item.path ?? "title"}`} item={item} location={location} onNavigate={onNavigate} />
           ))}
         </SidebarMenu>
       </SidebarContent>
@@ -99,6 +100,7 @@ export function WorkspaceSidebar({
                   <SettingsIcon />
                   <span>设置</span>
                 </DropdownMenuItem>
+                {/* 与侧栏「账号安全」入口同一地址：两个入口都指向 /settings?section=security，任一状态下只有一个入口点亮。 */}
                 <DropdownMenuItem onClick={() => onNavigate("/settings?section=security")}>
                   <ShieldIcon />
                   <span>登录与安全</span>

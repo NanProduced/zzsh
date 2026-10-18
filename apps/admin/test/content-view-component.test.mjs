@@ -156,7 +156,8 @@ async function mountHarness(t, { fetchImpl, perms }) {
   const { createRoot } = await import("react-dom/client");
   const root = createRoot(el);
   const dirtyLog = [];
-  const render = async (nonce = 0, nextPerms = perms) =>
+  const queryLog = [];
+  const render = async (nonce = 0, nextPerms = perms, query = {}) =>
     act(async () => {
       root.render(
         createElement(ContentView, {
@@ -164,6 +165,8 @@ async function mountHarness(t, { fetchImpl, perms }) {
           snapshot: snapshot(nextPerms),
           onDirtyChange: (dirty) => dirtyLog.push(dirty),
           refreshNonce: nonce,
+          tab: { id: "content", title: "内容管理", path: "/content", query, closable: true, kind: "content" },
+          onQueryChange: (next) => queryLog.push(next),
         }),
       );
     });
@@ -190,7 +193,7 @@ async function mountHarness(t, { fetchImpl, perms }) {
     await browser.happyDOM.abort();
   };
   t.after(cleanup);
-  return { browser, el, root, render, settle, click, btn, textOf, gets, writes, dirtyLog };
+  return { browser, el, root, render, settle, click, btn, textOf, gets, writes, dirtyLog, queryLog };
 }
 
 test("公告 tab：请求 scope=platform&type=ANNOUNCEMENT&limit=20；渲染标题与状态；loading、空态、错误后重试", async (t) => {
@@ -412,7 +415,7 @@ test("无 content 读权限：显示受限说明、不渲染 tab、无写请求"
   assert.equal(h.gets.filter((g) => g.path === "/api/bff/admin/content/items").length, 1, "现状：仍发出一次内容列表读，由服务端拒绝");
 });
 
-test("仅有 content.read：news tab 默认游戏范围，请求带 scope=game 与 gameId", async (t) => {
+test("仅有 content.read：news 默认游戏范围，切到游戏范围后按 scope=game 与 gameId 请求", async (t) => {
   const newsVersion = version({ id: "ver_news", itemId: "item_news_1", sequence: 1, state: "PUBLISHED", title: "版本更新资讯", revision: "rev_news" });
   const newsItem = itemRow({ id: "item_news_1", type: "NEWS", gameId: "game_1", gameName: "三角洲行动", published: newsVersion, latest: newsVersion });
   const h = await mountHarness(t, {
@@ -425,20 +428,65 @@ test("仅有 content.read：news tab 默认游戏范围，请求带 scope=game �
   assert.ok(h.btn("资讯"), "仅资讯 tab 可用");
   assert.ok(!h.btn("平台公告") && !h.btn("首页轮播") && !h.btn("平台素材"), "平台级 tab 不渲染");
   assert.ok(h.gets.some((g) => g.path === "/api/bff/admin/content/games"), "加载游戏范围");
-  const get = h.gets.find((g) => g.path === "/api/bff/admin/content/items");
-  assert.ok(get, "游戏范围就绪后请求列表");
+  const first = h.gets.find((g) => g.path === "/api/bff/admin/content/items");
+  assert.ok(first, "游戏范围就绪后请求列表");
+  assert.equal(new URLSearchParams(first.query).get("scope"), "game", "仅游戏内容权限时首个请求即游戏范围（ADM-R1-02）");
+  assert.equal(new URLSearchParams(first.query).get("type"), "NEWS", "首个请求为资讯");
+  assert.equal(new URLSearchParams(first.query).get("gameId"), "game_1", "首个请求带对象范围");
+  assert.equal(h.gets.some((g) => g.path === "/api/bff/admin/content/items" && g.query.includes("ANNOUNCEMENT")), false, "不先请求平台公告");
+  const scopeSelect = h.el.querySelector("select");
+  assert.ok(scopeSelect, "渲染资讯范围选择器");
+  assert.ok(![...scopeSelect.querySelectorAll("option")].some((option) => option.value === "platform"), "无平台资讯选项");
+  // 切到游戏范围：请求带对象范围，分区/范围/对象写入地址栏
+  await act(async () => {
+    const setValue = Object.getOwnPropertyDescriptor(h.browser.HTMLSelectElement.prototype, "value").set;
+    setValue.call(scopeSelect, "game");
+    scopeSelect.dispatchEvent(new h.browser.Event("change", { bubbles: true }));
+  });
+  await h.settle();
+  const get = h.gets.filter((g) => g.path === "/api/bff/admin/content/items").at(-1);
   const params = new URLSearchParams(get.query);
   assert.equal(params.get("scope"), "game");
   assert.equal(params.get("type"), "NEWS");
   assert.equal(params.get("limit"), "20");
   assert.equal(params.get("gameId"), "game_1", "带对象范围 gameId");
+  assert.deepEqual(h.queryLog.at(-1), { tab: "news", scope: "game", gameId: "game_1" }, "分区/范围/对象写入地址栏");
   const rows = [...h.el.querySelectorAll("tbody tr")];
   assert.equal(rows.length, 1, "渲染一条资讯");
   assert.ok(rows[0].textContent.includes("版本更新资讯"), "资讯标题");
   assert.ok(rows[0].textContent.includes("三角洲行动"), "范围列显示游戏名");
   assert.equal(rows[0].querySelector("button").textContent.trim(), "查看", "无编辑权显示查看入口");
-  const scopeSelect = h.el.querySelector("select");
-  assert.ok(scopeSelect, "渲染资讯范围选择器");
-  assert.ok(![...scopeSelect.querySelectorAll("option")].some((option) => option.value === "platform"), "无平台资讯选项");
   assert.equal(h.writes.length, 0, "读取流程无写请求");
+});
+
+test("页内分区与资讯范围写入地址栏：刷新恢复分区，秘密与筛选草稿不落 URL", async (t) => {
+  const newsVersion = version({ id: "ver_news", itemId: "item_news_1", sequence: 1, state: "PUBLISHED", title: "版本更新资讯", revision: "rev_news" });
+  const newsItem = itemRow({ id: "item_news_1", type: "NEWS", gameId: "game_1", gameName: "三角洲行动", published: newsVersion, latest: newsVersion });
+  // 同时持有平台与游戏内容读权限，才可能切换到游戏资讯范围（仅平台权限时不提供该范围，见 ADM-R1-02）。
+  const BOTH_CONTENT_PERMS = [...PLATFORM_PERMS, "content.read"];
+  const h = await mountHarness(t, {
+    perms: BOTH_CONTENT_PERMS,
+    fetchImpl: router([
+      { match: "/api/bff/admin/content/games", response: () => json({ games: [{ id: "game_1", code: "delta", name: "三角洲行动" }] }) },
+      { match: "/api/bff/admin/content/items", response: () => json(itemsPage([newsItem])) },
+    ]),
+  });
+  // ADM-R1-01：地址无 query 时首屏默认分区最多写一次，之后不得重复回写。
+  await h.settle();
+  await h.settle();
+  assert.deepEqual(h.queryLog, [{ tab: "announcement" }], "首屏默认分区只写一次（不再 21 次）");
+  await h.click(h.btn("资讯"));
+  await h.settle();
+  assert.deepEqual(h.queryLog.at(-1), { tab: "news", scope: "platform" }, "分区与范围写入地址栏");
+  await h.settle();
+  assert.equal(h.queryLog.length, 2, "切换分区只再产生一次回写");
+  assert.ok(!Object.keys(h.queryLog.at(-1)).some((key) => /password|pin|otp|phone|token|secret/i.test(key)), "敏感键不落 URL");
+  await h.render(0, BOTH_CONTENT_PERMS, { tab: "media" });
+  assert.ok(h.btn("平台素材"), "按地址栏 tab 恢复分区");
+  await h.render(0, BOTH_CONTENT_PERMS, { tab: "news", scope: "game", gameId: "game_1" });
+  const get = h.gets.filter((g) => g.path === "/api/bff/admin/content/items").at(-1);
+  const params = new URLSearchParams(get.query);
+  assert.equal(params.get("scope"), "game", "按地址栏恢复资讯范围");
+  assert.equal(params.get("gameId"), "game_1", "按地址栏恢复游戏范围");
+  assert.equal(h.writes.length, 0, "恢复分区无写请求");
 });

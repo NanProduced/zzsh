@@ -14,13 +14,14 @@ import {
   type SessionSnapshot,
 } from "../api";
 import { Button, StatusMessage } from "../components/ui-elements";
+import type { WorkspaceTab } from "../workspace/tab-model";
 
 import { CarouselTab } from "./content-carousel-tab";
 import { ItemEditor, itemStateLabel } from "./content-item-editor";
 import { ContentMediaTab } from "./content-media-tab";
 
 const inputClass = "w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs";
-const selectClass = "w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs";
+const selectClass = "w-full h-9 rounded border border-border bg-surface-raised text-xs px-2";
 
 type ContentTab = "announcement" | "news" | "carousel" | "media";
 
@@ -31,14 +32,42 @@ const TAB_LABELS: Record<ContentTab, string> = {
   media: "平台素材",
 };
 
+const CONTENT_TABS = Object.keys(TAB_LABELS) as ContentTab[];
+
+/** 无可用分区时给出可读默认：平台级优先，其次资讯；权限收窄后仍落在允许集合内。 */
+function defaultContentTab(available: readonly ContentTab[]): ContentTab {
+  return available[0] ?? "announcement";
+}
+
+/** 资讯范围的默认与合法值都取决于当前权限，避免先渲染无权分区。 */
+function defaultNewsScope(canPlatformRead: boolean): "platform" | "game" {
+  return canPlatformRead ? "platform" : "game";
+}
+
+function allowedNewsScope(value: string | undefined, canPlatformRead: boolean, canGameRead: boolean): "platform" | "game" | null {
+  if (value === "platform") return canPlatformRead ? "platform" : null;
+  if (value === "game") return canGameRead ? "game" : null;
+  return null;
+}
+
+/** 地址栏分区必须属于当前可访问分区集合；资讯另需范围合法，否则按权限默认。 */
+function allowedContentTab(value: string | undefined, available: readonly ContentTab[]): ContentTab | null {
+  if (!value || !CONTENT_TABS.includes(value as ContentTab) || !available.includes(value as ContentTab)) return null;
+  return value as ContentTab;
+}
+
 export function ContentView({
   snapshot,
   onDirtyChange,
   refreshNonce,
+  tab: workspaceTab,
+  onQueryChange,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   onDirtyChange: (dirty: boolean) => void;
   refreshNonce: number;
+  tab?: WorkspaceTab;
+  onQueryChange?: (query: Record<string, string>) => void;
 }) {
   const canPlatformRead = hasPermission(snapshot, "content.platform.read");
   const canPlatformEdit = hasPermission(snapshot, "content.platform.edit");
@@ -54,9 +83,11 @@ export function ContentView({
     ...(canPlatformRead ? (["carousel"] as const) : []),
     ...(canPlatformMedia ? (["media"] as const) : []),
   ];
-  const [tab, setTab] = useState<ContentTab>(availableTabs[0] ?? "announcement");
-  const [newsScope, setNewsScope] = useState<"platform" | "game">(canPlatformRead ? "platform" : "game");
-  const [gameId, setGameId] = useState("");
+  const [tab, setTab] = useState<ContentTab>(() => allowedContentTab(workspaceTab?.query.tab, availableTabs) ?? defaultContentTab(availableTabs));
+  const [newsScope, setNewsScope] = useState<"platform" | "game">(
+    allowedNewsScope(workspaceTab?.query.scope, canPlatformRead, canGameRead) ?? defaultNewsScope(canPlatformRead),
+  );
+  const [gameId, setGameId] = useState(workspaceTab?.query.gameId ?? "");
   const [games, setGames] = useState<ContentGame[]>([]);
   const [page, setPage] = useState<ContentItemsPage | null>(null);
   const [listLoading, setListLoading] = useState(false);
@@ -95,6 +126,48 @@ export function ContentView({
     if (!availableTabs.includes(tab)) setTab(availableTabs[0] ?? "announcement");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availableTabs.join(","), tab]);
+
+  // 地址栏同步只有一处 effect：
+  //  · 地址（含 query）与本地一致 → 什么都不做；
+  //  · 地址是外部变化（刷新/前后退/带 query 打开）→ 采用地址，不回写；
+  //  · 本地分区变化（用户点分区/切范围）→ 写回一次，且只在内容真的不同时才写。
+  // 依赖只取基元值（url/externalKey/tab/scope/gameId），父级每次渲染产生的新回调与未变的 query 对象都不会触发重跑。
+  const onQueryChangeRef = useRef(onQueryChange);
+  onQueryChangeRef.current = onQueryChange;
+  const url = workspaceTab?.path ?? "/content";
+  const externalKey = `${url}?${workspaceTab?.query.tab ?? ""}|${workspaceTab?.query.scope ?? ""}|${workspaceTab?.query.gameId ?? ""}`;
+  const pendingGameScope = tab === "news" && newsScope === "game" && !gameId;
+  const syncedQuery: { tab: ContentTab; scope?: "platform" | "game"; gameId?: string } = tab === "news"
+    ? { tab, scope: newsScope, ...(newsScope === "game" && gameId ? { gameId } : {}) }
+    : { tab };
+  const syncedKey = JSON.stringify(syncedQuery);
+  const lastExternal = useRef<string | null>(null);
+  useEffect(() => {
+    const notify = onQueryChangeRef.current;
+    if (!notify) return;
+    const current = workspaceTab?.query ?? {};
+    const sameAsLocal = current.tab === syncedQuery.tab
+      && (syncedQuery.scope === undefined || current.scope === syncedQuery.scope)
+      && (syncedQuery.gameId === undefined || current.gameId === syncedQuery.gameId);
+    if (sameAsLocal) {
+      lastExternal.current = externalKey;
+      return;
+    }
+    // 地址不是上次已处理过的地址 → 外部导航：采用地址里合法且有权的部分，不回写。
+    if (lastExternal.current !== externalKey) {
+      lastExternal.current = externalKey;
+      const adoptedTab = allowedContentTab(current.tab, availableTabs);
+      const adoptedScope = allowedNewsScope(current.scope, canPlatformRead, canGameRead);
+      if (adoptedTab && adoptedTab !== tab) setTab(adoptedTab);
+      if (adoptedScope && adoptedScope !== newsScope) setNewsScope(adoptedScope);
+      if (current.gameId !== undefined && current.gameId !== gameId) setGameId(current.gameId);
+      return;
+    }
+    // 本地分区变化：写回一次；game 范围尚未拿到 gameId 时等就绪再写，避免写入不完整范围。
+    if (pendingGameScope) return;
+    notify(syncedQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalKey, syncedKey, url, pendingGameScope, canPlatformRead, canGameRead, tab, newsScope, gameId]);
 
   const listQuery = useCallback((): string => {
     const params = new URLSearchParams({ scope: itemScope, type: itemType, limit: "20" });
@@ -228,7 +301,7 @@ export function ContentView({
             {tab === "news" && canGameRead ? (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <label className="space-y-1 text-xs"><span className="text-muted-foreground">资讯范围</span>
-                  <select value={newsScope} onChange={(event) => setNewsScope(event.target.value as "platform" | "game")} className={selectClass}>
+                  <select value={newsScope} onChange={(event) => { const next = event.target.value as "platform" | "game"; setNewsScope(next); }} className={selectClass}>
                     {canPlatformRead ? <option value="platform">平台资讯</option> : null}
                     <option value="game">游戏资讯</option>
                   </select>

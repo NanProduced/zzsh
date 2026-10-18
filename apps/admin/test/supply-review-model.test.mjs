@@ -27,6 +27,7 @@ import {
   reasonIsDirty,
   reviewStateLabel,
   skinsText,
+  supplyObjectLabel,
 } from "../src/views/supply-review/model.ts";
 
 test("supervision views, sources and state labels are explicit", () => {
@@ -200,4 +201,19 @@ test("historical display stays separate from native declarations, exact zero and
   assert.equal(historicalReadSummary(null), null);
   assert.match(historicalReadSummary({ ...read, display: { state: "NOT_IMPORTED", facts: null } }), /尚待接入/);
   assert.deepEqual(historicalAttributeFacts({ ...read, display: { state: "NOT_IMPORTED", facts: null } }), []);
+});
+
+test("ADM-R1-04：编号分列——displayNo 只认 canonical，旧来源号单独标注", () => {
+  // canonical 存在：直接用新编号，不掺旧号
+  assert.equal(supplyObjectLabel({ id: "a1", displayNo: "ZZ20261018000001", facts: { legacyNumbers: ["0000123"] } }), "ZZ20261018000001");
+  // canonical 为空、只有一个旧来源号：显式标注旧号，不冒充新编号
+  assert.equal(supplyObjectLabel({ id: "a2", displayNo: null, facts: { legacyNumbers: ["0000123"] } }), "旧来源号 0000123");
+  // canonical 为空且没有旧号：退回账号短标识，不编造编号
+  const fallback = supplyObjectLabel({ id: "account-fixture-0001", displayNo: null, facts: { legacyNumbers: [] } });
+  assert.match(fallback, /^账号 /);
+  assert.equal(fallback.includes("ZZ"), false, "不生成任何 canonical 形态编号");
+  // 多个旧号不冒充唯一编号
+  assert.match(supplyObjectLabel({ id: "a3", displayNo: null, facts: { legacyNumbers: ["0000123", "0000124"] } }), /^账号 /);
+  // 前导零保留
+  assert.equal(supplyObjectLabel({ id: "a4", displayNo: null, facts: { legacyNumbers: ["0000123"] } }).endsWith("0000123"), true);
 });

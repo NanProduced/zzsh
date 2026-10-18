@@ -70,7 +70,7 @@ export function IdLine({ row, onOpenOwner }: { row: SupplyWorkItem; onOpenOwner?
   const canOpen = row.ownerLink?.state === "READY" && Boolean(onOpenOwner);
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-      <span>编号：{row.displayNo ?? (label.startsWith("旧来源号") ? "未登记（" + label + "）" : "未登记编号")}</span>
+      <span>编号：{row.displayNo ?? (label.startsWith("旧来源号") ? "未登记（" + label + "）" : "编号待核")}</span>
       <span aria-hidden="true">|</span>
       <span>号主：</span>
       <OwnerHoverCard ownerName={row.ownerName} ownerId={row.ownerId} summary={row.ownerSummary ?? null} canOpen={canOpen} onOpenOwner={canOpen ? () => onOpenOwner?.(row) : undefined} />

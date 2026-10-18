@@ -55,7 +55,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     system.push({ label: "角色权限", icon: KeyRoundIcon, path: "/roles", kind: "roles" });
   }
   if (system.length > 0) {
-    items.push({ label: "系统管理", isTitle: true }, ...system);
+    items.push({ label: "系统与安全", isTitle: true }, ...system);
   }
 
   const supply: WorkspaceMenuItem[] = [];
@@ -95,12 +95,12 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     users.push({ label: "账号恢复", icon: UserRoundSearchIcon, path: "/users/restore", kind: "user-restore" });
   }
   if (users.length > 0) {
-    items.push({ label: "用户管理", isTitle: true }, ...users);
+    items.push({ label: "用户与会员", isTitle: true }, ...users);
   }
 
   const audit: WorkspaceMenuItem[] = [];
   if (["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some(has)) {
-    audit.push({ label: "审批", icon: ClipboardCheckIcon, path: "/approvals", kind: "approvals" });
+    audit.push({ label: "审批中心", icon: ClipboardCheckIcon, path: "/approvals", kind: "approvals" });
   }
   if (has("admin.audit.read")) {
     audit.push({ label: "账号与权限审计", icon: ScrollTextIcon, path: "/audit", kind: "audit" });
@@ -119,9 +119,9 @@ export function titleForPath(pathname: string): string {
   if (pathname.startsWith("/roles/")) return "角色详情";
   if (pathname === "/roles") return "角色权限";
   if (pathname.startsWith("/approvals/")) return "审批详情";
-  if (pathname === "/approvals") return "审批与审计";
+  if (pathname === "/approvals") return "审批中心";
   if (pathname === "/audit") return "账号与权限审计";
-  if (pathname === "/users/restore") return "用户账号恢复";
+  if (pathname === "/users/restore") return "账号恢复";
   if (pathname === "/users") return "用户管理";
   if (pathname.startsWith("/users/")) return "用户详情";
   if (pathname === "/supply/catalog") return "目录维护";
