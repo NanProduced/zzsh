@@ -38,8 +38,11 @@ function Link({children,onClick}:{children:React.ReactNode;onClick:()=>void}){re
 function ErrorState({error,retry}:{error:string;retry:()=>void}){return <div className="oc-empty" role="alert"><h2>读取暂不可用</h2><p>{error}</p><Button size="sm" onClick={retry}>重试</Button></div>;}
 function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}:{snapshot:Snapshot;onOpenPath:(path:string,title?:string)=>void;refreshNonce:number;initialQuery?:Record<string,string>;onQueryChange?:(query:Record<string,string>)=>void;}){
  const identity=keyOf(snapshot);const previous=saved.get(identity);
- const [filters,setFilters]=useState<Filters>(()=>(initialQuery?{...empty,...orderUrlFilters(initialQuery)}:previous?.filters??empty)),[active,setActive]=useState<Filters>(()=>(initialQuery?{...empty,...orderUrlFilters(initialQuery)}:previous?.filters??empty)),[page,setPage]=useState(()=>initialQuery?Math.max(1,Number(initialQuery.page)||1):previous?.page??1),[size,setSize]=useState(()=>initialQuery?parseOrderSize(initialQuery.size):previous?.size??ORDER_DEFAULT_SIZE),[data,setData]=useState<Page>(),[error,setError]=useState<string>(),[notice,setNotice]=useState<string>(),[inputError,setInputError]=useState<string>(),[nonce,setNonce]=useState(0);
- const state=useRef<Saved>({filters:active,page,size,context:previous?.context,selected:previous?.selected,scroll:previous?.scroll??0}),sequence=useRef(0),ready=useRef(false);state.current={...state.current,filters:active,page,size};
+ // 同地址返回才恢复本地线索；新地址仍独立决定公共筛选和分页。
+ const restored=previous&&(!initialQuery||orderUrlMatches(previous.filters,previous.page,previous.size,initialQuery))?previous:undefined;
+ const initialFilters=initialQuery?{...orderUrlFilters(initialQuery),...(restored?{kind:restored.filters.kind,q:restored.filters.q}:{})}:restored?.filters??empty;
+ const [filters,setFilters]=useState<Filters>(()=>initialFilters),[active,setActive]=useState<Filters>(()=>initialFilters),[page,setPage]=useState(()=>initialQuery?Math.max(1,Number(initialQuery.page)||1):restored?.page??1),[size,setSize]=useState(()=>initialQuery?parseOrderSize(initialQuery.size):restored?.size??ORDER_DEFAULT_SIZE),[data,setData]=useState<Page>(),[error,setError]=useState<string>(),[notice,setNotice]=useState<string>(),[inputError,setInputError]=useState<string>(),[nonce,setNonce]=useState(0);
+ const state=useRef<Saved>({filters:active,page,size,context:restored?.context,selected:restored?.selected,scroll:restored?.scroll??0}),sequence=useRef(0),ready=useRef(false);state.current={...state.current,filters:active,page,size};
  // URL 是状态/时间/页码的来源：显式地址优先于缓存；外部地址变化时采用地址栏，本地变更时写回地址栏。
  const incomingQuery=initialQuery??{};
  const incomingKey=orderUrlKey(incomingQuery);

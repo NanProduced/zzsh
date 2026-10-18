@@ -221,3 +221,25 @@ test("ADM-R1-03c：显式 CANCELLED 地址优先于旧 PAID/page2 缓存", async
   assert.equal(queries.some((query) => query.status === "PAID"), false, "不得把旧缓存写回地址");
   await second.close();
 });
+
+test("同一订单列表返回时保留本地线索，线索仍不进入地址栏", async (t) => {
+  const h = await harness(t, { permissions: ["order.read"], path: "/orders" });
+  const queries = [];
+  const props = {
+    snapshot: snapshot("root-order-return", h.permissions), onOpenPath: noop, refreshNonce: 0,
+    initialQuery: {}, onQueryChange: (query) => queries.push(query),
+  };
+  const first = await h.mount(h.AdminOrderChainView, props);
+  await h.until(() => first.element.textContent.includes("ORDER_R1"));
+  await h.change(first.element, "查找线索", "ORDER_R1");
+  await h.click(first.element, "查询");
+  await h.until(() => h.requests.at(-1)?.includes("qValue=ORDER_R1"));
+  await first.close();
+  h.requests.length = 0;
+  const returned = await h.mount(h.AdminOrderChainView, props);
+  await h.until(() => returned.element.textContent.includes("ORDER_R1"));
+  assert.equal(returned.element.querySelector('[aria-label="查找线索"]').value, "ORDER_R1");
+  assert.ok(h.requests.at(-1).includes("qValue=ORDER_R1"), "同地址返回保持原查找范围");
+  assert.equal(JSON.stringify(queries).includes("ORDER_R1"), false, "线索始终只留在内存");
+  await returned.close();
+});
