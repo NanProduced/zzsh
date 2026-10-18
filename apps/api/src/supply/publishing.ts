@@ -1473,6 +1473,12 @@ export async function listingDetail(
     });
     const attributeDisplay = projectPublicAttributeDisplay(attrs);
     const presentation = await readPresentation(client, v);
+    // The renter must accept the sealed full-payout terms before confirming; the client needs
+    // the owner's declaration before it can read those terms. A missing declaration is unknown,
+    // never "普通赔付".
+    const fullPayoutDeclaration = attrs.full_payout_declaration as { schema?: unknown; selected?: unknown } | undefined;
+    const fullPayoutSelected = fullPayoutDeclaration?.schema === "full-payout-declaration-v1" && typeof fullPayoutDeclaration.selected === "boolean"
+      ? fullPayoutDeclaration.selected : null;
     const publicAttrs = Object.fromEntries(
       [
         "vit_level",
@@ -1520,6 +1526,7 @@ export async function listingDetail(
       safeBox: offer.safeBox,
       termOption: offer.termOption,
       attributeDisplay,
+      fullPayoutSelected,
       presentation,
       quote,
       availability: { state: availability },

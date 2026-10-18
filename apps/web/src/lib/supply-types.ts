@@ -82,6 +82,8 @@ export type PublicListing = {
   rentalMode?: "ordinary" | "custom" | "fast" | null;
   displaySchema?: "legacy-listing-display-v1";
   canCreateOrder?: boolean;
+  /** Owner's sealed full-payout declaration: true/false declared, null = not declared (unknown). */
+  fullPayoutSelected?: boolean | null;
   availability?: { state: PublicAvailabilityState };
   sourceAvailability?: { state: "LISTED" | "OFFLINE" | "RENTED" | "PENDING_PAYMENT" | "UNKNOWN"; asOfUtc: string };
   sourceUpdatedAt?: string;
@@ -378,6 +380,14 @@ export type VersionToken = {
   versionId: string;
   releaseId: string;
   contentHash: string;
+};
+/** Sealed full-payout terms the renter must accept when the owner declared full payout. */
+export type FullPayoutTermsAcceptance = { termsVersionId: string; termsDigest: string; disclosureVersion: string };
+export type FullPayoutTerms = FullPayoutTermsAcceptance & {
+  policyRef: string;
+  policyVersion: string;
+  title: string;
+  body: string;
 };
 export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
   mediaBindings: Array<{

@@ -530,5 +530,10 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
 .rental-confirm-agreement { max-height: 240px; overflow: auto; padding: 9px 10px; border: 1px solid var(--color-border-subtle); border-radius: 6px; background: var(--color-bg-surface); }
 .rental-confirm-agreement p { margin: 0 0 6px; color: var(--color-text-primary); font-size: 12px; }
 .rental-confirm-agreement pre { margin: 0; color: var(--color-text-secondary); font-family: inherit; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rental-confirm-payout { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid var(--color-border-subtle); border-radius: 7px; background: var(--color-bg-card); }
+.rental-confirm-payout-head { display: flex; align-items: center; gap: 6px; color: var(--color-text-primary); font-size: 12px; }
+.rental-confirm-payout .rental-confirm-terms { padding: 0; border: 0; background: none; }
+.rental-confirm-payout-accept { display: flex; align-items: flex-start; gap: 7px; color: var(--color-text-primary); font-size: 12px; line-height: 1.5; cursor: pointer; }
+.rental-confirm-payout-accept input { margin-top: 2px; }
 
 .rental-confirm-total-line { margin: 0; color: var(--color-text-primary); font-size: 14px; font-variant-numeric: tabular-nums; }

@@ -530,6 +530,33 @@ test('historical listing keeps exact source amounts without inventing a current 
   assert.throws(() => toListingCard({ ...listing, quote: null }));
 });
 
+test('historical detail consumes the frozen haff rent for the display ratio only, never for goods rows', () => {
+  const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
+  const historical = { ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null,
+    historicalQuote: { haffRent: money('98.00'), goods: money('72.40'), deposit: money('100.00'), termDays: '2' },
+    presentation: { ...listing.presentation, items: [
+      { id: 'legacy-display:haff_base', code: 'haff_base', name: '哈夫币', unit: 'HAFF_BASE' },
+      { id: 'legacy-display:awm_round', code: 'awm_round', name: 'AWM子弹', unit: 'ROUND' },
+    ] },
+    inventory: [
+      { itemId: 'legacy-display:haff_base', quantity: '40000000', unit: 'HAFF_BASE' },
+      { itemId: 'legacy-display:awm_round', quantity: '47', unit: 'ROUND' },
+    ] };
+  const view = toListingCard(historical);
+  const haff = view.resourceLines.find((line) => line.unitLabel === '哈夫币');
+  assert.equal(haff.costAmount, '98.00', 'the haff line carries its own frozen rent record');
+  assert.equal(haffRatioLabel(haff.quantity, haff.costAmount), '41万/元');
+  assert.equal(haff.costLabel, null, 'the row keeps no per-row fee display');
+  assert.equal(haff.unitPriceLabel, null);
+  assert.equal(view.resourceLines.find((line) => line.unitLabel === '发').costAmount, null, 'goods rows never inherit the aggregate 72.40');
+  assert.equal(view.itemResourceTotalLabel, '¥72.40');
+  // The owner's declaration reaches the card; absence and legacy stay unknown, not 普通赔付.
+  assert.equal(toListingCard({ ...listing, fullPayoutSelected: true }).fullPayoutSelected, true);
+  assert.equal(toListingCard({ ...listing, fullPayoutSelected: false }).fullPayoutSelected, false);
+  assert.equal(toListingCard(listing).fullPayoutSelected, null);
+  assert.equal(view.fullPayoutSelected, null);
+});
+
 test('public native availability keeps readable occupied/offline cards distinct from rentability',()=>{
  const money=amount=>({currency:'CNY',unit:'yuan',amount,scale:2});
  for(const state of ['PENDING_PAYMENT','RENTED','OCCUPIED','OFFLINE','UNKNOWN','UNAVAILABLE']){

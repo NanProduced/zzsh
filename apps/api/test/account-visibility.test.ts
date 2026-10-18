@@ -67,6 +67,15 @@ test("public free control keeps the current object and public money projection",
   assert.equal(result.id, f.account.id); assert.equal(result.displayNo, "AC0000000001");
   assert(!JSON.stringify(result).includes("123456.78")); assert(!Object.hasOwn(result, "owner_user_id"));
 });
+test("public detail exposes the owner's full-payout declaration, with unknown kept distinct from 普通赔付", async () => {
+  const f = nativeFixture();
+  assert.equal((await readPublicListing(f.client, f.account, f.gate)).fullPayoutSelected, null, "no declaration is unknown, not 普通赔付");
+  for (const selected of [true, false] as const) {
+    (f.version.payload!.declaration.attributes as Record<string, unknown>).full_payout_declaration = { schema: "full-payout-declaration-v1", selected };
+    f.version.content_hash = computeContentHash(f.version.payload!);
+    assert.equal((await readPublicListing(f.client, f.account, f.gate)).fullPayoutSelected, selected);
+  }
+});
 test("pending and paid occupancy labels come from authoritative gate detail, with no order identifiers", async () => {
   for (const kind of ["PENDING_PAYMENT", "RENTED"] as const) {
     const f = nativeFixture(); f.facts.occupancy = "OCCUPIED"; f.facts.occupancyKind = kind;

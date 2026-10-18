@@ -29,6 +29,8 @@ export type ListingCardData = {
   availabilityLabel?: string | null;
   sourceAvailabilityLabel?: string | null;
   sourceUpdatedAt?: string;
+  /** Owner's full-payout declaration; null = not declared. Never inferred from the quote. */
+  fullPayoutSelected?: boolean | null;
   id: string;
   gameId?: string;
   versionId?: string;
@@ -254,6 +256,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     versionId: listing.versionId,
     releaseId: listing.releaseId,
     displayNo: listing.displayNo ?? null,
+    fullPayoutSelected: listing.fullPayoutSelected ?? null,
     title: listing.title?.trim() || structuredTitle || (listing.displayNo ? `账号 ${listing.displayNo}` : "账号资料待补充"),
     imageUrl: firstMedia?.url,
     media,
@@ -299,11 +302,17 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const items = new Map(listing.presentation.items.map(item => [item.id, item]));
   const subtotal = BigInt(history.haffRent.amount.replace(".", "")) + BigInt(history.goods.amount.replace(".", ""));
   const media = projectListingMedia(listing);
-  const resourceLines: ResourceLine[] = listing.inventory.map(line => ({
-    itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
-    quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code),
-    unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: null, costLabel: null, unitPriceLabel: null,
-  }));
+  const resourceLines: ResourceLine[] = listing.inventory.map(line => {
+    // The frozen haff rent record is the haff line's own amount; it feeds the display-only
+    // ratio exactly like a current quote line. Goods rows keep no per-row price because the
+    // source snapshot never stored one.
+    const haffLine = resourceUnitLabel(line.unit, items.get(line.itemId)?.code) === "哈夫币";
+    return {
+      itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
+      quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code),
+      unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: haffLine ? history.haffRent.amount : null, costLabel: null, unitPriceLabel: null,
+    };
+  });
   const conditions = conditionLines(listing.attributes, listing);
   const haff = resourceLines.find(line => line.unitLabel === "哈夫币");
   const structuredTitle = [haff ? `${haff.quantityLabel} 哈夫币` : null,
@@ -312,6 +321,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   return {
     ...listingVisibility(listing),
     historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title?.trim() || structuredTitle || "账号资料待补充",
+    fullPayoutSelected: null,
     imageUrl: media[0]?.url,
     media, resourceLines,
     resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,

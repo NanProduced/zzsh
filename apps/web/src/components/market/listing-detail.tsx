@@ -215,7 +215,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
            <p className="detail-stage-note account-readonly">已获准公开的资料仍可查看，当前不能创建新订单。这里是公开版本的资源费用参考，不是本人最终报价。</p>
            <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回账号市场</Link>
          </> : <>
-           <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} autoQuote reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
+           <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} autoQuote fullPayoutSelected={data.fullPayoutSelected === true} reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
            <section className="account-process-panel account-process-panel--quote" aria-labelledby="account-process-title">
              <div className="account-section-title"><h2 id="account-process-title"><Shield size={20} aria-hidden="true" />租赁流程</h2><span>从核对到开租</span></div>
              <ol className="account-process-steps">
@@ -256,7 +256,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
         {resources.length ? <table className="account-stock-table"><thead><tr><th scope="col">物资</th><th scope="col">数量</th><th scope="col">参考单价</th><th scope="col">参考费用</th></tr></thead><tbody>
           {resources.map(line => <tr key={line.itemId}><th scope="row"><InventoryArt code={line.code} /><span>{line.name}</span></th><td data-label="数量">{resourceQuantityLabel(line)}</td><td data-label="参考单价" className={!line.unitPriceLabel ? "account-value-unknown" : undefined}>{line.unitPriceLabel ? unitPriceText(line) : "未返回"}</td><td data-label="参考费用" className={!line.costLabel ? "account-value-unknown" : undefined}>{line.costLabel ?? "未返回"}</td></tr>)}
         </tbody><tfoot><tr><th scope="row" colSpan={3}>物资参考合计</th><td>{data.itemResourceTotalLabel ?? "待服务端确认"}</td></tr></tfoot></table> : <p className="account-empty-note">尚未申报可展示的物资库存。</p>}
-        {resources.length ? <div className="account-stock-legend" role="note"><Info size={15} aria-hidden="true" /><span>“未返回”表示公开接口没有给出参考价，不等于零。</span></div> : null}
+        {resources.length ? <div className="account-stock-legend" role="note"><Info size={15} aria-hidden="true" /><span>{data.historicalReadOnly ? "“未返回”表示历史来源只保留租金与物资合计，没有逐项金额；不等于零。" : "“未返回”表示公开接口没有给出参考价，不等于零。"}</span></div> : null}
         <p className="account-stock-note">物资金额先预付，最终按实际消耗与有效规则结算。</p>
       </section>
     </div>
