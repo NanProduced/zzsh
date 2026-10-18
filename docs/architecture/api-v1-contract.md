@@ -242,4 +242,5 @@ npm run typecheck
 ## 公共目录与上传反馈补充
 
 - 公开账号详情的 `game` 为服务器确认的 `{id, code, name}`，缺少可靠数据时为 `null`；客户端不得按来源 URL 推断游戏。旧客户端可忽略这一新增字段。
+- 原生公开账号投影可带 `fullPayoutSelected: true|false|null`，来自版本化号主声明；未声明/旧资料保持未知，不直接把旧包赔flag当新条款接受。明确选中时，租客先读该game/release适用的封存条款，主动勾选后向个人确认和首次建单携带同一`fullPayoutTermsAcceptance`；结果不明时冻结原接受字段、token与key恢复。该公开flag不替代服务端资金/政策校验，未选时不传空接受对象。
 - 用户与管理端上传意图共用 10 MiB（10485760 字节）上限，仅接收 PNG、JPEG、WebP。声明大小或格式错误返回 `400 INVALID_ARGUMENT`，`details[].path` 为 `size` 或 `mime`；超限信息包含声明字节数和上限。实际上传仍执行服务端字节、格式与图片安全检查，客户端前置提示不构成授权或校验替代。
