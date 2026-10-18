@@ -25,7 +25,7 @@ function nativeFixture(id = "account-a", game = "game-a") {
     ruleRefs: { releaseId: "release-a", priceVersionId: "price-a", termVersionId: "term-a", agreementVersionId: "agreement-a", agreementDigest: "d".repeat(64) },
     quoteValues: priced.quote });
   const account: PublishingAccount = { id, owner_user_id: "owner-a", game_id: game, current_version_id: "version-a",
-    owner_paused: false, staff_restricted: false, restriction_reason: null, lifecycle: "ACTIVE", legacy_hold: "NONE", revision: "1", display_no: "0000123" };
+    owner_paused: false, staff_restricted: false, restriction_reason: null, lifecycle: "ACTIVE", legacy_hold: "NONE", revision: "1", display_no: "AC0000000001" };
   const version: ListingVersion = { id: "version-a", account_id: account.id, sequence: "1", origin: "NATIVE", review_state: "PUBLISHED",
     schema_version: 1, title: payload.declaration.title, description: null, attributes: payload.declaration.attributes,
     term_option_code: "daily", pricing_option_code: "standard", rule_release_id: "release-a", content_hash: computeContentHash(payload), payload,
@@ -64,7 +64,7 @@ function nativeFixture(id = "account-a", game = "game-a") {
 
 test("public free control keeps the current object and public money projection", async () => {
   const f = nativeFixture(), result = await readPublicListing(f.client, f.account, f.gate);
-  assert.equal(result.id, f.account.id); assert.equal(result.displayNo, "0000123");
+  assert.equal(result.id, f.account.id); assert.equal(result.displayNo, "AC0000000001");
   assert(!JSON.stringify(result).includes("123456.78")); assert(!Object.hasOwn(result, "owner_user_id"));
 });
 test("pending and paid occupancy labels come from authoritative gate detail, with no order identifiers", async () => {
@@ -121,7 +121,7 @@ test("owner media readability follows the shared public view even while new rent
 test("real read errors are not converted to a successful unavailable DTO", async () => {
   const f = nativeFixture(); f.facts.failure = true; await assert.rejects(readPublicListing(f.client, f.account, f.gate), /READ_FAILURE_FIXTURE/);
 });
-test("exact number lookup fails closed on raw multi-target aliases before public projection", async () => {
+test("exact number lookup fails closed on canonical multi-target candidates before public projection", async () => {
   const one = nativeFixture(), two = nativeFixture("account-b", "game-b"); one.facts.occupancy = "OCCUPIED";
   let active = one;
   const client = { query: async (sql: string, args: any[] = []) => {
@@ -129,15 +129,15 @@ test("exact number lookup fails closed on raw multi-target aliases before public
     if (sql.includes("SELECT * FROM zzsh_supply.rental_account")) active = args[0] === two.account.id ? two : one;
     return active.client.query(sql, args);
   } } as unknown as PoolClient;
-  await assert.rejects(lookupPublicListing(client, { number: "0000123", gameId: null }, one.gate), (e: any) => e.status === 409);
-  const result = await lookupPublicListing(client, { number: "0000123", gameId: "game-a" }, one.gate);
+  await assert.rejects(lookupPublicListing(client, { number: "AC0000000001", gameId: null }, one.gate), (e: any) => e.status === 409);
+  const result = await lookupPublicListing(client, { number: "AC0000000001", gameId: "game-a" }, one.gate);
   assert.equal(result.id, one.account.id); assert.equal(result.canCreateOrder, false);
   two.account.staff_restricted = true;
-  await assert.rejects(lookupPublicListing(client, { number: "0000123", gameId: null }, one.gate), (e: any) => e.status === 409 && !JSON.stringify(e).includes("account-"));
+  await assert.rejects(lookupPublicListing(client, { number: "AC0000000001", gameId: null }, one.gate), (e: any) => e.status === 409 && !JSON.stringify(e).includes("account-"));
   one.account.staff_restricted = true;
-  await assert.rejects(lookupPublicListing(client, { number: "0000123", gameId: "game-a" }, one.gate), (e: any) => e.status === 404);
+  await assert.rejects(lookupPublicListing(client, { number: "AC0000000001", gameId: "game-a" }, one.gate), (e: any) => e.status === 404);
   two.account.game_id = "game-a";
-  await assert.rejects(lookupPublicListing(client, { number: "0000123", gameId: "game-a" }, one.gate), (e: any) => e.status === 409);
+  await assert.rejects(lookupPublicListing(client, { number: "AC0000000001", gameId: "game-a" }, one.gate), (e: any) => e.status === 409);
 });
 function responseCapture() {
   const result: { status: number; body: any } = { status: 0, body: null };
@@ -158,14 +158,14 @@ test("existing favorite stays recognizable through another party occupancy, rele
   for (const kind of ["PENDING_PAYMENT", "RENTED"] as const) {
     f.facts.occupancy = "OCCUPIED"; f.facts.occupancyKind = kind;
     const row = (await read()).items[0]; assert.equal(row.accountId, f.account.id); assert.equal(row.state, "AVAILABLE");
-    assert.equal(row.listing.displayNo, "0000123"); assert.equal(row.listing.canCreateOrder, false); assert.equal(row.listing.availability.state, kind);
+    assert.equal(row.listing.displayNo, "AC0000000001"); assert.equal(row.listing.canCreateOrder, false); assert.equal(row.listing.availability.state, kind);
   }
   f.facts.occupancy = "FREE"; f.facts.occupancyKind = null;
   assert.equal((await read()).items[0].listing.canCreateOrder, true);
   f.account.owner_paused = true; assert.equal((await read()).items[0].listing.availability.state, "OFFLINE");
   f.account.staff_restricted = true; f.account.restriction_reason = "PRIVATE_RESTRICTION_REASON";
   const hidden = (await read()).items[0]; assert.equal(hidden.state, "UNAVAILABLE"); assert.equal(hidden.accountId, f.account.id); assert.equal(hidden.listing, null);
-  assert(!JSON.stringify(hidden).includes("PRIVATE_RESTRICTION_REASON")); assert(!JSON.stringify(hidden).includes("0000123"));
+  assert(!JSON.stringify(hidden).includes("PRIVATE_RESTRICTION_REASON")); assert(!JSON.stringify(hidden).includes("AC0000000001"));
   actor = "other-reader"; assert.deepEqual((await read()).items, []); actor = null;
   await assert.rejects(read(), (e: any) => e.status === 401);
 });
@@ -174,7 +174,7 @@ test("lookup route is matched before the generic listing-id branch and stays ano
   const client = { query: async (sql: string, args: any[] = []) => sql.includes("SELECT DISTINCT a.id") ? { rows: [{ id: f.account.id }], rowCount: 1 } : f.client.query(sql, args), release() {} };
   const capture = responseCapture();
   await handlePublishingRoute({ method: "GET", headers: {} } as never, capture.response as never,
-    { pool: { connect: async () => client }, supplyGateReader: f.gate } as never, "req_lookup", "/listings/lookup", new URLSearchParams("number=0000123&gameId=game-a"), false);
+    { pool: { connect: async () => client }, supplyGateReader: f.gate } as never, "req_lookup", "/listings/lookup", new URLSearchParams("number=AC0000000001&gameId=game-a"), false);
   assert.equal(capture.result.status, 200); assert.equal(capture.result.body.id, f.account.id); assert.equal(capture.result.body.canCreateOrder, false);
 });
 test("default v2 keeps old-platform status=3 rows visible as read-only and separates cursor scope", async t => {

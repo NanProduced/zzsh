@@ -5,7 +5,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import { AlertCircle, ChevronRight, Info, RefreshCw } from "lucide-react";
 import { orderItemKey, formatOrderMoney, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
 import { groupedInteger, unitLabel } from "@/lib/order-display";
-import { paymentEntryOpen } from "@/lib/order-display";
+import { paymentEntryOpen, orderAccountTitle } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderUrl, STATUS_LABELS, termText } from "@/components/order/order-presentation";
 import "./order.css";
 
@@ -125,7 +125,7 @@ function ListRow({ party, order, status, accountId, onOpen }: { party: OrderPart
   return <li className="order-row" data-order-status={order.status}>
     <div className="order-row-account">
       {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
-      <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} onClick={(event) => onOpen(orderItemKey(order), event)}>{order.title ?? "账号信息暂不可用"}</Link>
+      <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} onClick={(event) => onOpen(orderItemKey(order), event)}>{orderAccountTitle(order)}</Link>
       {resources ? <p className="order-row-resources">{resources}</p> : null}
       <p className="order-row-meta">
         <span className="order-row-no">订单 {order.displayNo ?? "暂不可用"}</span>

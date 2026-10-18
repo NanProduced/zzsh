@@ -301,7 +301,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const media = projectListingMedia(listing);
   return {
     ...listingVisibility(listing),
-    historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: null, title: listing.title?.trim() || "历史资料待核实",
+    historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title?.trim() || "历史资料待核实",
     imageUrl: media[0]?.url,
     media, resourceLines: listing.inventory.map(line => ({
       itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { parseLegacyReadSnapshot,buildLegacyListingCandidates,buildMixedListingCandidates,legacyListingSortLabel,legacyReadSourceAllowed,legacySnapshotConflicts,legacySnapshotReplaySql,legacyHistoricalReadSql,projectLegacyHistoricalRead,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
+import { parseLegacyReadSnapshot,buildLegacyListingCandidates,buildMixedListingCandidates,legacyListingSortLabel,legacyReadSourceAllowed,legacySnapshotConflicts,legacySnapshotReplaySql,legacyHistoricalReadSql,projectLegacyHistoricalRead,withoutLegacyResourceNo,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
 import { publicFilterMetadata,validateConfigCatalog,validateListingQuery } from "../src/supply/listing-filter-config";
 import { parseFilterConfig,type ListingQueryV2 } from "../src/supply/listing-filter-contract";
 
@@ -43,6 +43,12 @@ const catalog = {
 const legacyState = { catalog, config, legacyReadOnly: true, mixed: false, mode: "LEGACY_READ_ONLY", hasLegacySnapshots: true, allowLegacyOptions: true, filterRevision: "3", catalogRevision: "7", ruleReleaseId: null } as unknown as Parameters<typeof publicFilterMetadata>[0];
 const baseQuery: ListingQueryV2 = { queryVersion: 2, gameId: "game_x", q: null, filters: {}, sort: "latest", direction: "DESC", coreItemId: null, limit: 20, cursor: null, filterRevision: null, catalogRevision: null, ruleReleaseId: null };
 const fakeClient = { query: async () => ({ rows: [] }) } as unknown as PoolClient;
+
+test("owner historical projection omits old identifiers without changing the admin source",()=>{
+ const source={resourceNo:'0000123',legacyId:'OLD-ID',quote:null,canCreateOrder:false};const visible=withoutLegacyResourceNo(source)!;
+ assert.equal(Object.hasOwn(visible,'resourceNo'),false);assert.equal(Object.hasOwn(visible,'legacyId'),false);
+ assert.equal(source.resourceNo,'0000123');assert.equal(source.legacyId,'OLD-ID');assert.equal(visible.quote,null);
+});
 
 test("legacy read metadata exposes the configured fields, real revision and plain sort labels", () => {
   const metadata = publicFilterMetadata(legacyState, true) as ReturnType<typeof publicFilterMetadata> & { readMode?: string };

@@ -11,6 +11,13 @@ const display = requireFromTree(path.join(tree, "apps/web/src/lib/order-display.
 
 const yuan = (amount) => ({ currency: "CNY", unit: "yuan", scale: 2, amount });
 
+test("legacy list and detail share the same account-read authorization title",()=>{
+ const order={source:{origin:'LEGACY'},account:{readable:false},title:'PRIVATE ACCOUNT TITLE'};
+ assert.equal(display.orderAccountTitle(order),'账号资料暂未提供');
+ assert.equal(display.orderAccountTitle({...order,account:{readable:true}}),'PRIVATE ACCOUNT TITLE');
+ assert.equal(display.orderAccountTitle({title:'原生标题',source:{origin:'NATIVE'}}),'原生标题');
+});
+
 test("resource names resolve through the order projection and never invent a name", () => {
   const order = { quote: { lines: [{ itemId: "item_haff", name: "哈夫币", unit: "HAFF_BASE" }, { itemId: "item_piece", name: "", unit: "PIECE" }] } };
   assert.equal(display.resourceName(order, "item_haff"), "哈夫币");

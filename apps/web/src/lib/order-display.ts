@@ -1,4 +1,4 @@
-import type { Order, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import type { Order, LegacyOrder, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 export function personalMembershipLabel(quote:PersonalRentalQuote):string {
   const b=quote.membershipBenefits;
@@ -17,6 +17,12 @@ export function personalBenefitSources(quote:PersonalRentalQuote):string|null {
  */
 export function paymentEntryOpen(order: Order): boolean {
   return order.paymentOpen ?? (order.status === "PENDING_PAYMENT" && !order.expiredAwaitingCancel);
+}
+
+/** Historical participation is not permission to view the account's current private facts. */
+export function orderAccountTitle(order: Pick<Order, "source" | "title"> & { account?: LegacyOrder["account"] }): string {
+  if (order.source?.origin === "LEGACY" && !order.account?.readable) return "账号资料暂未提供";
+  return order.title?.trim() || "账号信息暂不可用";
 }
 
 export function cancelEntryOpen(order: Order): boolean {

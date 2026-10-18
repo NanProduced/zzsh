@@ -20,7 +20,7 @@ export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:
   const attribute=(name:string)=>`(${attrs})->>'${name}'`;
   const numericAttribute=(name:string,digits:number)=>`CASE WHEN jsonb_typeof((${attrs})->'${name}')='number' AND ${attribute(name)} ~ '^(0|[1-9][0-9]{0,${digits-1}})$' THEN (${attribute(name)})::numeric END`;
   const where:string[]=[];
-  if(q!==null){const pattern=p(listingSearchPattern(q));where.push(`(v.title ILIKE ${pattern} ESCAPE '\\' OR a.display_no ILIKE ${pattern} ESCAPE '\\')`);}
+  if(q!==null){const pattern=p(listingSearchPattern(q));where.push(`(v.title ILIKE ${pattern} ESCAPE '\\' OR (a.display_no ~ '^AC[0-9]{10,}$' AND a.display_no ILIKE ${pattern} ESCAPE '\\'))`);}
   for(const row of filters.resources??[]){const itemId=p(row.itemId),bounds=[row.minQuantity===undefined?null:`l.quantity>=${p(row.minQuantity)}::numeric`,row.maxQuantity===undefined?null:`l.quantity<=${p(row.maxQuantity)}::numeric`].filter(Boolean);where.push(`EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${itemId} AND ${bounds.join(" AND ")})`);}
   for(const group of filters.skinGroups??[]) {
     if(!group.ids.length)continue;const ids=p(group.ids);

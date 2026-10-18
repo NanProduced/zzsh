@@ -485,6 +485,8 @@ test('historical listing keeps exact source amounts without inventing a current 
     inventory: [{ itemId: 'legacy-unknown', quantity: null, unit: 'ROUND' }, { itemId: 'legacy-zero', quantity: '0', unit: 'PIECE' }] };
   const view = toListingCard(historical);
   assert.equal(view.historicalReadOnly, true);
+  assert.equal(toListingCard({...historical,displayNo:'AC0000000001'}).displayNo,'AC0000000001');
+  assert.equal(toListingCard({...historical,displayNo:null}).displayNo,null);
   assert.equal(view.haffRentLabel, '¥2038.00');
   assert.equal(view.resourceTotalLabel, '¥2058.00');
   assert.equal(view.payableTotalLabel, null);

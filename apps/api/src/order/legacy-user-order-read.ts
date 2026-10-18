@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { invalid, notFound } from "../supply/supply-util";
 import { centsToYuan } from "./order";
+import { publicAccountNumber } from "../supply/account-number";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type LegacyUserOrderFilter = {
@@ -51,7 +52,7 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) 
     amounts: { rental: goods === null || items === null ? null : centsToYuan(BigInt(goods) + BigInt(items)), deposit: money(row.depositCents), totalDue: money(row.dueCents), currency: "CNY" as const },
     payment: { state: state.paymentState, recordedAt: row.paidAt, recordedAmount: paid },
     legacyAmounts: { required: money(row.dueCents), paid, deposit: money(row.depositCents), refund: money(legacyMoneyCents(row.refundYuan)), refundChannelState: "UNKNOWN" as const },
-    account: { id: row.accountReadable ? row.accountId : null, displayNo: row.accountDisplayNo, readable: row.accountReadable },
+    account: { id: row.accountReadable ? row.accountId : null, displayNo: row.accountReadable ? publicAccountNumber(row.accountDisplayNo) : null, readable: row.accountReadable },
     readOnly: true as const, paymentOpen: false as const, cancelOpen: false as const, continuationCount: 0 as const, actions: [] as never[],
   };
 }
@@ -59,7 +60,7 @@ const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-D
 // Only selected historical facts enter the user projection. No counterparty/contact/credential/audit JSON is loaded.
 export function legacyUserOrderFields(continuationReady: boolean): string { return `l.id,l.original_order_no AS "displayNo",l.source_order_status AS "sourceOrderStatus",l.source_pay_status AS "sourcePayStatus",h.stage AS "continuationStage",
  l.owner_user_id AS "ownerUserId",l.renter_user_id AS "renterUserId",l.game_id AS "gameId",CASE WHEN a.owner_user_id=$1 THEN v.title ELSE NULL END AS title,
- l.account_id AS "accountId",l.legacy_account_no AS "accountDisplayNo",COALESCE(a.owner_user_id=$1,false) AS "accountReadable",
+ l.account_id AS "accountId",a.display_no AS "accountDisplayNo",COALESCE(a.owner_user_id=$1,false) AS "accountReadable",
  ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc(continuationReady ? `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)` : "l.source_completed_at")} AS "completedAt",
  l.due_amount_cents::text AS "dueCents",l.recorded_paid_amount_cents::text AS "paidCents",l.deposit_amount_cents::text AS "depositCents",
  l.source_snapshot->>'goods_money' AS "goodsYuan",l.source_snapshot->>'expend_pay_money' AS "itemsYuan",l.source_snapshot->>'return_order_money' AS "refundYuan"`; }

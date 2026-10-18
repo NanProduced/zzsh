@@ -44,7 +44,7 @@ import { GAME_SERVICE, readGameService, requireWritableGameService } from "./gam
 import { assertDeltaResourceUnit, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
-import { assignAccountNumber } from "./account-number";
+import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { readLegacyListing } from "./legacy-listing-read";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
@@ -1438,7 +1438,7 @@ export async function listingDetail(
   }
   if (!v) {
     if (viewer === "public") throw notFound();
-    return { account: a, version: null };
+    return { account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a, version: null };
   }
   const observed = { gate: null as SupplyGate | null };
   const blockers = await evaluatePublication(client, a, v, async (client, account, purpose) => {
@@ -1510,7 +1510,7 @@ export async function listingDetail(
     )).rows;
     return {
       id: a.id,
-      displayNo: a.display_no,
+      displayNo: publicAccountNumber(a.display_no),
       versionId: v.id,
       releaseId: v.rule_release_id,
       title: v.title,
@@ -1572,7 +1572,7 @@ export async function listingDetail(
   return {
     ownerName,
     agreement,
-    account: a,
+    account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a,
     version: {
       schemaVersion: v.schema_version,
       id: v.id,

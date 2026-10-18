@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
 import { formatOrderMoney, formatOrderTime as timeText, type Order, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
-import { unitHint, unitLabel } from "@/lib/order-display";
+import { unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderError, OrderStatusBadge, orderUrl, statusLabel, termText } from "@/components/order/order-presentation";
 import "./order.css";
@@ -241,7 +241,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
         status pill is stated once here and nowhere else. */}
     <header className="order-detail-hero">
       <div className="order-detail-hero-copy">
-        <h1 className="order-detail-title">{order.title ?? "账号信息暂不可用"}</h1>
+        <h1 className="order-detail-title">{orderAccountTitle(order)}</h1>
         <p className="order-detail-meta">
           <span className="order-detail-no">订单 {order.displayNo ?? "待确认"}<CopyOrderNo value={order.displayNo} /></span>
           {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
