@@ -19,6 +19,7 @@ import type {
   PublicGunsmithPage,
   VersionToken,
   SavedDeclaration,
+  FullPayoutTerms,
 } from "./supply-types.ts";
 
 export function editableDeclaration(saved: SavedDeclaration): DraftInput {
@@ -325,6 +326,11 @@ export const supplyApi = {
   publishingOptions: (gameId: string, signal?: AbortSignal) =>
     supplyRequest<PublishingOptions>(
       "/games/" + id(gameId) + "/publishing-options",
+      { signal },
+    ),
+  fullPayoutTerms: (gameId: string, releaseId: string, signal?: AbortSignal) =>
+    supplyRequest<{ releaseId: string; fullPayoutTerms: FullPayoutTerms | null }>(
+      "/games/" + id(gameId) + "/full-payout-terms?" + new URLSearchParams({ releaseId }),
       { signal },
     ),
   resourceIncomePreview: (gameId: string, inventory: DraftInput["inventory"], binding: {catalogRevision:string;releaseId:string}, signal?:AbortSignal) =>

@@ -256,10 +256,10 @@ const confirmation = {
 };
 const publishingOptions = { releaseId: "release_1", agreement: { id: "ag_1", title: "三角洲出租协议", body: "协议正文（TEST_ONLY）", digest: "d".repeat(64) } };
 
-function loadPanelForSession(sessionObject, optionsResponder) {
+function loadPanelForSession(sessionObject, optionsResponder, extraSupplyApi) {
   return loadComponent("apps/web/src/components/order/rental-confirm-panel.tsx", sessionObject, {
     "@/lib/listing-view": { formatMoneyLabel: (value) => (value && typeof value.amount === "string" ? `¥${value.amount}` : null) },
-    "@/lib/supply-client": { supplyApi: { publishingOptions: optionsResponder } },
+    "@/lib/supply-client": { supplyApi: { publishingOptions: optionsResponder, ...(extraSupplyApi ?? {}) } },
   }).RentalConfirmPanel;
 }
 
@@ -269,6 +269,20 @@ function loadPanel(sessionUser, optionsResponder) {
 
 const referenceFees = { total: "¥295.91", haff: "¥256.41", items: "¥39.50" };
 const detailPanelProps = { accountId: "detail_price", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees };
+const fullPayoutTerms = {
+  termsVersionId: "terms_1", termsDigest: "e".repeat(64), disclosureVersion: "disclosure_1",
+  policyRef: "g0-full-payout", policyVersion: "1", title: "全额包赔条款", body: "包赔条款正文（TEST_ONLY）",
+};
+const payoutConfirmation = { ...confirmation, compensationDisclosure: { selected: true, disclosureVersion: "disclosure_1", terms: fullPayoutTerms } };
+const payoutAcceptance = { termsVersionId: "terms_1", termsDigest: "e".repeat(64), disclosureVersion: "disclosure_1" };
+const payoutSupply = { fullPayoutTerms: async (gameId, releaseId) => { assert.equal(gameId, "game_1"); assert.equal(releaseId, "release_1"); return { releaseId, fullPayoutTerms }; } };
+async function acceptPayout(window, probe) {
+  const checkbox = probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
+  assert.ok(checkbox, `payout acceptance checkbox missing; text=${probe.host.textContent?.slice(0, 300)}`);
+  await React.act(async () => { checkbox.dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await tick(); });
+  await tick();
+  assert.equal(checkbox.checked, true);
+}
 
 test("detail fees display API buyer amounts with exact cents; missing/mismatched lines never use public fees", () => {
   const { personalFeeLines } = loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session("user_A"));
@@ -547,6 +561,121 @@ test("F4: missing agreement evidence blocks creation instead of accepting a vers
     assert.ok(button.disabled, "create must be disabled while agreement evidence is unavailable");
     assert.ok(create);
     await probe.dispose();
+  });
+});
+
+test("D8-R1: StrictMode replaces an aborted terms read without accepting or posting", async () => {
+  await withDom(async (window) => {
+    const reads = [], log = [];
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, {
+      fullPayoutTerms: (gameId, releaseId, signal) => {
+        const result = deferred();
+        reads.push({ gameId, releaseId, signal, result });
+        return result.promise;
+      },
+    });
+    const probe = createProbe(window, Panel, { ...detailPanelProps, fullPayoutSelected: true }, router([], log), { strict: true });
+    try {
+      await probe.render();
+      assert.equal(reads.length, 2, "StrictMode's replacement effect starts a fresh read");
+      assert.equal(reads[0].signal.aborted, true);
+      assert.equal(reads[1].signal.aborted, false);
+      await React.act(async () => {
+        reads[0].result.resolve({ releaseId: "release_1", fullPayoutTerms: { ...fullPayoutTerms, termsDigest: "f".repeat(64) } });
+        await tick();
+      });
+      assert.equal(probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]'), null, "the cancelled response stays ignored");
+      await React.act(async () => {
+        reads[1].result.resolve({ releaseId: "release_1", fullPayoutTerms });
+        await tick();
+      });
+      const checkbox = probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
+      assert.ok(checkbox);
+      assert.equal(checkbox.checked, false, "reading the replacement terms never accepts them");
+      const terms = probe.host.querySelector('[aria-label="全额包赔条款"]');
+      assert.match(terms.textContent, /包赔条款正文/);
+      assert.doesNotMatch(terms.textContent, /条款版本|摘要/);
+      assert.ok([...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"))?.disabled);
+      assert.equal(log.length, 0, "no confirmation or order is posted before consent");
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("D1: a declared full-payout listing reads the sealed terms and binds the same acceptance to quote, order and recovery", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    let createCalls = 0;
+    const fetchImpl = router([
+      { match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) },
+      { match: "/api/v2/orders", method: "POST", respond: () => { createCalls += 1; if (createCalls === 1) throw new TypeError("network down"); return json({ order: { id: "order_P", displayNo: "ZZ-9", status: "PENDING_PAYMENT" } }); } },
+    ], log);
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
+    const props = { ...detailPanelProps, accountId: "account_payout", fullPayoutSelected: true };
+    const first = createProbe(window, Panel, props, fetchImpl);
+    await first.render();
+    await tick();
+    assert.ok(first.host.textContent.includes("全额包赔条款"), first.host.textContent.slice(0, 400));
+    const payoutDetails = [...first.host.querySelectorAll("details")].find((node) => node.textContent.includes("全额包赔条款"));
+    assert.ok(payoutDetails && !payoutDetails.open, "the sealed body stays behind the collapsed details");
+    const gated = [...first.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"));
+    assert.ok(gated?.disabled, "quote must stay blocked until the terms are accepted");
+    assert.equal(log.filter((entry) => entry.url.includes("order-confirmations")).length, 0);
+    await acceptPayout(window, first);
+    await first.click("查看我的报价");
+    const quote = log.find((entry) => entry.url.includes("order-confirmations"));
+    assert.deepEqual(quote.body, { accountId: "account_payout", versionId: "listing_1", releaseId: "release_1", fullPayoutTermsAcceptance: payoutAcceptance });
+    await first.click("确认并创建订单");
+    assert.ok(first.host.textContent.includes("创建请求结果未知"), first.host.textContent.slice(0, 300));
+    const firstCreate = log.find((entry) => entry.url.endsWith("/api/v2/orders"));
+    assert.deepEqual(firstCreate.body, { confirmationToken: "token_1", fullPayoutTermsAcceptance: payoutAcceptance });
+    await first.unmount();
+    // Recovery replays the frozen acceptance from the intent, not whatever the UI shows now.
+    const second = createProbe(window, Panel, props, fetchImpl);
+    await second.render();
+    await tick();
+    assert.ok(second.host.textContent.includes("创建请求结果未知"), "remount must restore the unknown create");
+    await second.click("查询原创建结果");
+    const creates = log.filter((entry) => entry.url.endsWith("/api/v2/orders"));
+    assert.equal(creates.length, 2);
+    assert.equal(creates[0].key, creates[1].key, "same idempotency key");
+    assert.deepEqual(creates[0].body, creates[1].body, "same frozen acceptance on recovery");
+    assert.ok(second.host.textContent.includes("原创建请求已确认成功"), second.host.textContent.slice(0, 300));
+    await second.dispose(() => intents.clearIntent("user_A", "order.create.v2", "account_payout"));
+  });
+});
+
+test("D1: unreadable full-payout terms block ordering instead of confirming blind", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) }], log);
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, { fullPayoutTerms: async () => { throw new Error("terms down"); } });
+    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "account_payout_unreadable", fullPayoutSelected: true }, fetchImpl);
+    try {
+      await probe.render();
+      await tick();
+      assert.ok(probe.host.textContent.includes("全额包赔条款暂时无法读取"), probe.host.textContent.slice(0, 300));
+      assert.equal(log.filter((entry) => entry.url.includes("order-confirmations")).length, 0);
+      const gated = [...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"));
+      assert.ok(gated?.disabled);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("D1: authoritative terms that differ from the accepted version stop creation", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    const drifted = { ...payoutConfirmation, compensationDisclosure: { selected: true, disclosureVersion: "disclosure_1", terms: { ...fullPayoutTerms, termsDigest: "f".repeat(64) } } };
+    const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(drifted) }], log);
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
+    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "account_payout_drift", fullPayoutSelected: true }, fetchImpl);
+    try {
+      await probe.render();
+      await tick();
+      await acceptPayout(window, probe);
+      await probe.click("查看我的报价");
+      assert.ok(probe.host.textContent.includes("包赔条款版本与已同意的版本不一致"), probe.host.textContent.slice(0, 300));
+      assert.equal(log.filter((entry) => entry.url.endsWith("/api/v2/orders")).length, 0);
+    } finally { await probe.dispose(); }
   });
 });
 

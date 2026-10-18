@@ -1,4 +1,5 @@
-import type { Money, UnitAmount } from "./supply-types";
+import type { Money, UnitAmount, FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
+export type { FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
 
 export type OrderParty = "renter" | "owner";
 export type OrderStatus = "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "COMPLETED";
@@ -91,7 +92,7 @@ export type PersonalRentalQuote = {
   customerTier?: string;
   membershipBenefits?: {schema:"membership-benefits-v1";effectiveTier:"STANDARD"|"SILVER"|"GOLD"|"PLATINUM"|"DIAMOND"|"BLACK_GOLD";policyTier:"STANDARD"|"SILVER"|"GOLD"|"PLATINUM"|"DIAMOND";priceSource:"GROWTH"|"FRIEND"|"PRESTIGE";depositSource:"GROWTH"|"FRIEND"|"PRESTIGE";policyVersion:string};
   depositWaived: boolean;
-  compensationDisclosure?: { selected: boolean; disclosureVersion: string };
+  compensationDisclosure?: { selected: boolean; disclosureVersion: string; terms?: FullPayoutTerms };
   confirmationId: string;
   listingHash: string;
   expiresAt: string;
@@ -324,10 +325,10 @@ export const orderApi = {
     requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal }),
   detail: (orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
-  confirmRental: (input: { accountId: string; versionId: string; releaseId: string }, signal?: AbortSignal) =>
+  confirmRental: (input: { accountId: string; versionId: string; releaseId: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance }, signal?: AbortSignal) =>
     requestWrite<PersonalRentalQuote>("/api/order-confirmations", { body: input, signal }),
-  createOrder: (confirmationToken: string, key: string, signal?: AbortSignal) =>
-    requestWrite<{ order: Order }>("/api/v2/orders", { body: { confirmationToken }, key, signal }).then(unwrapOrder),
+  createOrder: (confirmationToken: string, key: string, fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance, signal?: AbortSignal) =>
+    requestWrite<{ order: Order }>("/api/v2/orders", { body: { confirmationToken, ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {}) }, key, signal }).then(unwrapOrder),
   cancel: (orderId: string, key: string, reason?: string, signal?: AbortSignal) =>
     requestWrite<{ order?: Order } | Order>(`/api/orders/${encodeURIComponent(orderId)}/cancel`, { key, body: reason ? { reason } : {}, signal }),
   pay: (orderId: string, key: string, signal?: AbortSignal) =>
