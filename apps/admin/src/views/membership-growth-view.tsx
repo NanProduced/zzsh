@@ -69,6 +69,8 @@ function discountDraft(mode: AdminPricingMode, priceVersionId: string, payableRa
   return { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode, priceVersionId, payableRatio, costBasisRef };
 }
 
+function pending(value: string | undefined): boolean { return !value || !value.trim(); }
+
 function modeContractOf(value: AdminModeContract, mode: AdminPricingMode, priceVersionId: string): AdminTotalDiscount {
   return isAdminTotalDiscount(value) ? value : discountDraft(mode, priceVersionId);
 }
@@ -116,7 +118,6 @@ export function entitlementFromCap(policy: AdminGrowthPolicy, kind: AdminEntitle
 export function validateAdminPolicyDraft(policy: AdminGrowthPolicy, enabledModes: readonly AdminPricingMode[] = MODES): { errors: string[]; warnings: string[]; publishable: boolean } {
   const errors: string[] = [], warnings: string[] = [];
   const enabled = new Set<AdminPricingMode>(enabledModes);
-  const pending = (value: string | undefined) => !value || !value.trim();
   if (!policy.effectiveAt) warnings.push("政策生效时点未填写：发布前必须确认");
   for (const tier of policy.tiers) for (const mode of MODES) {
     const contract = tier[mode];
@@ -142,33 +143,36 @@ export function validateAdminPolicyDraft(policy: AdminGrowthPolicy, enabledModes
       if (lowerRatio !== null && higherRatio !== null && higherRatio > lowerRatio) errors.push(`${higher.tier}.${mode}:高档应付比例不得高于低档`);
     }
   }
-  // Every enabled mode needs a configured cap; the consumed caps must not sit below their tier.
+  // Every enabled mode needs a complete, valid cap; the consumed caps must not sit below their tier.
   for (const tier of policy.tiers) {
     const cap = tier.maxEntitlement;
-    if (isAdminCapByMode(cap)) {
-      for (const mode of enabled) {
-        const entry = cap.byMode[mode];
-        if (!entry || isAdminNotPriced(entry)) warnings.push(`${tier.tier}.entitlementCap.${mode}:礼遇上限未配置`);
-        else if (entry.mode !== mode) errors.push(`${tier.tier}.entitlementCap.${mode}:模式不一致`);
-      }
-    } else if (isAdminNotPriced(cap)) warnings.push(`${tier.tier}.entitlementCap:礼遇上限未配置`);
-  }
-  for (const tierName of ["GOLD", "DIAMOND"] as const) {
-    const tier = policy.tiers.find((entry) => entry.tier === tierName);
-    if (!tier) continue;
+    if (!isAdminCapByMode(cap)) { if (isAdminNotPriced(cap)) warnings.push(`${tier.tier}.entitlementCap:礼遇上限未配置`); continue; }
     for (const mode of enabled) {
-      const capEntry = adminCapForMode(tier.maxEntitlement, mode);
+      const entry = cap.byMode[mode];
+      const path = `${tier.tier}.entitlementCap.${mode}`;
+      if (!entry || isAdminNotPriced(entry)) { warnings.push(`${path}:礼遇上限未配置`); continue; }
+      if (entry.mode !== mode) { errors.push(`${path}:模式不一致`); continue; }
+      if (isLegacyAdminPricing(entry)) continue; // legacy configured cap stays readable as-is
+      const missing: string[] = [];
+      if (pending(entry.priceVersionId)) errors.push(`${path}:缺少价格版本`);
+      if (pending(entry.payableRatio)) missing.push("应付比例");
+      else if (parsePayableRatio(entry.payableRatio) === null) errors.push(`${path}:应付比例须为0–1之间的小数`);
+      if (pending(entry.costBasisRef)) missing.push("成本依据");
+      if (missing.length > 0) { warnings.push(`${path}:待补 ${missing.join("/")}`); continue; }
+      // A cap at or above its tier share is a legitimate tightening; below it would let 礼遇 beat the tier.
       const tierContract = tier[mode];
-      if (!isAdminTotalDiscount(capEntry) || !isAdminTotalDiscount(tierContract)) continue;
-      const capRatio = parsePayableRatio(capEntry.payableRatio);
-      const tierRatio = parsePayableRatio(tierContract.payableRatio);
-      if (capRatio !== null && tierRatio !== null && capRatio < tierRatio) warnings.push(`${tierName}.entitlementCap.${mode}:礼遇上限深于该成长档`);
+      const capRatio = parsePayableRatio(entry.payableRatio);
+      const tierRatio = isAdminTotalDiscount(tierContract) ? parsePayableRatio(tierContract.payableRatio) : null;
+      if (capRatio !== null && tierRatio !== null && capRatio < tierRatio) warnings.push(`${path}:礼遇上限深于该成长档`);
     }
   }
   return { errors, warnings, publishable: errors.length === 0 && warnings.length === 0 };
 }
 
-/** Explicit DRAFT-only action: fill missing caps from the matching tier and keep tightened caps. */
+/**
+ * Explicit DRAFT-only action: repair missing, pending or invalid caps from the matching tier share,
+ * fill an incomplete cap's own missing cost/version from the tier, and keep legitimate tightened caps.
+ */
 export function completeEntitlementCaps(policy: AdminGrowthPolicy, enabledModes: readonly AdminPricingMode[]): AdminGrowthPolicy {
   return {
     ...policy,
@@ -179,10 +183,18 @@ export function completeEntitlementCaps(policy: AdminGrowthPolicy, enabledModes:
       const byMode: Partial<Record<AdminPricingMode, AdminModeContract>> = { ...(existing ?? {}) };
       for (const mode of enabledModes) {
         const current = byMode[mode];
-        if (current && !isAdminNotPriced(current)) continue; // an operator-tightened cap is never overwritten
-        const contract = tier[mode];
-        if (!isAdminTotalDiscount(contract)) continue; // only a configured tier share can seed a cap
-        byMode[mode] = JSON.parse(JSON.stringify(contract)) as AdminTotalDiscount;
+        const tierContract = tier[mode];
+        const tierDiscount = isAdminTotalDiscount(tierContract) ? tierContract : null;
+        if (!tierDiscount) continue; // only a configured tier share can seed/repair a cap
+        const currentRatio = isAdminTotalDiscount(current) ? parsePayableRatio((current as AdminTotalDiscount).payableRatio) : null;
+        const tierRatio = parsePayableRatio(tierDiscount.payableRatio);
+        const invalid = !current || isAdminNotPriced(current) || currentRatio === null
+          || (currentRatio !== null && tierRatio !== null && currentRatio < tierRatio); // deeper than the tier cannot stand
+        if (invalid) { byMode[mode] = JSON.parse(JSON.stringify(tierDiscount)) as AdminTotalDiscount; continue; }
+        if (isAdminTotalDiscount(current) && (pending(current.costBasisRef) || pending(current.priceVersionId))) {
+          // Keep the operator's tightened share, repair only the incomplete facts from the tier.
+          byMode[mode] = { ...current, costBasisRef: pending(current.costBasisRef) ? tierDiscount.costBasisRef : current.costBasisRef, priceVersionId: pending(current.priceVersionId) ? tierDiscount.priceVersionId : current.priceVersionId };
+        }
       }
       return { ...tier, maxEntitlement: { byMode } };
     }),
@@ -279,7 +291,7 @@ export function MembershipGrowthAdminView({ state, policySaved = true, onPolicyC
     <header className="membership-admin-header"><div><p className="membership-admin-kicker">运营工作台 · 会员成长</p><h2>成长权益与人工礼遇</h2><p>会员优惠作用于“哈夫币租金＋物品资源费”的合计，按应付比例一次打折；不修改基础价与号主收入。</p></div><span className={`membership-admin-status membership-admin-status--${policy.status.toLowerCase()}`}>{policy.status === "DRAFT" ? "草稿" : "已批准版本"} · {policy.version}</span></header>
 
     <section className="membership-admin-section" aria-labelledby="membership-admin-policy-heading">
-      <div className="membership-admin-section-heading"><div><h3 id="membership-admin-policy-heading">五档总价折扣</h3><p>应付比例作用于基础哈夫租金与物品资源费的合计，一次打折；空值保持待配置，缺成本依据可保存草稿但不能提审。</p></div><div className="membership-admin-action-row"><GrowthSelect label="编辑计价模式" value={mode} onChange={(value) => setMode(value as AdminPricingMode)} options={enabledModes.map((value) => ({ value, label: MODE_LABELS[value] }))} className="membership-admin-inline-field" /><label className="membership-admin-control membership-admin-inline-field"><span>政策生效时点（北京时间）</span><Input aria-label="政策生效时点" type="datetime-local" value={utcToBeijingInput(policy.effectiveAt ?? "")} onChange={(event) => updatePolicy({ ...policy, effectiveAt: beijingInputToUtc(event.target.value) || null })} /></label>{onPolicyChange ? <button type="button" className="membership-admin-button" onClick={() => updatePolicy(completeEntitlementCaps(policy, enabledModes))}>按档位边界补齐礼遇上限</button> : null}{onSavePolicyDraft ? <button type="button" className="membership-admin-button" disabled={(!policyDirty && policySaved) || validation.errors.length > 0} onClick={onSavePolicyDraft}>保存草稿</button> : null}{onSubmitPolicy ? <button type="button" className="membership-admin-button" disabled={!validation.publishable || validation.errors.length > 0} onClick={onSubmitPolicy}>提交审批</button> : null}</div></div>
+      <div className="membership-admin-section-heading"><div><h3 id="membership-admin-policy-heading">五档总价折扣</h3><p>应付比例作用于基础哈夫租金与物品资源费的合计，一次打折；空值保持待配置，缺成本依据可保存草稿但不能提审。</p></div><div className="membership-admin-action-row"><GrowthSelect label="编辑计价模式" value={mode} onChange={(value) => setMode(value as AdminPricingMode)} options={enabledModes.map((value) => ({ value, label: MODE_LABELS[value] }))} className="membership-admin-inline-field" /><label className="membership-admin-control membership-admin-inline-field"><span>政策生效时点（北京时间）</span><Input aria-label="政策生效时点" type="datetime-local" value={utcToBeijingInput(policy.effectiveAt ?? "")} onChange={(event) => updatePolicy({ ...policy, effectiveAt: beijingInputToUtc(event.target.value) || null })} /></label>{onPolicyChange ? <button type="button" className="membership-admin-button" onClick={() => updatePolicy(completeEntitlementCaps(policy, enabledModes))}>按档位边界补齐/修正礼遇上限</button> : null}{onSavePolicyDraft ? <button type="button" className="membership-admin-button" disabled={(!policyDirty && policySaved) || validation.errors.length > 0} onClick={onSavePolicyDraft}>保存草稿</button> : null}{onSubmitPolicy ? <button type="button" className="membership-admin-button" disabled={!validation.publishable || validation.errors.length > 0} onClick={onSubmitPolicy}>提交审批</button> : null}</div></div>
       {policy.catalog.catalogSource === "POLICY_PAYLOAD" ? <p className="membership-admin-form-warning" role="status">绑定释放当前不可读：释放绑定与启用模式可能不完整；保存与发布仍以释放绑定校验为准。</p> : null}
       <div className="membership-admin-table-wrap"><table className="membership-admin-table"><thead><tr><th>档位</th><th>成长门槛</th><th>免押</th><th>当前模式应付比例</th><th>成本依据</th><th>来源/礼遇上限</th></tr></thead><tbody>{policy.tiers.map((tier) => {
         const contract = tier[mode];

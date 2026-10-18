@@ -1,5 +1,5 @@
 import { computeDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
-import { parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
+import { decimalToBigInt, parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
 import { normalizeTime } from "../supply/content-hash";
 
 export const MEMBERSHIP_GROWTH_SCHEMA = "membership-growth-v1" as const;
@@ -682,9 +682,11 @@ function validateTotalDiscount(contract: TotalDiscountContract, path: string, re
  * are skipped because their own validation already blocks publish.
  */
 function capWithinTierBoundary(cap: GrowthPricingContract, tier: GrowthPricingContract): boolean {
+  // All legacy decimals are normalised to their 8-decimal integer value before any comparison,
+  // so "0.5", "0.50" and "0.50000000" compare equal instead of by raw digit count.
   const decimal = (value: string | undefined): bigint | null => {
     if (value === undefined || value === "") return null;
-    try { return parseNonNegativeDecimal(value, 8, "pricing").value; } catch { return null; }
+    try { return decimalToBigInt(parseNonNegativeDecimal(value, 8, "pricing"), 8); } catch { return null; }
   };
   if (!notPriced(cap.haff) && !notPriced(tier.haff)) {
     const capSpread = decimal(cap.haff.spreadDelta ?? "0");

@@ -168,9 +168,10 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       const expectedVersion = meta ? meta.version : bootstrap!.expectedVersion;
       const draft = await adminRequest<{ id: string; version: string; payloadHash: string }>("/membership-growth/policy-drafts", { policy: toGrowthPolicy({ ...ready.policy, status: "DRAFT", version: String(versionNo) }), versionNo, expectedVersion, effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef });
       const saved: NonNullable<PolicyResponse["meta"]> = { id: draft.id, version: draft.version, status: "DRAFT", effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef, payloadHash: draft.payloadHash };
+      if (generation !== generationRef.current) return; // a receipt from another subject/refresh never writes into this context
       // The version advances for the next save, but only the exact revision that was sent becomes "saved".
       setMeta(saved);
-      if (revision === editRevisionRef.current && generation === generationRef.current) {
+      if (revision === editRevisionRef.current) {
         setSavedDraft(saved);
         setState(current => current.status === "ready" ? { ...current, policy: { ...current.policy, version: draft.version, status: "DRAFT", changes: [] } } : current);
         onDirtyChange(false);
@@ -182,10 +183,11 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const submitApproval = async () => {
     if (!meta) return;
     const generation = generationRef.current;
-    if (!savedDraft) { setState({ ...ready, approval: { status: "NOT_REQUESTED", message: "请先保存当前政策草稿，再提交审批" } }); return; }
+    if (!savedDraft) { setState((current) => current.status === "ready" ? { ...current, approval: { status: "NOT_REQUESTED", message: "请先保存当前政策草稿，再提交审批" } } : current); return; }
     const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.benefit.policy.publish", triggerCondition: "membership.policy.publish.requested", payloadVersion: 1, payload: policyDraftApprovalPayload(savedDraft!), summary: `发布会员政策 ${ready.policy.version}`, supersedesRequestId: null });
     if (generationRef.current !== generation) return;
-    setState({ ...ready, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } });
+    // Only the approval state of this generation is touched; edits made meanwhile stay untouched.
+    setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } } : current);
   };
   const submitEntitlement = async () => {
     if (ready.subject.status !== "LOADED" || !gameId || !meta) return;
@@ -197,7 +199,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       pricing: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: draft.pricingMode, priceVersionId: draft.priceVersionId, payableRatio: draft.payableRatio, costBasisRef: draft.costBasisRef },
       depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇`, supersedesRequestId: null });
     if (generationRef.current !== generation) return;
-    setState({ ...ready, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } });
+    setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } } : current);
   };
   const handlePolicyChange = (policy: AdminGrowthPolicy) => {
     editRevisionRef.current += 1;

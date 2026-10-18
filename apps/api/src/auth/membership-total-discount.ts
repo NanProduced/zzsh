@@ -95,12 +95,31 @@ export function unitAmountForCents(targetCents: bigint, ownerCents: bigint, owne
   return null; // the rounding grid skips this value: fail closed rather than misstate an amount
 }
 
+/** Exact rational (yuan) from the two decimal-text components of an exactRatio, matching settlement's yuanRatio semantics. */
+function exactRatioValue(numerator: string, denominator: string): { n: bigint; d: bigint } | null {
+  try {
+    const n = parseNonNegativeDecimal(numerator, 18, "buyerNumerator");
+    const d = parseNonNegativeDecimal(denominator, 18, "buyerDenominator");
+    if (d.value <= 0n) return null;
+    let nScaled = n.value * 10n ** BigInt(d.scale);
+    let dScaled = d.value * 10n ** BigInt(n.scale);
+    const gcd = (a: bigint, b: bigint): bigint => { a = a < 0n ? -a : a; b = b < 0n ? -b : b; while (b !== 0n) { const t = a % b; a = b; b = t; } return a; };
+    const g = gcd(nScaled, dScaled);
+    if (g > 1n) { nScaled /= g; dScaled /= g; }
+    return { n: nScaled, d: dScaled };
+  } catch { return null; }
+}
+
 export type TotalDiscountQuoteResult = { quote: InternalQuote; baseCents: bigint; payableCents: bigint; discountCents: bigint };
 
 /**
  * Applies one aggregate discount to a frozen base quote: resourceTotal becomes the payable total,
  * ownerTotal and every owner amount stay untouched, and each line's buyer side is rewritten so the
  * settlement formulas reproduce the allocated cents exactly.
+ *
+ * Neutral rows (no discount allocated, e.g. payableRatio 1) keep their original exact ratio, unit and
+ * amounts. A discounted HAFF row keeps its buyer exact rational at or above the owner's exact rational:
+ * the exacter of `payable/100` and the original owner fraction, which still rounds to the allocated cents.
  */
 export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: string): TotalDiscountQuoteResult | null {
   const baseCents = centsOfAmount(quote.resourceTotal.amount);
@@ -118,14 +137,30 @@ export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: st
     const line = quote.lines[index]!;
     const fact = facts[index]!;
     const payable = payableLines[index]!;
+    if (payable === fact.buyerCents) { // zero discount on this row: preserve the original frozen contract untouched
+      nextLines.push(line);
+      const untouched = baseRatioByItem.get(line.itemId);
+      if (line.pricingKind === "HAFF_RATIO") { if (!untouched) return null; nextRatios.push(untouched); }
+      continue;
+    }
     const platformAmount = yuanAmountObject(payable - fact.ownerCents);
     if (line.pricingKind === "HAFF_RATIO") {
-      const quantity = decimalToBigInt(parseNonNegativeDecimal(line.quantity, 0, "quantity"), 0);
       const baseRatio = baseRatioByItem.get(line.itemId);
       if (!baseRatio) return null;
-      // Payable prepaid amount as a rational over the full quantity keeps consumption proportional to the frozen discount.
-      nextRatios.push({ itemId: line.itemId, buyerNumerator: payable.toString(), buyerDenominator: "100", ownerNumerator: baseRatio.ownerNumerator, ownerDenominator: baseRatio.ownerDenominator });
-      const buyerUnitAmount = quantity > 0n ? divideToScale({ value: payable, scale: 2 }, { value: quantity, scale: 0 }, 8) : parseNonNegativeDecimal(line.buyerUnitAmount.amount, 8, "buyerUnit");
+      const ownerExact = exactRatioValue(baseRatio.ownerNumerator, baseRatio.ownerDenominator);
+      if (!ownerExact) return null;
+      // The payable hundredth (`payable/100`) is kept when it already covers the owner's exact fraction;
+      // otherwise the buyer exact equals the owner exact (zero haff spread), which still rounds to `payable`.
+      const payableCoversOwnerExact = payable * ownerExact.d >= 100n * ownerExact.n;
+      const buyerNumerator = payableCoversOwnerExact ? payable.toString() : baseRatio.ownerNumerator;
+      const buyerDenominator = payableCoversOwnerExact ? "100" : baseRatio.ownerDenominator;
+      nextRatios.push({ itemId: line.itemId, buyerNumerator, buyerDenominator, ownerNumerator: baseRatio.ownerNumerator, ownerDenominator: baseRatio.ownerDenominator });
+      // The reference unit price keeps the line's own unit dimension (per unitQuantity base units).
+      const quantity = decimalToBigInt(parseNonNegativeDecimal(line.quantity, 0, "quantity"), 0);
+      const unitQuantity = decimalToBigInt(parseNonNegativeDecimal(line.unitQuantity, 0, "unitQuantity"), 0);
+      const buyerUnitAmount = payableCoversOwnerExact && quantity > 0n && unitQuantity > 0n
+        ? divideToScale({ value: payable * unitQuantity, scale: 0 }, { value: quantity * 100n, scale: 0 }, 8)
+        : parseNonNegativeDecimal(line.ownerUnitAmount.amount, 8, "buyerUnit");
       nextLines.push({ ...line, buyerUnitAmount: { currency: "CNY", unit: "yuan", amount: formatScaledInteger(buyerUnitAmount.value, 8), scale: 8 }, buyerAmount: yuanAmountObject(payable), platformAmount });
       continue;
     }

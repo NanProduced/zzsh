@@ -52,7 +52,7 @@ test("admin membership view edits total-discount shares and manual entitlement d
   await setInput(inputByLabel("政策生效时点"), "2026-11-01T00:00");
   assert.equal(changed.at(-1).effectiveAt, "2026-10-31T16:00:00.000Z");
   // DRAFT with complete enabled modes can request approval once the missing caps are filled explicitly.
-  const fillCaps = [...host.querySelectorAll("button")].find((button) => button.textContent === "按档位边界补齐礼遇上限");
+  const fillCaps = [...host.querySelectorAll("button")].find((button) => button.textContent === "按档位边界补齐/修正礼遇上限");
   assert.ok(fillCaps);
   await act(async () => fillCaps.click());
   assert.equal(changed.at(-1).tiers[1].maxEntitlement.byMode.ordinary.payableRatio, "0.92");
@@ -166,6 +166,42 @@ test("empty policy bootstrap, discount gating and cap seeding stay honest", asyn
     const deepResult = validateAdminPolicyDraft(deepCap, ["ordinary", "custom"]);
     assert.equal(deepResult.publishable, false);
     assert.ok(deepResult.warnings.some((warning) => warning.includes("礼遇上限深于该成长档")));
+    // R2-04 sequence 1: tier tightened to 0.91 while the old cap (0.90) is now deeper — the repair action fixes it.
+    const staleCap = structuredClone(enabled);
+    staleCap.tiers[2].ordinary = { ...staleCap.tiers[2].ordinary, payableRatio: "0.91" };
+    staleCap.tiers[2].custom = { ...staleCap.tiers[2].custom, payableRatio: "0.91" };
+    staleCap.tiers[2].maxEntitlement = { byMode: { ordinary: { ...staleCap.tiers[2].ordinary, payableRatio: "0.90" }, custom: { ...staleCap.tiers[2].custom, payableRatio: "0.90" } } };
+    const staleBlocked = validateAdminPolicyDraft(staleCap, ["ordinary", "custom"]);
+    assert.equal(staleBlocked.publishable, false);
+    const staleRepaired = completeEntitlementCaps(staleCap, ["ordinary", "custom"]);
+    assert.equal(staleRepaired.tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.91");
+    assert.equal(validateAdminPolicyDraft(staleRepaired, ["ordinary", "custom"]).publishable, true);
+    // R2-04 sequence 2: caps seeded while the tier cost facts were still empty stay a blocker until repaired.
+    const pendingCosts = structuredClone(enabled);
+    const blankCost = (contract) => ({ ...contract, costBasisRef: "" });
+    pendingCosts.tiers[2].ordinary = blankCost(pendingCosts.tiers[2].ordinary);
+    pendingCosts.tiers[2].custom = blankCost(pendingCosts.tiers[2].custom);
+    pendingCosts.tiers[2].maxEntitlement = { byMode: { ordinary: { ...pendingCosts.tiers[2].ordinary, payableRatio: "0.93", costBasisRef: "" }, custom: blankCost(pendingCosts.tiers[2].custom) } };
+    const missingCost = validateAdminPolicyDraft(pendingCosts, ["ordinary", "custom"]);
+    assert.equal(missingCost.publishable, false);
+    assert.ok(missingCost.warnings.some((warning) => warning.includes("待补 成本依据")));
+    assert.equal(missingCost.errors.length, 0);
+    // Filling the tier cost lets the same explicit action repair only the missing cap cost and keep the tightened share.
+    const filledCosts = structuredClone(pendingCosts);
+    filledCosts.tiers[2].ordinary = { ...filledCosts.tiers[2].ordinary, costBasisRef: "cost-GOLD" };
+    filledCosts.tiers[2].custom = { ...filledCosts.tiers[2].custom, costBasisRef: "cost-GOLD" };
+    const repairedCaps = completeEntitlementCaps(filledCosts, ["ordinary", "custom"]);
+    assert.equal(repairedCaps.tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.93");
+    assert.equal(repairedCaps.tiers[2].maxEntitlement.byMode.ordinary.costBasisRef, "cost-GOLD");
+    assert.equal(repairedCaps.tiers[2].maxEntitlement.byMode.custom.costBasisRef, "cost-GOLD");
+    assert.equal(validateAdminPolicyDraft(repairedCaps, ["ordinary", "custom"]).publishable, true);
+    // A missing price version is an error, and the repair action restores it from the tier contract.
+    const missingVersion = structuredClone(enabled);
+    missingVersion.tiers[2].maxEntitlement = { byMode: { ordinary: { ...missingVersion.tiers[2].ordinary, priceVersionId: "" }, custom: { ...missingVersion.tiers[2].custom } } };
+    const versionResult = validateAdminPolicyDraft(missingVersion, ["ordinary", "custom"]);
+    assert.equal(versionResult.publishable, false);
+    assert.ok(versionResult.errors.some((error) => error.includes("缺少价格版本")));
+    assert.equal(completeEntitlementCaps(missingVersion, ["ordinary", "custom"]).tiers[2].maxEntitlement.byMode.ordinary.priceVersionId, "price-v1");
     // Entitlement seeding keeps the cap share and its own cost basis.
     const seededSource = completeEntitlementCaps(enabled, ["ordinary", "custom"]);
     const seeded = entitlementFromCap(seededSource, "FRIEND", "ordinary", "2026-10-10T02:00:00.000Z", "2026-10-20T02:00:00.000Z");

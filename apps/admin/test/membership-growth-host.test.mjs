@@ -151,3 +151,106 @@ test("R1-07 host manual entitlement sends its own discount share and cost basis"
     await browser.happyDOM.abort();
   }
 });
+
+test("R2-05 a late approval receipt never overwrites edits made while it was pending", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const host = browser.document.createElement("div");
+    browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(host);
+    const requests = [];
+    let releaseApproval = null;
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      const body = init.body === undefined ? undefined : JSON.parse(String(init.body));
+      requests.push({ path, method, body });
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null });
+      if (method === "GET" && path.includes("/users/")) return respond({ subjectId: "user-a" });
+      if (method === "POST" && path.endsWith("/security/approvals/requests")) return new Promise((resolve) => { releaseApproval = () => resolve(respond({ requestId: "approval-late" })); });
+      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) return respond({ id: "draft-9", version: "2", payloadHash: "d".repeat(64) });
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const tab = { query: { userId: "user-a", gameId: "game-1" } };
+    const snapshot = { authenticated: true, permissions: [], security: { isBoss: true } };
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab, snapshot, onDirtyChange: () => undefined, refreshNonce: 0 })));
+    const ratio = () => host.querySelector("input[aria-label='SILVERordinary应付比例']");
+    assert.ok(ratio(), host.textContent.slice(0, 400));
+    // The saved draft can request approval; the response is delayed while the operator keeps editing.
+    await act(async () => buttonByText(host, "提交审批").click());
+    assert.ok(releaseApproval);
+    await setInput(browser, ratio(), "0.91");
+    await act(async () => { releaseApproval(); await Promise.resolve(); });
+    assert.equal(ratio().value, "0.91");
+    assert.match(host.textContent, /已提交既有审批链/);
+    // The next save must send the current edit, not the stale pre-approval policy captured by the receipt.
+    await act(async () => buttonByText(host, "保存草稿").click());
+    const saves = requests.filter((request) => request.method === "POST" && request.path.endsWith("/policy-drafts"));
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].body.policy.tiers.SILVER.pricing.ordinary.payableRatio, "0.91");
+    await act(async () => root.unmount());
+  } finally {
+    await vite.close();
+    await browser.happyDOM.abort();
+  }
+});
+
+test("R2-06 a save receipt from a previous refresh generation never pollutes the current CAS binding", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const host = browser.document.createElement("div");
+    browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(host);
+    const requests = [];
+    let releaseFirstSave = null;
+    let policyGets = 0;
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      const body = init.body === undefined ? undefined : JSON.parse(String(init.body));
+      requests.push({ path, method, body });
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+        policyGets += 1;
+        if (policyGets === 1) return respond({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null });
+        return respond({ policy: { ...policyPayload(), version: "5" }, meta: { id: "draft-5", version: "5", status: "DRAFT", effectiveAtUtc: "2026-11-01T00:00:00.000Z", ruleReleaseId: "release-5", priceVersionId: "price-v5", sourceRef: "fixture", payloadHash: "e".repeat(64) }, catalog, thresholds, bootstrap: null });
+      }
+      if (method === "GET" && path.includes("/users/")) return respond({ subjectId: "user-a" });
+      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) {
+        if (!releaseFirstSave) return new Promise((resolve) => { releaseFirstSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64) })); });
+        return respond({ id: "draft-6", version: "6", payloadHash: "f".repeat(64) });
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const tab = { query: { userId: "user-a", gameId: "game-1" } };
+    const snapshot = { authenticated: true, permissions: [], security: { isBoss: true } };
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab, snapshot, onDirtyChange: () => undefined, refreshNonce: 0 })));
+    const ratio = () => host.querySelector("input[aria-label='SILVERordinary应付比例']");
+    assert.ok(ratio(), host.textContent.slice(0, 400));
+    // Save A on v1/price-v1, then refresh to v5/price-v5 while A is still pending.
+    await setInput(browser, ratio(), "0.90");
+    await act(async () => buttonByText(host, "保存草稿").click());
+    assert.equal(requests.filter((request) => request.method === "POST" && request.path.endsWith("/policy-drafts")).length, 1);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab, snapshot, onDirtyChange: () => undefined, refreshNonce: 1 })));
+    assert.equal(policyGets, 2);
+    assert.equal(ratio().value, "0.92");
+    await act(async () => { releaseFirstSave(); await Promise.resolve(); });
+    // The stale v2 receipt must not advance or rebind the current v5 context: the next save uses v5 and price-v5.
+    await setInput(browser, ratio(), "0.93");
+    await act(async () => buttonByText(host, "保存草稿").click());
+    const saves = requests.filter((request) => request.method === "POST" && request.path.endsWith("/policy-drafts"));
+    assert.equal(saves.length, 2);
+    assert.equal(saves[1].body.expectedVersion, "5");
+    assert.equal(saves[1].body.ruleReleaseId, "release-5");
+    assert.equal(saves[1].body.priceVersionId, "price-v5");
+    assert.equal(saves[1].body.versionNo, 6);
+    assert.equal(saves[1].body.policy.tiers.SILVER.pricing.ordinary.payableRatio, "0.93");
+    await act(async () => root.unmount());
+  } finally {
+    await vite.close();
+    await browser.happyDOM.abort();
+  }
+});

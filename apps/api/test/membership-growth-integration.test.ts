@@ -4,7 +4,7 @@ import { recordAcceptedSettlementGrowthFacts, assessGrowthSourceCompleteness, gr
 import { computeDeltaQuote, type QuoteInput } from "../src/supply/pricing";
 import { compatRule } from "./pricing-compat-fixture";
 import type { GrowthBenefitPolicy, GrowthContribution } from "../src/auth/membership-growth";
-import { chooseCompleteOffer, isLegacyPricingContract, isNotPriced } from "../src/auth/membership-growth";
+import { chooseCompleteOffer, isLegacyPricingContract, isNotPriced, validateBenefitPolicy } from "../src/auth/membership-growth";
 import { lockReplacementEntitlement } from "../src/auth/membership-growth-approval";
 import { executeMembershipGrowthOperation } from "../src/auth/membership-growth-approval";
 import { canonicalize } from "../src/supply/content-hash";
@@ -13,6 +13,8 @@ import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
 import { types as pgTypes } from "pg";
 import { parseGrowthConsumptionQuery, readMembershipGrowthConsumption } from "../src/auth/membership-growth-integration";
 import { handleMembershipGrowthPolicyAdmin, handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
+import { selectPersonalGrowthOffer } from "../src/order/personal-growth-confirmation";
+import { computeSettlement, SETTLEMENT_ROUNDING_POLICY } from "../src/order/settlement";
 
 test("membership approval accepts ALL_GAMES and selected targets, rejects empty or unrelated scope before mutation", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
@@ -425,6 +427,24 @@ test("R1 total-discount policy reader: growth and manual entitlement candidates 
     assert.ok(choice.depositBasis === "FRIEND" || choice.depositBasis === "GROWTH");
     assert.equal(choice.depositCents, "0");
   }
+  // R2 chain: the selected discounted candidate passes the real confirmation strategy and settles.
+  const binding = { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", listingVersionId: "listing-1", ruleReleaseId: "release-1", quantityDigest: "quantity-1" };
+  const selection = selectPersonalGrowthOffer({ knowledge: "KNOWN", policyVersion: result.policyVersion, candidates: result.candidates, entitlementIds: result.entitlementIds, effectiveTier: result.effectiveTier, policyTier: result.policyTier, asOfUtc: result.asOfUtc }, binding, asOf, base.quote);
+  assert.equal(selection.growth.selectedSource, "FRIEND");
+  const payable = selection.quote.resourceTotal.amount;
+  const haff = selection.quote.lines.find((line) => line.itemId === "haff")!;
+  const exact = selection.quote.pricingInputs.exactRatios.find((entry) => entry.itemId === "haff")!;
+  const settlement = computeSettlement({
+    orderId: "order-1", settlementVersionId: "sv-1", openingVersionId: "op-1", quoteDigest: "d".repeat(64), paymentDigest: "p".repeat(64),
+    roundingPolicy: SETTLEMENT_ROUNDING_POLICY, feePolicyVersion: "1", renterUserId: "user-1", ownerUserId: "owner-1",
+    depositAmount: "0.00", capturedAmount: payable, fullPayout: "NOT_SELECTED", fullPayoutPolicyRef: null,
+    rentalStarted: true, endReason: "NORMAL",
+    haff: { itemId: "haff", unit: haff.unit, pricingKind: "HAFF_RATIO", openingQuantity: haff.quantity, remainingQuantity: "0", unitQuantity: haff.unitQuantity, buyerUnitAmount: haff.buyerUnitAmount.amount, ownerUnitAmount: haff.ownerUnitAmount.amount, prepaidBuyerAmount: haff.buyerAmount.amount, prepaidOwnerAmount: haff.ownerAmount.amount, exactRatio: { buyerNumerator: exact.buyerNumerator, buyerDenominator: exact.buyerDenominator, ownerNumerator: exact.ownerNumerator, ownerDenominator: exact.ownerDenominator } },
+    items: [],
+  });
+  assert.equal(settlement.ok, true, JSON.stringify(settlement));
+  assert.equal(settlement.amounts!.renterCharge.amount, payable);
+  assert.equal(settlement.amounts!.ownerNet.amount, base.quote.ownerTotal.amount);
 });
 
 test("R1 total-discount policy publishes through the executor while a deeper cap stays zero-insert", async () => {
@@ -447,6 +467,82 @@ test("R1 total-discount policy publishes through the executor while a deeper cap
     const rejected = draftApprovalFixture(deep, { haffRule: fastOff });
     await assert.rejects(() => executeMembershipGrowthOperation(rejected.client as never, rejected.input as never, { userId: "boss" } as never, "approval-deep-cap"));
     assert.equal(rejected.inserted.length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+    else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous;
+  }
+});
+
+/** R2-03 fixture: legacy chain with decimal-scale variants (review's 0.5 / 0.49 / 0.50 case). */
+function scaledLegacyPolicy(): GrowthBenefitPolicy {
+  const value = readerPolicy();
+  const materialValues: Record<string, [string, string]> = { STANDARD: ["0.52", "0.4"], SILVER: ["0.51", "0.4"], GOLD: ["0.5", "0.4"], PLATINUM: ["0.49", "0.4"], DIAMOND: ["0.48", "0.4"] };
+  const haffBases: Record<string, string> = { STANDARD: "0.50", SILVER: "0.55", GOLD: "0.60", PLATINUM: "0.65", DIAMOND: "0.70" };
+  for (const [tier, [buyer, owner]] of Object.entries(materialValues)) {
+    const config = value.tiers[tier as "GOLD"];
+    for (const mode of ["ordinary", "custom"] as const) {
+      const source = config.pricing[mode];
+      if (!source || isNotPriced(source) || !isLegacyPricingContract(source)) throw new Error("fixture must be configured");
+      // readerPolicy shares nested contract objects; give every tier/mode its own copy before patching.
+      const contract = JSON.parse(JSON.stringify(source)) as typeof source;
+      config.pricing[mode] = contract;
+      contract.haff = { ...(contract.haff as Exclude<typeof contract.haff, { status: "NOT_PRICED" }>), baseBySafeBox: { "box-a": haffBases[tier]! }, spreadDelta: "0.10" };
+      const material = contract.materials.item!;
+      if (material.status !== "CONFIGURED") throw new Error("fixture must be configured");
+      material.buyerUnitAmount = buyer;
+      material.ownerUnitAmount = owner;
+    }
+    config.entitlementCap = { byMode: { ordinary: JSON.parse(JSON.stringify(config.pricing.ordinary)), custom: JSON.parse(JSON.stringify(config.pricing.custom)) } };
+  }
+  return value;
+}
+
+test("R2-03 legacy cap comparison normalises decimal scales before any direction check", async () => {
+  const enabled = ["ordinary", "custom"] as const;
+  const base = scaledLegacyPolicy();
+  assert.equal(validateBenefitPolicy(base, { enabledModes: enabled }).publishable, true, JSON.stringify(validateBenefitPolicy(base, { enabledModes: enabled })));
+  const variant = (patch: (cap: { payableRatio?: string; haff?: { baseBySafeBox: Record<string, string>; spreadDelta?: string }; materials: Record<string, { buyerUnitAmount: string; ownerUnitAmount: string }> }) => void) => {
+    const value = scaledLegacyPolicy();
+    const cap = value.tiers.GOLD.entitlementCap;
+    if (!cap || !("byMode" in cap) || !cap.byMode.ordinary) throw new Error("fixture must be a discount cap");
+    patch(cap.byMode.ordinary as never);
+    return validateBenefitPolicy(value, { enabledModes: enabled });
+  };
+  // Same value written with different decimal places compares equal.
+  const equalNotation = variant((cap) => { const haff = cap.haff!; haff.baseBySafeBox["box-a"] = "0.6"; haff.spreadDelta = "0.1"; cap.materials.item!.buyerUnitAmount = "0.50"; cap.materials.item!.ownerUnitAmount = "0.4"; });
+  assert.equal(equalNotation.publishable, true, JSON.stringify(equalNotation));
+  // A deeper buyer price (0.49 vs 0.50) must be rejected before any executor INSERT.
+const deeperMaterial = variant((cap) => { cap.materials.item!.buyerUnitAmount = "0.49"; });
+  assert.equal(deeperMaterial.publishable, false, JSON.stringify(deeperMaterial));
+  assert.ok(deeperMaterial.warnings.some((warning) => warning.includes("below_tier_boundary")));
+  // A deeper HAFF effective ratio (0.61 − 0.10 > 0.60 − 0.10) must be rejected too.
+  const deeperHaff = variant((cap) => { cap.haff!.baseBySafeBox["box-a"] = "0.61"; });
+  assert.equal(deeperHaff.publishable, false, JSON.stringify(deeperHaff));
+  assert.ok(deeperHaff.warnings.some((warning) => warning.includes("below_tier_boundary")));
+  // A legitimately tightened cap with a different notation still passes.
+  const tightened = variant((cap) => { cap.haff!.baseBySafeBox["box-a"] = "0.59"; cap.materials.item!.buyerUnitAmount = "0.51"; });
+  assert.equal(tightened.publishable, true, JSON.stringify(tightened));
+  // The real executor rejects the deep cap with zero INSERT and publishes the equal-notation control.
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+  process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  const fastOff = compatRule();
+  fastOff.compatibility!.modes.fast = { enabled: false };
+  try {
+    const deep = scaledLegacyPolicy();
+    const deepCap = deep.tiers.GOLD.entitlementCap;
+    if (!deepCap || !("byMode" in deepCap) || !deepCap.byMode.ordinary) throw new Error("fixture must be a discount cap");
+    (deepCap.byMode.ordinary as { materials: Record<string, { buyerUnitAmount: string }> }).materials.item!.buyerUnitAmount = "0.49";
+    const rejected = draftApprovalFixture(deep, { haffRule: fastOff });
+    await assert.rejects(() => executeMembershipGrowthOperation(rejected.client as never, rejected.input as never, { userId: "boss" } as never, "approval-deep-legacy-cap"));
+    assert.equal(rejected.inserted.length, 0);
+    const equal = scaledLegacyPolicy();
+    const equalCap = equal.tiers.GOLD.entitlementCap;
+    if (!equalCap || !("byMode" in equalCap) || !equalCap.byMode.ordinary) throw new Error("fixture must be a discount cap");
+    (equalCap.byMode.ordinary as { materials: Record<string, { buyerUnitAmount: string }> }).materials.item!.buyerUnitAmount = "0.50";
+    const accepted = draftApprovalFixture(equal, { haffRule: fastOff });
+    const published = await executeMembershipGrowthOperation(accepted.client as never, accepted.input as never, { userId: "boss" } as never, "approval-equal-legacy-cap");
+    assert.equal(published.resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+    assert.equal(accepted.inserted.length, 1);
   } finally {
     if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
     else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous;
