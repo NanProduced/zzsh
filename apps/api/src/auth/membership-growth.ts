@@ -473,7 +473,31 @@ export type GrowthPricingContract = {
   haff: HaffPricingParameter;
   materials: Record<string, MaterialPricingParameter>;
 };
-export type ModePricingContract = GrowthPricingContract | NotPricedParameter;
+/**
+ * Owner rule (2026-10-19): a member/entitlement benefit discounts the combined base total of
+ * haff rent + item resource fees once, expressed as a payable share (e.g. "0.9" pays 90%).
+ * It never rewrites the base haff rule or per-item unit prices.
+ */
+export type TotalDiscountContract = {
+  status: "CONFIGURED";
+  kind: "TOTAL_DISCOUNT";
+  mode: RentalMode;
+  priceVersionId: string;
+  /** Payable share of the combined base total; decimal text in (0, 1]. */
+  payableRatio: string;
+  costBasisRef: string;
+};
+export type ModePricingContract = GrowthPricingContract | TotalDiscountContract | NotPricedParameter;
+
+export function isTotalDiscountContract(value: unknown): value is TotalDiscountContract {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).status === "CONFIGURED" && (value as Record<string, unknown>).kind === "TOTAL_DISCOUNT");
+}
+export function isLegacyPricingContract(value: unknown): value is GrowthPricingContract {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).haff !== undefined && (value as Record<string, unknown>).materials !== undefined
+    && !isTotalDiscountContract(value) && !notPriced(value));
+}
 /**
  * A single legacy cap only bounds its own mode. The `byMode` shape keeps one cap entry per mode so
  * FRIEND/PRESTIGE boundaries are expressible in every enabled mode without rewriting old hashes.
@@ -631,6 +655,61 @@ function validateConfiguredContract(contract: GrowthPricingContract, path: strin
   validateCatalogCoverage(contract, path, context, result);
 }
 
+/** Payable ratio as an exact 8-decimal integer; null for pending/malformed/out-of-range values. */
+function discountRatio(value: string | undefined): bigint | null {
+  if (value === undefined || value === "") return null;
+  try {
+    const parsed = parseNonNegativeDecimal(value, 8, "payableRatio");
+    const unit = 10n ** BigInt(parsed.scale);
+    return parsed.value > 0n && parsed.value <= unit ? (parsed.value * 100_000_000n) / unit : null;
+  } catch { return null; }
+}
+
+/** Owner total-discount contract: combined base total × payable ratio, applied once by the quote adapter. */
+function validateTotalDiscount(contract: TotalDiscountContract, path: string, result: PolicyValidation): void {
+  if (!["ordinary", "custom", "fast"].includes(contract.mode)) result.errors.push(path);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(contract.priceVersionId ?? "")) result.errors.push(`${path}.priceVersionId`);
+  if (contract.payableRatio === undefined || contract.payableRatio === "") result.warnings.push(`${path}.payableRatio.value_pending`);
+  else if (discountRatio(contract.payableRatio) === null) result.errors.push(`${path}.payableRatio`);
+  if (contract.costBasisRef === undefined || contract.costBasisRef === "") result.warnings.push(`${path}.cost_basis_missing`);
+  else if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(contract.costBasisRef)) result.errors.push(`${path}.costBasisRef`);
+}
+
+/**
+ * R1-01: a consumed entitlement cap must not be more generous than its own tier boundary.
+ * Directional compare with the exact decimal tools: a stricter cap (smaller effective HAFF ratio, higher
+ * buyer price, or a larger spread) passes; only a deeper discount is rejected. Pending/malformed values
+ * are skipped because their own validation already blocks publish.
+ */
+function capWithinTierBoundary(cap: GrowthPricingContract, tier: GrowthPricingContract): boolean {
+  const decimal = (value: string | undefined): bigint | null => {
+    if (value === undefined || value === "") return null;
+    try { return parseNonNegativeDecimal(value, 8, "pricing").value; } catch { return null; }
+  };
+  if (!notPriced(cap.haff) && !notPriced(tier.haff)) {
+    const capSpread = decimal(cap.haff.spreadDelta ?? "0");
+    const tierSpread = decimal(tier.haff.spreadDelta ?? "0");
+    for (const safeBox of new Set([...Object.keys(cap.haff.baseBySafeBox), ...Object.keys(tier.haff.baseBySafeBox)])) {
+      const capBase = decimal(cap.haff.baseBySafeBox[safeBox]);
+      const tierBase = decimal(tier.haff.baseBySafeBox[safeBox]);
+      if (capBase === null || tierBase === null || capSpread === null || tierSpread === null) continue;
+      // Buyer ratio = base - spread; a larger ratio is a cheaper (more generous) buyer price.
+      if (capBase - capSpread > tierBase - tierSpread) return false;
+    }
+  }
+  for (const itemId of new Set([...Object.keys(cap.materials), ...Object.keys(tier.materials)])) {
+    const capMaterial = cap.materials[itemId];
+    const tierMaterial = tier.materials[itemId];
+    if (!capMaterial || !tierMaterial || notPriced(capMaterial) || notPriced(tierMaterial)) continue;
+    if (capMaterial.unit !== tierMaterial.unit || capMaterial.unitQuantity !== tierMaterial.unitQuantity) return false;
+    const capBuyer = decimal(capMaterial.buyerUnitAmount);
+    const tierBuyer = decimal(tierMaterial.buyerUnitAmount);
+    if (capBuyer === null || tierBuyer === null) continue;
+    if (capBuyer < tierBuyer) return false;
+  }
+  return true;
+}
+
 export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: PolicyValidationContext = {}): PolicyValidation {
   const result: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
   const enabled = new Set<RentalMode>(context.enabledModes ?? ["ordinary", "custom", "fast"]);
@@ -652,18 +731,32 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
     for (const mode of ["ordinary", "custom", "fast"] as const) {
       const contract = config.pricing?.[mode];
       const path = `tiers.${tier}.pricing.${mode}`;
+      if (contract === undefined) {
+        if (enabled.has(mode)) { result.errors.push(path); result.publishable = false; }
+        continue;
+      }
+      if (notPriced(contract)) {
+        if (enabled.has(mode)) { validatePricingContract(contract, path, result); result.publishable = false; }
+        continue;
+      }
+      if (isTotalDiscountContract(contract)) {
+        // A disabled mode is inert; a configured total discount is only shape-checked when its mode is enabled.
+        if (!enabled.has(mode)) continue;
+        validateTotalDiscount(contract, path, result);
+        if (contract.mode !== mode) result.errors.push(path);
+        continue;
+      }
+      // Legacy haff/materials contract: disabled by the sealed release stays inert, enabled is fully validated.
       if (!enabled.has(mode)) {
-        // Disabled by the sealed release: inert. Any NOT_PRICED marker (contract or haff level) is tolerated;
-        // an explicitly configured contract is still shape-checked so a drifted payload cannot be published.
-        if (contract === undefined || notPriced(contract)) continue;
         if (contract.haff !== undefined && notPriced(contract.haff)) continue;
         validatePricingContract(contract, path, result);
         if (contract.mode !== mode) result.errors.push(path);
         continue;
       }
-      if (contract === undefined) { result.errors.push(path); result.publishable = false; continue; }
-      if (notPriced(contract)) { validatePricingContract(contract, path, result); result.publishable = false; continue; }
       validateConfiguredContract(contract, path, context, result);
+      // R1-06: an enabled slot must carry the contract for that slot's own mode; otherwise the published
+      // policy is unreachable in the formal quote adapter.
+      if (contract.mode !== mode) result.errors.push(path);
     }
     const capPath = `tiers.${tier}.entitlementCap`;
     const cap = config.entitlementCap;
@@ -672,9 +765,10 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
         if (mode !== "ordinary" && mode !== "custom" && mode !== "fast") { result.errors.push(`${capPath}.byMode`); continue; }
         const entry = cap.byMode[mode];
         if (entry === undefined || !enabled.has(mode)) continue;
-        validatePricingContract(entry, `${capPath}.byMode.${mode}`, result);
+        if (isTotalDiscountContract(entry)) validateTotalDiscount(entry, `${capPath}.byMode.${mode}`, result);
+        else validatePricingContract(entry, `${capPath}.byMode.${mode}`, result);
         if (!notPriced(entry) && entry.mode !== mode) result.errors.push(`${capPath}.byMode.${mode}`);
-        else if (!notPriced(entry)) validateCatalogCoverage(entry, `${capPath}.byMode.${mode}`, context, result);
+        else if (!notPriced(entry) && !isTotalDiscountContract(entry)) validateCatalogCoverage(entry, `${capPath}.byMode.${mode}`, context, result);
       }
       for (const mode of enabled) {
         const entry = cap.byMode[mode];
@@ -683,16 +777,25 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
           result.warnings.push(`${capPath}.byMode.${mode}.cost_basis_missing`);
         }
       }
-    } else validatePricingContract(cap, capPath, result);
-    // The consumed caps (GOLD/DIAMOND) must not allow a deeper discount than the tier itself offers.
+    } else if (isTotalDiscountContract(cap)) validateTotalDiscount(cap, capPath, result);
+    else validatePricingContract(cap, capPath, result);
+    // R1-01: the consumed caps (GOLD/DIAMOND) must not be more generous than the tier boundary they derive from.
     if (tier === "GOLD" || tier === "DIAMOND") for (const mode of enabled) {
       const capEntry = entitlementCapForMode(config.entitlementCap, mode);
       const tierContract = config.pricing?.[mode];
       if (!capEntry || notPriced(capEntry) || !tierContract || notPriced(tierContract)) continue;
-      if (isEntitlementCapByMode(config.entitlementCap) || capEntry.mode === mode) {
-        // Pending draft values are not comparable; their own warnings already block publish.
-        try { if (!pricingWithinCap(tierContract, capEntry)) result.warnings.push(`${capPath}.${mode}.below_tier_boundary`); } catch { /* pending value */ }
+      const byModeCap = isEntitlementCapByMode(config.entitlementCap);
+      if (!byModeCap && capEntry.mode !== mode) continue; // a legacy single cap only bounds its own mode
+      if (isTotalDiscountContract(capEntry) || isTotalDiscountContract(tierContract)) {
+        if (isTotalDiscountContract(capEntry) && isTotalDiscountContract(tierContract)) {
+          const capRatio = discountRatio(capEntry.payableRatio);
+          const tierRatio = discountRatio(tierContract.payableRatio);
+          // Cap payable ratio must not be lower (deeper) than the tier it derives from.
+          if (capRatio !== null && tierRatio !== null && capRatio < tierRatio) result.warnings.push(`${capPath}.${mode}.below_tier_boundary`);
+        } else result.warnings.push(`${capPath}.${mode}.contract_kind_mismatch`);
+        continue;
       }
+      if (!capWithinTierBoundary(capEntry, tierContract)) result.warnings.push(`${capPath}.${mode}.below_tier_boundary`);
     }
   }
   const pricingDecimalDifference = (left: string, right: string): bigint | null => {
@@ -701,11 +804,7 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
   const pricingEffectiveHaff = (base: string, spread: string) => {
     try { return subtractDecimal(parseNonNegativeDecimal(base, 8, "pricing"), parseNonNegativeDecimal(spread, 8, "pricing")); } catch { return null; }
   };
-  const comparePricing = (left: ModePricingContract, right: ModePricingContract, path: string) => {
-    if (notPriced(left) || notPriced(right)) {
-      result.publishable = false;
-      return;
-    }
+  const comparePricing = (left: GrowthPricingContract, right: GrowthPricingContract, path: string) => {
     const leftHaff = left.haff;
     const rightHaff = right.haff;
     if (notPriced(leftHaff) || notPriced(rightHaff)) result.publishable = false;
@@ -742,7 +841,16 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
       const lowerContract = lower.pricing?.[mode];
       const higherContract = higher.pricing?.[mode];
       if (!lowerContract || !higherContract) continue;
-      comparePricing(lowerContract, higherContract, `pricing.${mode}.${higher.tier}`);
+      if (isTotalDiscountContract(lowerContract) && isTotalDiscountContract(higherContract)) {
+        const lowerRatio = discountRatio(lowerContract.payableRatio);
+        const higherRatio = discountRatio(higherContract.payableRatio);
+        if (lowerRatio === null || higherRatio === null) continue; // pending/invalid values already reported
+        // A higher tier must never pay more than a lower tier on the same base total.
+        if (higherRatio > lowerRatio) result.errors.push(`pricing.${mode}.${higher.tier}.discount_not_monotonic`);
+        continue;
+      }
+      if (notPriced(lowerContract) || notPriced(higherContract)) continue;
+      if (isLegacyPricingContract(lowerContract) && isLegacyPricingContract(higherContract)) comparePricing(lowerContract, higherContract, `pricing.${mode}.${higher.tier}`);
     }
   }
   result.publishable = result.publishable && result.errors.length === 0 && value?.status === "APPROVED" && result.warnings.length === 0;
@@ -768,7 +876,8 @@ export type EntitlementCandidate = {
   scopeKey: string;
   startsAt: string;
   endsAt: string;
-  pricing: GrowthPricingContract;
+  /** Legacy haff/materials contract or the owner total-discount contract. */
+  pricing: ModePricingContract;
   depositWaived?: boolean;
   reason: string;
   requestedBy: string;
@@ -814,16 +923,30 @@ export function validateEntitlementCandidate(candidate: EntitlementCandidate, _m
   const cap = candidate.kind === "FRIEND" ? "GOLD" : "DIAMOND";
   const capConfig = policy.tiers[cap];
   const pricing = candidate.pricing;
-  const capPricing = entitlementCapForMode(capConfig.entitlementCap, pricing.mode);
+  const candidateMode = !notPriced(pricing) && typeof (pricing as { mode?: unknown }).mode === "string" && ["ordinary", "custom", "fast"].includes((pricing as { mode: string }).mode)
+    ? (pricing as { mode: RentalMode }).mode : null;
+  const capPricing = candidateMode ? entitlementCapForMode(capConfig.entitlementCap, candidateMode) : undefined;
   const strict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
-  validatePricingContract(pricing, "candidate.pricing", strict);
+  if (notPriced(pricing)) strict.errors.push("candidate.pricing");
+  else if (isTotalDiscountContract(pricing)) validateTotalDiscount(pricing, "candidate.pricing", strict);
+  else validatePricingContract(pricing, "candidate.pricing", strict);
   const pricingValid = strict.errors.length === 0 && strict.warnings.length === 0;
   if (!pricingValid) errors.push("pricingInvalid");
   if (capPricing === undefined || notPriced(capPricing)) errors.push("costBasisMissing");
   else if (pricingValid) {
-    const capStrict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
-    validatePricingContract(capPricing, "cap.pricing", capStrict);
-    if (capStrict.errors.length > 0 || capStrict.warnings.length > 0 || !pricingWithinCap(pricing, capPricing)) errors.push("pricingBeyondPolicy");
+    if (isTotalDiscountContract(pricing) && isTotalDiscountContract(capPricing)) {
+      const capStrict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
+      validateTotalDiscount(capPricing, "cap.pricing", capStrict);
+      const candidateRatio = discountRatio(pricing.payableRatio);
+      const capRatio = discountRatio(capPricing.payableRatio);
+      // A manual benefit may keep the cap or make it stricter (pay a larger share), never deeper.
+      if (capStrict.errors.length > 0 || capStrict.warnings.length > 0 || pricing.mode !== capPricing.mode || pricing.priceVersionId !== capPricing.priceVersionId
+        || candidateRatio === null || capRatio === null || candidateRatio < capRatio) errors.push("pricingBeyondPolicy");
+    } else if (isLegacyPricingContract(pricing) && isLegacyPricingContract(capPricing)) {
+      const capStrict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
+      validatePricingContract(capPricing, "cap.pricing", capStrict);
+      if (capStrict.errors.length > 0 || capStrict.warnings.length > 0 || !pricingWithinCap(pricing, capPricing)) errors.push("pricingBeyondPolicy");
+    } else errors.push("contractKindMismatch");
   }
   return { valid: errors.length === 0, errors, depositWaived: candidate.depositWaived === true };
 }

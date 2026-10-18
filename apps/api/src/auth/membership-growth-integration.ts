@@ -7,6 +7,7 @@ import {
   entitlementStateAt,
   GROWTH_THRESHOLDS,
   NORMAL_GROWTH_TIERS,
+  isTotalDiscountContract,
   quoteToGrowthOfferPlan,
   replayGrowthProjection,
   projectGrowthConsumptionSources,
@@ -18,15 +19,19 @@ import {
   type GrowthOfferPlan,
   type HaffPricingParameter,
   type MaterialPricingParameter,
+  type ModePricingContract,
   type NormalGrowthTier,
+  type NotPricedParameter,
   type OfferBinding,
   type GrowthPricingContract,
   type GrowthProjection,
+  type RentalMode,
   type SettledContributionFact,
   GrowthRuleError,
   growthWindowStartAt,
 } from "./membership-growth";
 import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
+import { applyTotalDiscountToQuote } from "./membership-total-discount";
 import { canonicalize, normalizeTime } from "../supply/content-hash";
 import { decimalToBigInt, parseNonNegativeDecimal } from "../supply/decimal";
 import { type MembershipGrowthConfirmationReader } from "../order/personal-confirmation";
@@ -477,6 +482,12 @@ function configuredPricing(value: unknown): value is GrowthPricingContract {
   return isObject(value) && value.status !== "NOT_PRICED" && typeof value.mode === "string" && typeof value.priceVersionId === "string" && isObject(value.haff) && value.haff.status === "CONFIGURED" && isObject(value.materials);
 }
 
+/** A mode slot is spendable when it carries either a configured total discount or a configured legacy contract. */
+function configuredModeContract(value: unknown): value is Exclude<ModePricingContract, NotPricedParameter> {
+  if (isTotalDiscountContract(value)) return typeof value.payableRatio === "string" && value.payableRatio !== "" && typeof value.priceVersionId === "string";
+  return configuredPricing(value);
+}
+
 function configuredHaff(value: unknown): value is Exclude<HaffPricingParameter, { status: "NOT_PRICED" }> {
   return isObject(value) && value.status === "CONFIGURED" && value.kind === "HAFF_RATIO" && typeof value.priceVersionId === "string" && typeof value.costBasisRef === "string" && isObject(value.baseBySafeBox);
 }
@@ -523,12 +534,22 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract, 
   return { ...base, customerTier: "STANDARD", lines, haffRule, deposits: { ...base.deposits, ...(depositWaived ? { tenantDepositCents: "0" } : {}) } };
 }
 
-function quoteCandidate(base: QuoteInput, contract: GrowthPricingContract, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+  const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
+  if (isTotalDiscountContract(contract)) {
+    const rentalMode = base.conditions.rentalPricing?.rentalMode ?? "ordinary";
+    if (contract.mode !== rentalMode || contract.priceVersionId !== base.priceVersionId) return null;
+    const result = computeDeltaQuote({ ...base, deposits: { ...base.deposits, ...(depositWaived ? { tenantDepositCents: "0" } : {}) } });
+    if (!result.quotable) return null;
+    const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
+    if (!discounted) return null;
+    return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput) };
+  }
   const input = quoteInputForGrowth(base, contract, depositWaived);
   if (!input) return null;
   const result = computeDeltaQuote(input);
   if (!result.quotable) return null;
-  return { quote: result.quote, plan: quoteToGrowthOfferPlan(result.quote, { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) }) };
+  return { quote: result.quote, plan: quoteToGrowthOfferPlan(result.quote, planInput) };
 }
 
 function tierLabel(tier: GrowthProjection["normalTier"]): string {
@@ -548,31 +569,37 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function configuredModes(config: Record<string, unknown> | undefined): number {
+function modeContractConfigured(config: Record<string, unknown> | undefined, mode: string): boolean {
   const pricing = isObject(config?.pricing) ? config.pricing : null;
-  if (!pricing) return 0;
-  return ["ordinary", "custom", "fast"].filter((mode) => {
-    const contract = pricing[mode];
-    if (!isObject(contract) || contract.status === "NOT_PRICED") return false;
-    const haff = contract.haff;
-    return isObject(haff) && haff.status !== "NOT_PRICED";
-  }).length;
+  const contract = pricing ? pricing[mode] : undefined;
+  if (!isObject(contract) || contract.status === "NOT_PRICED") return false;
+  if (contract.kind === "TOTAL_DISCOUNT") return typeof contract.payableRatio === "string" && contract.payableRatio !== "";
+  const haff = contract.haff;
+  return isObject(haff) && haff.status !== "NOT_PRICED";
 }
 
-function policySummaries(policyPayload: Record<string, unknown> | null, policyVersion: string | null, tier: GrowthProjection["normalTier"] | null, benefitsState: GrowthBenefitsState): { benefits: GrowthBenefitSummary[]; comparison: GrowthComparison[] } {
+/**
+ * R1-05: readiness follows the SEALED release's authoritative enabled modes, never a fixed three-mode
+ * count. Disabled modes are inert; an enabled mode without a price, or an unreadable release, is not ready.
+ */
+function policyModesReady(config: Record<string, unknown> | undefined, enabledModes: readonly RentalMode[] | null): boolean {
+  if (enabledModes === null || enabledModes.length === 0) return false;
+  return enabledModes.every((mode) => modeContractConfigured(config, mode));
+}
+
+function policySummaries(policyPayload: Record<string, unknown> | null, policyVersion: string | null, tier: GrowthProjection["normalTier"] | null, benefitsState: GrowthBenefitsState, enabledModes: readonly RentalMode[] | null): { benefits: GrowthBenefitSummary[]; comparison: GrowthComparison[] } {
   if (!policyPayload || benefitsState !== "CONFIGURED") return { benefits: [{ label: "成长权益", value: "尚未发布" }], comparison: [] };
   const tiers = isObject(policyPayload.tiers) ? policyPayload.tiers : {};
   const current = tier && isObject(tiers[tier]) ? tiers[tier] : undefined;
   const deposit = current?.tenantDeposit === "WAIVED" ? "免租客押金" : "租客押金按账号条件缴纳";
-  const modeCount = configuredModes(current);
+  const modesReady = policyModesReady(current, enabledModes);
   const benefits = [
     { label: "租客押金", value: deposit, ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
-    { label: "租赁价格", value: modeCount === 3 ? "按完整报价择优" : "价格方案暂不可用", ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
+    { label: "租赁价格", value: modesReady ? "按完整报价择优" : "价格方案暂不可用", ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
   ];
   const comparison = NORMAL_GROWTH_TIERS.map((candidate) => {
     const item = isObject(tiers[candidate]) ? tiers[candidate] : undefined;
-    const modes = configuredModes(item);
-    return { tier: tierLabel(candidate), deposit: item?.tenantDeposit === "WAIVED" ? "免租客押金" : "租客押金按账号条件缴纳", pricing: modes === 3 ? "完整方案可比价" : "价格方案未就绪" };
+    return { tier: tierLabel(candidate), deposit: item?.tenantDeposit === "WAIVED" ? "免租客押金" : "租客押金按账号条件缴纳", pricing: policyModesReady(item, enabledModes) ? "完整方案可比价" : "价格方案未就绪" };
   });
   return { benefits, comparison };
 }
@@ -594,12 +621,12 @@ export function policyTierForGrowthProjection(projection: Pick<GrowthProjection,
   return projection.effectiveTier !== "UNKNOWN" ? projection.effectiveTier : null;
 }
 
-function dtoFromProjection(projection: GrowthProjection | null, asOfUtc: string, benefitsState: GrowthBenefitsState, sourceState: GrowthSourceState, known: boolean, policyPayload: Record<string, unknown> | null, policyVersion: string | null, rows: readonly StoredContribution[]): GrowthProjectionDto {
+function dtoFromProjection(projection: GrowthProjection | null, asOfUtc: string, benefitsState: GrowthBenefitsState, sourceState: GrowthSourceState, known: boolean, policyPayload: Record<string, unknown> | null, policyVersion: string | null, rows: readonly StoredContribution[], enabledModes: readonly RentalMode[] | null): GrowthProjectionDto {
   if (!projection || !known) {
     const windowStartUtc = growthWindowStartAt(asOfUtc);
     return { schema: "membership-growth-v1", knowledge: "UNKNOWN", sourceState, benefitsState, asOfUtc, windowStartUtc, rollingPoints: null, lifetimePoints: null, normalTier: null, effectiveTier: null, blackGold: null, grace: null, nextExpiryAtUtc: null, nextTier: null, benefits: [], comparison: [], contributions: [], pendingCount: projection?.pending.length ?? 0, pending: projection?.pending ?? [], excluded: projection?.excluded ?? [] };
   }
-  const summaries = policySummaries(policyPayload, policyVersion, policyTierForGrowthProjection(projection), benefitsState);
+  const summaries = policySummaries(policyPayload, policyVersion, policyTierForGrowthProjection(projection), benefitsState, enabledModes);
   return { schema: "membership-growth-v1", knowledge: "KNOWN", sourceState, benefitsState, asOfUtc: projection.asOf, windowStartUtc: projection.windowStart, rollingPoints: projection.rollingPoints, lifetimePoints: projection.lifetimePoints, normalTier: projection.normalTier, effectiveTier: projection.effectiveTier, blackGold: projection.blackGold, grace: projection.grace, nextExpiryAtUtc: projection.nextExpiryAt, nextTier: nextTierFor(projection), benefits: summaries.benefits, comparison: summaries.comparison, contributions: contributionSummaries(projection, rows), pendingCount: projection.pending.length, pending: projection.pending, excluded: projection.excluded };
 }
 
@@ -637,12 +664,19 @@ async function readMembershipGrowthModel(client: PoolClient, userId: string, asO
   }
   const projectionKnown = completeness?.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN";
   const sourceState: GrowthSourceState = completeness === null ? "READ_FAILED" : completeness.state;
-  const policy = (await client.query<{ id: string; version: string; policyPayload: Record<string, unknown> }>(`SELECT id, version::text AS version, policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' AND effective_at <= $1 ORDER BY version DESC LIMIT 1`, [asOfUtc])).rows[0];
+  const policy = (await client.query<{ id: string; version: string; policyPayload: Record<string, unknown>; haffRule: unknown }>(
+    `SELECT pol.id, pol.version::text AS version, pol.policy_payload AS "policyPayload", p.haff_rule AS "haffRule"
+       FROM zzsh_iam.membership_growth_policy pol
+       LEFT JOIN zzsh_supply.rule_release r ON r.id=pol.rule_release_id
+       LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+      WHERE pol.status='APPROVED' AND pol.effective_at <= $1 ORDER BY pol.version DESC LIMIT 1`, [asOfUtc],
+  )).rows[0];
+  const enabledModes = policy ? sealedEnabledRentalModes(policy.haffRule) : null;
   const entitlements = (await client.query<StoredEntitlement>(
     `SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived"
        FROM zzsh_iam.membership_entitlement WHERE user_id=$1 ORDER BY starts_at DESC, id DESC LIMIT 100`, [userId],
   )).rows.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived }));
-  return { rows, response: { subjectId: userId, growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", sourceState, projectionKnown, policy?.policyPayload ?? null, policy?.version ?? null, rows), entitlements, sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length } } };
+  return { rows, response: { subjectId: userId, growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", sourceState, projectionKnown, policy?.policyPayload ?? null, policy?.version ?? null, rows, enabledModes), entitlements, sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length } } };
 }
 
 export async function readMembershipGrowth(client: PoolClient, userId: string, asOfUtc = new Date().toISOString()): Promise<GrowthReaderResponse | null> {
@@ -744,7 +778,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   if (!policyTier || effectiveTier === "UNKNOWN") return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN", asOfUtc };
   const tier = policy.tiers[policyTier];
   const growthContract = tier?.pricing?.[rentalMode];
-  if (!configuredPricing(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
+  if (!configuredModeContract(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
   const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED");
   if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
@@ -760,7 +794,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     const state = entitlementStateAtMicro(entitlement, asOfUtc);
     if (state !== "ACTIVE") continue; // proven expired / revoked / replaced / pending / not started: excluded normally
     if (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_KIND_UNKNOWN", asOfUtc, entitlementId: entitlement.id };
-    if (!configuredPricing(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
+    if (!configuredModeContract(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt);
     if (!candidate) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_QUOTE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     candidates.push(candidate);

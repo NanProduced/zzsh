@@ -58,7 +58,7 @@ async function sealedFactsOrNull(client: PoolClient, ruleReleaseId: string, pric
 function bootstrapCatalog(sealed: SealedReleaseFacts, priceVersionId: string): ReturnType<typeof policyCatalog> {
   return {
     safeBoxes: sealed.catalog.safeBoxes,
-    materials: sealed.catalog.materials.map((material) => ({ id: material.itemId, name: material.itemId, unit: material.unit ?? "PIECE" })),
+    materials: sealed.catalog.materials.map((material) => ({ id: material.itemId, name: material.name ?? material.itemId, unit: material.unit ?? "PIECE", ...(material.unitQuantity === undefined ? {} : { unitQuantity: material.unitQuantity }) })),
     priceVersions: [{ id: priceVersionId, label: priceVersionId }],
   };
 }
@@ -96,8 +96,12 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
              FROM zzsh_iam.membership_growth_policy ORDER BY version DESC, created_at DESC LIMIT 1`,
         )).rows[0];
         if (row) {
+          // R1-03: an existing draft keeps the bound sealed catalog for editing; a pending payload must
+          // never collapse the editor to 0 boxes / 0 resources. An unreadable release is labelled, not faked.
           const sealed = await sealedFactsOrNull(client, row.ruleReleaseId, row.priceVersionId);
-          const catalog = { ...policyCatalog(row.policyPayload, row.priceVersionId), ...(sealed ? { enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema } : {}) };
+          const catalog = sealed
+            ? { ...bootstrapCatalog(sealed, row.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const }
+            : { ...policyCatalog(row.policyPayload, row.priceVersionId), releaseMode: null, catalogSource: "POLICY_PAYLOAD" as const };
           return { policy: row.policyPayload, meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog, thresholds, bootstrap: null };
         }
         const sealedRelease = (await client.query<{ releaseId: string; priceVersionId: string }>(
@@ -108,11 +112,11 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
             LIMIT 1`,
         )).rows[0];
         const sealed = sealedRelease ? await sealedFactsOrNull(client, sealedRelease.releaseId, sealedRelease.priceVersionId) : null;
-        if (!sealed) return { policy: null, meta: null, catalog: policyCatalog(null, null), thresholds, bootstrap: null };
+        if (!sealed) return { policy: null, meta: null, catalog: { ...policyCatalog(null, null), releaseMode: null, catalogSource: null }, thresholds, bootstrap: null };
         return {
           policy: null,
           meta: null,
-          catalog: { ...bootstrapCatalog(sealed, sealedRelease!.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema },
+          catalog: { ...bootstrapCatalog(sealed, sealedRelease!.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const },
           thresholds,
           bootstrap: { ruleReleaseId: sealedRelease!.releaseId, priceVersionId: sealedRelease!.priceVersionId, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, enabledModes: sealed.enabledModes, nextVersionNo: 1, expectedVersion: "0" },
         };

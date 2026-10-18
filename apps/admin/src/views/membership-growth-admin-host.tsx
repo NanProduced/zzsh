@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, hasPermission, type SessionSnapshot } from "../api";
 import type { WorkspaceTab } from "../workspace/tab-model";
 import {
@@ -113,6 +113,11 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const [bootstrap, setBootstrap] = useState<PolicyBootstrap | null>(null);
   const [savedDraft, setSavedDraft] = useState<PolicyResponse["meta"]>(null);
   const [subject, setSubject] = useState<AdminGrowthSubject>({ subjectId: subjectId ?? "", status: "NOT_LOADED" });
+  /** R1-02: a save receipt only marks the exact edit revision it was built from as saved. */
+  const editRevisionRef = useRef(0);
+  /** R1-02: late responses from a previous subject/refresh generation never write into the new context. */
+  const generationRef = useRef(0);
+  const savingRef = useRef(false);
 
   useEffect(() => {
     if (!membershipGrowthAccess(snapshot).canRead) {
@@ -120,6 +125,8 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       return;
     }
     const controller = new AbortController();
+    generationRef.current += 1;
+    const generation = generationRef.current;
     setState({ status: "loading" });
     setSavedDraft(null);
     const settle = <T,>(request: Promise<T>) => request.then((value) => ({ value, error: null as unknown })).catch((error: unknown) => ({ value: null, error }));
@@ -127,7 +134,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       settle(adminRequest<PolicyResponse>("/membership-growth/policy", undefined, "GET", {}, controller.signal)),
       subjectId ? settle(adminRequest<SubjectResponse>(`/users/${encodeURIComponent(subjectId)}/membership-growth`, undefined, "GET", {}, controller.signal)) : Promise.resolve({ value: null, error: null as unknown }),
     ]).then(([policyResult, subjectResult]) => {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || generation !== generationRef.current) return;
       const policy = policyResult.value ? asPolicy(policyResult.value) : null;
       const nextSubject = subjectOf(subjectResult.value, subjectId, subjectResult.error);
       setMeta(policyResult.value?.meta ?? null);
@@ -152,36 +159,51 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       ? { ruleReleaseId: bootstrap.ruleReleaseId, priceVersionId: bootstrap.priceVersionId, sourceRef: "admin:membership-growth" }
       : null;
   const saveDraft = async () => {
-    if (!binding) return;
-    const versionNo = meta ? Number(meta.version) + 1 : bootstrap!.nextVersionNo;
-    const expectedVersion = meta ? meta.version : bootstrap!.expectedVersion;
-    const draft = await adminRequest<{ id: string; version: string; payloadHash: string }>("/membership-growth/policy-drafts", { policy: toGrowthPolicy({ ...ready.policy, status: "DRAFT", version: String(versionNo) }), versionNo, expectedVersion, effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef });
-    const saved: NonNullable<PolicyResponse["meta"]> = { id: draft.id, version: draft.version, status: "DRAFT", effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef, payloadHash: draft.payloadHash };
-    setMeta(saved); setSavedDraft(saved); setState(current => current.status === "ready" ? { ...current, policy: { ...current.policy, version: draft.version, status: "DRAFT", changes: [] } } : current);
-    onDirtyChange(false);
+    if (!binding || savingRef.current) return;
+    savingRef.current = true;
+    const revision = editRevisionRef.current;
+    const generation = generationRef.current;
+    try {
+      const versionNo = meta ? Number(meta.version) + 1 : bootstrap!.nextVersionNo;
+      const expectedVersion = meta ? meta.version : bootstrap!.expectedVersion;
+      const draft = await adminRequest<{ id: string; version: string; payloadHash: string }>("/membership-growth/policy-drafts", { policy: toGrowthPolicy({ ...ready.policy, status: "DRAFT", version: String(versionNo) }), versionNo, expectedVersion, effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef });
+      const saved: NonNullable<PolicyResponse["meta"]> = { id: draft.id, version: draft.version, status: "DRAFT", effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef, payloadHash: draft.payloadHash };
+      // The version advances for the next save, but only the exact revision that was sent becomes "saved".
+      setMeta(saved);
+      if (revision === editRevisionRef.current && generation === generationRef.current) {
+        setSavedDraft(saved);
+        setState(current => current.status === "ready" ? { ...current, policy: { ...current.policy, version: draft.version, status: "DRAFT", changes: [] } } : current);
+        onDirtyChange(false);
+      }
+    } finally {
+      savingRef.current = false;
+    }
   };
   const submitApproval = async () => {
     if (!meta) return;
+    const generation = generationRef.current;
     if (!savedDraft) { setState({ ...ready, approval: { status: "NOT_REQUESTED", message: "请先保存当前政策草稿，再提交审批" } }); return; }
     const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.benefit.policy.publish", triggerCondition: "membership.policy.publish.requested", payloadVersion: 1, payload: policyDraftApprovalPayload(savedDraft!), summary: `发布会员政策 ${ready.policy.version}`, supersedesRequestId: null });
+    if (generationRef.current !== generation) return;
     setState({ ...ready, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } });
   };
   const submitEntitlement = async () => {
     if (ready.subject.status !== "LOADED" || !gameId || !meta) return;
+    const generation = generationRef.current;
     const draft = ready.entitlement;
-    const haffSchema = ready.policy.catalog.haffSchema ?? "haff-ratio-v1";
-    const spreadDelta = ready.policy.catalog.releaseMode === "PERCENT" ? undefined : draft.spreadDelta;
     const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.entitlement.grant", triggerCondition: "membership.entitlement.grant.requested", payloadVersion: 1, payload: {
       userId: ready.subject.subjectId, gameId, kind: draft.kind, scopeKey: draft.scopeKey, startsAtUtc: draft.startsAtUtc, endsAtUtc: draft.endsAtUtc, policyId: meta.id,
-      // The full contract carries every safe box/resource of the bound release plus the spread delta; nothing is dropped.
-      pricing: {
-        mode: draft.pricingMode,
-        priceVersionId: draft.priceVersionId,
-        haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: haffSchema, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef, baseBySafeBox: { ...draft.haffBaseBySafeBox }, ...(spreadDelta === undefined ? {} : { spreadDelta }) },
-        materials: Object.fromEntries(Object.entries(draft.materials).map(([itemId, material]) => [itemId, { status: "CONFIGURED", kind: "FIXED_UNIT", itemId, unit: material.unit, unitQuantity: material.unitQuantity, buyerUnitAmount: material.buyerUnitAmount, ownerUnitAmount: material.ownerUnitAmount, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef }])),
-      },
+      // Manual grant sets its own payable share and expiry; no second haff/material price table is sent.
+      pricing: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: draft.pricingMode, priceVersionId: draft.priceVersionId, payableRatio: draft.payableRatio, costBasisRef: draft.costBasisRef },
       depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇`, supersedesRequestId: null });
+    if (generationRef.current !== generation) return;
     setState({ ...ready, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } });
   };
-  return <MembershipGrowthAdminView state={ready} policySaved={meta !== null} onPolicyChange={access.canDraft ? (policy) => { setSavedDraft(null); setState((current) => current.status === "ready" ? { ...current, policy } : current); onDirtyChange(true); } : undefined} onSavePolicyDraft={access.canDraft ? () => void saveDraft() : undefined} onSubmitPolicy={access.canRequest ? () => void submitApproval() : undefined} onEntitlementChange={access.canRequest ? (entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current) : undefined} onSubmitEntitlement={access.canRequest ? () => void submitEntitlement() : undefined} />;
+  const handlePolicyChange = (policy: AdminGrowthPolicy) => {
+    editRevisionRef.current += 1;
+    setSavedDraft(null);
+    setState((current) => current.status === "ready" ? { ...current, policy } : current);
+    onDirtyChange(true);
+  };
+  return <MembershipGrowthAdminView state={ready} policySaved={meta !== null} onPolicyChange={access.canDraft ? handlePolicyChange : undefined} onSavePolicyDraft={access.canDraft ? () => void saveDraft() : undefined} onSubmitPolicy={access.canRequest ? () => void submitApproval() : undefined} onEntitlementChange={access.canRequest ? (entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current) : undefined} onSubmitEntitlement={access.canRequest ? () => void submitEntitlement() : undefined} />;
 }
