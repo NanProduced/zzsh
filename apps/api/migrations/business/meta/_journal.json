@@ -589,6 +589,13 @@
       "when": 1792281600000,
       "tag": "0083_account_date_numbers",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1792281600001,
+      "tag": "0084_stored_opening_input_decode",
+      "breakpoints": true
     }
   ]
 }
