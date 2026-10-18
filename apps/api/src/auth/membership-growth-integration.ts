@@ -9,6 +9,7 @@ import {
   NORMAL_GROWTH_TIERS,
   quoteToGrowthOfferPlan,
   replayGrowthProjection,
+  projectGrowthConsumptionSources,
   validateBenefitPolicy,
   type ExistingEntitlement,
   type GrowthContribution,
@@ -576,11 +577,13 @@ function policySummaries(policyPayload: Record<string, unknown> | null, policyVe
 }
 
 function contributionSummaries(projection: GrowthProjection, rows: readonly StoredContribution[]): GrowthContributionSummary[] {
-  const active = new Map(projection.active.map((item) => [item.sourceKey, item]));
-  return rows.filter((row) => active.has(row.sourceKey)).map((row) => {
-    const item = active.get(row.sourceKey)!;
-    const correction = row.sourceType === "REFUND_CORRECTION";
-    return { label: correction ? "消费更正" : row.sourceType === "MATERIAL_CONSUMPTION" ? "物资消费" : "租赁结算消费", effectiveAt: row.effectiveAt, amountCents: row.amountCents, exitsAt: item.expiresAt, kind: correction ? "CORRECTION" : "CONSUMPTION" };
+  const latest = new Map<string, StoredContribution>();
+  const asOf = normalizeGrowthInstant(projection.asOf, "projection.asOf");
+  for (const row of rows) if (normalizeGrowthInstant(row.recordedAt, "recordedAt") <= asOf && (!latest.has(row.sourceKey) || latest.get(row.sourceKey)!.revision < row.revision)) latest.set(row.sourceKey, row);
+  return projection.active.map((item) => {
+    const row = latest.get(item.sourceKey)!;
+    const correction = row.sourceType === "REFUND_CORRECTION" || row.correctionMode != null;
+    return { label: correction ? "消费更正" : row.sourceType === "MATERIAL_CONSUMPTION" ? "物资消费" : "租赁结算消费", effectiveAt: item.effectiveAt, amountCents: item.amountCents, exitsAt: item.expiresAt, kind: correction ? "CORRECTION" : "CONSUMPTION" };
   });
 }
 
@@ -599,7 +602,7 @@ function dtoFromProjection(projection: GrowthProjection | null, asOfUtc: string,
   return { schema: "membership-growth-v1", knowledge: "KNOWN", sourceState, benefitsState, asOfUtc: projection.asOf, windowStartUtc: projection.windowStart, rollingPoints: projection.rollingPoints, lifetimePoints: projection.lifetimePoints, normalTier: projection.normalTier, effectiveTier: projection.effectiveTier, blackGold: projection.blackGold, grace: projection.grace, nextExpiryAtUtc: projection.nextExpiryAt, nextTier: nextTierFor(projection), benefits: summaries.benefits, comparison: summaries.comparison, contributions: contributionSummaries(projection, rows), pendingCount: projection.pending.length, pending: projection.pending, excluded: projection.excluded };
 }
 
-export async function readMembershipGrowth(client: PoolClient, userId: string, asOfUtc = new Date().toISOString()): Promise<GrowthReaderResponse | null> {
+async function readMembershipGrowthModel(client: PoolClient, userId: string, asOfUtc: string): Promise<{ response: GrowthReaderResponse; rows: StoredContribution[] } | null> {
   const user = (await client.query<{ id: string }>(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1`, [userId])).rows[0];
   if (!user) return null;
   const rows = (await client.query<StoredContribution>(
@@ -638,7 +641,58 @@ export async function readMembershipGrowth(client: PoolClient, userId: string, a
     `SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived"
        FROM zzsh_iam.membership_entitlement WHERE user_id=$1 ORDER BY starts_at DESC, id DESC LIMIT 100`, [userId],
   )).rows.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived }));
-  return { subjectId: userId, growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", sourceState, projectionKnown, policy?.policyPayload ?? null, policy?.version ?? null, rows), entitlements, sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length } };
+  return { rows, response: { subjectId: userId, growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", sourceState, projectionKnown, policy?.policyPayload ?? null, policy?.version ?? null, rows), entitlements, sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length } } };
+}
+
+export async function readMembershipGrowth(client: PoolClient, userId: string, asOfUtc = new Date().toISOString()): Promise<GrowthReaderResponse | null> {
+  return (await readMembershipGrowthModel(client, userId, asOfUtc))?.response ?? null;
+}
+
+export type GrowthConsumptionQuery = { scope: "LIFETIME" | "ROLLING"; limit: number; cursor?: string };
+export type GrowthConsumptionPage = {
+  contractVersion: "membership-growth.consumption.v1"; subjectId: string; scope: GrowthConsumptionQuery["scope"];
+  asOfUtc: string; windowStartUtc: string; snapshotVersion: string; knowledge: GrowthKnowledge; sourceState: GrowthSourceState;
+  amountCents: string | null; points: string | null; total: number | null; nextCursor: string | null;
+  sourceSummary: GrowthReaderResponse["sourceSummary"];
+  items: Array<{ id: string; label: string; amountCents: string; effectiveAt: string; recordedAt: string; expiresAt: string; withinWindow: boolean; corrected: boolean; revision: number }>;
+};
+
+export function parseGrowthConsumptionQuery(query: URLSearchParams): GrowthConsumptionQuery {
+  if ([...query.keys()].some((key) => !["scope", "limit", "cursor"].includes(key) || query.getAll(key).length !== 1)) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Growth detail query is invalid");
+  const scope = query.get("scope") ?? "LIFETIME", limit = query.get("limit") ?? "20", cursor = query.get("cursor");
+  if (!["LIFETIME", "ROLLING"].includes(scope) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50 || cursor !== null && (cursor.length === 0 || cursor.length > 4096)) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Growth detail query is invalid");
+  return { scope: scope as GrowthConsumptionQuery["scope"], limit: Number(limit), ...(cursor === null ? {} : { cursor }) };
+}
+
+export async function readMembershipGrowthConsumption(client: PoolClient, userId: string, input: GrowthConsumptionQuery, nowUtc = new Date().toISOString()): Promise<GrowthConsumptionPage | null> {
+  const normalized = parseGrowthConsumptionQuery(new URLSearchParams({ scope: input.scope, limit: String(input.limit), ...(input.cursor === undefined ? {} : { cursor: input.cursor }) }));
+  const subject = createHash("sha256").update(userId).digest("hex");
+  let cursor: { v: number; subject: string; scope: string; at: string; snapshot: string; after: string } | null = null;
+  let asOfUtc = normalizeGrowthInstant(nowUtc, "nowUtc");
+  if (normalized.cursor) {
+    try {
+      if (!/^[A-Za-z0-9_-]+$/.test(normalized.cursor)) throw Error("cursor encoding");
+      cursor = JSON.parse(Buffer.from(normalized.cursor, "base64url").toString("utf8"));
+      if (!cursor || Object.keys(cursor).sort().join(",") !== "after,at,scope,snapshot,subject,v" || cursor.v !== 1 || cursor.subject !== subject || cursor.scope !== normalized.scope || !/^[a-f0-9]{64}$/.test(cursor.snapshot) || !/^growth_source_[a-f0-9]{48}$/.test(cursor.after)) throw Error("cursor");
+      const at = normalizeGrowthInstant(cursor.at, "cursor.at");
+      if (at !== cursor.at || at > asOfUtc) throw Error("cursor time");
+      asOfUtc = at;
+    } catch { throw new SecurityApiError(400, "INVALID_ARGUMENT", "Growth detail cursor is invalid"); }
+  }
+  const model = await readMembershipGrowthModel(client, userId, asOfUtc);
+  if (!model) return null;
+  const { response, rows } = model;
+  const snapshotVersion = createHash("sha256").update(canonicalize({ schema: "growth-consumption-page-v1", subject, scope: normalized.scope, asOfUtc, sourceState: response.growth.sourceState, rows: rows.map((row) => ({ sourceKey: row.sourceKey, gameId: row.gameId, amountCents: row.amountCents, revision: row.revision, status: row.status, eligible: row.eligible, effectiveAt: row.effectiveAt, recordedAt: row.recordedAt, sourceDigest: row.sourceDigest ?? null, previousAmountCents: row.previousAmountCents ?? null, correctionOf: row.correctionOf ?? null, correctionMode: row.correctionMode ?? null })) })).digest("hex");
+  if (cursor && cursor.snapshot !== snapshotVersion) throw new SecurityApiError(409, "CONFLICT", "Growth consumption source changed; reload the first page");
+  const base = { contractVersion: "membership-growth.consumption.v1" as const, subjectId: userId, scope: normalized.scope, asOfUtc, windowStartUtc: response.growth.windowStartUtc, snapshotVersion, knowledge: response.growth.knowledge, sourceState: response.growth.sourceState, sourceSummary: response.sourceSummary };
+  if (response.growth.knowledge !== "KNOWN") return { ...base, amountCents: null, points: null, total: null, nextCursor: null, items: [] };
+  const sources = projectGrowthConsumptionSources({ userId, asOf: asOfUtc, contributions: rows }).filter((row) => normalized.scope === "LIFETIME" || row.withinWindow);
+  const items = sources.map((row) => ({ id: "growth_source_" + createHash("sha256").update(userId + "\0" + row.sourceKey).digest("hex").slice(0, 48), label: row.corrected ? "消费更正后金额" : row.sourceType === "MATERIAL_CONSUMPTION" ? "物资消费" : row.sourceType === "MINIMUM_BILLING" ? "最低计费补足" : "租赁结算消费", amountCents: row.amountCents, effectiveAt: normalizeGrowthInstant(row.effectiveAt, "effectiveAt"), recordedAt: normalizeGrowthInstant(row.recordedAt, "recordedAt"), expiresAt: normalizeGrowthInstant(row.expiresAt, "expiresAt"), withinWindow: row.withinWindow, corrected: row.corrected, revision: row.revision })).sort((a, b) => b.effectiveAt.localeCompare(a.effectiveAt) || a.id.localeCompare(b.id));
+  const after = cursor ? items.findIndex((item) => item.id === cursor!.after) : -1;
+  if (cursor && after < 0) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Growth detail cursor item is invalid");
+  const page = items.slice(after + 1, after + 1 + normalized.limit), hasNext = after + 1 + page.length < items.length;
+  const nextCursor = hasNext ? Buffer.from(JSON.stringify({ v: 1, subject, scope: normalized.scope, at: asOfUtc, snapshot: snapshotVersion, after: page.at(-1)!.id })).toString("base64url") : null;
+  return { ...base, amountCents: sources.reduce((sum, row) => sum + BigInt(row.amountCents), 0n).toString(), points: normalized.scope === "LIFETIME" ? response.growth.lifetimePoints : response.growth.rollingPoints, total: items.length, nextCursor, items: page };
 }
 
 /** Canonical UTC instant with exactly six fractional digits (PG timestamptz microsecond precision). */

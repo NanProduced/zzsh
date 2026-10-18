@@ -319,6 +319,21 @@ export type GrowthProjection = {
   excluded: Array<{ sourceKey: string; reason: string }>;
 };
 
+/** Current confirmed monetary sources, not a fabricated historical points-event ledger. */
+export function projectGrowthConsumptionSources(input: GrowthReplayInput): Array<{
+  sourceKey: string; sourceType: GrowthSourceType; revision: number; amountCents: string;
+  effectiveAt: string; recordedAt: string; expiresAt: string; withinWindow: boolean; corrected: boolean;
+}> {
+  parseId(input.userId, "userId");
+  const asOf = parseInstant(input.asOf, "asOf");
+  return canonicalContributions(input, asOf).rows.map((row) => ({
+    sourceKey: row.sourceKey, sourceType: row.contribution.sourceType, revision: row.contribution.revision,
+    amountCents: row.amountCents.toString(), effectiveAt: formatInstant(row.effectiveAt), recordedAt: formatInstant(row.recordedAt),
+    expiresAt: formatInstant(row.expiryAt), withinWindow: row.effectiveAt > asOf - GROWTH_WINDOW_US && row.effectiveAt <= asOf,
+    corrected: row.correctionEvents.length > 0,
+  }));
+}
+
 export function replayGrowthProjection(input: GrowthReplayInput): GrowthProjection {
   const userId = parseId(input.userId, "userId");
   const asOfMs = parseInstant(input.asOf, "asOf"); // epoch microseconds despite the historical name

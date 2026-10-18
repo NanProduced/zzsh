@@ -10,6 +10,8 @@ import { canonicalize } from "../src/supply/content-hash";
 import { createHash } from "node:crypto";
 import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
 import { types as pgTypes } from "pg";
+import { parseGrowthConsumptionQuery, readMembershipGrowthConsumption } from "../src/auth/membership-growth-integration";
+import { handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
 
 test("membership approval accepts ALL_GAMES and selected targets, rejects empty or unrelated scope before mutation", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
@@ -418,4 +420,125 @@ test("Q time adapter: PG text drop anchor preserves microsecond grace and a KNOW
   const after = await readMembershipGrowthQuoteCandidatesAt(client(), { ...common, asOfUtc: atEnd });
   assert.equal(after.knowledge, "KNOWN");
   if (after.knowledge === "KNOWN") assert.equal(after.effectiveTier, "STANDARD");
+});
+
+type HistoryFact = GrowthContribution & { gameId: string; sourceDigest?: string };
+function historyFact(index: number, cents = "100", effectiveAt = "2026-05-10T00:00:00.000000Z"): HistoryFact {
+  return { userId: "history-user", gameId: "history-game", sourceKey: `RENTAL_SETTLEMENT:history-${index}:haff`, sourceType: "RENTAL_SETTLEMENT", sourceId: `history-${index}:haff`, settlementVersion: "1", effectiveAt, recordedAt: effectiveAt, amountCents: cents, revision: 0, status: "SETTLED", eligible: true };
+}
+function historyClient(rows: HistoryFact[], options: { unknown?: boolean; active?: boolean; session?: boolean } = {}) {
+  const queries: Array<{ sql: string; params: unknown[] }> = [];
+  const client = {
+    async query(sql: string, params: unknown[] = []) {
+      queries.push({ sql, params });
+      const result = (r: unknown[]) => ({ rows: r, rowCount: r.length });
+      if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return result([]);
+      if (/^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)) throw Error("History read attempted a write");
+      if (sql.includes('SELECT id FROM zzsh_auth_user')) return result([{ id: "history-user" }]);
+      if (sql.includes('FROM zzsh_iam.membership_growth_contribution')) return result(rows.map((r) => ({ ...r, sourceDigest: growthContributionSourceDigest("a".repeat(64), r.gameId, r) })));
+      if (sql.includes('FROM zzsh_iam.user_rental_membership')) return result([{ sourceRef: "legacy:manual" }]);
+      if (sql.includes('FROM zzsh_iam.membership_growth_state') || sql.includes('FROM zzsh_iam.membership_growth_policy') || sql.includes('FROM zzsh_iam.membership_entitlement')) return result([]);
+      if (sql.includes('FROM zzsh_order.rental_order')) return result(rows.filter((r) => r.revision === 0).map((r) => ({ settlementVersionId: r.sourceId.slice(0, -5), versionNo: 1, versionHash: "a".repeat(64), userId: r.userId, gameId: r.gameId, inputSnapshot: { schema: "settlement-version-v2", amounts: { haffConsumedBuyer: `${BigInt(r.amountCents) / 100n}.${String(BigInt(r.amountCents) % 100n).padStart(2, "0")}`, itemConsumedBuyer: "0.00" } } })));
+      if (sql.includes("user.legacy_owner.migrated")) return result([{ migrated: options.unknown === true }]);
+      if (sql.includes("legacy-growth-schema")) return result([{ coverage: false, sources: false }]);
+      if (sql.includes('zzsh_auth_user') && sql.includes('"session"')) return result(options.session === false ? [] : [{ one: 1 }]);
+      if (sql.includes('zzsh_auth_user') && sql.includes('user')) return result([{ id: "history-user", suspended: options.active === false, accountStatus: "ACTIVE" }]);
+      if (sql.includes('zzsh_iam') && sql.includes('user_identity_state')) return result([{ accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 1 }]);
+      throw Error("Unexpected history fixture query: " + sql);
+    }, release() {},
+  };
+  return { client: client as never, queries, pool: { query: client.query.bind(client), connect: async () => client } };
+}
+
+test("growth summary and consumption page coalesce corrected versions without deleting facts", async () => {
+  const base = historyFact(0, "1000000", "2026-10-10T00:00:00.000000Z");
+  const rows = [base, { ...base, revision: 1, amountCents: "400000", previousAmountCents: "1000000", correctionMode: "REPLACE" as const, correctionOf: base.sourceKey, recordedAt: "2026-10-12T00:00:00.000000Z" }];
+  const { client } = historyClient(rows);
+  const summary = await readMembershipGrowth(client, "history-user", "2026-10-18T00:00:00Z");
+  assert.equal(summary?.growth.rollingPoints, "4000");
+  assert.deepEqual(summary?.growth.contributions.map((r) => r.amountCents), ["400000"]);
+  const page = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 20 }, "2026-10-18T00:00:00Z");
+  assert.equal(page?.total, 1); assert.equal(page?.items[0]?.amountCents, "400000"); assert.equal(page?.items[0]?.corrected, true);
+  assert.equal(page?.sourceSummary.contributionCount, 2); assert.equal(rows.length, 2);
+  assert(!JSON.stringify(page).includes(base.sourceKey)); assert(!JSON.stringify(page).includes(base.sourceId));
+});
+
+test("cumulative1353 with six historical sources and rolling zero remain distinct through all pages", async () => {
+  const rows = ["32000", "20000", "16000", "22000", "30000", "15280"].map((amount, i) => historyFact(i, amount));
+  const { client } = historyClient(rows); const now = "2026-10-18T00:00:00Z";
+  const first = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 2 }, now);
+  assert.equal(first?.knowledge, "KNOWN"); assert.equal(first?.amountCents, "135280"); assert.equal(first?.points, "1353"); assert.equal(first?.total, 6);
+  const second = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 2, cursor: first!.nextCursor! }, now);
+  const third = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 2, cursor: second!.nextCursor! }, now);
+  assert.equal(third?.nextCursor, null);
+  const all = [...first!.items, ...second!.items, ...third!.items];
+  assert.equal(new Set(all.map((r) => r.id)).size, 6); assert(all.every((r) => !r.withinWindow));
+  assert.equal(all.reduce((n, r) => n + BigInt(r.amountCents), 0n).toString(), "135280");
+  const window = await readMembershipGrowthConsumption(client, "history-user", { scope: "ROLLING", limit: 20 }, now);
+  assert.deepEqual([window?.total, window?.points, window?.amountCents, window?.items.length], [0, "0", "0", 0]);
+});
+
+test("growth detail rounds aggregate cents once and retains microsecond window boundaries", async () => {
+  const now = "2026-10-18T00:00:00.123456Z";
+  const { client } = historyClient([historyFact(0, "49", "2026-07-20T00:00:00.123456Z"), historyFact(1, "49", "2026-07-20T00:00:00.123457Z")]);
+  const lifetime = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 20 }, now);
+  const window = await readMembershipGrowthConsumption(client, "history-user", { scope: "ROLLING", limit: 20 }, now);
+  assert.deepEqual([lifetime?.amountCents, lifetime?.points, lifetime?.total], ["98", "1", 2]);
+  assert.deepEqual([window?.amountCents, window?.points, window?.total], ["49", "0", 1]);
+});
+
+test("growth detail monetary totals remain exact above Number safe integer", async () => {
+  const { client } = historyClient([historyFact(0, "90071992547409931"), historyFact(1, "49")]);
+  const page = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 20 }, "2026-10-18T00:00:00Z");
+  assert.equal(page?.amountCents, "90071992547409980");
+  assert.equal(page?.points, "900719925474100");
+});
+
+test("consumption pagination rejects changed facts, foreign subjects and changed scopes", async () => {
+  const rows = [historyFact(0), historyFact(1), historyFact(2)], fixture = historyClient(rows), now = "2026-10-18T00:00:00Z";
+  const first = await readMembershipGrowthConsumption(fixture.client, "history-user", { scope: "LIFETIME", limit: 1 }, now);
+  const other = historyClient(rows);
+  await assert.rejects(() => readMembershipGrowthConsumption(other.client, "other-user", { scope: "LIFETIME", limit: 1, cursor: first!.nextCursor! }, now), (e: any) => e.status === 400);
+  assert.equal(other.queries.length, 0);
+  await assert.rejects(() => readMembershipGrowthConsumption(fixture.client, "history-user", { scope: "ROLLING", limit: 1, cursor: first!.nextCursor! }, now), (e: any) => e.status === 400);
+  rows.push(historyFact(3));
+  await assert.rejects(() => readMembershipGrowthConsumption(fixture.client, "history-user", { scope: "LIFETIME", limit: 1, cursor: first!.nextCursor! }, now), (e: any) => e.status === 409);
+});
+
+test("growth source pending returns unknown totals rather than a complete empty page", async () => {
+  const { client } = historyClient([historyFact(0)], { unknown: true });
+  const page = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 20 }, "2026-10-18T00:00:00Z");
+  assert.deepEqual([page?.knowledge, page?.total, page?.points, page?.amountCents], ["UNKNOWN", null, null, null]);
+  assert.deepEqual(page?.items, []);
+});
+
+test("growth detail query validates bounded pagination and rejects foreign subject parameters", () => {
+  assert.deepEqual(parseGrowthConsumptionQuery(new URLSearchParams()), { scope: "LIFETIME", limit: 20 });
+  for (const text of ["limit=0", "limit=51", "limit=1e1", "scope=ALL", "limit=1&limit=2", "cursor=", "userId=other"]) assert.throws(() => parseGrowthConsumptionQuery(new URLSearchParams(text)));
+});
+
+test("history ordering preserves submillisecond instants and future corrections do not label the current summary", async () => {
+  const base = historyFact(0, "100", "2026-10-10T00:00:00.123000Z");
+  const later = historyFact(1, "101", "2026-10-10T00:00:00.123456Z");
+  const future = { ...base, revision: 1, amountCents: "50", previousAmountCents: "100", correctionMode: "REPLACE" as const, correctionOf: base.sourceKey, recordedAt: "2026-10-19T00:00:00Z" };
+  const { client } = historyClient([base, later, future]), now = "2026-10-18T00:00:00Z";
+  const page = await readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 1 }, now);
+  assert.equal(page?.items[0]?.effectiveAt, "2026-10-10T00:00:00.123456Z");
+  const summary = await readMembershipGrowth(client, "history-user", now);
+  assert(summary?.growth.contributions.every((r) => r.kind === "CONSUMPTION"));
+  assert.deepEqual(summary?.growth.contributions.map((r) => r.amountCents).sort(), ["100", "101"]);
+  await assert.rejects(() => readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 1, cursor: page!.nextCursor! + "#" }, now), (e: any) => e.status === 400);
+});
+
+test("growth consumption route reuses active actor/session guards and never writes facts", async () => {
+  async function request(options: { anonymous?: boolean; active?: boolean; session?: boolean }) {
+    const fixture = historyClient([historyFact(0)], options);
+    let status = 0, body: any;
+    const response = { status(n: number) { status = n; return this; }, setHeader() { return this; }, json(value: unknown) { body = value; return this; } };
+    await handleMembershipGrowthUser({ method: "GET", originalUrl: "/api/v1/users/me/membership-growth/consumption?scope=LIFETIME", headers: {} } as never, response as never, { pool: fixture.pool, userAuth: { api: { getSession: async () => options.anonymous ? null : { user: { id: "history-user" }, session: { id: "history-session" } } } } } as never);
+    return { status, body, queries: fixture.queries };
+  }
+  const good = await request({}); assert.equal(good.status, 200, JSON.stringify(good)); assert.equal(good.body.subjectId, "history-user");
+  assert(good.queries.every((q) => !/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+  for (const bad of [{ anonymous: true }, { active: false }, { session: false }]) assert.equal((await request(bad)).status, 401);
 });

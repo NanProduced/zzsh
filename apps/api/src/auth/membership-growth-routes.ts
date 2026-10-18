@@ -11,7 +11,7 @@ import { assertReplayAuthorization } from "../order/order";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { decodeId, safely, type SupplyResponse } from "../supply/supply-routes";
 import { forbidden, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
-import { backfillAcceptedSettlementAfterPosting, membershipGrowthEnabled, readMembershipGrowth, readMembershipGrowthScopeDetail } from "./membership-growth-integration";
+import { backfillAcceptedSettlementAfterPosting, membershipGrowthEnabled, parseGrowthConsumptionQuery, readMembershipGrowth, readMembershipGrowthConsumption, readMembershipGrowthScopeDetail } from "./membership-growth-integration";
 import { canonicalize } from "../supply/content-hash";
 import { GROWTH_THRESHOLDS, NORMAL_GROWTH_TIERS, validateBenefitPolicy, type GrowthBenefitPolicy } from "./membership-growth";
 
@@ -125,11 +125,14 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
 export async function handleMembershipGrowthUser(request: SupplyNodeRequest, response: SupplyResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
-    if (request.method !== "GET" || (request.originalUrl ?? request.url ?? "").split("?", 1)[0] !== "/api/v1/users/me/membership-growth") throw notFound();
+    const url = new URL(request.originalUrl ?? request.url ?? "", "http://127.0.0.1");
+    const detail = url.pathname === "/api/v1/users/me/membership-growth/consumption";
+    if (request.method !== "GET" || !detail && url.pathname !== "/api/v1/users/me/membership-growth") throw notFound();
+    const query = detail ? parseGrowthConsumptionQuery(url.searchParams) : null;
     const context = await readUserContext(request, options);
     const result = await withTransaction(options.pool, async (client) => {
       await assertReplayAuthorization(client, context);
-      return readMembershipGrowth(client, context.userId);
+      return query ? readMembershipGrowthConsumption(client, context.userId, query) : readMembershipGrowth(client, context.userId);
     });
     if (!result) throw notFound();
     sendJson(response, 200, result, requestId);

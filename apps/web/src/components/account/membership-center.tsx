@@ -6,6 +6,7 @@ import useEmblaCarousel from "embla-carousel-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { AlertTriangle, ArrowRight, ChevronLeft, ChevronRight, Clock3, Crown, Lock, Percent, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import type { EntitlementKind, EntitlementState, GrowthTier, MembershipGrowthData, MembershipGrowthViewState, MembershipPointEvent } from "@/lib/membership-growth-client";
+import { readMyMembershipGrowthConsumption, MembershipGrowthRequestError, type GrowthConsumptionScope, type MembershipGrowthConsumption } from "../../lib/membership-growth-client";
 import { Progress } from "../ui/progress";
 import "./membership-center.css";
 
@@ -575,11 +576,72 @@ function EntitlementSection({ data, entitlements }: { data?: MembershipGrowthDat
   );
 }
 
+function ConsumptionDetails({ data }: { data: MembershipGrowthData }) {
+  const [scope, setScope] = useState<GrowthConsumptionScope>("LIFETIME");
+  const [retry, setRetry] = useState(0);
+  const key = `${data.subjectId ?? ""}:${data.asOf}:${scope}`;
+  const [state, setState] = useState<{ key: string; page?: MembershipGrowthConsumption; error?: string; loading: boolean }>({ key, loading: true });
+  const generation = useRef(0), controller = useRef<AbortController | null>(null);
+  const shown = state.key === key ? state : { key, loading: true };
+  useEffect(() => {
+    const mine = ++generation.current;
+    controller.current?.abort();
+    const abort = new AbortController(); controller.current = abort;
+    setState({ key, loading: true });
+    if (data.subjectId) void readMyMembershipGrowthConsumption(data.subjectId, scope, undefined, abort.signal).then((page) => {
+      if (mine === generation.current && !abort.signal.aborted) setState({ key, page, loading: false });
+    }).catch((error) => {
+      if (mine === generation.current && !abort.signal.aborted) setState({ key, loading: false, error: error instanceof MembershipGrowthRequestError && error.status === 401 ? "当前身份已变化，请重新验证后读取明细。" : "成长消费明细暂时无法读取。" });
+    });
+    return () => { generation.current += 1; abort.abort(); };
+  }, [key, data.subjectId, scope, retry]);
+  if (!data.subjectId) return <p className="mc-quiet-note">积分变动明细暂不可用；下方为近90天有效消费记录。</p>;
+  const page = shown.page;
+  async function loadMore() {
+    if (!page?.nextCursor || shown.loading) return;
+    const mine = ++generation.current, abort = new AbortController();
+    controller.current?.abort(); controller.current = abort;
+    setState({ key, page, loading: true });
+    try {
+      const next = await readMyMembershipGrowthConsumption(data.subjectId!, scope, page.nextCursor, abort.signal);
+      if (mine !== generation.current || abort.signal.aborted) return;
+      if (next.snapshotVersion !== page.snapshotVersion || next.asOf !== page.asOf || next.total !== page.total || next.nextCursor === page.nextCursor || next.items.some((item) => page.items.some((prior) => prior.id === item.id))) throw new MembershipGrowthRequestError(409, null);
+      setState({ key, page: { ...next, items: [...page.items, ...next.items] }, loading: false });
+    } catch (error) {
+      if (mine !== generation.current || abort.signal.aborted) return;
+      const stale = error instanceof MembershipGrowthRequestError && [401, 403, 409].includes(error.status);
+      setState({ key, ...(stale ? {} : { page }), loading: false, error: stale ? "身份或消费依据已变化，请重新读取明细。" : "后续明细读取失败，已显示的记录保留。" });
+    }
+  }
+  return <div className="mc-consumption-details">
+    <div className="mc-detail-scopes" role="group" aria-label="消费明细范围">
+      <button type="button" className="mc-button" aria-pressed={scope === "LIFETIME"} onClick={() => setScope("LIFETIME")}>累计有效消费</button>
+      <button type="button" className="mc-button" aria-pressed={scope === "ROLLING"} onClick={() => setScope("ROLLING")}>近90天有效消费</button>
+    </div>
+    <p className="mc-quiet-note">按已确认更正合并消费来源，金额合计后统一折算积分；这里展示消费依据，不是历史积分发放流水。</p>
+    {shown.loading && !page ? <p className="mc-quiet-note" role="status">正在读取消费明细…</p> : null}
+    {shown.error ? <p className="mc-quiet-note" role="alert">{shown.error}<button type="button" className="mc-button" onClick={() => setRetry((value) => value + 1)}>重新读取明细</button></p> : null}
+    {page?.knowledge === "UNKNOWN" ? <p className="mc-quiet-note">消费来源尚未完成核验，暂不展示完整明细。</p> : null}
+    {page?.knowledge === "KNOWN" ? <>
+      <p className="mc-quiet-note">{scope === "LIFETIME" ? "累计" : "近90天"}有效消费 {yuanFromCents(page.amountCents!)}，合计 {page.points} 积分。统计截至 {formatBeijingDateTime(page.asOf)}。</p>
+      {page.total === 0 ? <p className="mc-quiet-note">{scope === "LIFETIME" ? "累计" : "当前窗口"}没有有效消费记录。</p> : <ul className="mc-contributions">
+        {page.items.map((item) => <li key={item.id} className="mc-contribution-row">
+          <span className="mc-contribution-label">{item.label}<em>{item.withinWindow ? "计入近90天" : "仅计入累计"}{item.corrected ? ` · 已更正至第${item.revision}版` : ""}</em></span>
+          <span className="mc-contribution-time">{formatBeijingDateTime(item.effectiveAt)} · 退出窗口 {formatBeijingDate(item.expiresAt)}</span>
+          <strong className="mc-contribution-amount">{yuanFromCents(item.amountCents)}</strong>
+        </li>)}
+      </ul>}
+      <p className="mc-quiet-note">已加载 {page.items.length} / {page.total} 条有效消费依据；源事实 {page.sourceSummary.contributionCount} 版，未结算 {page.sourceSummary.pendingCount} 条、已排除 {page.sourceSummary.excludedCount} 条均不计入。</p>
+      {page.nextCursor ? <button type="button" className="mc-button" disabled={shown.loading} onClick={() => { void loadMore(); }}>{shown.loading ? "正在读取…" : "加载更多消费依据"}</button> : null}
+    </> : null}
+  </div>;
+}
+
 function PointsLedger({ data, events }: { data: MembershipGrowthData; events?: MembershipPointEvent[] }) {
   return (
     <section className="mc-section" aria-labelledby="mc-ledger-heading">
       <div className="mc-section-heading">
-        <h3 id="mc-ledger-heading">积分变动明细</h3>
+        <h3 id="mc-ledger-heading">{events?.length ? "积分变动明细" : "成长消费明细"}</h3>
         <p className="mc-section-meta">
           {data.windowStart ? `统计窗口 ${formatBeijingDate(data.windowStart)} – ${formatBeijingDate(data.asOf)}` : `统计截至 ${formatBeijingDateTime(data.asOf)}`}
         </p>
@@ -596,8 +658,9 @@ function PointsLedger({ data, events }: { data: MembershipGrowthData; events?: M
           ))}
         </ul>
       ) : (
-        <p className="mc-quiet-note">积分变动明细暂不可用；下方为近90天有效消费记录。</p>
+        <ConsumptionDetails data={data} />
       )}
+      {!data.subjectId ? <>
       <h4 className="mc-ledger-subheading">当前窗口有效消费记录</h4>
       {data.contributions.length === 0 ? (
         <p className="mc-quiet-note">当前窗口没有有效消费记录。</p>
@@ -612,6 +675,7 @@ function PointsLedger({ data, events }: { data: MembershipGrowthData; events?: M
           ))}
         </ul>
       )}
+      </> : null}
       {data.nextExpiryAt ? <p className="mc-quiet-note"><Clock3 size={14} aria-hidden="true" />下一批有效消费预计于 {formatBeijingDateTime(data.nextExpiryAt)} 退出窗口；届时实时重算档位。</p> : null}
       {data.pendingCount > 0 ? <p className="mc-quiet-note">还有 {data.pendingCount} 条未完成结算，完成前不会增加成长积分。</p> : null}
     </section>

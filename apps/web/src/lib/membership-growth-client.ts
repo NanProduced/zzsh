@@ -4,6 +4,7 @@ export type EntitlementState = "PENDING" | "APPROVED_PENDING_EXECUTION" | "EXECU
 export type EntitlementKind = "FRIEND" | "PRESTIGE" | "UNKNOWN";
 
 export type MembershipGrowthData = {
+  subjectId?: string;
   tier: GrowthTier;
   rollingPoints: string;
   lifetimePoints: string;
@@ -106,6 +107,7 @@ function asReady(body: RecordValue): MembershipGrowthData {
   const contributions = requiredRecords(growth.contributions, "contributions");
   const next = growth.nextTier === null ? null : isRecord(growth.nextTier) ? { tier: tier(growth.nextTier.tier) as Exclude<MembershipGrowthData["tier"], "BLACK_GOLD" | "STANDARD" | "UNKNOWN">, threshold: text(growth.nextTier.threshold, "nextTier.threshold"), remaining: text(growth.nextTier.remaining, "nextTier.remaining") } : null;
   return {
+    subjectId: text(body.subjectId, "subjectId"),
     tier: tier(growth.effectiveTier), rollingPoints: text(growth.rollingPoints, "rollingPoints"), lifetimePoints: text(growth.lifetimePoints, "lifetimePoints"), asOf: text(growth.asOfUtc, "asOfUtc"),
     windowStart: typeof growth.windowStartUtc === "string" && growth.windowStartUtc ? growth.windowStartUtc : null,
     benefitsState: growth.benefitsState === "CONFIGURED" ? "CONFIGURED" : "NOT_CONFIGURED",
@@ -139,4 +141,38 @@ export async function readMyMembershipGrowth(signal?: AbortSignal): Promise<Memb
     if (error instanceof MembershipGrowthRequestError) throw error;
     throw new MembershipGrowthRequestError(200, null);
   }
+}
+
+export type GrowthConsumptionScope = "LIFETIME" | "ROLLING";
+export type MembershipGrowthConsumption = {
+  subjectId: string; scope: GrowthConsumptionScope; asOf: string; windowStart: string; snapshotVersion: string;
+  knowledge: "KNOWN" | "UNKNOWN"; sourceState: string; amountCents: string | null; points: string | null;
+  total: number | null; nextCursor: string | null;
+  sourceSummary: { contributionCount: number; pendingCount: number; excludedCount: number };
+  items: Array<{ id: string; label: string; amountCents: string; effectiveAt: string; recordedAt: string; expiresAt: string; withinWindow: boolean; corrected: boolean; revision: number }>;
+};
+
+export async function readMyMembershipGrowthConsumption(subjectId: string, scope: GrowthConsumptionScope, cursor?: string, signal?: AbortSignal): Promise<MembershipGrowthConsumption> {
+  const query = new URLSearchParams({ scope, limit: "20", ...(cursor === undefined ? {} : { cursor }) });
+  let response: Response;
+  try { response = await fetch("/api/account/membership-growth/consumption?" + query, { credentials: "same-origin", cache: "no-store", signal }); }
+  catch (error) { if (signal?.aborted) throw error; throw new MembershipGrowthRequestError(0, null); }
+  const body = await response.json().catch(() => null);
+  if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+  if (!response.ok || !isRecord(body)) throw new MembershipGrowthRequestError(response.status, body);
+  const bad = () => new MembershipGrowthRequestError(502, { error: { code: "MEMBERSHIP_CONTRACT_REQUIRED", message: "成长消费明细未闭合" } });
+  if (body.subjectId !== subjectId) throw new MembershipGrowthRequestError(401, { error: { code: "IDENTITY_CHANGED", message: "当前身份已变化" } });
+  const count = (v: unknown): number => { if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw bad(); return v; };
+  const cents = (v: unknown): string => { if (typeof v !== "string" || !/^-?(0|[1-9]\d{0,23})$/.test(v)) throw bad(); return v; };
+  if (body.contractVersion !== "membership-growth.consumption.v1" || body.scope !== scope || !["KNOWN", "UNKNOWN"].includes(String(body.knowledge)) || typeof body.snapshotVersion !== "string" || !/^[a-f0-9]{64}$/.test(body.snapshotVersion) || !isRecord(body.sourceSummary)) throw bad();
+  const items = requiredRecords(body.items, "consumption.items");
+  if (items.length > 20 || body.nextCursor !== null && (typeof body.nextCursor !== "string" || body.nextCursor.length > 4096)) throw bad();
+  const known = body.knowledge === "KNOWN";
+  if (!known && (body.total !== null || body.points !== null || body.amountCents !== null || items.length !== 0 || body.nextCursor !== null)) throw bad();
+  const mapped = items.map((item) => {
+    if (typeof item.id !== "string" || !/^growth_source_[a-f0-9]{48}$/.test(item.id) || typeof item.withinWindow !== "boolean" || typeof item.corrected !== "boolean") throw bad();
+    return { id: item.id, label: text(item.label, "consumption.label"), amountCents: cents(item.amountCents), effectiveAt: text(item.effectiveAt, "consumption.effectiveAt"), recordedAt: text(item.recordedAt, "consumption.recordedAt"), expiresAt: text(item.expiresAt, "consumption.expiresAt"), withinWindow: item.withinWindow, corrected: item.corrected, revision: count(item.revision) };
+  });
+  if (new Set(mapped.map((item) => item.id)).size !== mapped.length || known && (count(body.total) < mapped.length || !cursor && body.nextCursor === null && count(body.total) !== mapped.length) || scope === "ROLLING" && mapped.some((item) => !item.withinWindow)) throw bad();
+  return { subjectId, scope, asOf: text(body.asOfUtc, "consumption.asOfUtc"), windowStart: text(body.windowStartUtc, "consumption.windowStartUtc"), snapshotVersion: body.snapshotVersion, knowledge: known ? "KNOWN" : "UNKNOWN", sourceState: text(body.sourceState, "consumption.sourceState"), amountCents: known ? cents(body.amountCents) : null, points: known ? cents(body.points) : null, total: known ? count(body.total) : null, nextCursor: body.nextCursor as string | null, sourceSummary: { contributionCount: count(body.sourceSummary.contributionCount), pendingCount: count(body.sourceSummary.pendingCount), excludedCount: count(body.sourceSummary.excludedCount) }, items: mapped };
 }
