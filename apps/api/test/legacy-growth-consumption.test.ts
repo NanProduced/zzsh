@@ -42,3 +42,70 @@ test("full scoped source receipt and exact set closure are required; no extracti
  receipt.sourceSetSha256=sha256Hex(canonicalize({subjectUserId:subject,cutoff:receipt.cutoff,fromExclusive:null,expectedSourceKeys:receipt.expectedSourceKeys}));const allowed=new Set([sha256Hex(canonicalize(receipt))]);
  assert.equal(closeLegacyGrowthCoverage(subject,[row],receipt).state,"BACKFILL_PENDING");assert.equal(closeLegacyGrowthCoverage(subject,[row],receipt,allowed).state,"COMPLETE");const missing=closeLegacyGrowthCoverage(subject,[],receipt,allowed);assert.equal(missing.state,"BACKFILL_PENDING");assert.deepEqual(missing.missingSourceKeys,[row.sourceKey]);assert.equal(closeLegacyGrowthCoverage(subject,[row,row],receipt,allowed).state,"SOURCE_CONFLICT");
 });
+
+function cancelled(prepaid="30.00",patch:Record<string,string|null>={}){
+ const at=Date.parse("2026-10-01T01:00:00Z")/1000,t=(n:number)=>String(at+n),subjectUserId=legacyBinding.renterUserId;
+ const row:Record<string,string|null>={id:"7",order_sn:"FIXTURE_O7",user_id:"11",sale_user_id:"22",accounts_id:"33",order_status:"5",pay_is:"1",
+  pay_money:"100.00",need_pay_money:"100.00",expend_pay_money:prepaid,express_is:"0",is_settle:"0",express_time:"0",confirm_time:"0",expend_haff:null,return_order_money:null,
+  pay_time:t(0),cancel_time:t(60),awm_bullet_num:null,level6_bullet_num:null,level6_helmet_num:null,level6_armor_num:null,top_insure_card_num:null,barrett_bullet_num:"0",coffee_num:null,...patch};
+ const sourceRecord=proof(row),sourceDigest=sourceRecord.digest;
+ const payment=proof({id:"91",order_id:"7",order_type:"1",pay_is:"1",pay_money:"100.00",pay_time:t(0)});
+ const refund=proof({id:"92",order_id:"7",order_sn:"FIXTURE_O7",order_type:"order",user_id:"11",refund_type:"1",refund_status:"1",order_amount:"100.00",refund_amount:"100.00",create_time:t(60),update_time:t(61)});
+ const log=proof({id:"93",record_id:"92",user_id:"11",refund_status:"1",order_amount:"100.00",refund_amount:"100.00",create_time:t(60),update_time:t(61)});
+ const cutoff="2026-10-16T03:00:00.000000Z",components=proof({schema:"legacy-consumption-exclusion.v1",classification:"PAID_CANCELLED_UNCONSUMED",parentSourceDigest:sourceDigest,basisDigest:sourceRecord.digest,
+  legacyOrderId:"7",subjectUserId,cutoff,oldRuleEvidenceRef:"FIXTURE_ORIGINAL_UNFULFILLED_CANCEL_AND_FULL_REFUND",
+  payment:{sourceSystem:"legacy_mysql_restore",sourceEntity:"la_pay_order",extractSha256:"a".repeat(64),records:[payment]},
+  refundRecord:{sourceSystem:"legacy_mysql_restore",sourceEntity:"la_refund_record",extractSha256:"b".repeat(64),records:[refund]},
+  refundLog:{sourceSystem:"legacy_mysql_restore",sourceEntity:"la_refund_log",extractSha256:"c".repeat(64),records:[log]}});
+ const input:LegacyGrowthConsumptionInput={binding:{...legacyBinding,sourceDigest,sourceOrderStatus:5,completedAt:null},subjectUserId,recordedAt:"2026-10-16T02:00:00.000000Z",
+  origin:{kind:"LEGACY_CANCELLED_UNCONSUMED",parentSourceSnapshot:row,sourceRecord,components}};
+ const receipt:LegacyGrowthCoverageReceipt={subjectUserId,cutoff,fromExclusive:null,sourceExtractSha256:"d".repeat(64),sourceSetSha256:"",expectedSourceKeys:["legacy_mysql_restore:la_order:7"],
+  refundReviewEvidenceRefs:[components.digest,refund.digest,log.digest]};
+ receipt.sourceSetSha256=sha256Hex(canonicalize({subjectUserId,cutoff,fromExclusive:null,expectedSourceKeys:receipt.expectedSourceKeys}));
+ return{input,receipt};
+}
+function projectCancelled(x:ReturnType<typeof cancelled>){
+ if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED")assert.fail();
+ return projectLegacyGrowthConsumption(x.input,new Set([x.input.origin.components.digest]),x.receipt);
+}
+function changeCancelledProof(x:ReturnType<typeof cancelled>,field:"payment"|"refundRecord"|"refundLog",patch:Record<string,string>){
+ if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED")assert.fail();
+ const value=JSON.parse(x.input.origin.components.canonical),row=JSON.parse(value[field].records[0].canonical);value[field].records=[proof({...row,...patch})];
+ x.input.origin.components=proof(value);x.receipt.refundReviewEvidenceRefs=[x.input.origin.components.digest,value.refundRecord.records[0].digest,value.refundLog.records[0].digest];
+}
+
+test("unfulfilled fully refunded orders exclude the original prepaid material fee without inventing a refund channel result",()=>{
+ for(const amount of ["0.00","30.00","100.00"]){const x=cancelled(amount),before=structuredClone(x),p=projectCancelled(x);assert.equal(p.knowledge,"EXCLUDED",p.reason??"");assert.equal(p.reason,"CANCELLED_UNCONSUMED");assert.deepEqual(p.facts,[]);assert.equal(p.observedResourceChargeCents,null);assert.deepEqual(x,before);
+  const closed=closeLegacyGrowthCoverage(x.input.subjectUserId,[p],x.receipt,new Set([sha256Hex(canonicalize(x.receipt))]));assert.equal(closed.state,"COMPLETE");assert.deepEqual(closed.facts,[]);}
+});
+
+test("cancellation cannot erase positive material consumption, fulfilled sources or existing measured settlement fields",()=>{
+ for(const field of ["awm_bullet_num","level6_bullet_num","level6_helmet_num","level6_armor_num","top_insure_card_num","barrett_bullet_num","coffee_num"]){
+  assert.equal(projectCancelled(cancelled("0.00",{[field]:"1"})).reason,"CANCELLATION_NOT_UNCONSUMED",field);
+  assert.equal(projectCancelled(cancelled("30.00",{[field]:"0"})).knowledge,"EXCLUDED",field);
+ }
+ const measured:Array<Record<string,string|null>>=[{expend_haff:"0.00"},{expend_haff:"1.00"},{return_order_money:"0.00"},{return_order_money:"100.00"},{express_is:"1"},{express_time:"1790816460"},{is_settle:"1"}];
+ for(const patch of measured)assert.equal(projectCancelled(cancelled("30.00",patch)).reason,"CANCELLATION_NOT_UNCONSUMED");
+});
+
+test("prepaid material amount must remain a proven nonnegative portion of the original paid amount",()=>{
+ for(const value of [null,"-0.01","not-money","100.01"]){const p=projectCancelled(cancelled("30.00",{expend_pay_money:value}));assert.equal(p.knowledge,"UNKNOWN",String(value));}
+ assert.equal(projectCancelled(cancelled("30.00",{pay_money:"99.00"})).knowledge,"UNKNOWN");
+});
+
+test("full refund exclusion keeps exact typed payment, source party, order number, amount, status and time lineage",()=>{
+ for(const [field,patch]of [
+  ["payment",{order_type:"2"}],["payment",{pay_money:"99.00"}],
+  ["refundRecord",{order_id:"8"}],["refundRecord",{order_sn:"ANOTHER_ORDER"}],["refundRecord",{user_id:"22"}],
+  ["refundRecord",{refund_amount:"99.00"}],["refundRecord",{refund_status:"0"}],["refundRecord",{update_time:"0"}],
+  ["refundLog",{record_id:"99"}],["refundLog",{user_id:"22"}],["refundLog",{refund_amount:"99.00"}],["refundLog",{refund_status:"0"}],["refundLog",{update_time:"9999999999"}],
+ ] as const){const x=cancelled();changeCancelledProof(x,field,patch);assert.equal(projectCancelled(x).knowledge,"UNKNOWN",JSON.stringify([field,patch]));}
+});
+
+test("refund flags or a proof alone cannot replace scoped source receipt, admitted components or original parent binding",()=>{
+ const x=cancelled();if(x.input.origin.kind!=="LEGACY_CANCELLED_UNCONSUMED")assert.fail();
+ assert.equal(projectLegacyGrowthConsumption(x.input,new Set([x.input.origin.components.digest])).reason,"CANCELLATION_SCOPE_UNPROVEN");
+ assert.equal(projectLegacyGrowthConsumption(x.input,new Set(),x.receipt).reason,"COMPONENT_EVIDENCE_NOT_ADMITTED");
+ x.receipt.refundReviewEvidenceRefs=[];assert.equal(projectCancelled(x).reason,"CANCELLATION_NOT_IN_RECEIPT_LINEAGE");
+ const wrong=cancelled();wrong.input.binding.sourceDigest="e".repeat(64);assert.equal(projectCancelled(wrong).knowledge,"UNKNOWN");
+});
