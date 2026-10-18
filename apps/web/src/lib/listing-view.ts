@@ -14,6 +14,8 @@ export type ResourceLine = {
 };
 export type ConditionLine = { key: string; label: string; value: string };
 export type SkinTag = {
+  /** Stable catalog skin id shared by Admin, publish, market, detail, favorites and my-account. */
+  id: string;
   name: string;
   categoryCode: string | null;
   categoryName: string | null;
@@ -50,6 +52,8 @@ export type ListingCardData = {
   skinNames: string[];
   skinLabels: string[];
   skinTags: SkinTag[];
+  /** Declared skins that are still under catalog review; present only when > 0. */
+  skinsWithheld?: number;
   entitlementNames: string[];
   rentalMode?: "ordinary" | "custom" | "fast" | null;
   unitAmountsInformational: boolean;
@@ -278,11 +282,14 @@ function projectListingMedia(listing: PublicListing): ListingMedia[] {
     .sort((a, b) => a.position - b.position)
     .map(({ assetId, url, category }) => ({ assetId, url, ...(category ? { category } : {}) }));
 }
-function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "skinNames" | "skinLabels" | "skinTags"> {
+function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "skinNames" | "skinLabels" | "skinTags" | "skinsWithheld"> {
+  const withheld = listing.presentation.skinsWithheld;
   return {
+    ...(typeof withheld === "number" && Number.isSafeInteger(withheld) && withheld > 0 ? { skinsWithheld: withheld } : {}),
     skinNames: listing.presentation.skins.map((skin) => skin.name),
     skinLabels: listing.presentation.skins.map((skin) => skin.categoryName ? `${skin.categoryName} · ${skin.name}` : skin.name),
     skinTags: listing.presentation.skins.map((skin) => ({
+      id: skin.id,
       name: skin.name,
       categoryCode: skin.categoryCode ?? null,
       categoryName: skin.categoryName ?? null,

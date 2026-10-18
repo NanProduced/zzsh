@@ -46,6 +46,7 @@ import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { readLegacyListing } from "./legacy-listing-read";
+import { publicSkinMediaIdSql, publicSkinOwnerNameSql } from "./catalog";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -803,9 +804,8 @@ export async function quoteListing(
   const skins = (
     await client.query(
       `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.base_name,s.category_id AS category_id,c.code AS category_code,c.name AS category_name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible,
-        CASE WHEN s.owner_kind = 'FIREARM' THEN (SELECT f.name FROM zzsh_supply.firearm f WHERE f.game_id=s.game_id AND f.id=s.firearm_id)
-             ELSE (SELECT o.name FROM zzsh_supply.skin_owner o WHERE o.game_id=s.game_id AND o.kind=s.owner_kind AND o.id=s.owner_id) END AS owner_name,
-        CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=s.media_id AND a.game_id=s.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='SKIN_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN s.media_id ELSE NULL END AS media_id
+        ${publicSkinOwnerNameSql("s")} AS owner_name,
+        ${publicSkinMediaIdSql("s")} AS media_id
         FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE version_id=$1`,
       [v.id],
     )

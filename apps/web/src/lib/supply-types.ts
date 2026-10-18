@@ -75,6 +75,8 @@ export type PublicListing = {
   presentation: {
     items: Array<{ id: string; code?: string; name: string; unit: string }>;
     skins: PublicListingSkin[];
+    /** Migrated accounts only: declared references whose skin is not public yet (count, never names). */
+    skinsWithheld?: number;
     entitlements: Array<{ id: string; name: string }>;
   };
   quote: PublicQuote | null;

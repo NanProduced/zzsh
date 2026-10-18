@@ -106,6 +106,15 @@ function displayTime(value: string | null | undefined): string | null {
   return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(value)).replaceAll("/", "-");
 }
 
+/**
+ * Count-only note for declared skins that are not public right now. The reason
+ * (pending identity, disabled entry, hidden category) is not exposed, so the
+ * note does not claim one.
+ */
+export function withheldSkinsNote(count: number | undefined): string | null {
+  return typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? `另有 ${count} 项已申报皮肤当前未公开展示。` : null;
+}
+
 export function entitlementExpiryLabel(item: { expiresAt: string | null; expiryState: "MISSING" | "PERMANENT" | "TIMED" }, now = Date.now()): string {
   if (item.expiryState === "MISSING") return "期限未提供 · 覆盖范围以个人确认时为准";
   if (item.expiryState === "PERMANENT") return "长期权益 · 不保证覆盖全部租期";
@@ -233,8 +242,9 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
       <section className="account-detail-notes account-owner-section">
         <section aria-labelledby="account-note-title"><h2 id="account-note-title"><FileText size={20} aria-hidden="true" />号主说明</h2><p className="account-owner-note">{data.description || "暂无公开备注。"}</p><p className="account-note-source">资料由号主申报，以公开信息与当次适用条款核对。</p>
           <div className="account-cosmetics"><h3><Shirt size={17} aria-hidden="true" />皮肤与权益</h3>
+            {withheldSkinsNote(data.skinsWithheld) ? <p className="account-note-source">{withheldSkinsNote(data.skinsWithheld)}</p> : null}
             {data.skinTags.length || data.entitlementNames.length ? <>
-              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.name}:${i}`} className="account-skin-card"><SkinMediaThumb mediaId={tag.mediaId ?? null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /><strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong></article>)}</div></section>)}</div>
+              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.id}:${i}`} className="account-skin-card" data-skin-id={tag.id}><SkinMediaThumb mediaId={tag.mediaId ?? null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /><strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong></article>)}</div></section>)}</div>
               <div className="account-entitlement-list">{data.entitlementDetails?.length ? data.entitlementDetails.map(item => <div key={item.id} className="account-entitlement-item"><strong>{item.name}</strong><span>{entitlementExpiryLabel(item)}</span></div>) : data.entitlementNames.map((name, index) => <div key={`${name}:${index}`} className="account-entitlement-item"><strong>{name}</strong><span>权益详情以个人确认时为准</span></div>)}</div>
             </> : <p className="account-empty-note">暂无皮肤或权益的公开申报。</p>}
           </div>

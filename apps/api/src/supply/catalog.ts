@@ -704,6 +704,38 @@ export async function assertPlatformMediaBinding(
 
 export type CatalogFilters = { q?: string; categoryId?: string; rarityCode?: string };
 
+/**
+ * Shared public skin projection. Catalog pages, publish snapshots and legacy
+ * account reads resolve the owner name and the public image the same way:
+ * mediaId is exposed only for an approved, public SKIN_MEDIA platform asset of
+ * the same game that already has a public derivative.
+ */
+export function publicSkinOwnerNameSql(alias: string): string {
+  return `CASE WHEN ${alias}.owner_kind = 'FIREARM' THEN (SELECT f.name FROM zzsh_supply.firearm f WHERE f.game_id=${alias}.game_id AND f.id=${alias}.firearm_id)
+             ELSE (SELECT o.name FROM zzsh_supply.skin_owner o WHERE o.game_id=${alias}.game_id AND o.kind=${alias}.owner_kind AND o.id=${alias}.owner_id) END`;
+}
+/**
+ * Effective public category visibility as a recursive CTE named `visible`: a
+ * category is public only when it and every ancestor are enabled and
+ * form-visible in the given game. The public catalog and legacy account reads
+ * share this one definition.
+ */
+export function publicSkinCategoryCteSql(gameParam: string): string {
+  return `visible AS (
+       SELECT c."id", c."code", c."name", c."parent_id" AS "parentId", c."sort_order" AS "sortOrder"
+         FROM "zzsh_supply"."skin_category" c
+        WHERE c."game_id" = ${gameParam} AND c."enabled" = true AND c."form_visible" = true AND c."parent_id" IS NULL
+       UNION ALL
+       SELECT c."id", c."code", c."name", c."parent_id" AS "parentId", c."sort_order" AS "sortOrder"
+         FROM "zzsh_supply"."skin_category" c
+         JOIN visible p ON c."parent_id" = p."id"
+        WHERE c."game_id" = ${gameParam} AND c."enabled" = true AND c."form_visible" = true
+     )`;
+}
+export function publicSkinMediaIdSql(alias: string): string {
+  return `CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=${alias}.media_id AND a.game_id=${alias}.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='SKIN_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN ${alias}.media_id ELSE NULL END`;
+}
+
 export function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
@@ -774,16 +806,7 @@ export async function readPublicCatalog(
   );
 
   const categories = await client.query(
-    `WITH RECURSIVE visible AS (
-       SELECT c."id", c."code", c."name", c."parent_id" AS "parentId", c."sort_order" AS "sortOrder"
-         FROM "zzsh_supply"."skin_category" c
-        WHERE c."game_id" = $1 AND c."enabled" = true AND c."form_visible" = true AND c."parent_id" IS NULL
-       UNION ALL
-       SELECT c."id", c."code", c."name", c."parent_id" AS "parentId", c."sort_order" AS "sortOrder"
-         FROM "zzsh_supply"."skin_category" c
-         JOIN visible p ON c."parent_id" = p."id"
-        WHERE c."game_id" = $1 AND c."enabled" = true AND c."form_visible" = true
-     )
+    `WITH RECURSIVE ${publicSkinCategoryCteSql("$1")}
      SELECT * FROM visible ORDER BY "sortOrder", "code", "id"`,
     [gameId],
   );
@@ -835,9 +858,8 @@ export async function readPublicCatalog(
   const skins = await client.query(
     `SELECT s."id", s."code", s."name", s."category_id" AS "categoryId", s."rarity_code" AS "rarityCode",
             s."base_name" AS "baseName",
-            CASE WHEN s."owner_kind" = 'FIREARM' THEN (SELECT f."name" FROM zzsh_supply.firearm f WHERE f."game_id"=s."game_id" AND f."id"=s."firearm_id")
-                 ELSE (SELECT o."name" FROM zzsh_supply.skin_owner o WHERE o."game_id"=s."game_id" AND o."kind"=s."owner_kind" AND o."id"=s."owner_id") END AS "ownerName",
-            CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=s.media_id AND a.game_id=s.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='SKIN_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN s."media_id" ELSE NULL END AS "mediaId", s."sort_order" AS "sortOrder"
+            ${publicSkinOwnerNameSql("s")} AS "ownerName",
+            ${publicSkinMediaIdSql("s")} AS "mediaId", s."sort_order" AS "sortOrder"
        FROM "zzsh_supply"."skin" s
       WHERE ${conditions.join(" AND ")}
       ORDER BY s."id"

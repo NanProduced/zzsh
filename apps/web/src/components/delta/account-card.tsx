@@ -556,7 +556,7 @@ export function AccountCard({
                 {data.skinTags.slice(0, 3).map((tag, idx) => {
                   const tone = skinChipTone(tag);
                   return (
-                    <span key={`${tag.name}-${idx}`} className={`account-skin-chip account-skin-chip--${tone}`}>
+                    <span key={`${tag.id}-${idx}`} className={`account-skin-chip account-skin-chip--${tone}`} data-skin-id={tag.id}>
                       {tag.categoryName ? (
                         <span className="skin-chip-cat" style={{ opacity: 0.85, marginRight: "3px" }}>
                           [{tag.categoryName}]
@@ -753,8 +753,9 @@ export function AccountCard({
                 <>
                   {visibleSkins.map((skin, idx) => (
                     <span
-                      key={`${skin.name}-${idx}`}
+                      key={`${skin.id}-${idx}`}
                       className={`account-skin-chip account-skin-chip--${skinChipTone(skin)}`}
+                      data-skin-id={skin.id}
                     >
                       {skin.name}
                     </span>
