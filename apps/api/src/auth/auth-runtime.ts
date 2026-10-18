@@ -41,7 +41,7 @@ import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLega
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
-import { createTradePublicActivityReaders, type TradeActivityBindings } from "../order/public-trade-activity";
+import { createTradePublicActivityReaders, loadTradePublicActivityBindings, type TradeActivityBindings } from "../order/public-trade-activity";
 import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store";
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
@@ -632,6 +632,7 @@ export function loadAuthRuntimeConfig(
   capabilities: AuthRuntimeCapabilities = {},
 ): Omit<AuthRuntimeOptions, "pool"> {
   const creditGuaranteeEnabled = readCreditGuaranteeEnabled(env);
+  const publicTradeActivityBindings = loadTradePublicActivityBindings(env, workingDirectory);
   const apiOrigin = env.AUTH_API_ORIGIN?.trim() || `http://127.0.0.1:${env.PORT?.trim() || "3102"}`;
   const userOrigin = env.AUTH_USER_ORIGIN?.trim() || "http://127.0.0.1:3100";
   const adminOrigin = env.AUTH_ADMIN_ORIGIN?.trim() || "http://127.0.0.1:3101";
@@ -711,6 +712,7 @@ export function loadAuthRuntimeConfig(
     creditGuaranteeEnabled,
     legacyPublicAdmission: loadLegacyPublicAdmission(env, workingDirectory),
     legacyPublicAdmissionManifest: loadLegacyPublicAdmissionManifest(env, workingDirectory),
+    ...(publicTradeActivityBindings === undefined ? {} : { publicTradeActivityBindings }),
     apiOrigin,
     ...(confirmationSecret===undefined?{}:{confirmationKey:{keyId:confirmationKeyId!,secret:confirmationSecret}}),
     ...(listingSecret===undefined?{}:{listingCursorKey:{keyId:listingKeyId!,secret:listingSecret}}),

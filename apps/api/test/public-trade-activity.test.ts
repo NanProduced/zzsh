@@ -1,7 +1,12 @@
 import {test,type TestContext} from "node:test";
 import assert from "node:assert/strict";
 import type {Pool,PoolClient} from "pg";
-import {createTradePublicActivityReaders,legacyActivitySnapshotDigest,type TradeActivityBindings} from "../src/order/public-trade-activity";
+import {createTradePublicActivityReaders,legacyActivitySnapshotDigest,loadTradePublicActivityBindings,type TradeActivityBindings} from "../src/order/public-trade-activity";
+import {createHash} from "node:crypto";
+import {existsSync,mkdtempSync,mkdirSync,writeFileSync,unlinkSync,rmdirSync,symlinkSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join,relative} from "node:path";
+import {loadAuthRuntimeConfig} from "../src/auth/auth-runtime";
 import {PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE,PUBLIC_STANDARD_TIER_GUARD} from "../src/supply/listing-candidates";
 import {SecurityApiError} from "../src/auth/security-core";
 import {sha256Hex} from "../src/supply/supply-util";
@@ -53,4 +58,23 @@ test("coverage query reuses repository builtin sha256 without an unregistered pg
  const queries=p.events.filter(event=>event.sql.includes("public-activity-legacy-coverage"));
  assert.equal(queries.length,2);
  for(const query of queries){assert.doesNotMatch(query.sql,/public\.digest/);assert.match(query.sql,/encode\(sha256\(convert_to\(COALESCE\(string_agg/);assert.match(query.sql,/'UTF8'\)\),'hex'\)/);}
+});
+
+test("reviewed activity bindings reach the real startup assembly without enabling writes or an unreviewed legacy source",t=>{
+ const dir=mkdtempSync(join(tmpdir(),"zzsh-activity-config-"));assert(relative(tmpdir(),dir).startsWith("zzsh-activity-config-"));
+ mkdirSync(join(dir,".secrets"));const file=join(dir,".secrets","activity.json"),outside=join(dir,"outside.json"),oversize=join(dir,".secrets","large.json"),link=join(dir,".secrets","alias"),outsideDir=join(dir,"external");
+ t.after(()=>{if(existsSync(link))unlinkSync(link);for(const p of [file,outside,oversize,join(outsideDir,"activity.json")])if(existsSync(p))unlinkSync(p);if(existsSync(outsideDir))rmdirSync(outsideDir);rmdirSync(join(dir,".secrets"));rmdirSync(dir);});
+ const b=bindings();delete b.legacy;b.resource={database:"zzsh_test_activity",oid:123,runtimeRole:"activity_reader",marker:"FIXTURE_ONLY"};
+ const env:NodeJS.ProcessEnv={APP_PROFILE:"test",NODE_ENV:"development",DB_TARGET:"local-compose",DB_HOST:"127.0.0.1",DB_PORT:"55432",DB_NAME:b.resource.database,DB_USER:b.resource.runtimeRole,AUTH_USER_SECRET:"u".repeat(32),AUTH_ADMIN_SECRET:"a".repeat(32),PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE:".secrets/activity.json"};
+ const store=(value:unknown)=>{const bytes=Buffer.from(JSON.stringify(value));writeFileSync(file,bytes);env.PUBLIC_TRADE_ACTIVITY_BINDINGS_SHA256=createHash("sha256").update(bytes).digest("hex");};store(b);
+ assert.deepEqual(loadTradePublicActivityBindings(env,dir),b);const config=loadAuthRuntimeConfig(env,dir);
+ assert.deepEqual(config.publicTradeActivityBindings,b);assert.equal(config.testOperationsEnabled,false);assert.equal(config.publicTradeActivityBindings?.legacy,undefined);
+ assert.equal(loadTradePublicActivityBindings({},dir),undefined);
+ for(const change of [{APP_PROFILE:"prod"},{NODE_ENV:"production"},{DB_HOST:"remote"},{DB_PORT:"5432"},{DB_NAME:"production"},{PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE:""},{PUBLIC_TRADE_ACTIVITY_BINDINGS_SHA256:undefined}])assert.throws(()=>loadTradePublicActivityBindings({...env,...change},dir),/LOCAL_ONLY/);
+ assert.throws(()=>loadTradePublicActivityBindings({...env,PUBLIC_TRADE_ACTIVITY_BINDINGS_SHA256:"0".repeat(64)},dir),/DIGEST/);
+ assert.throws(()=>loadTradePublicActivityBindings({...env,DB_USER:"wrong_role"},dir),/RESOURCE_MISMATCH/);
+ writeFileSync(outside,JSON.stringify(b));assert.throws(()=>loadTradePublicActivityBindings({...env,PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE:"outside.json"},dir),/PATH/);
+ mkdirSync(outsideDir);writeFileSync(join(outsideDir,"activity.json"),JSON.stringify(b));symlinkSync(outsideDir,link,"junction");assert.throws(()=>loadTradePublicActivityBindings({...env,PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE:".secrets/alias/activity.json"},dir),/PATH/);unlinkSync(link);assert(existsSync(join(outsideDir,"activity.json")));
+ writeFileSync(oversize,Buffer.alloc(8*1024*1024+1));assert.throws(()=>loadTradePublicActivityBindings({...env,PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE:".secrets/large.json"},dir),/SIZE/);
+ for(const value of [null,[],{...b,resource:{...b.resource,marker:true}},{...b,testExclusions:{...b.testExclusions,evidenceRef:true}},{...b,legacy:null}]){store(value);assert.throws(()=>loadTradePublicActivityBindings(env,dir),/BINDINGS_INVALID|LEGACY_COVERAGE_INVALID/);}
 });

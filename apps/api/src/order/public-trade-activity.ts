@@ -1,4 +1,7 @@
 import type {Pool,PoolClient} from "pg";
+import {readFileSync,realpathSync,statSync} from "node:fs";
+import {isAbsolute,relative,resolve} from "node:path";
+import {createHash} from "node:crypto";
 import {withPublicListingSnapshot,readPublishingAccount,readCurrentVersion,readPublicListing,type SupplyGateReader} from "../supply/publishing";
 import {SecurityApiError} from "../auth/security-core";
 import {PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE,PUBLIC_STANDARD_TIER_GUARD} from "../supply/listing-candidates";
@@ -23,10 +26,27 @@ export function legacyActivitySnapshotDigest(rows:readonly {legacyId:string;sour
  return sha256Hex([...rows].sort((a,b)=>a.legacyId<b.legacyId?-1:a.legacyId>b.legacyId?1:0).map(r=>`${r.legacyId}:${r.sourceDigest}:${r.bindingDigest}`).join("\n"));
 }
 function checkedBindings(value:TradeActivityBindings|undefined){
- if(value===undefined)return undefined;const b=structuredClone(value),r=b.resource;
- if(!r || !r.database || !r.runtimeRole || !r.marker || !Number.isSafeInteger(r.oid)||r.oid<=0 || !b.testExclusions?.evidenceRef)throw new Error("PUBLIC_ACTIVITY_BINDINGS_INVALID");
+ if(value===undefined)return undefined;
+ if(value===null||typeof value!=="object"||Array.isArray(value))throw new Error("PUBLIC_ACTIVITY_BINDINGS_INVALID");
+ const b=structuredClone(value),r=b.resource;
+ const text=(v:unknown)=>typeof v==="string"&&v.trim().length>0&&v.length<=2048&&!/[\u0000-\u001f\u007f]/.test(v);
+ if(!r || !text(r.database) || !text(r.runtimeRole) || !text(r.marker) || !Number.isSafeInteger(r.oid)||r.oid<=0 || !text(b.testExclusions?.evidenceRef))throw new Error("PUBLIC_ACTIVITY_BINDINGS_INVALID");
  for(const ids of [b.testExclusions.accountIds,b.testExclusions.nativeOrderIds,b.testExclusions.legacyIds])if(!Array.isArray(ids)||ids.length>10000||new Set(ids).size!==ids.length||ids.some(id=>typeof id!=="string"||!ID.test(id)))throw new Error("PUBLIC_ACTIVITY_TEST_SCOPE_INVALID");
- const l=b.legacy;if(l && (l.sourceSystem!=="legacy_mysql_restore"||l.sourceEntity!=="la_order"||normalizeTime(l.sourceAsOf)!==l.sourceAsOf||!DIGEST.test(l.sourceBatchSha256)||!INTEGER.test(l.snapshotCount)||!DIGEST.test(l.snapshotDigest)||!INTEGER.test(l.isolatedCount)||!DIGEST.test(l.isolatedSetDigest)||!l.evidenceRef))throw new Error("PUBLIC_ACTIVITY_LEGACY_COVERAGE_INVALID");
+ const l=b.legacy;if(l!==undefined && (!l||l.sourceSystem!=="legacy_mysql_restore"||l.sourceEntity!=="la_order"||normalizeTime(l.sourceAsOf)!==l.sourceAsOf||!DIGEST.test(l.sourceBatchSha256)||!INTEGER.test(l.snapshotCount)||!DIGEST.test(l.snapshotDigest)||!INTEGER.test(l.isolatedCount)||!DIGEST.test(l.isolatedSetDigest)||!text(l.evidenceRef)))throw new Error("PUBLIC_ACTIVITY_LEGACY_COVERAGE_INVALID");
+ return b;
+}
+/** Load existing reviewed read inputs at startup; no provider or data scope is inferred. */
+export function loadTradePublicActivityBindings(env:NodeJS.ProcessEnv,workingDirectory:string):TradeActivityBindings|undefined{
+ const file=env.PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE,digest=env.PUBLIC_TRADE_ACTIVITY_BINDINGS_SHA256;
+ if(file===undefined&&digest===undefined)return undefined;
+ // shortcut: local reviewed-file assembly; production needs its own audited source/cohort binding.
+ if(env.APP_PROFILE!=="test"||env.NODE_ENV==="production"||env.DB_TARGET!=="local-compose"||env.DB_HOST!=="127.0.0.1"||env.DB_PORT!=="55432"||!/^zzsh_test_/.test(env.DB_NAME??"")||!env.DB_USER||!file||file.trim()!==file||!DIGEST.test(digest??""))throw new Error("PUBLIC_ACTIVITY_BINDINGS_LOCAL_ONLY");
+ const base=realpathSync(resolve(workingDirectory,".secrets")),target=realpathSync(resolve(workingDirectory,file)),rel=relative(base,target);
+ if(!rel||rel.startsWith("..")||isAbsolute(rel)||!statSync(target).isFile())throw new Error("PUBLIC_ACTIVITY_BINDINGS_PATH");
+ const limit=8*1024*1024;if(statSync(target).size>limit)throw new Error("PUBLIC_ACTIVITY_BINDINGS_SIZE");
+ const bytes=readFileSync(target);if(bytes.length>limit||createHash("sha256").update(bytes).digest("hex")!==digest)throw new Error("PUBLIC_ACTIVITY_BINDINGS_DIGEST");
+ const b=checkedBindings(JSON.parse(bytes.toString("utf8")));
+ if(!b||b.resource.database!==env.DB_NAME||b.resource.runtimeRole!==env.DB_USER)throw new Error("PUBLIC_ACTIVITY_BINDINGS_RESOURCE_MISMATCH");
  return b;
 }
 async function context(client:PoolClient,b:TradeActivityBindings){

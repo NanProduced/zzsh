@@ -4,6 +4,8 @@
 
 `TradeActivityBindings`由现有受审导入manifest和测试cohort清单组成，仅供可信启动装配，不接受HTTP输入。资源tuple须实查相等；测试订单/账号/旧ID按明确清单排除，不凭名称判断。旧来源须有完整cutoff、提取SHA、已映射snapshot数量及按`legacy_id:source_digest:binding_digest`的C排序SHA256、隔离数量/集合摘要与原证据引用；实际目标集合不符即未知。它不新增签名、审批、token、导入或逐单授权体系，也不把marker当完整来源证明。
 
+本地联验启动可显式提供`PUBLIC_TRADE_ACTIVITY_BINDINGS_FILE`与`PUBLIC_TRADE_ACTIVITY_BINDINGS_SHA256`：仅test、非production、本机local-compose/55432及`zzsh_test_*`资源可用，文件须位于运行目录`.secrets`的真实路径内、至多8MiB、原字节SHA一致。启动时校验结构及数据库/角色绑定，读取时仍核实际资源和来源覆盖。未配置时不装配统计来源；配置缺项或错误直接拒绝启动，不退回默认数字。该临时文件接线不等于生产配置或真实指标已验收。
+
 累计口径：原生订单COMPLETED、对应settlement_posting和APPLIED付款；现有CONTROLLED付款全部排除，不冒充真实成交。旧订单须已付、有效旧状态或续办head为4；完成时间取原业务完成时间或真正CONFIRM时间，不取导入日期。原生ID和旧来源tuple分别唯一，隔离与test排除写入scope。缺原完成时点或完整来源时不返回总数。
 
 当前上架口径：正式当前发布版本的公共候选，共享PUBLIC_CANDIDATE与STANDARD谓词，随后调用现有完整`readPublicListing`链复核身份、有效规则、接受/媒体、保证金和共同占用。历史LEGACY_READ_ONLY展示不计当前上架。分页扫描完结才返回精确数量；超过10000候选、门禁UNKNOWN返回未知，不能返回已扫描前缀作为近似数。上架读取独立于旧订单coverage。
