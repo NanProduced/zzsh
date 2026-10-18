@@ -1,4 +1,4 @@
-import type { Money, PublicListing, PublicQuote, PublicCodeLabel, PublicAvailabilityState } from "./supply-types.ts";
+import type { Money, PublicListing, PublicQuote, PublicCodeLabel, PublicAvailabilityState, SkinOwnerKind } from "./supply-types.ts";
 import { canonicalResourceCode, resourceItemDisplayName, resourceUnitLabel } from "./listing-filters.ts";
 
 export type ResourceLine = {
@@ -22,6 +22,9 @@ export type SkinTag = {
   ownerName?: string | null;
   baseName?: string | null;
   mediaId?: string | null;
+  ownerKind?: SkinOwnerKind | null;
+  rarityCode?: string | null;
+  rarityName?: string | null;
 };
 export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
 export type ListingCardData = {
@@ -299,8 +302,25 @@ function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "ski
       ...(skin.ownerName !== undefined ? { ownerName: skin.ownerName ?? null } : {}),
       ...(skin.baseName !== undefined ? { baseName: skin.baseName ?? null } : {}),
       ...(skin.mediaId !== undefined ? { mediaId: skin.mediaId ?? null } : {}),
+      ...(skin.ownerKind !== undefined ? { ownerKind: skin.ownerKind ?? null } : {}),
+      ...(skin.rarityCode !== undefined ? { rarityCode: skin.rarityCode ?? null } : {}),
+      ...(skin.rarityName !== undefined ? { rarityName: skin.rarityName ?? null } : {}),
     })),
   };
+}
+/** User-facing skin type, only from the verified owner kind; never from category, colour or a legacy group. */
+export const SKIN_TYPE_LABELS: Readonly<Record<SkinOwnerKind, string>> = { AGENT: "干员外观", FIREARM: "枪械外观", MELEE_TYPE: "刀具外观" };
+export function skinTypeLabel(kind: unknown): string | null {
+  return typeof kind === "string" && Object.prototype.hasOwnProperty.call(SKIN_TYPE_LABELS, kind) ? SKIN_TYPE_LABELS[kind as SkinOwnerKind] : null;
+}
+/** Official quality label exactly as the server delivered it; unknown stays null (no guessing from code, name or category). */
+export function skinQualityLabel(skin: { rarityName?: string | null }): string | null {
+  const name = typeof skin.rarityName === "string" ? skin.rarityName.trim() : "";
+  return name || null;
+}
+/** Shared "type · quality" facet for every skin surface; null when neither fact is known. */
+export function skinFacetLabel(skin: { ownerKind?: unknown; rarityName?: string | null }): string | null {
+  return [skinTypeLabel(skin.ownerKind), skinQualityLabel(skin)].filter(Boolean).join(" · ") || null;
 }
 function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const history = listing.historicalQuote;

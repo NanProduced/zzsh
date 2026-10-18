@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertCurrentRelease, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
+import { assertCurrentRelease, freezePresentationSkin, quoteListing, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
 import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS } from "../src/supply/delta-rental";
@@ -136,4 +136,32 @@ test("readPresentation fills both missing skin category fields without changing 
   );
 
   assert.deepEqual(result.skins, [{ id: "skin-a", name: "皮肤", categoryName: "审核分类", categoryCode: "current-category" }]);
+});
+
+// SKIN-MODEL-7 A: a new quote/presentation snapshot freezes owner type and official quality
+// (null = not known when frozen). Snapshots written before these keys existed keep them
+// absent: readPresentation may still fill category labels, never type or quality.
+test("SK7 new snapshots freeze owner type and quality; unknown is an explicit null", () => {
+  const row = { id: "skin-a", name: "露娜-黑·天际线", base_name: "黑·天际线", owner_name: "露娜", owner_kind: "AGENT", rarity_code: "q_fixture", rarity_name: "测试品质", media_id: null, category_code: "df_skin_category_agent", category_name: "干员外观" };
+  assert.deepEqual(freezePresentationSkin(row), { id: "skin-a", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", ownerKind: "AGENT", rarityCode: "q_fixture", rarityName: "测试品质", mediaId: null, categoryCode: "df_skin_category_agent", categoryName: "干员外观" });
+  const unknown = freezePresentationSkin({ ...row, owner_kind: null, rarity_code: null, rarity_name: undefined });
+  assert.equal(unknown.ownerKind, null); assert.equal(unknown.rarityCode, null); assert.equal(unknown.rarityName, null);
+  const source = quoteListing.toString();
+  assert.ok(source.includes("s.owner_kind,s.rarity_code,"), "quote reads owner kind and quality code");
+  assert.ok(source.includes("AS rarity_name"), "quote reads the quality name through the shared helper");
+  assert.ok(source.includes("skins.map(freezePresentationSkin)"), "the snapshot uses the single freeze function");
+});
+
+test("SK7 an old snapshot without type or quality stays without them; category labels may still be filled", async () => {
+  const result = await readPresentation(
+    { query: async () => ({ rows: [{ id: "skin-old", categoryCode: "df_skin_category_agent", categoryName: "干员外观", ownerKind: "AGENT", rarityCode: "q_now", rarityName: "当前品质" }] }) } as never,
+    { presentation: { items: [], skins: [{ id: "skin-old", name: "旧快照皮肤" }] } } as never,
+  );
+  assert.deepEqual(result.skins, [{ id: "skin-old", name: "旧快照皮肤", categoryCode: "df_skin_category_agent", categoryName: "干员外观" }]);
+  for (const key of ["ownerKind", "rarityCode", "rarityName"]) assert.equal(Object.hasOwn((result.skins as object[])[0]!, key), false, `${key} is not back-filled from today's catalog`);
+  const frozen = await readPresentation(
+    { query: async () => ({ rows: [{ id: "skin-new", categoryCode: "c", categoryName: "C", rarityName: "当前品质" }] }) } as never,
+    { presentation: { items: [], skins: [{ id: "skin-new", name: "新快照皮肤", ownerKind: "AGENT", rarityCode: null, rarityName: null, categoryCode: "c", categoryName: "C" }] } } as never,
+  );
+  assert.equal((frozen.skins as Array<{ rarityName: unknown }>)[0]!.rarityName, null, "a frozen unknown quality is not upgraded by a later catalog change");
 });

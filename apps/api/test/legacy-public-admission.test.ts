@@ -605,7 +605,7 @@ test("legacy account skins carry the shared public summary and count withheld re
     return base.query(sql);
   } } as unknown as PoolClient;
   const listing = await readLegacyListing(client, "account_1");
-  assert.deepEqual(listing.presentation.skins, [{ id: "skin_luna", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", mediaId: "asset_public", categoryCode: "df_skin_category_agent", categoryName: "干员外观" }]);
+  assert.deepEqual(listing.presentation.skins, [{ id: "skin_luna", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", ownerKind: null, rarityCode: null, rarityName: null, mediaId: "asset_public", categoryCode: "df_skin_category_agent", categoryName: "干员外观" }]);
   assert.equal((listing.presentation as { skinsWithheld?: number }).skinsWithheld, 1);
   assert.equal(JSON.stringify(listing).includes("PENDING_PRIVATE_TOKEN"), false);
   assert.match(seen[0]!, /purpose='SKIN_MEDIA' AND a\.review_state='APPROVED' AND a\.access_class='PUBLIC_DISPLAY' AND a\.public_storage_key IS NOT NULL/);
@@ -662,4 +662,26 @@ test("SK6-R1-04 legacy account skins withhold hidden categories, disabled and cr
     assert.equal(listing.quote, null);
     assert.equal(listing.canCreateOrder, false);
   }
+});
+
+// SKIN-MODEL-7 A: the legacy account's current-catalog summary carries the same owner type and
+// official quality as the public catalog; a missing column or unknown quality stays null.
+test("SK7 legacy account skin summary carries owner type and quality from the shared projection", async () => {
+  const seen: string[] = [];
+  const skinRows = [
+    { id: "skin_a", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", ownerKind: "AGENT", rarityCode: "q_fixture", rarityName: "测试品质", mediaId: null, categoryCode: "df_skin_category_agent", categoryName: "干员外观", visible: true, isPublic: true },
+    { id: "skin_b", name: "露娜-另一外观", baseName: "另一外观", ownerName: "露娜", ownerKind: "AGENT", rarityCode: null, rarityName: null, mediaId: null, categoryCode: "df_skin_category_agent", categoryName: "干员外观", visible: true, isPublic: true },
+    { id: "skin_c", name: "旧数据皮肤", mediaId: null, categoryCode: "df_skin_category_agent_gold", categoryName: "干员金皮（旧分组）", visible: true, isPublic: true },
+  ];
+  const base = legacyProjectionClient(legacyProjectionRow());
+  const client = { query: async (sql: string) => {
+    if (sql.includes("FROM zzsh_supply.listing_skin ls")) { seen.push(sql); return { rows: skinRows, rowCount: skinRows.length }; }
+    return base.query(sql);
+  } } as unknown as PoolClient;
+  const listing = await readLegacyListing(client, "account_1");
+  const byId = new Map(listing.presentation.skins.map((s) => [s.id, s as Record<string, unknown>]));
+  assert.deepEqual([byId.get("skin_a")!.ownerKind, byId.get("skin_a")!.rarityCode, byId.get("skin_a")!.rarityName], ["AGENT", "q_fixture", "测试品质"]);
+  assert.deepEqual([byId.get("skin_b")!.ownerKind, byId.get("skin_b")!.rarityName], ["AGENT", null], "same owner type, different (unknown) quality");
+  assert.deepEqual([byId.get("skin_c")!.ownerKind, byId.get("skin_c")!.rarityCode, byId.get("skin_c")!.rarityName], [null, null, null], "a legacy gold group never becomes a type or quality");
+  assert.match(seen[0]!, /s\.owner_kind AS "ownerKind",s\.rarity_code AS "rarityCode",\(SELECT r\.name FROM zzsh_supply\.skin_rarity r WHERE r\.game_id=s\.game_id AND r\.code=s\.rarity_code\) AS "rarityName"/);
 });

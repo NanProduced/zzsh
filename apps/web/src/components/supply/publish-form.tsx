@@ -1,6 +1,7 @@
 "use client";
 import { FormSelect, FormRadioGroup, Input, IntegerStepper, Textarea, DateTimePicker } from "../ui/form-controls";
 import { SkinMediaThumb } from "./skin-media-thumb";
+import { skinQualityLabel } from "../../lib/listing-view";
 import "./publish-refinement.css";
 
 import Link from "next/link";
@@ -2280,7 +2281,6 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const resourceOrder = ["df_billable_level6_bullet", "df_billable_level6_armor", "df_billable_level6_helmet", "df_billable_awm_bullet", "df_billable_barrett_bullet", "df_billable_top_insure_card", "df_billable_coffee"];
   const resourcePosition = (code: string | null) => { const index = resourceOrder.indexOf(canonicalResourceCode(code) ?? ""); return index < 0 ? resourceOrder.length : index; };
   const resourceRows=[...inventoryRows,...missingResourceRows].sort((a,b)=>resourcePosition(a.code)-resourcePosition(b.code));
-  const rarityNames = new Map((catalog?.rarities ?? []).map((item) => [item.code, item.name]));
   const savedSkinNames = new Map((supply?.version?.presentation?.skins ?? []).map((skin) => [skin.id, skin.name]));
   const skinName = (id: string) => skinNames[id] ?? savedSkinNames.get(id) ?? "目录名称待加载";
   const activeSkinCategory = skinCategory || catalog?.categories[0]?.id || "";
@@ -2552,10 +2552,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </div>
                 <div className={`skin-search-row${catalog?.rarities.length ? "" : " skin-search-row--single"}`}>
                   <Input className="skin-search-input" aria-label="搜索皮肤名称" enterKeyHint="search" value={skinQuery} disabled={formDisabled} onChange={(event) => setSkinQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void loadSkinPage({ q: skinQuery.trim(), categoryId: activeSkinCategory, rarityCode: skinRarity }, false); } }} placeholder="搜索皮肤名称，回车查找" />
-                  {catalog?.rarities.length ? <FormSelect label="皮肤稀有度"
+                  {catalog?.rarities.length ? <FormSelect label="皮肤品质"
                     value={skinRarity}
                     disabled={formDisabled}
-                    placeholder="全部稀有度"
+                    placeholder="全部品质"
                     options={catalog.rarities.map((rarity) => ({ value: rarity.code, label: rarity.name }))}
                     onChange={(val) => {
                       setSkinRarity(val);
@@ -2591,7 +2591,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                         <div className="skin-card-copy">
                           <span className="skin-card-name" title={skin.name}>{skin.name}</span>
                           {skin.ownerName || skin.baseName ? <span className="skin-card-owner" title={[skin.ownerName, skin.baseName].filter(Boolean).join(" · ")}>{[skin.ownerName, skin.baseName].filter(Boolean).join(" · ")}</span> : <span className="skin-card-owner">所属对象待核</span>}
-                          {skin.rarityCode ? <span className="skin-card-rarity">{rarityNames.get(skin.rarityCode) ?? "稀有度待核"}</span> : null}
+                          {skinQualityLabel(skin) ? <span className="skin-card-rarity">{skinQualityLabel(skin)}</span> : null}
                         </div>
                         <input type="checkbox" checked={isSelected} aria-label={`选择 ${skin.name}`} disabled={formDisabled} onChange={() => setDraft((previous) => ({
                           ...previous,

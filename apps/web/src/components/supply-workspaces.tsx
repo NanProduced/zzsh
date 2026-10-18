@@ -20,7 +20,7 @@ import { PersonalInvitations } from "./account/personal-invitations";
 import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
-import { CONDITION_LABELS, conditionLines, haffMillionsLabel, termLabel, unitLabel } from "../lib/listing-view";
+import { CONDITION_LABELS, conditionLines, haffMillionsLabel, skinFacetLabel, termLabel, unitLabel } from "../lib/listing-view";
 import { supplyApi, SupplyRequestError } from "../lib/supply-client";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import type { MySupply } from "../lib/supply-types";
@@ -1120,7 +1120,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
         <details className="supply-block supply-block--fold">
           <summary><strong>皮肤与权益</strong><span>{skins.length} 项皮肤 · {entitlements.length} 项权益</span><ChevronDown size={16} aria-hidden="true" /></summary>
           <div className="supply-fold-body">
-            {skins.length ? <ul className="supply-skin-list">{skins.map((skin, index) => <li key={`${skin.id}-${index}`} data-skin-id={skin.id}><SkinMediaThumb mediaId={skin.mediaId ?? null} className="supply-skin-thumb" fallbackClassName="supply-skin-thumb is-empty" iconSize={16} /><span>{skinCardTitle(skin)}</span>{skin.categoryName ? <small>{skin.categoryName}</small> : null}</li>)}</ul> : null}
+            {skins.length ? <ul className="supply-skin-list">{skins.map((skin, index) => <li key={`${skin.id}-${index}`} data-skin-id={skin.id}><SkinMediaThumb mediaId={skin.mediaId ?? null} className="supply-skin-thumb" fallbackClassName="supply-skin-thumb is-empty" iconSize={16} /><span>{skinCardTitle(skin)}</span>{skinFacetLabel(skin) ? <small>{skinFacetLabel(skin)}</small> : null}</li>)}</ul> : null}
             {entitlements.length ? <ul className="supply-entitlement-list">{entitlements.map((entry, index) => <li key={`${entry.name}-${index}`}><strong>{entry.name}</strong><span>{entry.term}</span></li>)}</ul> : null}
             {!skins.length && !entitlements.length ? <p className="supply-block-empty">还没有申报皮肤或权益。</p> : null}
           </div>

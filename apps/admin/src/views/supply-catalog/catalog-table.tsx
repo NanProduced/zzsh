@@ -222,7 +222,7 @@ export function CatalogObjectTable({
           onValueChange={set}
         />
       );
-    if (key === "rarityCode") return <CellSelect label="稀有度" value={values.rarityCode ?? ""} items={editOptions!.rarityItems} disabled={busy} onValueChange={set} />;
+    if (key === "rarityCode") return <CellSelect label="品质" value={values.rarityCode ?? ""} items={editOptions!.rarityItems} disabled={busy} onValueChange={set} />;
     if (key === "kind") return <CellSelect label="所属对象类型" value={values.ownerKind ?? "AGENT"} items={editOptions!.kindItems} disabled={busy} onValueChange={set} />;
     return null;
   };

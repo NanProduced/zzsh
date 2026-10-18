@@ -1,5 +1,5 @@
 import { beijingCalendarDate } from "../workspace/beijing-time.ts";
-import type { AdminCatalogResponse, CatalogSkin, CatalogSkinOwner } from "../api";
+import type { AdminCatalogResponse, CatalogRarity, CatalogSkin, CatalogSkinOwner } from "../api";
 
 export const skinStates = { LEGACY: "旧词条（LEGACY）", PENDING: "待核草稿（PENDING）", VERIFIED: "身份已核（VERIFIED）" };
 export const ownerKinds = { AGENT: "干员", MELEE_TYPE: "刀型", FIREARM: "枪械" };
@@ -20,6 +20,20 @@ export function skinContractReady(catalog: AdminCatalogResponse | null): boolean
       (s.baseName === null || typeof s.baseName === "string") && (s.sourceNamespace === null || typeof s.sourceNamespace === "string") &&
       (s.ownerRef === null || (s.ownerRef && ["AGENT", "MELEE_TYPE", "FIREARM"].includes(s.ownerRef.kind) && typeof s.ownerRef.id === "string")) &&
       (s.mediaId === null || typeof s.mediaId === "string")));
+}
+
+/**
+ * Quality choices for creating or editing a skin, matching the server guard:
+ * only enabled entries can be newly selected. A disabled entry is listed only
+ * when it is this skin's current binding, so an unrelated edit keeps it as-is.
+ */
+export function rarityOptions(rarities: readonly CatalogRarity[], currentCode: string | null | undefined): Array<{ value: string; label: string }> {
+  const items = [{ value: "", label: "品质未知（不默认）" }];
+  for (const rarity of rarities) {
+    if (rarity.enabled) items.push({ value: rarity.code, label: rarity.name });
+    else if (currentCode && rarity.code === currentCode) items.push({ value: rarity.code, label: `${rarity.name}（已停用，仅保留现有绑定）` });
+  }
+  return items;
 }
 
 export function skinValues(skin?: CatalogSkin): Record<string, string> {

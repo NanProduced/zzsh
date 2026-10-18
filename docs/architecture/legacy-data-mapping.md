@@ -1,6 +1,6 @@
 # 旧数据转换与字段映射
 
-规则版 `1.2.0`（2026-10-18，补充历史比例展示与包赔声明投影）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
+规则版 `1.3.0`（2026-10-19，补充皮肤类型、品质及冻结快照边界）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
 
 ## 共同约束
 
@@ -25,6 +25,7 @@
 | SUP-MODE-009/PRICE-011/TERM-012 | `ratio_type`映ordinary/custom/fast；custom/fast的B只取已证`base_bot`，不反推。历史`price_tenant/extra_goods_total_price_tenant/deposit_amount/rental_days`保原义，不造当前价。 | 当前价须由`zzsh_supply.price_version/price_line`、`term_option`和受审release/政策构成；`saveListingDraft→quoteListing→确认/建单`消费。Web显示服务器报价；Admin规则与双边价。旧四档计价枚举不是新会员产品。 |
 | SUP-DISPLAY-018 | 历史快照中已冻结的哈夫币base数量与该行租金可作展示折算；用整数精确计算、沿既有HALF_UP显示万/元，零租金或缺数量保持未知。 | `historicalQuote.haffRent`只供HAFF_BASE行的展示参考，不用物资合计/押金，不代表已取回原`base_bot`或`ownerRatioB`。不写回源快照/历史单价，不参与报价或结算。当前承接输入未提供逐项物资价，不能外推原MySQL不存在该事实；后续补源仍须证明有效时点，不能拿现行价或合计分摊。 |
 | SUP-CATALOG-013/MEDIA-017 | `la_dict_type/la_dict_data`保资源/皮肤字典身份；`knife_skin/agent_skin/weapon_skin/gold_skin`是持有声明，不等于新skinId。原图URL/path不证明目标asset字节或归属。 | `zzsh_supply.billable_item/skin/listing_skin`分别保存字典和持有关系；媒体须另核sourceRef→`media_asset`→`listing_media`。无图不造URL，私有凭证不作封面；ECS文件迁OSS与数据库字段转换分别验收，发布媒体门禁仍有效。 |
+| SUP-SKIN-019 | 旧红皮/金皮分组只留来源对照，不推导类型或品质。类型由已核所属对象决定；品质只接受同游戏的官方字典，未知保持null。目录配图不证明账号持有，持有仍须来源声明→skinId映射。 | 复用`skin.owner_kind/owner_id/firearm_id/rarity_code`及`skin_owner/firearm/skin_rarity`；公开目录、旧账号公开摘要及双端按同一类型和品质标签显示。新报价快照冻结`ownerKind/rarityCode/rarityName`，旧原生快照不补写这些字段；公开媒体仍经审核、同游戏及分类祖先门禁。新绑/改绑须启用品质，无关编辑可保留原停用品质或清空，不改价格或押金。 |
 | SUP-VIS-014 / SUP-NUM-015 v2 | `status/is_delete/update_time`保冻结来源租态；`no`只作为内部旧号alias，保前导零。公开查看、当前可租、本人本次可交易分开。 | `rental_account.display_no`新发`ZZYYYYMMDDNNNNNN`；`zzsh_supply.account_display_no_counter`按数据库上海日期原子计数，经`next_dated_account_display_no()`与账号同事务持久分配。旧已发AC仅兼容读取/重放，不清号；缺新增能力拒绝新发。旧账号先公开准入集合，其余首次准入时发，原生仍创建时发。用户不回退旧alias，Admin可内部解析，发号不提升资格，见[可见性与编号](account-visibility.md)。 |
 | IO-ORD-01…08 | `la_order.id/order_sn/accounts_id/sale_user_id/user_id`及金额、状态、原时间分别核绑定；`order_sn`原单号与账号canonical号独立。 | `zzsh_order.legacy_order_read_snapshot`保存来源、双方、金额和时间；不伪造原生付款。统一列表/历史详情与Admin订单读按角色授权；不可读账号不泄旧号/当前私有标题，见[用户旧单](user-legacy-orders.md)。 |
 | IO-CONT-01…07 | 原订单实耗参数、退款/暂扣及多态分销来源按原规则和证据计算；calc provenance、输入与结果血缘分列。 | `zzsh_order.legacy_continuation_evidence/version`及head，结果不覆盖原快照；续办命令绑定同版计划/身份/权限，处置delta不清既有金额，版本/责任/CAS/幂等/审计同事务，见[旧单续办](legacy-trade-continuation.md)。 |

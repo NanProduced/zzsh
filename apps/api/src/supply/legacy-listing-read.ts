@@ -12,7 +12,7 @@ import type { ListingQueryV2 } from "./listing-filter-contract";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { publicAccountNumber } from "./account-number";
-import { publicSkinCategoryCteSql, publicSkinMediaIdSql, publicSkinOwnerNameSql } from "./catalog";
+import { publicSkinCategoryCteSql, publicSkinMediaIdSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 
 export type LegacyReadSnapshot = {
   schema: "legacy-listing-read-v1";
@@ -260,8 +260,8 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   // category and every ancestor public. Any other declared reference (pending
   // identity, disabled, hidden category) is withheld by count only; its name, id
   // and image never leave the server.
-  const declaredSkins=(await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`WITH RECURSIVE ${publicSkinCategoryCteSql("$2")}
-    SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",${publicSkinMediaIdSql("s")} AS "mediaId",
+  const declaredSkins=(await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;ownerKind:string|null;rarityCode:string|null;rarityName:string|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`WITH RECURSIVE ${publicSkinCategoryCteSql("$2")}
+    SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMediaIdSql("s")} AS "mediaId",
     c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND s.category_id IN (SELECT "id" FROM visible)) AS "isPublic"
     FROM zzsh_supply.listing_skin ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
     WHERE ls.version_id=$1 ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[r.version_id,r.game_id])).rows;
@@ -286,7 +286,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     ...(extra ? {rentalMode:extra.rentalMode,displaySchema:extra.schema} : {}),
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:resources.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),
-    presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(x=>({id:x.id,name:x.name,baseName:x.baseName??null,ownerName:x.ownerName??null,mediaId:x.mediaId??null,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})})),...(skinsWithheld>0?{skinsWithheld}:{}),entitlements:[]},
+    presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(x=>({id:x.id,name:x.name,baseName:x.baseName??null,ownerName:x.ownerName??null,ownerKind:x.ownerKind??null,rarityCode:x.rarityCode??null,rarityName:x.rarityName??null,mediaId:x.mediaId??null,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})})),...(skinsWithheld>0?{skinsWithheld}:{}),entitlements:[]},
     media:media.map(m=>({assetId:m.assetId,position:m.position,url:`/api/v1/supply/listings/${r.id}/media/${m.assetId}`})),publishedAt:null};
 }
 
