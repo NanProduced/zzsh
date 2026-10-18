@@ -76,7 +76,7 @@ function isZeroMoney(value: string): boolean {
 function CopyableAccountNumber({ displayNo, compact = false }: { displayNo: string | null; compact?: boolean }) {
   const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
   const number = displayNo?.trim() || null;
-  if (!number) return <span className={`account-card-number account-card-number--missing${compact ? " account-card-number--compact" : ""}`}>账号编号暂未提供</span>;
+  if (!number) return <span className={`account-card-number account-card-number--missing${compact ? " account-card-number--compact" : ""}`}>账号编号待分配</span>;
   const copy = async (event: ReactMouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -135,7 +135,7 @@ export function composeGridTitle(
     return { haff, rest: parts.join(" · ") };
   }
 
-  const rawTitle = data.historicalReadOnly ? (data.title?.trim() || "历史资料待核实") : (data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号"));
+  const rawTitle = data.historicalReadOnly ? (data.title?.trim() || "账号资料待补充") : (data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号"));
   if (!haffQuantityText) {
     return { haff: null, rest: rawTitle };
   }
@@ -488,10 +488,10 @@ export function AccountCard({
                 ) : null}
               </Link>
             </div>
-            <div className="account-list-subline-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "历史记录 · 不可下单"}{data.sourceAvailabilityLabel ? ` · ${data.sourceAvailabilityLabel}` : ""}</span> : null}
+            <div className="account-list-subline-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "暂不可租"}</span> : null}
               {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
               <p className="account-list-subline">{sublineContent}</p>
-              {data.historicalReadOnly ? null : <CopyableAccountNumber displayNo={data.displayNo} compact />}
+              <CopyableAccountNumber displayNo={data.displayNo} compact />
             </div>
           </div>
 
@@ -580,7 +580,7 @@ export function AccountCard({
           <div className="account-list-rail">
             <div className="account-list-finance">
               <div className="finance-row">
-                <span className="finance-label">{data.historicalReadOnly ? "历史租金" : readOnly ? "公开租金参考" : "租金"}</span>
+                <span className="finance-label">{data.historicalReadOnly ? "租金记录" : readOnly ? "公开租金参考" : "租金"}</span>
                 <span className={`finance-val ${moneyValue(data.haffRentLabel, "无租金") === "待确认" ? "finance-val--unconfirmed" : ""}`}>
                   {moneyValue(data.haffRentLabel, "无租金")}
                 </span>
@@ -598,7 +598,7 @@ export function AccountCard({
                 </span>
               </div>
               <div className="finance-total-row">
-                <span className="finance-total-label">{data.historicalReadOnly ? "来源资源费用" : readOnly ? "公开资源费用参考" : "总价"}</span>
+                <span className="finance-total-label">{data.historicalReadOnly ? "资源费用记录" : readOnly ? "公开资源费用参考" : "总价"}</span>
                 <strong
                   className={`finance-total-val ${
                     !readOnly && !isPayableConfirmed ? "finance-total-val--unconfirmed" : ""
@@ -735,9 +735,9 @@ export function AccountCard({
                 </strong>
               </Link>
             </div>
-            <div className="account-card-meta-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "历史记录 · 不可下单"}{data.sourceAvailabilityLabel ? ` · ${data.sourceAvailabilityLabel}` : ""}</span> : null}
+            <div className="account-card-meta-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "暂不可租"}</span> : null}
               {isFastMode ? <span className="account-card-deal-tag">特惠</span> : null}
-              {data.historicalReadOnly ? null : <CopyableAccountNumber displayNo={data.displayNo} compact />}
+              <CopyableAccountNumber displayNo={data.displayNo} compact />
             </div>
 
             {gridAttrs.length > 0 ? (
@@ -817,7 +817,7 @@ export function AccountCard({
                 </div>
               </div>
               <div className="breakdown-total-row">
-                <span className="breakdown-total-label">{data.historicalReadOnly ? "来源资源费用" : readOnly ? "公开资源费用参考" : "合计"}</span>
+                <span className="breakdown-total-label">{data.historicalReadOnly ? "资源费用记录" : readOnly ? "公开资源费用参考" : "合计"}</span>
                 <strong
                   className={`breakdown-total-val ${
                     !readOnly && !isPayableConfirmed ? "breakdown-total-val--unconfirmed" : ""

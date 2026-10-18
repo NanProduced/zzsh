@@ -1,5 +1,5 @@
 import { AlertCircle, LockKeyhole, RefreshCw } from "lucide-react";
-import { type Order, OrderRequestError, type OrderParty, type OrderStatus, type OrderStatusFilter } from "@/lib/order-client";
+import { formatOrderTime, type Order, OrderRequestError, type OrderParty, type OrderStatus, type OrderStatusFilter } from "@/lib/order-client";
 
 export const STATUS_LABELS: Record<OrderStatus, string> = {
   PENDING_PAYMENT: "待支付",
@@ -80,6 +80,13 @@ export function termText(value: string | null | undefined): string {
   if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
   if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
   return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+/** Native orders use their frozen term; legacy orders expose only the actual source deadline, never an inferred duration. */
+export function orderTermLabel(order: Pick<Order, "termSeconds" | "orderFacts">): string {
+  if (order.termSeconds) return `约定租期 ${termText(order.termSeconds)}`;
+  const deadline = order.orderFacts?.rentalDeadlineAt;
+  return deadline ? `租赁截止 ${formatOrderTime(deadline, { timeZoneName: false })}` : "约定租期 待确认";
 }
 
 export function OrderError({ error, first, onRetry, onLogin, onReauthorize, label }: { error: OrderRequestError; first: boolean; onRetry: () => void; onLogin: () => void; onReauthorize?: () => void; label?: string }) {

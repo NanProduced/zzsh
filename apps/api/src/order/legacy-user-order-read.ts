@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { invalid, notFound } from "../supply/supply-util";
 import { centsToYuan } from "./order";
 import { publicAccountNumber } from "../supply/account-number";
-import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { legacyContinuationReady, legacyEpochTimestamp, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
 export type LegacyUserOrderFilter = {
   party: "renter" | "owner";
@@ -30,7 +30,12 @@ export function parseLegacyUserOrderQuery(query: URLSearchParams): LegacyUserOrd
   return { party, page, pageSize, ...(status === null ? {} : { status }), ...(accountId === null ? {} : { accountId }) };
 }
 
-export type LegacyUserOrderRow = {
+type LegacyOrderResourceRow = {
+  expendHaff?: string | null; awmBulletNum?: string | null; level6BulletNum?: string | null;
+  level6HelmetNum?: string | null; level6ArmorNum?: string | null; topInsureCardNum?: string | null;
+  barrettBulletNum?: string | null; coffeeNum?: string | null; rentalDeadlineSource?: string | null;
+};
+export type LegacyUserOrderRow = LegacyOrderResourceRow & {
   id: string; displayNo: string; sourceOrderStatus: number; sourcePayStatus: number; continuationStage?: number | null;
   ownerUserId: string; renterUserId: string; gameId: string; title: string | null;
   accountId: string; accountDisplayNo: string | null; accountReadable: boolean;
@@ -38,6 +43,25 @@ export type LegacyUserOrderRow = {
   dueCents: string | null; paidCents: string | null; depositCents: string | null;
   goodsYuan: string | null; itemsYuan: string | null; refundYuan: string | null;
 };
+const RESOURCE_FIELDS = [
+  ["expendHaff", "df_billable_haff", null],
+  ["awmBulletNum", "df_billable_awm_bullet", null],
+  ["level6BulletNum", "df_billable_level6_bullet", null],
+  ["level6HelmetNum", "df_billable_level6_helmet", null],
+  ["level6ArmorNum", "df_billable_level6_armor", null],
+  ["topInsureCardNum", "df_billable_top_insure_card", "DAY"],
+  ["barrettBulletNum", "df_billable_barrett_bullet", null],
+  ["coffeeNum", "df_billable_coffee", null],
+] as const;
+export function legacyUserOrderResources(row: LegacyOrderResourceRow) {
+  return RESOURCE_FIELDS.flatMap(([field, code, unit]) => {
+    const quantity = row[field];
+    if (quantity === null || quantity === undefined) return [];
+    if (field === "expendHaff") legacyMoneyCents(quantity);
+    else if (!/^(0|[1-9]\d{0,23})$/.test(quantity)) throw invalid("Legacy order resource quantity is invalid", field);
+    return [{ code, quantity, unit }];
+  });
+}
 const money = (value: string | null) => value === null ? null : centsToYuan(value);
 export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) {
   const party = row.renterUserId === userId ? "renter" : row.ownerUserId === userId ? "owner" : null;
@@ -53,6 +77,7 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) 
     payment: { state: state.paymentState, recordedAt: row.paidAt, recordedAmount: paid },
     legacyAmounts: { required: money(row.dueCents), paid, deposit: money(row.depositCents), refund: money(legacyMoneyCents(row.refundYuan)), refundChannelState: "UNKNOWN" as const },
     account: { id: row.accountReadable ? row.accountId : null, displayNo: row.accountReadable ? publicAccountNumber(row.accountDisplayNo) : null, readable: row.accountReadable },
+    orderFacts: { resources: legacyUserOrderResources(row), rentalDeadlineAt: legacyEpochTimestamp(row.rentalDeadlineSource) },
     readOnly: true as const, paymentOpen: false as const, cancelOpen: false as const, continuationCount: 0 as const, actions: [] as never[],
   };
 }
@@ -63,7 +88,10 @@ export function legacyUserOrderFields(continuationReady: boolean): string { retu
  l.account_id AS "accountId",a.display_no AS "accountDisplayNo",COALESCE(a.owner_user_id=$1,false) AS "accountReadable",
  ${utc("l.source_created_at")} AS "createdAt",${utc("l.source_paid_at")} AS "paidAt",${utc("l.source_cancelled_at")} AS "cancelledAt",${utc(continuationReady ? `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)` : "l.source_completed_at")} AS "completedAt",
  l.due_amount_cents::text AS "dueCents",l.recorded_paid_amount_cents::text AS "paidCents",l.deposit_amount_cents::text AS "depositCents",
- l.source_snapshot->>'goods_money' AS "goodsYuan",l.source_snapshot->>'expend_pay_money' AS "itemsYuan",l.source_snapshot->>'return_order_money' AS "refundYuan"`; }
+ l.source_snapshot->>'goods_money' AS "goodsYuan",l.source_snapshot->>'expend_pay_money' AS "itemsYuan",l.source_snapshot->>'return_order_money' AS "refundYuan",
+ l.source_snapshot->>'expend_haff' AS "expendHaff",l.source_snapshot->>'awm_bullet_num' AS "awmBulletNum",l.source_snapshot->>'level6_bullet_num' AS "level6BulletNum",
+ l.source_snapshot->>'level6_helmet_num' AS "level6HelmetNum",l.source_snapshot->>'level6_armor_num' AS "level6ArmorNum",l.source_snapshot->>'top_insure_card_num' AS "topInsureCardNum",
+ l.source_snapshot->>'barrett_bullet_num' AS "barrettBulletNum",l.source_snapshot->>'coffee_num' AS "coffeeNum",l.source_snapshot->>'tenancy_deadline' AS "rentalDeadlineSource"`; }
 export function legacyUserOrderFrom(continuationReady: boolean): string { return `FROM zzsh_order.legacy_order_read_snapshot l LEFT JOIN zzsh_supply.rental_account a ON a.id=l.account_id
  ${continuationReady ? `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL` : `LEFT JOIN (SELECT NULL::text AS order_id,NULL::int AS stage) h ON h.order_id=l.id`}
  LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id`; }

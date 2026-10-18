@@ -176,7 +176,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
     { label: "上号方式", value: value("login_method_code"), icon: LogIn },
     { label: "配合上号", value: value("service_window"), icon: Clock3, note: "北京时间" },
     { label: "每日消耗", value: value("daily_consumption"), icon: Coins },
-    { label: data.historicalReadOnly ? "来源租期" : "推算租期", value: data.termLabel, icon: CalendarDays },
+    { label: data.historicalReadOnly ? "租期记录" : "推算租期", value: data.termLabel, icon: CalendarDays },
   ];
   const displayedAt = data.historicalReadOnly ? data.sourceUpdatedAt : data.publishedAt;
   const published = displayTime(displayedAt);
@@ -190,7 +190,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
         <h1 className="account-detail-title">{titleParts.haff ? <><strong className="account-title-haff account-title-part">{titleParts.haff}</strong>{titleParts.rest ? <span className="account-title-separator"> · </span> : null}</> : null}{titleParts.rest.split(" · ").map((part, index) => <span key={index}>{index > 0 ? <span className="account-title-separator"> · </span> : null}<span className="account-title-part">{part}</span></span>)}</h1>
         {fast ? <span className="account-detail-deal"><Zap size={14} aria-hidden="true" />特惠 · 极速出租</span> : null}
         <div className="account-identity">
-          <div className="account-number-row"><span>账号编号</span><strong>{number ?? "未提供"}</strong>
+          <div className="account-number-row"><span>账号编号</span><strong>{number ?? "待分配"}</strong>
             <button type="button" className="account-copy" disabled={!number} onClick={() => void copyNumber()} aria-label="复制账号编号">{copyState?.number === number && copyState.ok ? <Check size={16} /> : <Copy size={16} />}<span>复制</span></button>
           </div>
           <div className="account-published"><Clock3 size={15} aria-hidden="true" />{published ? <time dateTime={displayedAt!}>{data.historicalReadOnly ? "来源更新时间" : "发布时间"} {published}</time> : <span>{data.historicalReadOnly ? "来源时间未提供" : "发布时间未提供"}</span>}</div>
@@ -201,13 +201,12 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
       </section>
       <aside className="account-quote" aria-label="租赁报价">
         {data.historicalReadOnly ? <>
-          <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />来源资源费用 · 历史只读</h2></div>
-          <p className="account-readonly-badge">历史来源记录 · 不支持在线租赁</p>
-          {data.availabilityLabel && data.availabilityState !== "LEGACY_READ_ONLY" ? <p role="status">{data.availabilityLabel}</p> : null}
-          {data.sourceAvailabilityLabel ? <p>{data.sourceAvailabilityLabel}；这不是今天的占用结论。</p> : null}
+          <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />资源费用记录</h2></div>
+          <p className="account-readonly-badge">暂不可租</p>
+          {data.sourceAvailabilityLabel ? <p>{data.sourceAvailabilityLabel}，不代表当前租态。</p> : null}
           <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
-          <dl className="account-fee-lines"><div><dt>历史哈夫币租金</dt><dd>{moneyValue(data.haffRentLabel)}</dd></div><div><dt>历史物资预付</dt><dd>{moneyValue(data.itemResourceTotalLabel)}</dd></div><div><dt>历史押金</dt><dd>{moneyValue(data.depositLabel)}</dd></div></dl>
-          <p className="detail-stage-note account-readonly">这笔费用来自历史来源记录，不是当前本人应付。</p>
+          <dl className="account-fee-lines"><div><dt>哈夫币租金记录</dt><dd>{moneyValue(data.haffRentLabel)}</dd></div><div><dt>物资预付记录</dt><dd>{moneyValue(data.itemResourceTotalLabel)}</dd></div><div><dt>押金记录</dt><dd>{moneyValue(data.depositLabel)}</dd></div></dl>
+          <p className="detail-stage-note account-readonly">这些费用来自历史记录，不是当前报价；当前不能创建新订单。</p>
           <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回账号市场</Link>
          </> : data.canCreateOrder === false ? <>
            <div className="account-quote-head"><h2><ReceiptText size={20} aria-hidden="true" />公开版本资源费用参考</h2></div>
@@ -295,7 +294,7 @@ function DetailView({ accountId }: { accountId: string }) {
   const title = "账号详情";
   const description = "";
   const breadcrumbs = detailBreadcrumbs(state.status === "ready" ? state.data.gameName : null);
-  return <ServiceShell surface="detail" contextLabel={null} breadcrumbs={breadcrumbs} title={title} description={description} backHref={back.href} backLabel={back.label} showPageHeading={false} headingInContent={current.status === "ready"} searchLabel="在公开目录中搜索账号名称" searchInputLabel="搜索账号名称" searchPlaceholder="搜索其他账号名称">
+  return <ServiceShell surface="detail" contextLabel={null} breadcrumbs={breadcrumbs} title={title} description={description} backHref={back.href} backLabel={back.label} showPageHeading={false} headingInContent={current.status === "ready"} searchLabel="在公开目录中搜索账号编号或关键词" searchInputLabel="搜索账号编号或关键词" searchPlaceholder="搜索其他账号编号或关键词">
     {current.status === "loading" ? <div className="detail-skeleton" aria-busy="true" aria-label="正在加载账号详情">
       <div className="detail-skeleton-hero" aria-hidden="true">
         <div className="detail-skeleton-gallery" />

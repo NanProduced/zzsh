@@ -441,7 +441,7 @@ test("the detail keeps the base order visible when the settlement read is not as
 
 test("one list includes both sources and old deep links return to the same filtered list", async () => {
   const calls = [];
-  const old = { ...legacyOrder, id: orderA.id };
+  const old = { ...legacyOrder, id: orderA.id, orderFacts: { resources: [{ code: "df_billable_level6_bullet", quantity: "60", unit: null }, { code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" }], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" } };
   const probe = await createProbe(async (input, init) => {
     const url=String(input);calls.push({url,init});
     if(url.includes("/api/orders/legacy/"+orderA.id))return Response.json({order:old});
@@ -453,12 +453,17 @@ test("one list includes both sources and old deep links return to the same filte
     await probe.render({status:"PAID",accountId:"acct_9"});
     assert.equal(probe.host.querySelectorAll(".order-row").length,2);
     assert.doesNotMatch(probe.host.textContent,/历史订单|当前订单|旧平台|新平台|统一入口尚未完成/);
+    assert.match(probe.host.textContent,/订单资源：六级子弹 60 · 顶级保险卡 7 天/);
+    assert.match(probe.host.textContent,/租赁截止/);
     const links=[...probe.host.querySelectorAll("a[data-order-id]")];
     assert.equal(new Set(links.map(a=>a.dataset.orderKey)).size,2);
     assert.ok(links.some(a=>a.href.includes("source=legacy")));
     await probe.render({status:"PAID",accountId:"acct_9",orderId:orderA.id,source:"legacy"});
     assert.match(probe.host.textContent,/可办理事项以本单核定结果为准/);
-    assert.doesNotMatch(probe.host.textContent,/历史|旧平台|新平台/);
+    assert.match(probe.host.textContent,/不是原账号标题/);
+    assert.match(probe.host.textContent,/保险按天/);
+    assert.match(probe.host.textContent,/租赁截止/);
+    assert.doesNotMatch(probe.host.textContent,/历史|旧平台|新平台|旧单记录/);
     const back=[...probe.host.querySelectorAll("a")].find(a=>a.textContent==="返回订单列表");
     assert.equal(back.getAttribute("href"),"/account?view=rentals&status=PAID&accountId=acct_9");
     assert.equal(calls.filter(c=>c.url.endsWith("/api/orders/"+orderA.id)).length,0);

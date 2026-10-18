@@ -6,7 +6,7 @@ import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, Me
 import { formatOrderMoney, formatOrderTime as timeText, type Order, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
 import { unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
-import { OrderError, OrderStatusBadge, orderUrl, statusLabel, termText } from "@/components/order/order-presentation";
+import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
 import "./order.css";
 
 type DetailState = { status: "loading" } | { status: "ready"; order: Order | null; error: OrderRequestError | null } | { status: "error"; error: OrderRequestError | null };
@@ -246,7 +246,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
           <span className="order-detail-no">订单 {order.displayNo ?? "待确认"}<CopyOrderNo value={order.displayNo} /></span>
           {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
           <span>下单 {timeText(order.createdAt)}</span>
-          <span>约定租期 {termText(order.termSeconds)}</span>
+          <span>{orderTermLabel(order)}</span>
         </p>
         <div className="order-detail-status">
           <OrderStatusBadge order={order} />

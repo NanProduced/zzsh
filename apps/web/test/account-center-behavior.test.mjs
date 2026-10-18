@@ -95,6 +95,7 @@ function loadCenter(session) {
       child._compile(typescript.transpileModule(fs.readFileSync(file, "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
       return child.exports;
     }
+    if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
     if (name === "@/lib/membership-client") return requireFromTree(path.join(tree, "apps/web/src/lib/membership-client.ts"));
     if (name === "@/lib/membership-growth-client") {
       const MockGrowthError = class MembershipGrowthRequestError extends Error {
@@ -227,7 +228,9 @@ const orderA = { id: "order_A", displayNo: "A-001", title: "PRIVATE_ORDER_A", st
 const orderB = { id: "order_B", displayNo: "B-001", title: "PRIVATE_ORDER_B", status: "PAID" };
 
 for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read shows ${mode} records with safe detail links and native-only tasks`, async () => {
-  const old = { ...orderA, id: "same-id", title: "SYNTHETIC_OLD", source: { origin: "LEGACY", statusLabel: "历史待支付" }, readOnly: true, paymentOpen: false, cancelOpen: false };
+  const old = { ...orderA, id: "same-id", title: "SYNTHETIC_OLD", source: { origin: "LEGACY", statusLabel: "历史待支付" }, readOnly: true, paymentOpen: false, cancelOpen: false,
+    payment: { state: "RECORDED_UNPAID" }, legacyAmounts: { required: { currency: "CNY", amount: "66.00" }, paid: null, deposit: { currency: "CNY", amount: "0.00" }, refund: null },
+    orderFacts: { resources: [{ code: "df_billable_level6_bullet", quantity: "60", unit: null }, { code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" }], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" } };
   const native = { ...orderA, id: "same-id", title: "SYNTHETIC_NATIVE", source: { origin: "NATIVE" }, readOnly: false };
   const items = mode === "legacy" ? [old] : mode === "native" ? [native] : [old, native];
   const calls = [];
@@ -244,13 +247,18 @@ for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read sh
     assert.deepEqual(reads.map(url => url.searchParams.get("party")).sort(), ["owner", "renter"]);
     const card = probe.host.querySelector("[data-testid=order-summary-renter]");
     assert.equal(card.querySelectorAll(".account-order-row").length, items.length);assert.doesNotMatch(card.textContent, /暂无租入记录/);
-    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.title));
+    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.source?.origin === "LEGACY" ? "订单资源：六级子弹 60 · 顶级保险卡 7 天" : item.title));
     const links = [...card.querySelectorAll(".account-order-row")].map(node => new URL(node.href));
     assert.deepEqual(links.map(url => url.searchParams.get("source")), items.map(item => item.readOnly ? "legacy" : null));
     assert.ok(links.every(url => url.searchParams.get("orderId") === "same-id" && url.searchParams.get("view") === "rentals"));
     assert.match(card.textContent, /还有更多订单/);
     assert.equal(probe.host.querySelectorAll(".account-pending-row").length, mode === "legacy" ? 0 : 1);
-    if (mode !== "native") assert.match(card.textContent, /历史待支付/);
+    if (mode !== "native") {
+      assert.match(card.textContent, /历史待支付/);
+      assert.match(card.textContent, /租赁截止/);
+      assert.match(card.textContent, /订单应付 66.00 元/);
+      assert.match(card.textContent, /押金 0.00 元/);
+    }
   } finally { await probe.dispose(); }
 });
 

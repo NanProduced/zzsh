@@ -29,6 +29,9 @@ export type OrderAmounts = {
   currency?: string;
 };
 
+export type LegacyOrderResource = { code: string; quantity: string; unit: "DAY" | null };
+export type LegacyOrderFacts = { resources: LegacyOrderResource[]; rentalDeadlineAt: string | null };
+
 export type FulfillmentAssignment = {
   state?: string | null;
   waitingReason?: string | null;
@@ -48,6 +51,8 @@ export type Order = {
   accountId?: string | null;
   versionId?: string | null;
   title?: string | null;
+  account?: LegacyOrder["account"];
+  orderFacts?: LegacyOrderFacts;
   termSeconds?: string | null;
   amounts?: OrderAmounts | null;
   createdAt?: string | null;
@@ -72,6 +77,7 @@ export type LegacyOrder = {
   payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
   legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; refund: Money | null; refundChannelState: "UNKNOWN" };
   account: { id: string | null; displayNo: string | null; readable: boolean };
+  orderFacts?: LegacyOrderFacts;
   readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];
 };
 export type LegacyOrderPage = { items: LegacyOrder[]; page: number; pageSize: number; total: number };

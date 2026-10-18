@@ -3,10 +3,10 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type LegacyOrder, type LegacyOrderPage, type OrderParty, type OrderStatusFilter } from "@/lib/order-client";
-import { orderUrl } from "@/components/order/order-presentation";
+import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
-import { orderAccountTitle } from "@/lib/order-display";
+import { orderAccountTitle, orderAmountFacts, orderUsesResourceSummary } from "@/lib/order-display";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
   const q = new URLSearchParams({ view: party === "owner" ? "leased" : "rentals", source: "legacy", page: String(page) });
@@ -43,12 +43,15 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   if (!current || current.loading) return <p role="status" aria-busy="true">正在读取订单…</p>;
   if (current.error || !current.data) return <section role="alert" className="order-error-block"><h2>订单暂不可用</h2><p>{current.error}</p><button className="button secondary" onClick={() => setReload(n => n + 1)}>重试读取</button></section>;
   const data = current.data;
-  const notice = <p className="order-muted">原付款与金额记录保留；可办理事项以本单核定结果为准。应退金额不代表已到账。</p>;
+  const notice = <p className="order-muted">金额按订单记录展示；可办理事项以本单核定结果为准，应退金额不代表已到账。</p>;
   if ("items" in data) return <section className="order-detail-view">
-    <header className="account-module-heading"><div><h2>{party === "owner" ? "出租" : "租入"}订单</h2><p>只读记录</p></div><button className="button secondary" onClick={() => setReload(n => n + 1)}>刷新</button></header>
+    <header className="account-module-heading"><div><h2>{party === "owner" ? "出租" : "租入"}订单</h2><p>查看订单进展与金额记录。</p></div><button className="button secondary" onClick={() => setReload(n => n + 1)}>刷新</button></header>
     {notice}
     <div className="account-module-card">
-      {data.items.length ? <ul className="legacy-order-list">{data.items.map(row => <li key={row.id}><Link href={legacyOrderHref(party, page, row.id, accountId)}><strong>{row.displayNo || "订单号暂未提供"}</strong><span>{orderAccountTitle(row)}</span><span>{row.source.statusLabel || "状态待确认"}</span><time>{formatOrderTime(row.createdAt)}</time></Link></li>)}</ul> : <p>暂无订单记录。</p>}
+      {data.items.length ? <ul className="legacy-order-list">{data.items.map(row => {
+        const facts = orderAmountFacts(row, party);
+        return <li key={row.id}><Link href={legacyOrderHref(party, page, row.id, accountId)}><strong>{row.displayNo || "订单号暂未提供"}<small> · {facts.caption} {facts.main}</small></strong><span>{orderAccountTitle(row)}</span><span>{row.source.statusLabel || "状态待确认"} · {orderTermLabel(row)}</span><time>{formatOrderTime(row.createdAt)}</time></Link></li>;
+      })}</ul> : <p>暂无订单记录。</p>}
       <nav className="order-trade-actions" aria-label="订单分页">
         {page > 1 ? <Link className="button secondary" href={legacyOrderHref(party, page - 1, undefined, accountId)}>上一页</Link> : null}
         <span>第 {page} 页 · 共 {data.total} 条</span>
@@ -58,9 +61,10 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   </section>;
   return <section className="order-detail-view">
     <Link href={orderUrl(party, status, accountId)} scroll={false}>返回订单列表</Link>
-    <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
+    <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><p>{orderTermLabel(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
+    {orderUsesResourceSummary(data) ? <p className="order-muted">账号摘要按本单资源记录整理，不是原账号标题；数量沿原订单单位，保险按天。</p> : null}
     {notice}
-    <section className="account-module-card"><h3>金额记录</h3>{party === "owner" ? <p className="order-muted">以下是订单记载金额，不代表号主结算收入。</p> : null}<dl className="order-facts">
+    <section className="account-module-card"><h3>金额记录</h3>{party === "owner" ? <p className="order-muted">以下是租客订单金额，不是号主结算收入。</p> : null}<dl className="order-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts.required)}</dd></div>
       <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts.paid)}</dd></div>
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts.deposit)}</dd></div>

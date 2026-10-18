@@ -210,8 +210,8 @@ export function previewListingCard(listing: PublicListing): { ok: true; card: Li
   }
 }
 export function publicAvailabilityLabel(state: PublicAvailabilityState): string | null {
-  return ({ RENTABLE: null, PENDING_PAYMENT: "待付款占用 · 不可下单", RENTED: "已租用 · 不可下单", OCCUPIED: "暂不可租 · 不可下单",
-    OFFLINE: "已下架 · 不可下单", UNKNOWN: "资格待确认 · 不可下单", UNAVAILABLE: "暂不可租 · 不可下单", LEGACY_READ_ONLY: "旧平台上架数据 · 暂不可自助下单" })[state] ?? "状态待确认 · 不可下单";
+  return ({ RENTABLE: null, PENDING_PAYMENT: "待付款 · 暂不可租", RENTED: "已出租", OCCUPIED: "暂不可租",
+    OFFLINE: "已下架", UNKNOWN: "暂不可租", UNAVAILABLE: "暂不可租", LEGACY_READ_ONLY: "暂不可租" })[state] ?? "暂不可租";
 }
 function listingVisibility(listing: PublicListing) {
   const historical = listing.source === "LEGACY_READ_ONLY";
@@ -220,7 +220,7 @@ function listingVisibility(listing: PublicListing) {
   if (listing.canCreateOrder === true && !canCreateOrder) throw new Error("Inconsistent public availability");
   const source = listing.sourceAvailability?.state;
   return { canCreateOrder, availabilityState: state, availabilityLabel: publicAvailabilityLabel(state),
-    sourceAvailabilityLabel: source ? ({ LISTED: "来源时点上架", OFFLINE: "已下架", RENTED: "已出租", PENDING_PAYMENT: "待支付占位", UNKNOWN: "来源状态待核" })[source] : null };
+    sourceAvailabilityLabel: source ? ({ LISTED: "来源状态为上架", OFFLINE: "来源状态为下架", RENTED: "来源状态为已出租", PENDING_PAYMENT: "来源状态为待付款", UNKNOWN: "来源状态待确认" })[source] : null };
 }
 
 export function toListingCard(listing: PublicListing): ListingCardData {
@@ -299,21 +299,27 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
   const items = new Map(listing.presentation.items.map(item => [item.id, item]));
   const subtotal = BigInt(history.haffRent.amount.replace(".", "")) + BigInt(history.goods.amount.replace(".", ""));
   const media = projectListingMedia(listing);
+  const resourceLines: ResourceLine[] = listing.inventory.map(line => ({
+    itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
+    quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
+    unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: null, costLabel: null, unitPriceLabel: null,
+  }));
+  const conditions = conditionLines(listing.attributes, listing);
+  const haff = resourceLines.find(line => line.unitLabel === "哈夫币");
+  const structuredTitle = [haff ? `${haff.quantityLabel} 哈夫币` : null,
+    ...["safe_box_code", "grading_code", "character_level"].map(key => conditions.find(line => line.key === key)?.value),
+  ].filter(Boolean).join(" · ");
   return {
     ...listingVisibility(listing),
-    historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title?.trim() || "历史资料待核实",
+    historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title?.trim() || structuredTitle || "账号资料待补充",
     imageUrl: media[0]?.url,
-    media, resourceLines: listing.inventory.map(line => ({
-      itemId: line.itemId, code: items.get(line.itemId)?.code ?? null, name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
-      quantity: line.quantity ?? "", quantityLabel: line.quantity === null ? "未确认" : quantityLabel(line.unit, line.quantity, items.get(line.itemId)?.code, "1"),
-      unitLabel: resourceUnitLabel(line.unit, items.get(line.itemId)?.code), costAmount: null, costLabel: null, unitPriceLabel: null,
-    })),
+    media, resourceLines,
     resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,
     haffRentLabel: formatMoneyLabel(history.haffRent), itemResourceTotalLabel: formatMoneyLabel(history.goods),
     depositLabel: formatMoneyLabel(history.deposit),
     payableTotalLabel: null,
     termLabel: `${history.termDays} 天`, termOptionLabel: listing.termOption?.displayName ?? null,
-    conditionLines: conditionLines(listing.attributes, listing), loginMethod: listing.attributeDisplay?.loginMethod ?? null,
+    conditionLines: conditions, loginMethod: listing.attributeDisplay?.loginMethod ?? null,
     ...projectListingSkins(listing), entitlementNames: [], rentalMode: listing.rentalMode ?? null, unitAmountsInformational: false,
   };
 }

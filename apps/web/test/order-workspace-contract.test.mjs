@@ -36,9 +36,9 @@ test("the order list states each party's own money basis and never invents it", 
     assert.match(presentation, new RegExp(status));
   }
   assert.match(list, /expiredAwaitingCancel/);
-  assert.match(list, /ownerTotal/);
+  assert.match(display, /ownerTotal/);
   assert.match(list, /renterName/);
-  assert.match(list, /号主报价暂不可用/);
+  assert.match(display, /号主报价暂不可用/);
   assert.match(list, /page \? "刷新失败"/);
   assert.match(list, /已加载/);
   assert.match(list, /data-order-id/);

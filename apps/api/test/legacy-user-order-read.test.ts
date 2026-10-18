@@ -80,3 +80,23 @@ test("unreadable legacy accounts expose neither old nor canonical account number
  assert.equal(visible.account.displayNo,'AC0000000001');assert.equal(visible.title,'本人资料');
  const old=projectUserLegacyOrder({...row,accountReadable:true},'owner');assert.equal(old.account.displayNo,null);
 });
+
+test("immutable order facts fill summary inputs without current private data or inferred terms",()=>{
+ const result=projectUserLegacyOrder({...row,title:"PRIVATE_CURRENT_ACCOUNT_TITLE",expendHaff:"12.50",awmBulletNum:"3",level6BulletNum:"60",level6HelmetNum:null,level6ArmorNum:"0",topInsureCardNum:"7",barrettBulletNum:"2",coffeeNum:"1",rentalDeadlineSource:"1760000000"},"renter");
+ assert.deepEqual(result.orderFacts.resources,[
+  {code:"df_billable_haff",quantity:"12.50",unit:null},
+  {code:"df_billable_awm_bullet",quantity:"3",unit:null},
+  {code:"df_billable_level6_bullet",quantity:"60",unit:null},
+  {code:"df_billable_level6_armor",quantity:"0",unit:null},
+  {code:"df_billable_top_insure_card",quantity:"7",unit:"DAY"},
+  {code:"df_billable_barrett_bullet",quantity:"2",unit:null},
+  {code:"df_billable_coffee",quantity:"1",unit:null},
+ ]);
+ assert.equal(result.orderFacts.rentalDeadlineAt,"2025-10-09T08:53:20.000Z");
+ assert.equal(Object.hasOwn(result,"termSeconds"),false);
+ assert.equal(result.title,"账号资料暂未提供");
+ assert.ok(!JSON.stringify(result).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
+ assert.ok(!JSON.stringify(result).includes("OLD-ACCOUNT"));
+ const empty=projectUserLegacyOrder(row,"renter");assert.deepEqual(empty.orderFacts,{resources:[],rentalDeadlineAt:null});
+ assert.throws(()=>projectUserLegacyOrder({...row,level6BulletNum:"not-a-quantity"},"renter"),(e:unknown)=>(e as {status:number}).status===400);
+});

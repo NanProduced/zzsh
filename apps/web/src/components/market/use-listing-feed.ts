@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  exactAccountLookupQuery,
   ListingRequestBudgetError,
   listingFilterKey,
   listingQuery,
@@ -107,6 +108,14 @@ export function useListingFeed(
       const requestedCursors: Array<string | null> = [];
       let incomplete = false;
       try {
+        const lookupNumber = exactAccountLookupQuery(filters.q);
+        if (lookupNumber) {
+          const listing = await supplyApi.lookupListing(lookupNumber, filters.game, controller.signal);
+          if (controller.signal.aborted || mine !== sequence.current) return;
+          if (replayKey) completedReplay.current = { filterKey, attempt };
+          commit({ ...EMPTY, status: "ready", items: [listing], requestedCursors: [null] });
+          return;
+        }
         for (let index = 0; index < desired.length; index += 1) {
           const cursor = desired[index] ?? null;
           if (requestedCursors.includes(cursor)) {
@@ -138,7 +147,7 @@ export function useListingFeed(
           nextCursor,
           requestedCursors,
           error: errorInfo(error),
-          cursorInvalid: invalidCursor(error, requestedCursors.at(-1) ?? desired[requestedCursors.length] ?? null),
+          cursorInvalid: exactAccountLookupQuery(filters.q) ? false : invalidCursor(error, requestedCursors.at(-1) ?? desired[requestedCursors.length] ?? null),
           resumeIncomplete: incomplete,
           scanBudgetReached,
         });

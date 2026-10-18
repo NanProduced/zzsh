@@ -503,12 +503,6 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
   .market-skin-panel-content { grid-template-columns:110px minmax(0,1fr) 210px; }
 }
 
-.market-number-lookup { margin-block:24px; color:var(--color-text-primary); }
-.market-number-lookup form { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
-.market-number-lookup input { flex:1; min-width:140px; min-height:44px; padding:10px 12px; border:1px solid var(--color-border-strong); border-radius:6px; background:var(--color-bg-canvas); color:var(--color-text-primary); }
-.market-number-lookup input:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
-.market-number-lookup > p { margin-block:10px; color:var(--color-text-secondary); line-height:1.6; }
-.market-number-result { margin-block:14px; }
 .rental-confirm { display: grid; gap: 9px; width: 100%; max-width: 520px; padding: 13px 14px; border: 1px solid var(--color-border-subtle); border-radius: 8px; background: var(--color-bg-surface); }
 .rental-confirm-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .rental-confirm-head strong { color: var(--color-text-primary); font-size: 13px; }

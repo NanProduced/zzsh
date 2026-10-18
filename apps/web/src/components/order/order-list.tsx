@@ -3,10 +3,9 @@
 import Link from "next/link";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { AlertCircle, ChevronRight, Info, RefreshCw } from "lucide-react";
-import { orderItemKey, formatOrderMoney, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
-import { groupedInteger, unitLabel } from "@/lib/order-display";
-import { paymentEntryOpen, orderAccountTitle } from "@/lib/order-display";
-import { OrderError, OrderStatusBadge, orderUrl, STATUS_LABELS, termText } from "@/components/order/order-presentation";
+import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
+import { groupedInteger, orderAccountTitle, orderAmountFacts, paymentEntryOpen, unitLabel } from "@/lib/order-display";
+import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
 import "./order.css";
 
 export type OrderListState = {
@@ -84,42 +83,10 @@ function statusHint(order: Order): string | null {
   return "状态以服务端记录为准";
 }
 
-/**
- * The money column names what the figure actually is for this row's state. A closed order never
- * reads as an unpaid bill and a settled one never reads as still payable; the numbers themselves
- * are still the server's order snapshot, never recomputed here.
- */
-function amountFacts(order: Order, party: OrderParty): { main: string; caption: string; secondary: string[] } {
-  if (order.readOnly && order.source?.origin === "LEGACY") {
-    if (party === "owner") return { main: "待确认", caption: "结算收入待确认", secondary: [] };
-    const paid = order.payment?.state === "RECORDED_PAID";
-    return { main: formatOrderMoney(paid ? order.legacyAmounts?.paid : order.legacyAmounts?.required), caption: paid ? "已付金额记录" : "订单应付", secondary: [] };
-  }
-  const amounts = order.amounts;
-  const settled = order.status === "COMPLETED";
-  if (party === "owner") {
-    // The owner is quoted at listing time; what the renter actually pays is a different number
-    // (rental discounts apply), so a row never carries the other side's figure.
-    const quote = order.quote?.ownerTotal;
-    return quote
-      ? { main: formatOrderMoney(quote), caption: "下单时号主报价", secondary: [] }
-      : { main: "待确认", caption: "号主报价暂不可用", secondary: [] };
-  }
-  const caption = order.status === "PENDING_PAYMENT" ? "待支付"
-    : order.status === "PAID" ? "已支付"
-    : settled ? "实付 · 下单快照"
-    : "下单金额";
-  return {
-    main: formatOrderMoney(amounts?.totalDue),
-    caption,
-    secondary: [`租赁 ${formatOrderMoney(amounts?.rental)}`, `押金 ${formatOrderMoney(amounts?.deposit)}`],
-  };
-}
-
 function ListRow({ party, order, status, accountId, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
-  const facts = amountFacts(order, party);
+  const facts = orderAmountFacts(order, party);
   const hint = statusHint(order);
-  const resources = resourceSummary(order);
+  const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order);
   // Only the renter, and only while the server still offers the payment entry, is invited to pay.
   const pending = party === "renter" && paymentEntryOpen(order);
   return <li className="order-row" data-order-status={order.status}>
@@ -132,7 +99,7 @@ function ListRow({ party, order, status, accountId, onOpen }: { party: OrderPart
         <span aria-hidden="true">·</span>
         <span>{shortTime(order.createdAt)}</span>
         <span aria-hidden="true">·</span>
-        <span>约定租期 {termText(order.termSeconds)}</span>
+        <span>{orderTermLabel(order)}</span>
       </p>
       {party === "owner" && !order.readOnly ? <p className="order-row-meta">租客：{order.renterName ?? "暂不显示"}</p> : null}
     </div>

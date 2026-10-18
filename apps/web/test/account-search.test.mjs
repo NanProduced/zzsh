@@ -1,12 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { searchAccounts } from '../src/lib/account-search.ts';
+import { accountSearchHref, exactAccountLookupQuery } from '../src/lib/account-search.ts';
 
-test('loaded-account search handles names, IDs, normalization and literal input', () => {
-  const accounts = [{ id:'DELTA-A', title:'三角洲 资源账号' }, { id:'delta-b', title:'特殊 [账号]' }];
-  assert.equal(searchAccounts(accounts, '  '), accounts);
-  assert.deepEqual(searchAccounts(accounts, 'ｄｅｌｔａ－Ａ 三角洲'), [accounts[0]]);
-  assert.deepEqual(searchAccounts(accounts, '[账号]'), [accounts[1]]);
-  assert.deepEqual(searchAccounts(accounts, '三角洲 不存在'), []);
-  assert.deepEqual(searchAccounts([], 'DELTA-A'), []);
+test('number-shaped searches stay on exact lookup while ordinary text remains a keyword query', () => {
+  for (const value of ['AC0000000001', 'ＡＣ0000000001', 'AC123', '0000123', 'account_c6c6a7af', 'ac0000000001']) {
+    assert.equal(exactAccountLookupQuery(value), value.normalize('NFKC'));
+  }
+  for (const value of ['三角洲账号', '60M 哈夫币', 'AC 0000000001', '[账号]', '咖啡']) {
+    assert.equal(exactAccountLookupQuery(value), null);
+  }
+  assert.equal(exactAccountLookupQuery('  '), null);
+});
+
+test('all header entries navigate to the same normalized market URL', () => {
+  assert.equal(accountSearchHref('  ＡＣ0000000001  '), '/accounts?q=AC0000000001');
+  assert.equal(accountSearchHref('  60M   哈夫币  '), `/accounts?q=${encodeURIComponent('60M 哈夫币')}`);
+  assert.equal(accountSearchHref('  '), '/accounts');
 });

@@ -679,12 +679,12 @@ test("historical account detail renders saved display facts and refreshes its li
     assert.match(p.host.textContent, /编号待分配.*扩展资料尚待接入/);
     assert.doesNotMatch(p.host.textContent, /SOURCE-9/);
     await p.render("accounts", "history-1");
-    assert.match(p.host.textContent, /历史属性与资源/);
+    assert.match(p.host.textContent, /属性与资源记录/);
     assert.match(p.host.textContent, /微信扫码/);
     assert.match(p.host.textContent, /0 M 哈夫币/);
     assert.match(p.host.textContent, /咖啡豆：数量待核/);
     assert.match(p.host.textContent, /不替代当前资料申报、报价或可租资格/);
-    assert.match(p.host.textContent, /部分历史属性未提供或尚待核实/);
+    assert.match(p.host.textContent, /部分属性未提供或尚待核实/);
     await p.render("accounts");
     assert.match(p.host.textContent, /历史资料已读取/);
     assert.match(p.host.textContent, /AC0000000019/);

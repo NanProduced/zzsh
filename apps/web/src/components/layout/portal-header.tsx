@@ -44,7 +44,7 @@ function SessionEntry() {
 }
 
 // Adapted from Aceternity Resizable Navbar; keep the search mounted across states.
-export function PortalHeader({ query, onQueryChange, onSearch, home=true, searchLabel = "搜索当前账号", searchInputLabel = "搜索账号编号或名称", searchPlaceholder = "搜索当前展示账号", searchCompactPlaceholder = "搜索账号或关键字..." }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean; searchLabel?: string; searchInputLabel?: string; searchPlaceholder?: string; searchCompactPlaceholder?: string }) {
+export function PortalHeader({ query, onQueryChange, onSearch, home=true, searchLabel = "搜索公开账号", searchInputLabel = "搜索账号编号或关键词", searchPlaceholder = "搜索账号编号或关键词", searchCompactPlaceholder = "搜索账号或关键字..." }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean; searchLabel?: string; searchInputLabel?: string; searchPlaceholder?: string; searchCompactPlaceholder?: string }) {
   const { scrollY } = useScroll();
   const [reducedMotion,setReducedMotion]=useState(true);
   const [scrollPosition, setScrollPosition] = useState(0);

@@ -1,4 +1,5 @@
-import type { Order, LegacyOrder, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import { formatOrderMoney } from "./order-client.ts";
+import type { Order, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 export function personalMembershipLabel(quote:PersonalRentalQuote):string {
   const b=quote.membershipBenefits;
@@ -19,10 +20,74 @@ export function paymentEntryOpen(order: Order): boolean {
   return order.paymentOpen ?? (order.status === "PENDING_PAYMENT" && !order.expiredAwaitingCancel);
 }
 
+const LEGACY_RESOURCE_NAMES: Record<string, string> = {
+  df_billable_haff: "哈夫币",
+  df_billable_awm_bullet: "AWM子弹",
+  df_billable_level6_bullet: "六级子弹",
+  df_billable_level6_helmet: "六级头盔",
+  df_billable_level6_armor: "六级护甲",
+  df_billable_top_insure_card: "顶级保险卡",
+  df_billable_barrett_bullet: "巴雷特子弹",
+  df_billable_coffee: "咖啡",
+};
+
+/** A natural order summary from frozen order facts; no current account title or legacy alias is consulted. */
+export function orderResourceSummary(order: Pick<Order, "orderFacts">, limit = 3): string | null {
+  const labels = (order.orderFacts?.resources ?? []).flatMap((resource) => {
+    const name = LEGACY_RESOURCE_NAMES[resource.code];
+    if (!name || /^0+(?:\.0+)?$/.test(resource.quantity)) return [];
+    const unit = resource.unit === "DAY" ? " 天" : "";
+    return [`${name} ${resource.quantity}${unit}`];
+  });
+  return labels.length ? labels.slice(0, Math.max(1, limit)).join(" · ") : null;
+}
+
+export function orderUsesResourceSummary(order: Pick<Order, "source" | "title" | "account" | "orderFacts">): boolean {
+  return order.source?.origin === "LEGACY" && !(order.account?.readable && order.title?.trim()) && orderResourceSummary(order) !== null;
+}
+
 /** Historical participation is not permission to view the account's current private facts. */
-export function orderAccountTitle(order: Pick<Order, "source" | "title"> & { account?: LegacyOrder["account"] }): string {
-  if (order.source?.origin === "LEGACY" && !order.account?.readable) return "账号资料暂未提供";
+export function orderAccountTitle(order: Pick<Order, "source" | "title" | "account" | "orderFacts">): string {
+  if (order.source?.origin === "LEGACY") {
+    if (order.account?.readable && order.title?.trim()) return order.title.trim();
+    const summary = orderResourceSummary(order);
+    return summary ? `订单资源：${summary}` : "账号资料暂未提供";
+  }
   return order.title?.trim() || "账号信息暂不可用";
+}
+
+export type OrderAmountFacts = { main: string; caption: string; secondary: string[] };
+
+/** The main amount is the renter's actual order record; an owner view never relabels it as owner income. */
+export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFacts {
+  if (order.readOnly && order.source?.origin === "LEGACY") {
+    const paid = order.payment?.state === "RECORDED_PAID";
+    return {
+      main: formatOrderMoney(paid ? order.legacyAmounts?.paid : order.legacyAmounts?.required),
+      caption: party === "owner" ? (paid ? "租客实付记录" : "租客应付") : (paid ? "已付金额记录" : "订单应付"),
+      secondary: [
+        ...(order.legacyAmounts?.deposit ? [`押金 ${formatOrderMoney(order.legacyAmounts.deposit)}`] : []),
+        ...(order.legacyAmounts?.refund ? [`应退责任 ${formatOrderMoney(order.legacyAmounts.refund)}`] : []),
+      ],
+    };
+  }
+  const amounts = order.amounts;
+  const settled = order.status === "COMPLETED";
+  if (party === "owner") {
+    const quote = order.quote?.ownerTotal;
+    return quote
+      ? { main: formatOrderMoney(quote), caption: "下单时号主报价", secondary: [] }
+      : { main: "待确认", caption: "号主报价暂不可用", secondary: [] };
+  }
+  const caption = order.status === "PENDING_PAYMENT" ? "待支付"
+    : order.status === "PAID" ? "已支付"
+    : settled ? "实付 · 下单快照"
+    : "下单金额";
+  return {
+    main: formatOrderMoney(amounts?.totalDue),
+    caption,
+    secondary: [`租赁 ${formatOrderMoney(amounts?.rental)}`, `押金 ${formatOrderMoney(amounts?.deposit)}`],
+  };
 }
 
 export function cancelEntryOpen(order: Order): boolean {

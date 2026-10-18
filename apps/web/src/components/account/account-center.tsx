@@ -24,7 +24,8 @@ import { MembershipGrowthRequestError, readMyMembershipGrowth, type GrowthTier, 
 import { readMyCredit, CreditRequestError, type CreditOverview, type CreditGuarantee } from "@/lib/credit-guarantee-client";
 import { readMyWallet, walletMoney, WalletRequestError, type WalletRead } from "@/lib/personal-wallet-client";
 import { formatOrderTime, orderApi, orderItemKey, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
-import { orderUrl } from "@/components/order/order-presentation";
+import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
+import { orderAccountTitle, orderAmountFacts } from "@/lib/order-display";
 import { EntitlementBadge, formatScopeName, GrowthMemberCardArt, GROWTH_TIER_LABELS, MembershipCenterView } from "./membership-center";
 import { NicknameEditEntry } from "./nickname-edit";
 import type { SecurityNicknameDraft, SecurityPendingWrite } from "./account-security-controls";
@@ -800,13 +801,17 @@ export function OrderSummaryCard({
           <div className="account-recent-orders-list">
             {items.map((order) => {
               const orderHref = orderUrl(party, "", undefined, order.id, order.source?.origin);
+              const facts = orderAmountFacts(order, party);
               return (
                 <Link key={orderItemKey(order)} className="account-order-row" href={orderHref} scroll={false}>
                   <div className="account-order-row-main">
-                    <strong className="account-order-row-title">{order.title ?? "账号信息暂不可用"}</strong>
+                    <strong className="account-order-row-title">{orderAccountTitle(order)}</strong>
                     <div className="account-order-row-meta">
                       {order.displayNo ? <span>单号 {order.displayNo}</span> : null}
                       {order.createdAt ? <time dateTime={order.createdAt} title={formatOrderTime(order.createdAt)} aria-label={formatOrderTime(order.createdAt)}>{summaryOrderTime(order.createdAt)}</time> : null}
+                      <span>{orderTermLabel(order)}</span>
+                      <span>{facts.caption} {facts.main}</span>
+                      {facts.secondary.map((line) => <span key={line}>{line}</span>)}
                     </div>
                   </div>
                   <div className="account-order-row-end">

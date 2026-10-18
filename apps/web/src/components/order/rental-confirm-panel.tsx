@@ -304,7 +304,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
   const dockPrice = reference ? <span className="rental-dock-price"><span>{priceQuote ? "本次应付" : pendingLabel ?? "参考费用 · 押金另核"}</span><strong>{priceQuote ? moneyText(priceQuote.quote.tenantPayableTotal) : pendingLabel ? "—" : reference.total}</strong></span> : null;
   const renderStage = () => {
     if (!versionId || !releaseId || !gameId) {
-      return <p className="detail-stage-note">该账号当前缺少可确认的发布依据；历史只读信息暂不支持在线租赁。</p>;
+      return <p className="detail-stage-note">当前缺少可确认的发布依据，暂不能创建订单。</p>;
     }
 
     if (stage.kind === "idle") return <div className="rental-confirm" data-stage="idle">

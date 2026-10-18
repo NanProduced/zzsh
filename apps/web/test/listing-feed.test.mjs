@@ -595,3 +595,146 @@ test("a cursor can exceed the BFF budget without retrying the next page forever"
   await act(async () => latestFeed.loadMore());
   assert.deepEqual(calls, [null]);
 });
+
+class LookupError extends Error {
+  constructor(status) {
+    super(`HTTP ${status}`);
+    this.status = status;
+    this.code = "LOOKUP_ERROR";
+    this.details = [];
+  }
+}
+
+async function lookupProbe(lookupListing, initialQuery = "AC0000000001") {
+  const { Window } = require("happy-dom");
+  const React = require("react");
+  const { act, createElement, useState } = React;
+  const browser = new Window({ url: "http://127.0.0.1:4320/accounts" });
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    HTMLElement: globalThis.HTMLElement,
+    Node: globalThis.Node,
+    Event: globalThis.Event,
+    navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+    IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT,
+  };
+  Object.assign(globalThis, {
+    window: browser,
+    document: browser.document,
+    HTMLElement: browser.HTMLElement,
+    Node: browser.Node,
+    Event: browser.Event,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+  const calls = { lookup: [], market: [] };
+  const supplyApi = {
+    lookupListing: async (...args) => {
+      calls.lookup.push(args);
+      return lookupListing(...args);
+    },
+    market: async (query) => {
+      calls.market.push(query);
+      return { items: [{ id: "keyword-account" }], nextCursor: null, scanBudgetReached: false };
+    },
+  };
+  const { useListingFeed } = loadSource(path.join(repoRoot, "apps/web/src/components/market/use-listing-feed.ts"), {
+    react: React,
+    "@/lib/listing-filters": loadSource(path.join(repoRoot, "apps/web/src/lib/listing-filters.ts")),
+    "@/lib/listing-feed-utils": loadSource(path.join(repoRoot, "apps/web/src/lib/listing-feed-utils.ts")),
+    "@/lib/supply-client": { supplyApi, SupplyRequestError: LookupError },
+  });
+  const filters = {
+    game: "game-a", q: initialQuery, filters: {}, sort: "latest", direction: "DESC",
+    limit: 20, cursor: null, coreItemId: null, viewMode: "list",
+  };
+  const host = browser.document.createElement("div");
+  browser.document.body.append(host);
+  const root = require("react-dom/client").createRoot(host);
+  let latestFeed;
+  let updateFilters;
+  function Consumer() {
+    const [current, update] = useState(filters);
+    updateFilters = update;
+    latestFeed = useListingFeed(current, null, { enabled: true });
+    return createElement("output", null, `${latestFeed.status}:${latestFeed.items.map((item) => item.id).join(",")}:${latestFeed.error?.status ?? ""}`);
+  }
+  await act(async () => root.render(createElement(Consumer)));
+  return {
+    calls,
+    get feed() { return latestFeed; },
+    async waitFor(text) {
+      for (let attempt = 0; attempt < 100 && host.textContent !== text; attempt += 1) {
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+      }
+      assert.equal(host.textContent, text);
+    },
+    async setQuery(query) {
+      await act(async () => updateFilters({ ...filters, q: query }));
+    },
+    async close() {
+      await act(async () => root.unmount());
+      browser.happyDOM.abort();
+      for (const [key, value] of Object.entries(previous)) {
+        if (key === "navigator") continue;
+        if (value === undefined) delete globalThis[key];
+        else globalThis[key] = value;
+      }
+      if (previous.navigator) Object.defineProperty(globalThis, "navigator", previous.navigator);
+      else delete globalThis.navigator;
+    },
+  };
+}
+
+test("exact lookup covers rentable, rented, pending-payment and ordinary-offline public details", async () => {
+  for (const state of ["RENTABLE", "RENTED", "PENDING_PAYMENT", "OFFLINE"]) {
+    const probe = await lookupProbe(async (number) => ({ id: `account-${state}`, displayNo: number, availability: { state } }));
+    try {
+      await probe.waitFor(`ready:account-${state}:`);
+      assert.equal(probe.feed.items[0].availability.state, state);
+      assert.equal(probe.feed.nextCursor, null);
+      assert.equal(probe.calls.market.length, 0);
+      assert.deepEqual(probe.calls.lookup.map((call) => [call[0], call[1]]), [["AC0000000001", "game-a"]]);
+    } finally {
+      await probe.close();
+    }
+  }
+});
+
+test("invalid, missing and ambiguous exact lookups clear the previous card without keyword fallback", async () => {
+  for (const status of [400, 404, 409]) {
+    let reject = false;
+    const probe = await lookupProbe(async () => {
+      if (reject) throw new LookupError(status);
+      return { id: "previous-account" };
+    });
+    try {
+      await probe.waitFor("ready:previous-account:");
+      reject = true;
+      await probe.setQuery(status === 400 ? "0000123" : "AC0000000002");
+      await probe.waitFor(`error::${status}`);
+      assert.deepEqual(probe.feed.items, []);
+      assert.equal(probe.calls.market.length, 0);
+      assert.equal(probe.calls.lookup.at(-1)[0], status === 400 ? "0000123" : "AC0000000002");
+    } finally {
+      await probe.close();
+    }
+  }
+});
+
+test("a late exact result cannot replace a newer keyword query", async () => {
+  const pending = [];
+  const probe = await lookupProbe((number, game, signal) => new Promise((resolve) => pending.push({ resolve, signal })));
+  try {
+    await probe.setQuery("咖啡");
+    await probe.waitFor("ready:keyword-account:");
+    assert.equal(pending[0].signal.aborted, true);
+    pending[0].resolve({ id: "stale-account" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(probe.feed.items[0].id, "keyword-account");
+    assert.equal(probe.calls.market.length, 1);
+  } finally {
+    await probe.close();
+  }
+});

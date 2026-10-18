@@ -116,3 +116,40 @@ test("consumption rows read opening, remaining and consumed from the server proj
   assert.deepEqual(bare.map((row) => row.remaining), [null, null]);
   assert.deepEqual(display.consumptionRows(order, null, version), []);
 });
+
+test("frozen legacy order resources form a labelled summary without a private title or unit conversion", () => {
+  const order = {
+    source: { origin: "LEGACY" }, account: { readable: false }, title: "PRIVATE_CURRENT_ACCOUNT_TITLE",
+    orderFacts: { resources: [
+      { code: "df_billable_haff", quantity: "12.50", unit: null },
+      { code: "df_billable_level6_bullet", quantity: "60", unit: null },
+      { code: "df_billable_level6_armor", quantity: "0", unit: null },
+      { code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" },
+      { code: "df_billable_coffee", quantity: "1", unit: null },
+    ], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" },
+  };
+  assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 六级子弹 60 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(order), "订单资源：哈夫币 12.50 · 六级子弹 60 · 顶级保险卡 7 天");
+  assert.equal(display.orderUsesResourceSummary(order), true);
+  assert.ok(!display.orderAccountTitle(order).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
+  assert.equal(display.orderAccountTitle({ ...order, account: { readable: true } }), "PRIVATE_CURRENT_ACCOUNT_TITLE");
+});
+
+test("legacy amount facts share renter evidence across parties and never rename it as owner income", () => {
+  const order = {
+    readOnly: true, source: { origin: "LEGACY" }, status: "CANCELLED",
+    payment: { state: "RECORDED_PAID" },
+    legacyAmounts: { required: yuan("66.00"), paid: yuan("66.00"), deposit: yuan("0.00"), refund: null },
+  };
+  const renter = display.orderAmountFacts(order, "renter");
+  const owner = display.orderAmountFacts(order, "owner");
+  assert.equal(renter.main, "66.00 元");
+  assert.equal(owner.main, "66.00 元");
+  assert.equal(renter.caption, "已付金额记录");
+  assert.equal(owner.caption, "租客实付记录");
+  assert.deepEqual(owner.secondary, ["押金 0.00 元"]);
+  assert.ok(!owner.secondary.some((line) => line.includes("号主") || line.includes("结算收入")));
+  const unknown = display.orderAmountFacts({ ...order, legacyAmounts: { required: null, paid: null, deposit: null, refund: null }, payment: { state: "UNKNOWN" } }, "owner");
+  assert.equal(unknown.main, "待确认");
+  assert.deepEqual(unknown.secondary, []);
+});

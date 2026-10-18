@@ -1050,12 +1050,12 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
       </div>
     </div>
 
-    {historical ? <section className="supply-block account-module-card"><h2>历史账号资料</h2><p>历史记录仅供查阅，不表示当前可接新单。</p><dl className="order-facts"><div><dt>账号编号</dt><dd>{account.display_no ?? "编号待分配"}</dd></div><div><dt>历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>历史哈夫币租金</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>历史物资金额</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>历史押金</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的历史出租订单</Link></section> : null}
-    {historical ? <section className="supply-block"><h2>历史属性与资源</h2>
+    {historical ? <section className="supply-block account-module-card"><h2>账号资料记录</h2><p>这些记录不代表当前可接新单。</p><dl className="order-facts"><div><dt>账号编号</dt><dd>{account.display_no ?? "编号待分配"}</dd></div><div><dt>租期记录</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>哈夫币租金记录</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>物资金额记录</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>押金记录</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的出租订单</Link></section> : null}
+    {historical ? <section className="supply-block"><h2>属性与资源记录</h2>
       {historicalDisplay ? <>
-        <p>来源记录更新于 {displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"} · 租赁模式：{({ ordinary: "普通", custom: "定制", fast: "极速" } as Record<string, string>)[historicalDisplay.rentalMode ?? ""] ?? "待核"}</p>
+        <p>资料更新于 {displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"} · 租赁模式：{({ ordinary: "普通", custom: "定制", fast: "极速" } as Record<string, string>)[historicalDisplay.rentalMode ?? ""] ?? "待核"}</p>
         <dl className="order-facts">{historicalConditions.map(item => <div key={item.key}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>
-        {Object.values(historicalDisplay.attributes).some(value => value === null) ? <p role="status">部分历史属性未提供或尚待核实。</p> : null}
+        {Object.values(historicalDisplay.attributes).some(value => value === null) ? <p role="status">部分属性未提供或尚待核实。</p> : null}
         <ul>{historicalDisplay.resources.map(item => <li key={item.code}>{item.name}：{historicalQuantityText(item.quantity, item.unit)}</li>)}</ul>
         <p>以上为历史显示记录，不替代当前资料申报、报价或可租资格。</p>
       </> : <p role={historical.display?.state === "KNOWN" ? "alert" : "status"}>{historical.display?.state === "KNOWN" ? "历史扩展资料返回不完整，请重试读取。" : "历史扩展资料尚未接入，不能据此认定资源数量为零。"}</p>}
