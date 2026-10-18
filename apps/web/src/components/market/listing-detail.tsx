@@ -11,7 +11,7 @@ import { accountHref, composeGridTitle, isHaff, moneyValue, orderedQuoteResource
 import { accountReturnTarget, readAccountReturn } from "@/lib/account-return";
 import { canonicalResourceCode } from "@/lib/listing-filters";
 import { DELTA_GAME_CODE } from "@/lib/supply-games";
-import { detailBreadcrumbs, haffRatioLabel, resourceQuantityLabel, toListingDetail, type ListingDetailData, type ResourceLine } from "@/lib/listing-view";
+import { detailBreadcrumbs, haffRatioLabel, resourceQuantityLabel, skinQualityLabel, skinTypeLabel, toListingDetail, type ListingDetailData, type ResourceLine } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
 import { useUserSession } from "@/components/session/user-session-provider";
@@ -192,7 +192,8 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   const resources = orderedQuoteResources(data);
   const penalties = data.media.filter(item => item.category === "PENALTY");
   const skinGroups = new Map<string, ListingDetailData["skinTags"]>();
-  for (const tag of data.skinTags) { const category = tag.categoryName || "未分类"; skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
+  // Group by the verified skin type when the server sent one; older frozen snapshots keep their recorded category.
+  for (const tag of data.skinTags) { const category = skinTypeLabel(tag.ownerKind) ?? (tag.categoryName || "未分类"); skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
   return <article className="listing-detail account-detail">
     <div className="account-detail-top">
       <section className="account-detail-info" aria-label="账号摘要">
@@ -244,7 +245,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
           <div className="account-cosmetics"><h3><Shirt size={17} aria-hidden="true" />皮肤与权益</h3>
             {withheldSkinsNote(data.skinsWithheld) ? <p className="account-note-source">{withheldSkinsNote(data.skinsWithheld)}</p> : null}
             {data.skinTags.length || data.entitlementNames.length ? <>
-              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.id}:${i}`} className="account-skin-card" data-skin-id={tag.id}><SkinMediaThumb mediaId={tag.mediaId ?? null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /><strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong></article>)}</div></section>)}</div>
+              <div className="account-skin-groups">{[...skinGroups].map(([category, skins]) => <section key={category} className="account-skin-group"><div className="account-skin-group-head"><strong>{category}</strong><span>{skins.length}项</span></div><div className="account-skin-grid">{skins.map((tag, i) => <article key={`${tag.id}:${i}`} className="account-skin-card" data-skin-id={tag.id}><SkinMediaThumb mediaId={tag.mediaId ?? null} className="account-skin-card-media" fallbackClassName="account-skin-card-media-fallback" iconSize={22} /><strong title={skinCardTitle(tag)}>{skinCardTitle(tag)}</strong>{skinQualityLabel(tag) ? <span className="account-skin-card-quality">{skinQualityLabel(tag)}</span> : null}</article>)}</div></section>)}</div>
               <div className="account-entitlement-list">{data.entitlementDetails?.length ? data.entitlementDetails.map(item => <div key={item.id} className="account-entitlement-item"><strong>{item.name}</strong><span>{entitlementExpiryLabel(item)}</span></div>) : data.entitlementNames.map((name, index) => <div key={`${name}:${index}`} className="account-entitlement-item"><strong>{name}</strong><span>权益详情以个人确认时为准</span></div>)}</div>
             </> : <p className="account-empty-note">暂无皮肤或权益的公开申报。</p>}
           </div>

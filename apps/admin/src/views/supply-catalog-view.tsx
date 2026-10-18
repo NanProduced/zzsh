@@ -15,7 +15,7 @@ import { SupplyWriteLockError, withSupplyWriteLock } from "@/lib/supply-write-lo
 
 import { adminRequest, AdminApiError, friendlyError, hasPermission, type AdminCatalogResponse, type CatalogSkin, type CatalogSkinOwner, type CatalogMediaOption, type MediaOptionsResponse, type SessionSnapshot, type SupplyGame } from "../api";
 import { StatusMessage } from "../components/ui-elements";
-import { skinContractReady, skinValues, skinPayload, ownerPayload, catalogReceipt, ownerKinds } from "./catalog-skin-fields";
+import { skinContractReady, skinValues, skinPayload, ownerPayload, catalogReceipt, ownerKinds, rarityOptions } from "./catalog-skin-fields";
 import { CatalogObjectTable, CellSelect } from "./supply-catalog/catalog-table";
 import { CatalogObjectNav } from "./supply-catalog/object-nav";
 import {
@@ -745,7 +745,7 @@ export function SupplyCatalogView({
     if (key === "kind") return <span className="text-xs">{ownerKinds[row.kind as keyof typeof ownerKinds] ?? "未提供"}</span>;
     if (key === "rarityCode") {
       const rarity = (catalog?.rarities ?? []).find(entry => entry.code === row.rarityCode);
-      return <span className="text-xs">{rarity ? rarity.name : row.rarityCode ? String(row.rarityCode) : "未标注"}</span>;
+      return <span className="text-xs">{rarity ? (rarity.enabled ? rarity.name : `${rarity.name}（已停用）`) : row.rarityCode ? String(row.rarityCode) : "未标注"}</span>;
     }
     if (key === "required") return <span className="text-xs">{row.required ? "必填" : "可选"}</span>;
     if (key === "unit") return <span className="text-xs">{UNIT_LABEL[String(row.unit)] ?? "单位未登记"}</span>;
@@ -772,7 +772,7 @@ export function SupplyCatalogView({
 
   const editOptions = {
     categoryItems: [{ value: "", label: "（一级分类）" }, ...(catalog?.categories ?? []).filter((category) => !descendantsOf.has(category.id)).map((category) => ({ value: category.id, label: categoryPath(category.id, catalog?.categories ?? []) }))],
-    rarityItems: [{ value: "", label: "未标注（不默认金色）" }, ...(catalog?.rarities ?? []).map((rarity) => ({ value: rarity.code, label: rarity.name }))],
+    rarityItems: rarityOptions(catalog?.rarities ?? [], editor?.kind === "skins" ? (editor.original as CatalogSkin | undefined)?.rarityCode ?? null : null),
     kindItems: editor?.kind === "skins"
       ? [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "刀型" }, { value: "FIREARM", label: "枪械" }]
       : [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "刀型" }],

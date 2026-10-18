@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { createCatalogEntry, updateCatalogEntry, parseSkinWrite, createSkinOwner } from "../src/supply/catalog";
+import { createCatalogEntry, updateCatalogEntry, parseSkinWrite, createSkinOwner, readPublicCatalog } from "../src/supply/catalog";
 import { configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 import { withIdempotency } from "../src/supply/supply-util";
 import { changeMediaVisibility, reviewMediaAsset } from "../src/supply/media";
@@ -144,4 +144,91 @@ test("existing idempotency entry reauthorizes and replays without executing a st
   assert.equal(result.replayed, true); assert.equal(authorized, 1); assert.equal(executed, 0);
   await assert.rejects(withIdempotency(client, scope, "same_key", "changed_body", async () => { authorized++; }, async () => { throw new Error("must not execute"); }), /different request/);
   assert.equal(authorized, 2);
+});
+
+// SKIN-MODEL-7 B: official quality reuses skin_rarity. A new or changed binding must name an
+// enabled entry of the same game; an unrelated edit keeps whatever is already bound. The fake
+// client answers the rarity lookup from an in-memory vocabulary; it is not PostgreSQL.
+const SK7_RARITIES: Record<string, Record<string, boolean>> = { game_fixture: { q_enabled: true, q_retired: false }, game_other: { q_foreign: true } };
+function withRarities(fixture: ReturnType<typeof clientFixture>, options: { referenced?: boolean } = {}) {
+  const inner = fixture.client.query as unknown as (sql: string, args?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>;
+  const client = { query: async (sql: string, args: unknown[] = []) => {
+    if (sql.startsWith('SELECT * FROM "zzsh_supply"."skin_rarity"')) {
+      fixture.calls.push({ sql, args });
+      const rows = [{ id: "rarity_fixture", game_id: "game_fixture", code: "q_enabled", name: "测试品质", enabled: true }];
+      return { rows, rowCount: 1 };
+    }
+    if (sql.includes('"zzsh_supply"."skin_rarity"') && sql.includes('"code" = $2')) {
+      fixture.calls.push({ sql, args });
+      const vocabulary = SK7_RARITIES[String(args[0])] ?? {};
+      const code = String(args[1]);
+      const rows = Object.hasOwn(vocabulary, code) ? [{ enabled: vocabulary[code] }] : [];
+      return { rows, rowCount: rows.length };
+    }
+    if (sql.includes('"rarity_code" = $2 LIMIT 1')) {
+      fixture.calls.push({ sql, args });
+      const rows = options.referenced ? [{}] : [];
+      return { rows, rowCount: rows.length };
+    }
+    return inner(sql, args);
+  } } as unknown as PoolClient;
+  return { client, calls: fixture.calls };
+}
+const sk7Update = (calls: Array<{ sql: string; args: unknown[] }>) => calls.find(c => c.sql.startsWith("UPDATE zzsh_supply.skin SET"));
+
+test("SK7 create refuses a disabled or foreign-game quality before any insert and keeps an enabled one", async () => {
+  for (const rarityCode of ["q_retired", "q_foreign", "q_missing"]) {
+    const f = withRarities(clientFixture());
+    await assert.rejects(createCatalogEntry(f.client, "a", true, "skins", "game_fixture", { ...draft, rarityCode }), /Rarity is (disabled|not defined)/, rarityCode);
+    assert.ok(!f.calls.some(c => c.sql.startsWith("INSERT")), `${rarityCode} must not insert`);
+    assert.ok(!f.calls.some(c => c.sql.startsWith("UPDATE zzsh_supply.game")), `${rarityCode} must not bump the catalog`);
+  }
+  const ok = withRarities(clientFixture());
+  await createCatalogEntry(ok.client, "a", true, "skins", "game_fixture", { ...draft, rarityCode: "q_enabled" });
+  assert.equal(ok.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[5], "q_enabled");
+  const unknown = withRarities(clientFixture());
+  await createCatalogEntry(unknown.client, "a", true, "skins", "game_fixture", draft);
+  assert.equal(unknown.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[5], null, "unknown quality stays null, never defaulted");
+});
+
+test("SK7 update keeps an existing disabled binding through unrelated edits but refuses a new disabled or foreign one", async () => {
+  const bound = { ...legacy, rarity_code: "q_retired" };
+  for (const body of [{ expectedCatalogRevision: "10", sortOrder: 3 }, { expectedCatalogRevision: "10", rarityCode: "q_retired", sortOrder: 4 }]) {
+    const f = withRarities(clientFixture(bound));
+    await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", body);
+    assert.equal(sk7Update(f.calls)!.args[5], "q_retired", `kept binding is neither cleared nor relabelled: ${JSON.stringify(body)}`);
+  }
+  for (const rarityCode of ["q_retired", "q_foreign", "q_missing"]) {
+    const f = withRarities(clientFixture({ ...legacy, rarity_code: "q_enabled" }));
+    await assert.rejects(updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode }), /Rarity is (disabled|not defined)/, rarityCode);
+    assert.equal(sk7Update(f.calls), undefined, `${rarityCode} must not write`);
+  }
+  const changed = withRarities(clientFixture(bound));
+  await updateCatalogEntry(changed.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: "q_enabled" });
+  assert.equal(sk7Update(changed.calls)!.args[5], "q_enabled");
+  const cleared = withRarities(clientFixture(bound));
+  await updateCatalogEntry(cleared.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: null });
+  assert.equal(sk7Update(cleared.calls)!.args[5], null, "clearing to unknown stays possible");
+});
+
+test("SK7 a referenced quality still cannot be disabled", async () => {
+  const f = withRarities(clientFixture(), { referenced: true });
+  await assert.rejects(updateCatalogEntry(f.client, "a", true, "rarities", "rarity_fixture", { enabled: false }), /still referenced/);
+  assert.ok(!f.calls.some(c => c.sql.startsWith('UPDATE "zzsh_supply"."skin_rarity"')));
+});
+
+test("SK7 public catalog skins carry owner type and the same-game quality name; filters list enabled qualities only", async () => {
+  const queries: string[] = [];
+  const client = { query: async (sql: string) => {
+    queries.push(sql);
+    const rows = sql.includes('FROM "zzsh_supply"."game"') ? [{ id: "game_fixture", code: "delta", name: "三角洲行动", catalogRevision: "10", currentReleaseId: null, coverMediaId: null }] : [];
+    return { rows, rowCount: rows.length };
+  } } as unknown as PoolClient;
+  await readPublicCatalog(client, "game_fixture", {}, 20);
+  const skins = queries.find(q => q.includes('s."owner_kind" AS "ownerKind"'));
+  assert.ok(skins, "skin projection selects owner kind");
+  assert.ok(skins!.includes("(SELECT r.name FROM zzsh_supply.skin_rarity r WHERE r.game_id=s.game_id AND r.code=s.rarity_code) AS \"rarityName\""), "quality name joins on the same game and code");
+  const vocabulary = queries.find(q => /FROM "zzsh_supply"\."skin_rarity"/.test(q));
+  assert.ok(vocabulary && /"enabled" = true/.test(vocabulary), "the filter vocabulary offers enabled qualities only");
+  assert.ok(queries.every(q => !/^\s*(INSERT|UPDATE|DELETE)/.test(q)));
 });

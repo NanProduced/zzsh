@@ -46,7 +46,7 @@ import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { readLegacyListing } from "./legacy-listing-read";
-import { publicSkinMediaIdSql, publicSkinOwnerNameSql } from "./catalog";
+import { publicSkinMediaIdSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -805,6 +805,7 @@ export async function quoteListing(
     await client.query(
       `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.base_name,s.category_id AS category_id,c.code AS category_code,c.name AS category_name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible,
         ${publicSkinOwnerNameSql("s")} AS owner_name,
+        s.owner_kind,s.rarity_code,${publicSkinRarityNameSql("s")} AS rarity_name,
         ${publicSkinMediaIdSql("s")} AS media_id
         FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE version_id=$1`,
       [v.id],
@@ -887,20 +888,32 @@ export async function quoteListing(
       release.id,
       {
         items: rows.map((r) => ({ id: r.itemId, code: r.code, name: r.name, unit: r.unit })),
-        skins: skins.map((s) => ({
-          id: s.id,
-          name: s.name,
-          baseName: s.base_name,
-          ownerName: s.owner_name,
-          mediaId: s.media_id,
-          categoryCode: s.category_code,
-          categoryName: s.category_name,
-        })),
+        skins: skins.map(freezePresentationSkin),
         entitlements: ents.map((e) => ({ id: e.entitlementId, name: e.name })),
       },
     ],
   );
   await bumpAccount(client, a);
+}
+/**
+ * Skin entry of a new quote/presentation snapshot. Owner type and official
+ * quality are frozen when the snapshot is generated (null = not known then).
+ * Readers never re-derive them from today's catalog, so snapshots written
+ * before these fields existed keep the keys absent.
+ */
+export function freezePresentationSkin(s: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: s.id,
+    name: s.name,
+    baseName: s.base_name,
+    ownerName: s.owner_name,
+    ownerKind: s.owner_kind ?? null,
+    rarityCode: s.rarity_code ?? null,
+    rarityName: s.rarity_name ?? null,
+    mediaId: s.media_id,
+    categoryCode: s.category_code,
+    categoryName: s.category_name,
+  };
 }
 export async function readPresentation(
   client: PoolClient,

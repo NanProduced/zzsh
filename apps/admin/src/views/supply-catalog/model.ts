@@ -19,7 +19,7 @@ export const OBJECT_LABEL: Record<CatalogKind, string> = {
   categories: "皮肤分类",
   skins: "皮肤",
   "skin-owners": "所属对象",
-  rarities: "稀有度",
+  rarities: "品质",
   entitlements: "账号权益",
 };
 
@@ -46,7 +46,7 @@ export const OBJECT_EMPTY_HINT: Record<CatalogKind, string> = {
   categories: "创建第一个分类后，皮肤才有可挂接的分组。",
   skins: "皮肤需要先有至少一个皮肤分类；创建后为停用待核草稿，身份确认与启用是独立动作。",
   "skin-owners": "创建干员或刀型本体后，皮肤才能挂接归属；枪械归属在改枪码目录维护。",
-  rarities: "创建受控稀有度词表后，皮肤才能标注展示档位。",
+  rarities: "创建受控品质词表后，皮肤才能标注有依据的官方品质；停用的品质不能再新选。",
   entitlements: "创建权益词表后，账号属性才有可读取的类型。",
 };
 
@@ -187,7 +187,7 @@ export const COLUMN_SETS: Record<CatalogKind, Array<{ key: string; label: string
     { key: "ownerRef", label: "所属对象" },
     { key: "namingState", label: "身份状态" },
     { key: "categoryPath", label: "分类" },
-    { key: "rarityCode", label: "稀有度" },
+    { key: "rarityCode", label: "品质" },
     { key: "enabled", label: "状态" },
     { key: "formVisible", label: "表单展示" },
   ],

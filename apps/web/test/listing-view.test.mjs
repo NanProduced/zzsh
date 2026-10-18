@@ -196,7 +196,7 @@ const accountCardCode = ts.transpileModule(
 const accountCardExports = {};
 new Function('require', 'exports', accountCardCode)((name) => {
   if (name === '@/lib/listing-filters') return listingFilters;
-  if (name === '@/lib/listing-view') return { haffRatioLabel, resourceQuantityLabel };
+  if (name === '@/lib/listing-view') return { haffRatioLabel, resourceQuantityLabel, skinQualityLabel: listingViewSk7.skinQualityLabel };
   if (name === '@/lib/account-return') return {};
   if (name === './login-method-icon') return { LoginMethodIcon: () => null };
   if (name === '@/components/favorites/favorite-button') return { FavoriteButton: () => null };
@@ -541,4 +541,47 @@ test('detail adds public title/time/expiry consumption without inventing missing
   const detail=toListingDetail(listing);assert.equal(detail.publicTitle,null);assert.equal(detail.publishedAt,listing.publishedAt);assert.equal(detail.depositLabel,null);assert.deepEqual(detail.entitlementDetails,[{id:'e',name:'体验权益',expiresAt:'2026-10-09T07:00:00Z',expiryState:'TIMED'}]);assert.ok(!Object.hasOwn(detail,'faceIsSelf'));assert.ok(!Object.hasOwn(detail,'banRecord'));
   delete listing.publishedAt;listing.quote.expiryDisclosures=[];assert.equal(toListingDetail(listing).publishedAt,null);assert.equal(toListingDetail(listing).entitlementDetails[0].expiresAt,null);assert.equal(toListingDetail(listing).entitlementDetails[0].expiryState,'MISSING');
   listing.quote.expiryDisclosures=[{entitlementId:'e',expiresAt:null,fullTermGuaranteed:false}];assert.equal(toListingDetail(listing).entitlementDetails[0].expiryState,'PERMANENT');
+});
+
+// SKIN-MODEL-7: list, detail, publish and filter surfaces share one type/quality conversion.
+// Type comes only from the verified owner kind; quality only from the server-delivered name.
+import * as listingViewSk7 from '../src/lib/listing-view.ts';
+
+test('SK7 skin type comes only from owner kind and quality only from the delivered name', () => {
+  const { skinTypeLabel, skinQualityLabel, skinFacetLabel, SKIN_TYPE_LABELS } = listingViewSk7;
+  assert.deepEqual(SKIN_TYPE_LABELS, { AGENT: '干员外观', FIREARM: '枪械外观', MELEE_TYPE: '刀具外观' });
+  for (const kind of ['CATEGORY', undefined, null, 'toString', 'agent']) assert.equal(skinTypeLabel(kind), null, String(kind));
+  assert.equal(skinQualityLabel({ rarityName: '  ' }), null);
+  assert.equal(skinQualityLabel({ rarityCode: 'q_fixture' }), null, 'a bare code is never turned into a label');
+  assert.equal(skinQualityLabel({ name: 'M4A1 金色', categoryName: '干员金皮（旧分组）' }), null, 'red/gold names or legacy groups never become a quality');
+  assert.equal(skinFacetLabel({ ownerKind: 'AGENT', rarityName: ' 测试品质 ' }), '干员外观 · 测试品质');
+  assert.equal(skinFacetLabel({ ownerKind: 'MELEE_TYPE' }), '刀具外观');
+  assert.equal(skinFacetLabel({ rarityName: '测试品质' }), '测试品质');
+  assert.equal(skinFacetLabel({ categoryName: '干员金皮（旧分组）' }), null);
+});
+
+test('SK7 list and detail project the same id, type and quality; absent snapshot keys stay absent', () => {
+  const l = structuredClone(listing);
+  l.presentation.skins = [
+    { id: 's1', name: '露娜-黑·天际线', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q1', rarityName: '品质甲', categoryName: '干员外观' },
+    { id: 's2', name: '露娜-另一外观', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q2', rarityName: '品质乙', categoryName: '干员外观' },
+    { id: 's3', name: '战术斧头-黑鹰', baseName: '黑鹰', ownerName: '战术斧头', ownerKind: 'MELEE_TYPE', rarityCode: null, rarityName: null, categoryName: '近战相关待核词条' },
+    { id: 's4', name: 'Vector-黑鹰', baseName: '黑鹰', ownerName: 'Vector', ownerKind: 'FIREARM', rarityCode: null, rarityName: null, categoryName: '枪械外观' },
+    { id: 's5', name: '旧快照皮肤', categoryCode: 'df_skin_category_agent_gold', categoryName: '干员金皮（旧分组）' },
+  ];
+  const card = toListingCard(l), detail = toListingDetail(l);
+  assert.deepEqual(card.skinTags, detail.skinTags, 'list and detail read the same projection');
+  const tags = card.skinTags;
+  assert.deepEqual(tags.map((t) => t.id), ['s1', 's2', 's3', 's4', 's5']);
+  const facets = tags.map((t) => listingViewSk7.skinFacetLabel(t));
+  assert.deepEqual(facets, ['干员外观 · 品质甲', '干员外观 · 品质乙', '刀具外观', '枪械外观', null], 'same type, different quality; same base name, different owner type');
+  assert.deepEqual([tags[2].ownerKind, tags[2].rarityName], ['MELEE_TYPE', null]);
+  for (const key of ['ownerKind', 'rarityCode', 'rarityName']) assert.equal(Object.hasOwn(tags[4], key), false, `old snapshot keeps ${key} absent`);
+});
+
+test('SK7 chip tone prefers the verified owner kind over category text', () => {
+  assert.equal(skinChipTone({ name: 'x', ownerKind: 'MELEE_TYPE', categoryCode: 'df_skin_category_agent', categoryName: '干员外观' }), 'teal');
+  assert.equal(skinChipTone({ name: 'x', ownerKind: 'AGENT', categoryCode: 'weapon', categoryName: '枪械外观' }), 'purple');
+  assert.equal(skinChipTone({ name: 'x', ownerKind: 'FIREARM', categoryCode: 'df_skin_category_knife', categoryName: '近战相关待核词条' }), 'blue');
+  assert.equal(skinChipTone({ name: 'x', categoryCode: 'df_skin_category_agent_gold', categoryName: '干员金皮（旧分组）' }), 'purple', 'without a verified owner kind the existing category fallback is unchanged');
 });

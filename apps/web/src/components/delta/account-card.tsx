@@ -8,7 +8,7 @@ import { FavoriteButton } from "@/components/favorites/favorite-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThumbnailCarousel } from "@/components/ui/thumbnail-carousel";
 import { rememberAccountReturn, type AccountReturnSnapshot } from "@/lib/account-return";
-import { haffRatioLabel, resourceQuantityLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
+import { haffRatioLabel, resourceQuantityLabel, skinQualityLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
 import { LoginMethodIcon } from "./login-method-icon";
 import { canonicalResourceCode } from "@/lib/listing-filters";
 export { canonicalResourceCode } from "@/lib/listing-filters";
@@ -206,6 +206,10 @@ export function composeListTitle(
 }
 
 export function skinChipTone(tag: SkinTag): "teal" | "purple" | "blue" | "default" {
+  // The verified owner type wins; the category fallback below only colours older frozen snapshots without it.
+  if (tag.ownerKind === "MELEE_TYPE") return "teal";
+  if (tag.ownerKind === "AGENT") return "purple";
+  if (tag.ownerKind === "FIREARM") return "blue";
   const code = (tag.categoryCode ?? "").toLowerCase();
   const cat = (tag.categoryName ?? "").toLowerCase();
 
@@ -563,6 +567,7 @@ export function AccountCard({
                         </span>
                       ) : null}
                       <span className="skin-chip-name" title={tag.name}>{tag.name}</span>
+                      {skinQualityLabel(tag) ? <span className="skin-chip-quality" style={{ opacity: 0.85, marginLeft: "3px" }}>· {skinQualityLabel(tag)}</span> : null}
                     </span>
                   );
                 })}
@@ -756,6 +761,7 @@ export function AccountCard({
                       key={`${skin.id}-${idx}`}
                       className={`account-skin-chip account-skin-chip--${skinChipTone(skin)}`}
                       data-skin-id={skin.id}
+                      title={[skin.name, skinQualityLabel(skin)].filter(Boolean).join(" · ")}
                     >
                       {skin.name}
                     </span>

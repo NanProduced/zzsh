@@ -219,13 +219,22 @@ export type PublicSkinSummary = {
   ownerName: string | null;
   categoryId: string;
   rarityCode: string | null;
+  /** Official quality name from the game's quality list; null = unknown, never guessed. */
+  rarityName?: string | null;
+  ownerKind?: SkinOwnerKind | null;
   mediaId: string | null;
 };
+/** Verified owner type of a skin: operator, firearm or melee-weapon type. */
+export type SkinOwnerKind = "AGENT" | "FIREARM" | "MELEE_TYPE";
 export type PublicListingSkin = {
   id: string;
   name: string;
   baseName?: string | null;
   ownerName?: string | null;
+  /** Absent on snapshots frozen before type/quality were captured; null = unknown when frozen. */
+  ownerKind?: SkinOwnerKind | null;
+  rarityCode?: string | null;
+  rarityName?: string | null;
   mediaId?: string | null;
   categoryCode?: string;
   categoryName?: string;

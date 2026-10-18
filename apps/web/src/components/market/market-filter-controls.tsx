@@ -22,6 +22,7 @@ import {
   type ResourceInputMode,
 } from "@/lib/listing-filters";
 import type { ListingFilterConditions, PublicCatalog, PublicListingFilterField, PublicListingFilterMetadata } from "@/lib/supply-types";
+import { skinQualityLabel } from "@/lib/listing-view";
 
 type Props = {
   filters: ListingFilters;
@@ -560,6 +561,7 @@ function SkinTile({ skin, selected, onClick }: { skin: PublicCatalog["skins"][nu
     <span className="market-skin-image">{src && !failed ? <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} /> : <span className="market-skin-image-empty"><ImageOff size={17} aria-hidden="true" /><span>暂无公开图</span></span>}</span>
     <span className="market-skin-check" aria-hidden="true">{selected ? <Check size={13} /> : null}</span>
     <span className="market-skin-name">{skin.name}</span>
+    {skinQualityLabel(skin) ? <span className="market-skin-quality">{skinQualityLabel(skin)}</span> : null}
   </button>;
 }
 

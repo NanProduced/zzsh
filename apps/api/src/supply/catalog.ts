@@ -258,7 +258,7 @@ async function createSkin(client: PoolClient, gameId: string, id: string, input:
   await checkCatalogRevision(client, gameId, body);
   await assertUnique(client, "skin", gameId, body.code as string);
   await assertCategoryParent(client, gameId, body.categoryId as string);
-  if (body.rarityCode) await assertRarity(client, gameId, body.rarityCode as string);
+  if (body.rarityCode) await assertRarity(client, gameId, body.rarityCode as string, true);
   await assertSkinSource(client, gameId, id, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null);
   await client.query(`INSERT INTO zzsh_supply.skin (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,sort_order,source_namespace,source_field,source_token,aliases)
     VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10,$11)`, [id, gameId, body.code, body.name, body.categoryId, body.rarityCode ?? null, body.sortOrder ?? 0, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null, body.aliases ?? []]);
@@ -306,7 +306,7 @@ async function updateSkin(client: PoolClient, gameId: string, row: Record<string
   const categoryId = body.categoryId ?? row.category_id;
   await assertCategoryParent(client, gameId, categoryId as string);
   const rarityCode = "rarityCode" in body ? body.rarityCode : row.rarity_code;
-  if (rarityCode) await assertRarity(client, gameId, rarityCode as string);
+  if (rarityCode) await assertRarity(client, gameId, rarityCode as string, rarityCode !== row.rarity_code);
   const mediaId = "mediaId" in body ? body.mediaId : row.media_id;
   if (body.mediaId) await assertPlatformMediaBinding(client, gameId, body.mediaId as string, "SKIN_MEDIA");
   const result = await client.query<{ namingState: string }>(`UPDATE zzsh_supply.skin SET name=$1,enabled=$2,form_visible=$3,sort_order=$4,category_id=$5,rarity_code=$6,media_id=$7,aliases=$8,source_namespace=$9,source_field=$10,source_token=$11,owner_kind=$12,owner_id=$13,firearm_id=$14,base_name=$15 WHERE id=$16 RETURNING naming_state AS "namingState"`,
@@ -655,9 +655,17 @@ async function assertCategoryParent(client: PoolClient, gameId: string, category
   if (result.rows.length === 0) throw invalid("Category does not belong to this game");
 }
 
-async function assertRarity(client: PoolClient, gameId: string, rarityCode: string): Promise<void> {
-  const result = await client.query(`SELECT 1 FROM "zzsh_supply"."skin_rarity" WHERE "game_id" = $1 AND "code" = $2`, [gameId, rarityCode]);
-  if (result.rows.length === 0) throw invalid("Rarity is not defined for this game");
+/**
+ * Quality binding guard. The code must exist in this game (a code of another
+ * game does not resolve). A new or changed binding also needs an enabled entry;
+ * keeping a skin's existing binding stays allowed after that entry was
+ * disabled, so unrelated edits never clear, relabel or reject historical quality.
+ */
+async function assertRarity(client: PoolClient, gameId: string, rarityCode: string, newBinding: boolean): Promise<void> {
+  const result = await client.query<{ enabled: boolean }>(`SELECT "enabled" FROM "zzsh_supply"."skin_rarity" WHERE "game_id" = $1 AND "code" = $2`, [gameId, rarityCode]);
+  const rarity = result.rows[0];
+  if (!rarity) throw invalid("Rarity is not defined for this game", "rarityCode");
+  if (newBinding && rarity.enabled !== true) throw invalid("Rarity is disabled and cannot be newly selected", "rarityCode");
 }
 
 async function assertRarityUnused(client: PoolClient, gameId: string, rarityCode: string): Promise<void> {
@@ -731,6 +739,16 @@ export function publicSkinCategoryCteSql(gameParam: string): string {
          JOIN visible p ON c."parent_id" = p."id"
         WHERE c."game_id" = ${gameParam} AND c."enabled" = true AND c."form_visible" = true
      )`;
+}
+/**
+ * Official quality label of a skin row: the name of its game-scoped
+ * skin_rarity entry, or NULL when the skin has no quality or the code does not
+ * resolve in the same game. Never derived from legacy red/gold groups, the
+ * category, a colour or the name. A bound quality keeps its name after the
+ * entry is disabled; disabling only stops new bindings.
+ */
+export function publicSkinRarityNameSql(alias: string): string {
+  return `(SELECT r.name FROM zzsh_supply.skin_rarity r WHERE r.game_id=${alias}.game_id AND r.code=${alias}.rarity_code)`;
 }
 export function publicSkinMediaIdSql(alias: string): string {
   return `CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=${alias}.media_id AND a.game_id=${alias}.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='SKIN_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN ${alias}.media_id ELSE NULL END`;
@@ -857,8 +875,8 @@ export async function readPublicCatalog(
   parameters.push(limit + 1);
   const skins = await client.query(
     `SELECT s."id", s."code", s."name", s."category_id" AS "categoryId", s."rarity_code" AS "rarityCode",
-            s."base_name" AS "baseName",
-            ${publicSkinOwnerNameSql("s")} AS "ownerName",
+            s."base_name" AS "baseName", s."owner_kind" AS "ownerKind",
+            ${publicSkinOwnerNameSql("s")} AS "ownerName", ${publicSkinRarityNameSql("s")} AS "rarityName",
             ${publicSkinMediaIdSql("s")} AS "mediaId", s."sort_order" AS "sortOrder"
        FROM "zzsh_supply"."skin" s
       WHERE ${conditions.join(" AND ")}

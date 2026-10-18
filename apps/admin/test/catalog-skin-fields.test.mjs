@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evidenceFields, skinValues } from "../src/views/catalog-skin-fields.ts";
+import { evidenceFields, rarityOptions, skinValues } from "../src/views/catalog-skin-fields.ts";
 
 // 北京时间 2026-10-14 00:30 = UTC 2026-10-13 16:30：UTC 切片会把“今日”填成前一天。
 const beijingMidnight = Date.UTC(2026, 9, 13, 16, 30);
@@ -17,4 +17,16 @@ test("F5 an explicit operator date is preserved and invalid dates are refused", 
   for (const observedAt of ["2026-02-30", "2026-13-01", "not-a-date"]) {
     assert.throws(() => evidenceFields(evidence({ observedAt })), /核对日期/, observedAt);
   }
+});
+
+// SKIN-MODEL-7 B: the admin quality picker matches the server guard.
+test("SK7 quality options offer enabled entries, keep only the current disabled binding, and never default", () => {
+  const rarities = [
+    { id: "r1", code: "q_enabled", name: "品质甲", sortOrder: 0, enabled: true },
+    { id: "r2", code: "q_retired", name: "品质乙", sortOrder: 1, enabled: false },
+  ];
+  assert.deepEqual(rarityOptions(rarities, null), [{ value: "", label: "品质未知（不默认）" }, { value: "q_enabled", label: "品质甲" }]);
+  assert.deepEqual(rarityOptions(rarities, "q_enabled").map((o) => o.value), ["", "q_enabled"]);
+  assert.deepEqual(rarityOptions(rarities, "q_retired"), [{ value: "", label: "品质未知（不默认）" }, { value: "q_enabled", label: "品质甲" }, { value: "q_retired", label: "品质乙（已停用，仅保留现有绑定）" }]);
+  assert.deepEqual(rarityOptions([], undefined), [{ value: "", label: "品质未知（不默认）" }], "an empty vocabulary leaves quality unknown");
 });
