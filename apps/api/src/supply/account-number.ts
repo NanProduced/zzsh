@@ -11,9 +11,21 @@ export function parseAccountNumber(value: unknown): string {
   return number;
 }
 
-/** Only independently allocated AC numbers belong in user projections. */
+// SQL uses this lexical guard; ZZ dates/counters are additionally checked at the write boundary.
+export const PUBLIC_ACCOUNT_NUMBER_PATTERN = "^(AC[0-9]{10,}|ZZ[0-9]{14})$";
+
+function datedAccountNumber(value: unknown): string | null {
+  if (typeof value !== "string" || !/^ZZ[0-9]{14}$/.test(value)) return null;
+  const year = value.slice(2, 6), month = value.slice(6, 8), day = value.slice(8, 10);
+  if (year === "0000" || month < "01" || month > "12" || day < "01" || value.slice(10) === "000000") return null;
+  const y = BigInt(year), leap = y % 4n === 0n && (y % 100n !== 0n || y % 400n === 0n);
+  const lastDay = month === "02" ? leap ? "29" : "28" : ["04", "06", "09", "11"].includes(month) ? "30" : "31";
+  return day <= lastDay ? value : null;
+}
+
+/** Existing AC canonical numbers remain readable; new assignments are dated ZZ only. */
 export function publicAccountNumber(value: unknown): string | null {
-  return typeof value === "string" && value.length <= 128 && /^AC[0-9]{10,}$/.test(value) ? value : null;
+  return typeof value === "string" && value.length <= 128 && /^AC[0-9]{10,}$/.test(value) ? value : datedAccountNumber(value);
 }
 export function parsePublicAccountNumber(value: unknown): string {
   const number = publicAccountNumber(parseAccountNumber(value));
@@ -45,11 +57,19 @@ export async function assignAccountNumber(client: PoolClient, accountId: string)
     return account.display_no;
   }
   const ready = (await client.query<{ ready: boolean }>(
-    `SELECT to_regprocedure('zzsh_supply.next_account_display_no()') IS NOT NULL AS ready`,
+    `SELECT to_regprocedure('zzsh_supply.next_dated_account_display_no()') IS NOT NULL
+       AND to_regclass('zzsh_supply.account_display_no_counter') IS NOT NULL AS ready`,
   )).rows[0]?.ready;
   if (!ready) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "账号编号能力尚未装配");
-  const number = (await client.query<{ number: string }>(`SELECT zzsh_supply.next_account_display_no() AS number`)).rows[0]?.number;
-  if (!number || publicAccountNumber(number) !== number) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "账号编号暂不可分配");
+  let number: string | undefined;
+  try {
+    number = (await client.query<{ number: string }>(`SELECT zzsh_supply.next_dated_account_display_no() AS number`)).rows[0]?.number;
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === "54000" && (error as Error).message === "ACCOUNT_NUMBER_DAY_EXHAUSTED")
+      throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "今日账号编号暂不可分配");
+    throw error;
+  }
+  if (!number || datedAccountNumber(number) !== number) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "账号编号暂不可分配");
   if (await numberHasOtherTarget(client, number, accountId)) throw conflict("账号编号暂无法唯一核定");
   try {
     const changed = await client.query(`UPDATE zzsh_supply.rental_account SET display_no=$2 WHERE id=$1 AND display_no IS NULL`, [accountId, number]);
