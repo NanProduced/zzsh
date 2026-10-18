@@ -5,7 +5,7 @@
 - [技术选择](architecture/technology-decisions.md)
 - [仓库结构](architecture/repository-layout.md)
 - [多端与 BFF](architecture/multi-client-bff.md)
-- [供给目录与管理权限术语](architecture/GLOSSARY.md)
+- [供给目录、管理权限与会员计价术语](architecture/GLOSSARY.md)
 - [API v1 契约](architecture/api-v1-contract.md)
 - [三角洲租赁业务边界](architecture/rental-business-rules.md)（已确认要求与当前实现范围分开）
 - [新旧交易与结算行为对照](architecture/legacy-business-behavior-diff.md)（测试用预期变更、保留行为与证据边界）
