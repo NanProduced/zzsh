@@ -94,7 +94,7 @@ function blockerText(code: string): string {
   } as Record<string, string>)[code] ?? "当前资料暂不能继续，请读取最新状态或稍后重试。";
 }
 
-type AccountRow = { id: string; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean; historicalRead?: MySupply["historicalRead"] };
+type AccountRow = { id: string; display_no?: string | null; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean; historicalRead?: MySupply["historicalRead"] };
 /** 读取失败的归属作用域：决定顶部提示文案，避免把局部详情失败写成「账号不存在」。写动作仍回显服务端原文。 */
 type AccountErrorScope = "list" | "detail" | "action";
 function AccountActionError({ error, scope, onRetry }: { error: SupplyRequestError | null; scope: AccountErrorScope; onRetry?: () => void }) {
@@ -578,6 +578,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       owner_paused: next.account.owner_paused,
       staff_restricted: next.account.staff_restricted,
       historicalRead: next.historicalRead === undefined ? row.historicalRead : next.historicalRead,
+      display_no: next.account.display_no ?? null,
     } : row));
   }, []);
   const revokeList = useCallback(() => {
@@ -848,7 +849,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
         {visibleRows.map((row) => <div className="mra-row" role="listitem" key={row.id} data-account-row={row.id}>
           <Link className="mra-row-main" id={`account-row-title-${row.id}`} href={`/account?view=accounts&accountId=${encodeURIComponent(row.id)}`} scroll={false}>
             <strong className="mra-row-title">{row.title ?? "未命名草稿"}</strong>
-            {row.historicalRead ? <span className="mra-row-sub">历史编号 {row.historicalRead.resourceNo} · {row.historicalRead.display?.state === "KNOWN" ? "历史资料已读取" : "扩展资料尚待接入"}</span> : null}
+            <span className="mra-row-sub">{row.display_no ? `账号 ${row.display_no}` : "编号待分配"}{row.historicalRead ? ` · ${row.historicalRead.display?.state === "KNOWN" ? "历史资料已读取" : "扩展资料尚待接入"}` : ""}</span>
             <span className="mra-row-sub">{row.game_name} · {row.sequence ? `版本 ${row.sequence}` : "尚无版本"}</span>
           </Link>
           <div className="mra-row-state">
@@ -1025,7 +1026,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
       <div className="supply-detail-hero-copy">
         <h1 className="supply-detail-title">{declaration?.title || "未命名出租账号"}</h1>
         <p className="supply-detail-meta">
-          {account.display_no ? <span className="supply-detail-no">账号 {account.display_no}<button type="button" className="account-copy" onClick={() => void navigator.clipboard.writeText(account.display_no ?? "")} aria-label="复制账号编号"><Copy size={13} aria-hidden="true" />复制</button></span> : null}
+          {account.display_no ? <span className="supply-detail-no">账号 {account.display_no}<button type="button" className="account-copy" onClick={() => void navigator.clipboard.writeText(account.display_no ?? "")} aria-label="复制账号编号"><Copy size={13} aria-hidden="true" />复制</button></span> : <span className="supply-detail-no">编号待分配</span>}
           {gameName ? <span>{gameName}</span> : null}
           {publishedAt ? <span>发布于 {publishedAt}</span> : null}
           {publication?.source === "OWNER_DIRECT" ? <span>号主直接发布</span> : null}
@@ -1049,7 +1050,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
       </div>
     </div>
 
-    {historical ? <section className="supply-block account-module-card"><h2>历史账号资料</h2><p>历史记录仅供查阅，不表示当前可接新单。</p><dl className="order-facts"><div><dt>历史账号编号</dt><dd>{historical.resourceNo}</dd></div><div><dt>历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>历史哈夫币租金</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>历史物资金额</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>历史押金</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的历史出租订单</Link></section> : null}
+    {historical ? <section className="supply-block account-module-card"><h2>历史账号资料</h2><p>历史记录仅供查阅，不表示当前可接新单。</p><dl className="order-facts"><div><dt>账号编号</dt><dd>{account.display_no ?? "编号待分配"}</dd></div><div><dt>历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>历史哈夫币租金</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>历史物资金额</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>历史押金</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的历史出租订单</Link></section> : null}
     {historical ? <section className="supply-block"><h2>历史属性与资源</h2>
       {historicalDisplay ? <>
         <p>来源记录更新于 {displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"} · 租赁模式：{({ ordinary: "普通", custom: "定制", fast: "极速" } as Record<string, string>)[historicalDisplay.rentalMode ?? ""] ?? "待核"}</p>

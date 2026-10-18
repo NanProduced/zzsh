@@ -294,6 +294,12 @@ test("legacy public read never chooses a private current native draft over its f
   assert(!JSON.stringify(listing).includes("UNREVIEWED_PRIVATE_DRAFT"));
 });
 
+test("legacy public projection uses only its independently assigned canonical number",async()=>{
+ const canonical=await readLegacyListing(legacyProjectionClient(legacyProjectionRow({display_no:'AC0000000001'})),'account_1');
+ assert.equal(canonical.displayNo,'AC0000000001');assert.equal(canonical.quote,null);assert.equal(canonical.canCreateOrder,false);
+ for(const display_no of ['A-1',null,undefined]){const listing=await readLegacyListing(legacyProjectionClient(legacyProjectionRow({display_no})),'account_1');assert.equal(listing.displayNo,null);}
+});
+
 test("v3 binds each added source status; old capability versions never imply extra public states", async () => {
   const row = legacyProjectionRow({ source_status: 4 });
   const original = approvedFixture();

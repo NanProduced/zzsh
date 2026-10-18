@@ -18,7 +18,7 @@ test("user historical projection preserves paid cancellation, unknown refund and
   assert.equal(result.status,"CANCELLED");assert.equal(result.party,"renter");assert.equal(result.payment.state,"RECORDED_PAID");
   assert.equal(result.payment.recordedAmount!.amount,"66.00");assert.equal(result.paidAt,null);assert.equal(result.amounts.rental!.amount,"66.00");
   assert.equal(result.legacyAmounts.refund,null);assert.equal(result.legacyAmounts.refundChannelState,"UNKNOWN");
-  assert.equal(result.account.id,null);assert.equal(result.account.displayNo,"OLD-ACCOUNT");assert.equal(result.account.readable,false);
+  assert.equal(result.account.id,null);assert.equal(result.account.displayNo,null);assert.equal(result.account.readable,false);
   assert.equal(result.readOnly,true);assert.equal(result.paymentOpen,false);assert.equal(result.cancelOpen,false);assert.equal(result.continuationCount,0);assert.deepEqual(result.actions,[]);
   for(const key of ["ownerUserId","renterUserId","source_snapshot","evidence_ref","owner_phone","quote","accountId"])assert.equal(Object.hasOwn(result,key),false);
   assert.ok(!JSON.stringify(result).includes("private"));
@@ -52,6 +52,7 @@ test("single list statement filters by authenticated subject before count, stabl
   assert.deepEqual(values,["renter","CANCELLED",null,1,1]);assert.match(sql,/l\.renter_user_id=\$1/);assert.match(sql,/ORDER BY "createdAt" DESC NULLS LAST,id DESC/);assert.match(sql,/count\(\*\).*FROM filtered/);
   assert.equal(result.total,2);assert.equal(result.page,2);assert.equal(result.items[0]!.party,"renter");
   assert.ok(!sql.includes('to_jsonb(l)'));assert.ok(!sql.includes('username'));
+  assert.ok(sql.includes('a.display_no AS "accountDisplayNo"'));assert.ok(!sql.includes('l.legacy_account_no'));
 });
 test("detail lookup binds both party columns and absence fails closed",async()=>{
   let sql="",values:unknown[]=[];
@@ -67,4 +68,15 @@ test("historical party permission does not expose the current private account ti
 });
 test("effective continuation stage updates the list while original source status and recorded payment remain unchanged",()=>{
  const result=projectUserLegacyOrder({...row,sourceOrderStatus:8,continuationStage:4,completedAt:"2026-10-16T00:00:00.123456Z"},"renter");assert.equal(result.status,"COMPLETED");assert.equal(result.source.originalStatus,8);assert.equal(result.payment.state,"RECORDED_PAID");assert.equal(result.completedAt,"2026-10-16T00:00:00.123456Z");assert.equal(result.legacyAmounts.refundChannelState,"UNKNOWN");
+});
+
+test("unreadable legacy accounts expose neither old nor canonical account numbers",()=>{
+ for(const number of ['OLD-ACCOUNT','AC0000000001']){
+  const hidden=projectUserLegacyOrder({...row,accountDisplayNo:number,title:'PRIVATE_TITLE'},'renter');
+  assert.equal(hidden.account.id,null);assert.equal(hidden.account.displayNo,null);assert.equal(hidden.title,'账号资料暂未提供');
+  assert(!JSON.stringify(hidden).includes(number));assert(!JSON.stringify(hidden).includes('PRIVATE_TITLE'));
+ }
+ const visible=projectUserLegacyOrder({...row,accountReadable:true,accountDisplayNo:'AC0000000001',title:'本人资料'},'owner');
+ assert.equal(visible.account.displayNo,'AC0000000001');assert.equal(visible.title,'本人资料');
+ const old=projectUserLegacyOrder({...row,accountReadable:true},'owner');assert.equal(old.account.displayNo,null);
 });

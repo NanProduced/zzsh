@@ -671,11 +671,13 @@ const historicalAccount = (known = true) => ({
 });
 
 test("historical account detail renders saved display facts and refreshes its list without writes or new requests", async () => {
-  const next = { ...detailOf("history-1"), historicalRead: historicalAccount() };
+  const base = detailOf("history-1");
+  const next = { ...base, account: { ...base.account, display_no: "AC0000000019" }, historicalRead: historicalAccount() };
   const p = await probe({ rows: [accountRow("history-1", { historicalRead: historicalAccount(false) })], detail: next });
   try {
     await p.render("accounts");
-    assert.match(p.host.textContent, /SOURCE-9.*扩展资料尚待接入/);
+    assert.match(p.host.textContent, /编号待分配.*扩展资料尚待接入/);
+    assert.doesNotMatch(p.host.textContent, /SOURCE-9/);
     await p.render("accounts", "history-1");
     assert.match(p.host.textContent, /历史属性与资源/);
     assert.match(p.host.textContent, /微信扫码/);
@@ -685,6 +687,8 @@ test("historical account detail renders saved display facts and refreshes its li
     assert.match(p.host.textContent, /部分历史属性未提供或尚待核实/);
     await p.render("accounts");
     assert.match(p.host.textContent, /历史资料已读取/);
+    assert.match(p.host.textContent, /AC0000000019/);
+    assert.doesNotMatch(p.host.textContent, /SOURCE-9/);
     assert.equal(p.calls.myAccounts.length, 1);
     assert.equal(p.calls.mine.length, 1);
     assert.equal(p.writes, 0);

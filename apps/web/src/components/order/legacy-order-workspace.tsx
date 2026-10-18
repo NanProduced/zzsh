@@ -6,6 +6,7 @@ import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type Le
 import { orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
+import { orderAccountTitle } from "@/lib/order-display";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
   const q = new URLSearchParams({ view: party === "owner" ? "leased" : "rentals", source: "legacy", page: String(page) });
@@ -47,7 +48,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     <header className="account-module-heading"><div><h2>{party === "owner" ? "出租" : "租入"}订单</h2><p>只读记录</p></div><button className="button secondary" onClick={() => setReload(n => n + 1)}>刷新</button></header>
     {notice}
     <div className="account-module-card">
-      {data.items.length ? <ul className="legacy-order-list">{data.items.map(row => <li key={row.id}><Link href={legacyOrderHref(party, page, row.id, accountId)}><strong>{row.displayNo || "订单号暂未提供"}</strong><span>{row.title}</span><span>{row.source.statusLabel || "状态待确认"}</span><time>{formatOrderTime(row.createdAt)}</time></Link></li>)}</ul> : <p>暂无订单记录。</p>}
+      {data.items.length ? <ul className="legacy-order-list">{data.items.map(row => <li key={row.id}><Link href={legacyOrderHref(party, page, row.id, accountId)}><strong>{row.displayNo || "订单号暂未提供"}</strong><span>{orderAccountTitle(row)}</span><span>{row.source.statusLabel || "状态待确认"}</span><time>{formatOrderTime(row.createdAt)}</time></Link></li>)}</ul> : <p>暂无订单记录。</p>}
       <nav className="order-trade-actions" aria-label="订单分页">
         {page > 1 ? <Link className="button secondary" href={legacyOrderHref(party, page - 1, undefined, accountId)}>上一页</Link> : null}
         <span>第 {page} 页 · 共 {data.total} 条</span>
@@ -57,7 +58,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   </section>;
   return <section className="order-detail-view">
     <Link href={orderUrl(party, status, accountId)} scroll={false}>返回订单列表</Link>
-    <header><h2>{data.displayNo || "订单"}</h2><p>{data.title}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
+    <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
     {notice}
     <section className="account-module-card"><h3>金额记录</h3>{party === "owner" ? <p className="order-muted">以下是订单记载金额，不代表号主结算收入。</p> : null}<dl className="order-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts.required)}</dd></div>
@@ -69,7 +70,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     <section className="account-module-card"><h3>订单信息</h3><dl className="order-facts">
       <div><dt>创建时间</dt><dd>{formatOrderTime(data.createdAt)}</dd></div><div><dt>支付记录时间</dt><dd>{formatOrderTime(data.paidAt)}</dd></div>
       <div><dt>完成时间</dt><dd>{formatOrderTime(data.completedAt)}</dd></div><div><dt>取消时间</dt><dd>{formatOrderTime(data.cancelledAt)}</dd></div>
-      {data.account.displayNo ? <div><dt>账号编号</dt><dd>{data.account.displayNo}</dd></div> : null}
+      {data.account.readable ? <div><dt>账号编号</dt><dd>{data.account.displayNo ?? "编号待分配"}</dd></div> : null}
     </dl>{data.account.readable && data.account.id && party === "owner" ? <Link href={`/account?view=accounts&accountId=${encodeURIComponent(data.account.id)}`}>查看本人账号</Link> : null}</section>
   </section>;
 }

@@ -29,7 +29,7 @@ export function ExactAccountLookup({ gameId, initialNumber = "" }: { gameId: str
   return <section className="market-number-lookup" aria-label="按完整账号编号查找">
     <form onSubmit={lookup} aria-busy={state.status === "loading"}>
       <label htmlFor="exact-account-number">完整账号编号</label>
-      <input id="exact-account-number" name="number" value={number} maxLength={128} autoComplete="off" placeholder="保留编号中的前导零" aria-describedby="exact-account-number-help" aria-invalid={state.status === "invalid"}
+      <input id="exact-account-number" name="number" value={number} maxLength={128} autoComplete="off" placeholder="AC开头的新平台编号" aria-describedby="exact-account-number-help" aria-invalid={state.status === "invalid"}
         onChange={event => { generation.current++; request.current?.abort(); setNumber(event.target.value); setState({ status: "idle" }); }} />
       <button type="submit" className="button secondary" disabled={!number.trim() || state.status === "loading"}>{state.status === "loading" ? "正在查找…" : "精确查找编号"}</button>
     </form>

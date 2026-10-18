@@ -2,6 +2,7 @@ import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, withoutLegacyResourceNo } from "./legacy-listing-read";
+import { publicAccountNumber } from "./account-number";
 import { listV2 } from "./listing-filter-routes";
 import { lookupPublicListing, parseNumberLookupQuery } from "./public-listing-lookup";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
@@ -507,7 +508,7 @@ export async function handlePublishingRoute(
       if (admin) assertGameScopeUsable(await readAdminGameScope(client, actorId), access?.isBoss === true);
       const rows = (
         await client.query(
-          `SELECT a.id,a.game_id,a.revision::text,a.owner_paused,a.staff_restricted,v.id AS version_id,v.title,v.review_state,v.sequence::text,u.name AS owner_name,g.name AS game_name FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND ($2::boolean OR a.owner_user_id=$3) AND (NOT $2::boolean OR (v.review_state=$4 AND ${gameScopeSql("a.game_id","$3","$5")})) ORDER BY a.id LIMIT $6`,
+          `SELECT a.id,a.display_no,a.game_id,a.revision::text,a.owner_paused,a.staff_restricted,v.id AS version_id,v.title,v.review_state,v.sequence::text,u.name AS owner_name,g.name AS game_name FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.id>$1 AND ($2::boolean OR a.owner_user_id=$3) AND (NOT $2::boolean OR (v.review_state=$4 AND ${gameScopeSql("a.game_id","$3","$5")})) ORDER BY a.id LIMIT $6`,
           [
             query.get("after") ?? "",
             admin,
@@ -520,7 +521,7 @@ export async function handlePublishingRoute(
       ).rows;
       const historical = admin ? null : await loadLegacyHistoricalReads(client, rows.map(row => row.id));
       return {
-        items: historical ? rows.map(row => ({ ...row, historicalRead: withoutLegacyResourceNo(historical.get(row.id) ?? null) })) : rows,
+        items: historical ? rows.map(row => ({ ...row, display_no: publicAccountNumber(row.display_no), historicalRead: withoutLegacyResourceNo(historical.get(row.id) ?? null) })) : rows,
         nextCursor: rows.length === limit ? rows[rows.length - 1]!.id : null,
       };
     });

@@ -392,7 +392,6 @@ export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
   }>;
 };
 export type LegacyHistoricalRead = {
-  resourceNo: string;
   canCreateOrder: false;
   trade: "UNKNOWN";
   quote?: null;
@@ -416,7 +415,7 @@ export type MySupply = {
     owner_paused: boolean;
     staff_restricted: boolean;
     restriction_reason: string | null;
-    /** Business account number. Nullable by design: the create/publish path does not assign one. */
+    /** Canonical AC number; legacy rows stay null until their reviewed public admission. */
     display_no?: string | null;
     lifecycle?: string | null;
     legacy_hold?: string | null;
