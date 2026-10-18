@@ -153,3 +153,52 @@ test("legacy amount facts share renter evidence across parties and never rename 
   assert.equal(unknown.main, "待确认");
   assert.deepEqual(unknown.secondary, []);
 });
+
+test("a historical refund figure is labelled as the original record, never as the current duty", () => {
+  // gross 87 / detain 5 / verified net 82: only the gross source record exists on the read projection,
+  // so it is shown as a record — not as what is still owed, and not as money already received.
+  const order = {
+    readOnly: true, source: { origin: "LEGACY" }, status: "COMPLETED",
+    payment: { state: "RECORDED_PAID" },
+    legacyAmounts: { required: yuan("66.00"), paid: yuan("66.00"), deposit: yuan("57.00"), refund: yuan("87.00") },
+    orderFacts: { resources: [], rentalDeadlineAt: null },
+  };
+  for (const party of ["renter", "owner"]) {
+    const facts = display.orderAmountFacts(order, party);
+    assert.deepEqual(facts.secondary, ["押金 57.00 元", "原退款金额记录 87.00 元"]);
+    assert.ok(!facts.secondary.some((line) => /应退责任|仍欠|已到账|净/.test(line)), `${party} must not read the record as a live duty`);
+  }
+  assert.ok(!JSON.stringify(display.orderAmountFacts(order, "renter")).includes("82.00"), "no net is derived from the record");
+  // REFUND_RECORD_EXISTS keeps only the record: no duty row is invented and nothing claims settlement.
+  const recordOnly = display.orderAmountFacts({ ...order, payment: { state: "RECORDED_UNPAID" } }, "renter");
+  assert.deepEqual(recordOnly.secondary, ["押金 57.00 元", "原退款金额记录 87.00 元"]);
+  // Unknown stays unknown: no refund record, no invented line.
+  const empty = display.orderAmountFacts({ ...order, legacyAmounts: { ...order.legacyAmounts, refund: null } }, "renter");
+  assert.deepEqual(empty.secondary, ["押金 57.00 元"]);
+});
+
+test("a reader placeholder never blocks the frozen resource summary", () => {
+  const order = {
+    source: { origin: "LEGACY" }, account: { readable: true }, title: "账号资料暂未提供",
+    orderFacts: { resources: [
+      { code: "df_billable_haff", quantity: "12.50", unit: null },
+      { code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" },
+    ], rentalDeadlineAt: null },
+  };
+  assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(order), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderUsesResourceSummary(order), true);
+  // an empty/null current title behaves the same way
+  assert.equal(display.orderAccountTitle({ ...order, title: null }), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, title: "   " }), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  // a real current title keeps priority over the resource summary
+  assert.equal(display.orderAccountTitle({ ...order, title: "真实当前标题" }), "真实当前标题");
+  assert.equal(display.orderUsesResourceSummary({ ...order, title: "真实当前标题" }), false);
+  // the tenant guard stays: without the account read authorization no current title is shown
+  assert.equal(display.orderAccountTitle({ ...order, account: { readable: false }, title: "PRIVATE_CURRENT_ACCOUNT_TITLE" }), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.ok(!JSON.stringify(display.orderAccountTitle({ ...order, account: { readable: false } })).includes("PRIVATE"));
+  // without any frozen fact the display stays honestly empty
+  const bare = { source: { origin: "LEGACY" }, account: { readable: true }, title: null, orderFacts: { resources: [], rentalDeadlineAt: null } };
+  assert.equal(display.orderAccountTitle(bare), "账号资料暂未提供");
+  assert.equal(display.orderUsesResourceSummary(bare), false);
+});

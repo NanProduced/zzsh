@@ -70,7 +70,7 @@ export type Order = {
 };
 
 export type LegacyOrder = {
-  id: string; displayNo: string; status: OrderStatus | "UNKNOWN"; party: OrderParty; title: string; gameId: string;
+  id: string; displayNo: string; status: OrderStatus | "UNKNOWN"; party: OrderParty; title: string | null; gameId: string;
   source: { origin: "LEGACY"; ruleOrigin: "LEGACY_ORDER"; originalStatus: number; originalPayStatus: number; statusLabel: string };
   createdAt: string | null; paidAt: string | null; cancelledAt: string | null; completedAt: string | null;
   amounts: { rental: Money | null; deposit: Money | null; totalDue: Money | null; currency: "CNY" };

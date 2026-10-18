@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import type { PoolClient } from "pg";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectUserLegacyOrder } from "../src/order/legacy-user-order-read";
 import { legacyOrderReadState } from "../src/order/legacy-order-read";
@@ -63,7 +65,7 @@ test("detail lookup binds both party columns and absence fails closed",async()=>
 
 test("historical party permission does not expose the current private account title",()=>{
   const hidden=projectUserLegacyOrder({...row,title:"PRIVATE_CURRENT_ACCOUNT_TITLE"},"renter");
-  assert.equal(hidden.title,"账号资料暂未提供");assert.ok(!JSON.stringify(hidden).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
+  assert.equal(hidden.title,null);assert.ok(!JSON.stringify(hidden).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
   const owned=projectUserLegacyOrder({...row,title:"MY_ACCOUNT_TITLE",accountReadable:true},"owner");assert.equal(owned.title,"MY_ACCOUNT_TITLE");
 });
 test("effective continuation stage updates the list while original source status and recorded payment remain unchanged",()=>{
@@ -73,7 +75,7 @@ test("effective continuation stage updates the list while original source status
 test("unreadable legacy accounts expose neither old nor canonical account numbers",()=>{
  for(const number of ['OLD-ACCOUNT','AC0000000001']){
   const hidden=projectUserLegacyOrder({...row,accountDisplayNo:number,title:'PRIVATE_TITLE'},'renter');
-  assert.equal(hidden.account.id,null);assert.equal(hidden.account.displayNo,null);assert.equal(hidden.title,'账号资料暂未提供');
+  assert.equal(hidden.account.id,null);assert.equal(hidden.account.displayNo,null);assert.equal(hidden.title,null);
   assert(!JSON.stringify(hidden).includes(number));assert(!JSON.stringify(hidden).includes('PRIVATE_TITLE'));
  }
  const visible=projectUserLegacyOrder({...row,accountReadable:true,accountDisplayNo:'AC0000000001',title:'本人资料'},'owner');
@@ -94,9 +96,45 @@ test("immutable order facts fill summary inputs without current private data or 
  ]);
  assert.equal(result.orderFacts.rentalDeadlineAt,"2025-10-09T08:53:20.000Z");
  assert.equal(Object.hasOwn(result,"termSeconds"),false);
- assert.equal(result.title,"账号资料暂未提供");
+ assert.equal(result.title,null);
  assert.ok(!JSON.stringify(result).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
  assert.ok(!JSON.stringify(result).includes("OLD-ACCOUNT"));
  const empty=projectUserLegacyOrder(row,"renter");assert.deepEqual(empty.orderFacts,{resources:[],rentalDeadlineAt:null});
  assert.throws(()=>projectUserLegacyOrder({...row,level6BulletNum:"not-a-quantity"},"renter"),(e:unknown)=>(e as {status:number}).status===400);
+});
+
+test("API projection feeds the shared web display with honest titles and record-labelled refunds",()=>{
+  // Cross-layer chain: the real user projection is piped into the real web display functions.
+  const display = createRequire(__filename)(join(__dirname, "../../../web/src/lib/order-display.ts")) as {
+    orderResourceSummary(order: unknown): string | null;
+    orderAccountTitle(order: unknown): string;
+    orderUsesResourceSummary(order: unknown): boolean;
+    orderAmountFacts(order: unknown, party: "renter" | "owner"): { main: string; caption: string; secondary: string[] };
+  };
+  // U5-R1-03 counterexample: owner-readable, no real current title, frozen order resources present.
+  const chainRow = { ...row, accountReadable: true, title: null, expendHaff: "12.50", topInsureCardNum: "7", refundYuan: "87.00", depositCents: "5700" };
+  const projection = projectUserLegacyOrder(chainRow, "owner");
+  assert.equal(projection.title, null);
+  assert.equal(display.orderResourceSummary(projection), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(projection), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderUsesResourceSummary(projection), true);
+  // U5-R1-02 counterexample: gross 87 / detain 5 / verified net 82 — only the source record exists here.
+  for (const party of ["renter", "owner"] as const) {
+    const facts = display.orderAmountFacts(projection, party);
+    assert.deepEqual(facts.secondary, ["押金 57.00 元", "原退款金额记录 87.00 元"]);
+    assert.ok(!facts.secondary.some((line) => /应退责任|仍欠|已到账|净/.test(line)));
+  }
+  assert.ok(!JSON.stringify(display.orderAmountFacts(projection, "renter")).includes("82.00"), "no net is derived from the gross record");
+  // REFUND_RECORD_EXISTS: the record stays a record and the projection gains no accounting model.
+  assert.equal(Object.hasOwn(projection, "duty"), false);
+  assert.ok(!JSON.stringify(projection).includes("82.00"));
+  // A real current title keeps priority.
+  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...chainRow, title: "真实当前标题" }, "owner")), "真实当前标题");
+  // Cross-subject guard: without account read authorization the current title never reaches the display.
+  const hidden = projectUserLegacyOrder({ ...chainRow, title: "真实当前标题", accountReadable: false }, "renter");
+  assert.equal(hidden.title, null);
+  assert.ok(!JSON.stringify(hidden).includes("真实当前标题"));
+  assert.equal(display.orderAccountTitle(hidden), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  // No frozen facts at all: the display stays honestly empty instead of inventing a title.
+  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...row, accountReadable: true, title: null }, "owner")), "账号资料暂未提供");
 });

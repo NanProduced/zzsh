@@ -42,14 +42,23 @@ export function orderResourceSummary(order: Pick<Order, "orderFacts">, limit = 3
   return labels.length ? labels.slice(0, Math.max(1, limit)).join(" · ") : null;
 }
 
+/** System placeholder text is not a real current title and must never block the frozen resource summary. */
+const SYSTEM_ACCOUNT_TITLE_DEFAULTS = new Set(["账号资料暂未提供", "账号信息暂不可用"]);
+
+function realAccountTitle(title: string | null | undefined): string | null {
+  const trimmed = title?.trim();
+  return trimmed && !SYSTEM_ACCOUNT_TITLE_DEFAULTS.has(trimmed) ? trimmed : null;
+}
+
 export function orderUsesResourceSummary(order: Pick<Order, "source" | "title" | "account" | "orderFacts">): boolean {
-  return order.source?.origin === "LEGACY" && !(order.account?.readable && order.title?.trim()) && orderResourceSummary(order) !== null;
+  return order.source?.origin === "LEGACY" && !(order.account?.readable && realAccountTitle(order.title)) && orderResourceSummary(order) !== null;
 }
 
 /** Historical participation is not permission to view the account's current private facts. */
 export function orderAccountTitle(order: Pick<Order, "source" | "title" | "account" | "orderFacts">): string {
   if (order.source?.origin === "LEGACY") {
-    if (order.account?.readable && order.title?.trim()) return order.title.trim();
+    const title = order.account?.readable ? realAccountTitle(order.title) : null;
+    if (title) return title;
     const summary = orderResourceSummary(order);
     return summary ? `订单资源：${summary}` : "账号资料暂未提供";
   }
@@ -67,7 +76,7 @@ export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFa
       caption: party === "owner" ? (paid ? "租客实付记录" : "租客应付") : (paid ? "已付金额记录" : "订单应付"),
       secondary: [
         ...(order.legacyAmounts?.deposit ? [`押金 ${formatOrderMoney(order.legacyAmounts.deposit)}`] : []),
-        ...(order.legacyAmounts?.refund ? [`应退责任 ${formatOrderMoney(order.legacyAmounts.refund)}`] : []),
+        ...(order.legacyAmounts?.refund ? [`原退款金额记录 ${formatOrderMoney(order.legacyAmounts.refund)}`] : []),
       ],
     };
   }

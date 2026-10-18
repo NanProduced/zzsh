@@ -70,7 +70,9 @@ export function projectUserLegacyOrder(row: LegacyUserOrderRow, userId: string) 
   const goods = legacyMoneyCents(row.goodsYuan), items = legacyMoneyCents(row.itemsYuan);
   const paid = state.paymentState === "RECORDED_PAID" ? money(row.paidCents) : null;
   return {
-    id: row.id, displayNo: row.displayNo, status: state.status, party, title: row.accountReadable ? row.title ?? "账号资料暂未提供" : "账号资料暂未提供", gameId: row.gameId,
+    // Only a real current title crosses this boundary. Without one the field stays null, so readers can fall
+    // back to the frozen order resource summary instead of being blocked by fabricated placeholder text.
+    id: row.id, displayNo: row.displayNo, status: state.status, party, title: row.accountReadable ? row.title : null, gameId: row.gameId,
     source: { origin: "LEGACY" as const, ruleOrigin: "LEGACY_ORDER" as const, originalStatus: row.sourceOrderStatus, originalPayStatus: row.sourcePayStatus, statusLabel: state.statusLabel },
     createdAt: row.createdAt, paidAt: row.paidAt, cancelledAt: row.cancelledAt, completedAt: row.completedAt,
     amounts: { rental: goods === null || items === null ? null : centsToYuan(BigInt(goods) + BigInt(items)), deposit: money(row.depositCents), totalDue: money(row.dueCents), currency: "CNY" as const },

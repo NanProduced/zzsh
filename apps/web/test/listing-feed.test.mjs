@@ -723,6 +723,36 @@ test("invalid, missing and ambiguous exact lookups clear the previous card witho
   }
 });
 
+test("ZZ contract numbers stay on exact lookup for every publicly viewable state", async () => {
+  for (const state of ["RENTABLE", "RENTED", "PENDING_PAYMENT", "OFFLINE"]) {
+    const probe = await lookupProbe(async (number) => ({ id: `account-${state}`, displayNo: number, availability: { state } }), "ZZ20261018000001");
+    try {
+      await probe.waitFor(`ready:account-${state}:`);
+      assert.equal(probe.feed.items[0].availability.state, state);
+      assert.equal(probe.feed.nextCursor, null);
+      assert.equal(probe.calls.market.length, 0, "a ZZ number never falls back to the keyword market");
+      assert.deepEqual(probe.calls.lookup.map((call) => [call[0], call[1]]), [["ZZ20261018000001", "game-a"]]);
+    } finally {
+      await probe.close();
+    }
+  }
+});
+
+test("illegal ZZ shapes are refused by the exact lookup without a keyword fallback", async () => {
+  // illegal date / zero serial / short number: still suspected numbers, so the API rejects them.
+  for (const value of ["ZZ20261332000001", "ZZ20261018000000", "ZZ20261018"]) {
+    const probe = await lookupProbe(async () => { throw new LookupError(400); }, value);
+    try {
+      await probe.waitFor("error::400");
+      assert.deepEqual(probe.feed.items, []);
+      assert.equal(probe.calls.market.length, 0, `${value} must never be retried as a keyword query`);
+      assert.equal(probe.calls.lookup.at(-1)[0], value);
+    } finally {
+      await probe.close();
+    }
+  }
+});
+
 test("a late exact result cannot replace a newer keyword query", async () => {
   const pending = [];
   const probe = await lookupProbe((number, game, signal) => new Promise((resolve) => pending.push({ resolve, signal })));

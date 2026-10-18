@@ -43,7 +43,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   if (!current || current.loading) return <p role="status" aria-busy="true">正在读取订单…</p>;
   if (current.error || !current.data) return <section role="alert" className="order-error-block"><h2>订单暂不可用</h2><p>{current.error}</p><button className="button secondary" onClick={() => setReload(n => n + 1)}>重试读取</button></section>;
   const data = current.data;
-  const notice = <p className="order-muted">金额按订单记录展示；可办理事项以本单核定结果为准，应退金额不代表已到账。</p>;
+  const notice = <p className="order-muted">金额按订单记录展示；可办理事项以本单核定结果为准。原退款金额记录是原单记录的金额，不是当前应退责任，也不代表资金已到账。</p>;
   if ("items" in data) return <section className="order-detail-view">
     <header className="account-module-heading"><div><h2>{party === "owner" ? "出租" : "租入"}订单</h2><p>查看订单进展与金额记录。</p></div><button className="button secondary" onClick={() => setReload(n => n + 1)}>刷新</button></header>
     {notice}
@@ -68,7 +68,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts.required)}</dd></div>
       <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts.paid)}</dd></div>
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts.deposit)}</dd></div>
-      <div><dt>应退金额（到账待确认）</dt><dd>{formatOrderMoney(data.legacyAmounts.refund)}</dd></div>
+      <div><dt>原退款金额记录</dt><dd>{formatOrderMoney(data.legacyAmounts.refund)}</dd></div>
     </dl></section>
     <LegacyContinuationPanel orderId={data.id} party={party}/>
     <section className="account-module-card"><h3>订单信息</h3><dl className="order-facts">

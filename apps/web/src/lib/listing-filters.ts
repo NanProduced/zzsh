@@ -81,11 +81,15 @@ export function normalizeListingQuery(value: string | null): string | null {
   return normalized;
 }
 
-/** Number-shaped input never falls back to the rentable-only keyword pool; the API returns the exact 400/404/409. */
+/**
+ * Number-shaped input never falls back to the rentable-only keyword pool; the API returns the exact 400/404/409.
+ * The ZZYYYYMMDDNNNNNN contract shape follows the AC precedent: even a suspicious ZZ number (illegal date, zero
+ * serial, short counter) is still a suspected number and is handed to the exact lookup for the server to refuse.
+ */
 export function exactAccountLookupQuery(value: string | null): string | null {
   const query = normalizeListingQuery(value);
   if (!query || /\s/.test(query)) return null;
-  return /^(?:AC\d*|\d+|account[_:-][A-Za-z0-9._:-]+)$/i.test(query) ? query : null;
+  return /^(?:AC\d*|ZZ\d*|\d+|account[_:-][A-Za-z0-9._:-]+)$/i.test(query) ? query : null;
 }
 
 export function normalizeListingConditions(value: unknown): ListingFilterConditions {

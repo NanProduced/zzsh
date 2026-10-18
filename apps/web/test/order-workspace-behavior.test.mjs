@@ -455,6 +455,9 @@ test("one list includes both sources and old deep links return to the same filte
     assert.doesNotMatch(probe.host.textContent,/历史订单|当前订单|旧平台|新平台|统一入口尚未完成/);
     assert.match(probe.host.textContent,/订单资源：六级子弹 60 · 顶级保险卡 7 天/);
     assert.match(probe.host.textContent,/租赁截止/);
+    // U5-R1-02: the historical refund figure is labelled as the original record in the list row.
+    assert.match(probe.host.textContent,/原退款金额记录/);
+    assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);
     const links=[...probe.host.querySelectorAll("a[data-order-id]")];
     assert.equal(new Set(links.map(a=>a.dataset.orderKey)).size,2);
     assert.ok(links.some(a=>a.href.includes("source=legacy")));
@@ -463,6 +466,9 @@ test("one list includes both sources and old deep links return to the same filte
     assert.match(probe.host.textContent,/不是原账号标题/);
     assert.match(probe.host.textContent,/保险按天/);
     assert.match(probe.host.textContent,/租赁截止/);
+    // U5-R1-02: the detail keeps the original refund record wording and never calls it the current duty.
+    assert.match(probe.host.textContent,/原退款金额记录/);
+    assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);
     assert.doesNotMatch(probe.host.textContent,/历史|旧平台|新平台|旧单记录/);
     const back=[...probe.host.querySelectorAll("a")].find(a=>a.textContent==="返回订单列表");
     assert.equal(back.getAttribute("href"),"/account?view=rentals&status=PAID&accountId=acct_9");

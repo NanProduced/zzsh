@@ -229,7 +229,7 @@ const orderB = { id: "order_B", displayNo: "B-001", title: "PRIVATE_ORDER_B", st
 
 for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read shows ${mode} records with safe detail links and native-only tasks`, async () => {
   const old = { ...orderA, id: "same-id", title: "SYNTHETIC_OLD", source: { origin: "LEGACY", statusLabel: "历史待支付" }, readOnly: true, paymentOpen: false, cancelOpen: false,
-    payment: { state: "RECORDED_UNPAID" }, legacyAmounts: { required: { currency: "CNY", amount: "66.00" }, paid: null, deposit: { currency: "CNY", amount: "0.00" }, refund: null },
+    payment: { state: "RECORDED_UNPAID" }, legacyAmounts: { required: { currency: "CNY", amount: "66.00" }, paid: null, deposit: { currency: "CNY", amount: "0.00" }, refund: { currency: "CNY", amount: "87.00" } },
     orderFacts: { resources: [{ code: "df_billable_level6_bullet", quantity: "60", unit: null }, { code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" }], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" } };
   const native = { ...orderA, id: "same-id", title: "SYNTHETIC_NATIVE", source: { origin: "NATIVE" }, readOnly: false };
   const items = mode === "legacy" ? [old] : mode === "native" ? [native] : [old, native];
@@ -258,6 +258,9 @@ for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read sh
       assert.match(card.textContent, /租赁截止/);
       assert.match(card.textContent, /订单应付 66.00 元/);
       assert.match(card.textContent, /押金 0.00 元/);
+      // U5-R1-02: the overview shows the historical refund figure as an original record, never as a live duty.
+      assert.match(card.textContent, /原退款金额记录 87.00 元/);
+      assert.doesNotMatch(card.textContent, /应退责任|应退金额|已到账/);
     }
   } finally { await probe.dispose(); }
 });

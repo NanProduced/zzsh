@@ -1416,7 +1416,7 @@ test("legacy orders remain read-only and only owners get authorized account navi
       const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
       const log=[]; const fetchImpl=async (url,init={}) => {log.push(init.method??"GET");return json({order:row});};
       const probe=createProbe(window,Legacy,{party,orderId:"legacy_1"},fetchImpl);
-      try { await probe.render();assert.match(probe.host.textContent,/到账待确认/);assert.equal(probe.host.querySelectorAll("button").length,0);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");assert.ok(log.every(m=>m==="GET")); } finally {await probe.dispose();}
+      try { await probe.render();assert.match(probe.host.textContent,/原退款金额记录/);assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);assert.equal(probe.host.querySelectorAll("button").length,0);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");assert.ok(log.every(m=>m==="GET")); } finally {await probe.dispose();}
     }
   });
 });
