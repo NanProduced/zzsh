@@ -42,8 +42,10 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
       const money=(v:unknown)=>{if(typeof v!=="string")throw new Error("CANCELLATION_AMOUNT_UNPROVEN");return cents(legacyPlanYuanToCents(v));};
       // This is an explicit unfulfilled-source class; NULL measurement/return is never converted into a zero amount.
       if(row.express_is!=="0" || row.is_settle!=="0" || row.express_time!==null&&row.express_time!=="0" || row.confirm_time!==null&&row.confirm_time!=="0"
-        || row.expend_haff!==null || row.return_order_money!==null || money(row.expend_pay_money)!==0n)return unknown("CANCELLATION_NOT_UNCONSUMED");
-      const paid=cents(b.paidCents);if(paid<=0n || money(row.pay_money)!==paid || money(row.need_pay_money)!==paid)return unknown("CANCELLATION_AMOUNT_CONFLICT");
+        || row.expend_haff!==null || row.return_order_money!==null
+        || ["awm_bullet_num","level6_bullet_num","level6_helmet_num","level6_armor_num","top_insure_card_num","barrett_bullet_num","coffee_num"].some(field=>row[field]!==null&&row[field]!=="0"))return unknown("CANCELLATION_NOT_UNCONSUMED");
+      // Old addOrder stores the material prepayment before fulfillment; only zero actual usage plus the full typed refund below excludes growth.
+      const paid=cents(b.paidCents);if(paid<=0n || money(row.pay_money)!==paid || money(row.need_pay_money)!==paid || money(row.expend_pay_money)>paid)return unknown("CANCELLATION_AMOUNT_CONFLICT");
       const rows:Record<string,unknown>[]=[],digests:string[]=[];
       for(const[field,entity]of [["payment","la_pay_order"],["refundRecord","la_refund_record"],["refundLog","la_refund_log"]] as const){
         const source=p[field] as Record<string,unknown>|undefined;
