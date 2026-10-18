@@ -1,6 +1,6 @@
 # 旧数据转换与字段映射
 
-规则版 `1.0.0`（2026-10-18）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
+规则版 `1.1.0`（2026-10-18，更新新账号编号）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
 
 ## 共同约束
 
@@ -24,8 +24,8 @@
 | SUP-ATTR-007/008 | `insure_lv/grading_lv/login_way/vit_lv/bear_lv/dive_lv/character_lv/secret_kd`按显式枚举/精度映射；`processing_time_start/end`转可证时段，未知不补全天；风险与公开属性分开。 | display snapshot及正式`listing_version.attributes`；`publishing-options`与公共attributeDisplay→详情/上架，Admin监管/目录。真实箱码不能被测试box-a/b代替；后台风险事实不外泄。 |
 | SUP-MODE-009/PRICE-011/TERM-012 | `ratio_type`映ordinary/custom/fast；custom/fast的B只取已证`base_bot`，不反推。历史`price_tenant/extra_goods_total_price_tenant/deposit_amount/rental_days`保原义，不造当前价。 | 当前价须由`zzsh_supply.price_version/price_line`、`term_option`和受审release/政策构成；`saveListingDraft→quoteListing→确认/建单`消费。Web显示服务器报价；Admin规则与双边价。旧四档计价枚举不是新会员产品。 |
 | SUP-CATALOG-013/MEDIA-017 | `la_dict_type/la_dict_data`保资源/皮肤字典身份；`knife_skin/agent_skin/weapon_skin/gold_skin`是持有声明，不等于新skinId。原图URL/path不证明目标asset字节或归属。 | `zzsh_supply.billable_item/skin/listing_skin`分别保存字典和持有关系；媒体须另核sourceRef→`media_asset`→`listing_media`。无图不造URL，私有凭证不作封面；ECS文件迁OSS与数据库字段转换分别验收，发布媒体门禁仍有效。 |
-| SUP-VIS-014/NUM-015 | `status/is_delete/update_time`保冻结来源租态；`no`只作为内部旧号alias，保前导零。公开查看、当前可租、本人本次可交易分开。 | `rental_account.display_no`仅由独立AC序列持久分配；旧账号先当前公开准入集合，其余旧账号首次准入时发，原生新建仍同事务发号。用户lookup/列表/收藏/本人供给/旧单不回退旧号，Admin可内部解析。发号不提升资格，读取不发号，见[可见性与编号](account-visibility.md)。 |
-| IO-ORD-01…08 | `la_order.id/order_sn/accounts_id/sale_user_id/user_id`及金额、状态、原时间分别核绑定；`order_sn`原单号与账号AC号独立。 | `zzsh_order.legacy_order_read_snapshot`保存来源、双方、金额和时间；不伪造原生付款。统一列表/历史详情与Admin订单读按角色授权；不可读账号不泄旧号/当前私有标题，见[用户旧单](user-legacy-orders.md)。 |
+| SUP-VIS-014 / SUP-NUM-015 v2 | `status/is_delete/update_time`保冻结来源租态；`no`只作为内部旧号alias，保前导零。公开查看、当前可租、本人本次可交易分开。 | `rental_account.display_no`新发`ZZYYYYMMDDNNNNNN`；`zzsh_supply.account_display_no_counter`按数据库上海日期原子计数，经`next_dated_account_display_no()`与账号同事务持久分配。旧已发AC仅兼容读取/重放，不清号；缺新增能力拒绝新发。旧账号先公开准入集合，其余首次准入时发，原生仍创建时发。用户不回退旧alias，Admin可内部解析，发号不提升资格，见[可见性与编号](account-visibility.md)。 |
+| IO-ORD-01…08 | `la_order.id/order_sn/accounts_id/sale_user_id/user_id`及金额、状态、原时间分别核绑定；`order_sn`原单号与账号canonical号独立。 | `zzsh_order.legacy_order_read_snapshot`保存来源、双方、金额和时间；不伪造原生付款。统一列表/历史详情与Admin订单读按角色授权；不可读账号不泄旧号/当前私有标题，见[用户旧单](user-legacy-orders.md)。 |
 | IO-CONT-01…07 | 原订单实耗参数、退款/暂扣及多态分销来源按原规则和证据计算；calc provenance、输入与结果血缘分列。 | `zzsh_order.legacy_continuation_evidence/version`及head，结果不覆盖原快照；续办命令绑定同版计划/身份/权限，处置delta不清既有金额，版本/责任/CAS/幂等/审计同事务，见[旧单续办](legacy-trade-continuation.md)。 |
 | IO-LIAB-18/01/06/61 | 完成未退、暂扣、已没收、存在退款源记录分别核定；`is_settle`和退款记录不等于新渠道成功。 | `zzsh_order.legacy_order_duty`：前两类净退款PENDING；暂扣不是号主没收款；既有没收为不可重复支付的LEGACY_RECORDS终态；退款记录类只审计、无duty。订单完成、责任建立、财账入账、渠道到账分别展示。 |
 | IO-COM-162/208 | 在途佣金由真实confirm终定金额与成熟时点；完成父单用原终金额及完成/成熟证据。原`la_distribution_order`比例/金额/受益人不由新政策反推。 | `zzsh_order.legacy_order_duty/admission`；COMPLETED_AT只加原7天一次，MATURES_AT直接用，切换日不重起。原已结/作废不重付；后台财账权威写SETTLED，不因收益页出现记录称已到账。 |
