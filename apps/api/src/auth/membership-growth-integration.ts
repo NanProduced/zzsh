@@ -10,6 +10,7 @@ import {
   quoteToGrowthOfferPlan,
   replayGrowthProjection,
   projectGrowthConsumptionSources,
+  sealedEnabledRentalModes,
   validateBenefitPolicy,
   type ExistingEntitlement,
   type GrowthContribution,
@@ -729,16 +730,19 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   try { growth = await readMembershipGrowth(client, input.userId, asOfUtc); }
   catch (error) { if (error instanceof GrowthRuleError) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc }; throw error; }
   if (!growth || growth.growth.knowledge !== "KNOWN" || !growth.growth.normalTier || !growth.growth.effectiveTier || !growth.growth.grace) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc };
+  const rentalMode = input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary";
+  // The sealed release decides which modes are spendable; a disabled mode is an explicit refusal, not a missing price.
+  const enabledModes = sealedEnabledRentalModes(input.quoteInput.haffRule);
+  if (enabledModes === null || !enabledModes.includes(rentalMode)) return { knowledge: "UNKNOWN", reason: "RENTAL_MODE_DISABLED", asOfUtc };
   const policyRow = (await client.query<{ version: string; policyPayload: GrowthBenefitPolicy }>(`SELECT version::text AS version, policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' AND effective_at <= $1 ORDER BY version DESC LIMIT 1`, [asOfUtc])).rows[0];
   if (!policyRow) return { knowledge: "UNKNOWN", reason: "POLICY_UNAVAILABLE", asOfUtc };
   const policy = policyRow.policyPayload;
-  const policyValidation = validateBenefitPolicy(policy);
+  const policyValidation = validateBenefitPolicy(policy, { enabledModes });
   if (!policyValidation.valid || !policyValidation.publishable) return { knowledge: "UNKNOWN", reason: "POLICY_NOT_PUBLISHABLE", asOfUtc };
   const effectiveTier = growth.growth.effectiveTier;
   const policyTier = policyTierForGrowthProjection({ normalTier: growth.growth.normalTier, effectiveTier, grace: growth.growth.grace });
   if (!policyTier || effectiveTier === "UNKNOWN") return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN", asOfUtc };
   const tier = policy.tiers[policyTier];
-  const rentalMode = input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary";
   const growthContract = tier?.pricing?.[rentalMode];
   if (!configuredPricing(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };

@@ -5,17 +5,26 @@ import {
   computeGrowthOfferPlan,
   contributionFromSettlement,
   hasOverlappingEntitlement,
+  isNotPriced,
   normalTierForPoints,
   quoteToGrowthOfferPlan,
   replayGrowthProjection,
   entitlementStateAt,
   roundHalfUpCents,
+  sealedEnabledRentalModes,
   validateBenefitPolicy,
   validateEntitlementCandidate,
   type GrowthBenefitPolicy,
   type GrowthContribution,
+  type GrowthPricingContract,
 } from "../src/auth/membership-growth";
 import { compatRule } from "./pricing-compat-fixture";
+
+function configuredMode(tier: GrowthBenefitPolicy["tiers"]["STANDARD"], mode: "ordinary" | "custom" | "fast"): GrowthPricingContract {
+  const contract = tier.pricing[mode];
+  if (!contract || isNotPriced(contract)) throw new Error(`expected a configured ${mode} contract`);
+  return contract;
+}
 
 const contribution = (patch: Partial<GrowthContribution> = {}): GrowthContribution => ({
   userId: "user_1",
@@ -144,8 +153,8 @@ test("benefit policy requires monotonic configured savings and preserves missing
   assert.equal(validateBenefitPolicy(valid).valid, true);
   assert.equal(validateBenefitPolicy(valid).publishable, false);
   const bad = policy();
-  const silverMaterial = bad.tiers.SILVER.pricing.ordinary.materials.item!;
-  const goldMaterial = bad.tiers.GOLD.pricing.ordinary.materials.item!;
+  const silverMaterial = configuredMode(bad.tiers.SILVER, "ordinary").materials.item!;
+  const goldMaterial = configuredMode(bad.tiers.GOLD, "ordinary").materials.item!;
   if (silverMaterial.status === "CONFIGURED" && goldMaterial.status === "CONFIGURED") {
     silverMaterial.buyerUnitAmount = "1";
     silverMaterial.ownerUnitAmount = "1";
@@ -154,44 +163,134 @@ test("benefit policy requires monotonic configured savings and preserves missing
   }
   assert.equal(validateBenefitPolicy(bad).valid, false);
   const unknown = policy();
-  unknown.tiers.DIAMOND.pricing.fast.haff = { status: "NOT_PRICED", reason: "渠道成本未封存" };
+  configuredMode(unknown.tiers.DIAMOND, "fast").haff = { status: "NOT_PRICED", reason: "渠道成本未封存" };
   assert.equal(validateBenefitPolicy(unknown).valid, true);
   assert.equal(validateBenefitPolicy(unknown).publishable, false);
   assert.ok(validateBenefitPolicy(unknown).warnings.some((value) => value.includes("cost_basis_missing")));
   const invalid = policy();
   invalid.tiers.STANDARD.tenantDeposit = "INVALID" as never;
-  (invalid.tiers.STANDARD.pricing.ordinary.haff as { status: string }).status = "INVALID";
+  (configuredMode(invalid.tiers.STANDARD, "ordinary").haff as { status: string }).status = "INVALID";
   const invalidResult = validateBenefitPolicy(invalid);
   assert.equal(invalidResult.valid, false);
   assert.equal(invalidResult.publishable, false);
   const spread = policy();
   for (const tier of Object.values(spread.tiers)) for (const mode of ["ordinary", "custom", "fast"] as const) {
-    const haff = tier.pricing[mode].haff;
+    const haff = configuredMode(tier, mode).haff;
     if (haff.status === "CONFIGURED") { haff.baseBySafeBox.box = "100"; haff.spreadDelta = "10"; }
   }
   for (const mode of ["ordinary", "custom", "fast"] as const) {
-    const haff = spread.tiers.GOLD.pricing[mode].haff;
+    const haff = configuredMode(spread.tiers.GOLD, mode).haff;
     if (haff.status === "CONFIGURED") haff.spreadDelta = "90";
   }
   assert.equal(validateBenefitPolicy(spread).valid, false);
   const baseAndSpread = policy();
   for (const tier of Object.values(baseAndSpread.tiers)) for (const mode of ["ordinary", "custom", "fast"] as const) {
-    const haff = tier.pricing[mode].haff;
+    const haff = configuredMode(tier, mode).haff;
     if (haff.status === "CONFIGURED") { haff.baseBySafeBox.box = "100"; haff.spreadDelta = "10"; }
   }
   for (const mode of ["ordinary", "custom", "fast"] as const) {
-    const haff = baseAndSpread.tiers.GOLD.pricing[mode].haff;
+    const haff = configuredMode(baseAndSpread.tiers.GOLD, mode).haff;
     if (haff.status === "CONFIGURED") { haff.baseBySafeBox.box = "110"; haff.spreadDelta = "105"; }
   }
   assert.equal(validateBenefitPolicy(baseAndSpread).valid, false);
 });
 
+test("sealed release modes decide which contracts are required, and pending values stay draft-only", () => {
+  const approved = () => { const value = policy(); value.status = "APPROVED"; return value; };
+  const enabledOrdinaryCustom = ["ordinary", "custom"] as const;
+  // A mode the sealed release disabled is inert: NOT_PRICED fast neither warns nor blocks publish.
+  const fastOff = approved();
+  for (const tier of Object.values(fastOff.tiers)) configuredMode(tier, "fast").haff = { status: "NOT_PRICED", reason: "权威禁用模式" };
+  const fastOffResult = validateBenefitPolicy(fastOff, { enabledModes: enabledOrdinaryCustom });
+  assert.equal(fastOffResult.valid, true, JSON.stringify(fastOffResult));
+  assert.equal(fastOffResult.publishable, true, JSON.stringify(fastOffResult));
+  // The same policy against a release that enables fast must reject, and never invents a price.
+  const fastOnResult = validateBenefitPolicy(fastOff, { enabledModes: ["ordinary", "custom", "fast"] });
+  assert.equal(fastOnResult.valid, true);
+  assert.equal(fastOnResult.publishable, false);
+  assert.ok(fastOnResult.warnings.some((warning) => warning.includes("cost_basis_missing")));
+  // A dropped disabled-mode contract drifts downstream, so a configured one is still shape-checked.
+  const badDisabled = approved();
+  configuredMode(badDisabled.tiers.GOLD, "fast").mode = "ordinary" as never;
+  assert.equal(validateBenefitPolicy(badDisabled, { enabledModes: enabledOrdinaryCustom }).valid, false);
+  // Pending values are draft-savable but never publishable.
+  const pending = approved();
+  const pendingContract = configuredMode(pending.tiers.GOLD, "ordinary");
+  if (pendingContract.haff.status === "CONFIGURED") {
+    pendingContract.haff.baseBySafeBox.box = "";
+    pendingContract.haff.costBasisRef = "";
+  }
+  const pendingMaterial = pendingContract.materials.item!;
+  if (!isNotPriced(pendingMaterial)) pendingMaterial.buyerUnitAmount = "";
+  const pendingResult = validateBenefitPolicy(pending, { enabledModes: enabledOrdinaryCustom });
+  assert.equal(pendingResult.valid, true, JSON.stringify(pendingResult));
+  assert.equal(pendingResult.publishable, false);
+  assert.ok(pendingResult.warnings.some((warning) => warning.includes("value_pending")));
+  // Release catalog coverage is a publish blocker; a unit that contradicts the catalog is invalid.
+  const coverage = approved();
+  const coverageResult = validateBenefitPolicy(coverage, { enabledModes: enabledOrdinaryCustom, catalog: { safeBoxes: ["box", "box-2"], materials: [{ itemId: "item", unit: "PIECE" }] } });
+  assert.equal(coverageResult.publishable, false);
+  assert.ok(coverageResult.warnings.some((warning) => warning.includes("box-2.catalog_missing")));
+  const mismatched = approved();
+  const mismatchResult = validateBenefitPolicy(mismatched, { enabledModes: enabledOrdinaryCustom, catalog: { safeBoxes: ["box"], materials: [{ itemId: "item", unit: "DAY" }] } });
+  assert.equal(mismatchResult.valid, false);
+  assert.ok(mismatchResult.errors.some((error) => error.includes("unit_mismatch")));
+  // SPREAD releases price through a spread delta, so an enabled contract without one cannot publish.
+  const noSpread = approved();
+  const noSpreadHaff = configuredMode(noSpread.tiers.GOLD, "custom").haff;
+  if (isNotPriced(noSpreadHaff)) throw new Error("fixture must be configured");
+  delete noSpreadHaff.spreadDelta;
+  const noSpreadResult = validateBenefitPolicy(noSpread, { enabledModes: enabledOrdinaryCustom, releaseMode: "SPREAD" });
+  assert.equal(noSpreadResult.publishable, false);
+  assert.ok(noSpreadResult.warnings.some((warning) => warning.includes("spread_required")));
+});
+
+test("multi-mode entitlement caps stay bounded to their tier and keep legacy single contracts readable", () => {
+  const approved = () => { const value = policy(); value.status = "APPROVED"; return value; };
+  const byMode = approved();
+  for (const tier of Object.values(byMode.tiers)) {
+    tier.entitlementCap = { byMode: { ordinary: configuredMode(tier, "ordinary"), custom: configuredMode(tier, "custom") } };
+  }
+  const result = validateBenefitPolicy(byMode, { enabledModes: ["ordinary", "custom"] });
+  assert.equal(result.valid, true, JSON.stringify(result));
+  assert.equal(result.publishable, true, JSON.stringify(result));
+  const p = policy();
+  const friend = { userId: "user_1", kind: "FRIEND" as const, scopeKey: "game:delta", startsAt: "2026-10-01T00:00:00.000Z", endsAt: "2026-12-30T00:00:00.000Z", depositWaived: false, reason: "客服专项服务", requestedBy: "admin_1" };
+  const capPolicy = policy();
+  capPolicy.tiers.GOLD.entitlementCap = { byMode: { ordinary: configuredMode(capPolicy.tiers.GOLD, "ordinary"), custom: configuredMode(capPolicy.tiers.GOLD, "custom") } };
+  assert.equal(validateEntitlementCandidate({ ...friend, pricing: configuredMode(capPolicy.tiers.GOLD, "custom") }, "STANDARD", capPolicy).valid, true);
+  assert.equal(validateEntitlementCandidate({ ...friend, pricing: configuredMode(capPolicy.tiers.GOLD, "ordinary") }, "STANDARD", capPolicy).valid, true);
+  // A cap deeper than the tier boundary would let FRIEND beat GOLD: rejected, not silently accepted.
+  const tooDeep = policy();
+  const goldOrdinary = configuredMode(tooDeep.tiers.GOLD, "ordinary");
+  if (goldOrdinary.haff.status !== "CONFIGURED") throw new Error("fixture must be configured");
+  tooDeep.tiers.GOLD.entitlementCap = { byMode: { ordinary: { ...goldOrdinary, haff: { ...goldOrdinary.haff, baseBySafeBox: { box: "200" } } } } };
+  const deepResult = validateBenefitPolicy(tooDeep, { enabledModes: ["ordinary", "custom"] });
+  assert.equal(deepResult.publishable, false);
+  assert.ok(deepResult.warnings.some((warning) => warning.includes("below_tier_boundary")));
+  // Legacy single-contract caps keep their original single-mode behavior.
+  assert.equal(validateEntitlementCandidate({ ...friend, pricing: configuredMode(p.tiers.GOLD, "ordinary") }, "STANDARD", p).valid, true);
+  assert.equal(validateEntitlementCandidate({ ...friend, pricing: configuredMode(p.tiers.GOLD, "custom") }, "STANDARD", p).valid, false);
+});
+
+test("sealedEnabledRentalModes reads the release authoritative modes and fails closed", () => {
+  assert.deepEqual(sealedEnabledRentalModes(compatRule()), ["ordinary", "custom", "fast"]);
+  const fastOff = compatRule();
+  fastOff.compatibility!.modes.fast = { enabled: false };
+  assert.deepEqual(sealedEnabledRentalModes(fastOff), ["ordinary", "custom"]);
+  assert.deepEqual(sealedEnabledRentalModes({ schema: "haff-ratio-v1", baseBySafeBox: { "box-a": "50" }, options: {}, spreadDelta: "10", vitalityDeltaByLevel: {}, bearDeltaByLevel: {}, dailyDeltaByTermOption: {} }), ["ordinary"]);
+  assert.equal(sealedEnabledRentalModes(null), null);
+  assert.equal(sealedEnabledRentalModes({ schema: "haff-ratio-v2" }), null);
+  assert.equal(sealedEnabledRentalModes({ schema: "haff-ratio-v2", baseBySafeBox: {}, compatibility: { modes: { ordinary: { enabled: false } } } }), null);
+  assert.equal(sealedEnabledRentalModes({ schema: "unknown" }), null);
+});
+
 test("entitlement limits are typed, bounded and non-overlapping", () => {
   const p = policy();
-  const candidate = { userId: "user_1", kind: "FRIEND" as const, scopeKey: "game:delta:account-a", startsAt: "2026-10-01T00:00:00.000Z", endsAt: "2026-12-30T00:00:00.000Z", pricing: p.tiers.GOLD.pricing.ordinary, depositWaived: false, reason: "客服专项服务", requestedBy: "admin_1" };
+  const candidate = { userId: "user_1", kind: "FRIEND" as const, scopeKey: "game:delta:account-a", startsAt: "2026-10-01T00:00:00.000Z", endsAt: "2026-12-30T00:00:00.000Z", pricing: configuredMode(p.tiers.GOLD, "ordinary"), depositWaived: false, reason: "客服专项服务", requestedBy: "admin_1" };
   const friendValidation = validateEntitlementCandidate(candidate, "STANDARD", p);
   assert.equal(friendValidation.valid, true, JSON.stringify(friendValidation));
-  const prestigeValidation = validateEntitlementCandidate({ ...candidate, kind: "PRESTIGE", pricing: p.tiers.DIAMOND.pricing.ordinary }, "STANDARD", p);
+  const prestigeValidation = validateEntitlementCandidate({ ...candidate, kind: "PRESTIGE", pricing: configuredMode(p.tiers.DIAMOND, "ordinary") }, "STANDARD", p);
   assert.equal(prestigeValidation.valid, true, JSON.stringify(prestigeValidation));
   assert.equal(validateEntitlementCandidate({ ...candidate, endsAt: "2027-01-01T00:00:00.000Z" }, "STANDARD", p).valid, false);
   assert.equal(hasOverlappingEntitlement([{ ...candidate, id: "old", status: "ACTIVE" }], { ...candidate, id: "new" }), true);

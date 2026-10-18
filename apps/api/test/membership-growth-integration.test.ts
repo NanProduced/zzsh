@@ -4,6 +4,7 @@ import { recordAcceptedSettlementGrowthFacts, assessGrowthSourceCompleteness, gr
 import { computeDeltaQuote, type QuoteInput } from "../src/supply/pricing";
 import { compatRule } from "./pricing-compat-fixture";
 import type { GrowthBenefitPolicy, GrowthContribution } from "../src/auth/membership-growth";
+import { isNotPriced } from "../src/auth/membership-growth";
 import { lockReplacementEntitlement } from "../src/auth/membership-growth-approval";
 import { executeMembershipGrowthOperation } from "../src/auth/membership-growth-approval";
 import { canonicalize } from "../src/supply/content-hash";
@@ -11,7 +12,7 @@ import { createHash } from "node:crypto";
 import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
 import { types as pgTypes } from "pg";
 import { parseGrowthConsumptionQuery, readMembershipGrowthConsumption } from "../src/auth/membership-growth-integration";
-import { handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
+import { handleMembershipGrowthPolicyAdmin, handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
 
 test("membership approval accepts ALL_GAMES and selected targets, rejects empty or unrelated scope before mutation", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
@@ -134,14 +135,15 @@ test("feature-off does not create a post-commit growth callback or approval exec
   }
 });
 
-function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(), status: "DRAFT" }) {
+function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(), status: "DRAFT" }, releasePatch: Record<string, unknown> = {}) {
   const metadata = { schema: "membership-growth-draft-v1", policy, versionNo: 1, ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: policy.sourceRef, effectiveAtUtc: policy.effectiveAt };
   const draftHash = createHash("sha256").update(canonicalize(metadata)).digest("hex");
   const inserted: Array<unknown[]> = [];
   const client = {
     query: async (sql: string, args: unknown[] = []) => {
       if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
-      if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED" }] };
+      if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: compatRule(), ...releasePatch }] };
+      if (sql.includes("FROM zzsh_supply.price_line")) return { rows: [{ itemId: "item", unit: "PIECE" }] };
       if (sql.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")) { assert.doesNotMatch(sql, /FOR UPDATE|FOR SHARE/); return { rows: [{ id: "growth_policy_draft_1", version: 1, status: "DRAFT", effectiveAt: "2026-01-01T00:00:00.000Z", ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: policy.sourceRef, policyPayload: policy, payloadHash: draftHash }] }; }
       if (sql.startsWith("INSERT INTO zzsh_iam.membership_growth_policy")) { inserted.push(args); return { rowCount: 1, rows: [] }; }
       throw new Error(`unexpected query: ${sql}`);
@@ -183,7 +185,11 @@ test("draft reference rejects hash, version, release, unpublishable policy and f
       await assert.rejects(() => executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: "boss" } as never, `approval-${patch.name}`));
       assert.equal(fixture.inserted.length, 0, patch.name);
     }
-    const invalidPolicy = { ...readerPolicy(), status: "DRAFT" as const, tiers: { ...readerPolicy().tiers, STANDARD: { ...readerPolicy().tiers.STANDARD, pricing: { ...readerPolicy().tiers.STANDARD.pricing, ordinary: { ...readerPolicy().tiers.STANDARD.pricing.ordinary, haff: { status: "NOT_PRICED" as const, reason: "pending" } } } } } };
+    const invalidPolicy = readerPolicy();
+    invalidPolicy.status = "DRAFT";
+    const standardOrdinary = invalidPolicy.tiers.STANDARD.pricing.ordinary;
+    if (!standardOrdinary || isNotPriced(standardOrdinary)) throw new Error("fixture must be configured");
+    standardOrdinary.haff = { status: "NOT_PRICED", reason: "pending" };
     const invalid = draftApprovalFixture(invalidPolicy);
     await assert.rejects(() => executeMembershipGrowthOperation(invalid.client as never, invalid.input as never, { userId: "boss" } as never, "approval-invalid"));
     assert.equal(invalid.inserted.length, 0);
@@ -200,6 +206,49 @@ test("draft reference rejects hash, version, release, unpublishable policy and f
   } finally {
     if (previousDisabled === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
     else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previousDisabled;
+  }
+});
+
+test("sealed-enabled modes gate publish while a disabled mode stays inert and multi-mode caps stay expressible", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+  process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  const fastDisabledRelease = () => { const rule = compatRule(); rule.compatibility!.modes.fast = { enabled: false }; return { haffRule: rule }; };
+  const fastOffPolicy = (): GrowthBenefitPolicy => {
+    const value = readerPolicy();
+    value.status = "DRAFT";
+    for (const tier of Object.values(value.tiers)) {
+      const fast = tier.pricing.fast;
+      if (!fast || isNotPriced(fast)) throw new Error("fixture must be configured");
+      fast.haff = { status: "NOT_PRICED", reason: "权威禁用模式" };
+    }
+    return value;
+  };
+  const byModeCaps = (value: GrowthBenefitPolicy): GrowthBenefitPolicy => {
+    for (const tier of Object.values(value.tiers)) {
+      const ordinary = tier.pricing.ordinary;
+      const custom = tier.pricing.custom;
+      if (!ordinary || isNotPriced(ordinary) || !custom || isNotPriced(custom)) throw new Error("fixture must be configured");
+      tier.entitlementCap = { byMode: { ordinary, custom } };
+    }
+    return value;
+  };
+  try {
+    // fast disabled by the sealed release: NOT_PRICED fast publishes without inventing a fast price.
+    const disabledFast = draftApprovalFixture(byModeCaps(fastOffPolicy()), fastDisabledRelease());
+    const published = await executeMembershipGrowthOperation(disabledFast.client as never, disabledFast.input as never, { userId: "boss" } as never, "approval-fast-off");
+    assert.equal(published.resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+    assert.equal(disabledFast.inserted.length, 1);
+    // The same policy against a release that enables fast must keep rejecting.
+    const enabledFast = draftApprovalFixture(byModeCaps(fastOffPolicy()));
+    await assert.rejects(() => executeMembershipGrowthOperation(enabledFast.client as never, enabledFast.input as never, { userId: "boss" } as never, "approval-fast-on"));
+    assert.equal(enabledFast.inserted.length, 0);
+    // A release whose haff rule cannot be read is not silently treated as fully priced.
+    const unreadable = draftApprovalFixture(byModeCaps(fastOffPolicy()), { haffRule: { schema: "haff-ratio-v2" } });
+    await assert.rejects(() => executeMembershipGrowthOperation(unreadable.client as never, unreadable.input as never, { userId: "boss" } as never, "approval-unreadable"));
+    assert.equal(unreadable.inserted.length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+    else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous;
   }
 });
 
@@ -528,6 +577,90 @@ test("history ordering preserves submillisecond instants and future corrections 
   assert(summary?.growth.contributions.every((r) => r.kind === "CONSUMPTION"));
   assert.deepEqual(summary?.growth.contributions.map((r) => r.amountCents).sort(), ["100", "101"]);
   await assert.rejects(() => readMembershipGrowthConsumption(client, "history-user", { scope: "LIFETIME", limit: 1, cursor: page!.nextCursor! + "#" }, now), (e: any) => e.status === 400);
+});
+
+test("empty policy admin GET boots a first draft from the sealed release and saves it as DRAFT", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+  process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    const haffRule = compatRule();
+    haffRule.compatibility!.modes.fast = { enabled: false };
+    haffRule.baseBySafeBox = { safe_box_1x2: "60", safe_box_2x2: "57", safe_box_2x3: "53", safe_box_3x3: "49" };
+    const state: { policyRows: unknown[]; release: unknown; priceLines: unknown[]; inserts: unknown[][] } = {
+      policyRows: [],
+      release: { releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule },
+      priceLines: [{ itemId: "item-a", unit: "PIECE" }, { itemId: "item-b", unit: "DAY" }],
+      inserts: [],
+    };
+    const client = {
+      query: async (sql: string, args: unknown[] = []) => {
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql.includes('"zzsh_auth_admin"."session"')) return { rows: [{ locked: false, twoFactorEnabled: true, suspended: false }] };
+        if (sql.includes('"zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
+        if (sql.includes("FROM zzsh_iam.membership_growth_policy")) return { rows: state.policyRows };
+        if (sql.includes("JOIN zzsh_supply.price_version")) return { rows: state.release ? [state.release] : [] };
+        if (sql.includes("FROM zzsh_supply.price_line")) return { rows: state.priceLines };
+        if (sql.startsWith("INSERT INTO zzsh_iam.membership_growth_policy")) { state.inserts.push(args); return { rowCount: 1, rows: [] }; }
+        if (sql.includes("set_config") || sql.includes("audit_event")) return { rows: [] };
+        throw new Error(`unexpected query: ${sql}`);
+      },
+      release: () => undefined,
+    };
+    const options = {
+      pool: { connect: async () => client, query: client.query },
+      adminOrigin: "http://127.0.0.1:3101", userOrigin: "http://127.0.0.1:3100", apiOrigin: "http://127.0.0.1:3102",
+      adminAuth: { api: { getSession: async () => ({ user: { id: "admin-1", twoFactorEnabled: true }, session: { id: "session-1" } }) } },
+    } as never;
+    const request = async (method: string, path: string, body?: unknown) => {
+      let status = 0; let payload: any;
+      const response = { status(n: number) { status = n; return this; }, setHeader() { return this; }, json(value: unknown) { payload = value; return this; } };
+      await handleMembershipGrowthPolicyAdmin({ method, originalUrl: path, headers: {}, ...(body === undefined ? {} : { body }) } as never, response as never, options);
+      return { status, body: payload };
+    };
+    // Empty table: the first draft is bootstrapped from the real sealed release catalog, never from a fake price.
+    const boot = await request("GET", "/api/v1/admin/membership-growth/policy");
+    assert.equal(boot.status, 200, JSON.stringify(boot));
+    assert.equal(boot.body.policy, null);
+    assert.equal(boot.body.bootstrap.ruleReleaseId, "release-1");
+    assert.deepEqual(boot.body.bootstrap.enabledModes, ["ordinary", "custom"]);
+    assert.deepEqual(boot.body.catalog.safeBoxes, ["safe_box_1x2", "safe_box_2x2", "safe_box_2x3", "safe_box_3x3"]);
+    assert.deepEqual(boot.body.catalog.enabledModes, ["ordinary", "custom"]);
+    assert.deepEqual(boot.body.catalog.materials.map((material: { id: string }) => material.id), ["item-a", "item-b"]);
+    // No sealed release: no bootstrap that could invent a binding.
+    const released = state.release; state.release = null;
+    const empty = await request("GET", "/api/v1/admin/membership-growth/policy");
+    assert.equal(empty.body.bootstrap, null);
+    state.release = released;
+    // A structurally valid first draft (all parameters pending) is savable as DRAFT.
+    const notPriced = { status: "NOT_PRICED", reason: "待核" };
+    const tiers = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"];
+    const draftPolicy = {
+      schema: "membership-growth-v1", version: "1", status: "DRAFT", effectiveAt: null, sourceRef: "admin:membership-growth",
+      tiers: Object.fromEntries(tiers.map((tier) => [tier, { tier, tenantDeposit: tier === "STANDARD" || tier === "SILVER" ? "ACCOUNT_BASE" : "WAIVED", pricing: { ordinary: notPriced, custom: notPriced, fast: notPriced }, entitlementCap: notPriced }])),
+      entitlementCaps: { FRIEND: "GOLD", PRESTIGE: "DIAMOND" },
+    };
+    const saved = await request("POST", "/api/v1/admin/membership-growth/policy-drafts", { policy: draftPolicy, versionNo: 1, expectedVersion: "0", ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: "admin:membership-growth", effectiveAtUtc: null });
+    assert.equal(saved.status, 200, JSON.stringify(saved));
+    assert.equal(saved.body.status, "DRAFT");
+    assert.match(saved.body.payloadHash, /^[0-9a-f]{64}$/);
+    assert.equal(saved.body.publishable, false);
+    assert.equal(state.inserts.length, 1);
+    // Re-read returns the immutable saved draft, not an approved policy.
+    state.policyRows = [{ id: saved.body.id, version: "1", status: "DRAFT", effectiveAt: null, ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: "admin:membership-growth", payloadHash: saved.body.payloadHash, policyPayload: draftPolicy }];
+    const reread = await request("GET", "/api/v1/admin/membership-growth/policy");
+    assert.equal(reread.body.meta.status, "DRAFT");
+    assert.equal(reread.body.meta.payloadHash, saved.body.payloadHash);
+    assert.equal(reread.body.bootstrap, null);
+    // An anonymous request is rejected before any policy read or write.
+    const anonymous = { pool: { connect: async () => client, query: client.query }, adminOrigin: "http://127.0.0.1:3101", userOrigin: "http://127.0.0.1:3100", apiOrigin: "http://127.0.0.1:3102", adminAuth: { api: { getSession: async () => null } } } as never;
+    let status = 0;
+    const response = { status(n: number) { status = n; return this; }, setHeader() { return this; }, json() { return this; } };
+    await handleMembershipGrowthPolicyAdmin({ method: "GET", originalUrl: "/api/v1/admin/membership-growth/policy", headers: {} } as never, response as never, anonymous);
+    assert.equal(status, 401);
+  } finally {
+    if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
+    else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous;
+  }
 });
 
 test("growth consumption route reuses active actor/session guards and never writes facts", async () => {

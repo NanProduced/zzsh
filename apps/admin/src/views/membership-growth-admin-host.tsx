@@ -2,19 +2,34 @@ import { useEffect, useState } from "react";
 import { AdminApiError, adminRequest, hasPermission, type SessionSnapshot } from "../api";
 import type { WorkspaceTab } from "../workspace/tab-model";
 import {
+  bootstrapGrowthPolicy,
+  entitlementFromCap,
   MembershipGrowthAdminView,
   type AdminEntitlementDraft,
+  type AdminGrowthCatalog,
   type AdminGrowthPolicy,
   type AdminGrowthSubject,
   type AdminApproval,
+  type AdminPricingMode,
   type MembershipGrowthAdminState,
 } from "./membership-growth-view";
+
+export type PolicyBootstrap = {
+  ruleReleaseId: string;
+  priceVersionId: string;
+  haffSchema: "haff-ratio-v1" | "haff-ratio-v2" | null;
+  releaseMode: "SPREAD" | "PERCENT";
+  enabledModes: AdminPricingMode[];
+  nextVersionNo: number;
+  expectedVersion: string;
+};
 
 type PolicyResponse = {
   policy: Record<string, any> | null;
   meta: { id: string; version: string; status: "DRAFT" | "APPROVED"; effectiveAtUtc: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string } | null;
-  catalog: AdminGrowthPolicy["catalog"];
+  catalog: AdminGrowthCatalog;
   thresholds: Record<string, string>;
+  bootstrap?: PolicyBootstrap | null;
 };
 
 export function policyDraftApprovalPayload(meta: NonNullable<PolicyResponse["meta"]>) {
@@ -25,23 +40,27 @@ export function policyDraftApprovalPayload(meta: NonNullable<PolicyResponse["met
 type SubjectResponse = { subjectId: string; growth?: { knowledge: "KNOWN" | "UNKNOWN"; effectiveTier: string | null; rollingPoints: string | null; lifetimePoints: string | null; sourceState: string }; authorizationState?: string };
 
 function asPolicy(response: PolicyResponse): AdminGrowthPolicy | null {
-  if (!response.policy || !response.meta) return null;
-  const raw = response.policy;
-  const tiers = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"] as const;
-  const tierConfig = raw.tiers as Record<string, any>;
-  return {
-    version: response.meta.version,
-    status: raw.status === "APPROVED" ? "APPROVED" : "DRAFT",
-    effectiveAt: response.meta.effectiveAtUtc,
-    catalog: response.catalog,
-    selectedSafeBoxCode: response.catalog.safeBoxes[0] ?? "",
-    selectedMaterialId: response.catalog.materials[0]?.id ?? "",
-    tiers: tiers.map((tier) => {
-      const config = tierConfig[tier] ?? {};
-      return { tier, threshold: response.thresholds[tier] ?? "0", tenantDeposit: config.tenantDeposit === "WAIVED" ? "WAIVED" : "ACCOUNT_BASE", ordinary: config.pricing?.ordinary ?? { status: "NOT_PRICED", reason: "未载入普通方案" }, custom: config.pricing?.custom ?? { status: "NOT_PRICED", reason: "未载入自定义方案" }, fast: config.pricing?.fast ?? { status: "NOT_PRICED", reason: "未载入极速方案" }, maxEntitlement: config.entitlementCap ?? { status: "NOT_PRICED", reason: "未载入礼遇上限" } };
-    }),
-    changes: [],
-  };
+  if (response.policy && response.meta) {
+    const raw = response.policy;
+    const tiers = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"] as const;
+    const tierConfig = raw.tiers as Record<string, any>;
+    return {
+      version: response.meta.version,
+      status: raw.status === "APPROVED" ? "APPROVED" : "DRAFT",
+      effectiveAt: response.meta.effectiveAtUtc,
+      catalog: response.catalog,
+      selectedSafeBoxCode: response.catalog.safeBoxes[0] ?? "",
+      selectedMaterialId: response.catalog.materials[0]?.id ?? "",
+      tiers: tiers.map((tier) => {
+        const config = tierConfig[tier] ?? {};
+        return { tier, threshold: response.thresholds[tier] ?? "0", tenantDeposit: config.tenantDeposit === "WAIVED" ? "WAIVED" : "ACCOUNT_BASE", ordinary: config.pricing?.ordinary ?? { status: "NOT_PRICED", reason: "未载入普通方案" }, custom: config.pricing?.custom ?? { status: "NOT_PRICED", reason: "未载入自定义方案" }, fast: config.pricing?.fast ?? { status: "NOT_PRICED", reason: "未载入极速方案" }, maxEntitlement: config.entitlementCap ?? { status: "NOT_PRICED", reason: "未载入礼遇上限" } };
+      }),
+      changes: [],
+    };
+  }
+  // Empty policy table: the first draft binds the real sealed release/catalog; unknown prices stay 待核.
+  if (!response.policy && response.bootstrap) return bootstrapGrowthPolicy(response.catalog, response.thresholds, response.bootstrap.nextVersionNo);
+  return null;
 }
 
 function toGrowthPolicy(policy: AdminGrowthPolicy): Record<string, unknown> {
@@ -57,8 +76,8 @@ function toGrowthPolicy(policy: AdminGrowthPolicy): Record<string, unknown> {
 }
 
 function initialEntitlement(policy: AdminGrowthPolicy): AdminEntitlementDraft {
-  const material = policy.catalog.materials[0];
-  return { kind: "FRIEND", scopeKey: "", startsAtUtc: new Date().toISOString(), endsAtUtc: new Date(Date.now() + 7 * 86_400_000).toISOString(), pricingMode: "ordinary", priceVersionId: policy.catalog.priceVersions[0]?.id ?? "", haffSchema: "haff-ratio-v1", safeBoxCode: policy.selectedSafeBoxCode, haffBaseRatio: "", materialItemId: material?.id ?? "", materialUnit: material?.unit ?? "PIECE", materialUnitQuantity: "", materialBuyerUnitAmount: "", materialOwnerUnitAmount: "", costBasisRef: "", depositWaived: false, reason: "" };
+  const mode = policy.catalog.enabledModes?.[0] ?? "ordinary";
+  return entitlementFromCap(policy, "FRIEND", mode, new Date().toISOString(), new Date(Date.now() + 7 * 86_400_000).toISOString());
 }
 
 function subjectOf(response: SubjectResponse | null, subjectId: string | undefined, error: unknown = null): AdminGrowthSubject {
@@ -69,9 +88,10 @@ function subjectOf(response: SubjectResponse | null, subjectId: string | undefin
 }
 
 /** A missing/failed policy read is reported on its own; it never erases an authorized subject read. */
-function policyFailure(error: unknown): string {
+function policyFailure(error: unknown, response: PolicyResponse | null): string {
   if (error instanceof AdminApiError && error.status === 403) return "当前管理员没有会员成长读取权限";
   if (error instanceof AdminApiError && error.status === 404) return "会员成长功能尚未启用";
+  if (response && !response.policy && !response.bootstrap) return "当前没有可绑定的 SEALED 价格版本，首版草稿暂不能建立";
   if (error instanceof AdminApiError) return "会员成长政策暂时无法读取";
   return "尚未读取到会员政策；功能保持未启用或等待首个草稿";
 }
@@ -90,6 +110,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const gameId = tab.query.gameId;
   const [state, setState] = useState<MembershipGrowthAdminState>({ status: "loading" });
   const [meta, setMeta] = useState<PolicyResponse["meta"]>(null);
+  const [bootstrap, setBootstrap] = useState<PolicyBootstrap | null>(null);
   const [savedDraft, setSavedDraft] = useState<PolicyResponse["meta"]>(null);
   const [subject, setSubject] = useState<AdminGrowthSubject>({ subjectId: subjectId ?? "", status: "NOT_LOADED" });
 
@@ -110,10 +131,11 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       const policy = policyResult.value ? asPolicy(policyResult.value) : null;
       const nextSubject = subjectOf(subjectResult.value, subjectId, subjectResult.error);
       setMeta(policyResult.value?.meta ?? null);
+      setBootstrap(policyResult.value?.bootstrap ?? null);
       setSavedDraft(policyResult.value?.meta?.status === "DRAFT" ? policyResult.value.meta : null);
       setSubject(nextSubject);
       if (!policy) {
-        setState({ status: "error", message: policyFailure(policyResult.error), subject: nextSubject });
+        setState({ status: "error", message: policyFailure(policyResult.error, policyResult.value), subject: nextSubject });
         return;
       }
       setState({ status: "ready", policy, preview: { status: "NOT_RUN", reason: "真实报价预览需在正式quote与主体快照接线后执行" }, subject: nextSubject, entitlement: initialEntitlement(policy), approval: { status: "NOT_REQUESTED" } });
@@ -124,10 +146,17 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   if (state.status !== "ready") return <MembershipGrowthAdminView state={state} />;
   const access = membershipGrowthAccess(snapshot);
   const ready = state;
+  const binding = meta
+    ? { ruleReleaseId: meta.ruleReleaseId, priceVersionId: meta.priceVersionId, sourceRef: meta.sourceRef }
+    : bootstrap
+      ? { ruleReleaseId: bootstrap.ruleReleaseId, priceVersionId: bootstrap.priceVersionId, sourceRef: "admin:membership-growth" }
+      : null;
   const saveDraft = async () => {
-    if (!meta) return;
-    const draft = await adminRequest<{ id: string; version: string; payloadHash: string }>("/membership-growth/policy-drafts", { policy: toGrowthPolicy({ ...ready.policy, status: "DRAFT", version: String(Number(meta.version) + 1) }), versionNo: Number(meta.version) + 1, expectedVersion: meta.version, effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: meta.ruleReleaseId, priceVersionId: meta.priceVersionId, sourceRef: "admin:membership-growth" });
-    const saved = { ...meta, id: draft.id, version: draft.version, payloadHash: draft.payloadHash, status: "DRAFT" as const, effectiveAtUtc: ready.policy.effectiveAt, sourceRef: "admin:membership-growth" };
+    if (!binding) return;
+    const versionNo = meta ? Number(meta.version) + 1 : bootstrap!.nextVersionNo;
+    const expectedVersion = meta ? meta.version : bootstrap!.expectedVersion;
+    const draft = await adminRequest<{ id: string; version: string; payloadHash: string }>("/membership-growth/policy-drafts", { policy: toGrowthPolicy({ ...ready.policy, status: "DRAFT", version: String(versionNo) }), versionNo, expectedVersion, effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef });
+    const saved: NonNullable<PolicyResponse["meta"]> = { id: draft.id, version: draft.version, status: "DRAFT", effectiveAtUtc: ready.policy.effectiveAt, ruleReleaseId: binding.ruleReleaseId, priceVersionId: binding.priceVersionId, sourceRef: binding.sourceRef, payloadHash: draft.payloadHash };
     setMeta(saved); setSavedDraft(saved); setState(current => current.status === "ready" ? { ...current, policy: { ...current.policy, version: draft.version, status: "DRAFT", changes: [] } } : current);
     onDirtyChange(false);
   };
@@ -140,8 +169,19 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const submitEntitlement = async () => {
     if (ready.subject.status !== "LOADED" || !gameId || !meta) return;
     const draft = ready.entitlement;
-    const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.entitlement.grant", triggerCondition: "membership.entitlement.grant.requested", payloadVersion: 1, payload: { userId: ready.subject.subjectId, gameId, kind: draft.kind, scopeKey: draft.scopeKey, startsAtUtc: draft.startsAtUtc, endsAtUtc: draft.endsAtUtc, policyId: meta.id, pricing: { mode: draft.pricingMode, priceVersionId: draft.priceVersionId, haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: draft.haffSchema, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef, baseBySafeBox: { [draft.safeBoxCode]: draft.haffBaseRatio } }, materials: { [draft.materialItemId]: { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: draft.materialItemId, unit: draft.materialUnit, unitQuantity: draft.materialUnitQuantity, buyerUnitAmount: draft.materialBuyerUnitAmount, ownerUnitAmount: draft.materialOwnerUnitAmount, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef } } }, depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇`, supersedesRequestId: null });
+    const haffSchema = ready.policy.catalog.haffSchema ?? "haff-ratio-v1";
+    const spreadDelta = ready.policy.catalog.releaseMode === "PERCENT" ? undefined : draft.spreadDelta;
+    const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.entitlement.grant", triggerCondition: "membership.entitlement.grant.requested", payloadVersion: 1, payload: {
+      userId: ready.subject.subjectId, gameId, kind: draft.kind, scopeKey: draft.scopeKey, startsAtUtc: draft.startsAtUtc, endsAtUtc: draft.endsAtUtc, policyId: meta.id,
+      // The full contract carries every safe box/resource of the bound release plus the spread delta; nothing is dropped.
+      pricing: {
+        mode: draft.pricingMode,
+        priceVersionId: draft.priceVersionId,
+        haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: haffSchema, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef, baseBySafeBox: { ...draft.haffBaseBySafeBox }, ...(spreadDelta === undefined ? {} : { spreadDelta }) },
+        materials: Object.fromEntries(Object.entries(draft.materials).map(([itemId, material]) => [itemId, { status: "CONFIGURED", kind: "FIXED_UNIT", itemId, unit: material.unit, unitQuantity: material.unitQuantity, buyerUnitAmount: material.buyerUnitAmount, ownerUnitAmount: material.ownerUnitAmount, priceVersionId: draft.priceVersionId, costBasisRef: draft.costBasisRef }])),
+      },
+      depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇`, supersedesRequestId: null });
     setState({ ...ready, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } });
   };
-  return <MembershipGrowthAdminView state={ready} onPolicyChange={access.canDraft ? (policy) => { setSavedDraft(null); setState((current) => current.status === "ready" ? { ...current, policy } : current); onDirtyChange(true); } : undefined} onSavePolicyDraft={access.canDraft ? () => void saveDraft() : undefined} onSubmitPolicy={access.canRequest ? () => void submitApproval() : undefined} onEntitlementChange={access.canRequest ? (entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current) : undefined} onSubmitEntitlement={access.canRequest ? () => void submitEntitlement() : undefined} />;
+  return <MembershipGrowthAdminView state={ready} policySaved={meta !== null} onPolicyChange={access.canDraft ? (policy) => { setSavedDraft(null); setState((current) => current.status === "ready" ? { ...current, policy } : current); onDirtyChange(true); } : undefined} onSavePolicyDraft={access.canDraft ? () => void saveDraft() : undefined} onSubmitPolicy={access.canRequest ? () => void submitApproval() : undefined} onEntitlementChange={access.canRequest ? (entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current) : undefined} onSubmitEntitlement={access.canRequest ? () => void submitEntitlement() : undefined} />;
 }

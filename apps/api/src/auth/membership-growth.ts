@@ -473,12 +473,52 @@ export type GrowthPricingContract = {
   haff: HaffPricingParameter;
   materials: Record<string, MaterialPricingParameter>;
 };
+export type ModePricingContract = GrowthPricingContract | NotPricedParameter;
+/**
+ * A single legacy cap only bounds its own mode. The `byMode` shape keeps one cap entry per mode so
+ * FRIEND/PRESTIGE boundaries are expressible in every enabled mode without rewriting old hashes.
+ */
+export type EntitlementCapByMode = { byMode: Partial<Record<RentalMode, ModePricingContract>> };
+export type EntitlementCap = ModePricingContract | EntitlementCapByMode;
 export type TierBenefitConfig = {
   tier: NormalGrowthTier;
   tenantDeposit: "ACCOUNT_BASE" | "WAIVED";
-  pricing: Record<RentalMode, GrowthPricingContract>;
-  entitlementCap: GrowthPricingContract | NotPricedParameter;
+  /** A mode disabled by the bound SEALED release may omit its contract; enabled modes must be CONFIGURED to publish. */
+  pricing: Partial<Record<RentalMode, ModePricingContract>>;
+  entitlementCap: EntitlementCap;
 };
+
+export function isEntitlementCapByMode(cap: EntitlementCap): cap is EntitlementCapByMode {
+  return Boolean(cap && typeof cap === "object" && !Array.isArray(cap) && (cap as Record<string, unknown>).byMode && typeof (cap as Record<string, unknown>).byMode === "object" && !Array.isArray((cap as Record<string, unknown>).byMode));
+}
+
+/** Resolves the cap entry for a candidate mode; legacy single contracts stay returned for every mode (pricingWithinCap rejects a mode mismatch). */
+export function entitlementCapForMode(cap: EntitlementCap, mode: RentalMode): ModePricingContract | undefined {
+  if (isEntitlementCapByMode(cap)) return cap.byMode[mode];
+  return cap as ModePricingContract;
+}
+
+/**
+ * Enabled rental modes are an authoritative property of the bound SEALED release, not of the policy.
+ * haff-ratio-v1 releases only ever price ordinary rentals; null means the release shape cannot be trusted.
+ */
+export function sealedEnabledRentalModes(haffRule: unknown): RentalMode[] | null {
+  if (haffRule === null || haffRule === undefined) return null;
+  if (typeof haffRule !== "object" || Array.isArray(haffRule)) return null;
+  const rule = haffRule as Record<string, unknown>;
+  if (rule.schema === "haff-ratio-v1") return ["ordinary"];
+  if (rule.schema !== "haff-ratio-v2") return null;
+  const compatibility = rule.compatibility;
+  if (!compatibility || typeof compatibility !== "object" || Array.isArray(compatibility)) return null;
+  const modes = (compatibility as Record<string, unknown>).modes;
+  if (!modes || typeof modes !== "object" || Array.isArray(modes)) return null;
+  const enabled: RentalMode[] = [];
+  for (const mode of ["ordinary", "custom", "fast"] as const) {
+    const config = (modes as Record<string, unknown>)[mode];
+    if (config && typeof config === "object" && !Array.isArray(config) && (config as Record<string, unknown>).enabled === true) enabled.push(mode);
+  }
+  return enabled.length > 0 ? enabled : null;
+}
 export type GrowthBenefitPolicy = {
   schema: typeof MEMBERSHIP_GROWTH_SCHEMA;
   version: string;
@@ -495,23 +535,38 @@ function notPriced(value: unknown): value is NotPricedParameter {
   return Boolean(value && typeof value === "object" && (value as Record<string, unknown>).status === "NOT_PRICED");
 }
 
+export { notPriced as isNotPriced };
+
 function validateNotPriced(value: NotPricedParameter, path: string, result: PolicyValidation): void {
   if (typeof value.reason !== "string" || !value.reason.trim() || value.reason.length > 300) result.errors.push(`${path}.reason`);
   result.warnings.push(`${path}.cost_basis_missing`);
 }
+
+/** Draft-visible pending value. A published policy can never carry one: every pending warning blocks publishability. */
+function validatePendingValue(value: unknown, path: string, result: PolicyValidation): boolean {
+  if (value !== "") return false;
+  result.warnings.push(`${path}.value_pending`);
+  return true;
+}
+
+const DECIMAL_8 = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 
 function validateHaffPricing(value: HaffPricingParameter, path: string, result: PolicyValidation): void {
   if (!value || typeof value !== "object") { result.errors.push(path); return; }
   if (notPriced(value)) return validateNotPriced(value, path, result);
   if (value.status !== "CONFIGURED" || value.kind !== "HAFF_RATIO" || !["haff-ratio-v1", "haff-ratio-v2"].includes(value.schema)
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.priceVersionId)
-    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(value.costBasisRef)
     || !value.baseBySafeBox || typeof value.baseBySafeBox !== "object" || Object.keys(value.baseBySafeBox).length === 0) {
     result.errors.push(path);
     return;
   }
-  for (const [safeBox, ratio] of Object.entries(value.baseBySafeBox)) if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(safeBox) || !/^(0|[1-9]\d*)(?:\.\d{1,8})?$/.test(ratio)) result.errors.push(`${path}.baseBySafeBox.${safeBox}`);
-  if (value.spreadDelta !== undefined && !/^(0|[1-9]\d*)(?:\.\d{1,8})?$/.test(value.spreadDelta)) result.errors.push(`${path}.spreadDelta`);
+  if (value.costBasisRef === "") result.warnings.push(`${path}.cost_basis_missing`);
+  else if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(value.costBasisRef)) result.errors.push(`${path}.costBasisRef`);
+  for (const [safeBox, ratio] of Object.entries(value.baseBySafeBox)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(safeBox)) result.errors.push(`${path}.baseBySafeBox.${safeBox}`);
+    else if (!validatePendingValue(ratio, `${path}.baseBySafeBox.${safeBox}`, result) && !DECIMAL_8.test(ratio)) result.errors.push(`${path}.baseBySafeBox.${safeBox}`);
+  }
+  if (value.spreadDelta !== undefined && !validatePendingValue(value.spreadDelta, `${path}.spreadDelta`, result) && !DECIMAL_8.test(value.spreadDelta)) result.errors.push(`${path}.spreadDelta`);
 }
 
 function validateMaterialPricing(value: MaterialPricingParameter, path: string, result: PolicyValidation): void {
@@ -519,11 +574,15 @@ function validateMaterialPricing(value: MaterialPricingParameter, path: string, 
   if (notPriced(value)) return validateNotPriced(value, path, result);
   if (value.status !== "CONFIGURED" || value.kind !== "FIXED_UNIT" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.itemId)
     || !["ROUND", "PIECE", "DAY"].includes(value.unit)
-    || !/^[1-9]\d{0,23}$/.test(value.unitQuantity)
-    || !/^(0|[1-9]\d*)(?:\.\d{1,8})?$/.test(value.buyerUnitAmount)
-    || !/^(0|[1-9]\d*)(?:\.\d{1,8})?$/.test(value.ownerUnitAmount)
-    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.priceVersionId)
-    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(value.costBasisRef)) result.errors.push(path);
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.priceVersionId)) {
+    result.errors.push(path);
+    return;
+  }
+  if (value.costBasisRef === "") result.warnings.push(`${path}.cost_basis_missing`);
+  else if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(value.costBasisRef)) result.errors.push(`${path}.costBasisRef`);
+  if (!validatePendingValue(value.unitQuantity, `${path}.unitQuantity`, result) && !/^[1-9]\d{0,23}$/.test(value.unitQuantity)) result.errors.push(`${path}.unitQuantity`);
+  if (!validatePendingValue(value.buyerUnitAmount, `${path}.buyerUnitAmount`, result) && !DECIMAL_8.test(value.buyerUnitAmount)) result.errors.push(`${path}.buyerUnitAmount`);
+  if (!validatePendingValue(value.ownerUnitAmount, `${path}.ownerUnitAmount`, result) && !DECIMAL_8.test(value.ownerUnitAmount)) result.errors.push(`${path}.ownerUnitAmount`);
 }
 
 function validatePricingContract(value: GrowthPricingContract | NotPricedParameter, path: string, result: PolicyValidation): void {
@@ -541,8 +600,40 @@ function validatePricingContract(value: GrowthPricingContract | NotPricedParamet
   }
 }
 
-export function validateBenefitPolicy(value: GrowthBenefitPolicy): PolicyValidation {
+export type PolicyValidationContext = {
+  /**
+   * Authoritative enabled modes of the bound SEALED release. Omitted keeps the legacy all-modes rule.
+   * A mode the release disabled is inert: its contract may be omitted or NOT_PRICED and never blocks publish.
+   */
+  enabledModes?: readonly RentalMode[];
+  /** Bound release catalog. When present, every enabled contract must cover every catalog safe box and material. */
+  catalog?: { safeBoxes?: readonly string[]; materials?: ReadonlyArray<{ itemId: string; unit?: "ROUND" | "PIECE" | "DAY" }> };
+  /** Bound release quote mode. SPREAD releases price through a spread delta, so enabled contracts must carry one. */
+  releaseMode?: "SPREAD" | "PERCENT";
+};
+
+function validateCatalogCoverage(contract: GrowthPricingContract, path: string, context: PolicyValidationContext, result: PolicyValidation): void {
+  const haff = contract.haff;
+  if (haff && !notPriced(haff) && haff.baseBySafeBox && typeof haff.baseBySafeBox === "object") {
+    for (const safeBox of context.catalog?.safeBoxes ?? []) if (!Object.hasOwn(haff.baseBySafeBox, safeBox)) result.warnings.push(`${path}.haff.baseBySafeBox.${safeBox}.catalog_missing`);
+  }
+  const materials = contract.materials;
+  if (materials && typeof materials === "object") for (const material of context.catalog?.materials ?? []) {
+    const entry = materials[material.itemId];
+    if (!entry || notPriced(entry)) result.warnings.push(`${path}.materials.${material.itemId}.catalog_missing`);
+    else if (material.unit !== undefined && entry.unit !== material.unit) result.errors.push(`${path}.materials.${material.itemId}.unit_mismatch`);
+  }
+}
+
+function validateConfiguredContract(contract: GrowthPricingContract, path: string, context: PolicyValidationContext, result: PolicyValidation): void {
+  validatePricingContract(contract, path, result);
+  if (context.releaseMode === "SPREAD" && contract.haff && !notPriced(contract.haff) && contract.haff.spreadDelta === undefined) result.warnings.push(`${path}.haff.spreadDelta.spread_required`);
+  validateCatalogCoverage(contract, path, context, result);
+}
+
+export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: PolicyValidationContext = {}): PolicyValidation {
   const result: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
+  const enabled = new Set<RentalMode>(context.enabledModes ?? ["ordinary", "custom", "fast"]);
   if (!value || value.schema !== MEMBERSHIP_GROWTH_SCHEMA) result.errors.push("schema");
   if (!value || !["DRAFT", "APPROVED"].includes(value.status)) result.errors.push("status");
   if (!value || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.version)) result.errors.push("version");
@@ -558,8 +649,51 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy): PolicyValidat
       continue;
     }
     if (config.tenantDeposit !== "ACCOUNT_BASE" && config.tenantDeposit !== "WAIVED") result.errors.push(`tiers.${tier}.tenantDeposit`);
-    for (const mode of ["ordinary", "custom", "fast"] as const) validatePricingContract(config.pricing[mode], `tiers.${tier}.pricing.${mode}`, result);
-    validatePricingContract(config.entitlementCap, `tiers.${tier}.entitlementCap`, result);
+    for (const mode of ["ordinary", "custom", "fast"] as const) {
+      const contract = config.pricing?.[mode];
+      const path = `tiers.${tier}.pricing.${mode}`;
+      if (!enabled.has(mode)) {
+        // Disabled by the sealed release: inert. Any NOT_PRICED marker (contract or haff level) is tolerated;
+        // an explicitly configured contract is still shape-checked so a drifted payload cannot be published.
+        if (contract === undefined || notPriced(contract)) continue;
+        if (contract.haff !== undefined && notPriced(contract.haff)) continue;
+        validatePricingContract(contract, path, result);
+        if (contract.mode !== mode) result.errors.push(path);
+        continue;
+      }
+      if (contract === undefined) { result.errors.push(path); result.publishable = false; continue; }
+      if (notPriced(contract)) { validatePricingContract(contract, path, result); result.publishable = false; continue; }
+      validateConfiguredContract(contract, path, context, result);
+    }
+    const capPath = `tiers.${tier}.entitlementCap`;
+    const cap = config.entitlementCap;
+    if (isEntitlementCapByMode(cap)) {
+      for (const mode of Object.keys(cap.byMode) as RentalMode[]) {
+        if (mode !== "ordinary" && mode !== "custom" && mode !== "fast") { result.errors.push(`${capPath}.byMode`); continue; }
+        const entry = cap.byMode[mode];
+        if (entry === undefined || !enabled.has(mode)) continue;
+        validatePricingContract(entry, `${capPath}.byMode.${mode}`, result);
+        if (!notPriced(entry) && entry.mode !== mode) result.errors.push(`${capPath}.byMode.${mode}`);
+        else if (!notPriced(entry)) validateCatalogCoverage(entry, `${capPath}.byMode.${mode}`, context, result);
+      }
+      for (const mode of enabled) {
+        const entry = cap.byMode[mode];
+        if (!entry || notPriced(entry)) {
+          result.publishable = false;
+          result.warnings.push(`${capPath}.byMode.${mode}.cost_basis_missing`);
+        }
+      }
+    } else validatePricingContract(cap, capPath, result);
+    // The consumed caps (GOLD/DIAMOND) must not allow a deeper discount than the tier itself offers.
+    if (tier === "GOLD" || tier === "DIAMOND") for (const mode of enabled) {
+      const capEntry = entitlementCapForMode(config.entitlementCap, mode);
+      const tierContract = config.pricing?.[mode];
+      if (!capEntry || notPriced(capEntry) || !tierContract || notPriced(tierContract)) continue;
+      if (isEntitlementCapByMode(config.entitlementCap) || capEntry.mode === mode) {
+        // Pending draft values are not comparable; their own warnings already block publish.
+        try { if (!pricingWithinCap(tierContract, capEntry)) result.warnings.push(`${capPath}.${mode}.below_tier_boundary`); } catch { /* pending value */ }
+      }
+    }
   }
   const pricingDecimalDifference = (left: string, right: string): bigint | null => {
     try { return subtractDecimal(parseNonNegativeDecimal(left, 8, "pricing"), parseNonNegativeDecimal(right, 8, "pricing")).value; } catch { return null; }
@@ -567,7 +701,7 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy): PolicyValidat
   const pricingEffectiveHaff = (base: string, spread: string) => {
     try { return subtractDecimal(parseNonNegativeDecimal(base, 8, "pricing"), parseNonNegativeDecimal(spread, 8, "pricing")); } catch { return null; }
   };
-  const comparePricing = (left: GrowthPricingContract | NotPricedParameter, right: GrowthPricingContract | NotPricedParameter, path: string) => {
+  const comparePricing = (left: ModePricingContract, right: ModePricingContract, path: string) => {
     if (notPriced(left) || notPriced(right)) {
       result.publishable = false;
       return;
@@ -576,12 +710,15 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy): PolicyValidat
     const rightHaff = right.haff;
     if (notPriced(leftHaff) || notPriced(rightHaff)) result.publishable = false;
     else for (const safeBox of new Set([...Object.keys(leftHaff.baseBySafeBox), ...Object.keys(rightHaff.baseBySafeBox)])) {
-      if (leftHaff.baseBySafeBox[safeBox] === undefined || rightHaff.baseBySafeBox[safeBox] === undefined) result.errors.push(`${path}.haff.baseBySafeBox.${safeBox}`);
+      const leftBase = leftHaff.baseBySafeBox[safeBox];
+      const rightBase = rightHaff.baseBySafeBox[safeBox];
+      if (leftBase === undefined || rightBase === undefined) result.errors.push(`${path}.haff.baseBySafeBox.${safeBox}`);
+      else if (leftBase === "" || rightBase === "" || leftHaff.spreadDelta === "" || rightHaff.spreadDelta === "") continue; // pending draft values are not comparable
       else {
         const leftSpread = leftHaff.spreadDelta ?? "0";
         const rightSpread = rightHaff.spreadDelta ?? "0";
-        const leftEffective = pricingEffectiveHaff(leftHaff.baseBySafeBox[safeBox], leftSpread);
-        const rightEffective = pricingEffectiveHaff(rightHaff.baseBySafeBox[safeBox], rightSpread);
+        const leftEffective = pricingEffectiveHaff(leftBase, leftSpread);
+        const rightEffective = pricingEffectiveHaff(rightBase, rightSpread);
         if (leftEffective === null || rightEffective === null || subtractDecimal(rightEffective, leftEffective).value < 0n) result.errors.push(`${path}.haff.${safeBox}.not_monotonic`);
       }
     }
@@ -590,6 +727,7 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy): PolicyValidat
       const lower = left.materials[itemId];
       const higher = right.materials[itemId];
       if (!lower || !higher || notPriced(lower) || notPriced(higher)) { result.publishable = false; continue; }
+      if (lower.unitQuantity === "" || higher.unitQuantity === "") continue; // pending draft values are not comparable
       if (lower.unit !== higher.unit || lower.unitQuantity !== higher.unitQuantity) result.errors.push(`${path}.materials.${itemId}.contract_mismatch`);
       if ((pricingDecimalDifference(higher.buyerUnitAmount, lower.buyerUnitAmount) ?? 0n) > 0n) result.errors.push(`${path}.materials.${itemId}.buyer_not_monotonic`);
       if ((pricingDecimalDifference(higher.ownerUnitAmount, lower.ownerUnitAmount) ?? 0n) < 0n) result.errors.push(`${path}.materials.${itemId}.owner_not_monotonic`);
@@ -600,20 +738,25 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy): PolicyValidat
     const higher = value?.tiers?.[NORMAL_GROWTH_TIERS[index]!];
     if (!lower || !higher) continue;
     if (lower.tenantDeposit === "WAIVED" && higher.tenantDeposit !== "WAIVED") result.errors.push(`tiers.${higher.tier}.tenantDeposit.not_monotonic`);
-    for (const mode of ["ordinary", "custom", "fast"] as const) comparePricing(lower.pricing[mode], higher.pricing[mode], `pricing.${mode}.${higher.tier}`);
+    for (const mode of enabled) {
+      const lowerContract = lower.pricing?.[mode];
+      const higherContract = higher.pricing?.[mode];
+      if (!lowerContract || !higherContract) continue;
+      comparePricing(lowerContract, higherContract, `pricing.${mode}.${higher.tier}`);
+    }
   }
-  result.publishable = result.publishable && result.errors.length === 0 && value?.status === "APPROVED" && !result.warnings.some((warning) => warning.includes("cost_basis_missing"));
+  result.publishable = result.publishable && result.errors.length === 0 && value?.status === "APPROVED" && result.warnings.length === 0;
   result.valid = result.errors.length === 0;
   return result;
 }
 
-export function assertValidBenefitPolicy(policy: GrowthBenefitPolicy): void {
-  const result = validateBenefitPolicy(policy);
+export function assertValidBenefitPolicy(policy: GrowthBenefitPolicy, context?: PolicyValidationContext): void {
+  const result = validateBenefitPolicy(policy, context);
   if (!result.valid) fail("INVALID_BENEFIT_POLICY", result.errors.join(","));
 }
 
-export function assertPublishableBenefitPolicy(policy: GrowthBenefitPolicy): void {
-  const result = validateBenefitPolicy(policy);
+export function assertPublishableBenefitPolicy(policy: GrowthBenefitPolicy, context?: PolicyValidationContext): void {
+  const result = validateBenefitPolicy(policy, context);
   if (!result.valid || !result.publishable) fail("BENEFIT_POLICY_NOT_PUBLISHABLE", [...result.errors, ...result.warnings].join(","));
 }
 
@@ -671,12 +814,12 @@ export function validateEntitlementCandidate(candidate: EntitlementCandidate, _m
   const cap = candidate.kind === "FRIEND" ? "GOLD" : "DIAMOND";
   const capConfig = policy.tiers[cap];
   const pricing = candidate.pricing;
-  const capPricing = capConfig.entitlementCap;
+  const capPricing = entitlementCapForMode(capConfig.entitlementCap, pricing.mode);
   const strict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
   validatePricingContract(pricing, "candidate.pricing", strict);
   const pricingValid = strict.errors.length === 0 && strict.warnings.length === 0;
   if (!pricingValid) errors.push("pricingInvalid");
-  if (notPriced(capPricing)) errors.push("costBasisMissing");
+  if (capPricing === undefined || notPriced(capPricing)) errors.push("costBasisMissing");
   else if (pricingValid) {
     const capStrict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
     validatePricingContract(capPricing, "cap.pricing", capStrict);
