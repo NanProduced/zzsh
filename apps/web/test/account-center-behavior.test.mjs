@@ -118,6 +118,7 @@ function loadCenter(session) {
       child.filename = path.join(tree, "membership-center-probe.cjs");
       child.paths = Module._nodeModulePaths(tree);
       child.require = (request) => {
+        if (request === "../../lib/membership-growth-client") return module.require("@/lib/membership-growth-client");
         if (request === "../ui/progress") {
           const progressPath = path.join(tree, "apps/web/src/components/ui/progress.tsx");
           const progress = new Module(progressPath);
