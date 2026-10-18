@@ -1005,3 +1005,6 @@
 }
 
 .mc-node:focus-visible { outline: none; }
+
+.mc-detail-scopes { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.mc-detail-scopes .mc-button[aria-pressed="true"] { border-color: currentColor; font-weight: 600; }

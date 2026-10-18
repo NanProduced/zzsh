@@ -424,3 +424,76 @@ test("tier dots keep actual identity while previewing and progress uses the acce
     assert(globalThis.__mcEmbla.calls.some(([snap, immediate]) => snap === 3 && !immediate), 'user selection must animate rather than reinitialize immediately');
   } finally { await view.dispose(); }
 });
+
+function consumptionFixture(subjectId = "history-user", patch = {}) {
+  return { contractVersion: "membership-growth.consumption.v1", subjectId, scope: "LIFETIME", asOfUtc: "2026-10-18T00:00:00.000000Z", windowStartUtc: "2026-07-20T00:00:00.000000Z", snapshotVersion: "a".repeat(64), knowledge: "KNOWN", sourceState: "COMPLETE", amountCents: "135280", points: "1353", total: 6, nextCursor: null, sourceSummary: { contributionCount: 6, pendingCount: 0, excludedCount: 0 }, items: ["32000", "20000", "16000", "22000", "30000", "15280"].map((amountCents, i) => ({ id: "growth_source_" + String(i).repeat(48), label: "历史消费依据" + i, amountCents, effectiveAt: "2026-05-10T00:00:00Z", recordedAt: "2026-09-13T00:00:00Z", expiresAt: "2026-08-08T00:00:00Z", withinWindow: false, corrected: false, revision: 0 })), ...patch };
+}
+const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), { status });
+async function settleHistory() { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); }); }
+
+test("real consumption detail renders cumulative1353 and switches to a known empty90-day window", async () => {
+  const original = globalThis.fetch, view = await loadView();
+  try {
+    globalThis.fetch = async (url) => jsonResponse(new URL(String(url), "http://test").searchParams.get("scope") === "ROLLING" ? consumptionFixture("history-user", { scope: "ROLLING", total: 0, points: "0", amountCents: "0", items: [] }) : consumptionFixture());
+    await view.render({ state: ready({ subjectId: "history-user", lifetimePoints: "1353", rollingPoints: "0", contributions: [] }) });
+    await settleHistory();
+    const detail = () => view.host.querySelector(".mc-consumption-details");
+    assert.match(detail().textContent, /合计 1353 积分/);
+    assert.match(detail().textContent, /已加载 6 \/ 6/);
+    assert.equal(detail().querySelectorAll(".mc-contribution-row").length, 6);
+    assert.match(detail().textContent, /不是历史积分发放流水/);
+    await view.click('[aria-label="消费明细范围"] button:nth-child(2)'); await settleHistory();
+    assert.match(detail().textContent, /当前窗口没有有效消费记录/);
+    assert.match(detail().textContent, /合计 0 积分/);
+    assert.doesNotMatch(detail().textContent, /历史消费依据0/);
+  } finally { globalThis.fetch = original; await view.dispose(); }
+});
+
+test("late consumption response from the previous identity cannot overwrite the new subject", async () => {
+  const original = globalThis.fetch, view = await loadView(); let oldResponse, count = 0;
+  try {
+    globalThis.fetch = async () => ++count === 1 ? new Promise((resolve) => { oldResponse = resolve; }) : jsonResponse(consumptionFixture("second-user", { total: 1, items: [{ ...consumptionFixture().items[0], label: "第二主体消费" }] }));
+    await view.render({ state: ready({ subjectId: "first-user" }) });
+    await view.render({ state: ready({ subjectId: "second-user" }) }); await settleHistory();
+    assert.match(view.host.textContent, /第二主体消费/);
+    await act(async () => { oldResponse(jsonResponse(consumptionFixture("first-user", { total: 1, items: [{ ...consumptionFixture().items[0], label: "旧主体不得显示" }] }))); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.doesNotMatch(view.host.textContent, /旧主体不得显示/); assert.match(view.host.textContent, /第二主体消费/);
+  } finally { globalThis.fetch = original; await view.dispose(); }
+});
+
+test("late cumulative detail cannot replace a newly selected rolling scope", async () => {
+  const original = globalThis.fetch, view = await loadView(); let oldResponse;
+  try {
+    globalThis.fetch = async (url) => new URL(String(url), "http://test").searchParams.get("scope") === "LIFETIME" ? new Promise((resolve) => { oldResponse = resolve; }) : jsonResponse(consumptionFixture("history-user", { scope: "ROLLING", total: 0, points: "0", amountCents: "0", items: [] }));
+    await view.render({ state: ready({ subjectId: "history-user" }) });
+    await view.click('[aria-label="消费明细范围"] button:nth-child(2)'); await settleHistory();
+    await act(async () => { oldResponse(jsonResponse(consumptionFixture())); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const text = view.host.querySelector(".mc-consumption-details").textContent;
+    assert.match(text, /当前窗口没有有效消费记录/); assert.doesNotMatch(text, /历史消费依据0/);
+  } finally { globalThis.fetch = original; await view.dispose(); }
+});
+
+test("consumption pagination merges the same snapshot and a409 clears stale details", async () => {
+  const original = globalThis.fetch, view = await loadView(); let rejectNext = false;
+  const first = consumptionFixture("history-user", { total: 2, nextCursor: "cursor_page_2", items: [consumptionFixture().items[0]] });
+  try {
+    globalThis.fetch = async (url) => new URL(String(url), "http://test").searchParams.has("cursor") ? rejectNext ? jsonResponse({ error: { code: "CONFLICT" } }, 409) : jsonResponse(consumptionFixture("history-user", { total: 2, nextCursor: null, items: [consumptionFixture().items[1]] })) : jsonResponse(first);
+    await view.render({ state: ready({ subjectId: "history-user" }) }); await settleHistory();
+    await view.click('.mc-consumption-details > button'); await settleHistory();
+    assert.match(view.host.querySelector(".mc-consumption-details").textContent, /已加载 2 \/ 2/);
+    await view.render({ state: ready({ subjectId: "history-user", asOf: "2026-10-19T00:00:00Z" }) }); await settleHistory();
+    rejectNext = true; await view.click('.mc-consumption-details > button'); await settleHistory();
+    const detail = view.host.querySelector(".mc-consumption-details");
+    assert.match(detail.textContent, /身份或消费依据已变化/); assert.equal(detail.querySelectorAll(".mc-contribution-row").length, 0);
+  } finally { globalThis.fetch = original; await view.dispose(); }
+});
+
+test("a pending consumption source is not rendered as a complete zero", async () => {
+  const original = globalThis.fetch, view = await loadView();
+  try {
+    globalThis.fetch = async () => jsonResponse(consumptionFixture("history-user", { knowledge: "UNKNOWN", sourceState: "BACKFILL_PENDING", total: null, amountCents: null, points: null, items: [] }));
+    await view.render({ state: ready({ subjectId: "history-user" }) }); await settleHistory();
+    const text = view.host.querySelector(".mc-consumption-details").textContent;
+    assert.match(text, /消费来源尚未完成核验/); assert.doesNotMatch(text, /没有有效消费记录|已加载 0|合计 0/);
+  } finally { globalThis.fetch = original; await view.dispose(); }
+});
