@@ -26,6 +26,11 @@ import {
   requirePermission,
 } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
+import {
+  LEGACY_SKIN_FIELDS,
+  type LegacySkinField,
+  splitLegacySkinColumn,
+} from "../legacy-load/legacy-skin-holdings";
 
 type LegacyInventoryInput = {
   itemId: string;
@@ -740,7 +745,6 @@ export async function resolveLegacyObservationToDraft(
       );
       for (const [table, fields] of [
         ["inventory_line", "item_id,quantity"],
-        ["listing_skin", "skin_id"],
         ["listing_entitlement", "entitlement_id,value,expires_at,expiry_knowledge"],
         ["listing_media", "asset_id,position"],
       ])
@@ -748,6 +752,15 @@ export async function resolveLegacyObservationToDraft(
           `INSERT INTO zzsh_supply.${table}(version_id,${fields}) SELECT $1,${fields} FROM zzsh_supply.${table} WHERE version_id=$2`,
           [id, old.id],
         );
+      await client.query(
+        `INSERT INTO zzsh_supply.listing_skin(version_id, skin_id)
+         SELECT $1, skin_id FROM (
+           SELECT skin_id FROM zzsh_supply.listing_skin WHERE version_id=$2
+           UNION
+           SELECT unnest(skin_ids) AS skin_id FROM zzsh_supply.legacy_skin_holding WHERE observation_version_id=$2
+         ) u ON CONFLICT (version_id, skin_id) DO NOTHING`,
+        [id, old.id],
+      );
       const updated = await client.query(
         `UPDATE zzsh_supply.rental_account
             SET current_version_id=$2,legacy_hold='NONE',revision=revision+1
@@ -797,8 +810,10 @@ export type LegacySkinHoldingsInput = {
   sourceEntity: string;
   legacyId: string;
   sourceDigest: string;
+  holdingDigest: string;
   skinIds: string[];
   evidenceRef: string;
+  columns?: Record<LegacySkinField, string | null>;
 };
 
 export type LegacySkinHoldingsResult = {
@@ -809,7 +824,8 @@ export type LegacySkinHoldingsResult = {
 
 /**
  * Controlled additive seam: attach verified legacy skin holdings to an immutable observation version.
- * Idempotent, audit-logged, and verified against game scope and existing observation mapping.
+ * Persists to zzsh_supply.legacy_skin_holding, avoiding non-DRAFT listing_skin 40001 constraint.
+ * Idempotent, audit-logged, and verified against game scope, exact map, holding digest, and public verified skins.
  */
 export async function recordLegacySkinHoldings(
   client: PoolClient,
@@ -825,15 +841,37 @@ export async function recordLegacySkinHoldings(
     throw invalid("Legacy skin source system/entity is not allowed");
   if (!/^[a-f0-9]{64}$/.test(input.sourceDigest))
     throw invalid("Source digest is invalid", "sourceDigest");
+  if (!/^[a-f0-9]{64}$/.test(input.holdingDigest))
+    throw invalid("Holding digest is invalid", "holdingDigest");
   if (typeof input.evidenceRef !== "string" || input.evidenceRef.length === 0 || input.evidenceRef.length > 512)
     throw invalid("Invalid evidence ref", "evidenceRef");
   if (!Array.isArray(input.skinIds))
     throw invalid("skinIds must be an array", "skinIds");
   const skinIds = Array.from(new Set(input.skinIds.map(id => idText(id, "skinIds")))).sort();
 
+  if (input.columns !== undefined) {
+    if (!input.columns || typeof input.columns !== "object" || Array.isArray(input.columns))
+      throw invalid("Invalid legacy skin columns", "columns");
+    const extra = Object.keys(input.columns).filter((field) => !(LEGACY_SKIN_FIELDS as readonly string[]).includes(field));
+    if (extra.length) throw invalid("Unexpected legacy skin column in columns", "columns");
+    const missing = LEGACY_SKIN_FIELDS.filter((field) => !Object.hasOwn(input.columns!, field) || input.columns![field as LegacySkinField] === undefined);
+    if (missing.length) throw invalid("All four legacy skin columns must be observed", "columns");
+  }
+
+  if (skinIds.length === 0) {
+    if (!input.columns) {
+      throw invalid("Empty skinIds requires proof of four observed empty columns", "skinIds");
+    }
+    const allEmpty = LEGACY_SKIN_FIELDS.every((f) => splitLegacySkinColumn(input.columns![f]).length === 0);
+    if (!allEmpty) {
+      throw invalid("Empty skinIds requires proof of four observed empty columns", "skinIds");
+    }
+  }
+
   const operation = "supply.legacy.skin_holdings";
+  // SK11-A03: skinIds does NOT participate in idempotencyKey so set changes cannot produce disjoint keys.
   const idempotencyKey = sha256Hex(
-    JSON.stringify([operation, input.sourceSystem, input.sourceEntity, legacyId, input.sourceDigest, skinIds]),
+    JSON.stringify([operation, input.sourceSystem, input.sourceEntity, legacyId, accountIdText, input.sourceDigest]),
   );
   const fingerprint = fingerprintRequest(operation, accountIdText, { ...input, skinIds });
 
@@ -847,44 +885,117 @@ export async function recordLegacySkinHoldings(
       account = await lockPublishingAccount(client, accountIdText);
       await authorizeLegacyAdmin(client, actor, account);
 
+      // Verify immutable observation version
       const versionRow = (
-        await client.query<{ id: string }>(
-          `SELECT id FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`,
+        await client.query<{ id: string; origin: string; review_state: string }>(
+          `SELECT id, origin, review_state FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2`,
           [observationVersionId, accountIdText],
         )
       ).rows[0];
       if (!versionRow) throw notFound();
+      if (versionRow.origin !== "LEGACY_OBSERVATION" || versionRow.review_state !== "IMPORTED_UNVERIFIED") {
+        throw invalid("Observation version must be an IMPORTED_UNVERIFIED legacy observation", "observationVersionId");
+      }
 
+      // SK11-A02: Strict legacy_supply_map binding
       const mapRow = (
-        await client.query<{ source_digest: string }>(
-          `SELECT source_digest FROM zzsh_supply.legacy_supply_map WHERE source_system=$1 AND source_entity=$2 AND legacy_id=$3 AND account_id=$4`,
-          [input.sourceSystem, input.sourceEntity, legacyId, accountIdText],
+        await client.query<{ source_digest: string; version_id: string; account_id: string }>(
+          `SELECT source_digest, version_id, account_id FROM zzsh_supply.legacy_supply_map WHERE source_system=$1 AND source_entity=$2 AND legacy_id=$3`,
+          [input.sourceSystem, input.sourceEntity, legacyId],
         )
       ).rows[0];
-      if (mapRow && mapRow.source_digest !== input.sourceDigest) {
+      if (!mapRow) {
+        throw conflict("Legacy supply map not found for source tuple");
+      }
+      if (mapRow.account_id !== accountIdText) {
+        throw conflict("Legacy supply map account does not match target account");
+      }
+      if (mapRow.version_id !== observationVersionId) {
+        throw conflict("Legacy supply map observation version does not match target version");
+      }
+      if (mapRow.source_digest !== input.sourceDigest) {
         throw conflict("Legacy source digest conflicts with recorded observation");
       }
+
+      // Check existing persistent holding in zzsh_supply.legacy_skin_holding
+      const existing = (
+        await client.query<{ holding_digest: string; skin_ids: string[]; source_digest: string; observation_version_id: string }>(
+          `SELECT holding_digest, skin_ids, source_digest, observation_version_id FROM zzsh_supply.legacy_skin_holding WHERE account_id=$1`,
+          [accountIdText],
+        )
+      ).rows[0];
+      if (existing) {
+        const existingSet = new Set(existing.skin_ids);
+        const newSet = new Set(skinIds);
+        const setsEqual = existingSet.size === newSet.size && skinIds.every((s) => existingSet.has(s));
+        if (
+          existing.holding_digest === input.holdingDigest &&
+          existing.source_digest === input.sourceDigest &&
+          existing.observation_version_id === observationVersionId &&
+          setsEqual
+        ) {
+          // Replay of identical holding
+          return false;
+        }
+        // SK11-A03: Different set conflicts!
+        throw conflict("Legacy skin holdings conflict with recorded holding for this account");
+      }
+
       return false;
     },
     async () => {
       const a = account!;
       if (skinIds.length > 0) {
         const existingSkins = (
-          await client.query<{ id: string }>(
-            `SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND id=ANY($2::text[])`,
+          await client.query<{ id: string; naming_state: string; enabled: boolean; form_visible: boolean }>(
+            `SELECT id, naming_state, enabled, form_visible FROM zzsh_supply.skin WHERE game_id=$1 AND id=ANY($2::text[])`,
             [a.game_id, skinIds],
           )
         ).rows;
         if (existingSkins.length !== skinIds.length) {
           throw invalid("One or more skins do not belong to the game or do not exist", "skinIds");
         }
-        for (const skinId of skinIds) {
-          await client.query(
-            `INSERT INTO zzsh_supply.listing_skin(version_id, skin_id) VALUES($1, $2) ON CONFLICT (version_id, skin_id) DO NOTHING`,
-            [observationVersionId, skinId],
-          );
+        for (const s of existingSkins) {
+          if (s.naming_state !== "VERIFIED" || !s.enabled || !s.form_visible) {
+            throw invalid(`Skin ${s.id} is not a verified, enabled, public skin`, "skinIds");
+          }
         }
       }
+
+      const existing = (
+        await client.query<{ skin_ids: string[] }>(
+          `SELECT skin_ids FROM zzsh_supply.legacy_skin_holding WHERE account_id=$1`,
+          [accountIdText],
+        )
+      ).rows[0];
+      if (existing) {
+        return {
+          status: 200,
+          body: {
+            accountId: accountIdText,
+            observationVersionId,
+            attachedSkins: existing.skin_ids,
+          },
+        };
+      }
+
+      // SK11-A01: Insert into zzsh_supply.legacy_skin_holding (avoiding non-DRAFT listing_skin 40001)
+      await client.query(
+        `INSERT INTO zzsh_supply.legacy_skin_holding(
+           account_id, observation_version_id, source_system, source_entity, legacy_id, source_digest, holding_digest, skin_ids, created_by_admin_id
+         ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          accountIdText,
+          observationVersionId,
+          input.sourceSystem,
+          input.sourceEntity,
+          legacyId,
+          input.sourceDigest,
+          input.holdingDigest,
+          skinIds,
+          actor.id,
+        ],
+      );
 
       await recordAudit(client, {
         actorType: "admin",
@@ -895,12 +1006,13 @@ export async function recordLegacySkinHoldings(
         objectType: "rental_account",
         objectId: accountIdText,
         outcome: "SUCCESS",
-        reason: "旧站账号已核实皮肤持有记录保存；关联至历史观察版本",
+        reason: "旧站账号已核实皮肤持有记录保存；关联至历史观察版本与独立持有事实表",
         details: {
           sourceSystem: input.sourceSystem,
           sourceEntity: input.sourceEntity,
           legacyId,
           sourceDigest: input.sourceDigest,
+          holdingDigest: input.holdingDigest,
           observationVersionId,
           attachedSkins: skinIds,
           evidenceRef: input.evidenceRef,
