@@ -18,7 +18,7 @@ test("admin membership view separates draft, local preview and approval executio
   const { createRoot } = await import("react-dom/client");
   const root = createRoot(host);
   const contract = (mode) => ({ mode, priceVersionId: "price-v1", haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: "haff-ratio-v2", priceVersionId: "price-v1", costBasisRef: "cost-v1", baseBySafeBox: { box: "50", "box-2": "60" }, spreadDelta: "8" }, materials: { item: { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: "item", unit: "PIECE", unitQuantity: "1", buyerUnitAmount: "5.00", ownerUnitAmount: "3.00", priceVersionId: "price-v1", costBasisRef: "cost-v1" }, "item-2": { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: "item-2", unit: "DAY", unitQuantity: "1", buyerUnitAmount: "6.00", ownerUnitAmount: "4.00", priceVersionId: "price-v1", costBasisRef: "cost-v1" } } });
-  const policy = { version: "b1", status: "DRAFT", effectiveAt: null, catalog: { safeBoxes: ["box", "box-2"], materials: [{ id: "item", name: "物资一", unit: "PIECE", unitQuantity: "1" }, { id: "item-2", name: "物资二", unit: "DAY", unitQuantity: "1" }], priceVersions: [{ id: "price-v1", label: "当前价格方案" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD" }, selectedSafeBoxCode: "box", selectedMaterialId: "item", tiers: ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map((tier, index) => ({ tier, threshold: String(index * 5000), tenantDeposit: index < 2 ? "ACCOUNT_BASE" : "WAIVED", ordinary: contract("ordinary"), custom: contract("custom"), fast: { status: "NOT_PRICED", reason: "权威禁用模式" }, maxEntitlement: { byMode: { ordinary: contract("ordinary"), custom: contract("custom") } } })), changes: [{ label: "金卡免押", before: "按账号条件", after: "默认免押", risk: "LOW" }] };
+  const policy = { version: "b1", status: "DRAFT", effectiveAt: "2026-11-01T00:00:00.000Z", catalog: { safeBoxes: ["box", "box-2"], materials: [{ id: "item", name: "物资一", unit: "PIECE", unitQuantity: "1" }, { id: "item-2", name: "物资二", unit: "DAY", unitQuantity: "1" }], priceVersions: [{ id: "price-v1", label: "当前价格方案" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD" }, selectedSafeBoxCode: "box", selectedMaterialId: "item", tiers: ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map((tier, index) => ({ tier, threshold: String(index * 5000), tenantDeposit: index < 2 ? "ACCOUNT_BASE" : "WAIVED", ordinary: contract("ordinary"), custom: contract("custom"), fast: { status: "NOT_PRICED", reason: "权威禁用模式" }, maxEntitlement: { byMode: { ordinary: contract("ordinary"), custom: contract("custom") } } })), changes: [{ label: "金卡免押", before: "按账号条件", after: "默认免押", risk: "LOW" }] };
   const state = { status: "ready", policy, preview: { status: "LOCAL_FIXTURE", totalCents: "5", priceBasis: "GROWTH", depositBasis: "FRIEND" }, subject: { subjectId: "user-a", status: "LOADED", userLabel: "用户甲", tier: "GOLD", rollingPoints: "12000", lifetimePoints: "15000", evidence: ["结算版本 s1", "退款更正 1 条"] }, entitlement: { kind: "FRIEND", scopeKey: "game:delta", startsAtUtc: "2026-10-10T02:00:00.000Z", endsAtUtc: "2026-10-20T02:00:00.000Z", pricingMode: "ordinary", priceVersionId: "price-v1", spreadDelta: "8", haffBaseBySafeBox: { box: "50", "box-2": "60" }, materials: { item: { unit: "PIECE", unitQuantity: "1", buyerUnitAmount: "5.00", ownerUnitAmount: "3.00" }, "item-2": { unit: "DAY", unitQuantity: "1", buyerUnitAmount: "6.00", ownerUnitAmount: "4.00" } }, costBasisRef: "cost-v1", depositWaived: false, reason: "客服专项" }, approval: { status: "APPROVED_PENDING_EXECUTION", requestId: "approval_1", message: "已批准，等待阶段B执行接线" } };
   const changed = [];
   const entitlementChanges = [];
@@ -58,6 +58,8 @@ test("admin membership view separates draft, local preview and approval executio
   await setInput(inputByLabel("STANDARD成本依据"), "cost-v2");
   assert.equal(changed.at(-1).tiers[0].ordinary.haff.costBasisRef, "cost-v2");
   assert.equal(changed.at(-1).tiers[0].ordinary.materials.item.costBasisRef, "cost-v2");
+  await setInput(inputByLabel("政策生效时点"), "2026-11-01T00:00");
+  assert.equal(changed.at(-1).effectiveAt, "2026-10-31T16:00:00.000Z");
   // DRAFT with complete enabled modes can request approval without pretending to be APPROVED.
   const submitPolicy = [...host.querySelectorAll("button")].find((button) => button.textContent === "提交审批");
   assert.ok(submitPolicy && !submitPolicy.disabled);
@@ -135,10 +137,15 @@ test("empty policy bootstrap, draft gating and cap seeding stay honest", async (
     assert.ok(first.warnings.every((warning) => !warning.includes(".fast")));
     // An enabled but unpriced mode blocks publish, not the draft.
     const enabled = structuredClone(policy);
+    enabled.effectiveAt = "2026-11-01T00:00:00.000Z";
     for (const tier of enabled.tiers) { tier.ordinary = { mode: "ordinary", priceVersionId: "price-v1", haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: "haff-ratio-v2", priceVersionId: "price-v1", costBasisRef: "cost-v1", baseBySafeBox: { safe_box_1x2: "60", safe_box_3x3: "49" }, spreadDelta: "8" }, materials: { "item-a": { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: "item-a", unit: "PIECE", unitQuantity: "1", buyerUnitAmount: "5.00", ownerUnitAmount: "3.00", priceVersionId: "price-v1", costBasisRef: "cost-v1" } } }; tier.custom = structuredClone(tier.ordinary); tier.custom.mode = "custom"; }
     const ready = validateAdminPolicyDraft(enabled, ["ordinary", "custom"]);
     assert.deepEqual(ready.errors, []);
     assert.equal(ready.publishable, true, JSON.stringify(ready));
+    // A policy without an effective time can never be consumed and must not be publishable.
+    const noTime = structuredClone(enabled);
+    noTime.effectiveAt = null;
+    assert.equal(validateAdminPolicyDraft(noTime, ["ordinary", "custom"]).publishable, false);
     // The entitlement editor seeds from the GOLD cap so edits start at the approved boundary.
     enabled.tiers.find((tier) => tier.tier === "GOLD").maxEntitlement = { byMode: { ordinary: structuredClone(enabled.tiers[2].ordinary) } };
     const seeded = entitlementFromCap(enabled, "FRIEND", "ordinary", "2026-10-10T02:00:00.000Z", "2026-10-20T02:00:00.000Z");

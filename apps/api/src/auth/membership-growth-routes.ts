@@ -103,7 +103,9 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
         const sealedRelease = (await client.query<{ releaseId: string; priceVersionId: string }>(
           `SELECT r.id AS "releaseId", r.price_version_id AS "priceVersionId"
              FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
-            WHERE p.status='SEALED' ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+            WHERE p.status='SEALED'
+            ORDER BY (EXISTS (SELECT 1 FROM zzsh_supply.game g WHERE g.current_release_id=r.id AND g.enabled)) DESC, r.created_at DESC, r.id DESC
+            LIMIT 1`,
         )).rows[0];
         const sealed = sealedRelease ? await sealedFactsOrNull(client, sealedRelease.releaseId, sealedRelease.priceVersionId) : null;
         if (!sealed) return { policy: null, meta: null, catalog: policyCatalog(null, null), thresholds, bootstrap: null };
