@@ -192,8 +192,8 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   const resources = orderedQuoteResources(data);
   const penalties = data.media.filter(item => item.category === "PENALTY");
   const skinGroups = new Map<string, ListingDetailData["skinTags"]>();
-  // Group by the verified skin type when the server sent one; older frozen snapshots keep their recorded category.
-  for (const tag of data.skinTags) { const category = skinTypeLabel(tag.ownerKind) ?? (tag.categoryName || "未分类"); skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
+  // Group only by the verified skin type; the retired category label stays in the snapshot as a trace and is never shown as a group.
+  for (const tag of data.skinTags) { const category = skinTypeLabel(tag.ownerKind) ?? "类型未标注"; skinGroups.set(category, [...(skinGroups.get(category) ?? []), tag]); }
   return <article className="listing-detail account-detail">
     <div className="account-detail-top">
       <section className="account-detail-info" aria-label="账号摘要">
