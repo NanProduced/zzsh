@@ -89,7 +89,20 @@ function supplyOf(declarationValue, { quote = null, reviewState = "DRAFT", revis
   };
 }
 
-async function probe({ mode = "standard", accountId, editRequested = false, gameCode = "delta", options = optionsV1, catalogValue = catalog, mine, saveDraft, quote, confirm, depositRecommendation, readNotice = true, createAccount, createDraft, uploadMedia, userId = 'user_A', storageSeed, storageUnavailable = false } = {}) {
+function resourceEstimate({ quantity = "60", amount = "12.34", total = amount, unpriced = [], unreported = [], revision = "1", release = "release_1" } = {}) {
+  return {
+    available: true, informationalOnly: true,
+    binding: { gameId: "game_1", catalogRevision: revision, releaseId: release, releaseGeneration: "1", priceVersionId: "price_1" },
+    lines: unpriced.includes("item_round") ? [] : [{ itemId: "item_round", code: "level6_round", name: "六级子弹", unit: "ROUND", unitQuantity: "60", quantity,
+      ownerUnitAmount: { currency: "CNY", unit: "yuan", amount: "12.34", scale: 2 },
+      ownerAmount: amount === null ? null : { currency: "CNY", unit: "yuan", amount, scale: 2 } }],
+    ownerTotal: total === null ? null : { currency: "CNY", unit: "yuan", amount: total, scale: 2 },
+    unpricedItemIds: unpriced, unreportedItemIds: unreported,
+  };
+}
+const previewTick = () => React.act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
+
+async function probe({ mode = "standard", accountId, editRequested = false, gameCode = "delta", options = optionsV1, catalogValue = catalog, mine, saveDraft, quote, confirm, depositRecommendation, resourceIncomePreview, readNotice = true, createAccount, createDraft, uploadMedia, userId = 'user_A', storageSeed, storageUnavailable = false } = {}) {
   const window = new Window({ url: "http://127.0.0.1:3100/publish" });
   Object.assign(globalThis, {
     window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
@@ -122,7 +135,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
   const api = {
     games: async () => ({ games }),
     publishingOptions: async () => options,
-    resourceIncomePreview: async () => ({available:false,reason:"PREVIEW_UNAVAILABLE"}),
+    resourceIncomePreview: async (...args) => resourceIncomePreview ? resourceIncomePreview(...args) : ({available:false,reason:"PREVIEW_UNAVAILABLE"}),
     catalog: async () => typeof catalogValue === "function" ? catalogValue() : catalogValue,
     mine: async (...args) => (typeof mine === "function" ? mine(...args) : mine),
     createAccount: async (...args) => createAccount ? createAccount(...args) : ({ accountId: "account_1", gameId: "game_1" }),
@@ -556,6 +569,140 @@ test("unquoted summary distinguishes missing pricing from a zero income", async 
     assert.doesNotMatch(rail.textContent,/0\.00 元/);
     assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent,'预估暂不可用');
     assert.match(p.host.querySelector('[data-resource-code="df_billable_barrett_bullet"]').textContent,/待配置.*目录待配置/);
+  } finally { await p.close(); }
+});
+
+test("PUBLISH-UX-2 quantity pending keeps a clearly previous estimate and invalidates the formal quote", async () => {
+  let finish, reads = 0;
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "60" }] }), { quote: ownerQuote }),
+    resourceIncomePreview: () => ++reads === 1 ? resourceEstimate() : new Promise(resolve => { finish = resolve; }) });
+  try {
+    await p.render(); await previewTick();
+    assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, "0.00 元", "the official quote, not L2, owns the initial amount");
+    await p.type('[aria-label="六级子弹数量"]', "2"); await previewTick();
+    assert.equal(p.host.querySelector('#publish-quote').dataset.quoted, "false");
+    assert.equal(p.host.querySelector('.publish-confirm'), null);
+    assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, "12.34 元");
+    assert.match(p.host.querySelector('.publish-live-resource-total').textContent, /上次预估/);
+    assert.equal(p.host.querySelector('.supply-resource-grid').getAttribute('aria-busy'), "true");
+    assert.match(p.host.querySelector('[data-resource-code="level6_round"] .publish-resource-subtotal').textContent, /上次预估.*12\.34/);
+    await React.act(async () => finish(resourceEstimate({ quantity: "120", amount: "24.68" })));
+    assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, "24.68 元");
+    assert.doesNotMatch(p.host.querySelector('.publish-live-resource-total').textContent, /上次预估/);
+    assert.equal(p.host.querySelector('.supply-resource-grid').getAttribute('aria-busy'), "false");
+  } finally { await p.close(); }
+});
+
+test("PUBLISH-UX-2 missing price explains configuration instead of asking for an already filled quantity", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "60" }] })),
+    resourceIncomePreview: () => resourceEstimate({ amount: null, total: null, unpriced: ["item_round"] }) });
+  try {
+    await p.render(); await previewTick();
+    const total = p.host.querySelector('[aria-label="物品预估收入"]');
+    assert.match(total.textContent, /价目.*配置|未配置.*价目/);
+    assert.doesNotMatch(total.textContent, /填写数量|0\.00/);
+    assert.match(p.host.querySelector('[data-resource-code="level6_round"] .publish-resource-subtotal').textContent, /价目.*配置|未配置.*价目/);
+  } finally { await p.close(); }
+});
+
+test("PUBLISH-UX-2 legal zero and partial server totals survive an unrelated unmapped quantity", async () => {
+  for (const amount of ["0.00", "12.34"]) {
+    const quantity = amount === "0.00" ? "0" : "60";
+    const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity }] })),
+      resourceIncomePreview: () => resourceEstimate({ quantity, amount, total: amount, unreported: ["other_item"] }) });
+    try {
+      await p.render(); await previewTick();
+      await p.type('[aria-label="巴雷特子弹数量"]', "7");
+      assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, `${amount} 元`);
+      assert.match(p.text(), /目录待配置/);
+      assert.equal(p.calls.length, 0);
+    } finally { await p.close(); }
+  }
+});
+
+test("PUBLISH-UX-2 CSS keeps the rail bounded and sticky through 1024 without measuring its height", () => {
+  const source = fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8");
+  const css = fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-refinement.css"), "utf8");
+  assert.equal(/rail\.dataset\.sticky|observer\.observe\(rail\)/.test(source), false, "rail height cannot select static positioning");
+  assert.equal(/max-height:\s*calc\(100dvh\s*-\s*var\(--publish-header-offset/.test(css), true, "quote height is viewport bounded");
+  assert.equal(/overflow-y:\s*auto/.test(css), true, "all rail children including the actions can scroll");
+  assert.equal(/@media\s*\(max-width:\s*1023px\)/.test(css), true, "1024 retains the collaborative two columns");
+  assert.equal(/@media\s*\(max-width:\s*1279px\)\s*\{\s*\.functional-shell--editor \.publish-page-layout/.test(css), false);
+});
+
+test("PUBLISH-UX-2 fast edits abort the previous read and refuse its late amount", async () => {
+  const pending = []; let reads = 0;
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "60" }] })),
+    resourceIncomePreview: (_game, inventory, _binding, signal) => ++reads === 1 ? resourceEstimate() : new Promise(resolve => pending.push({ inventory, signal, resolve })) });
+  try {
+    await p.render(); await previewTick();
+    await p.type('[aria-label="六级子弹数量"]', "2"); await previewTick();
+    await p.type('[aria-label="六级子弹数量"]', "3"); await previewTick();
+    assert.equal(pending.length, 2);
+    assert.equal(pending[0].signal.aborted, true);
+    assert.deepEqual(pending[1].inventory, [{ itemId: "item_round", quantity: "180" }]);
+    await React.act(async () => pending[1].resolve(resourceEstimate({ quantity: "180", amount: "37.02" })));
+    await React.act(async () => pending[0].resolve(resourceEstimate({ quantity: "120", amount: "24.68" })));
+    assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, "37.02 元");
+    assert.doesNotMatch(p.host.querySelector('.publish-live-resource-total').textContent, /上次预估/);
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("PUBLISH-UX-2 a rule change clears previous estimates and refuses an old binding", async () => {
+  const currentCatalog = structuredClone(catalog), pending = []; let reads = 0;
+  const p = await probe({ catalogValue: currentCatalog, accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "60" }] })),
+    resourceIncomePreview: () => ++reads === 1 ? resourceEstimate() : new Promise(resolve => pending.push(resolve)) });
+  try {
+    await p.render(); await previewTick();
+    await p.type('[aria-label="六级子弹数量"]', "2"); await previewTick();
+    currentCatalog.game.catalogRevision = "2";
+    currentCatalog.game.currentReleaseId = "release_2";
+    await p.type('[aria-label="六级子弹数量"]', "3");
+    assert.doesNotMatch(p.host.querySelector('.publish-live-resource-total').textContent, /12\.34|上次预估/);
+    await previewTick();
+    await React.act(async () => pending[0](resourceEstimate({ quantity: "120", amount: "24.68" })));
+    await React.act(async () => pending[1](resourceEstimate({ quantity: "180", amount: "37.02", revision: "1", release: "release_1" })));
+    assert.doesNotMatch(p.host.querySelector('.publish-live-resource-total').textContent, /12\.34|24\.68|37\.02|0\.00/);
+    assert.equal(p.host.querySelector('.supply-resource-grid').getAttribute('aria-busy'), "false");
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("PUBLISH-UX-2 identity changes hide previous values and a late read cannot restore them", async () => {
+  const pending = []; let reads = 0;
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "60" }] })),
+    resourceIncomePreview: () => ++reads === 1 ? resourceEstimate() : new Promise(resolve => pending.push(resolve)) });
+  try {
+    await p.render(); await previewTick();
+    await p.type('[aria-label="六级子弹数量"]', "2"); await previewTick();
+    await changeSubject(p, "user_B");
+    assert.doesNotMatch(p.text(), /12\.34 元|上次预估/);
+    await React.act(async () => pending[0](resourceEstimate({ quantity: "120", amount: "24.68" })));
+    assert.doesNotMatch(p.text(), /12\.34 元|24\.68 元|上次预估/);
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("PUBLISH-UX-2 preview failure and an unknown save cannot retain an apparently current amount", async () => {
+  let rejectPreview, reads = 0;
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "60" }] })),
+    resourceIncomePreview: () => ++reads === 1 ? resourceEstimate() : new Promise((_resolve, reject) => { rejectPreview = reject; }),
+    saveDraft: () => { throw new actualSupply.SupplyRequestError(503, { error: { code: "INTERNAL_ERROR", message: "unknown save" } }); } });
+  try {
+    await p.render(); await previewTick();
+    await p.type('[aria-label="六级子弹数量"]', "2"); await previewTick();
+    await React.act(async () => rejectPreview(new actualSupply.SupplyRequestError(503, { error: { code: "INTERNAL_ERROR", message: "preview failed" } })));
+    assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, "预估暂不可用");
+    assert.match(p.host.querySelector('.publish-resource-preview-status').textContent, /暂未取得/);
+    assert.doesNotMatch(p.host.querySelector('.publish-live-resource-total').textContent, /12\.34|0\.00|上次预估/);
+    await p.clickButton("保存草稿");
+    assert.ok(await p.waitFor(() => intentFor(p, "user_A")?.uncertain === true));
+    assert.equal(intentFor(p, "user_A").phase, "pending");
+    const before = reads; await previewTick();
+    assert.equal(reads, before, "an unknown write must not start another preview");
+    assert.equal(p.host.querySelector('[aria-label="六级子弹数量"]').disabled, true);
+    assert.equal(p.calls.filter(c => c.op === "saveDraft").length, 1);
   } finally { await p.close(); }
 });
 

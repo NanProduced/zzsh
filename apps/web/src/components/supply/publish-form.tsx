@@ -524,7 +524,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const [supply, setSupply] = useState<MySupply | null>(null);
   const [draft, setDraftState] = useState<DraftInput>(emptyDraft);
   const [pendingResourceInputs,setPendingResourceInputs]=useState<Record<string,string>>({});
-  const [resourcePreview,setResourcePreview]=useState<ResourceIncomePreview|null>(null);
+  const [resourcePreviewSnapshot,setResourcePreview]=useState<{ value: ResourceIncomePreview; scopeKey: string; inventoryKey: string } | null>(null);
   const [resourcePreviewPending,setResourcePreviewPending]=useState(false);
   const [serviceWindowCustomSelected, setServiceWindowCustomSelected] = useState(false);
   const [options, setOptions] = useState<PublishingOptions | null>(null);
@@ -2122,11 +2122,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     const measure = () => {
       const offset = Math.ceil(header?.getBoundingClientRect().height ?? 96) + 12;
       rail.closest<HTMLElement>(".functional-shell--editor")?.style.setProperty("--publish-header-offset", `${offset}px`);
-      const twoColumns = getComputedStyle(rail.parentElement ?? rail).gridTemplateColumns.trim().split(/\s+/).length > 1;
-      rail.dataset.sticky = twoColumns && rail.getBoundingClientRect().height <= window.innerHeight - offset - 16 ? "true" : "false";
     };
     const observer = new ResizeObserver(measure);
-    observer.observe(rail);
     if (header) observer.observe(header);
     window.addEventListener("resize", measure);
     measure();
@@ -2134,25 +2131,29 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   }, [identityState, gameId]);
 
   const previewInventoryKey=JSON.stringify(draft.inventory.filter(row=>(catalog?.items.find(item=>item.id===row.itemId)?.unit??supply?.version?.catalogItems?.find(item=>item.id===row.itemId)?.unit)!=="HAFF_BASE"));
+  const previewScopeKey=JSON.stringify([epochRef.current,identityRef.current,gameId,catalog?.game.catalogRevision,catalog?.game.currentReleaseId]);
+  const previewEnabled=identityState==="confirmed"&&Boolean(identityRef.current)&&!authRequired&&Boolean(gameId&&catalog?.game.currentReleaseId)&&!writeIntent;
+  const resourcePreview=previewEnabled&&resourcePreviewSnapshot?.scopeKey===previewScopeKey?resourcePreviewSnapshot.value:null;
+  const resourcePreviewStale=Boolean(resourcePreview?.available&&resourcePreviewSnapshot?.inventoryKey!==previewInventoryKey);
   useEffect(()=>{
-    setResourcePreview(null);
-    setResourcePreviewPending(false);
-    if(identityState!=="confirmed"||!identityRef.current||authRequired||!gameId||!catalog?.game.currentReleaseId||writeIntent)return;
+    if(!previewEnabled||!catalog?.game.currentReleaseId){setResourcePreview(null);setResourcePreviewPending(false);return;}
+    // Only quantities may retain an explicitly previous estimate; identity or rule changes cannot.
+    setResourcePreview(previous=>previous?.scopeKey===previewScopeKey&&previous.value.available?previous:null);
     const context=captureContext(),controller=beginRequest();
     setResourcePreviewPending(true);
     const timer=setTimeout(()=>{void supplyApi.resourceIncomePreview(gameId,JSON.parse(previewInventoryKey),{catalogRevision:catalog.game.catalogRevision,releaseId:catalog.game.currentReleaseId!},controller.signal).then(result=>{
       if(!currentContext(context,controller.signal))return;
-      if(result.available&&(result.binding.gameId!==gameId||result.binding.catalogRevision!==catalog.game.catalogRevision||result.binding.releaseId!==catalog.game.currentReleaseId))return;
-      setResourcePreview(result);
+      if(result.available&&(result.binding.gameId!==gameId||result.binding.catalogRevision!==catalog.game.catalogRevision||result.binding.releaseId!==catalog.game.currentReleaseId)){setResourcePreview(null);return;}
+      setResourcePreview({value:result,scopeKey:previewScopeKey,inventoryKey:previewInventoryKey});
     }).catch(failure=>{
       if(!currentContext(context,controller.signal)||isAbort(failure))return;
-      setResourcePreview({available:false,reason:"PREVIEW_UNAVAILABLE"});
+      setResourcePreview({value:{available:false,reason:"PREVIEW_UNAVAILABLE"},scopeKey:previewScopeKey,inventoryKey:previewInventoryKey});
       if(failure instanceof SupplyRequestError&&failure.status===401)reportFailure(failure,undefined,context);
     }).finally(()=>{if(currentContext(context,controller.signal))setResourcePreviewPending(false);finishRequest(controller);});},180);
     return()=>{clearTimeout(timer);controller.abort();finishRequest(controller);};
     // The read depends on inventory and the immutable price/catalog binding, not account copy.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[gameId,identityState,authRequired,catalog?.game.catalogRevision,catalog?.game.currentReleaseId,previewInventoryKey,writeIntent]);
+  },[gameId,previewEnabled,previewScopeKey,previewInventoryKey,writeIntent]);
 
   useEffect(()=>{
     if(!catalog||writeIntent||identityState!=="confirmed")return;
@@ -2343,14 +2344,19 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (effectiveQuote) void confirmPublish();
     else void quote();
   };
-  const resourcePreviewState = resourcePreviewPending ? "正在读取资源单价…"
-    : resourcePreview?.available ? null
+  const hasPendingResources=Object.values(pendingResourceInputs).some(value=>value!=="");
+  const resourcePreviewState = resourcePreview?.available ? resourcePreview.unpricedItemIds.length
+      ? "部分资源未配置价目，预估仅包含已定价且已申报的物品。"
+      : hasPendingResources ? "部分资源待目录配置，已取得的预估仅包含已配置物品。"
+      : "物品预估仅供参考，实际金额以核价为准。"
+    : resourcePreviewPending ? "正在读取物品预估，实际金额以核价为准。"
     : resourcePreview?.reason === "PREVIEW_UNAVAILABLE" ? "暂未取得资源单价，预估金额尚不可用。已填数量会保留，实际金额需核价确认。"
     : "当前资源价目尚不可用。可继续填写数量，配置齐备后再核对报价。";
   const resourceTotalText = effectiveQuote && breakdown ? `${centsText(breakdown.itemCents)} 元`
-    : Object.values(pendingResourceInputs).some(value => value !== "") ? "待资源配置"
-    : resourcePreviewPending ? "读取中…"
     : resourcePreview?.available && resourcePreview.ownerTotal ? `${resourcePreview.ownerTotal.amount} 元`
+    : resourcePreview?.available && resourcePreview.unpricedItemIds.length ? "价目待配置"
+    : hasPendingResources ? "待资源配置"
+    : resourcePreviewPending ? "读取中…"
     : resourcePreview?.available ? "填写数量后显示" : "预估暂不可用";
   const sectionActions = () => <div className="publish-section-actions"><a href="#publish-outline">返回分组</a><div><button type="button" className="button quiet" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button><a className="button secondary" href="#publish-quote">去核对报价</a></div></div>;
   const showTerms = () => {
@@ -2498,10 +2504,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
 
           <SectionCard id="assets" title={groupMeta.assets.title} hasError={errorGroups.has("assets")} actions={sectionActions()}>
             <div className="supply-subsection">
-              <div className="publish-assets-heading"><h3><Box size={20} aria-hidden="true" />库存数量</h3><FieldHelp label="库存数量">只统计可用于本次出租的资源。留空表示尚未申报，0表示明确没有；数量只支持整数。</FieldHelp></div>
+              <div className="publish-assets-heading"><h3><Box size={20} aria-hidden="true" />库存数量</h3><FieldHelp label="库存数量">只统计可用于本次出租的资源。留空表示尚未申报，0表示明确没有；数量只支持整数。</FieldHelp><span className="publish-preview-updating" data-updating={resourcePreviewPending} aria-hidden="true">更新中</span></div>
               <p className="publish-resource-read-state">留空表示尚未申报，0表示明确没有。数量填整数；标注必填的项目需在核价前补齐，草稿可暂留空。</p>
-              {resourcePreviewState ? <p className="publish-resource-read-state" role="status"><Info size={16} aria-hidden="true" />{resourcePreviewState}</p> : null}
-              {resourceRows.length ? <div className="supply-resource-grid" role="list" aria-label="资源库存">{resourceRows.map((item) => {
+              <p className="publish-resource-read-state publish-resource-preview-status" role="status" aria-live="polite" aria-busy={resourcePreviewPending}><Info size={16} aria-hidden="true" />{resourcePreviewState}</p>
+              {resourceRows.length ? <div className="supply-resource-grid" role="list" aria-label="资源库存" aria-busy={resourcePreviewPending}>{resourceRows.map((item) => {
                 const itemCode=item.code, key=item.itemId??itemCode!;
                 const itemName=canonicalResourceCode(itemCode)==="df_billable_coffee"?"咖啡豆":itemCode==="df_billable_top_insure_card"?"顶级保险卡":item.name;
                 const retiredInsurance=retiredInsuranceCode(itemCode);
@@ -2510,7 +2516,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 const valid=/^(0|[1-9]\d{0,23})$/.test(quantity), remainder=grouped&&valid?BigInt(quantity)%60n:0n;
                 const inputValue=grouped&&valid?(BigInt(quantity)/60n).toString():quantity;
                 const inputUnit=grouped?"组":resourceUnitLabel(item.unit??"",itemCode);
-                const line=item.itemId&&resourcePreview?.available&&!resourcePreviewPending?resourcePreview.lines.find(row=>row.itemId===item.itemId):null;
+                const line=item.itemId&&resourcePreview?.available?resourcePreview.lines.find(row=>row.itemId===item.itemId):null;
+                const unpriced=Boolean(item.itemId&&resourcePreview?.available&&resourcePreview.unpricedItemIds.includes(item.itemId));
                 const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":itemCode==="df_billable_top_insure_card"?"填写顶级保险卡的可用天数。":null;
                 return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined}>
                   <div className="supply-resource-card-head">
@@ -2518,14 +2525,14 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     <div className="supply-resource-name"><label htmlFor={`quantity-${key}`}>{itemName}</label>{help?<FieldHelp label={itemName}>{help}</FieldHelp>:null}</div>
                     {item.required?<span className="supply-resource-required">必填</span>:null}
                   </div>
-                  <div className="publish-owner-rate"><span>单价</span><strong>{line?`¥ ${line.ownerUnitAmount.amount} / ${inputUnit}`:!item.itemId?"待配置":resourcePreviewPending?"读取中…":"暂未取得"}</strong>{line?<FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp>:null}</div>
+                  <div className="publish-owner-rate"><span>单价</span><strong>{line?`¥ ${line.ownerUnitAmount.amount} / ${inputUnit}`:!item.itemId||unpriced?"待配置":resourcePreviewPending?"读取中…":"暂未取得"}</strong>{line?<FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp>:null}</div>
                   {!item.itemId ? <small className="publish-resource-state">此项暂存本页。填写后需等待目录配置，整份资料才能保存或核价。</small> : null}
                   <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max={grouped?((999999999999999999999999n-remainder)/60n).toString():"999999999999999999999999"} disabled={formDisabled||retiredInsurance} invalid={quantity!==""&&!valid} onChange={raw=>{
                     const base=raw===""?"":grouped?(BigInt(raw)*60n+remainder).toString():raw;
                     if(item.itemId)changeInventory(item.itemId,base);else setPendingResourceInputs(previous=>({...previous,[itemCode!]:base}));
                   }} />
                   {retiredInsurance?<small className="publish-resource-state">单位需核对，原数量保留，未换算为天数。</small>:null}
-                  <div className="publish-resource-subtotal"><span>本项预估</span><output>{line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:quantity===""?"未填写":!item.itemId?"待资源配置":resourcePreviewPending?"计算中…":"预估暂不可用"}</output></div>
+                  <div className="publish-resource-subtotal"><span>{resourcePreviewStale&&line?.ownerAmount?"上次预估":"本项预估"}</span><output aria-live="off">{line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:quantity===""?"未填写":!item.itemId?"待资源配置":unpriced?"价目待配置":resourcePreviewPending?"计算中…":"预估暂不可用"}</output></div>
                   {!item.itemId ? <small className="publish-resource-state">目录待配置 · 数量暂存本页</small> : null}
                   {grouped?<small className="publish-resource-measure">1组 = 60发{remainder>0n?` · 已保留历史余量${remainder}发`:""}</small>:null}
                   {quantity!==""&&!valid?<FieldError text="请填写非负整数，或留空。"/>:null}
@@ -2685,7 +2692,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           </div>
           <FieldHelp label="查看出租报价">预计收入为号主侧哈夫币和物品的扣费前金额，按全部库存消耗估算。押金不计入收入；实际收入按使用情况和结束场景结算，不代表最终净到账。</FieldHelp>
         </div>
-        <div className="publish-quote-status" data-status={quoteStatus} role="status" aria-live="polite">
+        <div className="publish-quote-status" data-status={quoteStatus} role="status" aria-live="polite" aria-busy={quoteStatus === "processing" || quoteStatus === "loading"}>
           <div className="publish-quote-status-title"><Calculator size={20} aria-hidden="true" />{quoteStatusTitle}</div>
           <p className="publish-quote-status-copy">{quoteStatusCopy}</p>
         </div>
@@ -2694,7 +2701,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           {effectiveQuote ? <div className="publish-income-total"><span>预计收入（扣费前）</span><output aria-label="预计收入合计">{breakdown ? `${centsText(breakdown.totalCents)} 元` : "金额待核对"}</output></div> : null}
           <dl className="publish-rail-lines">
             {effectiveQuote ? <div><dt>哈夫币预计收入</dt><dd>{breakdown ? `${centsText(breakdown.haffCents)} 元` : "金额待核对"}</dd></div> : null}
-            <div className="publish-live-resource-total"><dt>物品预计收入</dt><dd><output aria-label="物品预估收入">{resourceTotalText}</output></dd></div>
+            <div className="publish-live-resource-total" aria-busy={resourcePreviewPending&&!effectiveQuote}><dt>物品预计收入{resourcePreviewStale&&!effectiveQuote?<small>上次预估</small>:null}</dt><dd><output aria-label="物品预估收入" aria-live="off">{resourceTotalText}</output></dd></div>
           </dl>
           {effectiveQuote || resourcePreview?.available && resourcePreview.ownerTotal ? <p className="publish-rail-note">按全部库存消耗估算，实际收入按使用情况及结束场景结算。</p> : null}
           <dl className="publish-rail-lines publish-rail-deposits">
