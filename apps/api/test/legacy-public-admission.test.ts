@@ -596,8 +596,8 @@ test("v3 manifest rejects malformed manifests, mixed resources and accepts exact
 test("legacy account skins carry the shared public summary and count withheld references", async () => {
   const seen: string[] = [];
   const skinRows = [
-    { id: "skin_luna", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", mediaId: "asset_public", categoryCode: "df_skin_category_agent", categoryName: "干员外观", visible: true },
-    { id: "skin_pending", name: "PENDING_PRIVATE_TOKEN", baseName: null, ownerName: null, mediaId: null, categoryCode: "df_skin_category_knife", categoryName: "近战外观", visible: false },
+    { id: "skin_luna", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", mediaId: "asset_public", categoryCode: "df_skin_category_agent", categoryName: "干员外观", visible: true, isPublic: true },
+    { id: "skin_pending", name: "PENDING_PRIVATE_TOKEN", baseName: null, ownerName: null, mediaId: null, categoryCode: "df_skin_category_knife", categoryName: "近战外观", visible: false, isPublic: false },
   ];
   const base = legacyProjectionClient(legacyProjectionRow());
   const client = { query: async (sql: string) => {
@@ -616,4 +616,50 @@ test("legacy account skins carry the shared public summary and count withheld re
   assert.equal(Object.hasOwn(complete.presentation, "skinsWithheld"), false);
   assert.equal(complete.canCreateOrder, false);
   assert.equal(complete.quote, null);
+});
+
+// SK6-R1-04: the current-catalog skin summary on a legacy account follows the public
+// catalog's effective visibility (same game, category and every ancestor public).
+// The fake client evaluates the visibility the SQL asks for; it is not PostgreSQL.
+test("SK6-R1-04 legacy account skins withhold hidden categories, disabled and cross-game skins by count only", async () => {
+  type Cat = { parent: string | null; enabled: boolean; formVisible: boolean };
+  const run = async (change: (cats: Map<string, Cat>, skin: { gameId: string; enabled: boolean; formVisible: boolean }) => void) => {
+    const cats = new Map<string, Cat>([["root", { parent: null, enabled: true, formVisible: true }], ["leaf", { parent: "root", enabled: true, formVisible: true }]]);
+    const skin = { gameId: "game-1", enabled: true, formVisible: true };
+    change(cats, skin);
+    const seen: Array<{ sql: string; args: unknown[] }> = [];
+    const base = legacyProjectionClient(legacyProjectionRow());
+    const client = { query: async (sql: string, args: unknown[] = []) => {
+      if (!sql.includes("FROM zzsh_supply.listing_skin ls")) return base.query(sql);
+      seen.push({ sql, args });
+      const asksCategory = sql.includes("WITH RECURSIVE visible AS (") && sql.includes(`c."parent_id" IS NULL`) && sql.includes(`JOIN visible p ON c."parent_id" = p."id"`)
+        && sql.includes(`s.category_id IN (SELECT "id" FROM visible)`) && sql.includes("s.game_id=$2") && args[1] === "game-1";
+      const publicCats = new Set<string>();
+      for (let i = 0; i < cats.size; i++) for (const [id, c] of cats) if (c.enabled && c.formVisible && (c.parent === null || publicCats.has(c.parent))) publicCats.add(id);
+      const ok = skin.enabled && skin.formVisible && (!asksCategory ? true : skin.gameId === args[1] && publicCats.has("leaf"));
+      const row = { id: "skin_probe_id", name: "PROBE_PUBLIC_NAME", baseName: "PROBE_BASE", ownerName: "PROBE_OWNER", mediaId: "asset_probe_media", categoryCode: "leaf", categoryName: "Leaf", visible: ok, isPublic: ok };
+      return { rows: [row], rowCount: 1 };
+    } } as unknown as PoolClient;
+    return { listing: await readLegacyListing(client, "account_1"), seen };
+  };
+  const open = await run(() => {});
+  assert.deepEqual(open.listing.presentation.skins.map((s) => s.id), ["skin_probe_id"], "positive control");
+  assert.equal(Object.hasOwn(open.listing.presentation, "skinsWithheld"), false);
+  assert.match(open.seen[0]!.sql, /purpose='SKIN_MEDIA' AND a\.review_state='APPROVED' AND a\.access_class='PUBLIC_DISPLAY' AND a\.public_storage_key IS NOT NULL/, "unqualified media stays null via the shared media guard");
+  const hidden: Array<[string, (cats: Map<string, Cat>, skin: { gameId: string; enabled: boolean; formVisible: boolean }) => void]> = [
+    ["root enabled=false", (c) => { c.get("root")!.enabled = false; }],
+    ["root formVisible=false", (c) => { c.get("root")!.formVisible = false; }],
+    ["leaf formVisible=false", (c) => { c.get("leaf")!.formVisible = false; }],
+    ["verified skin disabled", (_c, s) => { s.enabled = false; }],
+    ["cross-game skin", (_c, s) => { s.gameId = "game-other"; }],
+  ];
+  for (const [label, change] of hidden) {
+    const { listing } = await run(change);
+    assert.deepEqual(listing.presentation.skins, [], label);
+    assert.equal((listing.presentation as { skinsWithheld?: number }).skinsWithheld, 1, label);
+    const body = JSON.stringify(listing);
+    for (const secret of ["skin_probe_id", "PROBE_PUBLIC_NAME", "PROBE_BASE", "PROBE_OWNER", "asset_probe_media"]) assert.equal(body.includes(secret), false, `${label} leaks ${secret}`);
+    assert.equal(listing.quote, null);
+    assert.equal(listing.canCreateOrder, false);
+  }
 });

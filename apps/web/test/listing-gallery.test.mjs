@@ -70,3 +70,12 @@ test('detail presentation keeps fields unique, copy bound to public number, and 
   assert.ok(![...host.querySelectorAll('button')].some(b=>b.textContent==='本人报价'));
  } finally {await React.act(async()=>root.unmount());await window.happyDOM.abort();}
 });
+
+test('SK6-R1-04 withheld skin note states a count without claiming a reason',()=>{
+ const file=tree+'/apps/web/src/components/market/listing-detail.tsx',source=fs.readFileSync(file,'utf8'),m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n.endsWith('.css')?{}:n.startsWith('@/')?{}:n==='next/link'?()=>null:rq(n);
+ m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
+ const note=m.exports.withheldSkinsNote;assert.equal(typeof note,'function');
+ assert.equal(note(2),'另有 2 项已申报皮肤当前未公开展示。');
+ for(const bad of [0,-1,1.5,undefined,null,'2'])assert.equal(note(bad),null);
+ assert.doesNotMatch(source,/待平台核实名称/,'a disabled or category-hidden verified skin is not an unverified name');
+});

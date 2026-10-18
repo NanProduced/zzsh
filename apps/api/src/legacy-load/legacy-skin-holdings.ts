@@ -29,25 +29,44 @@ export type LegacySkinCatalogEntry = {
   enabled: boolean;
   formVisible: boolean;
 };
+/** One old dictionary row a held token can come from. Kept verbatim; never inferred from a column or dict type. */
+export type LegacySkinSourceRef = {
+  dictField: string;
+  dictTypeId: number | null;
+  dictDataId: number;
+  state: "HISTORICAL_SOFT_DELETED" | "CURRENT";
+};
 /** Explicit, reviewed decisions for held tokens that are not a catalog source tuple. */
 export type LegacySkinTokenRule =
   | { field: LegacySkinField; token: string; decision: "ALIAS_OF"; targetField: LegacySkinField; targetToken: string }
-  | { field: LegacySkinField; token: string; decision: "INVALID" | "HISTORICAL" | "PENDING_DECISION" };
-export type LegacySkinUnresolvedReason = "NOT_IN_CATALOG" | "INVALID_TOKEN" | "HISTORICAL_ONLY" | "PENDING_DECISION" | "CROSS_GAME" | "AMBIGUOUS_SEPARATOR";
+  | { field: LegacySkinField; token: string; decision: "INVALID" | "HISTORICAL" | "PENDING_DECISION" }
+  /**
+   * Several old dictionary rows share this exact token, so a held token cannot
+   * say which one the account had. This is a source fact, separate from catalog
+   * naming: it may sit on the same key as a catalog source tuple and it stays
+   * unresolved even after that catalog entry is VERIFIED, until a reviewed source
+   * fact replaces the rule.
+   */
+  | { field: LegacySkinField; token: string; decision: "SOURCE_AMBIGUOUS"; sources: readonly LegacySkinSourceRef[] };
+export type LegacySkinUnresolvedReason =
+  | "NOT_IN_CATALOG" | "INVALID_TOKEN" | "HISTORICAL_ONLY" | "PENDING_DECISION" | "SOURCE_AMBIGUOUS" | "CROSS_GAME" | "AMBIGUOUS_SEPARATOR";
 export type LegacySkinHoldingInput = {
   accountKey: string;
   gameId: string;
-  columns: Partial<Record<LegacySkinField, string | null>>;
+  /** Every column must be observed: null or "" is an observed empty column; a missing key or undefined is not. */
+  columns: Record<LegacySkinField, string | null>;
 };
 export type LegacySkinHolding = {
   accountKey: string;
   gameId: string;
   catalogRevision: string;
+  /** Columns the extract did not deliver. Any entry keeps the holding incomplete. */
+  unobservedColumns: LegacySkinField[];
   tokens: Array<{ field: LegacySkinField; token: string }>;
   mappedSkinIds: string[];
   pending: Array<{ field: LegacySkinField; token: string; skinId: string; namingState: string }>;
   unresolved: Array<{ field: LegacySkinField; token: string; reason: LegacySkinUnresolvedReason }>;
-  /** True only when every held token resolved to a public skin. Never true for a guess. */
+  /** True only when all four columns were observed and every held token resolved to a public skin. Never true for a guess. */
   complete: boolean;
   digest: string;
 };
@@ -71,8 +90,13 @@ export function buildLegacySkinIndex(catalog: readonly LegacySkinCatalogEntry[],
   const byRule = new Map<string, LegacySkinTokenRule>();
   for (const rule of rules) {
     const k = key(rule.field, rule.token);
-    if (byRule.has(k) || bySource.has(k)) throw new Error(`Conflicting legacy token rule: ${rule.field}`);
+    // Only a source ambiguity may share a key with a catalog tuple; any other rule there is a conflict, not a silent override.
+    if (byRule.has(k) || (bySource.has(k) && rule.decision !== "SOURCE_AMBIGUOUS")) throw new Error(`Conflicting legacy token rule: ${rule.field}`);
     if (rule.decision === "ALIAS_OF" && !bySource.has(key(rule.targetField, rule.targetToken))) throw new Error(`Alias target missing: ${rule.targetField}`);
+    if (rule.decision === "SOURCE_AMBIGUOUS") {
+      const refs = new Set((rule.sources ?? []).map((s) => `${s.dictField}:${s.dictTypeId ?? ""}:${s.dictDataId}`));
+      if (refs.size < 2 || refs.size !== rule.sources.length) throw new Error(`Source ambiguity needs two or more distinct sources: ${rule.field}`);
+    }
     byRule.set(k, rule);
   }
   return { bySource, byRule };
@@ -83,17 +107,23 @@ export function mapLegacySkinHolding(
   index: ReturnType<typeof buildLegacySkinIndex>,
   catalogRevision: string,
 ): LegacySkinHolding {
+  if (!input.columns || typeof input.columns !== "object") throw new TypeError("Legacy skin columns are required");
   const extra = Object.keys(input.columns).filter((field) => !(LEGACY_SKIN_FIELDS as readonly string[]).includes(field));
   if (extra.length) throw new Error("Unexpected legacy skin column");
+  const columns = input.columns as Partial<Record<LegacySkinField, string | null>>;
+  const unobservedColumns = LEGACY_SKIN_FIELDS.filter((field) => !Object.hasOwn(columns, field) || columns[field] === undefined);
   const tokens: LegacySkinHolding["tokens"] = [];
   const mapped = new Set<string>();
   const pending: LegacySkinHolding["pending"] = [];
   const unresolved: LegacySkinHolding["unresolved"] = [];
   for (const field of LEGACY_SKIN_FIELDS) {
-    for (const token of splitLegacySkinColumn(input.columns[field])) {
+    if (unobservedColumns.includes(field)) continue;
+    for (const token of splitLegacySkinColumn(columns[field])) {
       tokens.push({ field, token });
       if (token.includes("，")) { unresolved.push({ field, token, reason: "AMBIGUOUS_SEPARATOR" }); continue; }
       const rule = index.byRule.get(key(field, token));
+      // Checked before the catalog on purpose: catalog naming state never settles which old row a token came from.
+      if (rule?.decision === "SOURCE_AMBIGUOUS") { unresolved.push({ field, token, reason: "SOURCE_AMBIGUOUS" }); continue; }
       let entry = index.bySource.get(key(field, token));
       if (!entry && rule) {
         if (rule.decision !== "ALIAS_OF") {
@@ -112,16 +142,17 @@ export function mapLegacySkinHolding(
     accountKey: input.accountKey,
     gameId: input.gameId,
     catalogRevision,
+    unobservedColumns,
     tokens,
     mappedSkinIds: [...mapped].sort(),
     pending,
     unresolved,
-    complete: pending.length === 0 && unresolved.length === 0,
+    complete: unobservedColumns.length === 0 && pending.length === 0 && unresolved.length === 0,
   };
   return { ...body, digest: sha256Hex(canonicalize(body)) };
 }
 
-/** Skin ids that may be written as a complete declaration; null while anything is unresolved. */
+/** Skin ids that may be written as a complete declaration; null while any column is unobserved or anything is unresolved. */
 export function declarableLegacySkinIds(holding: LegacySkinHolding): string[] | null {
   return holding.complete ? [...holding.mappedSkinIds] : null;
 }
