@@ -790,3 +790,135 @@ export async function resolveLegacyObservationToDraft(
   );
   return result.body as LegacyDraftResolutionResult;
 }
+
+export type LegacySkinHoldingsInput = {
+  observationVersionId: string;
+  sourceSystem: string;
+  sourceEntity: string;
+  legacyId: string;
+  sourceDigest: string;
+  skinIds: string[];
+  evidenceRef: string;
+};
+
+export type LegacySkinHoldingsResult = {
+  accountId: string;
+  observationVersionId: string;
+  attachedSkins: string[];
+};
+
+/**
+ * Controlled additive seam: attach verified legacy skin holdings to an immutable observation version.
+ * Idempotent, audit-logged, and verified against game scope and existing observation mapping.
+ */
+export async function recordLegacySkinHoldings(
+  client: PoolClient,
+  accountId: string,
+  input: LegacySkinHoldingsInput,
+  actor: LegacyImportActor,
+): Promise<LegacySkinHoldingsResult> {
+  if (!input || typeof input !== "object") throw invalid("Invalid legacy skin holdings input");
+  const accountIdText = idText(accountId, "accountId");
+  const observationVersionId = idText(input.observationVersionId, "observationVersionId");
+  const legacyId = idText(input.legacyId, "legacyId");
+  if (input.sourceSystem !== "legacy_mysql_restore" || input.sourceEntity !== "la_rental_accounts")
+    throw invalid("Legacy skin source system/entity is not allowed");
+  if (!/^[a-f0-9]{64}$/.test(input.sourceDigest))
+    throw invalid("Source digest is invalid", "sourceDigest");
+  if (typeof input.evidenceRef !== "string" || input.evidenceRef.length === 0 || input.evidenceRef.length > 512)
+    throw invalid("Invalid evidence ref", "evidenceRef");
+  if (!Array.isArray(input.skinIds))
+    throw invalid("skinIds must be an array", "skinIds");
+  const skinIds = Array.from(new Set(input.skinIds.map(id => idText(id, "skinIds")))).sort();
+
+  const operation = "supply.legacy.skin_holdings";
+  const idempotencyKey = sha256Hex(
+    JSON.stringify([operation, input.sourceSystem, input.sourceEntity, legacyId, input.sourceDigest, skinIds]),
+  );
+  const fingerprint = fingerprintRequest(operation, accountIdText, { ...input, skinIds });
+
+  let account: PublishingAccount | undefined;
+  const result = await withIdempotency(
+    client,
+    { realm: "admin", principalId: actor.id, operation, resourceId: accountIdText },
+    idempotencyKey,
+    fingerprint,
+    async () => {
+      account = await lockPublishingAccount(client, accountIdText);
+      await authorizeLegacyAdmin(client, actor, account);
+
+      const versionRow = (
+        await client.query<{ id: string }>(
+          `SELECT id FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`,
+          [observationVersionId, accountIdText],
+        )
+      ).rows[0];
+      if (!versionRow) throw notFound();
+
+      const mapRow = (
+        await client.query<{ source_digest: string }>(
+          `SELECT source_digest FROM zzsh_supply.legacy_supply_map WHERE source_system=$1 AND source_entity=$2 AND legacy_id=$3 AND account_id=$4`,
+          [input.sourceSystem, input.sourceEntity, legacyId, accountIdText],
+        )
+      ).rows[0];
+      if (mapRow && mapRow.source_digest !== input.sourceDigest) {
+        throw conflict("Legacy source digest conflicts with recorded observation");
+      }
+      return false;
+    },
+    async () => {
+      const a = account!;
+      if (skinIds.length > 0) {
+        const existingSkins = (
+          await client.query<{ id: string }>(
+            `SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND id=ANY($2::text[])`,
+            [a.game_id, skinIds],
+          )
+        ).rows;
+        if (existingSkins.length !== skinIds.length) {
+          throw invalid("One or more skins do not belong to the game or do not exist", "skinIds");
+        }
+        for (const skinId of skinIds) {
+          await client.query(
+            `INSERT INTO zzsh_supply.listing_skin(version_id, skin_id) VALUES($1, $2) ON CONFLICT (version_id, skin_id) DO NOTHING`,
+            [observationVersionId, skinId],
+          );
+        }
+      }
+
+      await recordAudit(client, {
+        actorType: "admin",
+        actorId: actor.id,
+        sessionId: actor.sessionId,
+        requestId: actor.requestId,
+        action: "supply.legacy.skin_holdings_recorded",
+        objectType: "rental_account",
+        objectId: accountIdText,
+        outcome: "SUCCESS",
+        reason: "旧站账号已核实皮肤持有记录保存；关联至历史观察版本",
+        details: {
+          sourceSystem: input.sourceSystem,
+          sourceEntity: input.sourceEntity,
+          legacyId,
+          sourceDigest: input.sourceDigest,
+          observationVersionId,
+          attachedSkins: skinIds,
+          evidenceRef: input.evidenceRef,
+          result: "SKIN_HOLDINGS_RECORDED",
+        },
+      });
+
+      return {
+        status: 200,
+        body: {
+          accountId: accountIdText,
+          observationVersionId,
+          attachedSkins: skinIds,
+        },
+      };
+    },
+  );
+  return result.body as LegacySkinHoldingsResult;
+}
+
+
