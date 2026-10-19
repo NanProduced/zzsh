@@ -39,6 +39,7 @@ function errorOf(error: unknown): OrderRequestError {
 
 function noticeFor(error: OrderRequestError): { message: string; canRequote: boolean; action?: "orders" | "refresh" | "back" } {
   if (error.code === "PREVIEW_READ_ONLY") return { message: "当前预览仅开放浏览，暂未接通个人报价与租用。", canRequote: false, action: "back" };
+  if (error.code === "CONFIRMATION_INVALID") return { message: "本次确认凭据无效，请重新获取本人报价后再创建订单。", canRequote: true };
   if (error.code === "CONFIRMATION_EXPIRED" || error.code === "CONFIRMATION_CHANGED") {
     return { message: "报价或资格已变化，原确认已失效；请重新确认后创建。", canRequote: true };
   }
@@ -84,13 +85,12 @@ function PayoutTerms({ state, accepted, locked, onAccept }: { state: PayoutState
   </section>;
 }
 
-export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, reference, autoQuote = false, fullPayoutSelected = false }: { accountId: string; gameId?: string | null; versionId?: string; releaseId?: string; reference?: ReferenceFees; autoQuote?: boolean; fullPayoutSelected?: boolean }) {
+export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, reference, fullPayoutSelected = false }: { accountId: string; gameId?: string | null; versionId?: string; releaseId?: string; reference?: ReferenceFees; fullPayoutSelected?: boolean }) {
   const session = useUserSession();
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [now, setNow] = useState(() => Date.now());
   const [agreementOpen, setAgreementOpen] = useState(false);
   const createKey = useRef<string | null>(null);
-  const autoQuotedContext = useRef<string | null>(null);
   const quoteGeneration = useRef(0);
   const [payout, setPayout] = useState<PayoutState | null>(fullPayoutSelected ? { status: "loading" } : null);
   const [payoutAccepted, setPayoutAccepted] = useState(false);
@@ -99,7 +99,6 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
   currentQuoteTarget.current = quoteTarget;
   const reset = useCallback(() => {
     createKey.current = null;
-    autoQuotedContext.current = null;
     quoteGeneration.current += 1;
     setAgreementOpen(false);
     setStage({ kind: "idle" });
@@ -202,16 +201,6 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
       else setStage({ kind: "notice", ...noticeFor(typed) });
     }
   }, [accountId, gameId, releaseId, userId, isCurrent, versionId, session, payoutGateOpen, payoutAcceptance]);
-
-  useEffect(() => {
-    if (!autoQuote || !userId || stage.kind !== "idle" || !gameId || !versionId || !releaseId) return;
-    if (!payoutGateOpen) return;
-    const context = JSON.stringify([userId, accountId, gameId, versionId, releaseId]);
-    if (autoQuotedContext.current === context) return;
-    autoQuotedContext.current = context;
-    // Original unresolved intent wins inside requote. No automatic retries or order writes.
-    void requote();
-  }, [autoQuote, userId, accountId, gameId, versionId, releaseId, stage.kind, requote, payoutGateOpen]);
 
   const sendCreate = useCallback(async (quote: PersonalRentalQuote) => {
     if (!userId) return;
@@ -377,7 +366,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
 
     if (stage.kind === "idle") return <div className="rental-confirm" data-stage="idle">
       <PayoutTerms state={payout} accepted={payoutAccepted} locked={false} onAccept={setPayoutAccepted} />
-      <div className="rental-confirm-actions"><div className="rental-confirm-primary-action">{dockPrice}{!userId && session.status !== "loading" ? <Link className="button rental-confirm-primary" href={`/login?next=${encodeURIComponent(`/accounts/${accountId}`)}`}>登录后显示最终报价</Link> : <button type="button" className="button rental-confirm-primary" onClick={() => void requote()} disabled={session.status === "loading" || (autoQuote && payoutGateOpen) || !payoutGateOpen}>{!payoutGateOpen ? "请先同意包赔条款" : autoQuote ? "正在读取最终报价…" : "查看我的报价"}</button>}</div></div>
+      <div className="rental-confirm-actions"><div className="rental-confirm-primary-action">{dockPrice}{!userId && session.status !== "loading" ? <Link className="button rental-confirm-primary" href={`/login?next=${encodeURIComponent(`/accounts/${accountId}`)}`}>登录后显示最终报价</Link> : <button type="button" className="button rental-confirm-primary" onClick={() => void requote()} disabled={session.status === "loading" || !payoutGateOpen}>{!payoutGateOpen ? "请先同意包赔条款" : "查看我的报价"}</button>}</div></div>
       <p className="detail-stage-note">先核对本人的会员价格、押金和适用条款，再确认创建订单。</p>
     </div>;
 
@@ -477,9 +466,9 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
       </details>
       <p className="rental-confirm-expiry"><Clock3 size={14} aria-hidden="true" />确认凭据 {countdown(quote.expiresAt, now) ?? "有效期以服务端为准"}；会员、规则或资格变化后需要重新确认。</p>
       <div className="rental-confirm-actions">
-        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || expired || (fullPayoutSelected && !payoutAcceptance)}><WalletCards size={15} aria-hidden="true" />{autoQuote ? "立即租用" : "确认并创建订单"}</button></div>
+        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || expired || (fullPayoutSelected && !payoutAcceptance)}><WalletCards size={15} aria-hidden="true" />确认并创建订单</button></div>
         <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button>
-        {!autoQuote ? <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button> : null}
+        <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button>
       </div>
     </div>;
   };

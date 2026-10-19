@@ -227,7 +227,7 @@ export function supplyRecovery(error: SupplyRequestError): {
     preserveDraft: true,
   };
 }
-type ReadOptions = { method?: "GET"; signal?: AbortSignal };
+type ReadOptions = { method?: "GET"; signal?: AbortSignal; idempotencyKey?: string };
 type WriteOptions = {
   method: "POST" | "PUT";
   body: unknown;
@@ -241,7 +241,7 @@ export async function supplyRequest<T>(
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://"))
     throw new Error("Supply path must be relative");
   const write = options.method === "POST" || options.method === "PUT",
-    key = write ? options.idempotencyKey : undefined;
+    key = options.idempotencyKey;
   let response: Response;
   try {
     response = await fetch("/api/supply" + path, {
@@ -257,7 +257,7 @@ export async function supplyRequest<T>(
             },
             body: JSON.stringify(options.body),
           }
-        : {}),
+        : key ? { headers: { "idempotency-key": key } } : {}),
     });
   } catch (error) {
     if (options.signal?.aborted) throw error;
@@ -356,6 +356,14 @@ export const supplyApi = {
     ),
   mine: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId), { signal }),
+  operationResult: async (action: "pause" | "resume" | "withdraw", accountId: string, body: Record<string, unknown>, key: string, signal?: AbortSignal) => {
+    const operation = `supply.publication.${action}`;
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([operation, accountId, body])));
+    const fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    return supplyRequest<{ receipt: "UNRESOLVED" } | { receipt: "RECORDED"; operation: string; resourceId: string; responseStatus: number; result: { accountId: string; revision: string; versionId?: string } }>(
+      "/operation-result?" + new URLSearchParams({ operation, resourceId: accountId, fingerprint }), { idempotencyKey: key, signal },
+    );
+  },
   depositRecommendation: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<DepositRecommendation>(
       "/accounts/" + id(accountId) + "/deposit-recommendation",

@@ -680,6 +680,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (currentContext(intent.context)) setWritePending(intent);
   };
   const recoverStoredIntent = async (initial: SupplyWriteIntent): Promise<boolean> => {
+    if (["pause", "resume", "withdraw"].includes(initial.action)) {
+      setNotice("有一笔接单状态或撤回操作待核对，请返回出租账号管理查询原操作结果；本页不会重发或清除它。");
+      return false;
+    }
     if (identityRef.current !== initial.userId || identityStatusRef.current !== "confirmed" || gameRef.current !== initial.gameId) return false;
     const persisted = loadSupplyIntent(initial.userId), memory = storedIntentRef.current;
     if (!persisted || !sameSupplyIntent(persisted, initial) || !sameSupplyIntent(memory, initial)) return false;

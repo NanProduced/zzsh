@@ -17,7 +17,7 @@ const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 // Owner-approved explicit whitelist: exact public listing-number lookup is a read-only
 // passthrough distinct from the generic /listings/:id branch.
 const getPath = new RegExp(
-  `^/(?:games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation)?|media/${id}/(?:access|content))$`,
+  `^/(?:operation-result|games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation)?|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
   `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents)$`,
@@ -82,6 +82,7 @@ async function forward(
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId }),
     cookies = userCookies(request.headers.get("cookie"));
   if (cookies) headers.set("cookie", cookies);
+  if (method === "GET" && path === "/operation-result" && request.headers.has("idempotency-key")) headers.set("idempotency-key", request.headers.get("idempotency-key")!);
   const upload = method === "PUT" && path.startsWith("/media/uploads/"),
     deadline = AbortSignal.timeout(15000);
   let body: ArrayBuffer | undefined;

@@ -34,6 +34,32 @@ for (const operation of ["review", "visibility"]) operations.set(`supply.media.$
 const safeFields = ["id", "intentId", "assetId", "gameId", "releaseId", "revision", "generation", "status", "technicalState", "reviewState", "accessClass", "visibility", "expiresAt", "noop", "enabled"];
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 
+export async function readUserSupplyOperationResult(client: PoolClient, userId: string, query: URLSearchParams, keyHeader: string | undefined) {
+  for (const name of query.keys()) if (!["operation", "resourceId", "fingerprint"].includes(name) || query.getAll(name).length !== 1) throw invalid("Unsupported operation result query");
+  const operation = query.get("operation") ?? "", accountId = query.get("resourceId"), fingerprint = query.get("fingerprint");
+  if (!["supply.publication.pause", "supply.publication.resume", "supply.publication.withdraw"].includes(operation)) throw invalid("Operation does not support result recovery", "operation");
+  if (!id(accountId)) throw invalid("Original account is required", "resourceId");
+  if (!fingerprint || !/^[0-9a-f]{64}$/.test(fingerprint)) throw invalid("Original request fingerprint is required", "fingerprint");
+  const key = validateIdempotencyKey(keyHeader);
+  const account = (await client.query<{ gameId: string }>(
+    `SELECT game_id AS "gameId" FROM zzsh_supply.rental_account WHERE id=$1 AND owner_user_id=$2`, [accountId, userId],
+  )).rows[0];
+  if (!account) throw notFound();
+  const row = (await client.query<{ requestFingerprint: string; responseStatus: number; responseBody: Record<string, unknown> }>(
+    `SELECT request_fingerprint AS "requestFingerprint",response_status AS "responseStatus",response_body AS "responseBody"
+       FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`,
+    [JSON.stringify(["user", userId, operation, accountId]), key],
+  )).rows[0];
+  if (!row) return { receipt: "UNRESOLVED" as const };
+  if (row.requestFingerprint !== fingerprint) throw new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Original request fingerprint does not match");
+  const original = row.responseBody?.account as Record<string, unknown> | undefined;
+  const version = row.responseBody?.version as Record<string, unknown> | null | undefined;
+  if (row.responseStatus !== 200 || original?.id !== accountId || original.game_id !== account.gameId || typeof original.revision !== "string" || !/^[1-9]\d*$/.test(original.revision)
+    || (version != null && !id(version.id))) throw notFound();
+  return { receipt: "RECORDED" as const, operation, resourceId: accountId, responseStatus: row.responseStatus,
+    result: { accountId, revision: original.revision, ...(version ? { versionId: version.id as string } : {}) } };
+}
+
 export async function readAdminSupplyOperationResult(client: PoolClient, actorId: string, access: EffectiveAdminAccess, query: URLSearchParams, keyHeader: string | undefined) {
   for (const name of query.keys()) if (!["operation", "resourceId", "fingerprint"].includes(name) || query.getAll(name).length !== 1) throw invalid("Unsupported operation result query");
   const operation = query.get("operation") ?? "", definition = operations.get(operation);

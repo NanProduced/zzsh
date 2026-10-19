@@ -20,8 +20,9 @@ const profileReply = (userId) => ({ user: { id: userId, username: `PRIVATE_${use
 const identityReply = (identityStatus = "VERIFIED") => ({ accountStatus: "ACTIVE", identityStatus, ageStatus: "ADULT", provider: "none", eligibleForProtectedTrade: false });
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
-async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", authRead, confirm = () => false, writeReply, pages = null, mine = null, viaFetch = null } = {}) {
+async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", authRead, confirm = () => false, writeReply, pages = null, mine = null, viaFetch = null, initialStorage = {} } = {}) {
   const window = new Window({ url: "http://127.0.0.1:3100/account" });
+  for (const [key, value] of Object.entries(initialStorage)) window.sessionStorage.setItem(key, value);
   Object.assign(globalThis, { window, document: window.document, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, Element: window.Element, Node: window.Node, Event: window.Event, MouseEvent: window.MouseEvent, KeyboardEvent: window.KeyboardEvent, CustomEvent: window.CustomEvent, FocusEvent: window.FocusEvent, DOMException: window.DOMException, getComputedStyle: window.getComputedStyle.bind(window), requestAnimationFrame: window.requestAnimationFrame.bind(window), cancelAnimationFrame: window.cancelAnimationFrame.bind(window), IS_REACT_ACT_ENVIRONMENT: true });
   Object.defineProperty(globalThis, "navigator", { value: window.navigator, configurable: true });
   // Base UI AlertDialog（t2 交付的真实依赖，非桩）所需的最小环境。
@@ -128,12 +129,16 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     sessionChange() { for (const listener of [...identityListeners]) listener(); },
     // 滚动/焦点恢复走 requestAnimationFrame（下一帧），探针里真实推进定时器后才能断言。
     async frames() { await new Promise(setImmediate); await new Promise((resolve) => setTimeout(resolve, 40)); },
+    async waitFor(predicate, turns = 50) {
+      for (let index = 0; index < turns && !predicate(); index++) await React.act(async () => { await new Promise(setImmediate); });
+      assert.ok(predicate(), "component did not reach the expected state");
+    },
     // Alert Dialog 弹层经 Portal 挂到 body（host 之外），查询与点击走 document。
     popup: () => window.document.querySelector('[data-slot="alert-dialog-content"]'),
     async clickDocButton(text) {
       const button = [...window.document.querySelectorAll("button")].find((item) => item.textContent === text);
       assert.ok(button, "doc button: " + text);
-      await React.act(async () => { button.click(); });
+      await React.act(async () => { button.click(); await new Promise(setImmediate); });
       await new Promise(setImmediate);
     },
     async render(view, accountId) {
@@ -469,6 +474,79 @@ test("unknown cancellation survives tab navigation without resubmission", async 
 //    往返恢复（滚动/焦点/游标/筛选）与迟到响应/401/403/404 撤销。所有请求均被 fixture/传输层拦截，不达真实 API。 ══
 const accountRow = (id, extra = {}) => ({ id, title: `账号 ${id}`, game_name: "三角洲行动", review_state: "PUBLISHED", sequence: "1", owner_paused: false, staff_restricted: false, ...extra });
 const detailOf = (id) => ({ account: { id, revision: "1", owner_paused: false, staff_restricted: false }, version: { reviewState: "PUBLISHED", declaration: { title: `账号 ${id}`, mediaBindings: [] } }, decisions: [], blockers: [] });
+
+test("R03: unknown pause/resume/withdraw survives remount and recovers only the original receipt", async () => {
+  for (const action of ["pause", "resume", "withdraw"]) {
+    const calls = [], supply = detailOf("acc-recover");
+    supply.account.game_id = "game-recover"; supply.version.id = "version-recover";
+    supply.account.owner_paused = action === "resume";
+    supply.version.reviewState = action === "withdraw" ? "SUBMITTED" : "PUBLISHED";
+    let receipt = "UNRESOLVED", readbackFails = false;
+    const viaFetch = async (url, init = {}) => {
+      calls.push({url, method:init.method ?? "GET", key:new Headers(init.headers).get("idempotency-key"), body:init.body ? JSON.parse(init.body) : null});
+      if (url.includes("/me/accounts")) return Response.json({items:[accountRow("acc-recover")],nextCursor:null});
+      if (url.includes("/operation-result")) return Response.json(receipt === "UNRESOLVED" ? {receipt} : {receipt,operation:`supply.publication.${action}`,resourceId:"acc-recover",responseStatus:200,result:{accountId:"acc-recover",revision:"2",versionId:"version-recover"}});
+      if (init.method === "POST") throw new TypeError("connection lost after send");
+      if (readbackFails) return Response.json({error:{code:"INTERNAL_ERROR",message:"read failed"}},{status:503});
+      return Response.json(supply);
+    };
+    const slot = "zzsh.supply-write.v1:user_A";
+    const first = await probe({viaFetch}); let stored;
+    try {
+      await first.render("accounts", "acc-recover");
+      await first.clickDocButton(({pause:"暂停接单",resume:"恢复接单",withdraw:"撤回审核"})[action]);
+      await first.waitFor(() => JSON.parse(first.window.sessionStorage.getItem(slot) ?? "null")?.uncertain === true);
+      stored = first.window.sessionStorage.getItem(slot);
+      assert.ok(stored, "a write responsibility must survive closing this component");
+      const record = JSON.parse(stored), sent = calls.find(call => call.method === "POST");
+      assert.equal(record.action, action); assert.equal(record.accountId,"acc-recover"); assert.equal(record.gameId,"game-recover");
+      assert.equal(record.key,sent.key); assert.deepEqual(record.body,sent.body);
+    } finally {await first.close();}
+    const second = await probe({viaFetch,initialStorage:{[slot]:stored}});
+    try {
+      await second.render("accounts", "acc-recover");
+      assert.equal(calls.filter(call=>call.method==="POST").length,1,"remount never re-POSTs an unknown action");
+      await second.clickDocButton("查询原操作结果");
+      await second.waitFor(() => second.host.textContent.includes("尚未查到原操作回执"));
+      assert.ok(second.window.sessionStorage.getItem(slot),"UNRESOLVED is not a rejection or a success");
+      assert.match(second.host.textContent,/尚未查到原操作回执/);
+      receipt="RECORDED"; readbackFails=true;
+      await second.clickDocButton("查询原操作结果");
+      await second.waitFor(() => second.host.textContent.includes("read failed"));
+      assert.equal(JSON.parse(second.window.sessionStorage.getItem(slot)).phase,"accepted","failed current readback preserves the successful original receipt");
+      readbackFails=false;
+      supply.account.revision="3";
+      await second.clickDocButton("查询原操作结果");
+      await second.waitFor(() => second.host.textContent.includes("已核实原操作成功"));
+      assert.equal(second.window.sessionStorage.getItem(slot),null);
+      assert.match(second.host.textContent,/已核实原操作成功/);
+      assert.equal(calls.filter(call=>call.method==="POST").length,1);
+      assert.ok(calls.filter(call=>call.url.includes("operation-result")).every(call=>call.key===JSON.parse(stored).key));
+    } finally {await second.close();}
+  }
+});
+
+test("R03: recovery conflicts and current paused state cannot clear another original request", async () => {
+  const supply = detailOf("acc-recover"); supply.account.game_id="game-recover"; supply.account.owner_paused=true; supply.version.id="version-recover";
+  const record={version:1,userId:"user_A",gameId:"game-recover",accountId:"acc-recover",action:"pause",key:"original-key",body:{expectedRevision:"1"},phase:"pending",uncertain:true,createdAt:new Date().toISOString()};
+  const slot="zzsh.supply-write.v1:user_A", calls=[];
+  const p=await probe({initialStorage:{[slot]:JSON.stringify(record)},viaFetch:async(url,init={})=>{
+    calls.push({url,method:init.method??"GET"});
+    if(url.includes("/me/accounts"))return Response.json({items:[accountRow("acc-recover")],nextCursor:null});
+    if(url.includes("/operation-result"))return Response.json({error:{code:"IDEMPOTENCY_KEY_REUSED",message:"fingerprint conflict"}},{status:409});
+    return Response.json(supply);
+  }});
+  try{
+    await p.render("accounts","acc-recover");
+    await p.clickDocButton("查询原操作结果");await p.waitFor(()=>p.host.textContent.includes("fingerprint conflict"));
+    assert.deepEqual(JSON.parse(p.window.sessionStorage.getItem(slot)),record);
+    assert.ok([...p.host.querySelectorAll('button')].find(button=>button.textContent==='恢复接单')?.disabled);
+    p.session.userId="user_B";p.session.identityVersion++;await React.act(async()=>p.sessionChange());await p.render("accounts");
+    assert.doesNotMatch(p.host.textContent,/原操作结果待恢复/);
+    assert.equal(p.window.sessionStorage.getItem(slot),JSON.stringify(record),"another identity cannot clear A's responsibility");
+    assert.equal(calls.filter(call=>call.method!=="GET").length,0);
+  }finally{await p.close();}
+});
 const rowIds = (p) => [...p.host.querySelectorAll("[data-account-row]")].map((node) => node.getAttribute("data-account-row"));
 const { SupplyRequestError } = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));
 

@@ -25,6 +25,38 @@ beforeEach(() => {
   resetNetworkInfoCacheForTest();
 });
 
+test("I05：StrictMode 初载不外呼，显式查询才请求一次", async () => {
+  const requests = [];
+  const p = await mountAuthComponent(file, "CurrentNetworkFields", {}, {
+    strictMode: true,
+    fetch: provider(() => Response.json({ ip: "203.0.113.9" }), requests),
+  });
+  try {
+    await p.settle();
+    assert.equal(requests.length, 0, "初载不能自动访问第三方");
+    assert.match(p.host.textContent, /第三方/);
+    await p.click("查询当前网络");
+    assert.equal(requests.length, 1, "一次明确动作只查询一次");
+    assert.match(p.host.textContent, /203\.0\.113\.9/);
+  } finally { await p.close(); }
+});
+
+test("本机时区读取与当前网络重挂都不发起外呼", async () => {
+  const requests = [];
+  for (const component of ["browserTimezone", "CurrentNetworkFields", "CurrentNetworkFields"]) {
+    const p = await mountAuthComponent(file, component, {}, {
+      fetch: provider(() => Response.json({ ip: "203.0.113.9" }), requests),
+    });
+    try {
+      await p.render();
+      await p.settle();
+      assert.equal(requests.length, 0, component);
+      if (component === "browserTimezone") assert.equal(p.host.textContent, Intl.DateTimeFormat().resolvedOptions().timeZone);
+      else assert.doesNotMatch(p.host.textContent, /203\.0\.113\.9/);
+    } finally { await p.close(); }
+  }
+});
+
 test("解析接受 IPv4 与 IPv6 字面量，拒绝非 IP 的返回", () => {
   assert.deepEqual(parseNetworkInfo({ ip: "203.0.113.9" }), { ip: "203.0.113.9" });
   assert.deepEqual(parseNetworkInfo({ ip: "  2001:db8::1  " }), { ip: "2001:db8::1" }, "IPv6 同样有效并去空白");
@@ -78,7 +110,7 @@ test("响应头之后的超时和断流不会误报为无效 IP", async () => {
   } finally { globalThis.fetch = original; }
 });
 
-test("StrictMode effect 重放复用一次查询，挂载不产生重复外呼", async () => {
+test("显式查询中禁用按钮，StrictMode 与重渲染均不重复外呼", async () => {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const requests = [];
@@ -87,7 +119,13 @@ test("StrictMode effect 重放复用一次查询，挂载不产生重复外呼",
     fetch: provider(count => count === 1 ? gate : Response.json({ ip: "203.0.113.9" }), requests),
   });
   try {
-    assert.equal(requests.length, 1, "StrictMode 不重复外呼");
+    assert.equal(requests.length, 0, "StrictMode 初载不外呼");
+    await p.click("查询当前网络");
+    assert.equal(requests.length, 1, "显式查询只请求一次");
+    assert.equal(p.findButton("查询中…").disabled, true);
+    await p.click("查询中…");
+    await p.render();
+    assert.equal(requests.length, 1, "等待中点击与重渲染不重试");
     release(Response.json({ ip: "203.0.113.9" }));
     await p.settle();
     assert.match(p.host.textContent, /203\.0\.113\.9/);
@@ -119,7 +157,7 @@ test("限流、超时、断网、非 2xx 与坏返回分别给出可区分的失
   } finally { globalThis.fetch = original; }
 });
 
-test("挂载即查询一次，展示当前公网 IP，有详情时展示地理位置与运营商", async () => {
+test("点击后展示可靠公网 IP、地理位置与运营商，复制只使用已返回 IP", async () => {
   const requests = [];
   const mockPayload = {
     ip: "203.0.113.9",
@@ -135,6 +173,12 @@ test("挂载即查询一次，展示当前公网 IP，有详情时展示地理�
   });
   try {
     await p.settle();
+    assert.equal(requests.length, 0);
+    assert.match(p.host.textContent, /第三方 ipwho\.is.*ipify/);
+    const queryButton = p.findButton("查询当前网络");
+    queryButton.focus();
+    assert.equal(p.window.document.activeElement, queryButton, "原生按钮可键盘聚焦");
+    await p.click("查询当前网络");
     assert.equal(requests.length, 1, "单次查询，不轮询");
     assert.equal(requests[0].init.credentials, "omit");
     assert.equal(requests[0].init.referrerPolicy, "no-referrer");
@@ -145,19 +189,65 @@ test("挂载即查询一次，展示当前公网 IP，有详情时展示地理�
     assert.match(text, /浙江省 · 杭州市/);
     assert.match(text, /中国电信/);
     assert.ok(p.host.querySelector('button[aria-label="复制当前公网 IP"]'), "复制入口");
+    const copied = [];
+    Object.defineProperty(p.window.navigator, "clipboard", { configurable: true, value: { writeText: async value => copied.push(value) } });
+    await p.click("复制当前公网 IP");
+    assert.deepEqual(copied, ["203.0.113.9"]);
+    assert.match(p.host.textContent, /已复制/);
+    assert.equal(requests.length, 1, "复制不触发网络查询");
   } finally { await p.close(); }
 });
 
-test("429 额度耗尽且无可靠 IP 时整块隐藏，不留失效节点与空白", async () => {
+test("429 无可靠 IP 时提供手动重试，不造 IP、不自动重试或轮询", async () => {
   const requests = [];
   const p = await mountAuthComponent(file, "CurrentNetworkFields", {}, {
     initialStatus: "authenticated",
     fetch: provider(() => new Response(null, { status: 429 }), requests),
   });
   try {
-    await p.settle();
-    assert.equal(p.host.querySelector(".sec-network"), null);
+    await p.click("查询当前网络");
+    assert.equal(requests.length, 2, "一次 ipwho.is 与一次 ipify 兜底");
+    assert.match(p.host.textContent, /暂时无法查询当前网络，请重试/);
+    assert.equal(p.host.querySelector(".sec-network-ip-val"), null);
+    assert.equal(p.host.querySelector('[aria-label="复制当前公网 IP"]'), null);
     assert.doesNotMatch(p.host.textContent, /203\.0\.113\.9/);
+    await p.render();
+    await p.settle();
+    assert.equal(requests.length, 2, "错误界面重渲染不自动重试");
+    await p.click("重试查询当前网络");
+    assert.equal(requests.length, 3, "冷却中手动重试只使用一次 ipify 兜底");
+  } finally { await p.close(); }
+});
+
+test("普通查询失败可手动重试成功，不因读取错误重复请求", async () => {
+  const requests = [];
+  const p = await mountAuthComponent(file, "CurrentNetworkFields", {}, {
+    fetch: provider(count => {
+      if (count === 1) throw new TypeError("offline");
+      return Response.json({ ip: "203.0.113.9" });
+    }, requests),
+  });
+  try {
+    await p.click("查询当前网络");
+    assert.equal(requests.length, 1);
+    assert.match(p.host.textContent, /暂时无法查询当前网络/);
+    await p.click("重试查询当前网络");
+    assert.equal(requests.length, 2);
+    assert.match(p.host.textContent, /203\.0\.113\.9/);
+  } finally { await p.close(); }
+});
+
+test("限流兜底只展示可靠 IP，不展示过时地区和运营商", async () => {
+  const requests = [];
+  const p = await mountAuthComponent(file, "CurrentNetworkFields", {}, {
+    fetch: provider(count => count === 1 ? new Response(null, { status: 429 }) : Response.json({ ip: "203.0.113.9" }), requests),
+  });
+  try {
+    await p.click("查询当前网络");
+    assert.equal(requests.length, 2);
+    assert.equal(p.host.querySelector(".sec-network").getAttribute("data-rate-limited"), "true");
+    assert.match(p.host.textContent, /203\.0\.113\.9/);
+    assert.doesNotMatch(p.host.textContent, /近似地区|运营商|网络归属/);
   } finally { await p.close(); }
 });
 
@@ -169,7 +259,7 @@ test("读取未完成前只展示占位，卸载后迟到的返回不改写已�
     fetch: provider(() => gate),
   });
   try {
-    await p.settle();
+    await p.click("查询当前网络");
     assert.match(p.host.textContent, /当前公网 IP/);
     assert.ok(p.host.querySelector(".sec-network-value") && !/203\.0\.113\.9/.test(p.host.textContent), "未返回前不出现任何 IP 值");
   } finally { await p.close(); }
@@ -192,7 +282,12 @@ test("集成：只有当前会话卡查询公网 IP，其他会话行与刷新�
   });
   try {
     await p.settle();
-    assert.equal(requests.length, 1, "两个会话只产生一次查询");
+    assert.equal(requests.length, 0, "两个会话与本机时区初载都不外呼");
+    assert.match(p.host.textContent, /浏览器时区/);
+    await p.click("刷新会话列表");
+    assert.equal(requests.length, 0, "未查询前刷新会话列表也不外呼");
+    await p.click("查询当前网络");
+    assert.equal(requests.length, 1, "明确点击后才查询一次");
     assert.equal(requests[0].init.credentials, "omit", "查询不带平台凭据");
     const current = p.host.querySelector('[aria-labelledby="sec-current-session-heading"]');
     const others = p.host.querySelector('[aria-labelledby="sec-other-sessions-heading"]');

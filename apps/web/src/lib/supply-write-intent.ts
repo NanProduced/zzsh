@@ -1,6 +1,6 @@
 // Supply-specific version of the reviewed subject-bound trade intent pattern.
 // One unresolved operation per subject/tab: no TTL deletes a write responsibility.
-export type SupplyWriteAction = "create-account" | "create-draft" | "save-draft" | "quote" | "accept-rules" | "submit" | "media";
+export type SupplyWriteAction = "create-account" | "create-draft" | "save-draft" | "quote" | "accept-rules" | "submit" | "media" | "pause" | "resume" | "withdraw";
 export type SupplyWriteReceipt = { accountId: string; revision?: string; versionId?: string; assetId?: string; purpose?: string; reviewState?: string };
 export type SupplyWriteIntent = {
   version: 1; userId: string; gameId: string; accountId: string | null;
@@ -36,7 +36,7 @@ export function loadSupplyIntent(userId: string): SupplyWriteIntent | null {
     if (value.version !== 1 || value.userId !== userId || typeof value.gameId !== "string" || !value.gameId || typeof value.key !== "string" || !value.key ||
       !(value.accountId === null || typeof value.accountId === "string" && value.accountId.length > 0) || !value.body || typeof value.body !== "object" || Array.isArray(value.body) ||
       (value.phase === "accepted" && (!value.receipt || typeof value.receipt.accountId !== "string" || !value.receipt.accountId)) ||
-      !["create-account", "create-draft", "save-draft", "quote", "accept-rules", "submit", "media"].includes(value.action) ||
+      !["create-account", "create-draft", "save-draft", "quote", "accept-rules", "submit", "media", "pause", "resume", "withdraw"].includes(value.action) ||
       !["pending", "accepted"].includes(value.phase) || !Number.isFinite(Date.parse(value.createdAt))) throw new SupplyIntentStorageError();
     serializable(value.body);
     return value;

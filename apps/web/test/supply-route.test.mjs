@@ -32,6 +32,17 @@ test('supply BFF forwards only user cookies, preserves query and adapts public U
   globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({items:[{url:'/api/v1/supply/listings/a/media/m',resourceTotal:{amount:'125.00'}}],sessionToken:'must-not-forward'});};
   try{const p=['listings'];const r=await GET(input(p,{headers:{cookie:'zzsh_user.session_token=usr; zzsh_admin.session_token=adm; other=x'}}),ctx(p));assert.equal(r.status,200);assert.equal(seen.url,'http://127.0.0.1:3102/api/bff/user/supply/listings?limit=2');assert.equal(seen.options.headers.get('cookie'),'zzsh_user.session_token=usr');const b=await r.json();assert.equal(b.items[0].url,'/api/supply/listings/a/media/m');assert.equal(b.items[0].resourceTotal.amount,'125.00');assert.equal('sessionToken' in b,false);assert.equal(r.headers.get('cache-control'),'no-store');}finally{globalThis.fetch=old;}
 });
+
+test('supply original-result GET forwards only the user realm and preserves the recovery key',async()=>{
+  const old=globalThis.fetch;let seen;
+  globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({receipt:'UNRESOLVED'});};
+  try{const query=new URLSearchParams({operation:'supply.publication.pause',resourceId:'account-1',fingerprint:'a'.repeat(64)});
+    const request=new Request('http://127.0.0.1:3100/api/supply/operation-result?'+query,{headers:{cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin','idempotency-key':'original-recovery-key'}});
+    const response=await GET(request,ctx(['operation-result']));assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');
+    assert.equal(seen.url,'http://127.0.0.1:3102/api/bff/user/supply/operation-result?'+query);assert.equal(seen.options.method,'GET');assert.equal(seen.options.body,undefined);
+    assert.equal(seen.options.headers.get('cookie'),'zzsh_user.session_token=user');assert.equal(seen.options.headers.get('idempotency-key'),'original-recovery-key');
+  }finally{globalThis.fetch=old;}
+});
 test('supply BFF rejects admin routes, traversal, wrong method and cross-origin writes before forwarding',async()=>{
   const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({});};
   try{for(const p of [['admin','supply'],['accounts','a/../admin'],['accounts','a','submit']])assert.equal((await GET(input(p),ctx(p))).status,404);

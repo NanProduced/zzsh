@@ -2100,6 +2100,7 @@ html:not(.dark) {
 .sec-network-label { color: var(--color-text-primary); font-size: var(--type-label-size); font-weight: 600; line-height: 1.5; }
 .sec-network-value { color: var(--color-text-secondary); font-size: var(--type-meta-size); line-height: 1.6; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .sec-network-value.is-pending { color: var(--color-text-secondary); }
+.sec-network > .sec-action-btn { justify-self: start; }
 .sec-network-row .sec-info { margin-left: auto; }
 .sec-network-note { margin: 0; max-width: 62ch; color: var(--color-text-secondary); font-size: var(--type-meta-size); line-height: var(--type-meta-leading); text-wrap: pretty; }
 .sec-network-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 18px; margin: 2px 0 0; }

@@ -14,7 +14,7 @@ const { Window } = requireFromTree("happy-dom");
 const intents = requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
 
 function compile(relativePath) {
-  const source = fs.readFileSync(path.join(tree, relativePath), "utf8");
+  const source = fs.readFileSync(path.join(tree, relativePath), "utf8").replace("function ReadyDetail(", "export function ReadyDetail(");
   return typescript.transpileModule(source, {
     compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
@@ -269,6 +269,44 @@ function loadPanel(sessionUser, optionsResponder) {
 
 const referenceFees = { total: "¥295.91", haff: "¥256.41", items: "¥39.50" };
 const detailPanelProps = { accountId: "detail_price", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees };
+
+test("R03: invalid confirmation uses actionable Chinese copy and only explicitly requotes", async () => {
+  await withDom(async window => {
+    const log = [];
+    const fetchImpl = router([
+      { match: "/api/order-confirmations", method: "POST", respond: () => json(confirmation) },
+      { match: "/api/v2/orders", method: "POST", respond: () => json({ error: { code: "CONFIRMATION_INVALID", message: "Invalid confirmation credential" } }, 400) },
+    ], log);
+    const accountId = "account_invalid_confirmation";
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, accountId }, fetchImpl);
+    try {
+      await probe.render();
+      await probe.click("查看我的报价");
+      await probe.click("确认并创建订单");
+      assert.match(probe.host.textContent, /本次确认凭据无效，请重新获取本人报价后再创建订单/);
+      assert.doesNotMatch(probe.host.textContent, /Invalid confirmation credential/);
+      assert.ok(probe.buttons().includes("重新确认"), "invalid credentials allow a fresh personal quote");
+      assert.equal(intents.loadIntent("user_A", "order.create.v2", accountId), null, "definitive initial 400 retains existing non-commit handling");
+      await probe.render();
+      assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1, "notice rerender never requotes automatically");
+      await probe.click("重新确认");
+      assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 2);
+      assert.equal(log.filter(entry => entry.url.endsWith("/api/v2/orders")).length, 1, "requote does not create another order");
+    } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", accountId)); }
+  });
+});
+
+function loadReadyDetail(current) {
+  return loadComponent("apps/web/src/components/market/listing-detail.tsx", current, {
+    "@/components/layout/service-shell": {},
+    "@/components/favorites/favorite-button": { FavoriteButton: () => null, FavoriteNotice: () => null },
+    "@/components/favorites/favorites-context": {},
+    "@/components/delta/account-card": { composeGridTitle: () => ({ haff: "", rest: "真实详情组件测试" }), isHaff: () => false, moneyValue: value => value, orderedQuoteResources: () => [] },
+    "@/lib/account-return": {}, "@/lib/listing-filters": {}, "@/lib/supply-games": {}, "@/lib/listing-view": {}, "@/lib/supply-client": {},
+    "@/components/order/rental-confirm-panel": { RentalConfirmPanel: loadPanelForSession(current, async () => publishingOptions) },
+    "@/components/supply/skin-media-thumb": {},
+  }).ReadyDetail;
+}
 const fullPayoutTerms = {
   termsVersionId: "terms_1", termsDigest: "e".repeat(64), disclosureVersion: "disclosure_1",
   policyRef: "g0-full-payout", policyVersion: "1", title: "全额包赔条款", body: "包赔条款正文（TEST_ONLY）",
@@ -380,25 +418,36 @@ test("detail identity loading/B and late A quote never reveal A payable or waive
   });
 });
 
-test("detail auto quote runs once, keeps the actionable button, and consumes the returned token", async () => {
+test("I04: the real public detail requires an explicit quote action and consumes only its returned token", async () => {
   await withDom(async window => {
     const log = [];
     const fetchImpl = router([
       { match: "/api/order-confirmations", method: "POST", respond: () => json(confirmation) },
       { match: "/api/v2/orders", method: "POST", respond: () => json({ order: { id: "order_auto", displayNo: "ZZ-AUTO", status: "PENDING_PAYMENT" } }) },
     ], log);
-    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl, { strict: true });
+    const data = { id: "detail_price", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", canCreateOrder: true,
+      resourceTotalLabel: referenceFees.total, haffRentLabel: referenceFees.haff, itemResourceTotalLabel: referenceFees.items,
+      conditionLines: [], resourceLines: [], skinTags: [], media: [], entitlementNames: [] };
+    const probe = createProbe(window, loadReadyDetail(session("user_A")), { data }, fetchImpl, { strict: true });
     try {
       await probe.render();
       await tick(); await tick();
+      assert.equal(log.length, 0, "opening a rentable public detail is read-only");
+      assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥295.91");
+      await probe.render();
+      window.document.documentElement.dataset.theme = "dark";
+      window.innerWidth = 390;
+      window.dispatchEvent(new window.Event("resize"));
+      await probe.render();
+      assert.equal(log.length, 0, "rerender, theme and viewport changes do not request a quote");
+      await probe.click("查看我的报价");
       assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
       assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥470.00");
-      assert.ok(probe.host.textContent.includes("立即租用"));
+      assert.ok(probe.host.textContent.includes("确认并创建订单"));
       assert.ok(!probe.host.textContent.includes("查看我的报价"));
-      assert.ok(!probe.host.textContent.includes("确认并创建订单"));
       await probe.render(); await tick();
       assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
-      await probe.click("立即租用");
+      await probe.click("确认并创建订单");
       const creates = log.filter(entry => entry.url.endsWith("/api/v2/orders"));
       assert.equal(creates.length, 1);
       assert.deepEqual(creates[0].body, { confirmationToken: "token_1" });
@@ -406,12 +455,12 @@ test("detail auto quote runs once, keeps the actionable button, and consumes the
   });
 });
 
-test("guest detail auto quote links directly to login without a quote request", async () => {
+test("guest detail links directly to login without a quote request", async () => {
   await withDom(async window => {
     const guest = { status: "guest", userId: null, identityVersion: 1, revalidate() {}, confirm: async () => "guest", signOut: async () => undefined };
     const log = [];
     const fetchImpl = router([], log);
-    const probe = createProbe(window, loadPanelForSession(guest, async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl);
+    const probe = createProbe(window, loadPanelForSession(guest, async () => publishingOptions), detailPanelProps, fetchImpl);
     try {
       await probe.render();
       const link = probe.host.querySelector('a[href*="/login?next="]');
@@ -423,7 +472,30 @@ test("guest detail auto quote links directly to login without a quote request", 
   });
 });
 
-test("auto quote does not loop after 401 or 503", async () => {
+test("I04: identity and listing version changes never initiate a public-detail quote", async () => {
+  await withDom(async window => {
+    const current = session("user_A"), log = [];
+    const data = { id: "detail_price", gameId: "game_1", versionId: "listing_1", releaseId: "release_1", canCreateOrder: true,
+      resourceTotalLabel: referenceFees.total, haffRentLabel: referenceFees.haff, itemResourceTotalLabel: referenceFees.items,
+      conditionLines: [], resourceLines: [], skinTags: [], media: [], entitlementNames: [] };
+    const probe = createProbe(window, loadReadyDetail(current), { data }, router([], log), { strict: true });
+    try {
+      await probe.render();
+      for (const [versionId, releaseId] of [["listing_2", "release_1"], ["listing_2", "release_2"], ["listing_1", "release_1"]]) {
+        await probe.render({ data: { ...data, versionId, releaseId } });
+        assert.equal(log.length, 0);
+      }
+      current.status = "loading"; current.userId = null; await probe.render();
+      assert.ok([...probe.host.querySelectorAll("button")].find(button => button.textContent === "查看我的报价")?.disabled);
+      current.status = "authenticated"; current.userId = "user_B"; current.identityVersion++;
+      await probe.render();
+      assert.equal(log.length, 0);
+      assert.ok([...probe.host.querySelectorAll("button")].find(button => button.textContent === "查看我的报价"));
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("explicit quote does not retry itself after 401 or 503", async () => {
   for (const failure of [
     { status: 401, body: { error: { code: "UNAUTHENTICATED", message: "登录已失效" } }, message: "登录状态已变化" },
     { status: 503, body: { error: { code: "DEPENDENCY_UNAVAILABLE", message: "依赖暂不可用" } }, message: "最终报价暂时无法读取" },
@@ -434,9 +506,11 @@ test("auto quote does not loop after 401 or 503", async () => {
       current.confirm = async () => { confirms += 1; return "authenticated"; };
       const log = [];
       const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(failure.body, failure.status) }], log);
-      const probe = createProbe(window, loadPanelForSession(current, async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl, { strict: true });
+      const probe = createProbe(window, loadPanelForSession(current, async () => publishingOptions), detailPanelProps, fetchImpl, { strict: true });
       try {
         await probe.render(); await tick(); await tick();
+        assert.equal(log.length, 0);
+        await probe.click("查看我的报价");
         assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
         assert.equal(confirms, failure.status === 401 ? 1 : 0);
         assert.match(probe.host.textContent, new RegExp(failure.message));
@@ -447,11 +521,11 @@ test("auto quote does not loop after 401 or 503", async () => {
   }
 });
 
-test("auto quote honors a frozen create intent before requesting a new quote", async () => {
+test("detail honors a frozen create intent without requesting a new quote", async () => {
   await withDom(async window => {
     intents.saveIntent({ userId: "user_A", kind: "order.create.v2", resourceId: "detail_intent", key: "op_frozen", body: {}, token: "token_frozen", context: { payable: "470.00" } });
     const log = [];
-    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, accountId: "detail_intent", autoQuote: true }, router([], log), { strict: true });
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, accountId: "detail_intent" }, router([], log), { strict: true });
     try {
       await probe.render(); await tick();
       assert.ok(probe.host.textContent.includes("创建请求结果未知"));
@@ -460,27 +534,33 @@ test("auto quote honors a frozen create intent before requesting a new quote", a
   });
 });
 
-test("late auto quotes are dropped across an A to B to A object switch", async () => {
+test("late explicit quotes are dropped across an A to B to A object switch without auto requests", async () => {
   await withDom(async window => {
     const pending = [deferred(), deferred(), deferred()];
     let call = 0;
     const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => pending[call++].promise }], []);
-    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), { ...detailPanelProps, autoQuote: true }, fetchImpl);
-    const props = accountId => ({ ...detailPanelProps, accountId, autoQuote: true });
+    const probe = createProbe(window, loadPanel("user_A", async () => publishingOptions), detailPanelProps, fetchImpl);
+    const props = accountId => ({ ...detailPanelProps, accountId });
     try {
       await probe.render(); await tick();
+      assert.equal(call, 0);
+      await probe.click("查看我的报价");
       assert.equal(call, 1);
       await probe.render(props("detail_other")); await tick();
+      assert.equal(call, 1);
+      await probe.click("查看我的报价");
       assert.equal(call, 2);
       await React.act(async () => { pending[0].resolve(json(confirmation)); await tick(); await tick(); });
       assert.ok(!probe.host.textContent.includes("¥470.00"));
       await probe.render(props("detail_price")); await tick();
+      assert.equal(call, 2);
+      await probe.click("查看我的报价");
       assert.equal(call, 3);
       await React.act(async () => { pending[1].resolve(json(confirmation)); await tick(); await tick(); });
       assert.ok(!probe.host.textContent.includes("¥470.00"));
       await React.act(async () => { pending[2].resolve(json(confirmation)); await tick(); await tick(); });
       assert.equal(probe.host.querySelector(".account-reference-price").textContent, "¥470.00");
-      assert.ok(probe.host.textContent.includes("立即租用"));
+      assert.ok(probe.host.textContent.includes("确认并创建订单"));
     } finally { await probe.dispose(); }
   });
 });
@@ -621,6 +701,7 @@ test("D1: a declared full-payout listing reads the sealed terms and binds the sa
     assert.ok(gated?.disabled, "quote must stay blocked until the terms are accepted");
     assert.equal(log.filter((entry) => entry.url.includes("order-confirmations")).length, 0);
     await acceptPayout(window, first);
+    assert.equal(log.length, 0, "agreeing to terms does not implicitly request a quote");
     await first.click("查看我的报价");
     const quote = log.find((entry) => entry.url.includes("order-confirmations"));
     assert.deepEqual(quote.body, { accountId: "account_payout", versionId: "listing_1", releaseId: "release_1", fullPayoutTermsAcceptance: payoutAcceptance });

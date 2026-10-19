@@ -21,7 +21,8 @@ import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
 import { CONDITION_LABELS, conditionLines, haffMillionsLabel, skinFacetLabel, termLabel, unitLabel } from "../lib/listing-view";
-import { supplyApi, SupplyRequestError } from "../lib/supply-client";
+import { supplyApi, SupplyRequestError, uncertainSupplyWriteFailure } from "../lib/supply-client";
+import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent } from "../lib/supply-write-intent";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import type { MySupply } from "../lib/supply-types";
 // 出租账号列表的 A2 收敛样式（状态分列 · 已加载筛选 chips · 往返恢复）；详情继续沿用 supply-* 规则。
@@ -472,9 +473,10 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
   const identityStatusRef = useRef<IdentityState>("checking");
   const identityPauseGate = useRef(new IdentityPauseGate());
   const controllers = useRef(new Set<AbortController>());
-  const pendingKeys = useRef(new Map<string, { fingerprint: string; key: string }>());
+  const storedIntentRef = useRef<SupplyWriteIntent | null>(null);
+  const [storedIntent, setStoredIntent] = useState<SupplyWriteIntent | null>(null);
+  const [intentStorageIssue, setIntentStorageIssue] = useState("");
   const lastRetry = useRef<RetryTask | null>(null);
-  const lastActionRetry = useRef<RetryTask | null>(null);
   const accountRef = useRef(accountIdProp);
   const routeAccountRef = useRef(accountIdProp);
   const listRequestRef = useRef(0);
@@ -503,25 +505,21 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     setIdentityState(next);
   };
 
-  const actionKey = (operation: string, body: unknown) => {
-    const fingerprint = JSON.stringify(body);
-    const previous = pendingKeys.current.get(operation);
-    if (previous?.fingerprint === fingerprint) return previous.key;
-    const key = newKey();
-    pendingKeys.current.set(operation, { fingerprint, key });
-    return key;
-  };
-  const finishKey = (operation: string, body: unknown) => {
-    if (pendingKeys.current.get(operation)?.fingerprint === JSON.stringify(body)) pendingKeys.current.delete(operation);
-  };
+  const restoreStoredIntent = useCallback((userId: string) => {
+    try {
+      const record = loadSupplyIntent(userId);
+      storedIntentRef.current = record; setStoredIntent(record); setIntentStorageIssue("");
+    } catch {
+      setIntentStorageIssue("原操作记录暂时无法读取，已阻止新操作；请保持本页并重试。");
+    }
+  }, []);
   const invalidateContext = useCallback((message: string, requireAuth: boolean) => {
     epoch.current += 1;
     identityPauseGate.current.cancelWaiters();
     for (const controller of controllers.current) controller.abort();
     controllers.current.clear();
-    pendingKeys.current.clear();
+    storedIntentRef.current = null; setStoredIntent(null); setIntentStorageIssue("");
     lastRetry.current = null;
-    lastActionRetry.current = null;
     accountRef.current = undefined;
     listReadyRef.current = false;
     listPositionRef.current = null;
@@ -557,16 +555,18 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       if (accountIdProp) router.replace("/account?view=accounts");
     }
     identityPauseGate.current.markConfirmed();
+    if (next) restoreStoredIntent(next);
     setAuthRequired(!next);
     setIdentityPhase("confirmed");
     return !(previous !== undefined && previous !== next && accountIdProp);
-  }, [sharedSession, invalidateContext, router, accountIdProp]);
+  }, [sharedSession, invalidateContext, router, accountIdProp, restoreStoredIntent]);
   // 撤销私有事实：身份变化走 invalidateContext（整体清空）；详情读取 401/403/404 只撤详情，
   // 已加载列表、游标与筛选按 F2 保留，避免「开/换详情」把列表一起打掉。
   const revokeDetail = useCallback(() => { setDetail(null); setLatest(null); }, []);
   // Preserve list position and pagination, but never restore facts superseded by a confirmed detail.
   const updateListFromDetail = useCallback((next: MySupply) => {
-    if (!next.account || next.account.id !== accountRef.current) return;
+    // Recovery can refresh another loaded row after its identity and original target were checked.
+    if (!next.account) return;
     setRows((previous) => previous.map((row) => row.id === next.account.id ? {
       ...row,
       title: next.version ? next.version.declaration?.title ?? row.title : null,
@@ -624,7 +624,6 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
         const page = await supplyApi.myAccounts(params, controller.signal);
         if (!currentContext({ ...context, epoch: requestEpoch }, controller.signal) || !isCurrent()) return;
         lastRetry.current = null;
-        if (!append) lastActionRetry.current = null;
         setRows((previous) => {
           if (!append) return page.items;
           return mergePageById(previous, page.items);
@@ -681,9 +680,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       epoch.current += 1;
       for (const controller of controllers.current) controller.abort();
       controllers.current.clear();
-      pendingKeys.current.clear();
       lastRetry.current = null;
-      lastActionRetry.current = null;
       identityPauseGate.current.cancel();
       unsubscribeIdentity();
     };
@@ -725,7 +722,6 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       updateListFromDetail(next);
       setError(null);
       lastRetry.current = null;
-      lastActionRetry.current = null;
     } catch (failure) {
       if (currentContext(context, controller.signal)) {
         const nextError = failure instanceof SupplyRequestError ? failure : new SupplyRequestError(0, null);
@@ -740,29 +736,47 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       finishRequest(controller);
     }
   };
-  const executeAction = async (action: "withdraw" | "pause" | "resume", context: RequestContext, body: { accountId: string; expectedRevision: string; versionId: string; action: string }, key: string): Promise<void> => {
+  const finishActionResult = (record: SupplyWriteIntent, next: MySupply, context: RequestContext, message: string) => {
+    if (next.account?.id !== record.accountId || next.account.game_id !== record.gameId) throw new SupplyRequestError(502, null, record.key);
+    if (record.receipt?.revision && (!/^[1-9]\d*$/.test(next.account.revision) || BigInt(next.account.revision) < BigInt(record.receipt.revision))) throw new SupplyRequestError(502, null, record.key);
+    if (!currentContext(context) || !sameSupplyIntent(storedIntentRef.current, record)) return;
+    if (!clearSupplyIntent(record)) throw new SupplyIntentStorageError();
+    storedIntentRef.current = null; setStoredIntent(null); setIntentStorageIssue("");
+    if (accountRef.current === record.accountId) { setDetail(next); setLatest(null); }
+    updateListFromDetail(next);
+    setNotice(message); lastRetry.current = null;
+  };
+  const executeAction = async (record: SupplyWriteIntent, context: RequestContext): Promise<void> => {
     if (!(await waitForIdentity(context))) return;
     const controller = beginRequest();
     try {
+      const { action, body, key } = record;
       const next = action === "withdraw"
-        ? await supplyApi.withdraw(context.accountId!, body.expectedRevision, body.versionId, key, undefined, controller.signal)
-        : await supplyApi.setPaused(context.accountId!, action === "pause", body.expectedRevision, key, undefined, controller.signal);
-      if (!currentContext(context, controller.signal)) return;
-      finishKey(action, body);
-      setDetail(next);
-      setLatest(null);
-      updateListFromDetail(next);
-       setNotice(action === "withdraw" ? "已撤回当前审核版本；修改请创建新草稿。" : action === "pause" ? "已下架并停止接单，已获准公开的详情仍可查看。" : "已恢复接单，资格检查已完成。");
-      lastActionRetry.current = null;
-      lastRetry.current = null;
+        ? await supplyApi.withdraw(record.accountId!, String(body.expectedRevision), String(body.versionId), key, undefined, controller.signal)
+        : await supplyApi.setPaused(record.accountId!, action === "pause", String(body.expectedRevision), key, undefined, controller.signal);
+      if (next.account?.id !== record.accountId || next.account.game_id !== record.gameId || typeof next.account.revision !== "string") throw new SupplyRequestError(502, null, key);
+      // A late successful response still updates its original durable responsibility.
+      const accepted = acceptSupplyIntent(record, { accountId: next.account.id, revision: next.account.revision, ...(next.version ? { versionId: next.version.id } : {}) });
+      if (!currentContext(context, controller.signal) || !sameSupplyIntent(storedIntentRef.current, record)) return;
+      storedIntentRef.current = accepted; setStoredIntent(accepted);
+      finishActionResult(accepted, next, context, action === "withdraw" ? "已撤回当前审核版本；修改请创建新草稿。" : action === "pause" ? "已下架并停止接单，已获准公开的详情仍可查看。" : "已恢复接单，资格检查已完成。");
     } catch (failure) {
+      try {
+        const persisted = loadSupplyIntent(record.userId);
+        if (sameSupplyIntent(persisted, record) && persisted?.phase === "pending") {
+          if (uncertainSupplyWriteFailure(failure) || persisted.uncertain) {
+            const retained = retainUncertainSupplyIntent(record);
+            if (currentContext(context)) { storedIntentRef.current = retained; setStoredIntent(retained); }
+          } else if (clearSupplyIntent(record) && currentContext(context)) { storedIntentRef.current = null; setStoredIntent(null); }
+        }
+      } catch {
+        if (currentContext(context)) setIntentStorageIssue("原操作记录暂不可更新，已阻止新操作；请保持本页并重试恢复。");
+      }
       if (currentContext(context, controller.signal)) {
         const nextError = failure instanceof SupplyRequestError ? failure : new SupplyRequestError(0, null);
         setError(nextError);
-        // 写动作保留服务端原文（409 冲突块与字段错误都要读懂）；仅 401 视为身份失效并撤旧私有事实。
         setErrorScope("action");
         if (nextError.status === 401) { setAuthRequired(true); revokeList(); revokeDetail(); }
-        if (nextError.status === 0) lastActionRetry.current = { context, busy: action, run: () => executeAction(action, context, body, key) };
         if (nextError.status === 409) void reloadDetail(false);
       }
     } finally {
@@ -771,24 +785,61 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     }
   };
   const runAction = async (action: "withdraw" | "pause" | "resume") => {
-    if (identityStatusRef.current !== "confirmed" || !identity.current || !detail?.version) return;
+    if (identityStatusRef.current !== "confirmed" || !identity.current || !detail?.version || busy || intentStorageIssue) return;
     const id = detail.account.id;
     const context = captureContext(id);
-    const body = { accountId: id, expectedRevision: detail.account.revision, versionId: detail.version.id, action };
-    const key = actionKey(action, body);
-    setBusy(action);
-    setError(null);
-    await executeAction(action, context, body, key);
+    try {
+      const previous = loadSupplyIntent(identity.current);
+      if (previous) { storedIntentRef.current = previous; setStoredIntent(previous); return; }
+      if (!detail.account.game_id) throw new SupplyIntentStorageError();
+      const body = { expectedRevision: detail.account.revision, ...(action === "withdraw" ? { versionId: detail.version.id } : {}) };
+      const record = prepareSupplyIntent({ userId: identity.current, gameId: detail.account.game_id, accountId: id, action, body, key: newKey() });
+      storedIntentRef.current = record; setStoredIntent(record);
+      setBusy(action); setError(null);
+      await executeAction(record, context);
+    } catch {
+      setIntentStorageIssue("无法保留原操作记录，暂不能提交；请保持本页并重试。");
+    }
+  };
+  const recoverAction = async () => {
+    const original = storedIntentRef.current;
+    if (!original || !original.accountId || identity.current !== original.userId || identityStatusRef.current !== "confirmed" || busy
+      || !["pause", "resume", "withdraw"].includes(original.action)) return;
+    const context = captureContext(), controller = beginRequest();
+    setBusy("recover"); setError(null);
+    try {
+      const record = loadSupplyIntent(original.userId);
+      if (!record || !sameSupplyIntent(record, original)) throw new SupplyIntentStorageError();
+      if (!(await waitForIdentity(context))) return;
+      const receipt = await supplyApi.operationResult(record.action as "pause" | "resume" | "withdraw", record.accountId!, record.body, record.key, controller.signal);
+      if (!currentContext(context, controller.signal) || !sameSupplyIntent(storedIntentRef.current, record)) return;
+      if (receipt.receipt === "UNRESOLVED") { setNotice("尚未查到原操作回执；结果仍待确认，不会重新发送或据当前状态推断成功。"); return; }
+      if (receipt.operation !== `supply.publication.${record.action}` || receipt.resourceId !== record.accountId || receipt.responseStatus !== 200
+        || receipt.result?.accountId !== record.accountId || !/^[1-9]\d*$/.test(receipt.result.revision)) throw new SupplyRequestError(502, null, record.key);
+      const accepted = acceptSupplyIntent(record, receipt.result);
+      storedIntentRef.current = accepted; setStoredIntent(accepted);
+      const next = await supplyApi.mine(record.accountId!, controller.signal);
+      if (!currentContext(context, controller.signal) || !(await waitForIdentity(context))) return;
+      finishActionResult(accepted, next, context, "已核实原操作成功，并读取当前账号资料；可以继续操作。");
+    } catch (failure) {
+      if (!currentContext(context, controller.signal)) return;
+      if (failure instanceof SupplyIntentStorageError) setIntentStorageIssue("原操作记录暂不可读取或更新；请保持本页并重试恢复。");
+      setError(failure instanceof SupplyRequestError ? failure : new SupplyRequestError(0, null));
+      setErrorScope("action");
+      // A recovery failure or fingerprint conflict never resolves the original write.
+      if (failure instanceof SupplyRequestError && failure.status === 401) { setAuthRequired(true); revokeList(); revokeDetail(); }
+    } finally {
+      if (currentContext(context, controller.signal)) setBusy("");
+      finishRequest(controller);
+    }
   };
   const retryLast = async () => {
-    const task = lastActionRetry.current ?? lastRetry.current;
+    const task = lastRetry.current;
     if (!task || !currentContext(task.context)) {
-      lastActionRetry.current = null;
       lastRetry.current = null;
       return;
     }
-    if (lastActionRetry.current === task) lastActionRetry.current = null;
-    else lastRetry.current = null;
+    lastRetry.current = null;
     setBusy(task.busy);
     setError(null);
     try {
@@ -816,11 +867,15 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
   const allLoaded = nextCursor === null && lastPageSize !== null && lastPageSize < LIST_PAGE_SIZE;
   return <section className="my-accounts-panel account-module">
     {accountIdProp ? null : heading}
-    <AccountActionError error={error} scope={errorScope} onRetry={error?.status === 0 ? () => void retryLast() : undefined} />
+    <AccountActionError error={error} scope={errorScope} onRetry={error?.status === 0 && !storedIntent ? () => void retryLast() : undefined} />
+    {intentStorageIssue ? <div className="supply-notice is-error" role="alert"><AlertCircle size={17} /><span>{intentStorageIssue}</span><button type="button" className="button quiet" disabled={Boolean(busy)} onClick={() => { if (identity.current) restoreStoredIntent(identity.current); }}>重试读取操作记录</button></div> : null}
+    {storedIntent ? <div className="supply-notice" role="status"><Clock3 size={17} /><span>有一笔原操作结果待恢复，请先核对后继续，当前账号状态不能证明原操作结果。</span>{["pause", "resume", "withdraw"].includes(storedIntent.action)
+      ? <button type="button" className="button secondary button--sm" disabled={Boolean(busy)} onClick={() => void recoverAction()}>{busy === "recover" ? "查询中…" : "查询原操作结果"}</button>
+      : <Link className="button secondary button--sm" href="/publish">前往上架页面恢复</Link>}</div> : null}
     {notice ? <div className="supply-notice" role="status"><Check size={17} />{notice}</div> : null}
     {authRequired ? <div className="supply-auth-block"><LockKeyhole size={18} /><span>登录后才能查看你的出租账号。</span><Link className="button secondary" href={`/login?next=${encodeURIComponent("/account?view=accounts")}`}>登录 / 注册</Link></div> : accountIdProp ? <>
       <Link className="account-detail-back" href="/account?view=accounts" scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回出租账号</Link>
-      {visibleDetail ? <AccountDetail detail={visibleDetail} gameName={rows.find((row) => row.id === visibleDetail.account.id)?.game_name ?? null} latest={latest} busy={busy} identityReady={identityState === "confirmed" && Boolean(identity.current)} onAction={runAction} onRefresh={() => void reloadDetail(false)} onAdopt={() => void reloadDetail(true)} /> : <div className="account-module-card account-empty-state" aria-busy={loading ? true : undefined} role="status"><House size={28} aria-hidden="true" /><h3>{loading ? "正在读取账号资料" : "账号资料暂不可用"}</h3><p>{loading ? "请稍候。" : "请返回账号列表，或重试读取当前账号。"}</p></div>}
+      {visibleDetail ? <AccountDetail detail={visibleDetail} gameName={rows.find((row) => row.id === visibleDetail.account.id)?.game_name ?? null} latest={latest} busy={busy} identityReady={identityState === "confirmed" && Boolean(identity.current) && !storedIntent && !intentStorageIssue} onAction={runAction} onRefresh={() => void reloadDetail(false)} onAdopt={() => void reloadDetail(true)} /> : <div className="account-module-card account-empty-state" aria-busy={loading ? true : undefined} role="status"><House size={28} aria-hidden="true" /><h3>{loading ? "正在读取账号资料" : "账号资料暂不可用"}</h3><p>{loading ? "请稍候。" : "请返回账号列表，或重试读取当前账号。"}</p></div>}
     </> : rows.length === 0 ? (!loading && !error
       ? <div className="account-module-card account-empty-art-state" role="status">
         <img className="account-empty-art" src="/art/empty/account-prepare-r1.webp" alt="" width={240} height={180} loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />

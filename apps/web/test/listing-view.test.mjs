@@ -11,6 +11,7 @@ import {
   haffMillionsLabel,
   termLabel,
   listingResourceLinesLabel,
+  publicAvailabilityLabel,
   resourceQuantityLabel,
   toListingCard,
   toListingDetail,
@@ -571,6 +572,29 @@ test('public native availability keeps readable occupied/offline cards distinct 
  assert.equal(historical.canCreateOrder,false);assert.equal(historical.availabilityState,'LEGACY_READ_ONLY');assert.equal(historical.availabilityLabel,'暂不可租');assert.equal(historical.sourceAvailabilityLabel,'来源状态为已出租');
  const derived=toListingCard({...listing,source:'LEGACY_READ_ONLY',title:'',canCreateOrder:false,quote:null,historicalQuote:{haffRent:money('1.00'),goods:money('2.00'),deposit:money('3.00'),termDays:'1'},inventory:[{itemId:'item_haff',quantity:'60000000',unit:'HAFF_BASE'}]});
  assert.match(derived.title,/60 M 哈夫币/);assert.doesNotMatch(derived.title,/历史资料|旧平台|首批/);
+});
+
+test('I03 rentable cards and details omit the unavailable badge while other states keep their labels', () => {
+  const labels = {
+    RENTABLE: null,
+    PENDING_PAYMENT: '待付款 · 暂不可租',
+    RENTED: '已出租',
+    OCCUPIED: '暂不可租',
+    OFFLINE: '已下架',
+    UNKNOWN: '暂不可租',
+    UNAVAILABLE: '暂不可租',
+    LEGACY_READ_ONLY: '暂不可租',
+  };
+  for (const [state, label] of Object.entries(labels)) {
+    assert.equal(publicAvailabilityLabel(state), label, state);
+    if (state === 'LEGACY_READ_ONLY') continue;
+    for (const project of [toListingCard, toListingDetail]) {
+      const card = project({ ...listing, availability: { state }, canCreateOrder: state === 'RENTABLE' });
+      assert.equal(card.availabilityLabel, label, state);
+      assert.equal(card.canCreateOrder, state === 'RENTABLE', state);
+    }
+  }
+  for (const state of [undefined, null, 'FUTURE_STATE']) assert.equal(publicAvailabilityLabel(state), '暂不可租');
 });
 
 

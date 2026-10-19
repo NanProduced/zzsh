@@ -4,7 +4,8 @@ import { ADMIN_PERMISSION, type EffectiveAdminAccess } from "../src/auth/admin-a
 import { readAdminCatalog } from "../src/supply/catalog";
 import { assertFullPayoutTermsAccepted, fullPayoutDraftFields, fullPayoutTermsSourceSuffix, parseFullPayoutTermsAcceptance, readFullPayoutTerms } from "../src/supply/full-payout-terms";
 import { sealVersion, updateFullPayoutTermsDraft } from "../src/supply/rules";
-import { readAdminSupplyOperationResult } from "../src/supply/supply-operation-results";
+import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "../src/supply/supply-operation-results";
+import { fingerprintRequest } from "../src/supply/supply-util";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
 const fields=fullPayoutDraftFields({policyRef:"g0-full-payout",policyVersion:"1",disclosureVersion:"g0-disclosure",title:"Offline terms",body:"Offline explicit full-payout disclosure."});
@@ -74,6 +75,37 @@ function recoveryClient(body:Record<string,unknown>|null,scopeActor="admin-1",ow
   }} as never};
 }
 const query=(operation="supply.rules.full_payout_terms_draft.create",resourceId?:string)=>new URLSearchParams({operation,fingerprint,...(resourceId?{resourceId}:{})});
+
+test("user account recovery is original-scope read-only and returns only a bounded receipt",async()=>{
+  for(const action of ["pause","resume","withdraw"]){
+    const operation=`supply.publication.${action}`,body={expectedRevision:"1",...(action==="withdraw"?{versionId:"version-1"}:{})};
+    const digest=fingerprintRequest(operation,"account-1",body),sql:string[]=[];
+    const client={query:async(text:string,values:unknown[])=>{
+      sql.push(text);assert(!/\b(INSERT|UPDATE|DELETE)\b/.test(text));
+      if(text.includes("rental_account")){assert.deepEqual(values,["account-1","owner-1"]);return{rows:[{gameId:"game-1"}]};}
+      assert.deepEqual(values,[JSON.stringify(["user","owner-1",operation,"account-1"]),key]);
+      return{rows:[{requestFingerprint:digest,responseStatus:200,responseBody:{account:{id:"account-1",game_id:"game-1",revision:"2",private:"omit"},version:{id:"version-1",quote:{ownerAmount:"900"}},token:"omit"}}]};
+    }} as never;
+    const result=await readUserSupplyOperationResult(client,"owner-1",new URLSearchParams({operation,resourceId:"account-1",fingerprint:digest}),key);
+    assert.deepEqual(result,{receipt:"RECORDED",operation,resourceId:"account-1",responseStatus:200,result:{accountId:"account-1",revision:"2",versionId:"version-1"}});assert.equal(sql.length,2);
+  }
+});
+
+test("user recovery rejects other owners and arbitrary scope, and never resolves a missing or mismatched original",async()=>{
+  const operation="supply.publication.pause",params=new URLSearchParams({operation,resourceId:"account-1",fingerprint});
+  let queries=0;
+  await assert.rejects(()=>readUserSupplyOperationResult({query:async()=>{queries++;return{rows:[]};}} as never,"other-owner",params,key),(error:any)=>error.status===404);assert.equal(queries,1);
+  const own=(row:unknown)=>({query:async(text:string)=>({rows:text.includes("rental_account")?[{gameId:"game-1"}]:row?[row]:[]})} as never);
+  assert.deepEqual(await readUserSupplyOperationResult(own(null),"owner-1",params,key),{receipt:"UNRESOLVED"});
+  await assert.rejects(()=>readUserSupplyOperationResult(own({requestFingerprint:"0".repeat(64)}),"owner-1",params,key),(error:any)=>error.code==="IDEMPOTENCY_KEY_REUSED");
+  const invalidFields: Record<string,string>[] = [{userId:"other"},{operation:"supply.publication.submit"},{resourceId:""},{fingerprint:"bad"}];
+  for(const extra of invalidFields){
+    const q=new URLSearchParams({...Object.fromEntries(params),...extra});let sent=0;
+    await assert.rejects(()=>readUserSupplyOperationResult({query:async()=>{sent++;return{rows:[]};}} as never,"owner-1",q,key));assert.equal(sent,0);
+  }
+  for(const responseBody of [{account:{id:"other",game_id:"game-1",revision:"2"}},{account:{id:"account-1",game_id:"other-game",revision:"2"}},{}])
+    await assert.rejects(()=>readUserSupplyOperationResult(own({requestFingerprint:fingerprint,responseStatus:200,responseBody}),"owner-1",params,key),(error:any)=>error.status===404);
+});
 
 test("original-result recovery returns bounded receipt data and omits tokens, evidence and amounts",async()=>{
   const f=recoveryClient({id:"payout-1",status:"DRAFT",uploadToken:"private-token",ownerAmount:"999",body:"private-body",evidenceRef:"private-evidence"});

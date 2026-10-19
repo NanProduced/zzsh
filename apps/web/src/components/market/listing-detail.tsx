@@ -227,7 +227,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
            <p className="detail-stage-note account-readonly">已获准公开的资料仍可查看，当前不能创建新订单。这里是公开版本的资源费用参考，不是本人最终报价。</p>
            <Link className="button secondary button--sm account-readonly-action" href="/accounts">返回账号市场</Link>
          </> : <>
-           <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} autoQuote fullPayoutSelected={data.fullPayoutSelected === true} reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
+           <RentalConfirmPanel key={`${identityKey}:${data.id}:${data.versionId}:${data.releaseId}`} accountId={data.id} gameId={data.gameId} versionId={data.versionId} releaseId={data.releaseId} fullPayoutSelected={data.fullPayoutSelected === true} reference={{ total: moneyValue(data.resourceTotalLabel), haff: moneyValue(data.haffRentLabel), items: moneyValue(data.itemResourceTotalLabel) }} />
            <section className="account-process-panel account-process-panel--quote" aria-labelledby="account-process-title">
              <div className="account-section-title"><h2 id="account-process-title"><Shield size={20} aria-hidden="true" />租赁流程</h2><span>从核对到开租</span></div>
              <ol className="account-process-steps">

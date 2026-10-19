@@ -687,8 +687,8 @@ test("缺 UA 会话的展开详情集中说一次登录时未记录，不猜系�
   } finally { await p.close(); }
 });
 
-// Owner §3 安全页最终结构（repair-20261014 → session-detail-20261014）：固定顺序、当前会话突出本机真实可读信息、当前网络行按 Owner 20261014 批准查询一次当前公网 IP。
-test("Owner §3 结构：登录与找回→当前会话→其他有效会话→帮助，网络行内嵌当前会话且只查询一次当前公网 IP", async () => {
+// 当前网络查询必须由用户明确触发，本机时区与会话读取不代表用户同意访问第三方。
+test("安全页结构：登录与找回→当前会话→其他有效会话→帮助，当前网络只在明确点击后查询", async () => {
   const p = await mount();
   try {
     await p.settle();
@@ -721,9 +721,12 @@ test("Owner §3 结构：登录与找回→当前会话→其他有效会话→�
     assert.equal(card.querySelector(".sec-record-toggle"), null, "当前会话不再提供冗余展开按钮");
     assert.equal(card.querySelector(".sec-record-detail"), null, "当前会话卡片信息直接展示，不重复展开");
 
-    // 当前网络一行内嵌当前会话；Owner 2026-10-14 批准后挂载即查询一次当前公网 IP，仍不造地区/运营商。
+    // 当前网络一行内嵌当前会话，页面说明第三方查询，初载只读本机信息。
     const network = card.querySelector(".sec-network");
     assert.ok(network, "当前网络一行属于当前会话");
+    assert.equal(p.calls.filter(item => String(item.url).includes("ipify.org") || String(item.url).includes("ipwho.is")).length, 0);
+    assert.match(network.textContent, /第三方/);
+    await p.click("查询当前网络");
     assert.match(network.textContent, /当前公网 IP/);
     assert.match(network.textContent, /203\.0\.113\.9/, "展示查询到的当前出口 IP");
     assert.match(network.textContent, /基于当前网络出口查询|位置仅供参考|不是登录时的 IP/, "文案区分查询时出口与登录时记录");

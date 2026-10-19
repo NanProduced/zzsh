@@ -71,7 +71,7 @@ import {
   updateTermDraft,
 } from "./rules";
 import { readFullPayoutTerms } from "./full-payout-terms";
-import { readAdminSupplyOperationResult } from "./supply-operation-results";
+import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
 import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
 import {
@@ -533,6 +533,16 @@ export async function handleSupplyUserRoute(
     }
 
     if (!requireOrigin(request, response, options, requestId)) return;
+
+    if (path === "/operation-result" && method === "GET") {
+      const context = await readUserContext(request, options);
+      const result = await withTransaction(options.pool, async client => {
+        await assertUserContextInTransaction(client, context);
+        return readUserSupplyOperationResult(client, context.userId, query, headerValue(request.headers["idempotency-key"]));
+      });
+      sendJson(response, 200, result, requestId);
+      return;
+    }
 
     if (path === "/accounts" && method === "POST") {
       const context = await readUserContext(request, options);

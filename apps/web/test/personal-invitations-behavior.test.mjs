@@ -29,3 +29,20 @@ test('GAP-014 self terms show only own level and version, labelled LOCAL_CONTROL
 test('GAP-014 unknown terms never show a default level or zero; terms failure keeps relations',async()=>{const unknownTerms={...termsKnown(),knowledge:'UNKNOWN',applicable:null,reason:'LEVEL_NOT_IN_CURRENT_POLICY',level:null,accountModes:null,minimumAccrualCents:null,settlementDelayDays:null};let mode='unknown';const p=await probe(async url=>String(url).includes('/terms')?(mode==='unknown'?Response.json(unknownTerms):Response.json({error:{code:'INTERNAL_ERROR'}},{status:503})):Response.json(String(url).includes('/invitees?')?list('user_A','REL_STILL_VISIBLE'):unknown('user_A')));try{await p.render();let card=p.host.querySelector('.invitation-terms');assert.match(card.textContent,/适用条款待核定/);assert.match(card.textContent,/不在当前政策中/);assert.doesNotMatch(card.textContent,/0%|¥0|等级 /);mode='fail';await p.close();}finally{}
  const q=await probe(async url=>String(url).includes('/terms')?Response.json({error:{code:'INTERNAL_ERROR'}},{status:503}):Response.json(String(url).includes('/invitees?')?list('user_A','REL_STILL_VISIBLE'):unknown('user_A')));try{await q.render();assert.match(q.host.querySelector('.invitation-terms').textContent,/适用条款暂时无法读取/);assert.match(q.host.textContent,/REL_STILL_VISIBLE/);}finally{await q.close();}});
 test('GAP-014 malformed or foreign terms payload fails closed in the client',async()=>{const {distributionTerms}=client;assert.throws(()=>distributionTerms({...termsKnown(),levels:[{code:'L1'}]},'user_A'));assert.throws(()=>distributionTerms(termsKnown(),'user_B'),e=>e.status===401);assert.throws(()=>distributionTerms({...termsKnown(),applicable:true,level:null},'user_A'));assert.throws(()=>distributionTerms({...termsKnown(),knowledge:'UNKNOWN'},'user_A'));assert.equal(distributionTerms(termsKnown(),'user_A').level.code,'L2');});
+
+test('I01 long policy versions retain their complete text and use local wrapping styles', async () => {
+ const policyVersion='distribution_policy_'+ 'a'.repeat(40),participantPolicyVersion='distribution_policy_'+ 'b'.repeat(40);
+ const p=await probe(async url=>Response.json(String(url).includes('/terms')?termsKnown({policyVersion,participantPolicyVersion}):String(url).includes('/invitees?')?list('user_A',null):unknown('user_A')));
+ try {
+  const style=document.createElement('style');
+  style.textContent=readFileSync(tree+'/apps/web/src/components/account/personal-invitations.css','utf8');
+  document.head.append(style);
+  await p.render();
+  const source=p.host.querySelector('.invitation-terms .invitation-source');
+  assert(source.textContent.includes(policyVersion));assert(source.textContent.includes(participantPolicyVersion));
+  assert.equal(window.getComputedStyle(source).overflowWrap,'anywhere');
+  assert.equal(parseFloat(window.getComputedStyle(p.host.querySelector('.personal-invitations')).minWidth),0);
+  assert.notEqual(window.getComputedStyle(source).whiteSpace,'nowrap');
+  assert(!['hidden','clip'].includes(window.getComputedStyle(source).overflowX));
+ } finally {await p.close();}
+});

@@ -65,6 +65,19 @@ test('user calls carry explicit replay keys, no price calculation or automatic r
   try{assert.deepEqual(await supplyApi.setFavorite('a',true,'stable-key'),{accountId:'a',saved:true});assert.equal(count,1);globalThis.fetch=async()=>{count++;throw Error('network');};await assert.rejects(()=>supplyRequest('/favorites/a',{method:'PUT',body:{saved:true},idempotencyKey:'stable-key'}),e=>e.idempotencyKey==='stable-key'&&e.status===0);assert.equal(count,2);}finally{globalThis.fetch=old;}
 });
 
+test('account operation recovery is one GET with the exact original request fingerprint and key',async()=>{
+  const {createHash}=await import('node:crypto'),old=globalThis.fetch,calls=[];
+  globalThis.fetch=async(url,init)=>{calls.push({url,init});return Response.json({receipt:'UNRESOLVED'});};
+  try{for(const action of ['pause','resume','withdraw']){
+    const body={expectedRevision:'7',...(action==='withdraw'?{versionId:'version-7'}:{})};
+    assert.deepEqual(await supplyApi.operationResult(action,'account-7',body,'original-operation-key'),{receipt:'UNRESOLVED'});
+    const call=calls.at(-1),query=new URL(call.url,'http://127.0.0.1').searchParams;
+    assert.equal(call.init.method,'GET');assert.equal(call.init.body,undefined);assert.equal(new Headers(call.init.headers).get('idempotency-key'),'original-operation-key');
+    assert.equal(query.get('fingerprint'),createHash('sha256').update(JSON.stringify([`supply.publication.${action}`,'account-7',body])).digest('hex'));
+    assert.deepEqual([...query.keys()],['operation','resourceId','fingerprint']);
+  }assert.equal(calls.length,3);}finally{globalThis.fetch=old;}
+});
+
 test('owner acceptance forwards exact full-payout terms with its original replay key',async()=>{
   const old=globalThis.fetch,calls=[];
   globalThis.fetch=async(url,init)=>{calls.push({url,key:init.headers['idempotency-key'],body:JSON.parse(init.body)});return Response.json({account:{id:'a'}});};

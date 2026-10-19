@@ -219,7 +219,8 @@ export function previewListingCard(listing: PublicListing): { ok: true; card: Li
   }
 }
 export function publicAvailabilityLabel(state: PublicAvailabilityState): string | null {
-  return ({ RENTABLE: null, PENDING_PAYMENT: "待付款 · 暂不可租", RENTED: "已出租", OCCUPIED: "暂不可租",
+  if (state === "RENTABLE") return null;
+  return ({ PENDING_PAYMENT: "待付款 · 暂不可租", RENTED: "已出租", OCCUPIED: "暂不可租",
     OFFLINE: "已下架", UNKNOWN: "暂不可租", UNAVAILABLE: "暂不可租", LEGACY_READ_ONLY: "暂不可租" })[state] ?? "暂不可租";
 }
 function listingVisibility(listing: PublicListing) {

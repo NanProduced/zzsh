@@ -379,6 +379,22 @@ test('an uncertain retry rejected after remount retains responsibility rather th
 
 test('pending media survives remount without storing File or upload tokens and cannot pretend to reupload',async()=>{const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration()),uploadMedia:()=>{throw new actualSupply.SupplyRequestError(503,{error:{code:'INTERNAL_ERROR',message:'upload unknown'}})}});try{await p.render();const input=p.host.querySelector('input[type=file]');Object.defineProperty(input,'files',{value:[new File(['valid-bytes-for-component-probe'],'show.png',{type:'image/png'})],configurable:true});await React.act(async()=>input.dispatchEvent(new p.window.Event('change',{bubbles:true})));await p.waitFor(()=>p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));const raw=p.storageDump().find(([key])=>key.startsWith('zzsh.supply-write'))[1];assert.doesNotMatch(raw,/uploadToken|valid-bytes-for-component-probe/);assert.equal(JSON.parse(raw).action,'media');await p.remount();await p.clickButton('重试当前步骤');assert.match(p.text(),/原图片文件没有保留/);assert.ok(p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));}finally{await p.close();}});
 
+test('R03: publishing cannot resolve pause/resume/withdraw by reading current account state',async()=>{
+  for(const action of ['pause','resume','withdraw'])for(const phase of ['pending','accepted']){
+    const record={version:1,userId:'user_A',gameId:'game_1',accountId:'account_1',action,key:'frozen-management-key',body:{expectedRevision:'1',...(action==='withdraw'?{versionId:'version_1'}:{})},phase,uncertain:true,createdAt:new Date().toISOString(),...(phase==='accepted'?{receipt:{accountId:'account_1',revision:'2'}}:{})};
+    const slot='zzsh.supply-write.v1:user_A',raw=JSON.stringify(record);let reads=0;
+    const p=await probe({accountId:'account_1',mine:()=>{reads++;return supplyOf(declaration());},storageSeed:[[slot,raw]]});
+    try{
+      await p.render();assert.ok(p.findButton('重试当前步骤'));const before=reads;
+      await p.clickButton('重试当前步骤');
+      assert.match(p.text(),/返回出租账号管理查询原操作结果/);
+      assert.equal(reads,before,'recovery never substitutes a current-account read for the original receipt');
+      assert.equal(p.calls.length,0);assert.equal(p.window.sessionStorage.getItem(slot),raw);
+      assert.equal(p.host.querySelector('#publish-description').disabled,true);
+    }finally{await p.close();}
+  }
+});
+
 async function changeSubject(p, userId) {
   await React.act(async () => { p.session.status = 'loading'; p.notifyIdentity(); });
   assert.ok(await p.waitFor(() => !p.host.querySelector('.publish-groups')));

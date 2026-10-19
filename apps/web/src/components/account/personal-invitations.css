@@ -1,4 +1,4 @@
-.personal-invitations { display:grid; gap:24px; }
+.personal-invitations { display:grid; min-width:0; gap:24px; }
 .invitation-workbench { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.2fr); gap:20px; }
 .personal-invitations h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
 .invitation-code>strong { display:block; font-size:26px; line-height:1.5; letter-spacing:.015em; overflow-wrap:anywhere; }
@@ -11,7 +11,7 @@
 .invitation-parent input:not([type=checkbox]) { width:100%; min-width:0; min-height:44px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-elevated); color:var(--color-text-primary); font:inherit; caret-color:var(--account-accent); }
 .invitation-confirm { display:flex; align-items:center; gap:10px; min-height:44px; cursor:pointer; }
 .invitation-confirm input { width:17px; height:17px; accent-color:var(--account-accent); }
-.invitation-source { margin:20px 0 0; padding-top:16px; border-top:1px solid var(--color-border-subtle); }
+.invitation-source { margin:20px 0 0; padding-top:16px; border-top:1px solid var(--color-border-subtle); overflow-wrap:anywhere; }
 .invitation-list-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
 .invitation-list-heading h3 { display:flex; align-items:center; gap:9px; margin:0; }
 .invitation-list-heading>span { color:var(--color-text-secondary); font-size:13px; font-variant-numeric:tabular-nums; }

@@ -15,12 +15,12 @@ export function browserTimezone(): string {
 
 /**
  * 「当前会话」内的当前网络模块：
- * - 默认查询第三方网络出口信息（公网 IP、近似地区、运营商、网络归属等）。
+ * - 用户明确点击后查询第三方网络出口信息（公网 IP、近似地区、运营商、网络归属等）。
  * - 位置仅供参考，不写入后端，不用于授权或安全判断。
- * - 额度耗尽 (429) 或降级：仅展示公网 IP 与查询时间；若无 IP 则整块隐藏，不留空白卡片或长期 Skeleton。
+ * - 额度耗尽 (429) 或降级：仅展示可靠公网 IP 与查询时间；若无 IP 则提供手动重试。
  */
 export function CurrentNetworkFields() {
-  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; info?: NetworkInfo }>({ status: "loading" });
+  const [state, setState] = useState<{ status: "idle" | "loading" | "ready" | "error"; info?: NetworkInfo }>({ status: "idle" });
   const [copied, setCopied] = useState(false);
   const sequence = useRef(0);
   const copyTimer = useRef<number | null>(null);
@@ -35,17 +35,13 @@ export function CurrentNetworkFields() {
       }
     } catch {
       if (sequence.current !== id) return;
-      // 失败（含未知异常）都整块隐藏，不铺错误文案、不留长期 Skeleton。
       setState({ status: "error" });
     }
   };
 
-  useEffect(() => {
-    void load();
-    return () => {
-      sequence.current += 1;
-      if (copyTimer.current) window.clearTimeout(copyTimer.current);
-    };
+  useEffect(() => () => {
+    sequence.current += 1;
+    if (copyTimer.current) window.clearTimeout(copyTimer.current);
   }, []);
 
   const handleCopy = async (text: string) => {
@@ -62,24 +58,27 @@ export function CurrentNetworkFields() {
 
   const { status, info } = state;
 
-  // 失败（含 429 兜底也没拿到 IP）：整块隐藏，不留失效 ARIA 或空白卡片
-  if (status === "error") return null;
-
-  if (status === "loading") {
+  if (status !== "ready") {
     return (
-      <div className="sec-network" role="status" aria-label="正在查询当前网络">
+      <div className="sec-network" aria-busy={status === "loading"}>
         <div className="sec-network-head">
           <h4 className="sec-network-title">当前网络</h4>
-          <p className="sec-network-desc">基于当前网络出口查询，位置仅供参考。</p>
+          <p className="sec-network-desc">点击后将访问第三方 ipwho.is（限流时使用 ipify）查询当前网络出口，位置仅供参考，不是登录时的 IP。</p>
         </div>
-        <div className="sec-network-grid">
-          <div className="sec-network-item">
-            <span className="sec-network-k"><span className="sr-only">当前</span>公网 IP</span>
-            <span className="sec-network-v sec-network-value">
-              <SkeletonBlock label="正在查询当前网络出口" lines={1} variant="text" />
-            </span>
+        {status === "loading" ? (
+          <div className="sec-network-grid">
+            <div className="sec-network-item">
+              <span className="sec-network-k"><span className="sr-only">当前</span>公网 IP</span>
+              <span className="sec-network-v sec-network-value">
+                <SkeletonBlock label="正在查询当前网络出口" lines={1} variant="text" />
+              </span>
+            </div>
           </div>
-        </div>
+        ) : null}
+        {status === "error" ? <p className="sec-network-desc" role="status">暂时无法查询当前网络，请重试。</p> : null}
+        <button type="button" className="sec-action-btn" disabled={status === "loading"} onClick={() => void load()}>
+          {status === "loading" ? "查询中…" : status === "error" ? "重试查询当前网络" : "查询当前网络"}
+        </button>
       </div>
     );
   }
