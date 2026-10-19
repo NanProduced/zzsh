@@ -120,7 +120,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const [metadataAttempt, setMetadataAttempt] = useState(0);
   const [catalogAttempt, setCatalogAttempt] = useState(0);
   const [skinSearchAttempt, setSkinSearchAttempt] = useState(0);
-  const [loadingMoreSkins, setLoadingMoreSkins] = useState(false);
   const [loadingMoreSkinSearch, setLoadingMoreSkinSearch] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [restoreReady, setRestoreReady] = useState(false);
@@ -131,7 +130,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const invalidCursorHandled = useRef<string | null>(null);
   const catalogSequence = useRef(0);
   const catalogController = useRef<AbortController | null>(null);
-  const catalogBusy = useRef(false);
   const skinSearchSequence = useRef(0);
   const skinSearchController = useRef<AbortController | null>(null);
   const skinSearchBusy = useRef(false);
@@ -257,7 +255,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     setLoadingMoreSkinSearch(false);
     const query = normalizedSkinSearch;
     const categoryId = resolvedSkinCategoryId;
-    if (!filters.game || !query || !categoryId) {
+    if (!filters.game || !categoryId) {
       skinSearchSequence.current += 1;
       setSkinSearchCatalog({ status: "idle", data: null });
       return;
@@ -268,7 +266,8 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     skinSearchController.current = controller;
     setSkinSearchCatalog({ status: "loading", data: null });
     const timer = window.setTimeout(() => {
-      const params = new URLSearchParams({ limit: "100", q: query, categoryId });
+      const params = new URLSearchParams({ limit: "100", categoryId });
+      if (query) params.set("q", query);
       supplyApi.browseCatalog(filters.game!, params, controller.signal).then((data) => {
         if (controller.signal.aborted || requestId !== skinSearchSequence.current) return;
         setSkinSearchCatalog({ status: "ready", data });
@@ -278,7 +277,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         setSkinSearchCatalog({ status: "error", data: null, error: error instanceof SupplyRequestError ? error : null });
         if (skinSearchController.current === controller) skinSearchController.current = null;
       });
-    }, 250);
+    }, query ? 250 : 0);
 
     return () => {
       window.clearTimeout(timer);
@@ -287,6 +286,17 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
       if (requestId === skinSearchSequence.current) skinSearchSequence.current += 1;
     };
   }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, skinSearchAttempt]);
+
+  useEffect(() => {
+    const page = skinSearchCatalog.data;
+    if (!page || page.game.id !== filters.game) return;
+    setCatalog((previous) => {
+      if (!previous.data || previous.data.game.id !== page.game.id || previous.data.game.catalogRevision !== page.game.catalogRevision) return previous;
+      const ids = new Set(previous.data.skins.map((skin) => skin.id));
+      const added = page.skins.filter((skin) => !ids.has(skin.id));
+      return added.length ? { ...previous, data: { ...previous.data, skins: [...previous.data.skins, ...added] } } : previous;
+    });
+  }, [filters.game, skinSearchCatalog.data]);
 
   useEffect(() => {
     if (!filterSourceReady || metadata.status !== "ready" || filters.game !== metadata.data?.gameId) return;
@@ -391,43 +401,12 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     return () => observer.disconnect();
   }, [feed.loadMore, feed.nextCursor, feed.scanBudgetReached, feed.status]);
 
-  const loadMoreSkins = useCallback(async () => {
-    const current = catalog.data;
-    if (!filters.game || !current?.nextCursor || catalogBusy.current) return;
-    const requestId = catalogSequence.current;
-    const controller = new AbortController();
-    catalogController.current?.abort();
-    catalogController.current = controller;
-    catalogBusy.current = true;
-    setLoadingMoreSkins(true);
-    try {
-      const page = await supplyApi.browseCatalog(filters.game, new URLSearchParams({ limit: "100", cursor: current.nextCursor }), controller.signal);
-      if (controller.signal.aborted || requestId !== catalogSequence.current) return;
-      setCatalog((previous) => {
-        if (!previous.data || previous.data.game.id !== filters.game) return previous;
-        const ids = new Set(previous.data.skins.map((skin) => skin.id));
-        return { ...previous, data: { ...previous.data, skins: [...previous.data.skins, ...page.skins.filter((skin) => !ids.has(skin.id))], nextCursor: page.nextCursor === current.nextCursor ? null : page.nextCursor } };
-      });
-    } catch {
-      if (!controller.signal.aborted) {
-        setRecoveryNotice("更多皮肤加载失败，已加载的类别与皮肤仍可继续筛选；可再次加载。");
-        setCatalog((previous) => ({ ...previous, status: previous.data ? "ready" : "error" }));
-      }
-    } finally {
-      if (requestId === catalogSequence.current) {
-        catalogBusy.current = false;
-        setLoadingMoreSkins(false);
-        if (catalogController.current === controller) catalogController.current = null;
-      }
-    }
-  }, [catalog.data, filters.game]);
-
   const loadMoreSkinSearch = useCallback(async () => {
     const current = skinSearchCatalog.data;
     const query = normalizedSkinSearch;
     const categoryId = resolvedSkinCategoryId;
     const cursor = current?.nextCursor;
-    if (!filters.game || !query || !categoryId || !cursor || skinSearchBusy.current) return;
+    if (!filters.game || !categoryId || !cursor || skinSearchBusy.current) return;
     const requestId = skinSearchSequence.current;
     const controller = new AbortController();
     skinSearchController.current?.abort();
@@ -435,7 +414,8 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     skinSearchBusy.current = true;
     setLoadingMoreSkinSearch(true);
     try {
-      const params = new URLSearchParams({ limit: "100", q: query, categoryId, cursor });
+      const params = new URLSearchParams({ limit: "100", categoryId, cursor });
+      if (query) params.set("q", query);
       const page = await supplyApi.browseCatalog(filters.game, params, controller.signal);
       if (controller.signal.aborted || requestId !== skinSearchSequence.current) return;
       setSkinSearchCatalog((previous) => {
@@ -624,7 +604,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
                 <Drawer.Handle />
                 <Drawer.CloseTrigger className="market-filter-drawer-close" aria-label="关闭筛选"><X size={18} aria-hidden="true" /></Drawer.CloseTrigger>
                 <Drawer.Header><Drawer.Heading>筛选账号</Drawer.Heading></Drawer.Header>
-              <Drawer.Body><MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={setActiveSkinCategoryId} onLoadMoreSkins={() => void (normalizedSkinSearch ? loadMoreSkinSearch() : loadMoreSkins())} loadingMoreSkins={normalizedSkinSearch ? loadingMoreSkinSearch : loadingMoreSkins} /></Drawer.Body>
+              <Drawer.Body><MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={setActiveSkinCategoryId} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} /></Drawer.Body>
                 <Drawer.Footer className="market-filter-drawer-footer"><div className="market-filter-drawer-actions">
                   <button type="button" className="market-clear-filters" disabled={filterCount === 0} onClick={resetFilters}>清空筛选</button>
                   <Button className="market-filter-drawer-apply" variant="primary" onPress={() => setMobileFiltersOpen(false)}>返回结果</Button>
@@ -634,7 +614,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
           </div>
           <details className="market-filter-details" open>
             <summary><span>筛选条件</span>{filterCount > 0 ? <span className="market-filter-summary-count">已选 {filterCount} 项</span> : <span className="market-filter-summary-count">展开选择资源、属性与皮肤</span>}</summary>
-            <MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={setActiveSkinCategoryId} onLoadMoreSkins={() => void (normalizedSkinSearch ? loadMoreSkinSearch() : loadMoreSkins())} loadingMoreSkins={normalizedSkinSearch ? loadingMoreSkinSearch : loadingMoreSkins} />
+            <MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={setActiveSkinCategoryId} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} />
             <button type="button" className="market-clear-filters market-clear-top" disabled={filterCount === 0} onClick={resetFilters}>清空筛选</button>
           </details>
         </>}

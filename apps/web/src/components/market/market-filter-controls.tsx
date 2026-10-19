@@ -603,11 +603,9 @@ function SkinFilters({
   const group = filters.filters.skinGroups?.find((entry) => entry.categoryId === activeCategory?.id);
   const totalSelected = (filters.filters.skinGroups ?? []).reduce((sum, entry) => sum + entry.ids.length, 0);
   const searchQuery = skinSearch.normalize("NFKC").trim();
-  const skinResultsStatus = searchQuery ? skinSearchStatus : catalogStatus;
-  const skins = searchQuery
-    ? (skinSearchCatalog?.skins ?? [])
-    : (catalog?.skins ?? []).filter((skin) => skin.categoryId === activeCategory?.id);
-  const nextCursor = searchQuery ? skinSearchCatalog?.nextCursor : catalog?.nextCursor;
+  const skinResultsStatus = skinSearchStatus;
+  const skins = skinSearchCatalog?.skins ?? [];
+  const nextCursor = skinSearchCatalog?.nextCursor;
   const updateMatch = (match: "ANY" | "ALL") => {
     if (!activeCategory) return;
     const groups = [...(filters.filters.skinGroups ?? [])];
@@ -635,8 +633,8 @@ function SkinFilters({
             <span className="sr-only">搜索{activeCategory.name}名称</span>
             <input ref={searchRef} id={`${id}-skin-search`} type="search" maxLength={80} value={skinSearch} placeholder={`搜索${activeCategory.name}`} onChange={(event) => onSkinSearchChange(event.target.value)} />
           </label>
-          {skinResultsStatus === "loading" ? <p className="market-filter-hint" role="status">正在搜索当前类别…</p> : null}
-          {searchQuery && skinResultsStatus === "error" ? <div className="market-filter-error" role="alert"><p>皮肤搜索暂时不可用，已选条件不会清除。</p><button type="button" className="market-filter-chip" onClick={onRetrySkinSearch}>重试搜索</button></div> : null}
+          {skinResultsStatus === "loading" ? <p className="market-filter-hint" role="status">{searchQuery ? "正在搜索当前类别…" : "正在读取当前类别…"}</p> : null}
+          {skinResultsStatus === "error" ? <div className="market-filter-error" role="alert"><p>皮肤目录暂时不可用，已选条件不会清除。</p><button type="button" className="market-filter-chip" onClick={onRetrySkinSearch}>{searchQuery ? "重试搜索" : "重试类别"}</button></div> : null}
           {skinResultsStatus === "ready" ? <>
             <div className="market-skin-grid" role="group" aria-label={`按${activeCategory.name}筛选`}>
               {skins.map((skin) => <SkinTile key={skin.id} skin={skin} selected={Boolean(group?.ids.includes(skin.id))} onClick={() => onChange(toggleSkinId(filters, activeCategory.id, skin.id))} />)}

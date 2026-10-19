@@ -136,7 +136,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
     games: async () => ({ games }),
     publishingOptions: async () => options,
     resourceIncomePreview: async (...args) => resourceIncomePreview ? resourceIncomePreview(...args) : ({available:false,reason:"PREVIEW_UNAVAILABLE"}),
-    catalog: async () => typeof catalogValue === "function" ? catalogValue() : catalogValue,
+    catalog: async (...args) => typeof catalogValue === "function" ? catalogValue(...args) : catalogValue,
     mine: async (...args) => (typeof mine === "function" ? mine(...args) : mine),
     createAccount: async (...args) => createAccount ? createAccount(...args) : ({ accountId: "account_1", gameId: "game_1" }),
     createDraft: async (...args) => createDraft ? createDraft(...args) : supplyOf(declaration()),
@@ -1453,4 +1453,35 @@ test("皮肤标题：以服务端 name 为可靠回退，owner/base 齐全才组
   assert.equal(skinCardTitle({ name: "服务端名", ownerName: "威龙", baseName: "凌霄戍卫" }), "威龙-凌霄戍卫");
   assert.equal(skinCardTitle({ name: "威龙-凌霄戍卫", ownerName: "威龙", baseName: "凌霄戍卫" }), "威龙-凌霄戍卫", "已带前缀不重复拼接");
   assert.equal(skinCardTitle({ name: "水墨云图", ownerName: "骇爪", baseName: "水墨云图" }), "骇爪-水墨云图", "裸名必须补所属对象，子串包含不算完整标题");
+});
+
+function skin12CatalogPage(categoryId, cursor) {
+  const categories = [{ id: 'category_agent', name: '干员外观' }, { id: 'category_firearm', name: '枪械外观' }];
+  const selected = categoryId || 'category_firearm';
+  return { ...catalog, categories, skins: [{ id: `${selected}_${cursor ? 'second' : 'first'}`, code: 'fixture', name: `${selected} ${cursor ? '第二页' : '第一页'}`, categoryId: selected, mediaId: null }], nextCursor: cursor ? null : `${selected}_next` };
+}
+
+test('SKIN12 publish default category requests its own first page before exposing a cursor', async () => {
+  const requests = [];
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: async (_game, query) => {
+    requests.push(Object.fromEntries(query)); return skin12CatalogPage(query.get('categoryId'), query.get('cursor'));
+  } });
+  try {
+    await p.render();
+    assert.equal(await p.waitFor(() => requests.some(q => q.categoryId === 'category_agent')), true, '默认可见分类须读取同一分类的第一页');
+    assert.match(p.host.querySelector('.skin-card-name')?.textContent ?? '', /category_agent/);
+  } finally { await p.close(); }
+});
+
+test('SKIN12 publish load-more keeps the default category query and accepts its second page', async () => {
+  const requests = [];
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: async (_game, query) => {
+    requests.push(Object.fromEntries(query)); return skin12CatalogPage(query.get('categoryId'), query.get('cursor'));
+  } });
+  try {
+    await p.render(); await p.clickButton('加载更多皮肤');
+    assert.equal(await p.waitFor(() => requests.some(q => q.cursor === 'category_agent_next' && q.categoryId === 'category_agent')), true, '不能因空分类首包与默认分类 key 不同而静默丢掉加载更多');
+    assert.equal(p.host.querySelectorAll('.skin-card').length, 2);
+    assert.match(p.text(), /category_agent 第二页/);
+  } finally { await p.close(); }
 });

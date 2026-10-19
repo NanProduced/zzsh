@@ -1203,6 +1203,13 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       if (query.cursor) params.set("cursor", query.cursor);
       const page = await supplyApi.catalog(gameId, params, controller.signal);
       if (!currentContext(context, controller.signal) || !isCurrent()) return;
+      // The first visible category and every later cursor must share one query.
+      if (!append && !query.categoryId && page.categories[0]) {
+        const categoryId = page.categories[0].id;
+        setSkinCategory(categoryId);
+        await loadSkinPage({ ...query, categoryId }, false);
+        return;
+      }
       setCatalog((previous) => {
         if (!append || !previous) return page;
         const existing = new Set(previous.skins.map((skin) => skin.id));

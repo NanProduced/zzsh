@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { createRequire, Module } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -786,4 +786,35 @@ test("a late exact result cannot replace a newer keyword query", async () => {
   } finally {
     await probe.close();
   }
+});
+
+async function skin12MarketProbe(browse) {
+  const fs = require('node:fs'), ts = require('typescript'), React = require('react'), {Window} = require('happy-dom');
+  const browser = new Window({url:'http://127.0.0.1:4320/accounts?game=game_1'}), previous = Object.fromEntries(['window','document','HTMLElement','Element','Node','Event','MouseEvent','IS_REACT_ACT_ENVIRONMENT'].map(k=>[k,globalThis[k]])), priorNavigator=Object.getOwnPropertyDescriptor(globalThis,'navigator');
+  Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Element:browser.Element,Node:browser.Node,Event:browser.Event,MouseEvent:browser.MouseEvent,IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  browser.matchMedia=()=>({matches:true,addEventListener(){},removeEventListener(){}});browser.scrollTo=()=>{};
+  const pass=({children})=>React.createElement(React.Fragment,null,children), Item=Object.assign(pass,{Indicator:pass}), ListBox=Object.assign(({children})=>React.createElement(React.Fragment,null,children),{Item}), Select=Object.fromEntries(['Root','Trigger','Value','Indicator','Popover'].map(k=>[k,pass]));
+  const Drawer=Object.assign(({children})=>React.createElement(React.Fragment,null,children),Object.fromEntries(['Trigger','Backdrop','Content','Dialog','Handle','CloseTrigger','Header','Heading','Body','Footer'].map(k=>[k,pass])));
+  const categories=[{id:'category_agent',name:'干员外观',parentId:null},{id:'category_firearm',name:'枪械外观',parentId:null}];
+  const meta={available:true,reasonCode:null,gameId:'game_1',queryVersion:2,filterRevision:'1',catalogRevision:'1',ruleReleaseId:'release_1',defaultSort:{sort:'latest',direction:'DESC',label:'最新发布'},fields:[{key:'skinGroups',operator:'GROUPED',label:'皮肤',enabled:true,order:1,categoryIds:categories.map(c=>c.id)}],sorts:[{key:'latest',label:'最新发布',enabled:true,order:1}],directions:['DESC'],items:[],categories,skinCatalogUrl:'/api/supply/games/game_1/catalog',limits:{urlBytes:8192,resources:16,skinGroups:8,skinIds:50,enumValues:50,regions:20,limit:50,scanBudget:200},livePages:true};
+  const calls=[], page=(categoryId,cursor)=>({game:{id:'game_1',code:'delta',name:'三角洲行动',catalogRevision:'1'},items:[],categories,rarities:[],entitlements:[],skins:categoryId?[{id:`${categoryId}_${cursor?'second':'first'}`,name:`${categoryId} ${cursor?'第二页':'第一页'}`,categoryId,mediaId:null}]:Array.from({length:100},(_,n)=>({id:'global_weapon_'+n,name:'全局枪械'+n,categoryId:'category_firearm',mediaId:null})),nextCursor:cursor?null:(categoryId||'global')+'_next',limit:100});
+  const supply={games:async()=>({games:[{id:'game_1',code:'delta',name:'三角洲行动'}]}),listingFilters:async()=>meta,browseCatalog:async(game,query,signal)=>{const call={game,query:Object.fromEntries(query),signal};calls.push(call);return browse?browse(call,page):page(query.get('categoryId'),query.get('cursor'));}};
+  const actualSupply=require(path.join(repoRoot,'apps/web/src/lib/supply-client.ts')), feed={status:'ready',items:[],nextCursor:null,error:null,requestedCursors:[null],scanBudgetReached:false,loadMore(){},reload(){},reloadFirstPage(){}};
+  function load(file){const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(repoRoot);module.require=name=>{
+    if(name.endsWith('.css'))return{};if(name==='next/link')return({children,href})=>React.createElement('a',{href},children);if(name==='@heroui/react')return{Button:pass,Drawer};if(name==='@heroui/react/list-box')return{ListBox};if(name==='@heroui/react/select')return{Select};if(name==='@radix-ui/react-popover')return Object.fromEntries(['Root','Trigger','Portal','Content'].map(k=>[k,pass]));if(name==='embla-carousel-react')return()=>[()=>{}];
+    if(name==='@/components/market/market-filter-controls')return load(path.join(repoRoot,'apps/web/src/components/market/market-filter-controls.tsx'));
+    if(name==='@/components/layout/service-shell')return{ServiceShell:pass};if(name==='@/components/favorites/favorites-context')return{FavoritesProvider:pass};if(name==='@/components/favorites/favorite-button')return{FavoriteNotice:()=>null};if(name==='@/components/delta/account-card')return{AccountCard:()=>null};if(name==='@/components/delta/account-card-skeleton')return{AccountCardSkeleton:()=>null};if(name==='@/components/delta/account-card-empty')return{AccountCardEmpty:pass};
+    if(name==='./use-listing-feed')return{useListingFeed:()=>feed};if(name==='@/lib/supply-client')return{...actualSupply,supplyApi:supply};if(name==='@/lib/listing-view')return{toListingCard:x=>x};if(name.startsWith('@/lib/'))return require(path.join(repoRoot,'apps/web/src/lib',name.slice(6)+'.ts'));return require(name);};
+    module._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);return module.exports;}
+  const {AccountMarket}=load(path.join(repoRoot,'apps/web/src/components/market/account-market.tsx')),host=browser.document.createElement('div');browser.document.body.append(host);const root=require('react-dom/client').createRoot(host),settle=async()=>{await React.act(async()=>new Promise(resolve=>setTimeout(resolve,5)));};
+  await React.act(async()=>root.render(React.createElement(AccountMarket,{searchParams:{game:'game_1'}})));for(let n=0;n<12;n++)await settle();
+  return {host,calls,page,async waitFor(fn){for(let n=0;n<80;n++){if(fn())return true;await settle();}return Boolean(fn());},async open(){const button=host.querySelector('button[aria-label^="选择皮肤"]');assert(button);await React.act(async()=>button.click());await settle();},async clickText(text){const button=[...host.querySelectorAll('button')].find(b=>b.textContent===text||b.textContent?.trim()===text);assert(button,'missing '+text);await React.act(async()=>button.click());await settle();},async close(){await React.act(async()=>root.unmount());browser.happyDOM.abort();for(const[k,v]of Object.entries(previous)){if(v===undefined)delete globalThis[k];else globalThis[k]=v;}if(priorNavigator)Object.defineProperty(globalThis,'navigator',priorNavigator);else delete globalThis.navigator;}};
+}
+
+test('SKIN12 market reads and paginates the current category with an empty search',async()=>{
+  const p=await skin12MarketProbe();try{await p.open();assert.equal(await p.waitFor(()=>p.calls.some(c=>c.query.categoryId==='category_agent'&&!c.query.q)),true,'默认分类不能依赖全局首100中的偶然命中');assert.match(p.host.textContent,/category_agent 第一样|category_agent 第一页/);await p.clickText('加载更多皮肤');assert.equal(await p.waitFor(()=>p.calls.some(c=>c.query.categoryId==='category_agent'&&c.query.cursor==='category_agent_next')),true);assert.match(p.host.textContent,/category_agent 第二页/);await p.clickText('枪械外观');assert.equal(await p.waitFor(()=>p.calls.some(c=>c.query.categoryId==='category_firearm'&&!c.query.q)),true);assert.equal(await p.waitFor(()=>p.host.textContent.includes('category_firearm 第一页')),true);}finally{await p.close();}
+});
+
+test('SKIN12 a late category reply cannot replace the newest empty-query category',async()=>{
+  let late;const p=await skin12MarketProbe((call,page)=>call.query.categoryId==='category_firearm'?new Promise(resolve=>{late=()=>resolve(page('category_firearm',null));}):page(call.query.categoryId,call.query.cursor));try{await p.open();assert.equal(await p.waitFor(()=>p.host.textContent.includes('category_agent 第一页')),true);await p.clickText('枪械外观');assert.equal(await p.waitFor(()=>Boolean(late)),true);await p.clickText('干员外观');assert.equal(await p.waitFor(()=>p.host.textContent.includes('category_agent 第一页')),true);await ReactActLate();assert(!p.host.textContent.includes('category_firearm 第一页'));}finally{await p.close();}async function ReactActLate(){const React=require('react');await React.act(async()=>{late();await new Promise(resolve=>setTimeout(resolve,0));});}
 });
