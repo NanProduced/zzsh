@@ -102,7 +102,7 @@ function resourceEstimate({ quantity = "60", amount = "12.34", total = amount, u
 }
 const previewTick = () => React.act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
 
-async function probe({ mode = "standard", accountId, editRequested = false, gameCode = "delta", options = optionsV1, catalogValue = catalog, mine, saveDraft, quote, confirm, depositRecommendation, resourceIncomePreview, readNotice = true, createAccount, createDraft, uploadMedia, userId = 'user_A', storageSeed, storageUnavailable = false } = {}) {
+async function probe({ mode = "standard", accountId, editRequested = false, gameCode = "delta", options = optionsV1, catalogValue = catalog, mine, saveDraft, quote, confirm, fullPayoutTerms, depositRecommendation, resourceIncomePreview, readNotice = true, createAccount, createDraft, uploadMedia, userId = 'user_A', storageSeed, storageUnavailable = false } = {}) {
   const window = new Window({ url: "http://127.0.0.1:3100/publish" });
   Object.assign(globalThis, {
     window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
@@ -154,6 +154,10 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       calls.push({ op: "confirm", action, accountId, body, key });
       if (typeof confirm === "function") return confirm(action, body, calls);
       return supplyOf(declaration(), { quote: ownerQuote });
+    },
+    fullPayoutTerms: async (...args) => {
+      calls.push({ op: "fullPayoutTerms", gameId: args[0], releaseId: args[1] });
+      return fullPayoutTerms ? fullPayoutTerms(...args) : { releaseId: args[1], fullPayoutTerms: null };
     },
     depositRecommendation: async (accountId) => {
       calls.push({ op: "depositRecommendation", accountId });
@@ -1204,6 +1208,42 @@ test("legacy agreement markup renders readable inert text while retaining the or
   try {await p.render();const node=p.host.querySelector('.publish-terms-body');assert.match(node.textContent,/真实条款\n请阅读条件/);assert.match(node.textContent,/物品\t金额/);assert.doesNotMatch(node.textContent,/<h3>|bad/);assert.equal(node.querySelector('script'),null);assert.equal(data.agreement.body,body);}finally{await p.close();}
 });
 
+const selectedPayoutDeclaration = () => declaration({ title: "包赔声明", inventory: [{ itemId: "item_haff", quantity: "60000000" }], attributes: { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: true }, owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "test" } } });
+const ownerPayoutTerms = { termsVersionId: "payout_v1", termsDigest: "a".repeat(64), disclosureVersion: "disclosure_v1", policyRef: "policy_v1", policyVersion: "1", title: "本次包赔条款", body: "本次保障条件与责任。" };
+
+test("owner selected payout requires its separate acceptance and sends exact sealed refs only to accept-rules", async () => {
+  let complete;
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote }), fullPayoutTerms: () => new Promise(resolve => { complete = resolve; }),
+    confirm: action => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote, revision: action === "accept-rules" ? "6" : "7", reviewState: action === "accept-rules" ? "DRAFT" : "PUBLISHED" }) });
+  try {
+    await p.render(); await p.click(".publish-confirm > label input");
+    assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true);
+    assert.equal(p.host.querySelector(".publish-payout-acceptance input").disabled, true);
+    await React.act(async () => complete({ releaseId: "release_1", fullPayoutTerms: ownerPayoutTerms })); await p.waitFor(() => !p.host.querySelector(".publish-payout-acceptance input").disabled);
+    assert.match(p.host.querySelector(".publish-payout-terms").textContent, /本次保障条件与责任/);
+    assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true);
+    await p.click(".publish-payout-acceptance input"); await p.clickButton("确认上架");
+    assert.ok(await p.waitFor(() => p.calls.filter(c => c.op === "confirm").length === 2));
+    const calls = p.calls.filter(c => c.op === "confirm");
+    assert.deepEqual(calls[0].body.fullPayoutTermsAcceptance, { termsVersionId: "payout_v1", termsDigest: "a".repeat(64), disclosureVersion: "disclosure_v1" });
+    assert.equal(calls[1].action, "submit"); assert.equal(calls[1].body.fullPayoutTermsAcceptance, undefined);
+  } finally { await p.close(); }
+});
+
+test("owner unreadable or wrong-release payout terms never permit publishing", async () => {
+  for (const fullPayoutTerms of [async () => { throw Error("offline"); }, async () => ({ releaseId: "old_release", fullPayoutTerms: ownerPayoutTerms })]) {
+    const p = await probe({ accountId: "account_1", mine: () => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote }), fullPayoutTerms });
+    try { await p.render(); await p.click(".publish-confirm > label input"); assert.match(p.text(), /全额包赔条款暂时无法读取或版本已变化/); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true); assert.equal(p.calls.some(c => c.op === "confirm"), false); } finally { await p.close(); }
+  }
+});
+
+test("owner quote revision change reloads payout terms and clears the earlier acceptance", async () => {
+  let reads = 0;
+  const next = supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote, revision: "6", versionRevision: "2" });
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote }), fullPayoutTerms: async () => ({ releaseId: "release_1", fullPayoutTerms: { ...ownerPayoutTerms, termsDigest: (++reads === 1 ? "a" : "b").repeat(64) } }), saveDraft: () => next, quote: () => next });
+  try { await p.render(); await p.click(".publish-confirm > label input"); await p.click(".publish-payout-acceptance input"); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, false); await p.clickButton("重新核对报价"); assert.ok(await p.waitFor(() => reads === 2)); assert.equal(p.host.querySelector(".publish-payout-acceptance input").checked, false); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true); assert.equal(p.calls.some(c => c.op === "confirm"), false); } finally { await p.close(); }
+});
+
 test("inventory stepper rejects fractional or negative input, maps groups once, and haff invalid input cannot save",async()=>{
   const p=await probe({accountId:"account_1",mine:()=>supplyOf(declaration())});
   try{
@@ -1282,7 +1322,7 @@ test("a previously referenced wrong PIECE insurance row is retained read-only wi
 test("gross owner income excludes declared deposits and never pre-deducts a flat payout fee",async()=>{
   const attrs={...declaration().attributes,rentalPricing:{rentalMode:'ordinary'},owner_deposit_declaration:{schema:'owner-deposit-declaration-v1',amountCents:'30000',declarationVersion:'1'},full_payout_declaration:{schema:'full-payout-declaration-v1',selected:true}};
   const p=await probe({accountId:'account_1',options:optionsV2,mine:()=>supplyOf(declaration({attributes:attrs}),{schemaVersion:2,quote:{...ownerQuote,schemaVersion:2,rentalMode:'ordinary',ownerHaffRatio:'50',publisherBailRequirement:{currency:'CNY',unit:'yuan',amount:'0.00',scale:2}}})});
-  try{await p.render();assert.equal(p.host.querySelector('[aria-label="预计收入合计"]').textContent,'120.00 元');assert.match(p.host.querySelector('.publish-rail-deposits').textContent,/300.00 元/);assert.doesNotMatch(p.host.querySelector('.publish-rail-deposits').textContent,/发布保证金/);assert.match(p.host.querySelector('[aria-label="普通兑换比例"]').textContent,/50 万哈夫币/);assert.equal(p.host.querySelector('.publish-confirm input').checked,false);assert.equal(p.calls.length,0);}finally{await p.close();}
+  try{await p.render();assert.equal(p.host.querySelector('[aria-label="预计收入合计"]').textContent,'120.00 元');assert.match(p.host.querySelector('.publish-rail-deposits').textContent,/300.00 元/);assert.doesNotMatch(p.host.querySelector('.publish-rail-deposits').textContent,/发布保证金/);assert.match(p.host.querySelector('[aria-label="普通兑换比例"]').textContent,/50 万哈夫币/);assert.equal(p.host.querySelector('.publish-confirm input').checked,false);assert.deepEqual(p.calls.map(c=>c.op),["fullPayoutTerms"]);}finally{await p.close();}
 });
 
 test("an explicit positive server publisher requirement remains separate from income",async()=>{

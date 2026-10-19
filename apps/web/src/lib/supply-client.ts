@@ -20,6 +20,7 @@ import type {
   VersionToken,
   SavedDeclaration,
   FullPayoutTerms,
+  FullPayoutTermsAcceptance,
 } from "./supply-types.ts";
 
 export function editableDeclaration(saved: SavedDeclaration): DraftInput {
@@ -443,7 +444,7 @@ export const supplyApi = {
   confirm: (
     accountId: string,
     action: "accept-rules" | "submit",
-    body: VersionToken,
+    body: VersionToken & { fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance },
     key: string,
     signal?: AbortSignal,
   ) =>

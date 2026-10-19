@@ -93,6 +93,8 @@ import {
 import type {
   DepositRecommendation,
   DraftInput,
+  FullPayoutTerms,
+  FullPayoutTermsAcceptance,
   MySupply,
   PublishingCatalog,
   PublishingOptions,
@@ -553,6 +555,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const leavingRef = useRef(false);
   const navigationFocusRef = useRef<HTMLElement | null>(null);
   const [agreementChecked, setAgreementChecked] = useState(false);
+  const [payoutTerms, setPayoutTerms] = useState<{ target: string; terms: FullPayoutTerms | null; status: "loading" | "ready" | "unavailable" } | null>(null);
+  const [payoutAccepted, setPayoutAccepted] = useState(false);
   const [rulesAccepted, setRulesAccepted] = useState(false);
   const [quoteStale, setQuoteStale] = useState(false);
   const [depositInput, setDepositInput] = useState("");
@@ -1668,7 +1672,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const sendConfirmRequest = async (
     action: "accept-rules" | "submit",
     context: RequestContext,
-    body: { expectedRevision: string; versionId: string; releaseId: string; contentHash: string },
+    body: { expectedRevision: string; versionId: string; releaseId: string; contentHash: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance },
     key: string,
     retryBusy: string,
     onSuccess: (next: MySupply) => void,
@@ -1694,6 +1698,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       locate("terms", "请先勾选确认已阅读本次条款。");
       return;
     }
+    if (payoutSelected === true && !payoutAcceptance) {
+      locate("terms", "请先阅读并同意本次全额包赔条款。");
+      return;
+    }
     const currentToken = token();
     if (!currentToken) {
       locate("terms", "当前报价已失效，请重新核对报价。");
@@ -1702,7 +1710,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     setBusy("accept");
     setError(null);
     const context = captureContext(currentToken.id);
-    const body = { expectedRevision: currentToken.expectedRevision, versionId: currentToken.versionId, releaseId: currentToken.releaseId, contentHash: currentToken.contentHash };
+    const body = { expectedRevision: currentToken.expectedRevision, versionId: currentToken.versionId, releaseId: currentToken.releaseId, contentHash: currentToken.contentHash, ...(payoutAcceptance ? { fullPayoutTermsAcceptance: payoutAcceptance } : {}) };
     const keyBody = { accountId: currentToken.id, ...body };
     try {
       const frozen = freezeRequest(body, keyFor("accept-rules", keyBody));
@@ -2232,17 +2240,40 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     onSearch: (value: string) => requestNavigation({ message: "本页还有未保存的资料。离开后，这些修改不会保留。", label: "放弃修改并离开", run: () => router.push(`/accounts?q=${encodeURIComponent(value)}`) }),
   };
 
+  const published = supply?.version?.reviewState === "PUBLISHED";
+  const quoteData = supply?.version?.quote ?? null;
+  const effectiveQuote = quoteData && !quoteStale ? quoteData : null;
+  const payoutSelected = fullPayoutSelected(draft.attributes);
+  const payoutReleaseId = effectiveQuote?.ruleReleaseId;
+  const payoutTarget = JSON.stringify([identityRef.current, gameId, accountId, supply?.version?.id, supply?.version?.revision, payoutReleaseId, supply?.version?.contentHash]);
+  useEffect(() => {
+    setPayoutAccepted(false);
+    if (payoutSelected !== true || !payoutReleaseId || identityState !== "confirmed" || published) { setPayoutTerms(null); return; }
+    const controller = new AbortController();
+    setPayoutTerms({ target: payoutTarget, status: "loading", terms: null });
+    supplyApi.fullPayoutTerms(gameId, payoutReleaseId, controller.signal).then((result) => {
+      if (controller.signal.aborted) return;
+      setPayoutTerms(result.releaseId === payoutReleaseId && result.fullPayoutTerms
+        ? { target: payoutTarget, status: "ready", terms: result.fullPayoutTerms }
+        : { target: payoutTarget, status: "unavailable", terms: null });
+    }).catch(() => {
+      if (!controller.signal.aborted) setPayoutTerms({ target: payoutTarget, status: "unavailable", terms: null });
+    });
+    return () => controller.abort();
+  }, [payoutSelected, payoutReleaseId, payoutTarget, identityState, published, gameId]);
+  const currentPayoutTerms = payoutTerms?.target === payoutTarget && payoutTerms.status === "ready" ? payoutTerms.terms : null;
+  const payoutAcceptance: FullPayoutTermsAcceptance | undefined = payoutSelected === true && payoutAccepted && currentPayoutTerms
+    ? { termsVersionId: currentPayoutTerms.termsVersionId, termsDigest: currentPayoutTerms.termsDigest, disclosureVersion: currentPayoutTerms.disclosureVersion } : undefined;
+
   if (identityState === "checking") return <ServiceShell {...publishShell} title="上架出租" description="填写公开账号资料与出租条件；价格、规则和资格以本次核价结果为准。"><PublishVisualBanner /><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在确认登录身份</h2><p>确认期间暂不展示私人发布资料，也不会继续发送保存、核价或上传请求。</p></section></ServiceShell>;
   if (identityState === "failed") return <ServiceShell {...publishShell} title="上架出租" description="填写公开账号资料与出租条件；价格、规则和资格以本次核价结果为准。"><PublishVisualBanner /><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>暂时无法确认登录身份</h2><p>私人发布资料仍保留在本页，确认恢复后可继续；当前不会发送新的保存、核价或上传请求。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重试身份确认</button></section></ServiceShell>;
   if (identityState === "confirmed" && authRequired && identityRef.current) return <ServiceShell {...publishShell} title="上架出租" description="填写公开账号资料与出租条件；价格、规则和资格以本次核价结果为准。"><PublishVisualBanner /><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>登录状态已失效</h2><p>私有发布资料已暂停展示；原写回执与待重试步骤仍然保留。重新确认同一登录身份后可继续。</p><button type="button" className="button secondary" onClick={() => void sharedSession.confirm()}>重新确认身份</button></section></ServiceShell>;
   if (!accountIdProp && gamesLoaded && games.length === 0) return <ServiceShell {...publishShell} title="上架出租" description="填写账号资料并提交上架。"><PublishVisualBanner /><section className="account-guest"><h2>暂未开放上架</h2><p>目前没有开放出租的游戏，请稍后再来。</p><Link className="button secondary" href="/">返回首页</Link></section></ServiceShell>;
 
   const blockers = [...(catalog?.blockers ?? []).map((item) => item.code), ...(supply?.blockers ?? [])];
-  const quoteData = supply?.version?.quote ?? null;
   const breakdown = ownerQuoteBreakdown(quoteData);
   const agreement = supply?.agreement ?? options?.agreement ?? null;
   const readOnly = Boolean(accountId && !editing);
-  const published = supply?.version?.reviewState === "PUBLISHED";
   const formDisabled = identityState !== "confirmed" || !identityRef.current || readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue);
   const reviewState = supply?.version?.reviewState;
   const safeBoxOptions = options?.safeBoxOptions ?? [];
@@ -2304,12 +2335,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const serviceWindowMode = serviceWindowAllDay ? "allDay" : serviceWindowCustomSelected || serviceWindowStart !== null || serviceWindowEnd !== null ? "window" : null;
   const serviceWindowEqual = serviceWindowStart !== null && serviceWindowEnd !== null && serviceWindowStart === serviceWindowEnd && !serviceWindowAllDay;
   const serviceWindowHasLegacyValue = (serviceWindowStart !== null && !SERVICE_WINDOW_START_OPTIONS.includes(serviceWindowStart)) || (serviceWindowEnd !== null && !SERVICE_WINDOW_END_OPTIONS.includes(serviceWindowEnd));
-  const payoutSelected = fullPayoutSelected(draft.attributes);
   const hasBanRecord = draft.attributes.ban_record === true;
   const retainedPenaltyCount = media.filter(item => item.category === "PENALTY" || item.purpose === "ACCOUNT_EVIDENCE").length;
 
   const errorGroups = new Set(fieldErrors.map((item) => publishGroupForPath(item.path)));
-  const effectiveQuote = quoteData && !quoteStale ? quoteData : null;
   const quotedHaffRatio = effectiveQuote?.ownerHaffRatio;
   const declaredDepositCents = yuanToCents(depositInput);
   const actualPublisherRequirement = centsOfMoney(effectiveQuote?.publisherBailRequirement);
@@ -2345,7 +2374,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         : item.bindingSaved ? "已保存，状态待核" : "已上传，待保存；状态待核";
 
   const primaryLabel = effectiveQuote ? "确认上架" : busy === "quote" ? "核对中…" : "核对报价";
-  const primaryDisabled = readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue) || identityState !== "confirmed" || !identityRef.current || (effectiveQuote ? !agreementChecked || !quoteConsistent : false);
+  const primaryDisabled = readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue) || identityState !== "confirmed" || !identityRef.current || (effectiveQuote ? !agreementChecked || !quoteConsistent || (payoutSelected === true && !payoutAcceptance) : false);
   const primaryAction = () => {
     if (primaryDisabled) return;
     if (effectiveQuote) void confirmPublish();
@@ -2720,6 +2749,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           {effectiveQuote && !quoteConsistent ? <div className="supply-blockers" role="alert"><strong>报价金额待核对</strong><p>本次报价的行金额与合计不一致，暂不能确认上架。</p></div> : null}
           {visibleBlockers.length ? <div className="supply-blockers"><strong>上架前请处理</strong><ul>{visibleBlockers.map((code) => <li key={code}>{blockerText(code)}</li>)}</ul></div> : null}
           {effectiveQuote && quoteConsistent ? agreement ? <details className="publish-terms"><summary>查看本次出租条款（{agreement.title}）</summary><AgreementBody body={agreement.body} /></details> : <p className="supply-muted">本次条款正文尚未读取，暂不能确认上架。</p> : null}
+          {effectiveQuote && payoutSelected === true && !published ? currentPayoutTerms
+            ? <details className="publish-terms publish-payout-terms"><summary>查看本次全额包赔条款（{currentPayoutTerms.title}）</summary><AgreementBody body={currentPayoutTerms.body} /></details>
+            : <p className="supply-muted" role={payoutTerms?.status === "unavailable" ? "alert" : "status"}>{payoutTerms?.target === payoutTarget && payoutTerms.status === "unavailable" ? "全额包赔条款暂时无法读取或版本已变化，请重新核对报价后重试。" : "正在读取本次全额包赔条款…"}</p> : null}
         </>}
         </div>
         {!published ? <div className="publish-rail-footer">
@@ -2728,6 +2760,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               {quoteConsistent ? <>
 
                 <label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !agreement} onChange={(event) => setAgreementChecked(event.target.checked)} />我已阅读并同意本次出租条款与条件</label>
+                {payoutSelected === true ? <label className="supply-check publish-payout-acceptance"><input type="checkbox" checked={Boolean(payoutAcceptance)} disabled={formDisabled || !currentPayoutTerms} onChange={(event) => setPayoutAccepted(event.target.checked)} />我已阅读并同意本次全额包赔条款</label> : null}
                 <button type="button" className="button primary" disabled={primaryDisabled} onClick={() => void confirmPublish()}>{busy === "submit" ? "上架中…" : busy === "accept" ? "确认条款中…" : "确认上架"}</button>
               </> : null}
               <button type="button" className="button quiet" disabled={formDisabled} onClick={() => void quote()}>重新核对报价</button>

@@ -64,6 +64,13 @@ test('user calls carry explicit replay keys, no price calculation or automatic r
   const old=globalThis.fetch;let count=0;globalThis.fetch=async(url,init)=>{count++;assert.equal(url,'/api/supply/favorites/a');assert.equal(init.headers['idempotency-key'],'stable-key');assert.deepEqual(JSON.parse(init.body),{saved:true});return Response.json({accountId:'a',saved:true});};
   try{assert.deepEqual(await supplyApi.setFavorite('a',true,'stable-key'),{accountId:'a',saved:true});assert.equal(count,1);globalThis.fetch=async()=>{count++;throw Error('network');};await assert.rejects(()=>supplyRequest('/favorites/a',{method:'PUT',body:{saved:true},idempotencyKey:'stable-key'}),e=>e.idempotencyKey==='stable-key'&&e.status===0);assert.equal(count,2);}finally{globalThis.fetch=old;}
 });
+
+test('owner acceptance forwards exact full-payout terms with its original replay key',async()=>{
+  const old=globalThis.fetch,calls=[];
+  globalThis.fetch=async(url,init)=>{calls.push({url,key:init.headers['idempotency-key'],body:JSON.parse(init.body)});return Response.json({account:{id:'a'}});};
+  const body={expectedRevision:'5',versionId:'v',releaseId:'r',contentHash:'h',fullPayoutTermsAcceptance:{termsVersionId:'payout-v1',termsDigest:'a'.repeat(64),disclosureVersion:'d1'}};
+  try{await supplyApi.confirm('a','accept-rules',body,'original-accept-key');assert.deepEqual(calls,[{url:'/api/supply/accounts/a/accept-rules',key:'original-accept-key',body}]);}finally{globalThis.fetch=old;}
+});
 test('public browse calls keep contract paths and forward abort signals',async()=>{
   const old=globalThis.fetch;const calls=[];
   globalThis.fetch=async(url,init)=>{calls.push({url,signal:init?.signal});return Response.json({items:[],games:[],skins:[]});};

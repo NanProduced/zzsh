@@ -392,7 +392,7 @@ export type VersionToken = {
   releaseId: string;
   contentHash: string;
 };
-/** Sealed full-payout terms the renter must accept when the owner declared full payout. */
+/** Sealed full-payout terms accepted separately by the publishing owner and renter. */
 export type FullPayoutTermsAcceptance = { termsVersionId: string; termsDigest: string; disclosureVersion: string };
 export type FullPayoutTerms = FullPayoutTermsAcceptance & {
   policyRef: string;
