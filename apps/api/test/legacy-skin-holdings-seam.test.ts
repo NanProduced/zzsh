@@ -3,17 +3,27 @@ import { test } from "node:test";
 import type { PoolClient } from "pg";
 import type { PublishingAccount, SupplyGateReader } from "../src/supply/publishing";
 import {
-  recordLegacySkinHoldings,
+  recordLegacySkinHoldings as writeLegacySkinHoldings,
+  prepareLegacySkinHoldingsAdmission,
+  prepareLegacySkinHoldingsInput,
   resolveLegacyObservationToDraft,
+  type LegacySkinHoldingsAdmission,
+  type LegacySkinHoldingsSourcePackage,
   type LegacySkinHoldingsInput,
   type LegacyImportActor,
 } from "../src/supply/legacy-observation";
+import { buildLegacySkinIndex, mapLegacySkinHolding, type LegacySkinCatalogEntry, type LegacySkinTokenRule } from "../src/legacy-load/legacy-skin-holdings";
+import { sha256Hex } from "../src/supply/supply-util";
 
 const DIGEST = "a".repeat(64);
 const HOLDING_DIGEST = "c".repeat(64);
 const ACTOR: LegacyImportActor = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };
 const ACTOR_2: LegacyImportActor = { id: "admin-2", sessionId: "session-2", requestId: "request-2" };
 const FREE_GATE: SupplyGateReader = async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "fixture:free" });
+const DEFAULT_COLUMNS = { knife_skin: "", agent_skin: "天际线", weapon_skin: "", gold_skin: "蛊-不羁人生" };
+const LUNA_COLUMNS = { ...DEFAULT_COLUMNS, gold_skin: null };
+const GU_COLUMNS = { ...DEFAULT_COLUMNS, agent_skin: null };
+const EMPTY_COLUMNS = { knife_skin: "", agent_skin: null, weapon_skin: "", gold_skin: null };
 
 function account(id = "account-1"): PublishingAccount {
   return {
@@ -80,8 +90,13 @@ class FakeClient {
   readonly queries: string[] = [];
   permission = true;
   scope = true;
+  gameCatalogRevision: string | null = "146";
+  readonly sealedColumns: LegacySkinHoldingsInput["columns"];
+  readonly sealedRules: LegacySkinTokenRule[];
 
-  constructor() {
+  constructor(columns: LegacySkinHoldingsInput["columns"] = DEFAULT_COLUMNS, rules: LegacySkinTokenRule[] = []) {
+    this.sealedColumns = structuredClone(columns);
+    this.sealedRules = structuredClone(rules);
     this.maps.set("legacy_mysql_restore|la_rental_accounts|source-1", {
       source_system: "legacy_mysql_restore",
       source_entity: "la_rental_accounts",
@@ -161,7 +176,7 @@ class FakeClient {
       return { rows: row ? [{ ...row } as T] : [], rowCount: row ? 1 : 0 };
     }
     if (sql.includes("FROM zzsh_supply.game") || sql.includes("FROM \"zzsh_supply\".\"game\"")) {
-      return { rows: [{ id: String(values[0] || "game-delta"), catalogRevision: "146" } as T], rowCount: 1 };
+      return { rows: this.gameCatalogRevision === null ? [] : [{ id: String(values[0] || "game-delta"), catalogRevision: this.gameCatalogRevision } as T], rowCount: this.gameCatalogRevision === null ? 0 : 1 };
     }
     if (sql.includes("FROM zzsh_supply.skin WHERE game_id=$1")) {
       const gameId = values[0];
@@ -289,13 +304,29 @@ function asClient(fake: FakeClient): PoolClient {
   return fake as unknown as PoolClient;
 }
 
-const DEFAULT_COLUMNS = {
-  knife_skin: "",
-  agent_skin: "天际线",
-  weapon_skin: "",
-  gold_skin: "蛊-不羁人生",
-};
 const DEFAULT_HOLDING_DIGEST = "7d356dee2c23c40ad81893e75d0f11146e5d06a4596decb4a80b546896cb4d41";
+
+function sourcePackage(fake: FakeClient): LegacySkinHoldingsSourcePackage {
+  return { schema: "legacy-skin-holdings-source-v1", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts",
+    sourceExtractSha256: "1".repeat(64), sourceCutoff: "2026-09-13T13:31:22Z", targetBindingsSha256: "2".repeat(64),
+    tokenRulesVersion: "FIXTURE_RULES_1", tokenRulesExtractSha256: "3".repeat(64), tokenRules: fake.sealedRules,
+    gameId: "game-delta", catalogRevision: "146", rows: [{ legacyId: "source-1", accountId: "account-1", observationVersionId: "obs-1",
+      sourceDigest: DIGEST, sourceUpdatedAtUtc: "2026-08-01T00:00:00Z", columns: fake.sealedColumns }] };
+}
+const admissions = new WeakMap<FakeClient, LegacySkinHoldingsAdmission>();
+function admissionFor(fake: FakeClient) {
+  let admitted = admissions.get(fake);
+  if (!admitted) {
+    const bytes = JSON.stringify(sourcePackage(fake));
+    admitted = prepareLegacySkinHoldingsAdmission(bytes, sha256Hex(bytes));
+    admissions.set(fake, admitted);
+  }
+  return admitted;
+}
+// The fixture's sealed source is configured before the request and never obtained from its columns/digest.
+function recordLegacySkinHoldings(client: PoolClient, accountId: string, input: LegacySkinHoldingsInput, actor: LegacyImportActor) {
+  return writeLegacySkinHoldings(client, accountId, input, actor, admissionFor(client as unknown as FakeClient));
+}
 
 function validInput(overrides: Partial<LegacySkinHoldingsInput> = {}): LegacySkinHoldingsInput {
   let columns = overrides.columns !== undefined ? overrides.columns : DEFAULT_COLUMNS;
@@ -363,6 +394,11 @@ test("SK11-R1-01: recordLegacySkinHoldings writes to legacy_skin_holding without
   assert.equal(holding.created_by_admin_id, ACTOR.id);
   assert.deepEqual(holding.skin_ids, ["skin_gu", "skin_luna"]);
   assert.ok(fake.audits.length > 0);
+  const audit = JSON.parse((fake.audits[0]!.values as unknown[])[10] as string) as { sourceAdmission: Record<string, string> };
+  assert.equal(audit.sourceAdmission.packageSha256, admissionFor(fake).packageSha256);
+  assert.equal(audit.sourceAdmission.sourceExtractSha256, "1".repeat(64));
+  assert.equal(audit.sourceAdmission.sourceCutoff, "2026-09-13T13:31:22Z");
+  assert.equal(audit.sourceAdmission.tokenRulesDigest, sha256Hex("[]"));
 });
 
 test("SK11-R1-01: resolveLegacyObservationToDraft carries legacy_skin_holding into native DRAFT listing_skin", async () => {
@@ -404,24 +440,27 @@ test("SK11-R1-02: validates parameters, exact map, holding digest and verified p
   await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ evidenceRef: "" }), ACTOR), /Invalid evidence ref/);
 
   // Missing map
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ legacyId: "missing-source" }), ACTOR), /Legacy supply map not found/);
+  const missingMap = new FakeClient(); missingMap.maps.clear();
+  await assert.rejects(() => recordLegacySkinHoldings(asClient(missingMap), "account-1", validInput(), ACTOR), /Legacy supply map not found/);
 
   // Mismatched map account
-  fake.maps.set("legacy_mysql_restore|la_rental_accounts|other-acc", { source_digest: DIGEST, version_id: "obs-1", account_id: "account-other" });
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ legacyId: "other-acc" }), ACTOR), /account does not match target account/);
+  const wrongAccount = new FakeClient(); wrongAccount.maps.get("legacy_mysql_restore|la_rental_accounts|source-1")!.account_id = "account-other";
+  await assert.rejects(() => recordLegacySkinHoldings(asClient(wrongAccount), "account-1", validInput(), ACTOR), /account does not match target account/);
 
   // Mismatched map version
-  fake.maps.set("legacy_mysql_restore|la_rental_accounts|other-ver", { source_digest: DIGEST, version_id: "obs-other", account_id: "account-1" });
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ legacyId: "other-ver" }), ACTOR), /version does not match target version/);
+  const wrongVersion = new FakeClient(); wrongVersion.maps.get("legacy_mysql_restore|la_rental_accounts|source-1")!.version_id = "obs-other";
+  await assert.rejects(() => recordLegacySkinHoldings(asClient(wrongVersion), "account-1", validInput(), ACTOR), /version does not match target version/);
 
   // Mismatched source digest
   await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ sourceDigest: "b".repeat(64) }), ACTOR), /conflicts/);
 
   // Unverified or disabled skins
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ skinIds: ["skin_pending"], columns: { knife_skin: "", agent_skin: "午夜邮差", weapon_skin: "", gold_skin: null }, holdingDigest: "0".repeat(64) }), ACTOR), /Legacy skin holding source has unmapped, pending, or ambiguous skins/);
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ skinIds: ["skin_disabled"], columns: { knife_skin: "", agent_skin: null, weapon_skin: "AKM-群星", gold_skin: null }, holdingDigest: "0".repeat(64) }), ACTOR), /Legacy skin holding source has unmapped, pending, or ambiguous skins/);
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ skinIds: ["skin_other_game"], columns: { knife_skin: "", agent_skin: "狂怒", weapon_skin: "", gold_skin: null }, holdingDigest: "0".repeat(64) }), ACTOR), /Legacy skin holding source has unmapped, pending, or ambiguous skins/);
-  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ skinIds: ["skin_nonexistent"], columns: { knife_skin: "nonexistent", agent_skin: null, weapon_skin: "", gold_skin: null }, holdingDigest: "0".repeat(64) }), ACTOR), /Legacy skin holding source has unmapped, pending, or ambiguous skins/);
+  for (const input of [
+    validInput({ skinIds: ["skin_pending"], columns: { knife_skin: "", agent_skin: "午夜邮差", weapon_skin: "", gold_skin: null }, holdingDigest: "0".repeat(64) }),
+    validInput({ skinIds: ["skin_disabled"], columns: { knife_skin: "", agent_skin: null, weapon_skin: "AKM-群星", gold_skin: null }, holdingDigest: "0".repeat(64) }),
+    validInput({ skinIds: ["skin_other_game"], columns: { knife_skin: "", agent_skin: "狂怒", weapon_skin: "", gold_skin: null }, holdingDigest: "0".repeat(64) }),
+    validInput({ skinIds: ["skin_nonexistent"], columns: { knife_skin: "nonexistent", agent_skin: null, weapon_skin: "", gold_skin: null }, holdingDigest: "0".repeat(64) }),
+  ]) await assert.rejects(() => recordLegacySkinHoldings(asClient(new FakeClient(input.columns)), "account-1", input, ACTOR), /Legacy skin holding source has unmapped, pending, or ambiguous skins/);
 });
 
 test("SK11-R1-02: legal empty vs non-legal empty validation", async () => {
@@ -447,22 +486,24 @@ test("SK11-R1-02: legal empty vs non-legal empty validation", async () => {
   );
 
   // Empty skinIds with 4 observed empty columns is accepted as legal empty
+  const emptyColumns = { knife_skin: "", agent_skin: null, weapon_skin: "", gold_skin: " , " };
+  const emptyFake = new FakeClient(emptyColumns);
   const res = await recordLegacySkinHoldings(
-    asClient(fake),
+    asClient(emptyFake),
     "account-1",
     validInput({
       skinIds: [],
-      columns: { knife_skin: "", agent_skin: null, weapon_skin: "", gold_skin: " , " },
+      columns: emptyColumns,
       holdingDigest: "3b4fc78d87782d18c0d9720fba8079b6c3dab0087b975e2fc3fd687acd6c511d",
     }),
     ACTOR,
   );
   assert.deepEqual(res.attachedSkins, []);
-  assert.deepEqual(fake.legacySkinHoldings.get("account-1")?.skin_ids, []);
+  assert.deepEqual(emptyFake.legacySkinHoldings.get("account-1")?.skin_ids, []);
 });
 
 test("SK11-R1-03: set conflict detection prevents disjoint keys or union accumulation", async () => {
-  const fake = new FakeClient();
+  const fake = new FakeClient(LUNA_COLUMNS);
   // First declaration: set A = [skin_luna]
   const inputA = validInput({ skinIds: ["skin_luna"] });
   const resA = await recordLegacySkinHoldings(asClient(fake), "account-1", inputA, ACTOR);
@@ -492,7 +533,7 @@ test("SK11-R1-03: set conflict detection prevents disjoint keys or union accumul
 });
 
 test("SK11-R1-03: reverse order B then A conflicts", async () => {
-  const fake = new FakeClient();
+  const fake = new FakeClient(GU_COLUMNS);
   const inputB = validInput({ skinIds: ["skin_gu"] });
   await recordLegacySkinHoldings(asClient(fake), "account-1", inputB, ACTOR);
 
@@ -528,7 +569,7 @@ test("SK11-R2-01: unobserved or unresolved source token cannot claim positive sk
   // Unresolved source token
   const unresolvedCols = { knife_skin: "UNRESOLVED_TOKEN", agent_skin: null, weapon_skin: "", gold_skin: null };
   await assert.rejects(
-    () => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({
+    () => recordLegacySkinHoldings(asClient(new FakeClient(unresolvedCols)), "account-1", validInput({
       columns: unresolvedCols,
       skinIds: ["skin_luna"],
       holdingDigest: "f".repeat(64),
@@ -551,7 +592,7 @@ test("SK11-R2-02: DDL schema and writer INSERT statement match column contract e
 });
 
 test("SK11-R2-03: resolveLegacyObservationToDraft uses authoritative holding without union accumulation", async () => {
-  const fake = new FakeClient();
+  const fake = new FakeClient(LUNA_COLUMNS);
   // obs-1 has listing_skin = skin_gu
   fake.listingSkins.push({ version_id: "obs-1", skin_id: "skin_gu" });
   // Record holding with only skin_luna
@@ -577,7 +618,7 @@ test("SK11-R2-03: resolveLegacyObservationToDraft uses authoritative holding wit
 });
 
 test("SK11-R2-03: resolveLegacyObservationToDraft with legal empty holding produces 0 skins in draft", async () => {
-  const fake = new FakeClient();
+  const fake = new FakeClient(EMPTY_COLUMNS);
   // obs-1 has listing_skin = skin_gu
   fake.listingSkins.push({ version_id: "obs-1", skin_id: "skin_gu" });
   // Record legal empty holding
@@ -600,4 +641,82 @@ test("SK11-R2-03: resolveLegacyObservationToDraft with legal empty holding produ
   const draftSkins = fake.listingSkins.filter(ls => ls.version_id === draft.versionId);
   // Authoritative empty: 0 skins in draft, old skin is NOT inherited!
   assert.equal(draftSkins.length, 0);
+});
+
+function catalogFor(fake: FakeClient): LegacySkinCatalogEntry[] {
+  return [...fake.skins.values()].map(s => ({ skinId: s.id, gameId: s.game_id, sourceField: s.source_field ?? null,
+    sourceToken: s.source_token ?? null, namingState: s.naming_state as LegacySkinCatalogEntry["namingState"], enabled: s.enabled, formVisible: s.form_visible }));
+}
+
+test("SK11-R3-01: another sealed account's columns and freshly recomputed digest cannot replace the admitted row", async () => {
+  const target = new FakeClient(GU_COLUMNS);
+  const borrowed = mapLegacySkinHolding({ accountKey: "source-1", gameId: "game-delta", columns: LUNA_COLUMNS }, buildLegacySkinIndex(catalogFor(target)), "146");
+  assert.equal(borrowed.complete, true);
+  await assert.rejects(() => recordLegacySkinHoldings(asClient(target), "account-1", validInput({ columns: LUNA_COLUMNS,
+    skinIds: borrowed.mappedSkinIds, holdingDigest: borrowed.digest }), ACTOR), /columns conflict with the admitted sealed row/);
+  assert.equal(target.legacySkinHoldings.size, 0);
+  assert.equal(target.idempotency.size, 0);
+  const admitted = admissionFor(target), copied = JSON.parse(JSON.stringify(admitted)) as LegacySkinHoldingsAdmission;
+  await assert.rejects(() => writeLegacySkinHoldings(asClient(target), "account-1", validInput({ skinIds: ["skin_gu"] }), ACTOR, copied), /server-admitted/);
+  await assert.rejects(() => writeLegacySkinHoldings(asClient(target), "account-1", Object.assign(validInput(), { sourceAdmission: admitted }), ACTOR,
+    undefined as unknown as LegacySkinHoldingsAdmission), /server-admitted/);
+});
+
+test("SK11-R3-01: source admission checks bytes, cutoff, observed columns and unique target bindings", () => {
+  const original = sourcePackage(new FakeClient()), bytes = JSON.stringify(original);
+  assert.throws(() => prepareLegacySkinHoldingsAdmission(bytes, "f".repeat(64)), /package bytes do not match/);
+  for (const mutate of [
+    (p: LegacySkinHoldingsSourcePackage) => { p.sourceCutoff = "2026-07-01T00:00:00Z"; },
+    (p: LegacySkinHoldingsSourcePackage) => { delete (p.rows[0]!.columns as Partial<LegacySkinHoldingsInput["columns"]>).agent_skin; },
+    (p: LegacySkinHoldingsSourcePackage) => { p.rows.push(structuredClone(p.rows[0]!)); },
+    (p: LegacySkinHoldingsSourcePackage) => { p.tokenRules = undefined as never; },
+    (p: LegacySkinHoldingsSourcePackage) => { p.tokenRules = [{}] as never; },
+    (p: LegacySkinHoldingsSourcePackage) => { p.sourceExtractSha256 = ["1".repeat(64)] as never; },
+    (p: LegacySkinHoldingsSourcePackage) => { p.catalogRevision = 146 as never; },
+  ]) {
+    const changed = structuredClone(original); mutate(changed); const text = JSON.stringify(changed);
+    assert.throws(() => prepareLegacySkinHoldingsAdmission(text, sha256Hex(text)));
+  }
+  const admission = prepareLegacySkinHoldingsAdmission(bytes, sha256Hex(bytes));
+  original.rows[0]!.columns = EMPTY_COLUMNS;
+  const prepared = prepareLegacySkinHoldingsInput(admission, "source-1", catalogFor(new FakeClient()), "fixture:source");
+  assert.deepEqual(prepared.input.columns, DEFAULT_COLUMNS);
+  assert.deepEqual(prepared.input.skinIds, ["skin_gu", "skin_luna"]);
+});
+
+test("SK11-R3-02: caller revision cannot override the admitted version or a missing/stale database catalog", async () => {
+  const fake = new FakeClient(), h = mapLegacySkinHolding({ accountKey: "source-1", gameId: "game-delta", columns: DEFAULT_COLUMNS }, buildLegacySkinIndex(catalogFor(fake)), "999999");
+  await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", validInput({ catalogRevision: "999999", holdingDigest: h.digest }), ACTOR), /revision does not match/);
+  for (const revision of [null, "147"]) {
+    const changed = new FakeClient(); changed.gameCatalogRevision = revision;
+    await assert.rejects(() => recordLegacySkinHoldings(asClient(changed), "account-1", validInput(), ACTOR), /catalog changed/);
+    assert.equal(changed.legacySkinHoldings.size, 0);
+  }
+  const fresh = new FakeClient(), pkg = sourcePackage(fresh); pkg.catalogRevision = "147"; fresh.gameCatalogRevision = "147";
+  const bytes = JSON.stringify(pkg), admission = prepareLegacySkinHoldingsAdmission(bytes, sha256Hex(bytes));
+  const prepared = prepareLegacySkinHoldingsInput(admission, "source-1", catalogFor(fresh), "fixture:current147");
+  await writeLegacySkinHoldings(asClient(fresh), prepared.accountId, prepared.input, ACTOR, admission);
+  assert.equal(fresh.legacySkinHoldings.size, 1);
+  fresh.gameCatalogRevision = "148";
+  await writeLegacySkinHoldings(asClient(fresh), prepared.accountId, prepared.input, ACTOR, admission);
+  assert.equal(fresh.legacySkinHoldings.size, 1);
+  assert.equal(fresh.idempotency.size, 1);
+});
+
+test("SK11-R3-03: all nine preserved ambiguous source tokens remain blocked after catalog identity is VERIFIED", async () => {
+  const names = ["影锋", "AUG-气象感应", "K416-命运", "M4棱镜攻势", "M7棱镜攻势", "QBZ95-王牌之剑", "SCAR-电玩", "Vctor-冲锋枪-美杜莎", "腾龙-气象感应"];
+  const rules: LegacySkinTokenRule[] = names.map((token, i) => ({ field: i === 0 ? "knife_skin" : "weapon_skin", token, decision: "SOURCE_AMBIGUOUS", sources: [
+    { dictField: i === 0 ? "knife_skin" : "weapon_skin", dictTypeId: null, dictDataId: 100 + i, state: "CURRENT" },
+    { dictField: "knife_skin", dictTypeId: 1, dictDataId: 200 + i, state: "HISTORICAL_SOFT_DELETED" },
+  ] }));
+  for (const [i, rule] of rules.entries()) {
+    const columns = { ...EMPTY_COLUMNS, [rule.field]: rule.token }, fake = new FakeClient(columns, rules), skinId = "skin_ambiguous_" + i;
+    fake.skins.set(skinId, { id: skinId, game_id: "game-delta", naming_state: "VERIFIED", enabled: true, form_visible: true,
+      source_field: rule.field, source_token: rule.token });
+    const unguarded = mapLegacySkinHolding({ accountKey: "source-1", gameId: "game-delta", columns }, buildLegacySkinIndex(catalogFor(fake)), "146");
+    assert.equal(unguarded.complete, true);
+    await assert.rejects(() => recordLegacySkinHoldings(asClient(fake), "account-1", Object.assign(validInput({ columns, skinIds: [skinId], holdingDigest: unguarded.digest }), { tokenRules: [] }), ACTOR), /unmapped, pending, or ambiguous/);
+    assert.throws(() => prepareLegacySkinHoldingsInput(admissionFor(fake), "source-1", catalogFor(fake), "fixture:ambiguous"), /not completely declarable/);
+    assert.equal(fake.legacySkinHoldings.size, 0);
+  }
 });
