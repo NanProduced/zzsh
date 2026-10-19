@@ -1,4 +1,5 @@
 import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
+import type {DistributionEarningStore} from '../finance/distribution-earning-store';
 import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-dispatch";
 import { OrderTeamLifecycle } from "../im/order-team";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
@@ -58,7 +59,7 @@ import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEvents
 import { assertLocalDistributionAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
 import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
-import { mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
+import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
 import { mountDistributionPolicyRoutes } from "../finance/distribution-policy-routes";
 
@@ -86,6 +87,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Exact local creation-receipt capability; absent in ordinary configuration. */
   distributionScope?: LocalDistributionScope;
   distributionReadScope?: LocalDistributionScope;
+  /** Explicit bounded local driver; no production or environment default. */
+  distributionEarnings?: DistributionEarningStore;
   /** Explicit local assembly only; lets fresh registrations initialize a native zero origin on one exact resource. */
   nativeWalletOrigin?: NativeOriginResource;
   /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
@@ -737,6 +740,10 @@ export async function mountAuthHandlers(
 ): Promise<AuthSecurityOptions> {
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);
+  if(options.distributionEarnings){
+    if(!options.localControlledPayments||!options.distributionScope)throw new ConfigurationError('Distribution earnings require explicit local payment and distribution capabilities');
+    assertLocalControlledPaymentAssembly(options.localControlledPayments);
+  }
   const legacyPublicAdmission=options.legacyPublicAdmission ? parseLegacyPublicAdmission(options.legacyPublicAdmission) : undefined;
   if(legacyPublicAdmission) await assertLegacyPublicAdmissionTarget(options.pool,legacyPublicAdmission);
   const legacyPublicAdmissionManifest=options.legacyPublicAdmissionManifest;
@@ -1038,6 +1045,7 @@ export async function mountAuthHandlers(
   })();
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
+    distributionEarnings: options.distributionEarnings,
     orderHoldSeconds,
     legacyDutyFinalizationReader: readLegacyDutyFinalization,
     supplyGateReader,

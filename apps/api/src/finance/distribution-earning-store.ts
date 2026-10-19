@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';import type {Pool,PoolClient} from 'pg';
+import {Logger} from '@nestjs/common';
 import {withTransaction,recordAudit,SecurityApiError} from '../auth/security-core';import {canonicalize} from '../supply/content-hash';import {conflict,invalid,notFound} from '../supply/supply-util';
-import {createPaymentDistributionStore} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
+import {createPaymentDistributionStore,type DistributionOrderScope} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 function originalOutcome(receipt:any,root:RentalEarning,action:'SETTLE'|'REVOKE'|'RECOVER'){
  const version=String(receipt.result_version),expected=String(receipt.expected_version),event=receipt.finance_event_id;
@@ -9,7 +10,6 @@ function originalOutcome(receipt:any,root:RentalEarning,action:'SETTLE'|'REVOKE'
  if(state==='RECOVERY_REQUIRED'&&BigInt(root.amountCents)<=0n||version===root.version&&(root.state!==state||root.fundsDisposition!==fundsDisposition||root.recoveryRequiredCents!==recoveryRequiredCents))throw conflict('Original outcome differs from the exact current transition');
  return{earningId:root.id,action,version,state,fundsDisposition,recoveryRequiredCents,financeEventId:event,sourceDigest:receipt.source_digest};
 }
-type Scope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
 function seed(row:any):RentalEarning{
  if(sha(row.canonical_seed)!==row.seed_digest)throw conflict('Original earning source digest differs');
  const original=JSON.parse(row.canonical_seed),source={kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:row.order_id} as const;
@@ -23,15 +23,15 @@ function seed(row:any):RentalEarning{
  return{...original,state:row.state,fundsDisposition:row.funds_disposition,version:String(row.version),recoveryRequiredCents:row.recovery_required_cents===null?null:String(row.recovery_required_cents)};
 }
 /** Candidate only: no HTTP outcome/amount fields, no automatic worker start. */
-export function createDistributionEarningStore(scope:Scope){
+export function createDistributionEarningStore(scope:DistributionOrderScope){
  const payment=createPaymentDistributionStore(scope),allowed=new Set(scope.allowedOrderIds),name='zzsh_test_order_'+scope.resourceSet,role='zzsh_order_'+scope.resourceSet+'_r';
  async function ready(c:PoolClient){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS complete FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||Number(r.oid)!==scope.resourceOid||r.name!==name||r.role!==role||r.marker!=='zzsh:order-reservation-test:v1'||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');}
  async function orderLock(c:PoolClient,orderId:string){if(!allowed.has(orderId))throw notFound();await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['zzsh:earning-order:'+orderId]);}
  async function wallet(c:PoolClient,userId:string){const covered=(await c.query('SELECT 1 FROM zzsh_order.wallet_coverage WHERE user_id=$1',[userId])).rowCount;if(!covered)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet origin coverage not closed');const r=(await c.query(`SELECT ledger_revision::text AS revision,COALESCE((SELECT sum(credit_cents-debit_cents) FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code IN('OWNER_AVAILABLE','WALLET_AVAILABLE')),0)::text AS available FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0];if(!r||BigInt(r.available)<0n)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet requires reconciliation');return r;}
  async function append(c:PoolClient,root:RentalEarning,plan:EarningLedgerPlan,revision:string){const eventId='earning_event_'+sha(canonicalize([root.economicKey,plan.kind])).slice(0,40);await c.query('INSERT INTO zzsh_order.finance_event(id,economic_root_id,kind,subject_user_id,expected_ledger_revision) VALUES($1,$2,$3,$4,$5)',[eventId,root.id,plan.kind,root.beneficiaryUserId,revision]);for(const[n,line]of plan.lines.entries())await c.query(`INSERT INTO zzsh_order.settlement_ledger_entry(id,finance_event_id,line_no,account_code,debit_cents,credit_cents,counterparty_user_id,source_payment_confirmation_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,['earning_line_'+sha(canonicalize([eventId,n+1])).slice(0,40),eventId,n+1,line.accountCode,line.debitCents,line.creditCents,line.counterpartyUserId,null,JSON.stringify({earningId:root.id,earningRole:root.role,scope:'LOCAL_CONTROLLED'})]);return eventId;}
- async function posting(c:PoolClient,orderId:string){const row=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at FROM zzsh_order.settlement_posting p WHERE order_id=$1`,[orderId])).rows[0];if(!row)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original completed posting unavailable');const facts:CompletedDistributionFacts={origin:'NATIVE',orderId,confirmationId:row.payment_confirmation_id,postingId:row.id,postingDigest:sha(canonicalize(row)),postedAt:row.posted_at,classification:row.early?'EARLY':'NORMAL',calculationMode:row.manual_reason===null?'SYSTEM':'MANUAL',capturedCents:row.captured_cents,ownerNetCents:row.owner_net_cents,renterRefundCents:row.renter_refund_cents,platformContributionCents:row.platform_contribution_cents,compensationFeeCents:row.compensation_fee_cents};return{row,facts};}
+ async function posting(c:PoolClient,orderId:string){const row=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at FROM zzsh_order.settlement_posting p WHERE order_id=$1`,[orderId])).rows[0];if(!row)return null;const facts:CompletedDistributionFacts={origin:'NATIVE',orderId,confirmationId:row.payment_confirmation_id,postingId:row.id,postingDigest:sha(canonicalize(row)),postedAt:row.posted_at,classification:row.early?'EARLY':'NORMAL',calculationMode:row.manual_reason===null?'SYSTEM':'MANUAL',capturedCents:row.captured_cents,ownerNetCents:row.owner_net_cents,renterRefundCents:row.renter_refund_cents,platformContributionCents:row.platform_contribution_cents,compensationFeeCents:row.compensation_fee_cents};return{row,facts};}
  async function accrue(pool:Pool,orderId:string,requestId:string){return withTransaction(pool,async c=>{
-  await ready(c);await orderLock(c,orderId);const completed=await posting(c,orderId),original=await payment.readOriginal(c,orderId,completed.facts.confirmationId),allocation=prepareAccrualFromFrozenPayment(original.basis,completed.facts);if(allocation.knowledge==='UNKNOWN')return allocation;
+  await ready(c);await orderLock(c,orderId);const completed=await posting(c,orderId);if(!completed)return{knowledge:'UNKNOWN' as const,reason:'ORDER_NOT_COMPLETED',baseCents:null,items:[]};const original=await payment.readOriginal(c,orderId,completed.facts.confirmationId),allocation=prepareAccrualFromFrozenPayment(original.basis,completed.facts);if(allocation.knowledge==='UNKNOWN')return allocation;
   await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[[...new Set(allocation.items.map(i=>i.beneficiaryUserId))]]);const results=[];
   for(const item of allocation.items){const found=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact FROM zzsh_order.rental_referral_earning e WHERE economic_key=$1 FOR UPDATE`,[item.economicKey])).rows[0];if(found){if(found.basis_digest!==item.basisDigest||found.posting_digest!==item.postingDigest||String(found.amount_cents)!==item.amountCents||found.due_exact!==item.dueAt)throw conflict('Original economic event has different frozen earning facts');results.push({root:seed(found),replayed:true});continue;}
    const w=await wallet(c,item.beneficiaryUserId),root:RentalEarning={id:'earning_'+sha(item.economicKey),economicKey:item.economicKey,source:{kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:orderId,digest:item.postingDigest,eventAt:completed.facts.postedAt},beneficiaryUserId:item.beneficiaryUserId,role:item.role,policyVersion:item.policyVersion,policyDigest:original.basis!.policyDigest!,baseDigest:allocation.digest,relationDigest:item.relationDigest,amountCents:item.amountCents,dueAt:item.dueAt,fingerprint:sha(canonicalize(item)),state:'PENDING',fundsDisposition:'PENDING',recoveryRequiredCents:null,version:'1'},canonical=canonicalize(root);
@@ -56,7 +56,55 @@ export function createDistributionEarningStore(scope:Scope){
   if(changed.replayed)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original earning transition receipt unavailable');const next={...changed.root,dueAt:root.dueAt};const eventId=changed.ledgerPlan?await append(c,next,changed.ledgerPlan,w.revision):null;
   const updated=await c.query('UPDATE zzsh_order.rental_referral_earning SET state=$2,funds_disposition=$3,version=$4,recovery_required_cents=$5 WHERE id=$1 AND version=$6',[earningId,next.state,next.fundsDisposition,next.version,next.recoveryRequiredCents,expectedVersion]);if(updated.rowCount!==1)throw conflict('Earning CAS changed');await c.query(`INSERT INTO zzsh_order.rental_referral_transition(id,earning_id,action,expected_version,result_version,finance_event_id,reversal_source_id,source_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,['earning_transition_'+sha(earningId+':'+action).slice(0,40),earningId,action,expectedVersion,next.version,eventId,reversal?.id??null,reversal?.source_digest??row.seed_digest]);await recordAudit(c,{actorType:'system',actorId:'distribution-transition',action:'distribution.earning.'+action.toLowerCase(),objectType:'rental_referral_earning',objectId:earningId,requestId,outcome:'SUCCESS',details:{before:root.state,after:next.state,version:next.version,reversalSourceId:reversal?.id??null}});await c.query('SET CONSTRAINTS ALL IMMEDIATE');return{root:next,replayed:false,originalResult:originalOutcome({earning_id:earningId,action,expected_version:expectedVersion,result_version:next.version,finance_event_id:eventId,source_digest:reversal?.source_digest??row.seed_digest},next,action)};
  });}
- return{accrue,transition};
+ async function settleDue(pool:Pool,limit:number,requestId:string){
+  if(allowed.size>100||!Number.isSafeInteger(limit)||limit<1||limit>100||!requestId)throw invalid('Bounded due batch and request required');
+  const due=await withTransaction(pool,async c=>{
+   await ready(c);
+   return(await c.query(`SELECT id,version::text AS version FROM zzsh_order.rental_referral_earning
+    WHERE order_id=ANY($1::text[]) AND state='PENDING' AND due_at<=clock_timestamp() ORDER BY due_at,id LIMIT $2`,
+    [[...allowed],limit])).rows as {id:string;version:string}[];
+  });
+  const results:({earningId:string;status:'SETTLED';currentState:RentalEarning['state'];replayed:boolean}|{earningId:string;status:'UNKNOWN';errorCode:string})[]=[];
+  for(const row of due){
+   try{
+    const result=await transition(pool,row.id,'SETTLE',row.version,requestId);
+    results.push({earningId:row.id,status:'SETTLED',currentState:result.root.state,replayed:result.replayed});
+   }catch(error){
+    results.push({earningId:row.id,status:'UNKNOWN',errorCode:distributionFailureCode(error)});
+    break;
+   }
+  }
+  return{scope:'LOCAL_CONTROLLED' as const,selected:due.length,notAttempted:due.length-results.length,recoveryRequired:results.some(r=>r.status==='UNKNOWN'),results};
+ }
+ async function readOrder(pool:Pool,orderId:string){return withTransaction(pool,async c=>{
+  await ready(c);if(!allowed.has(orderId))throw notFound();
+  const rows=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact
+   FROM zzsh_order.rental_referral_earning e WHERE order_id=$1 ORDER BY id`,[orderId])).rows;
+  const items=[];
+  for(const row of rows){
+   const root=seed(row),receipts=(await c.query('SELECT * FROM zzsh_order.rental_referral_transition WHERE earning_id=$1 ORDER BY result_version',[row.id])).rows;
+   items.push({root,transitions:receipts.filter(r=>['SETTLE','REVOKE','RECOVER'].includes(r.action)).map(r=>originalOutcome(r,root,r.action))});
+  }
+  return{scope:'LOCAL_CONTROLLED' as const,orderId,items};
+ });}
+ return{accrue,transition,settleDue,readOrder,admitsOrder:(orderId:string)=>allowed.has(orderId)};
+}
+export type DistributionEarningStore=ReturnType<typeof createDistributionEarningStore>;
+export function distributionFailureCode(error:unknown){
+ const code=(error as {code?:unknown}|null)?.code;
+ return typeof code==='string'&&/^[A-Z0-9_]{1,64}$/.test(code)?code:'EARNING_WRITE_FAILED';
+}
+/** The posting is already committed. Its original economic roots are the recovery keys. */
+export function distributionSettlementPostCommitCallback(pool:Pool,orderId:string,requestId:string,store?:DistributionEarningStore):(()=>Promise<void>)|undefined{
+ if(!store?.admitsOrder(orderId))return undefined;
+ return async()=>{
+  try{
+   const result=await store.accrue(pool,orderId,requestId);
+   if(result.knowledge==='UNKNOWN'&&result.reason!=='ORDER_NOT_COMPLETED')Logger.warn({event:'distribution.accrual.unknown',orderId,requestId,reason:result.reason},'Distribution');
+  }catch(error){
+   Logger.warn({event:'distribution.accrual.unknown',orderId,requestId,reason:distributionFailureCode(error),recovery:'READ_ORIGINAL_ORDER_BEFORE_RECOVERY'},'Distribution');
+  }
+ };
 }
 
 

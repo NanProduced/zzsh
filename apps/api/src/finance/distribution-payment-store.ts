@@ -2,12 +2,12 @@ import {createHash} from 'node:crypto';import type {PoolClient} from 'pg';
 import {SecurityApiError,recordAudit} from '../auth/security-core';import {conflict,invalid,notFound} from '../supply/supply-util';import {canonicalize,withoutContentHash} from '../supply/content-hash';import {sourceYuanToCents} from './personal-finance-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';import {readDistributionParentInTransaction} from './invitation-store';import {freezePaymentDistributionBasis,readOriginalPaymentDistributionBasis,type PaymentDistributionBasis,type PaymentReferralFacts} from './distribution-payment-basis';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-type Scope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
+export type DistributionOrderScope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
 type Prepared={orderId:string};
 /** Candidate integration seam. Caller is the verified payment gate on its original transaction.
  * No route or default scope. Null means no admission; explicit composition must reject it.
  * Old payment callers that do not install this store retain their original behavior. */
-export function createPaymentDistributionStore(scope:Scope){
+export function createPaymentDistributionStore(scope:DistributionOrderScope){
  if(!/^[a-z][a-z0-9_]{0,20}$/.test(scope.resourceSet)||!Number.isSafeInteger(scope.resourceOid)||scope.resourceOid<=0||!/^[0-9a-f]{64}$/.test(scope.approvalDigest)||!scope.allowedOrderIds.length||scope.allowedOrderIds.some(id=>!ID.test(id)))throw invalid('Exact reviewed order resource and allowlist required');
  const allowed=new Set(scope.allowedOrderIds),name='zzsh_test_order_'+scope.resourceSet,role='zzsh_order_'+scope.resourceSet+'_r',prepared=new WeakMap<object,{client:PoolClient;transactionId:string;input:Omit<Parameters<typeof freezePaymentDistributionBasis>[0],'confirmationId'|'acceptedAt'|'paymentDigest'>}>();
  async function resource(c:PoolClient){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||Number(r.oid)!==scope.resourceOid||r.name!==name||r.role!==role||r.marker!=='zzsh:order-reservation-test:v1')throw conflict('Distribution payment resource differs');}

@@ -6,6 +6,7 @@ import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { bodyOf, ensureOnlyFields, invalid, notFound, sendJson } from "../supply/supply-util";
 import { decodeId, requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
 import { membershipGrowthPostCommitCallback } from "../auth/membership-growth-integration";
+import { distributionSettlementPostCommitCallback, type DistributionEarningStore } from "../finance/distribution-earning-store";
 import {
   adjustSettlement,
   classifySettlement,
@@ -22,9 +23,16 @@ import {
   submitSettlement,
 } from "./settlement-record";
 
-type Options = AuthSecurityOptions & { settlementRecordingEnabled?: boolean };
+type Options = AuthSecurityOptions & { settlementRecordingEnabled?: boolean; distributionEarnings?: DistributionEarningStore };
 type Request = Parameters<typeof requestPath>[0];
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function settlementPostCommit(options:Options,orderId:string,actor:{realm:'user'|'admin';userId:string;sessionId:string},requestId:string){
+  const growth=membershipGrowthPostCommitCallback(options.pool,orderId,actor,requestId);
+  const distribution=distributionSettlementPostCommitCallback(options.pool,orderId,requestId,options.distributionEarnings);
+  if(!growth&&!distribution)return undefined;
+  return async()=>{try{await growth?.();}finally{await distribution?.();}};
+}
 
 function idOf(value: string): string {
   const id = decodeId(value);
@@ -109,7 +117,7 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
       (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId),
       (client, result) => projectSettlementResponse(client, actor, result),
-      membershipGrowthPostCommitCallback(options.pool, orderId, actor, requestId));
+      settlementPostCommit(options, orderId, actor, requestId));
     return true;
   }
   if (method === "POST" && opening) {
@@ -199,7 +207,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
       (client) => reviewSettlement(client, orderId, versionId, actor, versionHash, requestId),
       (client, result) => projectSettlementResponse(client, actor, result),
-      membershipGrowthPostCommitCallback(options.pool, orderId, actor, requestId));
+      settlementPostCommit(options, orderId, actor, requestId));
     return true;
   }
   if (method === "POST" && adjust) {

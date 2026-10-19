@@ -8,6 +8,7 @@ import { ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v
 import { bodyOf, conflict, ensureOnlyFields, forbidden, headerValue, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { confirmOrderPayment, createControlledPaymentSource } from "./payment-confirmation";
+import type { PaymentDistributionStore } from "../finance/distribution-payment-store";
 
 /**
  * Explicit local test-only assembly seam. The page submits a payment request and the server,
@@ -19,6 +20,7 @@ export type LocalControlledPaymentOptions = Readonly<{
   resourceSet: string;
   appId: string;
   merchantScopeId: string;
+  distribution?: PaymentDistributionStore;
 }>;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PATHS = ["/api/v1/orders", "/api/bff/user/orders"] as const;
@@ -87,7 +89,10 @@ export function mountLocalControlledPayments(app: INestApplication, security: Au
           const applied = (await client.query(
             `SELECT id, reason_code AS "reasonCode" FROM zzsh_order.payment_confirmation WHERE order_id=$1 AND disposition='APPLIED'`, [orderId],
           )).rows[0];
-          if (applied) return { confirmationId: applied.id, disposition: "APPLIED", reasonCode: applied.reasonCode, replay: true };
+          if (applied) {
+            if (options.distribution) await options.distribution.readOriginal(client, orderId, applied.id);
+            return { confirmationId: applied.id, disposition: "APPLIED", reasonCode: applied.reasonCode, replay: true };
+          }
           if (order.status !== "PENDING_PAYMENT") throw conflict("Order is not awaiting local payment");
           const total = (BigInt(order.rental_amount_cents) + BigInt(order.deposit_amount_cents)).toString();
           const payment = await confirmOrderPayment(client, source({
@@ -95,7 +100,7 @@ export function mountLocalControlledPayments(app: INestApplication, security: Au
             // Stable per order so a retried key replays the identical local declaration; the
             // authoritative acceptance time is still the database clock inside the gate.
             amountCents: total, currency: order.currency, providerPaidAt: order.created_at as string, requestId,
-          }));
+          }), options.distribution);
           return payment;
         });
         sendJson(response, 200, { payment: result }, requestId);

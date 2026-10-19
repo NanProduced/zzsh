@@ -1,4 +1,5 @@
 import type { INestApplication } from "@nestjs/common";
+import type { DistributionEarningStore } from "../finance/distribution-earning-store";
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import type { OrderImSdkRouteBindings } from "../config/config";
@@ -51,6 +52,7 @@ import {
 } from "./order";
 
 export type OrderRuntimeOptions = AuthSecurityOptions & {
+  distributionEarnings?: DistributionEarningStore;
   legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;

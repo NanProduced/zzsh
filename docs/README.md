@@ -16,6 +16,7 @@
 - [旧交易续办与责任边界](architecture/legacy-trade-continuation.md)
 - [会员成长与人工礼遇](architecture/membership-growth.md)
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)
+- [分销与本地提现](architecture/distribution-and-withdrawal.md)
 - [开租与结算确认](architecture/settlement-confirmation.md)
 - [公开列表组合筛选与配置](architecture/listing-query.md)
 - [账号公开查看、可租状态与编号](architecture/account-visibility.md)
