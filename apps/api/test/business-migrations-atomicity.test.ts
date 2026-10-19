@@ -5,6 +5,22 @@ import {resolve} from 'node:path';
 import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 import {ModuleKind,ScriptTarget,transpileModule} from 'typescript';
+import {createHash} from 'node:crypto';
+
+test('0087 fixes the legacy-duty audit alias and preserves the full admission and transition guards',()=>{
+ const prior=readFileSync(resolve('migrations/business/0074_legacy_trade_continuation.sql'),'utf8');
+ assert.equal(createHash('sha256').update(prior).digest('hex'),'0afd676ab9f0fd3b9be88718a6202ce38d6ffcc8a966d5605437c1baf41d7dbd');
+ const block=prior.match(/CREATE FUNCTION zzsh_order\.guard_legacy_duty\(\)[\s\S]*?END \$\$;/)![0].replaceAll('\r\n','\n');
+ const predicate=block.slice(block.indexOf("IF NEW.status='VOID'"),block.indexOf("  THEN RAISE EXCEPTION 'Commission void"));
+ assert.match(predicate,/FROM zzsh_iam\.audit_event a WHERE a\.id=/);
+ const expected=block.replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION').replace(predicate,predicate.replace('audit_event a WHERE','audit_event audit_evt WHERE').replaceAll(/\ba\./g,'audit_evt.'));
+ const repair=readFileSync(resolve('migrations/business/0087_legacy_duty_audit_alias.sql'),'utf8').replaceAll('\r\n','\n');
+ assert.equal(repair.match(/CREATE OR REPLACE FUNCTION[\s\S]*?END \$\$;/)![0],expected);
+ assert.match(repair,/DECLARE l zzsh_order\.legacy_order_read_snapshot;a zzsh_order\.legacy_order_duty_admission;/);
+ assert.equal(repair.match(/CREATE OR REPLACE FUNCTION/g)?.length,1);
+ const journal=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
+ assert.deepEqual(journal.entries.slice(85,88).map((x:{idx:number;tag:string})=>[x.idx,x.tag]),[[85,'0085_membership_total_discount'],[86,'0086_legacy_skin_holding'],[87,'0087_legacy_duty_audit_alias']]);
+});
 
 const runnerPath=resolve('src/database/business-migrations.ts');
 const runnerSource=readFileSync(runnerPath,'utf8');
