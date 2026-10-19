@@ -8,7 +8,7 @@ import react from "@vitejs/plugin-react";
 
 const rootPath = fileURLToPath(new URL("..", import.meta.url));
 
-test("admin membership view separates draft, local preview and approval execution", async () => {
+test("admin membership view edits total-discount shares and manual entitlement discounts", async () => {
   const browser = new Window({ url: "http://127.0.0.1:3101/membership-growth" });
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, getComputedStyle: browser.getComputedStyle.bind(browser), requestAnimationFrame: (callback) => setTimeout(() => callback(Date.now()), 0), cancelAnimationFrame: (id) => clearTimeout(id), IS_REACT_ACT_ENVIRONMENT: true });
   const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
@@ -17,19 +17,21 @@ test("admin membership view separates draft, local preview and approval executio
   browser.document.body.append(host);
   const { createRoot } = await import("react-dom/client");
   const root = createRoot(host);
-  const contract = (mode) => ({ mode, priceVersionId: "price-v1", haff: { status: "CONFIGURED", kind: "HAFF_RATIO", schema: "haff-ratio-v1", priceVersionId: "price-v1", costBasisRef: "cost-v1", baseBySafeBox: { box: "50", "box-2": "60" }, spreadDelta: "0" }, materials: { item: { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: "item", unit: "PIECE", unitQuantity: "1", buyerUnitAmount: "5.00", ownerUnitAmount: "3.00", priceVersionId: "price-v1", costBasisRef: "cost-v1" }, "item-2": { status: "CONFIGURED", kind: "FIXED_UNIT", itemId: "item-2", unit: "DAY", unitQuantity: "1", buyerUnitAmount: "6.00", ownerUnitAmount: "4.00", priceVersionId: "price-v1", costBasisRef: "cost-v1" } } });
-  const policy = { version: "b1", status: "DRAFT", effectiveAt: null, catalog: { safeBoxes: ["box", "box-2"], materials: [{ id: "item", name: "物资一", unit: "PIECE" }, { id: "item-2", name: "物资二", unit: "DAY" }], priceVersions: [{ id: "price-v1", label: "当前价格方案" }] }, selectedSafeBoxCode: "box", selectedMaterialId: "item", tiers: ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map((tier, index) => ({ tier, threshold: String(index * 5000), tenantDeposit: index < 2 ? "ACCOUNT_BASE" : "WAIVED", ordinary: contract("ordinary"), custom: contract("custom"), fast: contract("fast"), maxEntitlement: contract("ordinary") })), changes: [{ label: "金卡免押", before: "按账号条件", after: "默认免押", risk: "LOW" }] };
-  const state = { status: "ready", policy, preview: { status: "LOCAL_FIXTURE", totalCents: "5", priceBasis: "GROWTH", depositBasis: "FRIEND" }, subject: { subjectId: "user-a", status: "LOADED", userLabel: "用户甲", tier: "GOLD", rollingPoints: "12000", lifetimePoints: "15000", evidence: ["结算版本 s1", "退款更正 1 条"] }, entitlement: { kind: "FRIEND", scopeKey: "game:delta", startsAtUtc: "2026-10-10T02:00:00.000Z", endsAtUtc: "2026-10-20T02:00:00.000Z", pricingMode: "ordinary", priceVersionId: "price-v1", haffSchema: "haff-ratio-v1", safeBoxCode: "box", haffBaseRatio: "50", materialItemId: "item", materialUnit: "PIECE", materialUnitQuantity: "1", materialBuyerUnitAmount: "5.00", materialOwnerUnitAmount: "3.00", costBasisRef: "cost-v1", depositWaived: false, reason: "客服专项" }, approval: { status: "APPROVED_PENDING_EXECUTION", requestId: "approval_1", message: "已批准，等待阶段B执行接线" } };
+  const contract = (mode, payableRatio = "0.9") => ({ status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode, priceVersionId: "price-v1", payableRatio, costBasisRef: "cost-v1" });
+  const policy = { version: "b1", status: "DRAFT", effectiveAt: "2026-11-01T00:00:00.000Z", catalog: { safeBoxes: [], materials: [], priceVersions: [{ id: "price-v1", label: "当前价格方案" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD", catalogSource: "SEALED" }, selectedSafeBoxCode: "", selectedMaterialId: "", tiers: ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map((tier, index) => { const share = ["0.95", "0.90", "0.88", "0.86", "0.84"][index]; return { tier, threshold: String(index * 5000), tenantDeposit: index < 2 ? "ACCOUNT_BASE" : "WAIVED", ordinary: contract("ordinary", share), custom: contract("custom", share), fast: { status: "NOT_PRICED", reason: "权威禁用模式" }, maxEntitlement: { status: "NOT_PRICED", reason: "礼遇上限待配置" } }; }), changes: [{ label: "金卡免押", before: "按账号条件", after: "默认免押", risk: "LOW" }] };
+  const state = { status: "ready", policy, preview: { status: "LOCAL_FIXTURE", totalCents: "5", priceBasis: "GROWTH", depositBasis: "FRIEND" }, subject: { subjectId: "user-a", status: "LOADED", userLabel: "用户甲", tier: "GOLD", rollingPoints: "12000", lifetimePoints: "15000", evidence: ["结算版本 s1", "退款更正 1 条"] }, entitlement: { kind: "FRIEND", scopeKey: "game:delta", startsAtUtc: "2026-10-10T02:00:00.000Z", endsAtUtc: "2026-10-20T02:00:00.000Z", pricingMode: "ordinary", priceVersionId: "price-v1", payableRatio: "0.85", costBasisRef: "cost-ent", depositWaived: false, reason: "客服专项" }, approval: { status: "APPROVED_PENDING_EXECUTION", requestId: "approval_1", message: "已批准，等待阶段B执行接线" } };
   const changed = [];
   const entitlementChanges = [];
   const saves = [];
   const submitted = [];
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state, onEntitlementChange: (value) => entitlementChanges.push(value), onPolicyChange: (value) => changed.push(value), onSavePolicyDraft: () => saves.push("save"), onSubmitEntitlement: () => submitted.push("submit") })));
+  const policysubmitted = [];
+  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state, onEntitlementChange: (value) => entitlementChanges.push(value), onPolicyChange: (value) => changed.push(value), onSavePolicyDraft: () => saves.push("save"), onSubmitPolicy: () => policysubmitted.push("submit-policy"), onSubmitEntitlement: () => submitted.push("submit") })));
   assert.match(host.textContent, /成长权益与人工礼遇/);
-  assert.match(host.textContent, /哈夫/);
+  assert.match(host.textContent, /五档总价折扣/);
   assert.match(host.textContent, /¥0.05/);
+  assert.match(host.textContent, /礼遇上限/);
   assert.doesNotMatch(host.textContent, /LOCAL_UI \/ FIXTURE/);
-  assert.doesNotMatch(host.textContent, /APPROVED_PENDING_EXECUTION|PIECE|schema/);
+  assert.doesNotMatch(host.textContent, /APPROVED_PENDING_EXECUTION/);
   assert.match(host.textContent, /已批准，等待阶段B执行接线/);
   assert.doesNotMatch(host.textContent, /授予成功/);
   assert.ok(host.querySelector("input[type=datetime-local]"));
@@ -40,26 +42,39 @@ test("admin membership view separates draft, local preview and approval executio
   await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(reason, "新的礼遇申请原因"); reason.dispatchEvent(new browser.Event("input", { bubbles: true })); reason.dispatchEvent(new browser.Event("change", { bubbles: true })); });
   assert.equal(entitlementChanges.at(-1).reason, "新的礼遇申请原因");
   assert.equal(host.querySelector("textarea").value, "新的礼遇申请原因");
-  const materialTrigger = host.querySelector("button[aria-label='物资']");
-  assert.ok(materialTrigger);
-  await act(async () => materialTrigger.click());
-  const materialOption = [...browser.document.querySelectorAll("[role=option]")].find((option) => option.textContent === "物资二");
-  assert.ok(materialOption);
-  await act(async () => materialOption.click());
-  assert.equal(entitlementChanges.at(-1).materialItemId, "item-2");
-  assert.equal(entitlementChanges.at(-1).materialUnit, "DAY");
-  const ratio = host.querySelector("input[aria-label='STANDARDordinary哈夫比例']");
-  assert.ok(ratio);
-  await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(ratio, "52"); ratio.dispatchEvent(new browser.Event("input", { bubbles: true })); ratio.dispatchEvent(new browser.Event("change", { bubbles: true })); });
-  assert.ok(changed.length > 0);
-  assert.equal(changed.at(-1).tiers[0].ordinary.haff.baseBySafeBox["box-2"], "60");
-  assert.equal(changed.at(-1).tiers[0].ordinary.materials["item-2"].buyerUnitAmount, "6.00");
+  const setInput = async (element, value) => { await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(element, value); element.dispatchEvent(new browser.Event("input", { bubbles: true })); element.dispatchEvent(new browser.Event("change", { bubbles: true })); }); };
+  const inputByLabel = (label) => { const input = host.querySelector(`input[aria-label='${label}']`); assert.ok(input, `missing input ${label}`); return input; };
+  // The member discount is one payable share per tier and mode, never a second base price table.
+  await setInput(inputByLabel("SILVERordinary应付比例"), "0.92");
+  assert.equal(changed.at(-1).tiers[1].ordinary.payableRatio, "0.92");
+  await setInput(inputByLabel("SILVERordinary成本依据"), "cost-v2");
+  assert.equal(changed.at(-1).tiers[1].ordinary.costBasisRef, "cost-v2");
+  await setInput(inputByLabel("政策生效时点"), "2026-11-01T00:00");
+  assert.equal(changed.at(-1).effectiveAt, "2026-10-31T16:00:00.000Z");
+  // DRAFT with complete enabled modes can request approval once the missing caps are filled explicitly.
+  const fillCaps = [...host.querySelectorAll("button")].find((button) => button.textContent === "按档位边界补齐/修正礼遇上限");
+  assert.ok(fillCaps);
+  await act(async () => fillCaps.click());
+  assert.equal(changed.at(-1).tiers[1].maxEntitlement.byMode.ordinary.payableRatio, "0.92");
+  assert.equal(changed.at(-1).tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.88");
+  const submitPolicy = [...host.querySelectorAll("button")].find((button) => button.textContent === "提交审批");
+  assert.ok(submitPolicy && !submitPolicy.disabled, host.textContent.slice(-800));
+  await act(async () => submitPolicy.click());
+  assert.deepEqual(policysubmitted, ["submit-policy"]);
+  // Manual entitlement discounts: a deeper share than the tier cap is blocked, a valid one submits.
+  await setInput(inputByLabel("礼遇应付比例"), "0.80");
+  assert.match(host.textContent, /礼遇折扣深于该成长档上限/);
+  assert.equal([...host.querySelectorAll("button")].find((button) => button.textContent === "提交礼遇审批").disabled, true);
+  await setInput(inputByLabel("礼遇应付比例"), "0.92");
+  await setInput(inputByLabel("礼遇成本依据"), "cost-ent-2");
+  assert.equal(entitlementChanges.at(-1).payableRatio, "0.92");
+  assert.equal(entitlementChanges.at(-1).costBasisRef, "cost-ent-2");
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存草稿");
   assert.ok(save);
   await act(async () => save.click());
   assert.deepEqual(saves, ["save"]);
   const submit = [...host.querySelectorAll("button")].find((button) => button.textContent === "提交礼遇审批");
-  assert.ok(submit && !submit.disabled);
+  assert.ok(submit && !submit.disabled, host.textContent.slice(-500));
   await act(async () => submit.click());
   assert.deepEqual(submitted, ["submit"]);
   let revoked = null;
@@ -69,7 +84,7 @@ test("admin membership view separates draft, local preview and approval executio
   const revoke = host.querySelector("button.membership-admin-button--danger");
   const revokeInput = host.querySelector(".membership-admin-revoke-row input");
   assert.ok(revoke && revokeInput);
-  await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(revokeInput, "客户要求撤销"); revokeInput.dispatchEvent(new browser.Event("input", { bubbles: true })); revokeInput.dispatchEvent(new browser.Event("change", { bubbles: true })); });
+  await setInput(revokeInput, "客户要求撤销");
   await act(async () => revoke.click());
   assert.equal(revoked, "客户要求撤销");
   await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "loading" } })));
@@ -96,6 +111,106 @@ test("admin membership view separates draft, local preview and approval executio
   await act(async () => root.unmount());
   await vite.close();
   await browser.happyDOM.abort();
+});
+
+test("empty policy bootstrap, discount gating and cap seeding stay honest", async () => {
+  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
+  try {
+    const { bootstrapGrowthPolicy, validateAdminPolicyDraft, entitlementFromCap, capStatusSummary, completeEntitlementCaps } = await vite.ssrLoadModule("/src/views/membership-growth-view.tsx");
+    const catalog = { safeBoxes: [], materials: [], priceVersions: [{ id: "price-v1", label: "price-v1" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD" };
+    const policy = bootstrapGrowthPolicy(catalog, { STANDARD: "0", SILVER: "5000", GOLD: "10000", PLATINUM: "20000", DIAMOND: "40000" }, 1);
+    assert.equal(policy.version, "1");
+    assert.equal(policy.status, "DRAFT");
+    assert.deepEqual(policy.tiers.map((tier) => tier.tenantDeposit), ["ACCOUNT_BASE", "ACCOUNT_BASE", "WAIVED", "WAIVED", "WAIVED"]);
+    assert.equal(policy.tiers.every((tier) => tier.ordinary.status === "NOT_PRICED" && tier.maxEntitlement.status === "NOT_PRICED"), true);
+    // First draft is savable but not publishable; disabled modes never warn.
+    const first = validateAdminPolicyDraft(policy, ["ordinary", "custom"]);
+    assert.deepEqual(first.errors, []);
+    assert.equal(first.publishable, false);
+    assert.ok(first.warnings.every((warning) => !warning.includes(".fast")));
+    // Enabled modes need explicit shares; unknown values stay pending, invalid values are errors.
+    const enabled = structuredClone(policy);
+    enabled.effectiveAt = "2026-11-01T00:00:00.000Z";
+    const shares = ["0.95", "0.92", "0.90", "0.88", "0.85"];
+    for (const [index, tier] of enabled.tiers.entries()) {
+      for (const mode of ["ordinary", "custom"]) {
+        tier[mode] = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode, priceVersionId: "price-v1", payableRatio: shares[index], costBasisRef: `cost-${tier.tier}` };
+      }
+    }
+    const capsPending = validateAdminPolicyDraft(enabled, ["ordinary", "custom"]);
+    assert.deepEqual(capsPending.errors, []);
+    assert.equal(capsPending.publishable, false);
+    assert.ok(capsPending.warnings.some((warning) => warning.includes("礼遇上限")));
+    // A tightened cap survives the explicit completion action; missing entries are seeded from the tier share.
+    const tightened = structuredClone(enabled);
+    tightened.tiers[2].maxEntitlement = { byMode: { ordinary: { ...tightened.tiers[2].ordinary, payableRatio: "0.95" } } };
+    const completed = completeEntitlementCaps(tightened, ["ordinary", "custom"]);
+    assert.equal(completed.tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.95");
+    assert.equal(completed.tiers[2].maxEntitlement.byMode.custom.payableRatio, "0.90");
+    assert.equal(completed.tiers[0].maxEntitlement.byMode.ordinary.payableRatio, "0.95");
+    const ready = validateAdminPolicyDraft(completeEntitlementCaps(enabled, ["ordinary", "custom"]), ["ordinary", "custom"]);
+    assert.deepEqual(ready.errors, []);
+    assert.equal(ready.publishable, true, JSON.stringify(ready));
+    // Non-monotonic tiers and invalid shares must never publish.
+    const inverted = structuredClone(enabled);
+    inverted.tiers[1].ordinary = { ...inverted.tiers[1].ordinary, payableRatio: "0.99" };
+    const invertedResult = validateAdminPolicyDraft(completeEntitlementCaps(inverted, ["ordinary", "custom"]), ["ordinary", "custom"]);
+    assert.equal(invertedResult.publishable, false);
+    assert.ok(invertedResult.errors.some((error) => error.includes("高档应付比例不得高于低档")));
+    const invalid = structuredClone(enabled);
+    invalid.tiers[0].ordinary = { ...invalid.tiers[0].ordinary, payableRatio: "1.5" };
+    assert.equal(validateAdminPolicyDraft(completeEntitlementCaps(invalid, ["ordinary", "custom"]), ["ordinary", "custom"]).errors.some((error) => error.includes("0–1")), true);
+    // A cap deeper than its tier stays a publish blocker, not silently accepted.
+    const deepCap = structuredClone(enabled);
+    deepCap.tiers[2].maxEntitlement = { byMode: { ordinary: { ...deepCap.tiers[2].ordinary, payableRatio: "0.80" }, custom: { ...deepCap.tiers[2].custom } } };
+    const deepResult = validateAdminPolicyDraft(deepCap, ["ordinary", "custom"]);
+    assert.equal(deepResult.publishable, false);
+    assert.ok(deepResult.warnings.some((warning) => warning.includes("礼遇上限深于该成长档")));
+    // R2-04 sequence 1: tier tightened to 0.91 while the old cap (0.90) is now deeper — the repair action fixes it.
+    const staleCap = structuredClone(enabled);
+    staleCap.tiers[2].ordinary = { ...staleCap.tiers[2].ordinary, payableRatio: "0.91" };
+    staleCap.tiers[2].custom = { ...staleCap.tiers[2].custom, payableRatio: "0.91" };
+    staleCap.tiers[2].maxEntitlement = { byMode: { ordinary: { ...staleCap.tiers[2].ordinary, payableRatio: "0.90" }, custom: { ...staleCap.tiers[2].custom, payableRatio: "0.90" } } };
+    const staleBlocked = validateAdminPolicyDraft(staleCap, ["ordinary", "custom"]);
+    assert.equal(staleBlocked.publishable, false);
+    const staleRepaired = completeEntitlementCaps(staleCap, ["ordinary", "custom"]);
+    assert.equal(staleRepaired.tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.91");
+    assert.equal(validateAdminPolicyDraft(staleRepaired, ["ordinary", "custom"]).publishable, true);
+    // R2-04 sequence 2: caps seeded while the tier cost facts were still empty stay a blocker until repaired.
+    const pendingCosts = structuredClone(enabled);
+    const blankCost = (contract) => ({ ...contract, costBasisRef: "" });
+    pendingCosts.tiers[2].ordinary = blankCost(pendingCosts.tiers[2].ordinary);
+    pendingCosts.tiers[2].custom = blankCost(pendingCosts.tiers[2].custom);
+    pendingCosts.tiers[2].maxEntitlement = { byMode: { ordinary: { ...pendingCosts.tiers[2].ordinary, payableRatio: "0.93", costBasisRef: "" }, custom: blankCost(pendingCosts.tiers[2].custom) } };
+    const missingCost = validateAdminPolicyDraft(pendingCosts, ["ordinary", "custom"]);
+    assert.equal(missingCost.publishable, false);
+    assert.ok(missingCost.warnings.some((warning) => warning.includes("待补 成本依据")));
+    assert.equal(missingCost.errors.length, 0);
+    // Filling the tier cost lets the same explicit action repair only the missing cap cost and keep the tightened share.
+    const filledCosts = structuredClone(pendingCosts);
+    filledCosts.tiers[2].ordinary = { ...filledCosts.tiers[2].ordinary, costBasisRef: "cost-GOLD" };
+    filledCosts.tiers[2].custom = { ...filledCosts.tiers[2].custom, costBasisRef: "cost-GOLD" };
+    const repairedCaps = completeEntitlementCaps(filledCosts, ["ordinary", "custom"]);
+    assert.equal(repairedCaps.tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.93");
+    assert.equal(repairedCaps.tiers[2].maxEntitlement.byMode.ordinary.costBasisRef, "cost-GOLD");
+    assert.equal(repairedCaps.tiers[2].maxEntitlement.byMode.custom.costBasisRef, "cost-GOLD");
+    assert.equal(validateAdminPolicyDraft(repairedCaps, ["ordinary", "custom"]).publishable, true);
+    // A missing price version is an error, and the repair action restores it from the tier contract.
+    const missingVersion = structuredClone(enabled);
+    missingVersion.tiers[2].maxEntitlement = { byMode: { ordinary: { ...missingVersion.tiers[2].ordinary, priceVersionId: "" }, custom: { ...missingVersion.tiers[2].custom } } };
+    const versionResult = validateAdminPolicyDraft(missingVersion, ["ordinary", "custom"]);
+    assert.equal(versionResult.publishable, false);
+    assert.ok(versionResult.errors.some((error) => error.includes("缺少价格版本")));
+    assert.equal(completeEntitlementCaps(missingVersion, ["ordinary", "custom"]).tiers[2].maxEntitlement.byMode.ordinary.priceVersionId, "price-v1");
+    // Entitlement seeding keeps the cap share and its own cost basis.
+    const seededSource = completeEntitlementCaps(enabled, ["ordinary", "custom"]);
+    const seeded = entitlementFromCap(seededSource, "FRIEND", "ordinary", "2026-10-10T02:00:00.000Z", "2026-10-20T02:00:00.000Z");
+    assert.equal(seeded.priceVersionId, "price-v1");
+    assert.equal(seeded.payableRatio, "0.90");
+    assert.equal(seeded.costBasisRef, "cost-GOLD");
+    assert.equal(capStatusSummary(seededSource.tiers[2].maxEntitlement, ["ordinary", "custom"]), "礼遇上限 普通/自定义 已配置");
+    assert.equal(capStatusSummary({ status: "NOT_PRICED", reason: "待核" }, ["ordinary"]), "礼遇上限未配置");
+  } finally { await vite.close(); }
 });
 
 test("policy approval uses immutable saved-draft metadata rather than the full policy body", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { PoolClient } from "pg";
 import type { INestApplication } from "@nestjs/common";
 
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "./auth-security";
@@ -6,7 +7,7 @@ import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "./adm
 import { assertGameScopeUsable, isAllGamesScope, readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 import { readUserContext } from "./user-identity";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
-import { assertSealedRuleRelease } from "./membership-growth-approval";
+import { assertSealedRuleRelease, type SealedReleaseFacts } from "./membership-growth-approval";
 import { assertReplayAuthorization } from "../order/order";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { decodeId, safely, type SupplyResponse } from "../supply/supply-routes";
@@ -41,12 +42,25 @@ function optionalText(body: Record<string, unknown>, field: string): string | nu
 }
 
 function policyCatalog(policy: GrowthBenefitPolicy | null, priceVersionId: string | null): { safeBoxes: string[]; materials: Array<{ id: string; name: string; unit: "ROUND" | "PIECE" | "DAY" }>; priceVersions: Array<{ id: string; label: string }> } {
-  const ordinary = policy?.tiers.STANDARD.pricing.ordinary as unknown as Record<string, unknown> | undefined;
+  const ordinary = policy?.tiers?.STANDARD?.pricing?.ordinary as unknown as Record<string, unknown> | undefined;
   const haff = ordinary?.haff && typeof ordinary.haff === "object" && !Array.isArray(ordinary.haff) && (ordinary.haff as Record<string, unknown>).status === "CONFIGURED" ? ordinary.haff as Record<string, unknown> : null;
   const safeBoxes = haff?.baseBySafeBox && typeof haff.baseBySafeBox === "object" && !Array.isArray(haff.baseBySafeBox) ? Object.keys(haff.baseBySafeBox).sort() : [];
   const materialsRaw = ordinary?.materials && typeof ordinary.materials === "object" && !Array.isArray(ordinary.materials) ? ordinary.materials as Record<string, unknown> : {};
   const materials = Object.values(materialsRaw).filter((item) => { if (!item || typeof item !== "object" || Array.isArray(item)) return false; const row = item as Record<string, unknown>; return row.status === "CONFIGURED" && typeof row.itemId === "string" && ["ROUND", "PIECE", "DAY"].includes(String(row.unit)); }).map((item) => { const row = item as Record<string, unknown>; return { id: row.itemId as string, name: row.itemId as string, unit: row.unit as "ROUND" | "PIECE" | "DAY" }; }).sort((a, b) => a.id.localeCompare(b.id));
   return { safeBoxes, materials, priceVersions: priceVersionId ? [{ id: priceVersionId, label: priceVersionId }] : [] };
+}
+
+/** Read-only release facts for the Admin editor; an unreadable binding falls back to the policy payload. */
+async function sealedFactsOrNull(client: PoolClient, ruleReleaseId: string, priceVersionId: string): Promise<SealedReleaseFacts | null> {
+  try { return await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId); } catch { return null; }
+}
+
+function bootstrapCatalog(sealed: SealedReleaseFacts, priceVersionId: string): ReturnType<typeof policyCatalog> {
+  return {
+    safeBoxes: sealed.catalog.safeBoxes,
+    materials: sealed.catalog.materials.map((material) => ({ id: material.itemId, name: material.name ?? material.itemId, unit: material.unit ?? "PIECE", ...(material.unitQuantity === undefined ? {} : { unitQuantity: material.unitQuantity }) })),
+    priceVersions: [{ id: priceVersionId, label: priceVersionId }],
+  };
 }
 
 export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeRequest, response: SupplyResponse, options: AuthSecurityOptions): Promise<void> {
@@ -76,11 +90,36 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
         await assertAdminContextInTransaction(client, context);
         const access = await loadEffectiveAdminAccess(client, context.userId);
         if (!hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft) && !hasPermission(access, ADMIN_PERMISSION.membershipPolicyPublish) && !hasPermission(access, ADMIN_PERMISSION.membershipGrowthSummaryRead)) throw forbidden();
+        const thresholds = Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()]));
         const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string; policyPayload: GrowthBenefitPolicy }>(
           `SELECT id, version::text AS version, status, effective_at AS "effectiveAt", rule_release_id AS "ruleReleaseId", price_version_id AS "priceVersionId", source_ref AS "sourceRef", payload_hash AS "payloadHash", policy_payload AS "policyPayload"
              FROM zzsh_iam.membership_growth_policy ORDER BY version DESC, created_at DESC LIMIT 1`,
         )).rows[0];
-        return row ? { policy: row.policyPayload, meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog: policyCatalog(row.policyPayload, row.priceVersionId), thresholds: Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()])) } : { policy: null, meta: null, catalog: policyCatalog(null, null), thresholds: Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()])) };
+        if (row) {
+          // R1-03: an existing draft keeps the bound sealed catalog for editing; a pending payload must
+          // never collapse the editor to 0 boxes / 0 resources. An unreadable release is labelled, not faked.
+          const sealed = await sealedFactsOrNull(client, row.ruleReleaseId, row.priceVersionId);
+          const catalog = sealed
+            ? { ...bootstrapCatalog(sealed, row.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const }
+            : { ...policyCatalog(row.policyPayload, row.priceVersionId), releaseMode: null, catalogSource: "POLICY_PAYLOAD" as const };
+          return { policy: row.policyPayload, meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog, thresholds, bootstrap: null };
+        }
+        const sealedRelease = (await client.query<{ releaseId: string; priceVersionId: string }>(
+          `SELECT r.id AS "releaseId", r.price_version_id AS "priceVersionId"
+             FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+            WHERE p.status='SEALED'
+            ORDER BY (EXISTS (SELECT 1 FROM zzsh_supply.game g WHERE g.current_release_id=r.id AND g.enabled)) DESC, r.created_at DESC, r.id DESC
+            LIMIT 1`,
+        )).rows[0];
+        const sealed = sealedRelease ? await sealedFactsOrNull(client, sealedRelease.releaseId, sealedRelease.priceVersionId) : null;
+        if (!sealed) return { policy: null, meta: null, catalog: { ...policyCatalog(null, null), releaseMode: null, catalogSource: null }, thresholds, bootstrap: null };
+        return {
+          policy: null,
+          meta: null,
+          catalog: { ...bootstrapCatalog(sealed, sealedRelease!.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const },
+          thresholds,
+          bootstrap: { ruleReleaseId: sealedRelease!.releaseId, priceVersionId: sealedRelease!.priceVersionId, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, enabledModes: sealed.enabledModes, nextVersionNo: 1, expectedVersion: "0" },
+        };
       });
       sendJson(response, 200, result, requestId);
       return;
@@ -90,8 +129,6 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
     const policy = body.policy;
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new SecurityApiError(400, "INVALID_ARGUMENT", "policy is invalid");
     if ((policy as Record<string, unknown>).status !== "DRAFT") throw new SecurityApiError(400, "INVALID_ARGUMENT", "policy.status must be DRAFT");
-    const validation = validateBenefitPolicy(policy as GrowthBenefitPolicy);
-    if (!validation.valid) throw new SecurityApiError(409, "CONFLICT", validation.errors.join(","));
     const versionNo = body.versionNo;
     if (typeof versionNo !== "number" || !Number.isSafeInteger(versionNo) || versionNo < 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "versionNo is invalid");
     const ruleReleaseId = requiredText(body, "ruleReleaseId");
@@ -105,7 +142,9 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
       await assertAdminContextInTransaction(client, context);
       const access = await loadEffectiveAdminAccess(client, context.userId);
       if (!hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft)) throw forbidden();
-      await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
+      const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
+      const validation = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
+      if (!validation.valid) throw new SecurityApiError(409, "CONFLICT", validation.errors.join(","));
       const current = (await client.query<{ version: string }>(`SELECT version::text AS version FROM zzsh_iam.membership_growth_policy ORDER BY version DESC LIMIT 1`)).rows[0];
       if (expectedVersion !== undefined && (typeof expectedVersion !== "string" || expectedVersion !== (current?.version ?? "0"))) throw new SecurityApiError(409, "CONFLICT", "Membership policy version changed");
       await client.query(
