@@ -58,6 +58,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name === "@heroui/react") return { Chip: ({ children }) => React.createElement("span", null, children) };
     if (name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
     if (name === "./layout/service-shell") return { ServiceShell: ({ children }) => React.createElement("main", null, children) };
+    if (name === "@/components/status/status-page") return { StatusPage: () => null }; // The real shared state page is composed in auth-entry-behavior.
     if (name === "./auth/auth-form") return {
       AuthForm: () => null,
       WebAuthError: ProbeWebAuthError,

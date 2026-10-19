@@ -11,14 +11,14 @@ const code=ts.transpileModule(readFileSync(new URL('../src/components/auth/auth-
 function probe(status,target){
  const exports={},states=[];let index=0;
  new Function('require','exports','window','document','HTMLElement',code)(name=>{
-  if(name==='react')return {...React,useState(initial){const i=index++;states[i]=initial;return [initial,value=>{states[i]=value;}];},useRef:value=>({current:value}),useCallback:fn=>fn,useEffect(){}};
+  if(name==='react')return {...React,useState(initial){const i=index++,value=typeof initial==='function'?initial():initial;states[i]=value;return [value,next=>{states[i]=next;}];},useRef:value=>({current:value}),useCallback:fn=>fn,useEffect(){}};
    if(name==='next/navigation')return {useRouter:()=>({push(){throw Error('Must not navigate without confirmed authentication');},replace(){throw Error('Must not navigate without confirmed authentication');}}),usePathname:()=>'/'};
   if(name.includes('session/user-session-provider'))return {useUserSession:()=>({status,revalidate(){}})};
   if(name==='@/lib/safe-return')return {safeReturnTo:value=>value};
   if(name==='@/components/brand/brand-logo')return {BrandLogo:()=>null};
   if(name==='./auth-form')return {AuthForm:()=>null};
   return require(name);
- },exports,{location:{pathname:'/',search:''}},{activeElement:null},class HTMLElement {});
+ },exports,{location:{pathname:'/',search:'',hash:''}},{activeElement:null},class HTMLElement {});
  const element=exports.AuthOverlayProvider({children:null});
  element.props.value.open(target);
  return states[0];
@@ -68,6 +68,40 @@ test('support and complaint entries wait for unified authentication without crea
 const coordinator = 'apps/web/src/components/auth/auth-overlay-provider.tsx';
 const loginPage = 'apps/web/src/app/login/page.tsx';
 const dialog = p => p.host.querySelector('[role="dialog"]');
+
+// Compose the real route coordinator, AccountWorkspace session gate and StatusPage.
+// Private leaf workspaces are sentinels: this suite must not fetch business or external data.
+const privateAccountView = ({ userId }) => React.createElement('p', { 'data-private-account-view': true }, `PRIVATE_${userId ?? 'account'}`);
+const accountGateModules = {
+  './layout/service-shell': { ServiceShell: ({ children }) => React.createElement('main', null, children) },
+  '@/components/layout/service-shell': { ServiceShell: ({ children }) => React.createElement('main', null, children) },
+  './supply/skin-media-thumb': { SkinMediaThumb: () => null },
+  './favorites/favorites-panel': { FavoritesPanel: privateAccountView },
+  './favorites/favorites-context': { FavoritesProvider: ({ children }) => children },
+  './order/legacy-order-workspace': { LegacyOrderWorkspace: privateAccountView },
+  './order/order-workspace': { OrderWorkspace: privateAccountView },
+  './account/personal-wallet': { PersonalWallet: privateAccountView },
+  './account/personal-invitations': { PersonalInvitations: privateAccountView },
+  './account/credit-center': { CreditCenter: privateAccountView },
+  './account/account-security-controls': { AccountSecurityControls: privateAccountView },
+  './ui/alert-dialog': { ConfirmAlertDialog: () => null },
+  './account/account-center': {
+    AccountCenterFrame: ({ children }) => children,
+    AccountOverview: privateAccountView,
+    AccountMembershipCenter: privateAccountView,
+    resolveAccountView: view => view || 'overview',
+    isKnownAccountView: () => true,
+    accountSectionHref: view => '/account?view=' + view,
+    accountViewTitle: view => view,
+  },
+};
+const mountAccountGate = (status, view = 'overview', suffix = '') => mountAuthComponent(coordinator, 'AuthOverlayProvider', {}, {
+  url: `http://127.0.0.1:4200/account?view=${view}${suffix}`,
+  pathname: '/account',
+  initialStatus: status,
+  stubModules: accountGateModules,
+  child: { path: 'apps/web/src/components/supply-workspaces.tsx', name: 'AccountWorkspace', props: { view } },
+});
 async function setSession(p, status) {
   await p.React.act(async () => { p.identity.status = status; p.identity.userId = status === 'authenticated' ? 'user_A' : null; });
   await p.render();
@@ -103,6 +137,76 @@ test('a session read failure is a retryable notice, never a guess that the visit
     assert.equal(p.host.querySelector('.auth-session-pending'), null);
     await setSession(p, 'guest');
     assert.equal(p.host.querySelectorAll('[role="dialog"]').length, 1, 'only a confirmed guest opens the dialog');
+  } finally { await p.close(); }
+});
+
+test('account overview confirmed anonymous arrival opens the shared login once with the original query', async () => {
+  const p = await mountAccountGate('guest', 'overview', '&from=direct');
+  try {
+    assert.equal(p.host.querySelectorAll('[data-auth-dialog]').length, 1);
+    assert.equal(p.host.querySelectorAll('form').length, 1);
+    assert.equal(p.host.querySelector('[data-auth-form-next]').getAttribute('data-auth-form-next'), '/account?view=overview&from=direct');
+    assert.equal(p.host.querySelector('[data-private-account-view]'), null);
+    assert.doesNotMatch(p.host.textContent, /登录状态暂未确认|暂时无法加载页面/);
+    assert.deepEqual(p.router.replaces, []);
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test('all account entry views reuse the unavailable state page on session failure, without duplicate notices or private data', async () => {
+  for (const view of ['overview', 'membership', 'credit', 'wallet', 'invite', 'accounts', 'rentals', 'leased', 'identity', 'security', 'favorites']) {
+    const p = await mountAccountGate('error', view);
+    try {
+      assert.equal(p.host.querySelector('h1')?.textContent, '暂时无法加载页面', view);
+      assert.ok(p.host.querySelector('img[src="/art/status/unavailable-r1.webp"]'), view);
+      assert.equal(p.host.querySelector('[data-auth-dialog]'), null, 'UNKNOWN is not anonymous: ' + view);
+      assert.equal(p.host.querySelector('[data-private-account-view]'), null, view);
+      assert.equal(p.host.querySelector('.auth-session-pending'), null, 'one recovery surface: ' + view);
+      assert.doesNotMatch(p.host.textContent, /登录状态暂未确认|暂时无法打开该入口|此内容暂不可访问/);
+      assert.ok(p.host.querySelector('a[href="/"]'), 'safe public return: ' + view);
+      assert.equal(p.window.location.search, '?view=' + view);
+      assert.deepEqual(p.router.replaces, []);
+      assert.equal(p.calls.length, 0, 'no private API call during failed discovery');
+    } finally { await p.close(); }
+  }
+});
+
+test('account unavailable retry can settle anonymous, preserve the query and cancel to a public page', async () => {
+  const p = await mountAccountGate('error', 'wallet', '&wallet=entries#available');
+  try {
+    await p.click('重新加载');
+    assert.equal(p.confirmations, 1);
+    assert.equal(p.host.querySelector('[data-auth-dialog]'), null, 'a retry alone proves no identity');
+    await setSession(p, 'loading');
+    assert.equal(p.host.querySelector('[data-private-account-view]'), null);
+    await setSession(p, 'guest');
+    assert.equal(p.host.querySelectorAll('[data-auth-dialog]').length, 1);
+    assert.equal(p.host.querySelector('[data-auth-form-next]').getAttribute('data-auth-form-next'), '/account?view=wallet&wallet=entries#available');
+    await p.click('关闭认证窗口');
+    assert.equal(dialog(p), null);
+    assert.deepEqual(p.router.replaces, ['/']);
+    assert.equal(p.host.querySelector('[data-private-account-view]'), null);
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test('account unavailable retry reveals the private view only after confirmed authentication and hides it on a later outage', async () => {
+  const p = await mountAccountGate('error', 'overview', '&from=recovery');
+  try {
+    assert.equal(p.host.querySelector('[data-private-account-view]'), null);
+    await p.click('重新加载');
+    assert.equal(p.confirmations, 1);
+    await setSession(p, 'loading');
+    assert.equal(p.host.querySelector('[data-private-account-view]'), null);
+    await setSession(p, 'authenticated');
+    assert.equal(p.host.querySelector('[data-private-account-view]')?.textContent, 'PRIVATE_user_A', p.host.textContent);
+    assert.equal(dialog(p), null, 'no login prompt for a confirmed subject');
+    assert.deepEqual(p.router.replaces, []);
+    assert.equal(p.window.location.search, '?view=overview&from=recovery');
+    await setSession(p, 'error');
+    assert.equal(p.host.querySelector('[data-private-account-view]'), null);
+    assert.equal(p.host.querySelector('h1')?.textContent, '暂时无法加载页面');
+    assert.equal(p.host.querySelector('.auth-session-pending'), null);
   } finally { await p.close(); }
 });
 

@@ -72,7 +72,8 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     const code = ts.transpileModule(fs.readFileSync(file, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const module = new Module(file); module.filename = file; module.paths = Module._nodeModulePaths(path.dirname(file)); cache.set(file, module);
     module.require = (name) => {
-      if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
+      if (Object.hasOwn(options.stubModules ?? {}, name)) return options.stubModules[name];
+      if (name === "@/components/session/user-session-provider" || name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
       if (name === "@/lib/web-auth-request") return load(path.join(rootPath, "apps/web/src/lib/web-auth-request.ts"));
       if (name === "../auth/auth-form" || name === "./auth-form") return load(path.join(rootPath, "apps/web/src/components/auth/auth-form.tsx"));
       // The support rail's own children: the workspace pulls in Radix popover, the IM client and
@@ -80,10 +81,11 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
       // Routing tests only need the rail's trigger chain, so both stand in as null renders.
       if (name === "./contact-popover") return { ContactPopover: () => null };
       if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: () => null };
+      if (name.endsWith(".css")) return {};
       // Sibling imports inside src/ resolve like a bundler would; the two stubs above still win.
       if (name.startsWith("./") || name.startsWith("../")) {
         const base = path.resolve(path.dirname(module.filename), name);
-        const candidate = [base + ".tsx", base + ".ts", path.join(base, "index.tsx"), path.join(base, "index.ts")].find(option => fs.existsSync(option));
+        const candidate = [base, base + ".tsx", base + ".ts", path.join(base, "index.tsx"), path.join(base, "index.ts")].find(option => fs.existsSync(option) && fs.statSync(option).isFile());
         if (candidate) return load(candidate);
       }
       // A test may stand in for the coordinator when it only exercises a consumer such as /login.
@@ -101,7 +103,6 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
       // than happy-dom's document. The dialog renders inline in tests; focus semantics are proven in a browser.
       if (name === "@radix-ui/react-dialog") return dialogStub;
       if (name === "next/link") return { __esModule: true, default: ({ href, children, ...rest }) => React.createElement("a", { ...rest, href: String(href) }, children) };
-      if (name.endsWith(".css")) return {};
       if (name.startsWith("@/")) { const resolved = resolveSource(name); if (resolved) return load(resolved); }
       return require(name);
     };
@@ -113,8 +114,8 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   let currentProps = { onSuccess: () => successes++, ...props };
   // Lets a test mount the coordinator with a real consumer (for example the legacy /login page)
   // instead of a stub, so the composition itself is what gets asserted.
-  if (options.child) currentProps.children = React.createElement(load(path.join(rootPath, options.child.path))[options.child.name]);
-  const render = async (changes = {}) => { syncSession(); currentProps = { ...currentProps, ...changes }; await React.act(async () => { const element = React.createElement(Component, currentProps); root.render(options.strictMode ? React.createElement(React.StrictMode, null, element) : element); }); };
+  const Child = options.child ? load(path.join(rootPath, options.child.path))[options.child.name] : null;
+  const render = async (changes = {}) => { syncSession(); currentProps = { ...currentProps, ...changes }; if (Child) currentProps.children = React.createElement(Child, options.child.props); await React.act(async () => { const element = React.createElement(Component, currentProps); root.render(options.strictMode ? React.createElement(React.StrictMode, null, element) : element); }); };
   await render();
   const settle = () => React.act(async () => { await new Promise(resolve => setImmediate(resolve)); });
   const findButton = text => { const buttons = [...host.querySelectorAll("button")]; const button = buttons.find(item => item.textContent === text) ?? buttons.find(item => item.getAttribute("aria-label") === text); assert.ok(button, "button present: " + text); return button; };

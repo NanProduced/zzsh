@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, House, ImageOff, Images, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
 import { WebAuthError, webAuthRequest } from "./auth/auth-form";
-import { useAuthOverlay } from "./auth/auth-overlay-provider";
+import { StatusPage } from "@/components/status/status-page";
 import { accountStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
 import { SkinMediaThumb, skinCardTitle } from "./supply/skin-media-thumb";
 import { FavoritesPanel } from "./favorites/favorites-panel";
@@ -112,7 +112,6 @@ function AccountUnsupported({ view }: { view: string }) {
 }
 
 export function AccountWorkspace({ view, accountId, orderId, status, source, page }: { view: string; accountId?: string; orderId?: string; status?: string; source?: string; page?: string }) {
-  const auth = useAuthOverlay();
   const session = useUserSession();
   const nicknameDraft = useRef<SecurityNicknameDraft["current"]>(null);
   const pendingSecurityWrite = useRef<SecurityPendingWrite["current"]>(null);
@@ -135,10 +134,8 @@ export function AccountWorkspace({ view, accountId, orderId, status, source, pag
     searchPlaceholder: "搜索账号编号或名称",
   };
   const title = "个人中心";
-  // Only ever read on the client: the error branch renders after the probe fails, never during SSR.
-
   // One bounded retry: a restarting API or a single gateway timeout should not hand the visitor a dead
-  // end. Beyond that the card below offers both ways forward.
+  // end. A failed read stays UNKNOWN; the shared unavailable page offers retry/public recovery.
   const retried = useRef(false);
   useEffect(() => {
     if (session.status !== "error" || retried.current) return;
@@ -147,7 +144,7 @@ export function AccountWorkspace({ view, accountId, orderId, status, source, pag
     return () => window.clearTimeout(timer);
   }, [session.status, session.revalidate]);
   if (session.status === "loading") return <ServiceShell {...accountShell} title={title}><section className="account-guest" aria-busy="true"><h2>正在准备个人中心…</h2><p>请稍候。</p></section></ServiceShell>;
-  if (session.status === "error") return <ServiceShell {...accountShell} title={title}><section className="account-guest" role="alert"><LockKeyhole size={30} /><h2>登录状态暂未确认</h2><p>暂时没能确认这次的登录状态（网络或服务短暂不可用）。可以重新确认；还没登录的话，直接去登录。</p><div className="account-guest-actions"><button type="button" className="button secondary" onClick={session.revalidate}>重新确认</button><button type="button" className="button primary" onClick={() => auth.open()}>打开登录窗口</button></div></section></ServiceShell>;
+  if (session.status === "error") return <StatusPage kind="unavailable" onRetry={session.revalidate} />;
   if (session.status === "guest") return <ServiceShell {...accountShell} title={title}><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在打开登录窗口</h2></section></ServiceShell>;
   const identityScope = `${session.userId}:${session.identityVersion}`;
   // The two detail views render the account or order name as the page's own h1; the shell must not add

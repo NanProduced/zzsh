@@ -18,6 +18,9 @@ test("only the contract null is a guest; broken reads are errors", async () => {
     [() => jsonResponse({ user: { id: "" } }), "error"],
     [() => jsonResponse({ user: { id: 7 } }), "error"],
     [() => new Response(JSON.stringify(null), { status: 500 }), "error"],
+    [() => jsonResponse(null, 401), "error"],
+    [() => jsonResponse({ error: { code: "FORBIDDEN" } }, 403), "error"],
+    [() => jsonResponse({ error: { code: "UPSTREAM_UNAVAILABLE" } }, 503), "error"],
     [() => jsonResponse(null), "guest"],
     [() => jsonResponse({ user: { id: "user-a", name: "用户甲" } }), "authenticated"],
   ];
