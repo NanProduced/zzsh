@@ -6,6 +6,8 @@
 
 付款原事务冻结政策版本、关系、受益人资格和比例。付款估算基数为 quote 的 platformFullProfit；最终佣金按不可变结算 posting 的 `platformContributionCents - compensationFeeCents` 计算，HALF_UP 到分，两角色总额不得超过该基数。不是订单支付总额的 5%。已有 APPLIED 付款只读原冻结依据；缺失保持 `MISSING_ORIGINAL_BASIS`，不能换政策追补。历史佣金观察和旧钱包期初不生成新佣金。
 
+本人收益详情的 v2 投影可返回本笔冻结的分销比例、受益等级、政策版本、计佣口径与舍入说明；不公开计佣基数、平台贡献或补偿费数值。来源订单公开号仅对该订单的租客或号主本人可见，收益受益人身份本身不增加订单读取权。原依据缺失或不一致保持未知，历史观察未记录的比例不按当前政策倒算。Web 用稳定收益记录 ID 定位详情，刷新与浏览器历史恢复仍按当前登录主体重新授权。
+
 `createLocalDistributionRuntime` 只为明确的本地 test/fake 资源组装已有能力，返回可传入认证装配的 `auth` 与有界 `earnings`。构造时不连接数据库，不写政策、注册身份或准入数据，也不生成默认 5% 政策。最多接受 100 个唯一订单；实际付款还要求该订单原生创建审计和有效的精确 admission。无此显式装配时，原行为保持。
 
 把返回的 `auth` 传入 `createApp` 的认证选项后，新注册、付款冻结、本人条款/佣金读与结算提交后计提使用现有模块。新原生钱包初始化仍需数据库端准入与同事务 INSERT 证明；缺失来源不能冒充零钱包。可选提现 binding 必须绑定 resource、subject、admission、destination、intent、payoutKey。

@@ -17,11 +17,11 @@ function transpile(rel) {
   return ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
 }
 
-test("neighbors follow the flattened help-nav order for all 22 articles", () => {
+test("neighbors follow the flattened help-nav order for all 24 articles", () => {
   const nav = buildHelpNavData(allHelpArticles);
   const order = flattenHelpNavArticles(nav).map((a) => a.slug);
-  assert.equal(order.length, 22);
-  assert.equal(new Set(order).size, 22, "every article appears exactly once in nav order");
+  assert.equal(order.length, 24);
+  assert.equal(new Set(order).size, 24, "every article appears exactly once in nav order");
   for (let index = 0; index < order.length; index++) {
     const { prev, next } = getHelpArticleNeighbors(nav, order[index]);
     const expectedPrev = index > 0 ? order[index - 1] : null;

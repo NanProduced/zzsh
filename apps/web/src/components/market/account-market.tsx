@@ -99,6 +99,7 @@ function resultError(error: { status: number; code: string; details: SupplyField
     if ([401, 403, 404].includes(error.status)) return { title: "未找到可公开查看的账号", description: "请核对完整编号；也可以清空编号后改用关键词搜索。", kind: "adjust" };
     if (error.status === 400) return { title: "编号格式未被接受", description: "请输入完整的新平台账号编号；旧编号不会转为关键词继续查询。", kind: "adjust" };
     if (error.status === 409) return { title: "该编号暂无法唯一核定", description: "请确认游戏范围与完整编号后重试。", kind: "retry" };
+    if (error.status >= 500) return { title: "编号查询暂不可用", description: "服务暂时无法处理查询，请稍后重试；这不代表账号不存在。", kind: "retry" };
     return { title: "编号查找未完成", description: "请检查连接后重试；这不代表账号不存在。", kind: "retry" };
   }
   if (error.code === "LISTING_URL_TOO_LONG") return { title: "筛选条件过多，未发起请求", description: error.message ?? "请减少部分筛选条件后重试。", kind: "adjust" };
@@ -623,7 +624,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {catalog.status === "error" && activeMetadata && !lookupNumber ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
         <div className="market-results-toolbar">
-          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? lookupNumber && feed.error?.status === 400 ? "编号格式未被接受" : "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? currentError?.title ?? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
             {activeMetadata && !lookupNumber && <div className="market-sort-controls" aria-label="账号排序">
               <div className="market-sort-field"><span>排序</span><MarketSelect

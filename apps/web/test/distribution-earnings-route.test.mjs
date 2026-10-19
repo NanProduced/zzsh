@@ -13,3 +13,11 @@ test('earnings actual BFF versions list and encoded-colon detail together, rejec
  }finally{globalThis.fetch=previous;}
 });
 test('earnings unknown projections, duplicate versions and detail filter injection reject before upstream',async()=>{const previous=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error();};try{for(const [suffix,parts]of [['?projectionVersion=3',[]],['?projectionVersion=2&projectionVersion=2',[]],['/history%3Aobs?projectionVersion=2&state=ALL',['history:obs']]])assert.equal((await GET(new Request(root+suffix),context(parts))).status,400);assert.equal(calls,0);}finally{globalThis.fetch=previous;}});
+
+test('U04 real earnings BFF keeps only frozen beneficiary disclosure and rejects contradictory scope',async()=>{
+ const previous=globalThis.fetch,item={id:'native:one',origin:'NATIVE',state:'SETTLED',role:'OWNER_REFERRAL',amount:{currency:'CNY',unit:'cent',amountCents:'95'},occurredAt:empty.asOf,dueAt:empty.asOf,dueAtKnowledge:'KNOWN',fundsDisposition:'SETTLED',recoveryRequiredCents:null,includedInOpening:false,version:'2',accountingEffect:'EXISTING_LEDGER_EVENT',businessReference:{type:'RENTAL_ORDER',id:'order'},channelArrivalKnowledge:'UNKNOWN',currentFinance:null,
+  calculation:{knowledge:'KNOWN',policyVersion:'frozen-policy',beneficiaryLevelCode:'LEVEL',percent:'5',basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'LOCAL_CONTROLLED',orderNumber:null,baseCents:'PRIVATE_BASE',partyUserId:'PRIVATE_PARTY',canonical_basis:'PRIVATE_RAW'}};
+ try{globalThis.fetch=async()=>Response.json({...empty,projectionVersion:2,item});const r=await GET(new Request(root+'/native%3Aone?projectionVersion=2'),context(['native:one']));assert.equal(r.status,200);const body=await r.json();assert.equal(body.item.calculation.percent,'5');assert.doesNotMatch(JSON.stringify(body),/PRIVATE_BASE|PRIVATE_PARTY|PRIVATE_RAW/);
+  globalThis.fetch=async()=>Response.json({...empty,projectionVersion:2,item:{...item,calculation:{...item.calculation,baseDisclosure:'PUBLIC'}}});assert.equal((await GET(new Request(root+'/native%3Aone?projectionVersion=2'),context(['native:one']))).status,502);
+ }finally{globalThis.fetch=previous;}
+});

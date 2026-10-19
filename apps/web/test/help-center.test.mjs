@@ -72,6 +72,43 @@ test("search: common aliases hit the right scope", () => {
   assert.ok(searchHelpArticles("人脸").some((h) => h.article.slug === "account-realname-vs-face"));
 });
 
+test("UX22 U01: withdrawal help keeps no manual review without treating available balance as eligibility", () => {
+  const withdrawal = getHelpArticle("withdraw-status");
+  const text = JSON.stringify(withdrawal);
+  assert.doesNotMatch(text, /可用余额可立即申请提现|进入可用余额，可立即申请提现/);
+  assert.match(text, /不设人工.*审核/);
+  assert.match(text, /身份.*资格.*渠道/);
+  assert.match(text, /可用余额不等于可提现金额/);
+  assert.match(text, /待确认/);
+  assert.match(text, /结果未知/);
+  assert.doesNotMatch(JSON.stringify(getHelpArticle("fees-settlement")), /可立即申请提现/);
+});
+
+test("UX22 U05: upgrade and commission help can be found through user search and existing related links", () => {
+  for (const [query, slug] of [["迁移", "platform-upgrade-records"], ["旧号", "platform-upgrade-records"], ["佣金", "invitation-earnings"]]) {
+    assert.ok(searchHelpArticles(query).some(hit => hit.article.slug === slug), `${query} has its help article`);
+  }
+  assert.ok(resolveRelated(getHelpArticle("account-register-login")).some(article => article.slug === "platform-upgrade-records"));
+  assert.ok(resolveRelated(getHelpArticle("membership-benefits")).some(article => article.slug === "invitation-earnings"));
+  const upgrade = JSON.stringify(getHelpArticle("platform-upgrade-records"));
+  assert.match(upgrade, /原订单.*原.*规则/);
+  assert.match(upgrade, /原退款金额记录.*不代表.*到账/);
+  assert.match(upgrade, /待确认.*不代表零/);
+  assert.doesNotMatch(upgrade, /全部迁移完成|所有用户.*完成|正在人工核对|即将到账/);
+});
+
+test("UX22 U05: commission help separates its frozen settlement basis and two minimum thresholds", () => {
+  const article = getHelpArticle("invitation-earnings");
+  assert.ok(article);
+  const text = JSON.stringify(article);
+  assert.match(text, /平台贡献额.*扣除.*包赔费/);
+  assert.match(text, /不是订单支付总额的 5%/);
+  assert.match(text, /最低计佣额/);
+  assert.match(text, /最低提现额/);
+  assert.match(text, /待结算.*不等于.*可用/);
+  assert.match(text, /历史.*不.*重新计算/);
+});
+
 test("search: empty and unknown queries return nothing", () => {
   assert.deepEqual(searchHelpArticles(""), []);
   assert.deepEqual(searchHelpArticles("   "), []);

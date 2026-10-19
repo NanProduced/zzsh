@@ -381,7 +381,7 @@ export const helpArticles: readonly HelpArticle[] = [
     category: "fees",
     audience: ["renter", "owner"],
     keywords: ["结算", "确认结算", "结算明细", "异议", "复核", "人工调整", "收益"],
-    updatedAt: "2026-10-06",
+    updatedAt: "2026-10-19",
     related: ["fees-early-end", "fees-refund-status", "withdraw-status"],
     sections: [
       {
@@ -408,7 +408,7 @@ export const helpArticles: readonly HelpArticle[] = [
         title: "生效之后",
         blocks: [
           { type: "list", items: [
-            "号主收入在结算生效时进入可用余额，可立即申请提现，不用等租客退款完成。",
+            "号主收入按结算生效后的入账结果进入钱包，不用等租客退款完成；能否申请提现，另看钱包当前的提现资格与可提现金额。",
             "租客剩余款自动发起原路退款：正常结算生效即发起；不足 70% 的提前结算在复核生效满 7 天后发起。",
             "「应退」是平台的退款责任记录，不代表支付渠道已经到账，到账时间见退款状态说明。",
           ] },
@@ -471,19 +471,21 @@ export const helpArticles: readonly HelpArticle[] = [
     id: "F06",
     slug: "withdraw-status",
     title: "提现什么时候到账，失败后怎么办？",
-    summary: "可用余额可立即申请提现，不设人工审核；确认未出款且钱包显示资金已释放后，才能按当前可用额度重新申请。",
+    summary: "提现不设人工审核，但须通过身份、资格、渠道及资金校验；能否申请与可提现金额以钱包当前状态为准。",
     category: "fees",
-    audience: ["owner"],
+    audience: ["all"],
     keywords: ["提现", "出款", "到账", "提现失败", "余额", "钱包", "释放"],
-    updatedAt: "2026-10-06",
-    related: ["fees-settlement", "fees-refund-status"],
+    updatedAt: "2026-10-19",
+    related: ["fees-settlement", "fees-refund-status", "invitation-earnings", "platform-upgrade-records"],
     contactCta: true,
     sections: [
       {
         id: "answer",
         title: "先给结论",
         blocks: [
-          { type: "paragraph", text: "结算生效后号主收入进入可用余额，可立即申请提现，平台不设人工提现审核；仍会执行身份、余额与防重复出款校验。到账时间取决于出款渠道的实际处理，平台按渠道结果记账。" },
+          { type: "paragraph", text: "提现不设人工审核；身份与提现资格、收款渠道、资金和原申请状态满足条件后即可申请。号主收入入账后，也不需要等租客退款完成才核定提现条件。" },
+          { type: "callout", tone: "info", text: "钱包可用余额不等于可提现金额。可提现金额显示「待确认」、收款目标暂不可申请，或原申请结果未明时，不要据可用余额发起新的提现。" },
+          { type: "paragraph", text: "到账时间取决于出款渠道的实际处理；已提交或处理中不代表已经到账，请查看这笔提现的结果。" },
           { type: "callout", tone: "info", text: "提现是余额出款，与租客「退款未到账」是两条不同的资金链路，不要按同一种状态理解。" },
         ],
       },
@@ -495,7 +497,7 @@ export const helpArticles: readonly HelpArticle[] = [
           { type: "list", ordered: true, items: [
             "先确认这笔提现确实没有出款（以渠道与平台记录为准，不只看页面状态文字）。",
             "再确认钱包流水显示该笔资金已释放、可用余额已经恢复。",
-            "两项都确认后，才可以按当前可用额度重新申请。",
+            "两项都确认后，再核对当前提现条件与可提现金额，符合条件才重新申请。",
           ] },
           { type: "callout", tone: "warning", text: "结果未知或释放记录待核时，不要重新申请，避免重复出款；请保留记录并联系平台客服继续核实。" },
         ],
@@ -520,8 +522,8 @@ export const helpArticlesMore: readonly HelpArticle[] = [
     category: "account",
     audience: ["all"],
     keywords: ["注册", "登录", "验证码", "手机号", "密码", "昵称"],
-    updatedAt: "2026-10-06",
-    related: ["account-recovery", "account-realname-vs-face"],
+    updatedAt: "2026-10-19",
+    related: ["account-recovery", "account-realname-vs-face", "platform-upgrade-records"],
     sections: [
       {
         id: "register",
@@ -545,7 +547,7 @@ export const helpArticlesMore: readonly HelpArticle[] = [
         id: "legacy",
         title: "旧平台用户",
         blocks: [
-          { type: "paragraph", text: "旧平台注册用户用原手机号接收验证码即可登录原账户，历史订单与资产关系保留；旧密码也可继续用于手机号 + 密码登录，首次成功后会自动完成安全升级，不要求更换密码。" },
+          { type: "paragraph", text: "已接入的原平台账户可使用原手机号按登录页提供的方式登录，已承接的订单与资产关系在个人中心查看；原密码验证成功后会完成安全升级，不要求先更换密码。原记录暂未显示时，可查看平台升级说明或联系平台客服核实，不必重新注册账户。" },
         ],
       },
     ],
@@ -774,8 +776,8 @@ export const helpArticlesMore: readonly HelpArticle[] = [
     category: "membership",
     audience: ["renter"],
     keywords: ["会员", "成长", "档位", "礼遇", "押金", "优惠"],
-    updatedAt: "2026-10-11",
-    related: ["fees-overview", "rental-check-before-order"],
+    updatedAt: "2026-10-19",
+    related: ["fees-overview", "rental-check-before-order", "invitation-earnings", "platform-upgrade-records"],
     sections: [
       {
         id: "tiers",
@@ -811,7 +813,104 @@ export const helpArticlesMore: readonly HelpArticle[] = [
         title: "注意",
         blocks: [
           { type: "paragraph", text: "页面没有展示的权益不作承诺；资源价格与押金金额以下单确认页为你计算的本人报价为准，帮助说明不改变订单金额。" },
-          { type: "paragraph", text: "本分类目前只覆盖会员成长与费用说明；邀请关系的绑定与收益规则将随既有合同接入后另行说明，本文不涉及。" },
+          { type: "paragraph", text: "邀请佣金与会员消费优惠是两回事；邀请收益的适用条件、计算与入账见相关说明。" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "M02",
+    slug: "invitation-earnings",
+    title: "邀请收益怎么算，什么时候可以使用？",
+    summary: "佣金按符合条件订单的结算结果和该单适用比例计算；待结算、钱包可用与可提现分别看对应状态。",
+    category: "membership",
+    audience: ["all"],
+    keywords: ["邀请", "佣金", "分佣", "分销", "返现", "收益", "5%", "最低计佣额", "最低提现额"],
+    updatedAt: "2026-10-19",
+    related: ["membership-benefits", "withdraw-status", "platform-upgrade-records"],
+    contactCta: true,
+    sections: [
+      {
+        id: "eligibility",
+        title: "哪些订单可以产生收益",
+        blocks: [
+          { type: "paragraph", text: "有邀请码或完成注册，不代表每笔订单都会计佣。是否参与，取决于本人的分销资格、直属分销关系、账号出租模式和订单适用政策；注册邀请人与分销上级分别记录，不能仅凭邀请注册判断受益归属。" },
+          { type: "paragraph", text: "普通、自定义模式按适用政策判断，极速模式不计佣，也不能把自己绑定为自己的分销上级。本人适用比例和条件可在「邀请与佣金」的「我的分佣条款」查看；未核定时不按默认比例估算。" },
+        ],
+      },
+      {
+        id: "calculation",
+        title: "金额怎样计算",
+        blocks: [
+          { type: "paragraph", text: "订单付款时记录该单适用的政策、受益关系与比例。最终以已确认结算中的平台贡献额扣除其中的包赔费作为基数，再按该单适用比例计算，四舍五入到分。平台贡献额是本单结算归属平台的金额，不是租客总付款。" },
+          { type: "callout", tone: "info", text: "条款显示 5% 时，也是上述计佣基数的 5%，不是订单支付总额的 5%。订单预估与最终结算可能不同，不用当前比例重算已经确定的旧单。" },
+          { type: "list", items: [
+            "最低计佣额是订单进入计佣的条件，按该单适用政策判断，不是提现门槛。",
+            "最低提现额是符合提现资格时，单次申请金额的下限；达到最低计佣额不代表可以提现。两项条件分别查看。",
+          ] },
+        ],
+      },
+      {
+        id: "available",
+        title: "待结算与可用有什么区别",
+        blocks: [
+          { type: "paragraph", text: "待结算不等于钱包可用余额。收益达到该单的结算条件并实际入账后，才能作为可用资金；能否提现还要核对当前可提现金额、收款目标与其他办理条件，入账也不等于渠道到账。" },
+          { type: "paragraph", text: "收益被撤销或显示待追回时，按对应记录核实；不要继续用原金额估算可提现额度。有疑问请保留收益记录信息联系平台客服。" },
+        ],
+      },
+      {
+        id: "history",
+        title: "原平台收益怎样查看",
+        blocks: [
+          { type: "paragraph", text: "历史收益按原订单及原政策记录展示，不用现行比例重新计算。标为「已含期初」的记录已经计入承接余额，不会再次入账；仅供查询的记录也不会因展示就增加当前余额。来源或结果待确认时，不将未显示部分当作零或已到账。" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "A04",
+    slug: "platform-upgrade-records",
+    title: "平台升级后，怎样查原来的订单、余额和账号？",
+    summary: "从个人中心查找已接入的订单、钱包流水与出租账号；原记录暂未显示或状态待确认时，带原编号联系平台客服核实。",
+    category: "account",
+    audience: ["all"],
+    keywords: ["平台升级", "迁移", "历史订单", "原余额", "期初", "旧号", "旧平台", "收藏", "记录不见了"],
+    updatedAt: "2026-10-19",
+    related: ["account-register-login", "fees-refund-status", "withdraw-status", "invitation-earnings"],
+    contactCta: true,
+    sections: [
+      {
+        id: "where",
+        title: "先到个人中心查找",
+        blocks: [
+          { type: "list", items: [
+            "订单：在「租入订单」「出租订单」按自己的交易身份查看已接入记录，原订单仍保留原单号。",
+            "余额与收益：在「我的钱包」查看余额和流水，在「邀请与佣金」查看收益。「期初余额」是承接进钱包的原余额；标为「已含期初」的历史记录不会再重复增加余额。",
+            "账号与收藏：在「出租账号」「我的收藏」查看已显示的关联记录。市场默认只列当前可租账号，不能单凭市场列表判断自己的账号或收藏是否丢失。",
+          ] },
+        ],
+      },
+      {
+        id: "numbers",
+        title: "账号编号与公开状态",
+        blocks: [
+          { type: "paragraph", text: "公开查询账号时，请用页面显示的新平台账号编号；原平台纯数字账号编号不用于公开搜索。原订单号仍用于核对对应订单，原账号编号可以保留给客服核实关联。" },
+          { type: "paragraph", text: "可公开查看不等于当前可租。已租、待付款占用或普通下架的账号仍可能保留公开资料，能否下单以详情与本人报价为准；封禁、撤回公开或未公开资料，不会因为原订单或收藏而额外开放。" },
+        ],
+      },
+      {
+        id: "meaning",
+        title: "金额与权益怎样理解",
+        blocks: [
+          { type: "paragraph", text: "原订单继续按原来确定的规则与记录处理，不用新会员价格重新计算。原退款金额记录不代表当前应退责任或已经到账，应退金额与到账结果分别查看订单进度。" },
+          { type: "paragraph", text: "钱包可用与可提现分别核定；金额、档位或积分显示待确认不代表零。会员档位和礼遇以会员中心的已核定记录为准，原平台人工等级不自动等同新成长档位或新礼遇。" },
+        ],
+      },
+      {
+        id: "missing",
+        title: "原记录暂未显示怎么办",
+        blocks: [
+          { type: "paragraph", text: "本说明不表示全部历史数据都已完成承接。暂未显示、资料待核或金额待确认，不能直接判断为零或记录丢失。请保留原订单或账号编号、发生时间和页面状态，通过站内联系平台客服核实。" },
         ],
       },
     ],

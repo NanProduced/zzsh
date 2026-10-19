@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import type {Pool} from 'pg';
+import type {Pool,PoolClient} from 'pg';
 import {withTransaction,SecurityApiError} from '../auth/security-core';
 import {assertUserContextInTransaction,type UserContext} from '../auth/user-identity';
 import {invalid,notFound} from '../supply/supply-util';
@@ -8,6 +8,8 @@ import type {ListingCursorKey} from '../supply/listing-cursor';
 import {exactCents,sourceYuanToCents,encodeFinanceCursor,decodeFinanceCursor,OPENING_OBSERVATION_JOIN,prepareHistoricalObservation,parseFinanceProjectionVersion} from './personal-finance-read';
 import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
 import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,type LegacyCommissionFinance} from './legacy-duty-finance-store';
+import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';
+import {referralPercent,validateDistributionPolicy} from './distribution-policy';
 
 const states=['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'] as const;
 export type EarningsQuery={state:typeof states[number];limit:number;cursor:string|null;projectionVersion?:2};
@@ -21,6 +23,41 @@ export function parseEarningsDetailQuery(q:URLSearchParams):EarningsQuery{for(co
 export function decodeEarningDetailId(raw:string){let id:string;try{id=decodeURIComponent(raw);}catch{throw notFound();}if(!/^(native|history):[A-Za-z0-9_-]{1,180}$/.test(id))throw notFound();return id;}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const unavailable=()=>new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original earning evidence is inconsistent');
+export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{
+ knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string;percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';
+ baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED';orderNumber:string|null;
+};
+/** Only the beneficiary's frozen terms; the private posting/base and other parties never leave this reader. */
+export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:Record<string,any>,installed:boolean):Promise<EarningCalculation>{
+ if(row.origin==='LEGACY_MYSQL')return{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'};
+ if(!installed)return{knowledge:'UNKNOWN',reason:'ORIGINAL_BASIS_UNAVAILABLE'};
+ const f=(await c.query(`SELECT e.id,e.order_id,e.payment_confirmation_id,e.beneficiary_user_id,e.beneficiary_role,e.amount_cents::text,
+  e.canonical_seed,e.seed_digest,e.basis_digest,e.posting_digest,b.canonical_basis,b.basis_digest AS payment_basis_digest,
+  CASE WHEN o.renter_user_id=$1 OR o.owner_user_id=$1 THEN o.display_no ELSE NULL END AS order_number
+  FROM zzsh_order.rental_referral_earning e
+  LEFT JOIN zzsh_order.payment_distribution_basis b ON b.order_id=e.order_id AND b.payment_confirmation_id=e.payment_confirmation_id
+  LEFT JOIN zzsh_order.rental_order o ON o.id=e.order_id
+  WHERE e.beneficiary_user_id=$1 AND e.id=$2`,[actor.userId,row.id.slice('native:'.length)])).rows[0];
+ if(!f?.canonical_basis)return{knowledge:'UNKNOWN',reason:'ORIGINAL_BASIS_UNAVAILABLE'};
+ try{
+  if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
+   ||hash(f.canonical_seed)!==f.seed_digest||f.basis_digest!==f.payment_basis_digest)throw unavailable();
+  const seed=JSON.parse(f.canonical_seed),basis={...JSON.parse(f.canonical_basis),digest:f.payment_basis_digest} as PaymentDistributionBasis;
+  readOriginalPaymentDistributionBasis(basis,{orderId:f.order_id,confirmationId:f.payment_confirmation_id,paymentDigest:basis.paymentDigest});
+  if(seed.id!==f.id||seed.beneficiaryUserId!==actor.userId||seed.role!==f.beneficiary_role||seed.amountCents!==exactCents(f.amount_cents)
+   ||seed.source?.id!==f.order_id||seed.source?.digest!==f.posting_digest||seed.policyVersion!==basis.policyVersion||seed.policyDigest!==basis.policyDigest
+   ||!basis.policyVersion||!basis.policyConfig||hash(canonicalize(basis.policyConfig))!==basis.policyDigest)throw unavailable();
+  const policy=validateDistributionPolicy(basis.policyConfig as unknown as Record<string,unknown>);
+  const roles=basis.roles.filter(r=>r.role===f.beneficiary_role&&r.beneficiaryUserId===actor.userId);
+  if(roles.length!==1)throw unavailable();const role=roles[0]!;
+  const level=policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);
+  if(role.status!=='ELIGIBLE'||!level||!role.ratio||canonicalize(role.ratio)!==canonicalize(percent.ratio)||seed.relationDigest!==role.relationDigest
+   ||referralPercent(role.role==='RENTER_REFERRAL'?level.renterPercent:level.ownerPercent).percent!==percent.percent)throw unavailable();
+  return{knowledge:'KNOWN',policyVersion:basis.policyVersion,beneficiaryLevelCode:level.code,percent:percent.percent,
+   basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
+   cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'LOCAL_CONTROLLED',orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
+ }catch{return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};}
+}
 /** History is an observation, never a fresh ledger credit or a channel-paid claim. */
 export function earningProjection(row:Record<string,any>,currentFinance?:LegacyCommissionFinance,projectionVersion:1|2=1){
  const legacy=row.origin==='LEGACY_MYSQL';if(!legacy&&row.origin!=='NATIVE')throw unavailable();
@@ -64,7 +101,7 @@ function sourceSql(native:boolean){
 }
 /** Candidate self read seam; route mounting requires the separately reviewed source package. */
 type EarningReadContext={contractVersion:string;projectionVersion?:2;subjectId:string;snapshotVersion:string;asOf:string};
-type EarningReadDetail=EarningReadContext&{item:ReturnType<typeof earningProjection>};
+type EarningReadDetail=EarningReadContext&{item:ReturnType<typeof earningProjection>&{calculation?:EarningCalculation}};
 type EarningReadPage=EarningReadContext&{state:EarningsQuery['state'];knowledge:string;count:string|null;mappedRecordCount:string;reason:string|null;totalAmountKnowledge:string;items:ReturnType<typeof earningProjection>[];nextCursor:string|null;
  amountsByOrigin?:{scope:string;native:{knowledge:string;amountCents:string|null};historical:{knowledge:string;amountCents:string|null};mappedHistoricalAmountCents:string}};
 export function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:EarningsQuery,key:ListingCursorKey|undefined,detailId:string):Promise<EarningReadDetail>;
@@ -76,7 +113,7 @@ export async function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:E
  return withTransaction(pool,async c=>{
   if(projectionVersion===2)await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
   await assertUserContextInTransaction(c,actor);
-  const installed=(await c.query("SELECT to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AS history,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native,to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AND to_regclass('zzsh_order.native_user_insert_proof') IS NOT NULL AS native_origin,to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_finance")).rows[0];
+  const installed=(await c.query("SELECT to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AS history,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native,to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AND to_regclass('zzsh_order.native_user_insert_proof') IS NOT NULL AS native_origin,to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_finance,to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AS earning_basis")).rows[0];
   if(!installed?.history)throw unavailable();const sql=sourceSql(installed.native===true);
   const coverage=(await c.query('SELECT origin FROM zzsh_order.wallet_coverage WHERE user_id=$1',[actor.userId])).rows[0];
   const nativeEmpty=installed.native_origin===true&&coverage?.origin==='NATIVE_GENESIS'?await hasProvedNativeHistoryAbsence(c,actor.userId,'HISTORICAL_DISTRIBUTION'):false;
@@ -95,7 +132,7 @@ export async function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:E
   const asOf=after?.asOf??(await c.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
   const projection=`SELECT *,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS occurred_at,
    to_char(due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at FROM earnings`;
-  if(detailId){const row=(await c.query(sql+projection+' WHERE id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();const finance=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionFinance(c,actor.userId,[row.source_id]):null;return{contractVersion:'distribution-earnings.read.v1',...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,snapshotVersion,asOf,item:earningProjection(row,finance?.get(row.source_id),projectionVersion)};}
+  if(detailId){const row=(await c.query(sql+projection+' WHERE id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();const finance=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionFinance(c,actor.userId,[row.source_id]):null;return{contractVersion:'distribution-earnings.read.v1',...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,snapshotVersion,asOf,item:{...earningProjection(row,finance?.get(row.source_id),projectionVersion),...(projectionVersion===2?{calculation:await readEarningCalculation(c,actor,row,installed.earning_basis===true)}:{})}};}
   const rows=(await c.query(sql+projection+` WHERE imported_at<=$2::timestamptz AND($3='ALL' OR state=$3)
    AND($4::timestamptz IS NULL OR (earnings.occurred_at,id COLLATE "C")<($4::timestamptz,$5 COLLATE "C"))
    ORDER BY earnings.occurred_at DESC,id COLLATE "C" DESC LIMIT $6`,[actor.userId,asOf,q.state,after?.position.at??null,after?.position.id??null,q.limit+1])).rows;

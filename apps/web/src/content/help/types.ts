@@ -7,7 +7,7 @@ export const helpCategories = [
   { id: "fees", label: "费用与资金", description: "费用构成、押金、结算、退款与提现" },
   { id: "account", label: "账号与安全", description: "注册登录、找回、实名与账号保护" },
   { id: "after-sale", label: "售后与保障", description: "异常处理、包赔保障、投诉与防骗" },
-  { id: "membership", label: "会员与邀请", description: "会员档位与费用优惠的适用" },
+  { id: "membership", label: "会员与邀请", description: "会员档位、礼遇与邀请收益的适用" },
 ] as const;
 
 export type HelpCategoryId = (typeof helpCategories)[number]["id"];

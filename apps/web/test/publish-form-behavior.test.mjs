@@ -1295,6 +1295,29 @@ test("payout rules are readable before quote and reading does not consent or sen
   try{await p.render();await p.clickButton('查看赔付规则');assert.equal(p.host.querySelector('#publish-payout-rules').open,true);assert.equal(p.window.document.activeElement,p.host.querySelector('#publish-payout-rules summary'));assert.equal(p.calls.length,0);assert.match(p.text(),/8%/);}finally{await p.close();}
 });
 
+test('UX22-U06 optional payout information never impersonates the current payout selection',async()=>{
+  const original=declaration({attributes:{...declaration().attributes,owner_deposit_declaration:{schema:'owner-deposit-declaration-v1',amountCents:'5000',declarationVersion:'1'}}});
+  const frozen=JSON.stringify(original),p=await probe({accountId:'account_1',mine:()=>supplyOf(original)});
+  try{
+    await p.render();
+    const title=()=>p.host.querySelector('.publish-payout-feature-heading strong').textContent;
+    const selected=()=>p.host.querySelector('.publish-payout-feature').getAttribute('data-selected');
+    assert.equal(title(),'可选全额包赔方案说明');assert.equal(selected(),'false');
+    assert.match(p.host.querySelector('.publish-payout-feature-heading span').textContent,/尚未选择赔付方案/);
+    assert.match(p.host.querySelector('.publish-payout-facts').textContent,/全额包赔基础押金门槛/);
+    assert.match(p.host.querySelector('.publish-payout-facts').textContent,/8%.*300 元起/);
+    assert.equal(parseFloat(p.host.querySelector('#publish-deposit').value),50);
+    await p.click('.publish-payout-group label:first-of-type [role="radio"]');
+    assert.equal(title(),'可选全额包赔方案说明');assert.equal(selected(),'false');
+    assert.match(p.host.querySelector('.publish-payout-feature-heading span').textContent,/当前选择普通赔付/);
+    await p.click('.publish-payout-group label:last-of-type [role="radio"]');
+    assert.equal(title(),'全额包赔');assert.equal(selected(),'true');
+    assert.match(p.host.querySelector('.publish-payout-feature-heading span').textContent,/已选择此方案/);
+    assert.equal(parseFloat(p.host.querySelector('#publish-deposit').value),50,'selecting optional cover must not replace the declared deposit');
+    assert.equal(JSON.stringify(original),frozen);assert.equal(p.calls.length,0);
+  }finally{await p.close();}
+});
+
 test("catalog changes invalidate a quote and consent without overwriting the declaration",async()=>{
   let revision='1';
   const p=await probe({accountId:"account_1",catalogValue:()=>({...catalog,game:{...catalog.game,catalogRevision:revision}}),mine:()=>supplyOf(declaration({description:'keep me'}),{quote:{...ownerQuote,catalogRevision:'1'}})});

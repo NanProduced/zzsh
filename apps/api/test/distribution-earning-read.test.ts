@@ -1,5 +1,8 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
-import {parseEarningsQuery,parseEarningsDetailQuery,decodeEarningDetailId,earningProjection,readMyDistributionEarnings} from '../src/finance/distribution-earning-read';
+import {parseEarningsQuery,parseEarningsDetailQuery,decodeEarningDetailId,earningProjection,readMyDistributionEarnings,readEarningCalculation} from '../src/finance/distribution-earning-read';
+import {createHash} from 'node:crypto';
+import {canonicalize} from '../src/supply/content-hash';
+import {freezePaymentDistributionBasis} from '../src/finance/distribution-payment-basis';
 import {prepareObservationCoverage} from '../src/finance/personal-finance-coverage';
 import {prepareHistoricalObservation} from '../src/finance/personal-finance-read';
 const actor={userId:'self',sessionId:'session'},key={keyId:'test',secret:'x'.repeat(40)},at='2026-10-04T00:00:00.000000Z';
@@ -7,7 +10,7 @@ const snapshot={kind:'historicalDistribution',sourceId:1,sourceUserId:11,amount:
 const original=prepareHistoricalObservation(snapshot,{userId:'self',legacyUserId:'11',sourceSystem:'legacy_mysql_restore',basisId:null});
 const legacy={id:'history:one',origin:'LEGACY_MYSQL',state:'SETTLED',role:'RENTER_REFERRAL',source_amount:'12.34',occurred_at:at,due_at:null,funds_disposition:'HISTORICAL_STATUS_ONLY',recovery_required_cents:null,included:true,version:'0',order_id:'71',user_id:'self',legacy_user_id:'11',source_system:original.sourceSystem,source_entity:original.sourceEntity,source_id:original.sourceId,source_digest:original.sourceDigest,source_canonical:original.sourceCanonical,snapshot};
 const native={...legacy,id:'native:two',origin:'NATIVE',state:'RECOVERY_REQUIRED',source_amount:'1234',funds_disposition:'SETTLED',recovery_required_cents:'1234',version:'3',due_at:at,included:false};
-function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECONCILED_OPENING',historyCoverage?:Record<string,unknown>){
+function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECONCILED_OPENING',historyCoverage?:Record<string,unknown>,earningBasisInstalled=false){
  const seen:{sql:string;args:any[]}[]=[],pool={connect:async()=>({release(){},query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
   if(['BEGIN','COMMIT','ROLLBACK','SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'].includes(sql))return{rows:[]};
   if(sql.startsWith('SELECT "suspended"'))return{rows:[{suspended:false}]};
@@ -16,7 +19,7 @@ function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECON
   if(sql.includes('finance history coverage installed'))return{rows:[{installed:historyCoverage!==undefined}]};
   if(sql.includes('finance history coverage exact target'))return{rows:[historyCoverage]};
   if(sql.startsWith('SELECT EXISTS'))return{rows:[{complete:coverage==='NATIVE_GENESIS'&&!rows.some(r=>r.origin==='LEGACY_MYSQL')}]};
-  if(sql.startsWith('SELECT to_regclass'))return{rows:[{history:true,native:nativeInstalled,native_origin:true}]};
+  if(sql.startsWith('SELECT to_regclass'))return{rows:[{history:true,native:nativeInstalled,native_origin:true,earning_basis:earningBasisInstalled}]};
   if(sql.startsWith('SELECT origin'))return{rows:coverage?[{origin:coverage}]:[]};
   if(sql.includes(' AS count,md5')){const selected=rows.filter(r=>args[1]==='ALL'||r.state===args[1]);return{rows:[{count:String(selected.length),digest:'source-digest',native_amount_cents:selected.filter(r=>r.origin==='NATIVE').reduce((s,r)=>s+BigInt(r.source_amount),0n).toString(),historical_amount_cents:selected.filter(r=>r.origin==='LEGACY_MYSQL').reduce((s,r)=>s+BigInt(r.source_amount.replace('.','')),0n).toString()}]};}
   if(sql.startsWith('SELECT to_char'))return{rows:[{at}]};
@@ -49,4 +52,41 @@ test('v1/v2 earnings cursors cannot cross projections and detail keeps the reque
  const v1=await readMyDistributionEarnings(p.pool,actor,q,key),v2=await readMyDistributionEarnings(p.pool,actor,{...q,projectionVersion:2},key);assert(v1.nextCursor&&v2.nextCursor);
  await assert.rejects(readMyDistributionEarnings(p.pool,actor,{...q,cursor:v1.nextCursor,projectionVersion:2},key),(e:any)=>e.status===409);await assert.rejects(readMyDistributionEarnings(p.pool,actor,{...q,cursor:v2.nextCursor},key),(e:any)=>e.status===409);
  const old=await readMyDistributionEarnings(p.pool,actor,q,key,'native:a'),detail=await readMyDistributionEarnings(p.pool,actor,{...q,projectionVersion:2},key,'native:a');assert.equal(old.projectionVersion,undefined);assert.equal('currentFinance' in old.item!,false);assert.equal(detail.projectionVersion,2);assert.equal(detail.item!.currentFinance,null);
+});
+
+function frozenCalculationRow(){
+ const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
+ const basis=freezePaymentDistributionBasis({orderId:'order-1',gameId:'game-1',currency:'CNY',confirmationId:'payment-1',acceptedAt:at,paymentDigest:'a'.repeat(64),admissionId:'admission-1',admissionRevision:'1',origin:'NATIVE',accountMode:'ordinary',estimate:{baseCents:'1908',sourceDigest:'e'.repeat(64)},
+  policy:{versionId:'policy-frozen',digest:sha(canonicalize({schema:'distribution-policy.v1',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary'],minimumAccrualCents:'1',settlementDelayDays:0,levels:[{code:'LEVEL_FROZEN',rank:1,default:true,renterPercent:'5',ownerPercent:'5',upgrade:null}]})),config:{schema:'distribution-policy.v1',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary'],minimumAccrualCents:'1',settlementDelayDays:0,levels:[{code:'LEVEL_FROZEN',rank:1,default:true,renterPercent:'5',ownerPercent:'5',upgrade:null}]}},
+  facts:[{role:'RENTER_REFERRAL',partyUserId:'PRIVATE_RENTER',relation:{knowledge:'KNOWN_NONE',id:null,childUserId:'PRIVATE_RENTER',parentUserId:null,sourceDigest:null},beneficiary:null},
+   {role:'OWNER_REFERRAL',partyUserId:'PRIVATE_OWNER',relation:{knowledge:'KNOWN_PARENT',id:'relation-1',childUserId:'PRIVATE_OWNER',parentUserId:'self',sourceDigest:'c'.repeat(64)},beneficiary:{userId:'self',active:true,eligibility:'ELIGIBLE',commissionFrozen:false,levelCode:'LEVEL_FROZEN'}}]});
+ const {digest,...body}=basis,seed={id:'earning-1',beneficiaryUserId:'self',role:'OWNER_REFERRAL',source:{id:'order-1',digest:'b'.repeat(64)},amountCents:'95',policyVersion:'policy-frozen',policyDigest:basis.policyDigest,relationDigest:'c'.repeat(64)};
+ const canonical_seed=canonicalize(seed);
+ return{id:'earning-1',order_id:'order-1',payment_confirmation_id:'payment-1',beneficiary_user_id:'self',beneficiary_role:'OWNER_REFERRAL',amount_cents:'95',canonical_seed,seed_digest:sha(canonical_seed),basis_digest:digest,posting_digest:'b'.repeat(64),canonical_basis:canonicalize(body),payment_basis_digest:digest,order_number:null};
+}
+
+test('U04 detail projects only the beneficiary frozen terms, never internal base or other parties',async()=>{
+ const frozen=frozenCalculationRow(),row={...native,id:'native:earning-1',order_id:'order-1',role:'OWNER_REFERRAL',source_amount:'95'};
+ for(const number of [null,'ZZ261019-000002']){
+  let queries=0;const client={query:async(sql:string,args:unknown[])=>{queries++;assert.deepEqual(args,['self','earning-1']);assert(sql.includes('WHERE e.beneficiary_user_id=$1 AND e.id=$2'));assert(sql.includes('CASE WHEN o.renter_user_id=$1 OR o.owner_user_id=$1 THEN o.display_no ELSE NULL END'));assert(!/platform_contribution_cents|compensation_fee_cents|owner_net_cents|\b(INSERT|UPDATE|DELETE)\b/.test(sql));return{rows:[{...frozen,order_number:number}]};}} as never;
+  const result=await readEarningCalculation(client,actor,row,true);assert.equal(queries,1);assert.equal(result.knowledge,'KNOWN');
+  if(result.knowledge!=='KNOWN')throw Error('frozen source must be readable');assert.equal(result.percent,'5');assert.equal(result.policyVersion,'policy-frozen');assert.equal(result.beneficiaryLevelCode,'LEVEL_FROZEN');assert.equal(result.orderNumber,number);
+  assert(!/PRIVATE_RENTER|PRIVATE_OWNER|1908|canonical_basis|payment_digest|posting_digest|estimateBaseCents/.test(JSON.stringify(result)));
+ }
+ const noQuery={query:async()=>{throw Error('history or missing schema must not read native basis');}} as never;
+ assert.deepEqual(await readEarningCalculation(noQuery,actor,legacy,true),{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'});
+ assert.deepEqual(await readEarningCalculation(noQuery,actor,row,false),{knowledge:'UNKNOWN',reason:'ORIGINAL_BASIS_UNAVAILABLE'});
+ for(const source of [null,{...frozen,canonical_basis:null},{...frozen,payment_basis_digest:'f'.repeat(64)},{...frozen,beneficiary_user_id:'other'},{...frozen,seed_digest:'f'.repeat(64)}]){
+  const result=await readEarningCalculation({query:async()=>({rows:source?[source]:[]})} as never,actor,row,true);assert.equal(result.knowledge,'UNKNOWN');assert(!('percent' in result));
+ }
+ const incomplete=JSON.parse(frozen.canonical_basis);incomplete.roles.find((r:any)=>r.role==='OWNER_REFERRAL').levelCode=null;
+ const canonical_basis=canonicalize(incomplete),digest=createHash('sha256').update(canonical_basis).digest('hex');
+ const missingLevel=await readEarningCalculation({query:async()=>({rows:[{...frozen,canonical_basis,basis_digest:digest,payment_basis_digest:digest}]})} as never,actor,row,true);
+ assert.equal(missingLevel.knowledge,'UNKNOWN');assert(!('percent' in missingLevel),'a missing original level never defaults to current 5%');
+});
+
+test('U04 lists never query frozen calculations per row, even when native basis is installed',async()=>{
+ const p=probe(true,[{...native,state:'SETTLED',recovery_required_cents:null}],'NATIVE_GENESIS',undefined,true);
+ await readMyDistributionEarnings(p.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ assert(!p.seen.some(q=>q.sql.includes('WHERE e.beneficiary_user_id=$1 AND e.id=$2')));
 });
