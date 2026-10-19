@@ -25,7 +25,14 @@ export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:
   for(const row of filters.resources??[]){const itemId=p(row.itemId),bounds=[row.minQuantity===undefined?null:`l.quantity>=${p(row.minQuantity)}::numeric`,row.maxQuantity===undefined?null:`l.quantity<=${p(row.maxQuantity)}::numeric`].filter(Boolean);where.push(`EXISTS(SELECT 1 FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${itemId} AND ${bounds.join(" AND ")})`);}
   for(const group of filters.skinGroups??[]) {
     if(!group.ids.length)continue;const ids=p(group.ids);
-    where.push(group.match==="ALL"?`(SELECT count(*) FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY(${ids}::text[]))=cardinality(${ids}::text[])`:`EXISTS(SELECT 1 FROM zzsh_supply.listing_skin s WHERE s.version_id=v.id AND s.skin_id=ANY(${ids}::text[]))`);
+    // Match the public reader's same-version declaration, including an authoritative empty holding.
+    // Native versions have no legacy holding and retain their own listing_skin rows.
+    const skins=`FROM (
+      SELECT unnest(h.skin_ids) AS skin_id FROM zzsh_supply.legacy_skin_holding h WHERE h.observation_version_id=v.id
+      UNION ALL
+      SELECT ls.skin_id FROM zzsh_supply.listing_skin ls WHERE ls.version_id=v.id AND NOT EXISTS (SELECT 1 FROM zzsh_supply.legacy_skin_holding h2 WHERE h2.observation_version_id=v.id)
+    ) s`;
+    where.push(group.match==="ALL"?`(SELECT count(DISTINCT s.skin_id) ${skins} WHERE s.skin_id=ANY(${ids}::text[]))=cardinality(${ids}::text[])`:`EXISTS(SELECT 1 ${skins} WHERE s.skin_id=ANY(${ids}::text[]))`);
   }
   for(const [key,attr] of [["safeBoxCodes","safe_box_code"],["gradingCodes","grading_code"],["loginMethodCodes","login_method_code"]] as const)if(filters[key]?.length)where.push(`${attribute(attr)}=ANY(${p(filters[key])}::text[])`);
   for(const [key,attr,legacy] of [["vitality","vit_level","vitLevel"],["bear","bear_level","bearLevel"]] as const)if(filters[key]){

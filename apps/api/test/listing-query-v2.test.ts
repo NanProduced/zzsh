@@ -9,6 +9,44 @@ import { sha256Hex } from "../src/supply/supply-util";
 import { validateListingQuery,validateConfigCatalog,publicFilterMetadata,listingReadMode } from "../src/supply/listing-filter-config";
 import { buildMixedListingCandidates,mixedListingBinding,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
 
+function skinCandidateQuery(match:"ANY"|"ALL") {
+  return parseListingQueryV2(new URLSearchParams({queryVersion:"2",gameId:"game",filters:JSON.stringify({skinGroups:[{categoryId:"agents",ids:["skin-luna"],match}]})}),"/listings");
+}
+
+test("skin ANY candidates include the same-version late verified holding before public projection",()=>{
+  const query=skinCandidateQuery("ANY");
+  for(const sql of [buildListingCandidates(query,null),buildMixedListingCandidates(query,null)]) {
+    assert.match(sql.text,/EXISTS\(SELECT 1 FROM \(\s*SELECT unnest\(h\.skin_ids\) AS skin_id FROM zzsh_supply\.legacy_skin_holding h WHERE h\.observation_version_id=v\.id/);
+    assert.ok(sql.values.some(value=>Array.isArray(value)&&value.length===1&&value[0]==="skin-luna"));
+  }
+});
+
+test("skin ALL candidates count the effective skin set rather than observation children only",()=>{
+  const query=skinCandidateQuery("ALL");
+  for(const sql of [buildListingCandidates(query,null),buildMixedListingCandidates(query,null)]) {
+    assert.match(sql.text,/SELECT count\(DISTINCT s\.skin_id\) FROM \(\s*SELECT unnest\(h\.skin_ids\)/);
+    assert.match(sql.text,/s\.skin_id=ANY\(\$\d+::text\[\]\)\)=cardinality\(\$\d+::text\[\]\)/);
+  }
+});
+
+test("an authoritative empty late holding suppresses stale listing_skin matches",()=>{
+  for(const match of ["ANY","ALL"] as const) {
+    const sql=buildMixedListingCandidates(skinCandidateQuery(match),null);
+    // Existence of the holding, including skin_ids={}, prevents the fallback.
+    assert.match(sql.text,/SELECT ls\.skin_id FROM zzsh_supply\.listing_skin ls WHERE ls\.version_id=v\.id AND NOT EXISTS \(SELECT 1 FROM zzsh_supply\.legacy_skin_holding h2 WHERE h2\.observation_version_id=v\.id\)/);
+    assert.doesNotMatch(sql.text,/cardinality\(h2\.skin_ids\)|array_length\(h2\.skin_ids/);
+  }
+});
+
+test("native skin candidates retain their own listing_skin fallback and public guards",()=>{
+  const sql=buildListingCandidates(skinCandidateQuery("ANY"),null);
+  assert.match(sql.text,/FROM zzsh_supply\.listing_skin (ls|s) WHERE \1\.version_id=v\.id/);
+  assert.doesNotMatch(sql.text,/h2\.account_id=a\.id/);
+  assert.match(sql.text,/JOIN zzsh_supply\.listing_publication pub ON pub\.version_id=v\.id AND pub\.account_id=a\.id/);
+  assert.ok(sql.text.includes(PUBLIC_STANDARD_TIER_GUARD));
+  assert.match(sql.text,/a\.legacy_hold='NONE'/);
+});
+
 test("listing v2 finite parsing, normalization, UTF8 budget and independent legacy boundary",()=>{
   const parse=(extra:Record<string,string|undefined>={})=>{const q=new URLSearchParams({queryVersion:"2",gameId:"delta-id"});for(const [k,v] of Object.entries(extra))if(v!==undefined)q.set(k,v);return parseListingQueryV2(q,"/api/v1/supply/listings?"+q);};
   assert.equal(parse().sort,"latest");assert.equal(parse().direction,"DESC");assert.equal(parse().limit,20);
