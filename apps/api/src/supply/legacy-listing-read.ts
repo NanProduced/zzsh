@@ -264,9 +264,17 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMediaIdSql("s")} AS "mediaId",
     c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND s.category_id IN (SELECT "id" FROM visible)) AS "isPublic"
     FROM (
-      SELECT skin_id FROM zzsh_supply.listing_skin ls WHERE ls.version_id=$1
-      UNION
-      SELECT unnest(skin_ids) AS skin_id FROM zzsh_supply.legacy_skin_holding WHERE observation_version_id=$1
+      SELECT unnest(h.skin_ids) AS skin_id
+      FROM zzsh_supply.legacy_skin_holding h
+      WHERE h.observation_version_id = $1
+      UNION ALL
+      SELECT ls.skin_id
+      FROM zzsh_supply.listing_skin ls
+      WHERE ls.version_id = $1
+        AND NOT EXISTS (
+          SELECT 1 FROM zzsh_supply.legacy_skin_holding h2
+          WHERE h2.observation_version_id = $1
+        )
     ) ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
     ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[r.version_id,r.game_id])).rows;
   const skins=declaredSkins.filter(x=>x.isPublic===true);

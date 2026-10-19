@@ -30,6 +30,10 @@ import {
   LEGACY_SKIN_FIELDS,
   type LegacySkinField,
   splitLegacySkinColumn,
+  buildLegacySkinIndex,
+  mapLegacySkinHolding,
+  declarableLegacySkinIds,
+  type LegacySkinCatalogEntry,
 } from "../legacy-load/legacy-skin-holdings";
 
 type LegacyInventoryInput = {
@@ -755,9 +759,17 @@ export async function resolveLegacyObservationToDraft(
       await client.query(
         `INSERT INTO zzsh_supply.listing_skin(version_id, skin_id)
          SELECT $1, skin_id FROM (
-           SELECT skin_id FROM zzsh_supply.listing_skin WHERE version_id=$2
-           UNION
-           SELECT unnest(skin_ids) AS skin_id FROM zzsh_supply.legacy_skin_holding WHERE observation_version_id=$2
+           SELECT unnest(h.skin_ids) AS skin_id
+           FROM zzsh_supply.legacy_skin_holding h
+           WHERE h.observation_version_id = $2
+           UNION ALL
+           SELECT ls.skin_id
+           FROM zzsh_supply.listing_skin ls
+           WHERE ls.version_id = $2
+             AND NOT EXISTS (
+               SELECT 1 FROM zzsh_supply.legacy_skin_holding h2
+               WHERE h2.observation_version_id = $2
+             )
          ) u ON CONFLICT (version_id, skin_id) DO NOTHING`,
         [id, old.id],
       );
@@ -813,7 +825,8 @@ export type LegacySkinHoldingsInput = {
   holdingDigest: string;
   skinIds: string[];
   evidenceRef: string;
-  columns?: Record<LegacySkinField, string | null>;
+  columns: Record<LegacySkinField, string | null>;
+  catalogRevision?: string;
 };
 
 export type LegacySkinHoldingsResult = {
@@ -849,23 +862,25 @@ export async function recordLegacySkinHoldings(
     throw invalid("skinIds must be an array", "skinIds");
   const skinIds = Array.from(new Set(input.skinIds.map(id => idText(id, "skinIds")))).sort();
 
-  if (input.columns !== undefined) {
-    if (!input.columns || typeof input.columns !== "object" || Array.isArray(input.columns))
-      throw invalid("Invalid legacy skin columns", "columns");
-    const extra = Object.keys(input.columns).filter((field) => !(LEGACY_SKIN_FIELDS as readonly string[]).includes(field));
-    if (extra.length) throw invalid("Unexpected legacy skin column in columns", "columns");
-    const missing = LEGACY_SKIN_FIELDS.filter((field) => !Object.hasOwn(input.columns!, field) || input.columns![field as LegacySkinField] === undefined);
-    if (missing.length) throw invalid("All four legacy skin columns must be observed", "columns");
+  if (!input.columns || typeof input.columns !== "object" || Array.isArray(input.columns))
+    throw invalid("All four legacy skin columns are required", "columns");
+  const extra = Object.keys(input.columns).filter((field) => !(LEGACY_SKIN_FIELDS as readonly string[]).includes(field));
+  if (extra.length) throw invalid("Unexpected legacy skin column in columns", "columns");
+  const missing = LEGACY_SKIN_FIELDS.filter((field) => !Object.hasOwn(input.columns, field) || input.columns[field as LegacySkinField] === undefined);
+  if (missing.length) throw invalid("All four legacy skin columns must be observed", "columns");
+  for (const field of LEGACY_SKIN_FIELDS) {
+    const val = input.columns[field];
+    if (val !== null && typeof val !== "string") {
+      throw invalid(`Legacy skin column ${field} must be a string or null`, "columns");
+    }
   }
 
-  if (skinIds.length === 0) {
-    if (!input.columns) {
-      throw invalid("Empty skinIds requires proof of four observed empty columns", "skinIds");
-    }
-    const allEmpty = LEGACY_SKIN_FIELDS.every((f) => splitLegacySkinColumn(input.columns![f]).length === 0);
-    if (!allEmpty) {
-      throw invalid("Empty skinIds requires proof of four observed empty columns", "skinIds");
-    }
+  const allColumnsEmpty = LEGACY_SKIN_FIELDS.every((f) => splitLegacySkinColumn(input.columns[f]).length === 0);
+  if (allColumnsEmpty && skinIds.length > 0) {
+    throw invalid("Empty skin columns cannot claim positive skin holdings", "skinIds");
+  }
+  if (!allColumnsEmpty && skinIds.length === 0) {
+    throw invalid("Empty skinIds requires proof of four observed empty columns", "skinIds");
   }
 
   const operation = "supply.legacy.skin_holdings";
@@ -945,21 +960,74 @@ export async function recordLegacySkinHoldings(
     },
     async () => {
       const a = account!;
-      if (skinIds.length > 0) {
-        const existingSkins = (
-          await client.query<{ id: string; naming_state: string; enabled: boolean; form_visible: boolean }>(
-            `SELECT id, naming_state, enabled, form_visible FROM zzsh_supply.skin WHERE game_id=$1 AND id=ANY($2::text[])`,
-            [a.game_id, skinIds],
-          )
-        ).rows;
-        if (existingSkins.length !== skinIds.length) {
-          throw invalid("One or more skins do not belong to the game or do not exist", "skinIds");
+
+      // Verify catalog mapping against observed columns and declared skinIds
+      const gameRevisionRow = (
+        await client.query<{ catalogRevision: string }>(
+          `SELECT catalog_revision::text AS "catalogRevision" FROM zzsh_supply.game WHERE id=$1`,
+          [a.game_id],
+        )
+      ).rows[0];
+      const catalogRevision = input.catalogRevision ?? gameRevisionRow?.catalogRevision ?? "146";
+
+      const catalogRows = (
+        await client.query<{
+          id: string;
+          gameId: string;
+          sourceField: string | null;
+          sourceToken: string | null;
+          namingState: "LEGACY" | "PENDING" | "VERIFIED";
+          enabled: boolean;
+          formVisible: boolean;
+        }>(
+          `SELECT id, game_id AS "gameId", source_field AS "sourceField", source_token AS "sourceToken",
+                  naming_state AS "namingState", enabled, form_visible AS "formVisible"
+             FROM zzsh_supply.skin
+            WHERE game_id=$1`,
+          [a.game_id],
+        )
+      ).rows;
+
+      const catalogEntries: LegacySkinCatalogEntry[] = catalogRows.map((r) => ({
+        skinId: r.id,
+        gameId: r.gameId,
+        sourceField: r.sourceField,
+        sourceToken: r.sourceToken,
+        namingState: r.namingState,
+        enabled: Boolean(r.enabled),
+        formVisible: Boolean(r.formVisible),
+      }));
+
+      const skinIndex = buildLegacySkinIndex(catalogEntries, []);
+      let holding = mapLegacySkinHolding(
+        { accountKey: legacyId, gameId: a.game_id, columns: input.columns },
+        skinIndex,
+        catalogRevision,
+      );
+      if (holding.digest !== input.holdingDigest) {
+        const byAcc = mapLegacySkinHolding(
+          { accountKey: accountIdText, gameId: a.game_id, columns: input.columns },
+          skinIndex,
+          catalogRevision,
+        );
+        if (byAcc.digest === input.holdingDigest) {
+          holding = byAcc;
         }
-        for (const s of existingSkins) {
-          if (s.naming_state !== "VERIFIED" || !s.enabled || !s.form_visible) {
-            throw invalid(`Skin ${s.id} is not a verified, enabled, public skin`, "skinIds");
-          }
-        }
+      }
+
+      if (!holding.complete) {
+        throw invalid("Legacy skin holding source has unmapped, pending, or ambiguous skins", "columns");
+      }
+      const declarable = declarableLegacySkinIds(holding);
+      if (
+        !declarable ||
+        declarable.length !== skinIds.length ||
+        !skinIds.every((id) => declarable.includes(id))
+      ) {
+        throw invalid("Declared skinIds do not match mapped declarable skins from observed columns", "skinIds");
+      }
+      if (holding.digest !== input.holdingDigest) {
+        throw conflict("Holding digest does not match computed digest from observed columns");
       }
 
       const existing = (
@@ -979,11 +1047,12 @@ export async function recordLegacySkinHoldings(
         };
       }
 
-      // SK11-A01: Insert into zzsh_supply.legacy_skin_holding (avoiding non-DRAFT listing_skin 40001)
+      // SK11-A01 & SK11-C01: Insert into zzsh_supply.legacy_skin_holding with exact 10 columns
       await client.query(
         `INSERT INTO zzsh_supply.legacy_skin_holding(
-           account_id, observation_version_id, source_system, source_entity, legacy_id, source_digest, holding_digest, skin_ids, created_by_admin_id
-         ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+           account_id, observation_version_id, source_system, source_entity, legacy_id,
+           source_digest, holding_digest, skin_ids, evidence_ref, created_by_admin_id
+         ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           accountIdText,
           observationVersionId,
@@ -993,6 +1062,7 @@ export async function recordLegacySkinHoldings(
           input.sourceDigest,
           input.holdingDigest,
           skinIds,
+          input.evidenceRef,
           actor.id,
         ],
       );
