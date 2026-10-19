@@ -35,7 +35,7 @@ export function createLocalDistributionRuntime(input: {
   const nativeWithdrawalScope = input.withdrawalBindings === undefined ? undefined : createNativeWithdrawalScope({ config, resourceSet,
     resourceOid: receipt.resourceOid, bindings: input.withdrawalBindings });
   return Object.freeze({
-    auth: Object.freeze({ distributionScope, distributionEarnings: earnings, localControlledPayments,
+    auth: Object.freeze({ distributionScope, distributionReadScope: distributionScope, distributionEarnings: earnings, localControlledPayments,
       nativeWalletOrigin: Object.freeze({ resourceSet, resourceOid: receipt.resourceOid }),
       ...(nativeWithdrawalScope ? { nativeWithdrawalScope } : {}) }),
     earnings,

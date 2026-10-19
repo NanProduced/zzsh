@@ -77,6 +77,7 @@ export function createDistributionEarningStore(scope:DistributionOrderScope){
   return{scope:'LOCAL_CONTROLLED' as const,selected:due.length,notAttempted:due.length-results.length,recoveryRequired:results.some(r=>r.status==='UNKNOWN'),results};
  }
  async function readOrder(pool:Pool,orderId:string){return withTransaction(pool,async c=>{
+  await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
   await ready(c);if(!allowed.has(orderId))throw notFound();
   const rows=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact
    FROM zzsh_order.rental_referral_earning e WHERE order_id=$1 ORDER BY id`,[orderId])).rows;

@@ -26,6 +26,7 @@ test('one explicit assembly reuses registration, payment, origin and optional ex
   const selected = input(), runtime = createLocalDistributionRuntime({ ...selected,
     withdrawalBindings: [{ userId: 'beneficiary', admissionId: 'admission', destinationId: 'destination', intentId: 'intent', payoutKey: 'payout' }] });
   assertLocalDistributionAssembly(runtime.auth.distributionScope, assembly);
+  assert.equal(runtime.auth.distributionReadScope, runtime.auth.distributionScope);
   assert(runtime.auth.nativeWithdrawalScope);
   assert.equal(runtime.auth.nativeWalletOrigin.resourceOid, receipt.resourceOid);
   assert.equal(runtime.auth.localControlledPayments.config, config);
@@ -114,6 +115,7 @@ function earningProbe() {
       seen.push(sql); const rows = (values: any[] = []) => ({ rows: values, rowCount: values.length });
       if (sql === 'BEGIN') { tx = structuredClone(state); return rows(); }
       if (sql === 'ROLLBACK') return rows();
+      if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY') return rows();
       if (sql === 'COMMIT') { state = tx; if (control.lostCommit) { control.lostCommit = false; throw Object.assign(new Error('commit acknowledgement lost'), { code: 'ECONNRESET' }); } return rows(); }
       if (sql.startsWith('SELECT d.oid')) return rows([{ oid: receipt.resourceOid, name: receipt.database, role: receipt.runtimeRole, marker: receipt.marker, complete: true }]);
       if (sql.startsWith('SELECT pg_advisory') || sql === 'SET CONSTRAINTS ALL IMMEDIATE') return rows();
@@ -174,6 +176,7 @@ test('lost accrual commit acknowledgement recovers with a read of original roots
   const before = p.state(), start = p.seen.length, recovered = await p.store.readOrder(p.pool, 'order');
   assert.equal(recovered.items.length, 2); assert.equal(before.lines.length, 4);
   assert(!p.seen.slice(start).some(sql => /^(INSERT|UPDATE|DELETE)/.test(sql)));
+  assert(p.seen.slice(start).includes('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'));
   const replay = await p.store.accrue(p.pool, 'order', 'req_same_source'); assert(replay.items.every((x: any) => x.replayed)); assert.deepEqual(p.state(), before);
 });
 
