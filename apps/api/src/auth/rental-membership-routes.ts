@@ -36,7 +36,11 @@ export async function handleRentalMembershipAdmin(request:SupplyNodeRequest,resp
 export function mountRentalMembership(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey;nativeWithdrawalScope?:NativeWithdrawalScope}) {
   mountPersonalFinanceRead(app,options);
   const express=app.getHttpAdapter().getInstance();
-  express.use("/api/v1/admin/users",(request:SupplyNodeRequest,response:SupplyResponse)=>handleRentalMembershipAdmin(request,response,options));
+  express.use("/api/v1/admin/users",(request:SupplyNodeRequest,response:SupplyResponse,next:()=>void)=>{
+    const path=(request.originalUrl??request.url??"").split("?")[0]!;
+    if(!/^\/api\/v1\/admin\/users\/[^/]+\/rental-membership$/.test(path)){next();return;}
+    return handleRentalMembershipAdmin(request,response,options);
+  });
   express.use("/api/v1/users/me/rental-membership",(request:SupplyNodeRequest,response:SupplyResponse)=>{
     const requestId=ensureApiV1RequestId(request);
     return safely(response,requestId,async()=>{
