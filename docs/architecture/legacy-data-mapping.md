@@ -1,6 +1,6 @@
 # 旧数据转换与字段映射
 
-规则版 `1.3.0`（2026-10-19，补充皮肤类型、品质及冻结快照边界）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
+规则版 `1.3.1`（2026-10-19，补充旧公共内容与现行规则的隔离边界）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
 
 ## 共同约束
 
@@ -35,6 +35,12 @@
 | GF-MEMBER-002 / GF-CREDIT-007 | 旧四档人工资格不自动变新成长等级或礼遇；初始信用100是新政策，不从旧等级/余额折算。 | 新等级按成长，`zzsh_iam.membership_entitlement`独立审批/期限/范围；`zzsh_credit.user_credit_state/credit_event`沿既有初始化runner，保留已有档案。会员/信用/保证金各自事实独立，见[信用与保证金](credit-guarantee.md)。 |
 | GF-HISTORY-008/OPENING-009 | `la_log_earnings.change_amount/left_amount/action`分别为变动元额/历史余额/方向；提取`amount/leftAmount`是别名。`la_user.earnings`受审映可用期初，`money`不相加。 | `zzsh_order.personal_finance_observation`与coverage保观察；`finance_opening_basis/finance_economic_root/finance_covered_event/finance_observation_admission`核期初覆盖；实际账务走event/ledger。Web钱包/收益、Admin财务读取overlay，历史观察不再次入账。 |
 | GF-WITHDRAW-010/DISTRIBUTION-011 | `la_withdraw_apply`金额/费用/旧状态/时间保原；`la_distribution`资格、邀请关系与6级比例保原文本，旧FLOAT不经parseFloat近似。 | 提现仅历史观察、不再扣款，渠道UNKNOWN；新分销政策/资格/关系与历史佣金分别准入。Web本人条款/收益/提现与Admin分销/财务不把旧状态当新渠道成功，用户不获全局比例表。 |
+
+## 旧公共内容（CONTENT-HISTORY-020）
+
+`la_article` 的 `cid/title/intro/summary/content/image/is_show/is_delete` 与 `la_article_category` 的名称、启停和删除状态分别保留来源关系；正文按原字节及摘要封存，不能截断，也不能把 HTML 当代码执行。文章已删除、文章隐藏、分类隐藏和未观察到正文分别记录，不能混为当前合法空。
+
+新帮助中心以受控的现行规则内容为来源，旧提现、费率、分销、履约、安全及免责文章不自动成为新订单条款。旧帮助分类也不直接改成原生公告或资讯类型。需要承接的正文须逐项核对用途及现行规则，经正常内容草稿、发布和媒体审核链处理；未核内容按具体原因隔离并保留原件，不计为已迁入或已公开。关联新的帮助路由仅是规则对照，不代表旧正文或分类已写入 PostgreSQL。
 
 ## 变更与验收对照
 
