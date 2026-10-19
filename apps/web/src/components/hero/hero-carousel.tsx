@@ -10,6 +10,7 @@ const DEFAULT_SLIDES: DefaultSlide[] = [
   { kind: "default", title: <>未成年人<br/><span>禁止消费</span></>, text: "理性游戏 · 守护成长", button: "了解平台规则", href: "/help#protection", poster:"protection", label:"未成年人保护" },
   { kind: "default", title: <>海量账号<br/><span>真实可靠</span></>, text: "洲洲商行 · 游戏账号服务", button: "浏览资源账号", href: "#delta-section", poster:"accounts", subtitle:"洲洲商行 · 游戏账号服务", label:"洲洲商行" },
   { kind: "default", title: <>账号交易<br/><span>即将上线</span></>, text: "打造属于您的游戏专属集市", button: "了解交易服务", href: "", poster:"market", label:"账号交易预告" },
+  { kind: "default", title: <>邀好友注册<br/><span>交易返现5%</span></>, text: "2元即可提现", button: "查看邀请活动", href: "", poster:"invite", label:"邀请好友活动" },
 ];
 function parseApiSlide(value: unknown): ApiSlide | null {
   if (!value || typeof value !== "object") return null;

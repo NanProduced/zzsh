@@ -503,7 +503,8 @@ test("entry notice requires five seconds, cannot escape early, and never accepts
     assert.ok(popup);
     assert.match(popup.textContent,/绑定人脸须为号主本人/);
     assert.match(popup.textContent,/双设备.*两部手机/);
-    assert.match(popup.textContent,/仅支持银行卡提现/);
+    assert.match(popup.textContent,/可用渠道和办理条件以钱包的当前状态为准/);
+    assert.doesNotMatch(popup.textContent,/仅支持银行卡提现/);
     const button = popup.querySelector('button');
     assert.equal(button.disabled,true);
     await React.act(async () => popup.dispatchEvent(new p.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true})));
