@@ -364,7 +364,7 @@ function PublishingNotice({ open, onClose, agreement }: { open: boolean; onClose
         <div className="publish-reading-body">
           <div className="publish-reading-essentials">
             <div><ShieldCheck size={20} aria-hidden="true" /><div><h3>绑定人脸须为号主本人</h3><p>解除人脸验证需准备双设备：两部手机，或手机与电脑。</p></div></div>
-            <div><CreditCard size={20} aria-hidden="true" /><div><h3>目前仅支持银行卡提现</h3><p>请提前准备本人银行卡。</p></div></div>
+            <div><CreditCard size={20} aria-hidden="true" /><div><h3>核对提现条件</h3><p>可用渠道和办理条件以钱包的当前状态为准。</p></div></div>
           </div>
           <section><h3>如实申报资料与库存</h3><ul><li>安全箱填写赛季永久容量，顶级保险卡另填可用天数；有封禁记录时，需提供对应截图。</li><li>申报可出租的全量库存，留空与 0 含义不同。六级子弹 <strong>1 组 = 60 发</strong>，AWM、巴雷特按发，顶级保险卡按天。</li></ul></section>
           <section><h3>核对报价、租期与收入</h3><ul><li>租期和金额由平台按本次规则计算；修改资料或规则变化后，需要重新核价。</li><li>预计收入为<strong>扣费前金额</strong>，最终按实际消耗与结束场景结算。押金不计入收入。</li></ul></section>
@@ -2690,7 +2690,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 <div className="publish-term-row publish-term-options-row"><span className="publish-term-label">赔付方案</span><div className="publish-term-control publish-payout-control"><FormRadioGroup name="full_payout" label="赔付方案" variant="segmented" className="publish-payout-group" value={payoutSelected} disabled={formDisabled} onChange={changeFullPayout} options={[{ value: false, label: "普通赔付" }, { value: true, label: "全额包赔" }]} />
                   <div className="publish-payout-feature" data-selected={payoutSelected === true ? "true" : "false"}>
                     <div className="publish-payout-feature-heading"><ShieldCheck size={28} aria-hidden="true" /><div><strong>全额包赔</strong><span>{payoutSelected === true ? "已选择此方案" : payoutSelected === false ? "当前选择普通赔付" : "可选保障 · 尚未选择赔付方案"}</span></div>{payoutSelected === true ? <Check size={18} aria-hidden="true" /> : null}</div>
-                    <dl className="publish-payout-facts"><div><dt>服务费率</dt><dd>8%</dd></div><div><dt>基础押金</dt><dd>{recommendation?.available && recommendationFresh ? `${yuanFromCents(recommendation.fullPayoutMinCents)} 元起` : "300 元起"}</dd></div></dl>
+                    <dl className="publish-payout-facts"><div><dt>包赔费率</dt><dd>8%</dd></div><div><dt>基础押金</dt><dd>{recommendation?.available && recommendationFresh ? `${yuanFromCents(recommendation.fullPayoutMinCents)} 元起` : "300 元起"}</dd></div></dl>
                     <p>费用在结算时按结束场景确认，不能直接从本页预计收入统一扣除；具体赔付条件以本次有效条款为准。</p>
                     <button type="button" className="button quiet supply-terms-link" onClick={showTerms}><FileText size={14} aria-hidden="true" />查看赔付规则</button>
                   </div>
