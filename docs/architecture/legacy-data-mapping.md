@@ -1,6 +1,6 @@
 # 旧数据转换与字段映射
 
-规则版 `1.3.1`（2026-10-19，补充旧公共内容与现行规则的隔离边界）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
+规则版 `1.3.2`（2026-10-19，明确附加皮肤持有集合的共同读取优先级）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
 
 ## 共同约束
 
@@ -36,7 +36,7 @@
 | GF-HISTORY-008/OPENING-009 | `la_log_earnings.change_amount/left_amount/action`分别为变动元额/历史余额/方向；提取`amount/leftAmount`是别名。`la_user.earnings`受审映可用期初，`money`不相加。 | `zzsh_order.personal_finance_observation`与coverage保观察；`finance_opening_basis/finance_economic_root/finance_covered_event/finance_observation_admission`核期初覆盖；实际账务走event/ledger。Web钱包/收益、Admin财务读取overlay，历史观察不再次入账。 |
 | GF-WITHDRAW-010/DISTRIBUTION-011 | `la_withdraw_apply`金额/费用/旧状态/时间保原；`la_distribution`资格、邀请关系与6级比例保原文本，旧FLOAT不经parseFloat近似。 | 提现仅历史观察、不再扣款，渠道UNKNOWN；新分销政策/资格/关系与历史佣金分别准入。Web本人条款/收益/提现与Admin分销/财务不把旧状态当新渠道成功，用户不获全局比例表。 |
 
-后补皮肤持有采用规则 `SUP-SKIN-020`：服务端受信上下文绑定封存四列、来源截点、来源与目标摘要、映射规则及目录版本，写入前重算完整集合，并核对实际账号和观察版本。附加事实保存在 `zzsh_supply.legacy_skin_holding`，不修改不可变观察的子表；合法空集合覆盖旧关联，缺列、歧义或未核词条保持未知。解析至新草稿时继承已核集合，后续按正常草稿合同编辑；目录配图仍不证明持有。数据库约束和运行权限须随对应迁移部署，不能只更新读取代码。
+后补皮肤持有采用规则 `SUP-SKIN-020`：服务端受信上下文绑定封存四列、来源截点、来源与目标摘要、映射规则及目录版本，写入前重算完整集合，并核对实际账号和观察版本。附加事实保存在 `zzsh_supply.legacy_skin_holding`，不修改不可变观察的子表；合法空集合覆盖旧关联，缺列、歧义或未核词条保持未知。同观察版本存在附加持有事实时，公开详情、ANY/ALL筛选与新草稿继承共同采用该完整集合（含合法空）；不存在时才回退原listing_skin，原生版本仍读取自身关系。新草稿后续按正常声明合同编辑；目录配图仍不证明持有。数据库约束和运行权限须随对应迁移部署，不能只更新读取代码。
 
 ## 旧公共内容（CONTENT-HISTORY-020）
 

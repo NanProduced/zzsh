@@ -15,3 +15,7 @@
 到期维护方显式调用 `earnings.settleDue(pool, limit, requestId)`，limit 为 1–100。它只选该订单名单内、DB 时钟已到期的 PENDING 根，每个根在原锁、版本、到期复核和独立事务内 SETTLE。异常返回 UNKNOWN 并停止本批，`notAttempted` 标出未执行数；先读原回执，再安排恢复。默认不启动后台循环，也不在 GET 中驱动资金写入。只有 SETTLE 的真实分录才能把 pending 转到可用余额。
 
 本地提现策略最低 200 分；银行固定费 100 分、支付码 2% HALF_UP，日额度按北京时间计算。报价/预留仍须核定钱包覆盖和余额、有效准入、精确目标、钱包版本及未清分销追偿。提现能力为 LOCAL_CONTROLLED，SQL 持久化的失败/超时场景不代表银行或支付码到账；全局 withdrawable 保持 UNKNOWN。真实渠道、真实身份与目的地验证另行接入验收。
+
+外部收款、退款及银行卡代付只对接国内[汇聚支付 JoinPay](https://www.joinpay.com/)。旧银行卡提现使用单笔代付；旧微信/支付宝收款码分支是后台人工确认记录，不能认作汇聚自动出款。旧代码的非生产配置会把代付金额改为 0.01 元，但仍请求生产地址，不能作为沙盒运行方式。新适配保留原请求号、金额、商户作用域、验签、幂等和原号查单；收款成功、退款应付、退款到账及代付终态分别核定，不复制旧代码把请求返回直接当到账的行为。
+
+汇聚官方技术资料列出的聚合支付联调地址为 `https://trade.joinpay.cc`，并要求[联调使用专用密钥，禁用生产密钥](https://github.com/Joinpay-Official/hj-payment-skills/blob/main/hj-joinpay-pay-shared-base/governance/credential-boundary.md)。是否另发测试商户号以及单笔代付联调范围须由汇聚确认；现有本地受控收款和提现不构成汇聚协议适配或沙盒验收。上述本地手续费也不作为已批准的正式渠道费率。

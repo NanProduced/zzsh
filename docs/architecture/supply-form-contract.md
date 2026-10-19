@@ -10,7 +10,7 @@
 
 价格草稿全量保存时，原规则或请求规则为 v2 的每一行必须显式包含 `customerTier`；缺失返回400且不改变规则、revision、价目或成功审计。仅v1保留省略tier表示STANDARD的兼容。当前Admin编辑器支持v1/v2与四档价目草稿维护；未知schema继续只读，SEALED版本不可编辑。v2模式参数和资金政策的完整表单接线仍需单独验证。
 
-发布与管理试算接口均由服务端指定 STANDARD，不接受客户端 tier。个人确认从服务端会员资格读取实际档位，缺对应价目不回退；DISCOUNT_USER 不引入免押。公开投影只含租客金额和 rentalMode，不含 owner 内价、平台利润或 pricingInputs。publishing-options 对 v2 返回 pricingSchema/rentalModes（只含启停与范围），不暴露 P/V。现有发布 UI 尚未提供 v2 模式编辑控件，不能将接口能力视为浏览器验收。
+发布与管理试算接口均由服务端指定 STANDARD，不接受客户端 tier。个人确认从服务端会员资格读取实际档位，缺对应价目不回退；DISCOUNT_USER 不引入免押。公开投影只含租客金额和 rentalMode，不含 owner 内价、平台利润或 pricingInputs。publishing-options 对 v2 返回 pricingSchema/rentalModes（只含启停与范围），不暴露 P/V。现有发布UI按服务端选项提供v2出租模式和比例控件，极速入口锁定模式；缺配置或未知schema保持不可用，接口/组件支持与浏览器验收分别核定。
 
 旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员资格、个人确认凭据及新版建单已实现，见[个人确认合同](personal-confirmation.md)。正式声明、封存资金政策与保证金依据reader及核定API已接入；资金政策页面与推荐/披露接线仍有缺口；独立包赔正文版本及签发/首次建单末端检查已具备源码合同，对应新增数据库守卫与schema须部署并完成真实边界验收，缺依赖继续拒绝，不代表正式交易闭环已可用。
 
