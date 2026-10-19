@@ -26,6 +26,16 @@ import {
   requirePermission,
 } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
+import {
+  LEGACY_SKIN_FIELDS,
+  type LegacySkinField,
+  splitLegacySkinColumn,
+  buildLegacySkinIndex,
+  mapLegacySkinHolding,
+  declarableLegacySkinIds,
+  type LegacySkinCatalogEntry,
+  type LegacySkinTokenRule,
+} from "../legacy-load/legacy-skin-holdings";
 
 type LegacyInventoryInput = {
   itemId: string;
@@ -740,7 +750,6 @@ export async function resolveLegacyObservationToDraft(
       );
       for (const [table, fields] of [
         ["inventory_line", "item_id,quantity"],
-        ["listing_skin", "skin_id"],
         ["listing_entitlement", "entitlement_id,value,expires_at,expiry_knowledge"],
         ["listing_media", "asset_id,position"],
       ])
@@ -748,6 +757,23 @@ export async function resolveLegacyObservationToDraft(
           `INSERT INTO zzsh_supply.${table}(version_id,${fields}) SELECT $1,${fields} FROM zzsh_supply.${table} WHERE version_id=$2`,
           [id, old.id],
         );
+      await client.query(
+        `INSERT INTO zzsh_supply.listing_skin(version_id, skin_id)
+         SELECT $1, skin_id FROM (
+           SELECT unnest(h.skin_ids) AS skin_id
+           FROM zzsh_supply.legacy_skin_holding h
+           WHERE h.observation_version_id = $2
+           UNION ALL
+           SELECT ls.skin_id
+           FROM zzsh_supply.listing_skin ls
+           WHERE ls.version_id = $2
+             AND NOT EXISTS (
+               SELECT 1 FROM zzsh_supply.legacy_skin_holding h2
+               WHERE h2.observation_version_id = $2
+             )
+         ) u ON CONFLICT (version_id, skin_id) DO NOTHING`,
+        [id, old.id],
+      );
       const updated = await client.query(
         `UPDATE zzsh_supply.rental_account
             SET current_version_id=$2,legacy_hold='NONE',revision=revision+1
@@ -789,4 +815,387 @@ export async function resolveLegacyObservationToDraft(
     },
   );
   return result.body as LegacyDraftResolutionResult;
+}
+
+export type LegacySkinHoldingsSourcePackage = {
+  schema: "legacy-skin-holdings-source-v1";
+  sourceSystem: "legacy_mysql_restore";
+  sourceEntity: "la_rental_accounts";
+  sourceExtractSha256: string;
+  sourceCutoff: string;
+  targetBindingsSha256: string;
+  tokenRulesVersion: string;
+  tokenRulesExtractSha256: string;
+  tokenRules: LegacySkinTokenRule[];
+  gameId: string;
+  catalogRevision: string;
+  rows: Array<{
+    legacyId: string;
+    accountId: string;
+    observationVersionId: string;
+    sourceDigest: string;
+    sourceUpdatedAtUtc: string;
+    columns: Record<LegacySkinField, string | null>;
+  }>;
+};
+
+export type LegacySkinHoldingsAdmission = Readonly<{ packageSha256: string }>;
+type SkinSourceState = Omit<LegacySkinHoldingsSourcePackage, "rows"> & {
+  tokenRulesDigest: string;
+  rows: Map<string, LegacySkinHoldingsSourcePackage["rows"][number]>;
+};
+const admittedSkinSources = new WeakMap<LegacySkinHoldingsAdmission, SkinSourceState>();
+const SKIN_SOURCE_HEX = /^[a-f0-9]{64}$/;
+const SKIN_SOURCE_UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/;
+
+function validateSkinColumns(columns: unknown): asserts columns is Record<LegacySkinField, string | null> {
+  if (!recordValue(columns)) throw invalid("All four legacy skin columns are required", "columns");
+  if (Object.keys(columns).some(field => !(LEGACY_SKIN_FIELDS as readonly string[]).includes(field)))
+    throw invalid("Unexpected legacy skin column in columns", "columns");
+  if (LEGACY_SKIN_FIELDS.some(field => !Object.hasOwn(columns, field) || columns[field] === undefined))
+    throw invalid("All four legacy skin columns must be observed", "columns");
+  if (LEGACY_SKIN_FIELDS.some(field => columns[field] !== null && typeof columns[field] !== "string"))
+    throw invalid("Legacy skin columns must be strings or null", "columns");
+}
+
+/** Integrity is not approval: only the controlled maintenance loader supplies the independent Root-window SHA, never a request body. */
+export function prepareLegacySkinHoldingsAdmission(bytes: string | Buffer, approvedPackageSha256: string): LegacySkinHoldingsAdmission {
+  const raw = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+  if (!Buffer.isBuffer(raw) || raw.length > 2 * 1024 * 1024 || !SKIN_SOURCE_HEX.test(approvedPackageSha256))
+    throw invalid("An independently admitted skin source package is required");
+  const text = raw.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(raw) || sha256Hex(text) !== approvedPackageSha256)
+    throw invalid("Admitted skin source package bytes do not match");
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { throw invalid("Admitted skin source package must be JSON"); }
+  if (!recordValue(value)) throw invalid("Admitted skin source package must be an object");
+  const source = value as unknown as LegacySkinHoldingsSourcePackage;
+  if (source.schema !== "legacy-skin-holdings-source-v1" || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
+    || [source.sourceExtractSha256, source.targetBindingsSha256, source.tokenRulesExtractSha256].some(v => typeof v !== "string" || !SKIN_SOURCE_HEX.test(v))
+    || typeof source.sourceCutoff !== "string" || !SKIN_SOURCE_UTC.test(source.sourceCutoff) || !Number.isFinite(Date.parse(source.sourceCutoff))
+    || typeof source.tokenRulesVersion !== "string" || !source.tokenRulesVersion.trim() || source.tokenRulesVersion.length > 128
+    || !Array.isArray(source.tokenRules) || typeof source.catalogRevision !== "string" || !/^[1-9]\d{0,18}$/.test(source.catalogRevision)
+    || !Array.isArray(source.rows) || source.rows.length === 0 || source.rows.length > 500)
+    throw invalid("Admitted skin source bindings are incomplete");
+  if (source.tokenRules.some(rule => !recordValue(rule) || !(LEGACY_SKIN_FIELDS as readonly string[]).includes(rule.field)
+    || typeof rule.token !== "string" || !rule.token || !["ALIAS_OF", "INVALID", "HISTORICAL", "PENDING_DECISION", "SOURCE_AMBIGUOUS"].includes(rule.decision)))
+    throw invalid("Admitted skin token rules are invalid");
+  idText(source.gameId, "gameId");
+  const rows = new Map<string, LegacySkinHoldingsSourcePackage["rows"][number]>(), accounts = new Set<string>(), versions = new Set<string>();
+  for (const row of source.rows) {
+    if (!recordValue(row)) throw invalid("Admitted skin source row is invalid");
+    for (const key of ["legacyId", "accountId", "observationVersionId"] as const) idText(row[key], key);
+    if (typeof row.sourceDigest !== "string" || !SKIN_SOURCE_HEX.test(row.sourceDigest) || typeof row.sourceUpdatedAtUtc !== "string" || !SKIN_SOURCE_UTC.test(row.sourceUpdatedAtUtc)
+      || !Number.isFinite(Date.parse(row.sourceUpdatedAtUtc)) || Date.parse(row.sourceUpdatedAtUtc) > Date.parse(source.sourceCutoff))
+      throw invalid("Admitted skin source row digest or cutoff is invalid");
+    validateSkinColumns(row.columns);
+    if (rows.has(row.legacyId) || accounts.has(row.accountId) || versions.has(row.observationVersionId))
+      throw invalid("Admitted skin source targets must be unique");
+    rows.set(row.legacyId, row); accounts.add(row.accountId); versions.add(row.observationVersionId);
+  }
+  const admission = Object.freeze({ packageSha256: approvedPackageSha256 });
+  admittedSkinSources.set(admission, { ...source, tokenRulesDigest: sha256Hex(canonicalize(source.tokenRules)), rows });
+  return admission;
+}
+
+function admittedSkinRow(admission: LegacySkinHoldingsAdmission, legacyId: string) {
+  const source = admittedSkinSources.get(admission);
+  if (!source) throw invalid("A server-admitted legacy skin source context is required");
+  const row = source.rows.get(legacyId);
+  if (!row) throw conflict("Legacy skin source row was not admitted");
+  const bindingDigest = sha256Hex(canonicalize({ sourceExtractSha256: source.sourceExtractSha256, sourceCutoff: source.sourceCutoff,
+    targetBindingsSha256: source.targetBindingsSha256, tokenRulesVersion: source.tokenRulesVersion, tokenRulesExtractSha256: source.tokenRulesExtractSha256,
+    tokenRulesDigest: source.tokenRulesDigest, gameId: source.gameId, catalogRevision: source.catalogRevision, row }));
+  return { source, row, bindingDigest };
+}
+
+/** Root uses the same mapper for the frozen DTO; the writer rechecks the actual catalog and exact map on its transaction client. */
+export function prepareLegacySkinHoldingsInput(admission: LegacySkinHoldingsAdmission, legacyId: string, catalog: readonly LegacySkinCatalogEntry[], evidenceRef: string) {
+  const { source, row } = admittedSkinRow(admission, legacyId);
+  const holding = mapLegacySkinHolding({ accountKey: row.legacyId, gameId: source.gameId, columns: row.columns }, buildLegacySkinIndex(catalog, source.tokenRules), source.catalogRevision);
+  const skinIds = declarableLegacySkinIds(holding);
+  if (!skinIds) throw invalid("Admitted legacy skin source is not completely declarable");
+  return { accountId: row.accountId, input: { observationVersionId: row.observationVersionId, sourceSystem: source.sourceSystem,
+    sourceEntity: source.sourceEntity, legacyId: row.legacyId, sourceDigest: row.sourceDigest, holdingDigest: holding.digest,
+    skinIds, evidenceRef, columns: { ...row.columns }, catalogRevision: source.catalogRevision } satisfies LegacySkinHoldingsInput };
+}
+
+export type LegacySkinHoldingsInput = {
+  observationVersionId: string;
+  sourceSystem: string;
+  sourceEntity: string;
+  legacyId: string;
+  sourceDigest: string;
+  holdingDigest: string;
+  skinIds: string[];
+  evidenceRef: string;
+  columns: Record<LegacySkinField, string | null>;
+  catalogRevision?: string;
+};
+
+export type LegacySkinHoldingsResult = {
+  accountId: string;
+  observationVersionId: string;
+  attachedSkins: string[];
+};
+
+/**
+ * Controlled additive seam: attach verified legacy skin holdings to an immutable observation version.
+ * Persists to zzsh_supply.legacy_skin_holding, avoiding non-DRAFT listing_skin 40001 constraint.
+ * Idempotent, audit-logged, and verified against game scope, exact map, holding digest, and public verified skins.
+ */
+export async function recordLegacySkinHoldings(
+  client: PoolClient,
+  accountId: string,
+  input: LegacySkinHoldingsInput,
+  actor: LegacyImportActor,
+  admission: LegacySkinHoldingsAdmission,
+): Promise<LegacySkinHoldingsResult> {
+  if (!input || typeof input !== "object") throw invalid("Invalid legacy skin holdings input");
+  const accountIdText = idText(accountId, "accountId");
+  const observationVersionId = idText(input.observationVersionId, "observationVersionId");
+  const legacyId = idText(input.legacyId, "legacyId");
+  if (input.sourceSystem !== "legacy_mysql_restore" || input.sourceEntity !== "la_rental_accounts")
+    throw invalid("Legacy skin source system/entity is not allowed");
+  if (!/^[a-f0-9]{64}$/.test(input.sourceDigest))
+    throw invalid("Source digest is invalid", "sourceDigest");
+  if (!/^[a-f0-9]{64}$/.test(input.holdingDigest))
+    throw invalid("Holding digest is invalid", "holdingDigest");
+  if (typeof input.evidenceRef !== "string" || input.evidenceRef.length === 0 || input.evidenceRef.length > 512)
+    throw invalid("Invalid evidence ref", "evidenceRef");
+  if (!Array.isArray(input.skinIds))
+    throw invalid("skinIds must be an array", "skinIds");
+  const skinIds = Array.from(new Set(input.skinIds.map(id => idText(id, "skinIds")))).sort();
+
+  validateSkinColumns(input.columns);
+
+  const allColumnsEmpty = LEGACY_SKIN_FIELDS.every((f) => splitLegacySkinColumn(input.columns[f]).length === 0);
+  if (allColumnsEmpty && skinIds.length > 0) {
+    throw invalid("Empty skin columns cannot claim positive skin holdings", "skinIds");
+  }
+  if (!allColumnsEmpty && skinIds.length === 0) {
+    throw invalid("Empty skinIds requires proof of four observed empty columns", "skinIds");
+  }
+  const { source, row: sealedRow, bindingDigest } = admittedSkinRow(admission, legacyId);
+
+  const operation = "supply.legacy.skin_holdings";
+  // SK11-A03: skinIds does NOT participate in idempotencyKey so set changes cannot produce disjoint keys.
+  const idempotencyKey = sha256Hex(
+    JSON.stringify([operation, input.sourceSystem, input.sourceEntity, legacyId, accountIdText, input.sourceDigest]),
+  );
+  const fingerprint = fingerprintRequest(operation, accountIdText, { ...input, skinIds, sourceAdmissionDigest: bindingDigest });
+
+  let account: PublishingAccount | undefined;
+  const result = await withIdempotency(
+    client,
+    { realm: "admin", principalId: actor.id, operation, resourceId: accountIdText },
+    idempotencyKey,
+    fingerprint,
+    async () => {
+      account = await lockPublishingAccount(client, accountIdText);
+      await authorizeLegacyAdmin(client, actor, account);
+
+      // Verify immutable observation version
+      const versionRow = (
+        await client.query<{ id: string; origin: string; review_state: string }>(
+          `SELECT id, origin, review_state FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2`,
+          [observationVersionId, accountIdText],
+        )
+      ).rows[0];
+      if (!versionRow) throw notFound();
+      if (versionRow.origin !== "LEGACY_OBSERVATION" || versionRow.review_state !== "IMPORTED_UNVERIFIED") {
+        throw invalid("Observation version must be an IMPORTED_UNVERIFIED legacy observation", "observationVersionId");
+      }
+
+      // SK11-A02: Strict legacy_supply_map binding
+      const mapRow = (
+        await client.query<{ source_digest: string; version_id: string; account_id: string }>(
+          `SELECT source_digest, version_id, account_id FROM zzsh_supply.legacy_supply_map WHERE source_system=$1 AND source_entity=$2 AND legacy_id=$3`,
+          [input.sourceSystem, input.sourceEntity, legacyId],
+        )
+      ).rows[0];
+      if (!mapRow) {
+        throw conflict("Legacy supply map not found for source tuple");
+      }
+      if (mapRow.account_id !== accountIdText) {
+        throw conflict("Legacy supply map account does not match target account");
+      }
+      if (mapRow.version_id !== observationVersionId) {
+        throw conflict("Legacy supply map observation version does not match target version");
+      }
+      if (mapRow.source_digest !== input.sourceDigest) {
+        throw conflict("Legacy source digest conflicts with recorded observation");
+      }
+      if (sealedRow.accountId !== accountIdText || sealedRow.observationVersionId !== observationVersionId || sealedRow.sourceDigest !== input.sourceDigest || source.gameId !== account!.game_id)
+        throw conflict("Legacy skin source target does not match the admitted map and version");
+
+      // Check existing persistent holding in zzsh_supply.legacy_skin_holding
+      const existing = (
+        await client.query<{ holding_digest: string; skin_ids: string[]; source_digest: string; observation_version_id: string }>(
+          `SELECT holding_digest, skin_ids, source_digest, observation_version_id FROM zzsh_supply.legacy_skin_holding WHERE account_id=$1`,
+          [accountIdText],
+        )
+      ).rows[0];
+      if (existing) {
+        const existingSet = new Set(existing.skin_ids);
+        const newSet = new Set(skinIds);
+        const setsEqual = existingSet.size === newSet.size && skinIds.every((s) => existingSet.has(s));
+        if (
+          existing.holding_digest === input.holdingDigest &&
+          existing.source_digest === input.sourceDigest &&
+          existing.observation_version_id === observationVersionId &&
+          setsEqual
+        ) {
+          // Replay of identical holding
+          return false;
+        }
+        // SK11-A03: Different set conflicts!
+        throw conflict("Legacy skin holdings conflict with recorded holding for this account");
+      }
+
+      return false;
+    },
+    async () => {
+      const a = account!;
+      if (canonicalize(input.columns) !== canonicalize(sealedRow.columns))
+        throw conflict("Legacy skin source columns conflict with the admitted sealed row");
+      if (input.catalogRevision !== undefined && input.catalogRevision !== source.catalogRevision)
+        throw conflict("Legacy skin catalog revision does not match its admitted source context");
+
+      // Verify catalog mapping against observed columns and declared skinIds
+      const gameRevisionRow = (
+        await client.query<{ catalogRevision: string }>(
+          `SELECT catalog_revision::text AS "catalogRevision" FROM zzsh_supply.game WHERE id=$1`,
+          [a.game_id],
+        )
+      ).rows[0];
+      const catalogRevision = gameRevisionRow?.catalogRevision;
+      if (!catalogRevision || catalogRevision !== source.catalogRevision)
+        throw conflict("Legacy skin catalog changed after source admission");
+
+      const catalogRows = (
+        await client.query<{
+          id: string;
+          gameId: string;
+          sourceField: string | null;
+          sourceToken: string | null;
+          namingState: "LEGACY" | "PENDING" | "VERIFIED";
+          enabled: boolean;
+          formVisible: boolean;
+        }>(
+          `SELECT id, game_id AS "gameId", source_field AS "sourceField", source_token AS "sourceToken",
+                  naming_state AS "namingState", enabled, form_visible AS "formVisible"
+             FROM zzsh_supply.skin
+            WHERE game_id=$1`,
+          [a.game_id],
+        )
+      ).rows;
+
+      const catalogEntries: LegacySkinCatalogEntry[] = catalogRows.map((r) => ({
+        skinId: r.id,
+        gameId: r.gameId,
+        sourceField: r.sourceField,
+        sourceToken: r.sourceToken,
+        namingState: r.namingState,
+        enabled: Boolean(r.enabled),
+        formVisible: Boolean(r.formVisible),
+      }));
+
+      const skinIndex = buildLegacySkinIndex(catalogEntries, source.tokenRules);
+      const holding = mapLegacySkinHolding(
+        { accountKey: legacyId, gameId: a.game_id, columns: sealedRow.columns },
+        skinIndex,
+        catalogRevision,
+      );
+
+      if (!holding.complete) {
+        throw invalid("Legacy skin holding source has unmapped, pending, or ambiguous skins", "columns");
+      }
+      const declarable = declarableLegacySkinIds(holding);
+      if (
+        !declarable ||
+        declarable.length !== skinIds.length ||
+        !skinIds.every((id) => declarable.includes(id))
+      ) {
+        throw invalid("Declared skinIds do not match mapped declarable skins from observed columns", "skinIds");
+      }
+      if (holding.digest !== input.holdingDigest) {
+        throw conflict("Holding digest does not match computed digest from observed columns");
+      }
+
+      const existing = (
+        await client.query<{ skin_ids: string[] }>(
+          `SELECT skin_ids FROM zzsh_supply.legacy_skin_holding WHERE account_id=$1`,
+          [accountIdText],
+        )
+      ).rows[0];
+      if (existing) {
+        return {
+          status: 200,
+          body: {
+            accountId: accountIdText,
+            observationVersionId,
+            attachedSkins: existing.skin_ids,
+          },
+        };
+      }
+
+      // SK11-A01 & SK11-C01: Insert into zzsh_supply.legacy_skin_holding with exact 10 columns
+      await client.query(
+        `INSERT INTO zzsh_supply.legacy_skin_holding(
+           account_id, observation_version_id, source_system, source_entity, legacy_id,
+           source_digest, holding_digest, skin_ids, evidence_ref, created_by_admin_id
+         ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          accountIdText,
+          observationVersionId,
+          input.sourceSystem,
+          input.sourceEntity,
+          legacyId,
+          input.sourceDigest,
+          input.holdingDigest,
+          skinIds,
+          input.evidenceRef,
+          actor.id,
+        ],
+      );
+
+      await recordAudit(client, {
+        actorType: "admin",
+        actorId: actor.id,
+        sessionId: actor.sessionId,
+        requestId: actor.requestId,
+        action: "supply.legacy.skin_holdings_recorded",
+        objectType: "rental_account",
+        objectId: accountIdText,
+        outcome: "SUCCESS",
+        reason: "旧站账号已核实皮肤持有记录保存；关联至历史观察版本与独立持有事实表",
+        details: {
+          sourceSystem: input.sourceSystem,
+          sourceEntity: input.sourceEntity,
+          legacyId,
+          sourceDigest: input.sourceDigest,
+          holdingDigest: input.holdingDigest,
+          observationVersionId,
+          attachedSkins: skinIds,
+          evidenceRef: input.evidenceRef,
+          sourceAdmission: { packageSha256: admission.packageSha256, bindingDigest, sourceExtractSha256: source.sourceExtractSha256,
+            sourceCutoff: source.sourceCutoff, sourceUpdatedAtUtc: sealedRow.sourceUpdatedAtUtc, targetBindingsSha256: source.targetBindingsSha256,
+            tokenRulesVersion: source.tokenRulesVersion, tokenRulesExtractSha256: source.tokenRulesExtractSha256,
+            tokenRulesDigest: source.tokenRulesDigest, catalogRevision },
+          result: "SKIN_HOLDINGS_RECORDED",
+        },
+      });
+
+      return {
+        status: 200,
+        body: {
+          accountId: accountIdText,
+          observationVersionId,
+          attachedSkins: skinIds,
+        },
+      };
+    },
+  );
+  return result.body as LegacySkinHoldingsResult;
 }
