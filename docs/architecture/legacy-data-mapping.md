@@ -36,6 +36,8 @@
 | GF-HISTORY-008/OPENING-009 | `la_log_earnings.change_amount/left_amount/action`分别为变动元额/历史余额/方向；提取`amount/leftAmount`是别名。`la_user.earnings`受审映可用期初，`money`不相加。 | `zzsh_order.personal_finance_observation`与coverage保观察；`finance_opening_basis/finance_economic_root/finance_covered_event/finance_observation_admission`核期初覆盖；实际账务走event/ledger。Web钱包/收益、Admin财务读取overlay，历史观察不再次入账。 |
 | GF-WITHDRAW-010/DISTRIBUTION-011 | `la_withdraw_apply`金额/费用/旧状态/时间保原；`la_distribution`资格、邀请关系与6级比例保原文本，旧FLOAT不经parseFloat近似。 | 提现仅历史观察、不再扣款，渠道UNKNOWN；新分销政策/资格/关系与历史佣金分别准入。Web本人条款/收益/提现与Admin分销/财务不把旧状态当新渠道成功，用户不获全局比例表。 |
 
+后补皮肤持有采用规则 `SUP-SKIN-020`：服务端受信上下文绑定封存四列、来源截点、来源与目标摘要、映射规则及目录版本，写入前重算完整集合，并核对实际账号和观察版本。附加事实保存在 `zzsh_supply.legacy_skin_holding`，不修改不可变观察的子表；合法空集合覆盖旧关联，缺列、歧义或未核词条保持未知。解析至新草稿时继承已核集合，后续按正常草稿合同编辑；目录配图仍不证明持有。数据库约束和运行权限须随对应迁移部署，不能只更新读取代码。
+
 ## 变更与验收对照
 
 每次转换变更记录稳定规则ID、前后版本、真实源表/列及单位、原因/裁定、目标表、DTO/BFF和双端消费者；明确受影响集合、需重派生/补迁/不可变更正的范围。只有布局或文案变动时明确“转换规则未变”，不能顺手重算旧金额或修改源快照。

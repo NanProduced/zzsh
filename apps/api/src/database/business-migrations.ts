@@ -145,6 +145,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_listing_display_snapshot') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_listing_display_snapshot FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_listing_display_snapshot TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_listing_display_snapshot FROM ${runtimeUser}`);
   }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_skin_holding') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE ALL ON zzsh_supply.legacy_skin_holding FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_skin_holding TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_skin_holding FROM ${runtimeUser}`);
+  }
   if ((await pool.query(`SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_order.legacy_order_read_snapshot TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_order.legacy_order_read_snapshot FROM ${runtimeUser}`);
   }

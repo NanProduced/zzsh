@@ -603,6 +603,13 @@
       "when": 1792281600002,
       "tag": "0085_membership_total_discount",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1792281600003,
+      "tag": "0086_legacy_skin_holding",
+      "breakpoints": true
     }
   ]
 }
