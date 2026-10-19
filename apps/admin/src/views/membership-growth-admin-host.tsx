@@ -187,7 +187,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
     if (!meta) return;
     const generation = generationRef.current;
     if (!savedDraft) { setState((current) => current.status === "ready" ? { ...current, approval: { status: "NOT_REQUESTED", message: "请先保存当前政策草稿，再提交审批" } } : current); return; }
-    const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.benefit.policy.publish", triggerCondition: "membership.policy.publish.requested", payloadVersion: 1, payload: policyDraftApprovalPayload(savedDraft!), summary: `发布会员政策 ${ready.policy.version}`, supersedesRequestId: null });
+    const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.benefit.policy.publish", triggerCondition: "membership.policy.publish.requested", payloadVersion: 1, payload: policyDraftApprovalPayload(savedDraft!), summary: `发布会员政策 ${ready.policy.version}` });
     if (generationRef.current !== generation) return;
     // Only the approval state of this generation is touched; edits made meanwhile stay untouched.
     setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } } : current);
@@ -200,7 +200,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       userId: ready.subject.subjectId, gameId, kind: draft.kind, scopeKey: draft.scopeKey, startsAtUtc: draft.startsAtUtc, endsAtUtc: draft.endsAtUtc, policyId: meta.id,
       // Manual grant sets its own payable share and expiry; no second haff/material price table is sent.
       pricing: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: draft.pricingMode, priceVersionId: draft.priceVersionId, payableRatio: draft.payableRatio, costBasisRef: draft.costBasisRef },
-      depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇`, supersedesRequestId: null });
+      depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇` });
     if (generationRef.current !== generation) return;
     setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } } : current);
   };

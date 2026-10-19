@@ -96,6 +96,7 @@ test("R1-02 host save race: edits during a pending save stay unsaved and only th
     await act(async () => buttonByText(host, "提交审批").click());
     const approval = requests.find((request) => request.path.endsWith("/security/approvals/requests"));
     assert.ok(approval);
+    assert.equal(Object.hasOwn(approval.body, "supersedesRequestId"), false);
     assert.equal(approval.body.payload.policyDraftId, "draft-3");
     assert.equal(approval.body.payload.policyDraftVersion, 3);
     assert.equal(approval.body.payload.policyDraftHash, "c".repeat(64));
@@ -140,6 +141,7 @@ test("R1-07 host manual entitlement sends its own discount share and cost basis"
     await act(async () => submit.click());
     const approval = requests.find((request) => request.path.endsWith("/security/approvals/requests"));
     assert.ok(approval);
+    assert.equal(Object.hasOwn(approval.body, "supersedesRequestId"), false);
     assert.equal(approval.body.operationCode, "membership.entitlement.grant");
     assert.deepEqual(approval.body.payload.pricing, { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "ordinary", priceVersionId: "price-v1", payableRatio: "0.90", costBasisRef: "cost-ordinary" });
     assert.equal(approval.body.payload.pricing.haff, undefined);
