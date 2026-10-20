@@ -222,8 +222,8 @@ function expectedSourcesFromSettlement(row: StoredSettlementSource): { sources: 
 /** Result of membership-growth-legacy.assessLegacyCoverageRecord for this subject (Q wires the H3 record read). */
 export type LegacyCoverageAssessment = { state: "COMPLETE" | "BACKFILL_PENDING" | "SOURCE_CONFLICT"; reasons: string[] };
 
-export async function readGrowthSourceCompleteness(client: PoolClient, userId: string, contributions: readonly CompletenessContribution[], registrationSourceRef: string | null, legacyCoverage?: LegacyCoverageAssessment, asOfUtc?: string): Promise<GrowthSourceCompleteness> {
-  const sourceRows = (await client.query<StoredSettlementSource>(
+export async function readGrowthSourceCompleteness(client: PoolClient, userId: string, contributions: readonly CompletenessContribution[], registrationSourceRef: string | null, legacyCoverage?: LegacyCoverageAssessment, asOfUtc?: string, readFacts?: { sourceRows: StoredSettlementSource[]; migrated: boolean }): Promise<GrowthSourceCompleteness> {
+  const sourceRows = readFacts?.sourceRows ?? (await client.query<StoredSettlementSource>(
     `SELECT v.id AS "settlementVersionId", v.version_no AS "versionNo", v.version_hash AS "versionHash", o.renter_user_id AS "userId", o.game_id AS "gameId", v.input_snapshot AS "inputSnapshot"
        FROM zzsh_order.rental_order o
        JOIN zzsh_order.settlement_posting p ON p.order_id=o.id
@@ -235,7 +235,7 @@ export async function readGrowthSourceCompleteness(client: PoolClient, userId: s
   if (expectedDetails.some((entry) => !entry.valid)) return { state: "SOURCE_CONFLICT", expectedSourceKeys: [], presentSourceKeys: [...new Set(contributions.filter((row) => row.status !== "PENDING").map((row) => row.sourceKey))].sort(), missingSourceKeys: [], reasons: ["FORMAL_SOURCE_SNAPSHOT_INVALID"] };
   const expectedSources = expectedDetails.flatMap((entry) => entry.sources);
   const expected = expectedSources.map((source) => source.sourceKey);
-  const provenance = (await client.query<{ migrated: boolean }>(
+  const provenance = readFacts ? { migrated: readFacts.migrated } : (await client.query<{ migrated: boolean }>(
     `SELECT EXISTS(SELECT 1 FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='user.legacy_owner.migrated' AND outcome='SUCCESS') AS migrated`, [userId],
   )).rows[0];
   if (typeof provenance?.migrated !== "boolean") throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Growth source proof is unavailable");
@@ -470,6 +470,7 @@ type StoredContribution = GrowthContribution & { gameId: string; sourceDigest?: 
 type StoredEntitlement = { id: string; kind: "FRIEND" | "PRESTIGE"; scopeKey: string; startsAt: string; endsAt: string; status: ExistingEntitlement["status"]; depositWaived: boolean };
 type StoredQuoteEntitlement = StoredEntitlement & { pricingPayload: unknown };
 type StoredGrowthState = { normalTier: string; effectiveTier: string; blackGoldState: string; lastTierDropAt: string | null };
+type StoredGrowthPolicy = { id: string; version: string; policyPayload: Record<string, unknown>; haffRule: unknown };
 
 function normalizeStoredEntitlement<T extends StoredEntitlement>(row: T): T {
   return { ...row, startsAt: normalizeGrowthInstant(row.startsAt, "startsAt"), endsAt: normalizeGrowthInstant(row.endsAt, "endsAt") };
@@ -630,6 +631,22 @@ function dtoFromProjection(projection: GrowthProjection | null, asOfUtc: string,
   return { schema: "membership-growth-v1", knowledge: "KNOWN", sourceState, benefitsState, asOfUtc: projection.asOf, windowStartUtc: projection.windowStart, rollingPoints: projection.rollingPoints, lifetimePoints: projection.lifetimePoints, normalTier: projection.normalTier, effectiveTier: projection.effectiveTier, blackGold: projection.blackGold, grace: projection.grace, nextExpiryAtUtc: projection.nextExpiryAt, nextTier: nextTierFor(projection), benefits: summaries.benefits, comparison: summaries.comparison, contributions: contributionSummaries(projection, rows), pendingCount: projection.pending.length, pending: projection.pending, excluded: projection.excluded };
 }
 
+function projectMembershipGrowth(userId: string, rows: StoredContribution[], storedState: StoredGrowthState | null, completeness: GrowthSourceCompleteness | null, policy: StoredGrowthPolicy | undefined, entitlements: StoredEntitlement[], asOfUtc: string): GrowthReaderResponse {
+  const previousTier = storedState && (NORMAL_GROWTH_TIERS as readonly string[]).includes(storedState.normalTier) ? storedState.normalTier as GrowthProjection["normalTier"] : undefined;
+  const projection = replayGrowthProjection({
+    userId, asOf: asOfUtc, contributions: rows,
+    ...(previousTier ? { previousTier } : {}),
+    ...(storedState?.lastTierDropAt ? { lastTierDropAt: normalizeGrowthInstant(storedState.lastTierDropAt, "lastTierDropAt") } : {}),
+    ...(storedState && (storedState.effectiveTier === "BLACK_GOLD" || storedState.blackGoldState === "QUALIFIED" || storedState.blackGoldState === "REVIEW_REQUIRED") ? { existingBlackGold: true } : {}),
+  });
+  return {
+    subjectId: userId,
+    growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", completeness?.state ?? "READ_FAILED", completeness?.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN", policy?.policyPayload ?? null, policy?.version ?? null, rows, policy ? sealedEnabledRentalModes(policy.haffRule) : null),
+    entitlements: entitlements.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived })),
+    sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length },
+  };
+}
+
 async function readMembershipGrowthModel(client: PoolClient, userId: string, asOfUtc: string): Promise<{ response: GrowthReaderResponse; rows: StoredContribution[] } | null> {
   const user = (await client.query<{ id: string }>(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1`, [userId])).rows[0];
   if (!user) return null;
@@ -647,40 +664,85 @@ async function readMembershipGrowthModel(client: PoolClient, userId: string, asO
   } catch {
     storedState = null;
   }
-  const previousTier = storedState && (NORMAL_GROWTH_TIERS as readonly string[]).includes(storedState.normalTier) ? storedState.normalTier as GrowthProjection["normalTier"] : undefined;
-  const projection = replayGrowthProjection({
-    userId,
-    asOf: asOfUtc,
-    contributions: rows,
-    ...(previousTier ? { previousTier } : {}),
-    ...(storedState?.lastTierDropAt ? { lastTierDropAt: normalizeGrowthInstant(storedState.lastTierDropAt, "lastTierDropAt") } : {}),
-    ...(storedState && (storedState.effectiveTier === "BLACK_GOLD" || storedState.blackGoldState === "QUALIFIED" || storedState.blackGoldState === "REVIEW_REQUIRED") ? { existingBlackGold: true } : {}),
-  });
   let completeness: GrowthSourceCompleteness | null = null;
   try {
     completeness = await readGrowthSourceCompleteness(client, userId, rows, oldMembership?.sourceRef ?? null, undefined, asOfUtc);
   } catch {
     completeness = null;
   }
-  const projectionKnown = completeness?.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN";
-  const sourceState: GrowthSourceState = completeness === null ? "READ_FAILED" : completeness.state;
-  const policy = (await client.query<{ id: string; version: string; policyPayload: Record<string, unknown>; haffRule: unknown }>(
+  const policy = (await client.query<StoredGrowthPolicy>(
     `SELECT pol.id, pol.version::text AS version, pol.policy_payload AS "policyPayload", p.haff_rule AS "haffRule"
        FROM zzsh_iam.membership_growth_policy pol
        LEFT JOIN zzsh_supply.rule_release r ON r.id=pol.rule_release_id
        LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
       WHERE pol.status='APPROVED' AND pol.effective_at <= $1 ORDER BY pol.version DESC LIMIT 1`, [asOfUtc],
   )).rows[0];
-  const enabledModes = policy ? sealedEnabledRentalModes(policy.haffRule) : null;
   const entitlements = (await client.query<StoredEntitlement>(
     `SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived"
        FROM zzsh_iam.membership_entitlement WHERE user_id=$1 ORDER BY starts_at DESC, id DESC LIMIT 100`, [userId],
-  )).rows.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived }));
-  return { rows, response: { subjectId: userId, growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", sourceState, projectionKnown, policy?.policyPayload ?? null, policy?.version ?? null, rows, enabledModes), entitlements, sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length } } };
+  )).rows;
+  return { rows, response: projectMembershipGrowth(userId, rows, storedState, completeness, policy, entitlements, asOfUtc) };
 }
 
 export async function readMembershipGrowth(client: PoolClient, userId: string, asOfUtc = new Date().toISOString()): Promise<GrowthReaderResponse | null> {
   return (await readMembershipGrowthModel(client, userId, asOfUtc))?.response ?? null;
+}
+
+function groupGrowthRows<T extends { userId: string }>(rows: readonly T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const row of rows) {
+    const group = grouped.get(row.userId) ?? [];
+    group.push(row); grouped.set(row.userId, group);
+  }
+  return grouped;
+}
+
+/** Directory pages share the single-subject projection without one SQL round trip per user. */
+export async function readMembershipGrowthBatch(client: PoolClient, userIds: readonly string[], asOfUtc = new Date().toISOString()): Promise<Map<string, GrowthReaderResponse>> {
+  const ids = [...new Set(userIds)], results = new Map<string, GrowthReaderResponse>();
+  if (ids.length === 0) return results;
+  const asOf = normalizeGrowthInstant(asOfUtc);
+  const subjects = (await client.query<StoredGrowthState & { userId: string; sourceRef: string | null; migrated: boolean }>(
+    `SELECT /* directory-growth-subjects */ u.id AS "userId", m.source_ref AS "sourceRef",
+       s.normal_tier AS "normalTier", s.effective_tier AS "effectiveTier", s.black_gold_state AS "blackGoldState", s.last_tier_drop_at::text AS "lastTierDropAt",
+       EXISTS(SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id=u.id AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS') AS migrated
+     FROM zzsh_auth_user."user" u LEFT JOIN zzsh_iam.user_rental_membership m ON m.user_id=u.id
+     LEFT JOIN zzsh_iam.membership_growth_state s ON s.user_id=u.id WHERE u.id=ANY($1::text[])`, [ids],
+  )).rows;
+  const contributions = groupGrowthRows((await client.query<StoredContribution>(
+    `SELECT /* directory-growth-contributions */ user_id AS "userId", game_id AS "gameId", source_key AS "sourceKey", source_type AS "sourceType", source_id AS "sourceId",
+       settlement_version AS "settlementVersion", effective_at::text AS "effectiveAt", recorded_at::text AS "recordedAt", amount_cents::text AS "amountCents",
+       state AS status, eligible, revision, previous_amount_cents::text AS "previousAmountCents", correction_of_source_key AS "correctionOf", correction_mode AS "correctionMode", source_digest AS "sourceDigest"
+     FROM zzsh_iam.membership_growth_contribution WHERE user_id=ANY($1::text[]) ORDER BY effective_at,source_key,revision`, [ids],
+  )).rows.map(normalizeStoredContribution));
+  const sources = groupGrowthRows((await client.query<StoredSettlementSource>(
+    `SELECT /* directory-growth-sources */ v.id AS "settlementVersionId", v.version_no AS "versionNo", v.version_hash AS "versionHash", o.renter_user_id AS "userId", o.game_id AS "gameId", v.input_snapshot AS "inputSnapshot"
+     FROM zzsh_order.rental_order o JOIN zzsh_order.settlement_posting p ON p.order_id=o.id
+     JOIN zzsh_order.settlement_version v ON v.id=p.settlement_version_id AND v.order_id=o.id
+     WHERE o.renter_user_id=ANY($1::text[]) AND v.superseded_at IS NULL ORDER BY v.id`, [ids],
+  )).rows);
+  const policy = (await client.query<StoredGrowthPolicy>(
+    `SELECT /* directory-growth-policy */ pol.id,pol.version::text AS version,pol.policy_payload AS "policyPayload",p.haff_rule AS "haffRule"
+     FROM zzsh_iam.membership_growth_policy pol LEFT JOIN zzsh_supply.rule_release r ON r.id=pol.rule_release_id
+     LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+     WHERE pol.status='APPROVED' AND pol.effective_at<=$1 ORDER BY pol.version DESC LIMIT 1`, [asOf],
+  )).rows[0];
+  const entitlements = groupGrowthRows((await client.query<StoredEntitlement & { userId: string }>(
+    `SELECT /* directory-growth-entitlements */ user_id AS "userId",id,kind,scope_key AS "scopeKey",starts_at::text AS "startsAt",ends_at::text AS "endsAt",status,deposit_waived AS "depositWaived"
+     FROM (SELECT e.*,row_number() OVER(PARTITION BY user_id ORDER BY starts_at DESC,id DESC) AS row_no
+       FROM zzsh_iam.membership_entitlement e WHERE user_id=ANY($1::text[])) ranked
+     WHERE row_no<=100 ORDER BY user_id,starts_at DESC,id DESC`, [ids],
+  )).rows);
+  const migrated = subjects.filter(subject => subject.migrated);
+  const { readLegacyGrowthCoverageAssessments } = await import("./membership-growth-legacy-store");
+  const legacy = await readLegacyGrowthCoverageAssessments(client, new Map(migrated.map(subject => [subject.userId, contributions.get(subject.userId) ?? []])), asOf);
+  for (const subject of subjects) {
+    const rows = contributions.get(subject.userId) ?? [];
+    if (typeof subject.migrated !== "boolean" || subject.migrated && !legacy.has(subject.userId)) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Growth source proof is unavailable");
+    const completeness = await readGrowthSourceCompleteness(client, subject.userId, rows, subject.sourceRef, legacy.get(subject.userId), asOf, { sourceRows: sources.get(subject.userId) ?? [], migrated: subject.migrated });
+    results.set(subject.userId, projectMembershipGrowth(subject.userId, rows, subject.normalTier ? subject : null, completeness, policy, entitlements.get(subject.userId) ?? [], asOf));
+  }
+  return results;
 }
 
 export type GrowthConsumptionQuery = { scope: "LIFETIME" | "ROLLING"; limit: number; cursor?: string };

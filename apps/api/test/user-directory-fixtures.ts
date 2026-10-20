@@ -13,17 +13,20 @@ export const fixtureUserRows = [
   {id:'user_cancelled',name:'程野',phoneNumber:null,accountStatus:'CANCELLED',provider:'none',suspended:true},
   {id:'user_restricted',name:'陆青',phoneNumber:null,accountStatus:'ACTIVE',provider:'none',suspended:true},
   {id:'user_long',name:'长昵称样本_'+ 'Unicode用户'.repeat(14),phoneNumber:null,accountStatus:'ACTIVE',provider:'none'},
-].map(row=>({image:null,username:`login_${row.id}`,displayUsername:`显示_${row.name}`,suspended:false,localCreatedAt:date,localUpdatedAt:date,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',providerReference:row.id==='user_legacy'?'la_user:88001':null,migrationLegacyId:null,migrationSourceCreatedAt:null,resourceAccountCount:1,currentOrderCount:1,email:null,phoneNumberVerified:false,identityVerifiedAt:null,migrationSourceUpdatedAt:null,migrationSourceSystem:'zzsh_restore',migrationSourceEntity:'la_user',migrationSourceDigest:'fixture-digest',migrationEvidenceRef:'fixture-only',migratedAt:date,...row}));
+].map(row=>({image:null,username:`login_${row.id}`,displayUsername:`显示_${row.name}`,suspended:false,localCreatedAt:date,localUpdatedAt:date,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',providerReference:row.id==='user_legacy'?'la_user:88001':null,migrationLegacyId:null,migrationSourceCreatedAt:null,resourceAccountCount:1,currentOrderCount:1,renterCurrentOrderCount:1,ownerCurrentOrderCount:0,email:null,phoneNumberVerified:false,identityVerifiedAt:null,migrationSourceUpdatedAt:null,migrationSourceSystem:'zzsh_restore',migrationSourceEntity:'la_user',migrationSourceDigest:'fixture-digest',migrationEvidenceRef:'fixture-only',migratedAt:date,...row}));
 
 export const fixtureOrderRows=[
   {id:'order_paid',displayNo:'TEST-1001',status:'PAID',role:'renter',paidAt:null},
   {id:'order_complete',displayNo:'TEST-1002',status:'COMPLETED',role:'owner',paidAt:null},
   {id:'order_cancel',displayNo:'TEST-1003',status:'CANCELLED',role:'renter',paidAt:'2026-09-19T02:05:00.000000Z'},
+  {id:'order_pending',displayNo:'TEST-1004',status:'PENDING_PAYMENT',role:'renter',paidAt:null},
 ].map(row=>({accountId:'account_fixture',accountDisplayNo:'资源账号01',title:'三角洲行动 · 隔离测试账号',gameId:'delta',rentalAmountCents:'6000',depositAmountCents:'10000',currency:'CNY',counterpartyName:'另一方样本',createdAt:date,holdUntil:date,cancelledAt:row.status==='CANCELLED'?date:null,cancelReason:row.status==='CANCELLED'?'支付后取消（测试）':null,expiredAwaitingCancel:false,...row}));
 
 export class DirectorySqlFixture extends EventEmitter {
   actorId='admin-fixture';isBoss=false;
-  permissions=[...ADMIN_PERMISSION_CODES] as string[];
+  // Membership/credit have their own domain SQL fixtures and batch contract tests.
+  permissions=ADMIN_PERMISSION_CODES.filter(code=>code!=='membership.growth.read.summary'&&code!=='credit.read') as string[];
+  gameScopeMode='SELECTED_GAMES';
   gameIds=['delta'];queries:{sql:string;values:unknown[]}[]=[];
   users=fixtureUserRows.map(row=>({...row}));
   scenario='normal';fault='';
@@ -35,14 +38,15 @@ export class DirectorySqlFixture extends EventEmitter {
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
     if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return result([]);
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)||sql.startsWith("SELECT set_config("))return result([]);
-    if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':'SELECTED_GAMES',gameIds:this.isBoss?[]:this.gameIds}]);
+    if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':this.gameScopeMode,gameIds:this.isBoss?[]:this.gameIds}]);
     if(sql.startsWith('SELECT "status", "is_boss"'))return result([{status:'ACTIVE',isBoss:this.isBoss,passwordChangeRequired:false}]);
     if(sql.includes('"zzsh_auth_admin"."session"'))return result([{locked:false,twoFactorEnabled:true,pinConfigured:true,createdAt:date,expiresAt:'2027-01-01T00:00:00Z'}]);
     if(sql.includes('WITH role_permissions'))return result(this.permissions.map(permissionCode=>({permissionCode})));
     if(sql.startsWith('SELECT game_id AS'))return result(this.gameIds.map(gameId=>({gameId})));
     if(sql.includes('SELECT 1 FROM zzsh_auth_user'))return result(this.users.some(row=>row.id===values[0])?[{exists:1}]:[]);
     if(sql.includes('FROM zzsh_auth_user."user" u')) {
-      if(sql.includes('WHERE u.id = $1')) {
+      const counting=sql.includes('SELECT count(*)::int AS total FROM');
+      if(!counting&&sql.includes('WHERE u.id = $1')) {
         if(this.fault==='detail')throw new Error('Injected detail failure');
         return result(this.users.filter(row=>row.id===values[0]));
       }
@@ -61,13 +65,16 @@ export class DirectorySqlFixture extends EventEmitter {
       const phone=parameter(/u\."phoneNumber" = \$(\d+)/);if(phone)rows=rows.filter(row=>row.phoneNumber===phone);
       const from=parameter(/u\."createdAt" >= \$(\d+)/);if(from)rows=rows.filter(row=>Date.parse(row.localCreatedAt)>=Date.parse(String(from)));
       const to=parameter(/u\."createdAt" <= \$(\d+)/);if(to)rows=rows.filter(row=>Date.parse(row.localCreatedAt)<=Date.parse(String(to)));
+      if(counting)return result([{total:rows.length}]);
       const lastTime=values.at(-3);const lastId=values.at(-2);
       const cursorAt=(pattern:RegExp)=>{const match=sql.match(pattern);return match?values[Number(match[1])-1]:undefined;};
       const timeBound=cursorAt(/u\."createdAt" < \$(\d+)::timestamptz/)??lastTime;
       const idBound=cursorAt(/u\.id < \$(\d+)\)/)??lastId;
       rows.sort((a,b)=>b.localCreatedAt.localeCompare(a.localCreatedAt)||b.id.localeCompare(a.id));
       if(timeBound)rows=rows.filter(row=>row.localCreatedAt<String(timeBound)||row.localCreatedAt===String(timeBound)&&row.id<String(idBound));
-      const page=rows.slice(0,Number(values.at(-1))).map(row=>({...row,resourceAccountCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.resourceAccountCount,currentOrderCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.currentOrderCount}));
+      const limit=Number(parameter(/LIMIT \$(\d+)/)??values.at(-1));
+      const offset=Number(parameter(/OFFSET \$(\d+)/)??0);
+      const page=rows.slice(offset,offset+limit).map(row=>({...row,resourceAccountCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.resourceAccountCount,currentOrderCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.currentOrderCount}));
       // Deferred shape: the page carries the whole row and the migration-audit expansion happens in the
       // outer query, so the fixture must serve both projections from the same page rows.
       if(/WITH page AS MATERIALIZED/i.test(sql)){
@@ -100,6 +107,7 @@ export class DirectorySqlFixture extends EventEmitter {
       if(sql.includes('AND o.renter_user_id = $1'))rows=rows.filter(row=>row.role==='renter');
       if(sql.includes('AND o.owner_user_id = $1'))rows=rows.filter(row=>row.role==='owner');
       const status=values.find(value=>['PAID','COMPLETED','CANCELLED','PENDING_PAYMENT'].includes(String(value)));if(status)rows=rows.filter(row=>row.status===status);
+      if(sql.includes("o.status IN ('PENDING_PAYMENT','PAID')"))rows=rows.filter(row=>['PENDING_PAYMENT','PAID'].includes(row.status));
       return result(rows);
     }
     if(sql.includes('FROM zzsh_iam.audit_event e')) {

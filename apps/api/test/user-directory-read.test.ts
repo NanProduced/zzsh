@@ -33,7 +33,7 @@ test("directory admission rejects a third request before auth/connection work, w
 test("read transaction sets database budgets before work, rolls back before reuse, never COMMITs", async () => {
   const f = fixture();
   assert.equal(await withDirectoryReadTransaction(f.pool, new AbortController().signal, async c => { await c.query("SELECT safe"); return 7; }), 7);
-  assert.deepEqual(f.queries, ["BEGIN READ ONLY", "SELECT set_config('statement_timeout','3000',true),set_config('lock_timeout','500',true)", "SELECT safe", "ROLLBACK"]);
+  assert.deepEqual(f.queries, ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "SELECT set_config('statement_timeout','3000',true),set_config('lock_timeout','500',true)", "SELECT safe", "ROLLBACK"]);
   assert.deepEqual(f.releases, [false]); assert.equal(f.client.listenerCount("error"), 0);
 });
 

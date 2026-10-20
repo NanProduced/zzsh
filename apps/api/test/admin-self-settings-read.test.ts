@@ -61,7 +61,7 @@ class Fixture {
           this.queries.push({ handle: "client", sql, values });
           if (this.beforeSql) await this.beforeSql(sql, values, emitter);
           if (sql === "ROLLBACK" && this.rollbackError) throw this.rollbackError;
-          if (sql === "BEGIN READ ONLY") state = "T";
+          if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") state = "T";
           if (sql === "ROLLBACK") state = "I";
           return this.query("recorded-client", sql, values);
         },
@@ -84,7 +84,7 @@ class Fixture {
     if (handle !== "recorded-client") this.queries.push({ handle, sql, values });
     const q = sql.replace(/\s+/g, " ").trim(), rows = (rows: unknown[]) => ({ rows, rowCount: rows.length });
     assert(!/admin_security_command|admin_backup_code_generation|admin_(permission|role)|FOR UPDATE|COMMIT|INSERT |UPDATE |DELETE |CREATE |ALTER /i.test(q), "read entered a writer, initialization, or global permission path");
-    if (q === "BEGIN READ ONLY" || q === "ROLLBACK" || q.startsWith("SELECT set_config")) return rows([]);
+    if (q === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" || q === "ROLLBACK" || q.startsWith("SELECT set_config")) return rows([]);
     if (q.startsWith('SELECT "status", "is_boss"')) { assert.deepEqual(values, [SELF]); return rows(this.securityMissing ? [] : [{ status: this.status, isBoss: false, passwordChangeRequired: false }]); }
     if (q.startsWith('SELECT s."locked"')) {
       assert.deepEqual(values, [CURRENT, SELF]); const s = this.sessions.get(CURRENT), u = this.users.get(SELF);
@@ -155,7 +155,7 @@ test("ordinary admin reads all three DTOs through direct and BFF with no permiss
     assert.deepEqual(activity.body.coverage, { scope: "SELF_SECURITY_ACTIVITY", recordedActions: SELF_ACTIVITY_RECORDED_ACTIONS, notRecorded: SELF_ACTIVITY_NOT_RECORDED });
     assert.deepEqual([f.users, f.sessions, f.audits], before); assert.deepEqual(f.releases, [false, false, false]);
     assert.equal(f.queries.filter(q => q.sql === "ROLLBACK").length, 3); assert.equal(f.queries.filter(q => q.handle === "pool").length, 3);
-    const clientQueries = f.queries.filter(q => q.handle === "client"); assert.equal(clientQueries[0]!.sql, "BEGIN READ ONLY"); assert.match(clientQueries[1]!.sql, /statement_timeout','3000'.*lock_timeout','500'/);
+    const clientQueries = f.queries.filter(q => q.handle === "client"); assert.equal(clientQueries[0]!.sql, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); assert.match(clientQueries[1]!.sql, /statement_timeout','3000'.*lock_timeout','500'/);
   }
 });
 test("profile uses actual username fallback or null, never invents an internal-ID ZZ number", async () => {
@@ -198,7 +198,7 @@ test("all reads reject anonymous, expired/revoked, user realm, frozen, enrollmen
 test("transaction rechecks own existence/suspension/session/ACTIVE/2FA/lock after successful SDK snapshot", async () => {
   for (const bff of [false, true]) for (const path of PATHS) for (const scenario of ["missing_user", "suspended", "revoked", "expired", "frozen", "pending", "2fa", "locked"] as const) {
     const f = new Fixture(); f.beforeSql = async sql => {
-      if (sql !== "BEGIN READ ONLY") return;
+      if (sql !== "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") return;
       if (scenario === "missing_user") f.users.delete(SELF);
       if (scenario === "suspended") f.users.get(SELF)!.suspended = true;
       if (scenario === "revoked") f.sessions.delete(CURRENT);
@@ -297,7 +297,7 @@ test("request abort/response close during read holds the lease until SQL ends, t
 });
 test("normal finished close is not a cancellation; disconnected authentication never borrows a client", async () => {
   for (const bff of [false, true]) {
-    const f = new Fixture(); const r = invoke(f, "/profile", bff); f.beforeSql = async sql => { if (sql === "BEGIN READ ONLY") { r.response.writableFinished = true; r.response.emit("close"); } }; await r.pending; assert.equal(r.state.status, 200);
+    const f = new Fixture(); const r = invoke(f, "/profile", bff); f.beforeSql = async sql => { if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") { r.response.writableFinished = true; r.response.emit("close"); } }; await r.pending; assert.equal(r.state.status, 200);
     const other = new Fixture(), auth = deferred(); const api = (other.options.adminAuth.api as any), original = api.getSession;
     api.getSession = async (v: any) => { await auth.promise; return original(v); }; const stopped = invoke(other, "/profile", bff); stopped.request.emit("aborted"); auth.resolve(); await stopped.pending; assert.equal(other.clients.length, 0); assert.equal(stopped.state.body, undefined);
   }

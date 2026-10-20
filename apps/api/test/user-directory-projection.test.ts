@@ -148,8 +148,8 @@ test('anonymous and foreign-origin requests cannot obtain directory facts',async
 test('default page bounds narrow keys before one batched latest-audit relation',async()=>{
   const pool=new DirectorySqlFixture();
   const data:any=await listUserDirectory(client(pool),viewer,{limit:20});
-  assert.equal(pool.queries.length,1);
-  const sql=pool.queries[0]!.sql;
+  assert.equal(pool.queries.length,2);
+  const sql=pool.queries[1]!.sql;
   assert.ok(/WITH page AS MATERIALIZED/i.test(sql));
   assert.ok(sql.includes('LIMIT $'),'page query must carry the bound LIMIT');
   const pageEnd=sql.indexOf("migration AS MATERIALIZED");
@@ -202,10 +202,167 @@ test('second page keeps the keyset bound inside the page query and does not repe
   const pool=new DirectorySqlFixture();
   const first:any=await listUserDirectory(client(pool),viewer,{limit:2});
   const second:any=await listUserDirectory(client(pool),viewer,{limit:2,cursor:first.nextCursor});
-  assert.equal(pool.queries.length,2);
-  const sql=pool.queries[1]!.sql;
+  assert.equal(pool.queries.length,4);
+  const sql=pool.queries[3]!.sql;
   assert.ok(/WITH page AS MATERIALIZED/i.test(sql));
   const ids=[...first.items,...second.items].map((row:any)=>row.userId);
   assert.equal(new Set(ids).size,ids.length,'paging must not repeat a user');
   assert.deepEqual(second.items.map((row:any)=>row.userId),['user_restore','user_normal']);
+});
+
+test('filtered total covers every matching user before cursor and remains zero for legitimate empty results',async()=>{
+  const pool=new DirectorySqlFixture();
+  const first:any=await listUserDirectory(client(pool),viewer,{accountStatus:'ACTIVE',limit:1});
+  const second:any=await listUserDirectory(client(pool),viewer,{accountStatus:'ACTIVE',limit:1,cursor:first.nextCursor});
+  assert.equal(first.total,4);assert.equal(second.total,4);assert.equal(first.items.length,1);assert.equal(second.items.length,1);
+  assert.notEqual(first.items[0].userId,second.items[0].userId);
+  const counts=pool.queries.filter(query=>query.sql.includes('SELECT count(*)::int AS total FROM'));
+  assert.equal(counts.length,2);assert.deepEqual(counts[0]!.values,['ACTIVE']);assert.deepEqual(counts[1]!.values,['ACTIVE']);
+  assert.equal(counts.some(query=>query.sql.includes('LIMIT')||query.sql.includes('u.id <')||query.sql.includes('zzsh_iam.audit_event')),false);
+  const searched:any=await listUserDirectory(client(pool),viewer,{search:'林舟',limit:1});assert.equal(searched.total,1);
+  assert.ok(pool.queries.at(-2)!.sql.includes('migration AS MATERIALIZED'));
+  assert.deepEqual(pool.queries.at(-2)!.values,['林舟','%林舟%']);
+  const empty:any=await listUserDirectory(client(pool),viewer,{accountStatus:'ACTIVE',registeredFrom:'2027-01-01T00:00:00Z',limit:20});
+  assert.equal(empty.total,0);assert.deepEqual(empty.items,[]);assert.equal(empty.nextCursor,null);
+});
+
+test('relationship summaries split renter/owner while retaining aggregate and distinguish empty scope from zero',async()=>{
+  const pool=new DirectorySqlFixture();pool.users[0]!.currentOrderCount=3;pool.users[0]!.renterCurrentOrderCount=1;pool.users[0]!.ownerCurrentOrderCount=2;
+  const list:any=await listUserDirectory(client(pool),viewer,{search:'林舟',limit:20});
+  assert.deepEqual(list.items[0].orderSummary,{state:'ready',currentCount:3,renterCurrentCount:1,ownerCurrentCount:2});
+  const detail:any=await readUserDirectoryDetail(client(pool),viewer,'user_normal');assert.deepEqual(detail.orderSummary,list.items[0].orderSummary);
+  const listSql=pool.queries.find(query=>query.sql.includes('current_orders.current_count'))!.sql;
+  assert.ok(listSql.includes('count(*) FILTER (WHERE o.renter_user_id=u.id)'));assert.ok(listSql.includes('count(*) FILTER (WHERE o.owner_user_id=u.id)'));
+  assert.ok(listSql.includes("o.status IN ('PENDING_PAYMENT','PAID')"));assert.ok(listSql.includes('sgame."game_id" = o.game_id'));
+  const noScope:any=await listUserDirectory(client(pool),{...viewer,businessScopeUsable:false},{limit:20});
+  assert.ok(noScope.total>0);for(const item of noScope.items){assert.deepEqual(item.orderSummary,{state:'denied',permission:'order.read',reason:'NO_GAME_SCOPE'});assert.deepEqual(item.resourceSummary,{state:'denied',permission:'supply.rental_account.read',reason:'NO_GAME_SCOPE'});}
+  const noScopeDetail:any=await readUserDirectoryDetail(client(pool),{...viewer,businessScopeUsable:false},'user_normal');assert.equal(noScopeDetail.orderSummary.reason,'NO_GAME_SCOPE');
+  const denied:any=await listUserDirectory(client(pool),{...viewer,orderRead:false,businessScopeUsable:false},{limit:20});assert.deepEqual(denied.items[0].orderSummary,{state:'denied',permission:'order.read'});
+  pool.users[0]!.currentOrderCount=0;pool.users[0]!.renterCurrentOrderCount=0;pool.users[0]!.ownerCurrentOrderCount=0;
+  const zero:any=await readUserDirectoryDetail(client(pool),viewer,'user_normal');assert.deepEqual(zero.orderSummary,{state:'ready',currentCount:0,renterCurrentCount:0,ownerCurrentCount:0});
+});
+
+test('route keeps directory visible without game grants while all-games remains usable and sections reject no scope',async()=>{
+  const pool=new DirectorySqlFixture();pool.gameIds=[];
+  const result=await route('/api/bff/admin/users',pool,'GET',undefined,true);
+  assert.equal(result.status,200);assert.equal(result.body.total,pool.users.length);assert.equal(result.body.items[0].orderSummary.reason,'NO_GAME_SCOPE');
+  assert.equal((await route('/api/v1/admin/users/user_normal/orders',pool)).status,403);
+  assert.equal((await route('/api/v1/admin/users/user_normal/rental-accounts',pool)).status,403);
+  pool.gameScopeMode='ALL_GAMES';const all=await route('/api/v1/admin/users',pool);assert.equal(all.status,200);assert.equal(all.body.items[0].orderSummary.state,'ready');assert.equal(all.body.items[0].orderSummary.reason,undefined);
+});
+
+test('current order filter covers pending and paid before pagination, binds role and rejects other values',async()=>{
+  const pool=new DirectorySqlFixture();
+  const first:any=await listUserOrders(client(pool),viewer,'user_dual',{status:'current',role:'renter',limit:1});
+  assert.equal(first.items.length,1);assert.equal(first.items[0].status,'PAID');
+  const allCurrent:any=await listUserOrders(client(pool),viewer,'user_dual',{status:'current',role:'renter',limit:20});
+  assert.deepEqual(new Set(allCurrent.items.map((item:any)=>item.status)),new Set(['PENDING_PAYMENT','PAID']));
+  const sql=pool.queries.at(-1)!.sql;assert.ok(sql.includes("o.status IN ('PENDING_PAYMENT','PAID')"));assert.ok(sql.includes('o.renter_user_id = $1'));
+  assert.ok(sql.indexOf("o.status IN")<sql.indexOf('LIMIT $'));
+  assert.equal((await route('/api/bff/admin/users/user_dual/orders?status=current&role=renter',pool,'GET',undefined,true)).status,200);
+  assert.equal((await route('/api/v1/admin/users/user_dual/orders?status=working',pool)).status,400);
+});
+
+test('legacy current drilldown and role counters share the unified source without relaxing cursor or account privacy',async()=>{
+  const pool=new DirectorySqlFixture(),baseQuery=pool.query.bind(pool);
+  pool.query=async(sql:string,values:unknown[]=[])=>{
+    if(sql.includes("to_regclass('zzsh_order.legacy_continuation_version')"))return {rows:[{ready:false}],rowCount:1};
+    if(sql.startsWith('WITH all_orders AS')){
+      pool.queries.push({sql,values});
+      const rows=[3,1].map((status,index)=>{
+        const id=`legacy_current_${index}`;
+        return {id,sortAt:'2026-09-24T04:00:00.000000Z',origin:'LEGACY',role:'owner',record:{id,original_order_no:`OLD-${index}`,source_order_status:status,source_pay_status:status===1?0:1,due_amount_cents:'600',recorded_paid_amount_cents:status===1?'0':'600',deposit_amount_cents:'0',source_snapshot:{goods_money:'6.00',expend_pay_money:'0.00'},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_user_id:'user_normal',renter_user_id:'user_dual',owner_name:'Owner',renter_name:'Renter',account_id:'account_private',game_id:'delta',legacy_account_no:'A-PRIVATE'}};
+      });
+      return {rows,rowCount:rows.length};
+    }
+    return baseQuery(sql,values);
+  };
+  const scoped={...viewer,legacyRead:true,resourceRead:false};
+  await listUserDirectory(client(pool),scoped,{limit:20});
+  const summarySql=pool.queries.find(query=>query.sql.includes('current_orders.current_count'))!.sql;
+  assert.ok(summarySql.includes('UNION ALL')&&summarySql.includes('zzsh_order.legacy_order_read_snapshot'));
+  const page:any=await listUserOrders(client(pool),scoped,'user_normal',{role:'owner',status:'current',limit:1});
+  assert.equal(page.items[0].status,'PAID');assert.equal(page.items[0].source.origin,'LEGACY');assert.equal('accountId' in page.items[0],false);assert.ok(page.nextCursor);
+  const query=pool.queries.at(-1)!;assert.ok(query.sql.includes("x.status IN ('PENDING_PAYMENT','PAID')"));assert.ok(query.sql.includes('x.owner_user_id=$1'));assert.ok(query.sql.includes('sgame."game_id" = x.game_id'));
+  const all:any=await listUserOrders(client(pool),scoped,'user_normal',{role:'owner',status:'current',limit:20});assert.deepEqual(all.items.map((item:any)=>item.status),['PAID','PENDING_PAYMENT']);
+  for(const changed of [{role:'renter',status:'current'},{role:'owner',status:'PAID'}] as const)await assert.rejects(listUserOrders(client(pool),scoped,'user_normal',{...changed,limit:1,cursor:page.nextCursor}),{status:409});
+});
+
+test('numbered directory pages jump directly with complete metadata and expand only the selected keys',async()=>{
+  const pool=new DirectorySqlFixture();
+  const first=await route('/api/bff/admin/users?page=1&pageSize=3',pool,'GET',undefined,true);
+  assert.equal(first.status,200);assert.equal(first.body.paginationMode,'page');assert.equal(first.body.page,1);assert.equal(first.body.pageSize,3);assert.equal(first.body.limit,3);
+  assert.equal(first.body.total,pool.users.length);assert.equal(first.body.items.length,3);assert.equal(first.body.nextCursor,null);assert.match(first.body.contextKey,/^[0-9a-f]{64}$/);
+  const jumped=await route(`/api/bff/admin/users?page=3&pageSize=3&contextKey=${first.body.contextKey}`,pool,'GET',undefined,true);
+  assert.equal(jumped.status,200);assert.equal(jumped.body.page,3);assert.equal(jumped.body.total,pool.users.length);assert.equal(jumped.body.items.length,2);assert.equal(jumped.body.contextKey,first.body.contextKey);
+  const expected=[...pool.users].sort((a,b)=>b.localCreatedAt.localeCompare(a.localCreatedAt)||b.id.localeCompare(a.id)).slice(6,9).map(row=>row.id);
+  assert.deepEqual(jumped.body.items.map((row:any)=>row.userId),expected);
+  const pages=pool.queries.filter(query=>query.sql.includes('FROM page selected'));
+  assert.equal(pages.length,2,'jumping does not fetch intermediate pages');
+  const query=pages[1]!;const offset=query.sql.match(/OFFSET \$(\d+)/),limit=query.sql.match(/LIMIT \$(\d+)/);
+  assert.ok(offset&&limit);assert.equal(query.values[Number(offset[1])-1],6);assert.equal(query.values[Number(limit[1])-1],3);
+  assert.ok(query.sql.indexOf('OFFSET $')<query.sql.indexOf('FROM page selected'),'offset stays in the narrow-key page before domain projections');
+  assert.ok(query.sql.includes('ORDER BY u."createdAt" DESC, u.id DESC'));
+  assert.equal(pool.queries.filter(query=>query.sql.includes('SELECT count(*)::int AS total FROM')).some(query=>query.sql.includes('OFFSET')||query.sql.includes('LIMIT')),false);
+  assert.ok(pool.queries.some(query=>query.sql==='BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
+});
+
+test('numbered directory totals keep the same filters, defaults and original projection semantics',async()=>{
+  const pool=new DirectorySqlFixture();pool.scenario='long';
+  const normal=await route('/api/v1/admin/users?page=1',pool);assert.equal(normal.status,200);assert.equal(normal.body.pageSize,20);assert.equal(normal.body.items.length,20);assert.equal(normal.body.total,38);
+  const large=await route('/api/v1/admin/users?page=1&pageSize=100',pool);assert.equal(large.status,200);assert.equal(large.body.items.length,38);
+  pool.scenario='normal';
+  const first=await route('/api/v1/admin/users?page=1&pageSize=1&accountStatus=ACTIVE',pool);assert.equal(first.body.total,4);
+  const second=await route(`/api/v1/admin/users?page=2&pageSize=1&accountStatus=ACTIVE&contextKey=${first.body.contextKey}`,pool);assert.equal(second.status,200);assert.equal(second.body.total,4);assert.notEqual(first.body.items[0].userId,second.body.items[0].userId);
+  const found=await route('/api/v1/admin/users?page=1&pageSize=10&q=%E6%9E%97%E8%88%9F',pool);assert.equal(found.status,200);assert.equal(found.body.total,1);assert.equal(found.body.items[0].name,'林舟');
+  assert.ok(found.body.items[0].orderSummary);assert.ok(found.body.items[0].resourceSummary);assert.ok(found.body.items[0].membershipSummary);assert.ok(found.body.items[0].creditSummary);
+  const count=pool.queries.filter(query=>query.sql.includes('SELECT count(*)::int AS total FROM')).at(-1)!;assert.deepEqual(count.values,['林舟','%林舟%']);
+});
+
+test('numbered query context binds filters, capacity, principal and effective authorisation, but not page number',async()=>{
+  const pool=new DirectorySqlFixture();const query={limit:2,page:1};
+  const first:any=await listUserDirectory(client(pool),viewer,query);assert.match(first.contextKey,/^[0-9a-f]{64}$/);
+  const next={limit:2,page:2,contextKey:first.contextKey};
+  const page:any=await listUserDirectory(client(pool),viewer,next);assert.equal(page.contextKey,first.contextKey);assert.equal(page.page,2);
+  for(const changed of [{...viewer,adminId:'other'},{...viewer,authorizationKey:'scope-two'},{...viewer,resourceRead:false},{...viewer,phoneLookup:false}]){
+    const before=pool.queries.length;await assert.rejects(listUserDirectory(client(pool),changed,next),{status:409});assert.equal(pool.queries.length,before,'stale contexts fail before directory SQL');
+  }
+  for(const changed of [{...next,limit:3},{...next,search:'other'}])await assert.rejects(listUserDirectory(client(pool),viewer,changed),{status:409});
+  const routed=await route('/api/v1/admin/users?page=1&pageSize=2',pool);
+  pool.gameIds=['delta','other'];assert.equal((await route(`/api/v1/admin/users?page=2&pageSize=2&contextKey=${routed.body.contextKey}`,pool)).status,409);
+  pool.gameIds=['delta'];pool.permissions=pool.permissions.filter(code=>code!=='admin.audit.read');assert.equal((await route(`/api/v1/admin/users?page=2&pageSize=2&contextKey=${routed.body.contextKey}`,pool)).status,409);
+});
+
+test('numbered empty and out-of-range pages retain truthful counts without moving the request to another page',async()=>{
+  const pool=new DirectorySqlFixture();
+  const beyond=await route('/api/v1/admin/users?page=99&pageSize=10',pool);assert.equal(beyond.status,200);assert.equal(beyond.body.page,99);assert.equal(beyond.body.total,8);assert.deepEqual(beyond.body.items,[]);assert.equal(beyond.body.nextCursor,null);
+  pool.scenario='empty';const empty=await route('/api/v1/admin/users?page=1&pageSize=10',pool);assert.equal(empty.status,200);assert.equal(empty.body.total,0);assert.deepEqual(empty.body.items,[]);assert.equal(empty.body.page,1);
+  pool.fault='list';const failed=await route('/api/v1/admin/users?page=1&pageSize=10',pool);assert.equal(failed.status,500);assert.equal(failed.body.total,undefined);assert.equal(failed.body.items,undefined);
+});
+
+test('numbered pagination rejects invalid, repeated and mixed parameters rather than silently using the legacy first page',async()=>{
+  const invalid=['page=0','page=-1','page=1.5','page=1e2','page=NaN','page=','page=%202','page=1000001','page=1&page=2','page=1&pageSize=0','page=1&pageSize=101','page=1&pageSize=1.5','page=1&pageSize=','page=1&pageSize=1e1','page=1&pageSize=10&pageSize=20','pageSize=20','contextKey='+'a'.repeat(64),'page=1&contextKey=invalid','page=1&contextKey='+'a'.repeat(64)+'&contextKey='+'a'.repeat(64),'page=1&limit=20','page=1&cursor=invalid','page=1&unexpected=value'];
+  for(const query of invalid){const pool=new DirectorySqlFixture();const result=await route('/api/v1/admin/users?'+query,pool);assert.equal(result.status,400,query);assert.equal(result.body.error.code,'INVALID_ARGUMENT',query);assert.equal(pool.queries.some(item=>item.sql.includes('FROM zzsh_auth_user."user" u')),false,query);}
+  for(const path of ['/api/v1/admin/users/user_normal/orders?page=1','/api/v1/admin/users/user_normal?page=1','/api/v1/admin/users/resource-accounts/account_fixture?page=1'])assert.equal((await route(path,new DirectorySqlFixture())).status,400,path);
+});
+
+test('numbered phone lookup stays POST/body-only and separately authorised through the BFF',async()=>{
+  const pool=new DirectorySqlFixture();pool.permissions=['user.directory.read'];
+  const body={phone:'18800001101',page:'1',pageSize:'10'};
+  assert.equal((await route('/api/bff/admin/users/lookup',pool,'POST',body,true)).status,403);
+  pool.permissions.push('user.phone.lookup');const result=await route('/api/bff/admin/users/lookup',pool,'POST',body,true);
+  assert.equal(result.status,200);assert.equal(result.body.paginationMode,'page');assert.equal(result.body.total,1);assert.equal(result.body.items[0].userId,'user_normal');assert.equal(JSON.stringify(result.body).includes(body.phone),false);
+  assert.equal((await route('/api/v1/admin/users?phone=18800001101&page=1',pool)).status,400);
+  assert.equal((await route('/api/v1/admin/users/lookup?page=1',pool,'POST',body)).status,400,'body/query pagination cannot overwrite each other');
+  assert.equal((await route('/api/v1/admin/users/lookup',pool,'POST',{...body,page:1})).status,400,'lookup fields keep their documented string shape');
+  pool.permissions=[];assert.equal((await route('/api/bff/admin/users?page=1&pageSize=10',pool,'GET',undefined,true)).status,403);
+  assert.equal((await route('/api/bff/admin/users?page=1&pageSize=10',pool,'GET',undefined,true,'https://untrusted.invalid')).status,403);
+});
+
+test('existing cursor clients retain their response shape and cannot mix page contexts into cursor navigation',async()=>{
+  const pool=new DirectorySqlFixture();const first=await route('/api/v1/admin/users?limit=2',pool);
+  assert.equal(first.status,200);assert.equal(first.body.paginationMode,undefined);assert.equal(first.body.page,undefined);assert.equal(first.body.contextKey,undefined);assert.ok(first.body.nextCursor);
+  const next=await route('/api/v1/admin/users?limit=2&cursor='+encodeURIComponent(first.body.nextCursor),pool);assert.equal(next.status,200);assert.notEqual(next.body.items[0].userId,first.body.items[0].userId);
+  const numbered=await route('/api/v1/admin/users?page=1&pageSize=2',pool);
+  assert.equal((await route('/api/v1/admin/users?limit=2&contextKey='+numbered.body.contextKey,pool)).status,400);
 });
