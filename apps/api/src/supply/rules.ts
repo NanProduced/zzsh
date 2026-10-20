@@ -7,7 +7,7 @@ import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notF
 import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
 import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
-import { validateFundingPolicy } from "./funding-policy";
+import { validateFundingPolicy, validateFundingPolicyDraft } from "./funding-policy";
 import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
@@ -89,6 +89,12 @@ export async function listRules(
     termOptions: termOptions.rows,
     agreementVersions: agreementVersions.rows,
     fullPayoutTermsVersions: (await client.query(`SELECT id,policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt" FROM zzsh_supply.full_payout_terms_version WHERE game_id=$1 ORDER BY created_at DESC,id DESC LIMIT 20`,[gameId])).rows,
+    depositCatalog: (await client.query<{ catalog: unknown }>(`
+      SELECT jsonb_build_object(
+        'catalogRevision', g.catalog_revision::text,
+        'rarities', (SELECT COALESCE(jsonb_agg(jsonb_build_object('code',r.code,'name',r.name,'enabled',r.enabled) ORDER BY r.sort_order,r.code),'[]'::jsonb) FROM zzsh_supply.skin_rarity r WHERE r.game_id=g.id),
+        'skins', (SELECT COALESCE(jsonb_agg(jsonb_build_object('id',s.id,'name',s.name,'ownerKind',s.owner_kind,'rarityCode',s.rarity_code) ORDER BY s.name,s.id),'[]'::jsonb) FROM zzsh_supply.skin s WHERE s.game_id=g.id)
+      ) AS catalog FROM zzsh_supply.game g WHERE g.id=$1`, [gameId])).rows[0]?.catalog,
     items: items.rows,
   };
 }
@@ -165,8 +171,15 @@ export async function updatePriceDraft(
   const roundingPolicy = body.roundingPolicy === undefined ? undefined : body.roundingPolicy;
   if (roundingPolicy !== undefined && roundingPolicy !== DELTA_ROUNDING_POLICY) throw invalid("Rounding policy is unsupported");
   const fundingPolicy = Object.hasOwn(body, "fundingPolicy")
-    ? body.fundingPolicy === null ? null : validateFundingPolicy(body.fundingPolicy)
+    ? body.fundingPolicy === null ? null : validateFundingPolicyDraft(body.fundingPolicy)
     : undefined;
+  if (fundingPolicy?.recommendation.schema === "deposit-recommendation-v2") {
+    const codes = [...new Set(fundingPolicy.recommendation.parameters.skinRules.flatMap(row => row.rarityCode === null ? [] : [row.rarityCode]))];
+    const ids = fundingPolicy.recommendation.parameters.skinOverrides.map(row => row.skinId);
+    const rarities = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.skin_rarity WHERE game_id=$1 AND code=ANY($2::text[])`, [current.game_id, codes])).rows;
+    const skins = (await client.query<{ id: string }>(`SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND id=ANY($2::text[])`, [current.game_id, ids])).rows;
+    if (codes.some(code => !rarities.some(row => row.code === code)) || ids.some(id => !skins.some(row => row.id === id))) throw invalid("Skin deposit policy references an unknown quality or skin for this game");
+  }
   await client.query(
     `UPDATE "zzsh_supply"."price_version"
         SET "mode" = $1,

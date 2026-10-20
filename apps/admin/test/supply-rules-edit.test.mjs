@@ -35,6 +35,9 @@ test("rules model: complete changes, honest estimates, original request fingerpr
     const account = () => ({ haffM: "100", box: "box-a", vit: "6", bear: "6", dive: "0", term: "d10", items: {} });
     await t.test("edit keeps a local baseline and removes the unsafe unused write sequencer", () => {
       const bl = edit.baseline(fixture()); assert.equal(bl.values["dep.cap"], "1200"); assert.equal(bl.values["term.d10.daily"], "10");
+      assert.equal(bl.fields.some(field => field.key.startsWith("dep.skin.")), false, "original v1 skin groups have no editable fields");
+      assert.equal(Object.keys(bl.values).some(key => key.startsWith("dep.skin.")), false, "original v1 skin amounts are absent from edit state");
+      assert.equal(bl.values["dep.vit7"], "50", "non-skin deposit fields remain editable");
       assert.equal(edit.submitChanges, undefined); assert.equal(edit.buildPriceBody, undefined);
       assert.equal(edit.validate(bl.fields, { ...bl.values, "item.piece.buyer": "1.00000001" })["item.piece.buyer"], undefined);
       assert.ok(edit.validate(bl.fields, { ...bl.values, "dep.cap": "200" })["dep.cap"]);

@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { confirmLegacySkinIdentity, importLegacySkinOwner, legacyCatalogRecordDigest } from "../src/supply/catalog";
+import { SecurityApiError } from "../src/auth/security-core";
 import { buildLegacySkinIndex, declarableLegacySkinIds, LEGACY_SKIN_FIELD_TYPE_HINT, mapLegacySkinHolding, splitLegacySkinColumn } from "../src/legacy-load/legacy-skin-holdings";
 
 const NAMESPACE = "legacy_mysql_restore";
@@ -16,16 +17,27 @@ class Stub {
   ownerRow: { id: string; name: string } | undefined;
   ownerName: string | undefined = "威龙";
   skinRow: Record<string, unknown> | undefined;
+  catalogRevision = "7";
+  terminalCas = true;
   query = async (text: string, values: unknown[] = []): Promise<{ rows: unknown[]; rowCount?: number }> => {
     this.queries.push({ text, values });
     if (text.startsWith("SELECT id,name FROM zzsh_supply.skin_owner")) return { rows: this.ownerRow ? [this.ownerRow] : [], rowCount: this.ownerRow ? 1 : 0 };
     if (text.startsWith(`SELECT id,naming_state AS "namingState"`)) return { rows: this.skinRow ? [this.skinRow] : [], rowCount: this.skinRow ? 1 : 0 };
-    if (text.startsWith("SELECT name,enabled FROM zzsh_supply.skin_owner")) return { rows: this.ownerName ? [{ name: this.ownerName, enabled: true }] : [] };
+    if (text.startsWith("SELECT name,enabled FROM zzsh_supply.skin_owner") || text.startsWith("SELECT name,enabled FROM zzsh_supply.firearm")) return { rows: this.ownerName ? [{ name: this.ownerName, enabled: true }] : [] };
     if (text.startsWith(`SELECT naming_state AS "namingState" FROM zzsh_supply.skin WHERE id=$1`)) return { rows: [{ namingState: "VERIFIED" }] };
-    if (text.startsWith(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game`)) return { rows: [{ revision: "7" }] };
+    if (text.startsWith(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game`)) return { rows: [{ revision: this.catalogRevision }] };
+    if (text.startsWith('UPDATE zzsh_supply.game SET catalog_revision')) {
+      if (!this.terminalCas || values[1] !== this.catalogRevision) return { rows: [], rowCount: 0 };
+      this.catalogRevision = (BigInt(this.catalogRevision) + 1n).toString();
+      return { rows: [{ revision: this.catalogRevision }], rowCount: 1 };
+    }
     if (text.startsWith(`UPDATE "zzsh_supply"."game" SET "catalog_revision"`)) return { rows: [], rowCount: 1 };
     if (text.startsWith("INSERT INTO zzsh_supply.skin_owner")) return { rows: [], rowCount: 1 };
     if (text.startsWith("UPDATE zzsh_supply.skin SET owner_kind")) return { rows: [], rowCount: 1 };
+    if (text.startsWith('UPDATE zzsh_supply.skin SET name=')) {
+      this.skinRow = { ...this.skinRow, name: values[1], baseName: values[2], aliases: values[3] };
+      return { rows: [{ namingState: 'VERIFIED' }], rowCount: 1 };
+    }
     if (text.startsWith(`INSERT INTO "zzsh_iam"."audit_event"`)) {
       this.audits.push({ action: values[4], objectType: values[5], objectId: values[6], details: JSON.parse(String(values[10])) });
       return { rows: [], rowCount: 1 };
@@ -119,6 +131,100 @@ test("legacy catalog record digest is canonical across key order", () => {
   assert.equal(left, right);
   assert.match(left, /^[a-f0-9]{64}$/);
   assert.notEqual(left, legacyCatalogRecordDigest({ namespace: NAMESPACE, kind: "MELEE_TYPE", code: "c", name: "n" }));
+});
+
+const mechanicalRow = {
+  id: 'skin_mechanical', namingState: 'VERIFIED', ownerKind: 'FIREARM', ownerId: null, firearmId: 'firearm_1',
+  name: 'M4A1-M4A1-棱镜攻势', baseName: 'M4A1-棱镜攻势', aliases: ['M4棱镜攻势', ' raw alias '],
+  sourceNamespace: NAMESPACE, sourceField: 'weapon_skin', sourceToken: 'M4棱镜攻势',
+};
+const mechanicalRecord = {
+  namespace: NAMESPACE, code: 'df_skin_mechanical', sourceField: mechanicalRow.sourceField, sourceToken: mechanicalRow.sourceToken,
+  ownerKind: 'FIREARM', ownerId: 'firearm_1', previousBaseName: mechanicalRow.baseName, baseName: '棱镜攻势',
+};
+const mechanicalInput = () => ({
+  code: mechanicalRecord.code, ownerRef: { kind: 'FIREARM' as const, id: 'firearm_1' }, baseName: mechanicalRecord.baseName,
+  aliases: ['新增平台旧名'], evidence: evidence(mechanicalRecord), audit: AUDIT, reason: 'Mechanical normalization from reviewed local diff, not an official naming claim',
+  normalization: { previousBaseName: mechanicalRow.baseName, expectedCatalogRevision: '7' },
+});
+function mechanicalStub() {
+  const stub = new Stub(); stub.skinRow = structuredClone(mechanicalRow); stub.ownerName = 'M4A1'; return stub;
+}
+
+test('reviewed mechanical normalization changes only name/base/aliases, preserves the old name and all aliases, and binds its audit', async () => {
+  const stub = mechanicalStub(), input = mechanicalInput();
+  const result = await confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', input);
+  assert.deepEqual(result, { id: mechanicalRow.id, code: mechanicalRecord.code, namingState: 'VERIFIED', catalogRevision: '8' });
+  const update = stub.queries.find(query => query.text.startsWith('UPDATE zzsh_supply.skin SET name='))!;
+  const keptAliases = [...mechanicalRow.aliases, mechanicalRow.name, '新增平台旧名'];
+  assert.deepEqual(update.values, [mechanicalRow.id, 'M4A1-棱镜攻势', '棱镜攻势', keptAliases]);
+  assert.equal(/owner_id\s*=|firearm_id\s*=|owner_kind\s*=|source_\w+\s*=|enabled\s*=|form_visible\s*=/.test(update.text), false);
+  const initialCheck = stub.queries.findIndex(query => query.text.startsWith('SELECT catalog_revision::text'));
+  const writeIndex = stub.queries.indexOf(update);
+  const terminalCas = stub.queries.findIndex(query => query.text.startsWith('UPDATE zzsh_supply.game SET catalog_revision'));
+  assert.ok(initialCheck >= 0 && initialCheck < writeIndex && writeIndex < terminalCas);
+  assert.deepEqual(stub.queries[terminalCas]!.values, ['game_test', '7']);
+  assert.equal(stub.audits.length, 1);
+  assert.equal(stub.audits[0]!.action, 'supply.catalog.legacy_identity_normalized');
+  assert.deepEqual(stub.audits[0]!.details, {
+    ...mechanicalRecord, aliases: keptAliases, evidenceArtifact: ARTIFACT, evidenceArtifactSha256: ARTIFACT_SHA,
+    recordDigest: evidence(mechanicalRecord).recordDigest, previousDisplayName: mechanicalRow.name,
+    displayName: 'M4A1-棱镜攻势', expectedCatalogRevision: '7', result: 'NORMALIZED',
+  });
+  stub.queries = [];
+  await assert.rejects(() => confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', input), /Normalization conflicts/);
+  assert.deepEqual(writes(stub), [], 'normalization is not repeated after the previous name changes');
+  assert.equal(stub.audits.length, 1);
+  const { normalization, ...v1 } = input;
+  const { previousBaseName, ...v1Record } = mechanicalRecord;
+  await confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', { ...v1, evidence: evidence(v1Record) });
+  assert.deepEqual(writes(stub), [], 'the original v1 replay remains read-only');
+  assert.equal(stub.audits.at(-1)!.details.result, 'REPLAY_VERIFIED');
+});
+
+test('verified identity changes without normalization still conflict, including a same-owner base-name edit', async () => {
+  for (const patch of [{}, { ownerRef: { kind: 'AGENT' as const, id: 'firearm_1' } }, { ownerRef: { kind: 'FIREARM' as const, id: 'other_owner' } }]) {
+    const stub = mechanicalStub();
+    const { normalization, ...input } = { ...mechanicalInput(), ...patch };
+    const { previousBaseName, ...record } = { ...mechanicalRecord, ownerKind: input.ownerRef.kind, ownerId: input.ownerRef.id };
+    await assert.rejects(() => confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', { ...input, evidence: evidence(record) }), /Legacy identity conflicts/);
+    assert.deepEqual(writes(stub), []); assert.equal(stub.audits.length, 0);
+  }
+});
+
+test('mechanical normalization rejects wrong previous base, owner, source, evidence and revision before a write', async () => {
+  const cases: Array<{ row?: Record<string, unknown>; input?: Record<string, unknown> }> = [
+    { input: { normalization: { previousBaseName: ' M4A1-棱镜攻势', expectedCatalogRevision: '7' }, evidence: evidence({ ...mechanicalRecord, previousBaseName: ' M4A1-棱镜攻势' }) } },
+    { input: { ownerRef: { kind: 'AGENT', id: 'firearm_1' }, evidence: evidence({ ...mechanicalRecord, ownerKind: 'AGENT' }) } },
+    { input: { ownerRef: { kind: 'FIREARM', id: 'other_owner' }, evidence: evidence({ ...mechanicalRecord, ownerId: 'other_owner' }) } },
+    { row: { sourceNamespace: 'some_other_source' } },
+    { row: { sourceField: 'different_field' } }, { row: { sourceToken: 'changed token' } },
+    { row: { namingState: 'PENDING' } }, { row: { namingState: 'LEGACY' } },
+    { input: { evidence: { ...evidence(mechanicalRecord), recordDigest: '0'.repeat(64) } } },
+    { input: { normalization: { previousBaseName: mechanicalRow.baseName, expectedCatalogRevision: '6' } } },
+    { input: { normalization: { previousBaseName: mechanicalRow.baseName, expectedCatalogRevision: 7 } } },
+    { input: { normalization: null } },
+    { input: { aliases: 'abc' } },
+    { input: { aliases: null } }, { input: { aliases: 7 } },
+  ];
+  for (const item of cases) {
+    const stub = mechanicalStub(); stub.skinRow = { ...stub.skinRow, ...item.row };
+    await assert.rejects(() => confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', { ...mechanicalInput(), ...item.input } as ReturnType<typeof mechanicalInput>), (error: unknown) => error instanceof SecurityApiError);
+    assert.deepEqual(writes(stub), [], JSON.stringify(item)); assert.equal(stub.audits.length, 0);
+  }
+});
+
+test('normalization refuses alias loss, terminal revision races and missing game scope', async () => {
+  const full = mechanicalStub(); full.skinRow = { ...full.skinRow, aliases: Array.from({ length: 32 }, (_, index) => `alias_${index}`) };
+  await assert.rejects(() => confirmLegacySkinIdentity(client(full), 'admin_test', true, 'game_test', mechanicalInput()), /alias limit/);
+  assert.deepEqual(writes(full), []);
+  const raced = mechanicalStub(); raced.terminalCas = false;
+  await assert.rejects(() => confirmLegacySkinIdentity(client(raced), 'admin_test', true, 'game_test', mechanicalInput()), /Catalog changed/);
+  assert.equal(raced.audits.length, 0, 'caller transaction must roll back the earlier UPDATE when final CAS fails');
+  let scopeQueries = 0;
+  const unscoped = { query: async () => { scopeQueries++; return { rows: [{ mode: 'SELECTED_GAMES', gameIds: [] }] }; } } as unknown as PoolClient;
+  await assert.rejects(() => confirmLegacySkinIdentity(unscoped, 'scoped_admin', false, 'game_test', mechanicalInput()), /No game scope/);
+  assert.equal(scopeQueries, 1, 'scope is checked before any skin read or write');
 });
 
 // SKIN-CATALOG-INTEGRATION-6: old four holding columns -> skin ids, per account.

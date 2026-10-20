@@ -117,6 +117,8 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const [catalog, setCatalog] = useState<Directory<PublicCatalog>>({ status: "idle", data: null });
   const [skinSearchCatalog, setSkinSearchCatalog] = useState<Directory<PublicCatalog>>({ status: "idle", data: null });
   const [skinSearch, setSkinSearch] = useState("");
+  const [skinOwner, setSkinOwner] = useState("");
+  const [skinRarity, setSkinRarity] = useState("");
   const [activeSkinCategoryId, setActiveSkinCategoryId] = useState("");
   const [metadataAttempt, setMetadataAttempt] = useState(0);
   const [catalogAttempt, setCatalogAttempt] = useState(0);
@@ -145,6 +147,8 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     ? activeSkinCategoryId
     : skinCategories[0]?.id ?? "";
   const normalizedSkinSearch = skinSearch.normalize("NFKC").trim().slice(0, 80);
+  const resolvedSkinOwner = catalog.data?.game.id === filters.game && catalog.data.owners?.some((owner) => owner.id === skinOwner) ? skinOwner : "";
+  const resolvedSkinRarity = catalog.data?.game.id === filters.game && catalog.data.rarities.some((rarity) => rarity.code === skinRarity) ? skinRarity : "";
   const lookupNumber = exactAccountLookupQuery(filters.q);
   const feed = useListingFeed(filters, metadata.data, {
     enabled: filterSourceReady && (lookupNumber !== null || (restoreReady && metadata.status === "ready" && Boolean(metadata.data?.available))),
@@ -238,7 +242,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     catalogController.current = controller;
     const requestId = ++catalogSequence.current;
     setCatalog({ status: "loading", data: null });
-    supplyApi.browseCatalog(filters.game, new URLSearchParams({ limit: "100" }), controller.signal).then((data) => {
+    supplyApi.browseCatalog(filters.game, new URLSearchParams({ limit: "30" }), controller.signal).then((data) => {
       if (!controller.signal.aborted && requestId === catalogSequence.current) setCatalog({ status: "ready", data });
     }).catch(() => {
       if (!controller.signal.aborted && requestId === catalogSequence.current) setCatalog({ status: "error", data: null });
@@ -267,8 +271,10 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     skinSearchController.current = controller;
     setSkinSearchCatalog({ status: "loading", data: null });
     const timer = window.setTimeout(() => {
-      const params = new URLSearchParams({ limit: "100", categoryId });
+      const params = new URLSearchParams({ limit: "30", categoryId });
       if (query) params.set("q", query);
+      if (resolvedSkinOwner) params.set("ownerId", resolvedSkinOwner);
+      if (resolvedSkinRarity) params.set("rarityCode", resolvedSkinRarity);
       supplyApi.browseCatalog(filters.game!, params, controller.signal).then((data) => {
         if (controller.signal.aborted || requestId !== skinSearchSequence.current) return;
         setSkinSearchCatalog({ status: "ready", data });
@@ -286,7 +292,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
       if (skinSearchController.current === controller) skinSearchController.current = null;
       if (requestId === skinSearchSequence.current) skinSearchSequence.current += 1;
     };
-  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, skinSearchAttempt]);
+  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, resolvedSkinOwner, resolvedSkinRarity, skinSearchAttempt]);
 
   useEffect(() => {
     const page = skinSearchCatalog.data;
@@ -415,8 +421,10 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     skinSearchBusy.current = true;
     setLoadingMoreSkinSearch(true);
     try {
-      const params = new URLSearchParams({ limit: "100", categoryId, cursor });
+      const params = new URLSearchParams({ limit: "30", categoryId, cursor });
       if (query) params.set("q", query);
+      if (resolvedSkinOwner) params.set("ownerId", resolvedSkinOwner);
+      if (resolvedSkinRarity) params.set("rarityCode", resolvedSkinRarity);
       const page = await supplyApi.browseCatalog(filters.game, params, controller.signal);
       if (controller.signal.aborted || requestId !== skinSearchSequence.current) return;
       setSkinSearchCatalog((previous) => {
@@ -443,7 +451,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         if (skinSearchController.current === controller) skinSearchController.current = null;
       }
     }
-  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, skinSearchCatalog.data]);
+  }, [filters.game, normalizedSkinSearch, resolvedSkinCategoryId, resolvedSkinOwner, resolvedSkinRarity, skinSearchCatalog.data]);
 
   const game = catalog.data?.game ?? games.data?.find((entry) => entry.id === filters.game) ?? null;
   const filterCount = activeListingFilterCount(filters);
@@ -605,7 +613,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
                 <Drawer.Handle />
                 <Drawer.CloseTrigger className="market-filter-drawer-close" aria-label="关闭筛选"><X size={18} aria-hidden="true" /></Drawer.CloseTrigger>
                 <Drawer.Header><Drawer.Heading>筛选账号</Drawer.Heading></Drawer.Header>
-              <Drawer.Body><MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={setActiveSkinCategoryId} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} /></Drawer.Body>
+              <Drawer.Body><MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} skinOwner={resolvedSkinOwner} skinRarity={resolvedSkinRarity} onSkinOwnerChange={setSkinOwner} onSkinRarityChange={setSkinRarity} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} /></Drawer.Body>
                 <Drawer.Footer className="market-filter-drawer-footer"><div className="market-filter-drawer-actions">
                   <button type="button" className="market-clear-filters" disabled={filterCount === 0} onClick={resetFilters}>清空筛选</button>
                   <Button className="market-filter-drawer-apply" variant="primary" onPress={() => setMobileFiltersOpen(false)}>返回结果</Button>
@@ -615,7 +623,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
           </div>
           <details className="market-filter-details" open>
             <summary><span>筛选条件</span>{filterCount > 0 ? <span className="market-filter-summary-count">已选 {filterCount} 项</span> : <span className="market-filter-summary-count">展开选择资源、属性与皮肤</span>}</summary>
-            <MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={setActiveSkinCategoryId} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} />
+            <MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} skinOwner={resolvedSkinOwner} skinRarity={resolvedSkinRarity} onSkinOwnerChange={setSkinOwner} onSkinRarityChange={setSkinRarity} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} />
             <button type="button" className="market-clear-filters market-clear-top" disabled={filterCount === 0} onClick={resetFilters}>清空筛选</button>
           </details>
         </>}

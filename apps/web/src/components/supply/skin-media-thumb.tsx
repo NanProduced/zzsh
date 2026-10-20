@@ -1,42 +1,86 @@
 "use client";
 
-import { useState } from "react";
-import { FileImage } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { FileImage, RotateCw, X } from "lucide-react";
+import "./skin-media.css";
+
+type SkinDisplay = {
+  name: string;
+  mediaId?: string | null;
+  ownerKind?: string | null;
+  rarityName?: string | null;
+  rarityBasis?: "PLATFORM_REFERENCE" | "OFFICIAL" | null;
+  isCollectible?: boolean | null;
+  defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
+};
 
 type SkinMediaThumbProps = {
   mediaId: string | null;
   className?: string;
   fallbackClassName?: string;
   iconSize?: number;
+  ownerKind?: string | null;
 };
 
 export function skinMediaSource(mediaId: string | null): string | null {
   return mediaId ? `/api/supply/media/${encodeURIComponent(mediaId)}/content` : null;
 }
 
-function MediaFallback({ className, iconSize }: { className: string; iconSize: number }) {
-  return <span className={className}><FileImage size={iconSize} aria-hidden="true" /><span>暂无公开图</span></span>;
+function MediaFallback({ className, iconSize, failed = false }: { className: string; iconSize: number; failed?: boolean }) {
+  return <span className={className}><FileImage size={iconSize} aria-hidden="true" /><span>{failed ? "图片暂不可用" : "暂无公开图"}</span></span>;
 }
 
 /** One display cycle: failure is local, so a remount on mediaId change always starts clean. */
-function SkinMediaCycle({ src, fallbackClassName, iconSize }: { src: string | null; fallbackClassName: string; iconSize: number }) {
-  const [failed, setFailed] = useState(false);
-  if (!src || failed) return <MediaFallback className={fallbackClassName} iconSize={iconSize} />;
-  return <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} />;
+function SkinMediaCycle({ src, fallbackClassName, iconSize, alt = "", preview = false }: { src: string | null; fallbackClassName: string; iconSize: number; alt?: string; preview?: boolean }) {
+  const [state, setState] = useState<"loading" | "loaded" | "failed">("loading");
+  if (!src || state === "failed") return <>
+    <MediaFallback className={fallbackClassName} iconSize={iconSize} failed={Boolean(src)} />
+    {src && preview ? <button type="button" className="button secondary skin-preview-retry" onClick={() => setState("loading")}><RotateCw size={16} aria-hidden="true" />重试图片</button> : null}
+  </>;
+  return <>
+    <img src={src} alt={alt} loading={preview ? "eager" : "lazy"} decoding="async" data-state={state} onLoad={() => setState("loaded")} onError={() => setState("failed")} />
+    {state === "loading" ? <span className="skin-media-loading">图片加载中…</span> : null}
+  </>;
 }
 
 /** Public skin thumbnail over the existing media URL contract; missing or failed media stays neutral. */
-export function SkinMediaThumb({ mediaId, className = "skin-card-media", fallbackClassName = "skin-card-media-fallback", iconSize = 16 }: SkinMediaThumbProps) {
+export function SkinMediaThumb({ mediaId, ownerKind, className = "skin-card-media", fallbackClassName = "skin-card-media-fallback", iconSize = 16 }: SkinMediaThumbProps) {
   const src = skinMediaSource(mediaId);
-  return <span className={className} aria-hidden="true">
+  return <span className={`skin-media ${className}`} data-owner-kind={ownerKind ?? "UNKNOWN"} aria-hidden="true">
     <SkinMediaCycle key={src ?? "missing"} src={src} fallbackClassName={fallbackClassName} iconSize={iconSize} />
   </span>;
 }
 
 export function skinCardTitle(tag: { name: string; ownerName?: string | null; baseName?: string | null }): string {
-  const owner = tag.ownerName?.trim();
-  const base = tag.baseName?.trim();
-  if (!owner || !base) return tag.name;
-  const composed = `${owner}-${base}`;
-  return tag.name === composed || tag.name.startsWith(`${composed} `) ? tag.name : composed;
+  return tag.name;
+}
+
+export function SkinMetadata({ skin, className = "" }: { skin: SkinDisplay; className?: string }) {
+  return <span className={`skin-metadata ${className}`.trim()}>
+    <span>{skin.rarityName?.trim() || "品质待核"}{skin.rarityBasis === "PLATFORM_REFERENCE" ? " · 平台资料" : ""}</span>
+    {skin.isCollectible === true ? <span>典藏</span> : null}
+    {skin.defaultState === "DEFAULT" ? <span>默认外观</span> : null}
+  </span>;
+}
+
+/** One real-media preview for publish, market and public/owner detail; Radix restores the trigger. */
+export function SkinMediaPreview({ skin, children, triggerClassName = "skin-media-preview-trigger", mediaClassName, fallbackClassName, iconSize = 22 }: {
+  skin: SkinDisplay; children?: ReactNode; triggerClassName?: string; mediaClassName?: string; fallbackClassName?: string; iconSize?: number;
+}) {
+  const thumbnail = <SkinMediaThumb mediaId={skin.mediaId ?? null} ownerKind={skin.ownerKind} className={mediaClassName} fallbackClassName={fallbackClassName} iconSize={iconSize} />;
+  if (!skin.mediaId) return children ? null : thumbnail;
+  return <Dialog.Root>
+    <Dialog.Trigger asChild><button type="button" className={triggerClassName} aria-label={`放大查看 ${skin.name} 皮肤图片`}>{children ?? thumbnail}</button></Dialog.Trigger>
+    <Dialog.Portal>
+      {/* React Aria drawers recognise this layer when hiding and containing focus outside their portal. */}
+      <Dialog.Overlay className="skin-preview-overlay" data-react-aria-top-layer="" />
+      <Dialog.Content className="skin-preview-content" data-react-aria-top-layer="" aria-describedby={undefined} onEscapeKeyDown={(event) => event.stopPropagation()}>
+        <Dialog.Title className="skin-preview-title">{skin.name} 皮肤图片</Dialog.Title>
+        <Dialog.Close className="skin-preview-close" aria-label="关闭预览"><X size={20} aria-hidden="true" /></Dialog.Close>
+        <div className="skin-preview-image"><SkinMediaCycle key={skin.mediaId} src={skinMediaSource(skin.mediaId)} alt={`${skin.name} 皮肤图片`} fallbackClassName="skin-preview-fallback" iconSize={32} preview /></div>
+        <SkinMetadata skin={skin} />
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
 }

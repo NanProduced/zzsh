@@ -1,7 +1,6 @@
 "use client";
 import { FormSelect, FormRadioGroup, Input, IntegerStepper, Textarea, DateTimePicker } from "../ui/form-controls";
-import { SkinMediaThumb } from "./skin-media-thumb";
-import { skinQualityLabel } from "../../lib/listing-view";
+import { SkinMediaThumb, SkinMediaPreview, SkinMetadata } from "./skin-media-thumb";
 import "./publish-refinement.css";
 
 import Link from "next/link";
@@ -92,6 +91,7 @@ import {
 } from "../../lib/publish-derive";
 import type {
   DepositRecommendation,
+  DepositSkinFacts,
   DraftInput,
   FullPayoutTerms,
   FullPayoutTermsAcceptance,
@@ -131,17 +131,11 @@ type MediaEntry = {
   error?: string;
   context: RequestContext;
 };
-type SkinQuery = { q?: string; categoryId?: string; rarityCode?: string; cursor?: string };
+type SkinQuery = { q?: string; categoryId?: string; rarityCode?: string; ownerId?: string; cursor?: string };
 type PublishGroupId = "account" | "assets" | "terms" | "media";
 type OptionsAvailability = "pending" | "ready" | "unavailable" | "failed";
 type NavigationIntent = { message: string; label: string; run: () => void; cancel?: () => void };
-type RecommendationInputs = {
-  safeBoxCode: string | null;
-  vitality: number | null;
-  bear: number | null;
-  dive: number | null;
-  skinIds: string[];
-};
+type RecommendationInputs = Extract<DepositRecommendation, { available: true }>["inputs"];
 type RecommendationBinding = {
   accountId: string;
   accountRevision: string;
@@ -508,7 +502,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const gameRef = useRef("");
   const gamesRef = useRef<SupplyGame[]>([]);
   const skinRequestRef = useRef(0);
-  const skinQueryRef = useRef({ gameId: "", key: "" });
+  const skinQueryRef = useRef<{ gameId: string; key: string; query: SkinQuery }>({ gameId: "", key: "", query: {} });
   const supplyRef = useRef<MySupply | null>(null);
   const quoteCatalogBinding = useRef<{ token: string; catalogRevision: string } | null>(null);
   const draftRef = useRef<DraftInput>(emptyDraft());
@@ -534,10 +528,14 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const [optionsAvailability, setOptionsAvailability] = useState<OptionsAvailability>("pending");
   const [catalog, setCatalog] = useState<PublishingCatalog | null>(null);
   const [catalogAvailability, setCatalogAvailability] = useState<CatalogAvailability>("pending");
-  const [skinNames, setSkinNames] = useState<Record<string, string>>({});
+  const [knownSkins, setKnownSkins] = useState<Record<string, PublishingCatalog["skins"][number] & { catalogRevision: string }>>({});
+  const [skinCatalogRevision, setSkinCatalogRevision] = useState<{ gameId: string; revision: string } | null>(null);
   const [skinQuery, setSkinQuery] = useState("");
   const [skinCategory, setSkinCategory] = useState("");
   const [skinRarity, setSkinRarity] = useState("");
+  const [skinOwner, setSkinOwner] = useState("");
+  const [skinPagePending, setSkinPagePending] = useState(false);
+  const [skinPageFailed, setSkinPageFailed] = useState<"replace" | "append" | null>(null);
   const [media, setMedia] = useState<MediaEntry[]>([]);
   const [editing, setEditing] = useState(!accountIdProp);
   const [authRequired, setAuthRequired] = useState(false);
@@ -799,8 +797,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       setOptionsAvailability("pending");
       setCatalog(null);
       setCatalogAvailability("pending");
-      setSkinNames({});
-      skinQueryRef.current = { gameId: "", key: "" };
+      setKnownSkins({}); setSkinCatalogRevision(null);
+      skinQueryRef.current = { gameId: "", key: "", query: {} };
     }
   }, []);
   const applySupply = useCallback((next: MySupply, loadDraft: boolean, replaceMedia = false) => {
@@ -1090,8 +1088,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         setOptionsAvailability("pending");
         setCatalog(null);
         setCatalogAvailability("pending");
-        setSkinNames({});
-        skinQueryRef.current = { gameId: "", key: "" };
+        setKnownSkins({}); setSkinCatalogRevision(null);
+        skinQueryRef.current = { gameId: "", key: "", query: {} };
       }
     }
     if (routeAccountRef.current !== accountIdProp) {
@@ -1191,23 +1189,33 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountIdProp, editRequested, identityState, gameCodeProp, mode, routeSwitch, router, invalidateContext, reportFailure, waitForIdentity]);
 
+  const rememberSkinCatalog = useCallback((page: PublishingCatalog) => {
+    setSkinCatalogRevision({ gameId: page.game.id, revision: page.game.catalogRevision });
+    setKnownSkins((previous) => Object.fromEntries([
+      ...Object.entries(previous), ...page.skins.map((skin) => [skin.id, { ...skin, catalogRevision: page.game.catalogRevision }] as const),
+    ]));
+  }, []);
+
   const loadSkinPage = useCallback(async (query: SkinQuery, append: boolean) => {
     if (!gameId) return;
-    const queryKey = JSON.stringify({ q: query.q ?? "", categoryId: query.categoryId ?? "", rarityCode: query.rarityCode ?? "" });
+    const queryKey = JSON.stringify({ q: query.q ?? "", categoryId: query.categoryId ?? "", rarityCode: query.rarityCode ?? "", ownerId: query.ownerId ?? "" });
+    if (append && (skinQueryRef.current.gameId !== gameId || skinQueryRef.current.key !== queryKey)) return;
     const requestId = ++skinRequestRef.current;
     const request = { id: requestId, key: `${gameId}:${queryKey}` };
     const isCurrent = () => isCurrentQuery(request, skinRequestRef.current, `${skinQueryRef.current.gameId}:${skinQueryRef.current.key}`);
-    if (!append) skinQueryRef.current = { gameId, key: queryKey };
-    if (append && (skinQueryRef.current.gameId !== gameId || skinQueryRef.current.key !== queryKey)) return;
+    if (!append) skinQueryRef.current = { gameId, key: queryKey, query: { ...query, cursor: undefined } };
     const context = captureContext(accountRef.current, gameId);
     const controller = beginRequest();
     setLoadingCatalog(true);
+    setSkinPageFailed(null);
+    if (!append) setSkinPagePending(true);
     try {
       if (!(await waitForIdentity(context))) return;
       const params = new URLSearchParams({ limit: "30" });
       if (query.q) params.set("q", query.q);
       if (query.categoryId) params.set("categoryId", query.categoryId);
       if (query.rarityCode) params.set("rarityCode", query.rarityCode);
+      if (query.ownerId) params.set("ownerId", query.ownerId);
       if (query.cursor) params.set("cursor", query.cursor);
       const page = await supplyApi.catalog(gameId, params, controller.signal);
       if (!currentContext(context, controller.signal) || !isCurrent()) return;
@@ -1223,21 +1231,19 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         const existing = new Set(previous.skins.map((skin) => skin.id));
         return { ...page, skins: [...previous.skins, ...page.skins.filter((skin) => !existing.has(skin.id))] };
       });
-      setSkinNames((previous) => Object.fromEntries([
-        ...Object.entries(previous),
-        ...page.skins.map((skin) => [skin.id, skin.name] as const),
-      ]));
+      rememberSkinCatalog(page);
       setCatalogAvailability("ready");
     } catch (failure) {
       if (currentContext(context, controller.signal) && isCurrent()) {
         setCatalogAvailability("failed");
+        setSkinPageFailed(append ? "append" : "replace");
         reportFailure(failure, () => loadSkinPage(query, append), context, "catalog");
       }
     } finally {
-      if (currentContext(context, controller.signal) && isCurrent()) setLoadingCatalog(false);
+      if (currentContext(context, controller.signal) && isCurrent()) { setLoadingCatalog(false); setSkinPagePending(false); }
       finishRequest(controller);
     }
-  }, [currentContext, gameId, reportFailure, waitForIdentity]);
+  }, [currentContext, gameId, rememberSkinCatalog, reportFailure, waitForIdentity]);
 
   const loadOptions = useCallback(async (requestedGameId = gameId) => {
     if (!requestedGameId) return;
@@ -1279,6 +1285,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     setSkinQuery("");
     setSkinCategory("");
     setSkinRarity("");
+    setSkinOwner("");
     void loadOptions(gameId);
     void loadSkinPage({}, false);
   }, [gameId, identityState, loadOptions, loadSkinPage]);
@@ -1871,6 +1878,39 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     };
   };
 
+  const verifyRecommendationSkinFacts = async (facts: DepositSkinFacts | undefined, binding: RecommendationBinding, context: RequestContext, signal: AbortSignal): Promise<boolean> => {
+    if (!facts || facts.schema !== "deposit-skin-facts-v1" || facts.gameId !== context.gameId || facts.listingVersionId !== binding.versionId ||
+      typeof facts.catalogRevision !== "string" || !/^[1-9]\d*$/.test(facts.catalogRevision) || !Array.isArray(facts.skins) || facts.skins.length !== binding.inputs.skinIds.length) return false;
+    const pending = new Set(binding.inputs.skinIds), expected = new Map<string, DepositSkinFacts["skins"][number]>();
+    if (pending.size !== binding.inputs.skinIds.length) return false;
+    for (const skin of facts.skins) {
+      if (!skin || !pending.has(skin.skinId) || expected.has(skin.skinId) || !["AGENT", "FIREARM", "MELEE_TYPE"].includes(skin.ownerKind) ||
+        !(skin.rarityCode === null || typeof skin.rarityCode === "string")) return false;
+      expected.set(skin.skinId, skin);
+    }
+    let cursor: string | null = null;
+    const seen = new Set<string>();
+    do {
+      const query = new URLSearchParams({ limit: "100" });
+      if (cursor) query.set("cursor", cursor);
+      const page = await supplyApi.catalog(context.gameId, query, signal);
+      if (!currentContext(context, signal)) return false;
+      if (page.game.id !== facts.gameId || page.game.catalogRevision !== facts.catalogRevision || page.game.currentReleaseId !== binding.ruleReleaseId) return false;
+      rememberSkinCatalog(page);
+      for (const skin of page.skins) {
+        const fact = expected.get(skin.id);
+        if (!fact) continue;
+        if (skin.ownerKind !== fact.ownerKind || skin.rarityCode !== fact.rarityCode) return false;
+        pending.delete(skin.id);
+      }
+      if (pending.size === 0) return true;
+      cursor = page.nextCursor;
+      if (cursor && seen.has(cursor)) return false;
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return false;
+  };
+
   const recommendDeposit = async () => {
     const problem = pricingProblem();
     if (problem) { locate(problem.group, problem.message); return; }
@@ -1917,14 +1957,17 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         }
         // The response must prove it was computed for this account/version
         // revision, this rule release and this declaration snapshot.
-        const mismatch = result.accountId !== requestBinding.accountId ||
+        const v2 = result.recommendationSchema === "deposit-recommendation-v2" || result.inputs.skinFacts !== undefined;
+        const factsMatch = !v2 || await verifyRecommendationSkinFacts(result.inputs.skinFacts, requestBinding, { ...context, accountId: id }, controller.signal);
+        if (!currentContext({ ...context, accountId: id }, controller.signal)) return;
+        const mismatch = !factsMatch || (result.recommendationSchema !== undefined && !["deposit-recommendation-v1", "deposit-recommendation-v2"].includes(result.recommendationSchema)) || result.accountId !== requestBinding.accountId ||
           result.accountRevision !== requestBinding.accountRevision ||
           result.versionId !== requestBinding.versionId ||
           result.versionRevision !== requestBinding.versionRevision ||
           result.ruleReleaseId !== requestBinding.ruleReleaseId ||
           !inputsEqual(result.inputs, requestBinding.inputs);
         setRecommendation(result);
-        setRecommendationBinding({ ...requestBinding, mismatch });
+        setRecommendationBinding({ ...requestBinding, inputs: { ...requestBinding.inputs, ...(v2 ? { skinFacts: result.inputs.skinFacts } : {}) }, mismatch });
         setRecommendationAdopted(false);
         setNotice(mismatch
           ? "推荐结果与当前账号、版本或规则不匹配，已标记过期；请重新查看推荐押金。"
@@ -1940,10 +1983,14 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     }
   };
 
+  const recommendationFacts = recommendationBinding?.inputs.skinFacts;
+  const recommendationCatalogFresh = !recommendationFacts || (skinCatalogRevision?.gameId === gameId && skinCatalogRevision.revision === recommendationFacts.catalogRevision &&
+    recommendationFacts.skins.every((fact) => knownSkins[fact.skinId]?.catalogRevision === recommendationFacts.catalogRevision && knownSkins[fact.skinId]?.ownerKind === fact.ownerKind && knownSkins[fact.skinId]?.rarityCode === fact.rarityCode));
   const recommendationFresh = Boolean(
     recommendation?.available &&
     recommendationBinding &&
     !recommendationBinding.mismatch &&
+    recommendationCatalogFresh &&
     !draftDirty &&
     supply?.account.id === recommendationBinding.accountId &&
     supply?.account.revision === recommendationBinding.accountRevision &&
@@ -1953,16 +2000,33 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     inputsEqual(currentRecommendationInputs(), recommendationBinding.inputs),
   );
 
-  const adoptRecommendation = () => {
+  const adoptRecommendation = async () => {
     const current = recommendation;
     if (!current || !current.available || !recommendationFresh) {
       setNotice("推荐已过期或不可用，请重新查看推荐押金。");
       return;
     }
-    changeDeposit(yuanFromCents(current.amountCents) ?? "");
-    setRecommendation(current);
-    setRecommendationAdopted(true);
-    setNotice("已按推荐填入押金申报；可继续修改，核价与条款需重新确认。");
+    const binding = recommendationBinding!, context = captureContext(), controller = beginRequest();
+    setRecommendationBusy(true);
+    try {
+      if (current.recommendationSchema === "deposit-recommendation-v2" || current.inputs.skinFacts !== undefined) {
+        const matches = await verifyRecommendationSkinFacts(current.inputs.skinFacts, binding, context, controller.signal);
+        if (!currentContext(context, controller.signal)) return;
+        if (!matches || !inputsEqual(currentRecommendationInputs(), binding.inputs) || supplyRef.current?.account.revision !== binding.accountRevision || supplyRef.current?.version?.id !== binding.versionId || supplyRef.current?.version?.revision !== binding.versionRevision) {
+          setRecommendationBinding({ ...binding, mismatch: true }); setRecommendationAdopted(false);
+          setNotice("目录或资料已变化，推荐已过期；请重新查看推荐押金。"); return;
+        }
+      }
+      changeDeposit(yuanFromCents(current.amountCents) ?? "");
+      setRecommendation(current);
+      setRecommendationAdopted(true);
+      setNotice("已按推荐填入押金申报；可继续修改，核价与条款需重新确认。");
+    } catch {
+      if (currentContext(context, controller.signal)) { setRecommendationBinding({ ...binding, mismatch: true }); setRecommendationAdopted(false); setNotice("目录核对未完成，推荐不可采用；请重新查看推荐押金。"); }
+    } finally {
+      finishRequest(controller);
+      if (currentContext(context)) setRecommendationBusy(false);
+    }
   };
 
   const upload = async (entry: MediaEntry, queuedContext = entry.context) => {
@@ -2068,8 +2132,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     setOptionsAvailability("pending");
     setCatalog(null);
     setCatalogAvailability("pending");
-    setSkinNames({});
-    skinQueryRef.current = { gameId: "", key: "" };
+    setKnownSkins({}); setSkinCatalogRevision(null);
+    skinQueryRef.current = { gameId: "", key: "", query: {} };
     const code = games.find((game) => game.id === nextGameId)?.code;
     const params = new URLSearchParams();
     if (mode === "fast") params.set("mode", "fast");
@@ -2324,9 +2388,12 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const resourcePosition = (code: string | null) => { const index = resourceOrder.indexOf(canonicalResourceCode(code) ?? ""); return index < 0 ? resourceOrder.length : index; };
   const resourceRows=[...inventoryRows,...missingResourceRows].sort((a,b)=>resourcePosition(a.code)-resourcePosition(b.code));
   const savedSkinNames = new Map((supply?.version?.presentation?.skins ?? []).map((skin) => [skin.id, skin.name]));
-  const skinName = (id: string) => skinNames[id] ?? savedSkinNames.get(id) ?? "目录名称待加载";
+  const skinName = (id: string) => knownSkins[id]?.name ?? savedSkinNames.get(id) ?? "目录名称待加载";
   const activeSkinCategory = skinCategory || catalog?.categories[0]?.id || "";
+  const activeSkinKind = catalog?.categories.find((category) => category.id === activeSkinCategory)?.ownerKind;
+  const skinOwners = (catalog?.owners ?? []).filter((owner) => !activeSkinKind || owner.kind === activeSkinKind);
   const visibleSkinRows = (catalog?.skins ?? []).filter((skin) => !activeSkinCategory || skin.categoryId === activeSkinCategory);
+  const skinFilters = { q: skinQuery.trim(), categoryId: activeSkinCategory, rarityCode: skinRarity, ownerId: skinOwner };
   const showPricingSelect = options?.pricingSchema !== "haff-ratio-v2";
   const disabledPricing = formDisabled || !options;
   const rentalModes = options?.rentalModes;
@@ -2587,20 +2654,21 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               <div className="skin-picker">
                 <div className="skin-category-nav" role="group" aria-label="皮肤分类">
                   {catalog?.categories.map((category) => (
-                    <button key={category.id} type="button" className={`skin-category-btn${activeSkinCategory === category.id ? " is-active" : ""}`} disabled={formDisabled} onClick={() => { setSkinCategory(category.id); void loadSkinPage({ q: skinQuery.trim(), categoryId: category.id, rarityCode: skinRarity }, false); }}>{category.name}</button>
+                    <button key={category.id} type="button" className={`skin-category-btn${activeSkinCategory === category.id ? " is-active" : ""}`} aria-pressed={activeSkinCategory === category.id} disabled={formDisabled} onClick={() => { setSkinCategory(category.id); setSkinOwner(""); void loadSkinPage({ ...skinFilters, categoryId: category.id, ownerId: "" }, false); }}>{category.name}</button>
                   ))}
                 </div>
-                <div className={`skin-search-row${catalog?.rarities.length ? "" : " skin-search-row--single"}`}>
-                  <Input className="skin-search-input" aria-label="搜索皮肤名称" enterKeyHint="search" value={skinQuery} disabled={formDisabled} onChange={(event) => setSkinQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void loadSkinPage({ q: skinQuery.trim(), categoryId: activeSkinCategory, rarityCode: skinRarity }, false); } }} placeholder="搜索皮肤名称，回车查找" />
+                <div className="skin-search-row">
+                  <div className="skin-search-control">
+                    <Input className="skin-search-input" type="search" maxLength={80} aria-label="搜索皮肤或所属名称" enterKeyHint="search" value={skinQuery} disabled={formDisabled} onChange={(event) => setSkinQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void loadSkinPage(skinFilters, false); } }} placeholder="搜索皮肤或所属名称" />
+                    <button type="button" className="button secondary" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage(skinFilters, false)}>查找</button>
+                  </div>
+                  {skinOwners.length ? <FormSelect label="皮肤所属" value={skinOwner || "__all__"} disabled={formDisabled} placeholder="全部所属" options={[{ value: "__all__", label: "全部所属" }, ...skinOwners.map((owner) => ({ value: owner.id, label: owner.name }))]} onChange={(value) => { const ownerId = value === "__all__" ? "" : value; setSkinOwner(ownerId); void loadSkinPage({ ...skinFilters, ownerId }, false); }} /> : null}
                   {catalog?.rarities.length ? <FormSelect label="皮肤品质"
-                    value={skinRarity}
+                    value={skinRarity || "__all__"}
                     disabled={formDisabled}
                     placeholder="全部品质"
-                    options={catalog.rarities.map((rarity) => ({ value: rarity.code, label: rarity.name }))}
-                    onChange={(val) => {
-                      setSkinRarity(val);
-                      void loadSkinPage({ q: skinQuery.trim(), categoryId: activeSkinCategory, rarityCode: val }, false);
-                    }}
+                    options={[{ value: "__all__", label: "全部品质" }, ...catalog.rarities.map((rarity) => ({ value: rarity.code, label: rarity.name }))]}
+                    onChange={(value) => { const rarityCode = value === "__all__" ? "" : value; setSkinRarity(rarityCode); void loadSkinPage({ ...skinFilters, rarityCode }, false); }}
                     className="skin-rarity-select"
                   /> : null}
                 </div>
@@ -2612,37 +2680,41 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     </div>
                     <div className="supply-selected-chips" aria-label="已选皮肤">
                       {draft.skins.map((id) => (
-                        <span key={id} className="supply-chip">
+                        <span key={id} className="supply-chip" data-skin-id={id}>
                           {skinName(id)}
                           <button type="button" className="supply-chip-remove" aria-label={`移除 ${skinName(id)}`} disabled={formDisabled} onClick={() => setDraft((previous) => ({ ...previous, skins: previous.skins.filter((skinId) => skinId !== id) }))}>
-                            <Trash2 size={13} />
+                            <Trash2 size={13} aria-hidden="true" />
                           </button>
                         </span>
                       ))}
                     </div>
                   </div>
                 ) : null}
-                <div className="skin-choices-grid">
+                {skinPagePending || (!catalog && loadingCatalog) ? <p className="supply-muted" role="status">正在读取皮肤目录，已选皮肤会保留…</p> : null}
+                {skinPageFailed ? <div className="skin-picker-error" role="alert"><p>{skinPageFailed === "append" ? "更多皮肤加载失败，已加载内容与已选皮肤会保留。" : "皮肤目录加载失败，已选皮肤会保留。"}</p><button type="button" className="button secondary" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage({ ...skinQueryRef.current.query, ...(skinPageFailed === "append" ? { cursor: catalog?.nextCursor ?? undefined } : {}) }, skinPageFailed === "append")}>重试皮肤目录</button></div> : null}
+                {!skinPagePending && skinPageFailed !== "replace" ? <div className="skin-choices-grid" aria-label="可选皮肤">
                   {visibleSkinRows.map((skin) => {
                     const isSelected = draft.skins.includes(skin.id);
                     return (
-                      <label key={skin.id} className={`skin-card${isSelected ? " is-selected" : ""}`}>
-                        <SkinMediaThumb mediaId={skin.mediaId} />
-                        <div className="skin-card-copy">
-                          <span className="skin-card-name" title={skin.name}>{skin.name}</span>
-                          {skin.ownerName || skin.baseName ? <span className="skin-card-owner" title={[skin.ownerName, skin.baseName].filter(Boolean).join(" · ")}>{[skin.ownerName, skin.baseName].filter(Boolean).join(" · ")}</span> : <span className="skin-card-owner">所属对象待核</span>}
-                          {skinQualityLabel(skin) ? <span className="skin-card-rarity">{skinQualityLabel(skin)}</span> : null}
-                        </div>
-                        <input type="checkbox" checked={isSelected} aria-label={`选择 ${skin.name}`} disabled={formDisabled} onChange={() => setDraft((previous) => ({
-                          ...previous,
-                          skins: isSelected ? previous.skins.filter((id) => id !== skin.id) : [...previous.skins, skin.id],
-                        }))} />
-                      </label>
+                      <article key={skin.id} className={`skin-card${isSelected ? " is-selected" : ""}`} data-skin-id={skin.id} data-owner-kind={skin.ownerKind ?? "UNKNOWN"}>
+                        <label className="skin-card-choice">
+                          <SkinMediaThumb mediaId={skin.mediaId} ownerKind={skin.ownerKind} />
+                          <span className="skin-card-copy">
+                            <span className="skin-card-name" title={skin.name}>{skin.name}</span>
+                            <SkinMetadata skin={skin} className="skin-card-rarity" />
+                          </span>
+                          <input type="checkbox" checked={isSelected} aria-label={`选择 ${skin.name}`} disabled={formDisabled} onChange={(event) => setDraft((previous) => ({
+                            ...previous,
+                            skins: event.target.checked ? [...new Set([...previous.skins, skin.id])] : previous.skins.filter((id) => id !== skin.id),
+                          }))} />
+                        </label>
+                        <SkinMediaPreview skin={skin} triggerClassName="skin-card-preview"><span>预览图片</span></SkinMediaPreview>
+                      </article>
                     );
                   })}
-                  {catalog && visibleSkinRows.length === 0 ? <p className="supply-muted" style={{ gridColumn: "1 / -1", margin: "10px 0" }}>当前类别没有匹配的皮肤。</p> : null}
-                </div>
-                {catalog?.nextCursor ? <button type="button" className="button secondary" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage({ q: skinQuery.trim(), categoryId: activeSkinCategory, rarityCode: skinRarity, cursor: catalog.nextCursor ?? undefined }, true)}>{loadingCatalog ? "正在读取…" : "加载更多皮肤"}</button> : null}
+                  {catalog && visibleSkinRows.length === 0 ? <p className="skin-picker-empty">没有匹配的皮肤，可更换分类或减少查找条件；已选皮肤会保留。</p> : null}
+                </div> : null}
+                {catalog?.nextCursor && !skinPagePending && !skinPageFailed ? <button type="button" className="button secondary skin-load-more" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage({ ...skinQueryRef.current.query, cursor: catalog.nextCursor ?? undefined }, true)}>{loadingCatalog ? "正在读取…" : "加载更多皮肤"}</button> : null}
               </div>
             </div>
             {catalog?.entitlements.length ? <div className="supply-subsection">
@@ -2700,7 +2772,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   </div>
                   <small>{payoutSelected === false ? "普通赔付的范围与条件见本次出租协议。" : "选择方案不等于接受条款，上架前仍需阅读并确认。"}</small>
                 </div></div>
-                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={16} aria-hidden="true" /><p>结合账号价值设置押金。押金不计入你的收入；会员实际实付金额在下单时核定。推荐金额需要你点击“采用”才会填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAdopted ? `已采用推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || !recommendationFresh || recommendationAdopted} onClick={adoptRecommendation}>{recommendationAdopted ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <small className="supply-recommend-result">{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则未配置推荐依据，可自行填写。" : "补全账号能力与皮肤后可查看推荐。"}</small> : null}</div></div>
+                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={16} aria-hidden="true" /><p>结合账号价值设置押金。押金不计入你的收入；会员实际实付金额在下单时核定。推荐金额需要你点击“采用”才会填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <small className="supply-recommend-result">{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则未配置推荐依据，可自行填写。" : "补全账号能力与皮肤后可查看推荐。"}</small> : null}</div></div>
 
                 <details id="publish-payout-rules" className="publish-policy-disclosure"><summary>赔付规则说明</summary>
                   <div className="publish-payout-scenes"><div><strong>正常结束 / 号主或账号原因提前结束</strong><p>按实际消耗的号主侧毛收入计算，由号主承担。</p></div><div><strong>租客自愿提前结束，且非号主或账号原因</strong><p>按有效开租清单的全量号主侧毛收入计算，由租客承担；号主不重复承担同一费用。</p></div></div>

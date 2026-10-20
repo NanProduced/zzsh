@@ -423,10 +423,13 @@ html:not(.dark) {
 .supply-block--fold > summary > svg:last-child { transition: transform .18s; }
 .supply-block--fold[open] > summary > svg:last-child { transform: rotate(180deg); }
 .supply-fold-body { display: grid; gap: 16px; padding-top: 16px; }
-.supply-skin-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
-.supply-skin-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--color-border-subtle); border-radius: 9px; color: var(--color-text-primary); font-size: 13px; }
-.supply-skin-list small { margin-left: auto; color: var(--color-text-muted); font-size: 11px; }
-.supply-skin-thumb, .supply-skin-thumb.is-empty { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; border-radius: 7px; object-fit: cover; color: var(--color-text-muted); background: var(--color-bg-elevated); }
+.supply-skin-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 0; padding: 0; list-style: none; }
+.supply-skin-list li { display: grid; align-content:start; gap: 8px; min-width:0; padding: 10px; border: 1px solid var(--color-border-subtle); border-radius: 9px; color: var(--color-text-primary); font-size: 13px; }
+.supply-skin-list li > span { overflow-wrap:anywhere; }
+.supply-skin-list small { color: var(--color-text-secondary); font-size: 11px; }
+.supply-skin-thumb { display:grid; width:100%; height:auto; aspect-ratio:16 / 9; place-items:center; overflow:hidden; border-radius:6px; color:var(--color-text-secondary); background:var(--color-bg-elevated); }
+.supply-skin-thumb[data-owner-kind="AGENT"] { aspect-ratio:174 / 276; }
+.supply-skin-thumb-empty { display:grid; place-items:center; gap:6px; padding:8px; font-size:12px; text-align:center; }
 .supply-entitlement-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .supply-entitlement-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 11px 0; border-top: 1px solid var(--color-border-subtle); }
 .supply-entitlement-list strong { color: var(--color-text-primary); font-size: 14px; font-weight: 600; }

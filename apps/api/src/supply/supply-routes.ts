@@ -512,6 +512,7 @@ export async function handleSupplyUserRoute(
               ...(query.get("q") ? { q: query.get("q")! } : {}),
               ...(query.get("categoryId") ? { categoryId: query.get("categoryId")! } : {}),
               ...(query.get("rarityCode") ? { rarityCode: query.get("rarityCode")! } : {}),
+              ...(query.get("ownerId") ? { ownerId: decodeId(query.get("ownerId")!) } : {}),
             },
             limit,
             query.get("cursor") ?? undefined,

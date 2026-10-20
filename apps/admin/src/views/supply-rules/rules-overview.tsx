@@ -4,7 +4,7 @@ import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { formatDate, type RulesResponse } from "../../api";
 import { Alert, AlertDescription } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
-import { Button } from "../../components/ui/button";
+import { Button, buttonVariants } from "../../components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
@@ -174,6 +174,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
           <div className="min-w-0"><p className="text-xs text-muted-foreground">尚未生效的版本</p>
             <p className="text-sm leading-7">{sealedPending ? `${sealedPending} 个已封存，尚未生效` : "无已封存的新版本"}{drafts ? ` · ${drafts} 个草稿` : ""}</p></div>
           <div className="ml-auto flex flex-wrap gap-2">
+            {canEdit ? <a className={buttonVariants({ variant: "secondary" })} href={`#skin-deposit-policy-${rules.game.id}`}>配置新版皮肤押金</a> : null}
             {canEdit && release && !editing ? <Button type="button" variant="outline" disabled={command.locked} onClick={startEdit}>编辑规则（仅预览）</Button> : null}
             <Button type="button" variant="outline" disabled={!canPreview || !release} title={!canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
             {isBoss && !editing ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认生效</Button> : null}
@@ -319,12 +320,22 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         <TableRow><TableCell className="font-medium">7 级体力</TableCell><TableCell className="text-xs text-muted-foreground">角色属性</TableCell><TableCell className="text-right tabular-nums">{V("dep.vit7", centsYuan(policy.recommendation.parameters.vitalityAtLeast7Cents), { unit: "元" })}</TableCell><TableCell className="text-right text-muted-foreground">—</TableCell></TableRow>
                         <TableRow><TableCell className="font-medium">7 级负重</TableCell><TableCell className="text-xs text-muted-foreground">角色属性</TableCell><TableCell className="text-right tabular-nums">{V("dep.bear7", centsYuan(policy.recommendation.parameters.bearAtLeast7Cents), { unit: "元" })}</TableCell><TableCell className="text-right text-muted-foreground">—</TableCell></TableRow>
                         <TableRow><TableCell className="font-medium">3 级潜水</TableCell><TableCell className="text-xs text-muted-foreground">角色属性</TableCell><TableCell className="text-right tabular-nums">{V("dep.dive3", centsYuan(policy.recommendation.parameters.diveAtLeast3Cents), { unit: "元" })}</TableCell><TableCell className="text-right text-muted-foreground">—</TableCell></TableRow>
-                        {Object.entries(policy.recommendation.parameters.skinWeights).map(([group, weight]) => (
-                          <TableRow key={`skin-${group}`}><TableCell className="font-medium">{SKIN_LABELS[group] ?? `${group}（词表未映射）`} 首件 / 后续</TableCell><TableCell className="text-xs text-muted-foreground">外观皮肤</TableCell><TableCell className="text-right tabular-nums">{V(`dep.skin.${group}.first`, centsYuan(weight.firstCents), { unit: "元" })}</TableCell><TableCell className="text-right tabular-nums">{V(`dep.skin.${group}.sub`, centsYuan(weight.subsequentCents), { unit: "元" })}</TableCell></TableRow>
-                        ))}
+                        {policy.recommendation.schema === "deposit-recommendation-v2" ? policy.recommendation.parameters.skinRules.map((row, index) => (
+                          <TableRow key={`skin-v2-${index}`}><TableCell>{row.ownerKind === "AGENT" ? "干员" : row.ownerKind === "FIREARM" ? "枪械" : "近战外观"}</TableCell><TableCell>{row.rarityCode === null ? "类型兜底（含未知品质）" : rules.depositCatalog?.rarities.find(rarity => rarity.code === row.rarityCode)?.name ?? row.rarityCode}</TableCell><TableCell className="text-right tabular-nums">{row.firstCents === null ? "待配置" : centsYuan(row.firstCents)}</TableCell><TableCell className="text-right tabular-nums">{row.subsequentCents === null ? "待配置" : centsYuan(row.subsequentCents)}</TableCell></TableRow>
+                        )) : null}
+                        {policy.recommendation.schema === "deposit-recommendation-v2" ? policy.recommendation.parameters.skinOverrides.map(row => <TableRow key={`override-${row.skinId}`}><TableCell>{rules.depositCatalog?.skins.find(skin => skin.id === row.skinId)?.name ?? row.skinId}</TableCell><TableCell>单词条覆盖</TableCell><TableCell className="text-right">{row.amountCents === null ? "待配置" : centsYuan(row.amountCents)}</TableCell><TableCell>—</TableCell></TableRow>) : null}
                       </TableBody>
                     </Table>
                   </ScrollTable>
+                  {policy.recommendation.schema === "deposit-recommendation-v1" ? <Collapsible className="mt-4 border-t border-border pt-3">
+                    <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-between gap-3 whitespace-normal px-0 text-left" />}>
+                      <span><span className="block font-medium">原版本 v1 皮肤加价（只读）</span><span className="mt-1 block text-xs font-normal text-muted-foreground">v2 完成配置并生效前，既有版本口径保留。</span></span><ChevronDownIcon className="size-4" />
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="pt-3"><ScrollTable label="原版本 v1 皮肤加价（只读）"><Table>
+                      <TableHeader><TableRow><TableHead>原版本分组</TableHead><TableHead className="text-right">首件（元）</TableHead><TableHead className="text-right">后续每件（元）</TableHead></TableRow></TableHeader>
+                      <TableBody>{Object.entries(policy.recommendation.parameters.skinWeights).map(([group, weight]) => <TableRow key={group}><TableCell>{SKIN_LABELS[group] ?? group}</TableCell><TableCell className="text-right tabular-nums">{centsYuan(weight.firstCents)}</TableCell><TableCell className="text-right tabular-nums">{centsYuan(weight.subsequentCents)}</TableCell></TableRow>)}</TableBody>
+                    </Table></ScrollTable></CollapsibleContent>
+                  </Collapsible> : null}
                 </>
               )}
             </Card>

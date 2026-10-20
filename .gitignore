@@ -60,6 +60,8 @@ __pycache__/
 
 # Local planning, research, review artifacts and UI tool state
 /tmp/
+/apps/api/skin-api-build-*/
+/apps/web/skin-preview-build-*/
 .playwright-cli/
 .playwright-mcp/
 .impeccable/

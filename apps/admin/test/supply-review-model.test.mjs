@@ -38,6 +38,12 @@ test("mixed account numbers keep canonical ZZ/AC separate from numeric legacy so
   for (const value of [null, undefined, "", "ZZ20261018", "AC1", "not-a-number", " 0000123", "AC"+"1".repeat(127)]) assert.equal(accountNumberLabel(value), "账号编号待核");
 });
 
+test("review skin list stays text-only and distinguishes platform quality from identity", () => {
+  const version = { presentation: { skins: [{ id: "skin", name: "合成近战", ownerKind: "MELEE_TYPE", rarityName: "合成品质", rarityBasis: "PLATFORM_REFERENCE", isCollectible: true, defaultState: "DEFAULT", imageUrl: "https://example.org/do-not-render" }] }, declaration: { skins: ["skin"] } };
+  assert.equal(skinsText(version), "近战外观 · 合成近战 · 合成品质 · 品质为平台参考 · 典藏 · 默认外观");
+  assert.equal(skinsText(version).includes("https:"), false);
+});
+
 test("supervision views, sources and state labels are explicit", () => {
   assert.equal(reviewStateLabel("PUBLISHED"), "已发布(直发)");
   assert.equal(reviewStateLabel("APPROVED"), "已通过(历史审核)");

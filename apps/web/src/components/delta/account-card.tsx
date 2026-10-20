@@ -765,6 +765,7 @@ export function AccountCard({
                       title={[skin.name, skinQualityLabel(skin)].filter(Boolean).join(" · ")}
                     >
                       {skin.name}
+                      {skinQualityLabel(skin) ? <span className="skin-chip-quality"> · {skinQualityLabel(skin)}</span> : null}
                     </span>
                   ))}
                   {extraSkinCount > 0 ? (

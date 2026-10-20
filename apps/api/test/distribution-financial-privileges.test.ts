@@ -1,6 +1,7 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
 import {applyRuntimePrivileges,configureDistributionFinancialPrivileges,configureMembershipGrowthPrivileges} from '../src/database/business-migrations';
 function probe(present:boolean|boolean[]=true){const seen:string[]=[],pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);
+ if(sql.startsWith('SELECT name,to_regprocedure(name)'))return{rows:args[0].map((name:string)=>({name,present:false}))};
  if(sql.startsWith('SELECT name,to_regclass'))return{rows:args[0].map((name:string,i:number)=>({name,present:args[0].includes('zzsh_order.legacy_duty_finance_contract')?false:Array.isArray(present)?present[i]:present}))};
  if(sql.startsWith('SELECT attname FROM pg_attribute'))return{rows:['id','state','canonical_seed','unlisted_column'].map(attname=>({attname}))};
  if(sql.includes('native_user_insert_proof')&&sql.startsWith('SELECT'))return{rows:[{proof:false,initializer:false}]};

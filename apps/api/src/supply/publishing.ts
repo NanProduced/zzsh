@@ -44,9 +44,10 @@ import { GAME_SERVICE, readGameService, requireWritableGameService } from "./gam
 import { assertDeltaResourceUnit, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
+import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { readLegacyListing } from "./legacy-listing-read";
-import { publicSkinMediaIdSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
+import { publicSkinCategoryCteSql, publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
@@ -658,6 +659,12 @@ export async function readDepositRecommendation(
       releaseId: release.id,
     };
   const d = await readDeclaration(client, v);
+  const factRow = policy.recommendation.schema === "deposit-recommendation-v2" ? (await client.query<{ catalogRevision: string; skins: DepositSkinFacts["skins"] }>(`
+    SELECT g.catalog_revision::text AS "catalogRevision",
+      COALESCE(jsonb_agg(jsonb_build_object('skinId',s.id,'ownerKind',s.owner_kind,'rarityCode',s.rarity_code) ORDER BY s.id) FILTER (WHERE s.id IS NOT NULL),'[]'::jsonb) AS skins
+    FROM zzsh_supply.game g LEFT JOIN zzsh_supply.skin s ON s.game_id=g.id AND s.id=ANY($2::text[]) AND s.naming_state='VERIFIED'
+    WHERE g.id=$1 GROUP BY g.id,g.catalog_revision`, [a.game_id, d.skins])).rows[0] : undefined;
+  const skinFacts: DepositSkinFacts | undefined = factRow ? { schema: "deposit-skin-facts-v1", gameId: a.game_id, listingVersionId: v.id, catalogRevision: factRow.catalogRevision, skins: factRow.skins } : undefined;
   const attrs = d.attributes as Record<string, unknown>;
   const vitality = attrs.vit_level ?? attrs.vitLevel;
   const bear = attrs.bear_level ?? attrs.bearLevel;
@@ -668,6 +675,7 @@ export async function readDepositRecommendation(
     bear: typeof bear === "number" ? bear : null,
     dive: typeof attrs.dive_level === "number" ? attrs.dive_level : null,
     skinIds: [...d.skins],
+    ...(skinFacts ? { skinFacts } : {}),
   };
   const binding = {
     accountId: a.id,
@@ -690,6 +698,7 @@ export async function readDepositRecommendation(
       bear: inputs.bear,
       dive: inputs.dive,
       skinIds: inputs.skinIds,
+      skinFacts,
     });
     return {
       available: true,
@@ -698,6 +707,7 @@ export async function readDepositRecommendation(
       fullPayoutMinCents: policy.ownerDepositRules.fullPayoutSelected.minCents,
       capCents: policy.ownerDepositRules.capCents,
       policyVersion: policy.policyVersion,
+      recommendationSchema: policy.recommendation.schema,
       ...binding,
     };
   } catch {
@@ -805,7 +815,7 @@ export async function quoteListing(
     await client.query(
       `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.base_name,s.category_id AS category_id,c.code AS category_code,c.name AS category_name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible,
         ${publicSkinOwnerNameSql("s")} AS owner_name,
-        s.owner_kind,s.rarity_code,${publicSkinRarityNameSql("s")} AS rarity_name,
+        s.owner_kind,s.rarity_code,${publicSkinRarityNameSql("s")} AS rarity_name,${publicSkinMetadataSql("s")},
         ${publicSkinMediaIdSql("s")} AS media_id
         FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE version_id=$1`,
       [v.id],
@@ -910,6 +920,9 @@ export function freezePresentationSkin(s: Record<string, unknown>): Record<strin
     ownerKind: s.owner_kind ?? null,
     rarityCode: s.rarity_code ?? null,
     rarityName: s.rarity_name ?? null,
+    rarityBasis: s.rarityBasis ?? null,
+    isCollectible: s.isCollectible ?? null,
+    defaultState: s.defaultState ?? "UNKNOWN",
     mediaId: s.media_id,
     categoryCode: s.category_code,
     categoryName: s.category_name,
@@ -1394,6 +1407,26 @@ async function readOwnerDeclaration(
   };
 }
 
+export async function readDraftSkinSummary(client: PoolClient, gameId: string, skinIds: string[]): Promise<Record<string, unknown>> {
+  const found = (await client.query<{ revision: string; items: Record<string, unknown>[] }>(
+    `WITH RECURSIVE ${publicSkinCategoryCteSql("$1")}
+     SELECT g.catalog_revision::text AS revision, COALESCE((
+       SELECT jsonb_agg(entry) FROM (
+         SELECT s.id,s.name,s.base_name,${publicSkinOwnerNameSql("s")} AS owner_name,s.owner_kind,
+                s.rarity_code,${publicSkinRarityNameSql("s")} AS rarity_name,${publicSkinMetadataSql("s")},
+                ${publicSkinMediaIdSql("s")} AS media_id,c.code AS category_code,c.name AS category_name
+           FROM zzsh_supply.skin s JOIN zzsh_supply.skin_category c ON c.id=s.category_id
+          WHERE s.game_id=$1 AND s.id=ANY($2::text[]) AND s.naming_state='VERIFIED'
+            AND s.enabled=true AND s.form_visible=true AND s.category_id IN (SELECT id FROM visible)
+          ORDER BY s.sort_order,s.name COLLATE "C",s.id
+       ) entry
+     ),'[]'::jsonb) AS items FROM zzsh_supply.game g WHERE g.id=$1`,
+    [gameId, skinIds],
+  )).rows[0];
+  if (!found) throw notFound();
+  return { source: "CURRENT_DRAFT_SELECTION", catalogRevision: found.revision, items: found.items.map(freezePresentationSkin), withheld: skinIds.length - found.items.length };
+}
+
 export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
 export type PublicListingReadMode = "RENTABLE" | "DETAIL";
 const READABLE_NON_RENTAL_BLOCKERS = new Set(["OWNER_PAUSED", "OCCUPIED", "OCCUPANCY_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "RULE_CHANGED", "CONFIRMATION_OR_MEDIA_REQUIRED"]);
@@ -1585,6 +1618,10 @@ export async function listingDetail(
   });
   const presentation = await readPresentation(client, v);
   const declaration = await readOwnerDeclaration(client, v, publicRoute);
+  // An edited draft can retain an old presentation; only a hash-bound quote is frozen display authority.
+  const draftSkinSummary = v.origin === "NATIVE" && v.review_state === "DRAFT" && v.content_hash === null
+    ? await readDraftSkinSummary(client, a.game_id, declaration.skins as string[])
+    : undefined;
   const catalogItems = await readInventoryCatalogLabels(
     client,
     (declaration.inventory as Array<{ itemId: string }>).map((item) => item.itemId),
@@ -1611,6 +1648,7 @@ export async function listingDetail(
       attributeDisplay: projectPublicAttributeDisplay(v.attributes),
       declaration,
       catalogItems,
+      ...(draftSkinSummary ? { draftSkinSummary } : {}),
       presentation,
       quote,
     },

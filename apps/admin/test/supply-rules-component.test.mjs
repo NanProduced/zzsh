@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
+import { fundingPolicyFixture } from "../../api/test/funding-authority-fixtures.ts";
 import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 import { installSupplyLockFixture } from "./supply-lock-fixture.mjs";
 
@@ -95,9 +96,10 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     if (policy === "foreign-id") return Response.json({ id: "another-draft" });
     return Response.json(receipt);
   };
-  async function mount({ preserve = false, permissions = snapshot.permissions } = {}) {
+  async function mount({ preserve = false, permissions = snapshot.permissions, fundingPolicy = null } = {}) {
     if (root) { await act(async () => root.unmount()); el.remove(); }
     if (!preserve) { browser.localStorage.clear(); model = fresh(); writes = []; reads = []; policy = "ok"; quotes = []; recovery = { receipt: "UNRESOLVED" }; readResume = null; }
+    if (fundingPolicy) model.priceVersions.find(version => version.id === "p1").fundingPolicy = fundingPolicy;
     el = document.createElement("div"); document.body.append(el); root = createRoot(el);
     await act(async () => root.render(createElement(View, { snapshot: { ...snapshot, permissions }, onDirtyChange: () => undefined })));
     await wait(0);
@@ -109,6 +111,40 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
       await mount(); assert.match(el.textContent, /本轮修改不能保存/);
       assert.equal(el.querySelectorAll('select,details,summary,textarea:not([data-slot]),button:not([data-slot]),input:not([data-slot]):not([type=hidden]):not([aria-hidden])').length, 0);
       await click("编辑规则（仅预览）"); assert.match(el.textContent, /暂不能保存或提交审批/);
+    });
+    await t.test("v1 skin groups stay folded and read-only while the nearby link reaches the v2 editor", async () => {
+      const fundingPolicy = fundingPolicyFixture("NOT_REQUIRED");
+      fundingPolicy.recommendation.parameters.skinWeights.LEGACY_GOLD = { firstCents: "12345", subsequentCents: "6789" };
+      const original = structuredClone(fundingPolicy);
+      await mount({ fundingPolicy });
+      const link = el.querySelector('a[href="#skin-deposit-policy-g1"]'), editor = el.querySelector('#skin-deposit-policy-g1');
+      assert.ok(link, "current rules provide a visible v2 configuration link");
+      assert.ok(editor, "the link targets the existing v2 editor");
+      assert.ok(link.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING, "the editor keeps its existing order after the rules overview");
+      const trigger = [...el.querySelectorAll('[data-slot="collapsible-trigger"]')].find(node => node.textContent.includes("原版本 v1 皮肤加价（只读）"));
+      assert.ok(trigger); assert.equal(trigger.getAttribute("aria-expanded"), "false", "original skin groups start folded");
+      assert.match(trigger.textContent, /v2 完成配置并生效前，既有版本口径保留/);
+      assert.doesNotMatch(trigger.textContent, /退役/);
+      await click("编辑规则（仅预览）");
+      assert.match(el.textContent, /不含皮肤/, "the non-skin deposit example remains available");
+      await act(async () => trigger.click());
+      const content = trigger.closest('[data-slot="collapsible"]').querySelector('[data-slot="collapsible-content"]');
+      assert.ok(content); assert.match(content.textContent, /123\.45/); assert.match(content.textContent, /67\.89/);
+      assert.equal(content.querySelectorAll('input,select,textarea,[role="spinbutton"]').length, 0, "v1 amounts never become editable");
+      assert.equal(el.querySelectorAll('[aria-label*="人物金皮"]').length, 0);
+      assert.deepEqual(model.priceVersions.find(version => version.id === "p1").fundingPolicy, original, "read-only disclosure preserves the existing policy amounts");
+      assert.equal(businessWrites().length, 0);
+    });
+    await t.test("the non-skin deposit example remains available with an effective v2 policy", async () => {
+      const { buildSkinDepositPolicy, skinDepositDraft } = await vite.ssrLoadModule("/src/views/supply-rules/skin-deposit-policy.ts");
+      const original = fundingPolicyFixture("NOT_REQUIRED"), draft = skinDepositDraft(original);
+      draft.policyVersion = "synthetic-v2";
+      draft.rules = draft.rules.map(row => ({ ...row, first: "0", subsequent: "0" }));
+      await mount({ fundingPolicy: buildSkinDepositPolicy(original, draft) });
+      await click("编辑规则（仅预览）");
+      assert.match(el.textContent, /实时示例.*不含皮肤/);
+      assert.doesNotMatch(el.textContent, /原版本 v1 皮肤加价/);
+      assert.equal(businessWrites().length, 0);
     });
     await t.test("field association reaches the real select trigger through the rules wrapper", async () => {
       await mount();

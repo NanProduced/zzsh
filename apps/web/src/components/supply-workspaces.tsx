@@ -9,7 +9,7 @@ import { ServiceShell } from "./layout/service-shell";
 import { WebAuthError, webAuthRequest } from "./auth/auth-form";
 import { StatusPage } from "@/components/status/status-page";
 import { accountStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
-import { SkinMediaThumb, skinCardTitle } from "./supply/skin-media-thumb";
+import { SkinMediaPreview, SkinMetadata, skinCardTitle } from "./supply/skin-media-thumb";
 import { FavoritesPanel } from "./favorites/favorites-panel";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { LegacyOrderWorkspace } from "./order/legacy-order-workspace";
@@ -20,7 +20,7 @@ import { PersonalInvitations } from "./account/personal-invitations";
 import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
-import { CONDITION_LABELS, conditionLines, haffMillionsLabel, skinFacetLabel, termLabel, unitLabel } from "../lib/listing-view";
+import { CONDITION_LABELS, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel } from "../lib/listing-view";
 import { supplyApi, SupplyRequestError, uncertainSupplyWriteFailure } from "../lib/supply-client";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent } from "../lib/supply-write-intent";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
@@ -1058,7 +1058,10 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const penaltyMedia = displayMedia.filter((item) => item.category === "PENALTY");
   const galleryMedia = displayMedia.filter((item) => item.category !== "PENALTY");
   const cover = galleryMedia.find((item) => item.publiclyReadable !== false) ?? null;
-  const skins = version?.presentation?.skins ?? [];
+  const unconfirmedNativeDraft = version?.origin === "NATIVE" && version.reviewState === "DRAFT" && version.contentHash === null;
+  const draftSkinSummary = unconfirmedNativeDraft && version.draftSkinSummary?.source === "CURRENT_DRAFT_SELECTION" ? version.draftSkinSummary : null;
+  const skins = draftSkinSummary ? draftSkinSummary.items : version?.presentation?.skins ?? [];
+  const withheldSkins = draftSkinSummary?.withheld ?? 0;
   const entitlementNames = new Map((version?.presentation?.entitlements ?? []).map((entry) => [entry.id, entry.name]));
   const entitlements = (declaration?.entitlements ?? []).map((entry) => {
     const disclosure = quote?.expiryDisclosures?.find((item) => item.entitlementId === entry.entitlementId);
@@ -1169,12 +1172,19 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           <p className="supply-block-text">{declaration.description}</p>
         </section> : null}
 
-        <details className="supply-block supply-block--fold">
-          <summary><strong>皮肤与权益</strong><span>{skins.length} 项皮肤 · {entitlements.length} 项权益</span><ChevronDown size={16} aria-hidden="true" /></summary>
+        <details className="supply-block supply-block--fold" data-skin-summary-source={draftSkinSummary?.source}>
+          <summary><strong>{draftSkinSummary ? "草稿已选皮肤" : "皮肤与权益"}</strong><span>{draftSkinSummary ? `${skins.length + withheldSkins} 项已选皮肤` : `${skins.length} 项皮肤`} · {entitlements.length} 项权益</span><ChevronDown size={16} aria-hidden="true" /></summary>
           <div className="supply-fold-body">
-            {skins.length ? <ul className="supply-skin-list">{skins.map((skin, index) => <li key={`${skin.id}-${index}`} data-skin-id={skin.id}><SkinMediaThumb mediaId={skin.mediaId ?? null} className="supply-skin-thumb" fallbackClassName="supply-skin-thumb is-empty" iconSize={16} /><span>{skinCardTitle(skin)}</span>{skinFacetLabel(skin) ? <small>{skinFacetLabel(skin)}</small> : null}</li>)}</ul> : null}
+            {draftSkinSummary ? <p className="supply-block-empty">当前草稿的已选目录摘要，尚未冻结或公开上架。</p> : unconfirmedNativeDraft ? <p className="supply-block-empty">当前草稿的皮肤摘要暂未取得；已有展示信息请进入编辑核对。</p> : null}
+            {withheldSkins > 0 ? <p className="supply-block-empty">另有 {withheldSkins} 项已选皮肤当前不可展示，已选关系保留；请进入编辑核对。</p> : null}
+            {skins.length ? <ul className="supply-skin-list">{skins.map((skin, index) => <li key={`${skin.id}-${index}`} data-skin-id={skin.id}>
+              <SkinMediaPreview skin={skin} triggerClassName="skin-media-preview-trigger supply-skin-preview" mediaClassName="supply-skin-thumb" fallbackClassName="supply-skin-thumb-empty" iconSize={22} />
+              <span>{skinCardTitle(skin)}</span>
+              {skinTypeLabel(skin.ownerKind) ? <small>{skinTypeLabel(skin.ownerKind)}</small> : null}
+              <SkinMetadata skin={skin} />
+            </li>)}</ul> : null}
             {entitlements.length ? <ul className="supply-entitlement-list">{entitlements.map((entry, index) => <li key={`${entry.name}-${index}`}><strong>{entry.name}</strong><span>{entry.term}</span></li>)}</ul> : null}
-            {!skins.length && !entitlements.length ? <p className="supply-block-empty">还没有申报皮肤或权益。</p> : null}
+            {!skins.length && !entitlements.length && !withheldSkins ? <p className="supply-block-empty">{draftSkinSummary ? "草稿尚未选择皮肤。" : "还没有申报皮肤或权益。"}</p> : null}
           </div>
         </details>
 

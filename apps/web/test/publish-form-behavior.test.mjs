@@ -320,7 +320,7 @@ test("skin picker renders the public summary, neutral missing-media state, and k
     categories: [{ id: "category_1", code: "agent", name: "干员外观", parentId: null }],
     rarities: [{ code: "gold", name: "金色" }],
     skins: [
-      { id: "skin_1", code: "skin_1", name: "骇爪-维什戴尔", baseName: "维什戴尔", ownerName: "骇爪", categoryId: "category_1", rarityCode: "gold", mediaId: "asset_1" },
+      { id: "skin_1", code: "skin_1", name: "骇爪-维什戴尔", baseName: "维什戴尔", ownerName: "骇爪", ownerKind: "AGENT", categoryId: "category_1", rarityCode: "gold", rarityName: "测试品质", rarityBasis: "PLATFORM_REFERENCE", isCollectible: true, defaultState: "DEFAULT", mediaId: "asset_1" },
       { id: "skin_2", code: "skin_2", name: "待核缺图", baseName: null, ownerName: null, categoryId: "category_1", rarityCode: null, mediaId: null },
     ],
   };
@@ -328,7 +328,14 @@ test("skin picker renders the public summary, neutral missing-media state, and k
   try {
     await p.render();
     assert.ok(await p.waitFor(() => p.host.querySelectorAll(".skin-card").length === 2));
-    assert.match(p.text(), /骇爪 · 维什戴尔/);
+    assert.match(p.text(), /骇爪-维什戴尔/);
+    assert.equal(p.host.querySelector('.skin-card-name').textContent, '骇爪-维什戴尔');
+    assert.equal(p.host.querySelector('.skin-card-owner'), null, 'no duplicate owner/base subtitle');
+    assert.equal(p.host.querySelector('.skin-card-media').getAttribute('data-owner-kind'), 'AGENT');
+    assert.match(p.text(), /测试品质 · 平台资料/);
+    assert.match(p.text(), /典藏/);
+    assert.match(p.text(), /默认外观/);
+    assert.match(p.text(), /品质待核/);
     assert.match(p.text(), /暂无公开图/);
     assert.equal(p.host.querySelector('.skin-card img')?.getAttribute("src"), "/api/supply/media/asset_1/content");
     assert.match(p.text(), /目录名称待加载/, "a saved unknown skin remains visible instead of being silently dropped");
@@ -339,7 +346,7 @@ test("skin picker renders the public summary, neutral missing-media state, and k
     assert.equal(p.host.querySelector(".skin-card img"), null, "加载失败后小图必须卸载而不是留着隐藏的图片节点");
     assert.equal(p.host.querySelector(".skin-card-media-fallback:not([hidden])") !== null, true);
     skinCatalog.skins[0].mediaId = "asset_2";
-    const search = p.host.querySelector('input[aria-label="搜索皮肤名称"]');
+    const search = p.host.querySelector('input[aria-label="搜索皮肤或所属名称"]');
     await React.act(async () => search.dispatchEvent(new p.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     assert.ok(await p.waitFor(() => p.host.querySelector('.skin-card img')?.getAttribute('src') === '/api/supply/media/asset_2/content'));
     const replacement = p.host.querySelector('.skin-card img');
@@ -1130,6 +1137,107 @@ test("a matching recommendation is adoptable and becomes stale after further edi
   }
 });
 
+const recommendationSkin = { id: 'skin_v2', code: 'skin_v2', name: '测试干员-外观', categoryId: 'category_v2', ownerKind: 'AGENT', ownerName: '测试干员', baseName: '外观', rarityCode: 'legend', rarityName: '测试品质', mediaId: null };
+const recommendationCatalog = (revision = '1', skins = [recommendationSkin]) => ({ ...catalog, game: { ...catalog.game, catalogRevision: revision }, categories: [{ id: 'category_v2', name: '干员外观', ownerKind: 'AGENT' }], skins });
+function recommendationV2(skinIds = ['skin_v2']) {
+  return {
+    available: true, recommendationSchema: 'deposit-recommendation-v2', amountCents: '31234', minCents: '1', fullPayoutMinCents: '30000', capCents: '100000',
+    policyVersion: 'p2', accountId: 'account_1', accountRevision: '5', versionId: 'version_1', versionRevision: '1', ruleReleaseId: 'release_1', priceVersionId: 'price_1',
+    inputs: { safeBoxCode: null, vitality: null, bear: null, dive: null, skinIds, skinFacts: {
+      schema: 'deposit-skin-facts-v1', gameId: 'game_1', listingVersionId: 'version_1', catalogRevision: '1',
+      skins: skinIds.map(skinId => ({ skinId, ownerKind: 'AGENT', rarityCode: 'legend' })),
+    } },
+  };
+}
+
+test('v2 recommendation verifies every selected skin across catalog pages, rechecks before adoption, and expires on a later directory change', async () => {
+  const reads = []; let revision = '1';
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration({ skins: ['skin_v2'] })), depositRecommendation: () => recommendationV2(),
+    catalogValue: async (_game, query) => {
+      if (query.get('limit') === '100') {
+        reads.push(Object.fromEntries(query));
+        return query.get('cursor') ? recommendationCatalog(revision) : { ...recommendationCatalog(revision, []), nextCursor: 'metadata_next' };
+      }
+      return recommendationCatalog(revision, []);
+    },
+  });
+  try {
+    await p.render(); await p.clickButton('查看推荐押金');
+    assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34 元（依据当前版本资料）')), true);
+    assert.equal(reads.length, 2, 'selected facts outside the visible picker page are read as metadata');
+    await p.clickButton('采用推荐');
+    assert.equal(await p.waitFor(() => p.host.querySelector('#publish-deposit').value === '312.34'), true);
+    assert.equal(reads.length, 4, 'adoption repeats the directory check without calculating a client price');
+    assert.equal(p.calls.some(call => call.op === 'saveDraft'), false, 'adoption only edits the local declaration');
+    revision = '2';
+    await p.clickButton('查找');
+    assert.equal(await p.waitFor(() => p.text().includes('已过期')), true);
+    assert.equal(p.text().includes('已采用推荐'), false);
+    assert.equal(p.host.querySelector('#publish-deposit').value, '312.34', 'a stale recommendation does not erase the owner declaration');
+  } finally { await p.close(); }
+});
+
+test('v2 recommendation refuses missing, foreign, duplicate and mismatched skin facts before adoption', async () => {
+  const original = recommendationV2();
+  const cases = [
+    undefined,
+    { ...original.inputs.skinFacts, gameId: 'other_game' },
+    { ...original.inputs.skinFacts, listingVersionId: 'other_version' },
+    { ...original.inputs.skinFacts, catalogRevision: '2' },
+    { ...original.inputs.skinFacts, skins: [] },
+    { ...original.inputs.skinFacts, skins: [{ skinId: 'other_skin', ownerKind: 'AGENT', rarityCode: 'legend' }] },
+    { ...original.inputs.skinFacts, skins: [...original.inputs.skinFacts.skins, ...original.inputs.skinFacts.skins] },
+    { ...original.inputs.skinFacts, skins: [{ skinId: 'skin_v2', ownerKind: 'FIREARM', rarityCode: 'legend' }] },
+    { ...original.inputs.skinFacts, skins: [{ skinId: 'skin_v2', ownerKind: 'AGENT', rarityCode: 'other_quality' }] },
+  ];
+  for (const skinFacts of cases) {
+    const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration({ skins: ['skin_v2'] })), catalogValue: recommendationCatalog(),
+      depositRecommendation: () => ({ ...original, inputs: { ...original.inputs, skinFacts } }),
+    });
+    try {
+      await p.render(); await p.clickButton('查看推荐押金');
+      assert.equal(await p.waitFor(() => p.text().includes('不匹配')), true, JSON.stringify(skinFacts));
+      const adopt = [...p.host.querySelectorAll('button')].find(button => button.textContent === '采用推荐');
+      assert.equal(adopt.disabled, true);
+      assert.equal(p.host.querySelector('#publish-deposit').value, '');
+    } finally { await p.close(); }
+  }
+});
+
+test('v2 empty selection still needs explicit empty facts while v1 keeps its original contract', async () => {
+  for (const [schema, withFacts, adoptable] of [['deposit-recommendation-v2', false, false], ['deposit-recommendation-v2', true, true], ['deposit-recommendation-v1', false, true], ['deposit-recommendation-v3', false, false]]) {
+    const response = recommendationV2([]); response.recommendationSchema = schema;
+    if (!withFacts) delete response.inputs.skinFacts;
+    const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: recommendationCatalog('1', []), depositRecommendation: () => response });
+    try {
+      await p.render(); await p.clickButton('查看推荐押金');
+      assert.equal(await p.waitFor(() => p.text().includes(adoptable ? '推荐 312.34' : '不匹配')), true);
+      const adopt = [...p.host.querySelectorAll('button')].find(button => button.textContent === '采用推荐');
+      assert.equal(adopt.disabled, !adoptable, schema);
+    } finally { await p.close(); }
+  }
+});
+
+test('v2 directory changes or lookup failure just before adoption never fill the deposit', async () => {
+  for (const mode of ['revision', 'type', 'rarity', 'failure']) {
+    let changed = false;
+    const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration({ skins: ['skin_v2'] })), depositRecommendation: () => recommendationV2(),
+      catalogValue: async (_game, query) => {
+        if (changed && query.get('limit') === '100' && mode === 'failure') throw new actualSupply.SupplyRequestError(0, null);
+        const skin = changed ? { ...recommendationSkin, ...(mode === 'type' ? { ownerKind: 'FIREARM' } : mode === 'rarity' ? { rarityCode: 'other_quality' } : {}) } : recommendationSkin;
+        return recommendationCatalog(changed && mode === 'revision' ? '2' : '1', [skin]);
+      },
+    });
+    try {
+      await p.render(); await p.clickButton('查看推荐押金');
+      assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34')), true);
+      changed = true; await p.clickButton('采用推荐');
+      assert.equal(await p.waitFor(() => p.text().includes(mode === 'failure' ? '目录核对未完成' : '目录或资料已变化')), true);
+      assert.equal(p.host.querySelector('#publish-deposit').value, '');
+    } finally { await p.close(); }
+  }
+});
+
 test("timed entitlement calendar preserves Beijing time through save without a native date input", async () => {
   const entitlement = {id:"ent_1",name:"安全箱体验卡",valueKind:"FLAG",expiryKind:"TIMED"};
   const declared = declaration({entitlements:[{entitlementId:"ent_1",value:true,expiryKnowledge:"KNOWN",expiresAt:"2026-10-05T16:00:00.000Z"}]});
@@ -1426,6 +1534,7 @@ let thumbModuleCache;
 function loadThumbModule() {
   thumbModuleCache ??= loadTsFile(path.join(tree, "apps/web/src/components/supply/skin-media-thumb.tsx"), {
     react: React,
+    "./skin-media.css": {},
     "lucide-react": { FileImage: (props) => React.createElement("span", { "data-icon": "FileImage", ...props }) },
   });
   return thumbModuleCache;
@@ -1526,13 +1635,13 @@ test("皮肤小图：失败态不跨显示周期残留（换走再绑回同一�
   } finally { await p.close(); }
 });
 
-test("皮肤标题：以服务端 name 为可靠回退，owner/base 齐全才组合且不重复前缀", () => {
+test("皮肤标题：保留服务端规范名，不在客户端按 owner/base 改写", () => {
   const { skinCardTitle } = loadThumbModule();
   assert.equal(skinCardTitle({ name: "服务端名" }), "服务端名");
   assert.equal(skinCardTitle({ name: "服务端名", ownerName: "威龙" }), "服务端名", "缺 baseName 不组合");
-  assert.equal(skinCardTitle({ name: "服务端名", ownerName: "威龙", baseName: "凌霄戍卫" }), "威龙-凌霄戍卫");
+  assert.equal(skinCardTitle({ name: "服务端名", ownerName: "威龙", baseName: "凌霄戍卫" }), "服务端名");
   assert.equal(skinCardTitle({ name: "威龙-凌霄戍卫", ownerName: "威龙", baseName: "凌霄戍卫" }), "威龙-凌霄戍卫", "已带前缀不重复拼接");
-  assert.equal(skinCardTitle({ name: "水墨云图", ownerName: "骇爪", baseName: "水墨云图" }), "骇爪-水墨云图", "裸名必须补所属对象，子串包含不算完整标题");
+  assert.equal(skinCardTitle({ name: "水墨云图", ownerName: "骇爪", baseName: "水墨云图" }), "水墨云图", "旧快照名称也不由客户端重写");
 });
 
 function skin12CatalogPage(categoryId, cursor) {
@@ -1563,5 +1672,66 @@ test('SKIN12 publish load-more keeps the default category query and accepts its 
     assert.equal(await p.waitFor(() => requests.some(q => q.cursor === 'category_agent_next' && q.categoryId === 'category_agent')), true, '不能因空分类首包与默认分类 key 不同而静默丢掉加载更多');
     assert.equal(p.host.querySelectorAll('.skin-card').length, 2);
     assert.match(p.text(), /category_agent 第二页/);
+  } finally { await p.close(); }
+});
+
+test('skin catalog owner/quality/search pagination keeps selected IDs and canonical names', async () => {
+  const requests = [];
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: async (_game, query) => {
+    requests.push(Object.fromEntries(query));
+    const page = skin12CatalogPage(query.get('categoryId'), query.get('cursor'));
+    return { ...page, categories: page.categories.map(category => ({ ...category, ownerKind: category.id === 'category_agent' ? 'AGENT' : 'FIREARM' })), owners: [{ id: 'owner_A', kind: 'AGENT', name: '测试干员' }, { id: 'owner_GUN', kind: 'FIREARM', name: '测试枪械' }], rarities: [{ code: 'legend', name: '传说' }] };
+  } });
+  const choose = async (label, text) => {
+    await p.click(`button[aria-label="${label}"]`);
+    const option = [...p.window.document.querySelectorAll('[role="option"]')].find(item => item.textContent.includes(text));
+    assert.ok(option, text);
+    if (label === '皮肤所属') assert.equal([...p.window.document.querySelectorAll('[role="option"]')].some(item => item.textContent.includes('测试枪械')), false, 'owner menu follows the full-catalog category kind');
+    await React.act(async () => option.click());
+    await p.waitFor(() => !p.host.textContent.includes('正在读取皮肤目录'));
+  };
+  try {
+    await p.render();
+    await p.click('input[aria-label="选择 category_agent 第一页"]');
+    await choose('皮肤所属', '测试干员');
+    assert.equal(await p.waitFor(() => requests.some(query => query.ownerId === 'owner_A')), true);
+    await choose('皮肤品质', '传说');
+    assert.equal(await p.waitFor(() => requests.some(query => query.ownerId === 'owner_A' && query.rarityCode === 'legend')), true);
+    await p.type('.skin-search-input', '测试');
+    await p.clickButton('查找');
+    assert.equal(await p.waitFor(() => requests.some(query => query.q === '测试' && query.ownerId === 'owner_A' && query.rarityCode === 'legend')), true);
+    await p.clickButton('加载更多皮肤');
+    assert.equal(await p.waitFor(() => requests.some(query => query.cursor === 'category_agent_next' && query.q === '测试' && query.ownerId === 'owner_A' && query.rarityCode === 'legend')), true);
+    assert.ok(p.host.querySelector('.supply-selected-chips [data-skin-id="category_agent_first"]'));
+    assert.equal(p.host.querySelectorAll('input[aria-label="选择 category_agent 第一页"]:checked').length, 1);
+    await choose('皮肤所属', '全部所属');
+    assert.equal(requests.at(-1).ownerId, undefined);
+    await p.clickButton('枪械外观');
+    assert.equal(requests.at(-1).categoryId, 'category_firearm');
+    assert.ok(p.host.querySelector('.supply-selected-chips [data-skin-id="category_agent_first"]'));
+  } finally { await p.close(); }
+});
+
+test('skin append failure preserves loaded rows and selections, retry keeps the applied cursor query', async () => {
+  const requests = [];
+  let failNextPage = true;
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: async (_game, query) => {
+    requests.push(Object.fromEntries(query));
+    if (query.get('cursor') && failNextPage) { failNextPage = false; throw new actualSupply.SupplyRequestError(0, null); }
+    return skin12CatalogPage(query.get('categoryId'), query.get('cursor'));
+  } });
+  try {
+    await p.render();
+    await p.click('input[aria-label="选择 category_agent 第一页"]');
+    await p.type('.skin-search-input', '尚未点击查找');
+    await p.clickButton('加载更多皮肤');
+    assert.equal(await p.waitFor(() => p.text().includes('更多皮肤加载失败')), true);
+    assert.equal(p.host.querySelectorAll('.skin-card').length, 1);
+    assert.ok(p.host.querySelector('.supply-selected-chips [data-skin-id="category_agent_first"]'));
+    await p.clickButton('重试皮肤目录');
+    assert.equal(await p.waitFor(() => p.host.querySelectorAll('.skin-card').length === 2), true);
+    assert.equal(requests.at(-1).cursor, 'category_agent_next');
+    assert.equal(requests.at(-1).q, undefined, 'unapplied input never changes an existing cursor binding');
+    assert.equal(p.host.querySelector('input[aria-label="选择 category_agent 第一页"]').checked, true);
   } finally { await p.close(); }
 });

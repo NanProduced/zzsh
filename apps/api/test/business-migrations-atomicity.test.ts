@@ -67,6 +67,7 @@ function fixture(options:{failAcl?:boolean;rollbackFails?:boolean;commitFailure?
   if(sql==='ROLLBACK'){if(options.rollbackFails)throw rollbackFault;pending=null;return{rows:[]};}
   if(sql==='COMMIT'){assert(pending);if(options.commitFailure==='before')throw commitFault;durable=pending;pending=null;if(options.commitFailure==='after')throw commitFault;return{rows:[]};}
   if(sql.includes('continuity runtime role ownership')){if(options.failAcl)throw fault;return{rows:[{roleOid:'20001',superuser:false,ownerRights:false}]};}
+  if(sql.startsWith('SELECT name,to_regprocedure(name)'))return{rows:(args[0] as string[]).map(name=>({name,present:false}))};
   if(sql.startsWith('SELECT name,to_regclass'))return{rows:(args[0] as string[]).map(name=>({name,present:names.includes(name)}))};
   if(sql.includes("to_regprocedure('zzsh_order.assert_personal_growth_order_v4"))return{rows:[{present:true}]};
   if(sql.startsWith('SELECT attname AS name FROM pg_attribute'))return{rows:(columns.get(args[0])??[]).map(name=>({name}))};

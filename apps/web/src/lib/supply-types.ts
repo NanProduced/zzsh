@@ -221,8 +221,11 @@ export type PublicSkinSummary = {
   ownerName: string | null;
   categoryId: string;
   rarityCode: string | null;
-  /** Official quality name from the game's quality list; null = unknown, never guessed. */
+  /** Game-scoped quality name; evidence basis distinguishes platform and official sources. */
   rarityName?: string | null;
+  rarityBasis?: "PLATFORM_REFERENCE" | "OFFICIAL" | null;
+  isCollectible?: boolean | null;
+  defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
   ownerKind?: SkinOwnerKind | null;
   mediaId: string | null;
 };
@@ -237,11 +240,15 @@ export type PublicListingSkin = {
   ownerKind?: SkinOwnerKind | null;
   rarityCode?: string | null;
   rarityName?: string | null;
+  rarityBasis?: "PLATFORM_REFERENCE" | "OFFICIAL" | null;
+  isCollectible?: boolean | null;
+  defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
   mediaId?: string | null;
   categoryCode?: string;
   categoryName?: string;
 };
 export type PublicCatalog = {
+  owners?: Array<{ id: string; kind: SkinOwnerKind; name: string }>;
   game: SupplyGame & { catalogRevision: string; currentReleaseId: string | null };
   items: Array<{
     id: string;
@@ -257,6 +264,7 @@ export type PublicCatalog = {
     code: string;
     name: string;
     parentId: string | null;
+    ownerKind?: SkinOwnerKind | null;
   }>;
   rarities: Array<{ code: string; name: string }>;
   skins: PublicSkinSummary[];
@@ -264,6 +272,7 @@ export type PublicCatalog = {
   limit: number;
 };
 export type PublishingCatalog = {
+  owners?: Array<{ id: string; kind: SkinOwnerKind; name: string }>;
   game: {
     id: string;
     code: string;
@@ -294,6 +303,7 @@ export type PublishingCatalog = {
     code: string;
     name: string;
     parentId: string | null;
+    ownerKind?: SkinOwnerKind | null;
   }>;
   rarities: Array<{ code: string; name: string }>;
   skins: PublicSkinSummary[];
@@ -342,6 +352,13 @@ export type ResourceIncomePreview = {available:false;reason:string} | {
   ownerTotal:{currency:"CNY";unit:"yuan";amount:string;scale:2}|null;unreportedItemIds:string[];unpricedItemIds:string[];
 };
 export type RentalMode = "ordinary" | "custom" | "fast";
+export type DepositSkinFacts = {
+  schema: "deposit-skin-facts-v1";
+  gameId: string;
+  listingVersionId: string;
+  catalogRevision: string;
+  skins: Array<{ skinId: string; ownerKind: SkinOwnerKind; rarityCode: string | null }>;
+};
 export type DepositRecommendation =
   | {
       available: true;
@@ -350,6 +367,7 @@ export type DepositRecommendation =
       fullPayoutMinCents: string;
       capCents: string;
       policyVersion: string;
+      recommendationSchema?: "deposit-recommendation-v1" | "deposit-recommendation-v2";
       accountId: string;
       accountRevision: string;
       versionId: string;
@@ -362,6 +380,7 @@ export type DepositRecommendation =
         bear: number | null;
         dive: number | null;
         skinIds: string[];
+        skinFacts?: DepositSkinFacts;
       };
     }
   | {
@@ -474,6 +493,12 @@ export type MySupply = {
       items: Array<{ id: string; code?: string; name: string; unit: string }>;
       skins: PublicListingSkin[];
       entitlements: Array<{ id: string; name: string }>;
+    };
+    draftSkinSummary?: {
+      source: "CURRENT_DRAFT_SELECTION";
+      catalogRevision: string;
+      items: PublicListingSkin[];
+      withheld: number;
     };
     quote: OwnerQuote | null;
   };

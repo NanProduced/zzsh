@@ -16,6 +16,7 @@ test('group quantity inputs render a visible conversion hint linked to both boun
   const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(tree);
   module.require=name=>{
     if(name==='@/lib/listing-filters')return listingFilters;
+    if(name==='@/components/supply/skin-media-thumb')return {};
     if(name.startsWith('@heroui/'))return {};
     return require(name);
   };

@@ -75,7 +75,7 @@ const privateAccountView = ({ userId }) => React.createElement('p', { 'data-priv
 const accountGateModules = {
   './layout/service-shell': { ServiceShell: ({ children }) => React.createElement('main', null, children) },
   '@/components/layout/service-shell': { ServiceShell: ({ children }) => React.createElement('main', null, children) },
-  './supply/skin-media-thumb': { SkinMediaThumb: () => null },
+  './supply/skin-media-thumb': { SkinMediaPreview: () => null, SkinMetadata: () => null, skinCardTitle: tag => tag.name },
   './favorites/favorites-panel': { FavoritesPanel: privateAccountView },
   './favorites/favorites-context': { FavoritesProvider: ({ children }) => children },
   './order/legacy-order-workspace': { LegacyOrderWorkspace: privateAccountView },

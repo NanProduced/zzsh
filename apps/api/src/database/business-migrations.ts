@@ -130,6 +130,17 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."user_identity_state" FROM ${runtimeUser};
   `);
   await configureSkinIdentityPrivileges(pool, runtimeRole);
+  const fundingValidators = [
+    "zzsh_supply.valid_funding_policy_legacy_v1(jsonb)",
+    "zzsh_supply.valid_funding_policy_draft(jsonb)",
+  ];
+  const fundingFunctions = (await pool.query("SELECT name,to_regprocedure(name) IS NOT NULL AS present FROM unnest($1::text[]) AS f(name)", [fundingValidators])).rows;
+  if (fundingFunctions.length !== 2 || fundingFunctions.some(row => typeof row.present !== "boolean")) throw new Error("Funding validator inventory is incomplete");
+  if (fundingFunctions.some(row => row.present)) {
+    if (fundingFunctions.some(row => !row.present)) throw new Error("Funding validator schema is incomplete; runtime privileges not finalized");
+    await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_supply.valid_funding_policy_legacy_v1(jsonb),
+      zzsh_supply.valid_funding_policy_draft(jsonb), zzsh_supply.valid_funding_policy(jsonb) TO ${runtimeUser}`);
+  }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.full_payout_terms_version') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.full_payout_terms_version FROM ${runtimeUser};
       GRANT INSERT(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser};
@@ -291,13 +302,18 @@ export async function configureSkinIdentityPrivileges(pool: Pick<Pool, "query">,
     WHERE attrelid=to_regclass('zzsh_supply.skin') AND NOT attisdropped AND attname=ANY($1::text[])`,
     [["owner_kind","owner_id","firearm_id","base_name","aliases","source_namespace","naming_state"]])).rows[0]?.count;
   const owner = (await pool.query(`SELECT to_regclass('zzsh_supply.skin_owner') IS NOT NULL AS present`)).rows[0]?.present;
-  if (columns === 0 && !owner) return;
+  const metadataCount = (await pool.query(`SELECT count(*)::int AS count FROM pg_attribute
+    WHERE attrelid=to_regclass('zzsh_supply.skin') AND NOT attisdropped AND attname=ANY($1::text[])`,
+    [["rarity_evidence","is_collectible","default_state","media_source"]])).rows[0]?.count;
+  if (metadataCount !== 0 && metadataCount !== 4) throw new Error("Skin metadata schema is incomplete; runtime privileges not finalized");
+  if (columns === 0 && !owner && metadataCount === 0) return;
   if (columns !== 7 || !owner) throw new Error("Skin identity schema is incomplete; runtime privileges not finalized");
+  const metadataColumns = metadataCount === 4 ? ",rarity_evidence,is_collectible,default_state,media_source" : "";
   await pool.query(`
     REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin FROM ${role};
     GRANT SELECT ON zzsh_supply.skin TO ${role};
-    GRANT INSERT (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases) ON zzsh_supply.skin TO ${role};
-    GRANT UPDATE (name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name) ON zzsh_supply.skin TO ${role};
+    GRANT INSERT (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases${metadataColumns}) ON zzsh_supply.skin TO ${role};
+    GRANT UPDATE (name,category_id,rarity_code,enabled,form_visible,media_id,sort_order,source_namespace,source_field,source_token,aliases,owner_kind,owner_id,firearm_id,base_name${metadataColumns}) ON zzsh_supply.skin TO ${role};
     REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.skin_owner FROM ${role};
     GRANT SELECT ON zzsh_supply.skin_owner TO ${role};
     GRANT INSERT (id,game_id,kind,code,name,enabled) ON zzsh_supply.skin_owner TO ${role};

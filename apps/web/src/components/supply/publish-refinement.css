@@ -8,16 +8,29 @@
 .functional-shell--editor .publish-groups {gap:20px;}
 .functional-shell--editor .publish-column,.functional-shell--editor .publish-groups,.functional-shell--editor .publish-section-body {grid-template-columns:minmax(0,1fr);}
 .functional-shell--editor .publish-section-card,.functional-shell--editor .publish-subgroup,.functional-shell--editor .supply-subsection,.functional-shell--editor .skin-picker {min-width:0;}
-.functional-shell--editor .skin-choices-grid {grid-template-columns:repeat(3,minmax(0,1fr));max-height:320px;overflow-y:auto;overscroll-behavior:contain;}
-.functional-shell--editor .skin-card {min-width:0;min-height:48px;}
+.functional-shell--editor .skin-choices-grid {grid-template-columns:repeat(3,minmax(0,1fr));max-height:520px;overflow-y:auto;overscroll-behavior:contain;align-items:start;}
+.functional-shell--editor .skin-card {position:relative;display:block;min-width:0;min-height:48px;padding:6px;cursor:default;}
+.functional-shell--editor .skin-card-choice {position:relative;display:grid;gap:10px;cursor:pointer;}
+.functional-shell--editor .skin-card-choice input {position:absolute;top:8px;right:8px;width:22px;height:22px;accent-color:var(--color-accent-brand);}
+.functional-shell--editor .skin-card:focus-within {outline:2px solid var(--color-accent-brand);outline-offset:2px;}
+.functional-shell--editor .skin-card-copy {padding:0 4px;}
 .functional-shell--editor .skin-card-name {white-space:normal;overflow-wrap:anywhere;}
-.functional-shell--editor .skin-card-media {display:grid;flex:0 0 48px;width:48px;height:48px;place-items:center;overflow:hidden;border:1px solid var(--color-border-subtle);border-radius:7px;background:var(--color-bg-elevated);color:var(--color-text-muted);}
+.functional-shell--editor .skin-card-media {display:grid;width:100%;height:auto;aspect-ratio:16 / 9;place-items:center;overflow:hidden;border:0;border-radius:5px;background:var(--color-bg-elevated);color:var(--color-text-secondary);}
+.functional-shell--editor .skin-card-media[data-owner-kind="AGENT"] {aspect-ratio:174 / 276;}
 .functional-shell--editor .skin-card-media img,.functional-shell--editor .skin-card-media-fallback {width:100%;height:100%;object-fit:contain;display:grid;place-items:center;}
-.functional-shell--editor .skin-card-media-fallback {gap:2px;font-size:9px;text-align:center;line-height:1.2;}
+.functional-shell--editor .skin-card-media-fallback {gap:6px;font-size:12px;text-align:center;line-height:1.5;}
 .functional-shell--editor .skin-card-media-fallback span {display:block;}
 .functional-shell--editor .skin-card-owner {font-size:11px;line-height:1.35;color:var(--color-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.functional-shell--editor .skin-search-row {display:grid;grid-template-columns:minmax(0,1fr) 160px;}
-.functional-shell--editor .skin-search-row>.form-select-trigger {width:100%;min-width:0;}
+.functional-shell--editor .skin-search-row {display:flex;flex-wrap:wrap;gap:10px;}
+.functional-shell--editor .skin-search-control {display:flex;flex:1 1 260px;min-width:0;gap:6px;}
+.functional-shell--editor .skin-search-control .skin-search-input {min-width:0;flex:1;}
+.functional-shell--editor .skin-search-row>.form-select-trigger {width:auto;min-width:140px;flex:1 1 140px;}
+.functional-shell--editor .skin-card-preview {width:100%;min-height:44px;padding:6px;border:0;border-radius:5px;color:var(--color-text-secondary);background:transparent;font-size:12px;cursor:zoom-in;}
+.functional-shell--editor .skin-card-preview:hover {color:var(--color-text-primary);background:var(--color-bg-card-hover);}
+.functional-shell--editor .skin-picker-error {padding:10px 0;color:var(--color-status-error);}
+.functional-shell--editor .skin-picker-empty {grid-column:1 / -1;margin:10px 0;color:var(--color-text-secondary);font-size:13px;line-height:1.7;}
+.functional-shell--editor .skin-load-more {justify-self:center;min-height:44px;}
+.functional-shell--editor .skin-selected-box .supply-selected-chips {max-height:180px;overflow:auto;overscroll-behavior:contain;}
 .functional-shell--editor .publish-subgroup {padding:0;border:0;background:none;}
 .functional-shell--editor .publish-subgroup+.publish-subgroup {padding-top:24px;border-top:0;}
 .functional-shell--editor .publish-subgroup-title {padding:0;margin:0 0 16px;font-size:14px;font-weight:650;border:0;color:var(--color-text-primary);}

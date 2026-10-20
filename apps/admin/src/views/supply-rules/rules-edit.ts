@@ -60,10 +60,6 @@ export function baseline(rules: RulesResponse): { fields: EditField[]; values: E
     add({ key: "dep.vit7", group: "押金规则", label: "7 级体力", unit: "元" }, centsToYuan(p.vitalityAtLeast7Cents));
     add({ key: "dep.bear7", group: "押金规则", label: "7 级负重", unit: "元" }, centsToYuan(p.bearAtLeast7Cents));
     add({ key: "dep.dive3", group: "押金规则", label: "3 级潜水", unit: "元" }, centsToYuan(p.diveAtLeast3Cents));
-    for (const [g, w] of Object.entries(p.skinWeights)) {
-      add({ key: `dep.skin.${g}.first`, group: "押金规则", label: `${SKIN_LABELS[g] ?? g} 首件`, unit: "元" }, centsToYuan(w.firstCents));
-      add({ key: `dep.skin.${g}.sub`, group: "押金规则", label: `${SKIN_LABELS[g] ?? g} 之后每件`, unit: "元" }, centsToYuan(w.subsequentCents));
-    }
   }
   // 缺正式资金政策时不生成押金字段：页面对应位置显示“资金政策未提供”，不按默认值可编辑。
   for (const o of rules.termOptions.filter((o) => o.versionId === ctx.termVersionId)) add({ key: `term.${o.code}.daily`, group: "租期与每日消耗", label: `${o.name} 每天消耗`, unit: "M" }, rawToM(o.dailyConsumption));

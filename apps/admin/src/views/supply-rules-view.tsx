@@ -14,6 +14,7 @@ import { SupplySelect } from "../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { RulesOverview } from "./supply-rules/rules-overview";
 import { draftCommand, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
+import { SkinDepositPolicyEditor } from "./supply-rules/skin-deposit-policy-editor";
 
 const inputClass = "h-9";
 const textareaClass = "min-h-32";
@@ -103,6 +104,7 @@ export function SupplyRulesView({
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [overviewDirty, setOverviewDirty] = useState(false);
+  const [depositDirty, setDepositDirty] = useState(false);
   const [gamesLoaded, setGamesLoaded] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [haffRawOpen, setHaffRawOpen] = useState(false);
@@ -121,8 +123,8 @@ export function SupplyRulesView({
   };
 
   useEffect(() => {
-    onDirtyChange(dirty || overviewDirty);
-  }, [dirty, overviewDirty, onDirtyChange]);
+    onDirtyChange(dirty || overviewDirty || depositDirty);
+  }, [dirty, overviewDirty, depositDirty, onDirtyChange]);
 
   const loadGames = useCallback(async () => {
     const sequence = ++gamesSeq.current;
@@ -403,7 +405,7 @@ export function SupplyRulesView({
           </div>
           <div className="w-full sm:w-72">
             <Field label="游戏" composite>
-              <RulesSelect label="游戏" value={gameId} onChange={setGameId} disabled={command.state.kind === "busy" || command.state.kind === "recovering" || dirty || overviewDirty} placeholder="暂无可维护游戏" options={games.map((game) => ({ value: game.id, label: `${game.name}（${game.code}）` }))} />
+              <RulesSelect label="游戏" value={gameId} onChange={setGameId} disabled={command.state.kind === "busy" || command.state.kind === "recovering" || dirty || overviewDirty || depositDirty} placeholder="暂无可维护游戏" options={games.map((game) => ({ value: game.id, label: `${game.name}（${game.code}）` }))} />
             </Field>
           </div>
         </div>
@@ -451,6 +453,7 @@ export function SupplyRulesView({
       {rules && rules.game.id === gameId ? (
         <div className="space-y-6">
           <RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={canEdit} onDirtyChange={setOverviewDirty} />
+          <SkinDepositPolicyEditor key={`${snapshot.adminUserId}:${snapshot.session?.id}:${rules.game.id}`} rules={rules} command={command} onDirtyChange={setDepositDirty} />
           <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="hidden" aria-hidden="true">
           <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-start px-0 py-2 text-left whitespace-normal" />}><span className="grid min-w-0 gap-1 sm:flex sm:items-center sm:gap-2"><span className="shrink-0 text-base font-semibold">高级：按版本维护草稿</span><span className="text-sm font-normal text-muted-foreground">出租协议正文、首版建立与原始规则</span></span></CollapsibleTrigger>
           <CollapsibleContent keepMounted><div className="mt-4 space-y-6">

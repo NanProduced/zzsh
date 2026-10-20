@@ -15,7 +15,8 @@ import { SupplyWriteLockError, withSupplyWriteLock } from "@/lib/supply-write-lo
 
 import { adminRequest, AdminApiError, friendlyError, hasPermission, type AdminCatalogResponse, type CatalogSkin, type CatalogSkinOwner, type CatalogMediaOption, type MediaOptionsResponse, type SessionSnapshot, type SupplyGame } from "../api";
 import { StatusMessage } from "../components/ui-elements";
-import { skinContractReady, skinValues, skinPayload, ownerPayload, catalogReceipt, ownerKinds, rarityOptions } from "./catalog-skin-fields";
+import { skinContractReady, skinValues, skinPayload, ownerPayload, catalogReceipt, ownerKinds, rarityOptions, defaultStates } from "./catalog-skin-fields";
+import { SkinMetadataFields } from "./supply-catalog/skin-metadata-fields";
 import { CatalogObjectTable, CellSelect } from "./supply-catalog/catalog-table";
 import { CatalogObjectNav } from "./supply-catalog/object-nav";
 import {
@@ -40,6 +41,9 @@ import {
   OBJECT_PURPOSE,
   objectRows,
   ownerText,
+  skinOwnerKind,
+  skinIsSelectable,
+  skinRarityBasisText,
   pendingIdentityCount,
   type CatalogKind,
   type CatalogRow,
@@ -171,6 +175,9 @@ export function SupplyCatalogView({
   const [identityFilter, setIdentityFilter] = useState<IdentityFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [mediaFilter, setMediaFilter] = useState<"all" | "with-media" | "without-media">("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [rarityFilter, setRarityFilter] = useState("all");
+  const [selectableFilter, setSelectableFilter] = useState("all");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [closeAsked, setCloseAsked] = useState(false);
   const [error, setError] = useState<string>();
@@ -232,6 +239,7 @@ export function SupplyCatalogView({
   const editorDirty = !["saving", "unknown", "readback"].includes(writePhase) && Boolean(editor) && editor!.baseline !== JSON.stringify(editor!.values);
   const applySwitch = (type: "tab" | "game", value: string) => {
     setPendingSwitch(null);
+    setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all");
     if (type === "game") { changeEditor(null); setCatalog(null); setGameId(value); setCategoryFilter("all"); setMediaFilter("all"); return; }
     changeEditor(null); setTab(value as CatalogKind); setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all");
   };
@@ -285,7 +293,7 @@ export function SupplyCatalogView({
       } catch { setStorageBlocked(true); setError("无法读取目录恢复记录，新提交已停用。请恢复浏览器存储或联系维护者核对原回执。"); }
     }
     setCatalog(null);
-    setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all"); setCloseAsked(false); setToggleDraft(null);
+    setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); setCloseAsked(false); setToggleDraft(null);
     return () => { writeSeq.current += 1; writeIntent.current = null; writeBusy.current = false; catalogSeq.current += 1; mediaPickSeq.current += 1; };
   }, [scope]);
 
@@ -491,6 +499,7 @@ export function SupplyCatalogView({
         const fresh = { ...recordValues(editor.kind, latest as unknown as Record<string, unknown>), ...(editor.kind === "skins" ? skinValues(latest as CatalogSkin) : {}) };
         values = { ...values };
         for (const key of ["name", "categoryId", "rarityCode", "sortOrder", "enabled", "formVisible", "aliases", "ownerKind", "ownerId", "baseName", "mediaId", "sourceNamespace", "sourceField", "sourceToken"]) if (values[key] === previous[key] && fresh[key] !== undefined) values[key] = fresh[key]!;
+        for (const key of ["defaultState", "isCollectible", ...(values.changeRarityEvidence === "true" ? [] : ["rarityBasis", "raritySourceName", "rarityEvidenceUrls"]), ...(values.changeMediaSource === "true" ? [] : ["mediaSourceKind", "mediaSourceName", "mediaSourceUrl"])]) if (values[key] === previous[key] && fresh[key] !== undefined) values[key] = fresh[key]!;
       }
       setEditor({ ...editor, revision: catalog.game.catalogRevision, original: latest, values });
     }
@@ -536,7 +545,8 @@ export function SupplyCatalogView({
           if (!source) throw new Error("当前目录的枪械归属未接入，不能确认枪械所属关系。");
           const chosen = source.find(o => o.id === editor.values.ownerId);
           const old = (editor.original as CatalogSkin)?.ownerRef;
-          if (!chosen || (!chosen.enabled && !(old?.id === chosen.id && old.kind === editor.values.ownerKind && (editor.original as CatalogSkin).namingState === "VERIFIED"))) throw new Error("请选择已读取且可挂接的所属对象。");
+          const broadMelee = editor.values.ownerKind === "MELEE_TYPE" && !editor.values.ownerId;
+          if ((!chosen && !broadMelee) || (chosen && !chosen.enabled && !(old?.id === chosen.id && old.kind === editor.values.ownerKind && (editor.original as CatalogSkin).namingState === "VERIFIED"))) throw new Error("请选择已读取且可挂接的所属对象。");
         }
         const body = editor.kind === "skins" ? skinPayload(editor.values, editor.revision ?? "", editor.original as CatalogSkin | undefined, editor.confirm) : ownerPayload(editor.values, editor.revision ?? "", editor.original as CatalogSkinOwner | undefined);
         beginWrite(editor.kind, body, editor.id, continueAdd ? carryValuesFor(editor.kind, editor.values) : undefined);
@@ -664,6 +674,9 @@ export function SupplyCatalogView({
     let filtered = rows;
     if (tab === "skins") {
       filtered = applyIdentityFilter(filtered, identityFilter);
+      if (typeFilter !== "all") filtered = filtered.filter(row => (skinOwnerKind(row as CatalogSkin) ?? "unknown") === typeFilter);
+      if (rarityFilter !== "all") filtered = filtered.filter(row => (row.rarityCode ?? "unknown") === rarityFilter);
+      if (selectableFilter !== "all") filtered = filtered.filter(row => Boolean(catalog && skinIsSelectable(row as CatalogSkin, catalog)) === (selectableFilter === "selectable"));
       if (categoryFilter !== "all") {
         filtered = filtered.filter((row) => (row as CatalogSkin).categoryId === categoryFilter);
       }
@@ -674,7 +687,7 @@ export function SupplyCatalogView({
       }
     }
     return filtered.filter((row) => matchesQuery(row, query));
-  }, [catalog, tab, identityFilter, categoryFilter, mediaFilter, query]);
+  }, [catalog, tab, identityFilter, categoryFilter, mediaFilter, typeFilter, rarityFilter, selectableFilter, query]);
 
   const descendantsOf = useMemo(() => {
     if (!editor || editor.kind !== "categories" || !editor.id) return new Set<string>();
@@ -710,6 +723,7 @@ export function SupplyCatalogView({
             className="h-9 w-9 rounded-md border border-dashed border-border/80 bg-muted/20 text-muted-foreground/60 hover:border-primary/50 hover:bg-muted/50 hover:text-foreground"
             disabled={writePhase !== "idle" || Boolean(editor)}
             title="未绑定图片，点击配置"
+            aria-label={`绑定图片 ${String(row.name ?? row.code ?? row.id)}`}
             onClick={() => { openEdit(rowKind, row); showDetail(rowKind, row.id); }}
           >
             <ImageIcon className="size-4" />
@@ -730,6 +744,7 @@ export function SupplyCatalogView({
             alt=""
             className="h-full w-full object-contain rounded transition-transform group-hover:scale-105"
             loading="lazy"
+            onLoad={event => { event.currentTarget.style.display = ""; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden"); }}
             onError={(event) => {
               event.currentTarget.style.display = "none";
               event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden");
@@ -741,12 +756,16 @@ export function SupplyCatalogView({
     }
     if (key === "parentPath") return <span className="text-xs">{categoryPath(row.parentId as string | null, catalog?.categories ?? [])}</span>;
     if (key === "categoryPath") return <span className="text-xs">{categoryPath(row.categoryId as string | null, catalog?.categories ?? [])}</span>;
-    if (key === "ownerRef") return <span className="text-xs">{ownerText((row.ownerRef as CatalogSkin["ownerRef"]) ?? null, catalog?.owners ?? [], firearms)}</span>;
+    if (key === "ownerRef") {
+      const kind = skinOwnerKind(row as CatalogSkin);
+      return <div className="space-y-1 text-xs"><p>{kind ? ownerKinds[kind] : "类型待核"}</p><p className="text-muted-foreground">{kind === "MELEE_TYPE" && !row.ownerRef ? "具体刀型待核" : ownerText((row.ownerRef as CatalogSkin["ownerRef"]) ?? null, catalog?.owners ?? [], firearms)}</p></div>;
+    }
     if (key === "kind") return <span className="text-xs">{ownerKinds[row.kind as keyof typeof ownerKinds] ?? "未提供"}</span>;
     if (key === "rarityCode") {
       const rarity = (catalog?.rarities ?? []).find(entry => entry.code === row.rarityCode);
-      return <span className="text-xs">{rarity ? (rarity.enabled ? rarity.name : `${rarity.name}（已停用）`) : row.rarityCode ? String(row.rarityCode) : "未标注"}</span>;
+      return <div className="space-y-1 text-xs"><p>{rarity ? (rarity.enabled ? rarity.name : `${rarity.name}（已停用）`) : row.rarityCode ? String(row.rarityCode) : "品质未知"}</p><p className="text-muted-foreground">{skinRarityBasisText(row as CatalogSkin)}</p></div>;
     }
+    if (key === "appearance") return <div className="space-y-1 text-xs"><p>{defaultStates[(row.defaultState as keyof typeof defaultStates) ?? "UNKNOWN"]}</p><p className="text-muted-foreground">{row.isCollectible == null ? "典藏待确认" : row.isCollectible ? "典藏" : "非典藏"}</p></div>;
     if (key === "required") return <span className="text-xs">{row.required ? "必填" : "可选"}</span>;
     if (key === "unit") return <span className="text-xs">{UNIT_LABEL[String(row.unit)] ?? "单位未登记"}</span>;
     if (key === "valueKind") return <span className="text-xs">{VALUE_KIND_LABEL[String(row.valueKind)] ?? "类型未登记"}</span>;
@@ -774,7 +793,7 @@ export function SupplyCatalogView({
     categoryItems: [{ value: "", label: "（一级分类）" }, ...(catalog?.categories ?? []).filter((category) => !descendantsOf.has(category.id)).map((category) => ({ value: category.id, label: categoryPath(category.id, catalog?.categories ?? []) }))],
     rarityItems: rarityOptions(catalog?.rarities ?? [], editor?.kind === "skins" ? (editor.original as CatalogSkin | undefined)?.rarityCode ?? null : null),
     kindItems: editor?.kind === "skins"
-      ? [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "刀型" }, { value: "FIREARM", label: "枪械" }]
+      ? [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "近战外观" }, { value: "FIREARM", label: "枪械" }]
       : [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "刀型" }],
     unitItems: [
       { value: "HAFF_BASE", label: "哈夫币基础单位" },
@@ -870,6 +889,9 @@ export function SupplyCatalogView({
                   </div>
                   {kind === "skins" ? (
                     <>
+                      <div className="w-36"><LabeledSelect label="类型筛选" value={typeFilter} disabled={Boolean(editor)} items={[{ value: "all", label: "全部类型" }, ...Object.entries(ownerKinds).map(([value, label]) => ({ value, label })), { value: "unknown", label: "类型待核" }]} onValueChange={setTypeFilter} /></div>
+                      <div className="w-36"><LabeledSelect label="品质筛选" value={rarityFilter} disabled={Boolean(editor)} items={[{ value: "all", label: "全部品质" }, { value: "unknown", label: "品质未知" }, ...catalog.rarities.map(r => ({ value: r.code, label: r.name }))]} onValueChange={setRarityFilter} /></div>
+                      <div className="w-36"><LabeledSelect label="可选状态" value={selectableFilter} disabled={Boolean(editor)} items={[{ value: "all", label: "全部状态" }, { value: "selectable", label: "可选择" }, { value: "unselectable", label: "暂不可选择" }]} onValueChange={setSelectableFilter} /></div>
                       <div className="w-36">
                         <LabeledSelect label="身份状态" value={identityFilter} disabled={Boolean(editor)} items={IDENTITY_FILTER_ITEMS.map((entry) => ({ value: entry.value, label: entry.label }))} onValueChange={(value) => setIdentityFilter(value as IdentityFilter)} />
                       </div>
@@ -922,7 +944,7 @@ export function SupplyCatalogView({
                   kind={kind}
                   rows={visibleRows}
                   query={query}
-                  filterActive={kind === "skins" && (identityFilter !== "all" || categoryFilter !== "all" || mediaFilter !== "all")}
+                  filterActive={kind === "skins" && (identityFilter !== "all" || categoryFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")}
                   busy={writePhase !== "idle" || storageBlocked}
                   contractReady={kind === "skins" || kind === "skin-owners" ? contractReady : true}
                   onEdit={(row) => openEdit(kind, row)}
@@ -932,10 +954,10 @@ export function SupplyCatalogView({
                   onCreate={() => openCreate(kind)}
                   createReason={createReason}
                   prerequisiteAction={kind === "skins" && contractReady && !catalog.categories.length ? { label: "去维护皮肤分类", onClick: () => requestSwitch("tab", "categories") } : undefined}
-                  onClearQuery={() => { setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all"); }}
+                  onClearQuery={() => { setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); }}
                   renderCell={(row, key) => renderCell(kind, row, key)}
                 />
-                <p className="text-xs text-muted-foreground">当前已加载 {counts[kind]} 条{query.trim() || (kind === "skins" && (identityFilter !== "all" || categoryFilter !== "all" || mediaFilter !== "all")) ? `，匹配 ${visibleRows.length} 条` : ""}。计数仅覆盖本次目录读取。</p>
+                <p className="text-xs text-muted-foreground">当前已加载 {counts[kind]} 条{query.trim() || (kind === "skins" && (identityFilter !== "all" || categoryFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")) ? `，匹配 ${visibleRows.length} 条` : ""}。计数仅覆盖本次目录读取。</p>
               </TabsContent>
             ))}
           </div>
@@ -945,7 +967,7 @@ export function SupplyCatalogView({
     <Sheet open={detailOpen && Boolean(editor)} onOpenChange={(open) => { if (!open) requestClose(); }}>
       <SheetContent className="w-full! sm:max-w-[560px]! gap-0" showCloseButton={false} finalFocus={detailFocusTarget}>
         <SheetHeader className="shrink-0 border-b border-border pr-14">
-          <SheetTitle>{editor?.confirm ? `确认${editorKindLabel}身份` : editor?.kind === "items" ? "计费物品图片" : editor?.kind === "skins" ? "皮肤别名、来源与图片" : editor?.kind === "skin-owners" ? "所属对象身份与证据" : `${editorKindLabel}维护说明`}</SheetTitle>
+          <SheetTitle>{editor?.confirm ? `确认${editorKindLabel}身份` : editor?.kind === "items" ? "计费物品图片" : editor?.kind === "skins" ? "皮肤别名、品质与图片" : editor?.kind === "skin-owners" ? "所属对象身份与证据" : `${editorKindLabel}维护说明`}</SheetTitle>
           <SheetDescription>{editor?.kind === "skins" ? "核实身份、启用和表单展示分别处理；本次修改与行内输入一并保存。" : editor?.kind === "items" ? "选择已审核且可公开的物品图片；保存后才更新绑定。" : editor?.kind === "skin-owners" ? "按证据核实稳定归属，既有身份不能通过改名替换。" : "名称、状态和排序在表格内维护；稳定编号保持不变。"}</SheetDescription>
           <Button type="button" variant="ghost" size="icon" aria-label="关闭详细信息" className="absolute right-3 top-3" onClick={requestClose}><XIcon /></Button>
           {editor?.values.name ? <p className="pt-2 text-sm font-medium break-words">{editor.values.name}</p> : null}
@@ -961,12 +983,12 @@ export function SupplyCatalogView({
                 </Field>
                 {editor.kind === "skins" ? (
                   <>
-                    <Field label="所属对象" hint="按稳定ID选择；分类不是所属对象。">
+                    <Field label="所属对象" hint={editor.values.ownerKind === "MELEE_TYPE" ? "已确认近战大类时可保留具体刀型未知，不新建虚构刀型。" : "按稳定ID选择；分类不是所属对象。"}>
                       <CellSelect
                         label="所属对象"
                         disabled={editor.values.ownerKind === "FIREARM" && firearms === null}
                         value={editor.values.ownerId ?? ""}
-                        items={[{ value: "", label: "请选择已读取对象" }, ...(editor.values.ownerKind === "FIREARM" ? firearms ?? [] : (catalog?.owners ?? []).filter(o => o.kind === editor.values.ownerKind)).map(o => ({ value: o.id, label: `${o.name}${o.enabled ? "" : "（停用）"}` }))]}
+                        items={[{ value: "", label: editor.values.ownerKind === "MELEE_TYPE" ? "具体刀型待核（仅确认近战）" : "请选择已读取对象" }, ...(editor.values.ownerKind === "FIREARM" ? firearms ?? [] : (catalog?.owners ?? []).filter(o => o.kind === editor.values.ownerKind)).map(o => ({ value: o.id, label: `${o.name}${o.enabled ? "" : "（停用）"}` }))]}
                         onValueChange={(value) => setEditor({ ...editor, values: { ...editor.values, ownerId: value } })}
                       />
                     </Field>
@@ -985,6 +1007,7 @@ export function SupplyCatalogView({
                 <Textarea value={editor.values.aliases ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, aliases: event.target.value } })} className="min-h-20 text-xs" />
               </Field>
             ) : null}
+            {editor.kind === "skins" && !editor.confirm ? <SkinMetadataFields skin={editor.original as CatalogSkin | undefined} values={editor.values} rarities={editOptions.rarityItems} onChange={(key, value) => setEditor(current => current ? { ...current, values: { ...current.values, [key]: value } } : current)} /> : null}
             {editor.kind === "skins" ? (
               <div className="space-y-2">
                 <p className="text-xs text-muted-foreground">当前主来源：{(editor.original as CatalogSkin)?.sourceNamespace ?? "命名空间未核"} / {(editor.original as CatalogSkin)?.sourceField ?? "无"} / {(editor.original as CatalogSkin)?.sourceToken ?? "无"}</p>
@@ -1001,7 +1024,7 @@ export function SupplyCatalogView({
                 ) : null}
               </div>
             ) : null}
-            {(editor.kind === "skins" && editor.id) || editor.kind === "skin-owners" ? (
+            {editor.kind === "skins" || editor.kind === "skin-owners" ? (
               <Field label="操作原因"><Input value={editor.values.reason ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, reason: event.target.value } })} className="h-9 text-xs" /></Field>
             ) : null}
             {editor.confirm || (editor.kind === "skins" && editor.id && editor.values.changeSource === "true") || (editor.kind === "skin-owners" && !editor.id) ? (
@@ -1025,7 +1048,7 @@ export function SupplyCatalogView({
                 {editor.values.mediaId ? (
                   <div className="flex items-center gap-3">
                     <span className="relative">
-                      <img src={`/api/v1/supply/media/${editor.values.mediaId}/content`} alt="当前绑定图片" className="h-20 w-20 rounded border border-border object-cover" loading="lazy"
+                      <img src={`/api/v1/supply/media/${editor.values.mediaId}/content`} alt="当前绑定图片" className={editor.kind === "skins" && editor.values.ownerKind === "AGENT" ? "h-56 w-36 rounded border border-border object-contain" : "h-28 w-48 rounded border border-border object-contain"} loading="lazy"
                         onLoad={(event) => { event.currentTarget.style.display = ""; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden"); }}
                         onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden"); }} />
                       <span data-fallback className="hidden text-[11px] text-muted-foreground">图片加载失败或已不可公开展示。</span>
@@ -1052,7 +1075,7 @@ export function SupplyCatalogView({
                           {mediaOptions.map((option) => (
                             <Button type="button" variant="outline" key={option.id} className="h-auto flex-col gap-0 overflow-hidden rounded-md p-0 text-left" onClick={() => pickMedia(option.id)}>
                               <span className="relative block">
-                                <img src={`/api/v1/supply/media/${option.id}/content`} alt={`候选 ${option.id}`} className="h-16 w-full object-cover" loading="lazy"
+                                <img src={`/api/v1/supply/media/${option.id}/content`} alt={`候选 ${option.id}`} className="h-24 w-full object-contain" loading="lazy"
                                   onLoad={(event) => { event.currentTarget.style.display = ""; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden"); }}
                                   onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden"); }} />
                                 <span data-fallback className="absolute inset-0 hidden grid place-items-center bg-surface text-[10px] text-muted-foreground">预览不可用</span>

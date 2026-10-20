@@ -72,7 +72,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     };
     if (name === "@/app/user-account-status") return require(path.join(tree, "apps/web/src/app/user-account-status.ts"));
     if (name === "./favorites/favorites-panel") return { FavoritesPanel: () => null };
-    if (name === "./supply/skin-media-thumb") return { SkinMediaThumb: () => null };
+    if (name === "./supply/skin-media-thumb") return { SkinMediaPreview: () => null, SkinMetadata: () => null, skinCardTitle: tag => tag.name };
     if (name === "./favorites/favorites-context") return { FavoritesProvider: ({ children }) => children };
     if (name === "./order/legacy-order-workspace") return { LegacyOrderWorkspace: () => null };
     if (name === "./order/order-workspace") return { OrderWorkspace: () => null };

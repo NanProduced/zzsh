@@ -617,6 +617,20 @@
       "when": 1792281600004,
       "tag": "0087_legacy_duty_audit_alias",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1792454400000,
+      "tag": "0088_skin_catalog_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1792454400001,
+      "tag": "0089_skin_deposit_recommendation",
+      "breakpoints": true
     }
   ]
 }

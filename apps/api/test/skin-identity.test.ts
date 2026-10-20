@@ -7,11 +7,13 @@ import { withIdempotency } from "../src/supply/supply-util";
 import { changeMediaVisibility, reviewMediaAsset } from "../src/supply/media";
 
 const evidence = { reason: "Reviewed relation", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "Offline fixture, not official evidence" }] };
+const rarityEvidence = { schema: "skin-rarity-evidence-v1", basis: "PLATFORM_REFERENCE", sourceName: "Offline platform fixture", references: evidence.evidenceRefs };
+const mediaSource = { schema: "skin-media-source-v1", kind: "PORTRAIT_CARD", sourceName: "Offline image fixture", url: "https://example.org/skin.png" };
 const draft = { code: "skin_fixture", name: "旧名", categoryId: "category_fixture", expectedCatalogRevision: "10" };
 const legacy = { id: "skin_fixture", game_id: "game_fixture", code: "stable_code", name: "旧名", category_id: "category_fixture", rarity_code: null, media_id: null, sort_order: 0, enabled: true, form_visible: true, naming_state: "LEGACY", aliases: [], owner_kind: null, owner_id: null, firearm_id: null, base_name: null, source_namespace: null, source_field: null, source_token: null };
 
 // Records calls from the real writer; does not implement PostgreSQL constraints/locks.
-function clientFixture(row: Record<string, unknown> = legacy, options: { revision?: string; cas?: boolean; sourceOccupied?: boolean; ownerGameMismatch?: boolean; ownerEnabled?: boolean } = {}) {
+function clientFixture(row: Record<string, unknown> = legacy, options: { revision?: string; cas?: boolean; sourceOccupied?: boolean; ownerGameMismatch?: boolean; ownerEnabled?: boolean; mediaGameId?: string } = {}) {
   const calls: Array<{ sql: string; args: unknown[] }> = [];
   const client = { query: async (sql: string, args: unknown[] = []) => {
     calls.push({ sql, args });
@@ -23,6 +25,7 @@ function clientFixture(row: Record<string, unknown> = legacy, options: { revisio
     else if (sql.startsWith('UPDATE zzsh_supply.skin SET')) rows = [{ namingState: args[11] ? "VERIFIED" : row.naming_state }];
     else if (sql.includes('source_namespace COLLATE')) rows = options.sourceOccupied ? [{ id: "other_skin" }] : [];
     else if (sql.startsWith('SELECT name,enabled FROM')) rows = options.ownerGameMismatch ? [] : [{ name: "露娜", enabled: options.ownerEnabled ?? true }];
+    else if (sql.includes('FROM "zzsh_supply"."media_asset"')) rows = [{ gameId: options.mediaGameId ?? "game_fixture", ownershipKind: "PLATFORM_CATALOG", purpose: "SKIN_MEDIA", reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY" }];
     else if (sql.includes('SELECT 1 FROM "zzsh_supply"."skin"')) rows = [];
     else if (sql.includes('"zzsh_supply"."admin_supply_scope"')) rows = sql.includes('"game_scope_mode"') ? [{ mode: "SELECTED_GAMES", gameIds: [] }] : [];
     else if (sql.includes('SELECT 1 FROM "zzsh_supply"."skin_category"') || sql.includes('SELECT 1 FROM "zzsh_supply"."game"')) rows = [{}];
@@ -121,7 +124,8 @@ test("two names with different owners remain separate; owner writes stay narrow"
 test("runner leaves old migration prefixes alone, rejects partial schemas and excludes state/timestamp grants", async () => {
   for (const [count, present] of [[0, false], [7, true], [1, true]] as const) {
     const writes: string[] = [];
-    const pool = { query: async (sql: string) => {
+    const pool = { query: async (sql: string, args: unknown[] = []) => {
+      if ((args[0] as string[] | undefined)?.includes("rarity_evidence")) return { rows: [{ count: 0 }] };
       if (sql.includes('count(*)')) return { rows: [{ count }] };
       if (sql.includes('AS present')) return { rows: [{ present }] };
       writes.push(sql); return { rows: [] };
@@ -184,7 +188,7 @@ test("SK7 create refuses a disabled or foreign-game quality before any insert an
     assert.ok(!f.calls.some(c => c.sql.startsWith("UPDATE zzsh_supply.game")), `${rarityCode} must not bump the catalog`);
   }
   const ok = withRarities(clientFixture());
-  await createCatalogEntry(ok.client, "a", true, "skins", "game_fixture", { ...draft, rarityCode: "q_enabled" });
+  await createCatalogEntry(ok.client, "a", true, "skins", "game_fixture", { ...draft, rarityCode: "q_enabled", rarityEvidence });
   assert.equal(ok.calls.find(c => c.sql.startsWith("INSERT INTO zzsh_supply.skin"))!.args[5], "q_enabled");
   const unknown = withRarities(clientFixture());
   await createCatalogEntry(unknown.client, "a", true, "skins", "game_fixture", draft);
@@ -204,7 +208,7 @@ test("SK7 update keeps an existing disabled binding through unrelated edits but 
     assert.equal(sk7Update(f.calls), undefined, `${rarityCode} must not write`);
   }
   const changed = withRarities(clientFixture(bound));
-  await updateCatalogEntry(changed.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: "q_enabled" });
+  await updateCatalogEntry(changed.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: "q_enabled", rarityEvidence });
   assert.equal(sk7Update(changed.calls)!.args[5], "q_enabled");
   const cleared = withRarities(clientFixture(bound));
   await updateCatalogEntry(cleared.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: null });
@@ -231,4 +235,85 @@ test("SK7 public catalog skins carry owner type and the same-game quality name; 
   const vocabulary = queries.find(q => /FROM "zzsh_supply"\."skin_rarity"/.test(q));
   assert.ok(vocabulary && /"enabled" = true/.test(vocabulary), "the filter vocabulary offers enabled qualities only");
   assert.ok(queries.every(q => !/^\s*(INSERT|UPDATE|DELETE)/.test(q)));
+});
+
+test("skin metadata rejects coercible enum arrays, malformed evidence and nonpublic source URLs", () => {
+  const valid = parseSkinWrite({ ...draft, rarityEvidence, isCollectible: null, defaultState: "UNKNOWN", mediaSource }, false);
+  assert.deepEqual(valid.rarityEvidence, rarityEvidence);
+  assert.deepEqual(valid.mediaSource, mediaSource);
+  for (const extra of [
+    { defaultState: ["DEFAULT"] }, { defaultState: null }, { isCollectible: "false" },
+    { rarityEvidence: { ...rarityEvidence, basis: ["OFFICIAL"] } },
+    { rarityEvidence: { ...rarityEvidence, references: [] } },
+    { rarityEvidence: { ...rarityEvidence, unexpected: true } },
+    { mediaSource: { ...mediaSource, kind: ["PORTRAIT_CARD"] } },
+    { mediaSource: { ...mediaSource, url: "http://example.org/image.png" } },
+    { mediaSource: { ...mediaSource, url: "https://user:password@example.org/image.png" } },
+  ]) assert.throws(() => parseSkinWrite({ ...draft, ...extra }, false));
+  assert.throws(() => parseSkinWrite({ expectedCatalogRevision: "10", ownerKind: ["MELEE_TYPE"], confirmIdentity: true, ...evidence }, true));
+});
+
+test("new quality bindings require their own explicit evidence; an unchanged legacy binding may remain unknown", async () => {
+  const noSourceCreate = withRarities(clientFixture());
+  await assert.rejects(createCatalogEntry(noSourceCreate.client, "a", true, "skins", "game_fixture", { ...draft, rarityCode: "q_enabled" }), /Quality source required/);
+  assert.equal(noSourceCreate.calls.some(call => call.sql.startsWith('INSERT')), false);
+  for (const existing of [null, rarityEvidence]) {
+    const changed = withRarities(clientFixture({ ...legacy, rarity_code: "q_retired", rarity_evidence: existing }));
+    await assert.rejects(updateCatalogEntry(changed.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: "q_enabled" }), /Quality source required/);
+    assert.equal(sk7Update(changed.calls), undefined, 'old quality evidence cannot be reused implicitly for a different quality');
+  }
+  const old = withRarities(clientFixture({ ...legacy, rarity_code: "q_retired", rarity_evidence: null }));
+  await updateCatalogEntry(old.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", sortOrder: 2 });
+  assert.equal(sk7Update(old.calls)!.args[5], "q_retired");
+  assert.equal(sk7Update(old.calls)!.args[16], null);
+  const erased = withRarities(clientFixture({ ...legacy, rarity_code: "q_enabled", rarity_evidence: rarityEvidence }));
+  await assert.rejects(updateCatalogEntry(erased.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityEvidence: null }), /Quality source required/);
+  const cleared = withRarities(clientFixture({ ...legacy, rarity_code: "q_enabled", rarity_evidence: rarityEvidence }));
+  await updateCatalogEntry(cleared.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", rarityCode: null });
+  assert.equal(sk7Update(cleared.calls)!.args[16], null);
+});
+
+test("metadata edits preserve unknown/false distinctly and image replacement clears the prior image source", async () => {
+  const row = { ...legacy, media_id: "media_old", media_source: mediaSource, is_collectible: null, default_state: "UNKNOWN" };
+  for (const [body, expected] of [
+    [{ sortOrder: 1 }, ["media_old", mediaSource]],
+    [{ mediaId: "media_new" }, ["media_new", null]],
+    [{ mediaId: "media_new", mediaSource: { ...mediaSource, url: "https://example.org/new.png" } }, ["media_new", { ...mediaSource, url: "https://example.org/new.png" }]],
+    [{ mediaId: null }, [null, null]],
+  ] as const) {
+    const f = clientFixture(row);
+    await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", ...body });
+    const args = sk7Update(f.calls)!.args;
+    assert.deepEqual([args[6], args[19]], expected);
+    assert.equal(args[17], null);
+    assert.equal(args[18], "UNKNOWN");
+  }
+  const explicit = clientFixture(row);
+  await updateCatalogEntry(explicit.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", isCollectible: false, defaultState: "NON_DEFAULT" });
+  assert.deepEqual(sk7Update(explicit.calls)!.args.slice(17, 19), [false, "NON_DEFAULT"]);
+  const foreign = clientFixture(row, { mediaGameId: "game_other" });
+  await assert.rejects(updateCatalogEntry(foreign.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", mediaId: "media_foreign" }), /Media does not belong/);
+  assert.equal(sk7Update(foreign.calls), undefined);
+});
+
+test("creating an unbound skin rejects image provenance before inserting", async () => {
+  const f = clientFixture();
+  await assert.rejects(createCatalogEntry(f.client, "a", true, "skins", "game_fixture", { ...draft, mediaSource }), /Bind an image before recording its source/);
+  assert.equal(f.calls.some(call => call.sql.startsWith("INSERT INTO zzsh_supply.skin")), false);
+});
+
+test("editing an unbound skin rejects image provenance instead of silently discarding it", async () => {
+  const f = clientFixture();
+  await assert.rejects(updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", mediaSource }), /Bind an image before recording its source/);
+  assert.equal(sk7Update(f.calls), undefined);
+});
+
+test("confirmed unclassified melee keeps its real entity without inventing a specific knife owner", async () => {
+  const f = clientFixture({ ...legacy, enabled: false, form_visible: false });
+  await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", ownerKind: "MELEE_TYPE", ownerRef: null, baseName: "赤枭", confirmIdentity: true, ...evidence });
+  const update = sk7Update(f.calls)!;
+  assert.deepEqual(update.args.slice(11, 15), ["MELEE_TYPE", null, null, "赤枭"]);
+  assert.equal(update.args[0], "赤枭");
+  assert.equal(f.calls.some(call => call.sql.startsWith('SELECT name,enabled FROM')), false);
+  for (const ownerKind of ["AGENT", "FIREARM"]) assert.throws(() => parseSkinWrite({ expectedCatalogRevision: "10", ownerKind, ownerRef: null, baseName: "外观", confirmIdentity: true, ...evidence }, true));
 });

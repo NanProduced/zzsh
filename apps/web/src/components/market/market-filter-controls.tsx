@@ -3,7 +3,8 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import * as Popover from "@radix-ui/react-popover";
 import { ListBox } from "@heroui/react/list-box";
 import { Select as UiSelect } from "@heroui/react/select";
-import { Check, ChevronDown, ImageOff, MapPin, Minus, Plus, Search, X } from "lucide-react";
+import { Check, ChevronDown, MapPin, Minus, Plus, Search, X } from "lucide-react";
+import { SkinMediaThumb, SkinMediaPreview, SkinMetadata } from "@/components/supply/skin-media-thumb";
 import {
   buildServiceWindow,
   formatServiceWindowMinute,
@@ -30,6 +31,8 @@ type Props = {
   catalog: PublicCatalog | null;
   catalogStatus: "idle" | "loading" | "ready" | "error";
   skinSearch: string;
+  skinOwner: string;
+  skinRarity: string;
   activeSkinCategoryId: string;
   skinSearchCatalog: PublicCatalog | null;
   skinSearchStatus: "idle" | "loading" | "ready" | "error";
@@ -37,6 +40,8 @@ type Props = {
   onRetryCatalog: () => void;
   onRetrySkinSearch: () => void;
   onSkinSearchChange: (value: string) => void;
+  onSkinOwnerChange: (value: string) => void;
+  onSkinRarityChange: (value: string) => void;
   onSkinCategoryChange: (categoryId: string) => void;
   onLoadMoreSkins: () => void;
   loadingMoreSkins: boolean;
@@ -556,19 +561,20 @@ function ServiceWindowFilter({ filters, metadata, onChange }: Pick<Props, "filte
   </FilterRow>;
 }
 function SkinTile({ skin, selected, onClick }: { skin: PublicCatalog["skins"][number]; selected: boolean; onClick: () => void }) {
-  const [failed, setFailed] = useState(false);
-  const src = skin.mediaId ? `/api/supply/media/${encodeURIComponent(skin.mediaId)}/content` : null;
-  useEffect(() => setFailed(false), [src]);
-  return <button type="button" className="market-skin-tile" aria-pressed={selected} onClick={onClick}>
-    <span className="market-skin-image">{src && !failed ? <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} /> : <span className="market-skin-image-empty"><ImageOff size={17} aria-hidden="true" /><span>暂无公开图</span></span>}</span>
-    <span className="market-skin-check" aria-hidden="true">{selected ? <Check size={13} /> : null}</span>
-    <span className="market-skin-name">{skin.name}</span>
-  </button>;
+  return <div className="market-skin-candidate" data-skin-id={skin.id}>
+    <button type="button" className="market-skin-tile" aria-label={`选择 ${skin.name}`} aria-pressed={selected} onClick={onClick}>
+      <SkinMediaThumb mediaId={skin.mediaId} ownerKind={skin.ownerKind} className="market-skin-image" fallbackClassName="market-skin-image-empty" />
+      <span className="market-skin-check" aria-hidden="true">{selected ? <Check size={13} /> : null}</span>
+      <span className="market-skin-name">{skin.name}</span>
+      <SkinMetadata skin={skin} />
+    </button>
+    <SkinMediaPreview skin={skin} triggerClassName="market-skin-preview">预览图片</SkinMediaPreview>
+  </div>;
 }
 
 function SkinFilters({
-  filters: committedFilters, metadata, catalog, catalogStatus, skinSearch, activeSkinCategoryId, skinSearchCatalog, skinSearchStatus,
-  onChange: commitFilters, onRetryCatalog, onRetrySkinSearch, onSkinSearchChange, onSkinCategoryChange, onLoadMoreSkins, loadingMoreSkins,
+  filters: committedFilters, metadata, catalog, catalogStatus, skinSearch, skinOwner, skinRarity, activeSkinCategoryId, skinSearchCatalog, skinSearchStatus,
+  onChange: commitFilters, onRetryCatalog, onRetrySkinSearch, onSkinSearchChange, onSkinOwnerChange, onSkinRarityChange, onSkinCategoryChange, onLoadMoreSkins, loadingMoreSkins,
 }: Props) {
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -599,6 +605,7 @@ function SkinFilters({
   const categoryIds = new Set(skinField?.categoryIds ?? []);
   const categories = (catalog?.categories ?? []).filter((category) => categoryIds.has(category.id));
   const activeCategory = categories.find((category) => category.id === activeSkinCategoryId) ?? categories[0];
+  const owners = (catalog?.owners ?? []).filter((owner) => !activeCategory?.ownerKind || owner.kind === activeCategory.ownerKind);
   if (!skinField) return null;
   const group = filters.filters.skinGroups?.find((entry) => entry.categoryId === activeCategory?.id);
   const totalSelected = (filters.filters.skinGroups ?? []).reduce((sum, entry) => sum + entry.ids.length, 0);
@@ -629,10 +636,14 @@ function SkinFilters({
         </div>
         <div className="market-skin-candidates">
         {activeCategory && <>
-          <label className="market-skin-search" htmlFor={`${id}-skin-search`}>
-            <span className="sr-only">搜索{activeCategory.name}名称</span>
-            <input ref={searchRef} id={`${id}-skin-search`} type="search" maxLength={80} value={skinSearch} placeholder={`搜索${activeCategory.name}`} onChange={(event) => onSkinSearchChange(event.target.value)} />
-          </label>
+          <div className="market-skin-search-controls">
+            <label className="market-skin-search" htmlFor={`${id}-skin-search`}>
+              <span className="sr-only">搜索{activeCategory.name}或所属名称</span>
+              <input ref={searchRef} id={`${id}-skin-search`} type="search" maxLength={80} value={skinSearch} placeholder="搜索皮肤或所属名称" onChange={(event) => onSkinSearchChange(event.target.value)} />
+            </label>
+            {owners.length ? <MarketSelect label="皮肤所属" value={skinOwner || "__all__"} placeholder="全部所属" options={[{ value: "__all__", label: "全部所属" }, ...owners.map((owner) => ({ value: owner.id, label: owner.name }))]} onChange={(value) => onSkinOwnerChange(value === null || value === "__all__" ? "" : value)} /> : null}
+            {catalog?.rarities.length ? <MarketSelect label="皮肤品质" value={skinRarity || "__all__"} placeholder="全部品质" options={[{ value: "__all__", label: "全部品质" }, ...catalog.rarities.map((rarity) => ({ value: rarity.code, label: rarity.name }))]} onChange={(value) => onSkinRarityChange(value === null || value === "__all__" ? "" : value)} /> : null}
+          </div>
           {skinResultsStatus === "loading" ? <p className="market-filter-hint" role="status">{searchQuery ? "正在搜索当前类别…" : "正在读取当前类别…"}</p> : null}
           {skinResultsStatus === "error" ? <div className="market-filter-error" role="alert"><p>皮肤目录暂时不可用，已选条件不会清除。</p><button type="button" className="market-filter-chip" onClick={onRetrySkinSearch}>{searchQuery ? "重试搜索" : "重试类别"}</button></div> : null}
           {skinResultsStatus === "ready" ? <>
@@ -649,11 +660,8 @@ function SkinFilters({
           <div className="market-skin-selected-list">
             {(filters.filters.skinGroups ?? []).flatMap((selectedGroup) => selectedGroup.ids.map((skinId) => {
               const skin = knownSkins[skinId];
-              const src = skin?.mediaId ? `/api/supply/media/${encodeURIComponent(skin.mediaId)}/content` : null;
               return <div key={skinId} className="market-skin-selected-item">
-                <span className="market-skin-selected-thumb">
-                  {src ? <img src={src} alt="" loading="lazy" /> : <ImageOff size={14} aria-hidden="true" className="market-skin-thumb-placeholder" />}
-                </span>
+                <SkinMediaThumb mediaId={skin?.mediaId ?? null} ownerKind={skin?.ownerKind} className="market-skin-selected-thumb" fallbackClassName="market-skin-image-empty" iconSize={14} />
                 <span className="market-skin-selected-name" title={skin?.name ?? skinId}>
                   {skin?.name ?? "已选皮肤"}
                 </span>
@@ -700,7 +708,7 @@ function SkinFilters({
   const trigger = <button ref={triggerRef} type="button" className="market-picker-trigger market-skin-trigger" aria-label={`选择皮肤${committedCount ? `，已选 ${committedCount} 款` : ""}`} aria-expanded={open} aria-controls={`${id}-skin-panel`} onClick={() => { if (inline) changeOpen(!open); }}>
     <span>选择皮肤{committedCount ? ` · 已选 ${committedCount} 款` : ""}</span><ChevronDown size={14} aria-hidden="true" />
   </button>;
-  return <FilterRow label={skinField.label} id={`${id}-skins`}>
+  return <FilterRow label={skinField.label} id={`${id}-skins`} className="market-skin-filter">
     {inline ? <>
       {trigger}
       {open && <div id={`${id}-skin-panel`} className="market-skin-inline" role="region" aria-label="选择皮肤" onKeyDown={(event) => {

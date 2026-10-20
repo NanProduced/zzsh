@@ -379,7 +379,7 @@ export function CatalogObjectTable({
                   {columns.map((column) => (
                     <TableCell key={column.key} className={editCellClass(row)}>
                       {row.id === editingId && editValues && column.key !== "media" ? (
-                        editControl(column.key) ?? <span className="text-[11px] text-muted-foreground">创建后不可改</span>
+                        editControl(column.key) ?? (column.key === "appearance" ? <Button type="button" variant="link" size="sm" disabled={busy} onClick={() => onDetailRow?.()}>详情维护</Button> : <span className="text-[11px] text-muted-foreground">创建后不可改</span>)
                       ) : column.key === "enabled" || column.key === "formVisible" ? (
                         <StateBadge on={Boolean(row[column.key])} onLabel={column.key === "enabled" ? "启用" : "展示"} offLabel={column.key === "enabled" ? "停用" : "隐藏"} field={column.key} />
                       ) : column.key === "namingState" ? (

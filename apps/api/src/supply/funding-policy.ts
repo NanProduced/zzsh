@@ -1,4 +1,5 @@
 import { invalid } from "./supply-util";
+import { computeSkinDepositV2, parseDepositSkinRules, type DepositRecommendationV2, type DepositSkinFacts } from "./deposit-recommendation";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 const CENTS = /^(0|[1-9]\d{0,23})$/;
@@ -10,7 +11,7 @@ type RecommendationGroup = typeof DEPOSIT_RECOMMENDATION_GROUPS[number];
 export type FundingPolicy = {
   schema: "funding-policy-v1";
   policyVersion: string;
-  recommendation: {
+  recommendation: DepositRecommendationV2 | {
     schema: "deposit-recommendation-v1";
     algorithm: "delta-deposit-owner-declared-v1";
     version: "1";
@@ -82,6 +83,7 @@ export type DepositRecommendationInput = {
   bear: number | null;
   dive: number | null;
   skinIds: readonly string[];
+  skinFacts?: DepositSkinFacts;
 };
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -144,17 +146,27 @@ function parseSkinWeights(value: unknown): Record<Exclude<RecommendationGroup, "
   return result;
 }
 
+export function validateFundingPolicyDraft(value: unknown): FundingPolicy {
+  return parseFundingPolicy(value, true);
+}
+
 export function validateFundingPolicy(value: unknown): FundingPolicy {
+  return parseFundingPolicy(value, false);
+}
+
+function parseFundingPolicy(value: unknown, allowUnconfigured: boolean): FundingPolicy {
   const root = exact(value, ["schema", "policyVersion", "recommendation", "ownerDepositRules", "guaranteeRequirement", "proofValidity", "vipWaiver", "svipWaiver", "fullPayoutPolicyRef", "fullPayoutPolicyVersion", "disclosureVersion"], "fundingPolicy");
   if (root.schema !== "funding-policy-v1") throw invalid("Funding policy schema is unsupported");
   const recommendation = exact(root.recommendation, ["schema", "algorithm", "version", "currency", "unit", "inputSpec", "parameters"], "recommendation");
-  if (recommendation.schema !== "deposit-recommendation-v1" || recommendation.algorithm !== "delta-deposit-owner-declared-v1" || recommendation.version !== "1" || recommendation.currency !== "CNY" || recommendation.unit !== "cent") throw invalid("Funding recommendation is invalid");
+  const v2 = recommendation.schema === "deposit-recommendation-v2";
+  if (recommendation.schema !== (v2 ? "deposit-recommendation-v2" : "deposit-recommendation-v1") || recommendation.algorithm !== (v2 ? "delta-deposit-type-rarity-v2" : "delta-deposit-owner-declared-v1") || recommendation.version !== (v2 ? "2" : "1") || recommendation.currency !== "CNY" || recommendation.unit !== "cent") throw invalid("Funding recommendation is invalid");
   const inputSpec = exact(recommendation.inputSpec, ["schema", "identityFields", "attributeFields", "currency", "unit"], "recommendation.inputSpec");
-  if (inputSpec.schema !== "deposit-recommendation-input-v1" || inputSpec.currency !== "CNY" || inputSpec.unit !== "cent") throw invalid("Funding input specification is invalid");
+  if (inputSpec.schema !== (v2 ? "deposit-recommendation-input-v2" : "deposit-recommendation-input-v1") || inputSpec.currency !== "CNY" || inputSpec.unit !== "cent") throw invalid("Funding input specification is invalid");
   if (JSON.stringify(inputSpec.identityFields) !== JSON.stringify(["accountId", "gameId", "listingVersionId", "priceVersionId", "ruleReleaseId"])) throw invalid("Funding identity fields are invalid");
-  const attributeFields = exact(inputSpec.attributeFields, ["safeBoxCode", "vitality", "bear", "dive", "skinIds"], "recommendation.inputSpec.attributeFields");
+  const attributeFields = exact(inputSpec.attributeFields, ["safeBoxCode", "vitality", "bear", "dive", "skinIds", ...(v2 ? ["skinFacts"] : [])], "recommendation.inputSpec.attributeFields");
+  if (v2 && attributeFields.skinFacts !== "catalog.skinFacts") throw invalid("Funding skin fact specification is invalid");
   if (attributeFields.safeBoxCode !== "declaration.attributes.safe_box_code" || attributeFields.vitality !== "declaration.attributes.vit_level" || attributeFields.bear !== "declaration.attributes.bear_level" || attributeFields.dive !== "declaration.attributes.dive_level" || attributeFields.skinIds !== "declaration.skins[].skinId") throw invalid("Funding attribute fields are invalid");
-  const parameters = exact(recommendation.parameters, ["safeBoxWeightsByCode", "vitalityAtLeast7Cents", "bearAtLeast7Cents", "diveAtLeast3Cents", "skinGroupById", "skinWeights", "rounding", "upperLimitCents"], "recommendation.parameters");
+  const parameters = exact(recommendation.parameters, ["safeBoxWeightsByCode", "vitalityAtLeast7Cents", "bearAtLeast7Cents", "diveAtLeast3Cents", ...(v2 ? ["skinRules", "skinOverrides"] : ["skinGroupById", "skinWeights"]), "rounding", "upperLimitCents"], "recommendation.parameters");
   const rounding = exact(parameters.rounding, ["mode", "unitCents", "zeroFallbackCents"], "recommendation.parameters.rounding");
   if (rounding.mode !== "CEIL" || rounding.unitCents !== "5000" || rounding.zeroFallbackCents !== "5000") throw invalid("Funding rounding is invalid");
   const parsedParameters = {
@@ -162,10 +174,19 @@ export function validateFundingPolicy(value: unknown): FundingPolicy {
     vitalityAtLeast7Cents: cents(parameters.vitalityAtLeast7Cents, "vitalityAtLeast7Cents"),
     bearAtLeast7Cents: cents(parameters.bearAtLeast7Cents, "bearAtLeast7Cents"),
     diveAtLeast3Cents: cents(parameters.diveAtLeast3Cents, "diveAtLeast3Cents"),
-    skinGroupById: parseSkinGroups(parameters.skinGroupById),
-    skinWeights: parseSkinWeights(parameters.skinWeights),
     rounding: { mode: "CEIL" as const, unitCents: "5000" as const, zeroFallbackCents: "5000" as const },
     upperLimitCents: cents(parameters.upperLimitCents, "upperLimitCents", true),
+  };
+  const inputFields = { safeBoxCode: "declaration.attributes.safe_box_code" as const, vitality: "declaration.attributes.vit_level" as const, bear: "declaration.attributes.bear_level" as const, dive: "declaration.attributes.dive_level" as const, skinIds: "declaration.skins[].skinId" as const };
+  const identityFields: ["accountId", "gameId", "listingVersionId", "priceVersionId", "ruleReleaseId"] = ["accountId", "gameId", "listingVersionId", "priceVersionId", "ruleReleaseId"];
+  const parsedRecommendation: FundingPolicy["recommendation"] = v2 ? {
+    schema: "deposit-recommendation-v2", algorithm: "delta-deposit-type-rarity-v2", version: "2", currency: "CNY", unit: "cent",
+    inputSpec: { schema: "deposit-recommendation-input-v2", identityFields, attributeFields: { ...inputFields, skinFacts: "catalog.skinFacts" }, currency: "CNY", unit: "cent" },
+    parameters: { ...parsedParameters, ...parseDepositSkinRules(parameters.skinRules, parameters.skinOverrides, allowUnconfigured) },
+  } : {
+    schema: "deposit-recommendation-v1", algorithm: "delta-deposit-owner-declared-v1", version: "1", currency: "CNY", unit: "cent",
+    inputSpec: { schema: "deposit-recommendation-input-v1", identityFields, attributeFields: inputFields, currency: "CNY", unit: "cent" },
+    parameters: { ...parsedParameters, skinGroupById: parseSkinGroups(parameters.skinGroupById), skinWeights: parseSkinWeights(parameters.skinWeights) },
   };
   const owner = exact(root.ownerDepositRules, ["schema", "currency", "unit", "normal", "fullPayoutSelected", "capCents"], "ownerDepositRules");
   if (owner.schema !== "owner-deposit-rule-v1" || owner.currency !== "CNY" || owner.unit !== "cent") throw invalid("Owner deposit rules are invalid");
@@ -186,11 +207,7 @@ export function validateFundingPolicy(value: unknown): FundingPolicy {
   return {
     schema: "funding-policy-v1",
     policyVersion: text(root.policyVersion, "policyVersion"),
-    recommendation: {
-      schema: "deposit-recommendation-v1", algorithm: "delta-deposit-owner-declared-v1", version: "1", currency: "CNY", unit: "cent",
-      inputSpec: { schema: "deposit-recommendation-input-v1", identityFields: ["accountId", "gameId", "listingVersionId", "priceVersionId", "ruleReleaseId"], attributeFields: { safeBoxCode: "declaration.attributes.safe_box_code", vitality: "declaration.attributes.vit_level", bear: "declaration.attributes.bear_level", dive: "declaration.attributes.dive_level", skinIds: "declaration.skins[].skinId" }, currency: "CNY", unit: "cent" },
-      parameters: parsedParameters,
-    },
+    recommendation: parsedRecommendation,
     ownerDepositRules: { schema: "owner-deposit-rule-v1", currency: "CNY", unit: "cent", normal: { minCents: "1", zeroAllowed: false }, fullPayoutSelected: { minCents: "30000", zeroAllowed: false }, capCents },
     guaranteeRequirement: { schema: "account-guarantee-requirement-v1", version: "1", scope: "GAME_ACCOUNT", currency: "CNY", unit: "cent", mode: guaranteeMode as "FIXED_CENTS" | "NOT_REQUIRED", requiredCents },
     proofValidity: { schema: "guarantee-proof-validity-v1", satisfiedMode: "FIXED_DAYS", satisfiedDays },
@@ -213,7 +230,8 @@ export function validateOwnerDepositAmount(policy: FundingPolicy, amountCents: s
 }
 
 export function computeDepositRecommendation(policy: FundingPolicy, input: DepositRecommendationInput): string {
-  const p = policy.recommendation.parameters;
+  const recommendation = policy.recommendation;
+  const p = recommendation.parameters;
   if (![input.accountId, input.gameId, input.listingVersionId, input.priceVersionId, input.ruleReleaseId].every((value) => ID.test(value))) throw invalid("Deposit recommendation identity is invalid");
   const safeBoxWeight = input.safeBoxCode ? p.safeBoxWeightsByCode[input.safeBoxCode] : undefined;
   if (!input.safeBoxCode || safeBoxWeight === undefined || input.vitality === null || input.bear === null || input.dive === null || !Number.isSafeInteger(input.vitality) || !Number.isSafeInteger(input.bear) || !Number.isSafeInteger(input.dive)) throw invalid("Deposit recommendation inputs are unavailable");
@@ -221,6 +239,9 @@ export function computeDepositRecommendation(policy: FundingPolicy, input: Depos
   if (input.vitality >= 7) total += BigInt(p.vitalityAtLeast7Cents);
   if (input.bear >= 7) total += BigInt(p.bearAtLeast7Cents);
   if (input.dive >= 3) total += BigInt(p.diveAtLeast3Cents);
+  if (recommendation.schema === "deposit-recommendation-v2") total += computeSkinDepositV2(recommendation.parameters, input);
+  else {
+  const p = recommendation.parameters;
   const counts = new Map<Exclude<RecommendationGroup, "NONE">, number>();
   for (const skinId of input.skinIds) {
     const group = p.skinGroupById[skinId];
@@ -231,6 +252,7 @@ export function computeDepositRecommendation(policy: FundingPolicy, input: Depos
   for (const [group, count] of counts) {
     const weights = p.skinWeights[group];
     total += BigInt(weights.firstCents) + BigInt(Math.max(0, count - 1)) * BigInt(weights.subsequentCents);
+  }
   }
   const unit = 5000n;
   const rounded = total === 0n ? 5000n : ((total + unit - 1n) / unit) * unit;

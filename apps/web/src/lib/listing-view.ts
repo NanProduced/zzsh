@@ -25,6 +25,9 @@ export type SkinTag = {
   ownerKind?: SkinOwnerKind | null;
   rarityCode?: string | null;
   rarityName?: string | null;
+  rarityBasis?: "PLATFORM_REFERENCE" | "OFFICIAL" | null;
+  isCollectible?: boolean | null;
+  defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
 };
 export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY" };
 export type ListingCardData = {
@@ -306,11 +309,14 @@ function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "ski
       ...(skin.ownerKind !== undefined ? { ownerKind: skin.ownerKind ?? null } : {}),
       ...(skin.rarityCode !== undefined ? { rarityCode: skin.rarityCode ?? null } : {}),
       ...(skin.rarityName !== undefined ? { rarityName: skin.rarityName ?? null } : {}),
+      ...(skin.rarityBasis !== undefined ? { rarityBasis: skin.rarityBasis ?? null } : {}),
+      ...(skin.isCollectible !== undefined ? { isCollectible: skin.isCollectible ?? null } : {}),
+      ...(skin.defaultState !== undefined ? { defaultState: skin.defaultState } : {}),
     })),
   };
 }
 /** User-facing skin type, only from the verified owner kind; never from category, colour or a legacy group. */
-export const SKIN_TYPE_LABELS: Readonly<Record<SkinOwnerKind, string>> = { AGENT: "干员外观", FIREARM: "枪械外观", MELEE_TYPE: "刀具外观" };
+export const SKIN_TYPE_LABELS: Readonly<Record<SkinOwnerKind, string>> = { AGENT: "干员外观", FIREARM: "枪械外观", MELEE_TYPE: "近战外观" };
 export function skinTypeLabel(kind: unknown): string | null {
   return typeof kind === "string" && Object.prototype.hasOwnProperty.call(SKIN_TYPE_LABELS, kind) ? SKIN_TYPE_LABELS[kind as SkinOwnerKind] : null;
 }

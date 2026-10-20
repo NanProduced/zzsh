@@ -284,6 +284,11 @@ export type CatalogSkin = {
   aliases: string[];
   namingState: "LEGACY" | "PENDING" | "VERIFIED";
   ownerRef: { kind: "AGENT" | "MELEE_TYPE" | "FIREARM"; id: string } | null;
+  ownerKind?: "AGENT" | "MELEE_TYPE" | "FIREARM" | null;
+  rarityEvidence?: { schema: "skin-rarity-evidence-v1"; basis: "PLATFORM_REFERENCE" | "OFFICIAL"; sourceName: string; references: Array<{ url: string; observedAt: string; region: string; note: string }> } | null;
+  isCollectible?: boolean | null;
+  defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
+  mediaSource?: { schema: "skin-media-source-v1"; kind: "PORTRAIT_CARD" | "MODEL_IMAGE" | "PROMO_POSTER"; sourceName: string; url: string } | null;
 };
 
 export type CatalogSkinOwner = { id: string; kind: "AGENT" | "MELEE_TYPE"; code: string; name: string; enabled: boolean };
@@ -391,8 +396,8 @@ export type PriceLineRecord = {
 export type FundingPolicy = {
   schema: "funding-policy-v1";
   policyVersion: string;
-  recommendation: {
-    schema: string;
+  recommendation: SkinDepositRecommendation | {
+    schema: "deposit-recommendation-v1";
     algorithm: string;
     version: string;
     currency: string;
@@ -432,6 +437,26 @@ export type FundingPolicy = {
   fullPayoutPolicyRef: string;
   fullPayoutPolicyVersion: string;
   disclosureVersion: string;
+};
+
+export type SkinDepositRule = { ownerKind: "AGENT" | "MELEE_TYPE" | "FIREARM"; rarityCode: string | null; firstCents: string | null; subsequentCents: string | null };
+export type SkinDepositRecommendation = {
+  schema: "deposit-recommendation-v2";
+  algorithm: "delta-deposit-type-rarity-v2";
+  version: "2";
+  currency: "CNY";
+  unit: "cent";
+  inputSpec: Record<string, unknown>;
+  parameters: {
+    safeBoxWeightsByCode: Record<string, string>;
+    vitalityAtLeast7Cents: string;
+    bearAtLeast7Cents: string;
+    diveAtLeast3Cents: string;
+    skinRules: SkinDepositRule[];
+    skinOverrides: Array<{ skinId: string; amountCents: string | null }>;
+    rounding: Record<string, string>;
+    upperLimitCents: string;
+  };
 };
 
 export type PriceVersionRecord = {
@@ -482,6 +507,11 @@ export type RulesResponse = {
   termOptions: TermOptionRecord[];
   agreementVersions: AgreementVersionRecord[];
   items: CatalogItem[];
+  depositCatalog?: {
+    catalogRevision: string;
+    rarities: Array<{ code: string; name: string; enabled: boolean }>;
+    skins: Array<{ id: string; name: string; ownerKind: "AGENT" | "MELEE_TYPE" | "FIREARM" | null; rarityCode: string | null }>;
+  };
 };
 
 export type MediaAssetReview = {

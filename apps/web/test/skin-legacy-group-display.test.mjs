@@ -27,7 +27,7 @@ function load(file, extra = {}) {
     if (n.endsWith('listing-view')) return listingView;
     if (n.endsWith('listing-filters')) return listingFilters;
     if (n.endsWith('supply-games')) return { DELTA_GAME_CODE: 'df' };
-    if (n.endsWith('skin-media-thumb')) return { SkinMediaThumb: Empty, skinCardTitle: (t) => t.name };
+    if (n.endsWith('skin-media-thumb')) return load(path.join(web, 'src/components/supply/skin-media-thumb.tsx'));
     if (n.includes('user-session-provider')) return { useUserSession: () => ({ status: 'authenticated', userId: 'SYNTHETIC' }), useUserSessionStore: Empty, publishUserSessionChange: Empty };
     if (n.includes('favorite-button')) return { FavoriteButton: Empty, FavoriteNotice: Empty };
     if (n.includes('rental-confirm-panel')) return { RentalConfirmPanel: Empty };
@@ -57,9 +57,9 @@ function renderDetail(skin) {
   assert.equal(JSON.stringify(data), bytes, 'detail payload unchanged');
   return html;
 }
-function renderOwner(skin) {
+function renderOwner(skin, versionPatch = {}) {
   const s = structuredClone(skin);
-  const value = freeze({ account: { id: 'ACCOUNT_SYNTHETIC', display_no: 'ZZ202610180000002', state: 'ACTIVE', owner_paused: false, staff_restricted: false }, version: { id: 'VERSION_SYNTHETIC', reviewState: 'DRAFT', declaration: { title: '测试账号', attributes: {}, inventory: [], skins: [s.id], entitlements: [], mediaBindings: [] }, presentation: { items: [], skins: [s], entitlements: [] }, quote: null, catalogItems: [] }, history: [], decisions: [], blockers: [] });
+  const value = freeze({ account: { id: 'ACCOUNT_SYNTHETIC', display_no: 'ZZ202610180000002', state: 'ACTIVE', owner_paused: false, staff_restricted: false }, version: { id: 'VERSION_SYNTHETIC', reviewState: 'DRAFT', declaration: { title: '测试账号', attributes: {}, inventory: [], skins: [s.id], entitlements: [], mediaBindings: [] }, presentation: { items: [], skins: [s], entitlements: [] }, quote: null, catalogItems: [], ...structuredClone(versionPatch) }, history: [], decisions: [], blockers: [] });
   const bytes = JSON.stringify(value);
   const html = renderToStaticMarkup(React.createElement(owner.AccountDetail, { detail: value, latest: null, busy: '', identityReady: true, onAction: async () => {}, onRefresh: () => {}, onAdopt: () => {} }));
   assert.equal(JSON.stringify(value), bytes, 'owner payload unchanged');
@@ -88,11 +88,60 @@ test('SK7-R1-01 owner workspace facet shows only verified type/quality, never th
     assert.ok(html.includes(fixtures[key].name), `${key} keeps the skin's own name, including 金 in a legitimate name`);
   }
   assert.equal(facet(renderOwner(fixtures.verifiedAgent), 'SKIN_AGENT'), '干员外观');
-  assert.equal(facet(renderOwner({ ...fixtures.verifiedAgent, rarityName: '测试品质' }), 'SKIN_AGENT'), '干员外观 · 测试品质');
+  assert.equal(facet(renderOwner({ ...fixtures.verifiedAgent, rarityName: '测试品质' }), 'SKIN_AGENT'), '干员外观');
+  assert.ok(renderOwner({ ...fixtures.verifiedAgent, rarityName: '测试品质' }).includes('测试品质'));
+});
+
+const oldDraftSkin = { ...fixtures.verifiedAgent, id: 'OLD_FROZEN_SKIN', name: '旧冻结外观' };
+const currentDraftSkin = { ...fixtures.verifiedAgent, id: 'CURRENT_DRAFT_SKIN', name: '当前草稿外观' };
+const draftDeclaration = (ids) => ({ title: '测试账号', attributes: {}, inventory: [], skins: ids, entitlements: [], mediaBindings: [] });
+const draftSkinSummary = (items, withheld = 0) => ({ source: 'CURRENT_DRAFT_SELECTION', catalogRevision: '25', items, withheld });
+
+test('owner unconfirmed native draft prefers current skin selection over a stale presentation without rewriting either', () => {
+  const html = renderOwner(oldDraftSkin, {
+    origin: 'NATIVE', contentHash: null, declaration: draftDeclaration([currentDraftSkin.id]), draftSkinSummary: draftSkinSummary([currentDraftSkin]),
+  });
+  assert.ok(html.includes('草稿已选皮肤'));
+  assert.ok(html.includes('当前草稿外观'));
+  assert.equal(html.includes('旧冻结外观'), false);
+  assert.ok(html.includes('尚未冻结或公开上架'));
+  assert.ok(html.includes('data-skin-summary-source="CURRENT_DRAFT_SELECTION"'));
+});
+
+test('owner draft legal empty selection overrides stale skins and withheld selections are counted honestly', () => {
+  const empty = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null, declaration: draftDeclaration([]), draftSkinSummary: draftSkinSummary([]) });
+  assert.equal(empty.includes('旧冻结外观'), false);
+  assert.ok(empty.includes('0 项已选皮肤'));
+  assert.ok(empty.includes('草稿尚未选择皮肤'));
+  const partial = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null, declaration: draftDeclaration([currentDraftSkin.id, 'WITHHELD']), draftSkinSummary: draftSkinSummary([currentDraftSkin], 1) });
+  assert.ok(partial.includes('2 项已选皮肤'));
+  assert.ok(partial.includes('另有 1 项已选皮肤当前不可展示'));
+  assert.ok(partial.includes('当前草稿外观'));
+  assert.equal(partial.includes('WITHHELD'), false, 'withheld names/IDs are not fabricated into the visible list');
+  const allWithheld = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null, declaration: draftDeclaration(['WITHHELD']), draftSkinSummary: draftSkinSummary([], 1) });
+  assert.ok(allWithheld.includes('1 项已选皮肤'));
+  assert.equal(allWithheld.includes('草稿尚未选择皮肤'), false, 'nonpublic selection is not a legal empty set');
+});
+
+test('owner older service and frozen/non-native versions keep their original presentation', () => {
+  const oldService = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null });
+  assert.ok(oldService.includes('旧冻结外观'));
+  assert.ok(oldService.includes('皮肤摘要暂未取得'));
+  assert.equal(oldService.includes('草稿已选皮肤'), false);
+  for (const patch of [
+    { origin: 'NATIVE', reviewState: 'DRAFT', contentHash: 'frozen_hash' },
+    { origin: 'NATIVE', reviewState: 'PUBLISHED', contentHash: 'frozen_hash' },
+    { origin: 'LEGACY', reviewState: 'DRAFT', contentHash: null },
+  ]) {
+    const html = renderOwner(oldDraftSkin, { ...patch, draftSkinSummary: draftSkinSummary([currentDraftSkin]) });
+    assert.ok(html.includes('旧冻结外观'));
+    assert.equal(html.includes('当前草稿外观'), false);
+    assert.equal(html.includes('草稿已选皮肤'), false);
+  }
 });
 
 test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, uses verified type only', () => {
-  function renderCard(skin) {
+  function renderCard(skin, viewMode = 'list', moreSkins = []) {
     const data = freeze({
       id: 'ACCOUNT_SYNTHETIC',
       gameId: 'GAME_SYNTHETIC',
@@ -103,7 +152,7 @@ test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, us
       displayNo: 'ZZ202610180000002',
       conditionLines: [],
       resourceLines: [],
-      skinTags: [structuredClone(skin)],
+      skinTags: [structuredClone(skin), ...structuredClone(moreSkins)],
       skinNames: [skin.name],
       skinLabels: [skin.name],
       media: [],
@@ -120,7 +169,7 @@ test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, us
       unitAmountsInformational: false,
     });
     const bytes = JSON.stringify(data);
-    const html = renderToStaticMarkup(React.createElement(card.AccountCard, { data, viewMode: 'list' }));
+    const html = renderToStaticMarkup(React.createElement(card.AccountCard, { data, viewMode }));
     assert.equal(JSON.stringify(data), bytes, 'card payload unchanged');
     return html;
   }
@@ -136,4 +185,13 @@ test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, us
   const agentHtml = renderCard(fixtures.verifiedAgent);
   assert.equal(agentHtml.includes(OLD), false);
   assert.ok(agentHtml.includes('[干员外观]'), 'verified agent skin renders verified type label in list card chip');
+  for (const viewMode of ['list', 'grid']) {
+    const skin = { ...fixtures.verifiedAgent, rarityName: '测试品质', mediaId: 'TEXT_ONLY_MEDIA' };
+    const more = Array.from({ length: 5 }, (_, i) => ({ ...skin, id: `SKIN_${i}`, name: `其他外观${i}` }));
+    const html = renderCard(skin, viewMode, more);
+    assert.equal(html.includes('/api/supply/media/'), false, `${viewMode}: list/home/favorites cards request no skin images`);
+    assert.equal(html.includes('TEXT_ONLY_MEDIA'), false);
+    assert.ok(html.includes('测试品质'), `${viewMode}: quality remains a text summary`);
+    assert.ok(html.includes('+3'), `${viewMode}: the remaining count stays visible`);
+  }
 });

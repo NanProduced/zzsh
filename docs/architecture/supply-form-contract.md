@@ -14,7 +14,11 @@
 
 旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员资格、个人确认凭据及新版建单已实现，见[个人确认合同](personal-confirmation.md)。正式声明、封存资金政策与保证金依据reader及核定API已接入；资金政策页面与推荐/披露接线仍有缺口；独立包赔正文版本及签发/首次建单末端检查已具备源码合同，对应新增数据库守卫与schema须部署并完成真实边界验收，缺依赖继续拒绝，不代表正式交易闭环已可用。
 
-用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。号主侧推荐押金由 `GET /accounts/{id}/deposit-recommendation` 按当前版本申报与正式 fundingPolicy 计算；成功时返回 `accountId/accountRevision/versionId/versionRevision/ruleReleaseId/priceVersionId` 与本次计算使用的规范化输入字段对象（`safeBoxCode/vitality/bear/dive/skinIds`），客户端必须与发起请求时的保存快照逐项比对，不匹配即标记过期且不提供采用；未配置政策或输入不足时返回 `available:false` 及原因，不返回猜测值。是否采用由号主决定，不会自动覆盖申报。Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:"full-payout-declaration-v1",selected:boolean}`，并参与现有内容 hash 与发布事实（历史审核流程保留真实决定）；字段缺省时继续省略，不改写旧 v1 hash。发布 UI 已提供普通/全额包赔申报控件（不自动勾选，最低金额以政策为准）；确认/账务的受控 test/fake 接线不代表正式配置或生产资金能力。
+用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。号主侧 `GET /accounts/{id}/deposit-recommendation` 只为原生DRAFT按已保存申报与生效fundingPolicy计算，返回 `recommendationSchema`、`accountId/accountRevision/versionId/versionRevision/ruleReleaseId/priceVersionId` 及规范化 `inputs`；未配置政策或输入不足时返回 `available:false` 及原因，不补猜测值。客户端核对账号、版本、规则及声明输入，号主显式采用后才填入基础租客押金，不自动改变最终计价。
+
+推荐v1保留原 `safeBoxCode/vitality/bear/dive/skinIds` 与红/金分组政策的冻结回放；不将其金额或分组自动迁为v2。推荐v2为 `deposit-recommendation-v2`，在这些输入外由服务端生成 `skinFacts={schema:"deposit-skin-facts-v1",gameId,listingVersionId,catalogRevision,skins:[{skinId,ownerKind,rarityCode}]}`，必须与申报皮肤集合完全一致，空集合也显式返回。按单词条覆盖优先，再按类型+品质规则匹配；未匹配品质使用该类型显式null兜底，余下每组按首件/后续每件累计。金额是整数分文本，0须显式配置；null为待配置，不能封存为有效推荐。典藏和默认状态不自动加价，其他押金规则保持；总额沿既有向上取50元整、零值兜底50元及政策上限处理。Web仅对照目录核事实，不计算推荐金额；v2采用前重读目录核游戏、版本、目录修订及逐skin类型/品质，已观察到的变化或读取失败使推荐不可采用。采用后发现目录变化标记过期，保留号主已填申报，须重新查看推荐。
+
+Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:"full-payout-declaration-v1",selected:boolean}`，并参与现有内容 hash 与发布事实（历史审核流程保留真实决定）；字段缺省时继续省略，不改写旧 v1 hash。发布 UI 已提供普通/全额包赔申报控件（不自动勾选，最低金额以政策为准）；确认/账务的受控 test/fake 接线不代表正式配置或生产资金能力。
 
 ## 直接发布与公开事实（PUB-1/2）
 
@@ -28,10 +32,16 @@
 |---|---|---|
 | basics | 不要求号主输入标题或游戏内ID；description为可选公开备注，受控attributes与安全箱/等级按目录申报 | title保留内部兼容，允许为空；展示端为空时从当前版本资源和状态派生摘要。未知保留null，不默认0 |
 | inventory | publishing-catalog.items的稳定itemId及HAFF_BASE/ROUND/PIECE/DAY数量文本 | inputScale=0；必填填数量或0，空值留草稿且不发送为库存行；未定价blockers阻止提交，不补价格 |
-| skins | 可见分类树、q/categoryId/rarityCode、分页多选skinId | 搜索仅筛皮肤；未选择为未申报，不自动加价 |
+| skins | 可见分类树、q/categoryId/rarityCode/ownerId、分页多选skinId | 发布目录q只筛皮肤名称/别名/所属，不过滤物资；分类、搜索和翻页保留已选ID，不自动增加租赁费 |
 | entitlements | 目录valueKind/expiryKind、声明值及已知到期时间 | 限时未知不形成承诺；报价失败定位entitlements |
 | media | 账号展示图及处罚公示图均使用ACCOUNT_DISPLAY；其他已有ACCOUNT_EVIDENCE继续私有 | 绑定带assetId/position及可选category（SHOWCASE/PENALTY）。分类保存于当前版本attributes.media_categories并参与已有内容哈希，不改素材source_note；省略该键不改变旧声明的字节合同。公开媒体集合以封存payload为准，处罚图不能作为封面或替代必需展示图。SavedDeclaration附带用途/byteHash及只读公开状态；公开路由仍检查归属、版本、暂停/隔离及衍生文件 |
 | rules | 当前租期/计价选项、权威OwnerQuote、对应封存协议正文 | quote→accept-rules→submit，确认绑定versionId/releaseId/contentHash和expectedRevision |
+
+皮肤公开摘要包含 `ownerKind/rarityCode/rarityName/rarityBasis/isCollectible/defaultState/mediaId`；`rarityBasis`区分OFFICIAL与PLATFORM_REFERENCE，品质及典藏未知为null，默认状态为UNKNOWN/DEFAULT/NON_DEFAULT。同游戏完整可见目录提供 `owners:[{id,kind,name}]`；分类的ownerKind由含子分类的全部可见引用推导，混合/未知/空为null，不由当前分页猜测。管理端另有完整品质证据和图片来源，见[API合同](api-v1-contract.md)。
+
+上架/编辑、市场皮肤筛选及公开/本人账号详情可显示经平台媒体门禁的皮肤图片；干员竖卡、枪械/近战横图等比显示，缺图或失败保持明确状态。账号列表/卡片、首页和收藏仅显示名称、品质等文字摘要及余量，不显示皮肤图片。目录有图不证明持有；新报价冻结本次皮肤摘要，旧冻结快照缺失的新增字段继续缺省，不补写历史。
+
+本人私有详情对origin=NATIVE、DRAFT且contentHash=null的版本可附`draftSkinSummary={source:"CURRENT_DRAFT_SELECTION",catalogRevision,items,withheld}`，优先展示当前已选目录摘要（含合法空集合），不可展示项只记数量。它不改写旧presentation、不代表已冻结展示或公开上架；已确认/冻结版本仍使用原presentation，缺新字段的旧服务保持兼容并提示进入编辑核对。
 
 草稿创建/复制、保存、报价、接受/提交、撤回、暂停/恢复、我的账号和收藏已提供用户API调用封装。草稿允许不完整，提交后正文不可改；退回/撤回后新草稿。我的账号包含历史/审核原因与逐资产媒体状态；权限或资格不满足由blockers解释，公开收藏失效只显示通用不可用状态。公开列表`q`只搜标题，由服务端过滤全量结果；公开详情的安全箱/租期/每日消耗来自当前有效发布版本快照，缺值为null，不能写成“号主未申报”。
 

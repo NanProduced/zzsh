@@ -46,7 +46,7 @@ export const OBJECT_EMPTY_HINT: Record<CatalogKind, string> = {
   categories: "创建第一个分类后，皮肤才有可挂接的分组。",
   skins: "皮肤需要先有至少一个皮肤分类；创建后为停用待核草稿，身份确认与启用是独立动作。",
   "skin-owners": "创建干员或刀型本体后，皮肤才能挂接归属；枪械归属在改枪码目录维护。",
-  rarities: "创建受控品质词表后，皮肤才能标注有依据的官方品质；停用的品质不能再新选。",
+  rarities: "创建受控品质词表后，皮肤可按明确的官方或平台来源标注品质；停用的品质不能再新选。",
   entitlements: "创建权益词表后，账号属性才有可读取的类型。",
 };
 
@@ -158,9 +158,28 @@ export function ownerText(
   return `${owner.name}（${ownerRef.kind === "AGENT" ? "干员" : "刀型"}）${owner.enabled ? "" : " · 已停用"}`;
 }
 
+export const skinOwnerKind = (skin: Pick<CatalogSkin, "ownerKind" | "ownerRef">) => skin.ownerKind ?? skin.ownerRef?.kind ?? null;
+export function skinIsSelectable(skin: CatalogSkin, catalog: AdminCatalogResponse): boolean {
+  if (!catalog.game.enabled || !skin.enabled || !skin.formVisible || skin.namingState !== "VERIFIED") return false;
+  const seen = new Set<string>();
+  let categoryId: string | null = skin.categoryId;
+  while (categoryId !== null) {
+    if (seen.has(categoryId)) return false;
+    seen.add(categoryId);
+    const category = catalog.categories.find(row => row.id === categoryId);
+    if (!category?.enabled || !category.formVisible) return false;
+    categoryId = category.parentId;
+  }
+  return true;
+}
+export function skinRarityBasisText(skin: CatalogSkin): string {
+  return skin.rarityEvidence?.basis === "OFFICIAL" ? "官方已核" : skin.rarityEvidence?.basis === "PLATFORM_REFERENCE" ? "平台参考" : "品质依据待补";
+}
+
 export function skinNextSteps(skin: CatalogSkin): string[] {
   const steps: string[] = [];
-  if (skin.namingState !== "VERIFIED") steps.push("身份待核实：对照官方源确认后转为已核实");
+  if (skin.namingState !== "VERIFIED") steps.push("身份待核实：对照身份依据确认后转为已核实");
+  if (skin.rarityCode && !skin.rarityEvidence) steps.push("品质依据待补：与身份核实分开维护");
   if (skin.namingState === "VERIFIED" && !skin.enabled) steps.push("已核实但未启用：可单独启用");
   if (!skin.mediaId) steps.push("未绑定图片：绑图不是启用前置，仅影响公开投影");
   if (!skin.formVisible) steps.push("发布表单隐藏中");
@@ -184,10 +203,11 @@ export const COLUMN_SETS: Record<CatalogKind, Array<{ key: string; label: string
   ],
   skins: [
     { key: "media", label: "图片" },
-    { key: "ownerRef", label: "所属对象" },
+    { key: "ownerRef", label: "类型与所属" },
     { key: "namingState", label: "身份状态" },
     { key: "categoryPath", label: "分类" },
     { key: "rarityCode", label: "品质" },
+    { key: "appearance", label: "外观属性" },
     { key: "enabled", label: "状态" },
     { key: "formVisible", label: "表单展示" },
   ],

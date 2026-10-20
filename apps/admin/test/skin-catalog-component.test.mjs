@@ -38,7 +38,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       await act(async () => node.click());
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
       const LABEL_FOR = { FIREARM: "枪械", MELEE_TYPE: "刀型", AGENT: "干员" };
-      const option = [...document.querySelectorAll('[role="option"]')].find(o => o.textContent.includes(LABEL_FOR[value] ?? value));
+      const option = [...document.querySelectorAll('[role="option"]')].find(o => o.textContent.includes(LABEL_FOR[value] ?? value) || (value === "MELEE_TYPE" && o.textContent.includes("近战外观")));
       assert.ok(option, "option " + value);
       await act(async () => option.click());
       return;
@@ -58,7 +58,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     if (!record) { record = kind === "skins" ? { ...skin("created", "PENDING"), ...body, id: "created", sourceNamespace: null, sourceField: null, sourceToken: null } : { id: "created-owner", ...body, enabled: true }; model[kind].push(record); }
     else {
       Object.assign(record, body);
-      if (body.confirmIdentity) { record.namingState = "VERIFIED"; record.name = (body.ownerRef.kind === "FIREARM" ? "Gun" : model.owners.find(o => o.id === body.ownerRef.id)?.name) + "-" + body.baseName; }
+      if (body.confirmIdentity) { record.namingState = "VERIFIED"; record.name = body.ownerRef ? (body.ownerRef.kind === "FIREARM" ? "Gun" : model.owners.find(o => o.id === body.ownerRef.id)?.name) + "-" + body.baseName : body.baseName; }
     }
     return { id: record.id, code: record.code, catalogRevision: model.game.catalogRevision, ...(kind === "skins" ? { namingState: record.namingState } : { kind: record.kind, enabled: record.enabled }) };
   }
@@ -126,6 +126,13 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Renamed"); await fill("操作原因", "Row reason"); await saveRow(); assert.equal(writes[0].body.name, "Renamed"); for (const key of ["sourceNamespace", "sourceField", "sourceToken", "enabled", "namingState", "id", "code"]) assert.ok(!(key in writes[0].body), key);
       await click("编辑", row("verified")); assert.equal(field("名称").disabled, true); await click("详情", row("verified")); await fill("别名（每行一个）", "Verified alias"); await click("保存", document.querySelector('[role="dialog"]')); assert.ok(!("name" in writes[1].body)); assert.deepEqual(writes[1].body.aliases, ["Verified alias"]);
     });
+    await t.test("both source-name inputs expose the server's 100-character limit", async () => {
+      await mount(); await click("详情", row("legacy"));
+      assert.match(document.body.textContent, /先保存词条并绑定平台图片，再记录图片来源/);
+      assert.equal(field("品质来源名称").maxLength, 100);
+      await fill("更新图片来源", "填写本次来源"); assert.equal(field("图片来源名称").maxLength, 100);
+      assert.equal(writes.length, 0);
+    });
     await t.test("source attaches only by explicit choice and keeps exact old token", async () => {
       await mount(); await click("编辑", row("legacy")); await click("详情"); const box = document.querySelector('[role="dialog"] [role="checkbox"]'); await act(async () => box.click()); await fill("来源命名空间", "legacy.sg_zzsh"); assert.equal(field("来源字段").readOnly, true); assert.equal(field("原始来源值").readOnly, true); await review(); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes[0].body.sourceToken, " raw legacy "); assert.equal(writes[0].body.sourceField, "agent_skin"); assert.equal(writes[0].body.sourceNamespace, "legacy.sg_zzsh");
     });
@@ -153,6 +160,17 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     await t.test("409 preserves modified input, requires explicit version adoption and a new key", async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Kept input"); await fill("操作原因", "Row reason"); policy = "conflict"; await saveRow(); assert.equal(field("名称").value, "Kept input"); assert.equal(writes[0].body.expectedCatalogRevision, "10"); assert.equal(byText("保存").disabled, true);
       policy = "ok"; await click("读取最新目录"); assert.equal(writes.length, 1); assert.equal(field("名称").value, "Kept input"); await click("采用当前版本并保留输入"); await saveRow(); assert.equal(writes[1].body.expectedCatalogRevision, "11"); assert.notEqual(writes[1].key, writes[0].key); assert.equal(writes[1].body.name, "Kept input");
+    });
+    await t.test("409 adoption preserves concurrent metadata while keeping only the operator's edited fields", async () => {
+      await mount(); await click("编辑", row("legacy")); await fill("名称", "Alias-only editing"); await fill("操作原因", "Keep concurrent metadata"); policy = "conflict"; await saveRow();
+      Object.assign(model.skins.find(skin => skin.id === "legacy"), { isCollectible: true, defaultState: "NON_DEFAULT" });
+      policy = "ok"; await click("读取最新目录"); await click("采用当前版本并保留输入"); await saveRow();
+      assert.equal(writes[1].body.name, "Alias-only editing");
+      assert.equal(Object.hasOwn(writes[1].body, "isCollectible"), false); assert.equal(Object.hasOwn(writes[1].body, "defaultState"), false);
+    });
+    await t.test("melee identity can confirm its type and keep concrete knife identity unknown", async () => {
+      await mount(); await click("确认身份", row("pending")); await fill("所属对象类型", "MELEE_TYPE"); await fill("皮肤本名", "Synthetic melee"); await review(); await click("保存", document.querySelector('[role="dialog"]'));
+      assert.equal(writes.length, 1); assert.equal(writes[0].body.ownerKind, "MELEE_TYPE"); assert.equal(writes[0].body.ownerRef, null);
     });
     for (const mode of ["network", "invalid-receipt"]) await t.test(`${mode} restores the original method/body/key even after catalog refresh`, async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Unknown result"); await fill("操作原因", "Row reason"); policy = mode; await saveRow(); assert.equal(field("名称").disabled, true); assert.ok(byText("核对原提交")); model.game.catalogRevision = "99";

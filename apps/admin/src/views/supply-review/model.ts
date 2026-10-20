@@ -147,7 +147,7 @@ export type AttributeDisplay = {
 };
 
 export type PresentationItem = { id: string; name: string; unit: string };
-export type PresentationSkin = { id: string; name: string; categoryCode?: string; categoryName?: string };
+export type PresentationSkin = { id: string; name: string; categoryCode?: string; categoryName?: string; ownerKind?: "AGENT" | "FIREARM" | "MELEE_TYPE" | null; rarityName?: string | null; rarityBasis?: "OFFICIAL" | "PLATFORM_REFERENCE" | null; isCollectible?: boolean | null; defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT" };
 export type Presentation = {
   items?: PresentationItem[];
   skins?: PresentationSkin[];
@@ -545,7 +545,10 @@ export function inventoryRows(
 export function skinsText(version: Version): string {
   return (
     version.presentation.skins
-      ?.map((skin) => (skin.categoryName ? `${skin.categoryName} · ${skin.name}` : skin.name))
+      ?.map(skin => {
+        const type = skin.ownerKind === "AGENT" ? "干员" : skin.ownerKind === "FIREARM" ? "枪械" : skin.ownerKind === "MELEE_TYPE" ? "近战外观" : skin.categoryName;
+        return [type, skin.name, skin.rarityName, skin.rarityBasis === "PLATFORM_REFERENCE" ? "品质为平台参考" : null, skin.isCollectible === true ? "典藏" : null, skin.defaultState === "DEFAULT" ? "默认外观" : null].filter(Boolean).join(" · ");
+      })
       .join("、") || (version.declaration?.skins?.length ? "皮肤名称或归属尚未核齐" : version.declaration ? "未申报皮肤" : "皮肤资料未提供")
   );
 }

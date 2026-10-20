@@ -1,6 +1,6 @@
 # 旧数据转换与字段映射
 
-规则版 `1.3.2`（2026-10-19，明确附加皮肤持有集合的共同读取优先级）。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
+规则版 `1.3.2`（2026-10-19，明确附加皮肤持有集合的共同读取优先级）；2026-10-20补齐皮肤目录字段说明，持有转换规则未变。本页记录当前转换语义及双端消费边界；规则存在、批次已执行、真实接口/页面已验收分别核定。旧行为与新政策差异见[业务对照](legacy-business-behavior-diff.md)，不以页面展示成功代替迁移对账。
 
 ## 共同约束
 
@@ -25,7 +25,7 @@
 | SUP-MODE-009/PRICE-011/TERM-012 | `ratio_type`映ordinary/custom/fast；custom/fast的B只取已证`base_bot`，不反推。历史`price_tenant/extra_goods_total_price_tenant/deposit_amount/rental_days`保原义，不造当前价。 | 当前价须由`zzsh_supply.price_version/price_line`、`term_option`和受审release/政策构成；`saveListingDraft→quoteListing→确认/建单`消费。Web显示服务器报价；Admin规则与双边价。旧四档计价枚举不是新会员产品。 |
 | SUP-DISPLAY-018 | 历史快照中已冻结的哈夫币base数量与该行租金可作展示折算；用整数精确计算、沿既有HALF_UP显示万/元，零租金或缺数量保持未知。 | `historicalQuote.haffRent`只供HAFF_BASE行的展示参考，不用物资合计/押金，不代表已取回原`base_bot`或`ownerRatioB`。不写回源快照/历史单价，不参与报价或结算。当前承接输入未提供逐项物资价，不能外推原MySQL不存在该事实；后续补源仍须证明有效时点，不能拿现行价或合计分摊。 |
 | SUP-CATALOG-013/MEDIA-017 | `la_dict_type/la_dict_data`保资源/皮肤字典身份；`knife_skin/agent_skin/weapon_skin/gold_skin`是持有声明，不等于新skinId。原图URL/path不证明目标asset字节或归属。 | `zzsh_supply.billable_item/skin/listing_skin`分别保存字典和持有关系；媒体须另核sourceRef→`media_asset`→`listing_media`。无图不造URL，私有凭证不作封面；ECS文件迁OSS与数据库字段转换分别验收，发布媒体门禁仍有效。 |
-| SUP-SKIN-019 | 旧红皮/金皮分组只留来源对照，不推导类型或品质。类型由已核所属对象决定；品质只接受同游戏的官方字典，未知保持null。目录配图不证明账号持有，持有仍须来源声明→skinId映射。 | 复用`skin.owner_kind/owner_id/firearm_id/rarity_code`及`skin_owner/firearm/skin_rarity`；公开目录、旧账号公开摘要及双端按同一类型和品质标签显示。新报价快照冻结`ownerKind/rarityCode/rarityName`，旧原生快照不补写这些字段；公开媒体仍经审核、同游戏及分类祖先门禁。新绑/改绑须启用品质，无关编辑可保留原停用品质或清空，不改价格或押金。 |
+| SUP-SKIN-019 | 旧红皮/金皮分组只留来源对照，不推导类型或品质。类型使用已核ownerKind，近战实体可未细分具体刀型；品质取同游戏字典并区分官方/平台参考依据，未知保持null。典藏与默认状态独立，不自动加价。目录配图不证明账号持有，持有仍须来源声明→skinId映射。 | 复用`skin.owner_kind/owner_id/firearm_id/rarity_code`及`skin_owner/firearm/skin_rarity`，新增品质证据、典藏、默认状态和图片来源。公开摘要为`ownerKind/rarityCode/rarityName/rarityBasis/isCollectible/defaultState`；新报价冻结本次摘要，旧冻结快照不补写缺失字段。新/改绑品质须启用品质及显式证据，无关编辑可保留旧停用品质或缺证据值。公开图片仍核同游戏、审核、衍生图及分类祖先；展示与推荐政策不改写历史资金事实。 |
 | SUP-VIS-014 / SUP-NUM-015 v2 | `status/is_delete/update_time`保冻结来源租态；`no`只作为内部旧号alias，保前导零。公开查看、当前可租、本人本次可交易分开。 | `rental_account.display_no`新发`ZZYYYYMMDDNNNNNN`；`zzsh_supply.account_display_no_counter`按数据库上海日期原子计数，经`next_dated_account_display_no()`与账号同事务持久分配。旧已发AC仅兼容读取/重放，不清号；缺新增能力拒绝新发。旧账号先公开准入集合，其余首次准入时发，原生仍创建时发。用户不回退旧alias，Admin可内部解析，发号不提升资格，见[可见性与编号](account-visibility.md)。 |
 | IO-ORD-01…08 | `la_order.id/order_sn/accounts_id/sale_user_id/user_id`及金额、状态、原时间分别核绑定；`order_sn`原单号与账号canonical号独立。 | `zzsh_order.legacy_order_read_snapshot`保存来源、双方、金额和时间；不伪造原生付款。统一列表/历史详情与Admin订单读按角色授权；不可读账号不泄旧号/当前私有标题，见[用户旧单](user-legacy-orders.md)。 |
 | IO-CONT-01…07 | 原订单实耗参数、退款/暂扣及多态分销来源按原规则和证据计算；calc provenance、输入与结果血缘分列。 | `zzsh_order.legacy_continuation_evidence/version`及head，结果不覆盖原快照；续办命令绑定同版计划/身份/权限，处置delta不清既有金额，版本/责任/CAS/幂等/审计同事务，见[旧单续办](legacy-trade-continuation.md)。 |
@@ -37,6 +37,10 @@
 | GF-WITHDRAW-010/DISTRIBUTION-011 | `la_withdraw_apply`金额/费用/旧状态/时间保原；`la_distribution`资格、邀请关系与6级比例保原文本，旧FLOAT不经parseFloat近似。 | 提现仅历史观察、不再扣款，渠道UNKNOWN；新分销政策/资格/关系与历史佣金分别准入。Web本人条款/收益/提现与Admin分销/财务不把旧状态当新渠道成功，用户不获全局比例表。 |
 
 后补皮肤持有采用规则 `SUP-SKIN-020`：服务端受信上下文绑定封存四列、来源截点、来源与目标摘要、映射规则及目录版本，写入前重算完整集合，并核对实际账号和观察版本。附加事实保存在 `zzsh_supply.legacy_skin_holding`，不修改不可变观察的子表；合法空集合覆盖旧关联，缺列、歧义或未核词条保持未知。同观察版本存在附加持有事实时，公开详情、ANY/ALL筛选与新草稿继承共同采用该完整集合（含合法空）；不存在时才回退原listing_skin，原生版本仍读取自身关系。新草稿后续按正常声明合同编辑；目录配图仍不证明持有。数据库约束和运行权限须随对应迁移部署，不能只更新读取代码。
+
+既有9项来源歧义（影锋、AUG-气象感应、K416-命运、M4棱镜攻势、M7棱镜攻势、QBZ95-王牌之剑、SCAR-电玩、Vctor-冲锋枪-美杜莎、腾龙-气象感应）继续按`SOURCE_AMBIGUOUS`阻止持有准入。`buildLegacySkinIndex/mapLegacySkinHolding`优先保留该来源规则；目录后来VERIFIED、补图或修名都不能自动解除歧义，跨字段同名仍是不同source tuple。
+
+旧目录机械规范化只经受控`confirmLegacySkinIdentity`服务入口：本地已审artifact引用、SHA和recordDigest绑定code、原source tuple、同owner、旧/新baseName；显式normalization要求VERIFIED、旧base逐字匹配和预期catalogRevision。版本检查/CAS及审计在调用方原事务内完成，仅改目录名称/基础名并保留旧name及全部aliases，不改所属、来源、可见状态、历史观察、持有映射或冻结旧快照。不将本地差集称为官方命名证明，也不将源码支持计为实际迁移完成。
 
 ## 旧公共内容（CONTENT-HISTORY-020）
 

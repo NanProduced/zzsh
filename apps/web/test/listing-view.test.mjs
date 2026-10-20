@@ -618,13 +618,13 @@ import * as listingViewSk7 from '../src/lib/listing-view.ts';
 
 test('SK7 skin type comes only from owner kind and quality only from the delivered name', () => {
   const { skinTypeLabel, skinQualityLabel, skinFacetLabel, SKIN_TYPE_LABELS } = listingViewSk7;
-  assert.deepEqual(SKIN_TYPE_LABELS, { AGENT: '干员外观', FIREARM: '枪械外观', MELEE_TYPE: '刀具外观' });
+  assert.deepEqual(SKIN_TYPE_LABELS, { AGENT: '干员外观', FIREARM: '枪械外观', MELEE_TYPE: '近战外观' });
   for (const kind of ['CATEGORY', undefined, null, 'toString', 'agent']) assert.equal(skinTypeLabel(kind), null, String(kind));
   assert.equal(skinQualityLabel({ rarityName: '  ' }), null);
   assert.equal(skinQualityLabel({ rarityCode: 'q_fixture' }), null, 'a bare code is never turned into a label');
   assert.equal(skinQualityLabel({ name: 'M4A1 金色', categoryName: '干员金皮（旧分组）' }), null, 'red/gold names or legacy groups never become a quality');
   assert.equal(skinFacetLabel({ ownerKind: 'AGENT', rarityName: ' 测试品质 ' }), '干员外观 · 测试品质');
-  assert.equal(skinFacetLabel({ ownerKind: 'MELEE_TYPE' }), '刀具外观');
+  assert.equal(skinFacetLabel({ ownerKind: 'MELEE_TYPE' }), '近战外观');
   assert.equal(skinFacetLabel({ rarityName: '测试品质' }), '测试品质');
   assert.equal(skinFacetLabel({ categoryName: '干员金皮（旧分组）' }), null);
 });
@@ -632,7 +632,7 @@ test('SK7 skin type comes only from owner kind and quality only from the deliver
 test('SK7 list and detail project the same id, type and quality; absent snapshot keys stay absent', () => {
   const l = structuredClone(listing);
   l.presentation.skins = [
-    { id: 's1', name: '露娜-黑·天际线', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q1', rarityName: '品质甲', categoryName: '干员外观' },
+    { id: 's1', name: '露娜-黑·天际线', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q1', rarityName: '品质甲', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: false, defaultState: 'NON_DEFAULT', categoryName: '干员外观' },
     { id: 's2', name: '露娜-另一外观', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q2', rarityName: '品质乙', categoryName: '干员外观' },
     { id: 's3', name: '战术斧头-黑鹰', baseName: '黑鹰', ownerName: '战术斧头', ownerKind: 'MELEE_TYPE', rarityCode: null, rarityName: null, categoryName: '近战相关待核词条' },
     { id: 's4', name: 'Vector-黑鹰', baseName: '黑鹰', ownerName: 'Vector', ownerKind: 'FIREARM', rarityCode: null, rarityName: null, categoryName: '枪械外观' },
@@ -643,9 +643,10 @@ test('SK7 list and detail project the same id, type and quality; absent snapshot
   const tags = card.skinTags;
   assert.deepEqual(tags.map((t) => t.id), ['s1', 's2', 's3', 's4', 's5']);
   const facets = tags.map((t) => listingViewSk7.skinFacetLabel(t));
-  assert.deepEqual(facets, ['干员外观 · 品质甲', '干员外观 · 品质乙', '刀具外观', '枪械外观', null], 'same type, different quality; same base name, different owner type');
+  assert.deepEqual(facets, ['干员外观 · 品质甲', '干员外观 · 品质乙', '近战外观', '枪械外观', null], 'same type, different quality; same base name, different owner type');
+  assert.deepEqual([tags[0].rarityBasis, tags[0].isCollectible, tags[0].defaultState], ['PLATFORM_REFERENCE', false, 'NON_DEFAULT']);
   assert.deepEqual([tags[2].ownerKind, tags[2].rarityName], ['MELEE_TYPE', null]);
-  for (const key of ['ownerKind', 'rarityCode', 'rarityName']) assert.equal(Object.hasOwn(tags[4], key), false, `old snapshot keeps ${key} absent`);
+  for (const key of ['ownerKind', 'rarityCode', 'rarityName', 'rarityBasis', 'isCollectible', 'defaultState']) assert.equal(Object.hasOwn(tags[4], key), false, `old snapshot keeps ${key} absent`);
 });
 
 test('SK7 chip tone prefers the verified owner kind over category text', () => {
