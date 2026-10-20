@@ -106,15 +106,43 @@ test("mixed candidates merge both sources once with native priority and one seek
   assert.match(sql.text,/WITH native AS/);assert.match(sql.text,/legacy AS/);assert.match(sql.text,/UNION ALL/);
   assert.match(sql.text,/DISTINCT ON \(id\)/);assert.match(sql.text,/0 AS priority/);assert.match(sql.text,/1 AS priority/);
   assert.match(sql.text,/ORDER BY id,priority/);
-  assert.match(sql.text,/WHERE \(sort_key < \$[0-9]+::timestamptz OR sort_key IS NULL OR \(sort_key=\$[0-9]+::timestamptz AND id>\$[0-9]+\)\)/);
-  assert.match(sql.text,/ORDER BY sort_key DESC NULLS LAST,id ASC LIMIT 200/);
+  const branches=sql.text.slice(0,sql.text.indexOf("merged AS"));
+  // The seek rides inside both branches, so the merged set only ever carries rows
+  // past the cursor; the final order/limit still runs once over the merged set.
+  // Each branch repeats its own sort expression and a qualified account id: an
+  // output alias such as sort_key is not visible in the same SELECT's WHERE, and
+  // an unqualified id is ambiguous between the account and its version.
+  assert.match(branches,/pub\.published_at < \$[0-9]+::timestamptz OR pub\.published_at IS NULL OR \(pub\.published_at=\$[0-9]+::timestamptz AND a\.id>\$[0-9]+\)/,"the native branch seeks on its own publication timestamp");
+  assert.match(branches,/h\.source_updated_at < \$[0-9]+::timestamptz OR h\.source_updated_at IS NULL OR \(h\.source_updated_at=\$[0-9]+::timestamptz AND a\.id>\$[0-9]+\)/,"the legacy branch seeks on its own snapshot timestamp");
+  // An empty seek conjunct would leave a dangling AND in a branch WHERE.
+  assert.doesNotMatch(sql.text,/\bAND\s*\)/,"no branch WHERE ends in a dangling AND");
+  assert.doesNotMatch(branches,/\(sort_key IS NULL AND id>|\(sort_key [<>]|\(sort_key=/,"no branch WHERE names the SELECT output alias or an unqualified id");
+  assert.doesNotMatch(sql.text,/candidates AS/);
+  assert.match(sql.text,/FROM merged ORDER BY sort_key DESC NULLS LAST,id ASC LIMIT 200/);
   assert.match(sql.text,/v\.payload#>.\{declaration,attributes\}'/);
   assert.match(sql.text,/\(COALESCE\(d\.snapshot->'attributes',v\.attributes\)\)->>'safe_box_code'/);
   assert.match(sql.text,/NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication p WHERE p\.account_id=a\.id\)/);
   assert.match(sql.text,/v\.review_state='PUBLISHED' AND pub\.source='OWNER_DIRECT'/);
+  const noCursor=buildMixedListingCandidates(q,null);
+  assert.doesNotMatch(noCursor.text,/\bAND\s*\)/,"no cursor contributes no seek conjunct at all");
+  assert.doesNotMatch(noCursor.text.slice(0,noCursor.text.indexOf("merged AS")),/a\.id>/,"no cursor means no seek predicate in either branch");
+  const nullKey=buildMixedListingCandidates(q,{id:"acc",key:null,isNull:true});
+  assert.equal(nullKey.text.match(/pub\.published_at IS NULL AND a\.id>\$[0-9]+/g)?.length,1,"the native branch carries the null-key seek");
+  assert.equal(nullKey.text.match(/h\.source_updated_at IS NULL AND a\.id>\$[0-9]+/g)?.length,1,"the legacy branch carries the null-key seek");
+  assert.doesNotMatch(nullKey.text,/\bAND\s*\)/);
+  const ascending=buildMixedListingCandidates(parseListingQueryV2(new URLSearchParams(`queryVersion=2&gameId=game&sort=latest&direction=ASC&filters=${filters}`),"/listings"),{id:"acc",key:"2026-09-18T00:00:00.123456Z",isNull:false});
+  assert.match(ascending.text,/pub\.published_at > \$[0-9]+::timestamptz/,"ascending flips only the comparison");
+  assert.match(ascending.text,/h\.source_updated_at > \$[0-9]+::timestamptz/);
+  assert.match(ascending.text,/ORDER BY sort_key ASC NULLS LAST,id ASC LIMIT 200/);
   const priced=parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=game&sort=resourceTotal"),"/listings");
   const pricedSql=buildMixedListingCandidates(priced,null);
   assert.match(pricedSql.text,/h\.snapshot->>'haffRentYuan'/);assert.match(pricedSql.text,/quoteValues,resourceTotal,amount/);
+  assert.doesNotMatch(pricedSql.text,/\bAND\s*\)/);
+  const pricedCursor=buildMixedListingCandidates(priced,{id:"acc",key:"100.00",isNull:false});
+  const pricedBranches=pricedCursor.text.slice(0,pricedCursor.text.indexOf("merged AS"));
+  assert.match(pricedBranches,/\(\(h\.snapshot->>'haffRentYuan'\)::numeric\+\(h\.snapshot->>'goodsYuan'\)::numeric\) < \$[0-9]+::numeric/,"the legacy branch seeks on its own amount expression");
+  assert.match(pricedBranches,/a\.id>\$[0-9]+\)\)/,"the legacy branch qualifies the account id in the seek");
+  assert.doesNotMatch(pricedCursor.text,/\bAND\s*\)/);
   const core=parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=game&sort=coreQuantity&coreItemId=haff"),"/listings");
   const coreSql=buildMixedListingCandidates(core,null);
   const refs=[...coreSql.text.matchAll(/l\.item_id=\$(\d+)/g)].map(m=>m[1]);

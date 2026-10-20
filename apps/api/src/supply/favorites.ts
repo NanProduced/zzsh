@@ -11,6 +11,7 @@ import {
 } from "../auth/security-core";
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import {
+  listingCandidatePage,
   readPublicListing,
   readPublishingAccount,
   unknownSupplyGate,
@@ -90,17 +91,39 @@ export async function handleFavorites(
         const hasMore = found.length > limit,
           rows = found.slice(0, limit),
           items = [];
+        // Favorites are a private set of stable ids; the cards are read as one
+        // window so the page costs a fixed number of round trips, not one chain
+        // per row. Losing public eligibility still yields UNAVAILABLE with no
+        // private facts, and the saved id is never replaced by a detail.
+        const page = listingCandidatePage(client);
+        await page.load(rows.map((row) => row.account_id), true);
         for (const row of rows) {
+          const account = page.account(row.account_id);
+          if (!account) {
+            items.push({
+              accountId: row.account_id,
+              savedAt: row.savedAt,
+              state: "UNAVAILABLE",
+              message: "该供给暂不可用，收藏已保留",
+              listing: null,
+            });
+            continue;
+          }
           let listing: Record<string, unknown> | null = null;
           try {
             listing = await readPublicListing(
               client,
-              await readPublishingAccount(client, row.account_id),
+              account,
               gate,
               options.legacyPublicAdmission,
               false,
               "DETAIL",
               options.legacyPublicAdmissionDetail,
+              {
+                version: page.version(row.account_id),
+                hasPublication: page.hasPublication(row.account_id),
+                shared: page.shared,
+              },
             );
           } catch (error) {
             if ((error as { status?: number }).status !== 404) throw error;

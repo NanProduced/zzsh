@@ -2107,6 +2107,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       api: (path, body, method) => request(base, path, body, paymentBuyer, USER_ORIGIN, method, orderKey()),
       clone: cloneOrderOnAccount,
     };
+    // Gated PG stages must report their own absence. The outer switch only enables the
+    // payment/dispatch/team chain; settlement and first response need a further named
+    // resource, so "outer enabled" is never evidence that the funding or IM stages ran.
     if (RESOURCE_SET && !PRICING_COMPAT) {
       await runPaymentAcceptance(t, acceptance);
       await runDispatchAcceptance(t, acceptance);
@@ -2157,6 +2160,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
             assert.equal((await migrationPool!.query(`SELECT count(*)::int AS n FROM zzsh_business_meta.migrations`)).rows[0].n, 55);
           },
         });
+      } else {
+        await t.test("NOT_RUN: trade settlement PG acceptance", {
+          skip: `requires ORDER_TEST_RESOURCE_SET=trade_settlement; current resource set is "${RESOURCE_SET}"`,
+        });
       }
       if (stagedFirstResponse) {
       await runOrderFirstResponseAcceptance(t, acceptance, {
@@ -2169,7 +2176,18 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
             });
           },
         });
+      } else {
+        await t.test("NOT_RUN: order first response PG acceptance", {
+          skip: `requires ORDER_TEST_RESOURCE_SET=oim_first_response or oim_escalation_stage; current resource set is "${RESOURCE_SET}"`,
+        });
       }
+    } else {
+      const notRun = PRICING_COMPAT
+        ? "SUPPLY_TEST_RESOURCE_SET=pricing_compat selects the legacy V01-V21 order regression resource; payment/IM, dispatch, order-team, settlement and first-response PG acceptances are not enabled on it"
+        : "ORDER_TEST_RESOURCE_SET is not selected; these deeper PG acceptances are explicit opt-in and are not part of this run";
+      await t.test("NOT_RUN: payment/IM, dispatch and order-team PG acceptances", { skip: notRun });
+      await t.test("NOT_RUN: trade settlement PG acceptance", { skip: notRun });
+      await t.test("NOT_RUN: order first response PG acceptance", { skip: notRun });
     }
   } finally {
     const cleanupErrors: unknown[] = [];

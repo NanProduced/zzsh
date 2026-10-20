@@ -9,6 +9,7 @@ apps/web       Next.js 用户站框架
 apps/admin     React/Vite 管理站框架
 apps/api       NestJS 业务 API
 packages/ui    两端共享样式；后续按实际需求增加组件
+packages/im-client 两端与 packages/ui 共用的 IM 适配层
 docs/          已确认决定、设计和操作说明
 ```
 

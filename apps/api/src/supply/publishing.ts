@@ -40,7 +40,7 @@ import {
   newSupplyId,
   notFound,
 } from "./supply-util";
-import { GAME_SERVICE, readGameService, requireWritableGameService } from "./game-services";
+import { GAME_SERVICE, readGameService, requireWritableGameService, type GameServiceState } from "./game-services";
 import { assertDeltaResourceUnit, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
@@ -177,6 +177,178 @@ export async function readPublishingAccount(
   return account;
 }
 
+/** Set-based account read for one already authorized page of candidates.
+ *  A missing account stays missing; the caller's 404 path is unchanged. */
+export async function readPublishingAccounts(
+  client: PoolClient,
+  ids: readonly string[],
+): Promise<Map<string, PublishingAccount>> {
+  const unique = [...new Set(ids)];
+  if (!unique.length) return new Map();
+  const rows = (
+    await client.query<PublishingAccount>(
+      `SELECT * FROM zzsh_supply.rental_account WHERE id = ANY($1::text[])`,
+      [unique],
+    )
+  ).rows;
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+/** Batched form of readCurrentVersion, keyed by account so the account binding
+ *  is still checked per row: a version owned by another account stays absent. */
+export async function readCurrentVersions(
+  client: PoolClient,
+  accounts: readonly PublishingAccount[],
+): Promise<Map<string, ListingVersion>> {
+  const wanted = [
+    ...new Set(
+      accounts
+        .map((account) => account.current_version_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  ];
+  if (!wanted.length) return new Map();
+  const rows = (
+    await client.query<ListingVersion>(
+      `SELECT * FROM zzsh_supply.listing_version WHERE id = ANY($1::text[])`,
+      [wanted],
+    )
+  ).rows;
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const byAccount = new Map<string, ListingVersion>();
+  for (const account of accounts) {
+    const version = account.current_version_id
+      ? byId.get(account.current_version_id)
+      : undefined;
+    if (version && version.account_id === account.id)
+      byAccount.set(account.id, version);
+  }
+  return byAccount;
+}
+
+export type ListingGameRow = {
+  id: string;
+  code: string;
+  name: string;
+  enabled: boolean;
+  current_release_id: string | null;
+  catalog_revision: string;
+};
+
+/** Every candidate of one market page shares its game, that game's rental
+ *  service and the release policy the publication is bound to. Memoizing those
+ *  reads per request removes the repeated lookups without moving any rule. */
+export type ListingPageShared = {
+  game(gameId: string): Promise<ListingGameRow | undefined>;
+  rentalService(gameId: string): Promise<GameServiceState>;
+  fundingPolicy(
+    releaseId: string,
+  ): Promise<Awaited<ReturnType<typeof readFundingPolicyForRelease>>>;
+};
+
+export function listingPageShared(client: PoolClient): ListingPageShared {
+  const games = new Map<string, Promise<ListingGameRow | undefined>>();
+  const services = new Map<string, Promise<GameServiceState>>();
+  const policies = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof readFundingPolicyForRelease>>>
+  >();
+  return {
+    game: (gameId) => {
+      let pending = games.get(gameId);
+      if (!pending) {
+        pending = client
+          .query<ListingGameRow>(
+            `SELECT id,code,name,enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
+            [gameId],
+          )
+          .then((result) => result.rows[0]);
+        games.set(gameId, pending);
+      }
+      return pending;
+    },
+    rentalService: (gameId) => {
+      let pending = services.get(gameId);
+      if (!pending) {
+        pending = readGameService(client, gameId, GAME_SERVICE.ACCOUNT_RENTAL);
+        services.set(gameId, pending);
+      }
+      return pending;
+    },
+    fundingPolicy: (releaseId) => {
+      let pending = policies.get(releaseId);
+      if (!pending) {
+        pending = readFundingPolicyForRelease(client, releaseId);
+        policies.set(releaseId, pending);
+      }
+      return pending;
+    },
+  };
+}
+
+/** One version's media rows are read by both the readiness check and the public
+ *  projection; a lazy memo keeps that to a single read without changing either. */
+export type ListingMediaAssetRow = {
+  id: string;
+  account_id: string | null;
+  game_id: string | null;
+  owner_user_id: string | null;
+  ownership_kind: string | null;
+  purpose: string | null;
+  content_hash: string | null;
+  review_state: string | null;
+  access_class: string | null;
+  technical_state: string | null;
+  public_storage_key: string | null;
+  source_note: string | null;
+};
+
+export type ListingDetailPrefetch = {
+  /** Current version already loaded for the account; absent means "not loaded". */
+  version?: ListingVersion | null;
+  /** Answer to the publication probe, already resolved for this page. */
+  hasPublication?: boolean;
+  shared?: ListingPageShared;
+};
+
+/** One page of candidates: accounts, current versions and the native-publication
+ *  probe are read a window at a time instead of one round trip per candidate.
+ *  The window is the caller's own page size, so a small limit never loads rows it
+ *  will not project, and a rejected candidate just moves the window forward. */
+export function listingCandidatePage(client: PoolClient) {
+  const shared = listingPageShared(client);
+  const accounts = new Map<string, PublishingAccount | undefined>();
+  const versions = new Map<string, ListingVersion | null>();
+  const published = new Set<string>();
+  return {
+    shared,
+    has: (id: string) => accounts.has(id),
+    account: (id: string) => accounts.get(id),
+    version: (id: string) => versions.get(id) ?? null,
+    /** Only meaningful for ids covered by a load() that asked for publications. */
+    hasPublication: (id: string) => published.has(id),
+    async load(ids: readonly string[], withPublications = false): Promise<void> {
+      const pending = [...new Set(ids)].filter((id) => !accounts.has(id));
+      if (!pending.length) return;
+      const found = await readPublishingAccounts(client, pending);
+      const byAccount = await readCurrentVersions(client, [...found.values()]);
+      for (const id of pending) {
+        const account = found.get(id);
+        accounts.set(id, account);
+        versions.set(id, account ? byAccount.get(id) ?? null : null);
+      }
+      if (!withPublications) return;
+      const rows = (
+        await client.query<{ account_id: string }>(
+          `SELECT DISTINCT account_id FROM zzsh_supply.listing_publication WHERE account_id = ANY($1::text[])`,
+          [pending],
+        )
+      ).rows;
+      for (const row of rows) published.add(row.account_id);
+    },
+  };
+}
+
 export async function readCurrentVersion(
   client: PoolClient,
   account: PublishingAccount,
@@ -246,6 +418,7 @@ export async function publicationBlockers(
   gate: SupplyGateReader,
   purpose: "READ" | "WRITE" = "WRITE",
   strictReadErrors = false,
+  shared?: ListingPageShared,
 ): Promise<string[]> {
   const reasons: string[] = [];
   const user = (
@@ -258,15 +431,19 @@ export async function publicationBlockers(
     reasons.push("OWNER_UNAVAILABLE");
   if (user?.identity_status !== "VERIFIED") reasons.push("IDENTITY_REQUIRED");
   if (user?.age_status !== "ADULT") reasons.push("ADULT_REQUIRED");
-  const game = (
-    await client.query(
-      `SELECT enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
-      [a.game_id],
-    )
-  ).rows[0];
+  const game = shared
+    ? await shared.game(a.game_id)
+    : (
+        await client.query<ListingGameRow>(
+          `SELECT id,code,name,enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
+          [a.game_id],
+        )
+      ).rows[0];
   if (!game?.enabled) reasons.push("GAME_UNAVAILABLE");
   if (v.review_state === "DRAFT" && v.payload && v.origin === "NATIVE" && v.payload.ruleRefs.catalogRevision !== game?.catalog_revision) reasons.push("RULE_CHANGED");
-  const rentalService = await readGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
+  const rentalService = shared
+    ? await shared.rentalService(a.game_id)
+    : await readGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
   if (!v.rule_release_id || game?.current_release_id !== v.rule_release_id)
     reasons.push("RULE_CHANGED");
@@ -289,7 +466,9 @@ export async function publicationBlockers(
   }
   if (v.rule_release_id && game?.current_release_id === v.rule_release_id) {
     try {
-      const policy = await readFundingPolicyForRelease(client, v.rule_release_id);
+      const policy = shared
+        ? await shared.fundingPolicy(v.rule_release_id)
+        : await readFundingPolicyForRelease(client, v.rule_release_id);
       if (policy) {
         const declaration = validateOwnerDepositDeclaration(v.attributes.owner_deposit_declaration);
         const fullPayout = v.attributes.full_payout_declaration;
@@ -1111,13 +1290,15 @@ async function assertMediaReady(
   mode: "direct" | "review" = "direct",
   lockMedia = false,
   account?: PublishingAccount,
+  preloadedMedia?: ListingMediaAssetRow[],
 ): Promise<void> {
-  const media = (
-    await client.query(
-      `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1${lockMedia ? " ORDER BY a.id FOR UPDATE" : ""}`,
-      [v.id],
-    )
-  ).rows;
+  const media = preloadedMedia ??
+    ((
+      await client.query<ListingMediaAssetRow>(
+        `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1${lockMedia ? " ORDER BY a.id FOR UPDATE" : ""}`,
+        [v.id],
+      )
+    ).rows);
   if (account && media.some(m => m.purpose === "ACCOUNT_DISPLAY" &&
     (m.ownership_kind !== "USER_SUPPLY" || m.owner_user_id !== account.owner_user_id || m.account_id !== account.id || m.game_id !== account.game_id ||
       !v.payload?.declaration.mediaBindings.some(binding => binding.assetId === m.id && binding.byteHash === m.content_hash))))
@@ -1304,15 +1485,19 @@ export async function evaluatePublication(
   gate: SupplyGateReader,
   purpose: "READ" | "WRITE" = "WRITE",
   strictReadErrors = false,
+  shared?: ListingPageShared,
+  media?: () => Promise<ListingMediaAssetRow[]>,
+  observed?: { publication?: ListingPublication | null },
 ): Promise<string[]> {
-  const blockers = await publicationBlockers(client, a, v, gate, purpose, strictReadErrors);
+  const blockers = await publicationBlockers(client, a, v, gate, purpose, strictReadErrors, shared);
   const publication = await readListingPublication(client, a, v);
+  if (observed) observed.publication = publication;
   if (!isEffectivePublicationState(v.review_state, publication?.source)) blockers.push("PUBLICATION_REQUIRED");
   if (a.owner_paused) blockers.push("OWNER_PAUSED");
   if (a.staff_restricted) blockers.push("STAFF_RESTRICTED");
   try {
     await assertAccepted(client, a, v);
-    await assertMediaReady(client, v, "direct", false, purpose === "READ" ? a : undefined);
+    await assertMediaReady(client, v, "direct", false, purpose === "READ" ? a : undefined, media ? await media() : undefined);
   } catch (error) {
     if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
     blockers.push("CONFIRMATION_OR_MEDIA_REQUIRED");
@@ -1328,9 +1513,10 @@ async function resolvePublicMediaRoute(
   client: PoolClient,
   publicAccount: PublishingAccount,
   gate: SupplyGateReader,
+  prefetch?: ListingDetailPrefetch,
 ): Promise<PublicMediaRoute> {
   let listing: Record<string, unknown> | null = null;
-  try { listing = await listingDetail(client, publicAccount, "public", gate, "public", publicAccount, false, "DETAIL"); }
+  try { listing = await listingDetail(client, publicAccount, "public", gate, "public", publicAccount, false, "DETAIL", prefetch); }
   catch (error) { if ((error as { status?: number }).status !== 404) throw error; }
   return {
     listingPublic: Boolean(listing),
@@ -1450,12 +1636,19 @@ export async function readPublicListing(
   strictReadErrors = false,
   mode: PublicListingReadMode = "DETAIL",
   detailIndex?: LegacyPublicAdmissionDetailIndex,
+  prefetch?: ListingDetailPrefetch,
 ): Promise<Record<string, unknown>> {
-  const publication = await client.query(
-    `SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`,
-    [a.id],
-  );
-  if (publication.rowCount) return listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode);
+  const hasPublication = prefetch?.hasPublication ??
+    Boolean(
+      (
+        await client.query(
+          `SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`,
+          [a.id],
+        )
+      ).rowCount,
+    );
+  if (hasPublication)
+    return listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode, prefetch);
   if (mode === "RENTABLE") throw notFound();
   return readLegacyListing(client, a.id, admission, detailIndex);
 }
@@ -1468,10 +1661,13 @@ export async function listingDetail(
   publicAccount: PublishingAccount = a,
   strictReadErrors = false,
   mode: PublicListingReadMode = "RENTABLE",
+  prefetch?: ListingDetailPrefetch,
 ): Promise<Record<string, unknown>> {
-  let v = a.current_version_id
-    ? await readCurrentVersion(client, a)
-    : null;
+  let v = prefetch?.version !== undefined
+    ? prefetch.version
+    : a.current_version_id
+      ? await readCurrentVersion(client, a)
+      : null;
   if (viewer === "public" && mode === "DETAIL") {
     const currentPublication = v ? await readListingPublication(client, a, v) : null;
     if (!v || !isEffectivePublicationState(v.review_state, currentPublication?.source)) {
@@ -1487,12 +1683,26 @@ export async function listingDetail(
     if (viewer === "public") throw notFound();
     return { account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a, version: null };
   }
-  const observed = { gate: null as SupplyGate | null };
+  const observed = { gate: null as SupplyGate | null, publication: undefined as ListingPublication | null | undefined };
+  // The readiness check and the public projection read the same version's media;
+  // one lazy read serves both, and the request-level memo serves the game row.
+  let mediaRows: ListingMediaAssetRow[] | undefined;
+  const loadMedia = async (): Promise<ListingMediaAssetRow[]> =>
+    (mediaRows ??= (
+      await client.query<ListingMediaAssetRow>(
+        `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`,
+        [v.id],
+      )
+    ).rows);
   const blockers = await evaluatePublication(client, a, v, async (client, account, purpose) => {
     observed.gate = await gate(client, account, purpose);
     return observed.gate;
-  }, "READ", strictReadErrors);
-  const publication = await readListingPublication(client, publicAccount, v);
+  }, "READ", strictReadErrors, prefetch?.shared, loadMedia, observed);
+  // evaluatePublication already read this publication for the same account and
+  // version; only a divergent publicAccount needs its own read.
+  const publication = observed.publication !== undefined && publicAccount === a
+    ? observed.publication
+    : await readListingPublication(client, publicAccount, v);
   const quote = v.payload
     ? { ...projectDeltaQuote(
         {
@@ -1544,15 +1754,15 @@ export async function listingDetail(
         "service_window_cross_midnight",
       ].map((k) => [k, attrs[k] ?? null]),
     );
-    const game = (
-      await client.query<{ id: string; code: string; name: string }>(
-        `SELECT id, code, name FROM zzsh_supply.game WHERE id=$1`,
-        [a.game_id],
-      )
-    ).rows[0];
-    const currentMedia = (await client.query(
-      `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`, [v.id],
-    )).rows;
+    const game = prefetch?.shared
+      ? ((await prefetch.shared.game(a.game_id)) as ListingGameRow | undefined)
+      : (
+          await client.query<ListingGameRow>(
+            `SELECT id,code,name,enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
+            [a.game_id],
+          )
+        ).rows[0];
+    const currentMedia = await loadMedia();
     const publicMedia = v.payload!.declaration.mediaBindings.filter(binding => binding.purpose === "ACCOUNT_DISPLAY" && currentMedia.some(asset =>
       asset.id === binding.assetId && asset.content_hash === binding.byteHash && asset.purpose === "ACCOUNT_DISPLAY" && asset.ownership_kind === "USER_SUPPLY" &&
       asset.owner_user_id === a.owner_user_id && asset.account_id === a.id && asset.game_id === a.game_id && asset.technical_state === "READY" &&
@@ -1591,6 +1801,7 @@ export async function listingDetail(
     client,
     publicAccount,
     gate,
+    prefetch,
   );
   const decisions = (
     await client.query(

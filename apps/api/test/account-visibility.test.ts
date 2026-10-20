@@ -41,20 +41,20 @@ function nativeFixture(id = "account-a", game = "game-a") {
     let rows: unknown[] = [];
     if (sql.includes('SELECT u.suspended')) rows = [{ suspended: facts.suspended, account_status: facts.accountStatus, identity_status: "VERIFIED", age_status: "ADULT" }];
     else if (sql.includes('game_service_operation')) rows = [{ id: "service-a", gameId: game, gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (sql.includes('SELECT enabled,current_release_id')) rows = [{ enabled: true, current_release_id: "release-a", catalog_revision: "1" }];
+    else if (sql.includes('FROM zzsh_supply.game WHERE id=')) rows = [{ id: game, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-a", catalog_revision: "1" }];
     else if (sql.includes('funding_policy AS policy')) rows = [{ policy: null }];
     else if (sql.includes('rule_acceptance')) rows = facts.accepted ? [{}] : [];
     else if (sql.includes('SELECT a.* FROM zzsh_supply.listing_media')) rows = [{ id: "media-a", account_id: account.id, game_id: account.game_id, owner_user_id: account.owner_user_id,
       ownership_kind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", content_hash: "a".repeat(64), review_state: "APPROVED", access_class: "PUBLIC_DISPLAY", technical_state: facts.mediaReady ? "READY" : "FAILED", public_storage_key: "public-a" }];
     else if (sql.includes('m.asset_id AS "assetId"')) rows = [{ assetId: "media-a", position: 0, purpose: "ACCOUNT_DISPLAY", byteHash: "a".repeat(64), reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY", publicStorageKey: "public-a", technicalState: facts.mediaReady ? "READY" : "FAILED", ownerUserId: account.owner_user_id, category: "SHOWCASE" }];
     else if (sql.includes('SELECT item_id AS "itemId"')) rows = [{ itemId: "haff-a", quantity: "1000000" }];
-    else if (sql.includes('SELECT * FROM zzsh_supply.rental_account')) rows = args[0] === id ? [account] : [];
     else if (sql.includes('SELECT * FROM zzsh_supply.listing_version')) rows = [facts.draft?.id === args[0] ? facts.draft : version];
     else if (sql.includes('SELECT v.* FROM zzsh_supply.listing_version')) rows = account.owner_user_id === "owner-a" ? [version] : [];
     else if (sql.includes('SELECT 1 FROM zzsh_supply.listing_publication')) rows = [{}];
+    else if (sql.includes('SELECT DISTINCT account_id FROM zzsh_supply.listing_publication')) rows = [{ account_id: account.id }];
     else if (sql.includes('zzsh_supply.listing_publication')) rows = args[0] === facts.draft?.id || account.owner_user_id !== "owner-a" ? [] : [publication()];
     else if (sql.includes('term_option')) rows = [{ code: "daily", name: "每日", dailyConsumption: "10000000" }];
-    else if (sql.includes('SELECT id, code, name FROM zzsh_supply.game')) rows = [{ id: game, code: "delta", name: "三角洲行动" }];
+    else if (sql.includes('SELECT * FROM zzsh_supply.rental_account')) rows = (Array.isArray(args[0]) ? args[0].includes(id) : args[0] === id) ? [account] : [];
     return { rows, rowCount: rows.length };
   } } as unknown as PoolClient;
   const gate: SupplyGateReader = async () => ({ publisherBail: "NOT_REQUIRED", occupancy: facts.occupancy as "FREE" | "OCCUPIED" | "UNKNOWN", reference: "policy:fixture",
@@ -191,7 +191,7 @@ test("default v2 keeps old-platform status=3 rows visible as read-only and separ
   const client = { query: async (sql: string, args: any[] = []) => {
     queries.push(sql);
     if (sql.startsWith("WITH candidates AS")) return { rows: [{ id: f.account.id, version_id: f.version.id, key: "2026-10-01T00:00:00.000000Z" }], rowCount: 1 };
-    if (sql.includes("FROM native UNION ALL SELECT * FROM legacy")) return { rows: [
+    if (sql.startsWith("WITH native AS")) return { rows: [
       { id: "legacy-1", version_id: "legacy-version", key: "2026-09-13T00:00:00.000000Z", source: "legacy" },
       { id: f.account.id, version_id: f.version.id, key: "2026-10-01T00:00:00.000000Z", source: "native" }], rowCount: 2 };
     return f.client.query(sql, args);
