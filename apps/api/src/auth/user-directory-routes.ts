@@ -131,6 +131,7 @@ export async function handleUserDirectoryAdmin(
       await assertAdminContextInTransaction(client, context);
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
+      if (registrationTime === "ORIGINAL") await client.query("SELECT set_config('jit','off',true)");
       const gameScope = await readAdminGameScope(client, context.userId);
       const viewer = {
         adminId: context.userId,

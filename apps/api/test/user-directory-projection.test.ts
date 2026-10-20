@@ -469,6 +469,15 @@ test('original sort alone does not scan audit for total or materialise provenanc
   const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
   assert.equal(queries.length,2);assert.doesNotMatch(queries[0]!.sql,/audit_event|source_created_at/);
   assert.match(queries[1]!.sql,/migration AS NOT MATERIALIZED/);
+  assert.match(queries[1]!.sql,/registration_dates AS MATERIALIZED/);
   assert.doesNotMatch(queries[1]!.sql.split('FROM page selected')[1]!,/JOIN migration/);
   assert.match(queries[1]!.sql,/selected\.migration_legacy_id AS "migrationLegacyId"/);
+});
+
+test('original registration disables JIT only inside its bounded read transaction',async()=>{
+  const original=new DirectorySqlFixture();assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&page=1&pageSize=10',original)).status,200);
+  assert(original.queries.some(q=>q.sql==="SELECT set_config('jit','off',true)"));
+  assert(original.queries.some(q=>q.sql==='ROLLBACK'));
+  const old=new DirectorySqlFixture();assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
+  assert(!old.queries.some(q=>q.sql.includes("set_config('jit'")));
 });

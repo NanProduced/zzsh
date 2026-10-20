@@ -257,7 +257,7 @@ export async function listUserDirectory(
   filter: UserDirectoryFilter,
 ): Promise<Record<string, unknown>> {
   const original = filter.registrationTime === "ORIGINAL";
-  const materializeDates = original && Boolean(filter.registeredFrom || filter.registeredTo || filter.registeredBefore || filter.cursor);
+  const materializeDates = original;
   if ((filter.registrationTime !== undefined && !original) || (filter.sort !== undefined && (!original || !["registered_desc", "registered_asc"].includes(filter.sort)))) throw invalid("Registration time mode or sort is invalid");
   if (filter.registeredBefore !== undefined && (!original || filter.registeredTo !== undefined)) throw invalid("Registered before requires original time and no inclusive upper bound");
   const direction = filter.sort === "registered_asc" ? "ASC" : "DESC";
