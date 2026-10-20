@@ -18,6 +18,47 @@ async function route(path:string,pool:DirectorySqlFixture,method='GET',body?:unk
   return output.result();
 }
 
+test('published summary is separate from archives and shared by list and detail without per-user requests',async()=>{
+  const pool=new DirectorySqlFixture();Object.assign(pool.users[0]!,{resourceAccountCount:5,resourcePublishedCount:2});
+  const list:any=await listUserDirectory(client(pool),viewer,{search:'林舟',limit:20});
+  const detail:any=await readUserDirectoryDetail(client(pool),viewer,'user_normal');
+  assert.deepEqual(list.items[0].resourceSummary,{state:'ready',count:5,publishedCount:2});
+  assert.deepEqual(detail.resourceSummary,list.items[0].resourceSummary);
+  for(const query of pool.queries.filter(q=>q.sql.includes('AS "resourcePublishedCount"'))){
+    assert.match(query.sql,/count\(\*\) FILTER \(WHERE ra\.lifecycle='ACTIVE' AND EXISTS/);
+    assert.match(query.sql,/pv\.id=ra\.current_version_id AND pv\.account_id=ra\.id/);
+    assert.match(query.sql,/pp\.content_hash=pv\.content_hash/);
+    assert.match(query.sql,/pv\.review_state='APPROVED' AND pp\.source='LEGACY_APPROVED'/);
+    assert.doesNotMatch(query.sql,/ra\.owner_paused|ra\.staff_restricted|ra\.occupied/);
+  }
+  assert.equal(pool.queries.filter(q=>q.sql.includes('AS "resourcePublishedCount"')).length,2);
+});
+
+test('published drilldown uses the same effective publication tuple and preserves permission gates',async()=>{
+  const pool=new DirectorySqlFixture();
+  const result=await route('/api/v1/admin/users/user_normal/rental-accounts?publication=published',pool);
+  assert.equal(result.status,200);assert.equal(result.body.items[0].publication.currentlyPublished,true);
+  const sql=pool.queries.find(q=>q.sql.includes('FROM zzsh_supply.rental_account a'))!.sql;
+  assert.match(sql,/AND a\.lifecycle='ACTIVE' AND EXISTS/);
+  assert.match(sql,/pv\.id=a\.current_version_id AND pv\.account_id=a\.id/);
+  assert.match(sql,/pp\.owner_user_id=a\.owner_user_id AND pp\.game_id=a\.game_id/);
+  assert.equal((await route('/api/v1/admin/users/user_normal/rental-accounts?publication=rentable',pool)).status,400);
+  pool.permissions=['user.directory.read'];
+  assert.equal((await route('/api/v1/admin/users/user_normal/rental-accounts?publication=published',pool)).status,403);
+});
+
+test('published drilldown cursors cannot be reused for the full archive collection',async()=>{
+  const pool=new DirectorySqlFixture(),query=pool.query.bind(pool);
+  pool.query=async(sql,values=[])=>{
+    const result=await query(sql,values);
+    if(sql.includes('FROM zzsh_supply.rental_account a')&&result.rows.length)result.rows.push({...result.rows[0],id:'account_fixture_tail'});
+    return result;
+  };
+  const first:any=await listUserRentalAccounts(client(pool),viewer,'user_normal',{limit:1,publication:'published'});
+  assert.ok(first.nextCursor);
+  await assert.rejects(listUserRentalAccounts(client(pool),viewer,'user_normal',{limit:1,cursor:first.nextCursor}),error=>(error as any).status===409);
+});
+
 test('management UNKNOWN and status priority preserve cancelled/deactivated before restriction',()=>{
   assert.equal(projectUserAccountStatus(null,true),'UNKNOWN');
   assert.equal(projectUserAccountStatus('CANCELLED',true),'CANCELLED');

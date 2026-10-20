@@ -211,8 +211,10 @@ export async function handleUserDirectoryAdmin(
       if (section === "rental-accounts") {
         requirePermission(access, ADMIN_PERMISSION.supplyRentalAccountRead);
         assertGameScopeUsable(gameScope, access.isBoss);
+        const publication = query.get("publication");
+        if (publication !== null && publication !== "published") throw invalid("Publication filter is invalid");
         await enableLegacyRead();
-        dataToSend = await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) });
+        dataToSend = await listUserRentalAccounts(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}), ...(publication !== null ? { publication } : {}) });
         return;
       }
       if (section === "orders") {

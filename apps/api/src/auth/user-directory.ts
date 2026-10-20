@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { gameScopeSql } from "./admin-scope";
 import { conflict, forbidden, invalid, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { isEffectivePublicationState } from "../supply/listing-query";
+import { effectivePublicationStateSql, isEffectivePublicationState } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
 import { orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
 import { legacyContinuationReady } from "../order/legacy-order-read";
@@ -126,6 +126,7 @@ type UserListRow = {
   migrationLegacyId: string | null;
   migrationSourceCreatedAt: string | null;
   resourceAccountCount: number;
+  resourcePublishedCount: number;
   currentOrderCount: number;
   renterCurrentOrderCount: number;
   ownerCurrentOrderCount: number;
@@ -167,14 +168,33 @@ const ACCOUNT_STATUS_SQL = `CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
 const SOURCE_SQL = `CASE WHEN s.provider='${LEGACY_PROVIDER}' THEN 'MIGRATED'
   WHEN s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
 
+function publishedAccountSql(account: string): string {
+  return `${account}.lifecycle='ACTIVE' AND EXISTS (
+    SELECT 1 FROM zzsh_supply.listing_version pv
+    JOIN zzsh_supply.listing_publication pp ON pp.version_id=pv.id AND pp.account_id=pv.account_id
+      AND pp.owner_user_id=${account}.owner_user_id AND pp.game_id=${account}.game_id
+      AND pp.rule_release_id=pv.rule_release_id AND pp.content_hash=pv.content_hash
+    WHERE pv.id=${account}.current_version_id AND pv.account_id=${account}.id
+      AND ${effectivePublicationStateSql("pv", "pp")})`;
+}
+
+function resourceCountsSql(read: string, boss: string, admin: string): string {
+  return `LEFT JOIN LATERAL (
+    SELECT count(*)::int AS account_count,
+      count(*) FILTER (WHERE ${publishedAccountSql("ra")})::int AS published_count
+    FROM zzsh_supply.rental_account ra
+    WHERE ${read}::boolean AND ra.owner_user_id=u.id AND ${gameScopeSql("ra.game_id", admin, boss)}
+  ) resource_counts ON true`;
+}
+
 function projectRelationshipSummaries(
-  row: Pick<UserListRow, "resourceAccountCount" | "currentOrderCount" | "renterCurrentOrderCount" | "ownerCurrentOrderCount">,
+  row: Pick<UserListRow, "resourceAccountCount" | "resourcePublishedCount" | "currentOrderCount" | "renterCurrentOrderCount" | "ownerCurrentOrderCount">,
   viewer: AdminDirectoryViewer,
 ) {
   const noScope = viewer.businessScopeUsable === false;
   return {
     resourceSummary: viewer.resourceRead && !noScope
-      ? { state: "ready", count: row.resourceAccountCount }
+      ? { state: "ready", count: row.resourceAccountCount, publishedCount: row.resourcePublishedCount }
       : { state: "denied", permission: "supply.rental_account.read", ...(viewer.resourceRead && noScope ? { reason: "NO_GAME_SCOPE" } : {}) },
     orderSummary: viewer.orderRead && !noScope
       ? { state: "ready", currentCount: row.currentOrderCount, renterCurrentCount: row.renterCurrentOrderCount, ownerCurrentCount: row.ownerCurrentOrderCount }
@@ -300,9 +320,8 @@ export async function listUserDirectory(
               ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
               ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
               mig.legacy_id AS "migrationLegacyId", mig.source_created_at AS "migrationSourceCreatedAt",
-              CASE WHEN $3::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
-                WHERE ra.owner_user_id = u.id
-                  AND ${gameScopeSql("ra.game_id","$2","$1")}) ELSE NULL END AS "resourceAccountCount",
+              CASE WHEN $3::boolean THEN resource_counts.account_count ELSE NULL END AS "resourceAccountCount",
+              CASE WHEN $3::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
               CASE WHEN $4::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
               CASE WHEN $4::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
               CASE WHEN $4::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"`;
@@ -339,6 +358,7 @@ export async function listUserDirectory(
          JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          LEFT JOIN migration mig ON mig.object_id = u.id
+         ${resourceCountsSql("$3", "$1", "$2")}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
                   count(*) FILTER (WHERE o.renter_user_id=u.id)::int AS renter_count,
@@ -390,6 +410,7 @@ export type UserDetailRow = {
   migrationEvidenceRef: string | null;
   migratedAt: string | null;
   resourceAccountCount: number;
+  resourcePublishedCount: number;
   currentOrderCount: number;
   renterCurrentOrderCount: number;
   ownerCurrentOrderCount: number;
@@ -416,9 +437,8 @@ export async function readUserDirectoryDetail(
               mig.source_entity AS "migrationSourceEntity", mig.source_created_at AS "migrationSourceCreatedAt",
               mig.source_updated_at AS "migrationSourceUpdatedAt", mig.source_digest AS "migrationSourceDigest",
               mig.evidence_ref AS "migrationEvidenceRef", mig.migrated_at AS "migratedAt",
-              CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
-                WHERE ra.owner_user_id = u.id
-                  AND ${gameScopeSql("ra.game_id","$3","$2")}) ELSE NULL END AS "resourceAccountCount",
+              CASE WHEN $4::boolean THEN resource_counts.account_count ELSE NULL END AS "resourceAccountCount",
+              CASE WHEN $4::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
               CASE WHEN $5::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
               CASE WHEN $5::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
               CASE WHEN $5::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"
@@ -439,6 +459,7 @@ export async function readUserDirectoryDetail(
             ORDER BY e.occurred_at DESC, e.id DESC
             LIMIT 1
          ) mig ON true
+         ${resourceCountsSql("$4", "$2", "$3")}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
                   count(*) FILTER (WHERE o.renter_user_id=u.id)::int AS renter_count,
@@ -523,11 +544,12 @@ export async function listUserRentalAccounts(
   client: PoolClient,
   viewer: AdminDirectoryViewer,
   userId: string,
-  page: { limit: number; cursor?: string },
+  page: { limit: number; cursor?: string; publication?: "published" },
 ): Promise<Record<string, unknown>> {
   if (!viewer.resourceRead) throw forbidden("Resource reading requires supply.rental_account.read");
+  if (page.publication !== undefined && page.publication !== "published") throw invalid("Publication filter is invalid");
   const filterKey = sha256Hex(
-    JSON.stringify({ scope: "admin-user-rental-accounts", principal: viewer.adminId, isBoss: viewer.isBoss, authorizationKey: viewer.authorizationKey ?? null, userId, limit: page.limit }),
+    JSON.stringify({ scope: "admin-user-rental-accounts", principal: viewer.adminId, isBoss: viewer.isBoss, authorizationKey: viewer.authorizationKey ?? null, userId, limit: page.limit, ...(page.publication ? { publication: page.publication } : {}) }),
   );
   const cursor = parseKeysetCursor(page.cursor, filterKey);
   const rows = (
@@ -546,6 +568,7 @@ export async function listUserRentalAccounts(
            AND p.owner_user_id=a.owner_user_id AND p.game_id=a.game_id AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash
         WHERE a.owner_user_id = $1
           AND ${gameScopeSql("a.game_id","$3","$2")}
+          ${page.publication ? `AND ${publishedAccountSql("a")}` : ""}
           AND ($4::timestamptz IS NULL OR a.created_at < $4::timestamptz OR (a.created_at = $4::timestamptz AND a.id < $5))
         ORDER BY a.created_at DESC, a.id DESC
         LIMIT $6`,
@@ -568,7 +591,8 @@ export async function listUserRentalAccounts(
       legacyHold: row.legacyHold,
       currentVersionId: row.currentVersionId,
       publication: { versionState: row.versionState ?? null, source: row.publicationSource ?? null,
-        versionPublished: isEffectivePublicationState(row.versionState, row.publicationSource) },
+        versionPublished: isEffectivePublicationState(row.versionState, row.publicationSource),
+        currentlyPublished: row.lifecycle === "ACTIVE" && isEffectivePublicationState(row.versionState, row.publicationSource) },
       createdAt: row.createdAt,
       historicalRead: historical.get(row.id) ?? null,
     })),
