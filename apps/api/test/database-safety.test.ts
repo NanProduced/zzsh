@@ -204,7 +204,10 @@ test("runtime identity probes content schema ownership and CREATE while acceptin
   const identityQuery = queries.find((entry) => entry.sql.includes('"databaseName"'));
   const ownershipQuery = queries.find((entry) => entry.sql.includes("ownsBusinessSchema"));
   assert.ok(identityQuery && ownershipQuery);
-  assert.match(identityQuery.sql, /has_schema_privilege\(current_user, 'zzsh_content', 'CREATE'\)/);
+  assert.match(identityQuery.sql, /COALESCE\(has_schema_privilege\(current_user, to_regnamespace\('zzsh_content'\)::oid, 'CREATE'\), false\)/,
+    "content CREATE probe must resolve the optional schema by OID so a missing schema yields false instead of throwing 3F000");
+  assert.doesNotMatch(identityQuery.sql, /has_schema_privilege\(current_user, 'zzsh_content', 'CREATE'\)/,
+    "the name overload throws undefined_schema when the optional content schema is absent");
   const schemas = ownershipQuery.args[0] as string[];
   assert.ok(schemas.includes("zzsh_content"), "ownership probe must cover the content schema");
   assert.equal(schemas.length, 8);
@@ -231,7 +234,7 @@ test("runtime identity rejects a role holding CREATE on the content schema", asy
   await assert.rejects(() => assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG), /least privilege/);
 });
 
-test("runtime identity treats an absent optional content schema as no CREATE privilege, not as a violation", async () => {
+test("runtime identity treats a NULL content CREATE projection (absent schema) as no privilege, not a violation", async () => {
   const { pool } = runtimeIdentityPool({ identity: leastPrivilegeIdentityRow({ canCreateContentSchema: null }) });
   await assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG);
 });

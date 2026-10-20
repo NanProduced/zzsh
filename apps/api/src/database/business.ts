@@ -98,7 +98,7 @@ export async function assertBusinessRuntimeIdentity(pool: Pool, config: Database
       has_schema_privilege(current_user, 'zzsh_auth_user', 'CREATE') AS "canCreateUserSchema",
       has_schema_privilege(current_user, 'zzsh_auth_admin', 'CREATE') AS "canCreateAdminSchema",
       has_schema_privilege(current_user, 'zzsh_supply', 'CREATE') AS "canCreateSupplySchema",
-      has_schema_privilege(current_user, 'zzsh_content', 'CREATE') AS "canCreateContentSchema",
+      COALESCE(has_schema_privilege(current_user, to_regnamespace('zzsh_content')::oid, 'CREATE'), false) AS "canCreateContentSchema",
       has_schema_privilege(current_user, 'zzsh_order', 'CREATE') AS "canCreateOrderSchema",
       has_table_privilege(current_user, 'zzsh_iam.audit_event', 'UPDATE') AS "canUpdateAudit",
       has_table_privilege(current_user, 'zzsh_iam.audit_event', 'DELETE') AS "canDeleteAudit",
