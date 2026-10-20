@@ -79,11 +79,17 @@ export async function readObservationCoverage(client:PoolClient,userId:string,ki
  const row=(await client.query(`/* finance history coverage exact target */
   SELECT c.id,c.source_count,c.imported_count,c.isolated_count,c.imported_set_digest,
    to_char(c.source_cutoff AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS cutoff,
-   (SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_kind=c.source_kind AND o.source_system=c.source_system AND o.source_entity=c.source_entity AND o.source_event_at<=c.source_cutoff) AS actual_count,
-   (SELECT encode(sha256(convert_to(COALESCE(string_agg(o.source_id||':'||o.source_digest,chr(10) ORDER BY o.source_id COLLATE "C"),''),'UTF8')),'hex') FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_kind=c.source_kind AND o.source_system=c.source_system AND o.source_entity=c.source_entity AND o.source_event_at<=c.source_cutoff) AS actual_digest,
-   (SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_kind=c.source_kind AND (o.source_system<>c.source_system OR o.source_entity<>c.source_entity OR o.source_type<>'LEGACY_MYSQL' OR o.source_event_at IS NULL)) AS invalid_count,
-   (SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_kind=c.source_kind AND o.source_event_at>c.source_cutoff) AS outside_count
-  FROM zzsh_order.personal_finance_observation_coverage c WHERE c.user_id=$1 AND c.source_kind=$2
+   s.actual_count,s.actual_digest,s.invalid_count,s.outside_count
+  FROM zzsh_order.personal_finance_observation_coverage c
+  LEFT JOIN LATERAL (
+   /* One pass over the subject/kind observations replaces the former four correlated scans; each FILTER keeps the original predicate. */
+   SELECT count(*) FILTER(WHERE o.source_system=c.source_system AND o.source_entity=c.source_entity AND o.source_event_at<=c.source_cutoff)::text AS actual_count,
+    encode(sha256(convert_to(COALESCE(string_agg(o.source_id||':'||o.source_digest,chr(10) ORDER BY o.source_id COLLATE "C") FILTER(WHERE o.source_system=c.source_system AND o.source_entity=c.source_entity AND o.source_event_at<=c.source_cutoff),''),'UTF8')),'hex') AS actual_digest,
+    count(*) FILTER(WHERE o.source_system<>c.source_system OR o.source_entity<>c.source_entity OR o.source_type<>'LEGACY_MYSQL' OR o.source_event_at IS NULL)::text AS invalid_count,
+    count(*) FILTER(WHERE o.source_event_at>c.source_cutoff)::text AS outside_count
+   FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_kind=c.source_kind
+  ) s ON true
+  WHERE c.user_id=$1 AND c.source_kind=$2
   ORDER BY c.source_cutoff DESC,c.id COLLATE "C" DESC LIMIT 1`,[userId,kind])).rows[0];
  if(!row)return{knowledge:'UNKNOWN',reason:'HISTORICAL_COVERAGE_NOT_IMPORTED',count:null,cutoff:null,version:null};
  const counts=[row.source_count,row.imported_count,row.isolated_count].map(String);
