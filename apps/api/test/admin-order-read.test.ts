@@ -1,8 +1,19 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation} from "../src/order/admin-order-read";
+import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
+test('current-order summaries keep source/status joins and skip full volatile JSON records',()=>{
+ for(const ready of [false,true]){
+  const full=orderReadRelation(ready),summary=orderReadRelation(ready,true);
+  assert.match(full,/to_jsonb\(o\).*jsonb_build_object/s);assert.match(full,/AS record/);
+  assert.doesNotMatch(summary,/to_jsonb|jsonb_build_object|clock_timestamp|AS record/);
+  assert(summary.includes(LEGACY_ORDER_STATUS_SQL));
+  assert.equal(summary.slice(summary.indexOf('FROM zzsh_order.rental_order'),summary.indexOf('UNION ALL')),full.slice(full.indexOf('FROM zzsh_order.rental_order'),full.indexOf('UNION ALL')));
+  assert.equal(summary.slice(summary.indexOf('FROM zzsh_order.legacy_order_read_snapshot')),full.slice(full.indexOf('FROM zzsh_order.legacy_order_read_snapshot')));
+ }
+});
 const record={id:"legacy-1",original_order_no:"OLD-1",source_order_status:5,source_pay_status:1,due_amount_cents:"6600",recorded_paid_amount_cents:"6600",deposit_amount_cents:"0",source_snapshot:{goods_money:"36.00",expend_pay_money:"0.00",return_order_money:null},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_name:"Owner",renter_name:"Renter",owner_user_id:"owner",renter_user_id:"renter",account_id:"account",game_id:"game",legacy_account_no:"A1"};
 const amount={currency:"CNY",unit:"yuan",amount:"90071992547409931234.56",scale:2},zero={...amount,amount:"0.00"};
 const native={id:"native-1",display_no:"NEW-1",account_id:"account",account_no:"A1",listing_version_id:"version",owner_user_id:"owner",renter_user_id:"renter",owner_name:"Owner",renter_name:"Renter",game_id:"game",rule_release_id:"native-release",content_hash:"a".repeat(64),term_option_code:"day",status:"COMPLETED",rental_amount_cents:"9007199254740993123456",deposit_amount_cents:"0",currency:"CNY",term_seconds:"86400",title:"Native order",hold_until:"2026-09-30T00:00:00.000000Z",paid_at:null,created_at:"2026-09-29T00:00:00.000000Z",revision:"1",quote_snapshot:{schemaVersion:1,currency:"CNY",lines:[],resourceTotal:amount,tenantDeposit:zero,ownerTotal:amount,platformFullProfit:zero,termSeconds:"86400",expiryDisclosures:[],unitAmountsInformational:true}};

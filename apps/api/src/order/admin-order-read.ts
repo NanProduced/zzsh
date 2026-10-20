@@ -14,8 +14,8 @@ const ABSENT_CONTINUATION_JOIN = `LEFT JOIN (SELECT NULL::text AS order_id,NULL:
 const CONTINUATION_COMPLETED_AT = `COALESCE((SELECT created_at FROM zzsh_order.legacy_continuation_version WHERE order_id=l.id AND command='CONFIRM' ORDER BY revision DESC LIMIT 1),l.source_completed_at)`;
 
 // Both sources are filtered and sorted together, before counting or pagination.
-export function orderReadRelation(continuationReady: boolean): string { return `
- SELECT o.id,o.created_at,o.game_id,o.owner_user_id,o.renter_user_id,o.account_id,o.display_no,o.status,
+export function orderReadRelation(continuationReady: boolean, summaryOnly = false): string { return `
+ SELECT o.id,o.created_at,o.game_id,o.owner_user_id,o.renter_user_id,o.account_id,o.display_no,o.status${summaryOnly ? "" : `,
   a.display_no AS account_no,NULL::text AS renter_no,NULL::text AS owner_no,ou.name AS owner_name,ru.name AS renter_name,
   ou.username AS owner_username,ru.username AS renter_username,'NATIVE'::text AS origin,
   to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.rental_amount_cents::text,'deposit_amount_cents',o.deposit_amount_cents::text,
@@ -23,18 +23,18 @@ export function orderReadRelation(continuationReady: boolean): string { return `
     'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no,'expired',o.status='PENDING_PAYMENT' AND o.hold_until<=clock_timestamp(),
     'dispatch_state',g.provision_state,'wait_reason',g.wait_reason,'assigned_at',${utc('g.assigned_at')},'team_state',g.team_state,
     'first_response_at',to_jsonb(g)->>'first_response_at','remind_due_at',to_jsonb(g)->>'remind_due_at',
-    'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED')) AS record
+    'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED')) AS record`}
  FROM zzsh_order.rental_order o JOIN zzsh_auth_user."user" ou ON ou.id=o.owner_user_id
  JOIN zzsh_auth_user."user" ru ON ru.id=o.renter_user_id JOIN zzsh_supply.rental_account a ON a.id=o.account_id
  LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id
  UNION ALL
  SELECT l.id,l.source_created_at,l.game_id,l.owner_user_id,l.renter_user_id,l.account_id,l.original_order_no,
-  ${LEGACY_ORDER_STATUS_SQL},
+  ${LEGACY_ORDER_STATUS_SQL}${summaryOnly ? "" : `,
   l.legacy_account_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text,
   to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
     'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? CONTINUATION_COMPLETED_AT : "l.source_completed_at")},
     'continuation_stage',h.stage,
-    'owner_name',ou.name,'renter_name',ru.name,'title',v.title) AS record
+    'owner_name',ou.name,'renter_name',ru.name,'title',v.title) AS record`}
  FROM zzsh_order.legacy_order_read_snapshot l JOIN zzsh_auth_user."user" ou ON ou.id=l.owner_user_id
  ${continuationReady ? CONTINUATION_JOIN : ABSENT_CONTINUATION_JOIN}
  JOIN zzsh_auth_user."user" ru ON ru.id=l.renter_user_id JOIN zzsh_supply.rental_account a ON a.id=l.account_id

@@ -344,7 +344,7 @@ export async function listUserDirectory(
           OR (${timeColumn}=$${cursorTime}::timestamptz AND u.id COLLATE "C" < $${cursorId}))))))`
     : `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
 
-  const orderCountRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
+  const orderCountRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client), true) : null;
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
               ${original ? `to_char(selected.registered_at ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
@@ -485,7 +485,7 @@ export async function readUserDirectoryDetail(
   const original = registrationTime === "ORIGINAL";
   const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
   const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
-  const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
+  const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client), true) : null;
   const row = (
     await client.query<UserDetailRow>(
       `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u."phoneNumberVerified",
