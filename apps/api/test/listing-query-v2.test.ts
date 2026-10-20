@@ -106,12 +106,22 @@ test("mixed candidates merge both sources once with native priority and one seek
   assert.match(sql.text,/WITH native AS/);assert.match(sql.text,/legacy AS/);assert.match(sql.text,/UNION ALL/);
   assert.match(sql.text,/DISTINCT ON \(id\)/);assert.match(sql.text,/0 AS priority/);assert.match(sql.text,/1 AS priority/);
   assert.match(sql.text,/ORDER BY id,priority/);
-  assert.match(sql.text,/WHERE \(sort_key < \$[0-9]+::timestamptz OR sort_key IS NULL OR \(sort_key=\$[0-9]+::timestamptz AND id>\$[0-9]+\)\)/);
-  assert.match(sql.text,/ORDER BY sort_key DESC NULLS LAST,id ASC LIMIT 200/);
+  // The seek rides inside both branches, so the merged set only ever carries rows
+  // past the cursor; the final order/limit still runs once over the merged set.
+  assert.equal(sql.text.match(/sort_key < \$[0-9]+::timestamptz OR sort_key IS NULL OR \(sort_key=\$[0-9]+::timestamptz AND id>\$[0-9]+\)/g)?.length,2,"both sources carry the same seek predicate");
+  assert.equal(sql.text.match(/ AND AND /g)?.length??0,0,"no doubled conjunction");
+  assert.doesNotMatch(sql.text,/candidates AS/);
+  assert.match(sql.text,/FROM merged ORDER BY sort_key DESC NULLS LAST,id ASC LIMIT 200/);
   assert.match(sql.text,/v\.payload#>.\{declaration,attributes\}'/);
   assert.match(sql.text,/\(COALESCE\(d\.snapshot->'attributes',v\.attributes\)\)->>'safe_box_code'/);
   assert.match(sql.text,/NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication p WHERE p\.account_id=a\.id\)/);
   assert.match(sql.text,/v\.review_state='PUBLISHED' AND pub\.source='OWNER_DIRECT'/);
+  const noCursor=buildMixedListingCandidates(q,null);
+  assert.doesNotMatch(noCursor.text,/sort_key </,"no cursor means no seek predicate in either branch");
+  const nullKey=buildMixedListingCandidates(q,{id:"acc",key:null,isNull:true});
+  assert.equal(nullKey.text.match(/sort_key IS NULL AND id>\$[0-9]+/g)?.length,2,"both sources carry the null-key seek");
+  const ascending=buildMixedListingCandidates(parseListingQueryV2(new URLSearchParams(`queryVersion=2&gameId=game&sort=latest&direction=ASC&filters=${filters}`),"/listings"),{id:"acc",key:"2026-09-18T00:00:00.123456Z",isNull:false});
+  assert.match(ascending.text,/sort_key > \$[0-9]+::timestamptz/);
   const priced=parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=game&sort=resourceTotal"),"/listings");
   const pricedSql=buildMixedListingCandidates(priced,null);
   assert.match(pricedSql.text,/h\.snapshot->>'haffRentYuan'/);assert.match(pricedSql.text,/quoteValues,resourceTotal,amount/);

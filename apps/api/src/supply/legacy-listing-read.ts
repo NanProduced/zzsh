@@ -333,24 +333,26 @@ export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingP
 // deduplicated by accountId with the native publication taking priority, then
 // one seek/order/limit runs over the merged set. Legacy sort keys come from the
 // frozen snapshot facts; native keys from the frozen publication payload.
+// The seek predicate is identical in both branches, so pushing it down keeps the
+// merged set equal to the filtered union while shrinking what each branch (and
+// the DISTINCT ON / final sort) has to carry.
 export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPosition|null,admission?:LegacyPublicAdmission) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const game=p(query.gameId),core=query.coreItemId===null?null:p(query.coreItemId);
-  const nativeWhere=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${game}`,PUBLIC_STANDARD_TIER_GUARD,...candidatePredicates(query.filters,query.q,p)];
-  const legacyWhere=[VISIBLE,legacyAdmissionSql(admission,p),`a.game_id=${game}`,...legacySearchPredicate(query.q,p),...candidatePredicates(query.filters,null,p,"COALESCE(d.snapshot->'attributes',v.attributes)")];
+  let seek="";
+  if(after){const id=p(after.id);if(after.isNull)seek=`(sort_key IS NULL AND id>${id})`;
+    else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`(sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
+  const nativeWhere=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${game}`,PUBLIC_STANDARD_TIER_GUARD,...candidatePredicates(query.filters,query.q,p),seek];
+  const legacyWhere=[VISIBLE,legacyAdmissionSql(admission,p),`a.game_id=${game}`,...legacySearchPredicate(query.q,p),...candidatePredicates(query.filters,null,p,"COALESCE(d.snapshot->'attributes',v.attributes)"),seek];
   const publication=`pub.published_at`;
   const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
   const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
   const nativeKey=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
   const legacyKey=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
-  let seek="";
-  if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
-    else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
   const text=`WITH native AS (SELECT a.id AS id,v.id AS version_id,'native' AS source,0 AS priority,${nativeKey} AS sort_key ${PUBLIC_CANDIDATE_FROM} WHERE ${nativeWhere.join(" AND ")}),
    legacy AS (SELECT a.id AS id,v.id AS version_id,'legacy' AS source,1 AS priority,${legacyKey} AS sort_key ${FROM} WHERE ${legacyWhere.join(" AND ")}),
-   merged AS (SELECT DISTINCT ON (id) id,version_id,source,priority,sort_key FROM (SELECT * FROM native UNION ALL SELECT * FROM legacy) combined ORDER BY id,priority),
-   candidates AS (SELECT id,version_id,source,sort_key FROM merged ${seek})
-   SELECT id,version_id,source,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+   merged AS (SELECT DISTINCT ON (id) id,version_id,source,priority,sort_key FROM (SELECT * FROM native UNION ALL SELECT * FROM legacy) combined ORDER BY id,priority)
+   SELECT id,version_id,source,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM merged ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
   return {text,values};
 }
 

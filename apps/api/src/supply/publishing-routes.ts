@@ -57,6 +57,7 @@ import {
   checkAccountRevision,
   createListingDraft,
   currentVersion,
+  listingCandidatePage,
   listingDetail,
   lockPublishingAccount,
   readPublicListing,
@@ -302,19 +303,26 @@ export async function handlePublishingRoute(
         const items: unknown[] = [];
         let last = cursor;
         let hasMore = false;
-        for (const row of rows) {
-          if (items.length === limit) {
-            hasMore = true;
-            break;
-          }
+        const page = listingCandidatePage(client);
+        for (let i = 0; i < rows.length && items.length < limit; i++) {
+          const row = rows[i]!;
+          if (!page.has(row.id))
+            await page.load(rows.slice(i, i + limit).map((candidate) => candidate.id));
           last = row.id;
+          const account = page.account(row.id);
+          if (!account) continue;
           try {
             items.push(
               await listingDetail(
                 client,
-                await readPublishingAccount(client, row.id),
+                account,
                 "public",
                 gate,
+                undefined,
+                undefined,
+                false,
+                "RENTABLE",
+                { version: page.version(row.id), shared: page.shared },
               ),
             );
           } catch (error) {
