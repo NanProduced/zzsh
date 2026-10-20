@@ -10,7 +10,7 @@ import { listingCatalogContext,readListingState,validateConfigCatalog,validateLi
 import { canonicalize } from "./content-hash";
 import { buildListingCandidates,type ListingPosition } from "./listing-candidates";
 import { requireListingCursorKey,decodeListingCursor,encodeListingCursor,type ListingCursorBinding } from "./listing-cursor";
-import { withPublicListingSnapshot,listingDetail,readPublishingAccount,unknownSupplyGate } from "./publishing";
+import { withPublicListingSnapshot,listingCandidatePage,listingDetail,unknownSupplyGate } from "./publishing";
 
 function revision(v:unknown,path:string):string{if(typeof v!=="string"||!/^(0|[1-9]\d{0,18})$/.test(v)||BigInt(v)>9223372036854775807n)throw invalid("Invalid revision",path);return v;}
 export async function handleListingFilters(request:SupplyNodeRequest,response:SupplyNodeResponse,options:SupplyRuntimeOptions,requestId:string,path:string,query:URLSearchParams,admin:boolean):Promise<boolean> {
@@ -68,8 +68,12 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
       const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
       await validateListingQuery(client,q,state);
       const sql=buildMixedListingCandidates(q,after,options.legacyPublicAdmission),rows=(await client.query<{id:string;version_id:string;key:string|null;source:string}>(sql.text,sql.values)).rows;
-      const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;
-      for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(row.source==="legacy"?await readLegacyListing(client,row.id,options.legacyPublicAdmission):await listingDetail(client,await readPublishingAccount(client,row.id),"public",options.supplyGateReader??unknownSupplyGate));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
+      const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
+      for(let i=0;i<rows.length&&items.length<q.limit;i++){const row=rows[i]!;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;
+        if(row.source==="legacy"){try{items.push(await readLegacyListing(client,row.id,options.legacyPublicAdmission));}catch(e){if((e as {status?:number}).status!==404)throw e;}continue;}
+        if(!page.has(row.id))await page.load(rows.slice(i,i+q.limit).filter(r=>r.source!=="legacy").map(r=>r.id));
+        const account=page.account(row.id);if(!account)continue;
+        try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
       const more=scanned<rows.length||rows.length===200;
       return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
     }
@@ -77,8 +81,11 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);
     const sql=buildListingCandidates(q,after),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
-    const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;
-    for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(await listingDetail(client,await readPublishingAccount(client,row.id),"public",options.supplyGateReader??unknownSupplyGate));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
+    const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
+    for(let i=0;i<rows.length&&items.length<q.limit;i++){const row=rows[i]!;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;
+      if(!page.has(row.id))await page.load(rows.slice(i,i+q.limit).map(r=>r.id));
+      const account=page.account(row.id);if(!account)continue;
+      try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
     const more=scanned<rows.length||rows.length===200;
     return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
   });
