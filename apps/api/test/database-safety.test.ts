@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 
 import { withTransaction } from "../src/auth/security-core";
+import { assertBusinessRuntimeIdentity } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
 
 test("identity failure closes the resource without DROP or CREATE", async () => {
@@ -150,4 +151,87 @@ test("withTransaction propagates a pool connect failure without releasing a clie
     (error: unknown) => error === connectFailure,
   );
   assert.equal(connects, 1);
+});
+
+type CapturedQuery = { sql: string; args: unknown[] };
+
+function runtimeIdentityPool(options: {
+  identity?: Record<string, unknown> | null;
+  ownership?: Record<string, unknown> | null;
+}): { pool: Pool; queries: CapturedQuery[] } {
+  const queries: CapturedQuery[] = [];
+  const pool = {
+    async query(sql: string, args?: unknown[]) {
+      queries.push({ sql, args: args ?? [] });
+      if (sql.includes("ownsBusinessSchema")) {
+        return { rows: options.ownership === null ? [] : [options.ownership ?? { ownsBusinessSchema: false, ownsBusinessRelation: false, hasPrivilegedMembership: false }] };
+      }
+      return { rows: options.identity === null ? [] : [options.identity] };
+    },
+  } as unknown as Pool;
+  return { pool, queries };
+}
+
+function leastPrivilegeIdentityRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    databaseName: "zzsh_business",
+    currentUser: "zzsh_runtime",
+    owner: "zzsh_owner",
+    isSuperuser: false,
+    canCreateRole: false,
+    canCreateDb: false,
+    canReplicate: false,
+    canBypassRls: false,
+    canCreateDatabase: false,
+    canCreateIamSchema: false,
+    canCreateUserSchema: false,
+    canCreateAdminSchema: false,
+    canCreateSupplySchema: false,
+    canCreateOrderSchema: false,
+    canCreateContentSchema: false,
+    canUpdateAudit: false,
+    canDeleteAudit: false,
+    canTruncateAudit: false,
+    ...overrides,
+  };
+}
+
+const RUNTIME_IDENTITY_CONFIG = { database: { name: "zzsh_business", user: "zzsh_migration", runtimeUser: "zzsh_runtime" } };
+
+test("runtime identity probes content schema ownership and CREATE while accepting a least-privilege role", async () => {
+  const { pool, queries } = runtimeIdentityPool({ identity: leastPrivilegeIdentityRow() });
+  await assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG);
+  const identityQuery = queries.find((entry) => entry.sql.includes('"databaseName"'));
+  const ownershipQuery = queries.find((entry) => entry.sql.includes("ownsBusinessSchema"));
+  assert.ok(identityQuery && ownershipQuery);
+  assert.match(identityQuery.sql, /has_schema_privilege\(current_user, 'zzsh_content', 'CREATE'\)/);
+  const schemas = ownershipQuery.args[0] as string[];
+  assert.ok(schemas.includes("zzsh_content"), "ownership probe must cover the content schema");
+  assert.equal(schemas.length, 8);
+});
+
+test("runtime identity rejects a role owning the content schema", async () => {
+  const { pool } = runtimeIdentityPool({
+    identity: leastPrivilegeIdentityRow(),
+    ownership: { ownsBusinessSchema: true, ownsBusinessRelation: false, hasPrivilegedMembership: false },
+  });
+  await assert.rejects(() => assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG), /least privilege/);
+});
+
+test("runtime identity rejects a role owning a content relation", async () => {
+  const { pool } = runtimeIdentityPool({
+    identity: leastPrivilegeIdentityRow(),
+    ownership: { ownsBusinessSchema: false, ownsBusinessRelation: true, hasPrivilegedMembership: false },
+  });
+  await assert.rejects(() => assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG), /least privilege/);
+});
+
+test("runtime identity rejects a role holding CREATE on the content schema", async () => {
+  const { pool } = runtimeIdentityPool({ identity: leastPrivilegeIdentityRow({ canCreateContentSchema: true }) });
+  await assert.rejects(() => assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG), /least privilege/);
+});
+
+test("runtime identity treats an absent optional content schema as no CREATE privilege, not as a violation", async () => {
+  const { pool } = runtimeIdentityPool({ identity: leastPrivilegeIdentityRow({ canCreateContentSchema: null }) });
+  await assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG);
 });
