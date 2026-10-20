@@ -1,7 +1,7 @@
 import type { INestApplication } from "@nestjs/common";
 
 import { ADMIN_PERMISSION, hasPermission, requirePermission } from "./admin-authorization";
-import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "./admin-scope";
+import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope, scopeIsEmpty } from "./admin-scope";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "./auth-security";
 import { normalizeMainlandPhone } from "./phone-number";
 import { sanitizeDetail } from "./admin-audit";
@@ -18,6 +18,7 @@ import {
   readDirectoryRentalAccount,
   USER_DIRECTORY_SOURCE,
   USER_DIRECTORY_STATUS_FILTER,
+  USER_DIRECTORY_MAX_PAGE,
   type UserDirectoryStatusFilter,
   type UserDirectorySource,
 } from "./user-directory";
@@ -25,11 +26,30 @@ import {
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const USERNAME_SEARCH_MAX = 200;
 const LEGACY_ID_MAX = 128;
+const PAGINATION_KEYS = new Set(["page", "pageSize", "contextKey", "limit", "cursor"]);
+const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "registeredFrom", "registeredTo", "sort", "page", "pageSize", "contextKey"]);
 
 function parseLimit(raw: string | null): number {
   const limit = raw === null ? 20 : Number(raw);
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
   return limit;
+}
+
+function parseDirectoryPage(query: URLSearchParams, collection: boolean) {
+  for (const key of PAGINATION_KEYS) if (query.getAll(key).length > 1) throw invalid("Pagination argument is repeated", key);
+  if (!["page", "pageSize", "contextKey"].some(key => query.has(key))) return undefined;
+  if (!collection) throw invalid("Numbered pagination is only supported for the user list");
+  if (query.has("limit") || query.has("cursor")) throw invalid("Page pagination cannot include limit or cursor");
+  for (const key of query.keys()) if (!DIRECTORY_QUERY_KEYS.has(key)) throw invalid("Unsupported directory page argument", key);
+  const positive = (key: string, fallback: number | undefined, max: number) => {
+    const raw = query.get(key);
+    if (raw === null && fallback !== undefined) return fallback;
+    if (raw === null || !/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) throw invalid("Pagination argument is invalid", key);
+    return Number(raw);
+  };
+  const contextKey = query.get("contextKey");
+  if (contextKey !== null && !/^[0-9a-f]{64}$/.test(contextKey)) throw invalid("Page context is invalid", "contextKey");
+  return { page: positive("page", undefined, USER_DIRECTORY_MAX_PAGE), pageSize: positive("pageSize", 20, 100), ...(contextKey !== null ? { contextKey } : {}) };
 }
 
 function parseTimestamp(raw: string | null, label: string): string | undefined {
@@ -92,9 +112,10 @@ export async function handleUserDirectoryAdmin(
     if (query.has("phone")) throw invalid("Phone lookup must use a request body");
     if (lookup) {
       if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) throw invalid("Lookup body is invalid");
-      const allowed = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "registeredFrom", "registeredTo", "limit", "cursor"]);
+      const allowed = new Set([...DIRECTORY_QUERY_KEYS, "limit", "cursor"]);
       for (const [key, value] of Object.entries(request.body)) {
         if (!allowed.has(key) || typeof value !== "string" || value.length > 2000) throw invalid("Lookup field is invalid");
+        if (PAGINATION_KEYS.has(key) && query.has(key)) throw invalid("Lookup pagination argument is repeated", key);
         query.set(key, value);
       }
       if (!query.get("phone")) throw invalid("Phone is required");
@@ -114,13 +135,17 @@ export async function handleUserDirectoryAdmin(
         resourceRead: hasPermission(access, ADMIN_PERMISSION.supplyRentalAccountRead),
         orderRead: hasPermission(access, ADMIN_PERMISSION.orderRead),
         auditRead: hasPermission(access, ADMIN_PERMISSION.auditRead),
+        membershipSummaryRead: hasPermission(access, ADMIN_PERMISSION.membershipGrowthSummaryRead),
+        creditRead: hasPermission(access, ADMIN_PERMISSION.creditRead),
+        businessScopeUsable: !scopeIsEmpty(gameScope, access.isBoss),
         authorizationKey: sha256Hex(JSON.stringify([context.userId, context.sessionId, access.isBoss, [...access.permissions].sort(), gameScopeSignature(gameScope)])),
         legacyRead: false,
       };
       const enableLegacyRead=async()=>{viewer.legacyRead=(await client.query("SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS present")).rows[0]?.present===true;};
       const cursor = query.get("cursor") ?? undefined;
+      const pagination = parseDirectoryPage(query, path === "/" || lookup);
       if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);dataToSend = await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!));return;}
-      const limit = parseLimit(query.get("limit"));
+      const limit = pagination?.pageSize ?? parseLimit(query.get("limit"));
 
       if (path === "/" || lookup) {
         requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
@@ -162,6 +187,7 @@ export async function handleUserDirectoryAdmin(
           ...(registeredTo !== undefined ? { registeredTo } : {}),
           limit,
           ...(cursor !== undefined ? { cursor } : {}),
+          ...(pagination ? { page: pagination.page, ...(pagination.contextKey !== undefined ? { contextKey: pagination.contextKey } : {}) } : {}),
         });
         dataToSend = data;
         return;
@@ -195,11 +221,11 @@ export async function handleUserDirectoryAdmin(
         const roleRaw = query.get("role");
         if (roleRaw !== null && roleRaw !== "renter" && roleRaw !== "owner" && roleRaw !== "any") throw invalid("Role is invalid");
         const statusRaw = query.get("status");
-        if (statusRaw !== null && !["PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED"].includes(statusRaw)) throw invalid("Status is invalid");
+        if (statusRaw !== null && !["PENDING_PAYMENT", "PAID", "COMPLETED", "CANCELLED", "current"].includes(statusRaw)) throw invalid("Status is invalid");
         await enableLegacyRead();
         dataToSend = await listUserOrders(client, viewer, userId, {
           ...(roleRaw !== null ? { role: roleRaw as "renter" | "owner" | "any" } : {}),
-          ...(statusRaw !== null ? { status: statusRaw as "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED" } : {}),
+          ...(statusRaw !== null ? { status: statusRaw as "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED" | "current" } : {}),
           limit,
           ...(cursor !== undefined ? { cursor } : {}),
         });

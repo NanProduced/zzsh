@@ -196,16 +196,28 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 | 核心接口 | 输入/结果与权限 |
 |---|---|
-| GET /users | `user.directory.read`；`q`匹配稳定ID、旧ID、昵称、用户名/展示用户名；仍支持精确`userId/legacyId`和模糊`identifier`。筛选`accountStatus/source/identityStatus/ageStatus/registeredFrom/registeredTo/limit/cursor`；注册范围和排序均用canonical `user.createdAt`，时间为RFC3339，按(createdAt,id)倒序。游标绑定管理员、Boss状态、有效权限/游戏scope签名、全部筛选和limit，不一致409 |
+| GET /users | `user.directory.read`；`q`匹配稳定ID、旧ID、昵称、用户名/展示用户名；仍支持精确`userId/legacyId`和模糊`identifier`。筛选`accountStatus/source/identityStatus/ageStatus/registeredFrom/registeredTo/limit/cursor`；建档范围和排序均用canonical `user.createdAt`，时间为RFC3339，按(createdAt,id)倒序。cursor模式返回`items/total/nextCursor/limit`，total为同主体可见范围、同过滤的完整数量，不受cursor影响。游标绑定管理员、Boss状态、有效权限/游戏scope签名、全部筛选和limit，不一致409；可选页码模式见下文 |
 | POST /users/lookup | 同一只读查询，另需`user.phone.lookup`。手机号仅放JSON正文，允许与上述非敏感筛选一起提交；不改变数据。GET中的phone或搜索参数中的手机号拒绝400。响应只给脱敏手机号，游标仅含查询摘要及排序键，不含原手机号 |
-| GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态和脱敏联系方式；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。首期不投影会员/余额/收益，不在读取时补造资格 |
+| GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态和脱敏联系方式，附与列表同口径的关系、成长礼遇和信用摘要；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。不投影钱包余额/收益，不在读取时补造资格 |
 | GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；当前版本、发布记录复用供给发布元组和有效版本判断，发布不等于可租资格 |
-| GET /users/{userId}/orders | 另需`order.read` + 游戏/对象范围；`role=renter|owner|any`仅表示该单参与方，另有status/limit/cursor。金额来自冻结订单快照；取消后仍保留paidAt，已付/完成但时间缺失不可推断未付。没有独立供给读取权限时不返回内部accountId/展示号 |
+| GET /users/{userId}/orders | 另需`order.read` + 游戏/对象范围；`role=renter|owner|any`仅表示该单参与方，另有status/limit/cursor。status支持原单状态及`current`（PENDING_PAYMENT或PAID，属于过滤分组，不是新订单状态）；与目录分角色计数同口径、同新旧来源，过滤先于分页。金额来自冻结订单快照；取消后仍保留paidAt，已付/完成但时间缺失不可推断未付。没有独立供给读取权限时不返回内部accountId/展示号 |
 | GET /users/{userId}/audit-events | 另需既有`admin.audit.read`；按用户对象过滤，Boss全量、非Boss仅本人操作；沿用敏感detail裁剪，不新增用户页专用IAM scope |
+
+用户列表可选页码模式：`GET /users?page=1&pageSize=20&contextKey=…`；`page`为1–1000000的十进制正整数，`pageSize`为1–100（默认20）。响应在原字段之外返回`paginationMode:"page"/page/pageSize/contextKey`，`nextCursor=null`、`limit=pageSize`；`total`仍为当前授权及完整筛选后的数量，不能由本页条数推算。任意页可直接读取，不先遍历cursor。页码超出当前结果时返回200、空items及真实total/原请求page，不静默跳到其他页。
+
+`contextKey`绑定主体、有效权限/游戏scope、查询条件及页容量，不绑定页码；可在首次读取任意页时省略，后续翻页带回，不匹配409。它不是授权凭证或跨请求数据快照：每次仍完整授权并重新读取同一事务内的count/本页/摘要，数据变化后total可变。客户端仅在当前查询内存保留该key，不写地址栏、tab/storage或复制链接。
+
+页码模式与`limit/cursor`互斥；重复分页参数、无page但有pageSize/contextKey、非法/空/小数/越界值、未知页码查询字段均400。详情或其业务分区不接受这些新页码参数。未提供新分页参数时继续原cursor模式，保留既有响应形状和cursor签名。
+
+`POST /users/lookup`同样支持页码模式，所有正文查询值仍为字符串；手机号及其分页上下文随正文发送，不进入地址栏。正文和query重复分页键拒绝400，读取另需`user.phone.lookup`；响应不包含明文手机号，公共BFF不补造计数或分页。
 
 列表与详情分开返回canonical `createdAt/updatedAt`和审计授权后的旧来源时间。兼容字段`registeredAt/localCreatedAt`都取canonical创建时间，`registeredAtSource=LOCAL`；旧`sourceCreatedAt/sourceUpdatedAt`仅技术追溯。管理身份状态行缺失返回UNKNOWN；其余按CANCELLED→DEACTIVATED→suspended时RESTRICTED→ACTIVE，不认识的值不默认正常。provider=legacy_mysql_restore表示旧平台用户；provider=none且无冲突来源表示未关联旧平台来源；无法判断则UNKNOWN。
 
-`resourceSummary`为`{state:ready,count}`或`{state:denied,permission}`；`orderSummary`为`{state:ready,currentCount}`或拒绝态。数量由各域权限和游戏范围裁剪；无权限不返回数值或内部ID，拒绝/失败不能当零。当前`lastBusinessActivity={state:not_connected,domains:[ORDER,SUPPLY]}`，不支持活动排序，不能以表更新时间或迁入时间代替事件。
+`resourceSummary`为`{state:ready,count}`或`{state:denied,permission,reason?}`；count为名下游戏账号档案数，含各生命周期，不等于上架或可租数。`orderSummary`为`{state:ready,currentCount,renterCurrentCount,ownerCurrentCount}`或拒绝态，计数只含PENDING_PAYMENT/PAID，聚合currentCount按参与关系去重，不能将角色之和强当聚合数。数量由各域权限和游戏范围裁剪；非Boss的SELECTED_GAMES为空时，目录和详情保持200，对受影响摘要返回denied+reason=NO_GAME_SCOPE；对应业务分区仍403 NO_GAME_SCOPE。Boss或ALL_GAMES的空gameIds不是无范围。有效范围内的零保持ready:0，无权限/失败不返回数值或内部ID，不当零。当前`lastBusinessActivity={state:not_connected,domains:[ORDER,SUPPLY]}`，不支持活动排序，不能以表更新时间或迁入时间代替事件。
+
+列表与详情增加`membershipSummary`和`creditSummary`，按本页主体批量读取。前者仅`membership.growth.read.summary`可读：`{state:ready,asOfUtc,growth:{knowledge,sourceState,benefitsState,normalTier,effectiveTier,blackGold,grace},entitlements}`，成长/来源/未配置语义复用[会员合同](membership-growth.md)，entitlements为既有读合同的ACTIVE独立礼遇；成长UNKNOWN仍保留有效礼遇。只有detail权限不能取得全局成长摘要；无summary权限为`{state:denied,permission:membership.growth.read.summary}`。信用另需`credit.read`与原信用目标对象范围：`{state:ready,knowledge:KNOWN,score,revision}`或`{state:ready,knowledge:NOT_INITIALIZED,score:null,revision:null}`；拒绝态`{state:denied,permission:credit.read,reason?}`的reason可为NO_GAME_SCOPE或OUT_OF_SCOPE，不泄露评分或修订。读取不初始化信用、不补造100或0。目录权限不代替任何领域权限，不增加客服专用主体范围。
+
+目录读取使用同一REPEATABLE READ READ ONLY事务保持total、页面与领域摘要一致；保留并发2、请求8秒、SQL3秒和锁500毫秒预算，不逐行发起SQL/HTTP读取成长或信用。SQL/证据读取失败返回既有安全错误，不伪造成功摘要；这不替代实际数据规模的性能验证。新增字段为兼容添加，原items/nextCursor/limit、currentCount及所有旧过滤保留；钱包、成长明细和信用事件继续使用各自已授权的独立读接口。
 
 `user.directory.read/user.phone.lookup/supply.rental_account.read`已声明代码校验，正式数据库权限注册迁移仍由维护者分配；未登记时非Boss无法授予，不能用review.read或directory.read代替独立供给读权限。现有账号恢复入口沿用`user.account.restore`与密码/TOTP再认证，不新增写接口。上述合同与本地合成验证不等于旧数据迁移、真实PG或非空历史订单验收完成。
 

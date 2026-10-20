@@ -67,7 +67,8 @@ export async function withDirectoryReadTransaction<T>(
     signal.throwIfAborted();
     // Never join or roll back a previous borrower's uncertain transaction.
     if (client.getTransactionStatus() !== "I") throw failure(503, "User directory connection state unavailable");
-    await client.query("BEGIN READ ONLY");
+    // Counts and page/domain projections must describe the same snapshot.
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     started = true;
     await client.query("SELECT set_config('statement_timeout','3000',true),set_config('lock_timeout','500',true)");
     signal.throwIfAborted();

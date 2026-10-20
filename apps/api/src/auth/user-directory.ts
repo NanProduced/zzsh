@@ -1,13 +1,14 @@
 import type { PoolClient } from "pg";
 
 import { gameScopeSql } from "./admin-scope";
-import { conflict, forbidden, sha256Hex } from "../supply/supply-util";
+import { conflict, forbidden, invalid, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { isEffectivePublicationState } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
 import { orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
 import { legacyContinuationReady } from "../order/legacy-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
+import { readUserDirectoryBusinessSummaries } from "./user-directory-business-summary";
 
 export const USER_DIRECTORY_SOURCE = {
   LOCAL: "LOCAL",
@@ -18,6 +19,7 @@ export type UserDirectorySource = (typeof USER_DIRECTORY_SOURCE)[keyof typeof US
 
 export const USER_DIRECTORY_STATUS_FILTER = ["ACTIVE", "RESTRICTED", "DEACTIVATED", "CANCELLED", "UNKNOWN"] as const;
 export type UserDirectoryStatusFilter = (typeof USER_DIRECTORY_STATUS_FILTER)[number];
+export const USER_DIRECTORY_MAX_PAGE = 1_000_000;
 
 const TIMESTAMP_TEXT = `AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`;
 const LEGACY_MIGRATION_ACTION = "user.legacy_owner.migrated";
@@ -83,6 +85,9 @@ export type AdminDirectoryViewer = {
   resourceRead?: boolean;
   orderRead?: boolean;
   auditRead?: boolean;
+  membershipSummaryRead?: boolean;
+  creditRead?: boolean;
+  businessScopeUsable?: boolean;
   authorizationKey?: string;
   legacyRead?: boolean;
 };
@@ -101,6 +106,8 @@ export type UserDirectoryFilter = {
   registeredTo?: string;
   limit: number;
   cursor?: string;
+  page?: number;
+  contextKey?: string;
 };
 
 type UserListRow = {
@@ -120,6 +127,8 @@ type UserListRow = {
   migrationSourceCreatedAt: string | null;
   resourceAccountCount: number;
   currentOrderCount: number;
+  renterCurrentOrderCount: number;
+  ownerCurrentOrderCount: number;
   ageStatus: string | null;
   localUpdatedAt: string;
 };
@@ -158,6 +167,21 @@ const ACCOUNT_STATUS_SQL = `CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
 const SOURCE_SQL = `CASE WHEN s.provider='${LEGACY_PROVIDER}' THEN 'MIGRATED'
   WHEN s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
 
+function projectRelationshipSummaries(
+  row: Pick<UserListRow, "resourceAccountCount" | "currentOrderCount" | "renterCurrentOrderCount" | "ownerCurrentOrderCount">,
+  viewer: AdminDirectoryViewer,
+) {
+  const noScope = viewer.businessScopeUsable === false;
+  return {
+    resourceSummary: viewer.resourceRead && !noScope
+      ? { state: "ready", count: row.resourceAccountCount }
+      : { state: "denied", permission: "supply.rental_account.read", ...(viewer.resourceRead && noScope ? { reason: "NO_GAME_SCOPE" } : {}) },
+    orderSummary: viewer.orderRead && !noScope
+      ? { state: "ready", currentCount: row.currentOrderCount, renterCurrentCount: row.renterCurrentOrderCount, ownerCurrentCount: row.ownerCurrentOrderCount }
+      : { state: "denied", permission: "order.read", ...(viewer.orderRead && noScope ? { reason: "NO_GAME_SCOPE" } : {}) },
+  };
+}
+
 function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer) {
   const legacyId = row.migrationLegacyId ?? legacyIdFromReference(row.provider, row.providerReference);
   const source = sourceKindOf(row.migrationLegacyId, row.provider, row.accountStatus !== null);
@@ -182,8 +206,7 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer) {
     createdAt: row.localCreatedAt,
     updatedAt: row.localUpdatedAt,
     localCreatedAt: row.localCreatedAt,
-    resourceSummary: viewer.resourceRead ? { state: "ready", count: row.resourceAccountCount } : { state: "denied", permission: "supply.rental_account.read" },
-    orderSummary: viewer.orderRead ? { state: "ready", currentCount: row.currentOrderCount } : { state: "denied", permission: "order.read" },
+    ...projectRelationshipSummaries(row, viewer),
     lastBusinessActivity: { state: "not_connected", domains: ["ORDER", "SUPPLY"] },
   };
 }
@@ -198,15 +221,22 @@ export async function listUserDirectory(
   viewer: AdminDirectoryViewer,
   filter: UserDirectoryFilter,
 ): Promise<Record<string, unknown>> {
+  const numbered = filter.page !== undefined;
+  if (numbered && (!Number.isSafeInteger(filter.page) || filter.page! < 1 || filter.page! > USER_DIRECTORY_MAX_PAGE
+    || !Number.isSafeInteger(filter.limit) || filter.limit < 1 || filter.limit > 100 || filter.cursor !== undefined)) throw invalid("Directory page is invalid");
+  if (!numbered && filter.contextKey !== undefined) throw invalid("Page context requires numbered pagination");
   const filterKey = sha256Hex(
     JSON.stringify({
-      scope: "admin-user-directory",
+      scope: numbered ? "admin-user-directory-page" : "admin-user-directory",
       principal: viewer.adminId,
       phoneLookup: viewer.phoneLookup,
       isBoss: viewer.isBoss,
       authorizationKey: viewer.authorizationKey ?? null,
       resourceRead: viewer.resourceRead === true,
       orderRead: viewer.orderRead === true,
+      membershipSummaryRead: viewer.membershipSummaryRead === true,
+      creditRead: viewer.creditRead === true,
+      businessScopeUsable: viewer.businessScopeUsable !== false,
       userId: filter.userId ?? null,
       legacyId: filter.legacyId ?? null,
       identifier: filter.identifier ?? null,
@@ -221,9 +251,12 @@ export async function listUserDirectory(
       limit: filter.limit,
     }),
   );
+  if (filter.contextKey !== undefined && filter.contextKey !== filterKey) throw conflict("Directory query or authorisation changed; return to the first page");
   const cursor = parseKeysetCursor(filter.cursor, filterKey);
 
-  const values: unknown[] = [viewer.isBoss, viewer.adminId, viewer.resourceRead === true, viewer.orderRead === true];
+  const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
+  const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
+  const values: unknown[] = [viewer.isBoss, viewer.adminId, resourceRead, orderRead];
   const conditions: string[] = [];
   if (filter.userId) conditions.push(`u.id = $${values.push(filter.userId)}`);
   if (filter.legacyId) {
@@ -250,13 +283,17 @@ export async function listUserDirectory(
   if (filter.registeredTo) {
     conditions.push(`u."createdAt" <= $${values.push(filter.registeredTo)}::timestamptz`);
   }
-  values.push(cursor?.createdAt ?? null, cursor?.id ?? null, filter.limit + 1);
+  // Count uses the identical filter predicates, without the four projection-only parameters or cursor.
+  const countValues = values.slice(4);
+  const countConditions = conditions.map(condition => condition.replace(/\$(\d+)/g, (_, index: string) => `$${Number(index) - 4}`));
+  values.push(cursor?.createdAt ?? null, cursor?.id ?? null, numbered ? filter.limit : filter.limit + 1);
   const cursorTime = values.length - 2;
   const cursorId = values.length - 1;
   const limitParameter = values.length;
+  const offsetParameter = filter.page === undefined ? undefined : values.push((filter.page - 1) * filter.limit);
   const cursorCondition = `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
 
-  const orderCountRelation = viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
+  const orderCountRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
               to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", ${ageStatusExpr} AS "ageStatus",
@@ -266,9 +303,9 @@ export async function listUserDirectory(
               CASE WHEN $3::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
                   AND ${gameScopeSql("ra.game_id","$2","$1")}) ELSE NULL END AS "resourceAccountCount",
-              CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM ${orderCountRelation ? "("+orderCountRelation+")" : "zzsh_order.rental_order"} o
-                WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
-                  AND ${gameScopeSql("o.game_id","$2","$1")}) ELSE NULL END AS "currentOrderCount"`;
+              CASE WHEN $4::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
+              CASE WHEN $4::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
+              CASE WHEN $4::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"`;
 
   const consultsMigration = filterConsultsMigrationAudit(filter);
   const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
@@ -284,7 +321,15 @@ export async function listUserDirectory(
            ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
           WHERE ${[...conditions, cursorCondition].join(" AND ")}
           ORDER BY u."createdAt" DESC, u.id DESC
-          LIMIT $${limitParameter}`;
+           LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`;
+  const total = (await client.query<{ total: number }>(
+    `${consultsMigration ? `WITH migration AS MATERIALIZED (${migrationQuery})` : ""}
+       SELECT count(*)::int AS total FROM zzsh_auth_user."user" u
+       LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
+       ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
+       WHERE ${countConditions.join(" AND ") || "TRUE"}`,
+    countValues,
+  )).rows[0]!.total;
   // Narrow keys avoid materialising full user/identity rows before the top-N operation.
   const sql = `WITH ${consultsMigration
       ? `migration AS MATERIALIZED (${migrationQuery}), page AS MATERIALIZED (${pageQuery})`
@@ -294,16 +339,27 @@ export async function listUserDirectory(
          JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          LEFT JOIN migration mig ON mig.object_id = u.id
+         LEFT JOIN LATERAL (
+           SELECT count(*)::int AS current_count,
+                  count(*) FILTER (WHERE o.renter_user_id=u.id)::int AS renter_count,
+                  count(*) FILTER (WHERE o.owner_user_id=u.id)::int AS owner_count
+             FROM ${orderCountRelation ? "("+orderCountRelation+")" : "zzsh_order.rental_order"} o
+            WHERE $4::boolean AND (o.renter_user_id=u.id OR o.owner_user_id=u.id)
+              AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id","$2","$1")}
+         ) current_orders ON true
         ORDER BY u."createdAt" DESC, u.id DESC`;
 
   const rows = (await client.query<UserListRow>(sql, values)).rows;
   const items = rows.slice(0, filter.limit);
   const hasMore = rows.length > filter.limit;
   const last = items.at(-1);
+  const summaries = await readUserDirectoryBusinessSummaries(client, viewer, items.map(row => row.id));
   return {
-    items: items.map(row => projectListItem(row, viewer)),
-    nextCursor: hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: last.localCreatedAt, id: last.id }) : null,
+    items: items.map(row => ({ ...projectListItem(row, viewer), ...summaries.get(row.id) })),
+    total,
+    nextCursor: !numbered && hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: last.localCreatedAt, id: last.id }) : null,
     limit: filter.limit,
+    ...(numbered ? { paginationMode: "page", page: filter.page, pageSize: filter.limit, contextKey: filterKey } : {}),
   };
 }
 
@@ -335,6 +391,8 @@ export type UserDetailRow = {
   migratedAt: string | null;
   resourceAccountCount: number;
   currentOrderCount: number;
+  renterCurrentOrderCount: number;
+  ownerCurrentOrderCount: number;
 };
 
 export async function readUserDirectoryDetail(
@@ -342,7 +400,9 @@ export async function readUserDirectoryDetail(
   viewer: AdminDirectoryViewer,
   userId: string,
 ): Promise<Record<string, unknown> | null> {
-  const detailOrderRelation = viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
+  const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
+  const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
+  const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
   const row = (
     await client.query<UserDetailRow>(
       `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u."phoneNumberVerified",
@@ -359,9 +419,9 @@ export async function readUserDirectoryDetail(
               CASE WHEN $4::boolean THEN (SELECT count(*)::int FROM zzsh_supply.rental_account ra
                 WHERE ra.owner_user_id = u.id
                   AND ${gameScopeSql("ra.game_id","$3","$2")}) ELSE NULL END AS "resourceAccountCount",
-              CASE WHEN $5::boolean THEN (SELECT count(*)::int FROM ${detailOrderRelation ? "("+detailOrderRelation+")" : "zzsh_order.rental_order"} o
-                WHERE (o.renter_user_id=u.id OR o.owner_user_id=u.id) AND o.status IN ('PENDING_PAYMENT','PAID')
-                  AND ${gameScopeSql("o.game_id","$3","$2")}) ELSE NULL END AS "currentOrderCount"
+              CASE WHEN $5::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
+              CASE WHEN $5::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
+              CASE WHEN $5::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"
          FROM zzsh_auth_user."user" u
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          LEFT JOIN LATERAL (
@@ -379,14 +439,23 @@ export async function readUserDirectoryDetail(
             ORDER BY e.occurred_at DESC, e.id DESC
             LIMIT 1
          ) mig ON true
+         LEFT JOIN LATERAL (
+           SELECT count(*)::int AS current_count,
+                  count(*) FILTER (WHERE o.renter_user_id=u.id)::int AS renter_count,
+                  count(*) FILTER (WHERE o.owner_user_id=u.id)::int AS owner_count
+             FROM ${detailOrderRelation ? "("+detailOrderRelation+")" : "zzsh_order.rental_order"} o
+            WHERE $5::boolean AND (o.renter_user_id=u.id OR o.owner_user_id=u.id)
+              AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id","$3","$2")}
+         ) current_orders ON true
         WHERE u.id = $1`,
-      [userId, viewer.isBoss, viewer.adminId, viewer.resourceRead === true, viewer.orderRead === true],
+      [userId, viewer.isBoss, viewer.adminId, resourceRead, orderRead],
     )
   ).rows[0];
   if (!row) return null;
   const legacyId = row.migrationLegacyId ?? legacyIdFromReference(row.provider, row.providerReference);
   const source = sourceKindOf(row.migrationLegacyId, row.provider, row.accountStatus !== null);
   const registeredAt = row.localCreatedAt;
+  const summaries = await readUserDirectoryBusinessSummaries(client, viewer, [userId]);
   return {
     userId: row.id,
     name: row.name,
@@ -427,8 +496,8 @@ export async function readUserDirectoryDetail(
     updatedAt: row.localUpdatedAt,
     localCreatedAt: row.localCreatedAt,
     localUpdatedAt: row.localUpdatedAt,
-    resourceSummary: viewer.resourceRead ? { state: "ready", count: row.resourceAccountCount } : { state: "denied", permission: "supply.rental_account.read" },
-    orderSummary: viewer.orderRead ? { state: "ready", currentCount: row.currentOrderCount } : { state: "denied", permission: "order.read" },
+    ...projectRelationshipSummaries(row, viewer),
+    ...summaries.get(userId),
     lastBusinessActivity: { state: "not_connected", domains: ["ORDER", "SUPPLY"] },
   };
 }
@@ -523,7 +592,7 @@ export type UserOrderRole = (typeof USER_ORDER_ROLES)[number];
 
 export type UserOrderFilter = {
   role?: UserOrderRole;
-  status?: "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED";
+  status?: "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED" | "current";
   limit: number;
   cursor?: string;
 };
@@ -577,7 +646,8 @@ export async function listUserOrders(
   ];
   if (filter.role === "renter") conditions.push(`o.renter_user_id = $1`);
   if (filter.role === "owner") conditions.push(`o.owner_user_id = $1`);
-  if (filter.status) conditions.push(`o.status = $${values.push(filter.status)}`);
+  if (filter.status === "current") conditions.push(`o.status IN ('PENDING_PAYMENT','PAID')`);
+  else if (filter.status) conditions.push(`o.status = $${values.push(filter.status)}`);
   values.push(cursor?.createdAt ?? null, cursor?.id ?? null, filter.limit + 1);
   const cursorTime = values.length - 2;
   const cursorId = values.length - 1;
@@ -650,7 +720,8 @@ export async function listUserOrders(
 async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,userId:string,filter:UserOrderFilter) {
   const key=sha256Hex(JSON.stringify({scope:'admin-user-read-orders',principal:viewer.adminId,authorizationKey:viewer.authorizationKey??null,userId,role:filter.role??'any',status:filter.status??null,limit:filter.limit}));
   const cursor=parseKeysetCursor(filter.cursor,key),values:unknown[]=[userId,viewer.isBoss,viewer.adminId],where=[`(x.owner_user_id=$1 OR x.renter_user_id=$1)`,gameScopeSql("x.game_id","$3","$2")];
-  if(filter.role==='owner')where.push('x.owner_user_id=$1');if(filter.role==='renter')where.push('x.renter_user_id=$1');if(filter.status)where.push('x.status=$'+values.push(filter.status));
+  if(filter.role==='owner')where.push('x.owner_user_id=$1');if(filter.role==='renter')where.push('x.renter_user_id=$1');
+  if(filter.status==='current')where.push("x.status IN ('PENDING_PAYMENT','PAID')");else if(filter.status)where.push('x.status=$'+values.push(filter.status));
   const time='$'+values.push(cursor?.createdAt??null),id='$'+values.push(cursor?.id??null),limit='$'+values.push(filter.limit+1);
   where.push(`(${time}::timestamptz IS NULL OR COALESCE(x.created_at,'0001-01-01'::timestamptz)<${time}::timestamptz OR (COALESCE(x.created_at,'0001-01-01'::timestamptz)=${time}::timestamptz AND x.id<${id}))`);
   const relation=orderReadRelation(await legacyContinuationReady(client));

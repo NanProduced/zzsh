@@ -63,20 +63,39 @@ function isLegacy(row: LegacyGrowthStoredContribution): boolean {
   return /^legacy_mysql_restore:la_order:[1-9]\d{0,23}$/.test(source);
 }
 
-/** A complete historical base is distinct from native increments and from an unproved newer legacy window. */
-export async function readLegacyGrowthCoverageAssessment(client: Client, subject: string, contributions: readonly LegacyGrowthStoredContribution[], asOfUtc = new Date().toISOString()): Promise<ReturnType<typeof assessLegacyCoverageRecord>> {
-  const pending = (reason: string): ReturnType<typeof assessLegacyCoverageRecord> => ({ state: "BACKFILL_PENDING", reasons: [reason], incrementRows: [] });
-  const conflict = (reason: string): ReturnType<typeof assessLegacyCoverageRecord> => ({ state: "SOURCE_CONFLICT", reasons: [reason], incrementRows: [] });
-  const asOf = normalizeGrowthInstant(asOfUtc);
+type LegacyLiveSource = { sourceKey: string; commandId: string | null; revision: string | null };
+type CoverageAssessment = ReturnType<typeof assessLegacyCoverageRecord>;
+const pendingCoverage = (reason: string): CoverageAssessment => ({ state: "BACKFILL_PENDING", reasons: [reason], incrementRows: [] });
+
+async function readCoverageSchema(client: Client): Promise<{ coverage: boolean; sources: boolean }> {
   const installed = (await client.query<{ coverage: boolean; sources: boolean }>(`SELECT /* legacy-growth-schema */
     to_regclass('${TABLE}') IS NOT NULL AS coverage,
     to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AND to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL AS sources`)).rows[0];
   if (!installed || typeof installed.coverage !== "boolean" || typeof installed.sources !== "boolean") throw unavailable();
-  if (!installed.coverage) return pending("LEGACY_COVERAGE_SCHEMA_NOT_INSTALLED");
-  if (!installed.sources) return pending("LEGACY_GROWTH_SOURCES_NOT_INSTALLED");
+  return installed;
+}
+
+/** A complete historical base is distinct from native increments and from an unproved newer legacy window. */
+export async function readLegacyGrowthCoverageAssessment(client: Client, subject: string, contributions: readonly LegacyGrowthStoredContribution[], asOfUtc = new Date().toISOString()): Promise<ReturnType<typeof assessLegacyCoverageRecord>> {
+  const asOf = normalizeGrowthInstant(asOfUtc);
+  const installed = await readCoverageSchema(client);
+  if (!installed.coverage) return pendingCoverage("LEGACY_COVERAGE_SCHEMA_NOT_INSTALLED");
+  if (!installed.sources) return pendingCoverage("LEGACY_GROWTH_SOURCES_NOT_INSTALLED");
   const versions = (await client.query<StoredRecord>(`SELECT /* legacy-growth-versions */ record_canonical AS canonical,record_digest AS digest
     FROM ${TABLE} WHERE subject_user_id=$1 AND cutoff<=$2::timestamptz
     ORDER BY cutoff DESC,created_at DESC,id COLLATE "C" DESC`, [subject, asOf])).rows.map(row => decode(row)!);
+  return assessReadCoverage(subject, contributions, asOf, versions, async () => (await client.query<LegacyLiveSource>(`SELECT /* legacy-growth-live-sources */
+    'legacy_mysql_restore:la_order:'||o.legacy_id AS "sourceKey",v.id AS "commandId",v.revision::text AS revision
+    FROM zzsh_order.legacy_order_read_snapshot o LEFT JOIN zzsh_order.legacy_continuation_version v
+      ON v.order_id=o.id AND v.command='CONFIRM' AND v.created_at<=$2::timestamptz
+    WHERE o.renter_user_id=$1 AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
+      AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
+    ORDER BY o.id,v.revision`, [subject, asOf])).rows);
+}
+
+async function assessReadCoverage(subject: string, contributions: readonly LegacyGrowthStoredContribution[], asOf: string, versions: LegacyCoverageRecord[], readSources: () => Promise<LegacyLiveSource[]>): Promise<CoverageAssessment> {
+  const pending = pendingCoverage;
+  const conflict = (reason: string): CoverageAssessment => ({ state: "SOURCE_CONFLICT", reasons: [reason], incrementRows: [] });
   if (versions.some(record => record.subjectUserId !== subject)) throw unavailable();
   const base = versions.find(record => record.fromExclusive === null && record.coverageState === "COMPLETE");
   if (!base) return pending("LEGACY_COVERAGE_RECEIPT_MISSING");
@@ -88,13 +107,7 @@ export async function readLegacyGrowthCoverageAssessment(client: Client, subject
   }
   const ownFacts = new Set(base.factKeys.map(k => `${k.sourceKey}\u0000${k.revision}\u0000${k.sourceDigest}`));
   // A source can exist before its contribution. Read all CONFIRMs, including those superseded by HOLD/RELEASE.
-  const sources = (await client.query<{ sourceKey: string; commandId: string | null; revision: string | null }>(`SELECT /* legacy-growth-live-sources */
-    'legacy_mysql_restore:la_order:'||o.legacy_id AS "sourceKey",v.id AS "commandId",v.revision::text AS revision
-    FROM zzsh_order.legacy_order_read_snapshot o LEFT JOIN zzsh_order.legacy_continuation_version v
-      ON v.order_id=o.id AND v.command='CONFIRM' AND v.created_at<=$2::timestamptz
-    WHERE o.renter_user_id=$1 AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
-      AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
-    ORDER BY o.id,v.revision`, [subject, asOf])).rows;
+  const sources = await readSources();
   for (const source of sources) {
     if (!keys.has(source.sourceKey)) return pending("LEGACY_SOURCE_WINDOW_UNVERIFIED");
     if (source.commandId !== null) {
@@ -109,4 +122,35 @@ export async function readLegacyGrowthCoverageAssessment(client: Client, subject
   // Future rows are not increments at this asOf; the base's own immutable factKeys are still checked in full.
   const atThisTime = legacyRows.filter(r => ownFacts.has(`${r.sourceKey}\u0000${r.revision}\u0000${r.sourceDigest}`) || normalizeGrowthInstant(r.recordedAt) <= asOf);
   return assessLegacyCoverageRecord(base, atThisTime);
+}
+
+/** All subjects use the original receipt/source checks; SQL count does not grow with page length. */
+export async function readLegacyGrowthCoverageAssessments(client: Client, contributions: ReadonlyMap<string, readonly LegacyGrowthStoredContribution[]>, asOfUtc = new Date().toISOString()): Promise<Map<string, CoverageAssessment>> {
+  const ids = [...contributions.keys()], results = new Map<string, CoverageAssessment>();
+  if (ids.length === 0) return results;
+  const asOf = normalizeGrowthInstant(asOfUtc), installed = await readCoverageSchema(client);
+  if (!installed.coverage || !installed.sources) {
+    for (const id of ids) results.set(id, pendingCoverage(!installed.coverage ? "LEGACY_COVERAGE_SCHEMA_NOT_INSTALLED" : "LEGACY_GROWTH_SOURCES_NOT_INSTALLED"));
+    return results;
+  }
+  const versions = new Map<string, LegacyCoverageRecord[]>();
+  for (const row of (await client.query<StoredRecord & { userId: string }>(`SELECT /* legacy-growth-batch-versions */ subject_user_id AS "userId",record_canonical AS canonical,record_digest AS digest
+    FROM ${TABLE} WHERE subject_user_id=ANY($1::text[]) AND cutoff<=$2::timestamptz
+    ORDER BY subject_user_id,cutoff DESC,created_at DESC,id COLLATE "C" DESC`, [ids, asOf])).rows) {
+    const record = decode(row)!;
+    if (!contributions.has(row.userId) || record.subjectUserId !== row.userId) throw unavailable();
+    const records = versions.get(row.userId) ?? []; records.push(record); versions.set(row.userId, records);
+  }
+  const sources = new Map<string, LegacyLiveSource[]>();
+  for (const row of (await client.query<LegacyLiveSource & { userId: string }>(`SELECT /* legacy-growth-batch-live-sources */ o.renter_user_id AS "userId",
+    'legacy_mysql_restore:la_order:'||o.legacy_id AS "sourceKey",v.id AS "commandId",v.revision::text AS revision
+    FROM zzsh_order.legacy_order_read_snapshot o LEFT JOIN zzsh_order.legacy_continuation_version v
+      ON v.order_id=o.id AND v.command='CONFIRM' AND v.created_at<=$2::timestamptz
+    WHERE o.renter_user_id=ANY($1::text[]) AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
+      AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
+    ORDER BY o.renter_user_id,o.id,v.revision`, [ids, asOf])).rows) {
+    const group = sources.get(row.userId) ?? []; group.push(row); sources.set(row.userId, group);
+  }
+  for (const [id, rows] of contributions) results.set(id, await assessReadCoverage(id, rows, asOf, versions.get(id) ?? [], async () => sources.get(id) ?? []));
+  return results;
 }
