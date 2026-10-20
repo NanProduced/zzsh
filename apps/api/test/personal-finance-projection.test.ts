@@ -17,11 +17,16 @@ function fixture(){
   CREATE TABLE zzsh_order.finance_observation_admission(basis_id TEXT,user_id TEXT,source_system TEXT,legacy_user_id TEXT,source_entity TEXT,source_id TEXT,source_digest TEXT,source_event_at TEXT,included_in_opening BOOLEAN);`);
  const insert=db.prepare('INSERT INTO zzsh_order.settlement_ledger_entry VALUES(?,?,?,?,?,?,?,?,?)');
  for(const [id,bucket,amount,user]of [['available','WALLET_AVAILABLE','100','u1'],['refund','RENTER_REFUND_PAYABLE','20','u1'],['reserved','WALLET_RESERVED','30','u1'],['pending','WALLET_PENDING_EARNINGS','40','u1'],['foreign','WALLET_RESERVED','999','u2']])insert.run(id!,at,bucket!,amount!,'0',user!,null,null,'{}');
+ const translate=(sql:string)=>sql.replace(/to_char\((at|imported_at) AT TIME ZONE 'UTC','[^']*'\)/g,'$1').replace(/::numeric\(24,0\)/g,'').replace(/::(?:text|numeric|timestamptz)\b/g,'').replaceAll(' COLLATE "C"','').replaceAll('json_build_object(','json_object(').replaceAll('json_agg(','json_group_array(');
+ const mapRow=(r:Record<string,any>)=>Object.fromEntries(Object.entries(r).map(([k,v])=>[k,k==='included'?Boolean(v):v!==null&&['delta','balance_after','count','postedNetCents','coveredHistoricalNetCents','uncoveredHistoricalNetCents','coveredCount','uncoveredCount'].includes(k)?String(v):v]));
  const query=async(sql:string,args:any[]=[])=>{seen.push({sql,args});
-  if(sql.startsWith('WITH entries')){
-   const text=sql.replace(/to_char\(at AT TIME ZONE 'UTC','[^']*'\)/g,'at').replace(/::numeric\(24,0\)/g,'').replace(/::(?:text|numeric|timestamptz)\b/g,'').replaceAll(' COLLATE "C"','');
-   const rows=db.prepare(text).all(Object.fromEntries(args.map((v,i)=>['$'+(i+1),v]))) as Record<string,any>[];
-   return{rows:rows.map(r=>Object.fromEntries(Object.entries(r).map(([k,v])=>[k,k==='included'?Boolean(v):v!==null&&['delta','balance_after','count','postedNetCents','coveredHistoricalNetCents','uncoveredHistoricalNetCents','coveredCount','uncoveredCount'].includes(k)?String(v):v]))),rowCount:rows.length};
+  if(sql.startsWith('WITH entries')||sql.startsWith(`SELECT 'ledger:'||`)||sql.startsWith(`SELECT 'history:'||`)){
+   const rows=db.prepare(translate(sql)).all(Object.fromEntries(args.map((v,i)=>['$'+(i+1),v]))) as Record<string,any>[];
+   if(sql.includes('page_json')){
+    const bundle=rows[0] as any,fix=(j:string,keys:string[])=>JSON.stringify((JSON.parse(j) as any[]).map(o=>Object.fromEntries(Object.entries(o).map(([k,v])=>[k,keys.includes(k)&&v!==null?String(v):v]))));
+    return{rows:[{totals_json:fix(bundle.totals_json,['count','postedNetCents','coveredHistoricalNetCents','uncoveredHistoricalNetCents','coveredCount','uncoveredCount']),page_json:fix(bundle.page_json,['delta','balance_after'])}],rowCount:1};
+   }
+   return{rows:rows.map(mapRow),rowCount:rows.length};
   }
   if(sql.includes('to_regclass'))return{rows:[{ready:true,installed:false}],rowCount:1};
   if(sql.includes('FOR SHARE'))return{rows:[{id:args[0]}],rowCount:1};

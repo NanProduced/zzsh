@@ -93,10 +93,12 @@ export async function readControlledWithdrawalsInTransaction(client:PoolClient,a
  const totals=(await client.query(`SELECT COALESCE(sum(l.credit_cents-l.debit_cents) FILTER(WHERE l.account_code='WALLET_RESERVED'),0)::text AS reserved,COALESCE(sum(l.credit_cents) FILTER(WHERE l.account_code='PAYOUT_CLEARING'),0)::text AS paid,COALESCE(sum(l.credit_cents) FILTER(WHERE l.account_code='WITHDRAW_FEE'),0)::text AS fee FROM zzsh_order.withdrawal_intent i JOIN zzsh_order.finance_event e ON e.economic_root_id=i.economic_root_id JOIN zzsh_order.settlement_ledger_entry l ON l.finance_event_id=e.id WHERE i.user_id=$1${scope?' AND i.id=ANY($2::text[])':''}`,scope?[actor.userId,intentIds]:[actor.userId])).rows[0];
  const targets=(await client.query(`SELECT d.id,d.kind,${scope?'d.admission_id,':''}d.display_mask AS mask,a.per_intent_cents::text,
   a.active AND clock_timestamp()>=a.admitted_at AND clock_timestamp()<a.expires_at${scope?" AND a.resource_oid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND a.resource_name=current_database() AND a.resource_marker=(SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname=current_database())":""}
-  AND NOT EXISTS(SELECT 1 FROM zzsh_order.withdrawal_intent i WHERE i.destination_id=d.id)
-  AND (SELECT count(*) FROM zzsh_order.withdrawal_intent i WHERE i.admission_id=a.id)<a.max_intents
-  AND (SELECT COALESCE(sum(i.gross_cents),0) FROM zzsh_order.withdrawal_intent i WHERE i.admission_id=a.id)+a.per_intent_cents<=a.max_gross_cents AS can_quote
+  AND used.destination_id IS NULL
+  AND COALESCE(it.intent_count,0)<a.max_intents
+  AND COALESCE(it.intent_gross,0)+a.per_intent_cents<=a.max_gross_cents AS can_quote
   FROM zzsh_order.withdrawal_destination d JOIN zzsh_order.withdrawal_admission a ON a.id=d.admission_id AND a.user_id=d.user_id
+  LEFT JOIN (SELECT admission_id,count(*) AS intent_count,COALESCE(sum(gross_cents),0) AS intent_gross FROM zzsh_order.withdrawal_intent GROUP BY admission_id) it ON it.admission_id=a.id
+  LEFT JOIN (SELECT DISTINCT destination_id FROM zzsh_order.withdrawal_intent) used ON used.destination_id=d.id
   WHERE d.user_id=$1 AND d.active${scope?' AND d.id=ANY($2::text[])':''} ORDER BY d.id`,scope?[actor.userId,destinationIds]:[actor.userId])).rows;
  if(scope)for(const d of targets)assertNativeWithdrawalDestination(scope,{userId:actor.userId,admissionId:d.admission_id,destinationId:d.id});
  const reservation=scope?await readNativeReservationStatus(client,actor.userId,scope):undefined;
