@@ -23,6 +23,15 @@ test('0087 fixes the legacy-duty audit alias and preserves the full admission an
 });
 
 const runnerPath=resolve('src/database/business-migrations.ts');
+test('0090 adds only the two PG-measured subject indexes and retains the journal prefix',()=>{
+ const sql=readFileSync(resolve('migrations/business/0090_personal_finance_read_indexes.sql'),'utf8');
+ assert.equal(sql.match(/CREATE INDEX/g)?.length,2);assert.equal(sql.match(/id COLLATE "C"/g)?.length,2);
+ assert.match(sql,/settlement_ledger_entry \(counterparty_user_id, created_at, id COLLATE "C"\)/);
+ assert.match(sql,/personal_finance_observation \(user_id, source_kind, source_event_at, id COLLATE "C"\)/);
+ assert.doesNotMatch(sql,/\b(DROP|ALTER|INSERT|UPDATE|DELETE|TRUNCATE|GRANT|REVOKE)\b/);
+ const journal=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
+ assert.deepEqual(journal.entries.slice(88).map((entry:{idx:number;tag:string})=>[entry.idx,entry.tag]),[[88,'0088_skin_catalog_metadata'],[89,'0089_skin_deposit_recommendation'],[90,'0090_personal_finance_read_indexes']]);
+});
 const runnerSource=readFileSync(runnerPath,'utf8');
 const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarantee_history.sql'),'utf8');
 const names=['legacy_continuation_evidence','legacy_continuation_version','legacy_order_duty','legacy_order_duty_revision','legacy_order_duty_admission','legacy_inflight_register','personal_finance_observation_coverage','finance_stored_opening_review','legacy_duty_finance_contract','legacy_duty_finance_fact','legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);

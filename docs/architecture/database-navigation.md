@@ -2,7 +2,7 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，共 **90 份 SQL**，`meta/_journal.json` **90 条**登记（idx 0…89，tag 与文件名一一对应）。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，共 **91 份 SQL**，`meta/_journal.json` **91 条**登记（idx 0…90，tag 与文件名一一对应）。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
 下列静态计数只覆盖 0000–0087。0088、0089 追加皮肤元数据与推荐押金合同，不据旧计数推断当前完整结构或 ACL。
 
@@ -32,6 +32,7 @@
 | 0074, 0077–0079 | 旧单续办证据/版本/责任/修订/在途、旧责任财务合同与事实、个人报价 v4、旧保证金历史 |
 | 0081–0083, 0086–0087 | 公开编号序列/计数器、pricing compat 禁用模式、日期编号、旧皮肤持有、旧责任审计别名 |
 | 0088–0089 | 皮肤品质证据、典藏/默认状态与素材来源；按类型和品质配置的推荐押金合同 |
+| 0090 | 个人流水与历史财务观察按主体读取的复合索引，keyset ID 使用 C collation |
 
 ## 权限与不可变性模型
 
