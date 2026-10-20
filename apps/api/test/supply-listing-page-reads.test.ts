@@ -12,6 +12,7 @@ import {
 } from "../src/supply/publishing";
 import { listV2 } from "../src/supply/listing-filter-routes";
 import { handleFavorites } from "../src/supply/favorites";
+import { handlePublishingRoute } from "../src/supply/publishing-routes";
 import * as filterConfig from "../src/supply/listing-filter-config";
 import * as legacyRead from "../src/supply/legacy-listing-read";
 
@@ -284,4 +285,77 @@ test("favorites read the private set once per page and hide objects that lost pu
   (options.userAuth.api.getSession as unknown as () => Promise<{ user: { id: string }; session: { id: string } }>) = (async () => ({ user: { id: "reader-b" }, session: { id: "session-b" } })) as never;
   await handleFavorites({ method: "GET", headers: {} } as never, other.response as never, options as never, "req_fixture", "/me/favorites", new URLSearchParams());
   assert.deepEqual(other.result.body.items, [], "another reader never sees this set");
+});
+
+// The v1 public list is the same reader chain as the market page but keeps its own
+// keyset cursor. Its continuation contract is what the R1 review found broken:
+// the page must hand back a cursor whenever the limit is reached and candidates
+// remain unscanned, pointing at the last candidate actually scanned.
+async function v1Page(fixtures: Fixture[], limit: number) {
+  const { client, gate, queries, windows } = clientFor(fixtures);
+  const real = client.query;
+  (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) =>
+    sql.startsWith("SELECT a.id,v.id AS version_id FROM zzsh_supply.rental_account a")
+      ? { rows: fixtures.filter((f) => f.account.id > String(args[0])).map((f) => ({ id: f.account.id, version_id: f.version.id })), rowCount: fixtures.length }
+      : real(sql, args)) as never;
+  const capture = responseCapture();
+  await handlePublishingRoute({ method: "GET", headers: {} } as never, capture.response as never,
+    { pool: { connect: async () => client }, supplyGateReader: gate } as never, "req_fixture", "/listings", new URLSearchParams("limit=" + limit), false);
+  const body = capture.result.body;
+  return {
+    status: capture.result.status,
+    ids: (body.items as Array<{ id: string }>).map((item) => item.id),
+    nextCursor: body.nextCursor as string | null,
+    cursorBody: body.nextCursor ? JSON.parse(Buffer.from(body.nextCursor, "base64url").toString()) : null,
+    queries,
+    windows,
+  };
+}
+
+const V1_CASES: Array<{ name: string; count: number; limit: number; restricted: number[]; ids: string[]; cursor: string | null }> = [
+  // Limit reached with candidates left unscanned: the cursor must continue at the
+  // last scanned candidate, not collapse to null.
+  { name: "three candidates at limit one", count: 3, limit: 1, restricted: [], ids: ["a"], cursor: "a" },
+  { name: "unavailable candidates skipped before the page fills", count: 4, limit: 1, restricted: [0], ids: ["b"], cursor: "b" },
+  { name: "page already full when a later candidate would be dropped", count: 3, limit: 2, restricted: [2], ids: ["a", "b"], cursor: "b" },
+  // Everything returned: no cursor, no padding.
+  { name: "every candidate returned", count: 2, limit: 2, restricted: [], ids: ["a", "b"], cursor: null },
+  { name: "fewer candidates than the limit", count: 2, limit: 5, restricted: [], ids: ["a", "b"], cursor: null },
+  { name: "candidates exactly exhausted by the limit", count: 3, limit: 3, restricted: [], ids: ["a", "b", "c"], cursor: null },
+  { name: "every candidate dropped as unavailable", count: 2, limit: 2, restricted: [0, 1], ids: [], cursor: null },
+];
+
+test("the v1 public list keeps its keyset cursor whenever the page fills with candidates left", async () => {
+  for (const scenario of V1_CASES) {
+    const fixtures = Array.from({ length: scenario.count }, (_, index) => accountFixture("abcdefgh"[index]!, "owner-0", scenario.restricted.includes(index) ? { restricted: true } : {}));
+    const page = await v1Page(fixtures, scenario.limit);
+    assert.equal(page.status, 200, scenario.name);
+    assert.deepEqual(page.ids, scenario.ids, scenario.name);
+    assert.equal(page.nextCursor === null ? null : page.cursorBody!.id, scenario.cursor, `${scenario.name}: cursor position`);
+    if (scenario.cursor === null) assert.equal(page.nextCursor, null, scenario.name);
+    else assert.equal(page.cursorBody!.v, 2, `${scenario.name}: cursor version`);
+    // The windowed reader must not read more accounts than the page can project.
+    for (const window of page.windows) assert.ok(window.length <= scenario.limit, `${scenario.name}: window stays within the limit`);
+  }
+});
+
+test("the v1 cursor keeps the caller on the same filter and advances past the last scanned row", async () => {
+  const fixtures = ["a", "b", "c", "d"].map((id) => accountFixture(id, "owner-0"));
+  const first = await v1Page(fixtures, 2);
+  assert.deepEqual(first.ids, ["a", "b"]);
+  assert.equal(first.cursorBody!.id, "b");
+  // A second page built from that cursor must skip what the first page scanned.
+  const { client, gate } = clientFor(fixtures);
+  const seen: unknown[][] = [];
+  const real = client.query;
+  (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) => {
+    if (sql.startsWith("SELECT a.id,v.id AS version_id FROM zzsh_supply.rental_account a")) { seen.push(args); return { rows: fixtures.filter((f) => f.account.id > String(args[0])).map((f) => ({ id: f.account.id, version_id: f.version.id })), rowCount: fixtures.length }; }
+    return real(sql, args);
+  }) as never;
+  const capture = responseCapture();
+  await handlePublishingRoute({ method: "GET", headers: {} } as never, capture.response as never,
+    { pool: { connect: async () => client }, supplyGateReader: gate } as never, "req_fixture", "/listings", new URLSearchParams("limit=2&cursor=" + encodeURIComponent(first.nextCursor!)), false);
+  assert.deepEqual(seen[0], ["b", null], "the second page resumes after the last scanned candidate");
+  assert.deepEqual((capture.result.body.items as Array<{ id: string }>).map((item) => item.id), ["c", "d"]);
+  assert.equal(capture.result.body.nextCursor, null, "the last page returns no cursor");
 });

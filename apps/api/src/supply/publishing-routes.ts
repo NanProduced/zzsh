@@ -304,8 +304,14 @@ export async function handlePublishingRoute(
         let last = cursor;
         let hasMore = false;
         const page = listingCandidatePage(client);
-        for (let i = 0; i < rows.length && items.length < limit; i++) {
+        for (let i = 0; i < rows.length; i++) {
           const row = rows[i]!;
+          // The page is full and candidates remain unscanned: the caller still
+          // has rows to fetch, so the cursor advances to the last scanned one.
+          if (items.length === limit) {
+            hasMore = true;
+            break;
+          }
           if (!page.has(row.id))
             await page.load(rows.slice(i, i + limit).map((candidate) => candidate.id));
           last = row.id;
