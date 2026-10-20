@@ -18,16 +18,17 @@ export class SecurityApiError extends Error {
 
 export async function withTransaction<T>(pool: Pool, callback: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
+  let destroy = false;
   try {
     await client.query("BEGIN");
     const result = await callback(client);
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    try { await client.query("ROLLBACK"); } catch { /* preserve the primary error */ }
+    try { await client.query("ROLLBACK"); } catch { destroy = true; /* preserve the primary error */ }
     throw error;
   } finally {
-    client.release();
+    client.release(destroy ? true : undefined);
   }
 }
 
