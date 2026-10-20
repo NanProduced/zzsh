@@ -228,9 +228,11 @@ export type PublicSkinSummary = {
   defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
   ownerKind?: SkinOwnerKind | null;
   mediaId: string | null;
+  mediaKind?: SkinMediaKind | null;
 };
 /** Verified owner type of a skin: operator, firearm or melee-weapon type. */
 export type SkinOwnerKind = "AGENT" | "FIREARM" | "MELEE_TYPE";
+export type SkinMediaKind = "PORTRAIT_CARD" | "MODEL_IMAGE" | "PROMO_POSTER";
 export type PublicListingSkin = {
   id: string;
   name: string;
@@ -244,6 +246,7 @@ export type PublicListingSkin = {
   isCollectible?: boolean | null;
   defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
   mediaId?: string | null;
+  mediaKind?: SkinMediaKind | null;
   categoryCode?: string;
   categoryName?: string;
 };

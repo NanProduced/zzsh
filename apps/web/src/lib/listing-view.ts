@@ -1,4 +1,4 @@
-import type { Money, PublicListing, PublicQuote, PublicCodeLabel, PublicAvailabilityState, SkinOwnerKind } from "./supply-types.ts";
+import type { Money, PublicListing, PublicQuote, PublicCodeLabel, PublicAvailabilityState, SkinOwnerKind, SkinMediaKind } from "./supply-types.ts";
 import { canonicalResourceCode, resourceItemDisplayName, resourceUnitLabel } from "./listing-filters.ts";
 
 export type ResourceLine = {
@@ -22,6 +22,7 @@ export type SkinTag = {
   ownerName?: string | null;
   baseName?: string | null;
   mediaId?: string | null;
+  mediaKind?: SkinMediaKind | null;
   ownerKind?: SkinOwnerKind | null;
   rarityCode?: string | null;
   rarityName?: string | null;
@@ -306,6 +307,7 @@ function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "ski
       ...(skin.ownerName !== undefined ? { ownerName: skin.ownerName ?? null } : {}),
       ...(skin.baseName !== undefined ? { baseName: skin.baseName ?? null } : {}),
       ...(skin.mediaId !== undefined ? { mediaId: skin.mediaId ?? null } : {}),
+      ...(skin.mediaKind !== undefined ? { mediaKind: skin.mediaKind } : {}),
       ...(skin.ownerKind !== undefined ? { ownerKind: skin.ownerKind ?? null } : {}),
       ...(skin.rarityCode !== undefined ? { rarityCode: skin.rarityCode ?? null } : {}),
       ...(skin.rarityName !== undefined ? { rarityName: skin.rarityName ?? null } : {}),

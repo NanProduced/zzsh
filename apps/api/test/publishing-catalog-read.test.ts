@@ -49,7 +49,7 @@ test('public owners and category kinds cover the whole visible tree regardless o
     {categoryId:'mixed',kind:null,id:null,name:null},
   ];
   const queries:Array<{sql:string;args:unknown[]}>=[];
-  const page=[{id:'skin_A',name:'外观甲',ownerKind:'AGENT',rarityBasis:'PLATFORM_REFERENCE',isCollectible:false,defaultState:'NON_DEFAULT'},{id:'skin_B',name:'外观乙'}];
+  const page=[{id:'skin_A',name:'外观甲',ownerKind:'AGENT',rarityBasis:'PLATFORM_REFERENCE',isCollectible:false,defaultState:'NON_DEFAULT',mediaKind:'PROMO_POSTER'},{id:'skin_B',name:'外观乙',mediaKind:null}];
   const client={query:async(sql:string,args:unknown[]=[])=>{
     queries.push({sql,args});
     if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:[{id:'game_delta',catalogRevision:'129',currentReleaseId:null}]};
@@ -61,6 +61,7 @@ test('public owners and category kinds cover the whole visible tree regardless o
   const filters={categoryId:'agents',ownerId:'owner_A',rarityCode:'quality_A',q:'甲%_'};
   const body=await readPublicCatalog(client,'game_delta',filters,1) as any;
   assert.deepEqual(body.skins,[page[0]]);
+  assert.equal(body.skins[0].mediaKind,'PROMO_POSTER');
   assert.deepEqual(body.owners.map((owner:any)=>owner.id).sort(),['firearm_A','owner_A','owner_B'],'same-game owners outside this page/filter remain available');
   assert.equal(body.owners.some((owner:any)=>owner.id===null),false,'an unclassified melee is not a fake owner option');
   assert.deepEqual(Object.fromEntries(body.categories.map((category:any)=>[category.id,category.ownerKind])),{root:null,agents:'AGENT',firearms:'FIREARM',melee:'MELEE_TYPE',mixed:null,empty:null});
@@ -76,6 +77,8 @@ test('public owners and category kinds cover the whole visible tree regardless o
   assert.ok(skinSql.sql.includes(publicSkinMetadataSql('s')));
   assert.equal(skinSql.sql.includes('AS "mediaSource"'),false);
   assert.equal(skinSql.sql.includes('AS "rarityEvidence"'),false);
+  assert.ok(skinSql.sql.includes('s.media_source->>\'kind\' AS "mediaKind"'));
+  assert.equal(skinSql.sql.includes('media_source->>\'url\''),false);
   assert.equal(parseCursor(body.nextCursor,{gameId:'game_delta',revision:'129',filters}),'skin_A');
   assert.throws(()=>parseCursor(body.nextCursor,{gameId:'game_delta',revision:'129',filters:{...filters,ownerId:'owner_B'}}),/cursor does not match/);
   assert.ok(queries.every(query=>!/^\s*(INSERT|UPDATE|DELETE)/.test(query.sql)));
@@ -99,5 +102,5 @@ test('admin receives full metadata and only constructs ownerRef with a real owne
   const sql=queries.find(query=>query.includes('AS "namingState"'))!;
   for(const field of ['ownerKind','rarityEvidence','isCollectible','defaultState','mediaSource'])assert.ok(sql.includes(`AS "${field}"`),field);
   assert.match(sql,/owner_kind IS NULL OR COALESCE\(owner_id,firearm_id\) IS NULL THEN NULL/);
-  assert.equal(publicSkinMetadataSql('skin'),'skin.rarity_evidence->>\'basis\' AS "rarityBasis", skin.is_collectible AS "isCollectible", skin.default_state AS "defaultState"');
+  assert.equal(publicSkinMetadataSql('skin'),'skin.rarity_evidence->>\'basis\' AS "rarityBasis", skin.is_collectible AS "isCollectible", skin.default_state AS "defaultState", skin.media_source->>\'kind\' AS "mediaKind"');
 });

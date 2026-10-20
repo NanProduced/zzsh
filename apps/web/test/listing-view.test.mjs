@@ -632,7 +632,7 @@ test('SK7 skin type comes only from owner kind and quality only from the deliver
 test('SK7 list and detail project the same id, type and quality; absent snapshot keys stay absent', () => {
   const l = structuredClone(listing);
   l.presentation.skins = [
-    { id: 's1', name: '露娜-黑·天际线', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q1', rarityName: '品质甲', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: false, defaultState: 'NON_DEFAULT', categoryName: '干员外观' },
+    { id: 's1', name: '露娜-黑·天际线', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q1', rarityName: '品质甲', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: false, defaultState: 'NON_DEFAULT', mediaKind: 'PROMO_POSTER', categoryName: '干员外观' },
     { id: 's2', name: '露娜-另一外观', ownerName: '露娜', ownerKind: 'AGENT', rarityCode: 'q2', rarityName: '品质乙', categoryName: '干员外观' },
     { id: 's3', name: '战术斧头-黑鹰', baseName: '黑鹰', ownerName: '战术斧头', ownerKind: 'MELEE_TYPE', rarityCode: null, rarityName: null, categoryName: '近战相关待核词条' },
     { id: 's4', name: 'Vector-黑鹰', baseName: '黑鹰', ownerName: 'Vector', ownerKind: 'FIREARM', rarityCode: null, rarityName: null, categoryName: '枪械外观' },
@@ -645,6 +645,8 @@ test('SK7 list and detail project the same id, type and quality; absent snapshot
   const facets = tags.map((t) => listingViewSk7.skinFacetLabel(t));
   assert.deepEqual(facets, ['干员外观 · 品质甲', '干员外观 · 品质乙', '近战外观', '枪械外观', null], 'same type, different quality; same base name, different owner type');
   assert.deepEqual([tags[0].rarityBasis, tags[0].isCollectible, tags[0].defaultState], ['PLATFORM_REFERENCE', false, 'NON_DEFAULT']);
+  assert.equal(tags[0].mediaKind, 'PROMO_POSTER', 'frozen poster kind reaches the shared preview through listing projection');
+  assert.equal(Object.hasOwn(tags[4], 'mediaKind'), false, 'old snapshot does not gain a media kind');
   assert.deepEqual([tags[2].ownerKind, tags[2].rarityName], ['MELEE_TYPE', null]);
   for (const key of ['ownerKind', 'rarityCode', 'rarityName', 'rarityBasis', 'isCollectible', 'defaultState']) assert.equal(Object.hasOwn(tags[4], key), false, `old snapshot keeps ${key} absent`);
 });

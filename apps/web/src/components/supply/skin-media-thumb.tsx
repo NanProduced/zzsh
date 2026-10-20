@@ -4,10 +4,12 @@ import { useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FileImage, RotateCw, X } from "lucide-react";
 import "./skin-media.css";
+import type { SkinMediaKind } from "@/lib/supply-types";
 
 type SkinDisplay = {
   name: string;
   mediaId?: string | null;
+  mediaKind?: SkinMediaKind | null;
   ownerKind?: string | null;
   rarityName?: string | null;
   rarityBasis?: "PLATFORM_REFERENCE" | "OFFICIAL" | null;
@@ -77,6 +79,7 @@ export function SkinMediaPreview({ skin, children, triggerClassName = "skin-medi
       <Dialog.Overlay className="skin-preview-overlay" data-react-aria-top-layer="" />
       <Dialog.Content className="skin-preview-content" data-react-aria-top-layer="" aria-describedby={undefined} onEscapeKeyDown={(event) => event.stopPropagation()}>
         <Dialog.Title className="skin-preview-title">{skin.name} 皮肤图片</Dialog.Title>
+        {skin.mediaKind === "PROMO_POSTER" ? <span className="skin-preview-kind">宣传图</span> : null}
         <Dialog.Close className="skin-preview-close" aria-label="关闭预览"><X size={20} aria-hidden="true" /></Dialog.Close>
         <div className="skin-preview-image"><SkinMediaCycle key={skin.mediaId} src={skinMediaSource(skin.mediaId)} alt={`${skin.name} 皮肤图片`} fallbackClassName="skin-preview-fallback" iconSize={32} preview /></div>
         <SkinMetadata skin={skin} />

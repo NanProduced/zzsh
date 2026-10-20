@@ -822,7 +822,7 @@ export function publicSkinRarityNameSql(alias: string): string {
   return `(SELECT r.name FROM zzsh_supply.skin_rarity r WHERE r.game_id=${alias}.game_id AND r.code=${alias}.rarity_code)`;
 }
 export function publicSkinMetadataSql(alias: string): string {
-  return `${alias}.rarity_evidence->>'basis' AS "rarityBasis", ${alias}.is_collectible AS "isCollectible", ${alias}.default_state AS "defaultState"`;
+  return `${alias}.rarity_evidence->>'basis' AS "rarityBasis", ${alias}.is_collectible AS "isCollectible", ${alias}.default_state AS "defaultState", ${alias}.media_source->>'kind' AS "mediaKind"`;
 }
 export function publicSkinMediaIdSql(alias: string): string {
   return `CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=${alias}.media_id AND a.game_id=${alias}.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='SKIN_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN ${alias}.media_id ELSE NULL END`;

@@ -9,6 +9,7 @@
 .skin-preview-overlay { position:fixed; inset:0; z-index:160; background:rgb(0 0 0 / .72); }
 .skin-preview-content { position:fixed; top:50%; left:50%; z-index:161; display:flex; flex-direction:column; gap:12px; width:min(900px,calc(100vw - 32px)); max-height:calc(100dvh - 32px); padding:20px; border-radius:12px; color:var(--color-text-primary); background:var(--color-bg-card); transform:translate(-50%,-50%); overflow:auto; }
 .skin-preview-title { margin:0; padding-right:36px; font-family:var(--font-sans); font-size:16px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
+.skin-preview-kind { align-self:flex-start; color:var(--color-text-secondary); font-size:12px; line-height:1.5; }
 .skin-preview-close { position:absolute; top:8px; right:8px; display:grid; width:44px; height:44px; place-items:center; padding:0; border:0; border-radius:6px; color:var(--color-text-primary); background:transparent; cursor:pointer; }
 .skin-preview-close:hover { background:var(--color-bg-card-hover); }
 .skin-preview-image { position:relative; display:grid; min-height:160px; place-items:center; overflow:hidden; }

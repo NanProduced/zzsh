@@ -923,6 +923,7 @@ export function freezePresentationSkin(s: Record<string, unknown>): Record<strin
     rarityBasis: s.rarityBasis ?? null,
     isCollectible: s.isCollectible ?? null,
     defaultState: s.defaultState ?? "UNKNOWN",
+    mediaKind: s.mediaKind ?? null,
     mediaId: s.media_id,
     categoryCode: s.category_code,
     categoryName: s.category_name,

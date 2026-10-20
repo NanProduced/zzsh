@@ -68,7 +68,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
   const data = {
     id: 'ACCOUNT_SYNTHETIC', gameId: 'GAME_SYNTHETIC', versionId: 'VERSION_SYNTHETIC', releaseId: 'RELEASE_SYNTHETIC',
     title: '离线账号', publicTitle: '离线账号', displayNo: 'ZZ20261018000116', conditionLines: [], resourceLines: [],
-    skinTags: [{ id: 'SKIN_SYNTHETIC', name: '测试外观', ownerKind: 'AGENT', rarityName: null, mediaId: 'MEDIA_SYNTHETIC' }],
+    skinTags: [{ id: 'SKIN_SYNTHETIC', name: '测试外观', ownerKind: 'AGENT', rarityName: null, mediaId: 'MEDIA_SYNTHETIC', mediaKind: 'PROMO_POSTER' }],
     media: [], entitlementNames: [], termLabel: '1天', resourceTotalLabel: '待核定', canCreateOrder: false,
   };
   const settle = () => React.act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
@@ -87,6 +87,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
       assert.equal(document.getElementById(dialog.getAttribute('aria-labelledby'))?.textContent,
         kind === 'skin' ? '测试外观 皮肤图片' : '画廊控制 大图预览');
       if (kind === 'skin') {
+        assert.equal(dialog.querySelector('.skin-preview-kind')?.textContent, '宣传图', 'explicit poster kind is labelled in the actual public-detail preview');
         const preview = dialog.querySelector('img');
         assert.equal(preview.getAttribute('alt'), '测试外观 皮肤图片');
         assert.equal(preview.getAttribute('src'), '/api/supply/media/MEDIA_SYNTHETIC/content');
@@ -114,6 +115,15 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
     const { Drawer } = await import('@heroui/react/drawer');
     const { SkinMediaPreview } = load('apps/web/src/components/supply/skin-media-thumb.tsx');
     const h = React.createElement;
+    for (const mediaKind of ['MODEL_IMAGE', 'PORTRAIT_CARD', null, undefined]) {
+      await React.act(async () => root.render(h(SkinMediaPreview, { skin: { ...data.skinTags[0], mediaKind }, triggerClassName: 'unknown-kind-preview' }, '预览图片')));
+      await settle();
+      await React.act(async () => host.querySelector('.unknown-kind-preview').click()); await settle();
+      const preview = document.querySelector('.skin-preview-content');
+      assert.equal(preview.querySelector('.skin-preview-kind'), null, `${String(mediaKind)} does not invent a poster label`);
+      assert.equal(preview.querySelector('.skin-preview-title').textContent, '测试外观 皮肤图片');
+      await React.act(async () => preview.querySelector('[aria-label="关闭预览"]').click()); await settle();
+    }
     function NestedPicker() {
       const [drawerOpen, setDrawerOpen] = React.useState(true);
       const [pickerOpen, setPickerOpen] = React.useState(true);
@@ -139,6 +149,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
       await React.act(async () => trigger.click()); await settle();
       const preview = document.querySelector('.skin-preview-content');
       assert.ok(preview, 'nested real Radix preview opens');
+      assert.equal(preview.querySelector('.skin-preview-kind')?.textContent, '宣传图', 'poster label also reaches the nested market-style preview');
       assert.equal(preview.inert, false, 'the real Drawer observer must not make its nested preview inert');
       assert.equal(preview.closest('[inert], [aria-hidden="true"]'), null, 'preview stays in the accessible tree');
       assert.equal(preview.contains(document.activeElement), true, 'focus enters the preview rather than remaining in the Drawer');

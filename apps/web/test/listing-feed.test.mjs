@@ -788,7 +788,7 @@ test("a late exact result cannot replace a newer keyword query", async () => {
   }
 });
 
-async function skin12MarketProbe(browse, {searchParams={game:'game_1'},feedState={}}={}) {
+async function skin12MarketProbe(browse, {searchParams={game:'game_1'},feedState={},previewObserver}={}) {
   const fs = require('node:fs'), ts = require('typescript'), React = require('react'), {Window} = require('happy-dom');
   const browser = new Window({url:'http://127.0.0.1:4320/accounts?'+new URLSearchParams(searchParams)}), previous = Object.fromEntries(['window','document','HTMLElement','Element','Node','Event','MouseEvent','IS_REACT_ACT_ENVIRONMENT'].map(k=>[k,globalThis[k]])), priorNavigator=Object.getOwnPropertyDescriptor(globalThis,'navigator');
   Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Element:browser.Element,Node:browser.Node,Event:browser.Event,MouseEvent:browser.MouseEvent,IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
@@ -803,7 +803,10 @@ async function skin12MarketProbe(browse, {searchParams={game:'game_1'},feedState
   function load(file){const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(repoRoot);module.require=name=>{
     if(name.endsWith('.css'))return{};if(name==='next/link')return({children,href})=>React.createElement('a',{href},children);if(name==='@heroui/react')return{Button:pass,Drawer};if(name==='@heroui/react/list-box')return{ListBox};if(name==='@heroui/react/select')return{Select};if(name==='@radix-ui/react-popover')return Object.fromEntries(['Root','Trigger','Portal','Content'].map(k=>[k,pass]));if(name==='embla-carousel-react')return()=>[()=>{}];
     if(name==='@/components/market/market-filter-controls')return load(path.join(repoRoot,'apps/web/src/components/market/market-filter-controls.tsx'));
-    if(name==='@/components/supply/skin-media-thumb')return load(path.join(repoRoot,'apps/web/src/components/supply/skin-media-thumb.tsx'));
+    if(name==='@/components/supply/skin-media-thumb'){
+      const media=load(path.join(repoRoot,'apps/web/src/components/supply/skin-media-thumb.tsx'));
+      return {...media,SkinMediaPreview:props=>{previewObserver?.(props.skin);return React.createElement(media.SkinMediaPreview,props);}};
+    }
     if(name==='@/components/layout/service-shell')return{ServiceShell:pass};if(name==='@/components/favorites/favorites-context')return{FavoritesProvider:pass};if(name==='@/components/favorites/favorite-button')return{FavoriteNotice:()=>null};if(name==='@/components/delta/account-card')return{AccountCard:()=>null};if(name==='@/components/delta/account-card-skeleton')return{AccountCardSkeleton:()=>null};if(name==='@/components/delta/account-card-empty')return{AccountCardEmpty:pass};
     if(name==='./use-listing-feed')return{useListingFeed:()=>feed};if(name==='@/lib/supply-client')return{...actualSupply,supplyApi:supply};if(name==='@/lib/listing-view')return{toListingCard:x=>x};if(name.startsWith('@/lib/'))return require(path.join(repoRoot,'apps/web/src/lib',name.slice(6)+'.ts'));return require(name);};
     module._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);return module.exports;}
@@ -811,6 +814,13 @@ async function skin12MarketProbe(browse, {searchParams={game:'game_1'},feedState
   await React.act(async()=>root.render(React.createElement(AccountMarket,{searchParams})));for(let n=0;n<12;n++)await settle();
   return {host,calls,page,async waitFor(fn){for(let n=0;n<80;n++){if(fn())return true;await settle();}return Boolean(fn());},async open(){const button=host.querySelector('button[aria-label^="选择皮肤"]');assert(button);await React.act(async()=>button.click());await settle();},async select(label,value){const element=host.querySelector(`select[aria-label="${label}"]`);assert(element);await React.act(async()=>{element.value=value;element.dispatchEvent(new browser.Event('change',{bubbles:true}));});await settle();},async click(selector){const element=host.querySelector(selector);assert(element,selector);await React.act(async()=>element.click());await settle();},async clickText(text){const button=[...host.querySelectorAll('button')].find(b=>b.textContent===text||b.textContent?.trim()===text);assert(button,'missing '+text);await React.act(async()=>button.click());await settle();},async close(){await React.act(async()=>root.unmount());browser.happyDOM.abort();for(const[k,v]of Object.entries(previous)){if(v===undefined)delete globalThis[k];else globalThis[k]=v;}if(priorNavigator)Object.defineProperty(globalThis,'navigator',priorNavigator);else delete globalThis.navigator;}};
 }
+
+test('market picker forwards explicit poster kind to the real shared preview',async()=>{
+  const observed=[],skin={id:'poster_skin',code:'poster_skin',name:'测试海报',categoryId:'category_firearm',ownerKind:'FIREARM',mediaId:'poster_media',mediaKind:'PROMO_POSTER'};
+  const p=await skin12MarketProbe(async(call,page)=>({...page(call.query.categoryId,call.query.cursor),skins:[skin],nextCursor:null}),{previewObserver:value=>observed.push(value)});
+  try{await p.open();await p.clickText('枪械外观');assert.equal(await p.waitFor(()=>observed.some(value=>value.id===skin.id)),true);assert.equal(observed.find(value=>value.id===skin.id).mediaKind,'PROMO_POSTER');}
+  finally{await p.close();}
+});
 
 test('skin market owner/quality pagination preserves staged selections until confirm',async()=>{
   const p=await skin12MarketProbe();

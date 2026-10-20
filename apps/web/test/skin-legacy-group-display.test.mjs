@@ -15,6 +15,7 @@ const web = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(path.join(web, 'package.json'));
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
+let previewObserver;
 
 function load(file, extra = {}) {
   const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(web);
@@ -27,7 +28,10 @@ function load(file, extra = {}) {
     if (n.endsWith('listing-view')) return listingView;
     if (n.endsWith('listing-filters')) return listingFilters;
     if (n.endsWith('supply-games')) return { DELTA_GAME_CODE: 'df' };
-    if (n.endsWith('skin-media-thumb')) return load(path.join(web, 'src/components/supply/skin-media-thumb.tsx'));
+    if (n.endsWith('skin-media-thumb')) {
+      const media = load(path.join(web, 'src/components/supply/skin-media-thumb.tsx'));
+      return { ...media, SkinMediaPreview: props => { previewObserver?.(props.skin); return React.createElement(media.SkinMediaPreview, props); } };
+    }
     if (n.includes('user-session-provider')) return { useUserSession: () => ({ status: 'authenticated', userId: 'SYNTHETIC' }), useUserSessionStore: Empty, publishUserSessionChange: Empty };
     if (n.includes('favorite-button')) return { FavoriteButton: Empty, FavoriteNotice: Empty };
     if (n.includes('rental-confirm-panel')) return { RentalConfirmPanel: Empty };
@@ -94,6 +98,20 @@ test('SK7-R1-01 owner workspace facet shows only verified type/quality, never th
 
 const oldDraftSkin = { ...fixtures.verifiedAgent, id: 'OLD_FROZEN_SKIN', name: '旧冻结外观' };
 const currentDraftSkin = { ...fixtures.verifiedAgent, id: 'CURRENT_DRAFT_SKIN', name: '当前草稿外观' };
+test('public detail and current owner draft forward poster kind without changing old snapshots', () => {
+  const observed = [];
+  previewObserver = skin => observed.push(structuredClone(skin));
+  const poster = { ...fixtures.verifiedAgent, mediaId: 'POSTER_SYNTHETIC', mediaKind: 'PROMO_POSTER' };
+  try {
+    renderDetail(poster);
+    renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null, draftSkinSummary: { source: 'CURRENT_DRAFT_SELECTION', catalogRevision: '25', items: [poster], withheld: 0 } });
+    assert.equal(observed.length, 2);
+    assert.equal(observed.every(skin => skin.mediaKind === 'PROMO_POSTER'), true);
+    observed.length = 0;
+    renderDetail(fixtures.oldNative); renderOwner(fixtures.oldNative);
+    assert.equal(observed.every(skin => !Object.hasOwn(skin, 'mediaKind')), true, 'old payloads keep kind absent');
+  } finally { previewObserver = undefined; }
+});
 const draftDeclaration = (ids) => ({ title: '测试账号', attributes: {}, inventory: [], skins: ids, entitlements: [], mediaBindings: [] });
 const draftSkinSummary = (items, withheld = 0) => ({ source: 'CURRENT_DRAFT_SELECTION', catalogRevision: '25', items, withheld });
 

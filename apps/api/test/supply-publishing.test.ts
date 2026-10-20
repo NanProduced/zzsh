@@ -7,12 +7,14 @@ import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS } from "../src/supply/del
 
 test("unquoted draft skins use current visible identities with explicit withheld and empty states, without snapshot writes", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
-  let rows: Record<string, unknown>[] = [{ id: "skin_a", name: "干员-外观", base_name: "外观", owner_name: "干员", owner_kind: "AGENT", rarity_code: "epic", rarity_name: "史诗", rarityBasis: "PLATFORM_REFERENCE", isCollectible: false, defaultState: "NON_DEFAULT", media_id: "media_a", category_code: "agent", category_name: "干员外观" }];
+  let rows: Record<string, unknown>[] = [{ id: "skin_a", name: "干员-外观", base_name: "外观", owner_name: "干员", owner_kind: "AGENT", rarity_code: "epic", rarity_name: "史诗", rarityBasis: "PLATFORM_REFERENCE", isCollectible: false, defaultState: "NON_DEFAULT", mediaKind: "PROMO_POSTER", media_id: "media_a", category_code: "agent", category_name: "干员外观" }];
   const client = { query: async (sql: string, values: unknown[]) => { calls.push({ sql, values }); return { rows: [{ revision: "22", items: rows }] }; } };
   const result = await readDraftSkinSummary(client as never, "game", ["skin_a", "hidden_b"]);
   assert.equal(result.source, "CURRENT_DRAFT_SELECTION"); assert.equal(result.catalogRevision, "22"); assert.equal(result.withheld, 1);
   assert.deepEqual((result.items as Record<string, unknown>[])[0], freezePresentationSkin(rows[0]!));
   assert.equal((result.items as Record<string, unknown>[])[0]!.isCollectible, false);
+  assert.equal((result.items as Record<string, unknown>[])[0]!.mediaKind, "PROMO_POSTER");
+  assert.match(calls[0]!.sql, /s\.media_source->>'kind' AS "mediaKind"/);
   assert.deepEqual(calls[0]!.values, ["game", ["skin_a", "hidden_b"]]);
   for (const required of ["WITH RECURSIVE", "s.naming_state='VERIFIED'", "s.enabled=true", "s.form_visible=true", "s.category_id IN (SELECT id FROM visible)", "PUBLIC_DISPLAY", "APPROVED"]) assert(calls[0]!.sql.includes(required), required);
   assert.doesNotMatch(calls[0]!.sql, /\b(?:INSERT|UPDATE|DELETE)\b/);
@@ -160,10 +162,10 @@ test("readPresentation fills both missing skin category fields without changing 
 // absent: readPresentation may still fill category labels, never type or quality.
 test("SK7 new snapshots freeze owner type and quality; unknown is an explicit null", () => {
   const row = { id: "skin-a", name: "露娜-黑·天际线", base_name: "黑·天际线", owner_name: "露娜", owner_kind: "AGENT", rarity_code: "q_fixture", rarity_name: "测试品质", media_id: null, category_code: "df_skin_category_agent", category_name: "干员外观" };
-  assert.deepEqual(freezePresentationSkin(row), { id: "skin-a", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", ownerKind: "AGENT", rarityCode: "q_fixture", rarityName: "测试品质", rarityBasis: null, isCollectible: null, defaultState: "UNKNOWN", mediaId: null, categoryCode: "df_skin_category_agent", categoryName: "干员外观" });
+  assert.deepEqual(freezePresentationSkin(row), { id: "skin-a", name: "露娜-黑·天际线", baseName: "黑·天际线", ownerName: "露娜", ownerKind: "AGENT", rarityCode: "q_fixture", rarityName: "测试品质", rarityBasis: null, isCollectible: null, defaultState: "UNKNOWN", mediaKind: null, mediaId: null, categoryCode: "df_skin_category_agent", categoryName: "干员外观" });
   const unknown = freezePresentationSkin({ ...row, owner_kind: null, rarity_code: null, rarity_name: undefined });
   assert.equal(unknown.ownerKind, null); assert.equal(unknown.rarityCode, null); assert.equal(unknown.rarityName, null);
-  assert.equal(unknown.rarityBasis, null); assert.equal(unknown.isCollectible, null); assert.equal(unknown.defaultState, "UNKNOWN");
+  assert.equal(unknown.rarityBasis, null); assert.equal(unknown.isCollectible, null); assert.equal(unknown.defaultState, "UNKNOWN"); assert.equal(unknown.mediaKind, null);
   const source = quoteListing.toString();
   assert.ok(source.includes("s.owner_kind,s.rarity_code,"), "quote reads owner kind and quality code");
   assert.ok(source.includes("AS rarity_name"), "quote reads the quality name through the shared helper");
@@ -173,11 +175,11 @@ test("SK7 new snapshots freeze owner type and quality; unknown is an explicit nu
 
 test("SK7 an old snapshot without type or quality stays without them; category labels may still be filled", async () => {
   const result = await readPresentation(
-    { query: async () => ({ rows: [{ id: "skin-old", categoryCode: "df_skin_category_agent", categoryName: "干员外观", ownerKind: "AGENT", rarityCode: "q_now", rarityName: "当前品质", rarityBasis: "OFFICIAL", isCollectible: true, defaultState: "NON_DEFAULT" }] }) } as never,
+    { query: async (sql: string) => { assert.doesNotMatch(sql, /media_source|mediaKind/); return { rows: [{ id: "skin-old", categoryCode: "df_skin_category_agent", categoryName: "干员外观", ownerKind: "AGENT", rarityCode: "q_now", rarityName: "当前品质", rarityBasis: "OFFICIAL", isCollectible: true, defaultState: "NON_DEFAULT", mediaKind: "PROMO_POSTER" }] }; } } as never,
     { presentation: { items: [], skins: [{ id: "skin-old", name: "旧快照皮肤" }] } } as never,
   );
   assert.deepEqual(result.skins, [{ id: "skin-old", name: "旧快照皮肤", categoryCode: "df_skin_category_agent", categoryName: "干员外观" }]);
-  for (const key of ["ownerKind", "rarityCode", "rarityName", "rarityBasis", "isCollectible", "defaultState"]) assert.equal(Object.hasOwn((result.skins as object[])[0]!, key), false, `${key} is not back-filled from today's catalog`);
+  for (const key of ["ownerKind", "rarityCode", "rarityName", "rarityBasis", "isCollectible", "defaultState", "mediaKind"]) assert.equal(Object.hasOwn((result.skins as object[])[0]!, key), false, `${key} is not back-filled from today's catalog`);
   const frozen = await readPresentation(
     { query: async () => ({ rows: [{ id: "skin-new", categoryCode: "c", categoryName: "C", rarityName: "当前品质" }] }) } as never,
     { presentation: { items: [], skins: [{ id: "skin-new", name: "新快照皮肤", ownerKind: "AGENT", rarityCode: null, rarityName: null, categoryCode: "c", categoryName: "C" }] } } as never,
@@ -202,5 +204,16 @@ test("new skin metadata freezes known, false and unknown states without later ca
     assert.equal(reads, 1, "exercise the category compatibility lookup rather than only the no-read path");
     assert.deepEqual(later.skins, [{ ...snapshot, categoryCode: "current-category", categoryName: "当前分类" }]);
     assert.deepEqual([snapshot.rarityBasis, snapshot.isCollectible, snapshot.defaultState], [metadata.rarityBasis, metadata.isCollectible, metadata.defaultState], "reading does not mutate the frozen snapshot");
+  }
+});
+
+test("new presentation freezes media kind alone, including unknown, without exposing or re-reading source details", async () => {
+  for (const mediaKind of ["PORTRAIT_CARD", "MODEL_IMAGE", "PROMO_POSTER", null]) {
+    const frozen = freezePresentationSkin({ id: "skin-media", name: "合成外观", mediaKind, category_code: "c", category_name: "C", mediaSource: { kind: mediaKind, url: "https://private.example/source", sourceName: "素材来源" } });
+    assert.equal(frozen.mediaKind, mediaKind);
+    assert.equal(Object.hasOwn(frozen, "mediaSource"), false);
+    assert.equal(JSON.stringify(frozen).includes("private.example"), false);
+    const result = await readPresentation({ query: async () => { throw new Error("Frozen media kind must not query today's catalog"); } } as never, { presentation: { items: [], skins: [frozen] } } as never);
+    assert.equal((result.skins as Record<string, unknown>[])[0]!.mediaKind, mediaKind);
   }
 });

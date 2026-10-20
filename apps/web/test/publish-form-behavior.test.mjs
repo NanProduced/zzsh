@@ -178,7 +178,10 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       controlModule._compile(ts.transpileModule(fs.readFileSync(controlPath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, controlPath);
       return controlModule.exports;
     }
-    if (name === "./skin-media-thumb") return loadThumbModule();
+    if (name === "./skin-media-thumb") {
+      const media = loadThumbModule();
+      return { ...media, SkinMediaPreview: (props) => { skinPreviewObserver?.(props.skin); return React.createElement(media.SkinMediaPreview, props); } };
+    }
     if (name === "next/link") return ({ children, href, ...props }) => React.createElement("a", { href, ...props }, children);
     if (name === "next/navigation") return { useRouter: () => router };
     if (name === "../session/user-session-provider") return { useUserSessionStore: () => store, useUserSession: () => session };
@@ -312,6 +315,19 @@ test('real safe-box and lower-level declarations can be saved without claiming t
     assert.equal(saved.safe_box_code,codes[0]);assert.equal(saved.vit_level,4);assert.equal(saved.bear_level,5);
     assert.equal(p.calls.some(c=>c.op==='quote'||c.op==='confirm'),false);
   }finally{await p.close();}
+});
+
+test('publish picker forwards explicit poster kind to the real shared preview without a write', async () => {
+  const observed = [];
+  skinPreviewObserver = skin => observed.push(skin);
+  const skin = { id: 'poster_skin', code: 'poster_skin', name: '测试海报', categoryId: 'poster_category', mediaId: 'poster_media', mediaKind: 'PROMO_POSTER' };
+  const p = await probe({ accountId: 'account_1', catalogValue: { ...catalog, categories: [{ id: 'poster_category', code: 'firearm', name: '枪械外观', parentId: null }], skins: [skin] }, mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    assert.equal(await p.waitFor(() => observed.some(value => value.id === skin.id)), true);
+    assert.equal(observed.find(value => value.id === skin.id).mediaKind, 'PROMO_POSTER');
+    assert.equal(p.calls.some(call => ['saveDraft', 'quote', 'confirm'].includes(call.op)), false);
+  } finally { skinPreviewObserver = undefined; await p.close(); }
 });
 
 test("skin picker renders the public summary, neutral missing-media state, and keyboard selection", async () => {
@@ -1530,7 +1546,7 @@ function loadTsFile(file, overrides = {}) {
   return mod.exports;
 }
 
-let thumbModuleCache;
+let thumbModuleCache, skinPreviewObserver;
 function loadThumbModule() {
   thumbModuleCache ??= loadTsFile(path.join(tree, "apps/web/src/components/supply/skin-media-thumb.tsx"), {
     react: React,
