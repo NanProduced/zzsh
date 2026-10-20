@@ -407,3 +407,68 @@ test('existing cursor clients retain their response shape and cannot mix page co
   const numbered=await route('/api/v1/admin/users?page=1&pageSize=2',pool);
   assert.equal((await route('/api/v1/admin/users?limit=2&contextKey='+numbered.body.contextKey,pool)).status,400);
 });
+
+test('original registration projection uses the SQL fact while old clients retain local creation semantics',async()=>{
+  const pool=new DirectorySqlFixture();
+  for(const row of pool.users)Object.assign(row,{originalRegisteredAt:row.id==='user_legacy'?'2019-01-01T00:00:00.000000Z':row.provider==='none'?row.localCreatedAt:null});
+  const data:any=await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',limit:20});
+  const legacy=data.items.find((row:any)=>row.userId==='user_legacy');
+  assert.equal(legacy.registeredAt,'2019-01-01T00:00:00.000000Z');assert.equal(legacy.registeredAtSource,'LEGACY');
+  assert.notEqual(legacy.registeredAt,legacy.localCreatedAt);
+  const unknown=data.items.find((row:any)=>row.userId==='user_unknown');assert.equal(unknown.registeredAt,null);assert.equal(unknown.registeredAtSource,'UNKNOWN');
+  const detail:any=await readUserDirectoryDetail(client(pool),{...viewer,auditRead:false},'user_legacy','ORIGINAL');
+  assert.equal(detail.registeredAt,legacy.registeredAt);assert.equal(detail.source.sourceDigest,undefined);assert.equal(detail.source.sourceCreatedAt,undefined);
+  const old:any=await listUserDirectory(client(pool),viewer,{limit:20});
+  assert.equal(old.items.find((row:any)=>row.userId==='user_legacy').registeredAtSource,'LOCAL');
+});
+
+test('original registration filters and sort precede pagination and count uses identical validated fact relation',async()=>{
+  const pool=new DirectorySqlFixture();
+  await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',sort:'registered_asc',registeredFrom:'2019-01-01T00:00:00Z',registeredBefore:'2020-01-01T00:00:00Z',page:1,limit:20});
+  const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
+  assert.equal(queries.length,2);
+  for(const {sql} of queries){
+    assert.match(sql,/e\.outcome='SUCCESS'/);assert.match(sql,/pg_input_is_valid\(mig\.source_created_at,'timestamp with time zone'\)/);
+    assert.match(sql,/s\.provider_reference='la_user:' \|\| mig\.legacy_id/);
+    assert.match(sql,/registration\.registered_at >= \$\d+::timestamptz/);assert.match(sql,/registration\.registered_at < \$\d+::timestamptz/);
+    assert.doesNotMatch(sql,/COALESCE\(mig\.source_created_at|COALESCE\(registration\.registered_at/);
+  }
+  assert.match(queries[1]!.sql,/ORDER BY registration\.registered_at ASC NULLS LAST, registration\.id COLLATE "C" DESC[\s\S]*?LIMIT/);
+});
+
+test('original time mode and direction bind both page context and nullable keyset cursors',async()=>{
+  const pool=new DirectorySqlFixture();for(const row of pool.users)Object.assign(row,{originalRegisteredAt:null});
+  const page:any=await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',limit:1,page:1});
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:1,page:2,contextKey:page.contextKey}),error=>(error as any).status===409);
+  await assert.rejects(listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',sort:'registered_asc',limit:1,page:2,contextKey:page.contextKey}),error=>(error as any).status===409);
+  const first:any=await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',limit:1});
+  assert.equal(JSON.parse(Buffer.from(first.nextCursor,'base64url').toString()).c,null);
+  await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',limit:1,cursor:first.nextCursor});
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:1,cursor:first.nextCursor}),error=>(error as any).status===409);
+});
+
+test('original registration route rejects ambiguous modes, ranges and duplicates',async()=>{
+  for(const query of ['registrationTime=LOCAL','registrationTime=ORIGINAL&registrationTime=ORIGINAL','sort=registered_desc','registrationTime=ORIGINAL&sort=created','registeredBefore=2020-01-01T00:00:00Z','registrationTime=ORIGINAL&registeredTo=2020-01-01T00:00:00Z&registeredBefore=2020-01-02T00:00:00Z','registrationTime=ORIGINAL&registeredFrom=2020-01-02T00:00:00Z&registeredBefore=2020-01-01T00:00:00Z','registrationTime=ORIGINAL&registeredBefore=2020-02-31T00:00:00Z']){
+    const pool=new DirectorySqlFixture();const result=await route('/api/v1/admin/users?'+query,pool);assert.equal(result.status,400,query);
+    assert.equal(pool.queries.some(q=>q.sql.includes('FROM zzsh_auth_user."user" u')),false,query);
+  }
+});
+
+test('original registration uses the same body-only phone lookup projection through BFF',async()=>{
+  const pool=new DirectorySqlFixture();Object.assign(pool.users[0]!,{originalRegisteredAt:pool.users[0]!.localCreatedAt});
+  const body={phone:'18800001101',registrationTime:'ORIGINAL',sort:'registered_desc',page:'1',pageSize:'10'};
+  const lookup=await route('/api/bff/admin/users/lookup',pool,'POST',body,true);assert.equal(lookup.status,200);
+  const detail=await route('/api/bff/admin/users/user_normal?registrationTime=ORIGINAL',pool,'GET',undefined,true);assert.equal(detail.status,200);
+  assert.equal(lookup.body.items[0].registeredAt,detail.body.user.registeredAt);assert.equal(lookup.body.items[0].registeredAtSource,detail.body.user.registeredAtSource);
+  assert.equal((await route('/api/v1/admin/users/lookup?registrationTime=ORIGINAL',pool,'POST',body)).status,400);
+  pool.permissions=['user.directory.read'];assert.equal((await route('/api/bff/admin/users/lookup',pool,'POST',body,true)).status,403);
+});
+
+test('original sort alone does not scan audit for total or materialise provenance again after the page',async()=>{
+  const pool=new DirectorySqlFixture();await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',page:1,limit:20});
+  const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
+  assert.equal(queries.length,2);assert.doesNotMatch(queries[0]!.sql,/audit_event|source_created_at/);
+  assert.match(queries[1]!.sql,/migration AS NOT MATERIALIZED/);
+  assert.doesNotMatch(queries[1]!.sql.split('FROM page selected')[1]!,/JOIN migration/);
+  assert.match(queries[1]!.sql,/selected\.migration_legacy_id AS "migrationLegacyId"/);
+});

@@ -53,28 +53,27 @@ export function maskEmail(email: string | null): string | null {
 const CURSOR_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 const CURSOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-type KeysetCursor = { createdAt: string; id: string };
+type KeysetCursor = { createdAt: string | null; id: string };
 
-function parseKeysetCursor(cursor: string | undefined, filterKey: string): KeysetCursor | null {
+function parseKeysetCursor(cursor: string | undefined, filterKey: string, allowUnknownTime = false): KeysetCursor | null {
   if (cursor === undefined) return null;
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString()) as { f?: unknown; c?: unknown; i?: unknown };
     if (
       parsed.f !== filterKey ||
-      typeof parsed.c !== "string" ||
-      !CURSOR_TIME_PATTERN.test(parsed.c) ||
+      (!(allowUnknownTime && parsed.c === null) && (typeof parsed.c !== "string" || !CURSOR_TIME_PATTERN.test(parsed.c))) ||
       typeof parsed.i !== "string" ||
       !CURSOR_ID_PATTERN.test(parsed.i)
     ) {
       throw new Error("mismatch");
     }
-    return { createdAt: parsed.c, id: parsed.i };
+    return { createdAt: parsed.c as string | null, id: parsed.i };
   } catch {
     throw conflict("Cursor is invalid");
   }
 }
 
-function encodeKeysetCursor(filterKey: string, row: { sortAt: string; id: string }): string {
+function encodeKeysetCursor(filterKey: string, row: { sortAt: string | null; id: string }): string {
   return Buffer.from(JSON.stringify({ f: filterKey, c: row.sortAt, i: row.id })).toString("base64url");
 }
 
@@ -104,6 +103,9 @@ export type UserDirectoryFilter = {
   ageStatus?: string;
   registeredFrom?: string;
   registeredTo?: string;
+  registeredBefore?: string;
+  registrationTime?: "ORIGINAL";
+  sort?: "registered_desc" | "registered_asc";
   limit: number;
   cursor?: string;
   page?: number;
@@ -119,6 +121,7 @@ type UserListRow = {
   phoneNumber: string | null;
   suspended: boolean;
   localCreatedAt: string;
+  originalRegisteredAt?: string | null;
   accountStatus: string | null;
   identityStatus: string | null;
   provider: string | null;
@@ -168,6 +171,18 @@ const ACCOUNT_STATUS_SQL = `CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
 const SOURCE_SQL = `CASE WHEN s.provider='${LEGACY_PROVIDER}' THEN 'MIGRATED'
   WHEN s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
 
+// Validate the newest fact after selection; invalid or empty facts must never revive an older date.
+function originalRegistrationSql(migration = "mig"): string {
+  return `CASE WHEN s.user_id IS NOT NULL AND s.provider='none' AND ${migration}.object_id IS NULL THEN u."createdAt"
+    WHEN s.provider='${LEGACY_PROVIDER}' AND ${migration}.source_system='${LEGACY_PROVIDER}'
+      AND ${migration}.source_entity='la_user' AND NULLIF(${migration}.legacy_id,'') IS NOT NULL
+      AND s.provider_reference='la_user:' || ${migration}.legacy_id
+      AND ${migration}.source_digest ~ '^[0-9a-f]{64}$' AND NULLIF(${migration}.evidence_ref,'') IS NOT NULL
+      AND ${migration}.source_created_at ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,6})?Z$'
+      AND pg_input_is_valid(${migration}.source_created_at,'timestamp with time zone')
+    THEN ${migration}.source_created_at::timestamptz ELSE NULL END`;
+}
+
 function publishedAccountSql(account: string): string {
   return `${account}.lifecycle='ACTIVE' AND EXISTS (
     SELECT 1 FROM zzsh_supply.listing_version pv
@@ -202,10 +217,10 @@ function projectRelationshipSummaries(
   };
 }
 
-function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer) {
+function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer, original = false) {
   const legacyId = row.migrationLegacyId ?? legacyIdFromReference(row.provider, row.providerReference);
   const source = sourceKindOf(row.migrationLegacyId, row.provider, row.accountStatus !== null);
-  const registeredAt = row.localCreatedAt;
+  const registeredAt = original ? row.originalRegisteredAt ?? null : row.localCreatedAt;
   return {
     userId: row.id,
     name: row.name,
@@ -222,7 +237,7 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer) {
       ...(legacyId ? { legacyId } : {}),
     },
     registeredAt,
-    registeredAtSource: "LOCAL",
+    registeredAtSource: original ? registeredAt === null ? "UNKNOWN" : row.provider === LEGACY_PROVIDER ? "LEGACY" : "LOCAL" : "LOCAL",
     createdAt: row.localCreatedAt,
     updatedAt: row.localUpdatedAt,
     localCreatedAt: row.localCreatedAt,
@@ -233,7 +248,7 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer) {
 
 // Audit-dependent membership is decided before pagination; other reads batch audits for the page.
 function filterConsultsMigrationAudit(filter: UserDirectoryFilter): boolean {
-  return Boolean(filter.legacyId || filter.search || filter.source);
+  return Boolean(filter.legacyId || filter.search || filter.source || filter.registrationTime === "ORIGINAL");
 }
 
 export async function listUserDirectory(
@@ -241,6 +256,13 @@ export async function listUserDirectory(
   viewer: AdminDirectoryViewer,
   filter: UserDirectoryFilter,
 ): Promise<Record<string, unknown>> {
+  const original = filter.registrationTime === "ORIGINAL";
+  const materializeDates = original && Boolean(filter.registeredFrom || filter.registeredTo || filter.registeredBefore || filter.cursor);
+  if ((filter.registrationTime !== undefined && !original) || (filter.sort !== undefined && (!original || !["registered_desc", "registered_asc"].includes(filter.sort)))) throw invalid("Registration time mode or sort is invalid");
+  if (filter.registeredBefore !== undefined && (!original || filter.registeredTo !== undefined)) throw invalid("Registered before requires original time and no inclusive upper bound");
+  const direction = filter.sort === "registered_asc" ? "ASC" : "DESC";
+  const timeColumn = original ? "registration.registered_at" : 'u."createdAt"';
+  const order = original ? `${timeColumn} ${direction} NULLS LAST, u.id COLLATE "C" DESC` : 'u."createdAt" DESC, u.id DESC';
   const numbered = filter.page !== undefined;
   if (numbered && (!Number.isSafeInteger(filter.page) || filter.page! < 1 || filter.page! > USER_DIRECTORY_MAX_PAGE
     || !Number.isSafeInteger(filter.limit) || filter.limit < 1 || filter.limit > 100 || filter.cursor !== undefined)) throw invalid("Directory page is invalid");
@@ -269,10 +291,11 @@ export async function listUserDirectory(
       registeredFrom: filter.registeredFrom ?? null,
       registeredTo: filter.registeredTo ?? null,
       limit: filter.limit,
+      ...(original ? { registrationTime: "ORIGINAL", sort: filter.sort ?? "registered_desc", registeredBefore: filter.registeredBefore ?? null } : {}),
     }),
   );
   if (filter.contextKey !== undefined && filter.contextKey !== filterKey) throw conflict("Directory query or authorisation changed; return to the first page");
-  const cursor = parseKeysetCursor(filter.cursor, filterKey);
+  const cursor = parseKeysetCursor(filter.cursor, filterKey, original);
 
   const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
   const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
@@ -297,12 +320,15 @@ export async function listUserDirectory(
   if (filter.source) conditions.push(`(${SOURCE_SQL})=$${values.push(filter.source)}`);
   if (filter.identityStatus) conditions.push(`COALESCE(s.identity_status,'UNKNOWN')=$${values.push(filter.identityStatus)}`);
   if (filter.ageStatus) conditions.push(`COALESCE(s.age_status,'UNKNOWN')=$${values.push(filter.ageStatus)}`);
+  const membershipConditions = [...conditions];
   if (filter.registeredFrom) {
-    conditions.push(`u."createdAt" >= $${values.push(filter.registeredFrom)}::timestamptz`);
+    conditions.push(`${timeColumn} >= $${values.push(filter.registeredFrom)}::timestamptz`);
   }
   if (filter.registeredTo) {
-    conditions.push(`u."createdAt" <= $${values.push(filter.registeredTo)}::timestamptz`);
+    conditions.push(`${timeColumn} <= $${values.push(filter.registeredTo)}::timestamptz`);
   }
+  if (filter.registeredBefore) conditions.push(`${timeColumn} < $${values.push(filter.registeredBefore)}::timestamptz`);
+  const dateConditions = conditions.slice(membershipConditions.length);
   // Count uses the identical filter predicates, without the four projection-only parameters or cursor.
   const countValues = values.slice(4);
   const countConditions = conditions.map(condition => condition.replace(/\$(\d+)/g, (_, index: string) => `$${Number(index) - 4}`));
@@ -311,15 +337,22 @@ export async function listUserDirectory(
   const cursorId = values.length - 1;
   const limitParameter = values.length;
   const offsetParameter = filter.page === undefined ? undefined : values.push((filter.page - 1) * filter.limit);
-  const cursorCondition = `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
+  const cursorCondition = original
+    ? `(($${cursorTime}::timestamptz IS NULL AND $${cursorId}::text IS NULL) OR ($${cursorId}::text IS NOT NULL AND (
+        ($${cursorTime}::timestamptz IS NULL AND ${timeColumn} IS NULL AND u.id COLLATE "C" < $${cursorId}) OR
+        ($${cursorTime}::timestamptz IS NOT NULL AND (${timeColumn} IS NULL OR ${timeColumn} ${direction === "ASC" ? ">" : "<"} $${cursorTime}::timestamptz
+          OR (${timeColumn}=$${cursorTime}::timestamptz AND u.id COLLATE "C" < $${cursorId}))))))`
+    : `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
 
   const orderCountRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
+              ${original ? `to_char(selected.registered_at ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
               to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", ${ageStatusExpr} AS "ageStatus",
               ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
               ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
-              mig.legacy_id AS "migrationLegacyId", mig.source_created_at AS "migrationSourceCreatedAt",
+              ${original ? "selected.migration_legacy_id" : "mig.legacy_id"} AS "migrationLegacyId",
+              ${original ? "selected.migration_source_created_at" : "mig.source_created_at"} AS "migrationSourceCreatedAt",
               CASE WHEN $3::boolean THEN resource_counts.account_count ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $3::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
               CASE WHEN $4::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
@@ -327,37 +360,62 @@ export async function listUserDirectory(
               CASE WHEN $4::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"`;
 
   const consultsMigration = filterConsultsMigrationAudit(filter);
+  const countUsesOriginalTime = original && Boolean(filter.registeredFrom || filter.registeredTo || filter.registeredBefore);
+  const countConsultsMigration = Boolean(filter.legacyId || filter.search || filter.source || countUsesOriginalTime);
   const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
            e.details->>'legacyId' AS legacy_id,
            e.details->>'sourceCreatedAt' AS source_created_at
+           ${original ? `,e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,
+             e.details->>'sourceDigest' AS source_digest,e.details->>'evidenceRef' AS evidence_ref` : ""}
       FROM zzsh_iam.audit_event e
       ${consultsMigration ? "" : "JOIN page candidate ON candidate.id = e.object_id"}
      WHERE e.action = '${LEGACY_MIGRATION_ACTION}' AND e.object_type = 'user'
+       ${original ? "AND e.outcome='SUCCESS'" : ""}
      ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
-  const pageQuery = `SELECT u.id, u."createdAt"
+  // The validated timestamp is expensive; materialise narrow facts once before applying both bounds and sorting.
+  const registrationQuery = `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql()} AS registered_at,
+      mig.legacy_id AS migration_legacy_id,mig.source_created_at AS migration_source_created_at
+    FROM zzsh_auth_user."user" u
+    LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
+    LEFT JOIN migration mig ON mig.object_id=u.id
+    WHERE ${membershipConditions.join(" AND ") || "TRUE"}`;
+  const pageQuery = materializeDates
+    ? `SELECT registration.id,registration.created_at AS "createdAt",registration.registered_at,
+        registration.migration_legacy_id,registration.migration_source_created_at
+       FROM registration_dates registration
+       WHERE ${[...dateConditions,cursorCondition.replaceAll("u.id", "registration.id")].join(" AND ")}
+       ORDER BY ${order.replaceAll("u.id", "registration.id")}
+       LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`
+    : `SELECT u.id, u."createdAt"${original ? ",registration.registered_at,mig.legacy_id AS migration_legacy_id,mig.source_created_at AS migration_source_created_at" : ""}
            FROM zzsh_auth_user."user" u
            LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
            ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
+           ${original ? `LEFT JOIN LATERAL (SELECT ${originalRegistrationSql()} AS registered_at) registration ON true` : ""}
           WHERE ${[...conditions, cursorCondition].join(" AND ")}
-          ORDER BY u."createdAt" DESC, u.id DESC
+          ORDER BY ${order}
            LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`;
-  const total = (await client.query<{ total: number }>(
-    `${consultsMigration ? `WITH migration AS MATERIALIZED (${migrationQuery})` : ""}
+  const countSql = countUsesOriginalTime
+    ? `WITH migration AS NOT MATERIALIZED (${migrationQuery}),registration_dates AS MATERIALIZED (${registrationQuery})
+       SELECT count(*)::int AS total FROM registration_dates registration
+       WHERE ${dateConditions.join(" AND ")}`.replace(/\$(\d+)/g,(_, index: string)=>`$${Number(index)-4}`)
+    : `${countConsultsMigration ? `WITH migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery})` : ""}
        SELECT count(*)::int AS total FROM zzsh_auth_user."user" u
        LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
-       ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
-       WHERE ${countConditions.join(" AND ") || "TRUE"}`,
+       ${countConsultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
+       WHERE ${countConditions.join(" AND ") || "TRUE"}`;
+  const total = (await client.query<{ total: number }>(
+    countSql,
     countValues,
   )).rows[0]!.total;
   // Narrow keys avoid materialising full user/identity rows before the top-N operation.
   const sql = `WITH ${consultsMigration
-      ? `migration AS MATERIALIZED (${migrationQuery}), page AS MATERIALIZED (${pageQuery})`
+      ? `migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery}), ${materializeDates ? `registration_dates AS MATERIALIZED (${registrationQuery}),` : ""} page AS MATERIALIZED (${pageQuery})`
       : `page AS MATERIALIZED (${pageQuery}), migration AS MATERIALIZED (${migrationQuery})`}
        SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}
          FROM page selected
          JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
-         LEFT JOIN migration mig ON mig.object_id = u.id
+         ${original ? "" : "LEFT JOIN migration mig ON mig.object_id = u.id"}
          ${resourceCountsSql("$3", "$1", "$2")}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
@@ -367,7 +425,7 @@ export async function listUserDirectory(
             WHERE $4::boolean AND (o.renter_user_id=u.id OR o.owner_user_id=u.id)
               AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id","$2","$1")}
          ) current_orders ON true
-        ORDER BY u."createdAt" DESC, u.id DESC`;
+        ORDER BY ${original ? `selected.registered_at ${direction} NULLS LAST, u.id COLLATE "C" DESC` : order}`;
 
   const rows = (await client.query<UserListRow>(sql, values)).rows;
   const items = rows.slice(0, filter.limit);
@@ -375,9 +433,9 @@ export async function listUserDirectory(
   const last = items.at(-1);
   const summaries = await readUserDirectoryBusinessSummaries(client, viewer, items.map(row => row.id));
   return {
-    items: items.map(row => ({ ...projectListItem(row, viewer), ...summaries.get(row.id) })),
+    items: items.map(row => ({ ...projectListItem(row, viewer, original), ...summaries.get(row.id) })),
     total,
-    nextCursor: !numbered && hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: last.localCreatedAt, id: last.id }) : null,
+    nextCursor: !numbered && hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: original ? last.originalRegisteredAt ?? null : last.localCreatedAt, id: last.id }) : null,
     limit: filter.limit,
     ...(numbered ? { paginationMode: "page", page: filter.page, pageSize: filter.limit, contextKey: filterKey } : {}),
   };
@@ -394,6 +452,7 @@ export type UserDetailRow = {
   email: string | null;
   suspended: boolean;
   localCreatedAt: string;
+  originalRegisteredAt?: string | null;
   localUpdatedAt: string;
   accountStatus: string | null;
   identityStatus: string | null;
@@ -420,7 +479,10 @@ export async function readUserDirectoryDetail(
   client: PoolClient,
   viewer: AdminDirectoryViewer,
   userId: string,
+  registrationTime?: "ORIGINAL",
 ): Promise<Record<string, unknown> | null> {
+  if (registrationTime !== undefined && registrationTime !== "ORIGINAL") throw invalid("Registration time mode is invalid");
+  const original = registrationTime === "ORIGINAL";
   const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
   const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
   const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client)) : null;
@@ -429,6 +491,7 @@ export async function readUserDirectoryDetail(
       `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u."phoneNumberVerified",
               u.email, u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
+              ${original ? `to_char(registration.registered_at ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
               to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt",
               s.account_status AS "accountStatus", s.identity_status AS "identityStatus", s.age_status AS "ageStatus",
               s.provider, s.provider_reference AS "providerReference",
@@ -459,6 +522,15 @@ export async function readUserDirectoryDetail(
             ORDER BY e.occurred_at DESC, e.id DESC
             LIMIT 1
          ) mig ON true
+         ${original ? `LEFT JOIN LATERAL (
+           SELECT e.object_id,e.details->>'legacyId' AS legacy_id,e.details->>'sourceCreatedAt' AS source_created_at,
+             e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,
+             e.details->>'sourceDigest' AS source_digest,e.details->>'evidenceRef' AS evidence_ref
+           FROM zzsh_iam.audit_event e
+           WHERE e.action='${LEGACY_MIGRATION_ACTION}' AND e.object_type='user' AND e.object_id=u.id AND e.outcome='SUCCESS'
+           ORDER BY e.occurred_at DESC,e.id DESC LIMIT 1
+         ) registration_mig ON true
+         LEFT JOIN LATERAL (SELECT ${originalRegistrationSql("registration_mig")} AS registered_at) registration ON true` : ""}
          ${resourceCountsSql("$4", "$2", "$3")}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
@@ -475,7 +547,7 @@ export async function readUserDirectoryDetail(
   if (!row) return null;
   const legacyId = row.migrationLegacyId ?? legacyIdFromReference(row.provider, row.providerReference);
   const source = sourceKindOf(row.migrationLegacyId, row.provider, row.accountStatus !== null);
-  const registeredAt = row.localCreatedAt;
+  const registeredAt = original ? row.originalRegisteredAt ?? null : row.localCreatedAt;
   const summaries = await readUserDirectoryBusinessSummaries(client, viewer, [userId]);
   return {
     userId: row.id,
@@ -512,7 +584,7 @@ export async function readUserDirectoryDetail(
         : {}),
     },
     registeredAt,
-    registeredAtSource: "LOCAL",
+    registeredAtSource: original ? registeredAt === null ? "UNKNOWN" : row.provider === LEGACY_PROVIDER ? "LEGACY" : "LOCAL" : "LOCAL",
     createdAt: row.localCreatedAt,
     updatedAt: row.localUpdatedAt,
     localCreatedAt: row.localCreatedAt,

@@ -27,7 +27,8 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d
 const USERNAME_SEARCH_MAX = 200;
 const LEGACY_ID_MAX = 128;
 const PAGINATION_KEYS = new Set(["page", "pageSize", "contextKey", "limit", "cursor"]);
-const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "registeredFrom", "registeredTo", "sort", "page", "pageSize", "contextKey"]);
+const REGISTRATION_KEYS = new Set(["registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort"]);
+const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort", "page", "pageSize", "contextKey"]);
 
 function parseLimit(raw: string | null): number {
   const limit = raw === null ? 20 : Number(raw);
@@ -115,11 +116,14 @@ export async function handleUserDirectoryAdmin(
       const allowed = new Set([...DIRECTORY_QUERY_KEYS, "limit", "cursor"]);
       for (const [key, value] of Object.entries(request.body)) {
         if (!allowed.has(key) || typeof value !== "string" || value.length > 2000) throw invalid("Lookup field is invalid");
-        if (PAGINATION_KEYS.has(key) && query.has(key)) throw invalid("Lookup pagination argument is repeated", key);
+        if ((PAGINATION_KEYS.has(key) || REGISTRATION_KEYS.has(key)) && query.has(key)) throw invalid("Lookup argument is repeated", key);
         query.set(key, value);
       }
       if (!query.get("phone")) throw invalid("Phone is required");
     }
+    for (const key of REGISTRATION_KEYS) if (query.getAll(key).length > 1) throw invalid("Registration argument is repeated", key);
+    const registrationTime = query.get("registrationTime");
+    if (registrationTime !== null && registrationTime !== "ORIGINAL") throw invalid("Registration time mode is invalid");
     await withDirectoryRead(options.pool, request, response, async (signal) => {
     const context = await readAdminContext(request, options);
     let dataToSend: unknown;
@@ -158,12 +162,15 @@ export async function handleUserDirectoryAdmin(
         if (identityStatus && !["UNKNOWN", "UNVERIFIED", "VERIFIED", "REJECTED"].includes(identityStatus)) throw invalid("Identity status is invalid");
         const ageStatus = parseTrimmed(query.get("ageStatus"), 16, "Age status");
         if (ageStatus && !["UNKNOWN", "ADULT", "MINOR"].includes(ageStatus)) throw invalid("Age status is invalid");
-        if (query.has("sort") && query.get("sort") !== "created") throw invalid("Activity sorting is not connected");
+        const sort = query.get("sort");
+        if (registrationTime === "ORIGINAL" ? sort !== null && sort !== "registered_desc" && sort !== "registered_asc" : sort !== null && sort !== "created") throw invalid("Registration sort is invalid");
         const accountStatusFilter = parseAccountStatus(query.get("accountStatus"));
         const sourceFilter = parseSource(query.get("source"));
         const registeredFrom = parseTimestamp(query.get("registeredFrom"), "Registered from");
         const registeredTo = parseTimestamp(query.get("registeredTo"), "Registered to");
+        const registeredBefore = parseTimestamp(query.get("registeredBefore"), "Registered before");
         if (registeredFrom && registeredTo && Date.parse(registeredFrom) > Date.parse(registeredTo)) throw invalid("Registered range is reversed");
+        if (registeredBefore && (registrationTime !== "ORIGINAL" || registeredTo || registeredFrom && Date.parse(registeredFrom) >= Date.parse(registeredBefore))) throw invalid("Registered before is incompatible or not after the lower bound");
         const phoneRaw = parseTrimmed(query.get("phone"), 32, "Phone");
         let phone: string | undefined;
         if (phoneRaw !== undefined) {
@@ -185,6 +192,9 @@ export async function handleUserDirectoryAdmin(
           ...(sourceFilter !== undefined ? { source: sourceFilter } : {}),
           ...(registeredFrom !== undefined ? { registeredFrom } : {}),
           ...(registeredTo !== undefined ? { registeredTo } : {}),
+          ...(registrationTime !== null ? { registrationTime } : {}),
+          ...(sort === "registered_desc" || sort === "registered_asc" ? { sort } : {}),
+          ...(registeredBefore !== undefined ? { registeredBefore } : {}),
           limit,
           ...(cursor !== undefined ? { cursor } : {}),
           ...(pagination ? { page: pagination.page, ...(pagination.contextKey !== undefined ? { contextKey: pagination.contextKey } : {}) } : {}),
@@ -199,7 +209,7 @@ export async function handleUserDirectoryAdmin(
       if (section === undefined) {
         requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
         await enableLegacyRead();
-        const detail = await readUserDirectoryDetail(client, viewer, userId);
+        const detail = await readUserDirectoryDetail(client, viewer, userId, registrationTime ?? undefined);
         if (!detail) throw notFound();
         dataToSend = { user: detail };
         return;
