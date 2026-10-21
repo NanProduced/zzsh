@@ -452,26 +452,28 @@ test('original registration filters and sort precede pagination and count uses i
   const pool=new DirectorySqlFixture();
   await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',sort:'registered_asc',registeredFrom:'2019-01-01T00:00:00Z',registeredBefore:'2020-01-01T00:00:00Z',page:1,limit:20});
   const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
-  assert.equal(queries.length,2);
+  assert.equal(queries.length,1);
   for(const {sql} of queries){
     assert.match(sql,/e\.outcome='SUCCESS'/);assert.match(sql,/pg_input_is_valid\(mig\.source_created_at,'timestamp with time zone'\)/);
     assert.match(sql,/s\.provider_reference='la_user:' \|\| mig\.legacy_id/);
     assert.match(sql,/registration\.registered_at >= \$\d+::timestamptz/);assert.match(sql,/registration\.registered_at < \$\d+::timestamptz/);
     assert.doesNotMatch(sql,/COALESCE\(mig\.source_created_at|COALESCE\(registration\.registered_at/);
   }
-  assert.match(queries[1]!.sql,/ORDER BY registration\.registered_at ASC NULLS LAST, registration\.id COLLATE "C" DESC[\s\S]*?LIMIT/);
+  assert.match(queries[0]!.sql,/ORDER BY registration\.registered_at ASC NULLS LAST, registration\.id COLLATE "C" DESC[\s\S]*?LIMIT/);
 });
 
-test('original bounded count materialises only the validated date while the page keeps display facts',async()=>{
+test('original bounded count and page share one validated date materialisation with explicit aggregate order',async()=>{
   const pool=new DirectorySqlFixture();
   await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',registeredFrom:'2019-01-01T00:00:00Z',page:1,limit:20});
-  const [count,page]=pool.queries;
-  assert.ok(count!.sql.includes('registration_dates AS MATERIALIZED'));
-  assert.equal(count!.sql.includes('AS created_at'),false,'the total does not carry an unused page column');
-  assert.equal(count!.sql.includes('migration_legacy_id'),false,'the total does not carry an unused legacy id');
-  assert.ok(page!.sql.includes('registration.created_at AS "createdAt"'));
-  assert.ok(page!.sql.includes('registration.migration_legacy_id'));
-  assert.equal(page!.sql.includes('migration_source_created_at'),false,'the list never returned this unused column');
+  const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
+  assert.equal(queries.length,1);
+  const sql=queries[0]!.sql;
+  assert.equal(sql.split('registration_dates AS MATERIALIZED').length,2);
+  assert.match(sql,/SELECT count\(\*\)::int AS total FROM registration_dates registration/);
+  assert.match(sql,/registration\.created_at AS "createdAt"/);
+  assert.match(sql,/registration\.migration_legacy_id/);
+  assert.match(sql,/json_agg\(to_jsonb\(p\)-'__directory_sort_at' ORDER BY p\.__directory_sort_at DESC NULLS LAST,p\.id COLLATE "C" DESC\)/);
+  assert.equal(sql.includes('migration_source_created_at'),false,'the list never returned this unused column');
 });
 
 test('original time mode and direction bind both page context and nullable keyset cursors',async()=>{
@@ -502,14 +504,20 @@ test('original registration uses the same body-only phone lookup projection thro
   pool.permissions=['user.directory.read'];assert.equal((await route('/api/bff/admin/users/lookup',pool,'POST',body,true)).status,403);
 });
 
-test('original sort alone does not scan audit for total or materialise provenance again after the page',async()=>{
+test('original sort total reuses date facts without reloading provenance after the page',async()=>{
   const pool=new DirectorySqlFixture();await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',page:1,limit:20});
   const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
-  assert.equal(queries.length,2);assert.doesNotMatch(queries[0]!.sql,/audit_event|source_created_at/);
-  assert.match(queries[1]!.sql,/migration AS NOT MATERIALIZED/);
-  assert.match(queries[1]!.sql,/registration_dates AS MATERIALIZED/);
-  assert.doesNotMatch(queries[1]!.sql.split('FROM page selected')[1]!,/JOIN migration/);
-  assert.match(queries[1]!.sql,/selected\.migration_legacy_id AS "migrationLegacyId"/);
+  assert.equal(queries.length,1);
+  assert.match(queries[0]!.sql,/migration AS NOT MATERIALIZED/);
+  assert.match(queries[0]!.sql,/registration_dates AS MATERIALIZED/);
+  assert.doesNotMatch(queries[0]!.sql.split('FROM page selected')[1]!,/JOIN migration/);
+  assert.match(queries[0]!.sql,/selected\.migration_legacy_id AS "migrationLegacyId"/);
+});
+
+test('original numbered tail retains total when the selected page is empty',async()=>{
+  const pool=new DirectorySqlFixture(),data:any=await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',page:100,limit:20});
+  assert.equal(data.total,pool.users.length);assert.deepEqual(data.items,[]);assert.equal(data.nextCursor,null);
+  assert.equal(pool.queries.filter(q=>q.sql.includes('AS directory_rows')).length,1);
 });
 
 test('original registration disables JIT only inside its bounded read transaction',async()=>{

@@ -45,7 +45,8 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.startsWith('SELECT game_id AS'))return result(this.gameIds.map(gameId=>({gameId})));
     if(sql.includes('SELECT 1 FROM zzsh_auth_user'))return result(this.users.some(row=>row.id===values[0])?[{exists:1}]:[]);
     if(sql.includes('FROM zzsh_auth_user."user" u')) {
-      const counting=sql.includes('SELECT count(*)::int AS total FROM');
+      const combined=sql.includes('AS directory_rows');
+      const counting=!combined&&sql.includes('SELECT count(*)::int AS total FROM');
       if(!counting&&sql.includes('WHERE u.id = $1')) {
         if(this.fault==='detail')throw new Error('Injected detail failure');
         return result(this.users.filter(row=>row.id===values[0]));
@@ -68,6 +69,7 @@ export class DirectorySqlFixture extends EventEmitter {
       const from=parameter(/u\."createdAt" >= \$(\d+)/);if(from)rows=rows.filter(row=>Date.parse(row.localCreatedAt)>=Date.parse(String(from)));
       const to=parameter(/u\."createdAt" <= \$(\d+)/);if(to)rows=rows.filter(row=>Date.parse(row.localCreatedAt)<=Date.parse(String(to)));
       if(counting)return result([{total:rows.length}]);
+      const total=rows.length;
       const lastTime=values.at(-3);const lastId=values.at(-2);
       const cursorAt=(pattern:RegExp)=>{const match=sql.match(pattern);return match?values[Number(match[1])-1]:undefined;};
       const timeBound=cursorAt(/u\."createdAt" < \$(\d+)::timestamptz/)??lastTime;
@@ -77,6 +79,7 @@ export class DirectorySqlFixture extends EventEmitter {
       const limit=Number(parameter(/LIMIT \$(\d+)/)??values.at(-1));
       const offset=Number(parameter(/OFFSET \$(\d+)/)??0);
       const page=rows.slice(offset,offset+limit).map(row=>({...row,resourceAccountCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.resourceAccountCount,currentOrderCount:!this.isBoss&&!this.gameIds.includes('delta')?0:row.currentOrderCount}));
+      if(combined)return result([{total,directory_rows:page}]);
       // Deferred shape: the page carries the whole row and the migration-audit expansion happens in the
       // outer query, so the fixture must serve both projections from the same page rows.
       if(/WITH page AS MATERIALIZED/i.test(sql)){

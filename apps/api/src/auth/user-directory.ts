@@ -364,9 +364,8 @@ export async function listUserDirectory(
               CASE WHEN $4::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"`;
 
   const consultsMigration = filterConsultsMigrationAudit(filter);
-  const countUsesOriginalTime = original && Boolean(filter.registeredFrom || filter.registeredTo || filter.registeredBefore);
   const countConsultsMigration = Boolean(filter.legacyId || filter.search
-    || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED) || countUsesOriginalTime);
+    || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED));
   const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
            e.details->>'legacyId' AS legacy_id
            ${original ? `,e.details->>'sourceCreatedAt' AS source_created_at,
@@ -378,8 +377,7 @@ export async function listUserDirectory(
        ${original ? "AND e.outcome='SUCCESS'" : ""}
      ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
   // The validated timestamp is expensive; materialise narrow facts once before applying both bounds and sorting.
-  // The count only reads the validated date; page projection needs the remaining display columns.
-  const registrationFactsSql = (countOnly: boolean) => `SELECT ${countOnly ? "" : `u.id,u."createdAt" AS created_at,`}${originalRegistrationSql()} AS registered_at${countOnly ? "" : ",mig.legacy_id AS migration_legacy_id"}
+  const registrationFactsSql = () => `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql()} AS registered_at,mig.legacy_id AS migration_legacy_id
     FROM zzsh_auth_user."user" u
     LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
     LEFT JOIN migration mig ON mig.object_id=u.id
@@ -398,24 +396,20 @@ export async function listUserDirectory(
           WHERE ${[...conditions, cursorCondition].join(" AND ")}
           ORDER BY ${order}
            LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`;
-  const countSql = countUsesOriginalTime
-    ? `WITH migration AS NOT MATERIALIZED (${migrationQuery}),registration_dates AS MATERIALIZED (${registrationFactsSql(true)})
-       SELECT count(*)::int AS total FROM registration_dates registration
-       WHERE ${dateConditions.join(" AND ")}`.replace(/\$(\d+)/g,(_, index: string)=>`$${Number(index)-4}`)
-    : `${countConsultsMigration ? `WITH migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery})` : ""}
+  let total = 0;
+  if (!original) {
+    const countSql = `${countConsultsMigration ? `WITH migration AS MATERIALIZED (${migrationQuery})` : ""}
        SELECT count(*)::int AS total FROM zzsh_auth_user."user" u
        ${needsIdentity ? `LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id` : ""}
        ${countConsultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
        WHERE ${countConditions.join(" AND ") || "TRUE"}`;
-  const total = (await client.query<{ total: number }>(
-    countSql,
-    countValues,
-  )).rows[0]!.total;
+    total = (await client.query<{ total: number }>(countSql, countValues)).rows[0]!.total;
+  }
   // Narrow keys avoid materialising full user/identity rows before the top-N operation.
-  const sql = `WITH ${consultsMigration
-      ? `migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery}), ${materializeDates ? `registration_dates AS MATERIALIZED (${registrationFactsSql(false)}),` : ""} page AS MATERIALIZED (${pageQuery})`
-      : `page AS MATERIALIZED (${pageQuery}), migration AS MATERIALIZED (${migrationQuery})`}
-       SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}
+  const ctes = consultsMigration
+      ? `migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery}), ${materializeDates ? `registration_dates AS MATERIALIZED (${registrationFactsSql()}),` : ""} page AS MATERIALIZED (${pageQuery})`
+      : `page AS MATERIALIZED (${pageQuery}), migration AS MATERIALIZED (${migrationQuery})`;
+  const projection = `SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}${original ? ',selected.registered_at AS "__directory_sort_at"' : ""}
          FROM page selected
          JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
@@ -431,7 +425,18 @@ export async function listUserDirectory(
          ) current_orders ON true
         ORDER BY ${original ? `selected.registered_at ${direction} NULLS LAST, u.id COLLATE "C" DESC` : order}`;
 
-  const rows = (await client.query<UserListRow>(sql, values)).rows;
+  let rows: UserListRow[];
+  if (original) {
+    // One materialisation avoids repeating the expensive date validation on the same backend.
+    const result = (await client.query<{ total: number; directory_rows: UserListRow[] }>(`WITH ${ctes}, projected AS (${projection})
+      SELECT (SELECT count(*)::int AS total FROM registration_dates registration WHERE ${dateConditions.join(" AND ") || "TRUE"}) AS total,
+      COALESCE((SELECT json_agg(to_jsonb(p)-'__directory_sort_at' ORDER BY p.__directory_sort_at ${direction} NULLS LAST,p.id COLLATE "C" DESC)
+        FROM projected p),'[]'::json) AS directory_rows`, values)).rows[0]!;
+    total = result.total;
+    rows = result.directory_rows;
+  } else {
+    rows = (await client.query<UserListRow>(`WITH ${ctes} ${projection}`, values)).rows;
+  }
   const items = rows.slice(0, filter.limit);
   const hasMore = rows.length > filter.limit;
   const last = items.at(-1);
