@@ -127,6 +127,7 @@ export async function handleUserDirectoryAdmin(
     await withDirectoryRead(options.pool, request, response, async (signal) => {
     const context = await readAdminContext(request, options);
     let dataToSend: unknown;
+    // A preceding default directory read can make ORIGINAL exceed its SQL budget on the same backend.
     await withDirectoryReadTransaction(options.pool, signal, async (client) => {
       await assertAdminContextInTransaction(client, context);
       const access = await requireAdminAccess(client, context.userId);
@@ -246,7 +247,7 @@ export async function handleUserDirectoryAdmin(
       }
       requirePermission(access, ADMIN_PERMISSION.auditRead);
       dataToSend = await listUserAuditEvents(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }, sanitizeDetail);
-    }, registrationTime === "ORIGINAL");
+    }, true);
     signal.throwIfAborted();
     sendJson(response, 200, dataToSend, requestId);
     });

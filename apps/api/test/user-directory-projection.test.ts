@@ -512,12 +512,12 @@ test('original sort alone does not scan audit for total or materialise provenanc
   assert.match(queries[1]!.sql,/selected\.migration_legacy_id AS "migrationLegacyId"/);
 });
 
-test('original registration disables JIT only inside its bounded read transaction',async()=>{
+test('registration modes keep their JIT settings and retire both directory leases',async()=>{
   const original=new DirectorySqlFixture(),retired:(boolean|undefined)[]=[];original.release=(destroy?:boolean)=>{retired.push(destroy);};assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&page=1&pageSize=10',original)).status,200);
   assert(original.queries.some(q=>q.sql==="SELECT set_config('jit','off',true)"));
   assert(original.queries.some(q=>q.sql==='ROLLBACK'));
   assert.deepEqual(retired,[true]);
-  const old=new DirectorySqlFixture(),reused:(boolean|undefined)[]=[];old.release=(destroy?:boolean)=>{reused.push(destroy);};assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
+  const old=new DirectorySqlFixture(),retiredDefault:(boolean|undefined)[]=[];old.release=(destroy?:boolean)=>{retiredDefault.push(destroy);};assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
   assert(!old.queries.some(q=>q.sql.includes("set_config('jit'")));
-  assert.deepEqual(reused,[false]);
+  assert.deepEqual(retiredDefault,[true]);
 });
