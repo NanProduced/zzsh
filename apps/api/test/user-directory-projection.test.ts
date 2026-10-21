@@ -198,6 +198,10 @@ test('default page bounds narrow keys before one batched latest-audit relation',
   assert.equal(sql.slice(0,pageEnd).includes('zzsh_iam.audit_event'),false,'the page query must not consult the audit table');
   assert.ok(sql.slice(pageEnd).includes("e.details->>'legacyId'"),'the audit expansion stays available for the returned page');
   assert.ok(sql.includes('ORDER BY u."createdAt" DESC, u.id DESC'));
+  assert.equal(sql.includes('source_created_at'),false,'the default list does not compute an unused source date');
+  const count=pool.queries[0]!.sql;
+  assert.equal(count.includes('user_identity_state'),false,'the unfiltered total needs no identity join');
+  assert.equal(sql.slice(0,pageEnd).includes('user_identity_state'),false,'identity state is joined only after the bound page');
   assert.equal(data.items.length,pool.users.length);
   assert.equal(new Set(data.items.map((row:any)=>row.userId)).size,data.items.length);
   assert.equal(data.items.find((row:any)=>row.userId==='user_legacy').source.legacyId,'88001');
@@ -210,7 +214,7 @@ test('default page bounds narrow keys before one batched latest-audit relation',
 
 test('keyword, legacy-id and source filters keep migration-audit membership before the LIMIT',async()=>{
   const pool=new DirectorySqlFixture();
-  for(const filter of [{search:'88001'},{legacyId:'88001'},{source:'LOCAL'},{source:'MIGRATED'},{source:'UNKNOWN'}] as const){
+  for(const filter of [{search:'88001'},{legacyId:'88001'},{source:'LOCAL'},{source:'UNKNOWN'}] as const){
     await listUserDirectory(client(pool),viewer,{...filter,limit:20});
     const sql=pool.queries.at(-1)!.sql;
     assert.equal(/WITH page AS MATERIALIZED/i.test(sql),false,`${JSON.stringify(filter)} must decide membership before the page is bounded`);
@@ -222,6 +226,26 @@ test('keyword, legacy-id and source filters keep migration-audit membership befo
   assert.ok(pool.queries.at(-1)!.sql.includes('mig.legacy_id'),'the keyword predicate still consults the audit-derived legacy id');
   const found:any=await listUserDirectory(client(pool),viewer,{legacyId:'88001',limit:20});
   assert.equal(found.items.length,pool.users.length);
+});
+
+test('migrated source decides membership from identity state and bounds audit display to the page',async()=>{
+  const pool=new DirectorySqlFixture();
+  const data:any=await listUserDirectory(client(pool),viewer,{source:'MIGRATED',limit:20});
+  assert.deepEqual(data.items.map((row:any)=>row.userId),['user_legacy']);
+  assert.equal(data.total,1);
+  assert.equal(data.items[0].source.kind,'MIGRATED');
+  assert.equal(data.items[0].source.legacyId,'88001','the page-bounded latest fact still supplies the displayed legacy id');
+  const [count,page]=pool.queries;
+  assert.ok(count!.sql.includes("s.provider='legacy_mysql_restore'"));
+  assert.equal(count!.sql.includes('zzsh_iam.audit_event'),false,'provider-only membership needs no audit scan for the total');
+  assert.match(page!.sql,/WITH page AS MATERIALIZED/i);
+  assert.ok(page!.sql.indexOf('zzsh_iam.audit_event')>page!.sql.indexOf('migration AS MATERIALIZED'),'the audit read stays page-bounded');
+  assert.ok(page!.sql.includes('JOIN page candidate ON candidate.id = e.object_id'));
+  assert.ok(page!.sql.slice(0,page!.sql.indexOf('migration AS MATERIALIZED')).includes("s.provider='legacy_mysql_restore'"));
+  pool.users.find(row=>row.id==='user_legacy')!.migrationLegacyId=null;
+  const fallback:any=await listUserDirectory(client(pool),viewer,{source:'MIGRATED',limit:20});
+  assert.equal(fallback.items[0].source.kind,'MIGRATED');
+  assert.equal(fallback.items[0].source.legacyId,'88001','a newest fact without a legacy id still falls back to the bound provider reference');
 });
 
 test('source filter keeps the NULL test on the newest migration fact instead of an existence test',async()=>{
@@ -260,6 +284,7 @@ test('filtered total covers every matching user before cursor and remains zero f
   const counts=pool.queries.filter(query=>query.sql.includes('SELECT count(*)::int AS total FROM'));
   assert.equal(counts.length,2);assert.deepEqual(counts[0]!.values,['ACTIVE']);assert.deepEqual(counts[1]!.values,['ACTIVE']);
   assert.equal(counts.some(query=>query.sql.includes('LIMIT')||query.sql.includes('u.id <')||query.sql.includes('zzsh_iam.audit_event')),false);
+  assert.ok(counts[0]!.sql.includes('user_identity_state'),'status membership still reads identity state before counting');
   const searched:any=await listUserDirectory(client(pool),viewer,{search:'林舟',limit:1});assert.equal(searched.total,1);
   assert.ok(pool.queries.at(-2)!.sql.includes('migration AS MATERIALIZED'));
   assert.deepEqual(pool.queries.at(-2)!.values,['林舟','%林舟%']);
@@ -434,6 +459,18 @@ test('original registration filters and sort precede pagination and count uses i
     assert.doesNotMatch(sql,/COALESCE\(mig\.source_created_at|COALESCE\(registration\.registered_at/);
   }
   assert.match(queries[1]!.sql,/ORDER BY registration\.registered_at ASC NULLS LAST, registration\.id COLLATE "C" DESC[\s\S]*?LIMIT/);
+});
+
+test('original bounded count materialises only the validated date while the page keeps display facts',async()=>{
+  const pool=new DirectorySqlFixture();
+  await listUserDirectory(client(pool),viewer,{registrationTime:'ORIGINAL',registeredFrom:'2019-01-01T00:00:00Z',page:1,limit:20});
+  const [count,page]=pool.queries;
+  assert.ok(count!.sql.includes('registration_dates AS MATERIALIZED'));
+  assert.equal(count!.sql.includes('AS created_at'),false,'the total does not carry an unused page column');
+  assert.equal(count!.sql.includes('migration_legacy_id'),false,'the total does not carry an unused legacy id');
+  assert.ok(page!.sql.includes('registration.created_at AS "createdAt"'));
+  assert.ok(page!.sql.includes('registration.migration_legacy_id'));
+  assert.equal(page!.sql.includes('migration_source_created_at'),false,'the list never returned this unused column');
 });
 
 test('original time mode and direction bind both page context and nullable keyset cursors',async()=>{
