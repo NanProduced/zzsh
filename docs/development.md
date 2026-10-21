@@ -66,7 +66,9 @@ npm run test:auth -w @zzsh/api
 npm run migrate:business -w @zzsh/api
 ```
 
-check:offline 包括类型检查、显式API/Web/Admin测试、三端构建和会启动临时服务的smoke；fake readiness不代表真实依赖或业务通过。部分测试受环境变量控制进入PG，执行前核实际入口与继承环境。check增加test:db，但不自动覆盖所有专用资金/IM套件；例如order-reservation的深层验收依赖ORDER_TEST_RESOURCE_SET及具体资源分支，未进入须列NOT_RUN。不要把根命令或CI绿灯当作全部交易验收。
+check:offline 先检查离线环境及测试入口登记，再执行类型检查、显式API/Web/Admin测试、三端构建和会启动临时服务的smoke；fake readiness不代表真实依赖或业务通过。可单独运行 `node scripts/check-test-entries.mjs` 静态检查三端 test 目录中的 TypeScript/MJS 套件；它不加载被盘点套件，从实际 runner 和 import 图区分默认离线、check 追加的数据库范围、显式 opt-in、人工入口和 helper。孤儿或无法识别的源码/默认调用形状使检查失败；新命令形状须先扩展检查，不能把 UNKNOWN 当覆盖。
+
+部分测试受环境变量控制进入PG，执行前核实际入口与继承环境。check增加test:db:compiled，但不自动覆盖所有专用资金/IM套件；例如order-reservation的深层验收依赖ORDER_TEST_RESOURCE_SET及具体资源分支，两个独立 IM PG 命令也不在默认离线入口中，未进入须列NOT_RUN。不要把根命令或CI绿灯当作全部交易验收。Web 独立 typecheck 保留，不依赖 Next 构建的实验类型检查开关替代它。
 
 test:auth 使用有标记的隔离库及专用角色，不使用开发业务库；缺失配置应失败，不静默跳过。管理员个人工作台布局测试使用独立库 `zzsh_test_m2_workspace_layout` 与锁 `805014`，不占用 M2 auth 套件的 `805002`。迁移身份与运行身份分离，runtime 无 DDL/角色继承和审计修改权限。管理员目录与操作权限依赖 business migration `0008_m2_admin_permissions`；未应用时管理会话快照会查询失败。具体环境变量见 apps/api/.env.example，禁止将本地秘密提交。
 
