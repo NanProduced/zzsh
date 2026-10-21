@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionFacts, listSupervision } from "../src/supply/admin-supervision-read";
+import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionFacts, listSupervision, readSupervision } from "../src/supply/admin-supervision-read";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { listingDetail, publicationBlockers, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
@@ -9,6 +9,14 @@ import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
 const publishing = require("../src/supply/publishing");
 const fixtureAccount: PublishingAccount = { id: "fixture-account", owner_user_id: "fixture-owner", game_id: "fixture-game", current_version_id: null, owner_paused: false, staff_restricted: false, restriction_reason: null, legacy_hold: "NONE", lifecycle: "ACTIVE", revision: "1", display_no: null };
+/** The page reads its accounts, current versions and publication probe in one
+ *  batch, so the harness answers the batch reads instead of one read per row. */
+function batchAccounts(ids: readonly string[], versionId: (id: string) => string | null = (id) => `version-${id}`): Map<string, PublishingAccount> {
+    return new Map(ids.map(id => [id, { ...fixtureAccount, id, owner_user_id: id === "a-1" ? "u-1" : "u-2", current_version_id: versionId(id), revision: "3" }]));
+}
+function batchVersionRows(ids: readonly string[]) {
+    return ids.map(id => ({ id, account_id: id.replace(/^version-/, ""), sequence: "1", origin: "NATIVE", review_state: "DRAFT", title: "标题", description: null, attributes: {}, term_option_code: "", pricing_option_code: "", rule_release_id: null, content_hash: null, payload: null, presentation: {}, revision: "1", submitted_at: null, schema_version: 1 }));
+}
 const fixtureClient = { query: async (sql: string) => {
     assert.match(sql, /^\s*SELECT/, "occupancy projection remains read-only");
     return { rows: sql.includes('"game_service_operation"') ? [{ id: "fixture-service", gameCode: "delta", gameEnabled: true, enabled: true }] : [] };
@@ -142,14 +150,14 @@ test("account image guard checks locked account, listing, owner, asset revision 
 const historicalSnapshot = { schema: "legacy-listing-read-v1", resourceNo: "SOURCE-1", haffRentYuan: "1.00", goodsYuan: "2.00", depositYuan: "0.00", termDays: "1", dailyHaffBase: "10000000" };
 test("historical projection stays off public visibility for an empty row and a saved row", async t => {
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("hidden"), { status: 404 }); });
-    t.mock.method(publishing, "readPublishingAccount", async () => fixtureAccount);
     t.mock.method(publishing, "listingDetail", async () => ({ version: null }));
     let historicalRows: unknown[] = [];
     let historicalQueries = 0;
-    const client = { query: async (sql: string) => {
+    const client = { query: async (sql: string, values?: unknown[]) => {
         assert.match(sql, /^\s*SELECT/);
         if (sql.includes("source_status::int")) { historicalQueries++; return { rows: historicalRows }; }
         if (sql.startsWith("SELECT a.id,")) return { rows: [{ id: fixtureAccount.id, sortAt: "2026-10-03T00:00:00.000000Z" }] };
+        if (sql.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[], () => null).values()] };
         return { rows: [] };
     } };
     const gate = async () => { throw new Error("no gate"); };
@@ -157,13 +165,13 @@ test("historical projection stays off public visibility for an empty row and a s
     assert.equal(absent.historicalRead, null);
     assert.equal(absent.publicVisible, false);
     assert.equal(historicalQueries, 1);
-    historicalRows = [{ source_status: 3, legacy_id: "1", owner_user_id: "fixture-owner", snapshot: historicalSnapshot }];
+    historicalRows = [{ account_id: fixtureAccount.id, source_status: 3, legacy_id: "1", owner_user_id: "fixture-owner", snapshot: historicalSnapshot }];
     const candidate = await supervisionFacts(client as never, fixtureAccount, { version: null }, gate);
     assert.equal(candidate.publicVisible, false);
     assert.equal(candidate.historicalRead?.sourceStatus, 3);
     assert.equal(candidate.historicalRead?.sourceStatusPublicCandidate, true);
     assert.equal("publicRead" in (candidate.historicalRead ?? {}), false);
-    historicalRows = [{ source_status: 4, legacy_id: "1", owner_user_id: "fixture-owner", snapshot: historicalSnapshot }];
+    historicalRows = [{ account_id: fixtureAccount.id, source_status: 4, legacy_id: "1", owner_user_id: "fixture-owner", snapshot: historicalSnapshot }];
     historicalQueries = 0;
     const page = await listSupervision(client as never, queryViewer, parseSupervisionQuery(new URLSearchParams()), gate, queryKey);
     assert.equal(historicalQueries, 1);
@@ -240,6 +248,8 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
     const client = { query: async (text: string, values?: unknown[]) => {
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
+        if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: batchVersionRows((values?.[0] ?? []) as string[]) };
         if (text.includes("p.funding_policy AS policy,p.status AS status")) {
             if (options.policy === undefined) return { rows: [] };
             return { rows: [{ accountId: "a-1", status: "SEALED", policy: options.policy }] };
@@ -266,7 +276,6 @@ const detailThatReadsGate = async (_c: unknown, account: PublishingAccount, _v: 
 };
 
 test("list summary reports only authoritative facts and keeps every missing fact unprovided", async t => {
-    t.mock.method(publishing, "readPublishingAccount", async (_c: unknown, id: string) => ({ ...fixtureAccount, id, owner_user_id: id === "a-1" ? "u-1" : "u-2", current_version_id: "v-1", revision: "3" }));
     t.mock.method(publishing, "listingDetail", detailThatReadsGate);
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });
     const { sql, client, viewer } = summaryHarness(["supply.review.read"]);
@@ -296,7 +305,6 @@ test("list summary reports only authoritative facts and keeps every missing fact
 });
 
 test("list summary gates internal amounts and owner contact projection behind their own permissions", async t => {
-    t.mock.method(publishing, "readPublishingAccount", async (_c: unknown, id: string) => ({ ...fixtureAccount, id, owner_user_id: id === "a-1" ? "u-1" : "u-2", current_version_id: "v-1" }));
     t.mock.method(publishing, "listingDetail", detailThatReadsGate);
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const internal = summaryHarness(["supply.review.read", "supply.quote.internal.read", "user.directory.read"], {
@@ -320,7 +328,6 @@ test("list summary gates internal amounts and owner contact projection behind th
 });
 
 test("R1 the guarantee requirement follows the enabled mechanism, never the stale fixed policy", async t => {
-    t.mock.method(publishing, "readPublishingAccount", async (_c: unknown, id: string) => ({ ...fixtureAccount, id, owner_user_id: "u-1", current_version_id: "v-1" }));
     t.mock.method(publishing, "listingDetail", detailThatReadsGate);
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const waiver = fundingPolicyFixture("NOT_REQUIRED"), fixed = fundingPolicyFixture("FIXED_CENTS");
@@ -381,3 +388,116 @@ test("admin supervision source SQL still reads the old resourceNo as businessNo 
     assert.ok(seen.some(sql => /h\.snapshot->>'resourceNo' AS "businessNo"/.test(sql)), "admin source query keeps the old number");
     assert.deepEqual(facts.legacyNumbers, ["OLD-42"]);
 });
+
+/* ---------- 公共投影与页级批读 ---------- */
+
+const detailAccount: PublishingAccount = { ...fixtureAccount, id: "account-1", owner_user_id: "owner-1", current_version_id: "version-1" };
+const detailVersion = { schema_version: 1, id: "version-1", account_id: "account-1", sequence: "1", origin: "NATIVE", review_state: "PUBLISHED", title: "标题", description: null, attributes: {}, term_option_code: "", pricing_option_code: "", rule_release_id: null, content_hash: "a".repeat(64), payload: null, presentation: {}, revision: "1", submitted_at: null };
+/** A client that answers the real detail reads; the game service row is the one
+ *  the readiness check cannot answer without. */
+function detailClient(onQuery?: (sql: string) => void) {
+    return { query: async (sql: string) => {
+        onQuery?.(sql);
+        if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [detailVersion] };
+        if (sql.includes('"game_service_operation"')) return { rows: [{ id: "fixture-service", gameCode: "delta", gameEnabled: true, enabled: true }] };
+        return { rows: [] };
+    } } as never;
+}
+
+test("the request-scoped public projection reads one account once", async () => {
+    let versionReads = 0;
+    const client = detailClient(sql => { if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1")) versionReads++; });
+    const memo = publishing.publicListingMemo(client, async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }));
+    assert.equal(await memo.read(detailAccount), null, "a version without an effective publication has no public listing");
+    assert.equal(await memo.read(detailAccount), null);
+    assert.equal(versionReads, 1, "the second request for the same account is served by the request's projection");
+});
+
+test("the admin detail and the supervision facts share one public projection", async () => {
+    let versionReads = 0;
+    const client = detailClient(sql => { if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1")) versionReads++; });
+    const memo = publishing.publicListingMemo(client, async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }));
+    const prefetch = { hasPublication: true, publicListing: (account: PublishingAccount) => memo.read(account) };
+    const detail = await listingDetail(client, detailAccount, "admin", async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }), "admin", detailAccount, false, "RENTABLE", prefetch as never);
+    assert.equal((detail.version as { id?: string } | null)?.id, "version-1");
+    assert.equal(versionReads, 2, "the admin detail and its public projection read the version once each");
+    await assert.rejects(() => publishing.readPublicListing(client, detailAccount, async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }), undefined, false, "DETAIL", undefined, prefetch as never), (error: { status?: number }) => error.status === 404);
+    assert.equal(versionReads, 2, "the facts path reuses the request's projection");
+});
+
+test("the supervision page reads its accounts, versions, publication probe and legacy facts once per page", async t => {
+    const seen: Array<{ id: string; version: string | null; hasPublication: boolean; shared: boolean }> = [];
+    t.mock.method(publishing, "listingDetail", async (_c: unknown, account: PublishingAccount, _v: string, gate: unknown, _q: string, _pa: unknown, _s: boolean, _m: string, prefetch: any) => {
+        seen.push({ id: account.id, version: prefetch?.version?.id ?? null, hasPublication: prefetch?.hasPublication ?? null, shared: Boolean(prefetch?.shared) });
+        if (typeof gate === "function") await (gate as (client: unknown, account: PublishingAccount) => Promise<unknown>)(null, account);
+        return summaryDetail;
+    });
+    t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
+    const sql: string[] = [];
+    const client = { query: async (text: string, values?: unknown[]) => {
+        sql.push(text);
+        if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
+        if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: batchVersionRows((values?.[0] ?? []) as string[]) };
+        if (text.includes("SELECT DISTINCT account_id FROM zzsh_supply.listing_publication")) return { rows: [{ account_id: "a-1" }] };
+        return { rows: [], rowCount: 0 };
+    } } as never;
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(["supply.review.read"]) } };
+    const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    assert.equal(page.items.length, 2);
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.rental_account WHERE id = ANY")).length, 1, "the accounts are one batch");
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.listing_version WHERE id = ANY")).length, 1, "the current versions are one batch");
+    assert.equal(sql.filter(s => s.includes("SELECT DISTINCT account_id FROM zzsh_supply.listing_publication")).length, 1, "the publication probe is one batch");
+    assert.equal(sql.filter(s => s.includes("legacy_supply_map")).length, 1, "the legacy source rows are one batch");
+    assert.equal(sql.filter(s => s.includes("legacy_order_read_snapshot")).length, 1, "the old account numbers are one batch");
+    assert.equal(sql.filter(s => s.includes("source_status::int")).length, 1, "the historical reads are one batch");
+    // The first-read version tuple stays bound to the row.
+    assert.deepEqual(seen.map(entry => entry.version), ["version-a-1", "version-a-2"]);
+    assert.deepEqual(seen.map(entry => entry.hasPublication), [true, false]);
+    assert.ok(seen.every(entry => entry.shared), "the page shares its game and release reads");
+});
+
+test("the batch read keeps the first-read version tuple when current moves twice", async t => {
+    const seen: Array<string | null> = [];
+    let versionReads = 0;
+    t.mock.method(publishing, "listingDetail", async (_c: unknown, account: PublishingAccount, _v: string, gate: unknown, _q: string, _pa: unknown, _s: boolean, _m: string, prefetch: any) => {
+        seen.push(prefetch?.version?.id ?? null);
+        if (typeof gate === "function") await (gate as (client: unknown, account: PublishingAccount) => Promise<unknown>)(null, account);
+        return summaryDetail;
+    });
+    t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
+    const client = { query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow] };
+        if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) { versionReads++; return { rows: batchVersionRows((values?.[0] ?? []) as string[]) }; }
+        // A later single read of the same account would answer the moved current version.
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [{ ...batchVersionRows(["version-a-1"])[0], id: "version-moved" }] };
+        return { rows: [], rowCount: 0 };
+    } } as never;
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(["supply.review.read"]) } };
+    await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    assert.equal(versionReads, 1, "the current version is read once for the page");
+    assert.deepEqual(seen, ["version-a-1"], "the row keeps the version the page first selected");
+});
+
+test("the supervision detail reads one public projection for the viewed, current and restricted versions", async () => {
+    let publicProjections = 0;
+    const account: PublishingAccount = { ...detailAccount, current_version_id: "version-1" };
+    const oldVersion = { ...detailVersion, id: "version-old", sequence: "1" };
+    const client = { query: async (sql: string, values?: unknown[]) => {
+        // Only the public projection runs this join; it is the public listing's own probe.
+        if (sql.includes("JOIN zzsh_supply.listing_publication p ON p.version_id=v.id")) publicProjections++;
+        if (sql.startsWith("SELECT 1 FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2")) return { rows: [{ "1": 1 }], rowCount: 1 };
+        if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2")) return { rows: [values?.[0] === "version-old" ? oldVersion : detailVersion] };
+        if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [values?.[0] === "version-old" ? oldVersion : detailVersion] };
+        if (sql.includes('"game_service_operation"')) return { rows: [{ id: "fixture-service", gameCode: "delta", gameEnabled: true, enabled: true }] };
+        if (sql.includes("FROM zzsh_supply.listing_version WHERE account_id=$1 ORDER BY sequence DESC")) return { rows: [{ id: "version-1", sequence: "2" }, { id: "version-old", sequence: "1" }] };
+        return { rows: [] };
+    } } as never;
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(["supply.review.read"]) } };
+    const data = await readSupervision(client, account, viewer, async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "fixture" }), "version-old");
+    assert.equal(data.supervision.historical, true);
+    assert.equal(data.supervision.previousVersion, null, "the last version has no previous one");
+    assert.equal(publicProjections, 1, "the viewed, current and restricted versions share one public projection");
+});
+

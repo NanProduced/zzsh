@@ -8,9 +8,9 @@ import { maskPhoneNumber } from "../auth/user-directory";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
-import { loadLegacyHistoricalRead } from "./legacy-listing-read";
+import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, type LegacyHistoricalRead } from "./legacy-listing-read";
 import { validateFundingPolicy } from "./funding-policy";
-import { listingDetail, readPublishingAccount, readPublicListing, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { listingCandidatePage, listingDetail, listingPageShared, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 export const SUPERVISION_READ_VERSION = "admin-supervision.read.v1";
 export type SupervisionViewer = {
@@ -82,15 +82,47 @@ export function decodeSupervisionCursor(token: string, binding: string, key: Lis
     }
 }
 const sourceSql = `SELECT DISTINCT m.source_system AS "sourceSystem",m.source_entity AS "sourceEntity",m.legacy_id AS "sourceId",h.snapshot->>'resourceNo' AS "businessNo" FROM zzsh_supply.legacy_supply_map m LEFT JOIN zzsh_supply.legacy_listing_read_snapshot h ON h.account_id=m.account_id AND h.source_system=m.source_system AND h.source_entity=m.source_entity AND h.legacy_id=m.legacy_id WHERE m.account_id=$1 ORDER BY "sourceSystem","sourceEntity","sourceId"`;
-export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
-    const sources = (await client.query(sourceSql, [a.id])).rows;
-    const oldNumbers = (await client.query<{
+const pageSourceSql = `SELECT DISTINCT m.account_id AS "accountId",m.source_system AS "sourceSystem",m.source_entity AS "sourceEntity",m.legacy_id AS "sourceId",h.snapshot->>'resourceNo' AS "businessNo" FROM zzsh_supply.legacy_supply_map m LEFT JOIN zzsh_supply.legacy_listing_read_snapshot h ON h.account_id=m.account_id AND h.source_system=m.source_system AND h.source_entity=m.source_entity AND h.legacy_id=m.legacy_id WHERE m.account_id=ANY($1::text[]) ORDER BY "accountId","sourceSystem","sourceEntity","sourceId"`;
+const oldNumberSql = `SELECT DISTINCT legacy_account_no AS value FROM zzsh_order.legacy_order_read_snapshot WHERE account_id=$1 AND legacy_account_no IS NOT NULL ORDER BY value`;
+const pageOldNumberSql = `SELECT DISTINCT account_id,legacy_account_no AS value FROM zzsh_order.legacy_order_read_snapshot WHERE account_id=ANY($1::text[]) AND legacy_account_no IS NOT NULL ORDER BY account_id,value`;
+
+/** The facts of one supervision row that are the same for every row of a page:
+ *  the legacy source rows, the old account numbers and the historical read. */
+export type SupervisionPageFacts = {
+    sources: Map<string, Array<Record<string, unknown>>>;
+    oldNumbers: Map<string, string[]>;
+    historical: Map<string, LegacyHistoricalRead | null>;
+};
+
+async function loadSupervisionPageFacts(client: PoolClient, accountIds: string[]): Promise<SupervisionPageFacts> {
+    const ids = [...new Set(accountIds)];
+    const sources = new Map<string, Array<Record<string, unknown>>>(), oldNumbers = new Map<string, string[]>(), historical = new Map<string, LegacyHistoricalRead | null>();
+    if (!ids.length)
+        return { sources, oldNumbers, historical };
+    for (const row of (await client.query(pageSourceSql, [ids])).rows) {
+        const list = sources.get(row.accountId) ?? [];
+        list.push({ sourceSystem: row.sourceSystem, sourceEntity: row.sourceEntity, sourceId: row.sourceId, businessNo: row.businessNo });
+        sources.set(row.accountId, list);
+    }
+    for (const row of (await client.query(pageOldNumberSql, [ids])).rows) {
+        const list = oldNumbers.get(row.account_id) ?? [];
+        list.push(row.value);
+        oldNumbers.set(row.account_id, list);
+    }
+    for (const [accountId, read] of await loadLegacyHistoricalReads(client, ids))
+        historical.set(accountId, read);
+    return { sources, oldNumbers, historical };
+}
+
+export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, context?: { page?: SupervisionPageFacts; prefetch?: ListingDetailPrefetch }) {
+    const sources = context?.page ? (context.page.sources.get(a.id) ?? []) : (await client.query(sourceSql, [a.id])).rows;
+    const oldNumbers = context?.page ? (context.page.oldNumbers.get(a.id) ?? []) : (await client.query<{
         value: string;
-    }>(`SELECT DISTINCT legacy_account_no AS value FROM zzsh_order.legacy_order_read_snapshot WHERE account_id=$1 AND legacy_account_no IS NOT NULL ORDER BY value`, [a.id])).rows.map(r => r.value);
+    }>(oldNumberSql, [a.id])).rows.map(r => r.value);
     const blockers: string[] = detail.version ? detail.blockers ?? [] : ["CURRENT_VERSION_MISSING"];
     let publicVisible: boolean | null = null, publicSource: string | null = null;
     try {
-        const publicRead = await readPublicListing(client, a, gate, admission, false, "DETAIL", detailIndex);
+        const publicRead = await readPublicListing(client, a, gate, admission, false, "DETAIL", detailIndex, context?.prefetch);
         publicVisible = true;
         publicSource = publicRead.source === "LEGACY_READ_ONLY" ? "LEGACY_READ_ONLY" : "NATIVE_PUBLICATION";
     }
@@ -105,7 +137,7 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const unknown = ["OCCUPANCY_UNKNOWN", "FUNDING_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED"], definite = blockers.filter(r => !unknown.includes(r));
     const newOrders = definite.length ? false : blockers.length ? null : Boolean(detail.available);
     const primaryReasonCode = a.staff_restricted ? "STAFF_RESTRICTED" : a.owner_paused ? "OWNER_PAUSED" : blockers.includes("CURRENT_VERSION_MISSING") ? "CURRENT_VERSION_MISSING" : blockers.includes("PUBLICATION_REQUIRED") ? "PUBLICATION_REQUIRED" : blockers[0] ?? null;
-    const historicalRead = await loadLegacyHistoricalRead(client, a.id);
+    const historicalRead = context?.page ? (context.page.historical.get(a.id) ?? null) : await loadLegacyHistoricalRead(client, a.id);
     return { publicVisible, publicSource, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -314,9 +346,23 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         gates.set(account.id, snapshot);
         return snapshot;
     };
+    // One page of candidates shares its accounts, their current versions, the
+    // publication probe, the page-level game/release reads and the public
+    // projection: every one of them was read once per row before.
+    const page = listingCandidatePage(client);
+    await page.load(visible.map(row => row.id), true);
+    const publicMemo = publicListingMemo(client, recordGate);
+    const pageFacts = await loadSupervisionPageFacts(client, visible.map(row => row.id));
     for (const row of visible) {
-        const a = await readPublishingAccount(client, row.id), detail = await listingDetail(client, a, "admin", recordGate, quoteViewer);
-        const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex);
+        const a = page.account(row.id);
+        if (!a) throw notFound();
+        const version = page.version(row.id);
+        // A current version that the batch read did not resolve is a missing
+        // object, exactly as the single read reported it.
+        if (a.current_version_id && !version) throw notFound();
+        const prefetch: ListingDetailPrefetch = { version, shared: page.shared, hasPublication: page.hasPublication(row.id), publicListing: (account) => publicMemo.read(account, prefetch) };
+        const detail = await listingDetail(client, a, "admin", recordGate, quoteViewer, a, false, "RENTABLE", prefetch);
+        const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex, { page: pageFacts, prefetch });
         const ownerSummary = owners.get(row.ownerId);
         items.push({ ...row, facts, summary: listingSummary(detail, facts, guarantees.get(row.id), gates.get(row.id), { accountCreatedAt: row.accountCreatedAt, accountUpdatedAt: row.accountUpdatedAt, versionCreatedAt: row.versionCreatedAt, refs: { ruleReleaseId: row.ruleReleaseId ?? null, priceVersionId: row.priceVersionId ?? null } }), ownerLink: canDirectory ? { state: "READY" as const } : { state: "DENIED" as const }, ...(ownerSummary ? { ownerSummary } : {}) });
     }
@@ -330,14 +376,19 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
     if (versionId && !(await client.query("SELECT 1 FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2", [versionId, a.id])).rowCount)
         throw notFound();
     const historical = Boolean(versionId && versionId !== a.current_version_id), quoteViewer = viewer.access.permissions.has("supply.quote.internal.read") ? "admin" : "public";
-    const detail: Record<string, any> = await listingDetail(client, versionId ? { ...a, current_version_id: versionId } : a, "admin", gate, quoteViewer, a);
-    const live = historical ? await listingDetail(client, a, "admin", gate, quoteViewer) : detail;
+    // The viewed, current, previous and originally restricted versions all
+    // project the same account's public listing; one request-scoped projection
+    // serves them, and the page-level game/release reads are shared.
+    const publicMemo = publicListingMemo(client, gate);
+    const prefetch: ListingDetailPrefetch = { shared: listingPageShared(client), publicListing: (account) => publicMemo.read(account, prefetch) };
+    const detail: Record<string, any> = await listingDetail(client, versionId ? { ...a, current_version_id: versionId } : a, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch);
+    const live = historical ? await listingDetail(client, a, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : detail;
     const history = (await client.query("SELECT id,sequence::text,origin,review_state,title,content_hash,rule_release_id,created_at FROM zzsh_supply.listing_version WHERE account_id=$1 ORDER BY sequence DESC", [a.id])).rows;
     const viewed = versionId ?? a.current_version_id, previousId = history[history.findIndex(r => r.id === viewed) + 1]?.id;
-    const previous: Record<string, any> | null = previousId ? await listingDetail(client, { ...a, current_version_id: previousId }, "admin", gate, quoteViewer, a) : null;
+    const previous: Record<string, any> | null = previousId ? await listingDetail(client, { ...a, current_version_id: previousId }, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : null;
     const events = (await client.query(`SELECT e.id,e.action,e.reason,e.occurred_at AS "occurredAt",u.name AS "actorName",e.details->'before'->>'revision' AS "beforeRevision",e.details->'after'->>'revision' AS "afterRevision",e.details->'before'->>'currentVersionId' AS "versionId",e.details->'after'->'staffRestricted' AS restricted FROM zzsh_iam.audit_event e LEFT JOIN zzsh_auth_admin."user" u ON u.id=e.actor_id WHERE e.object_type='rental_account' AND e.object_id=$1 AND e.action='supply.publication.restriction' AND e.outcome='SUCCESS' ORDER BY e.occurred_at DESC,e.id DESC LIMIT 20`, [a.id])).rows;
     const originalRestrictionId = events.find(e => e.restricted === true)?.versionId;
-    const originalRestriction: Record<string, any> | null = originalRestrictionId && history.some(h => h.id === originalRestrictionId) ? await listingDetail(client, { ...a, current_version_id: originalRestrictionId }, "admin", gate, quoteViewer, a) : null;
+    const originalRestriction: Record<string, any> | null = originalRestrictionId && history.some(h => h.id === originalRestrictionId) ? await listingDetail(client, { ...a, current_version_id: originalRestrictionId }, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : null;
     const canOrder = viewer.access.permissions.has("order.read"), orders = canOrder ? await queryAdminReadOrders(client, { adminId: viewer.adminId, isBoss: viewer.access.isBoss, internalQuote: false, authorizationKey: viewer.contextKey }, { accountId: a.id, page: 1, pageSize: 5 }) : null;
     const duplicateHints = (await client.query(`SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`, [a.id, viewer.access.isBoss, viewer.adminId])).rows;
     const changes = previous?.version && detail.version ? { previousVersionId: previous.version.id, previousSequence: previous.version.sequence, changed: canonicalize(previous.version.declaration) !== canonicalize(detail.version.declaration) } : null;
@@ -357,5 +408,5 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
         detail.available = false;
         detail.blockers = [...((detail.blockers as string[]) ?? []), "HISTORICAL_VERSION"];
     }
-    return { ...detail, contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { historical, facts: await supervisionFacts(client, a, live, gate, admission, detailIndex), changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
+    return { ...detail, contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { historical, facts: await supervisionFacts(client, a, live, gate, admission, detailIndex, { prefetch }), changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
 }
