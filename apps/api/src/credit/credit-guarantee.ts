@@ -566,22 +566,31 @@ export async function readGuaranteeContextsBatch(client: PoolClient, ownerUserId
   if (readable.size === 0) return results;
   const credit = creditRow !== undefined ? creditRow ?? undefined : await readGuaranteeCredit(client, ownerUserId);
   const bindings = new Map<string, GuaranteeBindingRow>();
-  const needingBinding = [...readable.values()].filter((entry) => bindingNeeded(entry.row, credit)).map((entry) => entry.row.accountId);
+  const needingBinding = [...readable.values()].filter((entry) => bindingNeeded(entry.row, credit));
   if (needingBinding.length > 0) {
+    // I-R1-01: the binding facts are matched against the exact tuples the first contexts read selected.
+    // Re-reading current_release_id/current_version_id here would let a version switch between the two
+    // statements pair one version's context with another version's payment facts.
     for (const binding of (await client.query<GuaranteeBindingRow & { accountId: string }>(
-      `WITH payment_totals AS (
+      `WITH frozen AS (
+         SELECT * FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) AS t(account_id, owner_user_id, price_version_id, listing_version_id)
+       ), payment_totals AS (
          SELECT requirement_id,
                 COALESCE(sum(CASE WHEN status='CONFIRMED' THEN COALESCE(observed_amount_cents,amount_cents) ELSE 0 END),0)::text AS "confirmedCents",
                 COALESCE(bool_or(status='CONFIRMED' AND (provider_request_state<>'CONFIRMED' OR finance_event_id IS NULL OR ledger_entry_ref IS NULL)),false) AS "unrecognizedPayment"
            FROM zzsh_order.owner_guarantee_payment
-          WHERE requirement_id IN (SELECT id FROM zzsh_order.owner_guarantee_requirement WHERE account_id=ANY($1::text[]) AND owner_user_id=$2)
+          WHERE requirement_id IN (SELECT r.id FROM zzsh_order.owner_guarantee_requirement r
+                                     JOIN frozen fr ON fr.account_id=r.account_id AND fr.owner_user_id=r.owner_user_id
+                                      AND fr.price_version_id=r.price_version_id AND r.listing_version_id IS NOT DISTINCT FROM fr.listing_version_id)
           GROUP BY requirement_id
        ), refund_totals AS (
          SELECT requirement_id,
                 COALESCE(sum(CASE WHEN status='SUCCEEDED' THEN amount_cents ELSE 0 END),0)::text AS "succeededRefundCents",
                 COALESCE(bool_or(status IN ('REQUESTED','PROCESSING','UNKNOWN')),false) AS "activeRefund"
            FROM zzsh_order.owner_guarantee_refund
-          WHERE requirement_id IN (SELECT id FROM zzsh_order.owner_guarantee_requirement WHERE account_id=ANY($1::text[]) AND owner_user_id=$2)
+          WHERE requirement_id IN (SELECT r.id FROM zzsh_order.owner_guarantee_requirement r
+                                     JOIN frozen fr ON fr.account_id=r.account_id AND fr.owner_user_id=r.owner_user_id
+                                      AND fr.price_version_id=r.price_version_id AND r.listing_version_id IS NOT DISTINCT FROM fr.listing_version_id)
           GROUP BY requirement_id
        )
        SELECT DISTINCT ON (r.account_id) r.account_id AS "accountId",
@@ -591,19 +600,15 @@ export async function readGuaranteeContextsBatch(client: PoolClient, ownerUserId
               f.id AS "refundId",f.status AS "refundState",f.provider_request_state AS "refundProviderState",f.amount_cents::text AS "refundAmountCents",f.release_policy_state AS "refundPolicyState",f.finance_event_id AS "refundFinanceEventId",f.ledger_entry_ref AS "refundLedgerEntryRef",
               COALESCE(rt."succeededRefundCents",'0') AS "succeededRefundCents",COALESCE(rt."activeRefund",false) AS "activeRefund",r.updated_at::text AS "updatedAt"
          FROM zzsh_order.owner_guarantee_requirement r
-         JOIN zzsh_supply.rental_account a ON a.id=r.account_id AND a.owner_user_id=r.owner_user_id
-         JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
-         JOIN zzsh_supply.rule_release rel ON rel.id=g.current_release_id AND rel.game_id=a.game_id
-         LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id AND v.rule_release_id=rel.id
+         JOIN frozen fr ON fr.account_id=r.account_id AND fr.owner_user_id=r.owner_user_id
          LEFT JOIN LATERAL (SELECT * FROM zzsh_order.owner_guarantee_payment WHERE requirement_id=r.id ORDER BY created_at DESC,id DESC LIMIT 1) p ON true
          LEFT JOIN LATERAL (SELECT * FROM zzsh_order.owner_guarantee_refund WHERE requirement_id=r.id ORDER BY created_at DESC,id DESC LIMIT 1) f ON true
          LEFT JOIN payment_totals pt ON pt.requirement_id=r.id
          LEFT JOIN refund_totals rt ON rt.requirement_id=r.id
-        WHERE r.account_id=ANY($1::text[]) AND r.owner_user_id=$2
-          AND r.price_version_id=rel.price_version_id
-          AND r.listing_version_id IS NOT DISTINCT FROM v.id
+        WHERE r.price_version_id=fr.price_version_id
+          AND r.listing_version_id IS NOT DISTINCT FROM fr.listing_version_id
         ORDER BY r.account_id,r.created_at DESC,r.id DESC`,
-      [needingBinding, ownerUserId],
+      [needingBinding.map((entry) => entry.row.accountId), needingBinding.map((entry) => entry.row.ownerUserId), needingBinding.map((entry) => entry.row.priceVersionId), needingBinding.map((entry) => entry.row.versionId)],
     )).rows) bindings.set(binding.accountId, binding);
   }
   for (const [accountId, { row, policy }] of readable) results.set(accountId, projectGuaranteeContext(row, policy, credit, bindings.get(accountId)));

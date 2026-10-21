@@ -68,32 +68,68 @@ test("guarantee transaction reader keeps every payment and refund attempt", asyn
 
 // I (P-Q6): the owner page batch reader must project the same contexts as the per-account reader and
 // keep its SQL count flat in the number of held accounts, including the reused owner credit row.
+// I-R1-01: the batch binding read must be matched against the frozen (account, owner, price, version)
+// tuples of the first contexts read; the test double enforces those match conditions instead of
+// returning every binding when it merely sees DISTINCT ON.
 import { readGuaranteeContext, readGuaranteeContextsBatch } from "../src/credit/credit-guarantee";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
-const guaranteeRow = (accountId: string, payload: unknown) => ({
+const guaranteeRow = (accountId: string, payload: unknown, overrides: Record<string, unknown> = {}) => ({
   accountId, ownerUserId: "user-a", gameId: "game-a", currentVersionId: `version-${accountId}`, versionId: `version-${accountId}`,
   priceVersionId: "price-1", releaseId: "release-1", policy: { ...fundingPolicyFixture("NOT_REQUIRED"), policyVersion: "policy-1" },
-  policyStatus: "SEALED", priceStatus: "SEALED", payload,
+  policyStatus: "SEALED", priceStatus: "SEALED", payload, ...overrides,
 });
 const quotePayload = (amount: string | null) => (amount === null ? { quoteValues: {} } : { quoteValues: { resourceTotal: { currency: "CNY", unit: "yuan", scale: 2, amount } } });
-const bindingRow = {
-  requirementId: "req-1", requirementStatus: "ACTIVE", bindingBaseCents: "10000", bindingRequiredCents: "500",
-  paymentId: "pay-1", paymentState: "CONFIRMED", paymentProviderState: "CONFIRMED", paymentAmountCents: "500",
+const bindingRow = (requirementId = "req-1", overrides: Record<string, unknown> = {}) => ({
+  requirementId, requirementStatus: "ACTIVE", bindingBaseCents: "10000", bindingRequiredCents: "500",
+  paymentId: `pay-${requirementId}`, paymentState: "CONFIRMED", paymentProviderState: "CONFIRMED", paymentAmountCents: "500",
   paymentObservedAmountCents: "500", paymentFinanceEventId: "event-1", paymentLedgerEntryRef: "line-1",
   confirmedCents: "500", unrecognizedPayment: false,
   refundId: null, refundState: null, refundProviderState: null, refundAmountCents: null, refundPolicyState: null,
   refundFinanceEventId: null, refundLedgerEntryRef: null, succeededRefundCents: "0", activeRefund: false,
-  updatedAt: "2026-10-20T00:00:00.000000Z",
+  updatedAt: "2026-10-20T00:00:00.000000Z", ...overrides,
+});
+type BindingFacts = { accountId: string; ownerUserId: string; priceVersionId: string; listingVersionId: string | null; createdAt: string; row: Record<string, unknown> };
+const bindingFacts = (accountId: string, row: Record<string, unknown>, overrides: Partial<BindingFacts> = {}): BindingFacts => ({
+  accountId, ownerUserId: "user-a", priceVersionId: "price-1", listingVersionId: `version-${accountId}`, createdAt: "2026-10-20T00:00:00.000000Z", row, ...overrides,
+});
+/** The reader picks the newest requirement record per account: ORDER BY created_at DESC, id DESC. */
+const newestPerAccount = (rows: BindingFacts[], accountIds?: Set<string>) => {
+  const best = new Map<string, BindingFacts>();
+  for (const facts of rows) {
+    if (accountIds && !accountIds.has(facts.accountId)) continue;
+    const current = best.get(facts.accountId);
+    const id = String(facts.row.requirementId);
+    if (!current || facts.createdAt > current.createdAt || facts.createdAt === current.createdAt && id > String(current.row.requirementId)) best.set(facts.accountId, facts);
+  }
+  return best;
 };
-function guaranteeWorld(input: { credit?: { score: number; revision: string } | null; rows: Record<string, Record<string, unknown>>; bindings?: Record<string, Record<string, unknown>> }) {
+function guaranteeWorld(input: { credit?: { score: number; revision: string } | null; rows: Record<string, Record<string, unknown>>; bindings?: BindingFacts[] }) {
   const queries: string[] = [];
   const client = { query: async (sql: string, args: unknown[] = []) => {
     queries.push(sql);
     if (sql.includes("FROM zzsh_credit.user_credit_state")) return { rows: input.credit ? [{ score: input.credit.score, revision: input.credit.revision }] : [] };
-    if (sql.includes("DISTINCT ON (r.account_id)")) return { rows: Object.entries(input.bindings ?? {}).map(([accountId, row]) => ({ ...row, accountId })) };
-    if (sql.includes("a.id=ANY($1::text[])")) return { rows: Object.entries(input.rows).map(([accountId, row]) => row) };
-    if (sql.includes("FROM zzsh_order.owner_guarantee_requirement")) return { rows: input.bindings?.[String(args[0])] ? [input.bindings[String(args[0])]] : [] };
+    if (sql.includes("DISTINCT ON (r.account_id)")) {
+      assert.doesNotMatch(sql, /current_release_id|current_version_id/, "the batch binding read must not re-derive the mutable current pointers");
+      assert.match(sql, /IS NOT DISTINCT FROM/, "nullable frozen version keeps the NULL-safe match");
+      assert.match(sql, /ORDER BY r\.account_id,r\.created_at DESC,r\.id DESC/, "latest binding record per account stays the selection rule");
+      assert.match(sql, /ORDER BY created_at DESC,id DESC LIMIT 1/, "latest payment/refund records stay the selection rule");
+      const [accounts, owners, prices, versions] = args as [string[], string[], string[], (string | null)[]];
+      assert.ok(Array.isArray(accounts) && Array.isArray(owners) && Array.isArray(prices) && Array.isArray(versions), "the batch binding read takes the frozen (account, owner, priceVersion, version) tuples");
+      assert.equal(accounts.length, owners.length); assert.equal(accounts.length, prices.length); assert.equal(accounts.length, versions.length);
+      const frozen = accounts.map((accountId, index) => ({ accountId, ownerUserId: owners[index]!, priceVersionId: prices[index]!, listingVersionId: versions[index] ?? null }));
+      const matches = (facts: BindingFacts) => frozen.some((entry) => entry.accountId === facts.accountId && entry.ownerUserId === facts.ownerUserId
+        && entry.priceVersionId === facts.priceVersionId && (facts.listingVersionId === null ? entry.listingVersionId === null : facts.listingVersionId === entry.listingVersionId));
+      return { rows: [...newestPerAccount((input.bindings ?? []).filter(matches), new Set(frozen.map((entry) => entry.accountId))).values()].map((facts) => ({ ...facts.row, accountId: facts.accountId })) };
+    }
+    if (sql.includes("a.id=ANY($1::text[])")) return { rows: Object.entries(input.rows).map(([, row]) => row) };
+    if (sql.includes("FROM zzsh_order.owner_guarantee_requirement")) {
+      // The per-account reader binds the exact tuple from its first read; the fake holds the same facts.
+      const [accountId, ownerUserId, priceVersionId, versionId] = args as [string, string, string, string | null];
+      const matched = (input.bindings ?? []).filter((facts) => facts.accountId === accountId && facts.ownerUserId === ownerUserId
+        && facts.priceVersionId === priceVersionId && (facts.listingVersionId === null ? versionId === null : facts.listingVersionId === versionId));
+      return { rows: [...newestPerAccount(matched).values()].map((facts) => facts.row) };
+    }
     if (sql.includes('WHERE a.id=$1 AND a.owner_user_id=$2')) return { rows: input.rows[String(args[0])] ? [input.rows[String(args[0])]] : [] };
     throw new Error(`unexpected read: ${sql}`);
   } } as never;
@@ -108,7 +144,7 @@ test("batch owner-guarantee contexts equal the per-account reader while SQL stay
       "account-required": guaranteeRow("account-required", quotePayload("100.00")),
       "account-no-quote": guaranteeRow("account-no-quote", quotePayload(null)),
     },
-    bindings: { "account-satisfied": bindingRow },
+    bindings: [bindingFacts("account-satisfied", bindingRow())],
   });
   const ids = ["account-satisfied", "account-required", "account-no-quote", "account-missing"];
   const before = world.queries.length;
@@ -132,14 +168,50 @@ test("batch owner-guarantee contexts equal the per-account reader while SQL stay
 
 test("the batch credit-row seam neither re-reads owner credit nor invents an initialized state", async () => {
   const rows = { "account-satisfied": guaranteeRow("account-satisfied", quotePayload("100.00")) };
-  const reuse = guaranteeWorld({ credit: null, rows, bindings: { "account-satisfied": bindingRow } });
+  const reuse = guaranteeWorld({ credit: null, rows, bindings: [bindingFacts("account-satisfied", bindingRow())] });
   const reused = await readGuaranteeContextsBatch(reuse.client as never, "user-a", ["account-satisfied"], { score: 70, revision: "4" });
   assert.equal(reused.get("account-satisfied")!.state, "SATISFIED");
   assert.equal(reuse.queries.some((sql) => sql.includes("zzsh_credit.user_credit_state")), false, "an already read credit row must not be re-read");
-  const missing = guaranteeWorld({ credit: null, rows, bindings: { "account-satisfied": bindingRow } });
+  const missing = guaranteeWorld({ credit: null, rows, bindings: [bindingFacts("account-satisfied", bindingRow())] });
   const absent = await readGuaranteeContextsBatch(missing.client as never, "user-a", ["account-satisfied"], null);
   assert.deepEqual({ state: absent.get("account-satisfied")!.state, reasonCode: absent.get("account-satisfied")!.reasonCode }, { state: "UNKNOWN", reasonCode: "CREDIT_UNINITIALIZED" });
   assert.equal(missing.queries.some((sql) => sql.includes("zzsh_credit.user_credit_state")), false);
+});
+
+test("batch bindings match the frozen first-read version tuples instead of the mutable current pointers", async () => {
+  // The first contexts read selects version-A/price-1; version-B carries its own satisfied requirement.
+  // A binding read that re-derives current pointers would return B's payment against A's context.
+  const rows = {
+    "account-a": guaranteeRow("account-a", quotePayload("100.00")),
+    "account-null-version": guaranteeRow("account-null-version", quotePayload("100.00"), { currentVersionId: null, versionId: null }),
+    "account-satisfied": guaranteeRow("account-satisfied", quotePayload("100.00")),
+  };
+  const world = guaranteeWorld({
+    credit: { score: 70, revision: "4" },
+    rows,
+    bindings: [
+      bindingFacts("account-a", bindingRow("req-a")),
+      bindingFacts("account-a", bindingRow("req-a-newer"), { createdAt: "2026-10-21T00:00:00.000000Z" }),
+      bindingFacts("account-a", bindingRow("req-b", { bindingBaseCents: "20000", bindingRequiredCents: "1000", confirmedCents: "1000" }), { priceVersionId: "price-2", listingVersionId: "version-b" }),
+      bindingFacts("account-a", bindingRow("req-other-owner"), { ownerUserId: "user-b" }),
+      bindingFacts("account-null-version", bindingRow("req-null"), { listingVersionId: null }),
+      bindingFacts("account-null-version", bindingRow("req-not-null", { bindingBaseCents: "20000", bindingRequiredCents: "1000" }), { listingVersionId: "version-stale" }),
+      bindingFacts("account-satisfied", bindingRow("req-not-in-page"), { priceVersionId: "price-2", listingVersionId: "version-b" }),
+    ],
+  });
+  const batch = await readGuaranteeContextsBatch(world.client as never, "user-a", ["account-a", "account-null-version", "account-satisfied"]);
+  for (const accountId of ["account-a", "account-null-version", "account-satisfied"]) {
+    const single = await readGuaranteeContext(world.client as never, accountId, "user-a");
+    assert.deepEqual(batch.get(accountId) ?? null, single, `frozen version binding must match the single reader for ${accountId}`);
+  }
+  assert.equal(batch.get("account-a")!.requirementId, "req-a-newer", "the latest record of the frozen version wins over older and other-version requirements");
+  assert.equal(batch.get("account-a")!.state, "SATISFIED");
+  assert.equal(batch.get("account-null-version")!.requirementId, "req-null", "a NULL frozen version only matches NULL requirement versions");
+  assert.equal(batch.get("account-satisfied")!.requirementId, undefined, "requirements of other versions stay unmatched without a frozen tuple");
+  assert.equal(batch.get("account-satisfied")!.state, "REQUIRED");
+  // The batch binding arguments are exactly the frozen tuples of the accounts that need binding.
+  const bindingQuery = world.queries.find((sql) => sql.includes("DISTINCT ON (r.account_id)"))!;
+  assert.ok(bindingQuery);
 });
 
 test("actual payment-intent route restores its receipt even when current policy loading would fail", async (t) => {
