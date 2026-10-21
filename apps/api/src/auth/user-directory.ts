@@ -323,9 +323,8 @@ export async function listUserDirectory(
   else if (filter.source) conditions.push(`(${SOURCE_SQL})=$${values.push(filter.source)}`);
   if (filter.identityStatus) conditions.push(`COALESCE(s.identity_status,'UNKNOWN')=$${values.push(filter.identityStatus)}`);
   if (filter.ageStatus) conditions.push(`COALESCE(s.age_status,'UNKNOWN')=$${values.push(filter.ageStatus)}`);
-  // Only predicates above read identity state; the page projection joins it after the bound page.
-  const needsIdentity = Boolean(filter.legacyId || filter.search || filter.accountStatus || filter.source
-    || filter.identityStatus || filter.ageStatus);
+  // Join identity state only when a membership predicate reads it; the page projection joins it after the bound page.
+  const needsIdentity = conditions.some(condition => /\bs\./.test(condition));
   const membershipConditions = [...conditions];
   if (filter.registeredFrom) {
     conditions.push(`${timeColumn} >= $${values.push(filter.registeredFrom)}::timestamptz`);
