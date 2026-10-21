@@ -26,7 +26,9 @@ export async function bootstrap() {
   const dependencies = readinessMode === "fake"
     ? createFakeHealthDependencies()
     : createRealHealthDependencies(config);
-  const businessPool = authEnabledValue === "true" ? createBusinessPool(config) : undefined;
+  // Keep the total at ten; directory reads must not inherit another domain's reused backend.
+  const businessPool = authEnabledValue === "true" ? createBusinessPool(config, { max: 8 }) : undefined;
+  const directoryReadPool = businessPool ? createBusinessPool(config, { max: 2, maxUses: 1 }) : undefined;
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
@@ -34,10 +36,11 @@ export async function bootstrap() {
       health: { dependencies },
       ...(businessPool
         ? {
-            database: { pool: businessPool },
+            database: { pool: businessPool, directoryReadPool },
             auth: {
               ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
               pool: businessPool,
+              directoryReadPool,
               ...(config.database.name===milestoneDistributionReceipt.database?{distributionReadScope:createLocalDistributionReadScope(config,milestoneDistributionReceipt)}:{}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret
@@ -60,6 +63,7 @@ export async function bootstrap() {
       dependencies.postgres.close(),
       dependencies.redis.close(),
       businessPool?.end(),
+      directoryReadPool?.end(),
     ]);
     throw error;
   }

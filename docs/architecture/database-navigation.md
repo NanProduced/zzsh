@@ -63,8 +63,8 @@
 
 启动身份断言见 `apps/api/src/database/business.ts`，**三件事要分开看**：
 
-- `BUSINESS_SCHEMA_NAMES`（`business.ts:78`）列 **8 个 schema**（含 `zzsh_business_meta` 与 `zzsh_content`），用于归属查询（"当前角色是否拥有任一业务 schema / 任一业务关系"）；它是归属集合，不是授权集合。
-- 同一查询里的 **CREATE 否定探针只有 6 个**（`business.ts:107-112`：`zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`）。`zzsh_business_meta` 与 `zzsh_credit` **没有**在这条查询里逐个检查 CREATE；`zzsh_credit` 的运行授权由 `configureCreditGuaranteePrivileges` 独立处理。因此不能表述为"对 8 个 schema 都查 CREATE，任一有 CREATE 必拒启动"。
+- `BUSINESS_SCHEMA_NAMES`（定义见 `business.ts`）列 **8 个 schema**（含 `zzsh_business_meta` 与 `zzsh_content`），用于归属查询（"当前角色是否拥有任一业务 schema / 任一业务关系"）；它是归属集合，不是授权集合。
+- 同一查询里的 **CREATE 否定探针只有 6 个**（`business.ts` 的身份查询：`zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`）。`zzsh_business_meta` 与 `zzsh_credit` **没有**在这条查询里逐个检查 CREATE；`zzsh_credit` 的运行授权由 `configureCreditGuaranteePrivileges` 独立处理。因此不能表述为"对 8 个 schema 都查 CREATE，任一有 CREATE 必拒启动"。
 - 审计表 `zzsh_iam.audit_event` 的 UPDATE/DELETE/TRUNCATE 是另一组否定断言，不属于上述 schema CREATE 探针。
 
 不可变性由 **ACL 与触发器共同承担**，不是仅靠其一：运行时角色对审计表、`rule_release`、多数资金表没有 UPDATE/DELETE 权限（列级 GRANT 收敛），同时 `finance_immutable`、`guard_release_immutable`、`guard_version_identity`、`guard_legacy_*`、`public_derivative` 等触发器家族在语句层再拦一道；`zzsh_iam.audit_event` 为追加型；部分表另有 `BEFORE TRUNCATE` 守卫。

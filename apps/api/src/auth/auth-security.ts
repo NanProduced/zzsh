@@ -136,6 +136,7 @@ export type ApprovalOperationExecutor = (
 
 export type AuthSecurityOptions = {
   pool: Pool;
+  directoryReadPool?: Pool;
   adminAuth: AuthLike;
   userAuth: AuthLike;
   apiOrigin: string;

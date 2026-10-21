@@ -512,12 +512,22 @@ test('original sort alone does not scan audit for total or materialise provenanc
   assert.match(queries[1]!.sql,/selected\.migration_legacy_id AS "migrationLegacyId"/);
 });
 
-test('registration modes keep their JIT settings and retire both directory leases',async()=>{
+test('original registration disables JIT only inside its bounded read transaction',async()=>{
   const original=new DirectorySqlFixture(),retired:(boolean|undefined)[]=[];original.release=(destroy?:boolean)=>{retired.push(destroy);};assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&page=1&pageSize=10',original)).status,200);
   assert(original.queries.some(q=>q.sql==="SELECT set_config('jit','off',true)"));
   assert(original.queries.some(q=>q.sql==='ROLLBACK'));
   assert.deepEqual(retired,[true]);
-  const old=new DirectorySqlFixture(),retiredDefault:(boolean|undefined)[]=[];old.release=(destroy?:boolean)=>{retiredDefault.push(destroy);};assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
+  const old=new DirectorySqlFixture(),reused:(boolean|undefined)[]=[];old.release=(destroy?:boolean)=>{reused.push(destroy);};assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
   assert(!old.queries.some(q=>q.sql.includes("set_config('jit'")));
-  assert.deepEqual(retiredDefault,[true]);
+  assert.deepEqual(reused,[false]);
+});
+
+test('directory projection uses its assigned pool while authentication stays on the shared pool',async()=>{
+  const shared=new DirectorySqlFixture(),directory=new DirectorySqlFixture(),options=directorySecurityFixture(shared),output=capture();
+  options.directoryReadPool=directory as unknown as import('pg').Pool;
+  await handleUserDirectoryAdmin({method:'GET',url:'/api/v1/admin/users?page=1&pageSize=20',headers:{origin:'http://127.0.0.1:4291'}},output.response,options);
+  assert.equal(output.result().status,200);
+  assert(directory.queries.some(q=>q.sql==='BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
+  assert(directory.queries.some(q=>q.sql.includes('FROM page selected')));
+  assert(!shared.queries.some(q=>q.sql==='BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
 });

@@ -109,6 +109,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit supplier event ingress; omitted by default and never mounted without configuration. */
   orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number; escalationEnabled?: boolean };
   pool: Pool;
+  directoryReadPool?: Pool;
   yunxin?: { appId: string; appKey: string; appSecret: string };
   /** Test-only local provider seam; production construction must leave this unset. */
   testYunxinProvider?: YunxinServerApi & YunxinSupportScopeApi;
@@ -960,6 +961,7 @@ export async function mountAuthHandlers(
   const adminNodeHandler = toNodeHandler(adminWebHandler) as unknown as AuthHandler;
   const securityOptions: AuthSecurityOptions = {
     pool: options.pool,
+    directoryReadPool: options.directoryReadPool,
     adminAuth: adminAuth as unknown as Parameters<typeof mountAuthSecurityHandlers>[1]["adminAuth"],
     userAuth: userAuth as unknown as Parameters<typeof mountAuthSecurityHandlers>[1]["userAuth"],
     apiOrigin: options.apiOrigin,

@@ -1,23 +1,28 @@
 import { DynamicModule, Inject, Injectable, Module, OnApplicationShutdown } from "@nestjs/common";
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 import { ConfigurationError } from "../config/config";
 
 export const BUSINESS_DATABASE = Symbol("BUSINESS_DATABASE");
+const DIRECTORY_READ_DATABASE = Symbol("DIRECTORY_READ_DATABASE");
 
 export type BusinessDatabaseOptions = {
   pool: Pool;
+  directoryReadPool?: Pool;
 };
 
 @Injectable()
 export class BusinessDatabaseService implements OnApplicationShutdown {
-  constructor(@Inject(BUSINESS_DATABASE) private readonly pool: Pool) {}
+  constructor(
+    @Inject(BUSINESS_DATABASE) private readonly pool: Pool,
+    @Inject(DIRECTORY_READ_DATABASE) private readonly directoryReadPool: Pool | null = null,
+  ) {}
 
   getPool(): Pool {
     return this.pool;
   }
 
   async onApplicationShutdown(): Promise<void> {
-    await this.pool.end();
+    await Promise.all([this.pool.end(), this.directoryReadPool?.end()]);
   }
 }
 
@@ -28,6 +33,7 @@ export class BusinessDatabaseModule {
       module: BusinessDatabaseModule,
       providers: [
         { provide: BUSINESS_DATABASE, useValue: options.pool },
+        { provide: DIRECTORY_READ_DATABASE, useValue: options.directoryReadPool ?? null },
         BusinessDatabaseService,
       ],
       exports: [BusinessDatabaseService],
@@ -43,7 +49,7 @@ export function createBusinessPool(config: {
     user: string;
     password: string;
   };
-}): Pool {
+}, limits: Pick<PoolConfig, "max" | "maxUses"> = {}): Pool {
   const pool = new Pool({
     host: config.database.host,
     port: config.database.port,
@@ -53,7 +59,8 @@ export function createBusinessPool(config: {
     application_name: "zzsh-api-business",
     connectionTimeoutMillis: 2_000,
     idleTimeoutMillis: 30_000,
-    max: 10,
+    max: limits.max ?? 10,
+    maxUses: limits.maxUses,
   });
   /* An idle client whose backend died emits 'error' on the pool; without a listener the process
      would crash. The event is recorded in the API log stream; the driver removes the dead client. */

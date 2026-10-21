@@ -4,9 +4,26 @@ import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 
 import { withTransaction } from "../src/auth/security-core";
-import { assertBusinessRuntimeIdentity } from "../src/database/business";
+import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
 import { applyRuntimePrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+
+test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
+  const config={database:{host:'127.0.0.1',port:1,name:'offline',user:'offline',password:'offline'}},shared=createBusinessPool(config,{max:8}),directory=createBusinessPool(config,{max:2,maxUses:1});
+  assert.equal(shared.options.max!+directory.options.max!,10);
+  assert.equal(directory.options.maxUses,1);
+  assert.equal(shared.totalCount,0);assert.equal(directory.totalCount,0);
+  await new BusinessDatabaseService(shared,directory).onApplicationShutdown();
+  assert.equal(shared.ended,true);assert.equal(directory.ended,true);
+});
+
+test('database shutdown attempts both pools and preserves an end failure',async()=>{
+  const original=new Error('end failed'),closed:string[]=[];
+  const shared={end:async()=>{closed.push('shared');throw original;}} as unknown as Pool;
+  const directory={end:async()=>{closed.push('directory');}} as unknown as Pool;
+  await assert.rejects(new BusinessDatabaseService(shared,directory).onApplicationShutdown(),error=>error===original);
+  assert.deepEqual(closed,['shared','directory']);
+});
 
 test("identity failure closes the resource without DROP or CREATE", async () => {
   const events: string[] = [];
