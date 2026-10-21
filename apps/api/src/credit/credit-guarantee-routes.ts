@@ -16,7 +16,7 @@ import {
   confirmBreach,
   decideRecovery,
   readCreditSnapshot,
-  readGuaranteeContext,
+  readGuaranteeContextsBatch,
   requestGuaranteeRefund,
   requestRecovery,
   reverseBreach,
@@ -51,21 +51,23 @@ async function creditObligationReader(userId: string, client: PoolClient, config
   return configured ? configured(userId, client) : "NONE";
 }
 
-async function ownedGuarantees(client: PoolClient, userId: string) {
+async function ownedGuarantees(client: PoolClient, userId: string, creditRow?: { score: number; revision: string } | null) {
   const accounts = (await client.query(`SELECT id,display_no AS "displayNo",game_id AS "gameId" FROM zzsh_supply.rental_account WHERE owner_user_id=$1 ORDER BY id`, [userId])).rows as Array<{ id: string; displayNo: string | null; gameId: string }>;
+  const contexts = await readGuaranteeContextsBatch(client, userId, accounts.map((account) => account.id), creditRow);
   const items = [];
   for (const account of accounts) {
-    const context = await readGuaranteeContext(client, account.id, userId);
+    const context = contexts.get(account.id);
     if (!context) continue;
     items.push({ ...context, displayNo: account.displayNo });
   }
   return items.map(({ policy: _policy, ...item }) => item);
 }
 
-async function scopedGuarantees(client: PoolClient, userId: string, actor: { userId: string; isBoss: boolean }) {
+async function scopedGuarantees(client: PoolClient, userId: string, actor: { userId: string; isBoss: boolean }, creditRow?: { score: number; revision: string } | null) {
   const accounts = (await client.query(`SELECT id,display_no AS "displayNo",game_id AS "gameId" FROM zzsh_supply.rental_account WHERE owner_user_id=$1 AND ${gameScopeSql("rental_account.game_id","$3","$2")} ORDER BY id`, [userId, actor.isBoss, actor.userId])).rows as Array<{ id: string; displayNo: string | null; gameId: string }>;
+  const contexts = await readGuaranteeContextsBatch(client, userId, accounts.map((account) => account.id), creditRow);
   const items = [];
-  for (const account of accounts) { const context = await readGuaranteeContext(client, account.id, userId); if (context) items.push({ ...context, displayNo: account.displayNo }); }
+  for (const account of accounts) { const context = contexts.get(account.id); if (context) items.push({ ...context, displayNo: account.displayNo }); }
   return items.map(({ policy: _policy, ...item }) => item);
 }
 
@@ -108,7 +110,7 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
           if (method === "GET" && (path === "/" || path === "/overview")) {
             if (url.search) throw notFound();
             const credit = await readCreditSnapshot(client, context.userId, false);
-            return { creditState: credit ? "INITIALIZED" : "NOT_INITIALIZED", credit: credit ? { ...credit, events: credit.events.map((event) => userEvent(event as unknown as Record<string, unknown>)) } : null, recoveryRequests: await readRecoveryRequests(client, context.userId), guarantees: await ownedGuarantees(client, context.userId), transactions: await readGuaranteeTransactions(client, context.userId) };
+            return { creditState: credit ? "INITIALIZED" : "NOT_INITIALIZED", credit: credit ? { ...credit, events: credit.events.map((event) => userEvent(event as unknown as Record<string, unknown>)) } : null, recoveryRequests: await readRecoveryRequests(client, context.userId), guarantees: await ownedGuarantees(client, context.userId, credit ? { score: credit.score, revision: credit.revision } : null), transactions: await readGuaranteeTransactions(client, context.userId) };
           }
           if (method === "POST" && path === "/recovery-requests") {
             const input = bodyOf(request);
@@ -172,7 +174,7 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
             await assertCreditUserScope(client, { userId: context.userId, isBoss: access.isBoss }, userId);
             const credit = await readCreditSnapshot(client, userId, false, { adminId: context.userId, isBoss: access.isBoss });
             const guaranteeReadable = access.permissions.has(ADMIN_PERMISSION.creditGuaranteeRead) || access.isBoss;
-            return { credit, recoveryRequests: await readRecoveryRequests(client, userId), guarantees: guaranteeReadable ? await scopedGuarantees(client, userId, { userId: context.userId, isBoss: access.isBoss }) : [], transactions: guaranteeReadable ? await readGuaranteeTransactions(client, userId, { userId: context.userId, isBoss: access.isBoss }) : [] };
+            return { credit, recoveryRequests: await readRecoveryRequests(client, userId), guarantees: guaranteeReadable ? await scopedGuarantees(client, userId, { userId: context.userId, isBoss: access.isBoss }, credit ? { score: credit.score, revision: credit.revision } : null) : [], transactions: guaranteeReadable ? await readGuaranteeTransactions(client, userId, { userId: context.userId, isBoss: access.isBoss }) : [] };
           }
           if (request.method === "GET" && path === "/guarantees") {
             requirePermission(access, ADMIN_PERMISSION.creditGuaranteeRead);

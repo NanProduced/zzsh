@@ -47,9 +47,31 @@ export async function withDirectoryReadTransaction<T>(
   retireAfterRead = false,
 ): Promise<T> {
   signal.throwIfAborted();
+  /* Abort while waiting for a lease: the waiter rejects at once. Whether the lease actually
+     arrived is decided only by the raced connect promise — a boolean flag cannot stand in for
+     the race outcome. A lease that arrives after this request lost the race is retired by the
+     side branch; a lease the race delivered is released exactly once by the main finally below. */
+  let onAbortWait: () => void = () => undefined;
+  const waitAbort = new Promise<never>((_, reject) => {
+    onAbortWait = () => reject(signal.reason ?? failure(499, "Request closed"));
+  });
+  if (signal.aborted) onAbortWait(); else signal.addEventListener("abort", onAbortWait, { once: true });
+  const connect = pool.connect();
   let client: PoolClient;
-  try { client = await pool.connect(); } // Existing pool acquisition budget remains 2s.
-  catch (error) { throw Object.assign(failure(503, "User directory connection unavailable"), { cause: error }); }
+  try {
+    /* The race result alone decides lease ownership: a lease the race delivered is released exactly
+       once by the main finally below; only when the abort branch won do we retire a late lease. */
+    client = await Promise.race([connect, waitAbort]);
+  } catch (error) {
+    /* The race lost: no lease is held here. If the aborted rejection did not win the race, the
+       connect failure keeps its own 503 with the cause attached; the abort reason wins otherwise. */
+    connect.then(late => late.release(true), () => undefined);
+    const aborted = (signal as { aborted?: boolean }).aborted === true;
+    if (aborted) throw signal.reason ?? failure(499, "Request closed");
+    throw Object.assign(failure(503, "User directory connection unavailable"), { cause: error });
+  } finally {
+    signal.removeEventListener("abort", onAbortWait);
+  }
   let started = false;
   let rollbackAttempted = false;
   let destroy = false;
@@ -86,11 +108,16 @@ export async function withDirectoryReadTransaction<T>(
       try { await client.query("ROLLBACK"); }
       catch { destroy = true; }
     } else destroy = true;
+    /* An aborted request keeps its own 499/504 reason; a statement the server stopped mid-flight
+       under the in-transaction 3s budget maps to the budget 504 only when the request is still live. */
+    if (signal.aborted) throw signal.reason ?? error;
     if ((error as { code?: string })?.code === "57014") throw failure(504, "User directory SQL budget exceeded");
     throw error;
   } finally {
     client.off("error", onError);
-    // shortcut: isolate original-date reads until P-Q7B resolves the measured lease-reuse cost.
+    /* ORIGINAL-mode reads retire their lease on purpose: the observed slowdown on a reused backend
+       after the heavy first read is real evidence, while the mechanism behind it is NOT proven
+       (see results/H/repair-r1 brief); retirement is the bounded, measured mitigation. */
     client.release(destroy || connectionError !== undefined || retireAfterRead);
   }
 }

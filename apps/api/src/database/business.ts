@@ -44,7 +44,7 @@ export function createBusinessPool(config: {
     password: string;
   };
 }): Pool {
-  return new Pool({
+  const pool = new Pool({
     host: config.database.host,
     port: config.database.port,
     database: config.database.name,
@@ -55,6 +55,16 @@ export function createBusinessPool(config: {
     idleTimeoutMillis: 30_000,
     max: 10,
   });
+  /* An idle client whose backend died emits 'error' on the pool; without a listener the process
+     would crash. The event is recorded in the API log stream; the driver removes the dead client. */
+  pool.on("error", (error, client) => {
+    console.error(JSON.stringify({
+      event: "business_pool_idle_client_error",
+      code: (error as { code?: string }).code ?? error.name,
+      backendPid: (client as unknown as { processID?: number })?.processID ?? null,
+    }));
+  });
+  return pool;
 }
 
 type DatabaseIdentityConfig = {

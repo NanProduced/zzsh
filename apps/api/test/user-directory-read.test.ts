@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 import { withDirectoryRead, withDirectoryReadTransaction } from "../src/auth/user-directory-read";
+import { createBusinessPool } from "../src/database/business";
 
 function fixture() {
   const client = new EventEmitter() as EventEmitter & { query: (sql: string) => Promise<unknown>; release: (destroy?: boolean) => void; getTransactionStatus: () => "I" | "T" | "E" | null };
@@ -118,4 +119,80 @@ test("a dirty or unknown lease is disposed without BEGIN, ROLLBACK or touching t
     await assert.rejects(withDirectoryReadTransaction(f.pool, new AbortController().signal, async () => assert.fail("dirty lease used")), { status: 503 });
     assert.deepEqual(f.queries, []); assert.deepEqual(f.releases, [true]);
   }
+});
+
+test("abort while waiting for a lease rejects the waiter at once and retires the late lease unused", async () => {
+  const f = fixture(), controller = new AbortController(); let deliver!: (c: PoolClient) => void;
+  const pool = { connect: () => new Promise<PoolClient>(resolve => { deliver = resolve; }) } as unknown as Pool;
+  const waiting = withDirectoryReadTransaction(pool, controller.signal, async () => assert.fail("late lease must not run the action"));
+  controller.abort(new Error("closed while queued"));
+  await assert.rejects(waiting, /closed while queued/);
+  deliver(f.client as unknown as PoolClient);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.queries, []); assert.deepEqual(f.releases, [true]);
+});
+
+test("abort during an in-flight statement keeps the 499 reason and rolls back once", async () => {
+  const f = fixture(), controller = new AbortController(); let slow!: () => void;
+  const base = f.client.query;
+  f.client.query = async sql => { if (sql === "SELECT slow") await new Promise<void>(resolve => { slow = resolve; }); return base(sql); };
+  const reading = withDirectoryReadTransaction(f.pool, controller.signal, async c => { await c.query("SELECT slow"); await c.query("SELECT must_not_run"); });
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new Error("closed mid-statement"));
+  slow!();
+  await assert.rejects(reading, /closed mid-statement/);
+  assert.equal(f.queries.includes("SELECT must_not_run"), false);
+  assert.equal(f.queries.filter(q => q === "ROLLBACK").length, 1);
+  assert.deepEqual(f.releases, [false]);
+});
+
+test("cancelling one request mid-flight never disturbs a concurrent request on the same pool", async () => {
+  const f = fixture();
+  const f2 = fixture();
+  let i = 0;
+  const pool = { connect: async () => (i++ === 0 ? f.client : f2.client) } as unknown as Pool;
+  const controllerA = new AbortController(); let releaseSlow!: () => void;
+  const slowPromise = new Promise<void>(resolve => { releaseSlow = resolve; });
+  f.client.query = async sql => { if (sql === "SELECT slow") await slowPromise; return { rows: [] }; };
+  const a = withDirectoryReadTransaction(pool, controllerA.signal, async c => { await c.query("SELECT slow"); });
+  await new Promise(resolve => setImmediate(resolve));
+  const b = withDirectoryReadTransaction(pool, new AbortController().signal, async c => { await c.query("SELECT fast"); return 9; });
+  controllerA.abort(new Error("A closed"));
+  releaseSlow();
+  await assert.rejects(a, /A closed/);
+  assert.equal(await b, 9);
+  assert(f2.queries.includes("SELECT fast"));
+});
+
+test("an idle backend error is recorded in the API log stream and never crashes the process", async () => {
+  const pool = createBusinessPool({ database: { host: "127.0.0.1", port: 1, name: "none", user: "none", password: "none" } });
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (value: unknown) => { errors.push(String(value)); };
+  try {
+    (pool as unknown as { emit: (event: string, error: Error, client: unknown) => boolean }).emit("error", Object.assign(new Error("idle socket died"), { code: "57P01" }), { processID: 12345 });
+  } finally {
+    console.error = original;
+  }
+  assert.equal(errors.length, 1);
+  const parsed = JSON.parse(errors[0]!);
+  assert.equal(parsed.event, "business_pool_idle_client_error");
+  assert.equal(parsed.code, "57P01");
+  assert.equal(parsed.backendPid, 12345);
+});
+
+test("the 8s request deadline aborts a stuck read and frees its slot", { timeout: 12_000 }, async () => {
+  const f = fixture(), e = events();
+  const stuck = withDirectoryRead(f.pool, e.request as never, e.response as never, async signal => {
+    await withDirectoryReadTransaction(f.pool, signal, async c => {
+      await new Promise<never>((_, reject) => {
+        const onAbort = () => { signal.removeEventListener("abort", onAbort); reject(signal.reason ?? new Error("aborted")); };
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    });
+  });
+  const deadline = Date.now() + 10_000;
+  await assert.rejects(stuck, (error: unknown) => (error as { status?: number }).status === 504);
+  assert(Date.now() < deadline, "deadline fired at its contract time");
+  await withDirectoryRead(f.pool, e.request as never, e.response as never, async () => undefined);
 });

@@ -647,7 +647,7 @@ function projectMembershipGrowth(userId: string, rows: StoredContribution[], sto
   };
 }
 
-async function readMembershipGrowthModel(client: PoolClient, userId: string, asOfUtc: string): Promise<{ response: GrowthReaderResponse; rows: StoredContribution[] } | null> {
+async function readMembershipGrowthModel(client: PoolClient, userId: string, asOfUtc: string): Promise<{ response: GrowthReaderResponse; rows: StoredContribution[]; policy: StoredGrowthPolicy | undefined } | null> {
   const user = (await client.query<{ id: string }>(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1`, [userId])).rows[0];
   if (!user) return null;
   const rows = (await client.query<StoredContribution>(
@@ -681,7 +681,7 @@ async function readMembershipGrowthModel(client: PoolClient, userId: string, asO
     `SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived"
        FROM zzsh_iam.membership_entitlement WHERE user_id=$1 ORDER BY starts_at DESC, id DESC LIMIT 100`, [userId],
   )).rows;
-  return { rows, response: projectMembershipGrowth(userId, rows, storedState, completeness, policy, entitlements, asOfUtc) };
+  return { rows, policy, response: projectMembershipGrowth(userId, rows, storedState, completeness, policy, entitlements, asOfUtc) };
 }
 
 export async function readMembershipGrowth(client: PoolClient, userId: string, asOfUtc = new Date().toISOString()): Promise<GrowthReaderResponse | null> {
@@ -705,9 +705,12 @@ export async function readMembershipGrowthBatch(client: PoolClient, userIds: rea
   const subjects = (await client.query<StoredGrowthState & { userId: string; sourceRef: string | null; migrated: boolean }>(
     `SELECT /* directory-growth-subjects */ u.id AS "userId", m.source_ref AS "sourceRef",
        s.normal_tier AS "normalTier", s.effective_tier AS "effectiveTier", s.black_gold_state AS "blackGoldState", s.last_tier_drop_at::text AS "lastTierDropAt",
-       EXISTS(SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id=u.id AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS') AS migrated
+       COALESCE(p.migrated,false) AS migrated
      FROM zzsh_auth_user."user" u LEFT JOIN zzsh_iam.user_rental_membership m ON m.user_id=u.id
-     LEFT JOIN zzsh_iam.membership_growth_state s ON s.user_id=u.id WHERE u.id=ANY($1::text[])`, [ids],
+     LEFT JOIN zzsh_iam.membership_growth_state s ON s.user_id=u.id
+     LEFT JOIN (SELECT DISTINCT e.object_id, true AS migrated FROM zzsh_iam.audit_event e
+         WHERE e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS' AND e.object_id=ANY($1::text[])) p ON p.object_id=u.id
+     WHERE u.id=ANY($1::text[])`, [ids],
   )).rows;
   const contributions = groupGrowthRows((await client.query<StoredContribution>(
     `SELECT /* directory-growth-contributions */ user_id AS "userId", game_id AS "gameId", source_key AS "sourceKey", source_type AS "sourceType", source_id AS "sourceId",
@@ -822,17 +825,19 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   if (input.asOfUtc === undefined) asOfUtc = `${new Date().toISOString().slice(0, 23)}000Z`;
   else if (typeof input.asOfUtc !== "string" || !CANONICAL_MICRO_INSTANT.test(input.asOfUtc) || !Number.isFinite(Date.parse(input.asOfUtc))) return { knowledge: "UNKNOWN", reason: "AS_OF_INVALID" };
   else asOfUtc = input.asOfUtc;
-  let growth: GrowthReaderResponse | null;
-  try { growth = await readMembershipGrowth(client, input.userId, asOfUtc); }
+  let model: Awaited<ReturnType<typeof readMembershipGrowthModel>>;
+  try { model = await readMembershipGrowthModel(client, input.userId, asOfUtc); }
   catch (error) { if (error instanceof GrowthRuleError) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc }; throw error; }
+  const growth = model?.response ?? null;
   if (!growth || growth.growth.knowledge !== "KNOWN" || !growth.growth.normalTier || !growth.growth.effectiveTier || !growth.growth.grace) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc };
   const rentalMode = input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary";
   // The sealed release decides which modes are spendable; a disabled mode is an explicit refusal, not a missing price.
   const enabledModes = sealedEnabledRentalModes(input.quoteInput.haffRule);
   if (enabledModes === null || !enabledModes.includes(rentalMode)) return { knowledge: "UNKNOWN", reason: "RENTAL_MODE_DISABLED", asOfUtc };
-  const policyRow = (await client.query<{ version: string; policyPayload: GrowthBenefitPolicy }>(`SELECT version::text AS version, policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' AND effective_at <= $1 ORDER BY version DESC LIMIT 1`, [asOfUtc])).rows[0];
+  // Same transaction, same asOf: the policy row the projection just read is the quote authority.
+  const policyRow = model!.policy;
   if (!policyRow) return { knowledge: "UNKNOWN", reason: "POLICY_UNAVAILABLE", asOfUtc };
-  const policy = policyRow.policyPayload;
+  const policy = policyRow.policyPayload as GrowthBenefitPolicy;
   const policyValidation = validateBenefitPolicy(policy, { enabledModes });
   if (!policyValidation.valid || !policyValidation.publishable) return { knowledge: "UNKNOWN", reason: "POLICY_NOT_PUBLISHABLE", asOfUtc };
   const effectiveTier = growth.growth.effectiveTier;
