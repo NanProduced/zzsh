@@ -481,15 +481,35 @@ export async function readGuaranteeContext(client: PoolClient, accountId: string
       WHERE a.id=$1 AND a.owner_user_id=$2`,
     [accountId, ownerUserId, versionId ?? null],
   )).rows[0];
+  const context = readableGuaranteeRow(row);
+  if (!context) return null;
+  const credit = await readGuaranteeCredit(client, ownerUserId);
+  const binding = bindingNeeded(context.row, credit)
+    ? await readGuaranteeBinding(client, accountId, ownerUserId, context.row.priceVersionId, context.row.versionId)
+    : undefined;
+  return projectGuaranteeContext(context.row, context.policy, credit, binding);
+}
+
+type GuaranteeCreditRow = { score: number; revision: string };
+
+function readableGuaranteeRow(row: GuaranteeContextRow | undefined): { row: GuaranteeContextRow; policy: FundingPolicy } | null {
   if (!row || row.policyStatus !== "SEALED" || row.policy === null) return null;
-  const policy = validateFundingPolicy(row.policy);
-  const credit = (await client.query<{ score: number; revision: string }>(`SELECT score,revision::text FROM zzsh_credit.user_credit_state WHERE user_id=$1`, [ownerUserId])).rows[0];
-  if (!credit) return { accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents: null, requiredCents: "0", score: null, creditRevision: null, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "CREDIT_UNINITIALIZED" };
+  return { row, policy: validateFundingPolicy(row.policy) };
+}
+
+async function readGuaranteeCredit(client: PoolClient, ownerUserId: string): Promise<GuaranteeCreditRow | undefined> {
+  return (await client.query<GuaranteeCreditRow>(`SELECT score,revision::text FROM zzsh_credit.user_credit_state WHERE user_id=$1`, [ownerUserId])).rows[0];
+}
+
+/** The binding facts are only read when the projection can reach a binding-dependent state. */
+function bindingNeeded(row: GuaranteeContextRow, credit: GuaranteeCreditRow | undefined): boolean {
+  if (!credit) return false;
   const baseCents = quoteResourceCents(row.payload);
-  if (baseCents === null) return { accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents: null, requiredCents: "0", score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "STANDARD_QUOTE_UNAVAILABLE" };
-  const requiredCents = requiredGuaranteeCents(baseCents);
-  if (requiredCents === "0") return { accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents, score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "ZERO_AMOUNT_PROVIDER_UNSUPPORTED" };
-  const binding = (await client.query<GuaranteeBindingRow>(
+  return baseCents !== null && requiredGuaranteeCents(baseCents) !== "0";
+}
+
+async function readGuaranteeBinding(client: PoolClient, accountId: string, ownerUserId: string, priceVersionId: string, versionId: string | null): Promise<GuaranteeBindingRow | undefined> {
+  return (await client.query<GuaranteeBindingRow>(
     `WITH payment_totals AS (
        SELECT requirement_id,
               COALESCE(sum(CASE WHEN status='CONFIRMED' THEN COALESCE(observed_amount_cents,amount_cents) ELSE 0 END),0)::text AS "confirmedCents",
@@ -513,11 +533,92 @@ export async function readGuaranteeContext(client: PoolClient, accountId: string
        LEFT JOIN refund_totals rt ON rt.requirement_id=r.id
       WHERE r.account_id=$1 AND r.owner_user_id=$2 AND r.price_version_id=$3 AND r.listing_version_id IS NOT DISTINCT FROM $4
       ORDER BY r.created_at DESC,r.id DESC LIMIT 1`,
-    [accountId, ownerUserId, row.priceVersionId, row.versionId],
+    [accountId, ownerUserId, priceVersionId, versionId],
   )).rows[0];
+}
+
+/**
+ * Page reader for one owner's accounts: the same facts as readGuaranteeContext per account, but the
+ * owner credit row is read once and the binding aggregates are scoped to these accounts in one pass.
+ * Missing/unreadable rows stay absent from the map, matching the single reader's null result.
+ */
+export async function readGuaranteeContextsBatch(client: PoolClient, ownerUserId: string, accountIds: readonly string[], creditRow?: GuaranteeCreditRow | null): Promise<Map<string, GuaranteeContext>> {
+  const ids = [...new Set(accountIds)];
+  const results = new Map<string, GuaranteeContext>();
+  if (ids.length === 0) return results;
+  const rows = (await client.query<GuaranteeContextRow>(
+    `SELECT a.id AS "accountId",a.owner_user_id AS "ownerUserId",a.game_id AS "gameId",a.current_version_id AS "currentVersionId",
+            v.id AS "versionId",p.id AS "priceVersionId",r.id AS "releaseId",p.funding_policy AS policy,p.status AS "priceStatus",
+            r.id AS "releaseId",v.payload,p.status AS "policyStatus"
+       FROM zzsh_supply.rental_account a
+       JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
+       JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=a.game_id
+       JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+       LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id AND v.rule_release_id=r.id
+      WHERE a.id=ANY($1::text[]) AND a.owner_user_id=$2`,
+    [ids, ownerUserId],
+  )).rows;
+  const readable = new Map<string, { row: GuaranteeContextRow; policy: FundingPolicy }>();
+  for (const row of rows) {
+    const context = readableGuaranteeRow(row);
+    if (context) readable.set(row.accountId, context);
+  }
+  if (readable.size === 0) return results;
+  const credit = creditRow !== undefined ? creditRow ?? undefined : await readGuaranteeCredit(client, ownerUserId);
+  const bindings = new Map<string, GuaranteeBindingRow>();
+  const needingBinding = [...readable.values()].filter((entry) => bindingNeeded(entry.row, credit)).map((entry) => entry.row.accountId);
+  if (needingBinding.length > 0) {
+    for (const binding of (await client.query<GuaranteeBindingRow & { accountId: string }>(
+      `WITH payment_totals AS (
+         SELECT requirement_id,
+                COALESCE(sum(CASE WHEN status='CONFIRMED' THEN COALESCE(observed_amount_cents,amount_cents) ELSE 0 END),0)::text AS "confirmedCents",
+                COALESCE(bool_or(status='CONFIRMED' AND (provider_request_state<>'CONFIRMED' OR finance_event_id IS NULL OR ledger_entry_ref IS NULL)),false) AS "unrecognizedPayment"
+           FROM zzsh_order.owner_guarantee_payment
+          WHERE requirement_id IN (SELECT id FROM zzsh_order.owner_guarantee_requirement WHERE account_id=ANY($1::text[]) AND owner_user_id=$2)
+          GROUP BY requirement_id
+       ), refund_totals AS (
+         SELECT requirement_id,
+                COALESCE(sum(CASE WHEN status='SUCCEEDED' THEN amount_cents ELSE 0 END),0)::text AS "succeededRefundCents",
+                COALESCE(bool_or(status IN ('REQUESTED','PROCESSING','UNKNOWN')),false) AS "activeRefund"
+           FROM zzsh_order.owner_guarantee_refund
+          WHERE requirement_id IN (SELECT id FROM zzsh_order.owner_guarantee_requirement WHERE account_id=ANY($1::text[]) AND owner_user_id=$2)
+          GROUP BY requirement_id
+       )
+       SELECT DISTINCT ON (r.account_id) r.account_id AS "accountId",
+              r.id AS "requirementId",r.status AS "requirementStatus",r.base_cents::text AS "bindingBaseCents",r.required_cents::text AS "bindingRequiredCents",
+              p.id AS "paymentId",p.status AS "paymentState",p.provider_request_state AS "paymentProviderState",p.amount_cents::text AS "paymentAmountCents",p.observed_amount_cents::text AS "paymentObservedAmountCents",p.finance_event_id AS "paymentFinanceEventId",p.ledger_entry_ref AS "paymentLedgerEntryRef",
+              COALESCE(pt."confirmedCents",'0') AS "confirmedCents",COALESCE(pt."unrecognizedPayment",false) AS "unrecognizedPayment",
+              f.id AS "refundId",f.status AS "refundState",f.provider_request_state AS "refundProviderState",f.amount_cents::text AS "refundAmountCents",f.release_policy_state AS "refundPolicyState",f.finance_event_id AS "refundFinanceEventId",f.ledger_entry_ref AS "refundLedgerEntryRef",
+              COALESCE(rt."succeededRefundCents",'0') AS "succeededRefundCents",COALESCE(rt."activeRefund",false) AS "activeRefund",r.updated_at::text AS "updatedAt"
+         FROM zzsh_order.owner_guarantee_requirement r
+         JOIN zzsh_supply.rental_account a ON a.id=r.account_id AND a.owner_user_id=r.owner_user_id
+         JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
+         JOIN zzsh_supply.rule_release rel ON rel.id=g.current_release_id AND rel.game_id=a.game_id
+         LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id AND v.rule_release_id=rel.id
+         LEFT JOIN LATERAL (SELECT * FROM zzsh_order.owner_guarantee_payment WHERE requirement_id=r.id ORDER BY created_at DESC,id DESC LIMIT 1) p ON true
+         LEFT JOIN LATERAL (SELECT * FROM zzsh_order.owner_guarantee_refund WHERE requirement_id=r.id ORDER BY created_at DESC,id DESC LIMIT 1) f ON true
+         LEFT JOIN payment_totals pt ON pt.requirement_id=r.id
+         LEFT JOIN refund_totals rt ON rt.requirement_id=r.id
+        WHERE r.account_id=ANY($1::text[]) AND r.owner_user_id=$2
+          AND r.price_version_id=rel.price_version_id
+          AND r.listing_version_id IS NOT DISTINCT FROM v.id
+        ORDER BY r.account_id,r.created_at DESC,r.id DESC`,
+      [needingBinding, ownerUserId],
+    )).rows) bindings.set(binding.accountId, binding);
+  }
+  for (const [accountId, { row, policy }] of readable) results.set(accountId, projectGuaranteeContext(row, policy, credit, bindings.get(accountId)));
+  return results;
+}
+
+function projectGuaranteeContext(row: GuaranteeContextRow, policy: FundingPolicy, credit: GuaranteeCreditRow | undefined, binding: GuaranteeBindingRow | undefined): GuaranteeContext {
+  if (!credit) return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents: null, requiredCents: "0", score: null, creditRevision: null, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "CREDIT_UNINITIALIZED" };
+  const baseCents = quoteResourceCents(row.payload);
+  if (baseCents === null) return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents: null, requiredCents: "0", score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "STANDARD_QUOTE_UNAVAILABLE" };
+  const requiredCents = requiredGuaranteeCents(baseCents);
+  if (requiredCents === "0") return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents, score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "UNKNOWN", reference: null, reasonCode: "ZERO_AMOUNT_PROVIDER_UNSUPPORTED" };
   if (!binding) {
-    if (credit.score >= CREDIT_GUARANTEE_THRESHOLD) return { accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents: "0", score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "NOT_REQUIRED", reference: guaranteeReference({ accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, creditRevision: credit.revision, coverageRevision: null, state: "NOT_REQUIRED", requiredCents: "0" }) };
-    return { accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents, score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "REQUIRED", reference: null };
+    if (credit.score >= CREDIT_GUARANTEE_THRESHOLD) return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents: "0", score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "NOT_REQUIRED", reference: guaranteeReference({ accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, creditRevision: credit.revision, coverageRevision: null, state: "NOT_REQUIRED", requiredCents: "0" }) };
+    return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents, score: credit.score, creditRevision: credit.revision, coverageRevision: null, state: "REQUIRED", reference: null };
   }
   const boundRequiredCents = binding.bindingRequiredCents ?? requiredCents;
   const confirmedCents = binding.confirmedCents ?? (binding.paymentState === "CONFIRMED" ? (binding.paymentAmountCents ?? boundRequiredCents) : "0");
@@ -543,11 +644,11 @@ export async function readGuaranteeContext(client: PoolClient, accountId: string
   }
   if (credit.score >= CREDIT_GUARANTEE_THRESHOLD && state === "REQUIRED" && BigInt(confirmedCents) === 0n && (!binding.paymentId || binding.paymentState === "FAILED")) {
     state = "NOT_REQUIRED";
-    return { accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents: "0", score: credit.score, creditRevision: credit.revision, coverageRevision: null, state, reference: guaranteeReference({ accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, creditRevision: credit.revision, coverageRevision: null, state, requiredCents: "0" }) };
+    return { accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents: "0", score: credit.score, creditRevision: credit.revision, coverageRevision: null, state, reference: guaranteeReference({ accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, creditRevision: credit.revision, coverageRevision: null, state, requiredCents: "0" }) };
   }
-  const reference = guaranteeReference({ accountId, ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, creditRevision: credit.revision, coverageRevision: binding.updatedAt, state, requiredCents: boundRequiredCents });
+  const reference = guaranteeReference({ accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, creditRevision: credit.revision, coverageRevision: binding.updatedAt, state, requiredCents: boundRequiredCents });
   return {
-    accountId, ownerUserId, gameId: row.gameId, requirementId: binding.requirementId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents: boundRequiredCents,
+    accountId: row.accountId, ownerUserId: row.ownerUserId, gameId: row.gameId, requirementId: binding.requirementId, versionId: row.versionId, priceVersionId: row.priceVersionId, releaseId: row.releaseId, policy, baseCents, requiredCents: boundRequiredCents,
     score: credit.score, creditRevision: credit.revision, coverageRevision: binding.updatedAt, state, reasonCode, reference,
     paymentId: binding.paymentId, paymentState: binding.paymentState, paymentProviderState: binding.paymentProviderState, paymentAmountCents: binding.paymentAmountCents,
     paymentObservedAmountCents: binding.paymentObservedAmountCents, paymentFinanceEventId: binding.paymentFinanceEventId, paymentLedgerEntryRef: binding.paymentLedgerEntryRef,

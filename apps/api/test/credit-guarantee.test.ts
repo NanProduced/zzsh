@@ -66,6 +66,82 @@ test("guarantee transaction reader keeps every payment and refund attempt", asyn
   assert.equal(rows[0]?.refundId, "refund-2");
 });
 
+// I (P-Q6): the owner page batch reader must project the same contexts as the per-account reader and
+// keep its SQL count flat in the number of held accounts, including the reused owner credit row.
+import { readGuaranteeContext, readGuaranteeContextsBatch } from "../src/credit/credit-guarantee";
+import { fundingPolicyFixture } from "./funding-authority-fixtures";
+
+const guaranteeRow = (accountId: string, payload: unknown) => ({
+  accountId, ownerUserId: "user-a", gameId: "game-a", currentVersionId: `version-${accountId}`, versionId: `version-${accountId}`,
+  priceVersionId: "price-1", releaseId: "release-1", policy: { ...fundingPolicyFixture("NOT_REQUIRED"), policyVersion: "policy-1" },
+  policyStatus: "SEALED", priceStatus: "SEALED", payload,
+});
+const quotePayload = (amount: string | null) => (amount === null ? { quoteValues: {} } : { quoteValues: { resourceTotal: { currency: "CNY", unit: "yuan", scale: 2, amount } } });
+const bindingRow = {
+  requirementId: "req-1", requirementStatus: "ACTIVE", bindingBaseCents: "10000", bindingRequiredCents: "500",
+  paymentId: "pay-1", paymentState: "CONFIRMED", paymentProviderState: "CONFIRMED", paymentAmountCents: "500",
+  paymentObservedAmountCents: "500", paymentFinanceEventId: "event-1", paymentLedgerEntryRef: "line-1",
+  confirmedCents: "500", unrecognizedPayment: false,
+  refundId: null, refundState: null, refundProviderState: null, refundAmountCents: null, refundPolicyState: null,
+  refundFinanceEventId: null, refundLedgerEntryRef: null, succeededRefundCents: "0", activeRefund: false,
+  updatedAt: "2026-10-20T00:00:00.000000Z",
+};
+function guaranteeWorld(input: { credit?: { score: number; revision: string } | null; rows: Record<string, Record<string, unknown>>; bindings?: Record<string, Record<string, unknown>> }) {
+  const queries: string[] = [];
+  const client = { query: async (sql: string, args: unknown[] = []) => {
+    queries.push(sql);
+    if (sql.includes("FROM zzsh_credit.user_credit_state")) return { rows: input.credit ? [{ score: input.credit.score, revision: input.credit.revision }] : [] };
+    if (sql.includes("DISTINCT ON (r.account_id)")) return { rows: Object.entries(input.bindings ?? {}).map(([accountId, row]) => ({ ...row, accountId })) };
+    if (sql.includes("a.id=ANY($1::text[])")) return { rows: Object.entries(input.rows).map(([accountId, row]) => row) };
+    if (sql.includes("FROM zzsh_order.owner_guarantee_requirement")) return { rows: input.bindings?.[String(args[0])] ? [input.bindings[String(args[0])]] : [] };
+    if (sql.includes('WHERE a.id=$1 AND a.owner_user_id=$2')) return { rows: input.rows[String(args[0])] ? [input.rows[String(args[0])]] : [] };
+    throw new Error(`unexpected read: ${sql}`);
+  } } as never;
+  return { client, queries };
+}
+
+test("batch owner-guarantee contexts equal the per-account reader while SQL stays flat in account count", async () => {
+  const world = guaranteeWorld({
+    credit: { score: 70, revision: "4" },
+    rows: {
+      "account-satisfied": guaranteeRow("account-satisfied", quotePayload("100.00")),
+      "account-required": guaranteeRow("account-required", quotePayload("100.00")),
+      "account-no-quote": guaranteeRow("account-no-quote", quotePayload(null)),
+    },
+    bindings: { "account-satisfied": bindingRow },
+  });
+  const ids = ["account-satisfied", "account-required", "account-no-quote", "account-missing"];
+  const before = world.queries.length;
+  const batch = await readGuaranteeContextsBatch(world.client as never, "user-a", ids);
+  const batchSql = world.queries.slice(before);
+  assert.deepEqual([...batch.keys()].sort(), ["account-no-quote", "account-required", "account-satisfied"]);
+  for (const accountId of ids) {
+    const single = await readGuaranteeContext(world.client as never, accountId, "user-a");
+    assert.deepEqual(batch.get(accountId) ?? null, single, `batch must match the single reader for ${accountId}`);
+  }
+  assert.equal(batch.get("account-satisfied")!.state, "SATISFIED");
+  assert.equal(batch.get("account-required")!.state, "REQUIRED");
+  assert.equal(batch.get("account-required")!.reference, null);
+  assert.deepEqual({ state: batch.get("account-no-quote")!.state, reasonCode: batch.get("account-no-quote")!.reasonCode }, { state: "UNKNOWN", reasonCode: "STANDARD_QUOTE_UNAVAILABLE" });
+  assert.equal(batch.get("account-satisfied")!.creditRevision, "4");
+  // One context read, one owner credit read and one binding read, whatever the account count is.
+  assert.equal(batchSql.length, 3, JSON.stringify(batchSql.map((sql) => sql.slice(0, 40))));
+  assert.equal(batchSql.filter((sql) => sql.includes("zzsh_credit.user_credit_state")).length, 1, "owner credit is read once per page");
+  assert.equal(batchSql.filter((sql) => sql.includes("DISTINCT ON (r.account_id)")).length, 1);
+});
+
+test("the batch credit-row seam neither re-reads owner credit nor invents an initialized state", async () => {
+  const rows = { "account-satisfied": guaranteeRow("account-satisfied", quotePayload("100.00")) };
+  const reuse = guaranteeWorld({ credit: null, rows, bindings: { "account-satisfied": bindingRow } });
+  const reused = await readGuaranteeContextsBatch(reuse.client as never, "user-a", ["account-satisfied"], { score: 70, revision: "4" });
+  assert.equal(reused.get("account-satisfied")!.state, "SATISFIED");
+  assert.equal(reuse.queries.some((sql) => sql.includes("zzsh_credit.user_credit_state")), false, "an already read credit row must not be re-read");
+  const missing = guaranteeWorld({ credit: null, rows, bindings: { "account-satisfied": bindingRow } });
+  const absent = await readGuaranteeContextsBatch(missing.client as never, "user-a", ["account-satisfied"], null);
+  assert.deepEqual({ state: absent.get("account-satisfied")!.state, reasonCode: absent.get("account-satisfied")!.reasonCode }, { state: "UNKNOWN", reasonCode: "CREDIT_UNINITIALIZED" });
+  assert.equal(missing.queries.some((sql) => sql.includes("zzsh_credit.user_credit_state")), false);
+});
+
 test("actual payment-intent route restores its receipt even when current policy loading would fail", async (t) => {
   const identity = require("../src/auth/user-identity");
   const security = require("../src/auth/security-core");

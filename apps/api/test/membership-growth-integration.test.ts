@@ -359,6 +359,30 @@ test("growth quote reader keeps grace tier and black-gold tier in the actual can
   if (blackGold.knowledge === "KNOWN") assert.equal(blackGold.candidates[0]?.plan.source, "GROWTH");
 });
 
+test("the quote-candidate reader reads the same-transaction growth policy exactly once", async () => {
+  const now = new Date();
+  const at = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+  const contribution = (patch: Partial<GrowthContribution>): GrowthContribution & { gameId: string; sourceDigest: string } => {
+    const row = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: at(8), recordedAt: at(8), amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0, ...patch };
+    return { ...row, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", row) };
+  };
+  const input = quoteInput();
+  const base = computeDeltaQuote(input);
+  assert.equal(base.quotable, true);
+  if (!base.quotable) return;
+  const common = { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", gameId: "game-1", listingVersionId: "listing-1", listingHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-v1", quantityDigest: "quantity-1", baseQuote: base.quote, quoteInput: input };
+  const wrapped = growthReaderClient({ normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: at(1) }, [contribution({})], readerPolicy()) as unknown as { query: (sql: string) => Promise<unknown> };
+  let policyReads = 0;
+  const client = { query: async (sql: string) => { if (sql.includes("FROM zzsh_iam.membership_growth_policy")) policyReads += 1; return wrapped.query(sql); } } as never;
+  const result = await readMembershipGrowthQuoteCandidatesAt(client, common);
+  assert.equal(result.knowledge, "KNOWN", JSON.stringify(result));
+  assert.equal(policyReads, 1, "the projection's policy row is the quote authority in the same transaction");
+  if (result.knowledge === "KNOWN") {
+    assert.equal(result.policyVersion, "1");
+    assert.equal(result.candidates[0]?.plan.benefitVersion, "1");
+  }
+});
+
 test("R1-05 benefit summary readiness follows the sealed enabled modes, never a fixed three-mode count", async () => {
   const state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
   const asOf = "2026-10-18T00:00:00.000Z";
