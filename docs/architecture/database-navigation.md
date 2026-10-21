@@ -12,7 +12,7 @@
 
 7 个业务 schema：`zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`、`zzsh_credit`。
 
-**迁移顺序是开发顺序视图，不是当前结构视图。** "这个表现在长什么样"必须按创建迁移 + 后续 `ALTER` 叠加得出；替换型函数（`CREATE OR REPLACE FUNCTION`）只有文件级 journal，没有函数级留痕。本轮不重排、不重命名、不 squash 已应用的 88 份迁移。本文与所附对象清单里的"创建迁移"列只是 `CREATE TABLE`/`CREATE SEQUENCE` 所在的那一份迁移，**不等于完整当前定义**。
+**迁移顺序是开发顺序视图，不是当前结构视图。** "这个表现在长什么样"必须按创建迁移 + 后续 `ALTER` 叠加得出；替换型函数（`CREATE OR REPLACE FUNCTION`）只有文件级 journal，没有函数级留痕。已经应用的迁移不重排、不重命名、不 squash；新增变更沿 journal 前向追加。本文与所附对象清单里的"创建迁移"列只是 `CREATE TABLE`/`CREATE SEQUENCE` 所在的那一份迁移，**不等于完整当前定义**。
 
 ### 迁移顺序概览（按 idx）
 
@@ -52,7 +52,7 @@
 
 不可变性由 **ACL 与触发器共同承担**，不是仅靠其一：运行时角色对审计表、`rule_release`、多数资金表没有 UPDATE/DELETE 权限（列级 GRANT 收敛），同时 `finance_immutable`、`guard_release_immutable`、`guard_version_identity`、`guard_legacy_*`、`public_derivative` 等触发器家族在语句层再拦一道；`zzsh_iam.audit_event` 为追加型；部分表另有 `BEFORE TRUNCATE` 守卫。
 
-DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 ACL 事务；ACL 失败抛 `BusinessMigrationAclError`（`ACL_NOT_COMMITTED` / `ACL_COMMIT_UNKNOWN`）。此时库处于"结构已新、权限未知"状态，重试依赖人工判断。
+DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 ACL 事务；`applyRuntimePrivileges` 自身不拥有事务。ACL 失败时保留 `BusinessMigrationAclError` 的 outcome、原 cause 与 `rollbackAcknowledged`：`ACL_NOT_COMMITTED` 表示 COMMIT 未尝试发出，但不自动等于回滚已确认；`ACL_COMMIT_UNKNOWN` 不得被改报成功或已回滚，坏连接退役。权限观察和只重放 ACL 的条件见[结构与权限核对](acl-comparison.md)。
 
 ## 单位与金额
 
@@ -113,6 +113,7 @@ DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 A
 
 - [技术选择](technology-decisions.md) · [仓库结构](repository-layout.md) · [多端与 BFF](multi-client-bff.md)
 - [API v1 契约](api-v1-contract.md) · [旧数据转换与字段映射](legacy-data-mapping.md)
+- [结构与权限核对](acl-comparison.md) · [转换规则证据边界](rule-coverage.md)
 - [公开列表组合筛选与配置](listing-query.md) · [账号公开查看、可租状态与编号](account-visibility.md)
 - [供给表单数据契约](supply-form-contract.md) · [开租与结算确认](settlement-confirmation.md)
 - [信用与号主保证金运行合同](credit-guarantee.md) · [会员成长与人工礼遇](membership-growth.md)
