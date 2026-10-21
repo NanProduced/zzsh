@@ -197,6 +197,7 @@ test('default page bounds narrow keys before one batched latest-audit relation',
   assert.notEqual(pageEnd,-1,'deferred shape must have an outer projection query');
   assert.equal(sql.slice(0,pageEnd).includes('zzsh_iam.audit_event'),false,'the page query must not consult the audit table');
   assert.ok(sql.slice(pageEnd).includes("e.details->>'legacyId'"),'the audit expansion stays available for the returned page');
+  assert.equal(sql.slice(pageEnd).includes("outcome='SUCCESS'"),false,'default audit selection stays latest-fact regardless of outcome');
   assert.ok(sql.includes('ORDER BY u."createdAt" DESC, u.id DESC'));
   assert.equal(sql.includes('source_created_at'),false,'the default list does not compute an unused source date');
   const count=pool.queries[0]!.sql;
