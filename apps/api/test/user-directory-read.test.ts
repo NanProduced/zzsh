@@ -183,7 +183,14 @@ test("an idle backend error is recorded in the API log stream and never crashes 
 
 test("the 8s request deadline aborts a stuck read and frees its slot", { timeout: 12_000 }, async () => {
   const f = fixture(), e = events();
-  const stuck = withDirectoryRead(f.pool, e.request as never, e.response as never, async () => new Promise(() => undefined));
+  const stuck = withDirectoryRead(f.pool, e.request as never, e.response as never, async signal => {
+    await withDirectoryReadTransaction(f.pool, signal, async c => {
+      await new Promise<never>((_, reject) => {
+        const onAbort = () => { signal.removeEventListener("abort", onAbort); reject(signal.reason ?? new Error("aborted")); };
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    });
+  });
   const deadline = Date.now() + 10_000;
   await assert.rejects(stuck, (error: unknown) => (error as { status?: number }).status === 504);
   assert(Date.now() < deadline, "deadline fired at its contract time");
