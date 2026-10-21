@@ -1,74 +1,55 @@
-// Offline test-entry self-check (P-V2 item 1).
-//
-// Purpose: make the default/offline vs explicit-PG vs helper vs excluded split visible
-// without running any suite, and fail when an executable suite is not registered.
-//
-// Rules this tool enforces (each has a counter-example in assert-offline-env.test.mjs):
-//   1. An executable suite = a file that imports node:test's test/describe/it as a VALUE.
-//      Detection is static: the file is never imported, so a missing registration is
-//      still visible, and no inventoried suite has to run for the check to work.
-//   2. A registered entry = the compiled file name appears in some package script.
-//   3. A helper = no value import of node:test; it is reachable only through a suite
-//      that imports it. Helpers are not orphans.
-//   4. The 5 order PG helpers are helpers: they are imported by a registered suite
-//      (order-reservation), so they must not be reported as unregistered suites.
-//   5. A PG entry is opt-in: its script requires a named environment switch. The
-//      switch is read from the script, never from the environment at check time.
-//
-// Exit code 0 = no unregistered executable suite. Exit code 1 = one or more found.
-
-import { readFile, readdir } from "node:fs/promises";
+// Static inventory only: never import or execute an inventoried suite.
+// Registration comes from explicit node --test files; default scope comes from
+// root check:offline/check npm calls. Import reachability starts at those runners.
+import { readdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
-const selfDir = dirname(fileURLToPath(import.meta.url));
-export const defaultRoot = resolve(selfDir, "..");
-
-// Static only: a value import of the test/describe/it bindings from node:test.
-const VALUE_IMPORT = /import\s*(?:\{([^}]*)\}|(\w+))\s*from\s*["']node:test["']/g;
-const TEST_BINDING = /(^|[\s,{])(test|describe|it)([\s,}]|$)/;
-
+export const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const WORKSPACES = [
   { dir: "apps/api", pkgName: "@zzsh/api", testDir: "apps/api/test" },
   { dir: "apps/web", pkgName: "@zzsh/web", testDir: "apps/web/test" },
   { dir: "apps/admin", pkgName: "@zzsh/admin", testDir: "apps/admin/test" },
 ];
 
-/** A file is an executable suite when it imports node:test's runner bindings by value. */
-export function isExecutableSuite(source) {
-  VALUE_IMPORT.lastIndex = 0;
-  let match;
-  while ((match = VALUE_IMPORT.exec(source)) !== null) {
-    const named = match[1];
-    if (named === undefined) return true; // default import: import test from "node:test"
-    if (TEST_BINDING.test(named)) return true;
-  }
-  return false;
+const parseSource = source => ts.createSourceFile("inventory.ts", source, ts.ScriptTarget.Latest, true);
+const hasValueImport = clause => clause && !clause.isTypeOnly && (
+  clause.name || ts.isNamespaceImport(clause.namedBindings ?? {}) ||
+  clause.namedBindings?.elements?.some(binding => !binding.isTypeOnly)
+);
+
+// A value namespace/default may supply test(); conservatively treat it as a suite.
+function executableSuite(tree) {
+  return tree.statements.some(node => ts.isImportDeclaration(node) &&
+    node.moduleSpecifier.text === "node:test" && hasValueImport(node.importClause) && (
+      node.importClause.name || ts.isNamespaceImport(node.importClause.namedBindings ?? {}) ||
+      node.importClause.namedBindings.elements.some(binding => !binding.isTypeOnly &&
+        ["test", "describe", "it"].includes((binding.propertyName ?? binding.name).text))
+    ));
 }
 
-/** The environment switch a PG entry requires, read from the script text. */
-export function optInSwitch(script) {
-  const match = script.match(/process\.env\.([A-Z][A-Z_0-9]+)/);
-  return match ? match[1] : null;
+export const isExecutableSuite = source => executableSuite(parseSource(source));
+
+function unsupportedTestImport(tree) {
+  let found = false;
+  const visit = node => {
+    if (ts.isCallExpression(node) && node.arguments[0]?.text === "node:test" &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword || node.expression.text === "require")) found = true;
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return found;
 }
 
-/**
- * A switch a suite reads to decide whether its own PG stage runs. A suite that
- * self-skips its PG stage still runs in the default entry, so this is reported
- * separately from a script-level opt-in.
- */
+/** File-stage gates are separate annotations; they do not establish a runner. */
 export function fileLevelOptIn(source) {
-  // { skip: process.env.X ... } or { skip: !process.env.X }
   const direct = source.match(/skip\s*:\s*[^,{}]*?process\.env\.([A-Z][A-Z_0-9]+)/);
   if (direct) return direct[1];
-  // const ENABLED = process.env.X  ...  { skip: ENABLED ? false : ... }
   const alias = source.match(/const\s+(\w+)\s*=\s*process\.env\.([A-Z][A-Z_0-9]+)/);
   if (alias && new RegExp(`skip\\s*:\\s*${alias[1]}\\b`).test(source)) return alias[2];
-  // if (process.env.X) { test(...) }
-  const guarded = source.match(/if\s*\(\s*process\.env\.([A-Z][A-Z_0-9]+)\s*\)\s*\{[^}]*\btest\s*\(/);
-  if (guarded) return guarded[1];
-  return null;
+  return source.match(/if\s*\(\s*process\.env\.([A-Z][A-Z_0-9]+)\s*\)\s*\{[^}]*\btest\s*\(/)?.[1] ?? null;
 }
 
 function readPackage(root, dir) {
@@ -76,159 +57,189 @@ function readPackage(root, dir) {
   return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
 }
 
-/** Every script entry, with the files it runs and whether it is a PG opt-in. */
-export function collectEntries(pkg) {
-  const entries = [];
-  for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
-    const files = [];
-    for (const match of script.matchAll(/(?:dist\/test\/|test\/)([\w.-]+\.(?:js|mjs))/g)) {
-      if (!files.includes(match[1])) files.push(match[1]);
-    }
-    if (files.length === 0) continue;
-    const switchName = optInSwitch(script);
-    entries.push({
-      script: name,
-      files,
-      pgOptIn: switchName !== null,
-      switch: switchName,
-      // A script that asserts its switch before doing anything is a real gate.
-      guarded: /node --env-file-if-exists=\.env -e/.test(script) && switchName !== null,
-    });
+// shortcut: only current literal commands and && chains are supported; report
+// UNKNOWN before extending this grammar for a new runner or shell construct.
+function parseScript(script) {
+  const tokens = [];
+  const token = /"([^"]*)"|'([^']*)'|(&&)|([^\s"'&|;<>`$()]+)/y;
+  for (let offset = 0; offset < script.length;) {
+    if (/\s/.test(script[offset])) { offset++; continue; }
+    token.lastIndex = offset;
+    const match = token.exec(script);
+    if (!match) return { files: [], calls: [], switches: [], errors: ["unsupported shell syntax"] };
+    tokens.push(match[3] ? null : match[1] ?? match[2] ?? match[4]);
+    offset = token.lastIndex;
   }
-  return entries;
+  const commands = [[]];
+  for (const item of tokens) item === null ? commands.push([]) : commands.at(-1).push(item);
+  const files = [], calls = [], switches = [], errors = [];
+  for (const [program, ...args] of commands) {
+    if (program === "npm") {
+      const name = args[0] === "run" ? args[1] : args[0] === "test" ? "test" : null;
+      const options = args.slice(args[0] === "run" ? 2 : 1);
+      let workspace = null, all = false, ifPresent = false, supported = Boolean(name);
+      for (let i = 0; i < options.length; i++) {
+        if (["-w", "--workspace"].includes(options[i])) {
+          workspace = options[++i];
+          if (!workspace || workspace.startsWith("-")) supported = false;
+        }
+        else if (options[i].startsWith("--workspace=")) workspace = options[i].slice(12);
+        else if (options[i] === "--workspaces") all = true;
+        else if (options[i] === "--if-present") ifPresent = true;
+        else supported = false;
+      }
+      if (supported && !(all && workspace)) calls.push({ script: name, workspace, all, ifPresent });
+      else errors.push("unsupported npm invocation");
+    } else if (program === "node") {
+      const testFiles = [];
+      const runner = args.includes("--test");
+      let supported = true;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === "--test") continue;
+        else if (arg === "--import") { if (!args[++i]) supported = false; }
+        else if (/^(--env-file-if-exists=|--test-concurrency=)/.test(arg) || arg === "--experimental-strip-types") continue;
+        else if (arg === "-e") {
+          const code = args[++i] ?? "";
+          if (files.length || !/^require\(['"]node:assert\/strict['"]\)\.ok\(/.test(code)) supported = false;
+          else for (const match of code.matchAll(/process\.env\.([A-Z][A-Z_0-9]+)/g)) switches.push(match[1]);
+        } else if (/^(?:dist\/test\/|test\/|scripts\/)[\w.-]+\.(?:js|mjs|ts)$/.test(arg)) testFiles.push(arg);
+        else if (!runner && /^[\w./-]+\.(?:js|mjs)$/.test(arg)) continue;
+        else supported = false;
+      }
+      if (runner && supported && testFiles.length) files.push(...testFiles);
+      else if (!supported || (runner && !testFiles.length)) errors.push("unsupported node invocation");
+    } else if (!["tsc", "next", "vite", "echo"].includes(program)) {
+      errors.push("unsupported command");
+    }
+  }
+  return { files: [...new Set(files)], calls, switches: [...new Set(switches)], errors };
 }
 
-function importEdges(root, testDir, names) {
-  const edges = new Map();
-  for (const name of names) {
-    const source = readFileSync(join(root, testDir, name), "utf8");
-    const imported = new Set();
-    for (const match of source.matchAll(/from\s*["']\.\/([\w.-]+)["']/g)) {
-      const target = match[1];
-      for (const candidate of [target, `${target}.ts`, `${target}.js`]) {
-        if (names.includes(candidate)) imported.add(candidate);
-      }
-    }
-    edges.set(name, imported);
+/** Only explicit runner arguments count; text inside echo/eval/wrappers does not. */
+export function collectEntries(pkg) {
+  return Object.entries(pkg.scripts ?? {}).flatMap(([script, command]) => {
+    const parsed = parseScript(command);
+    return parsed.files.length ? [{ script, ...parsed,
+      pgOptIn: parsed.switches.length > 0, switch: parsed.switches[0] ?? null,
+      guarded: parsed.switches.length > 0,
+    }] : [];
+  });
+}
+
+function walk(roots, edges) {
+  const visited = new Set(), pending = [...roots];
+  while (pending.length) {
+    const id = pending.pop();
+    if (visited.has(id)) continue;
+    visited.add(id);
+    pending.push(...(edges[id] ?? []));
   }
-  return edges;
+  return visited;
 }
 
 export async function analyze({ root = defaultRoot, workspaces = WORKSPACES } = {}) {
-  const result = [];
-  for (const { dir, pkgName, testDir } of workspaces) {
-    const pkg = readPackage(root, dir);
-    if (!pkg) continue;
-    const entries = collectEntries(pkg);
-    const registered = new Set(entries.flatMap(e => e.files));
-    const absolute = join(root, testDir);
-    const names = existsSync(absolute)
-      ? (await readdir(absolute)).filter(n => /\.(ts|mjs)$/.test(n) && !n.endsWith(".d.ts"))
-      : [];
-    const files = names.map(name => {
-      const source = readFileSync(join(absolute, name), "utf8");
-      const compiled = name.replace(/\.ts$/, ".js");
-      const owners = entries.filter(e => e.files.includes(compiled) || e.files.includes(name));
-      return {
-        name,
-        compiled,
-        source,
-        executable: isExecutableSuite(source),
-        registered: owners.length > 0,
-        owners: owners.map(o => o.script),
-        pgOptIn: owners.length > 0 && owners.every(o => o.pgOptIn),
-        switch: owners.length > 0 ? owners.map(o => o.switch).find(Boolean) ?? null : null,
-        fileSwitch: fileLevelOptIn(source),
-      };
-    });
-    files.sort((a, b) => a.name.localeCompare(b.name));
-    const edges = Object.fromEntries([...importEdges(root, testDir, names)]);
-    result.push({ dir, pkgName, entries, files, edges });
+  const packages = [{ dir: "", pkgName: "root", pkg: readPackage(root, "") },
+    ...workspaces.map(ws => ({ ...ws, pkg: readPackage(root, ws.dir) }))].filter(ws => ws.pkg);
+  const scripts = packages.flatMap(ws => Object.entries(ws.pkg.scripts ?? {}).map(([script, command]) => ({
+    id: `${ws.pkgName}:${script}`, workspace: ws.pkgName, script, ...parseScript(command),
+  })));
+  const scriptEdges = {};
+  for (const entry of scripts) {
+    scriptEdges[entry.id] = [];
+    for (const call of entry.calls) {
+      const targets = call.all ? packages.filter(ws => ws.dir) :
+        packages.filter(ws => ws.pkgName === (call.workspace ?? entry.workspace) || (call.workspace && ws.dir === call.workspace));
+      if (!targets.length) entry.errors.push("unresolved workspace");
+      for (const target of targets) {
+        const id = `${target.pkgName}:${call.script}`;
+        if (scripts.some(script => script.id === id)) scriptEdges[entry.id].push(id);
+        else if (!call.ifPresent) entry.errors.push(`unresolved npm script ${id}`);
+      }
+    }
   }
-  return { root, workspaces: result };
+  const offline = walk(scripts.some(e => e.id === "root:check:offline") ? ["root:check:offline"] : [], scriptEdges);
+  const check = walk(scripts.some(e => e.id === "root:check") ? ["root:check"] : [], scriptEdges);
+  const unknownScripts = scripts.filter(e => e.errors.length).map(e => ({
+    workspace: e.workspace, script: e.script, status: "UNKNOWN", reasons: e.errors,
+    defaultReachable: offline.has(e.id), checkReachable: check.has(e.id),
+  }));
+  const result = [];
+  for (const ws of packages.filter(ws => ws.testDir)) {
+    const entries = collectEntries(ws.pkg).map(e => ({ ...e, id: `${ws.pkgName}:${e.script}` }));
+    const absolute = join(root, ws.testDir);
+    const names = existsSync(absolute) ? (await readdir(absolute)).filter(n => /\.(ts|mjs)$/.test(n) && !n.endsWith(".d.ts")) : [];
+    const edges = {};
+    const files = names.sort().map(name => {
+      const source = readFileSync(join(absolute, name), "utf8");
+      const tree = parseSource(source);
+      edges[name] = [];
+      for (const node of tree.statements) {
+        if (!(ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) || !node.moduleSpecifier || node.isTypeOnly) continue;
+        if (ts.isImportDeclaration(node) && node.importClause && !hasValueImport(node.importClause)) continue;
+        if (ts.isExportDeclaration(node) && node.exportClause?.elements?.every(e => e.isTypeOnly)) continue;
+        const path = node.moduleSpecifier.text;
+        if (!path?.startsWith("./")) continue;
+        const target = path.slice(2);
+        const resolved = [target, `${target}.ts`, `${target}.mjs`, target.replace(/\.js$/, ".ts")].find(n => names.includes(n));
+        if (resolved) edges[name].push(resolved);
+      }
+      const compiled = name.replace(/\.ts$/, ".js");
+      const owners = entries.filter(e => e.files.includes(`dist/test/${compiled}`) || e.files.includes(`test/${name}`));
+      return { name, executable: executableSuite(tree), sourceStatus: tree.parseDiagnostics.length || unsupportedTestImport(tree) ? "UNKNOWN" : "KNOWN",
+        registered: owners.length > 0, owners: owners.map(e => e.script), fileSwitch: fileLevelOptIn(source) };
+    });
+    const reachability = new Map(entries.map(e => [e.id, walk(files.filter(file => file.owners.includes(e.script)).map(file => file.name), edges)]));
+    for (const file of files) {
+      const roots = entries.filter(e => reachability.get(e.id).has(file.name));
+      file.reachable = roots.length > 0;
+      file.reachedFrom = roots.map(e => e.id);
+      file.defaultReachable = roots.some(e => offline.has(e.id));
+      file.checkReachable = roots.some(e => check.has(e.id));
+      file.pgOptIn = roots.length > 0 && roots.every(e => e.pgOptIn);
+      file.switches = [...new Set(roots.flatMap(e => e.switches))];
+    }
+    result.push({ dir: ws.dir, pkgName: ws.pkgName, entries, files, edges });
+  }
+  return { root, workspaces: result, unknownScripts, roots: { offline: [...offline], check: [...check] } };
 }
 
-/**
- * Classify every file into one of:
- *   default              - runs with the offline entry
- *   default-file-optin   - runs with the offline entry, but its own PG stage is
- *                          gated by a switch the suite reads itself
- *   pg-opt-in            - only reachable through a script that requires a switch
- *   helper               - no runner bindings; reached through an importing suite
- *   helper-unreferenced  - no runner bindings and no importer (dead support module)
- *   unregistered         - has runner bindings, no script runs it, nothing imports it
- */
 export function classify(analysis) {
   const rows = [];
-  for (const ws of analysis.workspaces) {
-    const importedBy = new Map();
-    for (const [from, tos] of Object.entries(ws.edges)) {
-      for (const to of tos) {
-        if (!importedBy.has(to)) importedBy.set(to, []);
-        importedBy.get(to).push(from);
-      }
-    }
-    for (const file of ws.files) {
-      const importers = importedBy.get(file.name) ?? [];
-      let category;
-      if (!file.executable) {
-        category = importers.length > 0 ? "helper" : "helper-unreferenced";
-      } else if (file.registered && file.pgOptIn) {
-        category = "pg-opt-in";
-      } else if (file.registered && file.fileSwitch) {
-        category = "default-file-optin";
-      } else if (file.registered) {
-        category = "default";
-      } else if (importers.length > 0) {
-        category = "helper-imported-by-suite";
-      } else {
-        category = "unregistered";
-      }
-      rows.push({
-        workspace: ws.pkgName,
-        file: file.name,
-        category,
-        entries: file.owners,
-        switch: file.switch ?? file.fileSwitch,
-        importedBy: importers,
-      });
-    }
+  for (const ws of analysis.workspaces) for (const file of ws.files) {
+    const importedBy = Object.entries(ws.edges).filter(([, tos]) => tos.includes(file.name)).map(([from]) => from);
+    let category;
+    if (file.sourceStatus === "UNKNOWN") category = "UNKNOWN";
+    else if (!file.executable) category = file.reachable ? "helper" : importedBy.length ? "helper-unreachable" : "helper-unreferenced";
+    else if (!file.reachable) category = "unregistered";
+    else if (file.defaultReachable) category = file.fileSwitch ? "default-file-optin" : "default";
+    else if (file.checkReachable) category = file.fileSwitch ? "check-only-file-optin" : "check-only";
+    else if (file.pgOptIn) category = "pg-opt-in";
+    else category = file.fileSwitch ? "manual-file-optin" : "manual";
+    rows.push({ workspace: ws.pkgName, file: file.name, category, entries: file.owners,
+      registered: file.registered, reachable: file.reachable, reachedFrom: file.reachedFrom,
+      defaultReachable: file.defaultReachable, checkReachable: file.checkReachable,
+      switch: file.switches[0] ?? file.fileSwitch, fileSwitch: file.fileSwitch, scriptSwitches: file.switches, importedBy });
   }
   return rows;
 }
 
-export function findUnregistered(rows) {
-  return rows.filter(r => r.category === "unregistered");
-}
+export const findUnregistered = rows => rows.filter(row => row.category === "unregistered");
 
-// --- CLI ---------------------------------------------------------------------
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const analysis = await analyze();
   const rows = classify(analysis);
   const unregistered = findUnregistered(rows);
-  const tally = rows.reduce((acc, r) => ((acc[r.category] = (acc[r.category] ?? 0) + 1), acc), {});
-  const report = {
-    schema: "wave4-L-test-entry-classification-v1",
-    atUtc: new Date().toISOString(),
-    node: process.version,
-    counts: tally,
-    entries: analysis.workspaces.map(w => ({
-      workspace: w.pkgName,
-      scripts: w.entries.map(e => ({
-        script: e.script,
-        files: e.files.length,
-        pgOptIn: e.pgOptIn,
-        switch: e.switch,
-        guarded: e.guarded,
-      })),
-    })),
-    unregistered: unregistered.map(u => `${u.workspace}:${u.file}`),
-    helperUnreferenced: rows.filter(r => r.category === "helper-unreferenced").map(r => `${r.workspace}:${r.file}`),
-  };
-  console.log(JSON.stringify(report, null, 2));
-  if (unregistered.length > 0) {
-    console.error(`FAIL: ${unregistered.length} executable suite(s) are not registered in any package script.`);
-    process.exit(1);
-  }
-  console.log("OK: every executable suite is registered.");
+  const unknown = rows.filter(row => row.category === "UNKNOWN");
+  const unknownReachable = analysis.unknownScripts.filter(row => row.defaultReachable || row.checkReachable);
+  console.log(JSON.stringify({
+    schema: "wave4-L-test-entry-classification-v2", atUtc: new Date().toISOString(), node: process.version,
+    counts: rows.reduce((sum, row) => (sum[row.category] = (sum[row.category] ?? 0) + 1, sum), {}),
+    roots: analysis.roots, unknownScripts: analysis.unknownScripts,
+    unregistered: unregistered.map(row => `${row.workspace}:${row.file}`), unknown,
+  }, null, 2));
+  if (unregistered.length || unknown.length || unknownReachable.length || !analysis.roots.offline.length) {
+    console.error("FAIL: unregistered suites or UNKNOWN source/default/check entry coverage.");
+    process.exitCode = 1;
+  } else console.log("OK: every executable suite is reachable from an explicit runner; default/check scopes are traced.");
 }

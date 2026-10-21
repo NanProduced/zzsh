@@ -52,6 +52,9 @@ test("an unregistered executable suite is detected without importing any invento
   try {
     const api = join(root, "apps/api");
     await mkdir(join(api, "test"), { recursive: true });
+    await writeFile(join(root, "package.json"), JSON.stringify({
+      name: "zzsh", scripts: { "check:offline": "npm run test:compiled -w @zzsh/api" },
+    }));
     await writeFile(join(api, "package.json"), JSON.stringify({
       name: "@zzsh/api",
       scripts: { "test:compiled": "node --test dist/test/registered.test.js" },
@@ -75,6 +78,92 @@ test("an unregistered executable suite is detected without importing any invento
   }
 });
 
+test("runner bindings distinguish value aliases and namespaces from type-only imports", async () => {
+  const { isExecutableSuite } = await import("./check-test-entries.mjs");
+  const cases = [
+    ['import { test as check } from "node:test";', true],
+    ['import { describe as group, it as check } from "node:test";', true],
+    ['import check from "node:test";', true],
+    ['import * as runner from "node:test"; runner.test("case", () => {});', true],
+    ['import { type test, type TestContext } from "node:test";', false],
+    ['import type { test as check } from "node:test";', false],
+    ['import type check from "node:test";', false],
+    ['import type * as runner from "node:test";', false],
+    ['import { before, type TestContext } from "node:test";', false],
+    ['// import { test } from "node:test";\nexport const helper = 1;', false],
+  ];
+  for (const [source, expected] of cases) assert.equal(isExecutableSuite(source), expected, source);
+});
+
+async function entryFixture(files, scripts, run) {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { analyze, classify } = await import("./check-test-entries.mjs");
+  const root = await mkdtemp(join(tmpdir(), "zzsh-entry-check-"));
+  try {
+    await mkdir(join(root, "apps/api/test"), { recursive: true });
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "zzsh", scripts: {
+      "check:offline": "npm run offline", offline: "npm test -w @zzsh/api",
+      check: "npm run check:offline && npm run test:db:compiled -w @zzsh/api",
+    } }));
+    await writeFile(join(root, "apps/api/package.json"), JSON.stringify({ name: "@zzsh/api", scripts }));
+    for (const [name, source] of Object.entries(files)) await writeFile(join(root, "apps/api/test", name), source);
+    const analysis = await analyze({ root, workspaces: [{ dir: "apps/api", pkgName: "@zzsh/api", testDir: "apps/api/test" }] });
+    await run(classify(analysis), analysis);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("only actual runners register suites; root npm calls separate offline, check, manual and guarded entries", async () => {
+  const suite = 'import { test } from "node:test"; throw new Error("INVENTORY_MUST_NOT_IMPORT");';
+  await entryFixture({
+    "offline.test.ts": suite, "db-only.test.ts": suite,
+    "manual.test.ts": suite + ' test("PG", { skip: !process.env.IM_PG_TEST }, () => {});',
+    "guarded.test.ts": suite, "printed.test.ts": suite, "unknown.test.ts": suite,
+    "unknown-import.test.ts": 'const { test } = require("node:test");',
+  }, {
+    test: "npm run test:compiled", "test:compiled": "node --import ../../scripts/assert-offline-env.mjs --test dist/test/offline.test.js",
+    "test:db:compiled": "node --test dist/test/db-only.test.js",
+    manual: "node --env-file-if-exists=.env --test dist/test/manual.test.js",
+    guarded: 'node --env-file-if-exists=.env -e "require(\'node:assert/strict\').ok(process.env.PG_OPT_IN===\'1\')" && node --test dist/test/guarded.test.js',
+    "print-path": "echo dist/test/printed.test.js",
+    unsupported: "unknown-runner dist/test/unknown.test.js",
+  }, (rows, analysis) => {
+    const byName = Object.fromEntries(rows.map(row => [row.file, row]));
+    assert.equal(byName["offline.test.ts"].category, "default");
+    assert.equal(byName["db-only.test.ts"].category, "check-only");
+    assert.equal(byName["manual.test.ts"].category, "manual-file-optin");
+    assert.equal(byName["guarded.test.ts"].category, "pg-opt-in");
+    assert.equal(byName["printed.test.ts"].category, "unregistered");
+    assert.equal(byName["unknown.test.ts"].category, "unregistered");
+    assert.equal(byName["unknown-import.test.ts"].category, "UNKNOWN");
+    assert.ok(analysis.unknownScripts.some(row => row.script === "unsupported" && row.status === "UNKNOWN"));
+  });
+});
+
+test("registration follows runtime import reachability through helpers, never disconnected chains, cycles or type edges", async () => {
+  const suite = 'import { test } from "node:test"; throw new Error("INVENTORY_MUST_NOT_IMPORT");';
+  await entryFixture({
+    "root.test.ts": suite + ' import "./reachable-helper.js"; import type { Marker } from "./type-edge.test";',
+    "reachable-helper.ts": 'export { marker } from "./child.test";',
+    "child.test.ts": suite + ' export const marker = 1;',
+    "unused-helper.ts": 'import "./orphan.test";', "orphan.test.ts": suite,
+    "cycle-a.test.ts": suite + ' import "./cycle-b.test";',
+    "cycle-b.test.ts": suite + ' import "./cycle-a.test";',
+    "type-edge.test.ts": suite + ' export type Marker = string;',
+  }, { test: "node --test dist/test/root.test.js", "test:db:compiled": "node --test dist/test/root.test.js" }, rows => {
+    const byName = Object.fromEntries(rows.map(row => [row.file, row]));
+    assert.equal(byName["child.test.ts"].category, "default");
+    assert.equal(byName["reachable-helper.ts"].category, "helper");
+    for (const name of ["orphan.test.ts", "cycle-a.test.ts", "cycle-b.test.ts", "type-edge.test.ts"]) {
+      assert.equal(byName[name].category, "unregistered", name);
+      assert.equal(byName[name].reachable, false, name);
+    }
+  });
+});
+
 test("the 5 order PG helpers are helpers, not unregistered default suites", async () => {
   const { analyze, classify, findUnregistered } = await import("./check-test-entries.mjs");
   const analysis = await analyze();
@@ -93,6 +182,9 @@ test("the 5 order PG helpers are helpers, not unregistered default suites", asyn
     // order-reservation suite imports them.
     assert.equal(row.category, "helper", name);
     assert.ok(row.importedBy.includes("order-reservation.test.ts"), `${name} imported by order-reservation`);
+    assert.equal(row.defaultReachable, false, `${name} is not in check:offline`);
+    assert.equal(row.checkReachable, true, `${name} is in the additional root check DB entry`);
+    assert.deepEqual(row.reachedFrom, ["@zzsh/api:test:db:compiled"], name);
   }
   // The real repository has no unregistered executable suite.
   assert.deepEqual(findUnregistered(rows).map(r => `${r.workspace}:${r.file}`), []);
