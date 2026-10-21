@@ -127,7 +127,6 @@ type UserListRow = {
   provider: string | null;
   providerReference: string | null;
   migrationLegacyId: string | null;
-  migrationSourceCreatedAt: string | null;
   resourceAccountCount: number;
   resourcePublishedCount: number;
   currentOrderCount: number;
@@ -247,8 +246,11 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer, origina
 }
 
 // Audit-dependent membership is decided before pagination; other reads batch audits for the page.
+// MIGRATED is SOURCE_SQL's first branch and depends only on identity state, so it needs no audit here.
 function filterConsultsMigrationAudit(filter: UserDirectoryFilter): boolean {
-  return Boolean(filter.legacyId || filter.search || filter.source || filter.registrationTime === "ORIGINAL");
+  return Boolean(filter.legacyId || filter.search
+    || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED)
+    || filter.registrationTime === "ORIGINAL");
 }
 
 export async function listUserDirectory(
@@ -317,9 +319,12 @@ export async function listUserDirectory(
   }
   if (filter.phone) conditions.push(`u."phoneNumber" = $${values.push(filter.phone)}`);
   if (filter.accountStatus) conditions.push(`(${ACCOUNT_STATUS_SQL})=$${values.push(filter.accountStatus)}`);
-  if (filter.source) conditions.push(`(${SOURCE_SQL})=$${values.push(filter.source)}`);
+  if (filter.source === USER_DIRECTORY_SOURCE.MIGRATED) conditions.push(`s.provider='${LEGACY_PROVIDER}'`);
+  else if (filter.source) conditions.push(`(${SOURCE_SQL})=$${values.push(filter.source)}`);
   if (filter.identityStatus) conditions.push(`COALESCE(s.identity_status,'UNKNOWN')=$${values.push(filter.identityStatus)}`);
   if (filter.ageStatus) conditions.push(`COALESCE(s.age_status,'UNKNOWN')=$${values.push(filter.ageStatus)}`);
+  // Join identity state only when a membership predicate reads it; the page projection joins it after the bound page.
+  const needsIdentity = conditions.some(condition => /\bs\./.test(condition));
   const membershipConditions = [...conditions];
   if (filter.registeredFrom) {
     conditions.push(`${timeColumn} >= $${values.push(filter.registeredFrom)}::timestamptz`);
@@ -352,7 +357,6 @@ export async function listUserDirectory(
               ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
               ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
               ${original ? "selected.migration_legacy_id" : "mig.legacy_id"} AS "migrationLegacyId",
-              ${original ? "selected.migration_source_created_at" : "mig.source_created_at"} AS "migrationSourceCreatedAt",
               CASE WHEN $3::boolean THEN resource_counts.account_count ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $3::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
               CASE WHEN $4::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
@@ -361,11 +365,12 @@ export async function listUserDirectory(
 
   const consultsMigration = filterConsultsMigrationAudit(filter);
   const countUsesOriginalTime = original && Boolean(filter.registeredFrom || filter.registeredTo || filter.registeredBefore);
-  const countConsultsMigration = Boolean(filter.legacyId || filter.search || filter.source || countUsesOriginalTime);
+  const countConsultsMigration = Boolean(filter.legacyId || filter.search
+    || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED) || countUsesOriginalTime);
   const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
-           e.details->>'legacyId' AS legacy_id,
-           e.details->>'sourceCreatedAt' AS source_created_at
-           ${original ? `,e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,
+           e.details->>'legacyId' AS legacy_id
+           ${original ? `,e.details->>'sourceCreatedAt' AS source_created_at,
+             e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,
              e.details->>'sourceDigest' AS source_digest,e.details->>'evidenceRef' AS evidence_ref` : ""}
       FROM zzsh_iam.audit_event e
       ${consultsMigration ? "" : "JOIN page candidate ON candidate.id = e.object_id"}
@@ -373,34 +378,33 @@ export async function listUserDirectory(
        ${original ? "AND e.outcome='SUCCESS'" : ""}
      ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
   // The validated timestamp is expensive; materialise narrow facts once before applying both bounds and sorting.
-  const registrationQuery = `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql()} AS registered_at,
-      mig.legacy_id AS migration_legacy_id,mig.source_created_at AS migration_source_created_at
+  // The count only reads the validated date; page projection needs the remaining display columns.
+  const registrationFactsSql = (countOnly: boolean) => `SELECT ${countOnly ? "" : `u.id,u."createdAt" AS created_at,`}${originalRegistrationSql()} AS registered_at${countOnly ? "" : ",mig.legacy_id AS migration_legacy_id"}
     FROM zzsh_auth_user."user" u
     LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
     LEFT JOIN migration mig ON mig.object_id=u.id
     WHERE ${membershipConditions.join(" AND ") || "TRUE"}`;
   const pageQuery = materializeDates
     ? `SELECT registration.id,registration.created_at AS "createdAt",registration.registered_at,
-        registration.migration_legacy_id,registration.migration_source_created_at
+        registration.migration_legacy_id
        FROM registration_dates registration
        WHERE ${[...dateConditions,cursorCondition.replaceAll("u.id", "registration.id")].join(" AND ")}
        ORDER BY ${order.replaceAll("u.id", "registration.id")}
        LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`
-    : `SELECT u.id, u."createdAt"${original ? ",registration.registered_at,mig.legacy_id AS migration_legacy_id,mig.source_created_at AS migration_source_created_at" : ""}
+    : `SELECT u.id
            FROM zzsh_auth_user."user" u
-           LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
+           ${needsIdentity ? `LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id` : ""}
            ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
-           ${original ? `LEFT JOIN LATERAL (SELECT ${originalRegistrationSql()} AS registered_at) registration ON true` : ""}
           WHERE ${[...conditions, cursorCondition].join(" AND ")}
           ORDER BY ${order}
            LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`;
   const countSql = countUsesOriginalTime
-    ? `WITH migration AS NOT MATERIALIZED (${migrationQuery}),registration_dates AS MATERIALIZED (${registrationQuery})
+    ? `WITH migration AS NOT MATERIALIZED (${migrationQuery}),registration_dates AS MATERIALIZED (${registrationFactsSql(true)})
        SELECT count(*)::int AS total FROM registration_dates registration
        WHERE ${dateConditions.join(" AND ")}`.replace(/\$(\d+)/g,(_, index: string)=>`$${Number(index)-4}`)
     : `${countConsultsMigration ? `WITH migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery})` : ""}
        SELECT count(*)::int AS total FROM zzsh_auth_user."user" u
-       LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
+       ${needsIdentity ? `LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id` : ""}
        ${countConsultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
        WHERE ${countConditions.join(" AND ") || "TRUE"}`;
   const total = (await client.query<{ total: number }>(
@@ -409,7 +413,7 @@ export async function listUserDirectory(
   )).rows[0]!.total;
   // Narrow keys avoid materialising full user/identity rows before the top-N operation.
   const sql = `WITH ${consultsMigration
-      ? `migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery}), ${materializeDates ? `registration_dates AS MATERIALIZED (${registrationQuery}),` : ""} page AS MATERIALIZED (${pageQuery})`
+      ? `migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery}), ${materializeDates ? `registration_dates AS MATERIALIZED (${registrationFactsSql(false)}),` : ""} page AS MATERIALIZED (${pageQuery})`
       : `page AS MATERIALIZED (${pageQuery}), migration AS MATERIALIZED (${migrationQuery})`}
        SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}
          FROM page selected

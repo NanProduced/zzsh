@@ -309,6 +309,13 @@ export type ListingDetailPrefetch = {
   /** Answer to the publication probe, already resolved for this page. */
   hasPublication?: boolean;
   shared?: ListingPageShared;
+  /** This request's public projection of one account. The admin detail path and
+   *  the supervision facts path need the same account's public listing, and the
+   *  projection is one expensive read; the memo serves both. A null result
+   *  means "no public listing" (the read answered 404). */
+  publicListing?: (
+    account: PublishingAccount,
+  ) => Promise<Record<string, unknown> | null>;
 };
 
 /** One page of candidates: accounts, current versions and the native-publication
@@ -345,6 +352,48 @@ export function listingCandidatePage(client: PoolClient) {
         )
       ).rows;
       for (const row of rows) published.add(row.account_id);
+    },
+  };
+}
+
+/** One request's public listing projection per account. The admin detail path
+ *  and the supervision facts path ask for the same account's public listing;
+ *  reading it once per request keeps one projection per account instead of one
+ *  per caller. A null result means "no public listing" (the read answered 404);
+ *  any other failure still throws. */
+export type PublicListingMemo = {
+  read(
+    account: PublishingAccount,
+    prefetch?: ListingDetailPrefetch,
+  ): Promise<Record<string, unknown> | null>;
+};
+
+export function publicListingMemo(
+  client: PoolClient,
+  gate: SupplyGateReader,
+): PublicListingMemo {
+  const pending = new Map<string, Promise<Record<string, unknown> | null>>();
+  return {
+    read: (account, prefetch) => {
+      let open = pending.get(account.id);
+      if (!open) {
+        open = listingDetail(
+          client,
+          account,
+          "public",
+          gate,
+          "public",
+          account,
+          false,
+          "DETAIL",
+          prefetch,
+        ).catch((error) => {
+          if ((error as { status?: number }).status === 404) return null;
+          throw error;
+        });
+        pending.set(account.id, open);
+      }
+      return open;
     },
   };
 }
@@ -1516,7 +1565,11 @@ async function resolvePublicMediaRoute(
   prefetch?: ListingDetailPrefetch,
 ): Promise<PublicMediaRoute> {
   let listing: Record<string, unknown> | null = null;
-  try { listing = await listingDetail(client, publicAccount, "public", gate, "public", publicAccount, false, "DETAIL", prefetch); }
+  try {
+    listing = prefetch?.publicListing
+      ? await prefetch.publicListing(publicAccount)
+      : await listingDetail(client, publicAccount, "public", gate, "public", publicAccount, false, "DETAIL", prefetch);
+  }
   catch (error) { if ((error as { status?: number }).status !== 404) throw error; }
   return {
     listingPublic: Boolean(listing),
@@ -1647,8 +1700,15 @@ export async function readPublicListing(
         )
       ).rowCount,
     );
-  if (hasPublication)
+  if (hasPublication) {
+    // The request's public projection is the same read this path would make.
+    if (prefetch?.publicListing && !strictReadErrors && mode === "DETAIL") {
+      const listing = await prefetch.publicListing(a);
+      if (!listing) throw notFound();
+      return listing;
+    }
     return listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode, prefetch);
+  }
   if (mode === "RENTABLE") throw notFound();
   return readLegacyListing(client, a.id, admission, detailIndex);
 }

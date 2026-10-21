@@ -58,6 +58,8 @@ export class DirectorySqlFixture extends EventEmitter {
       const parameter=(pattern:RegExp)=>{const match=sql.match(pattern);return match?values[Number(match[1])-1]:undefined;};
       const source=parameter(/\(CASE WHEN s.provider='[^']+'[\s\S]*?END\)=\$(\d+)/);
       if(source)rows=rows.filter(row=>(row.provider==='legacy_mysql_restore'?'MIGRATED':row.provider==='none'&&!row.migrationLegacyId?'LOCAL':'UNKNOWN')===source);
+      // MIGRATED membership is the provider-only branch, so the service no longer emits the CASE for it.
+      if(/(?:WHERE|AND) s\.provider='legacy_mysql_restore'/.test(sql))rows=rows.filter(row=>row.provider==='legacy_mysql_restore');
       const status=parameter(/\(CASE WHEN s.user_id IS NULL[\s\S]*?END\)=\$(\d+)/);
       if(status)rows=rows.filter(row=>(row.accountStatus===null?'UNKNOWN':['CANCELLED','DEACTIVATED'].includes(row.accountStatus)?row.accountStatus:row.suspended?'RESTRICTED':row.accountStatus)==status);
       const identity=parameter(/COALESCE\(s.identity_status,'UNKNOWN'\)=\$(\d+)/);if(identity)rows=rows.filter(row=>row.identityStatus===identity);
