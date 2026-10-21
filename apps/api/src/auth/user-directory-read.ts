@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { Client } from "pg";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { SecurityApiError } from "./security-core";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse } from "./auth-security";
@@ -39,6 +40,28 @@ export async function withDirectoryRead(
   }
 }
 
+/* Cancelling an in-flight read stops this request's SQL promptly instead of holding the pooled
+   backend until the statement budget; a one-shot connection cancels only our own backend's query. */
+async function cancelOwnBackendQuery(pool: Pool, backendPid: number): Promise<void> {
+  const options = (pool as unknown as { options?: Record<string, unknown> }).options;
+  if (typeof options?.host !== "string" || typeof options?.user !== "string") return;
+  const killer = new Client({
+    host: options.host as string,
+    port: options.port as number,
+    database: options.database as string,
+    user: options.user as string,
+    password: options.password as string,
+    connectionTimeoutMillis: 2_000,
+    application_name: "zzsh-api-directory-cancel",
+  });
+  try {
+    await killer.connect();
+    await killer.query("SELECT pg_cancel_backend($1)", [backendPid]);
+  } finally {
+    await killer.end().catch(() => undefined);
+  }
+}
+
 // Dedicated to read-only directory routes; the shared writer/COMMIT UNKNOWN transaction stays intact.
 export async function withDirectoryReadTransaction<T>(
   pool: Pool,
@@ -47,20 +70,50 @@ export async function withDirectoryReadTransaction<T>(
   retireAfterRead = false,
 ): Promise<T> {
   signal.throwIfAborted();
+  /* Abort while waiting for a lease: the waiter rejects at once; a lease that arrives late is
+     retired without ever running this request's work. */
+  let waitAborted = false;
+  let onAbortWait: () => void = () => undefined;
+  const waitAbort = new Promise<never>((_, reject) => {
+    onAbortWait = () => { waitAborted = true; reject(signal.reason ?? failure(499, "Request closed")); };
+  });
+  if (signal.aborted) onAbortWait(); else signal.addEventListener("abort", onAbortWait, { once: true });
+  const connect = pool.connect();
+  connect.then(late => { if (waitAborted) late.release(true); }, () => undefined);
   let client: PoolClient;
-  try { client = await pool.connect(); } // Existing pool acquisition budget remains 2s.
-  catch (error) { throw Object.assign(failure(503, "User directory connection unavailable"), { cause: error }); }
+  try { client = await Promise.race([connect, waitAbort]); } // Existing pool acquisition budget remains 2s.
+  catch (error) {
+    if (waitAborted) throw signal.reason ?? failure(499, "Request closed");
+    throw Object.assign(failure(503, "User directory connection unavailable"), { cause: error });
+  } finally {
+    signal.removeEventListener("abort", onAbortWait);
+  }
   let started = false;
   let rollbackAttempted = false;
   let destroy = false;
   let connectionError: Error | undefined;
+  let inFlight = 0;
+  let cancelIssued = false;
   const onError = (error: Error) => { connectionError ??= error; };
   client.on("error", onError);
+  const backendPid = (client as unknown as { processID?: number }).processID ?? null;
+  /* A request abort while a statement is in flight cancels that statement on its own backend;
+     the cancelled query then rejects with 57014 and the read rolls back on a live connection.
+     If the cancel path itself is unavailable, the in-tx statement_timeout still bounds the SQL. */
+  const onAbortQuery = () => {
+    if (inFlight > 0 && backendPid !== null && !cancelIssued) {
+      cancelIssued = true;
+      void cancelOwnBackendQuery(pool, backendPid).catch(() => undefined);
+    }
+  };
+  signal.addEventListener("abort", onAbortQuery);
   const guarded = new Proxy(client, { get(target, key) {
     if (key === "query") return (...args: unknown[]) => {
       signal.throwIfAborted();
       if (connectionError) throw connectionError;
-      return Reflect.apply(target.query, target, args);
+      inFlight++;
+      try { return Promise.resolve(Reflect.apply(target.query, target, args)).finally(() => { inFlight--; }); }
+      catch (error) { inFlight--; throw error; }
     };
     return Reflect.get(target, key, target);
   } });
@@ -86,11 +139,17 @@ export async function withDirectoryReadTransaction<T>(
       try { await client.query("ROLLBACK"); }
       catch { destroy = true; }
     } else destroy = true;
+    /* An aborted request keeps its own 499/504 reason; the cancelled statement's 57014 is the
+       cancellation evidence, not a budget failure. */
+    if (signal.aborted) throw signal.reason ?? error;
     if ((error as { code?: string })?.code === "57014") throw failure(504, "User directory SQL budget exceeded");
     throw error;
   } finally {
+    signal.removeEventListener("abort", onAbortQuery);
     client.off("error", onError);
-    // shortcut: isolate original-date reads until P-Q7B resolves the measured lease-reuse cost.
+    // Retire the lease after the heavy transient-allocation ORIGINAL-mode reads: the enlarged backend
+    // arena is not resettable by DISCARD/RESET (H evidence), so a reused backend would run the next
+    // identical read measurably slower and can cross the 3s statement budget.
     client.release(destroy || connectionError !== undefined || retireAfterRead);
   }
 }
