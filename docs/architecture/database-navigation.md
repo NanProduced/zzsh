@@ -1,14 +1,16 @@
 # 数据库结构导航
 
+源：[业务迁移目录](../../apps/api/migrations/business) · [迁移执行](../../apps/api/src/database/business-migrations.ts) · [启动身份断言](../../apps/api/src/database/business.ts) · [结构与权限核对](acl-comparison.md)
+
 ## 迁移基线与结构事实
 
 业务迁移位于 `apps/api/migrations/business/`，共 **91 份 SQL**，`meta/_journal.json` **91 条**登记（idx 0…90，tag 与文件名一一对应）。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
-下列静态计数只覆盖 0000–0087。0088、0089 追加皮肤元数据与推荐押金合同，不据旧计数推断当前完整结构或 ACL。
+下列计数是 0000–0090 全链的静态扫描结果（**不是真实 PostgreSQL 目录核验**）：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
 
-结构事实（静态扫描，**不是真实 PostgreSQL 目录核验**）：`CREATE TABLE` 146（含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3、函数定义 218 处、`CREATE TRIGGER` 211 处、`DROP TRIGGER` 49、`DROP COLUMN` 2（`zzsh_iam.im_support_presence.capacity`、`zzsh_order.settlement_posting.payment_disposition`）、`CREATE INDEX` 定义出现 126 次（普通 90 + UNIQUE 36）对应 124 个不同索引名。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
+> 计数用于导航，不替代逐对象清单。创建/修改/删除/重建事件、源文件行号和跨 schema 依赖由按需生成的静态结构索引给出；该索引是只读派生资料，不进入迁移链，也不随正式文档发布。
 
-授权关键字计数要分清三种口径，任一都不是当前数据库 ACL 清单：`GRANT` 原文出现 7 次（6 条注释 + 1 个权限代码字符串 `'admin.permission.grant'`），**顶层 `GRANT` 语句 0 条**；`REVOKE` 原文出现 87 次（2 注释 + 21 字符串字面量 + 64 处其他），**顶层 `REVOKE` 语句 64 条**。当前 ACL 期望清单属独立演练，不在本文件范围。
+授权关键字计数不是 ACL 清单：迁移目录中顶层 `GRANT` 语句 0 条；顶层 `REVOKE … FROM PUBLIC` 语句 64 条（静态扫描）。函数体、动态 `EXECUTE` 字符串和注释中的关键字不计入顶层语句，也不代表当前数据库权限。当前 ACL 期望清单属独立演练，不在本文件范围。
 
 7 个业务 schema：`zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`、`zzsh_credit`。
 
@@ -34,25 +36,47 @@
 | 0088–0089 | 皮肤品质证据、典藏/默认状态与素材来源；按类型和品质配置的推荐押金合同 |
 | 0090 | 个人流水与历史财务观察按主体读取的复合索引，keyset ID 使用 C collation |
 
+### 按 schema 查对象（静态、当前存在）
+
+| schema | 职责 | 表 | 序列 | 函数 | 触发器 | 显式索引 | 约束 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `zzsh_iam` | 身份、管理权限、审批、审计、IM 客服、会员成长 | 32 | 1 | 16 | 14 | 34 | 201 |
+| `zzsh_auth_user` | 用户认证（Better Auth） | 5 | 0 | 0 | 7 | 5 | 13 |
+| `zzsh_auth_admin` | 管理员认证（5 张 `LIKE` 克隆表） | 5 | 0 | 0 | 7 | 5 | 13 |
+| `zzsh_supply` | 目录、皮肤、账号、发布、计价、条款、媒体 | 41 | 1 | 49 | 50 | 29 | 365 |
+| `zzsh_content` | 内容条目、版本、轮播 | 3 | 0 | 0 | 0 | 5 | 29 |
+| `zzsh_order` | 订单、占用、云信建群、结算、资金观察、提现 | 57 | 1 | 114 | 151 | 45 | 679 |
+| `zzsh_credit` | 信用状态/事件/恢复、号主保证金 | 3 | 0 | 0 | 3 | 0 | 32 |
+
+`zzsh_business_meta`（业务迁移记账）和 `zzsh_meta`（test metadata 线）由 migrator 使用，不是这 7 个业务 schema 的一部分；`zzsh_credit` 不在 `BUSINESS_SCHEMAS` 的 USAGE 循环内，走独立授权分支。
+
+按对象查源头的顺序：先按 `schema.table` 找到 `CREATE TABLE` 所在迁移，再沿该对象的后续 `ALTER TABLE`/`DROP`/重建事件读；函数按输入类型签名、触发器按目标表+名称、索引按 schema+名称区分。创建位置只是定义出现处，不是当前完整定义。
+
 ## 权限与不可变性模型
 
 没有行级安全（RLS）。权限由两部分组成：
 
 1. 迁移 SQL 内的 `REVOKE … FROM PUBLIC`，以及函数体内的 `REVOKE ALL … FROM PUBLIC`；
-2. 运行时列级授权：`apps/api/src/database/business-migrations.ts` 的 `applyRuntimePrivileges`，含 17 个 `to_regclass` 可选分支与 2 个存在性探测，另有 7 个 `configure*` 收敛函数（`configureAdminSecurityCommandPrivileges`、`configureSkinIdentityPrivileges`、`configureDistributionFinancialPrivileges`、`configureCreditGuaranteePrivileges`、`configureMembershipGrowthPrivileges`、`configureLegacyGrowthCoveragePrivileges`、`configureContinuityFinancePrivileges`）。
+2. 运行时列级授权：`apps/api/src/database/business-migrations.ts` 的 `applyRuntimePrivileges`，含多个 `to_regclass`/`to_regprocedure` 存在性分支，另有 7 个 `configure*` 收敛函数（`configureAdminSecurityCommandPrivileges`、`configureSkinIdentityPrivileges`、`configureDistributionFinancialPrivileges`、`configureCreditGuaranteePrivileges`、`configureMembershipGrowthPrivileges`、`configureLegacyGrowthCoveragePrivileges`、`configureContinuityFinancePrivileges`）。
 
 `BUSINESS_SCHEMAS`（USAGE 授权循环）覆盖 `zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`；`zzsh_credit` 有单独分支（`GRANT USAGE ON SCHEMA zzsh_credit` + 列级 GRANT/REVOKE），不在该数组内。
 
-启动身份断言见 `apps/api/src/database/business.ts`，**两件事要分开看**：
+启动身份断言见 `apps/api/src/database/business.ts`，**三件事要分开看**：
 
-- `BUSINESS_SCHEMA_NAMES`（`business.ts:68`）列 **8 个 schema**（含 `zzsh_business_meta` 与 `zzsh_content`），用于归属查询（"当前角色是否拥有任一业务 schema / 任一业务关系"）。
-- 同一查询里的 **CREATE 否定探针只有 6 个**（`business.ts:97-102`：`zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`）。`zzsh_business_meta` 与 `zzsh_credit` **没有**在这条查询里逐个检查 CREATE；`zzsh_credit` 的运行授权由 `configureCreditGuaranteePrivileges` 独立处理。因此不能表述为"对 8 个 schema 都查 CREATE，任一有 CREATE 必拒启动"。
-
-审计表 `zzsh_iam.audit_event` 的 UPDATE/DELETE/TRUNCATE 同样是否定断言。
+- `BUSINESS_SCHEMA_NAMES`（`business.ts:78`）列 **8 个 schema**（含 `zzsh_business_meta` 与 `zzsh_content`），用于归属查询（"当前角色是否拥有任一业务 schema / 任一业务关系"）；它是归属集合，不是授权集合。
+- 同一查询里的 **CREATE 否定探针只有 6 个**（`business.ts:107-112`：`zzsh_iam`、`zzsh_auth_user`、`zzsh_auth_admin`、`zzsh_supply`、`zzsh_content`、`zzsh_order`）。`zzsh_business_meta` 与 `zzsh_credit` **没有**在这条查询里逐个检查 CREATE；`zzsh_credit` 的运行授权由 `configureCreditGuaranteePrivileges` 独立处理。因此不能表述为"对 8 个 schema 都查 CREATE，任一有 CREATE 必拒启动"。
+- 审计表 `zzsh_iam.audit_event` 的 UPDATE/DELETE/TRUNCATE 是另一组否定断言，不属于上述 schema CREATE 探针。
 
 不可变性由 **ACL 与触发器共同承担**，不是仅靠其一：运行时角色对审计表、`rule_release`、多数资金表没有 UPDATE/DELETE 权限（列级 GRANT 收敛），同时 `finance_immutable`、`guard_release_immutable`、`guard_version_identity`、`guard_legacy_*`、`public_derivative` 等触发器家族在语句层再拦一道；`zzsh_iam.audit_event` 为追加型；部分表另有 `BEFORE TRUNCATE` 守卫。
 
 DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 ACL 事务；`applyRuntimePrivileges` 自身不拥有事务。ACL 失败时保留 `BusinessMigrationAclError` 的 outcome、原 cause 与 `rollbackAcknowledged`：`ACL_NOT_COMMITTED` 表示 COMMIT 未尝试发出，但不自动等于回滚已确认；`ACL_COMMIT_UNKNOWN` 不得被改报成功或已回滚，坏连接退役。权限观察和只重放 ACL 的条件见[结构与权限核对](acl-comparison.md)。
+
+### 权限入口怎么看
+
+- **迁移元数据**：业务线在 `zzsh_business_meta.migrations` 记账（`business-migrations.ts:16-20`），test metadata 线在 `zzsh_meta`（`migrations.ts:10`）；两者由 migrator 管理，不是业务对象 schema，也不在 `BUSINESS_SCHEMAS` 的 USAGE 循环内。
+- **运行时授权**：`applyRuntimePrivileges`（`business-migrations.ts:63`）先对 `BUSINESS_SCHEMAS` 的 6 个 schema 执行 `GRANT USAGE`，再按表/列 `GRANT`/`REVOKE`，并由 7 个 `configure*` 分支收敛 `zzsh_credit`、皮肤、分销资金、会员成长、旧覆盖、连续性资金和管理安全命令。`zzsh_credit` 的 USAGE 与列级授权在该分支单独处理。
+- **启动断言**：`assertBusinessRuntimeIdentity` 检查 6 个 schema 的 CREATE 否定探针和 `zzsh_iam.audit_event` 的 UPDATE/DELETE/TRUNCATE 否定断言；这不等于逐对象 ACL 清单。
+- **实际 ACL**：只能由指定资源、角色和观察时点的只读 catalog 观察确认；迁移文本、关键字计数、对象索引和本页都不能替代。
 
 ## 单位与金额
 
@@ -60,7 +84,7 @@ DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 A
 
 ## 按域导航
 
-下表给"职责 → 关键对象 → 创建迁移 → API reader/writer → 权限依据 → 转换规则 ID"。"创建迁移"只是该对象 `CREATE TABLE`/`CREATE SEQUENCE` 所在的那一份，**不是完整当前定义**；逐对象的后续变更链、触发器名与事件、索引与 `STATIC_PARTIAL` 标注由结构清单另出，不在本文件维护。本文件的表格与说明可独立阅读，不依赖任何过程资料。
+下表给"职责 → 关键对象 → 创建迁移 → API reader/writer → 权限依据 → 转换规则 ID"。"创建迁移"只是该对象 `CREATE TABLE`/`CREATE SEQUENCE` 所在的那一份，**不是完整当前定义**；逐对象的后续变更链、触发器名与事件、索引与 `STATIC_PARTIAL` 标注由按需生成的静态结构索引给出，不在本文件维护。本文件的表格与说明可独立阅读，不依赖任何过程资料。
 
 | 域 | 关键对象（创建迁移） | API reader/writer | 权限依据 | 转换规则 ID |
 |---|---|---|---|---|
@@ -122,7 +146,7 @@ DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 A
 ## 已知限制（不得当作已核）
 
 - 本文件的结构事实来自迁移 SQL 与迁移执行链的**静态扫描**，不是真实 PostgreSQL 目录核验。已应用集合、实际权限、索引与统计须在隔离资源按 `docs/testing.md` 实测。
-- "创建迁移"列不等于完整当前定义：函数重载、`DROP TRIGGER` 后的重建、跨迁移重建的索引（126 次定义 → 124 个不同名）、`LIKE` 克隆展开均未完整静态归约，相关"当前唯一定义"判定标 `STATIC_PARTIAL`。
-- 三种授权关键字口径（原文出现 / 顶层语句 / 当前 ACL 清单）互不相同，本文件只给前两种。
+- "创建迁移"列不等于完整当前定义：函数重载、`DROP TRIGGER` 后的重建、跨迁移重建的索引（128 条 `CREATE INDEX` 语句 → 126 个身份）、`LIKE` 克隆展开均未完整静态归约，相关"当前唯一定义"判定标 `STATIC_PARTIAL`。
+- 授权关键字出现次数、顶层语句与当前 ACL 清单互不相同；本文件只说明前两种的边界，不给 ACL 清单。
 - `zzsh_content` 三个公开读取的 writer 与版本身份未逐个枚举；在补齐前，内容不进入任何缓存候选。
 - 源→目标字段覆盖仍有大块 DEFER（TXN_HISTORY、COMMERCE_SCAFFOLD、THIRD_PARTY_CONFIG 等），以 `docs/architecture/legacy-data-mapping.md` 的规则版本为准；`CONTENT-HISTORY-020` 的经营/法律正文承接用途未裁定。
