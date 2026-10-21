@@ -246,7 +246,7 @@ export async function handleUserDirectoryAdmin(
       }
       requirePermission(access, ADMIN_PERMISSION.auditRead);
       dataToSend = await listUserAuditEvents(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }, sanitizeDetail);
-    });
+    }, registrationTime === "ORIGINAL");
     signal.throwIfAborted();
     sendJson(response, 200, dataToSend, requestId);
     });

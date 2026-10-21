@@ -37,6 +37,15 @@ test("read transaction sets database budgets before work, rolls back before reus
   assert.deepEqual(f.releases, [false]); assert.equal(f.client.listenerCount("error"), 0);
 });
 
+test("explicit retirement closes only its completed read lease and preserves callback failures", async () => {
+  const normal=fixture();
+  assert.equal(await withDirectoryReadTransaction(normal.pool,new AbortController().signal,async()=>7,true),7);
+  assert.equal(normal.queries.at(-1),"ROLLBACK");assert.deepEqual(normal.releases,[true]);
+  const failed=fixture(),original=new Error("read failure");
+  await assert.rejects(withDirectoryReadTransaction(failed.pool,new AbortController().signal,async()=>{throw original;},true),error=>error===original);
+  assert.equal(failed.queries.at(-1),"ROLLBACK");assert.deepEqual(failed.releases,[true]);
+});
+
 test("request close retains the lease until executing SELECT ends and rollback is acknowledged; no later SQL", async () => {
   const f = fixture(), e = events(); let started!: () => void, complete!: () => void;
   const active = new Promise<void>(resolve => { started = resolve; }), finish = new Promise<void>(resolve => { complete = resolve; });

@@ -475,9 +475,11 @@ test('original sort alone does not scan audit for total or materialise provenanc
 });
 
 test('original registration disables JIT only inside its bounded read transaction',async()=>{
-  const original=new DirectorySqlFixture();assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&page=1&pageSize=10',original)).status,200);
+  const original=new DirectorySqlFixture(),retired:(boolean|undefined)[]=[];original.release=(destroy?:boolean)=>{retired.push(destroy);};assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&page=1&pageSize=10',original)).status,200);
   assert(original.queries.some(q=>q.sql==="SELECT set_config('jit','off',true)"));
   assert(original.queries.some(q=>q.sql==='ROLLBACK'));
-  const old=new DirectorySqlFixture();assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
+  assert.deepEqual(retired,[true]);
+  const old=new DirectorySqlFixture(),reused:(boolean|undefined)[]=[];old.release=(destroy?:boolean)=>{reused.push(destroy);};assert.equal((await route('/api/v1/admin/users?page=1&pageSize=10',old)).status,200);
   assert(!old.queries.some(q=>q.sql.includes("set_config('jit'")));
+  assert.deepEqual(reused,[false]);
 });

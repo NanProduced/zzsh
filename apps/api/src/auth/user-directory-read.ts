@@ -44,6 +44,7 @@ export async function withDirectoryReadTransaction<T>(
   pool: Pool,
   signal: AbortSignal,
   action: (client: PoolClient) => Promise<T>,
+  retireAfterRead = false,
 ): Promise<T> {
   signal.throwIfAborted();
   let client: PoolClient;
@@ -89,6 +90,7 @@ export async function withDirectoryReadTransaction<T>(
     throw error;
   } finally {
     client.off("error", onError);
-    client.release(destroy || connectionError !== undefined);
+    // shortcut: isolate original-date reads until P-Q7B resolves the measured lease-reuse cost.
+    client.release(destroy || connectionError !== undefined || retireAfterRead);
   }
 }
