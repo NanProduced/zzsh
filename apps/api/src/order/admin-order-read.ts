@@ -1,3 +1,4 @@
+import { readOrderPaymentSummary } from "./channel-payment-read";
 import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
@@ -5,7 +6,7 @@ import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 
-export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string };
+export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean };
 export type OrderReadFilters = { page: number; pageSize: number; status?: string; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
 const utc=(column:string)=>`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 const CONTINUATION_JOIN = `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL`;
@@ -113,5 +114,7 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string){
  const relation=orderReadRelation(await legacyContinuationReady(client),false,{nativeIds:'$1',legacyIds:'$1'});
  const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${relation}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=ANY($1::text[]) AND ${gameScopeSql("x.game_id","$3","$2")}`,[[id],viewer.isBoss,viewer.adminId])).rows[0];
- if(!row)throw notFound();return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey};
+ if(!row)throw notFound();
+ const paymentSummary=await readOrderPaymentSummary(client,{orderId:id,origin:row.origin==="NATIVE"?"NATIVE":"LEGACY",financeReadable:viewer.financeReadable===true});
+ return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey,paymentSummary};
 }

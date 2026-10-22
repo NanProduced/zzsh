@@ -1,3 +1,4 @@
+import { readOrderPaymentSummary } from "./channel-payment-read";
 import type { INestApplication } from "@nestjs/common";
 import type { DistributionEarningStore } from "../finance/distribution-earning-store";
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
@@ -285,6 +286,7 @@ export async function handleOrderAdminRoute(
         adminId: context.userId,
         isBoss: access.isBoss,
         internalQuote: access.permissions.has("supply.quote.internal.read"),
+        financeReadable: access.permissions.has(ADMIN_PERMISSION.financeRead),
         authorizationKey: sha256Hex(JSON.stringify([context.userId,context.sessionId,access.isBoss,[...access.permissions].sort(),gameScopeSignature(gameScope)])),
       };
       if (path === "/") {
@@ -326,8 +328,10 @@ export async function handleOrderAdminRoute(
       const detailMatch = /^\/([A-Za-z0-9._:-]+)$/.exec(path);
       if (!detailMatch) throw notFound();
       if(detailMatch[1]!.startsWith("legacy_order_")||query.get("readMode")==="combined") {sendJson(response,200,await getAdminReadOrder(client,admin,decodeId(detailMatch[1]!)),requestId);return;}
-      const data = await getAdminOrder(client, admin, decodeId(detailMatch[1]!), assertGameScope);
-      sendJson(response, 200, data, requestId);
+      const orderId=decodeId(detailMatch[1]!);
+      const data = await getAdminOrder(client, admin, orderId, assertGameScope);
+      const paymentSummary=await readOrderPaymentSummary(client,{orderId,origin:"NATIVE",financeReadable:admin.financeReadable});
+      sendJson(response, 200, {...data,contextKey:admin.authorizationKey,paymentSummary}, requestId);
     });
   });
 }

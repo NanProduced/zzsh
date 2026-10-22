@@ -29,14 +29,31 @@ test('the narrow key relation keeps every filter column and drops only the recor
 const record={id:"legacy-1",original_order_no:"OLD-1",source_order_status:5,source_pay_status:1,due_amount_cents:"6600",recorded_paid_amount_cents:"6600",deposit_amount_cents:"0",source_snapshot:{goods_money:"36.00",expend_pay_money:"0.00",return_order_money:null},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_name:"Owner",renter_name:"Renter",owner_user_id:"owner",renter_user_id:"renter",account_id:"account",game_id:"game",legacy_account_no:"A1"};
 const amount={currency:"CNY",unit:"yuan",amount:"90071992547409931234.56",scale:2},zero={...amount,amount:"0.00"};
 const native={id:"native-1",display_no:"NEW-1",account_id:"account",account_no:"A1",listing_version_id:"version",owner_user_id:"owner",renter_user_id:"renter",owner_name:"Owner",renter_name:"Renter",game_id:"game",rule_release_id:"native-release",content_hash:"a".repeat(64),term_option_code:"day",status:"COMPLETED",rental_amount_cents:"9007199254740993123456",deposit_amount_cents:"0",currency:"CNY",term_seconds:"86400",title:"Native order",hold_until:"2026-09-30T00:00:00.000000Z",paid_at:null,created_at:"2026-09-29T00:00:00.000000Z",revision:"1",quote_snapshot:{schemaVersion:1,currency:"CNY",lines:[],resourceTotal:amount,tenantDeposit:zero,ownerTotal:amount,platformFullProfit:zero,termSeconds:"86400",expiryDisclosures:[],unitAmountsInformational:true}};
+const paymentRequest={id:"request-1",order_id:native.id,channel:"JOINPAY",state:"UNKNOWN",method:"ALIPAY_NATIVE",amount_cents:"12345",currency:"CNY",
+ merchant_identity_id:"merchant-1",channel_order_no:"NEW_1",config_profile_id:"profile-1",protocol_version:"2.6",key_version_ref:"key-1",evidence_level:"SYNTHETIC_PROTOCOL",created_at:native.created_at,updated_at:native.created_at};
+const paymentSnapshot={
+ order:{id:native.id,display_no:native.display_no,status:native.status,paid_at:null,hold_expired:false,created_at:native.created_at},request:paymentRequest,confirmation:null,
+ observations:[{id:"observation-1",request_id:paymentRequest.id,channel:"JOINPAY",merchant_identity_id:paymentRequest.merchant_identity_id,channel_order_no:paymentRequest.channel_order_no,
+  config_profile_id:paymentRequest.config_profile_id,protocol_version:paymentRequest.protocol_version,key_version_ref:paymentRequest.key_version_ref,operation:"ASYNC_NOTIFY",source:"PROVIDER_INBOUND",evidence_level:"SYNTHETIC_PROTOCOL",
+  event:"E4",result:"CHANNEL_SIGNED_SYNTHETIC",reason:null,channel_status:"SUCCEEDED",channel_trx_no:"transaction-1",provider_paid_at_raw:null,raw_sha256:"b".repeat(64),observed_at:native.created_at,stale:false,late:false,conflict:false}],
+ conflicts:[],conflicts_truncated:false,latest_observed_at:native.created_at,
+};
 type Key={origin:string;id:string};
 type Statement={sql:string;values:unknown[]};
 /** The admin list reads its keys first and their records second; the harness
  *  answers both statements and records what was asked. */
-function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:string;id:string;record:Record<string,any>}>;ready?:boolean}={}){
+function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:string;id:string;record:Record<string,any>}>;ready?:boolean;channelReady?:boolean;paymentSnapshot?:Record<string,unknown>;paymentReadyError?:Error;paymentReadError?:Error}={}){
  const statements:Statement[]=[];
  const client={query:async(sql:string,values:unknown[]=[])=>{
   statements.push({sql,values:[...values]});
+   if(sql.includes("to_regclass('zzsh_order.payment_request')")){
+    if(options.paymentReadyError)throw options.paymentReadyError;
+    return {rows:[{ready:options.channelReady??false}]};
+   }
+   if(sql.includes("WITH scoped AS")){
+    if(options.paymentReadError)throw options.paymentReadError;
+    return {rows:options.paymentSnapshot?[options.paymentSnapshot]:[]};
+   }
   if(sql.includes("to_regclass"))return {rows:[{ready:options.ready??false}]};
   if(sql.includes("AS keys"))return {rows:[{total:options.total??String(options.keys?.length??0),keys:options.keys??[]}]};
   if(sql.includes("SELECT x.origin,x.record"))return {rows:(options.records??[]).filter(r=>values[0]&&(values[0] as string[]).includes(r.id))};
@@ -131,11 +148,66 @@ test("the single order read asks for its own id only and 404s when it is absent"
  const {client,statements}=orderClient({records:[{origin:"NATIVE",id:"native-1",record:native}]});
  const found=await getAdminReadOrder(client,viewer,"native-1");
  assert.equal(found.order.id,"native-1");assert.equal(found.contextKey,viewer.authorizationKey);
- const sql=statements[statements.length-1]!.sql;
+ const sql=statements.find(s=>s.sql.includes("SELECT x.origin,x.record"))!.sql;
  assert.ok(sql.includes("o.id=ANY($1::text[])")&&sql.includes("l.id=ANY($1::text[])"),"the relation must be restricted to the requested id");
  assert.ok(sql.includes("admin_supply_scope"));
  const missing={query:async()=>({rows:[]})} as unknown as PoolClient;
  await assert.rejects(()=>getAdminReadOrder(missing,viewer,"order-missing"),(e:any)=>e.status===404);
+});
+
+test("detail adds the undeployed payment summary beside the unchanged order and context",async()=>{
+ const {client,statements}=orderClient({records:[{origin:"NATIVE",id:native.id,record:native}]});
+ const detail=await getAdminReadOrder(client,viewer,native.id);
+ assert.equal(detail.order.id,native.id);assert.equal(detail.order.payment.state,"RECORDED_PAID");assert.equal(detail.order.paymentSummary,undefined);
+ assert.equal(detail.contextKey,viewer.authorizationKey);
+ assert.deepEqual(detail.paymentSummary,{contractVersion:"admin-order-payment-summary.v1",integration:"NOT_INTEGRATED",productionPaymentCapability:false,
+  originalRequest:null,latestTrustedObservation:null,acceptance:null,conflicts:null,recovery:null,settlement:"NOT_INTEGRATED",unknowns:null,updatedAt:null});
+ assert.equal(statements.some(s=>s.sql.includes("WITH scoped AS")),false);
+});
+
+test("detail passes only financeReadable to the five sensitive summary paths and stays read only",async()=>{
+ for(const financeReadable of [undefined,false,true]){
+  const {client,statements}=orderClient({records:[{origin:"NATIVE",id:native.id,record:native}],channelReady:true,paymentSnapshot});
+  const detail=await getAdminReadOrder(client,{...viewer,internalQuote:true,financeReadable},native.id),summary=detail.paymentSummary,visible=financeReadable===true;
+  assert.equal(summary.originalRequest!.channelOrderNo,visible?"NEW_1":null);
+  assert.deepEqual(summary.originalRequest!.amount,visible?{cents:"12345",currency:"CNY"}:null);
+  assert.equal(summary.originalRequest!.merchantIdentityId,visible?"merchant-1":null);
+  assert.equal(summary.originalRequest!.keyVersionRef,visible?"key-1":null);
+  assert.equal(summary.latestTrustedObservation!.channelTrxNo,visible?"transaction-1":null);
+  assert.equal(summary.latestTrustedObservation!.evidenceLevel,"SYNTHETIC_PROTOCOL");assert.equal(summary.productionPaymentCapability,false);
+  const objectRead=statements.findIndex(s=>s.sql.includes("SELECT x.origin,x.record")),summaryRead=statements.findIndex(s=>s.sql.includes("zzsh_order.payment_request"));
+  assert.ok(objectRead>=0&&summaryRead>objectRead,"the scoped object must be read before its payment summary");
+  assert.ok(statements[objectRead]!.sql.includes("admin_supply_scope"));
+  assert.deepEqual(statements.find(s=>s.sql.includes("WITH scoped AS"))!.values,[native.id,null]);
+  for(const {sql} of statements){assert.match(sql.trimStart(),/^(SELECT|WITH)\b/);assert.doesNotMatch(sql,/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|FOR UPDATE|pg_advisory)\b/i);}
+ }
+});
+
+test("missing scoped orders and legacy same-id orders never read native payment facts",async()=>{
+ const missing=orderClient();
+ await assert.rejects(()=>getAdminReadOrder(missing.client,viewer,native.id),(e:any)=>e.status===404);
+ assert.equal(missing.statements.some(s=>s.sql.includes("zzsh_order.payment_request")),false);
+ const legacy=orderClient({records:[{origin:"LEGACY",id:native.id,record:{...record,id:native.id}}],channelReady:true,paymentSnapshot});
+ const detail=await getAdminReadOrder(legacy.client,{...viewer,financeReadable:true},native.id);
+ assert.equal(detail.order.source.origin,"LEGACY");assert.equal(detail.paymentSummary.integration,"NOT_INTEGRATED");
+ assert.equal(legacy.statements.some(s=>s.sql.includes("zzsh_order.payment_request")),false);
+});
+
+test("payment readiness and fact read failures propagate instead of becoming NONE or NOT_INTEGRATED",async()=>{
+ const acl=Object.assign(new Error("synthetic denied"),{code:"42501"}),connection=Object.assign(new Error("synthetic disconnect"),{code:"ECONNRESET"});
+ for(const options of [{paymentReadyError:acl},{paymentReadError:acl},{paymentReadError:connection}]){
+  const {client}=orderClient({records:[{origin:"NATIVE",id:native.id,record:native}],channelReady:true,paymentSnapshot,...options});
+  const expected="paymentReadyError" in options?options.paymentReadyError:options.paymentReadError;
+  await assert.rejects(()=>getAdminReadOrder(client,viewer,native.id),(e:unknown)=>e===expected);
+ }
+});
+
+test("mixed JoinPay requests and controlled acceptance retain the nonproduction source warning",async()=>{
+ const {client}=orderClient({records:[{origin:"NATIVE",id:native.id,record:native}],channelReady:true,paymentSnapshot:{...paymentSnapshot,
+  confirmation:{id:"controlled-confirmation",source:"CONTROLLED",disposition:"APPLIED",reason_code:null,amount_cents:"12345",currency:"CNY",accepted_at:native.created_at}}});
+ const summary=(await getAdminReadOrder(client,{...viewer,financeReadable:true},native.id)).paymentSummary;
+ assert.equal(summary.integration,"JOINPAY");assert.equal(summary.acceptance!.state,"APPLIED");assert.equal(summary.productionPaymentCapability,false);
+ assert.ok(summary.unknowns!.includes("PAYMENT_SOURCE_DIFFERS_FROM_REQUEST"));assert.equal(summary.latestTrustedObservation!.evidenceLevel,"SYNTHETIC_PROTOCOL");
 });
 test("native absent or unready group does not expose support escalation",()=>{
  for(const teamState of [null,"NOT_STARTED"]){
