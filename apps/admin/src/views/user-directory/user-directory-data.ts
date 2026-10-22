@@ -14,11 +14,28 @@ export const PERMISSION = {
 } as const;
 export const CREDIT_GUARANTEE_PERMISSION = { read: 'credit.guarantee.read', manage: 'credit.guarantee.manage' } as const;
 export type Domain = keyof typeof PERMISSION;
-export type Part<T> = { state: 'ready'; data: T; count?: number; current?: number; nextCursor?: string | null } | { state: 'denied'; permission: string; reason?: string };
+export type Part<T> = { state: 'ready'; data: T; count?: number; publishedCount?: number; current?: number; nextCursor?: string | null } | { state: 'denied'; permission: string; reason?: string };
 /** The age filter is no longer offered: the server gate and the DTO stay, the operator surface drops it. */
 export type Filters = { q: string; status: string; from: string; to: string; identity: string; source: string; sort: string };
-export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', source: '', sort: 'created' };
-export const REGISTRATION_FILTER_UNAVAILABLE = '注册日期筛选尚未接入，请清除日期条件后查询。';
+export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', source: '', sort: 'registered_desc' };
+/** The directory always reads the server-declared original registration time; the local filing date is a different fact. */
+export const REGISTRATION_TIME_ORIGINAL = 'ORIGINAL';
+export const REGISTRATION_SORT = { desc: 'registered_desc', asc: 'registered_asc' } as const;
+/** The registration sort the directory supports; the old `created` sort normalises into the default. */
+export const normalizeRegistrationSort = (value: string | undefined) => value === REGISTRATION_SORT.asc ? REGISTRATION_SORT.asc : REGISTRATION_SORT.desc;
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/** A real calendar day. UTC midnight arithmetic on a date-only string keeps it free of browser timezone drift. */
+const isCalendarDay = (value: string) => {
+  if (!DAY_PATTERN.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+/** The day after the given calendar day, in the same plain YYYY-MM-DD shape. */
+const nextCalendarDay = (value: string) => {
+  const parsed = new Date(`${value}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + 1);
+  return parsed.toISOString().slice(0, 10);
+};
 export const PHONE_LIKE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
 export const STATUS_LABEL: Record<string,string> = { ACTIVE: '正常', RESTRICTED: '受限', DEACTIVATED: '已停用', CANCELLED: '已注销', UNKNOWN: '未知' };
 export const FILTER_VALUE_LABEL:Record<string,string>={VERIFIED:'已实名',UNVERIFIED:'未实名',REJECTED:'未通过',MIGRATED:'旧平台用户',LOCAL:'未关联旧平台来源'};
@@ -57,7 +74,7 @@ export type User = {
   registeredAtSource: RegisteredSource;
   trace?: UserDirectoryDetail['source'];
   orders: Part<Order[]> & { current?: number; renterCurrent?: number; ownerCurrent?: number; reason?: string };
-  resources: Part<Resource[]> & { count?: number; reason?: string };
+  resources: Part<Resource[]> & { count?: number; publishedCount?: number; reason?: string };
   membershipSummary?: UserDirectoryItem['membershipSummary'];
   creditSummary?: UserDirectoryItem['creditSummary'];
   match?: string;
@@ -94,6 +111,7 @@ function project(row: UserDirectoryItem | UserDirectoryDetail, has:(permission:s
       state: 'ready',
       data: [],
       count: knownCount(resourceSum?.count),
+      publishedCount: knownCount(resourceSum?.publishedCount),
     };
   }
 
@@ -213,6 +231,9 @@ export class UserDirectoryBff {
 
     const buildFilterParams = () => {
       const p = new URLSearchParams();
+      // R1: the directory always asks for the server-declared original registration time.
+      p.set('registrationTime', REGISTRATION_TIME_ORIGINAL);
+      p.set('sort', normalizeRegistrationSort(filters.sort));
       if (filters.q) p.set(phone ? 'phone' : 'q', filters.q);
       for (const [key, value] of Object.entries({
         accountStatus: filters.status,
@@ -221,21 +242,17 @@ export class UserDirectoryBff {
       })) {
         if (value) p.set(key, value);
       }
-      // The server still resolves this range against the local filing date; the label must not claim a real registration date.
-      for (const [key, value, end] of [
-        ['registeredFrom', filters.from, false],
-        ['registeredTo', filters.to, true],
-      ] as const) {
-        if (value) {
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('建档日期无效');
-          const calendar = new Date(`${value}T00:00:00Z`);
-          if (!Number.isFinite(calendar.getTime()) || calendar.toISOString().slice(0, 10) !== value)
-            throw new Error('建档日期无效');
-          p.set(key, end ? `${value}T23:59:59.999999+08:00` : `${value}T00:00:00+08:00`);
-        }
+      // The range is inclusive of the end day; the server bound is exclusive, so the upper bound is the next day's zero hour.
+      if (filters.from) {
+        if (!isCalendarDay(filters.from)) throw new Error('注册日期无效');
+        p.set('registeredFrom', `${filters.from}T00:00:00+08:00`);
+      }
+      if (filters.to) {
+        if (!isCalendarDay(filters.to)) throw new Error('注册日期无效');
+        p.set('registeredBefore', `${nextCalendarDay(filters.to)}T00:00:00+08:00`);
       }
       if (filters.from && filters.to && filters.from > filters.to)
-        throw new Error('建档起始日期不能晚于结束日期');
+        throw new Error('注册起始日期不能晚于结束日期');
       return p;
     };
 
@@ -329,7 +346,7 @@ export class UserDirectoryBff {
   }
 
   async detail(id:string,signal:AbortSignal,_drawer=false) {
-    const data=await this.request<{user:UserDirectoryDetail}>(`/users/${encodeURIComponent(id)}`,signal);
+    const data=await this.request<{user:UserDirectoryDetail}>(`/users/${encodeURIComponent(id)}?registrationTime=${REGISTRATION_TIME_ORIGINAL}`,signal);
     if(!data.user||data.user.userId!==id) throw new Error('用户详情响应格式无效');
     const user=project(data.user,permission=>this.has(permission)); this.users.set(id,user); return user;
   }

@@ -27,9 +27,10 @@ import {
   EMPTY_FILTERS,
   FILTER_VALUE_LABEL,
   PERMISSION,
-  REGISTRATION_FILTER_UNAVAILABLE,
   PHONE_LIKE,
+  REGISTRATION_SORT,
   STATUS_LABEL,
+  normalizeRegistrationSort,
   safeFilters,
   type Filters,
   type User,
@@ -45,8 +46,8 @@ import {
   MembershipSummaryCell,
   Message,
   OrdersCurrentCell,
+  PublishedCountCell,
   RegistrationCell,
-  ResourcesCountCell,
   Status,
   Summary,
   errorText,
@@ -63,9 +64,9 @@ export function EnumSelect({ label, value, onChange, options }: { label: string;
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
 /**
- * shortcut: Root尚未提供原注册日期查询，接入正式合同后再启用。
+ * 注册日期区间：起始日含当日，结束日含当日；控件只改草稿，查询时才提交。
  */
-function RegistrationDateRange({ from, to, onChange, disabled = true, disabledHint = '注册日期筛选待服务端接入' }: { from: string; to: string; onChange: (patch: Partial<Filters>) => void; disabled?: boolean; disabledHint?: string }) {
+function RegistrationDateRange({ from, to, onChange }: { from: string; to: string; onChange: (patch: Partial<Filters>) => void }) {
   const mobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<DateSelectorValue>({
@@ -92,7 +93,7 @@ function RegistrationDateRange({ from, to, onChange, disabled = true, disabledHi
   return (
     <Field label="注册日期" className="ud-field">
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger render={<Button type="button" variant="outline" className="ud-date-trigger" aria-label="注册日期" disabled={disabled} />}>
+        <PopoverTrigger render={<Button type="button" variant="outline" className="ud-date-trigger" aria-label="注册日期" />}>
           <CalendarDaysIcon size={15} aria-hidden />
           {label}
         </PopoverTrigger>
@@ -124,21 +125,26 @@ function RegistrationDateRange({ from, to, onChange, disabled = true, disabledHi
               确定
             </Button>
           </div>
-          {disabledHint ? <p className="ud-date-hint">{disabledHint}</p> : null}
         </PopoverContent>
       </Popover>
-      {disabled ? <p className="ud-date-hint">{disabledHint}</p> : null}
     </Field>
   );
 }
 
-function FilterFields({ filters, change, more = false, dateDisabled, dateHint }: { filters: Filters; change: (patch: Partial<Filters>) => void; more?: boolean; dateDisabled?: boolean; dateHint?: string }) {
+function FilterFields({ filters, change, more = false }: { filters: Filters; change: (patch: Partial<Filters>) => void; more?: boolean }) {
   return (
     <div className="ud-filter-fields">
       {!more ? (
         <>
           <ListToolbarEnumSelect label="账号状态" value={filters.status} onChange={status => change({ status })} options={Object.entries(STATUS_LABEL)} />
-          <RegistrationDateRange from={filters.from} to={filters.to} onChange={change} disabled={dateDisabled} disabledHint={dateHint} />
+          <RegistrationDateRange from={filters.from} to={filters.to} onChange={change} />
+          <ListToolbarEnumSelect
+            label="注册时间排序"
+            value={normalizeRegistrationSort(filters.sort)}
+            onChange={sort => change({ sort: normalizeRegistrationSort(sort) })}
+            options={[[REGISTRATION_SORT.desc, '注册时间新→旧'], [REGISTRATION_SORT.asc, '注册时间旧→新']]}
+            allLabel="默认"
+          />
         </>
       ) : (
         <>
@@ -152,13 +158,13 @@ function FilterFields({ filters, change, more = false, dateDisabled, dateHint }:
 
 const TABLE_HEADERS = ['用户', '账号与实名', '会员与礼遇', '信用', '当前业务', '注册时间', '操作'];
 const HEADER_HINTS: Record<string, string> = {
-  当前业务: '进行中订单含待支付与已支付两种状态；租入与出租分别统计，不相加为去重合计。名下账号数是授权范围内关联的账号档案数，不等于当前可租库存。',
-  注册时间: '注册时间来自服务端声明的来源；迁入用户在真实注册时间接入前显示待核。',
+  当前业务: '进行中订单含待支付与已支付两种状态；租入与出租分别统计，不相加为去重合计。上架数是该用户当前真实上架的账号档案数，不等于名下档案总数，也不等于当前可租库存。',
+  注册时间: '注册时间取服务端声明的原始注册时间及其来源；旧平台注册、本平台注册与待核分开，不用本地建档时间代替。',
 };
 
 export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce }: PageProps & { adapter: UserDirectoryData }) {
   const mobile = useIsMobile();
-  const safeInitial = { ...EMPTY_FILTERS, ...Object.fromEntries(Object.entries(tab.query).filter(([key]) => key in EMPTY_FILTERS)), sort: 'created' };
+  const safeInitial = { ...EMPTY_FILTERS, ...Object.fromEntries(Object.entries(tab.query).filter(([key]) => key in EMPTY_FILTERS)), sort: normalizeRegistrationSort(tab.query.sort) };
   const [appliedFilters, setAppliedFilters] = useState<Filters>(safeInitial);
   const [draftFilters, setDraftFilters] = useState<Filters>(safeInitial);
   const [draftInput, setDraftInput] = useState(safeInitial.q);
@@ -179,11 +185,10 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
 
   const filterKey = JSON.stringify(appliedFilters);
   const appliedFilterEntries = Object.entries(appliedFilters).filter(([key, value]) => value && key !== 'sort');
-  const filterLabels: Record<string, string> = { q: '搜索', status: '账号状态', from: '建档起始', to: '建档结束', identity: '实名状态', source: '来源' };
+  const filterLabels: Record<string, string> = { q: '搜索', status: '账号状态', from: '注册起始', to: '注册结束', identity: '实名状态', source: '来源' };
 
   const pageKey = `${filterKey}:${page}:${pageSize}:${cursor ?? ''}:${refreshNonce}`;
   const { result, retry } = useDirectoryRequest(pageKey, async signal => {
-    if (appliedFilters.from || appliedFilters.to) throw new Error(REGISTRATION_FILTER_UNAVAILABLE);
     return adapter.list(appliedFilters, { page, pageSize, cursor, contextKey: contextKeyRef.current }, signal);
   });
 
@@ -350,10 +355,10 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
 
       <div className="ud-list-meta">
         <span>{adapter.has('user.phone.lookup') ? '支持手机号精确查询；仅在当前页内使用' : '手机号精确查询需要单独权限'}</span>
-        <span>按本地建档时间倒序</span>
+        <span>{normalizeRegistrationSort(appliedFilters.sort) === REGISTRATION_SORT.asc ? '按注册时间升序' : '按注册时间倒序'}</span>
         <span className="ud-list-meta-scope">
           数量按当前管理员的游戏范围与对象权限裁剪
-          <Hint label="统计口径">进行中订单含待支付与已支付两种状态；租入与出租分别统计，不相加为去重合计。名下账号数为授权范围内关联的账号档案数，不等于当前可租库存。</Hint>
+          <Hint label="统计口径">进行中订单含待支付与已支付两种状态；租入与出租分别统计，不相加为去重合计。上架数是真实上架的账号档案数，名下档案总数不等于当前可租库存。</Hint>
         </span>
       </div>
 
@@ -388,9 +393,9 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
                         user={user}
                         onDrillDown={role => onOpenPath(`/users/${user.id}?section=orders&role=${role}&status=current`, user.name)}
                       />
-                      <ResourcesCountCell
+                      <PublishedCountCell
                         user={user}
-                        onDrillDown={() => onOpenPath(`/users/${user.id}?section=resources`, user.name)}
+                        onDrillDown={() => onOpenPath(`/users/${user.id}?section=resources&publication=published`, user.name)}
                       />
                     </dd>
                   </div>
@@ -450,9 +455,9 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
                           user={user}
                           onDrillDown={role => onOpenPath(`/users/${user.id}?section=orders&role=${role}&status=current`, user.name)}
                         />
-                        <ResourcesCountCell
+                        <PublishedCountCell
                           user={user}
-                          onDrillDown={() => onOpenPath(`/users/${user.id}?section=resources`, user.name)}
+                          onDrillDown={() => onOpenPath(`/users/${user.id}?section=resources&publication=published`, user.name)}
                         />
                       </div>
                     </TableCell>

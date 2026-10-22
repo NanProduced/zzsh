@@ -199,22 +199,44 @@ function Orders({
   );
 }
 
+/** 版本发布事实：版本状态，不是账号当前的有效发布事实。 */
+const PUBLICATION_VERSION_LABEL: Record<string, string> = { DRAFT: '未发布', SUBMITTED: '审核中', WITHDRAWN: '已下架', REJECTED: '已驳回', IMPORTED_UNVERIFIED: '旧资料待核' };
+
 function publicationLabel(resource: Resource) {
   const publication = resource.publication;
-  if (publication.versionPublished) return publication.source === 'OWNER_DIRECT' ? '当前版本已直接发布' : '当前版本已按旧承接审核发布';
-  if (!resource.currentVersionId) return '未提交发布';
-  const labels: Record<string, string> = { DRAFT: '未发布', SUBMITTED: '审核中', WITHDRAWN: '已下架', REJECTED: '已驳回', IMPORTED_UNVERIFIED: '旧资料待核' };
-  return labels[publication.versionState ?? ''] ?? `发布事实待确认（${publication.versionState ?? '未知'}）`;
+  const version = publication.versionPublished
+    ? publication.source === 'OWNER_DIRECT' ? '当前版本已直接发布' : '当前版本已按旧承接审核发布'
+    : !resource.currentVersionId
+      ? '未提交发布'
+      : PUBLICATION_VERSION_LABEL[publication.versionState ?? ''] ?? `发布事实待确认（${publication.versionState ?? '未知'}）`;
+  // currentlyPublished 是账号当前的有效发布事实；versionPublished 只是版本状态，不能代替它。
+  if (publication.currentlyPublished === undefined) return `当前上架状态待核 · ${version}`;
+  return `${publication.currentlyPublished ? '当前已上架' : '当前未上架'} · ${version}`;
 }
 
-function Resources({ adapter, user, refreshNonce, onOpenPath }: { adapter: UserDirectoryData; user: User; refreshNonce: number; onOpenPath: PageProps["onOpenPath"] }) {
+function Resources({ adapter, user, tab, refreshNonce, onOpenPath, onQueryChange }: { adapter: UserDirectoryData; user: User; tab: WorkspaceTab; refreshNonce: number; onOpenPath: PageProps["onOpenPath"]; onQueryChange: PageProps["onQueryChange"] }) {
+  const published = tab.query.publication === 'published';
+  const filters: Record<string, string> = published ? { publication: 'published' } : {};
   return (
     <>
       <div className="ud-section-heading">
         <h2>名下游戏账号</h2>
         <span className="ud-muted">该用户关联的资源 · 授权游戏范围内</span>
       </div>
-      <DomainBlock adapter={adapter} id={user.id} domain="resources" refreshNonce={refreshNonce}>
+      <div className="ud-order-filters flex flex-wrap gap-4 items-center mb-4">
+        <Field label="账号范围" className="w-48" composite>
+          <Select items={{ ALL: '全部档案', published: '已上架' }} value={published ? 'published' : 'ALL'} onValueChange={v => onQueryChange({ section: 'resources', publication: v === 'published' ? 'published' : '' })}>
+            <SelectTrigger aria-label="账号范围">
+              <SelectValue placeholder="全部档案" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">全部档案</SelectItem>
+              <SelectItem value="published">已上架</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+      </div>
+      <DomainBlock adapter={adapter} id={user.id} domain="resources" filters={filters} refreshNonce={refreshNonce}>
         {data => (data as Resource[]).length ? (
           <div className="ud-resource-list">
             {(data as Resource[]).map(resource => (
@@ -236,8 +258,8 @@ function Resources({ adapter, user, refreshNonce, onOpenPath }: { adapter: UserD
             ))}
           </div>
         ) : (
-          <Message kind="empty" title="范围内暂无名下游戏账号">
-            已按供给读取权限和游戏范围查询。
+          <Message kind="empty" title={published ? '该用户当前没有已上架的游戏账号' : '范围内暂无名下游戏账号'}>
+            {published ? '已按已上架范围查询；名下档案仍在“全部档案”中。' : '已按供给读取权限和游戏范围查询。'}
           </Message>
         )}
       </DomainBlock>
@@ -896,8 +918,10 @@ export function UserDetail({
             <Resources
               adapter={adapter}
               user={user}
+              tab={tab}
               refreshNonce={refreshNonce}
               onOpenPath={onOpenPath}
+              onQueryChange={onQueryChange}
             />
           ) : view === 'growth' ? (
             <MembershipGrowthSection

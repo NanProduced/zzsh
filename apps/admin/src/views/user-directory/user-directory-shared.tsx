@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { WorkspacePageContent } from '@/workspace/page-content';
-import { PERMISSION, REGISTRATION_FILTER_UNAVAILABLE, STATUS_LABEL, knownCount, type Audit, type Domain, type Order, type Part, type Resource, type User, type UserDirectoryBff } from './user-directory-data';
+import { PERMISSION, STATUS_LABEL, knownCount, type Audit, type Domain, type Order, type Part, type Resource, type User, type UserDirectoryBff } from './user-directory-data';
 import { AdminApiError, friendlyError } from '../../api';
 import { BEIJING_TIME_ZONE } from '../../workspace/beijing-time';
 export type PageProps = Pick<Parameters<typeof WorkspacePageContent>[0], 'tab' | 'snapshot' | 'onOpenPath' | 'onQueryChange' | 'refreshNonce'>;
@@ -14,7 +14,7 @@ export type UserDirectoryData = UserDirectoryBff;
 type RequestState<T> = { state: 'loading' } | { state: 'ready'; data: T } | { state: 'error'; error: Error };
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {timeZone:BEIJING_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 export const time = (value:string|null|undefined) => !value ? '未提供' : Number.isNaN(Date.parse(value)) ? '时间未知' : dateFormatter.format(new Date(value));
-export const isDirectoryInputError = (error:unknown) => error instanceof Error && ['建档日期无效','建档起始日期不能晚于结束日期',REGISTRATION_FILTER_UNAVAILABLE].includes(error.message);
+export const isDirectoryInputError = (error:unknown) => error instanceof Error && ['注册日期无效','注册起始日期不能晚于结束日期'].includes(error.message);
 export const errorText = (error:unknown) => isDirectoryInputError(error) ? (error as Error).message : friendlyError(error);
 /** 只有不自明的命中依据需要提示；昵称与用户名命中由界面本身说明。 */
 export const MATCH_REASON_LABEL: Record<string, string> = {
@@ -169,9 +169,12 @@ export function Identity({ user, full = false, heading = false, onOpenDetail }: 
 const dateOnlyFormatter = new Intl.DateTimeFormat('zh-CN', {timeZone:BEIJING_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit'});
 export const formatBeijingDate = (value: string | null | undefined) => !value ? '未提供' : Number.isNaN(Date.parse(value)) ? '日期未知' : dateOnlyFormatter.format(new Date(value)).replace(/\//g, '-');
 
+/**
+ * 注册时间只读服务端声明的来源：LEGACY 是旧平台注册时间，LOCAL 是本平台注册时间，UNKNOWN 没有可核事实。
+ * 不退回本地建档时间、updatedAt 或旧来源追溯时间，也不从用户名或迁入标签推断来源。
+ */
 export function RegistrationCell({ user, includeTime = false }: { user: User; includeTime?: boolean }) {
-  const knownSource = user.registeredAtSource === 'LEGACY' || (user.registeredAtSource === 'LOCAL' && user.provider === 'none');
-  if (!knownSource || !user.registeredAt || !Number.isFinite(Date.parse(user.registeredAt))) return <Badge variant="unknown">待核</Badge>;
+  if (user.registeredAtSource === 'UNKNOWN' || !user.registeredAt || !Number.isFinite(Date.parse(user.registeredAt))) return <Badge variant="unknown">待核</Badge>;
   return (
     <div className="ud-registered-cell flex flex-col gap-0.5 items-start">
       <span className="text-xs tabular-nums">{includeTime ? time(user.registeredAt) : formatBeijingDate(user.registeredAt)}</span>
@@ -314,7 +317,8 @@ export function OrdersCurrentCell({
   );
 }
 
-export function ResourcesCountCell({
+/** 上架数是服务端投影的真实上架档案数；缺字段保持待核，不用名下档案数或本页条数代替。 */
+export function PublishedCountCell({
   user,
   onDrillDown
 }: {
@@ -325,17 +329,17 @@ export function ResourcesCountCell({
   if (resources.state === 'denied') {
     return <span className="ud-muted">{resources.reason === 'NO_GAME_SCOPE' ? '未分配业务范围' : '无权限'}</span>;
   }
-  const count = resources.count;
-  if (count === undefined) return <span className="ud-muted">账号数待更新</span>;
+  const published = resources.publishedCount;
+  if (published === undefined) return <span className="ud-muted">上架数待更新</span>;
   return (
     <Button
       variant="outline"
       size="sm"
       className="h-6 px-1.5 text-xs tabular-nums"
       onClick={e => { e.stopPropagation(); onDrillDown(); }}
-      aria-label={`查看用户 ${user.name} 名下游戏账号`}
+      aria-label={`查看用户 ${user.name} 已上架游戏账号`}
     >
-      名下 {count}
+      上架 {published}
     </Button>
   );
 }
@@ -344,7 +348,8 @@ export function Summary({ part, kind }: { part: Part<Order[] | Resource[]>; kind
   if (part.state === 'denied') return <span className="ud-muted">{part.reason === 'NO_GAME_SCOPE' ? '未分配业务范围' : '无权限'}</span>;
   if (kind === 'resources') {
     const count = knownCount(part.count);
-    return <span>{count === undefined ? <span className="ud-muted">账号数待更新</span> : count ? `${count} 个` : '暂无资源账号'}<span className="ud-subline">授权游戏范围内</span></span>;
+    const published = knownCount(part.publishedCount);
+    return <span>{count === undefined ? <span className="ud-muted">账号数待更新</span> : count ? `${count} 个` : '暂无资源账号'}{published === undefined ? null : <span className="ud-subline">已上架 {published}</span>}<span className="ud-subline">授权游戏范围内</span></span>;
   }
   const current = knownCount(part.current);
   if (current === undefined) return <span className="ud-muted">订单摘要暂未接入</span>;

@@ -18,12 +18,13 @@ globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);globalThis.re
 const {createRoot}=await import('react-dom/client');
 const vite=await createServer({root:rootPath,configFile:false,plugins:[react()],resolve:{alias:{'@':path.join(rootPath,'src'),'@brand':path.resolve(rootPath,'../../assets/brand')}},server:{middlewareMode:true,hmr:false}});
 const {UserDirectoryView}=await vite.ssrLoadModule('/src/views/user-directory/user-directory-view.tsx');
+const {UserDetail}=await vite.ssrLoadModule('/src/views/user-directory/user-directory-detail.tsx');
 const {DateSelector}=await vite.ssrLoadModule('/src/components/reui/date-selector.tsx');
 const {UserDirectoryBff,EMPTY_FILTERS}=await vite.ssrLoadModule('/src/views/user-directory/user-directory-data.ts');
 after(async()=>{await vite.close();await browser.happyDOM.abort();});
 const permissions=['user.directory.read','user.phone.lookup','order.read','supply.rental_account.read','admin.audit.read','user.account.restore','im.support.read'];
 let serial=0;
-const user={userId:'user_normal',name:'林舟',image:null,username:null,displayUsername:null,maskedPhone:'188****1101',accountStatus:'ACTIVE',suspended:false,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',source:{kind:'MIGRATED',legacyId:'88001'},registeredAt:'2026-09-24T04:00:00Z',registeredAtSource:'LOCAL',createdAt:'2026-09-24T04:00:00Z',updatedAt:'2026-09-24T04:00:00Z',localCreatedAt:'2026-09-24T04:00:00Z',resourceSummary:{state:'ready',count:1},orderSummary:{state:'ready',currentCount:1},lastBusinessActivity:{state:'not_connected',domains:['ORDER','SUPPLY']}};
+const user={userId:'user_normal',name:'林舟',image:null,username:null,displayUsername:null,maskedPhone:'188****1101',accountStatus:'ACTIVE',suspended:false,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',source:{kind:'MIGRATED',legacyId:'88001'},registeredAt:'2026-09-24T04:00:00Z',registeredAtSource:'LOCAL',createdAt:'2026-09-24T04:00:00Z',updatedAt:'2026-09-24T04:00:00Z',localCreatedAt:'2026-09-24T04:00:00Z',resourceSummary:{state:'ready',count:1,publishedCount:1},orderSummary:{state:'ready',currentCount:1},lastBusinessActivity:{state:'not_connected',domains:['ORDER','SUPPLY']}};
 const detail={...user,maskedEmail:null,phoneNumberVerified:false,identity:{status:'UNKNOWN',ageStatus:'UNKNOWN',provider:'legacy_mysql_restore',verifiedAt:null},source:{kind:'MIGRATED',legacyId:'88001',sourceCreatedAt:'2019-01-01T00:00:00Z',sourceUpdatedAt:null},localUpdatedAt:user.updatedAt};
 const order={orderId:'order_cancel',displayNo:'TEST-1003',status:'CANCELLED',role:'renter',title:'订单快照',counterpartyName:'另一方',gameId:'delta',amounts:{rental:{currency:'CNY',unit:'yuan',amount:'60.00',scale:2},deposit:{currency:'CNY',unit:'yuan',amount:'100.00',scale:2},totalDue:{currency:'CNY',unit:'yuan',amount:'160.00',scale:2}},createdAt:user.createdAt,paidAt:'2026-09-19T02:05:00Z',cancelledAt:user.createdAt,cancelReason:'支付后取消',expiredAwaitingCancel:false};
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
@@ -123,7 +124,7 @@ test('successful empty list is distinct from failure and denied',async t=>{
 
 test('invalid local date range identifies the filter and never recommends API restart or unchanged retry',async t=>{
   const {calls}=await mount(t,{path:'/users?from=2026-10-01&to=2026-09-01'});await waitFor(()=>browser.document.querySelector('.ud-message-error'));
-  const text=browser.document.querySelector('.ud-message-error').textContent;assert.ok(text.includes('筛选条件无效'));assert.ok(text.includes('注册日期筛选尚未接入'));assert.equal(text.includes('API'),false);assert.equal(!!namedButton('重试'),false);assert.equal(calls.length,0);
+  const text=browser.document.querySelector('.ud-message-error').textContent;assert.ok(text.includes('筛选条件无效'));assert.ok(text.includes('注册起始日期不能晚于结束日期'));assert.equal(text.includes('API'),false);assert.equal(!!namedButton('重试'),false);assert.equal(calls.length,0);
 });
 
 for(const [name,outcome] of [['rejected',401],['conflict',409],['failed',503],['pending','pending']])test(`restore ${name} clears authentication inputs and keeps unknown outcome read-only`,async t=>{
@@ -151,7 +152,7 @@ test('U-LIST: displays total count from API and renders role-specific order entr
     userId: 'user_both_roles',
     name: '周既租又租',
     orderSummary: { state: 'ready', currentCount: 3, renterCurrentCount: 1, ownerCurrentCount: 2 },
-    resourceSummary: { state: 'ready', count: 4 },
+    resourceSummary: { state: 'ready', count: 4, publishedCount: 2 },
   };
   await mount(t, {
     fetch: async (address) => {
@@ -168,7 +169,7 @@ test('U-LIST: displays total count from API and renders role-specific order entr
   assert.ok(text.includes('租入 1'));
   assert.ok(text.includes('出租 2'));
   assert.equal(text.includes('共 3 个进行中'),false,'role counts are never summed into a de-duplicated total');
-  assert.ok(text.includes('名下 4'));
+  assert.ok(text.includes('上架 2'),'the published count is its own number, not the archive count');
 
   const renterBtn = [...browser.document.querySelectorAll('button')].find(b => b.textContent.includes('租入 1'));
   assert.ok(renterBtn);
@@ -264,18 +265,34 @@ test('U-LIST: credit distinguishes KNOWN 0 score, NOT_INITIALIZED, and NO_GAME_S
   assert.ok(rows[3].includes('无对象权限'));
 });
 
-test('U-LIST: legacy transport preserves microsecond boundaries without claiming original-registration support', async t => {
+test('R1: the registration range sends a Beijing day start and the next-day exclusive upper bound', async t => {
   const { calls,snapshot } = await mount(t);
   await waitFor(()=>browser.document.querySelector('tbody tr'));
   const adapter=new UserDirectoryBff(snapshot),signal=new AbortController().signal;
   await adapter.list({...EMPTY_FILTERS,from:'2026-10-18',to:'2026-10-18'},{page:1,pageSize:20},signal);
   const listCall = calls.find(c => c.url.includes('registeredFrom'));
   const url = new URL(listCall.url, 'http://127.0.0.1:4291');
+  assert.equal(url.searchParams.get('registrationTime'),'ORIGINAL');
   assert.equal(url.searchParams.get('registeredFrom'), '2026-10-18T00:00:00+08:00');
-  assert.equal(url.searchParams.get('registeredTo'), '2026-10-18T23:59:59.999999+08:00');
+  assert.equal(url.searchParams.get('registeredBefore'), '2026-10-19T00:00:00+08:00');
+  assert.equal(url.searchParams.has('registeredTo'),false,'the inclusive upper bound is never sent');
   const before=calls.length;
-  await assert.rejects(()=>adapter.list({...EMPTY_FILTERS,from:'2026-10-18',to:'2026-09-01'},{page:1,pageSize:20},signal),/建档起始日期不能晚于结束日期/);
-  assert.equal(calls.length,before,'invalid legacy ranges still fail before any request');
+  await assert.rejects(()=>adapter.list({...EMPTY_FILTERS,from:'2026-10-18',to:'2026-09-01'},{page:1,pageSize:20},signal),/注册起始日期不能晚于结束日期/);
+  assert.equal(calls.length,before,'a reversed range fails before any request');
+});
+
+test('R1: month end, year end and leap day ranges keep the real Beijing calendar day', async t => {
+  const { calls,snapshot } = await mount(t);
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  const adapter=new UserDirectoryBff(snapshot),signal=new AbortController().signal;
+  for (const [from,to] of [['2026-10-31','2026-10-31'],['2026-12-31','2026-12-31'],['2024-02-29','2024-02-29'],['2026-02-28','2026-02-28']]) {
+    await adapter.list({...EMPTY_FILTERS,from,to},{page:1,pageSize:20},signal);
+  }
+  const bounds = calls.filter(c=>c.url.includes('registeredBefore')).map(c=>new URL(c.url,'http://127.0.0.1:4291').searchParams.get('registeredBefore'));
+  assert.deepEqual(bounds,['2026-11-01T00:00:00+08:00','2027-01-01T00:00:00+08:00','2024-03-01T00:00:00+08:00','2026-03-01T00:00:00+08:00']);
+  const before=calls.length;
+  await assert.rejects(()=>adapter.list({...EMPTY_FILTERS,from:'2026-02-29',to:'2026-02-29'},{page:1,pageSize:20},signal),/注册日期无效/);
+  assert.equal(calls.length,before,'a day that does not exist never becomes a request');
 });
 
 test('U-LIST: graceful fallback when API lacks additive fields', async t => {
@@ -370,13 +387,13 @@ test('U-LIST-CLOSEOUT: permitted identity with absent summaries never reads as �
   assert.equal(text.includes('无权限'), false, 'a missing summary is not a permission verdict');
   assert.equal(text.includes('未分配业务范围'), false);
   assert.ok(text.includes('订单摘要待更新'));
-  assert.ok(text.includes('账号数待更新'));
+  assert.ok(text.includes('上架数待更新'));
   assert.equal(calls.filter(c => /\/(orders|rental-accounts|audit-events|membership-growth)/.test(c.url)).length, 0, 'the list never compensates with per-row growth/credit/finance reads');
 });
 
 test('U-LIST-CLOSEOUT: real zero stays zero, missing counts never become zero, role counts never sum into a total', async t => {
   const items = [
-    { ...user, userId: 'u_zero', name: '零单用户', orderSummary: { state: 'ready', currentCount: 0 }, resourceSummary: { state: 'ready', count: 0 } },
+    { ...user, userId: 'u_zero', name: '零单用户', orderSummary: { state: 'ready', currentCount: 0 }, resourceSummary: { state: 'ready', count: 0, publishedCount: 0 } },
     { ...user, userId: 'u_partial', name: '仅租入用户', orderSummary: { state: 'ready', currentCount: 5, renterCurrentCount: 2 } },
     { ...user, userId: 'u_split', name: '仅分角色用户', orderSummary: { state: 'ready', renterCurrentCount: 2, ownerCurrentCount: 3 } },
     { ...user, userId: 'u_nullish', name: '空值用户', orderSummary: { state: 'ready', currentCount: null }, resourceSummary: { state: 'ready' } },
@@ -385,16 +402,16 @@ test('U-LIST-CLOSEOUT: real zero stays zero, missing counts never become zero, r
   await waitFor(() => browser.document.querySelectorAll('tbody tr').length === 4);
   const rows = [...browser.document.querySelectorAll('tbody tr')].map(r => r.textContent);
   assert.ok(rows[0].includes('租入 0') || rows[0].includes('进行中 0'), 'known zero is stated as zero business, not as missing data');
-  assert.ok(rows[0].includes('名下 0'), 'known zero account count stays 0');
+  assert.ok(rows[0].includes('上架 0'), 'known zero published count stays 0');
   assert.ok(rows[1].includes('租入 2'));
   assert.ok(rows[1].includes('出租待更新'), 'the unknown sibling role is pending, never 0');
   assert.equal(rows[1].includes('出租 0'), false);
   assert.equal(rows[1].includes('共 5 个进行中'), false, 'role counts are never summed into a de-duplicated total');
   assert.ok(rows[2].includes('租入 2') && rows[2].includes('出租 3'));
   assert.equal(rows[2].includes('共 5'), false, 'role counts must not be added into a de-duplicated total');
-  assert.ok(rows[3].includes('订单摘要待更新') && rows[3].includes('账号数待更新'));
+  assert.ok(rows[3].includes('订单摘要待更新') && rows[3].includes('上架数待更新'));
   assert.equal(rows[3].includes('0 个进行中'), false);
-  assert.equal(rows[3].includes('名下 0'), false);
+  assert.equal(rows[3].includes('上架 0'), false);
 });
 
 for (const [value, trusted] of [[1234, true], [0, true], [12.5, false], [-3, false], ['1234', false], [null, false]]) test(`U-LIST-CLOSEOUT: page total ${String(value)} renders only when it is a trusted non-negative integer`, async t => {
@@ -438,7 +455,7 @@ test('U-LIST-CLOSEOUT: 390 cards use house actions and keep no bare wrapper butt
   assert.ok(detail && quick, 'each card carries its own house actions');
   assert.equal(detail.tagName, 'BUTTON');
   assert.equal(quick.closest('.ud-mobile-row'), card, 'both actions stay inside their own card');
-  const count = namedButton('查看用户 林舟 名下游戏账号');
+  const count = namedButton('查看用户 林舟 已上架游戏账号');
   assert.ok(count, 'a supported count stays its own focusable drill-down');
   assert.equal(count.closest('dl') !== null, true);
   assert.equal(browser.document.querySelector('button button'), null, 'no control is nested inside another control');
@@ -720,12 +737,12 @@ test('MASTER: malformed numbered response is rejected instead of becoming cursor
   assert.equal(browser.document.querySelector('.ud-pagination'),null);
 });
 
-test('MASTER: calendar selection remains a draft while the pending registration filter is disabled', async t => {
+test('MASTER: the registration date control is available and picking a day stays a draft', async t => {
   const {calls}=await mount(t);
   await waitFor(()=>browser.document.querySelector('tbody tr'));
   const before=calls.length;
   const trigger=browser.document.querySelector('[aria-label="注册日期"]');
-  assert.ok(trigger?.disabled,'unsupported registration filtering stays disabled');
+  assert.ok(trigger && !trigger.disabled,'the registration date filter is available');
   const {container}=await mountCalendar(t,{period:'day',operator:'between',startDate:new Date(2026,9,20)});
   const day=container.querySelector('button[data-day]');
   assert.ok(day,'the calendar renders selectable days');
@@ -735,12 +752,16 @@ test('MASTER: calendar selection remains a draft while the pending registration 
   assert.ok(browser.document.querySelector('tbody tr'),'the applied rows stay until the query is submitted');
 });
 
-test('MASTER-UX03: a restored unsupported date condition never queries local filing dates or all users',async t=>{
+test('R1: a restored date condition queries the original registration range instead of the local filing date',async t=>{
   const {calls}=await mount(t,{path:'/users?from=2026-10-18&to=2026-10-18'});
-  await waitFor(()=>browser.document.querySelector('.ud-message-error'));
-  assert.equal(calls.length,0);
-  assert.ok(browser.document.querySelector('tbody tr')===null);
-  assert.ok(browser.document.querySelector('.ud-message-error').textContent.includes('请清除日期条件'));
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  const call=calls.find(c=>c.url.includes('registeredFrom'));
+  assert.ok(call,'the restored date condition is executed as a registration range');
+  const url=new URL(call.url,browser.location.href);
+  assert.equal(url.searchParams.get('registrationTime'),'ORIGINAL');
+  assert.equal(url.searchParams.get('registeredFrom'),'2026-10-18T00:00:00+08:00');
+  assert.equal(url.searchParams.get('registeredBefore'),'2026-10-19T00:00:00+08:00');
+  assert.equal(url.searchParams.has('registeredTo'),false);
 });
 
 test('MASTER: a failed context recovery stops after one attempt and removes stale rows', async t => {
@@ -828,10 +849,14 @@ test('MASTER-UX03: quick ranges use the Beijing date in a UTC browser',async t=>
   assert.equal(changes.at(-1)?.startDate?.getDate(),15);
 });
 
-test('MASTER-UX03: original registration filtering stays unavailable until Root supplies it',async t=>{
-  await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr'));
-  const trigger=browser.document.querySelector('[aria-label="注册日期"]');
-  assert.ok(trigger&&trigger.disabled,'do not offer the filing-date query as a replacement');
+test('R1: the registration sort is available and the legacy created sort normalises into the default',async t=>{
+  const {calls}=await mount(t,{path:'/users?sort=created'});
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  assert.ok(browser.document.querySelector('[aria-label="注册时间排序"]'),'the registration sort entry is available');
+  const call=calls.find(c=>c.url.includes('/users?'));
+  const url=new URL(call.url,browser.location.href);
+  assert.equal(url.searchParams.get('sort'),'registered_desc','the old created sort normalises into the registration default');
+  assert.equal(url.searchParams.get('registrationTime'),'ORIGINAL');
 });
 
 test('MASTER-UX03: the source tooltip is keyboard reachable and never opens the row drawer',async t=>{
@@ -844,13 +869,13 @@ test('MASTER-UX03: the source tooltip is keyboard reachable and never opens the 
   assert.equal(calls.length,before);
 });
 
-test('MASTER-UX03: unknown user origin does not become local registration',async t=>{
-  const unknown={...user,source:{kind:'UNKNOWN'},registeredAt:'2026-04-01T00:00:00Z',registeredAtSource:'LOCAL'};
+test('R1: an unknown registration source never becomes a registration date',async t=>{
+  const unknown={...user,source:{kind:'UNKNOWN'},registeredAt:null,registeredAtSource:'UNKNOWN'};
   await mount(t,{fetch:async()=>json({items:[unknown],nextCursor:null,limit:20})});
   await waitFor(()=>browser.document.querySelector('tbody tr'));
   const dateCell=browser.document.querySelector('tbody tr').children[5];
   assert.ok(dateCell.textContent.includes('待核'));
-  assert.ok(!dateCell.textContent.includes('2026-04-01'));
+  assert.ok(!dateCell.textContent.includes('2026-09-24'),'the local filing date is never printed as a registration date');
 });
 
 test('MASTER-UX03: a known local registration agrees in the detail view',async t=>{
@@ -950,15 +975,16 @@ test('ADM-SUMMARY: the credit score boundaries follow the agreed tones and a zer
   assert.ok(rows[4].textContent.includes('0 分'));
 });
 
-test('ADM-SUMMARY: the business cell separates renting, lending and the owned accounts, each with its own drill-down', async t => {
-  const mixed = { ...user, userId: 'u_mixed', name: '混合用户', orderSummary: { state: 'ready', currentCount: 3, renterCurrentCount: 1, ownerCurrentCount: 2 }, resourceSummary: { state: 'ready', count: 4 } };
+test('R2: the business cell separates renting, lending and the published accounts, each with its own drill-down', async t => {
+  const mixed = { ...user, userId: 'u_mixed', name: '混合用户', orderSummary: { state: 'ready', currentCount: 3, renterCurrentCount: 1, ownerCurrentCount: 2 }, resourceSummary: { state: 'ready', count: 4, publishedCount: 2 } };
   const { calls } = await mount(t, { fetch: async () => json({ items: [mixed], total: 1, nextCursor: null, limit: 20 }) });
   await waitFor(() => browser.document.querySelector('tbody tr'));
   const cell = browser.document.querySelector('tbody tr .ud-business-cell');
   assert.ok(cell, 'the business cell groups the counts');
   assert.ok(cell.textContent.includes('租入 1'));
   assert.ok(cell.textContent.includes('出租 2'));
-  assert.ok(cell.textContent.includes('名下 4'));
+  assert.ok(cell.textContent.includes('上架 2'));
+  assert.equal(cell.textContent.includes('名下 4'), false, 'the archive count never stands in for the published count');
   assert.equal(cell.textContent.includes('共 3'), false, 'the two roles are never summed into a de-duplicated total');
   await click(cell.querySelector('[aria-label="查看用户 混合用户 租入订单"]'));
   await waitFor(() => browser.location.pathname === '/users/u_mixed');
@@ -967,16 +993,17 @@ test('ADM-SUMMARY: the business cell separates renting, lending and the owned ac
   assert.equal(calls.filter(c => c.url.includes('/rental-accounts')).length, 0, 'the list never compensates with per-row business reads');
 });
 
-test('ADM-SUMMARY: the registration fact follows the server source and a LOCAL alias never reads as a registration date', async t => {
-  const local = { ...user, userId: 'u_local', name: '本地建档', registeredAtSource: 'LOCAL', registeredAt: '2026-10-12T00:00:00Z' };
-  const legacy = { ...user, userId: 'u_legacy', name: '旧平台', registeredAtSource: 'LEGACY', registeredAt: '2026-07-29T00:00:00Z' };
-  await mount(t, { fetch: async () => json({ items: [local, legacy], total: 2, nextCursor: null, limit: 20 }) });
-  await waitFor(() => browser.document.querySelectorAll('tbody tr').length === 2);
+test('R1: the registration fact follows the server-declared source in every caller', async t => {
+  const local = { ...user, userId: 'u_local', name: '本平台注册', registeredAtSource: 'LOCAL', registeredAt: '2026-10-12T00:00:00Z' };
+  const legacy = { ...user, userId: 'u_legacy', name: '旧平台注册', registeredAtSource: 'LEGACY', registeredAt: '2026-07-29T00:00:00Z' };
+  const unknown = { ...user, userId: 'u_unknown', name: '来源未知', registeredAtSource: 'UNKNOWN', registeredAt: null };
+  await mount(t, { fetch: async () => json({ items: [local, legacy, unknown], total: 3, nextCursor: null, limit: 20 }) });
+  await waitFor(() => browser.document.querySelectorAll('tbody tr').length === 3);
   const rows = [...browser.document.querySelectorAll('tbody tr')].map(r => r.textContent);
-  assert.ok(rows[0].includes('待核'), 'a local filing alias is pending, not a registration date');
-  assert.equal(rows[0].includes('2026-10-12'), false, 'the local filing date is not printed as a registration date');
-  assert.ok(rows[1].includes('2026-07-29'));
-  assert.ok(rows[1].includes('旧平台注册'));
+  assert.ok(rows[0].includes('2026-10-12') && rows[0].includes('本平台注册'), 'a server-declared local registration is shown with its source');
+  assert.ok(rows[1].includes('2026-07-29') && rows[1].includes('旧平台注册'));
+  assert.ok(rows[2].includes('待核'), 'an unknown source stays pending');
+  assert.equal(rows[2].includes('2026-09-24'), false, 'the local filing date is never printed as a registration date');
 });
 
 test('ADM-SUMMARY: the growth detail separates active entitlements from history and never infers a missing one', async t => {
@@ -1047,4 +1074,109 @@ test('ADM-SUMMARY: the search keeps the old-ID hit explainable without a permane
   await waitFor(() => browser.document.querySelector('tbody tr'));
   const matched = browser.document.querySelector('tbody tr').textContent;
   assert.ok(matched.includes('按旧平台 ID 命中'), 'an old-ID hit explains itself once');
+});
+
+// ADM-USER-UI-RESTORE-01 / F0-B: R1 真实注册时间与 R2 上架摘要及同集合下钻。
+test('R1: the list, the phone lookup and the detail all ask for the original registration time',async t=>{
+  const {calls}=await mount(t);
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  const list=calls.find(c=>c.url.startsWith('/api/bff/admin/users?'));
+  assert.equal(new URL(list.url,browser.location.href).searchParams.get('registrationTime'),'ORIGINAL','the list asks for the original registration time');
+  await input(browser.document.querySelector('[aria-label="查找用户"]'),'18800001101');
+  await click(namedButton('查询'));
+  await waitFor(()=>calls.some(c=>c.url==='/api/bff/admin/users/lookup'));
+  const lookup=calls.find(c=>c.url==='/api/bff/admin/users/lookup');
+  assert.equal(lookup.method,'POST');
+  assert.equal(lookup.body.registrationTime,'ORIGINAL','the phone lookup body carries the mode');
+  assert.equal(lookup.body.sort,'registered_desc');
+  assert.ok(calls.every(c=>!c.url.includes('18800001101')),'the phone never enters the URL');
+  assert.equal(browser.location.href.includes('18800001101'),false);
+  await click(browser.document.querySelector('tbody tr'));
+  await waitFor(()=>namedButton('打开完整详情'));
+  const detail=calls.find(c=>c.url.includes('/api/bff/admin/users/user_normal?'));
+  assert.ok(detail,'the quick check reads the user detail');
+  assert.equal(new URL(detail.url,browser.location.href).searchParams.get('registrationTime'),'ORIGINAL','the detail asks for the original registration time');
+});
+
+test('R1: the registration sort sends the requested direction',async t=>{
+  const {calls}=await mount(t,{path:'/users?sort=registered_asc'});
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  const call=calls.find(c=>c.url.includes('/users?'));
+  assert.equal(new URL(call.url,browser.location.href).searchParams.get('sort'),'registered_asc');
+});
+
+test('R2: a zero published count, a missing published count and a denied scope stay different',async t=>{
+  const items=[
+    { ...user, userId:'p_zero', name:'零上架用户', resourceSummary:{state:'ready',count:4,publishedCount:0} },
+    { ...user, userId:'p_unknown', name:'上架未知用户', resourceSummary:{state:'ready',count:4} },
+    { ...user, userId:'p_denied', name:'无权限用户', resourceSummary:{state:'denied',permission:'supply.rental_account.read'} },
+    { ...user, userId:'p_noscope', name:'无范围用户', resourceSummary:{state:'denied',permission:'supply.rental_account.read',reason:'NO_GAME_SCOPE'} },
+  ];
+  await mount(t,{fetch:async()=>json({items,total:4,nextCursor:null,limit:20})});
+  await waitFor(()=>browser.document.querySelectorAll('tbody tr').length===4);
+  const rows=[...browser.document.querySelectorAll('tbody tr')].map(r=>r.textContent);
+  assert.ok(rows[0].includes('上架 0'),'a real zero stays a zero');
+  assert.equal(rows[0].includes('上架数待更新'),false);
+  assert.ok(rows[1].includes('上架数待更新'),'a missing published count stays unknown');
+  assert.equal(rows[1].includes('上架 0'),false,'a missing count never becomes zero');
+  assert.ok(rows[2].includes('无权限'));
+  assert.ok(rows[3].includes('未分配业务范围'));
+  assert.equal(rows[2].includes('上架 '),false,'a denied scope never shows a number');
+  assert.equal(rows[3].includes('上架 '),false,'a denied scope never shows a number');
+});
+
+test('R2: the published count opens the same collection with the published filter kept',async t=>{
+  const mixed={...user,userId:'u_pub',name:'混合用户',resourceSummary:{state:'ready',count:4,publishedCount:2}};
+  await mount(t,{fetch:async()=>json({items:[mixed],total:1,nextCursor:null,limit:20})});
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  await click(namedButton('查看用户 混合用户 已上架游戏账号'));
+  await waitFor(()=>browser.location.pathname==='/users/u_pub');
+  assert.ok(browser.location.search.includes('section=resources'));
+  assert.ok(browser.location.search.includes('publication=published'),'the drill-down keeps the published scope');
+});
+
+test('R2: the resources section reads the published collection instead of filtering a full page locally',async t=>{
+  const {calls}=await mount(t,{path:'/users/user_normal?section=resources&publication=published'});
+  await waitFor(()=>browser.document.querySelector('.ud-section-heading h2'));
+  const read=calls.find(c=>c.url.includes('/rental-accounts'));
+  assert.ok(read,'the resources section reads the rental accounts');
+  assert.ok(read.url.includes('publication=published'),'the published collection is requested explicitly');
+  assert.equal(calls.some(c=>c.url.includes('/rental-accounts')&&!c.url.includes('publication=published')),false,'the page never requests everything and filters it locally');
+});
+
+test('R2: the account publication fact comes from currentlyPublished, not from the version state',async t=>{
+  const account=(id,no,lifecycle,currentlyPublished)=>({accountId:id,displayNo:no,game:{id:'g',code:'g',name:'游戏'},lifecycle,ownerPaused:false,staffRestricted:false,restrictionReason:null,legacyHold:'NONE',currentVersionId:`v-${no}`,publication:{versionState:'PUBLISHED',source:'OWNER_DIRECT',versionPublished:true,...(currentlyPublished===undefined?{}:{currentlyPublished})},createdAt:'2026-10-01T00:00:00Z'});
+  const accounts=[account('a_published','ACC-1','ACTIVE',true),account('a_archived','ACC-2','ARCHIVED',false),account('a_unknown','ACC-3','ACTIVE',undefined)];
+  await mount(t,{path:'/users/user_normal?section=resources',fetch:async address=>address.pathname.endsWith('/rental-accounts')?json({items:accounts,nextCursor:null}):json({user:{...detail,userId:'user_normal'}})});
+  await waitFor(()=>browser.document.querySelector('.ud-resource'));
+  const articles=[...browser.document.querySelectorAll('.ud-resource')].map(a=>a.textContent);
+  assert.ok(articles[0].includes('当前已上架'),'a published account says so');
+  assert.ok(articles[1].includes('当前未上架'),'an archived account is not currently published even though its version is');
+  assert.ok(articles[1].includes('当前版本已直接发布'),'the version state stays readable next to it');
+  assert.ok(articles[2].includes('当前上架状态待核'),'a missing publication fact stays unknown');
+});
+
+test('R2: switching the account scope clears the cursor and the old rows',async t=>{
+  const calls=[];
+  const account=id=>({accountId:id,displayNo:id,game:{id:'g',code:'g',name:'游戏'},lifecycle:'ACTIVE',ownerPaused:false,staffRestricted:false,restrictionReason:null,legacyHold:'NONE',currentVersionId:`v-${id}`,publication:{versionState:'PUBLISHED',source:'OWNER_DIRECT',versionPublished:true,currentlyPublished:true},createdAt:'2026-10-01T00:00:00Z'});
+  const detailUser={id:'user_normal',name:'林舟',username:null,displayUsername:null,phoneMasked:'188****1101',emailMasked:null,image:null,status:'ACTIVE',suspended:false,identityStatus:'UNKNOWN',identity:'未知',age:'未知',verifiedAt:null,createdAt:'2026-09-24T04:00:00Z',updatedAt:'2026-09-24T04:00:00Z',registeredAt:'2026-09-24T04:00:00Z',registeredAtSource:'LOCAL',orders:{state:'ready',data:[],current:0},resources:{state:'ready',data:[],count:2,publishedCount:1}};
+  const allowed=['user.directory.read','supply.rental_account.read'];
+  const adapter={snapshot:{adminUserId:'admin-A',session:{id:'s-A'},security:{isBoss:false},permissions:allowed},has:p=>allowed.includes(p),hasCreditGuaranteeRead:()=>false,hasCreditGuaranteeManage:()=>false,detail:async()=>detailUser,section:async(id,domain,signal,cursor,filters)=>{calls.push({cursor,filters});return {state:'ready',data:[account(filters.publication==='published'?'a-published':'a-all')],nextCursor:'NEXT'};},membershipGrowth:async()=>({}),finance:async()=>({})};
+  const container=browser.document.createElement('div');browser.document.body.appendChild(container);const root=createRoot(container);
+  const tab=query=>({id:'user:user_normal',title:'林舟',path:'/users/user_normal',query,closable:true,kind:'user-object',objectType:'user',objectId:'user_normal'});
+  t.after(async()=>{await act(async()=>root.unmount());container.remove();await settle();});
+  const render=async query=>{await act(async()=>root.render(createElement(StrictMode,null,createElement(UserDetail,{adapter,snapshot:adapter.snapshot,tab:tab(query),onOpenPath:()=>{},onQueryChange:()=>{},refreshNonce:0}))));await settle();};
+  await render({section:'resources',publication:'published'});
+  await waitFor(()=>container.querySelector('.ud-resource'));
+  assert.ok(container.textContent.includes('a-published'),'the published collection is read');
+  await click(namedButton('下一页'));
+  await waitFor(()=>calls.some(c=>c.cursor==='NEXT'));
+  const before=calls.length;
+  await render({section:'resources'});
+  await waitFor(()=>calls.length>before);
+  const after=calls.slice(before);
+  assert.ok(after.every(c=>c.cursor===undefined),'the cursor from the previous scope is not reused');
+  assert.ok(after.every(c=>c.filters.publication===undefined),'the new scope reads the whole collection');
+  assert.ok(container.textContent.includes('a-all'),'the new scope shows its own rows');
+  assert.equal(container.textContent.includes('a-published'),false,'the rows of the previous scope are gone');
 });

@@ -56,7 +56,7 @@ const { tabFromLocation, tabHref, upsertTab } = await vite.ssrLoadModule('/src/w
 after(async () => { await vite.close(); await browser.happyDOM.abort(); });
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-const user = { userId: 'user_normal', name: '林舟', image: null, username: null, displayUsername: null, maskedPhone: '188****1101', accountStatus: 'ACTIVE', suspended: false, identityStatus: 'UNKNOWN', ageStatus: 'UNKNOWN', source: { kind: 'MIGRATED', legacyId: '88001' }, registeredAt: '2026-09-24T04:00:00Z', registeredAtSource: 'LOCAL', createdAt: '2026-09-24T04:00:00Z', updatedAt: '2026-09-24T04:00:00Z', localCreatedAt: '2026-09-24T04:00:00Z', resourceSummary: { state: 'ready', count: 1 }, orderSummary: { state: 'ready', currentCount: 1 }, lastBusinessActivity: { state: 'not_connected', domains: ['ORDER', 'SUPPLY'] } };
+const user = { userId: 'user_normal', name: '林舟', image: null, username: null, displayUsername: null, maskedPhone: '188****1101', accountStatus: 'ACTIVE', suspended: false, identityStatus: 'UNKNOWN', ageStatus: 'UNKNOWN', source: { kind: 'MIGRATED', legacyId: '88001' }, registeredAt: '2026-09-24T04:00:00Z', registeredAtSource: 'LOCAL', createdAt: '2026-09-24T04:00:00Z', updatedAt: '2026-09-24T04:00:00Z', localCreatedAt: '2026-09-24T04:00:00Z', resourceSummary: { state: 'ready', count: 1, publishedCount: 1 }, orderSummary: { state: 'ready', currentCount: 1 }, lastBusinessActivity: { state: 'not_connected', domains: ['ORDER', 'SUPPLY'] } };
 const order = { orderId: 'order_cancel', displayNo: 'TEST-1003', status: 'CANCELLED', role: 'renter', title: '订单快照', counterpartyName: '另一方', gameId: 'delta', amounts: { rental: { currency: 'CNY', unit: 'yuan', amount: '60.00', scale: 2 }, deposit: { currency: 'CNY', unit: 'yuan', amount: '100.00', scale: 2 }, totalDue: { currency: 'CNY', unit: 'yuan', amount: '160.00', scale: 2 } }, createdAt: user.createdAt, paidAt: null, cancelledAt: user.createdAt, cancelReason: '支付后取消', expiredAwaitingCancel: false };
 
 const loadedOrder = { id: 'order_cancel', displayNo: 'TEST-1003', status: 'CANCELLED', title: '订单快照', accountId: 'account_1', accountDisplayNo: null, gameId: 'delta', ownerUserId: 'user_owner', renterUserId: 'user_normal', ownerName: '号主', renterName: user.name, createdAt: user.createdAt, paidAt: null, payment: { state: 'UNKNOWN', recordedAt: null, recordedAmount: null }, amounts: order.amounts, source: { origin: 'LEGACY' } };
@@ -218,8 +218,8 @@ test('clearing user filters replaces the workspace query, including the old curs
   // The toolbar keeps one reset entry; the duplicate clear control was removed.
   await click(namedButton('重置'));
   await waitFor(() => browser.document.querySelector('[aria-label="查找用户"]').value === '');
-  assert.deepEqual(h.queries.at(-1), { sort: 'created' }, 'omitted filters must be removed instead of merged back');
-  assert.deepEqual(tabFromLocation('/users', tabHref(h.tab()).split('?')[1]).query, { sort: 'created' }, 'refresh receives only the cleared query');
+  assert.deepEqual(h.queries.at(-1), { sort: 'registered_desc' }, 'omitted filters must be removed instead of merged back');
+  assert.deepEqual(tabFromLocation('/users', tabHref(h.tab()).split('?')[1]).query, { sort: 'registered_desc' }, 'refresh receives only the cleared query');
 });
 
 test('phone lookup removes an older public search without persisting the phone', async (t) => {
@@ -227,7 +227,7 @@ test('phone lookup removes an older public search without persisting the phone',
   await waitFor(() => browser.document.querySelector('.ud-directory tbody tr'));
   await input(browser.document.querySelector('[aria-label="查找用户"]'), '18800001101');
   await click(namedButton('查询'));
-  assert.deepEqual(h.queries.at(-1), { sort: 'created' }, 'neither the old nickname nor the phone belongs in the workspace query');
+  assert.deepEqual(h.queries.at(-1), { sort: 'registered_desc' }, 'neither the old nickname nor the phone belongs in the workspace query');
 });
 
 test('user detail section changes retain order and supply origin context', async (t) => {
@@ -322,3 +322,21 @@ test('finance origin link and return navigation preserves user detail section', 
   assert.equal(h.opened.at(-1).path, '/users/user_normal?section=finance', 'return path lands back on user detail finance section');
 });
 
+
+test('the published drill-down keeps the collection scope and the published filter', async (t) => {
+  const list = { ...tabFromLocation('/users'), query: { sort: 'registered_desc' } };
+  const h = await mount(t, list, snapshot(['user.directory.read', 'supply.rental_account.read']));
+  await waitFor(() => browser.document.querySelector('.ud-directory tbody tr'));
+  await click(namedButton('查看用户 林舟 已上架游戏账号'));
+  const target = new URL(h.opened.at(-1).path, browser.location.href);
+  assert.equal(target.pathname, '/users/user_normal');
+  assert.equal(target.searchParams.get('section'), 'resources');
+  assert.equal(target.searchParams.get('publication'), 'published', 'the drill-down keeps the published scope');
+});
+
+test('the registration sort in the workspace query drives the directory request', async (t) => {
+  const list = { ...tabFromLocation('/users'), query: { sort: 'registered_asc' } };
+  const h = await mount(t, list, snapshot(['user.directory.read']));
+  await waitFor(() => browser.document.querySelector('.ud-directory tbody tr'));
+  assert.deepEqual(h.queries.at(-1), { sort: 'registered_asc' }, 'the applied sort stays in the workspace query');
+});

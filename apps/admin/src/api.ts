@@ -102,7 +102,7 @@ export type RestorableUserCandidate = {
 
 export type UserDirectorySourceKind = "LOCAL" | "MIGRATED" | "UNKNOWN";
 export type UserDirectoryResourceSummary =
-  | { state: "ready"; count: number }
+  | { state: "ready"; count: number; publishedCount?: number }
   | { state: "denied"; permission: string; reason?: "NO_GAME_SCOPE" };
 
 export type UserDirectoryOrderSummary =
@@ -176,7 +176,7 @@ export type UserDirectoryItem = {
   ageStatus: string;
   source: { kind: UserDirectorySourceKind; legacyId?: string };
   registeredAt: string | null;
-  registeredAtSource: "LEGACY" | "LOCAL";
+  registeredAtSource: "LEGACY" | "LOCAL" | "UNKNOWN";
   localCreatedAt: string;
   createdAt: string;
   updatedAt: string;
@@ -239,7 +239,7 @@ export type UserRentalAccountItem = {
   restrictionReason: string | null;
   legacyHold: "NONE" | "UNRESOLVED" | "ACTIVE_LEGACY";
   currentVersionId: string | null;
-  publication: { versionState: string | null; source: string | null; versionPublished: boolean };
+  publication: { versionState: string | null; source: string | null; versionPublished: boolean; currentlyPublished?: boolean };
   createdAt: string;
   historicalRead?: LegacyHistoricalRead | null;
 };
