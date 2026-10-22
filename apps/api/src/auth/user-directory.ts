@@ -5,7 +5,7 @@ import { conflict, forbidden, invalid, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { effectivePublicationStateSql, isEffectivePublicationState } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
-import { orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
+import { orderReadKeyRelation, orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
 import { legacyContinuationReady } from "../order/legacy-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 import { readUserDirectoryBusinessSummaries } from "./user-directory-business-summary";
@@ -917,7 +917,7 @@ export async function listUserOrders(
               o.account_id AS "accountId", a.display_no AS "accountDisplayNo", o.title, o.game_id AS "gameId",
               o.rental_amount_cents::text AS "rentalAmountCents", o.deposit_amount_cents::text AS "depositAmountCents",
               o.currency,
-              cp.name AS "counterpartyName",
+              cp.name AS "counterpartyName", cp.id AS "counterpartyUserId",
               to_char(o.created_at ${TIMESTAMP_TEXT}) AS "createdAt",
               to_char(o.hold_until ${TIMESTAMP_TEXT}) AS "holdUntil",
               to_char(o.paid_at ${TIMESTAMP_TEXT}) AS "paidAt",
@@ -952,6 +952,7 @@ export async function listUserOrders(
       title: row.title,
       gameId: row.gameId,
       counterpartyName: row.counterpartyName,
+      counterpartyUserId: (row as UserOrderRow & {counterpartyUserId:string}).counterpartyUserId,
       amounts: {
         rental: { currency: row.currency, unit: "yuan", amount: toYuan(row.rentalAmountCents), scale: 2 },
         deposit: { currency: row.currency, unit: "yuan", amount: toYuan(row.depositAmountCents), scale: 2 },
@@ -981,10 +982,31 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
   if(filter.status==='current')where.push("x.status IN ('PENDING_PAYMENT','PAID')");else if(filter.status)where.push('x.status=$'+values.push(filter.status));
   const time='$'+values.push(cursor?.createdAt??null),id='$'+values.push(cursor?.id??null),limit='$'+values.push(filter.limit+1);
   where.push(`(${time}::timestamptz IS NULL OR COALESCE(x.created_at,'0001-01-01'::timestamptz)<${time}::timestamptz OR (COALESCE(x.created_at,'0001-01-01'::timestamptz)=${time}::timestamptz AND x.id<${id}))`);
-  const relation=orderReadRelation(await legacyContinuationReady(client));
-  const rows=(await client.query(`WITH all_orders AS(${relation}) SELECT x.origin,x.record,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
+  const continuationReady=await legacyContinuationReady(client);
+  const rows=(await client.query(`WITH all_orders AS(${orderReadKeyRelation(continuationReady)}) SELECT x.origin,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
   const items=rows.slice(0,filter.limit),last=items.at(-1);
-  return {items:items.map(row=>{const order=projectAdminReadOrder(row.origin,row.record,{adminId:viewer.adminId,isBoss:viewer.isBoss,internalQuote:false,authorizationKey:viewer.authorizationKey??''});return {orderId:order.id,displayNo:order.displayNo,status:order.status,role:row.role,...(viewer.resourceRead?{accountId:order.accountId,accountDisplayNo:order.accountDisplayNo}:{}),title:order.title,gameId:order.gameId,counterpartyName:row.role==='renter'?order.ownerName:order.renterName,amounts:order.amounts,createdAt:order.createdAt,paidAt:order.paidAt,cancelledAt:order.cancelledAt,holdUntil:order.holdUntil,expiredAwaitingCancel:order.expiredAwaitingCancel,payment:order.payment,source:order.source};}),nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit};
+  const recordsByKey=new Map<string,Record<string,unknown>>();
+  if(items.length){
+    // Scope and cursor are decided on narrow keys; only this page's origin-bound records are expanded.
+    const recordValues=[items.filter(row=>row.origin==='NATIVE').map(row=>row.id),items.filter(row=>row.origin==='LEGACY').map(row=>row.id)];
+    const records=(await client.query<{origin:string;id:string;record:Record<string,unknown>}>(`WITH all_orders AS(${orderReadRelation(continuationReady,false,{nativeIds:'$1',legacyIds:'$2'})}) SELECT x.origin,x.id,x.record FROM all_orders x`,recordValues)).rows;
+    for(const row of records)recordsByKey.set(`${row.origin}\u0000${row.id}`,row.record);
+  }
+  return {
+    items:items.map(row=>{
+      const record=recordsByKey.get(`${row.origin}\u0000${row.id}`);
+      if(!record)throw notFound();
+      const order=projectAdminReadOrder(row.origin,record,{adminId:viewer.adminId,isBoss:viewer.isBoss,internalQuote:false,authorizationKey:viewer.authorizationKey??''});
+      return {orderId:order.id,displayNo:order.displayNo,status:order.status,role:row.role,
+        ...(viewer.resourceRead?{accountId:order.accountId,accountDisplayNo:order.accountDisplayNo}:{}),
+        title:order.title,gameId:order.gameId,counterpartyName:row.role==='renter'?order.ownerName:order.renterName,
+        counterpartyUserId:row.role==='renter'?order.ownerUserId:order.renterUserId,
+        amounts:order.amounts,
+        createdAt:order.createdAt,paidAt:order.paidAt,cancelledAt:order.cancelledAt,cancelReason:order.cancelReason,
+        holdUntil:order.holdUntil,expiredAwaitingCancel:order.expiredAwaitingCancel,
+        payment:order.payment,source:order.source};
+    }),nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit,
+  };
 }
 
 /** User-object audit history for the directory takeover: operations and migration facts on one user. */

@@ -340,7 +340,10 @@ test('legacy current drilldown and role counters share the unified source withou
         const id=`legacy_current_${index}`;
         return {id,sortAt:'2026-09-24T04:00:00.000000Z',origin:'LEGACY',role:'owner',record:{id,original_order_no:`OLD-${index}`,source_order_status:status,source_pay_status:status===1?0:1,due_amount_cents:'600',recorded_paid_amount_cents:status===1?'0':'600',deposit_amount_cents:'0',source_snapshot:{goods_money:'6.00',expend_pay_money:'0.00'},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_user_id:'user_normal',renter_user_id:'user_dual',owner_name:'Owner',renter_name:'Renter',account_id:'account_private',game_id:'delta',legacy_account_no:'A-PRIVATE'}};
       });
-      return {rows,rowCount:rows.length};
+      const selected=sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x')
+        ? rows.filter(row=>(values[1] as string[]).includes(row.id))
+        : rows.map(({record,...row})=>row);
+      return {rows:selected,rowCount:selected.length};
     }
     return baseQuery(sql,values);
   };
@@ -349,10 +352,47 @@ test('legacy current drilldown and role counters share the unified source withou
   const summarySql=pool.queries.find(query=>query.sql.includes('current_orders.current_count'))!.sql;
   assert.ok(summarySql.includes('UNION ALL')&&summarySql.includes('zzsh_order.legacy_order_read_snapshot'));
   const page:any=await listUserOrders(client(pool),scoped,'user_normal',{role:'owner',status:'current',limit:1});
-  assert.equal(page.items[0].status,'PAID');assert.equal(page.items[0].source.origin,'LEGACY');assert.equal('accountId' in page.items[0],false);assert.ok(page.nextCursor);
-  const query=pool.queries.at(-1)!;assert.ok(query.sql.includes("x.status IN ('PENDING_PAYMENT','PAID')"));assert.ok(query.sql.includes('x.owner_user_id=$1'));assert.ok(query.sql.includes('sgame."game_id" = x.game_id'));
+  assert.equal(page.items[0].status,'PAID');assert.equal(page.items[0].source.origin,'LEGACY');assert.deepEqual(page.items[0].amounts.totalDue,{currency:'CNY',unit:'yuan',amount:'6.00',scale:2});assert.deepEqual(page.items[0].amounts.deposit,{currency:'CNY',unit:'yuan',amount:'0.00',scale:2});assert.equal(page.items[0].counterpartyUserId,'user_dual');assert.equal('accountId' in page.items[0],false);assert.ok(page.nextCursor);
+  const query=pool.queries.filter(query=>query.sql.startsWith('WITH all_orders AS')&&!query.sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x')).at(-1)!;assert.ok(query.sql.includes("x.status IN ('PENDING_PAYMENT','PAID')"));assert.ok(query.sql.includes('x.owner_user_id=$1'));assert.ok(query.sql.includes('sgame."game_id" = x.game_id'));assert.ok(!query.sql.includes(' AS record'));assert.equal(query.values.at(-1),2);
+  const records=pool.queries.at(-1)!;assert.deepEqual(records.values,[[],['legacy_current_0']]);assert.match(records.sql,/o\.id=ANY\(\$1::text\[\]\)/);assert.match(records.sql,/l\.id=ANY\(\$2::text\[\]\)/);
   const all:any=await listUserOrders(client(pool),scoped,'user_normal',{role:'owner',status:'current',limit:20});assert.deepEqual(all.items.map((item:any)=>item.status),['PAID','PENDING_PAYMENT']);
   for(const changed of [{role:'renter',status:'current'},{role:'owner',status:'PAID'}] as const)await assert.rejects(listUserOrders(client(pool),scoped,'user_normal',{...changed,limit:1,cursor:page.nextCursor}),{status:409});
+});
+
+test('mixed user orders expand only page keys, preserve source collisions and use the original cursor',async()=>{
+  const queries:{sql:string;values:unknown[]}[]=[],at='2026-09-24T04:00:00.000000Z';
+  const head=[{origin:'LEGACY',id:'same-id',role:'owner',sortAt:at},{origin:'NATIVE',id:'same-id',role:'renter',sortAt:at},{origin:'LEGACY',id:'lookahead',role:'owner',sortAt:at}];
+  const legacy={id:'same-id',original_order_no:'OLD-SAME',source_order_status:3,source_pay_status:1,due_amount_cents:'600',recorded_paid_amount_cents:'600',deposit_amount_cents:'0',source_snapshot:{goods_money:'6.00',expend_pay_money:'0.00'},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_user_id:'user_normal',renter_user_id:'user_dual',owner_name:'Owner',renter_name:'Renter',account_id:'account-private',game_id:'delta'};
+  const quoteAmount=(amount:string)=>({currency:'CNY',unit:'yuan',amount,scale:2});
+  const native={id:'same-id',display_no:'NEW-SAME',status:'PAID',rental_amount_cents:'700',deposit_amount_cents:'300',currency:'CNY',owner_user_id:'native-owner',renter_user_id:'user_normal',owner_name:'Native Owner',renter_name:'Renter',account_id:'native-account',game_id:'delta',quote_snapshot:{schemaVersion:1,currency:'CNY',lines:[],resourceTotal:quoteAmount('7.00'),tenantDeposit:quoteAmount('3.00'),ownerTotal:quoteAmount('7.00'),platformFullProfit:quoteAmount('0.00'),termSeconds:'86400',unitAmountsInformational:true,expiryDisclosures:[]},created_at:at,hold_until:at,paid_at:at,cancelled_at:null,cancel_reason:null};
+  const c={query:async(sql:string,values:unknown[]=[])=>{
+    queries.push({sql,values});
+    if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true}]};
+    if(sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x'))return {rows:[{origin:'NATIVE',id:'same-id',record:native},{origin:'LEGACY',id:'same-id',record:legacy}]};
+    return {rows:head};
+  }} as unknown as PoolClient;
+  const page:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'any',status:'current',limit:2});
+  assert.deepEqual(page.items.map((row:any)=>row.displayNo),['OLD-SAME','NEW-SAME']);
+  assert.deepEqual(page.items[1].amounts.totalDue,{currency:'CNY',unit:'yuan',amount:'10.00',scale:2});
+  assert.equal(page.items[0].counterpartyUserId,'user_dual');assert.equal(page.items[1].counterpartyUserId,'native-owner');
+  assert.deepEqual(queries.at(-1)!.values,[['same-id'],['same-id']]);assert.ok(!JSON.stringify(queries.at(-1)!.values).includes('lookahead'));
+  assert.equal(queries.length,3);assert.ok(page.nextCursor);
+  await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'any',status:'current',limit:2,cursor:page.nextCursor});
+  const nextKeys=queries.at(-2)!;assert.equal(nextKeys.values[3],at);assert.equal(nextKeys.values[4],'same-id');assert.equal(nextKeys.values.at(-1),3);
+  assert.match(nextKeys.sql,/ORDER BY x\.created_at DESC NULLS LAST,x\.id DESC/);assert.ok(!nextKeys.sql.includes(' AS record'));
+});
+
+test('empty mixed user-order pages skip records and a missing selected record never falls back to full projection',async()=>{
+  let populated=false;const queries:string[]=[];
+  const c={query:async(sql:string)=>{queries.push(sql);if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:false}]};
+    if(sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x'))return {rows:[]};
+    return {rows:populated?[{origin:'LEGACY',id:'missing',role:'renter',sortAt:'0001-01-01T00:00:00.000000Z'}]:[]};}} as unknown as PoolClient;
+  const empty:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'renter',status:'current',limit:5});
+  assert.deepEqual(empty,{items:[],nextCursor:null,limit:5});assert.equal(queries.length,2);
+  populated=true;queries.length=0;
+  await assert.rejects(listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'renter',status:'current',limit:5}),{status:404});
+  assert.equal(queries.length,3);assert.equal(queries.filter(sql=>sql.includes(' AS record')).length,1);
+  assert.match(queries.at(-1)!,/WHERE l\.id=ANY\(\$2::text\[\]\)/);
 });
 
 test('numbered directory pages jump directly with complete metadata and expand only the selected keys',async()=>{
