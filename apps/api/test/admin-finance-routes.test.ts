@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handleAdminFinanceRead, type AdminFinanceOptions } from "../src/finance/admin-finance-routes";
+import { authorizeAdminFinance, handleAdminFinanceRead, type AdminFinanceOptions } from "../src/finance/admin-finance-routes";
 import { FinanceSqlFixture, legacyFinanceOrder } from "./admin-finance-fixture";
 import { financeSnapshot } from "../src/finance/admin-finance-read";
 
 function environment(permissions = ["finance.read", "finance.document.read"], financeSql?: FinanceSqlFixture) {
-  const state = { permissions, isBoss: false, connected: 0, auditFailure: false, revokeOnPrepare: false, schemaReady: true, locked: false, passwordChangeRequired: false, authenticated: true, withdrawalsReady: false, versionSqlOverride:undefined as string|undefined, beforeSecondTransaction:undefined as (()=>void)|undefined, operations: [] as Record<string, unknown>[], subjects: [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }], extraLedger: [] as Record<string, unknown>[], audits: [] as Record<string, unknown>[], statements: [] as string[] };
+  const state = { permissions, isBoss: false, gameIds: ["game1"], connected: 0, auditFailure: false, revokeOnPrepare: false, schemaReady: true, locked: false, passwordChangeRequired: false, authenticated: true, withdrawalsReady: false, versionSqlOverride:undefined as string|undefined, beforeSecondTransaction:undefined as (()=>void)|undefined, operations: [] as Record<string, unknown>[], subjects: [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }], extraLedger: [] as Record<string, unknown>[], audits: [] as Record<string, unknown>[], statements: [] as string[] };
   const ledgerRows=()=>[
     { id: "reserve-out", account_code: "WALLET_AVAILABLE", subject_id: "u1", subject_name: "用户一", delta: "-20000", at: "2026-10-03T01:00:00.000000Z", event_kind: "RESERVE", source_entity: "withdrawal_intent", source_id: "w1" },
     { id: "reserve-in", account_code: "WALLET_RESERVED", subject_id: "u1", subject_name: "用户一", delta: "20000", at: "2026-10-03T01:00:00.000000Z", event_kind: "RESERVE", source_entity: "withdrawal_intent", source_id: "w1" },...state.extraLedger,
@@ -28,6 +28,7 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
     }
     if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { if (state.auditFailure) throw Error("audit unavailable"); state.audits.push(JSON.parse(String(values[10]))); return { rows: [], rowCount: 1 }; }
     if (sql.includes('SELECT s."locked"')) return { rows: [{ locked: state.locked, twoFactorEnabled: true }], rowCount: 1 };
+    if (sql.includes('s."game_scope_mode" AS "mode"')) return { rows: [{mode:"SELECTED_GAMES",gameIds:state.gameIds}],rowCount:1 };
     if (sql.includes('"zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: state.isBoss, passwordChangeRequired: state.passwordChangeRequired }], rowCount: 1 };
     if (sql.includes("WITH role_permissions")) return { rows: state.permissions.map(permissionCode => ({ permissionCode })), rowCount: state.permissions.length };
     if (sql.includes("to_regclass")) return { rows: [{ ready: state.schemaReady, withdrawals: state.withdrawalsReady, native_orders: !!financeSql, legacy_orders: !!financeSql,native_distribution:false,history_coverage:false }], rowCount: 1 };
@@ -57,11 +58,32 @@ async function request(options: AdminFinanceOptions, route: string, query = "") 
   await handleAdminFinanceRead({ method: "GET", originalUrl: `/api/v1/admin/finance/${route}?from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`, headers: { origin: options.adminOrigin } }, response, options);
   return result;
 }
+test("finance authorization passes independent relation capabilities from the same context", async () => {
+  const env=environment(["finance.read"]);
+  const client=await env.options.pool.connect();
+  try {
+    const first=await authorizeAdminFinance(client,{userId:"admin1",sessionId:"session1"},"complete");
+    assert.deepEqual(first.relations,{adminId:"admin1",isBoss:false,orderRead:true,financeDocumentRead:false,resourceRead:false});
+    env.state.permissions=["finance.read","finance.document.read","order.read","supply.rental_account.read"];
+    const second=await authorizeAdminFinance(client,{userId:"admin1",sessionId:"session1"},"complete");
+    assert.deepEqual(second.relations,{adminId:"admin1",isBoss:false,orderRead:true,financeDocumentRead:true,resourceRead:true});
+    assert.notEqual(first.authorizationKey,second.authorizationKey);
+  } finally { client.release(); }
+});
+
+test("object game scope removal between reads withholds the finance response", async () => {
+  const env=environment(["finance.read","finance.document.read","order.read"]);
+  env.state.beforeSecondTransaction=()=>{env.state.gameIds=[];};
+  const response=await request(env.options,"period");
+  assert.equal(response.status,409);assert.equal(response.json.entries,undefined);
+  assert.equal(response.json.error.code,"CONFLICT");
+});
+
 test("complete read does not require role name, user allowlist, agent assignment or group membership", async () => {
   const env = environment(); const period = await request(env.options, "period");
   assert.equal(period.status, 200); assert.equal(period.json.entryCount, 2); assert.equal(period.json.documentCount, 1);
   assert.ok(env.state.statements.some(sql => sql === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"));
-  assert.ok(env.state.statements.every(sql => !sql.includes("personal_finance_read_scope") && !sql.includes("admin_supply_scope")));
+  assert.ok(env.state.statements.every(sql => !sql.includes("personal_finance_read_scope")));
 });
 test("document capability can locate exact business but cannot read wallet, period or export", async () => {
   const env = environment(["finance.document.read"]);
@@ -171,7 +193,7 @@ test("mixed lookup deduplicates funds/order refs, preserves source types and equ
  assert.deepEqual(all,expected);assert.equal(new Set(all).size,45);
  const exact=await request(env.options,"lookup","period=0&q=ORDER_LINK%3AL00");assert.equal(exact.status,200);assert.deepEqual(exact.json.documents.map((d:any)=>d.ref),["ORDER:L00","LEGACY_ORDER:L00"]);
  const detail=await request(env.options,"documents/LEGACY_ORDER%3AL00","period=0");assert.equal(detail.status,200);assert.equal(detail.json.evidence.recordedPaidCents,"9000");assert.equal(detail.json.entries.length,0);assert(detail.json.reasonCodes.includes("ORDER_RECORD_NOT_CHANNEL_RESULT"));
- const historical=await request(env.options,"documents/HISTORY_EARNINGS%3Aunknown","period=0");assert.equal(historical.status,200);assert(historical.json.related.some((r:any)=>r.ref==="LEGACY_ORDER:L01"));assert.equal(historical.json.entries[0].deltaCents,null);
+ const historical=await request(env.options,"documents/HISTORY_EARNINGS%3Aunknown","period=0");assert.equal(historical.status,200);assert(!historical.json.related.some((r:any)=>r.ref==="LEGACY_ORDER:L01"));assert.equal(historical.json.entries[0].historical.association.state,"UNRESOLVED");assert.equal(historical.json.entries[0].deltaCents,null);
  const period=await request(env.options,"period");assert.equal(period.status,200);assert.equal(period.json.entryCount,3);assert(period.json.reconciliation.every((r:any)=>r.knowledge==="KNOWN"&&r.scope==='CURRENT_LEDGER_ONLY'));assert.equal(period.json.reconciliation.find((r:any)=>r.bucket==='AVAILABLE').closingBalance,'900719925474099312344');assert(period.json.gaps.includes('CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY'));
  const filtered=await request(env.options,"lookup","period=0&state=HISTORICAL_ORDER_RECORDED");assert.equal(filtered.status,200);assert.equal(filtered.json.documentCount,43);assert.equal(filtered.json.entryCount,0);
  const byBucket=await request(env.options,"lookup","period=0&bucket=AVAILABLE");assert.equal(byBucket.status,200);assert.equal(byBucket.json.documentCount,2);assert.equal(byBucket.json.entryCount,3);

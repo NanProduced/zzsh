@@ -18,7 +18,7 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
   const kind = family === "ledger" ? ledgerKind : historyKind;
   const subject = family === "ledger" ? ledgerSubject : "r.subject_id";
   const document = family === "ledger" ? ledgerDocument : historyDocument;
-  const number = family === "ledger" ? "COALESCE(r.display_no,CASE WHEN r.event_kind='OPENING' THEN r.basis_id ELSE r.source_id END,r.posting_id,r.id)" : "COALESCE(r.reference_no,r.source_id)";
+  const number = family === "ledger" ? "COALESCE(r.display_no,CASE WHEN r.event_kind='OPENING' THEN r.basis_id ELSE r.source_id END,r.posting_id,r.id)" : "COALESCE(CASE WHEN r.source_entity='la_log_earnings' THEN NULLIF(r.extra_evidence->'snapshot'->>'legacyLogNumber','') END,r.reference_no,r.source_id)";
   const state = family === "history" ? "CASE WHEN r.observation_origin IN('NATIVE_EARNING_ZERO','LEGACY_DUTY_ZERO') THEN r.source_status ELSE 'HISTORICAL_OBSERVED' END" : withdrawalsReady ? `CASE WHEN r.source_entity='withdrawal_intent' AND i.id IS NOT NULL THEN i.state WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN COALESCE(r.earning_state,'UNKNOWN') WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END` : `CASE WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN COALESCE(r.earning_state,'UNKNOWN') WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END`;
   if (scope.documentRefs) conditions.push(`(${document})=ANY(${bind(scope.documentRefs)}::text[])`);
   if (scope.documentRef) conditions.push(`(${document})=${bind(scope.documentRef)}`);

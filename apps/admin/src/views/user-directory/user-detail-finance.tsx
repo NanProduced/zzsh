@@ -8,8 +8,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DateSelector, type DateSelectorValue } from "@/components/reui/date-selector";
 import { ListPagination } from "@/components/admin-list/list-pagination";
 import { ListTable, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/admin-list/list-table";
-import { bucketLabels, defaultFinanceFilters, financeMoney, financeTime, kindLabels, stateLabels, type FinanceFilters } from "../admin-finance-api";
-import { financeContextIdentity, registerFinanceOrigin } from "../admin-finance-view";
+import { bucketLabels, defaultFinanceFilters, financeMoney, financeTime, financeBusinessLabel, financeIsHistorical, financeRecordNumber, financeRecordState, type FinanceFilters } from "../admin-finance-api";
+import { HistoricalFinanceDetail, financeContextIdentity, registerFinanceOrigin } from "../admin-finance-view";
 import { PERMISSION, type User } from "./user-directory-data";
 import { errorText, Message, useDirectoryRequest, type PageProps, type UserDirectoryData } from "./user-directory-shared";
 
@@ -71,6 +71,11 @@ function FinanceDocuments({adapter,user,refreshNonce,onOpenPath}:Props) {
     const origin=registerFinanceOrigin(`/users/${encodeURIComponent(user.id)}?section=finance`,financeContextIdentity(adapter.snapshot));
     onOpenPath(ref?`/finance/documents/${encodeURIComponent(ref)}?origin=${encodeURIComponent(origin)}`:`/finance/users/${encodeURIComponent(user.id)}?origin=${encodeURIComponent(origin)}`,ref?"资金单据":`${user.name} · 资金`);
   };
+  const openRelated=(path:string,title?:string)=>{
+    if(!path.startsWith('/finance/documents/')){onOpenPath(path,title);return;}
+    const origin=registerFinanceOrigin(`/users/${encodeURIComponent(user.id)}?section=finance`,financeContextIdentity(adapter.snapshot));
+    onOpenPath(`${path}${path.includes('?')?'&':'?'}origin=${encodeURIComponent(origin)}`,title);
+  };
   return <section className="space-y-4 border-t pt-6" aria-labelledby="user-finance-documents-heading">
     <div className="flex flex-wrap items-center justify-between gap-3"><h3 id="user-finance-documents-heading" className="text-base font-semibold">资金单据</h3><Button variant="outline" size="sm" onClick={()=>open()}>完整资金核对<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button></div>
     <form className="flex flex-wrap items-end gap-3" onSubmit={event=>{event.preventDefault();if(draft.from&&draft.to){setApplied({...draft,scope:user.id});retry();}}}>
@@ -91,13 +96,13 @@ function FinanceDocuments({adapter,user,refreshNonce,onOpenPath}:Props) {
     {result.state==="loading"?<FinanceLoading label="正在读取资金单据"/>:result.state==="error"?
       <Message kind="error" title="资金单据读取失败" retry={retry}>{errorText(result.error)}</Message>:<>
         <ListTable empty={!result.data.documents?.length?<p className="text-sm text-muted-foreground">所选日期暂无资金单据。</p>:undefined}>
-          <Table aria-label="用户资金单据" className="min-w-[620px]"><TableHeader><TableRow><TableHead>时间 / 单据</TableHead><TableHead>类型</TableHead><TableHead>账务变动</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+          <Table aria-label="用户资金单据" className="min-w-[620px]"><TableHeader><TableRow><TableHead>时间 / 记录</TableHead><TableHead>用途</TableHead><TableHead>金额</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
             <TableBody>{result.data.documents?.map(document=><TableRow key={document.ref}>
-              <TableCell><span className="font-medium">{document.number}</span><span className="mt-1 block text-xs text-muted-foreground">{financeTime(document.occurredAt)}</span></TableCell>
-              <TableCell>{kindLabels[document.kind]??"待核对"}</TableCell>
-              <TableCell className="tabular-nums">{document.amounts.length?document.amounts.map(amount=><span key={amount.bucket} className="block text-sm">{bucketLabels[amount.bucket]??"其他科目"} {amount.unknownCount?"待核":money(amount.knownNetCents)}</span>):document.requestedAmountCents===null?"待核":`申请 ${money(document.requestedAmountCents)}`}</TableCell>
-              <TableCell><Badge variant={document.state==="RECONCILIATION_REQUIRED"||document.state==="UNKNOWN"?"warning":"secondary"}>{stateLabels[document.state]??"状态待核"}</Badge></TableCell>
-              <TableCell className="text-right">{canDocument?<Button size="sm" variant="ghost" aria-label={`查看资金单据 ${document.number}`} onClick={()=>open(document.ref)}>查看<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button>:<span className="text-xs text-muted-foreground">无单据查看权限</span>}</TableCell>
+              <TableCell className="min-w-52 whitespace-normal align-top"><span className="font-medium">{financeRecordNumber(document,document.number)}</span><span className="mt-1 block text-xs text-muted-foreground">{financeTime(document.occurredAt)}</span><HistoricalFinanceDetail historical={document.historical} recordKind={document.kind} orderRead={adapter.snapshot.security.isBoss||adapter.has(PERMISSION.orders)} documentRead={canDocument} onOpenPath={openRelated}/></TableCell>
+              <TableCell className="whitespace-normal align-top">{financeBusinessLabel(document)}</TableCell>
+              <TableCell className="tabular-nums align-top">{financeIsHistorical(document)&&document.kind==='WITHDRAWAL'&&document.requestedAmountCents!==null?`原申请 ${money(document.requestedAmountCents)}`:document.amounts.length?document.amounts.map(amount=><span key={amount.bucket} className="block text-sm">{financeIsHistorical(document)?'历史变动':bucketLabels[amount.bucket]??"其他科目"} {amount.unknownCount?"待核":money(amount.knownNetCents)}</span>):document.requestedAmountCents===null?"待核":`${financeIsHistorical(document)?'原申请':'申请'} ${money(document.requestedAmountCents)}`}</TableCell>
+              <TableCell className="whitespace-normal align-top"><Badge variant={financeIsHistorical(document)?'outline':document.state==="RECONCILIATION_REQUIRED"||document.state==="UNKNOWN"?"warning":"secondary"}>{financeRecordState(document)}</Badge></TableCell>
+              <TableCell className="text-right">{canDocument?<Button size="sm" variant="ghost" aria-label={financeIsHistorical(document)?`查看历史记录 ${document.historical?.originalLogNumber||document.number}`:`查看资金单据 ${document.number}`} onClick={()=>open(document.ref)}>查看<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button>:<span className="text-xs text-muted-foreground">无单据查看权限</span>}</TableCell>
             </TableRow>)}</TableBody>
           </Table>
         </ListTable>

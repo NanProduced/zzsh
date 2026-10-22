@@ -64,6 +64,16 @@ test('a dated subject document selection does not turn the current wallet into a
  assert.deepEqual(ledger.values,['u1']);assert(!ledger.sql.includes('created_at>'));assert(!ledger.sql.includes('created_at<'));
 });
 
+test('historical earnings searches the original log number rather than pretending it is the related business number',()=>{
+ const fixture=new FinanceSqlFixture({history:[{id:'original-log',subject_id:'u1',subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_log_earnings',source_kind:'HISTORICAL_EARNINGS_LOG',source_id:'11437',amount:'734.00',action:'2',reference_id:'5053',reference_no:null,at:'2026-06-29T11:22:00Z',extra_evidence:{snapshot:{legacyChangeType:1002,legacyLogNumber:'ORIGINAL-FLOW-20260629'}}}]});
+ try{
+  const filters=parseAdminFinanceFilters(new URLSearchParams('period=0&q=ORIGINAL-FLOW-20260629'),new Date(),false);
+  const query=scopedFinanceSql(adminFinanceObservationSql({}),'history',{filters},20,false);
+  const rows=fixture.query(query.text,query.values).rows;assert.equal(rows.length,1);assert.equal(rows[0]!.source_id,'11437');assert.equal(rows[0]!.reference_id,'5053');assert.equal(rows[0]!.reference_no,null);
+  assert(query.text.includes('legacyLogNumber'));assert(!query.text.includes('ORIGINAL-FLOW-20260629'));
+ }finally{fixture.close();}
+});
+
 test('actual native zero source branch remains visible as its distribution document without fabricating ledger rows',()=>{
  const fixture=new FinanceSqlFixture({earnings:[{id:'zero-earning',economic_root_id:'zero-earning',beneficiary_user_id:'u1',beneficiary_role:'RENTER_REFERRAL',amount_cents:'0',state:'SETTLED',funds_disposition:'SETTLED',version:'2',seed_digest:'a'.repeat(64),order_id:'native-order',created_at:'2026-10-03T01:00:00.000000Z'}]});
  try{
