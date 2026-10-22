@@ -659,6 +659,13 @@
       "when": 1792627200002,
       "tag": "0093_user_detail_operations",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1792627200003,
+      "tag": "0094_user_subject_finance_permission",
+      "breakpoints": true
     }
   ]
 }

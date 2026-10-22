@@ -176,6 +176,13 @@ test('actual route cursor changes with current game grants and effective permiss
   pool.gameIds=['delta'];pool.permissions=pool.permissions.filter(code=>code!=='admin.audit.read');assert.equal((await route(`/api/v1/admin/users?limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`,pool)).status,409);
 });
 
+test('balance-only permission cannot be expanded into user consumption details',async()=>{
+  const pool=new DirectorySqlFixture();pool.permissions=['user.directory.read','user.wallet.read'];
+  const output=await route('/api/v1/admin/users/user_normal/consumption?page=1&pageSize=20',pool);
+  assert.equal(output.status,403);
+  assert.equal(pool.queries.some(query=>query.sql.includes('CURRENT_POSTED_NATIVE_SETTLEMENTS')),false);
+});
+
 test('anonymous and foreign-origin requests cannot obtain directory facts',async()=>{
   const pool=new DirectorySqlFixture();const options=directorySecurityFixture(pool);options.adminAuth.api.getSession=async()=>null;
   const output=capture();await handleUserDirectoryAdmin({method:'GET',url:'/api/v1/admin/users',headers:{}},output.response,options);

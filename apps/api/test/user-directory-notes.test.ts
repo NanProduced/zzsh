@@ -3,13 +3,27 @@ import { test } from "node:test";
 import type { PoolClient } from "pg";
 
 import type { EffectiveAdminAccess } from "../src/auth/admin-authorization";
-import { createUserNote, deleteUserNote, listUserNotes, parseUserNoteBody, parseUserNotePage } from "../src/auth/user-directory-notes";
+import { createUserNote, deleteUserNote, listUserNotes, readUserNote, parseUserNoteBody, parseUserNotePage } from "../src/auth/user-directory-notes";
 
 const actor = { adminId: "staff-a", sessionId: "session-a", requestId: "req-notes" };
 const at = "2026-10-22T01:00:00.123456Z";
 const userId = "user-a";
 const access = (...permissions: string[]): EffectiveAdminAccess => ({ status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set(["user.directory.read", ...permissions]) });
 const denied = (status: number) => (error: unknown) => (error as { status?: number }).status === status;
+
+test('exact note readback binds user and id, retains digest after soft deletion and never returns deleted text',async()=>{
+  let deletedAt:string|null=null;
+  const client={async query(sql:string,values:unknown[]){assert.ok(sql.includes('n.user_id=$1 AND n.id=$2'));assert.deepEqual(values,[userId,'note-1']);return {rows:[{id:'note-1',userId,text:'原备注正文',authorId:actor.adminId,authorName:'备注作者',createdAt:at,deletedAt}]};}} as unknown as PoolClient;
+  const before=await readUserNote(client,actor,access(),userId,'note-1');assert.equal(before.text,'原备注正文');assert.match(before.bodyDigest,/^[a-f0-9]{64}$/);
+  deletedAt=at;const after=await readUserNote(client,actor,access(),userId,'note-1');assert.equal(after.deleted,true);assert.equal('text' in after,false);assert.equal(after.bodyDigest,before.bodyDigest);assert.equal(after.author.id,actor.adminId);
+});
+
+test('exact note readback checks directory access before SQL and keeps a missing note a 404',async()=>{
+  let calls=0;const client={async query(){calls++;return {rows:[]};}} as unknown as PoolClient;
+  const unauthorized={...access(),permissions:new Set<string>()};
+  await assert.rejects(readUserNote(client,actor,unauthorized,userId,'note-1'),denied(403));assert.equal(calls,0);
+  await assert.rejects(readUserNote(client,actor,access(),userId,'note-1'),denied(404));assert.equal(calls,1);
+});
 
 function fixture() {
   const calls: { sql: string; values: unknown[] }[] = [];

@@ -26,6 +26,7 @@ export const ADMIN_PERMISSION = {
   userDirectoryRead: "user.directory.read",
   userPhoneLookup: "user.phone.lookup",
   userWalletRead: "user.wallet.read",
+  userFinanceRead: "user.finance.read",
   userRiskManage: "user.risk.manage",
   userNoteWrite: "user.note.write",
   userNoteManage: "user.note.manage",

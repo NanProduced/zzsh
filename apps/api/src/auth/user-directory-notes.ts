@@ -10,6 +10,9 @@ export const USER_NOTE_DELETE_OPERATION = "user.note.delete";
 export type UserNoteActor = { adminId: string; sessionId: string; requestId: string };
 export type UserNotePage = { limit: number; cursor?: string };
 type NoteRow = { id: string; text: string; authorId: string; authorName: string | null; createdAt: string };
+const NOTE_SELECTION = `SELECT n.id,n.user_id AS "userId",n.body AS text,n.author_admin_id AS "authorId",a.name AS "authorName",n.deleted_at AS "deletedAt",
+  to_char(n.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"
+  FROM zzsh_iam.user_note n LEFT JOIN zzsh_auth_admin."user" a ON a.id=n.author_admin_id`;
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CURSOR_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
@@ -60,9 +63,7 @@ export async function listUserNotes(client: PoolClient, actor: UserNoteActor, ac
   const cursor = noteCursor(page.cursor, key);
   await requireUser(client, userId);
   const rows = (await client.query<NoteRow>(
-    `SELECT n.id, n.body AS text, n.author_admin_id AS "authorId", a.name AS "authorName",
-            to_char(n.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"
-       FROM zzsh_iam.user_note n LEFT JOIN zzsh_auth_admin."user" a ON a.id=n.author_admin_id
+    `${NOTE_SELECTION}
       WHERE n.user_id=$1 AND n.deleted_at IS NULL
         AND ($2::timestamptz IS NULL OR n.created_at<$2::timestamptz OR (n.created_at=$2::timestamptz AND n.id COLLATE "C"<$3))
       ORDER BY n.created_at DESC, n.id COLLATE "C" DESC LIMIT $4`,
@@ -76,6 +77,16 @@ export async function listUserNotes(client: PoolClient, actor: UserNoteActor, ac
     nextCursor: rows.length > page.limit && last ? Buffer.from(JSON.stringify({ v: 1, f: key, t: last.createdAt, i: last.id })).toString("base64url") : null,
     capabilities: { canCreate: hasPermission(access, "user.note.write"), canManage: hasPermission(access, "user.note.manage") },
   };
+}
+
+/** Exact readback remains possible after a later soft deletion without exposing the deleted text. */
+export async function readUserNote(client: PoolClient, actor: UserNoteActor, access: EffectiveAdminAccess, userId: string, noteId: string) {
+  assertIds(actor,userId,noteId); requirePermission(access,"user.directory.read");
+  const row=(await client.query<NoteRow & {userId:string;deletedAt:string|null}>(`${NOTE_SELECTION} WHERE n.user_id=$1 AND n.id=$2`,[userId,noteId])).rows[0];
+  if(!row)throw notFound();
+  return {id:row.id,userId:row.userId,deleted:row.deletedAt!==null,
+    ...(row.deletedAt===null?{text:row.text}:{}),bodyDigest:sha256Hex(row.text),
+    author:{id:row.authorId,displayName:row.authorName||"未知管理员"},createdAt:row.createdAt};
 }
 
 /** Caller supplies a write transaction and revalidates the current admin session in that transaction. */

@@ -8,7 +8,7 @@ import { sanitizeDetail } from "./admin-audit";
 import { withDirectoryRead, withDirectoryReadTransaction } from "./user-directory-read";
 import { withTransaction } from "./security-core";
 import { parseUserRiskFlagBody, writeUserRiskFlag } from "./user-directory-risk";
-import { parseUserNoteBody, parseUserNotePage, listUserNotes, createUserNote, deleteUserNote } from "./user-directory-notes";
+import { parseUserNoteBody, parseUserNotePage, listUserNotes, readUserNote, createUserNote, deleteUserNote } from "./user-directory-notes";
 import { readUserSensitiveProfile } from "./user-directory-sensitive";
 import { readAdminUserConsumption } from "../finance/admin-user-consumption-read";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
@@ -206,7 +206,7 @@ export async function handleUserDirectoryAdmin(
         auditRead: hasPermission(access, ADMIN_PERMISSION.auditRead),
         membershipSummaryRead: hasPermission(access, ADMIN_PERMISSION.membershipGrowthSummaryRead),
         creditRead: hasPermission(access, ADMIN_PERMISSION.creditRead),
-        walletRead: hasPermission(access, ADMIN_PERMISSION.userWalletRead) || hasPermission(access, ADMIN_PERMISSION.financeRead) || access.isBoss,
+        walletRead: hasPermission(access, ADMIN_PERMISSION.userWalletRead) || hasPermission(access, ADMIN_PERMISSION.userFinanceRead) || hasPermission(access, ADMIN_PERMISSION.financeRead) || access.isBoss,
         businessScopeUsable: !scopeIsEmpty(gameScope, access.isBoss),
         authorizationKey: sha256Hex(JSON.stringify([context.userId, context.sessionId, access.isBoss, [...access.permissions].sort(), gameScopeSignature(gameScope)])),
         legacyRead: false,
@@ -218,20 +218,13 @@ export async function handleUserDirectoryAdmin(
         if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(userId)) throw invalid("User id is invalid");
         if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id=$1`,[userId])).rowCount) throw notFound();
         if (noteRead && noteMatch![2]) {
-          const noteId=decodeId(noteMatch![2]);
-          if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(noteId))throw invalid("Note id is invalid");
-          const note=(await client.query(`SELECT n.id,n.user_id AS "userId",n.deleted_at IS NOT NULL AS deleted,n.body AS "internalText",
-            CASE WHEN n.deleted_at IS NULL THEN n.body END AS text,
-            jsonb_build_object('id',n.author_admin_id,'displayName',COALESCE(a.name,'未知管理员')) AS author,
-            to_char(n.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"
-            FROM zzsh_iam.user_note n LEFT JOIN zzsh_auth_admin."user" a ON a.id=n.author_admin_id WHERE n.id=$1 AND n.user_id=$2`,[noteId,userId])).rows[0];
-          if(!note)throw notFound(); const {internalText,...publicNote}=note; dataToSend={...publicNote,bodyDigest:sha256Hex(internalText)};
+          dataToSend=await readUserNote(client,{adminId:context.userId,sessionId:context.sessionId,requestId},access,userId,decodeId(noteMatch![2]));
         }
         else if (noteRead) dataToSend = await listUserNotes(client,{adminId:context.userId,sessionId:context.sessionId,requestId},access,userId,parseUserNotePage(query));
         else {
           for (const key of query.keys()) if (!["page","pageSize"].includes(key) || query.getAll(key).length !== 1) throw invalid("Consumption pagination is invalid");
           const positive = (key:string,fallback:number) => {const raw=query.get(key);if(raw===null)return fallback;if(!/^[1-9]\d*$/.test(raw)||!Number.isSafeInteger(Number(raw)))throw invalid("Consumption pagination is invalid");return Number(raw);};
-          dataToSend = await readAdminUserConsumption(client,{adminId:context.userId,isBoss:access.isBoss,subjectFinancialRead:viewer.walletRead,businessScopeUsable:viewer.businessScopeUsable},userId,{page:positive("page",1),pageSize:positive("pageSize",20)});
+          dataToSend = await readAdminUserConsumption(client,{adminId:context.userId,isBoss:access.isBoss,subjectFinancialRead:hasPermission(access,ADMIN_PERMISSION.userFinanceRead)||hasPermission(access,ADMIN_PERMISSION.financeRead),businessScopeUsable:viewer.businessScopeUsable},userId,{page:positive("page",1),pageSize:positive("pageSize",20)});
         }
         return;
       }
