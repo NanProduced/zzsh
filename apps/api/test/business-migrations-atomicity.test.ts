@@ -30,7 +30,15 @@ test('0090 adds only the two PG-measured subject indexes and retains the journal
  assert.match(sql,/personal_finance_observation \(user_id, source_kind, source_event_at, id COLLATE "C"\)/);
  assert.doesNotMatch(sql,/\b(DROP|ALTER|INSERT|UPDATE|DELETE|TRUNCATE|GRANT|REVOKE)\b/);
  const journal=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
- assert.deepEqual(journal.entries.slice(88).map((entry:{idx:number;tag:string})=>[entry.idx,entry.tag]),[[88,'0088_skin_catalog_metadata'],[89,'0089_skin_deposit_recommendation'],[90,'0090_personal_finance_read_indexes']]);
+ assert.deepEqual(journal.entries.slice(88,91).map((entry:{idx:number;tag:string})=>[entry.idx,entry.tag]),[[88,'0088_skin_catalog_metadata'],[89,'0089_skin_deposit_recommendation'],[90,'0090_personal_finance_read_indexes']]);
+});
+
+test('0091 appends the directory migration and the runtime risk table receives only its required rights',()=>{
+ const journal=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
+ assert.deepEqual(journal.entries.at(-1).tag,'0091_admin_user_directory_list');
+ const source=readFileSync(resolve('src/database/business-migrations.ts'),'utf8');
+ assert.match(source,/GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"\."user_risk_flag"/);
+ assert.doesNotMatch(source,/GRANT[^;\n]*DELETE[^;\n]*"user_risk_flag"/);
 });
 const runnerSource=readFileSync(runnerPath,'utf8');
 const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarantee_history.sql'),'utf8');

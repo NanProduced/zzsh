@@ -18,13 +18,14 @@ export const CREDIT_GUARANTEE_PERMISSION = { read: 'credit.guarantee.read', mana
 export type Domain = keyof typeof PERMISSION;
 export type Part<T> = { state: 'ready'; data: T; count?: number; publishedCount?: number; current?: number; nextCursor?: string | null } | { state: 'denied'; permission: string; reason?: string };
 /** The age filter is no longer offered: the server gate and the DTO stay, the operator surface drops it. */
-export type Filters = { q: string; status: string; from: string; to: string; identity: string; source: string; sort: string; tier: string; entitlement: string; credit: string; risk: string };
-export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', source: '', sort: 'registered_desc', tier: '', entitlement: '', credit: '', risk: '' };
+export type Filters = { q: string; status: string; from: string; to: string; identity: string; sort: string; tier: string; entitlement: string; creditMin: string; creditMax: string; risk: string };
+export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', sort: 'active_orders_desc', tier: '', entitlement: '', creditMin: '', creditMax: '', risk: '' };
 /** The directory always reads the server-declared original registration time; the local filing date is a different fact. */
 export const REGISTRATION_TIME_ORIGINAL = 'ORIGINAL';
 export const REGISTRATION_SORT = { desc: 'registered_desc', asc: 'registered_asc' } as const;
 /** 目录支持的排序。旧 `created` 排序归一到注册时间默认，其余按服务端合同取值。 */
 export const DIRECTORY_SORTS: readonly UserDirectorySort[] = [
+  'active_orders_desc',
   'registered_desc', 'registered_asc',
   'balance_desc', 'balance_asc',
   'credit_desc', 'credit_asc',
@@ -33,7 +34,7 @@ export const DIRECTORY_SORTS: readonly UserDirectorySort[] = [
   'published_desc', 'published_asc',
 ];
 export const normalizeRegistrationSort = (value: string | undefined): UserDirectorySort =>
-  DIRECTORY_SORTS.includes(value as UserDirectorySort) ? (value as UserDirectorySort) : REGISTRATION_SORT.desc;
+  DIRECTORY_SORTS.includes(value as UserDirectorySort) ? (value as UserDirectorySort) : value === 'created' ? REGISTRATION_SORT.desc : 'active_orders_desc';
 /** 排序的升降方向由取值后缀决定；注册时间之外的新排序都是服务端真实全量排序。 */
 export const sortDirection = (value: string | undefined) => value?.endsWith('_asc') ? 'asc' : 'desc';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -256,15 +257,17 @@ export class UserDirectoryBff {
       if (filters.q) p.set(phone ? 'phone' : 'q', filters.q);
       for (const [key, value] of Object.entries({
         accountStatus: filters.status,
-        identityStatus: filters.identity,
-        source: filters.source,
+        identityVerified: filters.identity ? String(filters.identity === 'VERIFIED') : '',
         membershipTier: filters.tier,
         entitlement: filters.entitlement,
-        creditState: filters.credit,
+        creditMin: filters.creditMin,
+        creditMax: filters.creditMax,
         riskState: filters.risk,
       })) {
         if (value) p.set(key, value);
       }
+      if ([filters.creditMin, filters.creditMax].some(value => value !== '' && !/^(0|[1-9]\d?|100)$/.test(value))
+        || filters.creditMin !== '' && filters.creditMax !== '' && Number(filters.creditMin) > Number(filters.creditMax)) throw new Error('信用分范围应为 0–100，最低分不能大于最高分');
       // The range is inclusive of the end day; the server bound is exclusive, so the upper bound is the next day's zero hour.
       if (filters.from) {
         if (!isCalendarDay(filters.from)) throw new Error('注册日期无效');

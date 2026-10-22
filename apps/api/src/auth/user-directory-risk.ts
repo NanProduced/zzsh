@@ -38,7 +38,7 @@ export async function writeUserRiskFlag(
     fingerprint,
     async () => undefined,
     async () => {
-      if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id=$1 FOR SHARE`, [input.userId])).rowCount) throw notFound();
+      if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`, [input.userId])).rowCount) throw notFound();
       const current = (await client.query<{ flagged: boolean; revision: number }>(
         `SELECT flagged, revision FROM zzsh_iam.user_risk_flag WHERE user_id=$1 FOR UPDATE`, [input.userId],
       )).rows[0];

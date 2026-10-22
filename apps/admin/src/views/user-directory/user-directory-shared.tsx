@@ -14,7 +14,7 @@ export type UserDirectoryData = UserDirectoryBff;
 type RequestState<T> = { state: 'loading' } | { state: 'ready'; data: T } | { state: 'error'; error: Error };
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {timeZone:BEIJING_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 export const time = (value:string|null|undefined) => !value ? '未提供' : Number.isNaN(Date.parse(value)) ? '时间未知' : dateFormatter.format(new Date(value));
-export const isDirectoryInputError = (error:unknown) => error instanceof Error && ['注册日期无效','注册起始日期不能晚于结束日期'].includes(error.message);
+export const isDirectoryInputError = (error:unknown) => error instanceof Error && ['注册日期无效','注册起始日期不能晚于结束日期','信用分范围应为 0–100，最低分不能大于最高分'].includes(error.message);
 export const errorText = (error:unknown) => isDirectoryInputError(error) ? (error as Error).message : friendlyError(error);
 /** 只有不自明的命中依据需要提示；昵称与用户名命中由界面本身说明。 */
 export const MATCH_REASON_LABEL: Record<string, string> = {

@@ -37,7 +37,13 @@ const USERNAME_SEARCH_MAX = 200;
 const LEGACY_ID_MAX = 128;
 const PAGINATION_KEYS = new Set(["page", "pageSize", "contextKey", "limit", "cursor"]);
 const REGISTRATION_KEYS = new Set(["registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort"]);
-const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "membershipTier", "entitlement", "creditState", "riskState", "registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort", "page", "pageSize", "contextKey"]);
+const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "identityVerified", "ageStatus", "membershipTier", "entitlement", "creditState", "creditMin", "creditMax", "riskState", "registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort", "page", "pageSize", "contextKey"]);
+
+function parseCreditScore(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  if (!/^(0|[1-9]\d?|100)$/.test(raw)) throw invalid("Credit score must be an integer from 0 to 100");
+  return Number(raw);
+}
 
 function parseLimit(raw: string | null): number {
   const limit = raw === null ? 20 : Number(raw);
@@ -195,6 +201,12 @@ export async function handleUserDirectoryAdmin(
         if ([identifierFilter, search].some(value => value && /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(value))) throw invalid("Phone lookup must use a request body");
         const identityStatus = parseTrimmed(query.get("identityStatus"), 16, "Identity status");
         if (identityStatus && !["UNKNOWN", "UNVERIFIED", "VERIFIED", "REJECTED"].includes(identityStatus)) throw invalid("Identity status is invalid");
+        const verified = query.get("identityVerified");
+        if (verified !== null && (!["true", "false"].includes(verified) || identityStatus !== undefined)) throw invalid("Identity verified filter is invalid");
+        const identityVerified = verified === null ? undefined : verified === "true";
+        const creditMin = parseCreditScore(query.get("creditMin"));
+        const creditMax = parseCreditScore(query.get("creditMax"));
+        if (creditMin !== undefined && creditMax !== undefined && creditMin > creditMax) throw invalid("Credit range is reversed");
         const ageStatus = parseTrimmed(query.get("ageStatus"), 16, "Age status");
         if (ageStatus && !["UNKNOWN", "ADULT", "MINOR"].includes(ageStatus)) throw invalid("Age status is invalid");
         const sort = query.get("sort");
@@ -225,6 +237,7 @@ export async function handleUserDirectoryAdmin(
           ...(identifierFilter !== undefined ? { identifier: identifierFilter } : {}),
           ...(search !== undefined ? { search } : {}),
           ...(identityStatus !== undefined ? { identityStatus } : {}),
+          ...(identityVerified !== undefined ? { identityVerified } : {}),
           ...(ageStatus !== undefined ? { ageStatus } : {}),
           ...(phone !== undefined ? { phone } : {}),
           ...(accountStatusFilter !== undefined ? { accountStatus: accountStatusFilter } : {}),
@@ -232,6 +245,8 @@ export async function handleUserDirectoryAdmin(
           ...(membershipTier !== undefined ? { membershipTier } : {}),
           ...(entitlement !== undefined ? { entitlement } : {}),
           ...(creditState !== undefined ? { creditState } : {}),
+          ...(creditMin !== undefined ? { creditMin } : {}),
+          ...(creditMax !== undefined ? { creditMax } : {}),
           ...(riskState !== undefined ? { riskState } : {}),
           ...(registeredFrom !== undefined ? { registeredFrom } : {}),
           ...(registeredTo !== undefined ? { registeredTo } : {}),

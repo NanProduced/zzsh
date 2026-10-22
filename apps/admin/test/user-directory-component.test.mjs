@@ -64,12 +64,13 @@ async function mount(t,options={}) {
 test('ordinary BFF list removes user classifications and shows canonical dates, explicit activity gap and source',async t=>{
   const {calls}=await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr'));
   assert.ok(calls.every(call=>call.url.startsWith('/api/bff/admin/')));
-  assert.deepEqual([...browser.document.querySelectorAll('th')].map(e=>e.textContent),['用户','账号与实名','会员与礼遇','信用↕','可用余额↕','当前业务租入↕出租↕上架↕','注册时间↓','操作']);
+  assert.deepEqual([...browser.document.querySelectorAll('th')].map(e=>e.textContent),['用户','账号与实名','会员与礼遇','信用','可用余额','当前业务租入出租上架','注册时间','操作']);
   const text=browser.document.querySelector('.ud-directory').textContent;assert.equal(text.includes('业务关系'),false);assert.equal(text.includes('租客'),false);assert.equal(text.includes('号主'),false);
   assert.equal(text.includes('业务活动暂未接入'),false,'the list no longer repeats a not-connected notice');
   const toolbar=browser.document.querySelector('.ud-directory').textContent;for(const label of ['业务关系','有无订单','有无资源','年龄状态'])assert.equal(toolbar.includes(label),false);
   assert.equal(namedButton('更多筛选'),undefined,'the filter drawer is gone; filters sit inline in the toolbar');
-  for(const label of ['账号状态','注册日期','实名状态','来源','会员等级','有效礼遇','信用','内部标识'])assert.ok(toolbar.includes(label),`inline filter ${label}`);
+  for(const label of ['账号状态','注册日期','实名状态','会员等级','有效礼遇','信用分','内部标识'])assert.ok(toolbar.includes(label),`inline filter ${label}`);
+  assert.equal(browser.document.querySelector('[aria-label="来源"]'),null);
 });
 
 test('desktop row and Enter open Drawer; only CTA navigates, viewport changes never create a detail',async t=>{
@@ -1090,7 +1091,7 @@ test('R1: the list, the phone lookup and the detail all ask for the original reg
   const lookup=calls.find(c=>c.url==='/api/bff/admin/users/lookup');
   assert.equal(lookup.method,'POST');
   assert.equal(lookup.body.registrationTime,'ORIGINAL','the phone lookup body carries the mode');
-  assert.equal(lookup.body.sort,'registered_desc');
+  assert.equal(lookup.body.sort,'active_orders_desc');
   assert.ok(calls.every(c=>!c.url.includes('18800001101')),'the phone never enters the URL');
   assert.equal(browser.location.href.includes('18800001101'),false);
   await click(browser.document.querySelector('tbody tr'));
@@ -1238,16 +1239,19 @@ test('R2: the business column sorts renting, lending and published separately',a
   assert.ok(calls.some(c=>c.url.includes('sort=published_asc')),'the published count has its own server sort');
 });
 
-test('R1: the applied date range is one condition and the draft only warns until 查询',async t=>{
+test('the date control shows its range once and a stable status line warns until 查询',async t=>{
   const {calls}=await mount(t,{path:'/users?from=2026-10-18&to=2026-10-18'});
   await waitFor(()=>browser.document.querySelector('tbody tr'));
   const chips=[...browser.document.querySelectorAll('.admin-list-toolbar-applied button')].map(b=>b.getAttribute('aria-label'));
-  assert.equal(chips.length,1,'the date range is a single applied condition');
-  assert.ok(chips[0].includes('注册日期'),'the applied condition is a readable Chinese label');
-  assert.equal(browser.document.querySelector('.ud-draft-hint'),null,'an applied range leaves no pending draft');
+  assert.equal(chips.length,0,'inline controls do not repeat their values as another filter row');
+  assert.ok(browser.document.querySelector('[aria-label="注册日期"]').textContent.includes('2026-10-18'));
+  const status=browser.document.querySelector('.ud-list-status');
+  assert.ok(status);
+  assert.equal(status.textContent.includes('点击查询'),false);
   const before=calls.length;
   await input(browser.document.querySelector('[aria-label="查找用户"]'),'林舟');
-  await waitFor(()=>browser.document.querySelector('.ud-draft-hint'));
+  await waitFor(()=>status.textContent.includes('点击查询应用'));
+  assert.equal(browser.document.querySelector('.ud-list-status'),status,'the status area is not inserted or removed');
   assert.equal(calls.length,before,'typing a draft never queries by itself');
   await click(namedButton('查询'));
   await waitFor(()=>calls.length>before);
@@ -1260,8 +1264,37 @@ test('R1: a refresh keeps the previous rows and says 更新中',async t=>{
   await input(browser.document.querySelector('[aria-label="查找用户"]'),'林舟');
   block=true;
   await click(namedButton('查询'));
-  await waitFor(()=>browser.document.querySelector('.ud-updating'));
+  await waitFor(()=>browser.document.querySelector('.ud-list-status').textContent.includes('更新中'));
   assert.ok(browser.document.querySelector('tbody tr'),'the previous rows stay visible while the new query runs');
-  assert.ok(browser.document.querySelector('.ud-updating').textContent.includes('更新中'));
+  assert.ok(browser.document.querySelector('.ud-list-status').textContent.includes('更新中'));
   if(release)await act(async()=>{release();});
+});
+
+test('the first load shows a table skeleton and a failed refresh stays above the existing rows',async t=>{
+  let release;let fail=false;
+  await mount(t,{fetch:async()=>{if(fail)return failure(503);return new Promise(resolve=>{release=resolve;});}});
+  assert.ok(browser.document.querySelector('[aria-label="用户列表加载中"][aria-busy="true"]'));
+  assert.equal(browser.document.querySelectorAll('[data-slot="skeleton"]').length>8,true);
+  await act(async()=>{release(json({items:[user],total:1,nextCursor:null,limit:20}));});
+  await waitFor(()=>browser.document.querySelector('tbody tr[aria-label]'));
+  const row=browser.document.querySelector('tbody tr[aria-label]');
+  fail=true;await click(namedButton('查询'));
+  await waitFor(()=>browser.document.querySelector('[role="alert"]'));
+  const alert=browser.document.querySelector('[role="alert"]');
+  assert.ok(alert.textContent.includes('暂保留原结果'));
+  assert.ok(alert.compareDocumentPosition(row)&browser.Node.DOCUMENT_POSITION_FOLLOWING,'the visible alert precedes the old table');
+});
+
+test('credit range sends inclusive bounds and rejects a reversed range without a request',async t=>{
+  const {calls}=await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr[aria-label]'));
+  assert.equal(new URL(calls.find(c=>c.url.includes('/users?')).url,browser.location.href).searchParams.get('sort'),'active_orders_desc');
+  await input(browser.document.querySelector('[aria-label="最低信用分"]'),'0');
+  await input(browser.document.querySelector('[aria-label="最高信用分"]'),'79');
+  await click(namedButton('查询'));await waitFor(()=>calls.some(c=>c.url.includes('creditMin=0')));
+  const params=new URL(calls.find(c=>c.url.includes('creditMin=0')).url,browser.location.href).searchParams;
+  assert.equal(params.get('creditMax'),'79');assert.equal(params.has('creditState'),false);assert.equal(params.has('source'),false);
+  const before=calls.length;
+  await input(browser.document.querySelector('[aria-label="最低信用分"]'),'80');
+  await click(namedButton('查询'));await waitFor(()=>browser.document.querySelector('[role="alert"]'));
+  assert.equal(calls.length,before);assert.ok(browser.document.querySelector('[role="alert"]').textContent.includes('最低分不能大于最高分'));
 });

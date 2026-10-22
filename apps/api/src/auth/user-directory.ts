@@ -25,6 +25,7 @@ export const USER_DIRECTORY_MAX_PAGE = 1_000_000;
 
 /** 目录支持的排序。筛选与排序都先在授权集合上执行，再分页。 */
 export const USER_DIRECTORY_SORTS = [
+  "active_orders_desc",
   "registered_desc", "registered_asc",
   "balance_desc", "balance_asc",
   "credit_desc", "credit_asc",
@@ -121,10 +122,13 @@ export type UserDirectoryFilter = {
   accountStatus?: UserDirectoryStatusFilter;
   source?: UserDirectorySource;
   identityStatus?: string;
+  identityVerified?: boolean;
   ageStatus?: string;
   membershipTier?: DirectoryMembershipTierFilter;
   entitlement?: UserDirectoryEntitlementFilter;
   creditState?: UserDirectoryCreditState;
+  creditMin?: number;
+  creditMax?: number;
   riskState?: UserDirectoryRiskState;
   registeredFrom?: string;
   registeredTo?: string;
@@ -289,12 +293,12 @@ export async function listUserDirectory(
   filter: UserDirectoryFilter,
 ): Promise<Record<string, unknown>> {
   const original = filter.registrationTime === "ORIGINAL";
-  const materializeDates = original;
   if (filter.registrationTime !== undefined && !original) throw invalid("Registration time mode or sort is invalid");
   if (filter.sort !== undefined && (!original || !USER_DIRECTORY_SORTS.includes(filter.sort))) throw invalid("Registration sort is invalid");
   if (filter.registeredBefore !== undefined && (!original || filter.registeredTo !== undefined)) throw invalid("Registered before requires original time and no inclusive upper bound");
   const sort: UserDirectorySort = filter.sort ?? "registered_desc";
   const registeredSort = sort === "registered_desc" || sort === "registered_asc";
+  const materializeDates = original && (registeredSort || Boolean(filter.registeredFrom || filter.registeredTo || filter.registeredBefore));
   if (!registeredSort && filter.cursor !== undefined) throw invalid("Cursor is only supported for the registration sort");
   const direction = sort.endsWith("_asc") ? "ASC" : "DESC";
   const timeColumn = original ? "registration.registered_at" : 'u."createdAt"';
@@ -303,6 +307,13 @@ export async function listUserDirectory(
   if (filter.membershipTier !== undefined && viewer.membershipSummaryRead !== true) throw forbidden("Membership tier filter requires membership.growth.read.summary");
   if (filter.entitlement !== undefined && viewer.membershipSummaryRead !== true) throw forbidden("Entitlement filter requires membership.growth.read.summary");
   if (filter.creditState !== undefined && viewer.creditRead !== true) throw forbidden("Credit filter requires credit.read");
+  if (filter.creditMin !== undefined || filter.creditMax !== undefined) {
+    if (viewer.creditRead !== true) throw forbidden("Credit filter requires credit.read");
+    if ([filter.creditMin, filter.creditMax].some(value => value !== undefined && (!Number.isInteger(value) || value < 0 || value > 100))
+      || filter.creditMin !== undefined && filter.creditMax !== undefined && filter.creditMin > filter.creditMax) throw invalid("Credit range is invalid");
+  }
+  if ((sort === "active_orders_desc" || sort.startsWith("renter_current_") || sort.startsWith("owner_current_")) && viewer.orderRead !== true) throw forbidden("Order sort requires order.read");
+  if (sort.startsWith("published_") && viewer.resourceRead !== true) throw forbidden("Published sort requires supply.rental_account.read");
   if (sort.startsWith("balance_") && viewer.walletRead !== true) throw forbidden("Balance sort requires user.wallet.read");
   if (sort.startsWith("credit_") && viewer.creditRead !== true) throw forbidden("Credit sort requires credit.read");
   // 列表、详情与快速核对共用同一 asOf，筛选结果与展示的会员投影因此同口径。
@@ -329,6 +340,7 @@ export async function listUserDirectory(
       identifier: filter.identifier ?? null,
       search: filter.search ?? null,
       identityStatus: filter.identityStatus ?? null,
+      identityVerified: filter.identityVerified ?? null,
       ageStatus: filter.ageStatus ?? null,
       phone: filter.phone ? sha256Hex(filter.phone) : null,
       accountStatus: filter.accountStatus ?? null,
@@ -336,6 +348,8 @@ export async function listUserDirectory(
       membershipTier: filter.membershipTier ?? null,
       entitlement: filter.entitlement ?? null,
       creditState: filter.creditState ?? null,
+      creditMin: filter.creditMin ?? null,
+      creditMax: filter.creditMax ?? null,
       riskState: filter.riskState ?? null,
       registeredFrom: filter.registeredFrom ?? null,
       registeredTo: filter.registeredTo ?? null,
@@ -369,6 +383,7 @@ export async function listUserDirectory(
   if (filter.source === USER_DIRECTORY_SOURCE.MIGRATED) conditions.push(`s.provider='${LEGACY_PROVIDER}'`);
   else if (filter.source) conditions.push(`(${SOURCE_SQL})=$${values.push(filter.source)}`);
   if (filter.identityStatus) conditions.push(`COALESCE(s.identity_status,'UNKNOWN')=$${values.push(filter.identityStatus)}`);
+  if (filter.identityVerified !== undefined) conditions.push(`(COALESCE(s.identity_status,'UNKNOWN')='VERIFIED')=$${values.push(filter.identityVerified)}`);
   if (filter.ageStatus) conditions.push(`COALESCE(s.age_status,'UNKNOWN')=$${values.push(filter.ageStatus)}`);
   if (filter.riskState) conditions.push(`COALESCE((SELECT r.flagged FROM zzsh_iam.user_risk_flag r WHERE r.user_id = u.id), false)=$${values.push(filter.riskState === "FLAGGED")}`);
   if (filter.creditState) {
@@ -379,6 +394,16 @@ export async function listUserDirectory(
     conditions.push(`(EXISTS (SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id = u.id AND (c.revision IS NOT NULL) = $${values.push(filter.creditState === "KNOWN")})
       AND (EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id = u.id AND ${gameScopeSql("a.game_id", adminParam, bossParam)})
         OR EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id = u.id OR o.renter_user_id = u.id) AND ${gameScopeSql("o.game_id", adminParam, bossParam)})))`);
+  }
+  if (filter.creditMin !== undefined || filter.creditMax !== undefined) {
+    const scoreBounds = ["c.revision IS NOT NULL"];
+    if (filter.creditMin !== undefined) scoreBounds.push(`c.score >= $${values.push(filter.creditMin)}`);
+    if (filter.creditMax !== undefined) scoreBounds.push(`c.score <= $${values.push(filter.creditMax)}`);
+    conditions.push(`EXISTS (SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id=u.id AND ${scoreBounds.join(" AND ")})`);
+    const bossParam = `$${values.push(viewer.isBoss)}`;
+    const adminParam = `$${values.push(viewer.adminId)}`;
+    conditions.push(`(${bossParam}::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id=u.id AND ${gameScopeSql("a.game_id", adminParam, bossParam)})
+      OR EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id=u.id OR o.renter_user_id=u.id) AND ${gameScopeSql("o.game_id", adminParam, bossParam)}))`);
   }
   if (filter.entitlement) {
     const asOfParameter = `$${values.push(asOfUtc)}`;
@@ -422,7 +447,7 @@ export async function listUserDirectory(
   const cursorId = values.length - 1;
   const limitParameter = values.length;
   const offsetParameter = filter.page === undefined ? undefined : values.push((filter.page - 1) * filter.limit);
-  const cursorCondition = original
+  const cursorCondition = !registeredSort ? `($${cursorTime}::timestamptz IS NULL AND $${cursorId}::text IS NULL)` : original
     ? `(($${cursorTime}::timestamptz IS NULL AND $${cursorId}::text IS NULL) OR ($${cursorId}::text IS NOT NULL AND (
         ($${cursorTime}::timestamptz IS NULL AND ${timeColumn} IS NULL AND u.id COLLATE "C" < $${cursorId}) OR
         ($${cursorTime}::timestamptz IS NOT NULL AND (${timeColumn} IS NULL OR ${timeColumn} ${direction === "ASC" ? ">" : "<"} $${cursorTime}::timestamptz
@@ -440,11 +465,11 @@ export async function listUserDirectory(
       GROUP BY owner_user_id
     ) resource_aggregate ON resource_aggregate.user_id = u.id`;
   const orderAggregateJoin = `LEFT JOIN (
-      SELECT user_id, sum(renter)::int AS renter_count, sum(owner_count)::int AS owner_count FROM (
-        SELECT o.renter_user_id AS user_id, 1::int AS renter, 0::int AS owner_count FROM ${orderSource} o
+      SELECT user_id, sum(renter)::int AS renter_count, sum(owner_count)::int AS owner_count, sum(current_count)::int AS current_count FROM (
+        SELECT o.renter_user_id AS user_id, 1::int AS renter, 0::int AS owner_count, 1::int AS current_count FROM ${orderSource} o
          WHERE $4::boolean AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id", "$2", "$1")}
         UNION ALL
-        SELECT o.owner_user_id AS user_id, 0::int AS renter, 1::int AS owner_count FROM ${orderSource} o
+        SELECT o.owner_user_id AS user_id, 0::int AS renter, 1::int AS owner_count, CASE WHEN o.owner_user_id IS DISTINCT FROM o.renter_user_id THEN 1 ELSE 0 END AS current_count FROM ${orderSource} o
          WHERE $4::boolean AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id", "$2", "$1")}
       ) roles GROUP BY user_id
     ) order_aggregate ON order_aggregate.user_id = u.id`;
@@ -455,21 +480,22 @@ export async function listUserDirectory(
     ) credit_scope ON credit_scope.user_id = u.id`;
   const creditStateJoin = `LEFT JOIN zzsh_credit.user_credit_state credit_state ON credit_state.user_id = u.id`;
   const sortPlan = (): { joins: string; key: string } => {
+    if (sort === "active_orders_desc") return { joins: orderAggregateJoin, key: "COALESCE(order_aggregate.current_count,0)" };
     if (sort === "balance_desc" || sort === "balance_asc") return { joins: DIRECTORY_WALLET_SORT_JOINS, key: DIRECTORY_WALLET_SORT_KEY };
-    if (sort === "credit_desc" || sort === "credit_asc") return { joins: `${creditStateJoin} ${creditScopeJoin}`, key: "CASE WHEN credit_scope.user_id IS NOT NULL THEN credit_state.score ELSE NULL END" };
-    if (sort === "renter_current_desc" || sort === "renter_current_asc") return { joins: orderAggregateJoin, key: "order_aggregate.renter_count" };
-    if (sort === "owner_current_desc" || sort === "owner_current_asc") return { joins: orderAggregateJoin, key: "order_aggregate.owner_count" };
-    if (sort === "published_desc" || sort === "published_asc") return { joins: resourceAggregateJoin, key: "resource_aggregate.published_count" };
+    if (sort === "credit_desc" || sort === "credit_asc") return { joins: `${creditStateJoin} ${creditScopeJoin}`, key: "CASE WHEN ($1::boolean OR credit_scope.user_id IS NOT NULL) AND credit_state.revision IS NOT NULL THEN credit_state.score ELSE NULL END" };
+    if (sort === "renter_current_desc" || sort === "renter_current_asc") return { joins: orderAggregateJoin, key: "COALESCE(order_aggregate.renter_count,0)" };
+    if (sort === "owner_current_desc" || sort === "owner_current_asc") return { joins: orderAggregateJoin, key: "COALESCE(order_aggregate.owner_count,0)" };
+    if (sort === "published_desc" || sort === "published_asc") return { joins: resourceAggregateJoin, key: "COALESCE(resource_aggregate.published_count,0)" };
     return { joins: "", key: "registration.registered_at" };
   };
   const plan = sortPlan();
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
-              ${original ? `to_char(selected.registered_at ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
+              ${original ? `to_char(${materializeDates ? "selected.registered_at" : originalRegistrationSql()} ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
               to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", ${ageStatusExpr} AS "ageStatus",
               ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
               ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
-              ${original ? "selected.migration_legacy_id" : "mig.legacy_id"} AS "migrationLegacyId",
+              ${materializeDates ? "selected.migration_legacy_id" : "mig.legacy_id"} AS "migrationLegacyId",
               selected.risk_flag AS "riskFlag",
               CASE WHEN $3::boolean THEN resource_counts.account_count ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $3::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
@@ -477,7 +503,7 @@ export async function listUserDirectory(
               CASE WHEN $4::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
               CASE WHEN $4::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"`;
 
-  const consultsMigration = filterConsultsMigrationAudit(filter);
+  const consultsMigration = materializeDates || filterConsultsMigrationAudit({ ...filter, registrationTime: undefined });
   const countConsultsMigration = Boolean(filter.legacyId || filter.search
     || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED));
   const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
@@ -496,7 +522,7 @@ export async function listUserDirectory(
     FROM zzsh_auth_user."user" u
     LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
     LEFT JOIN migration mig ON mig.object_id=u.id
-    ${RISK_FLAG_JOIN}${plan.joins}
+    ${RISK_FLAG_JOIN} ${plan.joins}
     WHERE ${membershipConditions.join(" AND ") || "TRUE"}`;
   const pageQuery = materializeDates
     ? `SELECT registration.id,registration.created_at AS "createdAt",registration.registered_at,
@@ -505,13 +531,13 @@ export async function listUserDirectory(
        WHERE ${[...dateConditions,cursorCondition.replaceAll("u.id", "registration.id")].join(" AND ")}
        ORDER BY ${plan.joins ? `registration.sort_value ${direction} NULLS LAST, registration.id COLLATE "C" DESC` : order.replaceAll("u.id", "registration.id")}
        LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`
-    : `SELECT u.id, COALESCE(risk_flag.flagged,false) AS risk_flag
+    : `SELECT u.id, COALESCE(risk_flag.flagged,false) AS risk_flag${plan.joins ? `,${plan.key} AS sort_value` : ""}
            FROM zzsh_auth_user."user" u
            ${needsIdentity ? `LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id` : ""}
            ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
-           ${RISK_FLAG_JOIN}
+           ${RISK_FLAG_JOIN} ${plan.joins}
           WHERE ${[...conditions, cursorCondition].join(" AND ")}
-          ORDER BY ${order}
+          ORDER BY ${plan.joins ? `sort_value ${direction} NULLS LAST,u.id COLLATE "C" DESC` : order}
            LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`;
   let total = 0;
   if (!original) {
@@ -526,11 +552,12 @@ export async function listUserDirectory(
   const ctes = consultsMigration
       ? `migration AS ${original ? "NOT MATERIALIZED" : "MATERIALIZED"} (${migrationQuery}), ${materializeDates ? `registration_dates AS MATERIALIZED (${registrationFactsSql()}),` : ""} page AS MATERIALIZED (${pageQuery})`
       : `page AS MATERIALIZED (${pageQuery}), migration AS MATERIALIZED (${migrationQuery})`;
-  const projection = `SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}${original ? ',selected.registered_at AS "__directory_sort_at"' : ""}
+  const projectionOrder = original ? `${plan.joins ? "selected.sort_value" : "selected.registered_at"} ${direction} NULLS LAST, u.id COLLATE "C" DESC` : order;
+  const projection = `SELECT ${selectColumns("s.account_status", "s.identity_status", "s.age_status", "s.provider", "s.provider_reference")}${original ? `,${plan.joins ? "selected.sort_value" : "selected.registered_at"} AS "__directory_sort_at"` : ""}
          FROM page selected
          JOIN zzsh_auth_user."user" u ON u.id = selected.id
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
-         ${original ? "" : "LEFT JOIN migration mig ON mig.object_id = u.id"}
+         ${materializeDates ? "" : "LEFT JOIN migration mig ON mig.object_id = u.id"}
          ${resourceCountsSql("$3", "$1", "$2")}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
@@ -540,13 +567,15 @@ export async function listUserDirectory(
             WHERE $4::boolean AND (o.renter_user_id=u.id OR o.owner_user_id=u.id)
               AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id","$2","$1")}
          ) current_orders ON true
-        ORDER BY ${original ? `selected.registered_at ${direction} NULLS LAST, u.id COLLATE "C" DESC` : order}`;
+        ORDER BY ${projectionOrder}`;
 
   let rows: UserListRow[];
   if (original) {
     // One materialisation avoids repeating the expensive date validation on the same backend.
     const result = (await client.query<{ total: number; directory_rows: UserListRow[] }>(`WITH ${ctes}, projected AS (${projection})
-      SELECT (SELECT count(*)::int AS total FROM registration_dates registration WHERE ${dateConditions.join(" AND ") || "TRUE"}) AS total,
+      SELECT (${materializeDates ? `SELECT count(*)::int AS total FROM registration_dates registration WHERE ${dateConditions.join(" AND ") || "TRUE"}`
+        : `SELECT count(*)::int FROM zzsh_auth_user."user" u ${needsIdentity ? "LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id" : ""}
+           ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id=u.id" : ""} WHERE ${membershipConditions.join(" AND ") || "TRUE"}`}) AS total,
       COALESCE((SELECT json_agg(to_jsonb(p)-'__directory_sort_at' ORDER BY p.__directory_sort_at ${direction} NULLS LAST,p.id COLLATE "C" DESC)
         FROM projected p),'[]'::json) AS directory_rows`, values)).rows[0]!;
     total = result.total;

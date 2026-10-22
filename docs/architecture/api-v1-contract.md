@@ -264,3 +264,11 @@ npm run typecheck
 - 公开账号详情的 `game` 为服务器确认的 `{id, code, name}`，缺少可靠数据时为 `null`；客户端不得按来源 URL 推断游戏。旧客户端可忽略这一新增字段。
 - 原生公开账号投影可带 `fullPayoutSelected: true|false|null`，来自版本化号主声明；未声明/旧资料保持未知，不直接把旧包赔flag当新条款接受。明确选中时，租客先读该game/release适用的封存条款，主动勾选后向个人确认和首次建单携带同一`fullPayoutTermsAcceptance`；结果不明时冻结原接受字段、token与key恢复。该公开flag不替代服务端资金/政策校验，未选时不传空接受对象。
 - 用户与管理端上传意图共用 10 MiB（10485760 字节）上限，仅接收 PNG、JPEG、WebP。声明大小或格式错误返回 `400 INVALID_ARGUMENT`，`details[].path` 为 `size` 或 `mime`；超限信息包含声明字节数和上限。实际上传仍执行服务端字节、格式与图片安全检查，客户端前置提示不构成授权或校验替代。
+
+### 管理用户列表的业务排序与摘要
+
+ORIGINAL 列表新增 `active_orders_desc`、`balance_asc/desc`、`credit_asc/desc`、`renter_current_asc/desc`、`owner_current_asc/desc`、`published_asc/desc`。管理 UI 显式默认使用活跃订单数降序；同用户参与同单只计一次，权限及游戏范围沿订单摘要；无订单读权限的 UI 默认注册时间降序。API 未传 sort 的旧默认不变。所有排序在完整筛选集合上执行，最终输出保持同序，未知排后，同值按 userId C 序降序。非注册排序不提供游标，使用数字分页；无日期条件时，原始注册时间可在选页后按相同证据规则批量读取。
+
+`identityVerified=true|false` 分别匹配当前已实名、未获得有效实名状态，不与精确 `identityStatus` 并用；底层认证状态和缺失状态仍保留。`creditMin/creditMax` 是可选的 0–100 整数闭区间，需要 credit.read 及对象范围，未初始化不能当 0 命中。`membershipTier`、`entitlement`、`creditState`、`riskState` 保持对应投影、领域读权限与 asOf 口径。筛选和排序进入 contextKey，变化后旧上下文 409。
+
+`walletSummary` 为 ready（精确整数分、CNY、asOfUtc）、unknown 或 denied。仅 user.wallet.read、既有 finance.read 或 Boss 可读；可用余额只计 OWNER_AVAILABLE/WALLET_AVAILABLE 净额，不含提现预留等其他科目，覆盖未接纳或账务不一致保留未知。`riskFlag` 是管理端内部显示标识，不联动信用、订单或发布资格；POST `/users/{id}/risk-flag` 另需 user.risk.manage、幂等键、目录对象授权及事务审计，不能从目录读取权限推导写授权。

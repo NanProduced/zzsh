@@ -171,6 +171,7 @@ export type UserDirectoryWalletSummary =
 
 /** 目录支持的排序：筛选与排序都先在授权集合上执行，再分页。 */
 export type UserDirectorySort =
+  | "active_orders_desc"
   | "registered_desc" | "registered_asc"
   | "balance_desc" | "balance_asc"
   | "credit_desc" | "credit_asc"

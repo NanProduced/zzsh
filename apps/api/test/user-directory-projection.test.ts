@@ -574,7 +574,10 @@ test('a balance sort needs the wallet capability and aggregates the whole candid
   const sql=pool.queries.map(query=>query.sql).join('\n');
   assert.match(sql,/wallet_ledger/,'the balance aggregate is part of the candidate set');
   assert.match(sql,/wallet_coverage/,'an unadmitted coverage is not a zero balance');
-  assert.match(sql,/ORDER BY registration\.sort_value DESC NULLS LAST/,'the sort is applied to the candidate set, not to one page');
+  assert.match(sql,/ORDER BY sort_value DESC NULLS LAST/,'the sort is applied to the full candidate set before LIMIT');
+  assert.match(sql,/selected\.sort_value AS "__directory_sort_at"/,'the final JSON uses the same sort value');
+  assert.match(sql,/JOIN page candidate ON candidate.id = e.object_id/,'only page users need date evidence for a non-date sort');
+  assert.doesNotMatch(sql,/registration_dates AS MATERIALIZED/);
 });
 
 test('the risk filter narrows the directory and the numeric sorts need their own capability',async()=>{
@@ -603,4 +606,31 @@ test('the new directory filters and sorts are validated by the route and reach t
   assert.match(sql,/user_risk_flag/);
   assert.match(sql,/zzsh_credit\.user_credit_state/);
   assert.match(sql,/zzsh_iam\.membership_entitlement/);
+});
+
+test('credit bounds and verified grouping are validated, authorized and bound to the query context',async()=>{
+  const pool=new DirectorySqlFixture();
+  for (const query of ['creditMin=-1','creditMax=101','creditMin=1.5','creditMin=80&creditMax=60','identityVerified=UNKNOWN','identityVerified=false&identityStatus=VERIFIED']) {
+    assert.equal((await route(`/api/v1/admin/users?registrationTime=ORIGINAL&${query}`,pool)).status,400,query);
+  }
+  assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&creditMin=0',pool)).status,403);
+  pool.permissions=[...pool.permissions,'credit.read'];
+  pool.users=[]; // This fixture checks SQL/route boundaries; actual score filtering is verified on isolated PG.
+  assert.equal((await route('/api/v1/admin/users?registrationTime=ORIGINAL&sort=active_orders_desc&creditMin=0&creditMax=79&identityVerified=false&page=1&pageSize=20',pool)).status,200);
+  const query=pool.queries.filter(q=>q.sql.includes('projected AS')).at(-1)!;
+  assert.match(query.sql,/c\.score >= \$/);
+  assert.match(query.sql,/c\.score <= \$/);
+  assert.match(query.sql,/c\.revision IS NOT NULL/,'uninitialized credit is not a zero score');
+  assert.match(query.sql,/COALESCE\(s\.identity_status,'UNKNOWN'\)='VERIFIED'/);
+  assert.match(query.sql,/IS DISTINCT FROM o\.renter_user_id/,'self participation is counted once for active ordering');
+  assert.match(query.sql,/selected\.sort_value AS "__directory_sort_at"/);
+  const low:any=await listUserDirectory(client(pool),{...viewer,creditRead:true},{limit:20,page:1,registrationTime:'ORIGINAL',sort:'active_orders_desc',creditMin:0});
+  await assert.rejects(listUserDirectory(client(pool),{...viewer,creditRead:true},{limit:20,page:2,registrationTime:'ORIGINAL',sort:'active_orders_desc',creditMin:1,contextKey:low.contextKey}),error=>(error as any).status===409);
+});
+
+test('business sorts require their own domain read capability',async()=>{
+  for (const sort of ['active_orders_desc','renter_current_desc','owner_current_asc'] as const) {
+    await assert.rejects(listUserDirectory(client(new DirectorySqlFixture()),{...viewer,orderRead:false},{limit:20,page:1,registrationTime:'ORIGINAL',sort}),error=>(error as any).status===403);
+  }
+  await assert.rejects(listUserDirectory(client(new DirectorySqlFixture()),{...viewer,resourceRead:false},{limit:20,page:1,registrationTime:'ORIGINAL',sort:'published_desc'}),error=>(error as any).status===403);
 });
