@@ -101,6 +101,68 @@ export type RestorableUserCandidate = {
 };
 
 export type UserDirectorySourceKind = "LOCAL" | "MIGRATED" | "UNKNOWN";
+export type UserDirectoryResourceSummary =
+  | { state: "ready"; count: number }
+  | { state: "denied"; permission: string; reason?: "NO_GAME_SCOPE" };
+
+export type UserDirectoryOrderSummary =
+  | { state: "ready"; currentCount: number; renterCurrentCount?: number; ownerCurrentCount?: number }
+  | { state: "denied"; permission: string; reason?: "NO_GAME_SCOPE" };
+
+export type UserDirectoryMembershipSummary =
+  | {
+      state: "ready";
+      asOfUtc: string;
+      growth: {
+        knowledge: "KNOWN" | "UNKNOWN";
+        sourceState: "COMPLETE" | "BACKFILL_PENDING" | "READ_FAILED" | "SOURCE_CONFLICT" | "NO_POLICY";
+        benefitsState: "CONFIGURED" | "NOT_CONFIGURED";
+        normalTier: "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND" | null;
+        effectiveTier: "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND" | "BLACK_GOLD" | "UNKNOWN" | null;
+        blackGold: "QUALIFIED" | "NOT_QUALIFIED" | "REVIEW_REQUIRED" | null;
+        grace: {
+          state: "NONE" | "ACTIVE" | "RECOVERED" | "EXPIRED" | "UNKNOWN";
+          fromTier: string | null;
+          droppedAt: string | null;
+          until: string | null;
+          gapPoints: string | null;
+        } | null;
+      };
+      entitlements: Array<{
+        id: string;
+        kind: "FRIEND" | "PRESTIGE";
+        scopeKey: string;
+        startsAtUtc: string;
+        endsAtUtc: string;
+        status: "ACTIVE";
+        label: string;
+        depositWaived: boolean;
+      }>;
+    }
+  | {
+      state: "denied";
+      permission: "membership.growth.read.summary";
+    };
+
+export type UserDirectoryCreditSummary =
+  | {
+      state: "ready";
+      knowledge: "KNOWN";
+      score: number;
+      revision: string;
+    }
+  | {
+      state: "ready";
+      knowledge: "NOT_INITIALIZED";
+      score: null;
+      revision: null;
+    }
+  | {
+      state: "denied";
+      permission: "credit.read";
+      reason?: "NO_GAME_SCOPE" | "OUT_OF_SCOPE";
+    };
+
 export type UserDirectoryItem = {
   userId: string;
   name: string;
@@ -118,11 +180,24 @@ export type UserDirectoryItem = {
   localCreatedAt: string;
   createdAt: string;
   updatedAt: string;
-  resourceSummary: { state: "ready"; count: number } | { state: "denied"; permission: string };
-  orderSummary: { state: "ready"; currentCount: number } | { state: "denied"; permission: string };
+  resourceSummary: UserDirectoryResourceSummary;
+  orderSummary: UserDirectoryOrderSummary;
+  membershipSummary?: UserDirectoryMembershipSummary;
+  creditSummary?: UserDirectoryCreditSummary;
   lastBusinessActivity: { state: "not_connected"; domains: string[] };
 };
-export type UserDirectoryPage = { items?: UserDirectoryItem[]; nextCursor?: string | null; limit?: number };
+export type UserDirectoryNumberedPage = {
+  paginationMode: "page";
+  items: UserDirectoryItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  contextKey: string;
+  nextCursor: null;
+  limit: number;
+};
+export type UserDirectoryPage = { items?: UserDirectoryItem[]; total?: number; nextCursor?: string | null; limit?: number };
+export type UserDirectoryListResponse = UserDirectoryNumberedPage | UserDirectoryPage;
 
 export type UserDirectoryDetail = Omit<UserDirectoryItem, "source"> & {
   phoneNumberVerified: boolean | null;

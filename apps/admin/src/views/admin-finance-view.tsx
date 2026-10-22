@@ -11,6 +11,7 @@ type Origin = { path: string; parent?: string };
 const savedViews = new Map<string, SavedView>(), origins = new Map<string, Origin>();
 let currentIdentity = "";
 export function clearFinanceContexts(): void { savedViews.clear(); origins.clear(); currentIdentity = ""; }
+export function registerFinanceOrigin(path: string, identity?: string): string { const origin = crypto.randomUUID(); if (identity) currentIdentity = identity; origins.set(origin, { path }); return origin; }
 function scroller() { const page = document.querySelector<HTMLElement>(".workspace-page"); return page && page.scrollHeight > page.clientHeight ? page : document.scrollingElement; }
 function has(snapshot: Snapshot, permission: string) { return snapshot.permissions.includes(permission); }
 function filtersFromTab(tab: WorkspaceTab, period: boolean): FinanceFilters {

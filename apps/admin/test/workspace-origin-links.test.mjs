@@ -52,43 +52,53 @@ export default WorkbenchPage;`;
   server: { middlewareMode: true, hmr: false, ws: false, watch: null },
 });
 const { WorkspacePageContent } = await vite.ssrLoadModule('/src/workspace/page-content.tsx');
+const { tabFromLocation, tabHref, upsertTab } = await vite.ssrLoadModule('/src/workspace/tab-model.ts');
 after(async () => { await vite.close(); await browser.happyDOM.abort(); });
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const user = { userId: 'user_normal', name: '林舟', image: null, username: null, displayUsername: null, maskedPhone: '188****1101', accountStatus: 'ACTIVE', suspended: false, identityStatus: 'UNKNOWN', ageStatus: 'UNKNOWN', source: { kind: 'MIGRATED', legacyId: '88001' }, registeredAt: '2026-09-24T04:00:00Z', registeredAtSource: 'LOCAL', createdAt: '2026-09-24T04:00:00Z', updatedAt: '2026-09-24T04:00:00Z', localCreatedAt: '2026-09-24T04:00:00Z', resourceSummary: { state: 'ready', count: 1 }, orderSummary: { state: 'ready', currentCount: 1 }, lastBusinessActivity: { state: 'not_connected', domains: ['ORDER', 'SUPPLY'] } };
 const order = { orderId: 'order_cancel', displayNo: 'TEST-1003', status: 'CANCELLED', role: 'renter', title: '订单快照', counterpartyName: '另一方', gameId: 'delta', amounts: { rental: { currency: 'CNY', unit: 'yuan', amount: '60.00', scale: 2 }, deposit: { currency: 'CNY', unit: 'yuan', amount: '100.00', scale: 2 }, totalDue: { currency: 'CNY', unit: 'yuan', amount: '160.00', scale: 2 } }, createdAt: user.createdAt, paidAt: null, cancelledAt: user.createdAt, cancelReason: '支付后取消', expiredAwaitingCancel: false };
 
-globalThis.fetch = async (input) => {
+const loadedOrder = { id: 'order_cancel', displayNo: 'TEST-1003', status: 'CANCELLED', title: '订单快照', accountId: 'account_1', accountDisplayNo: null, gameId: 'delta', ownerUserId: 'user_owner', renterUserId: 'user_normal', ownerName: '号主', renterName: user.name, createdAt: user.createdAt, paidAt: null, payment: { state: 'UNKNOWN', recordedAt: null, recordedAmount: null }, amounts: order.amounts, source: { origin: 'LEGACY' } };
+const readFixture = async (input) => {
   const url = new URL(String(input), browser.location.href);
   const admin = { id: 'admin-fixture', username: 'ZZ00002', name: '测试运营', status: 'ACTIVE', isBoss: false, roles: [], createdAt: '2026-09-24T04:00:00Z' };
   if (url.pathname.endsWith('/security/admins')) return json({ admins: [admin] });
   if (url.pathname.endsWith('/security/admins/detail')) return json({ ...admin, allowPermissions: [], denyPermissions: [], effectivePermissions: ['order.read'] });
   if (url.pathname.endsWith('/security/roles')) return json({ roles: [], permissions: [] });
   if (url.pathname.endsWith('/supply/games')) return json({ games: [] });
+  if (url.pathname === '/api/bff/admin/users' || url.pathname === '/api/bff/admin/users/lookup') return json({ items: [user], nextCursor: null, limit: 20 });
   if (url.pathname === '/api/bff/admin/users/user_normal') return json({ user });
+  if (/^\/api\/bff\/admin\/orders\/[^/]+$/.test(url.pathname)) return json({ order: { ...loadedOrder, id: url.pathname.split('/').at(-1), displayNo: url.pathname.endsWith('/order_cancel') ? 'TEST-1003' : 'TEST-OTHER' } });
   if (url.pathname.endsWith('/orders')) return json({ items: [order], nextCursor: null });
   if (url.pathname.endsWith('/rental-accounts')) return json({ items: [], nextCursor: null });
   if (url.pathname.endsWith('/audit-events')) return json({ items: [], nextCursor: null });
   return json({ error: { code: 'NOT_FOUND' } }, 404);
 };
+globalThis.fetch = readFixture;
 
 async function settle(ms = 25) { await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); }); }
 async function waitFor(fn, timeout = 3000) { const until = Date.now() + timeout; while (!fn()) { if (Date.now() > until) throw new Error('Component condition timed out'); await settle(); } }
 const namedButton = (name) => [...browser.document.querySelectorAll('button')].find((e) => (e.getAttribute('aria-label') || e.textContent.trim()) === name);
 async function click(element) { assert.ok(element, 'expected clickable element'); await act(async () => element.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true }))); await settle(); }
+async function input(element, value) { assert.ok(element); await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, 'value').set.call(element, value); element.dispatchEvent(new browser.Event('input', { bubbles: true })); }); await settle(); }
 
 function snapshot(permissions, isBoss = false) {
   return { authenticated: true, adminUserId: 'admin-1', user: { name: '测试管理员', username: 'ZZ00001', twoFactorEnabled: true }, security: { status: 'ACTIVE', isBoss, passwordChangeRequired: false }, session: { id: 'session-1', locked: false, pinConfigured: true, createdAt: null, expiresAt: null }, permissions };
 }
 
-async function mount(t, initialTab, snap) {
+async function mount(t, initialTab, snap, followNavigation = false) {
   const container = browser.document.createElement('div');
   browser.document.body.appendChild(container);
   const root = createRoot(container);
   const opened = [];
+  const queries = [];
   let locks = 0;
+  let currentTab = initialTab, replaceTab;
   function Harness() {
     const [tab, setTab] = useState(initialTab);
+    currentTab = tab;
+    replaceTab = setTab;
     return createElement(WorkspacePageContent, {
       tab,
       snapshot: snap,
@@ -97,16 +107,22 @@ async function mount(t, initialTab, snap) {
       onLock: () => { locks += 1; },
       onRefresh: async () => snap,
       onRecoveryCompleted: () => {},
-      onOpenPath: (path, title) => { opened.push({ path, title }); },
+      onOpenPath: (path, title) => {
+        opened.push({ path, title });
+        if (followNavigation) {
+          const target = new URL(path, browser.location.href), next = tabFromLocation(target.pathname, target.search);
+          setTab((current) => upsertTab([current], title ? { ...next, title } : next).find((item) => item.id === next.id));
+        }
+      },
       onDirtyChange: () => {},
-      onQueryChange: (query) => setTab((current) => ({ ...current, query })),
+      onQueryChange: (query) => { queries.push(query); setTab((current) => ({ ...current, query })); },
       refreshNonce: 0,
     });
   }
   t.after(async () => { await act(async () => root.unmount()); container.remove(); await settle(); });
   await act(async () => root.render(createElement(Harness)));
   await settle();
-  return { opened, locks: () => locks };
+  return { opened, queries, locks: () => locks, tab: () => currentTab, replaceTab: async (next) => { await act(async () => replaceTab(next)); await settle(); } };
 }
 
 const userTab = { id: 'user:user_normal', title: 'user_normal', path: '/users/user_normal', query: {}, closable: true, kind: 'user-object', objectType: 'user', objectId: 'user_normal' };
@@ -130,7 +146,7 @@ test('order detail without an origin user or without user permission shows no re
   const noOrigin = await mount(t, orderTab({}), snapshot(['user.directory.read', 'order.read']));
   await settle(60);
   assert.equal(namedButton('返回来源用户'), undefined, 'no origin user means no return button');
-  assert.equal(noOrigin.opened.length, 0);
+  assert.ok(noOrigin.opened.every((item) => item.path === '/orders/order_cancel'), 'only the order title may update without an origin');
 
   const noPermission = await mount(t, orderTab({ fromUserId: 'user_normal', fromUserSection: 'orders' }), snapshot(['order.read']));
   await settle(60);
@@ -194,3 +210,115 @@ test('formal settings wiring is not port-gated and the security entry targets th
     assert.ok(account.includes(marker), `legacy account page keeps ${marker}`);
   }
 });
+
+test('clearing user filters replaces the workspace query, including the old cursor', async (t) => {
+  const list = { ...tabFromLocation('/users'), query: { q: '林舟', status: 'ACTIVE', source: 'MIGRATED', cursor: 'OLD_CURSOR' } };
+  const h = await mount(t, list, snapshot(['user.directory.read']));
+  await waitFor(() => browser.document.querySelector('.ud-directory tbody tr'));
+  // The toolbar keeps one reset entry; the duplicate clear control was removed.
+  await click(namedButton('重置'));
+  await waitFor(() => browser.document.querySelector('[aria-label="查找用户"]').value === '');
+  assert.deepEqual(h.queries.at(-1), { sort: 'created' }, 'omitted filters must be removed instead of merged back');
+  assert.deepEqual(tabFromLocation('/users', tabHref(h.tab()).split('?')[1]).query, { sort: 'created' }, 'refresh receives only the cleared query');
+});
+
+test('phone lookup removes an older public search without persisting the phone', async (t) => {
+  const h = await mount(t, { ...tabFromLocation('/users'), query: { q: '林舟' } }, snapshot(['user.directory.read', 'user.phone.lookup']));
+  await waitFor(() => browser.document.querySelector('.ud-directory tbody tr'));
+  await input(browser.document.querySelector('[aria-label="查找用户"]'), '18800001101');
+  await click(namedButton('查询'));
+  assert.deepEqual(h.queries.at(-1), { sort: 'created' }, 'neither the old nickname nor the phone belongs in the workspace query');
+});
+
+test('user detail section changes retain order and supply origin context', async (t) => {
+  const origin = { fromOrderId: 'order_source', fromSupplyId: 'account_source', fromSupplyContext: 'archive', fromSupplyVersionId: 'version_source' };
+  const h = await mount(t, { ...userTab, query: origin }, snapshot(['user.directory.read', 'order.read', 'supply.review.read']));
+  await waitFor(() => namedButton('查看订单记录'));
+  await click(namedButton('查看订单记录'));
+  assert.deepEqual(h.queries.at(-1), { ...origin, section: 'orders' }, 'detail sections still send partial query changes');
+});
+
+test('a successful order title update retains the source user and its return path', async (t) => {
+  const origin = { fromUserId: 'user_normal', fromUserSection: 'resources' };
+  const h = await mount(t, orderTab(origin), snapshot(['user.directory.read', 'order.read']), true);
+  await waitFor(() => h.opened.some((item) => item.title === 'TEST-1003'));
+  assert.deepEqual(h.tab().query, origin, 'real host navigation must keep the order source after its response arrives');
+  await click(namedButton('返回来源用户'));
+  assert.equal(h.opened.at(-1).path, '/users/user_normal?section=resources');
+});
+
+for (const [name, nextOrigin] of [
+  ['changes', { fromUserId: 'user_other', fromUserSection: 'resources' }],
+  ['is removed', {}],
+]) test('an in-flight order uses the latest source when it ' + name, async (t) => {
+  let release;
+  t.mock.method(globalThis, 'fetch', (url, init) => new URL(String(url), browser.location.href).pathname === '/api/bff/admin/orders/order_cancel'
+    ? new Promise((resolve) => { release = resolve; })
+    : readFixture(url, init));
+  const h = await mount(t, orderTab({ fromUserId: 'user_normal', fromUserSection: 'orders' }), snapshot(['user.directory.read', 'order.read']), true);
+  await waitFor(() => release);
+  await h.replaceTab(orderTab(nextOrigin));
+  await act(async () => release(json({ order: loadedOrder })));
+  await waitFor(() => h.opened.some((item) => item.title === 'TEST-1003'));
+  assert.deepEqual(h.tab().query, nextOrigin, 'a late title update cannot resurrect the prior source');
+});
+
+test('switching to another order aborts the old response before it can restore a source', async (t) => {
+  let release, oldSignal;
+  t.mock.method(globalThis, 'fetch', (url, init) => new URL(String(url), browser.location.href).pathname === '/api/bff/admin/orders/order_cancel'
+    ? new Promise((resolve) => { release = resolve; oldSignal = init.signal; })
+    : readFixture(url, init));
+  const h = await mount(t, orderTab({ fromUserId: 'user_normal' }), snapshot(['user.directory.read', 'order.read']), true);
+  await waitFor(() => release);
+  const other = tabFromLocation('/orders/order_other', 'fromUserId=user_other&fromUserSection=orders');
+  await h.replaceTab(other);
+  await waitFor(() => h.opened.some((item) => item.title === 'TEST-OTHER'));
+  assert.equal(oldSignal.aborted, true);
+  await act(async () => release(json({ order: loadedOrder })));
+  await settle();
+  assert.equal(h.tab().objectId, 'order_other');
+  assert.deepEqual(h.tab().query, other.query);
+  assert.equal(h.opened.some((item) => item.title === 'TEST-1003'), false);
+});
+
+test('order origin wiring is limited to its own title and related resource', () => {
+  const opened = [], snap = snapshot(['user.directory.read', 'order.read']);
+  const element = WorkspacePageContent({ tab: orderTab({ fromUserId: 'user_normal', fromUserSection: 'orders' }), snapshot: snap, onOpenPath: (path) => opened.push(path) });
+  const orderView = element.props.children.find((child) => child?.props?.initialOrderId === 'order_cancel');
+  for (const [target, expectedUser] of [
+    ['/orders/order_cancel', 'user_normal'],
+    ['/supply/accounts/account_1?fromOrderId=order_cancel', 'user_normal'],
+    ['/orders', null],
+    ['/orders/order_other', null],
+    ['/orders/order_other?fromUserId=user_other&fromUserSection=resources', 'user_other'],
+  ]) {
+    orderView.props.onOpenPath(target, '核对');
+    const url = new URL(opened.at(-1), browser.location.href);
+    assert.equal(url.searchParams.get('fromUserId'), expectedUser, target);
+    if (target.includes('fromOrderId=')) assert.equal(url.searchParams.get('fromOrderId'), 'order_cancel');
+  }
+});
+
+test('user detail order link carries role and status and return path preserves them', async (t) => {
+  const container = await mount(
+    t,
+    orderTab({ fromUserId: 'user_normal', fromUserSection: 'orders', fromUserRole: 'renter', fromUserStatus: 'current' }),
+    snapshot(['user.directory.read', 'order.read'])
+  );
+  await waitFor(() => namedButton('返回来源用户'));
+  await click(namedButton('返回来源用户'));
+  assert.equal(container.opened.at(-1).path, '/users/user_normal?section=orders&role=renter&status=current', 'return path lands back on source user orders section with role and status=current');
+});
+
+test('finance origin link and return navigation preserves user detail section', async (t) => {
+  const { registerFinanceOrigin } = await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');
+  const snap = snapshot(['finance.read', 'user.directory.read']);
+  const identity = `${snap.adminUserId}:${snap.session.id}:${[...snap.permissions].sort().join('|')}`;
+  const token = registerFinanceOrigin('/users/user_normal?section=finance', identity);
+  const financeTab = { id: 'finance-user', title: '资金详情', path: '/finance/users/user_normal', query: { origin: token }, closable: true, kind: 'finance-user', objectId: 'user_normal' };
+  const h = await mount(t, financeTab, snap);
+  await waitFor(() => namedButton('返回来源'));
+  await click(namedButton('返回来源'));
+  assert.equal(h.opened.at(-1).path, '/users/user_normal?section=finance', 'return path lands back on user detail finance section');
+});
+

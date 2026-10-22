@@ -87,13 +87,15 @@ function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}
  </div>;
 }
 function Detail({snapshot,id,onOpenPath,refreshNonce}:{snapshot:Snapshot;id:string;onOpenPath:(p:string,t?:string)=>void;refreshNonce:number}){
+ // A source-only navigation keeps this request alive; use its latest return context.
+ const openPath=useRef(onOpenPath);openPath.current=onOpenPath;
  const [order,setOrder]=useState<Order>(),[error,setError]=useState<string>(),[nonce,setNonce]=useState(0);
  const [settlementNonce,retrySettlement]=useState(0),[teamNonce,retryTeam]=useState(0);
  const [settlement,setSettlement]=useState<{state:"loading"|"ready"|"forbidden"|"unavailable"|"legacy";data?:Record<string,unknown>;requestId?:string}>({state:"loading"});
  const [team,setTeam]=useState<{state:string;data?:{teamState:string|null;canRead:boolean;name?:string}}>({state:"loading"});
  useEffect(()=>{
   const controller=new AbortController();setOrder(undefined);setError(undefined);
-  void adminRequest<{order:Order}>(`/orders/${encodeURIComponent(id)}?readMode=combined`,undefined,"GET",{},controller.signal).then(value=>{   if(controller.signal.aborted)return;setOrder(value.order);onOpenPath(`/orders/${encodeURIComponent(id)}`,value.order.displayNo);
+  void adminRequest<{order:Order}>(`/orders/${encodeURIComponent(id)}?readMode=combined`,undefined,"GET",{},controller.signal).then(value=>{   if(controller.signal.aborted)return;setOrder(value.order);openPath.current(`/orders/${encodeURIComponent(id)}`,value.order.displayNo);
   }).catch(e=>{if(!controller.signal.aborted)setError(friendlyError(e));});return()=>controller.abort();
  },[id,keyOf(snapshot),refreshNonce,nonce]);
  useEffect(()=>{

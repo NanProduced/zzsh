@@ -14,6 +14,13 @@ const AdminApiError = class extends Error { constructor(status, code) { super(co
 const Button = ({ children, ...props }) => React.createElement("button", props, children);
 const Input = (props) => React.createElement("input", props);
 const Badge = ({ children }) => React.createElement("span", null, children);
+const Textarea = (props) => React.createElement("textarea", props);
+const Select = ({ children, value }) => React.createElement("div", { "data-value": value }, children);
+const SelectTrigger = ({ children, ...props }) => React.createElement("button", props, children);
+const SelectValue = () => React.createElement("span", null);
+const SelectContent = ({ children }) => React.createElement("div", null, children);
+const SelectItem = ({ children, value }) => React.createElement("div", { "data-item": value }, children);
+const Field = ({ children, label, ...props }) => React.createElement("div", props, label, children);
 const data = { credit: { userId: "user-A", score: 70, revision: "1", events: [] }, recoveryRequests: [], guarantees: [], transactions: [{ requirementId: "req-1", accountId: "account-1", paymentStatus: "CONFIRMED", refundStatus: "UNKNOWN", merchantOrderNo: "merchant-2", paymentFinanceEventId: "event-2", refundFinanceEventId: null, paymentHistory: [{ id: "pay-1", status: "FAILED", amountCents: "500", merchantOrderNo: "merchant-1", providerTransactionId: null, financeEventId: null, ledgerEntryRef: null }, { id: "pay-2", status: "CONFIRMED", amountCents: "500", merchantOrderNo: "merchant-2", providerTransactionId: "provider-2", financeEventId: "event-2", ledgerEntryRef: "line-2" }], refundHistory: [{ id: "refund-1", paymentId: "pay-2", status: "FAILED", amountCents: "500", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }, { id: "refund-2", paymentId: "pay-2", status: "UNKNOWN", amountCents: "500", providerRefundId: null, financeEventId: null, ledgerEntryRef: null }] }] };
 let creditResult = null;
 const historyProps = [];
@@ -29,6 +36,9 @@ function loadComponent() {
     if (name === "@/components/ui/button") return { Button };
     if (name === "@/components/ui/input") return { Input };
     if (name === "@/components/ui/badge") return { Badge };
+    if (name === "@/components/ui/textarea") return { Textarea };
+    if (name === "@/components/ui/select") return { Select, SelectTrigger, SelectValue, SelectContent, SelectItem };
+    if (name === "@/components/ui/field") return { Field };
     if (name === "@/api") return { AdminApiError };
     if (name === "../owner-guarantee-history") return { AdminOwnerGuaranteeHistory };
     if (name === "./user-directory-data") return { CREDIT_GUARANTEE_PERMISSION: { read: "credit.guarantee.read", manage: "credit.guarantee.manage" }, PERMISSION: { credit: "credit.read", creditDecide: "credit.decide" } };

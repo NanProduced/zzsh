@@ -159,7 +159,7 @@ export function WorkspacePageContent({
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}if(pathname.startsWith("/orders/")&&tab.objectId){params.set("fromUserId",tab.objectId);params.set("fromUserSection",tab.query.section??"orders");}withSupplyOrigin(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange({...tab.query,...query})} refreshNonce={refreshNonce}/></>;
+  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId)params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");}if(pathname.startsWith("/orders/")&&tab.objectId){params.set("fromUserId",tab.objectId);params.set("fromUserSection",tab.query.section??"orders");if(tab.query.role)params.set("fromUserRole",tab.query.role);if(tab.query.status)params.set("fromUserStatus",tab.query.status);}withSupplyOrigin(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange(tab.kind==="users"?query:{...tab.query,...query})} refreshNonce={refreshNonce}/></>;
   if(tab.kind==="resource-object")return <AdminResourceReadView snapshot={snapshot} accountId={tab.objectId!} fromOrderId={tab.query.fromOrderId} fromUserId={tab.query.fromUserId} fromUserSection={tab.query.fromUserSection} onOpenPath={onOpenPath} refreshNonce={refreshNonce}/>;
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
@@ -179,12 +179,14 @@ export function WorkspacePageContent({
   }
   if (tab.kind === "orders" || tab.kind === "order-object") {
     const fromUser = tab.kind === "order-object" && tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? tab.query.fromUserId : null;
-    const userReturn = fromUser ? <button className="oc-back" onClick={() => onOpenPath(`/users/${fromUser}?${new URLSearchParams({ section: tab.query.fromUserSection ?? "orders" })}`)}>返回来源用户</button> : null;
+    const userReturn = fromUser ? <button className="oc-back" onClick={() => onOpenPath(`/users/${fromUser}?${new URLSearchParams({ section: tab.query.fromUserSection ?? "orders", ...(tab.query.fromUserRole ? { role: tab.query.fromUserRole } : {}), ...(tab.query.fromUserStatus ? { status: tab.query.fromUserStatus } : {}) })}`)}>返回来源用户</button> : null;
     const withUserOrigin = (path: string, title?: string) => {
-      if (!fromUser || !path.startsWith("/supply/accounts/")) return withSupplyOrigin(path, title);
-      const [pathname, search = ""] = path.split("?"), params = new URLSearchParams(search);
+      const [pathname = "", search = ""] = path.split("?"), params = new URLSearchParams(search);
+      if (!fromUser || (pathname !== tab.path && !pathname.startsWith("/supply/accounts/"))) return withSupplyOrigin(path, title);
       params.set("fromUserId", fromUser);
       params.set("fromUserSection", tab.query.fromUserSection ?? "orders");
+      if (tab.query.fromUserRole) params.set("fromUserRole", tab.query.fromUserRole);
+      if (tab.query.fromUserStatus) params.set("fromUserStatus", tab.query.fromUserStatus);
       withSupplyOrigin(pathname + "?" + params, title);
     };
     return (
