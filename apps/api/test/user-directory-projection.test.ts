@@ -454,7 +454,8 @@ test('original registration filters and sort precede pagination and count uses i
   const queries=pool.queries.filter(q=>q.sql.includes('FROM zzsh_auth_user."user" u'));
   assert.equal(queries.length,1);
   for(const {sql} of queries){
-    assert.match(sql,/e\.outcome='SUCCESS'/);assert.match(sql,/pg_input_is_valid\(mig\.source_created_at,'timestamp with time zone'\)/);
+    assert.match(sql,/FROM zzsh_iam\.user_registration_fact fact/);
+    assert.match(sql,/THEN mig\.registered_at ELSE NULL END/);
     assert.match(sql,/s\.provider_reference='la_user:' \|\| mig\.legacy_id/);
     assert.match(sql,/registration\.registered_at >= \$\d+::timestamptz/);assert.match(sql,/registration\.registered_at < \$\d+::timestamptz/);
     assert.doesNotMatch(sql,/COALESCE\(mig\.source_created_at|COALESCE\(registration\.registered_at/);
@@ -576,7 +577,7 @@ test('a balance sort needs the wallet capability and aggregates the whole candid
   assert.match(sql,/wallet_coverage/,'an unadmitted coverage is not a zero balance');
   assert.match(sql,/ORDER BY sort_value DESC NULLS LAST/,'the sort is applied to the full candidate set before LIMIT');
   assert.match(sql,/selected\.sort_value AS "__directory_sort_at"/,'the final JSON uses the same sort value');
-  assert.match(sql,/JOIN page candidate ON candidate.id = e.object_id/,'only page users need date evidence for a non-date sort');
+  assert.match(sql,/JOIN page candidate ON candidate.id=fact.user_id/,'non-date sorts read only page registration facts');
   assert.doesNotMatch(sql,/registration_dates AS MATERIALIZED/);
 });
 

@@ -272,3 +272,5 @@ ORIGINAL 列表新增 `active_orders_desc`、`balance_asc/desc`、`credit_asc/de
 `identityVerified=true|false` 分别匹配当前已实名、未获得有效实名状态，不与精确 `identityStatus` 并用；底层认证状态和缺失状态仍保留。`creditMin/creditMax` 是可选的 0–100 整数闭区间，需要 credit.read 及对象范围，未初始化不能当 0 命中。`membershipTier`、`entitlement`、`creditState`、`riskState` 保持对应投影、领域读权限与 asOf 口径。筛选和排序进入 contextKey，变化后旧上下文 409。
 
 `walletSummary` 为 ready（精确整数分、CNY、asOfUtc）、unknown 或 denied。仅 user.wallet.read、既有 finance.read 或 Boss 可读；可用余额只计 OWNER_AVAILABLE/WALLET_AVAILABLE 净额，不含提现预留等其他科目，覆盖未接纳或账务不一致保留未知。`riskFlag` 是管理端内部显示标识，不联动信用、订单或发布资格；POST `/users/{id}/risk-flag` 另需 user.risk.manage、幂等键、目录对象授权及事务审计，不能从目录读取权限推导写授权。
+
+ORIGINAL 列表通过 `user_registration_fact` 读取最新成功迁移审计的派生事实，避免每次全量解析历史 JSON。0092 先安装审计追加触发器再回填；最新无效日期存 null，乱序追加不能覆盖更新的事实；当前身份来源及绑定仍在每次读取时核对。运行角色对投影只有 SELECT，同事务触发器负责同步，审计原件不改。审计专项离线恢复或修订若绕过追加路径，须在同一维护窗口重建并核对该投影。旧模式和按需审计原文读取保持原合同。

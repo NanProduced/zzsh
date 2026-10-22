@@ -35,10 +35,24 @@ test('0090 adds only the two PG-measured subject indexes and retains the journal
 
 test('0091 appends the directory migration and the runtime risk table receives only its required rights',()=>{
  const journal=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
- assert.deepEqual(journal.entries.at(-1).tag,'0091_admin_user_directory_list');
+ assert.deepEqual(journal.entries[91].tag,'0091_admin_user_directory_list');
  const source=readFileSync(resolve('src/database/business-migrations.ts'),'utf8');
  assert.match(source,/GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"\."user_risk_flag"/);
  assert.doesNotMatch(source,/GRANT[^;\n]*DELETE[^;\n]*"user_risk_flag"/);
+});
+
+test('0092 keeps the newest success even when its date is invalid and exposes only projection SELECT',()=>{
+ const sql=readFileSync(resolve('migrations/business/0092_user_registration_read_projection.sql'),'utf8');
+ assert.match(sql,/ORDER BY object_id,occurred_at DESC,id DESC/);
+ assert.match(sql,/THEN \(details->>'sourceCreatedAt'\)::timestamptz ELSE NULL END/);
+ assert.match(sql,/pg_input_is_valid/);
+ assert.match(sql,/NEW\.outcome='SUCCESS'/);
+ assert.match(sql,/SECURITY DEFINER SET search_path = pg_catalog/);
+ assert.match(sql,/REVOKE ALL ON FUNCTION/);
+ const source=readFileSync(resolve('src/database/business-migrations.ts'),'utf8');
+ assert.match(source,/GRANT SELECT ON TABLE "zzsh_iam"\."user_registration_fact"/);
+ assert.match(source,/REVOKE ALL ON TABLE "zzsh_iam"\."user_registration_fact"/);
+ assert.doesNotMatch(source,/GRANT[^;\n]*(INSERT|UPDATE|DELETE)[^;\n]*"user_registration_fact"/);
 });
 const runnerSource=readFileSync(runnerPath,'utf8');
 const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarantee_history.sql'),'utf8');

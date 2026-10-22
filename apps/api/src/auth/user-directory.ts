@@ -204,7 +204,9 @@ const SOURCE_SQL = `CASE WHEN s.provider='${LEGACY_PROVIDER}' THEN 'MIGRATED'
   WHEN s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
 
 // Validate the newest fact after selection; invalid or empty facts must never revive an older date.
-function originalRegistrationSql(migration = "mig"): string {
+function originalRegistrationSql(migration = "mig", projected = false): string {
+  if (projected) return `CASE WHEN s.user_id IS NOT NULL AND s.provider='none' AND ${migration}.object_id IS NULL THEN u."createdAt"
+    WHEN s.provider='${LEGACY_PROVIDER}' AND s.provider_reference='la_user:' || ${migration}.legacy_id THEN ${migration}.registered_at ELSE NULL END`;
   return `CASE WHEN s.user_id IS NOT NULL AND s.provider='none' AND ${migration}.object_id IS NULL THEN u."createdAt"
     WHEN s.provider='${LEGACY_PROVIDER}' AND ${migration}.source_system='${LEGACY_PROVIDER}'
       AND ${migration}.source_entity='la_user' AND NULLIF(${migration}.legacy_id,'') IS NOT NULL
@@ -491,7 +493,7 @@ export async function listUserDirectory(
   const plan = sortPlan();
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
-              ${original ? `to_char(${materializeDates ? "selected.registered_at" : originalRegistrationSql()} ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
+              ${original ? `to_char(${materializeDates ? "selected.registered_at" : originalRegistrationSql("mig", true)} ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
               to_char(u."updatedAt" ${TIMESTAMP_TEXT}) AS "localUpdatedAt", ${ageStatusExpr} AS "ageStatus",
               ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
               ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
@@ -506,18 +508,14 @@ export async function listUserDirectory(
   const consultsMigration = materializeDates || filterConsultsMigrationAudit({ ...filter, registrationTime: undefined });
   const countConsultsMigration = Boolean(filter.legacyId || filter.search
     || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED));
-  const migrationQuery = `SELECT DISTINCT ON (e.object_id) e.object_id,
-           e.details->>'legacyId' AS legacy_id
-           ${original ? `,e.details->>'sourceCreatedAt' AS source_created_at,
-             e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,
-             e.details->>'sourceDigest' AS source_digest,e.details->>'evidenceRef' AS evidence_ref` : ""}
+  const migrationQuery = original ? `SELECT fact.user_id AS object_id,fact.legacy_id,fact.registered_at
+      FROM zzsh_iam.user_registration_fact fact ${consultsMigration ? "" : "JOIN page candidate ON candidate.id=fact.user_id"}` : `SELECT DISTINCT ON (e.object_id) e.object_id,e.details->>'legacyId' AS legacy_id
       FROM zzsh_iam.audit_event e
       ${consultsMigration ? "" : "JOIN page candidate ON candidate.id = e.object_id"}
      WHERE e.action = '${LEGACY_MIGRATION_ACTION}' AND e.object_type = 'user'
-       ${original ? "AND e.outcome='SUCCESS'" : ""}
      ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
   // The validated timestamp is expensive; materialise narrow facts once before applying both bounds and sorting.
-  const registrationFactsSql = () => `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql()} AS registered_at,mig.legacy_id AS migration_legacy_id,
+  const registrationFactsSql = () => `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql("mig", true)} AS registered_at,mig.legacy_id AS migration_legacy_id,
        COALESCE(risk_flag.flagged,false) AS risk_flag${plan.joins ? `,${plan.key} AS sort_value` : ""}
     FROM zzsh_auth_user."user" u
     LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
