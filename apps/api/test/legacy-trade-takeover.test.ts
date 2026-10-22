@@ -388,7 +388,7 @@ test("ordinary draft chain saves the converted declaration without a quote and a
 });
 
 test("ordinary draft command saves one legacy observation without quote, review, takeover or an observation update", async (t) => {
-  const sourceRoot = join(__dirname, "../../src");
+  const sourceRoot = join(process.cwd(), "src");
   const source = readFileSync(join(sourceRoot, "supply/legacy-trade-takeover.ts"), "utf8");
   const fn = source.slice(source.indexOf("export async function applyLegacyOrdinaryDraft"), source.indexOf("export async function takeoverLegacyTrade"));
   for (const name of ["quoteListing(", "reviewListing(", "takeoverLegacyTrade(", "finalizeLegacyTradeTakeover(", "publishTakenOverDraft(", "withIdempotency("]) assert.equal(fn.includes(name), false, name);

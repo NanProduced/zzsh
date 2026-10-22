@@ -236,13 +236,15 @@ test("readiness/事实 SQL 的真实错误原样向上传播，不吞成未接�
 
 test("既有错误基础链加载后，支付模块导入与成功调用不建连/读配置/排任务", () => {
   const target = createRequire(__filename).resolve("../src/order/channel-payment-read");
-  const script = `const Module=require('node:module'),fs=require('node:fs'),net=require('node:net'),http=require('node:http'),https=require('node:https');
+  const script = `const assert=require('node:assert/strict'),Module=require('node:module'),fs=require('node:fs'),net=require('node:net'),http=require('node:http'),https=require('node:https');
     require(${JSON.stringify(createRequire(__filename).resolve("../src/supply/supply-util"))});
     const load=Module._load;Module._load=function(name,...args){if(name==='pg'||name==='pg-pool')throw Error('unexpected_pg');return load.call(this,name,...args)};
     const stop=()=>{throw Error('unexpected_side_effect')};net.connect=net.createConnection=http.request=http.get=https.request=https.get=stop;
     global.setTimeout=global.setInterval=global.setImmediate=stop;
     const read=fs.readFileSync;fs.readFileSync=function(path,...args){if(/\\.env|\\.secrets/.test(String(path)))throw Error('unexpected_private_read');return read.call(this,path,...args)};
-    process.env=new Proxy(process.env,{get(){throw Error('unexpected_env_read')}});
+    // Node 24 source-map caching reads this debug key while loading compiled modules.
+    process.env=new Proxy(process.env,{get(env,key){if(key==='NODE_V8_COVERAGE')return Reflect.get(env,key);throw Error('unexpected_env_read')}});
+    for(const key of ['JOINPAY_TEST_MERCHANT_NO','JOINPAY_TEST_MERCHANT_KEY','JOINPAY_PAYMENT_ENABLED'])assert.throws(()=>Reflect.get(process.env,key),/unexpected_env_read/);
     const readModule=require(${JSON.stringify(target)});
     readModule.readOrderPaymentSummary({query:async()=>{throw Error('unexpected_sql')}},{origin:'LEGACY',orderId:'ord_1',financeReadable:false}).then(r=>{if(r.integration!=='NOT_INTEGRATED')throw Error('unexpected_result')});`;
   const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });

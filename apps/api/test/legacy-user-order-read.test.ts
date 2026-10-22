@@ -105,7 +105,7 @@ test("immutable order facts fill summary inputs without current private data or 
 
 test("API projection feeds the shared web display with honest titles and record-labelled refunds",()=>{
   // Cross-layer chain: the real user projection is piped into the real web display functions.
-  const display = createRequire(__filename)(join(__dirname, "../../../web/src/lib/order-display.ts")) as {
+  const display = createRequire(__filename)(join(process.cwd(), "../web/src/lib/order-display.ts")) as {
     orderResourceSummary(order: unknown): string | null;
     orderAccountTitle(order: unknown): string;
     orderUsesResourceSummary(order: unknown): boolean;
