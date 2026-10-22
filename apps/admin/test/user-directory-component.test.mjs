@@ -1288,13 +1288,15 @@ test('the first load shows a table skeleton and a failed refresh stays above the
 test('credit range sends inclusive bounds and rejects a reversed range without a request',async t=>{
   const {calls}=await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr[aria-label]'));
   assert.equal(new URL(calls.find(c=>c.url.includes('/users?')).url,browser.location.href).searchParams.get('sort'),'active_orders_desc');
+  await click(browser.document.querySelector('[aria-label="信用分"]'));
   await input(browser.document.querySelector('[aria-label="最低信用分"]'),'0');
   await input(browser.document.querySelector('[aria-label="最高信用分"]'),'79');
-  await click(namedButton('查询'));await waitFor(()=>calls.some(c=>c.url.includes('creditMin=0')));
+  await click(namedButton('确定'));await waitFor(()=>calls.some(c=>c.url.includes('creditMin=0')));
   const params=new URL(calls.find(c=>c.url.includes('creditMin=0')).url,browser.location.href).searchParams;
   assert.equal(params.get('creditMax'),'79');assert.equal(params.has('creditState'),false);assert.equal(params.has('source'),false);
   const before=calls.length;
+  await click(browser.document.querySelector('[aria-label="信用分"]'));
   await input(browser.document.querySelector('[aria-label="最低信用分"]'),'80');
-  await click(namedButton('查询'));await waitFor(()=>browser.document.querySelector('[role="alert"]'));
+  await click(namedButton('确定'));await waitFor(()=>browser.document.querySelector('[role="alert"]'));
   assert.equal(calls.length,before);assert.ok(browser.document.querySelector('[role="alert"]').textContent.includes('最低分不能大于最高分'));
 });

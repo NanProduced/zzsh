@@ -1,6 +1,6 @@
 import { AdminApiError } from '../../api';
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, ArrowUpRightIcon, CalendarDaysIcon, FilterIcon, XIcon } from 'lucide-react';
+import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, ArrowUpRightIcon, CalendarDaysIcon, ChevronDownIcon, FilterIcon, RotateCcwIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Field } from '@/components/ui/field';
@@ -139,6 +139,153 @@ function RegistrationDateRange({ from, to, onChange }: { from: string; to: strin
   );
 }
 
+const CREDIT_PRESETS = [
+  { label: '全部', min: '', max: '' },
+  { label: '100 满分', min: '100', max: '100' },
+  { label: '≥80 良好', min: '80', max: '100' },
+  { label: '60–79 警示', min: '60', max: '79' },
+  { label: '<60 高危', min: '0', max: '59' },
+] as const;
+
+/**
+ * 信用分区间筛选：预设 0–100 常用业务分段（通常以 10/20 整数扣减）；支持自定义精确区间。
+ */
+function CreditRangeFilter({
+  creditMin,
+  creditMax,
+  onChange,
+}: {
+  creditMin: string;
+  creditMax: string;
+  onChange: (patch: Partial<Filters>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draftMin, setDraftMin] = useState(creditMin);
+  const [draftMax, setDraftMax] = useState(creditMax);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraftMin(creditMin);
+    setDraftMax(creditMax);
+    setError(null);
+  }, [creditMin, creditMax, open]);
+
+  const preset = CREDIT_PRESETS.find(p => p.min === creditMin && p.max === creditMax);
+  let label = '全部';
+  if (preset && preset.min !== '') label = preset.label;
+  else if (creditMin === '100' && creditMax === '100') label = '100 满分';
+  else if (creditMin && creditMax) label = `${creditMin}–${creditMax}分`;
+  else if (creditMin) label = `≥${creditMin}分`;
+  else if (creditMax) label = `≤${creditMax}分`;
+
+  const applyCustom = () => {
+    const min = draftMin.trim();
+    const max = draftMax.trim();
+    if (min && !/^(0|[1-9]\d?|100)$/.test(min)) {
+      setError('最低分应为 0–100 整数');
+      return;
+    }
+    if (max && !/^(0|[1-9]\d?|100)$/.test(max)) {
+      setError('最高分应为 0–100 整数');
+      return;
+    }
+    if (min && max && Number(min) > Number(max)) {
+      setError('最低分不能大于最高分');
+      return;
+    }
+    setError(null);
+    onChange({ creditMin: min, creditMax: max });
+    setOpen(false);
+  };
+
+  const clear = () => {
+    setDraftMin('');
+    setDraftMax('');
+    setError(null);
+    onChange({ creditMin: '', creditMax: '' });
+    setOpen(false);
+  };
+
+  return (
+    <Field label="信用分" composite className="ud-field ud-credit-filter">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger render={<Button type="button" variant="outline" className="ud-credit-trigger" aria-label="信用分" />}>
+          <span className="truncate">{label}</span>
+          <ChevronDownIcon size={14} className="ml-auto opacity-50 shrink-0" aria-hidden />
+        </PopoverTrigger>
+        <PopoverContent className="ud-credit-popover" align="start">
+          <div className="space-y-3">
+            <div>
+              <span className="text-xs font-medium text-muted-foreground mb-1.5 block">常用分档</span>
+              <div className="grid grid-cols-2 gap-1.5">
+                {CREDIT_PRESETS.map(p => {
+                  const active = p.min === (creditMin || '') && p.max === (creditMax || '');
+                  return (
+                    <Button
+                      key={p.label}
+                      type="button"
+                      variant={active ? 'default' : 'outline'}
+                      size="xs"
+                      onClick={() => {
+                        onChange({ creditMin: p.min, creditMax: p.max });
+                        setOpen(false);
+                      }}
+                      className="text-xs h-7 justify-start px-2 font-normal"
+                    >
+                      {p.label}
+                    </Button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-border">
+              <span className="text-xs font-medium text-muted-foreground mb-1.5 block">自定义区间 (0–100)</span>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={10}
+                  inputMode="numeric"
+                  aria-label="最低信用分"
+                  placeholder="最低分"
+                  value={draftMin}
+                  onChange={e => { setDraftMin(e.target.value); setError(null); }}
+                  className="h-8 text-xs tabular-nums"
+                />
+                <span className="text-muted-foreground" aria-hidden>–</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={10}
+                  inputMode="numeric"
+                  aria-label="最高信用分"
+                  placeholder="最高分"
+                  value={draftMax}
+                  onChange={e => { setDraftMax(e.target.value); setError(null); }}
+                  className="h-8 text-xs tabular-nums"
+                />
+              </div>
+              {error ? <p className="text-[11px] text-destructive mt-1.5" role="alert">{error}</p> : null}
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-border">
+              <Button type="button" variant="ghost" size="xs" onClick={clear} className="text-xs h-7">
+                清空
+              </Button>
+              <Button type="button" size="xs" onClick={applyCustom} className="text-xs h-7">
+                确定
+              </Button>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </Field>
+  );
+}
+
 /** 紧凑业务筛选：桌面一行可换行；窄屏先给状态与日期，其余行内折叠，不再藏进侧边抽屉。 */
 function FilterFields({ filters, change, variant }: { filters: Filters; change: (patch: Partial<Filters>) => void; variant: 'primary' | 'rest' | 'all' }) {
   return (
@@ -154,13 +301,7 @@ function FilterFields({ filters, change, variant }: { filters: Filters; change: 
           <ListToolbarEnumSelect label="实名状态" value={filters.identity} onChange={identity => change({ identity })} options={[['VERIFIED', '已实名'], ['UNVERIFIED', '未实名']]} />
           <ListToolbarEnumSelect label="会员等级" value={filters.tier} onChange={tier => change({ tier })} options={TIER_OPTIONS} />
           <ListToolbarEnumSelect label="有效礼遇" value={filters.entitlement} onChange={entitlement => change({ entitlement })} options={ENTITLEMENT_OPTIONS} />
-          <Field label="信用分" composite className="ud-field ud-credit-range">
-            <div className="ud-credit-range-inputs">
-              <Input type="number" min={0} max={100} step={1} inputMode="numeric" aria-label="最低信用分" placeholder="最低分" value={filters.creditMin} onChange={event => change({ creditMin: event.target.value })} />
-              <span aria-hidden>–</span>
-              <Input type="number" min={0} max={100} step={1} inputMode="numeric" aria-label="最高信用分" placeholder="最高分" value={filters.creditMax} onChange={event => change({ creditMax: event.target.value })} />
-            </div>
-          </Field>
+          <CreditRangeFilter creditMin={filters.creditMin} creditMax={filters.creditMax} onChange={change} />
           <ListToolbarEnumSelect label="内部标识" value={filters.risk} onChange={risk => change({ risk })} options={RISK_OPTIONS} />
         </>
       ) : null}
@@ -178,7 +319,7 @@ function SortHeader({ label, column, sort, onSort, hint }: { label: string; colu
         type="button"
         variant="ghost"
         size="xs"
-        className="ud-sort-header"
+        className={`ud-sort-header ${active ? 'font-semibold text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
         aria-label={`按${label}排序`}
         onClick={() => onSort(`${column}_${ascending ? 'desc' : 'asc'}`)}
       >
@@ -218,17 +359,27 @@ function BusinessSortHeader({ sort, onSort }: { sort: string; onSort: (next: str
   return (
     <TableHead aria-sort={active ? (ascending ? 'ascending' : 'descending') : 'none'}>
       <div className="ud-business-head">
-        <span>当前业务</span>
-        {columns.map(([column, label]) => {
-          const on = sort.startsWith(`${column}_`);
-          const up = on && sort.endsWith('_asc');
-          return (
-            <Button key={column} type="button" variant="ghost" size="xs" className="ud-sort-header" aria-label={`按${label}排序`} onClick={() => onSort(`${column}_${up ? 'desc' : 'asc'}`)}>
-              {label}
-              <span className="ud-sort-indicator" aria-hidden>{on ? (up ? <ArrowUpIcon size={12} /> : <ArrowDownIcon size={12} />) : <ArrowUpDownIcon size={12} />}</span>
-            </Button>
-          );
-        })}
+        <span className="text-xs font-medium">当前业务</span>
+        <div className="ud-business-head-pills">
+          {columns.map(([column, label]) => {
+            const on = sort.startsWith(`${column}_`);
+            const up = on && sort.endsWith('_asc');
+            return (
+              <Button
+                key={column}
+                type="button"
+                variant={on ? 'secondary' : 'ghost'}
+                size="xs"
+                className={`ud-sort-header h-6 px-1 text-xs ${on ? 'font-semibold text-foreground' : 'text-muted-foreground'}`}
+                aria-label={`按${label}排序`}
+                onClick={() => onSort(`${column}_${up ? 'desc' : 'asc'}`)}
+              >
+                {label}
+                <span className="ud-sort-indicator ml-0.5" aria-hidden>{on ? (up ? <ArrowUpIcon size={11} /> : <ArrowDownIcon size={11} />) : <ArrowUpDownIcon size={11} />}</span>
+              </Button>
+            );
+          })}
+        </div>
       </div>
     </TableHead>
   );
@@ -349,6 +500,20 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
     retry();
   };
 
+  /** 筛选条件即时生效并回到第 1 页 */
+  const handleFilterChange = (patch: Partial<Filters>) => {
+    setAppliedFilters(current => {
+      const next = { ...current, ...patch };
+      setDraftFilters(next);
+      return next;
+    });
+    setPage(1);
+    setCursor(undefined);
+    contextKeyRef.current = undefined;
+    setNotice('');
+    recoveringContext.current = false;
+  };
+
   /** 排序即时应用并回第 1 页；只用已生效条件，不动未提交草稿。 */
   const applySort = (nextSort: string) => {
     setAppliedFilters(current => ({ ...current, sort: nextSort }));
@@ -411,37 +576,71 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
       </div>
 
       <ListToolbar noValidate onSubmit={() => submitQuery()} onReset={handleReset}>
-        <div className="admin-list-toolbar-row">
-          <ListToolbarSearch
-            value={draftInput}
-            onChange={setDraftInput}
-            placeholder={adapter.has('user.phone.lookup') ? '用户 ID、旧平台 ID、名称或用户名；手机号仅支持精确查找' : '用户 ID、旧平台 ID、名称或用户名'}
-            ariaLabel="查找用户"
-          />
-          <ListToolbarActions>
+        <div className="admin-list-toolbar-row ud-search-row">
+          <div className="ud-search-bar">
+            <ListToolbarSearch
+              value={draftInput}
+              onChange={setDraftInput}
+              placeholder={adapter.has('user.phone.lookup') ? '用户 ID、旧平台 ID、名称或用户名；手机号仅支持精确查找' : '用户 ID、旧平台 ID、名称或用户名'}
+              ariaLabel="查找用户"
+            />
             <Button type="submit" aria-label="查询">查询</Button>
-            <Button type="button" variant="outline" onClick={handleReset}>重置</Button>
-            {mobile ? (
-              <Button type="button" variant="outline" aria-expanded={moreFiltersOpen} onClick={() => setMoreFiltersOpen(open => !open)}>
-                <FilterIcon size={16} className="mr-1" />
-                更多筛选
-              </Button>
-            ) : null}
-          </ListToolbarActions>
+          </div>
+          {mobile ? (
+            <Button type="button" variant="outline" size="sm" aria-expanded={moreFiltersOpen} onClick={() => setMoreFiltersOpen(open => !open)}>
+              <FilterIcon size={14} className="mr-1" />
+              更多筛选
+            </Button>
+          ) : null}
         </div>
-        <div className="admin-list-toolbar-row">
-          <FilterFields variant={mobile ? 'primary' : 'all'} filters={draftFilters} change={patch => setDraftFilters(c => ({ ...c, ...patch }))} />
+        <div className="admin-list-toolbar-row ud-filter-row">
+          <FilterFields variant={mobile ? 'primary' : 'all'} filters={appliedFilters} change={handleFilterChange} />
+          <div className="ud-filter-actions">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={handleReset}
+              className="ud-reset-button"
+              aria-label="重置"
+            >
+              <RotateCcwIcon size={13} className="mr-1.5" />
+              重置
+            </Button>
+          </div>
         </div>
         {mobile && moreFiltersOpen ? (
           <div className="admin-list-toolbar-row">
-            <FilterFields variant="rest" filters={draftFilters} change={patch => setDraftFilters(c => ({ ...c, ...patch }))} />
+            <FilterFields variant="rest" filters={appliedFilters} change={handleFilterChange} />
           </div>
         ) : null}
       </ListToolbar>
 
       <div className="ud-list-status" role="status" aria-live="polite">
-        <span>{result.state === 'loading' ? (rows ? '更新中，暂保留原结果' : '正在加载用户') : draftPending ? '条件已更改，点击查询应用' : SORT_LABEL[appliedFilters.sort]}</span>
-        {appliedFilters.sort !== defaultSort ? <Button type="button" variant="ghost" size="xs" onClick={() => applySort(defaultSort)}>恢复默认排序</Button> : null}
+        <div className="ud-status-left">
+          {result.state === 'loading' ? (
+            <span>{rows ? '更新中，暂保留原结果' : '正在加载用户'}</span>
+          ) : draftPending ? (
+            <span>条件已更改，点击查询应用</span>
+          ) : appliedFilters.sort !== defaultSort ? (
+            <div className="ud-active-sort-info">
+              <span>当前排序：</span>
+              <Badge variant="secondary" className="ud-sort-badge">
+                {SORT_LABEL[appliedFilters.sort] || appliedFilters.sort}
+              </Badge>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => applySort(defaultSort)}
+                className="ud-sort-reset-link"
+                aria-label="恢复默认排序"
+              >
+                恢复默认排序
+              </Button>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {notice ? <Message title={notice} /> : null}

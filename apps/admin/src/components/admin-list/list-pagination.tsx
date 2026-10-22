@@ -268,12 +268,11 @@ export function ListPagination(props: ListPaginationProps) {
               <Button
                 key={p}
                 variant={p === page ? "default" : "outline"}
-                size="icon-sm"
                 aria-label={`第 ${p} 页`}
                 aria-current={p === page ? "page" : undefined}
                 disabled={loading}
                 onClick={() => onPageChange(p)}
-                className="text-xs"
+                className="h-7 min-w-7 px-1.5 text-xs font-mono tabular-nums cursor-pointer"
               >
                 {p}
               </Button>
@@ -321,7 +320,7 @@ export function ListPagination(props: ListPaginationProps) {
                 if (jumpError) setJumpError(null);
               }}
               disabled={loading}
-              className="admin-list-pagination-jump-input h-7 w-12 px-1 text-center text-xs"
+              className="admin-list-pagination-jump-input h-7 w-16 px-1.5 text-center text-xs font-mono tabular-nums"
             />
             <span className="text-xs">页</span>
             <Button
