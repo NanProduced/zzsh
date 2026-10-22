@@ -481,8 +481,10 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (path === "/users" || /^\/users\/resource-accounts\/[A-Za-z0-9._:-]+$/.test(path) || /^\/users\/[^/]+(?:\/(?:rental-accounts|orders|audit-events))?$/.test(path)) {
-    if (!(method === "GET" && path !== "/users/lookup") && !(method === "POST" && path === "/users/lookup")) {
+  if (path === "/users" || /^\/users\/resource-accounts\/[A-Za-z0-9._:-]+$/.test(path) || /^\/users\/[^/]+(?:\/(?:rental-accounts|orders|audit-events|risk-flag))?$/.test(path)) {
+    // 内部高危标识的写入是目录族内唯一的写动作，沿用同一入口、同一授权与幂等回执。
+    const riskFlagWrite = method === "POST" && /^\/users\/[^/]+\/risk-flag$/.test(path);
+    if (!riskFlagWrite && !(method === "GET" && path !== "/users/lookup") && !(method === "POST" && path === "/users/lookup")) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }

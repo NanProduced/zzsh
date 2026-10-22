@@ -6,7 +6,10 @@ import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOpt
 import { normalizeMainlandPhone } from "./phone-number";
 import { sanitizeDetail } from "./admin-audit";
 import { withDirectoryRead, withDirectoryReadTransaction } from "./user-directory-read";
+import { withTransaction } from "./security-core";
+import { parseUserRiskFlagBody, writeUserRiskFlag } from "./user-directory-risk";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
+import { validateIdempotencyKey } from "../contracts/api-v1";
 import { decodeId, requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
 import { invalid, notFound, forbidden, sendJson, sha256Hex, type SupplyNodeRequest } from "../supply/supply-util";
 import {
@@ -19,16 +22,22 @@ import {
   USER_DIRECTORY_SOURCE,
   USER_DIRECTORY_STATUS_FILTER,
   USER_DIRECTORY_MAX_PAGE,
+  USER_DIRECTORY_SORTS,
+  USER_DIRECTORY_ENTITLEMENTS,
+  USER_DIRECTORY_CREDIT_STATES,
+  USER_DIRECTORY_RISK_STATES,
   type UserDirectoryStatusFilter,
   type UserDirectorySource,
+  type UserDirectorySort,
 } from "./user-directory";
+import { DIRECTORY_MEMBERSHIP_TIERS } from "./user-directory-membership";
 
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const USERNAME_SEARCH_MAX = 200;
 const LEGACY_ID_MAX = 128;
 const PAGINATION_KEYS = new Set(["page", "pageSize", "contextKey", "limit", "cursor"]);
 const REGISTRATION_KEYS = new Set(["registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort"]);
-const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort", "page", "pageSize", "contextKey"]);
+const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "ageStatus", "membershipTier", "entitlement", "creditState", "riskState", "registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort", "page", "pageSize", "contextKey"]);
 
 function parseLimit(raw: string | null): number {
   const limit = raw === null ? 20 : Number(raw);
@@ -62,8 +71,14 @@ function parseTimestamp(raw: string | null, label: string): string | undefined {
   return value;
 }
 
-function parseAccountStatus(raw: string | null): UserDirectoryStatusFilter | undefined {
+/** 枚举参数：未知取值一律拒绝，不静默忽略。 */
+function parseEnum<T extends string>(raw: string | null, allowed: readonly T[], label: string): T | undefined {
   if (raw === null) return undefined;
+  if (!(allowed as readonly string[]).includes(raw)) throw invalid(`${label} is invalid`);
+  return raw as T;
+}
+
+function parseAccountStatus(raw: string | null): UserDirectoryStatusFilter | undefined {  if (raw === null) return undefined;
   if ((USER_DIRECTORY_STATUS_FILTER as readonly string[]).includes(raw)) return raw as UserDirectoryStatusFilter;
   throw invalid("Account status is invalid");
 }
@@ -95,9 +110,11 @@ export async function handleUserDirectoryAdmin(
   const path = withoutQuery === prefix ? "/" : withoutQuery.startsWith(`${prefix}/`) ? withoutQuery.slice(prefix.length) : null;
   const method = (request.method ?? "GET").toUpperCase();
   const detailMatch = path === null ? null : /^\/([^/]+)(\/(rental-accounts|orders|audit-events))?$/.exec(path);
+  const riskFlagMatch = path === null ? null : /^\/([^/]+)\/risk-flag$/.exec(path);
   const lookup = method === "POST" && path === "/lookup";
+  const riskFlagWrite = method === "POST" && riskFlagMatch !== null;
   const resourceMatch=path===null?null:/^\/resource-accounts\/([A-Za-z0-9._:-]+)$/.exec(path);
-  const mine = lookup || method === "GET" && (resourceMatch!==null || path === "/" || path !== "/lookup" && detailMatch !== null);
+  const mine = lookup || riskFlagWrite || method === "GET" && (resourceMatch!==null || path === "/" || path !== "/lookup" && detailMatch !== null);
   if (!mine) {
     if (next) {
       next();
@@ -127,6 +144,22 @@ export async function handleUserDirectoryAdmin(
     await withDirectoryRead(options.pool, request, response, async (signal) => {
     const context = await readAdminContext(request, options);
     let dataToSend: unknown;
+    if (riskFlagWrite) {
+      const userId = decodeId(riskFlagMatch![1]!);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(userId)) throw invalid("User id is invalid");
+      const idempotencyKey = validateIdempotencyKey(request.headers["idempotency-key"]);
+      const body = parseUserRiskFlagBody(request.body);
+      const result = await withTransaction(options.pool, async (client) => {
+        await assertAdminContextInTransaction(client, context);
+        const access = await requireAdminAccess(client, context.userId);
+        requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
+        requirePermission(access, ADMIN_PERMISSION.userRiskManage);
+        return writeUserRiskFlag(client, { adminId: context.userId, sessionId: context.sessionId, requestId }, { userId, flagged: body.flagged, expectedRevision: body.expectedRevision }, idempotencyKey);
+      });
+      signal.throwIfAborted();
+      sendJson(response, 200, result.body, requestId);
+      return;
+    }
     await withDirectoryReadTransaction(options.directoryReadPool ?? options.pool, signal, async (client) => {
       await assertAdminContextInTransaction(client, context);
       const access = await requireAdminAccess(client, context.userId);
@@ -142,6 +175,7 @@ export async function handleUserDirectoryAdmin(
         auditRead: hasPermission(access, ADMIN_PERMISSION.auditRead),
         membershipSummaryRead: hasPermission(access, ADMIN_PERMISSION.membershipGrowthSummaryRead),
         creditRead: hasPermission(access, ADMIN_PERMISSION.creditRead),
+        walletRead: hasPermission(access, ADMIN_PERMISSION.userWalletRead) || hasPermission(access, ADMIN_PERMISSION.financeRead) || access.isBoss,
         businessScopeUsable: !scopeIsEmpty(gameScope, access.isBoss),
         authorizationKey: sha256Hex(JSON.stringify([context.userId, context.sessionId, access.isBoss, [...access.permissions].sort(), gameScopeSignature(gameScope)])),
         legacyRead: false,
@@ -164,9 +198,13 @@ export async function handleUserDirectoryAdmin(
         const ageStatus = parseTrimmed(query.get("ageStatus"), 16, "Age status");
         if (ageStatus && !["UNKNOWN", "ADULT", "MINOR"].includes(ageStatus)) throw invalid("Age status is invalid");
         const sort = query.get("sort");
-        if (registrationTime === "ORIGINAL" ? sort !== null && sort !== "registered_desc" && sort !== "registered_asc" : sort !== null && sort !== "created") throw invalid("Registration sort is invalid");
+        if (registrationTime === "ORIGINAL" ? sort !== null && !USER_DIRECTORY_SORTS.includes(sort as UserDirectorySort) : sort !== null && sort !== "created") throw invalid("Registration sort is invalid");
         const accountStatusFilter = parseAccountStatus(query.get("accountStatus"));
         const sourceFilter = parseSource(query.get("source"));
+        const membershipTier = parseEnum(query.get("membershipTier"), DIRECTORY_MEMBERSHIP_TIERS, "Membership tier");
+        const entitlement = parseEnum(query.get("entitlement"), USER_DIRECTORY_ENTITLEMENTS, "Entitlement");
+        const creditState = parseEnum(query.get("creditState"), USER_DIRECTORY_CREDIT_STATES, "Credit state");
+        const riskState = parseEnum(query.get("riskState"), USER_DIRECTORY_RISK_STATES, "Risk state");
         const registeredFrom = parseTimestamp(query.get("registeredFrom"), "Registered from");
         const registeredTo = parseTimestamp(query.get("registeredTo"), "Registered to");
         const registeredBefore = parseTimestamp(query.get("registeredBefore"), "Registered before");
@@ -191,10 +229,14 @@ export async function handleUserDirectoryAdmin(
           ...(phone !== undefined ? { phone } : {}),
           ...(accountStatusFilter !== undefined ? { accountStatus: accountStatusFilter } : {}),
           ...(sourceFilter !== undefined ? { source: sourceFilter } : {}),
+          ...(membershipTier !== undefined ? { membershipTier } : {}),
+          ...(entitlement !== undefined ? { entitlement } : {}),
+          ...(creditState !== undefined ? { creditState } : {}),
+          ...(riskState !== undefined ? { riskState } : {}),
           ...(registeredFrom !== undefined ? { registeredFrom } : {}),
           ...(registeredTo !== undefined ? { registeredTo } : {}),
           ...(registrationTime !== null ? { registrationTime } : {}),
-          ...(sort === "registered_desc" || sort === "registered_asc" ? { sort } : {}),
+          ...(sort !== null && USER_DIRECTORY_SORTS.includes(sort as UserDirectorySort) ? { sort: sort as UserDirectorySort } : {}),
           ...(registeredBefore !== undefined ? { registeredBefore } : {}),
           limit,
           ...(cursor !== undefined ? { cursor } : {}),

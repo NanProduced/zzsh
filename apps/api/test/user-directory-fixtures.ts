@@ -13,7 +13,7 @@ export const fixtureUserRows = [
   {id:'user_cancelled',name:'程野',phoneNumber:null,accountStatus:'CANCELLED',provider:'none',suspended:true},
   {id:'user_restricted',name:'陆青',phoneNumber:null,accountStatus:'ACTIVE',provider:'none',suspended:true},
   {id:'user_long',name:'长昵称样本_'+ 'Unicode用户'.repeat(14),phoneNumber:null,accountStatus:'ACTIVE',provider:'none'},
-].map(row=>({image:null,username:`login_${row.id}`,displayUsername:`显示_${row.name}`,suspended:false,localCreatedAt:date,localUpdatedAt:date,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',providerReference:row.id==='user_legacy'?'la_user:88001':null,migrationLegacyId:null,migrationSourceCreatedAt:null,resourceAccountCount:1,resourcePublishedCount:0,currentOrderCount:1,renterCurrentOrderCount:1,ownerCurrentOrderCount:0,email:null,phoneNumberVerified:false,identityVerifiedAt:null,migrationSourceUpdatedAt:null,migrationSourceSystem:'zzsh_restore',migrationSourceEntity:'la_user',migrationSourceDigest:'fixture-digest',migrationEvidenceRef:'fixture-only',migratedAt:date,...row}));
+].map(row=>({image:null,username:`login_${row.id}`,displayUsername:`显示_${row.name}`,suspended:false,localCreatedAt:date,localUpdatedAt:date,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',providerReference:row.id==='user_legacy'?'la_user:88001':null,migrationLegacyId:null,migrationSourceCreatedAt:null,resourceAccountCount:1,resourcePublishedCount:0,currentOrderCount:1,renterCurrentOrderCount:1,ownerCurrentOrderCount:0,riskFlag:false,email:null,phoneNumberVerified:false,identityVerifiedAt:null,migrationSourceUpdatedAt:null,migrationSourceSystem:'zzsh_restore',migrationSourceEntity:'la_user',migrationSourceDigest:'fixture-digest',migrationEvidenceRef:'fixture-only',migratedAt:date,...row}));
 
 export const fixtureOrderRows=[
   {id:'order_paid',displayNo:'TEST-1001',status:'PAID',role:'renter',paidAt:null},
@@ -30,6 +30,8 @@ export class DirectorySqlFixture extends EventEmitter {
   gameIds=['delta'];queries:{sql:string;values:unknown[]}[]=[];
   users=fixtureUserRows.map(row=>({...row}));
   scenario='normal';fault='';
+  walletCoverage:{userId:string;origin:string;sourceKind:string|null;openingAmount:string|null;coveredCount:number|null}[]=[];
+  walletLedger:{userId:string;availableCents:string|null}[]=[];
   async connect(){return this;} release(){}
   getTransactionStatus(){return "I" as const;}
   async query(sql:string,values:unknown[]=[]):Promise<any> {
@@ -64,6 +66,7 @@ export class DirectorySqlFixture extends EventEmitter {
       const status=parameter(/\(CASE WHEN s.user_id IS NULL[\s\S]*?END\)=\$(\d+)/);
       if(status)rows=rows.filter(row=>(row.accountStatus===null?'UNKNOWN':['CANCELLED','DEACTIVATED'].includes(row.accountStatus)?row.accountStatus:row.suspended?'RESTRICTED':row.accountStatus)==status);
       const identity=parameter(/COALESCE\(s.identity_status,'UNKNOWN'\)=\$(\d+)/);if(identity)rows=rows.filter(row=>row.identityStatus===identity);
+      const risk=parameter(/COALESCE\(\(SELECT r\.flagged FROM zzsh_iam\.user_risk_flag r WHERE r\.user_id = u\.id\), false\)=\$(\d+)/);if(risk!==undefined)rows=rows.filter(row=>(row.riskFlag===true)===(risk===true));
       const age=parameter(/COALESCE\(s.age_status,'UNKNOWN'\)=\$(\d+)/);if(age)rows=rows.filter(row=>row.ageStatus===age);
       const phone=parameter(/u\."phoneNumber" = \$(\d+)/);if(phone)rows=rows.filter(row=>row.phoneNumber===phone);
       const from=parameter(/u\."createdAt" >= \$(\d+)/);if(from)rows=rows.filter(row=>Date.parse(row.localCreatedAt)>=Date.parse(String(from)));
@@ -96,6 +99,7 @@ export class DirectorySqlFixture extends EventEmitter {
           migrationSourceCreatedAt:sql.includes('AS "migrationSourceCreatedAt"')?row.migrationSourceCreatedAt:null,
           resourceAccountCount:sql.includes('AS "resourceAccountCount"')?row.resourceAccountCount:undefined,
           currentOrderCount:sql.includes('AS "currentOrderCount"')?row.currentOrderCount:undefined,
+          riskFlag:sql.includes('AS "riskFlag"')?row.riskFlag===true:undefined,
         })));
       }
       return result(page);
@@ -115,7 +119,17 @@ export class DirectorySqlFixture extends EventEmitter {
       if(sql.includes("o.status IN ('PENDING_PAYMENT','PAID')"))rows=rows.filter(row=>['PENDING_PAYMENT','PAID'].includes(row.status));
       return result(rows);
     }
-    if(sql.includes('FROM zzsh_iam.audit_event e')) {
+    if(sql.includes('directory-growth-subjects'))return result([]);
+    if(sql.includes('directory-growth-contributions'))return result([]);
+    if(sql.includes('directory-growth-policy'))return result([]);
+    if(sql.includes('directory-growth-entitlements'))return result([]);
+    if(sql.includes('directory-growth-sources'))return result([]);
+    if(sql.includes('zzsh_iam.membership_growth_legacy_coverage'))return result([]);
+    if(sql.includes('zzsh_iam.membership_growth_contribution'))return result([]);
+    if(sql.includes('zzsh_iam.membership_entitlement'))return result([]);
+    if(sql.includes('zzsh_order.wallet_coverage'))return result(this.walletCoverage);
+    if(sql.includes('zzsh_order.settlement_ledger_entry'))return result(this.walletLedger);
+    if(sql.includes('zzsh_iam.audit_event e')) {
       if(this.fault==='audit')throw new Error('Injected audit failure');
       return result([{id:'audit_fixture',actorType:'admin',actorAdminUsername:'ZZ00001',actorAdminDisplayUsername:'ZZ00001',actorAdminName:'测试管理员',actorUserName:null,action:'user.account.restored',objectType:'user',objectId:values[0],outcome:'SUCCESS',reason:'测试原因',requestId:'fixture-request',occurredAt:date,details:{phoneNumber:'18800001101',sourceDigest:'fixture'}}]);
     }

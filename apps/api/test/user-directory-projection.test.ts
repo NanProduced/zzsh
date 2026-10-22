@@ -539,3 +539,68 @@ test('directory projection uses its assigned pool while authentication stays on 
   assert(directory.queries.some(q=>q.sql.includes('FROM page selected')));
   assert(!shared.queries.some(q=>q.sql==='BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
 });
+
+test('the internal risk flag and the wallet summary travel with their own permissions',async()=>{
+  const pool=new DirectorySqlFixture();
+  const plain:any=await listUserDirectory(client(pool),viewer,{limit:20});
+  assert.equal(plain.items[0].riskFlag,false,'a user without a flag is not flagged');
+  assert.deepEqual(plain.items[0].walletSummary,{state:'denied',permission:'user.wallet.read'},'no wallet capability means no amount at all');
+
+  Object.assign(pool.users[0]!,{riskFlag:true});
+  pool.walletCoverage=[{userId:'user_normal',origin:'LEGACY_MYSQL',sourceKind:'LEGACY_MYSQL',openingAmount:'0',coveredCount:0}];
+  pool.walletLedger=[{userId:'user_normal',availableCents:'12345'}];
+  const granted:any=await listUserDirectory(client(pool),{...viewer,walletRead:true} as AdminDirectoryViewer,{limit:20});
+  const flaggedRow=granted.items.find((item:any)=>item.userId==='user_normal');
+  assert.equal(flaggedRow.riskFlag,true);
+  assert.equal(flaggedRow.walletSummary.state,'ready');
+  assert.equal(flaggedRow.walletSummary.amountCents,'12345','the exact integer cents are carried, not a float');
+  const unknown=granted.items.find((item:any)=>item.userId!=='user_normal');
+  assert.equal(unknown.walletSummary.state,'unknown','a user without admitted coverage is unknown, not zero');
+
+  // 精确大整数：金额是整分字符串，不经过浮点。
+  pool.walletLedger=[{userId:'user_normal',availableCents:'9007199254740993'}];
+  const exact:any=await listUserDirectory(client(pool),{...viewer,walletRead:true} as AdminDirectoryViewer,{limit:20});
+  const exactRow=exact.items.find((item:any)=>item.userId==='user_normal');
+  assert.equal(exactRow.walletSummary.amountCents,'9007199254740993','a large exact amount is carried as an exact integer string');
+});
+
+test('a balance sort needs the wallet capability and aggregates the whole candidate set before paging',async()=>{
+  const pool=new DirectorySqlFixture();
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:20,registrationTime:'ORIGINAL',sort:'balance_desc'}),error=>(error as any).status===403);
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:20,registrationTime:'ORIGINAL',sort:'balance_asc'}),error=>(error as any).status===403);
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:20,sort:'balance_desc'}),error=>(error as any).status===400,'a sort without the original registration time is invalid');
+  pool.walletCoverage=[];pool.walletLedger=[];
+  await listUserDirectory(client(pool),{...viewer,walletRead:true} as AdminDirectoryViewer,{limit:20,sort:'balance_desc',registrationTime:'ORIGINAL'});
+  const sql=pool.queries.map(query=>query.sql).join('\n');
+  assert.match(sql,/wallet_ledger/,'the balance aggregate is part of the candidate set');
+  assert.match(sql,/wallet_coverage/,'an unadmitted coverage is not a zero balance');
+  assert.match(sql,/ORDER BY registration\.sort_value DESC NULLS LAST/,'the sort is applied to the candidate set, not to one page');
+});
+
+test('the risk filter narrows the directory and the numeric sorts need their own capability',async()=>{
+  const pool=new DirectorySqlFixture();
+  Object.assign(pool.users[0]!,{riskFlag:true});
+  const flagged:any=await listUserDirectory(client(pool),viewer,{limit:20,riskState:'FLAGGED'});
+  assert.equal(flagged.items.length,1,'only the flagged user stays');
+  const unflagged:any=await listUserDirectory(client(pool),viewer,{limit:20,riskState:'NOT_FLAGGED'});
+  assert.equal(unflagged.items.some((item:any)=>item.userId==='user_normal'),false);
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:20,creditState:'KNOWN'}),error=>(error as any).status===403);
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:20,membershipTier:'GOLD'}),error=>(error as any).status===403);
+  await assert.rejects(listUserDirectory(client(pool),viewer,{limit:20,entitlement:'FRIEND'}),error=>(error as any).status===403);
+});
+
+test('the new directory filters and sorts are validated by the route and reach the query',async()=>{
+  const pool=new DirectorySqlFixture();
+  for(const query of ['creditState=NOPE','riskState=NOPE','entitlement=NOPE','membershipTier=NOPE','sort=balance_sideways']){
+    const result=await route(`/api/v1/admin/users?${query}`,pool);
+    assert.equal(result.status,400,`${query} must be rejected instead of ignored`);
+  }
+  pool.walletCoverage=[];pool.walletLedger=[];
+  pool.permissions=[...pool.permissions,'membership.growth.read.summary','credit.read'];
+  const ok=await route('/api/v1/admin/users?registrationTime=ORIGINAL&sort=balance_desc&riskState=FLAGGED&creditState=KNOWN&entitlement=ANY&membershipTier=PENDING',pool);
+  assert.equal(ok.status,200);
+  const sql=pool.queries.map(query=>query.sql).join('\n');
+  assert.match(sql,/user_risk_flag/);
+  assert.match(sql,/zzsh_credit\.user_credit_state/);
+  assert.match(sql,/zzsh_iam\.membership_entitlement/);
+});

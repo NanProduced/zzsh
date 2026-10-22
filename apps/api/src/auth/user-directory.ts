@@ -9,6 +9,8 @@ import { orderReadRelation, projectAdminReadOrder } from "../order/admin-order-r
 import { legacyContinuationReady } from "../order/legacy-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 import { readUserDirectoryBusinessSummaries } from "./user-directory-business-summary";
+import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTORY_WALLET_SORT_JOINS, DIRECTORY_WALLET_SORT_KEY } from "./user-directory-wallet";
+import { readKnownMembershipTiers, DIRECTORY_MEMBERSHIP_TIERS, type DirectoryMembershipTierFilter } from "./user-directory-membership";
 
 export const USER_DIRECTORY_SOURCE = {
   LOCAL: "LOCAL",
@@ -20,6 +22,23 @@ export type UserDirectorySource = (typeof USER_DIRECTORY_SOURCE)[keyof typeof US
 export const USER_DIRECTORY_STATUS_FILTER = ["ACTIVE", "RESTRICTED", "DEACTIVATED", "CANCELLED", "UNKNOWN"] as const;
 export type UserDirectoryStatusFilter = (typeof USER_DIRECTORY_STATUS_FILTER)[number];
 export const USER_DIRECTORY_MAX_PAGE = 1_000_000;
+
+/** 目录支持的排序。筛选与排序都先在授权集合上执行，再分页。 */
+export const USER_DIRECTORY_SORTS = [
+  "registered_desc", "registered_asc",
+  "balance_desc", "balance_asc",
+  "credit_desc", "credit_asc",
+  "renter_current_desc", "renter_current_asc",
+  "owner_current_desc", "owner_current_asc",
+  "published_desc", "published_asc",
+] as const;
+export type UserDirectorySort = (typeof USER_DIRECTORY_SORTS)[number];
+export const USER_DIRECTORY_CREDIT_STATES = ["KNOWN", "NOT_INITIALIZED"] as const;
+export type UserDirectoryCreditState = (typeof USER_DIRECTORY_CREDIT_STATES)[number];
+export const USER_DIRECTORY_ENTITLEMENTS = ["FRIEND", "PRESTIGE", "ANY", "NONE"] as const;
+export type UserDirectoryEntitlementFilter = (typeof USER_DIRECTORY_ENTITLEMENTS)[number];
+export const USER_DIRECTORY_RISK_STATES = ["FLAGGED", "NOT_FLAGGED"] as const;
+export type UserDirectoryRiskState = (typeof USER_DIRECTORY_RISK_STATES)[number];
 
 const TIMESTAMP_TEXT = `AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`;
 const LEGACY_MIGRATION_ACTION = "user.legacy_owner.migrated";
@@ -86,6 +105,8 @@ export type AdminDirectoryViewer = {
   auditRead?: boolean;
   membershipSummaryRead?: boolean;
   creditRead?: boolean;
+  /** 目录可见余额：user.wallet.read，或既有 finance.read / Boss 的广读语义。 */
+  walletRead?: boolean;
   businessScopeUsable?: boolean;
   authorizationKey?: string;
   legacyRead?: boolean;
@@ -101,11 +122,15 @@ export type UserDirectoryFilter = {
   source?: UserDirectorySource;
   identityStatus?: string;
   ageStatus?: string;
+  membershipTier?: DirectoryMembershipTierFilter;
+  entitlement?: UserDirectoryEntitlementFilter;
+  creditState?: UserDirectoryCreditState;
+  riskState?: UserDirectoryRiskState;
   registeredFrom?: string;
   registeredTo?: string;
   registeredBefore?: string;
   registrationTime?: "ORIGINAL";
-  sort?: "registered_desc" | "registered_asc";
+  sort?: UserDirectorySort;
   limit: number;
   cursor?: string;
   page?: number;
@@ -134,6 +159,7 @@ type UserListRow = {
   ownerCurrentOrderCount: number;
   ageStatus: string | null;
   localUpdatedAt: string;
+  riskFlag: boolean;
 };
 
 function legacyIdFromReference(provider: string | null, reference: string | null): string | null {
@@ -161,6 +187,9 @@ const ACCOUNT_STATUS_SQL = `CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
   WHEN s.account_status='DEACTIVATED' THEN 'DEACTIVATED'
   WHEN u.suspended THEN 'RESTRICTED'
   WHEN s.account_status='ACTIVE' THEN 'ACTIVE' ELSE 'UNKNOWN' END`;
+
+/** 内部高危标识：固定布尔事实，随目录一起读出；没有记录即未标记。 */
+const RISK_FLAG_JOIN = "LEFT JOIN zzsh_iam.user_risk_flag risk_flag ON risk_flag.user_id = u.id";
 /**
  * Three-state source classification. `mig.legacy_id` is the *latest* migration audit's legacy id and is
  * nullable, so `IS NULL` distinguishes "no legacy id on the newest migration fact" from "has one". This
@@ -240,6 +269,7 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer, origina
     createdAt: row.localCreatedAt,
     updatedAt: row.localUpdatedAt,
     localCreatedAt: row.localCreatedAt,
+    riskFlag: row.riskFlag === true,
     ...projectRelationshipSummaries(row, viewer),
     lastBusinessActivity: { state: "not_connected", domains: ["ORDER", "SUPPLY"] },
   };
@@ -260,11 +290,23 @@ export async function listUserDirectory(
 ): Promise<Record<string, unknown>> {
   const original = filter.registrationTime === "ORIGINAL";
   const materializeDates = original;
-  if ((filter.registrationTime !== undefined && !original) || (filter.sort !== undefined && (!original || !["registered_desc", "registered_asc"].includes(filter.sort)))) throw invalid("Registration time mode or sort is invalid");
+  if (filter.registrationTime !== undefined && !original) throw invalid("Registration time mode or sort is invalid");
+  if (filter.sort !== undefined && (!original || !USER_DIRECTORY_SORTS.includes(filter.sort))) throw invalid("Registration sort is invalid");
   if (filter.registeredBefore !== undefined && (!original || filter.registeredTo !== undefined)) throw invalid("Registered before requires original time and no inclusive upper bound");
-  const direction = filter.sort === "registered_asc" ? "ASC" : "DESC";
+  const sort: UserDirectorySort = filter.sort ?? "registered_desc";
+  const registeredSort = sort === "registered_desc" || sort === "registered_asc";
+  if (!registeredSort && filter.cursor !== undefined) throw invalid("Cursor is only supported for the registration sort");
+  const direction = sort.endsWith("_asc") ? "ASC" : "DESC";
   const timeColumn = original ? "registration.registered_at" : 'u."createdAt"';
   const order = original ? `${timeColumn} ${direction} NULLS LAST, u.id COLLATE "C" DESC` : 'u."createdAt" DESC, u.id DESC';
+  // 等级、礼遇、信用与余额的筛选／排序必须先有对应的字段读权限，否则服务端直接拒绝。
+  if (filter.membershipTier !== undefined && viewer.membershipSummaryRead !== true) throw forbidden("Membership tier filter requires membership.growth.read.summary");
+  if (filter.entitlement !== undefined && viewer.membershipSummaryRead !== true) throw forbidden("Entitlement filter requires membership.growth.read.summary");
+  if (filter.creditState !== undefined && viewer.creditRead !== true) throw forbidden("Credit filter requires credit.read");
+  if (sort.startsWith("balance_") && viewer.walletRead !== true) throw forbidden("Balance sort requires user.wallet.read");
+  if (sort.startsWith("credit_") && viewer.creditRead !== true) throw forbidden("Credit sort requires credit.read");
+  // 列表、详情与快速核对共用同一 asOf，筛选结果与展示的会员投影因此同口径。
+  const asOfUtc = new Date().toISOString();
   const numbered = filter.page !== undefined;
   if (numbered && (!Number.isSafeInteger(filter.page) || filter.page! < 1 || filter.page! > USER_DIRECTORY_MAX_PAGE
     || !Number.isSafeInteger(filter.limit) || filter.limit < 1 || filter.limit > 100 || filter.cursor !== undefined)) throw invalid("Directory page is invalid");
@@ -280,6 +322,7 @@ export async function listUserDirectory(
       orderRead: viewer.orderRead === true,
       membershipSummaryRead: viewer.membershipSummaryRead === true,
       creditRead: viewer.creditRead === true,
+      walletRead: viewer.walletRead === true,
       businessScopeUsable: viewer.businessScopeUsable !== false,
       userId: filter.userId ?? null,
       legacyId: filter.legacyId ?? null,
@@ -290,6 +333,10 @@ export async function listUserDirectory(
       phone: filter.phone ? sha256Hex(filter.phone) : null,
       accountStatus: filter.accountStatus ?? null,
       source: filter.source ?? null,
+      membershipTier: filter.membershipTier ?? null,
+      entitlement: filter.entitlement ?? null,
+      creditState: filter.creditState ?? null,
+      riskState: filter.riskState ?? null,
       registeredFrom: filter.registeredFrom ?? null,
       registeredTo: filter.registeredTo ?? null,
       limit: filter.limit,
@@ -323,6 +370,39 @@ export async function listUserDirectory(
   else if (filter.source) conditions.push(`(${SOURCE_SQL})=$${values.push(filter.source)}`);
   if (filter.identityStatus) conditions.push(`COALESCE(s.identity_status,'UNKNOWN')=$${values.push(filter.identityStatus)}`);
   if (filter.ageStatus) conditions.push(`COALESCE(s.age_status,'UNKNOWN')=$${values.push(filter.ageStatus)}`);
+  if (filter.riskState) conditions.push(`COALESCE((SELECT r.flagged FROM zzsh_iam.user_risk_flag r WHERE r.user_id = u.id), false)=$${values.push(filter.riskState === "FLAGGED")}`);
+  if (filter.creditState) {
+    // 信用摘要按对象范围裁剪：范围外的管理员没有可显示的信用事实，不能命中任何信用状态。
+    // 授权参数随条件一起入参，计数查询的同一份条件因此保持同一口径。
+    const bossParam = `$${values.push(viewer.isBoss)}`;
+    const adminParam = `$${values.push(viewer.adminId)}`;
+    conditions.push(`(EXISTS (SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id = u.id AND (c.revision IS NOT NULL) = $${values.push(filter.creditState === "KNOWN")})
+      AND (EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id = u.id AND ${gameScopeSql("a.game_id", adminParam, bossParam)})
+        OR EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id = u.id OR o.renter_user_id = u.id) AND ${gameScopeSql("o.game_id", adminParam, bossParam)})))`);
+  }
+  if (filter.entitlement) {
+    const asOfParameter = `$${values.push(asOfUtc)}`;
+    const effective = `(e.status IN ('ACTIVE','EXECUTED_PENDING_START') AND e.ends_at > ${asOfParameter}::timestamptz AND (e.status = 'ACTIVE' OR e.starts_at <= ${asOfParameter}::timestamptz))`;
+    if (filter.entitlement === "NONE") {
+      conditions.push(`NOT EXISTS (SELECT 1 FROM zzsh_iam.membership_entitlement e WHERE e.user_id = u.id AND ${effective})`);
+    } else if (filter.entitlement === "ANY") {
+      conditions.push(`EXISTS (SELECT 1 FROM zzsh_iam.membership_entitlement e WHERE e.user_id = u.id AND ${effective})`);
+    } else {
+      const kind = `$${values.push(filter.entitlement)}`;
+      conditions.push(`EXISTS (SELECT 1 FROM zzsh_iam.membership_entitlement e WHERE e.user_id = u.id AND e.kind = ${kind} AND ${effective})`);
+    }
+  }
+  if (filter.membershipTier) {
+    const known = await readKnownMembershipTiers(client, asOfUtc);
+    if (filter.membershipTier === "PENDING") {
+      // 待核 = 投影没有给出可显示等级的用户；已确知等级的用户全部排除，不把缺字段当待核之外的任何事实。
+      const graded = [...known.known.entries()].filter(([, tier]) => tier !== "UNKNOWN").map(([id]) => id);
+      conditions.push(`u.id <> ALL($${values.push(graded)}::text[])`);
+    } else {
+      const graded = [...known.known.entries()].filter(([, tier]) => tier === filter.membershipTier).map(([id]) => id);
+      conditions.push(`u.id = ANY($${values.push(graded)}::text[])`);
+    }
+  }
   // Join identity state only when a membership predicate reads it; the page projection joins it after the bound page.
   const needsIdentity = conditions.some(condition => /\bs\./.test(condition));
   const membershipConditions = [...conditions];
@@ -350,6 +430,39 @@ export async function listUserDirectory(
     : `($${cursorTime}::timestamptz IS NULL OR u."createdAt" < $${cursorTime}::timestamptz OR (u."createdAt" = $${cursorTime}::timestamptz AND u.id < $${cursorId}))`;
 
   const orderCountRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client), true) : null;
+  const orderSource = orderCountRelation ? `(${orderCountRelation})` : "zzsh_order.rental_order";
+  // 排序用的候选集聚合：与展示用同一谓词、同一授权范围；未知排后不补 0。
+  const resourceAggregateJoin = `LEFT JOIN (
+      SELECT owner_user_id AS user_id, count(*)::int AS account_count,
+        count(*) FILTER (WHERE ${publishedAccountSql("ra")})::int AS published_count
+      FROM zzsh_supply.rental_account ra
+      WHERE $3::boolean AND ${gameScopeSql("ra.game_id", "$2", "$1")}
+      GROUP BY owner_user_id
+    ) resource_aggregate ON resource_aggregate.user_id = u.id`;
+  const orderAggregateJoin = `LEFT JOIN (
+      SELECT user_id, sum(renter)::int AS renter_count, sum(owner_count)::int AS owner_count FROM (
+        SELECT o.renter_user_id AS user_id, 1::int AS renter, 0::int AS owner_count FROM ${orderSource} o
+         WHERE $4::boolean AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id", "$2", "$1")}
+        UNION ALL
+        SELECT o.owner_user_id AS user_id, 0::int AS renter, 1::int AS owner_count FROM ${orderSource} o
+         WHERE $4::boolean AND o.status IN ('PENDING_PAYMENT','PAID') AND ${gameScopeSql("o.game_id", "$2", "$1")}
+      ) roles GROUP BY user_id
+    ) order_aggregate ON order_aggregate.user_id = u.id`;
+  const creditScopeJoin = `LEFT JOIN (
+      SELECT owner_user_id AS user_id FROM zzsh_supply.rental_account a WHERE ${gameScopeSql("a.game_id", "$2", "$1")}
+      UNION SELECT renter_user_id AS user_id FROM zzsh_order.rental_order o WHERE ${gameScopeSql("o.game_id", "$2", "$1")}
+      UNION SELECT owner_user_id AS user_id FROM zzsh_order.rental_order o WHERE ${gameScopeSql("o.game_id", "$2", "$1")}
+    ) credit_scope ON credit_scope.user_id = u.id`;
+  const creditStateJoin = `LEFT JOIN zzsh_credit.user_credit_state credit_state ON credit_state.user_id = u.id`;
+  const sortPlan = (): { joins: string; key: string } => {
+    if (sort === "balance_desc" || sort === "balance_asc") return { joins: DIRECTORY_WALLET_SORT_JOINS, key: DIRECTORY_WALLET_SORT_KEY };
+    if (sort === "credit_desc" || sort === "credit_asc") return { joins: `${creditStateJoin} ${creditScopeJoin}`, key: "CASE WHEN credit_scope.user_id IS NOT NULL THEN credit_state.score ELSE NULL END" };
+    if (sort === "renter_current_desc" || sort === "renter_current_asc") return { joins: orderAggregateJoin, key: "order_aggregate.renter_count" };
+    if (sort === "owner_current_desc" || sort === "owner_current_asc") return { joins: orderAggregateJoin, key: "order_aggregate.owner_count" };
+    if (sort === "published_desc" || sort === "published_asc") return { joins: resourceAggregateJoin, key: "resource_aggregate.published_count" };
+    return { joins: "", key: "registration.registered_at" };
+  };
+  const plan = sortPlan();
   const selectColumns = (accountStatusExpr: string, identityStatusExpr: string, ageStatusExpr: string, providerExpr: string, providerReferenceExpr: string) => `u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u.suspended,
               to_char(u."createdAt" ${TIMESTAMP_TEXT}) AS "localCreatedAt",
               ${original ? `to_char(selected.registered_at ${TIMESTAMP_TEXT}) AS "originalRegisteredAt",` : ""}
@@ -357,6 +470,7 @@ export async function listUserDirectory(
               ${accountStatusExpr} AS "accountStatus", ${identityStatusExpr} AS "identityStatus",
               ${providerExpr} AS provider, ${providerReferenceExpr} AS "providerReference",
               ${original ? "selected.migration_legacy_id" : "mig.legacy_id"} AS "migrationLegacyId",
+              selected.risk_flag AS "riskFlag",
               CASE WHEN $3::boolean THEN resource_counts.account_count ELSE NULL END AS "resourceAccountCount",
               CASE WHEN $3::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
               CASE WHEN $4::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
@@ -377,22 +491,25 @@ export async function listUserDirectory(
        ${original ? "AND e.outcome='SUCCESS'" : ""}
      ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
   // The validated timestamp is expensive; materialise narrow facts once before applying both bounds and sorting.
-  const registrationFactsSql = () => `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql()} AS registered_at,mig.legacy_id AS migration_legacy_id
+  const registrationFactsSql = () => `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql()} AS registered_at,mig.legacy_id AS migration_legacy_id,
+       COALESCE(risk_flag.flagged,false) AS risk_flag${plan.joins ? `,${plan.key} AS sort_value` : ""}
     FROM zzsh_auth_user."user" u
     LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
     LEFT JOIN migration mig ON mig.object_id=u.id
+    ${RISK_FLAG_JOIN}${plan.joins}
     WHERE ${membershipConditions.join(" AND ") || "TRUE"}`;
   const pageQuery = materializeDates
     ? `SELECT registration.id,registration.created_at AS "createdAt",registration.registered_at,
-        registration.migration_legacy_id
+        registration.migration_legacy_id, registration.risk_flag${plan.joins ? ",registration.sort_value" : ""}
        FROM registration_dates registration
        WHERE ${[...dateConditions,cursorCondition.replaceAll("u.id", "registration.id")].join(" AND ")}
-       ORDER BY ${order.replaceAll("u.id", "registration.id")}
+       ORDER BY ${plan.joins ? `registration.sort_value ${direction} NULLS LAST, registration.id COLLATE "C" DESC` : order.replaceAll("u.id", "registration.id")}
        LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`
-    : `SELECT u.id
+    : `SELECT u.id, COALESCE(risk_flag.flagged,false) AS risk_flag
            FROM zzsh_auth_user."user" u
            ${needsIdentity ? `LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id` : ""}
            ${consultsMigration ? "LEFT JOIN migration mig ON mig.object_id = u.id" : ""}
+           ${RISK_FLAG_JOIN}
           WHERE ${[...conditions, cursorCondition].join(" AND ")}
           ORDER BY ${order}
            LIMIT $${limitParameter}${offsetParameter === undefined ? "" : ` OFFSET $${offsetParameter}`}`;
@@ -440,9 +557,10 @@ export async function listUserDirectory(
   const items = rows.slice(0, filter.limit);
   const hasMore = rows.length > filter.limit;
   const last = items.at(-1);
-  const summaries = await readUserDirectoryBusinessSummaries(client, viewer, items.map(row => row.id));
+  const summaries = await readUserDirectoryBusinessSummaries(client, viewer, items.map(row => row.id), asOfUtc);
+  const wallets = await readUserDirectoryWalletSummaries(client, { walletRead: viewer.walletRead === true }, items.map(row => row.id), asOfUtc);
   return {
-    items: items.map(row => ({ ...projectListItem(row, viewer, original), ...summaries.get(row.id) })),
+    items: items.map(row => ({ ...projectListItem(row, viewer, original), ...summaries.get(row.id), walletSummary: wallets.get(row.id) ?? { state: "denied", permission: DIRECTORY_WALLET_PERMISSION } })),
     total,
     nextCursor: !numbered && hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: original ? last.originalRegisteredAt ?? null : last.localCreatedAt, id: last.id }) : null,
     limit: filter.limit,
@@ -482,6 +600,7 @@ export type UserDetailRow = {
   currentOrderCount: number;
   renterCurrentOrderCount: number;
   ownerCurrentOrderCount: number;
+  riskFlag: boolean;
 };
 
 export async function readUserDirectoryDetail(
@@ -513,9 +632,11 @@ export async function readUserDirectoryDetail(
               CASE WHEN $4::boolean THEN resource_counts.published_count ELSE NULL END AS "resourcePublishedCount",
               CASE WHEN $5::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
               CASE WHEN $5::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
-              CASE WHEN $5::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount"
+              CASE WHEN $5::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount",
+              COALESCE(risk_flag.flagged,false) AS "riskFlag"
          FROM zzsh_auth_user."user" u
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
+         ${RISK_FLAG_JOIN}
          LEFT JOIN LATERAL (
            SELECT e.details->>'legacyId' AS legacy_id,
                   e.details->>'sourceSystem' AS source_system,
@@ -558,6 +679,7 @@ export async function readUserDirectoryDetail(
   const source = sourceKindOf(row.migrationLegacyId, row.provider, row.accountStatus !== null);
   const registeredAt = original ? row.originalRegisteredAt ?? null : row.localCreatedAt;
   const summaries = await readUserDirectoryBusinessSummaries(client, viewer, [userId]);
+  const wallets = await readUserDirectoryWalletSummaries(client, { walletRead: viewer.walletRead === true }, [userId]);
   return {
     userId: row.id,
     name: row.name,
@@ -598,6 +720,8 @@ export async function readUserDirectoryDetail(
     updatedAt: row.localUpdatedAt,
     localCreatedAt: row.localCreatedAt,
     localUpdatedAt: row.localUpdatedAt,
+    riskFlag: row.riskFlag === true,
+    walletSummary: wallets.get(userId) ?? { state: "denied", permission: DIRECTORY_WALLET_PERMISSION },
     ...projectRelationshipSummaries(row, viewer),
     ...summaries.get(userId),
     lastBusinessActivity: { state: "not_connected", domains: ["ORDER", "SUPPLY"] },

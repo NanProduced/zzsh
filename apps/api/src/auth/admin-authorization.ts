@@ -25,6 +25,8 @@ export const ADMIN_PERMISSION = {
   distributionPolicyManage: "personal.distribution.policy.manage",
   userDirectoryRead: "user.directory.read",
   userPhoneLookup: "user.phone.lookup",
+  userWalletRead: "user.wallet.read",
+  userRiskManage: "user.risk.manage",
   auditRead: "admin.audit.read",
   roleRead: "admin.role.read",
   roleConfigure: "admin.role.configure",
