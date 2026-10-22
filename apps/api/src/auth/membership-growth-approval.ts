@@ -4,7 +4,7 @@ import { readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess, type EffectiveAdminAccess } from "./admin-authorization";
 import type { ApprovalOperationExecutor, ApprovalOperationExecutorInput } from "./auth-security";
-import { entitlementCapForMode, isNotPriced, isTotalDiscountContract, sealedEnabledRentalModes, validateBenefitPolicy, validateEntitlementCandidate, type EntitlementCandidate, type GrowthBenefitPolicy, type GrowthPricingContract, type RentalMode } from "./membership-growth";
+import { entitlementCapForMode, entitlementRangeForMode, GrowthRuleError, isNotPriced, isTotalDiscountContract, sealedEnabledRentalModes, validateBenefitPolicy, validateEntitlementCandidate, type EntitlementCandidate, type GrowthBenefitPolicy, type GrowthPricingContract, type RentalMode } from "./membership-growth";
 import { membershipGrowthEnabled } from "./membership-growth-integration";
 import { SecurityApiError } from "./security-core";
 import { canonicalize } from "../supply/content-hash";
@@ -80,11 +80,12 @@ export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId:
 
 type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string };
 
-async function loadApprovedPolicy(client: PoolClient, policyId: string): Promise<ApprovedPolicyPayload> {
+async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: string): Promise<ApprovedPolicyPayload> {
   // Approved policy versions are append-only for runtime; entitlement FK keeps the referenced version.
   const row = (await client.query<{ id: string; version: number; policyPayload: GrowthBenefitPolicy; sourceRef: string; ruleReleaseId: string; priceVersionId: string }>(
     `SELECT id, version, policy_payload AS "policyPayload", source_ref AS "sourceRef", rule_release_id AS "ruleReleaseId", price_version_id AS "priceVersionId"
-       FROM zzsh_iam.membership_growth_policy WHERE id=$1 AND status='APPROVED'`, [policyId],
+       FROM zzsh_iam.membership_growth_policy WHERE id=$1 AND status='APPROVED'
+         AND EXISTS (SELECT 1 FROM zzsh_supply.rule_release r WHERE r.id=membership_growth_policy.rule_release_id AND r.game_id=$2)`, [policyId, gameId],
   )).rows[0];
   if (!row) conflict("Approved membership policy is unavailable");
   const sealed = await assertSealedRuleRelease(client, row.ruleReleaseId, row.priceVersionId);
@@ -126,7 +127,23 @@ function candidateFromPayload(payload: Record<string, unknown>, requestedBy: str
   const scopeKey = text(payload, "scopeKey");
   const reason = text(payload, "reason", 500);
   const pricingValue = pricing(payload);
+  if (payload.depositWaived !== undefined && typeof payload.depositWaived !== "boolean") conflict("depositWaived is invalid");
   return { userId, kind, scopeKey, startsAt, endsAt, pricing: pricingValue, depositWaived: payload.depositWaived === true, reason, requestedBy };
+}
+
+/** Decision and execution share the exact immutable policy/range validation; execution adds locks and mutations. */
+export async function validateMembershipEntitlementPayload(client: PoolClient, payload: Record<string, unknown>, requestedBy: string): Promise<{ candidate: EntitlementCandidate; gameId: string; policyId: string }> {
+  const policyId = text(payload, "policyId"), gameId = text(payload, "gameId");
+  if (!ID.test(policyId) || !ID.test(gameId)) conflict("Entitlement policy or game is invalid");
+  const candidate = candidateFromPayload(payload, requestedBy), policy = await loadApprovedPolicy(client, policyId, gameId);
+  try {
+    const validation = validateEntitlementCandidate(candidate, "UNKNOWN", policy.policy);
+    if (!validation.valid) conflict(`Membership entitlement is invalid: ${validation.errors.join(",")}`);
+  } catch (error) {
+    if (error instanceof GrowthRuleError) conflict("Membership entitlement contains invalid values");
+    throw error;
+  }
+  return { candidate, gameId, policyId };
 }
 
 export async function lockReplacementEntitlement(client: PoolClient, payload: Record<string, unknown>, candidate: EntitlementCandidate, gameId: string): Promise<{ id: string; userId: string; kind: string; scopeKey: string }> {
@@ -140,11 +157,7 @@ export async function lockReplacementEntitlement(client: PoolClient, payload: Re
   return row;
 }
 
-async function insertEntitlement(client: PoolClient, payload: Record<string, unknown>, input: ApprovalOperationExecutorInput, policyId: string): Promise<string> {
-  const candidate = candidateFromPayload(payload, input.requestedBy);
-  const gameId = text(payload, "gameId");
-  const validation = validateEntitlementCandidate(candidate, "UNKNOWN", (await loadApprovedPolicy(client, policyId)).policy);
-  if (!validation.valid) conflict(`Membership entitlement is invalid: ${validation.errors.join(",")}`);
+async function insertEntitlement(client: PoolClient, candidate: EntitlementCandidate, gameId: string, input: ApprovalOperationExecutorInput, policyId: string): Promise<string> {
   const id = `entitlement_${randomUUID().replaceAll("-", "")}`;
   const configured = candidate.pricing;
   let pricingSchema: string;
@@ -165,6 +178,20 @@ async function insertEntitlement(client: PoolClient, payload: Record<string, unk
   return id;
 }
 
+/** One existing recipient row serializes grants even when no overlapping entitlement row exists yet. */
+async function lockEntitlementRecipient(client: PoolClient, candidate: EntitlementCandidate, gameId: string, excludeId?: string): Promise<void> {
+  const subject = (await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`, [candidate.userId])).rows[0];
+  if (!subject) throw new SecurityApiError(404, "NOT_FOUND", "Entitlement recipient is unavailable");
+  if (!(await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows.length) throw new SecurityApiError(404, "NOT_FOUND", "Entitlement game is unavailable");
+  const overlap = await client.query(
+    `SELECT id FROM zzsh_iam.membership_entitlement WHERE user_id=$1 AND game_id=$2 AND scope_key=$3
+       AND status NOT IN ('REVOKED','REPLACED') AND starts_at < $5::timestamptz AND ends_at > $4::timestamptz
+       AND ($6::text IS NULL OR id<>$6) LIMIT 1`,
+    [candidate.userId, gameId, candidate.scopeKey, candidate.startsAt, candidate.endsAt, excludeId ?? null],
+  );
+  if (overlap.rows.length) conflict("An entitlement already covers this recipient, scope and time range");
+}
+
 export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async (client, input, actor, requestId) => {
   if (!membershipGrowthEnabled()) throw new SecurityApiError(404, "NOT_FOUND", "Membership growth is disabled");
   if (!OPERATION_CODES.has(input.operationCode)) throw new SecurityApiError(409, "CONFLICT", "Membership operation is not supported");
@@ -181,6 +208,10 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
     const priceVersionId = draft?.priceVersionId ?? text(payload, "priceVersionId");
     const effectiveAtUtc = draft?.effectiveAt ?? text(payload, "effectiveAtUtc");
     const sourceRef = draft?.sourceRef ?? text(payload, "sourceRef");
+    if (!effective.isBoss) {
+      const previous = (await client.query<{ policyPayload: GrowthBenefitPolicy }>(`SELECT policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' ORDER BY version DESC,created_at DESC LIMIT 1`)).rows[0];
+      if (canonicalize(previous?.policyPayload.entitlementRanges ?? null) !== canonicalize((policy as GrowthBenefitPolicy).entitlementRanges ?? null)) throw new SecurityApiError(403, "FORBIDDEN", "Only Boss may change entitlement ranges");
+    }
     const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
     const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
     if (!result.valid || !result.publishable) conflict(`Membership policy is not publishable: ${[...result.errors, ...result.warnings].slice(0, 5).join(",")}`);
@@ -190,10 +221,16 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
         const contract = tier.pricing?.[mode];
         if (!contract || isNotPriced(contract)) conflict("Membership policy contains an unpriced enabled mode");
         if (contract.priceVersionId !== priceVersionId) conflict("Membership policy price version differs from the sealed release");
-        const cap = entitlementCapForMode(tier.entitlementCap, mode);
-        if (!cap || isNotPriced(cap)) conflict("Membership policy entitlement cap is missing");
-        if (cap.priceVersionId !== priceVersionId) conflict("Membership policy price version differs from the sealed release");
+        if ((policy as GrowthBenefitPolicy).entitlementRanges === undefined) {
+          const cap = entitlementCapForMode(tier.entitlementCap, mode);
+          if (!cap || isNotPriced(cap)) conflict("Membership policy entitlement cap is missing");
+          if (cap.priceVersionId !== priceVersionId) conflict("Membership policy price version differs from the sealed release");
+        }
       }
+    }
+    if ((policy as GrowthBenefitPolicy).entitlementRanges !== undefined) for (const kind of ["FRIEND", "PRESTIGE"] as const) for (const mode of sealed.enabledModes) {
+      const range = entitlementRangeForMode(policy as GrowthBenefitPolicy, kind, mode);
+      if (!range || isNotPriced(range) || range.priceVersionId !== priceVersionId) conflict("Entitlement range must bind to the sealed price version");
     }
     const id = `growth_policy_${randomUUID().replaceAll("-", "")}`;
     await client.query(`INSERT INTO zzsh_iam.membership_growth_policy (id,version,status,effective_at,rule_release_id,price_version_id,source_ref,policy_schema,policy_payload,payload_hash,approval_request_id,approved_by_admin_id) VALUES ($1,$2,'APPROVED',$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)`, [id, versionNo, effectiveAtUtc, ruleReleaseId, priceVersionId, sourceRef, "membership-growth-v1", JSON.stringify(policy), draft?.approvedPayloadHash ?? input.operationPayloadHash, input.requestId, actor.userId]);
@@ -211,13 +248,13 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
     return { resultCode: "MEMBERSHIP_ENTITLEMENT_REVOKED", resultDetail: id };
   }
   checkBusinessPermission(effective, ADMIN_PERMISSION.membershipEntitlementExecute);
-  const policyId = text(payload, "policyId");
-  const gameId = text(payload, "gameId");
   const scopeKey = text(payload, "scopeKey");
+  const gameId = text(payload, "gameId");
   await assertGameScope(client, effective, actor.userId, gameId);
-  const candidate = candidateFromPayload(payload, input.requestedBy);
+  const { candidate, policyId } = await validateMembershipEntitlementPayload(client, payload, input.requestedBy);
+  await lockEntitlementRecipient(client, candidate, gameId, input.operationCode === "membership.entitlement.replace" ? text(payload, "replaceEntitlementId") : undefined);
   const replacement = input.operationCode === "membership.entitlement.replace" ? await lockReplacementEntitlement(client, payload, candidate, gameId) : null;
-  const newId = await insertEntitlement(client, payload, input, policyId);
+  const newId = await insertEntitlement(client, candidate, gameId, input, policyId);
   if (replacement) {
     const updated = await client.query(`UPDATE zzsh_iam.membership_entitlement SET status='REPLACED', replaced_by_id=$2, updated_at=clock_timestamp() WHERE id=$1 AND user_id=$3 AND game_id=$4 AND kind=$5 AND scope_key=$6 AND status IN ('EXECUTED_PENDING_START','ACTIVE')`, [replacement.id, newId, candidate.userId, gameId, candidate.kind, scopeKey]);
     if (updated.rowCount !== 1) conflict("Entitlement to replace is not active");

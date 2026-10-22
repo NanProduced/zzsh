@@ -31,6 +31,7 @@ globalThis.ShadowRoot = browser.ShadowRoot;
 globalThis.HTMLInputElement = browser.HTMLInputElement;
 globalThis.HTMLTextAreaElement = browser.HTMLTextAreaElement;
 globalThis.MutationObserver = browser.MutationObserver;
+globalThis.ResizeObserver = browser.ResizeObserver;
 globalThis.Node = browser.Node;
 globalThis.Event = browser.Event;
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
@@ -1363,6 +1364,8 @@ test("lookup and same-key replay are mutually exclusive while either is in fligh
 // ── R4：通用资格与本单资格分开 ─────────────────────────────────────────────
 
 test("general eligibility is never presented as per-request eligibility", async () => {
+  freshSession("r4-eligibility");
+  const reviewFact = (view, label) => [...view.rootNode.querySelectorAll('section[aria-label="审批流程"] dl dt')].find((term) => term.textContent === label)?.nextElementSibling?.textContent;
   // 通用全合格，但本单 0 人可处理。
   const blocked = baseDetail({
     actions: [eligibility("approve", false, "BUSINESS_PERMISSION_REQUIRED"), eligibility("reject", false, "BUSINESS_PERMISSION_REQUIRED")],
@@ -1370,7 +1373,8 @@ test("general eligibility is never presented as per-request eligibility", async 
   });
   const view = await renderDetail(blocked);
   try {
-    await waitFor(() => text(view).includes("本单当前无人可处理"));
+    await waitFor(() => text(view).includes("候选 1 人，无人可处理"));
+    assert.equal(reviewFact(view, "本单可处理"), "0 人", "流程记录使用本单资格，不反推通用候选人数");
     assert.equal(text(view).includes("1 人当前合格"), false, "不得由通用名单反推本单合格人数");
     assert.equal(text(view).includes("当前可审批"), false, "个人徽标不得声称可审批这一单");
     assert.ok(text(view).includes("具备通用审批资格"), "个人徽标只声明通用资格");
@@ -1387,7 +1391,8 @@ test("general eligibility is never presented as per-request eligibility", async 
   });
   const second = await renderDetail(self);
   try {
-    await waitFor(() => text(second).includes("本单当前可处理 1 人"));
+    await waitFor(() => text(second).includes("候选 2 人，其中 1 人当前合格"));
+    assert.equal(reviewFact(second, "本单可处理"), "1 人", "流程记录与服务端本单汇总一致");
     assert.ok(text(second).includes("不能审批自己发起的申请"), "自审批禁令就地说明");
     assert.equal(text(second).includes("2 人当前合格"), false, "不得把快照人数说成本单合格人数");
   } finally {
@@ -1399,7 +1404,8 @@ test("general eligibility is never presented as per-request eligibility", async 
   delete missing.candidateAvailability;
   const third = await renderDetail(missing);
   try {
-    await waitFor(() => text(third).includes("本单可处理人数未提供"));
+    await waitFor(() => reviewFact(third, "本单可处理") === "未提供");
+    assert.equal(reviewFact(third, "本单可处理"), "未提供", "缺少本单汇总不能按候选快照补人数");
     assert.equal(text(third).includes("当前合格"), false, "汇总缺失时不给出合格人数");
   } finally {
     await third.cleanup();

@@ -2,6 +2,10 @@ export type GrowthTier = "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND"
 export type GrowthGraceState = "NONE" | "ACTIVE" | "RECOVERED" | "EXPIRED" | "UNKNOWN";
 export type EntitlementState = "PENDING" | "APPROVED_PENDING_EXECUTION" | "EXECUTED_PENDING_START" | "ACTIVE" | "EXPIRED" | "REPLACED" | "REVOKED" | "UNKNOWN";
 export type EntitlementKind = "FRIEND" | "PRESTIGE" | "UNKNOWN";
+export type EntitlementPricingSummary =
+  | { knowledge: "KNOWN"; kind: "TOTAL_DISCOUNT"; mode: "ordinary" | "custom" | "fast"; payableRatio: string }
+  | { knowledge: "LEGACY"; kind: "LEGACY" }
+  | { knowledge: "UNKNOWN"; kind: "UNKNOWN" };
 
 export type MembershipGrowthData = {
   subjectId?: string;
@@ -16,7 +20,7 @@ export type MembershipGrowthData = {
   nextExpiryAt: string | null;
   benefits: Array<{ label: string; value: string; sourceVersion?: string }>;
   comparison?: Array<{ tier: string; deposit: string; pricing: string }>;
-  entitlements: Array<{ id: string; kind: EntitlementKind; label: string; scope: string; startsAt: string; endsAt: string; state: EntitlementState; depositWaived: boolean }>;
+  entitlements: Array<{ id: string; kind: EntitlementKind; label: string; scope: string; gameId?: string | null; gameName?: string | null; startsAt: string; endsAt: string; state: EntitlementState; depositWaived: boolean; pricingSummary: EntitlementPricingSummary }>;
   contributions: Array<{ label: string; effectiveAt: string; amountCents: string; exitsAt: string; kind: "CONSUMPTION" | "CORRECTION" }>;
   pendingCount: number;
 };
@@ -81,6 +85,25 @@ function requiredRecords(value: unknown, field: string): RecordValue[] {
   return value as RecordValue[];
 }
 
+function entitlementPricing(value: unknown): EntitlementPricingSummary {
+  if (isRecord(value)) {
+    if (value.knowledge === "LEGACY" && value.kind === "LEGACY") return { knowledge: "LEGACY", kind: "LEGACY" };
+    if (value.knowledge === "KNOWN" && value.kind === "TOTAL_DISCOUNT"
+      && (value.mode === "ordinary" || value.mode === "custom" || value.mode === "fast") && typeof value.payableRatio === "string") {
+      const match = /^(0|1)(?:\.(\d{1,8}))?$/.exec(value.payableRatio);
+      if (match) {
+        const scaled = BigInt(`${match[1]}${(match[2] ?? "").padEnd(8, "0")}`);
+        if (scaled > 0n && scaled <= 100_000_000n) return { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: value.mode, payableRatio: value.payableRatio };
+      }
+    }
+  }
+  return { knowledge: "UNKNOWN", kind: "UNKNOWN" };
+}
+
+function optionalBoundedText(value: unknown, maxLength: number): string | null {
+  return typeof value === "string" && value.length <= maxLength ? value.trim() || null : null;
+}
+
 function entitlementRecords(body: RecordValue): MembershipGrowthData["entitlements"] {
   const entitlements = requiredRecords(body.entitlements, "entitlements");
   return entitlements.filter(isRecord).map((item) => {
@@ -90,10 +113,13 @@ function entitlementRecords(body: RecordValue): MembershipGrowthData["entitlemen
       kind,
       label: typeof item.label === "string" && item.label ? item.label : "专属礼遇",
       scope: text(item.scopeKey, "entitlements.scopeKey"),
+      gameId: optionalBoundedText(item.gameId, 128),
+      gameName: optionalBoundedText(item.gameName, 200),
       startsAt: text(item.startsAtUtc, "entitlements.startsAtUtc"),
       endsAt: text(item.endsAtUtc, "entitlements.endsAtUtc"),
       state: (ENTITLEMENT_STATES as readonly string[]).includes(item.status as string) ? (item.status as EntitlementState) : "UNKNOWN",
       depositWaived: item.depositWaived === true,
+      pricingSummary: entitlementPricing(item.pricingSummary),
     };
   });
 }

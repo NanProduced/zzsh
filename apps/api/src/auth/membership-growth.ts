@@ -489,6 +489,17 @@ export type TotalDiscountContract = {
 };
 export type ModePricingContract = GrowthPricingContract | TotalDiscountContract | NotPricedParameter;
 
+export type EntitlementDiscountRange = {
+  status: "CONFIGURED";
+  kind: "TOTAL_DISCOUNT_RANGE";
+  mode: RentalMode;
+  priceVersionId: string;
+  minPayableRatio: string;
+  maxPayableRatio: string;
+  costBasisRef: string;
+};
+export type EntitlementRanges = Record<"FRIEND" | "PRESTIGE", { byMode: Partial<Record<RentalMode, EntitlementDiscountRange | NotPricedParameter>> }>;
+
 export function isTotalDiscountContract(value: unknown): value is TotalDiscountContract {
   return Boolean(value && typeof value === "object" && !Array.isArray(value)
     && (value as Record<string, unknown>).status === "CONFIGURED" && (value as Record<string, unknown>).kind === "TOTAL_DISCOUNT");
@@ -551,7 +562,13 @@ export type GrowthBenefitPolicy = {
   sourceRef: string;
   tiers: Record<NormalGrowthTier, TierBenefitConfig>;
   entitlementCaps: { FRIEND: "GOLD"; PRESTIGE: "DIAMOND" };
+  /** Independent manual ranges; absence preserves the immutable legacy tier-cap contract. */
+  entitlementRanges?: EntitlementRanges;
 };
+
+export function entitlementRangeForMode(policy: GrowthBenefitPolicy, kind: "FRIEND" | "PRESTIGE", mode: RentalMode): EntitlementDiscountRange | NotPricedParameter | undefined {
+  return policy.entitlementRanges?.[kind]?.byMode?.[mode];
+}
 
 export type PolicyValidation = { valid: boolean; publishable: boolean; errors: string[]; warnings: string[] };
 
@@ -675,6 +692,43 @@ function validateTotalDiscount(contract: TotalDiscountContract, path: string, re
   else if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(contract.costBasisRef)) result.errors.push(`${path}.costBasisRef`);
 }
 
+function validateEntitlementRanges(value: EntitlementRanges, enabled: ReadonlySet<RentalMode>, result: PolicyValidation): void {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "FRIEND" && key !== "PRESTIGE")) {
+    result.errors.push("entitlementRanges"); return;
+  }
+  for (const kind of ["FRIEND", "PRESTIGE"] as const) {
+    const byMode = value[kind]?.byMode;
+    if (!byMode || typeof byMode !== "object" || Array.isArray(byMode)) { result.errors.push(`entitlementRanges.${kind}`); continue; }
+    if (Object.keys(byMode).some((mode) => !["ordinary", "custom", "fast"].includes(mode))) result.errors.push(`entitlementRanges.${kind}.byMode`);
+    for (const mode of enabled) {
+      const range = byMode[mode], path = `entitlementRanges.${kind}.byMode.${mode}`;
+      if (!range) { result.warnings.push(`${path}.unconfigured`); result.publishable = false; continue; }
+      if (notPriced(range)) { validateNotPriced(range, path, result); result.publishable = false; continue; }
+      if (range.status !== "CONFIGURED" || range.kind !== "TOTAL_DISCOUNT_RANGE" || range.mode !== mode) result.errors.push(path);
+      validateTotalDiscount({ ...range, kind: "TOTAL_DISCOUNT", payableRatio: range.minPayableRatio }, path, result);
+      const min = discountRatio(range.minPayableRatio), max = discountRatio(range.maxPayableRatio);
+      if (min === null) result.errors.push(`${path}.minPayableRatio`);
+      if (max === null) result.errors.push(`${path}.maxPayableRatio`);
+      if (min !== null && max !== null && min > max) result.errors.push(`${path}.range`);
+    }
+  }
+}
+
+export type EntitlementPricingSummary =
+  | { knowledge: "KNOWN"; kind: "TOTAL_DISCOUNT"; mode: RentalMode; payableRatio: string }
+  | { knowledge: "LEGACY"; kind: "LEGACY" }
+  | { knowledge: "UNKNOWN"; kind: "UNKNOWN" };
+
+/** Public display facts only: no cost basis, policy body or owner prices leave this projection. */
+export function entitlementPricingSummary(value: unknown): EntitlementPricingSummary {
+  if (isTotalDiscountContract(value)) {
+    const validation: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
+    validateTotalDiscount(value, "pricing", validation);
+    if (!validation.errors.length && !validation.warnings.length) return { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: value.mode, payableRatio: value.payableRatio };
+  } else if (isLegacyPricingContract(value)) return { knowledge: "LEGACY", kind: "LEGACY" };
+  return { knowledge: "UNKNOWN", kind: "UNKNOWN" };
+}
+
 /**
  * R1-01: a consumed entitlement cap must not be more generous than its own tier boundary.
  * Directional compare with the exact decimal tools: a stricter cap (smaller effective HAFF ratio, higher
@@ -722,7 +776,9 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
   if (value?.effectiveAt !== null) {
     try { parseInstant(value.effectiveAt, "effectiveAt"); } catch { result.errors.push("effectiveAt"); }
   }
-  if (!value?.entitlementCaps || value.entitlementCaps.FRIEND !== "GOLD" || value.entitlementCaps.PRESTIGE !== "DIAMOND") result.errors.push("entitlementCaps");
+  const independentRanges = value?.entitlementRanges !== undefined;
+  if (independentRanges) validateEntitlementRanges(value.entitlementRanges!, enabled, result);
+  else if (!value?.entitlementCaps || value.entitlementCaps.FRIEND !== "GOLD" || value.entitlementCaps.PRESTIGE !== "DIAMOND") result.errors.push("entitlementCaps");
   for (const tier of NORMAL_GROWTH_TIERS) {
     const config = value?.tiers?.[tier];
     if (!config || config.tier !== tier) {
@@ -760,6 +816,7 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
       // policy is unreachable in the formal quote adapter.
       if (contract.mode !== mode) result.errors.push(path);
     }
+    if (independentRanges) continue;
     const capPath = `tiers.${tier}.entitlementCap`;
     const cap = config.entitlementCap;
     if (isEntitlementCapByMode(cap)) {
@@ -922,18 +979,29 @@ export function validateEntitlementCandidate(candidate: EntitlementCandidate, _m
   const startsAt = parseInstant(candidate.startsAt, "startsAt");
   const endsAt = parseInstant(candidate.endsAt, "endsAt");
   if (endsAt <= startsAt || endsAt - startsAt > GROWTH_WINDOW_US) errors.push("duration");
-  const cap = candidate.kind === "FRIEND" ? "GOLD" : "DIAMOND";
-  const capConfig = policy.tiers[cap];
   const pricing = candidate.pricing;
   const candidateMode = !notPriced(pricing) && typeof (pricing as { mode?: unknown }).mode === "string" && ["ordinary", "custom", "fast"].includes((pricing as { mode: string }).mode)
     ? (pricing as { mode: RentalMode }).mode : null;
-  const capPricing = candidateMode ? entitlementCapForMode(capConfig.entitlementCap, candidateMode) : undefined;
   const strict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
   if (notPriced(pricing)) strict.errors.push("candidate.pricing");
   else if (isTotalDiscountContract(pricing)) validateTotalDiscount(pricing, "candidate.pricing", strict);
   else validatePricingContract(pricing, "candidate.pricing", strict);
   const pricingValid = strict.errors.length === 0 && strict.warnings.length === 0;
   if (!pricingValid) errors.push("pricingInvalid");
+  if (policy.entitlementRanges !== undefined) {
+    const range = candidateMode ? entitlementRangeForMode(policy, candidate.kind, candidateMode) : undefined;
+    const validation: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
+    if (candidateMode) validateEntitlementRanges(policy.entitlementRanges, new Set([candidateMode]), validation);
+    if (!range || notPriced(range) || validation.errors.length || validation.warnings.length) errors.push("costBasisMissing");
+    else if (!isTotalDiscountContract(pricing)) errors.push("contractKindMismatch");
+    else {
+      const actual = discountRatio(pricing.payableRatio), min = discountRatio(range.minPayableRatio), max = discountRatio(range.maxPayableRatio);
+      if (actual === null || min === null || max === null || actual < min || actual > max || pricing.priceVersionId !== range.priceVersionId || pricing.costBasisRef !== range.costBasisRef) errors.push("pricingBeyondPolicy");
+    }
+    return { valid: errors.length === 0, errors, depositWaived: candidate.depositWaived === true };
+  }
+  const cap = candidate.kind === "FRIEND" ? "GOLD" : "DIAMOND";
+  const capPricing = candidateMode ? entitlementCapForMode(policy.tiers[cap].entitlementCap, candidateMode) : undefined;
   if (capPricing === undefined || notPriced(capPricing)) errors.push("costBasisMissing");
   else if (pricingValid) {
     if (isTotalDiscountContract(pricing) && isTotalDiscountContract(capPricing)) {

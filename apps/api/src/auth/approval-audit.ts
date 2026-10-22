@@ -14,11 +14,13 @@ import {
   approvalRegistration,
   membershipBusinessPermission,
   membershipOperationRequiresGameScope,
+  editableEntitlementApprovalPayload,
   projectApprovalBusinesses,
   type ApprovalOperationRegistration,
   type ApprovalRequestFacts,
 } from "./approval-business";
 import type { AdminContext, AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
+import { validateMembershipEntitlementPayload } from "./membership-growth-approval";
 
 const IDEMPOTENCY_KEY_PATTERN = new RegExp(API_V1_TOKEN_PATTERN);
 
@@ -77,6 +79,9 @@ type RequestRow = {
   supersedesRequestId: string | null;
   supersededByRequestId: string | null;
 };
+
+type DecisionRow = { requestId: string; decision: string; reason: string | null; createdAt: Date | string; approverId: string; finalPayload: Record<string, unknown> | null; finalPayloadHash: string | null };
+const AMENDABLE_ENTITLEMENTS = new Set(["membership.entitlement.grant", "membership.entitlement.replace"]);
 
 function invalid(message = "Request body is invalid"): never {
   throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, message);
@@ -465,6 +470,42 @@ export function hashApprovalPayload(payload: Record<string, unknown>): { value: 
 function immutablePayload(body: Record<string, unknown>): { value: Record<string, unknown>; raw: string; hash: string } {
   if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) invalid("Operation payload must be an object");
   return hashApprovalPayload(body.payload as Record<string, unknown>);
+}
+
+function assertFinalPayloadTarget(row: RequestRow, final: Record<string, unknown>, expectedHash: string): void {
+  if (!AMENDABLE_ENTITLEMENTS.has(row.operationCode)) invalid("This operation does not support amended approval");
+  if (row.operationPayloadHash !== expectedHash) conflict("Approval request payload changed; reload before deciding");
+  const mutable = new Set(["startsAtUtc", "endsAtUtc", "pricing", "depositWaived", "reason"]);
+  const fixed = (payload: Record<string, unknown>) => Object.fromEntries(Object.entries(payload).filter(([key]) => !mutable.has(key)));
+  if (hashApprovalPayload(fixed(row.operationPayload)).hash !== hashApprovalPayload(fixed(final)).hash) conflict("An amended approval must keep the original recipient and business references");
+  const pricingFixed = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "payableRatio")) : {};
+  if (hashApprovalPayload(pricingFixed(row.operationPayload.pricing)).hash !== hashApprovalPayload(pricingFixed(final.pricing)).hash) conflict("An amended approval may change the payable share, not its pricing references");
+}
+
+function verifiedFinalPayload(row: RequestRow, decision: DecisionRow): ReturnType<typeof hashApprovalPayload> | null {
+  if (decision.finalPayload == null && decision.finalPayloadHash == null) return null;
+  if (decision.decision !== "APPROVED" || !decision.finalPayload || !decision.finalPayloadHash || !/^[a-f0-9]{64}$/.test(decision.finalPayloadHash)) conflict("Approval decision payload is incomplete");
+  if (decision.approverId !== row.decidedBy || !["APPROVED", "EXECUTED", "EXECUTION_FAILED", "EXPIRED"].includes(row.status)) conflict("Approved final decision binding is inconsistent");
+  const final = immutablePayload({ payload: decision.finalPayload });
+  if (final.hash !== decision.finalPayloadHash) conflict("Approved final payload hash does not match");
+  assertFinalPayloadTarget(row, final.value, row.operationPayloadHash);
+  return final;
+}
+
+async function readDecisions(client: Pool | PoolClient, rows: readonly RequestRow[]): Promise<Map<string, DecisionRow>> {
+  if (!rows.length) return new Map();
+  const decisions = await client.query<DecisionRow>(
+    `SELECT "request_id" AS "requestId","decision","reason","created_at" AS "createdAt","approver_admin_id" AS "approverId","final_payload" AS "finalPayload","final_payload_hash" AS "finalPayloadHash"
+       FROM "zzsh_iam"."approval_decision" WHERE "request_id" = ANY($1::text[])`, [rows.map((row) => row.id)],
+  );
+  const requests = new Map(rows.map((row) => [row.id, row])), result = new Map<string, DecisionRow>();
+  for (const decision of decisions.rows) {
+    const row = requests.get(decision.requestId);
+    if (!row || result.has(row.id)) conflict("Approval decision identity is inconsistent");
+    verifiedFinalPayload(row, decision);
+    result.set(row.id, decision);
+  }
+  return result;
 }
 
 function iso(value: Date | string | null | undefined): string | null {
@@ -858,17 +899,22 @@ async function buildApprovalActionContext(
 async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
   const context = await readContext(request, options);
   const body = bodyOf(request);
-  assertFields(body, ["requestId", "decision", "reason"]);
+  assertFields(body, ["requestId", "decision", "reason", "finalPayload", "expectedPayloadHash"]);
   const targetRequestId = requiredString(body, "requestId", 128);
   const decision = requiredString(body, "decision", 16);
   if (decision !== "APPROVE" && decision !== "REJECT") invalid("Decision is invalid");
   const reason = optionalString(body, "reason", 500)?.trim();
   if (decision === "REJECT" && (!reason || reason.length < 3)) invalid("A rejection reason is required");
+  const final = body.finalPayload === undefined ? null : immutablePayload({ payload: body.finalPayload });
+  const expectedHash = optionalString(body, "expectedPayloadHash", 64);
+  if (expectedHash !== undefined && !/^[a-f0-9]{64}$/.test(expectedHash)) invalid("Expected payload hash is invalid");
+  if (final && expectedHash === undefined) invalid("An amended approval requires the original payload hash");
+  if (decision !== "APPROVE" && (final || expectedHash !== undefined)) invalid("A rejection cannot amend the payload");
   const action: ApprovalAction = decision === "APPROVE" ? "approve" : "reject";
   await runApprovalWrite(request, response, requestId, options, context, {
     operation: APPROVAL_WRITE_OPERATIONS.decide,
     resourceId: targetRequestId,
-    fingerprint: approvalFingerprint([targetRequestId, decision, reason ?? ""]),
+    fingerprint: approvalFingerprint(final || expectedHash !== undefined ? [targetRequestId, decision, reason ?? "", expectedHash, final?.hash ?? ""] : [targetRequestId, decision, reason ?? ""]),
     authorize: async (client) => {
       const access = await requireWriteAccess(client, context, ADMIN_PERMISSION.approvalRequestApprove);
       const row = await readRequestForUpdate(client, targetRequestId);
@@ -878,6 +924,11 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
         includeStatePreconditions: false,
       });
       assertApprovalAction(evaluateApprovalActions(input), action);
+      if (final) assertFinalPayloadTarget(row, final.value, expectedHash!);
+      else if (expectedHash !== undefined) {
+        if (!AMENDABLE_ENTITLEMENTS.has(row.operationCode)) invalid("This operation does not support amended approval");
+        if (row.operationPayloadHash !== expectedHash) conflict("Approval request payload changed; reload before deciding");
+      }
     },
     action: async (client) => {
       const row = await readRequestForUpdate(client, targetRequestId);
@@ -886,10 +937,11 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
         await expireRequest(client, row, context, requestId);
         return approvalErrorReceipt(409, API_V1_ERROR_CODES.CONFLICT, "Approval request expired before the decision", requestId, "EXPIRED");
       }
+      if (final) await validateMembershipEntitlementPayload(client, final.value, row.requestedBy);
       const finalStatus: ApprovalStatus = decision === "APPROVE" ? "APPROVED" : "REJECTED";
       await client.query(
-        `INSERT INTO "zzsh_iam"."approval_decision" ("id", "request_id", "approver_admin_id", "decision", "reason") VALUES ($1, $2, $3, $4, $5)`,
-        [`approval_dec_${randomUUID().replaceAll("-", "")}`, row.id, context.userId, finalStatus, reason ?? null],
+        `INSERT INTO "zzsh_iam"."approval_decision" ("id", "request_id", "approver_admin_id", "decision", "reason", "final_payload", "final_payload_hash") VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+        [`approval_dec_${randomUUID().replaceAll("-", "")}`, row.id, context.userId, finalStatus, reason ?? null, final?.raw ?? null, final?.hash ?? null],
       );
       await client.query(
         `UPDATE "zzsh_iam"."approval_request" SET "status" = $1, "decided_at" = clock_timestamp(), "decided_by" = $2, "decision_reason" = $3, "status_reason" = $4 WHERE "id" = $5 AND "status" = 'PENDING'`,
@@ -899,9 +951,9 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
         actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
         action: decision === "APPROVE" ? "approval.request.approved" : "approval.request.rejected",
         objectType: "approval_request", objectId: row.id, outcome: "SUCCESS", requestId, reason,
-        details: { decision: finalStatus, summary: row.summary, operationCode: row.operationCode },
+        details: { decision: finalStatus, summary: row.summary, operationCode: row.operationCode, requestPayloadHash: row.operationPayloadHash, finalPayloadHash: final?.hash ?? null, approvedPayloadHash: final?.hash ?? row.operationPayloadHash },
       });
-      return { status: 200, body: { requestId: row.id, approvalRequestId: row.id, decision: finalStatus, status: finalStatus } };
+      return { status: 200, body: { requestId: row.id, approvalRequestId: row.id, decision: finalStatus, status: finalStatus, ...(final || expectedHash !== undefined ? { requestPayloadHash: row.operationPayloadHash, finalPayloadHash: final?.hash ?? null, approvedPayloadHash: final?.hash ?? row.operationPayloadHash } : {}) } };
     },
   });
 }
@@ -983,6 +1035,9 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
         return approvalErrorReceipt(409, API_V1_ERROR_CODES.CONFLICT, "Approved request expired before execution", requestId, "EXPIRED");
       }
       if (row.status !== "APPROVED") conflict("Only an approved request can be executed");
+      const decision = (await readDecisions(client, [row])).get(row.id);
+      if (!decision || decision.decision !== "APPROVED" || decision.approverId !== row.decidedBy) conflict("Approved decision is missing or inconsistent");
+      const final = verifiedFinalPayload(row, decision);
       const registration = approvalRegistration(row.operationCode);
       let executionStatus: "SUCCEEDED" | "FAILED" = "SUCCEEDED";
       let resultCode: string;
@@ -999,8 +1054,8 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
           requestId: row.id,
           operationCode: row.operationCode,
           payloadVersion: row.payloadVersion,
-          operationPayload: row.operationPayload,
-          operationPayloadHash: row.operationPayloadHash,
+          operationPayload: final?.value ?? row.operationPayload,
+          operationPayloadHash: final?.hash ?? row.operationPayloadHash,
           requestedBy: row.requestedBy,
           decidedBy: row.decidedBy!,
           expiresAt: row.expiresAt,
@@ -1021,7 +1076,7 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
         actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
         action: "approval.execution.completed", objectType: "approval_request", objectId: row.id,
         outcome: executionStatus === "SUCCEEDED" ? "SUCCESS" : "FAILURE", requestId,
-        details: { operationCode: row.operationCode, executionStatus, resultCode, summary: row.summary },
+        details: { operationCode: row.operationCode, executionStatus, resultCode, summary: row.summary, requestPayloadHash: row.operationPayloadHash, finalPayloadHash: final?.hash ?? null, approvedPayloadHash: final?.hash ?? row.operationPayloadHash },
       });
       return {
         status: 200,
@@ -1033,6 +1088,7 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
           resultCode,
           executionMode: registration?.executionMode ?? APPROVAL_EXECUTION_MODE.unsupported,
           businessResultRef: resultRef,
+          ...(final ? { requestPayloadHash: row.operationPayloadHash, finalPayloadHash: final.hash, approvedPayloadHash: final.hash } : {}),
         },
       };
     },
@@ -1226,6 +1282,7 @@ type ApprovalReadViews = {
   business: Map<string, Record<string, unknown>>;
   actions: Map<string, ApprovalActionEligibility[]>;
   candidates: Map<string, { total: number; eligible: number; blockingReasonCode: string | null }>;
+  decisions: Map<string, DecisionRow>;
 };
 
 /**
@@ -1240,6 +1297,7 @@ async function approvalReadViews(
   testOperationsEnabled: boolean,
   executorAssembled: boolean,
 ): Promise<ApprovalReadViews> {
+  const decisions = await readDecisions(client, rows);
   const facts: ApprovalRequestFacts[] = rows.map((row) => ({
     id: row.id,
     operationCode: row.operationCode,
@@ -1251,6 +1309,8 @@ async function approvalReadViews(
     status: row.status,
     decidedBy: row.decidedBy,
     expiresAt: row.expiresAt,
+    finalPayload: decisions.get(row.id)?.finalPayload ?? null,
+    finalPayloadHash: decisions.get(row.id)?.finalPayloadHash ?? null,
   }));
   const [gameScope, self, candidateRows, viewerCandidateRows] = await Promise.all([
     readAdminGameScope(client, context.userId),
@@ -1297,7 +1357,7 @@ async function approvalReadViews(
       policyDraftStatus: state?.policyDraftStatus,
     }));
   }
-  return { business: projection.views, actions, candidates };
+  return { business: projection.views, actions, candidates, decisions };
 }
 
 function sanitizeDetail(value: unknown): unknown {
@@ -1367,10 +1427,6 @@ async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSec
   if (!row) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Approval request not found");
   const requester = await adminByUserId(options.pool, row.requestedBy);
   const candidates = await requestCandidateRows(options.pool, row.id);
-  const decision = await options.pool.query<{ decision: string; reason: string | null; createdAt: Date | string; approverId: string }>(
-    `SELECT "decision", "reason", "created_at" AS "createdAt", "approver_admin_id" AS "approverId" FROM "zzsh_iam"."approval_decision" WHERE "request_id" = $1`,
-    [row.id],
-  );
   const execution = await options.pool.query<{ status: string; resultCode: string; resultDetail: string | null; executedBy: string; createdAt: Date | string; completedAt: Date | string }>(
     `SELECT "status", "result_code" AS "resultCode", "result_detail" AS "resultDetail", "executed_by" AS "executedBy", "created_at" AS "createdAt", "completed_at" AS "completedAt" FROM "zzsh_iam"."approval_execution" WHERE "request_id" = $1`,
     [row.id],
@@ -1385,6 +1441,9 @@ async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSec
   );
   const status = virtualRequestStatus(row);
   const views = await approvalReadViews(options.pool, context, access, [row], options.testOperationsEnabled, Boolean(options.approvalOperationExecutor));
+  const decision = views.decisions.get(row.id);
+  const mayAmend = AMENDABLE_ENTITLEMENTS.has(row.operationCode) && views.actions.get(row.id)?.some((action) => action.action === "approve" && action.allowed);
+  const editablePayload = mayAmend ? editableEntitlementApprovalPayload(row.operationPayload) : null;
   sendSuccess(response, {
     requestId: row.id,
     status,
@@ -1392,13 +1451,14 @@ async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSec
     operation: { code: row.operationCode, triggerCondition: row.triggerCondition, payloadVersion: row.payloadVersion, payloadHash: row.operationPayloadHash, executionMode: views.business.get(row.id)?.executionMode ?? null, payload: row.operationCode === TEST_OPERATION ? sanitizeDetail(row.operationPayload) : undefined },
     summary: row.summary,
     business: views.business.get(row.id) ?? null,
+    entitlementAmendment: editablePayload ? { expectedPayloadHash: row.operationPayloadHash, editablePayload } : null,
     actions: views.actions.get(row.id) ?? [],
     candidateAvailability: views.candidates.get(row.id) ?? null,
     template: { id: row.templateId, version: row.templateVersion },
     requester: { username: requester.username, displayUsername: requester.displayUsername, name: requester.name, status: requester.status },
     createdAt: iso(row.createdAt),
     expiresAt: iso(row.expiresAt),
-    decision: decision.rows[0] ? { decision: decision.rows[0].decision, reason: decision.rows[0].reason, approver: await adminByUserId(options.pool, decision.rows[0].approverId), createdAt: iso(decision.rows[0].createdAt) } : null,
+    decision: decision ? { decision: decision.decision, reason: decision.reason, approver: await adminByUserId(options.pool, decision.approverId), createdAt: iso(decision.createdAt), requestPayloadHash: row.operationPayloadHash, finalPayloadHash: decision.finalPayloadHash ?? null, approvedPayloadHash: decision.finalPayloadHash ?? row.operationPayloadHash } : null,
     execution: execution.rows[0] ? { status: execution.rows[0].status, resultCode: execution.rows[0].resultCode, resultDetail: execution.rows[0].resultDetail, executor: await adminByUserId(options.pool, execution.rows[0].executedBy), createdAt: iso(execution.rows[0].createdAt), completedAt: iso(execution.rows[0].completedAt) } : null,
     candidates: await Promise.all(candidates.map((item) => candidateView(options.pool, item.candidate, item.source, item.addedBy))),
     history: history.rows.map(auditView),
@@ -1469,7 +1529,7 @@ async function auditEvents(request: AuthSecurityNodeRequest, response: AuthSecur
 }
 
 /** 恢复合同只投影安全业务字段：绝不回载荷正文、token 或越权金额。 */
-const RECEIPT_FIELDS = ["approvalRequestId", "status", "decision", "executionStatus", "resultCode", "executionMode", "businessResultRef", "templateVersion", "candidateCount", "candidateUsername", "expiresAt"] as const;
+const RECEIPT_FIELDS = ["approvalRequestId", "status", "decision", "executionStatus", "resultCode", "executionMode", "businessResultRef", "templateVersion", "candidateCount", "candidateUsername", "expiresAt", "requestPayloadHash", "finalPayloadHash", "approvedPayloadHash"] as const;
 
 function recoveryReceipt(body: unknown): Record<string, unknown> | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;

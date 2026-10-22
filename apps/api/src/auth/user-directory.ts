@@ -3,10 +3,11 @@ import type { PoolClient } from "pg";
 import { gameScopeSql } from "./admin-scope";
 import { conflict, forbidden, invalid, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
-import { effectivePublicationStateSql, isEffectivePublicationState } from "../supply/listing-query";
+import { effectivePublicationStateSql, isEffectivePublicationState, projectPublicAttributeDisplay } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
 import { orderReadKeyRelation, orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
 import { legacyContinuationReady } from "../order/legacy-order-read";
+import { legacyUserOrderResources } from "../order/legacy-user-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 import { readUserDirectoryBusinessSummaries, directoryCreditScopeSql, directoryCreditNotInitializedSql } from "./user-directory-business-summary";
 import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTORY_WALLET_SORT_JOINS, DIRECTORY_WALLET_SORT_KEY } from "./user-directory-wallet";
@@ -629,7 +630,7 @@ export async function readUserDirectoryDetail(
   const original = registrationTime === "ORIGINAL";
   const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
   const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
-  const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client), true) : null;
+  const detailOrderRelation = orderRead && viewer.legacyRead ? orderReadRelation(await legacyContinuationReady(client), true, { participantUserId: '$1' }) : null;
   const row = (
     await client.query<UserDetailRow>(
       `SELECT u.id, u.name, u.image, u.username, u."displayUsername", u."phoneNumber", u."phoneNumberVerified",
@@ -669,14 +670,10 @@ export async function readUserDirectoryDetail(
             LIMIT 1
          ) mig ON true
          ${original ? `LEFT JOIN LATERAL (
-           SELECT e.object_id,e.details->>'legacyId' AS legacy_id,e.details->>'sourceCreatedAt' AS source_created_at,
-             e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,
-             e.details->>'sourceDigest' AS source_digest,e.details->>'evidenceRef' AS evidence_ref
-           FROM zzsh_iam.audit_event e
-           WHERE e.action='${LEGACY_MIGRATION_ACTION}' AND e.object_type='user' AND e.object_id=u.id AND e.outcome='SUCCESS'
-           ORDER BY e.occurred_at DESC,e.id DESC LIMIT 1
+           SELECT fact.user_id AS object_id,fact.legacy_id,fact.registered_at
+           FROM zzsh_iam.user_registration_fact fact WHERE fact.user_id=u.id
          ) registration_mig ON true
-         LEFT JOIN LATERAL (SELECT ${originalRegistrationSql("registration_mig")} AS registered_at) registration ON true` : ""}
+         LEFT JOIN LATERAL (SELECT ${originalRegistrationSql("registration_mig", true)} AS registered_at) registration ON true` : ""}
          ${resourceCountsSql("$4", "$2", "$3")}
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS current_count,
@@ -863,7 +860,41 @@ type UserOrderRow = {
   cancelledAt: string | null;
   cancelReason: string | null;
   expiredAwaitingCancel: boolean;
+  versionId?: string;
+  contentHash?: string;
+  termSeconds?: string;
 };
+
+type OrderAccountBinding = { origin: 'NATIVE' | 'LEGACY'; orderId: string; accountId: string; versionId?: string | null; contentHash?: string | null };
+type OrderAccountFacts = { source: 'ORDER_VERSION' | 'LEGACY_ACCOUNT'; resources: Array<{code: string; name: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string };
+
+/** Page-selected accounts only: never substitute current inventory for the frozen native version. */
+async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryViewer, bindings: OrderAccountBinding[]) {
+  const facts = new Map<string, OrderAccountFacts>();
+  if (!viewer.resourceRead || viewer.businessScopeUsable === false || !bindings.length) return facts;
+  const selected = bindings.filter(row=>row.origin==='LEGACY' || row.versionId && row.contentHash);
+  if (!selected.length) return facts;
+  const rows = (await client.query<{origin: 'NATIVE'|'LEGACY'; orderId: string; accountId: string; versionId: string | null; attributes: Record<string, unknown>; resources: OrderAccountFacts['resources']}>(
+      `SELECT /* directory-order-account-facts */ wanted.origin,wanted."orderId",wanted."accountId",v.id AS "versionId",v.attributes,
+        COALESCE(jsonb_agg(jsonb_build_object('code',i.code,'name',i.name,'quantity',l.quantity::text,'unit',i.unit) ORDER BY i.sort_order,i.id) FILTER (WHERE i.id IS NOT NULL),'[]'::jsonb) AS resources
+       FROM jsonb_to_recordset($1::jsonb) AS wanted(origin text,"orderId" text,"accountId" text,"versionId" text,"contentHash" text)
+       JOIN zzsh_supply.rental_account a ON a.id=wanted."accountId"
+       LEFT JOIN zzsh_supply.listing_version v ON wanted.origin='NATIVE' AND v.id=wanted."versionId" AND v.account_id=wanted."accountId" AND v.content_hash=wanted."contentHash"
+       LEFT JOIN zzsh_supply.inventory_line l ON l.version_id=v.id
+       LEFT JOIN zzsh_supply.billable_item i ON i.id=l.item_id
+       WHERE ${gameScopeSql('a.game_id','$3','$2')}
+       GROUP BY wanted.origin,wanted."orderId",wanted."accountId",v.id`, [JSON.stringify(selected),viewer.isBoss,viewer.adminId],
+  )).rows;
+  for (const row of rows) if (row.origin==='NATIVE' && row.versionId) facts.set(`NATIVE\u0000${row.orderId}`, {source:'ORDER_VERSION',resources:row.resources,loginMethodText:projectPublicAttributeDisplay(row.attributes).loginMethod?.displayName ?? null});
+  const legacy = rows.filter(row => row.origin==='LEGACY');
+  const historical = await loadLegacyHistoricalReads(client, legacy.map(row => row.accountId));
+  for (const row of legacy) {
+    const read = historical.get(row.accountId);
+    if (read?.display.state !== 'KNOWN' || !read.display.facts) continue;
+    facts.set(`LEGACY\u0000${row.orderId}`, {source:'LEGACY_ACCOUNT',resources:read.display.facts.resources,loginMethodText:read.display.facts.attributeDisplay.loginMethod?.displayName ?? null,termDays:read.historicalQuote.termDays});
+  }
+  return facts;
+}
 
 export async function listUserOrders(
   client: PoolClient,
@@ -913,6 +944,7 @@ export async function listUserOrders(
               to_char(o.paid_at ${TIMESTAMP_TEXT}) AS "paidAt",
               CASE WHEN o.cancelled_at IS NULL THEN NULL ELSE to_char(o.cancelled_at ${TIMESTAMP_TEXT}) END AS "cancelledAt",
               o.cancel_reason AS "cancelReason",
+              o.listing_version_id AS "versionId",o.content_hash AS "contentHash",o.term_seconds::text AS "termSeconds",
               (o.status = 'PENDING_PAYMENT' AND o.hold_until <= clock_timestamp()) AS "expiredAwaitingCancel"
          FROM zzsh_order.rental_order o
          LEFT JOIN zzsh_supply.rental_account a ON a.id = o.account_id
@@ -924,7 +956,8 @@ export async function listUserOrders(
     )
   ).rows;
   const items = rows.slice(0, filter.limit);
-  const counterparties = await readDirectoryUserSummaries(client, items.map(row => row.counterpartyUserId), viewer.permissions);
+  const counterparties = await readDirectoryUserSummaries(client, items.map(row => row.counterpartyUserId), viewer.permissions, viewer);
+  const accountFacts = await readOrderAccountFacts(client, viewer, items.map(row => ({origin:'NATIVE',orderId:row.id,accountId:row.accountId,versionId:row.versionId,contentHash:row.contentHash})));
   const hasMore = rows.length > filter.limit;
   const last = items.at(-1);
   const toYuan = (cents: string) => {
@@ -941,6 +974,8 @@ export async function listUserOrders(
       role: row.role,
       ...(viewer.resourceRead ? { accountId: row.accountId, accountDisplayNo: row.accountDisplayNo } : {}),
       title: row.title,
+      orderFacts: {termSeconds: row.termSeconds ?? null, resources: []},
+      ...(accountFacts.has(`NATIVE\u0000${row.id}`) ? {accountFacts: accountFacts.get(`NATIVE\u0000${row.id}`)!} : {}),
       gameId: row.gameId,
       counterpartyName: row.counterpartyName,
       counterpartyUserId: row.counterpartyUserId,
@@ -975,7 +1010,7 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
   const time='$'+values.push(cursor?.createdAt??null),id='$'+values.push(cursor?.id??null),limit='$'+values.push(filter.limit+1);
   where.push(`(${time}::timestamptz IS NULL OR COALESCE(x.created_at,'0001-01-01'::timestamptz)<${time}::timestamptz OR (COALESCE(x.created_at,'0001-01-01'::timestamptz)=${time}::timestamptz AND x.id<${id}))`);
   const continuationReady=await legacyContinuationReady(client);
-  const rows=(await client.query(`WITH all_orders AS(${orderReadKeyRelation(continuationReady)}) SELECT x.origin,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
+  const rows=(await client.query(`WITH all_orders AS(${orderReadKeyRelation(continuationReady,{participantUserId:'$1'})}) SELECT x.origin,x.id,CASE WHEN x.renter_user_id=$1 THEN 'renter' ELSE 'owner' END AS role,to_char(COALESCE(x.created_at,'0001-01-01'::timestamptz) ${TIMESTAMP_TEXT}) AS "sortAt" FROM all_orders x WHERE ${where.join(' AND ')} ORDER BY x.created_at DESC NULLS LAST,x.id DESC LIMIT ${limit}`,values)).rows;
   const items=rows.slice(0,filter.limit),last=items.at(-1);
   const recordsByKey=new Map<string,Record<string,unknown>>();
   if(items.length){
@@ -988,18 +1023,29 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
       const record=recordsByKey.get(`${row.origin}\u0000${row.id}`);
       if(!record)throw notFound();
       const order=projectAdminReadOrder(row.origin,record,{adminId:viewer.adminId,isBoss:viewer.isBoss,internalQuote:false,authorizationKey:viewer.authorizationKey??''});
+      const raw=record.source_snapshot as Record<string, unknown> | undefined;
+      const resources=row.origin==='LEGACY'?legacyUserOrderResources({
+        expendHaff:raw?.expend_haff as string | null,awmBulletNum:raw?.awm_bullet_num as string | null,level6BulletNum:raw?.level6_bullet_num as string | null,
+        level6HelmetNum:raw?.level6_helmet_num as string | null,level6ArmorNum:raw?.level6_armor_num as string | null,topInsureCardNum:raw?.top_insure_card_num as string | null,
+        barrettBulletNum:raw?.barrett_bullet_num as string | null,coffeeNum:raw?.coffee_num as string | null,
+      }):[];
       return {orderId:order.id,displayNo:order.displayNo,status:order.status,role:row.role,
         ...(viewer.resourceRead?{accountId:order.accountId,accountDisplayNo:order.accountDisplayNo}:{}),
         title:order.title,gameId:order.gameId,counterpartyName:row.role==='renter'?order.ownerName:order.renterName,
+        orderFacts:{termSeconds:row.origin==='NATIVE'?order.termSeconds??null:null,resources},
         counterpartyUserId:row.role==='renter'?order.ownerUserId:order.renterUserId,
         amounts:order.amounts,
         createdAt:order.createdAt,paidAt:order.paidAt,cancelledAt:order.cancelledAt,cancelReason:order.cancelReason,
         holdUntil:order.holdUntil,expiredAwaitingCancel:order.expiredAwaitingCancel,
         payment:order.payment,source:order.source};
     });
-  const counterparties=await readDirectoryUserSummaries(client,projected.flatMap(row=>typeof row.counterpartyUserId==='string'?[row.counterpartyUserId]:[]),viewer.permissions);
+  const counterparties=await readDirectoryUserSummaries(client,projected.flatMap(row=>typeof row.counterpartyUserId==='string'?[row.counterpartyUserId]:[]),viewer.permissions,viewer);
+  const accountFacts=await readOrderAccountFacts(client,viewer,items.map(row=>{
+    const record=recordsByKey.get(`${row.origin}\u0000${row.id}`)!;
+    return {origin:row.origin as 'NATIVE'|'LEGACY',orderId:row.id,accountId:String(record.account_id),versionId:row.origin==='NATIVE'?record.listing_version_id as string:null,contentHash:row.origin==='NATIVE'?record.content_hash as string:null};
+  }));
   return {
-    items:projected.map(row=>({...row,...(counterparties.has(row.counterpartyUserId)?{counterpartySummary:counterparties.get(row.counterpartyUserId)!}:{})})),
+    items:projected.map((row,index)=>({...row,...(counterparties.has(row.counterpartyUserId)?{counterpartySummary:counterparties.get(row.counterpartyUserId)!}:{}),...(accountFacts.has(`${items[index]!.origin}\u0000${row.orderId}`)?{accountFacts:accountFacts.get(`${items[index]!.origin}\u0000${row.orderId}`)!}:{})})),
     nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit,
   };
 }

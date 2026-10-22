@@ -37,6 +37,8 @@ export function receiptEnvelopeIssue(result: RecoveryResult, bound: { key: strin
 
   const status = typeof receipt.status === "string" ? receipt.status.trim() : "";
   switch (bound.operation) {
+    case "approval.request.create":
+      return status === "PENDING" ? null : "创建回执缺少待审批状态";
     case "approval.request.decide": {
       // 决定命令的返回是 APPROVED / REJECTED；PENDING 或未知值都不是终态。
       if (status !== "APPROVED" && status !== "REJECTED") return "决定回执不是已生效的批准或驳回终态";
@@ -144,7 +146,7 @@ export type BusinessView = {
   };
   pendingConditionCodes?: string[];
   /** 会员定价与成本口径引用；仅在持有 membership.growth.read.detail 时返回。 */
-  pricingReference?: { mode: string | null; priceVersionId: string | null; costBasisRef: string | null; schema: string | null };
+  pricingReference?: { mode: string | null; priceVersionId: string | null; costBasisRef: string | null; schema: string | null; payableRatio?: string | null; payloadSource?: string };
   costBasis?: { priceVersionId: string | null; ruleReleaseId: string | null };
 };
 
@@ -179,18 +181,25 @@ export type AuditEvent = {
 };
 
 export type RequestDetail = RequestSummary & {
+  entitlementAmendment?: { expectedPayloadHash: string; editablePayload: EntitlementAmendmentPayload } | null;
   operation: {
     code: string; triggerCondition: string; payloadVersion: number; payloadHash: string;
     executionMode?: string; payload?: Record<string, unknown>;
   };
   template: { id: string; version: number };
-  decision: { decision: string; reason: string | null; approver: Person; createdAt: string | null } | null;
+  decision: { decision: string; reason: string | null; approver: Person; createdAt: string | null; requestPayloadHash?: string; finalPayloadHash?: string | null; approvedPayloadHash?: string } | null;
   execution: { status: string; resultCode: string; resultDetail: string | null; executor: Person; createdAt: string | null; completedAt: string | null } | null;
   candidates: Candidate[];
   history: AuditEvent[];
   supersedesRequestId: string | null;
   supersededByRequestId: string | null;
 };
+
+export type EntitlementAmendmentPayload = Record<string, unknown> & {
+  startsAtUtc: string; endsAtUtc: string; depositWaived: boolean; reason: string;
+  pricing: Record<string, unknown> & { payableRatio: string };
+};
+export type ApprovalDecisionAmendment = { expectedPayloadHash: string; finalPayload: EntitlementAmendmentPayload };
 
 export type OperationTrigger = {
   triggerCondition: string; templateVersion: number;

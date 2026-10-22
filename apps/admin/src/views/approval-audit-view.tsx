@@ -866,7 +866,7 @@ export function ApprovalAuditView({
     setConfirm({ kind: "template" });
   };
 
-  const decide = (decision: "APPROVE" | "REJECT", reason: string) => {
+  const decide = (decision: "APPROVE" | "REJECT", reason: string, amendment?: import("./approval/contract").ApprovalDecisionAmendment) => {
     const current = detail;
     if (!current) return;
     const successMessage = decision === "APPROVE"
@@ -874,7 +874,7 @@ export function ApprovalAuditView({
       : "已驳回；原申请关闭且不会复活，如需再次办理请由来源业务重新发起。";
     void submitWrite(makeWriteIntent(
       "/security/approvals/requests/decision",
-      { requestId: current.requestId, decision, ...(reason ? { reason } : {}) },
+      { requestId: current.requestId, decision, ...(reason ? { reason } : {}), ...(decision === "APPROVE" && amendment ? amendment : {}) },
       successMessage,
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
     ));

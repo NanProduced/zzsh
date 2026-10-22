@@ -228,7 +228,7 @@ export function AccountGrowthHeader({
                 <div className="account-entitlement-info">
                   <span className="account-entitlement-title">{activeEntitlement.label}</span>
                   <span className="account-entitlement-meta">
-                    {formatScopeName(activeEntitlement.scope)} · 有效至 {formatBeijingDate(activeEntitlement.endsAt)}
+                    {formatScopeName(activeEntitlement.scope, activeEntitlement.gameId, activeEntitlement.gameName)} · 有效至 {formatBeijingDate(activeEntitlement.endsAt)}
                   </span>
                 </div>
               </div>

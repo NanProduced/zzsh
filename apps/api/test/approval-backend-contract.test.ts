@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { Pool, PoolClient } from "pg";
 
-import { handleAdminApprovalRoute, evaluateApprovalActions, assertApprovalAction } from "../src/auth/approval-audit";
+import { handleAdminApprovalRoute, evaluateApprovalActions, assertApprovalAction, hashApprovalPayload } from "../src/auth/approval-audit";
 import { projectApprovalBusinesses, approvalRegistration, APPROVAL_EXECUTION_MODE } from "../src/auth/approval-business";
 
 type Status = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED" | "EXPIRED" | "EXECUTED" | "EXECUTION_FAILED";
@@ -54,6 +54,7 @@ type Fixture = {
   settlementVersions?: Record<string, unknown>[];
   settlementDecisions?: Record<string, unknown>[];
   executions?: { requestId: string; status: string; resultCode: string; resultDetail: string | null }[];
+  decisions?: { requestId: string; decision: string; reason?: string | null; createdAt?: string; approverId: string; finalPayload?: Record<string, unknown> | null; finalPayloadHash?: string | null }[];
 };
 
 type Outcome = { status: number; body: Record<string, any>; code: string | null; message: string; details: { path: string; code: string }[] };
@@ -95,6 +96,7 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
     requestCandidates: [...(fixture.requestCandidates ?? [])],
     idempotency: new Map(idempotencySeed),
     decisions: 0,
+    decisionRows: new Map((fixture.decisions ?? (fixture.requests ?? []).filter((row) => row.decidedBy && ["APPROVED", "EXECUTED", "EXECUTION_FAILED"].includes(row.status)).map((row) => ({ requestId: row.id, decision: "APPROVED", reason: null, createdAt: row.decidedAt ?? row.createdAt, approverId: row.decidedBy!, finalPayload: null, finalPayloadHash: null }))).map((row) => [row.requestId, { ...row, reason: row.reason ?? null, createdAt: row.createdAt ?? new Date().toISOString(), finalPayload: row.finalPayload ?? null, finalPayloadHash: row.finalPayloadHash ?? null }])),
     executions: 0,
     audits: 0,
     created: 0,
@@ -252,6 +254,7 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
     }
     if (text.includes('INSERT INTO "zzsh_iam"."approval_decision"')) {
       state.decisions += 1;
+      state.decisionRows.set(String(values[1]), { requestId: String(values[1]), decision: String(values[3]), reason: values[4] as string | null, createdAt: new Date().toISOString(), approverId: String(values[2]), finalPayload: values[5] == null ? null : JSON.parse(String(values[5])), finalPayloadHash: values[6] == null ? null : String(values[6]) });
       const row = state.requests.get(String(values[1]));
       if (row) { row.status = String(values[3]) as Status; row.decidedBy = String(values[2]); }
       return { rows: [], rowCount: 1 };
@@ -270,7 +273,11 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
       if (row) row.status = (literal ? literal[1] : String(values[0])) as Status;
       return { rows: [], rowCount: row ? 1 : 0 };
     }
-    if (text.includes('FROM "zzsh_iam"."approval_decision"')) return { rows: [], rowCount: 0 };
+    if (text.includes('FROM "zzsh_iam"."approval_decision"')) {
+      const ids = Array.isArray(values[0]) ? values[0] as string[] : [String(values[0])];
+      const rows = [...state.decisionRows.values()].filter((row) => ids.includes(row.requestId));
+      return { rows, rowCount: rows.length };
+    }
     if (text.includes('FROM "zzsh_iam"."approval_execution"')) {
       const ids = (values[0] as string[]) ?? [];
       const rows = (fixture.executions ?? []).filter((row) => ids.includes(row.requestId));
@@ -287,6 +294,11 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
       const rows = (fixture.policies ?? []).filter((row) => (values[0] as string[]).includes(String(row.id)) || (values[0] as string[]).includes(String(row.approvalRequestId)));
       return { rows, rowCount: rows.length };
     }
+    if (text.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")) {
+      const rows = (fixture.policies ?? []).filter((row) => row.id === values[0]); return { rows, rowCount: rows.length };
+    }
+    if (text.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release_1", priceVersionId: "price_1", status: "SEALED", mode: "SPREAD", haffRule: { schema: "haff-ratio-v1" } }], rowCount: 1 };
+    if (text.includes("FROM zzsh_supply.price_line")) return { rows: [], rowCount: 0 };
     if (text.includes('FROM "zzsh_order"."settlement_version"')) {
       const rows = (fixture.settlementVersions ?? []).filter((row) => (values[0] as string[]).includes(String(row.approvalRequestId)));
       return { rows, rowCount: rows.length };
@@ -336,7 +348,7 @@ async function call(view: ReturnType<typeof harness>, actorId: string, method: s
       {
         pool: view.pool,
         testOperationsEnabled: true,
-        approvalOperationExecutor: executor ?? (async () => ({ resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED", resultDetail: "entitlement_created_1" })),
+        approvalOperationExecutor: executor ? async (_client: PoolClient, input: { operationCode: string }) => executor(input) : async () => ({ resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED", resultDetail: "entitlement_created_1" }),
       } as never,
       async () => ({ userId: actorId, sessionId: "session_1" }) as never,
     );
@@ -363,6 +375,104 @@ function baseFixture(extra: Partial<Fixture> = {}): Fixture {
     ...extra,
   };
 }
+
+function entitlementAmendmentFixture() {
+  const pricing = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "ordinary", priceVersionId: "price_1", payableRatio: "0.95", costBasisRef: "cost_ref_1" };
+  const payload = { userId: "member_1", gameId: "game_1", kind: "FRIEND", scopeKey: "game:delta", policyId: "policy_1", startsAtUtc: new Date(Date.now() + 60_000).toISOString(), endsAtUtc: new Date(Date.now() + 86_400_000).toISOString(), pricing, depositWaived: false, reason: "客户专属礼遇" };
+  const row = requestFixture({ operationCode: "membership.entitlement.grant", operationPayload: payload, operationPayloadHash: hashApprovalPayload(payload).hash });
+  const range = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT_RANGE", mode: "ordinary", priceVersionId: "price_1", minPayableRatio: "0.7", maxPayableRatio: "1", costBasisRef: "cost_ref_1" };
+  const policyPayload = { schema: "membership-growth-v1", version: "policy-v1", status: "APPROVED", effectiveAt: "2026-01-01T00:00:00Z", sourceRef: "cost_ref_1", entitlementCaps: { FRIEND: "GOLD", PRESTIGE: "DIAMOND" }, entitlementRanges: { FRIEND: { byMode: { ordinary: range } }, PRESTIGE: { byMode: { ordinary: range } } }, tiers: Object.fromEntries(["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map((tier) => [tier, { tier, tenantDeposit: "ACCOUNT_BASE", pricing: { ordinary: pricing }, entitlementCap: { status: "NOT_PRICED", reason: "Independent ranges" } }])) };
+  const fixture = baseFixture({ requests: [row], games: [{ id: "game_1", name: "测试游戏" }], policies: [{ id: "policy_1", version: 1, policyPayload, sourceRef: "cost_ref_1", ruleReleaseId: "release_1", priceVersionId: "price_1" }] });
+  const finalPayload = { ...payload, pricing: { ...pricing, payableRatio: "0.8" }, depositWaived: true, reason: "运营修改折扣后批准" };
+  return { fixture, row, finalPayload, body: { requestId: row.id, decision: "APPROVE", expectedPayloadHash: row.operationPayloadHash, finalPayload } };
+}
+
+test("amended entitlement approval persists a separate hash and execution consumes that exact decision once", async () => {
+  const { fixture, row, finalPayload, body } = entitlementAmendmentFixture();
+  const view = harness(fixture), original = JSON.stringify(row.operationPayload), finalHash = hashApprovalPayload(finalPayload).hash;
+  const first = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "idem_amended_1" });
+  assert.equal(first.status, 200, JSON.stringify(first));
+  assert.equal(first.body.finalPayloadHash, finalHash);
+  assert.equal(first.body.requestPayloadHash, row.operationPayloadHash);
+  assert.equal(JSON.stringify(view.state.requests.get(row.id)?.operationPayload), original);
+  assert.equal(view.state.decisionRows.get(row.id)?.finalPayloadHash, finalHash);
+  const replay = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "idem_amended_1" });
+  assert.equal(replay.body.idempotencyReplay, true);
+  assert.equal(view.state.decisions, 1);
+  const conflict = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", { ...body, finalPayload: { ...finalPayload, reason: "同键不得替换已批准内容" } }, { "idempotency-key": "idem_amended_1" });
+  assert.equal(conflict.status, 409);
+  const recover = await call(view, CANDIDATE.id, "GET", `/approvals/recovery?operation=approval.request.decide&key=idem_amended_1&requestId=${row.id}`);
+  assert.equal(recover.status, 200, JSON.stringify(recover));
+  assert.equal(recover.body.receipt.finalPayloadHash, finalHash);
+  let effective: any;
+  const execute = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: row.id }, { "idempotency-key": "idem_execute_final" }, async (input) => { effective = input; return { resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED" }; });
+  assert.equal(execute.status, 200, JSON.stringify(execute));
+  assert.deepEqual(effective.operationPayload, hashApprovalPayload(finalPayload).value);
+  assert.equal(effective.operationPayloadHash, finalHash);
+  const executeReplay = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: row.id }, { "idempotency-key": "idem_execute_final" });
+  assert.equal(executeReplay.body.idempotencyReplay, true);
+  assert.equal(view.state.executions, 1);
+  const detail = await call(view, CANDIDATE.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
+  assert.equal(detail.status, 200, JSON.stringify(detail));
+  assert.equal(detail.body.operation.payloadHash, row.operationPayloadHash);
+  assert.equal(detail.body.business.summary.payloadSource, "APPROVED_FINAL");
+  assert.equal(detail.body.business.summary.pricingSummary.payableRatio, "0.8");
+  assert.equal(detail.body.business.summary.originalRequest.pricingSummary.payableRatio, "0.95");
+  assert.equal(detail.body.entitlementAmendment, null);
+});
+
+test("only a currently eligible approver receives the limited entitlement amendment projection", async () => {
+  const { fixture, row } = entitlementAmendmentFixture();
+  const view = harness(fixture);
+  const detail = await call(view, CANDIDATE.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
+  assert.equal(detail.status, 200, JSON.stringify(detail));
+  assert.equal(detail.body.entitlementAmendment.expectedPayloadHash, row.operationPayloadHash);
+  assert.equal(detail.body.entitlementAmendment.editablePayload.pricing.costBasisRef, "cost_ref_1");
+  assert.equal(detail.body.entitlementAmendment.editablePayload.userId, "member_1");
+  assert.doesNotMatch(JSON.stringify(detail.body.entitlementAmendment), /ownerUnitAmount|baseBySafeBox|policyPayload/);
+  const own = await call(view, REQUESTER.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
+  assert.equal(own.body.entitlementAmendment, null);
+  const wrongScope = harness({ ...fixture, actors: [BOSS, REQUESTER, { ...CANDIDATE, gameScope: { mode: "SELECTED_GAMES", gameIds: ["other_game"] } }] });
+  const scoped = await call(wrongScope, CANDIDATE.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
+  assert.equal(scoped.body.entitlementAmendment, null);
+  assert.equal(scoped.body.business.summaryAvailable, false);
+});
+
+test("amended approval rejects stale hashes, frozen target changes, unsupported operations and oversized bodies before decision write", async () => {
+  for (const variant of ["hash", "userId", "gameId", "kind", "policyId", "scopeKey", "target", "price", "cost", "mode", "ratio", "reject", "missingHash", "unsupported", "oversized"] as const) {
+    const { fixture, row, body } = entitlementAmendmentFixture();
+    const input: any = structuredClone(body);
+    let expected = 409;
+    if (variant === "hash") input.expectedPayloadHash = "a".repeat(64);
+    else if (["userId", "gameId", "kind", "policyId", "scopeKey"].includes(variant)) input.finalPayload[variant] = "changed_target";
+    else if (variant === "target") input.finalPayload.replaceEntitlementId = "ent-other";
+    else if (variant === "price") input.finalPayload.pricing.priceVersionId = "price_other";
+    else if (variant === "cost") input.finalPayload.pricing.costBasisRef = "cost_other";
+    else if (variant === "mode") input.finalPayload.pricing.mode = "custom";
+    else if (variant === "ratio") input.finalPayload.pricing.payableRatio = "0.6";
+    else if (variant === "reject") { input.decision = "REJECT"; input.reason = "拒绝本次申请"; expected = 400; }
+    else if (variant === "missingHash") { delete input.expectedPayloadHash; expected = 400; }
+    else if (variant === "unsupported") { fixture.requests![0] = { ...row, operationCode: "approval.test.execute" }; expected = 400; }
+    else if (variant === "oversized") { for (let i = 0; i < 8; i++) input.finalPayload[`large_${i}`] = "x".repeat(1500); expected = 400; }
+    const view = harness(fixture);
+    const result = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", input, { "idempotency-key": `idem_amend_${variant}` });
+    assert.equal(result.status, expected, `${variant}: ${JSON.stringify(result)}`);
+    assert.equal(view.state.decisions, 0, variant);
+  }
+});
+
+test("execute fails closed on a corrupt or missing decision while legacy null overrides keep the original snapshot", async () => {
+  for (const variant of ["hash", "partial", "actor", "missing", "legacy"] as const) {
+    const { fixture, row, finalPayload } = entitlementAmendmentFixture();
+    fixture.requests = [{ ...row, status: "APPROVED", decidedBy: CANDIDATE.id }];
+    const finalHash = hashApprovalPayload(finalPayload).hash;
+    fixture.decisions = variant === "missing" ? [] : [{ requestId: row.id, decision: "APPROVED", approverId: variant === "actor" ? BOSS.id : CANDIDATE.id, finalPayload: variant === "partial" || variant === "legacy" ? null : finalPayload, finalPayloadHash: variant === "legacy" ? null : variant === "hash" ? "a".repeat(64) : finalHash }];
+    const view = harness(fixture); let called = 0;
+    const result = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: row.id }, { "idempotency-key": `idem_corrupt_${variant}` }, async (input: any) => { called += 1; assert.equal(input.operationPayloadHash, row.operationPayloadHash); assert.deepEqual(input.operationPayload, row.operationPayload); return { resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED" }; });
+    assert.equal(result.status, variant === "legacy" ? 200 : 409, JSON.stringify(result));
+    assert.equal(called, variant === "legacy" ? 1 : 0);
+  }
+});
 
 test("approval writes reject a missing or malformed Idempotency-Key before touching state", async () => {
   const view = harness(baseFixture({ requests: [requestFixture({ status: "APPROVED", decidedBy: BOSS.id })] }));

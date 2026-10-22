@@ -49,6 +49,9 @@ export function OwnerHoverCard({
           userId={ownerId}
           image={summary?.image}
           maskedPhone={summary?.maskedPhone}
+          membershipSummary={summary?.membershipSummary}
+          creditSummary={summary?.creditSummary}
+          riskFlag={summary?.riskFlag}
           canOpen={canOpen}
           onOpen={onOpenOwner}
           openLabel="查看号主资料"

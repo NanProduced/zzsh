@@ -4,6 +4,17 @@ import type {PoolClient} from "pg";
 import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
+test('participant restriction combines with origin-bound page keys before either source expands',()=>{
+ for(const ready of [false,true]){
+  const restrict={nativeIds:'$4',legacyIds:'$5',participantUserId:'$1'};
+  for(const relation of [orderReadRelation(ready,true,restrict),orderReadKeyRelation(ready,restrict)]){
+   assert.match(relation,/WHERE o\.id=ANY\(\$4::text\[\]\) AND \(o\.owner_user_id=\$1 OR o\.renter_user_id=\$1\)/);
+   assert.match(relation,/WHERE l\.id=ANY\(\$5::text\[\]\) AND \(l\.owner_user_id=\$1 OR l\.renter_user_id=\$1\)/);
+   assert.ok(relation.includes(LEGACY_ORDER_STATUS_SQL));
+   assert.doesNotMatch(relation,/\bDISTINCT\b/,'a self-associated row remains one row; no second participant UNION');
+  }
+ }
+});
 test('current-order summaries keep source/status joins and skip full volatile JSON records',()=>{
  for(const ready of [false,true]){
   const full=orderReadRelation(ready),summary=orderReadRelation(ready,true);

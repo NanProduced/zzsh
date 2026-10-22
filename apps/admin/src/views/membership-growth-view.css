@@ -1,6 +1,69 @@
-.membership-admin-view{--ma-text:var(--foreground,#17202e);--ma-muted:var(--muted-foreground,#64748b);--ma-border:var(--border,#d9e0e7);--ma-surface:var(--card,#fff);--ma-raised:var(--surface-raised,#f8fafc);--ma-accent:var(--primary,#b7791f);display:grid;gap:18px;min-width:0;color:var(--ma-text)}.membership-admin-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}.membership-admin-kicker{margin:0 0 6px;color:var(--ma-accent);font-size:11px;font-weight:700;letter-spacing:.08em}.membership-admin-header h2{margin:0;font-size:24px;line-height:1.3;letter-spacing:-.02em}.membership-admin-header p:not(.membership-admin-kicker){max-width:68ch;margin:7px 0 0;color:var(--ma-muted);font-size:13px;line-height:1.7}.membership-admin-status,.membership-admin-fixture-label{display:inline-flex;align-items:center;min-height:26px;padding:4px 9px;border:1px solid var(--ma-border);border-radius:999px;color:var(--ma-muted);font-size:11px;white-space:nowrap}.membership-admin-status--draft{color:#a16207;border-color:#facc15}.membership-admin-status--approved_pending_execution,.membership-admin-status--requested{color:#1d4ed8;border-color:#93c5fd}.membership-admin-status--applied{color:#047857;border-color:#6ee7b7}.membership-admin-status--rejected,.membership-admin-status--unknown{color:#b91c1c;border-color:#fca5a5}.membership-admin-fixture-label{color:#7c3aed;border-color:#c4b5fd;background:#faf5ff;font-weight:700}.membership-admin-section{display:grid;gap:15px;min-width:0;padding:20px;border:1px solid var(--ma-border);border-radius:12px;background:var(--ma-surface)}.membership-admin-section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.membership-admin-section-heading h3{margin:0;font-size:15px;line-height:1.4}.membership-admin-section-heading p{max-width:68ch;margin:5px 0 0;color:var(--ma-muted);font-size:12px;line-height:1.65}.membership-admin-button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:7px 12px;border:1px solid var(--ma-accent);border-radius:8px;color:#fff;background:var(--ma-accent);font:inherit;font-size:12px;font-weight:700;cursor:pointer}.membership-admin-button:hover{filter:brightness(.96)}.membership-admin-button:focus-visible,.membership-admin-view input:focus-visible,.membership-admin-view select:focus-visible,.membership-admin-view textarea:focus-visible{outline:2px solid var(--ma-accent);outline-offset:2px}.membership-admin-button--danger{color:#b91c1c;border-color:#fca5a5;background:transparent}.membership-admin-table-wrap{overflow:auto;border:1px solid var(--ma-border);border-radius:9px}.membership-admin-table{width:100%;min-width:760px;border-collapse:collapse;font-size:12px}.membership-admin-table th,.membership-admin-table td{padding:11px 12px;border-bottom:1px solid var(--ma-border);text-align:left;vertical-align:top}.membership-admin-table thead th{color:var(--ma-muted);font-size:11px;font-weight:700;background:var(--ma-raised)}.membership-admin-table tbody tr:last-child th,.membership-admin-table tbody tr:last-child td{border-bottom:0}.membership-admin-table tbody th{font-weight:700}.membership-admin-change-list{display:grid;gap:0}.membership-admin-change-list>div{display:grid;grid-template-columns:minmax(120px,1fr) minmax(160px,2fr) auto;gap:12px;align-items:center;padding:10px 0;border-top:1px solid var(--ma-border);font-size:12px}.membership-admin-change-list strong{color:#047857;font-size:11px}.membership-admin-change-list [data-risk=REVIEW_REQUIRED] strong{color:#b45309}.membership-admin-muted{margin:0;color:var(--ma-muted);font-size:12px}.membership-admin-two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.membership-admin-preview{display:grid;gap:12px;padding:16px;border:1px solid var(--ma-border);border-radius:10px;background:var(--ma-raised)}.membership-admin-preview>strong{font-size:28px;letter-spacing:-.04em}.membership-admin-preview dl{display:grid;gap:0;margin:0}.membership-admin-preview dl>div,.membership-admin-facts>div{display:flex;justify-content:space-between;gap:14px;padding:9px 0;border-top:1px solid var(--ma-border);font-size:12px}.membership-admin-preview dt,.membership-admin-facts dt{color:var(--ma-muted)}.membership-admin-preview dd,.membership-admin-facts dd{margin:0;font-weight:700;text-align:right;overflow-wrap:anywhere}.membership-admin-preview p{margin:0;color:var(--ma-muted);font-size:12px;line-height:1.6}.membership-admin-facts{display:grid;margin:0}.membership-admin-empty{display:grid;gap:5px;padding:20px 0;color:var(--ma-muted);font-size:12px}.membership-admin-empty strong{color:var(--ma-text);font-size:14px}.membership-admin-evidence{display:grid;gap:5px;margin:0;padding-left:18px;color:var(--ma-muted);font-size:11px;line-height:1.55}.membership-admin-form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.membership-admin-form-grid label{display:grid;gap:6px;color:var(--ma-muted);font-size:11px}.membership-admin-form-grid input,.membership-admin-form-grid select,.membership-admin-form-grid textarea{box-sizing:border-box;width:100%;min-height:36px;padding:7px 9px;border:1px solid var(--ma-border);border-radius:8px;color:var(--ma-text);background:var(--ma-raised);font:inherit;font-size:12px}.membership-admin-form-grid textarea{min-height:78px;resize:vertical}.membership-admin-wide{grid-column:1 / -1}.membership-admin-checkbox{display:flex!important;grid-template-columns:auto 1fr;align-items:center;align-content:center;grid-auto-flow:column;justify-content:start;gap:8px;min-height:36px}.membership-admin-checkbox input{width:16px}.membership-admin-action-row{display:flex;align-items:center;flex-wrap:wrap;gap:12px}.membership-admin-approval-row{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:12px;border:1px solid var(--ma-border);border-radius:9px;background:var(--ma-raised);color:var(--ma-muted);font-size:12px}.membership-admin-approval-row code{color:var(--ma-text);font-size:11px}.membership-admin-state{display:grid;gap:5px;padding:24px;border:1px solid var(--ma-border);border-radius:12px;background:var(--ma-surface)}.membership-admin-state strong{font-size:15px}.membership-admin-state p{margin:0;color:var(--ma-muted);font-size:12px}
-@media (max-width:900px){.membership-admin-two-col{grid-template-columns:1fr}.membership-admin-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media (max-width:560px){.membership-admin-header,.membership-admin-section-heading{display:grid;gap:10px}.membership-admin-header .membership-admin-status,.membership-admin-section-heading .membership-admin-status,.membership-admin-section-heading .membership-admin-fixture-label{width:max-content}.membership-admin-section{padding:16px}.membership-admin-form-grid{grid-template-columns:1fr}.membership-admin-wide{grid-column:auto}.membership-admin-change-list>div{grid-template-columns:1fr;gap:4px}.membership-admin-change-list strong{width:max-content}.membership-admin-approval-row{align-items:flex-start;flex-direction:column}}
-.membership-admin-inline-field{display:flex;align-items:center;gap:8px;color:var(--ma-muted);font-size:11px}.membership-admin-inline-field select{min-height:34px;padding:6px 8px;border:1px solid var(--ma-border);border-radius:7px;color:var(--ma-text);background:var(--ma-raised);font:inherit}.membership-admin-price-pair{display:grid;gap:5px}.membership-admin-price-pair input{width:82px;min-height:30px;padding:5px 7px;border:1px solid var(--ma-border);border-radius:6px;color:var(--ma-text);background:var(--ma-raised);font:inherit;font-size:12px}.membership-admin-form-error,.membership-admin-form-warning{margin:0;padding:10px 12px;border:1px solid var(--ma-border);border-radius:8px;font-size:12px;line-height:1.6}.membership-admin-form-error{color:#b91c1c;border-color:#fca5a5;background:#fff7f7}.membership-admin-form-warning{color:#92400e;border-color:#facc15;background:#fffbeb}.membership-admin-revoke-row{display:flex;align-items:end;gap:12px;padding-top:14px;border-top:1px solid var(--ma-border)}.membership-admin-revoke-row label{display:grid;gap:6px;flex:1;color:var(--ma-muted);font-size:11px}.membership-admin-revoke-row input{min-height:36px;padding:7px 9px;border:1px solid var(--ma-border);border-radius:8px;color:var(--ma-text);background:var(--ma-raised);font:inherit;font-size:12px}
-.membership-admin-advanced{border-top:1px solid var(--ma-border);padding-top:12px;color:var(--ma-muted);font-size:12px}.membership-admin-advanced summary{cursor:pointer;color:var(--ma-text);font-weight:600}.membership-admin-readonly-value{display:flex;align-items:center;min-height:36px;color:var(--ma-text);font-size:12px}
-.membership-admin-control{display:grid;gap:6px;color:var(--ma-muted);font-size:11px}.membership-admin-control>span{line-height:1.3}.membership-admin-select-trigger{box-sizing:border-box;width:100%;min-height:36px;background:var(--ma-raised);color:var(--ma-text);font:inherit}.membership-admin-inline-field{display:grid;align-items:stretch;min-width:112px}.membership-admin-inline-field .membership-admin-select-trigger{width:auto;min-width:112px}.membership-admin-table-select{min-width:112px;gap:4px}.membership-admin-table-select>span{display:none}.membership-admin-table-select .membership-admin-select-trigger{min-height:32px}.membership-admin-checkbox{display:flex!important;align-items:center;gap:8px;min-height:36px}.membership-admin-checkbox-control{display:inline-grid;place-items:center;width:18px;height:18px;flex:none;border:1px solid var(--ma-border);border-radius:5px;background:var(--ma-raised);color:var(--ma-accent);font-size:13px;line-height:1}.membership-admin-checkbox-control[data-checked]{border-color:var(--ma-accent);background:color-mix(in srgb,var(--ma-accent) 14%,var(--ma-raised))}.membership-admin-checkbox-control:focus-visible{outline:2px solid var(--ma-accent);outline-offset:2px}
+.membership-admin-view {
+  --ma-text: var(--foreground);
+  --ma-muted: var(--muted-foreground);
+  --ma-border: var(--border);
+  --ma-surface: var(--background);
+  --ma-raised: var(--muted);
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+  color: var(--ma-text);
+}
+.membership-admin-header,
+.membership-admin-section-heading,
+.membership-admin-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.membership-admin-header { align-items: flex-start; }
+.membership-admin-header h2 { margin: 0; font-size: 22px; line-height: 1.4; font-weight: 650; }
+.membership-admin-header p,
+.membership-admin-section-heading p { margin: 5px 0 0; max-width: 70ch; color: var(--ma-muted); font-size: 12px; line-height: 1.65; }
+.membership-admin-section { display: grid; min-width: 0; gap: 13px; padding: 4px 0 20px; border-bottom: 1px solid var(--ma-border); }
+.membership-admin-section-heading h3 { margin: 0; font-size: 14px; line-height: 1.5; font-weight: 650; }
+.membership-admin-policy-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 18px; }
+.membership-admin-inline-field { min-width: 145px; }
+.membership-admin-control { display: grid; min-width: 0; align-content: start; gap: 6px; color: var(--ma-text); font-size: 12px; }
+.membership-admin-control > span { line-height: 1.4; }
+.membership-admin-control :is(input,textarea) { font-size: 12px; }
+.membership-admin-table { min-width: 730px; font-size: 12px; }
+.membership-admin-table th { background: var(--ma-raised); font-size: 11px; }
+.membership-admin-table :is(th,td) { padding: 10px 12px; }
+.membership-admin-table td { vertical-align: middle; }
+.membership-admin-table input { max-width: 230px; font-size: 12px; }
+.membership-admin-table td:nth-child(4) input { min-width: 115px; }
+.membership-admin-table-select { min-width: 125px; }
+.membership-admin-table-select > span { display: none; }
+.membership-admin-select-trigger { width: 100%; min-height: 32px; font-size: 12px; }
+.membership-admin-form-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px 14px; }
+.membership-admin-wide { grid-column: 1 / -1; }
+.membership-admin-date-time { display: flex; align-items: center; min-width: 0; gap: 8px; }
+.membership-admin-date-time button { justify-content: flex-start; flex: 1; min-width: 135px; font-size: 12px; }
+.membership-admin-date-time input { width: 108px; flex: none; color-scheme: light; }
+.dark .membership-admin-date-time input { color-scheme: dark; }
+.membership-admin-checkbox { display: flex; min-height: 32px; align-items: center; gap: 8px; cursor: pointer; }
+.membership-admin-range-hint { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--ma-muted); font-size: 12px; }
+.membership-admin-muted { margin: 0; color: var(--ma-muted); font-size: 12px; line-height: 1.6; }
+.membership-admin-action-row { justify-content: flex-start; flex-wrap: wrap; }
+.membership-admin-form-error,
+.membership-admin-form-warning { margin: 0; padding: 10px 12px; border: 1px solid var(--ma-border); border-radius: 8px; color: var(--ma-text); font-size: 12px; line-height: 1.65; }
+.membership-admin-form-error { border-color: color-mix(in oklch,var(--destructive) 50%,var(--ma-border)); background: color-mix(in oklch,var(--destructive) 5%,var(--ma-surface)); }
+.membership-admin-form-warning { background: var(--ma-raised); }
+.membership-admin-state { display: grid; gap: 12px; padding: 20px; border: 1px solid var(--ma-border); border-radius: 10px; }
+.membership-admin-state p { margin: 0; font-size: 12px; color: var(--ma-muted); }
+.membership-admin-change-list { display: grid; }
+.membership-admin-change-list > div { display: grid; grid-template-columns: minmax(110px,1fr) minmax(150px,2fr) auto; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--ma-border); font-size: 12px; }
+.membership-entitlement-form { gap: 16px; container: membership-entitlement / inline-size; }
+.membership-entitlement-form .membership-admin-date-time button { min-width: 0; }
+@container membership-entitlement (max-width:820px) { .membership-admin-form-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@container membership-entitlement (max-width:540px) { .membership-admin-form-grid { grid-template-columns: minmax(0,1fr); } }
+@media (max-width:1000px) { .membership-admin-form-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (max-width:560px) {
+  .membership-admin-header,.membership-admin-section-heading { align-items: flex-start; flex-direction: column; }
+  .membership-admin-form-grid { grid-template-columns: minmax(0,1fr); }
+  .membership-admin-policy-toolbar { display: grid; grid-template-columns: minmax(0,1fr); }
+  .membership-admin-date-time button { min-width: 0; }
+  .membership-admin-change-list > div { grid-template-columns: minmax(0,1fr); gap: 4px; }
+}

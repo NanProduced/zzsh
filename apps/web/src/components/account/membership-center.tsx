@@ -7,6 +7,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { AlertTriangle, ArrowRight, ChevronLeft, ChevronRight, Clock3, Crown, Lock, Percent, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import type { EntitlementKind, EntitlementState, GrowthTier, MembershipGrowthData, MembershipGrowthViewState, MembershipPointEvent } from "@/lib/membership-growth-client";
 import { readMyMembershipGrowthConsumption, MembershipGrowthRequestError, type GrowthConsumptionScope, type MembershipGrowthConsumption } from "../../lib/membership-growth-client";
+import { rentalModeLabel } from "../../lib/publish-derive";
 import { Progress } from "../ui/progress";
 import "./membership-center.css";
 
@@ -103,8 +104,9 @@ function tierClass(tier: GrowthTier): string {
   return `tier-${tier.toLowerCase().replace("_", "-")}`;
 }
 
-export function formatScopeName(scope: string): string {
+export function formatScopeName(scope: string, gameId?: string | null, gameName?: string | null): string {
   if (scope === "ALL_PLATFORM") return "全平台适用";
+  if (scope.startsWith("game:")) return gameId && gameName && scope === `game:${gameId}` ? `${gameName}租赁` : "范围待确认";
   if (scope === "DELTA_ACCOUNT_RENTAL" || scope.includes("DELTA")) return "三角洲租赁";
   return "范围待确认";
 }
@@ -490,6 +492,15 @@ function benefitItems(selected: TrackTier, actual: TrackTier | null, data: Membe
   };
 }
 
+function entitlementDiscountLabel(summary: MembershipGrowthData["entitlements"][number]["pricingSummary"]): string {
+  if (summary?.knowledge === "LEGACY") return "旧版计价合同";
+  if (summary?.knowledge !== "KNOWN") return "折扣待核";
+  const [integer = "0", fraction = ""] = summary.payableRatio.split(".");
+  const scaled = BigInt(`${integer}${fraction.padEnd(8, "0")}`);
+  const decimal = (scaled % 10_000_000n).toString().padStart(7, "0").replace(/0+$/, "");
+  return `${scaled / 10_000_000n}${decimal ? `.${decimal}` : ""}折`;
+}
+
 function EntitlementRow({ item, detailed }: { item: MembershipGrowthData["entitlements"][number]; detailed?: boolean }) {
   const period = item.state === "ACTIVE"
     ? `自 ${formatBeijingDate(item.startsAt)} · 有效至 ${formatBeijingDate(item.endsAt)}`
@@ -504,7 +515,8 @@ function EntitlementRow({ item, detailed }: { item: MembershipGrowthData["entitl
           {item.label}
           <em data-state={item.state}>{ENTITLEMENT_STATE_LABELS[item.state]}</em>
         </span>
-        <span className="mc-entitlement-meta">{formatScopeName(item.scope)} · {period}</span>
+        <span className="mc-entitlement-meta">{formatScopeName(item.scope, item.gameId, item.gameName)} · {period}</span>
+        <span className="mc-entitlement-meta">{entitlementDiscountLabel(item.pricingSummary)}{item.pricingSummary?.knowledge === "KNOWN" ? ` · ${rentalModeLabel(item.pricingSummary.mode)}` : ""} · {item.depositWaived ? "含租客免押" : "不含租客免押"}</span>
       </div>
     </div>
   );
@@ -546,9 +558,11 @@ function EntitlementSection({ data, entitlements }: { data?: MembershipGrowthDat
                     <EntitlementRow item={item} detailed />
                     <dl className="mc-dialog-facts">
                       <div><dt>状态</dt><dd>{ENTITLEMENT_STATE_LABELS[item.state]}</dd></div>
-                      <div><dt>适用范围</dt><dd>{formatScopeName(item.scope)}</dd></div>
+                      <div><dt>适用范围</dt><dd>{formatScopeName(item.scope, item.gameId, item.gameName)}</dd></div>
                       <div><dt>生效时间</dt><dd>{formatBeijingDateTime(item.startsAt)}</dd></div>
                       <div><dt>到期时间</dt><dd>{formatBeijingDateTime(item.endsAt)}</dd></div>
+                      <div><dt>租赁优惠</dt><dd>{entitlementDiscountLabel(item.pricingSummary)}</dd></div>
+                      {item.pricingSummary?.knowledge === "KNOWN" ? <div><dt>适用模式</dt><dd>{rentalModeLabel(item.pricingSummary.mode)}</dd></div> : null}
                       <div><dt>租客押金</dt><dd>{item.depositWaived ? "含租客押金减免，以生效记录为准" : "不包含租客押金减免"}</dd></div>
                     </dl>
                     <p id="mc-entitlement-dialog-note" className="mc-quiet-note">礼遇由平台人工核发，范围与期限以生效记录为准；审批通过不等于已享受。</p>

@@ -1,7 +1,13 @@
-import { Checkbox } from "@base-ui/react/checkbox";
 import { useEffect, useState } from "react";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Skeleton } from "../components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { MembershipDateTimeField, parsePayableRatio, type AdminEntitlementDraft, type AdminEntitlementRange, type AdminEntitlementRanges } from './membership-entitlement-form';
+export { parsePayableRatio, formatEntitlementDiscount, beijingInputToUtc, utcToBeijingInput, entitlementWindowError } from './membership-entitlement-form';
+export type { AdminEntitlementDraft, AdminEntitlementRange, AdminEntitlementRanges } from './membership-entitlement-form';
 import "./membership-growth-view.css";
 
 export type AdminGrowthTier = "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND";
@@ -26,12 +32,12 @@ export type AdminGrowthPolicy = {
   selectedMaterialId: string;
   tiers: Array<{ tier: AdminGrowthTier; threshold: string; tenantDeposit: "ACCOUNT_BASE" | "WAIVED"; ordinary: AdminModeContract; custom: AdminModeContract; fast: AdminModeContract; maxEntitlement: AdminEntitlementCap }>;
   changes: Array<{ label: string; before: string; after: string; risk: "LOW" | "REVIEW_REQUIRED" }>;
+  entitlementRanges?: AdminEntitlementRanges;
 };
 
 export type AdminGrowthPreview = { status: "NOT_RUN" | "LOCAL_FIXTURE" | "KNOWN" | "UNKNOWN"; totalCents?: string; priceBasis?: string; depositBasis?: string; reason?: string };
 export type AdminGrowthSubject = { subjectId: string; status: "NOT_LOADED" | "LOADED" | "UNKNOWN" | "FORBIDDEN"; userLabel?: string; tier?: string; rollingPoints?: string; lifetimePoints?: string; evidence?: string[]; reason?: string };
 /** Manual entitlement grant: discount plus an explicit expiry, no second base price table. */
-export type AdminEntitlementDraft = { kind: "FRIEND" | "PRESTIGE"; scopeKey: string; startsAtUtc: string; endsAtUtc: string; pricingMode: AdminPricingMode; priceVersionId: string; payableRatio: string; costBasisRef: string; depositWaived: boolean; reason: string };
 export type AdminApproval = { status: "NOT_REQUESTED" | "REQUESTED" | "APPROVED_PENDING_EXECUTION" | "APPLIED" | "REJECTED" | "UNKNOWN"; requestId?: string; message?: string };
 
 export type MembershipGrowthAdminState =
@@ -42,11 +48,8 @@ export type MembershipGrowthAdminState =
   | { status: "ready"; policy: AdminGrowthPolicy; preview: AdminGrowthPreview; subject: AdminGrowthSubject; entitlement: AdminEntitlementDraft; approval: AdminApproval };
 
 const TIER_LABELS: Record<AdminGrowthTier, string> = { STANDARD: "普通", SILVER: "银卡", GOLD: "金卡", PLATINUM: "铂金", DIAMOND: "钻石" };
-const GROWTH_TIER_LABELS: Record<string, string> = { ...TIER_LABELS, BLACK_GOLD: "黑金", UNKNOWN: "资格待确认" };
-const BASIS_LABELS: Record<string, string> = { GROWTH: "成长权益", ENTITLEMENT: "人工礼遇", ACCOUNT_BASE: "账号条件", WAIVED: "独立免押" };
 const MODES = ["ordinary", "custom", "fast"] as const satisfies readonly AdminPricingMode[];
 const MODE_LABELS: Record<AdminPricingMode, string> = { ordinary: "普通", custom: "自定义", fast: "极速" };
-const RATIO_SCALE = 100_000_000n;
 
 export function isAdminNotPriced(value: unknown): value is AdminNotPriced { return Boolean(value && typeof value === "object" && "status" in value && (value as AdminNotPriced).status === "NOT_PRICED"); }
 export function isAdminTotalDiscount(value: unknown): value is AdminTotalDiscount { return Boolean(value && typeof value === "object" && "status" in value && (value as AdminTotalDiscount).status === "CONFIGURED" && (value as AdminTotalDiscount).kind === "TOTAL_DISCOUNT"); }
@@ -54,15 +57,6 @@ export function isLegacyAdminPricing(value: unknown): value is Exclude<AdminPric
 export function isAdminCapByMode(cap: AdminEntitlementCap): cap is AdminEntitlementCapByMode { return Boolean(cap && "byMode" in cap); }
 export function adminCapForMode(cap: AdminEntitlementCap, mode: AdminPricingMode): AdminModeContract | undefined {
   return isAdminCapByMode(cap) ? cap.byMode[mode] : cap;
-}
-
-/** Exact payable-ratio parse: decimal text in (0, 1], normalised to 8 decimals. */
-export function parsePayableRatio(value: string | undefined): bigint | null {
-  if (!value) return null;
-  if (!/^(0|1)(?:\.\d{1,8})?$/.test(value)) return null;
-  const [whole = "0", fraction = ""] = value.split(".");
-  const parsed = BigInt(whole) * RATIO_SCALE + BigInt(fraction.padEnd(8, "0"));
-  return parsed > 0n && parsed <= RATIO_SCALE ? parsed : null;
 }
 
 function discountDraft(mode: AdminPricingMode, priceVersionId: string, payableRatio = "", costBasisRef = ""): AdminTotalDiscount {
@@ -92,9 +86,10 @@ export function bootstrapGrowthPolicy(catalog: AdminGrowthCatalog, thresholds: R
       ordinary: pending("普通方案待配置：需批准的应付比例与成本依据"),
       custom: pending("自定义方案待配置：需批准的应付比例与成本依据"),
       fast: pending("极速方案待配置：需批准的应付比例与成本依据"),
-      maxEntitlement: pending("礼遇上限待配置：引用对应成长档的应付比例"),
+      maxEntitlement: pending("独立礼遇范围另行配置，旧档位上限不适用"),
     })),
     changes: [],
+    entitlementRanges: {FRIEND:{byMode:{}},PRESTIGE:{byMode:{}}},
   };
 }
 
@@ -118,10 +113,11 @@ export function entitlementFromCap(policy: AdminGrowthPolicy, kind: AdminEntitle
 export function validateAdminPolicyDraft(policy: AdminGrowthPolicy, enabledModes: readonly AdminPricingMode[] = MODES): { errors: string[]; warnings: string[]; publishable: boolean } {
   const errors: string[] = [], warnings: string[] = [];
   const enabled = new Set<AdminPricingMode>(enabledModes);
+  if(!enabled.size)warnings.push('当前没有启用的计价模式');
   if (!policy.effectiveAt) warnings.push("政策生效时点未填写：发布前必须确认");
   for (const tier of policy.tiers) for (const mode of MODES) {
     const contract = tier[mode];
-    const path = `${tier.tier}.${mode}`;
+    const path = `${TIER_LABELS[tier.tier]} · ${MODE_LABELS[mode]}`;
     if (!enabled.has(mode)) continue; // the sealed release disabled this mode: draft content is inert
     if (isAdminNotPriced(contract)) { warnings.push(`${path}:应付比例待配置`); continue; }
     if (isLegacyAdminPricing(contract)) continue; // legacy haff/materials contract stays readable as-is
@@ -130,6 +126,7 @@ export function validateAdminPolicyDraft(policy: AdminGrowthPolicy, enabledModes
     if (pending(contract.payableRatio)) missing.push("应付比例");
     else if (parsePayableRatio(contract.payableRatio) === null) errors.push(`${path}:应付比例须为0–1之间的小数`);
     if (pending(contract.costBasisRef)) missing.push("成本依据");
+    else if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(contract.costBasisRef))errors.push(`${path}:成本依据须填写有效编号`);
     if (missing.length > 0) warnings.push(`${path}:待补 ${missing.join("/")}`);
   }
   // Higher tiers must never pay a larger share of the same base total; disabled modes stay inert.
@@ -140,16 +137,27 @@ export function validateAdminPolicyDraft(policy: AdminGrowthPolicy, enabledModes
       if (!isAdminTotalDiscount(lowerContract) || !isAdminTotalDiscount(higherContract)) continue;
       const lowerRatio = parsePayableRatio(lowerContract.payableRatio);
       const higherRatio = parsePayableRatio(higherContract.payableRatio);
-      if (lowerRatio !== null && higherRatio !== null && higherRatio > lowerRatio) errors.push(`${higher.tier}.${mode}:高档应付比例不得高于低档`);
+      if (lowerRatio !== null && higherRatio !== null && higherRatio > lowerRatio) errors.push(`${TIER_LABELS[higher.tier]} · ${MODE_LABELS[mode]}：高档应付比例不得高于低档`);
     }
   }
-  // Every enabled mode needs a complete, valid cap; the consumed caps must not sit below their tier.
-  for (const tier of policy.tiers) {
+  if (policy.entitlementRanges) {
+    for (const kind of ['FRIEND','PRESTIGE'] as const) for (const mode of enabled) {
+      const entry=policy.entitlementRanges[kind]?.byMode[mode],path=`${kind==='FRIEND'?'挚友':'尊享'}.${MODE_LABELS[mode]}`;
+      if(!entry||isAdminNotPriced(entry)){warnings.push(`${path}:独立折扣范围待配置`);continue;}
+      const min=parsePayableRatio(entry.minPayableRatio),max=parsePayableRatio(entry.maxPayableRatio);
+      if(entry.mode!==mode)errors.push(`${path}:模式不一致`);
+      if(!entry.priceVersionId.trim())errors.push(`${path}:缺少价格版本`);
+      if(!entry.minPayableRatio||!entry.maxPayableRatio)errors.push(`${path}:请填写最小和最大应付比例`);
+      else if(min===null||max===null||min>max)errors.push(`${path}:范围须在0–1之间，最小值不能大于最大值`);
+      if(!entry.costBasisRef.trim())warnings.push(`${path}:成本依据待配置`);
+      else if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(entry.costBasisRef))errors.push(`${path}:成本依据须填写有效编号`);
+    }
+  } else for (const tier of policy.tiers) {
     const cap = tier.maxEntitlement;
-    if (!isAdminCapByMode(cap)) { if (isAdminNotPriced(cap)) warnings.push(`${tier.tier}.entitlementCap:礼遇上限未配置`); continue; }
+    if (!isAdminCapByMode(cap)) { if (isAdminNotPriced(cap)) warnings.push(`${TIER_LABELS[tier.tier]}：旧礼遇上限未配置`); continue; }
     for (const mode of enabled) {
       const entry = cap.byMode[mode];
-      const path = `${tier.tier}.entitlementCap.${mode}`;
+      const path = `${TIER_LABELS[tier.tier]} · ${MODE_LABELS[mode]}旧礼遇上限`;
       if (!entry || isAdminNotPriced(entry)) { warnings.push(`${path}:礼遇上限未配置`); continue; }
       if (entry.mode !== mode) { errors.push(`${path}:模式不一致`); continue; }
       if (isLegacyAdminPricing(entry)) continue; // legacy configured cap stays readable as-is
@@ -174,6 +182,7 @@ export function validateAdminPolicyDraft(policy: AdminGrowthPolicy, enabledModes
  * fill an incomplete cap's own missing cost/version from the tier, and keep legitimate tightened caps.
  */
 export function completeEntitlementCaps(policy: AdminGrowthPolicy, enabledModes: readonly AdminPricingMode[]): AdminGrowthPolicy {
+  if(policy.entitlementRanges)return policy;
   return {
     ...policy,
     tiers: policy.tiers.map((tier) => {
@@ -207,135 +216,76 @@ export function capStatusSummary(cap: AdminEntitlementCap, enabledModes: readonl
   return configured.length === 0 ? "礼遇上限未配置" : `礼遇上限 ${configured.map((mode) => MODE_LABELS[mode]).join("/")} 已配置${configured.length < modes.length ? "（部分模式）" : ""}`;
 }
 
-function GrowthSelect({ label, value, onChange, options, className = "" }: { label: string; value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }>; className?: string }) {
-  return <label className={`membership-admin-control ${className}`}><span>{label}</span><Select value={value || null} onValueChange={(next) => onChange(next ?? "")}><SelectTrigger aria-label={label} className="membership-admin-select-trigger"><SelectValue placeholder="请选择">{options.find((option) => option.value === value)?.label}</SelectValue></SelectTrigger><SelectContent align="start">{options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></label>;
+function GrowthSelect({ label, value, onChange, options, className = "", disabled=false }: { label: string; value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }>; className?: string;disabled?:boolean }) {
+  return <label className={`membership-admin-control ${className}`}><span>{label}</span><Select value={value || null} disabled={disabled||!options.length} onValueChange={(next) => onChange(next ?? "")}><SelectTrigger aria-label={label} className="membership-admin-select-trigger"><SelectValue placeholder="请选择">{options.find((option) => option.value === value)?.label}</SelectValue></SelectTrigger><SelectContent align="start">{options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></label>;
 }
 
 export function formatCents(cents: string | undefined): string { if (!cents || !/^(0|[1-9]\d*)$/.test(cents)) return "待确认"; const value = cents.padStart(3, "0"); return `¥${value.slice(0, -2)}.${value.slice(-2)}`; }
-export function utcToBeijingInput(value: string): string { const date = new Date(value); if (Number.isNaN(date.getTime())) return ""; const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(date); const get = (name: string) => parts.find((part) => part.type === name)?.value ?? ""; return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`; }
-export function beijingInputToUtc(value: string): string { if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return ""; const date = new Date(`${value}:00+08:00`); return Number.isNaN(date.getTime()) ? "" : date.toISOString(); }
-export function entitlementWindowError(startsAtUtc: string, endsAtUtc: string): string { if (!startsAtUtc || !endsAtUtc) return "请填写北京时间起止"; const duration = Date.parse(endsAtUtc) - Date.parse(startsAtUtc); return !Number.isFinite(duration) ? "请填写北京时间起止" : duration <= 0 || duration > 90 * 24 * 60 * 60 * 1000 ? "礼遇单次最多90天" : ""; }
 
-function approvalLabel(status: AdminApproval["status"]): string {
-  return { NOT_REQUESTED: "未提交", REQUESTED: "审批中", APPROVED_PENDING_EXECUTION: "已批准，待执行", APPLIED: "已执行并生效", REJECTED: "已拒绝", UNKNOWN: "状态待确认" }[status];
-}
-
-function SubjectFacts({ subject }: { subject: AdminGrowthSubject }) {
-  return <>
-    {subject.status === "LOADED" ? <dl className="membership-admin-facts"><div><dt>对象</dt><dd>{subject.userLabel}</dd></div><div><dt>当前档位</dt><dd>{GROWTH_TIER_LABELS[subject.tier ?? ""] ?? subject.tier ?? "资格待确认"}</dd></div><div><dt>近90天积分</dt><dd>{subject.rollingPoints} 分</dd></div><div><dt>累计积分</dt><dd>{subject.lifetimePoints} 分</dd></div></dl> : <div className="membership-admin-empty"><strong>{subject.status === "FORBIDDEN" ? "当前身份无权查看" : subject.status === "UNKNOWN" ? "成长依据未知" : "尚未加载用户"}</strong><span>{subject.reason ?? "未知不显示为普通会员或0分。"}</span></div>}
-    {subject.evidence?.length ? <ul className="membership-admin-evidence">{subject.evidence.map((item) => <li key={item}>{item}</li>)}</ul> : null}
-  </>;
-}
-
-function stateMessage(state: Exclude<MembershipGrowthAdminState, { status: "ready" }>) {
-  const title = state.status === "loading" ? "正在读取会员成长配置" : state.status === "permission" ? "没有会员成长管理权限" : "会员成长模块暂不可用";
-  return <section className="membership-admin-view" data-state={state.status} role={state.status === "error" ? "alert" : "status"}>
-    <div className="membership-admin-state"><strong>{title}</strong><p>{state.status === "loading" ? "不会把未知数据显示为0或成功。" : state.message}</p></div>
-    {state.status === "error" && state.subject ? <section className="membership-admin-section" aria-labelledby="membership-admin-subject-heading"><div className="membership-admin-section-heading"><div><h3 id="membership-admin-subject-heading">用户成长依据</h3><p>政策缺失只影响配置区；已获准的对象读取继续显示，不用它推断档位或积分。</p></div></div><SubjectFacts subject={state.subject} /></section> : null}
+function stateMessage(state: Exclude<MembershipGrowthAdminState, {status:'ready'}>) {
+  const title=state.status==='loading'?'正在读取会员政策':state.status==='permission'?'没有会员政策查看权限':'会员政策暂不可用';
+  return <section className="membership-admin-view" data-state={state.status} role={state.status==='error'?'alert':'status'}>
+    <div className="membership-admin-state"><strong>{title}</strong>{state.status==='loading'?<><Skeleton className="h-8 w-full"/><Skeleton className="h-36 w-full"/></>:<p>{state.message}</p>}</div>
   </section>;
 }
 
-export function MembershipGrowthAdminView({ state, policySaved = true, onPolicyChange, onSavePolicyDraft, onSubmitPolicy, onEntitlementChange, onSubmitEntitlement, onRevokeEntitlement }: {
-  state: MembershipGrowthAdminState;
-  /** false for an unsaved first draft: saving it records the DRAFT without requiring an edit first. */
-  policySaved?: boolean;
-  onPolicyChange?: (policy: AdminGrowthPolicy) => void;
-  onSavePolicyDraft?: () => void;
-  onSubmitPolicy?: () => void;
-  onEntitlementChange?: (draft: AdminEntitlementDraft) => void;
-  onSubmitEntitlement?: () => void;
-  onRevokeEntitlement?: (reason: string) => void;
+export function MembershipGrowthAdminView({state,policySaved=true,canEditEntitlementRanges=false,onPolicyChange,onSavePolicyDraft,onSubmitPolicy}:{
+  state:MembershipGrowthAdminState;policySaved?:boolean;canEditEntitlementRanges?:boolean;
+  onPolicyChange?:(policy:AdminGrowthPolicy)=>void;onSavePolicyDraft?:()=>void;onSubmitPolicy?:()=>void;
+  /** Kept for the old host during the split; grants and approvals now use their own workspace. */
+  onEntitlementChange?:(draft:AdminEntitlementDraft)=>void;onSubmitEntitlement?:()=>void;onRevokeEntitlement?:(reason:string)=>void;
 }) {
-  const [draftPolicy, setDraftPolicy] = useState<AdminGrowthPolicy | null>(state.status === "ready" ? state.policy : null);
-  const [draftEntitlement, setDraftEntitlement] = useState<AdminEntitlementDraft | null>(state.status === "ready" ? state.entitlement : null);
-  const [draftSubjectId, setDraftSubjectId] = useState<string | null>(state.status === "ready" ? state.subject.subjectId : null);
-  const [mode, setMode] = useState<AdminPricingMode>("ordinary");
-  const [policyDirty, setPolicyDirty] = useState(false);
-  const [entitlementDirty, setEntitlementDirty] = useState(false);
-  const [revokeReason, setRevokeReason] = useState("");
-  useEffect(() => { if (state.status === "ready") { setDraftPolicy(state.policy); setDraftEntitlement(state.entitlement); setDraftSubjectId(state.subject.subjectId); setPolicyDirty(false); setEntitlementDirty(false); setRevokeReason(""); } }, [state.status === "ready" ? state.policy.version : null, state.status === "ready" ? state.subject.subjectId : null]);
-  if (state.status !== "ready") return stateMessage(state);
-  if (!draftPolicy || !draftEntitlement) return stateMessage({ status: "loading" });
-  const { preview, subject, approval } = state;
-  const policy = draftPolicy;
-  const entitlement = !entitlementDirty || draftSubjectId !== state.subject.subjectId ? state.entitlement : draftEntitlement;
-  const enabledModes: AdminPricingMode[] = policy.catalog.enabledModes && policy.catalog.enabledModes.length > 0 ? [...policy.catalog.enabledModes] : [...MODES];
-  const boundPriceVersion = policy.catalog.priceVersions[0]?.id ?? "";
-  const validation = validateAdminPolicyDraft(policy, enabledModes);
-  const updatePolicy = (next: AdminGrowthPolicy) => { setDraftPolicy(next); setPolicyDirty(true); onPolicyChange?.(next); };
-  const updateTier = (tierName: AdminGrowthTier, update: (tier: AdminGrowthPolicy["tiers"][number]) => AdminGrowthPolicy["tiers"][number]) => updatePolicy({ ...policy, tiers: policy.tiers.map((tier) => tier.tier === tierName ? update(tier) : tier) });
-  const updateEntitlement = (next: AdminEntitlementDraft) => { setDraftEntitlement(next); setEntitlementDirty(true); onEntitlementChange?.(next); };
-  const setEntitlementField = (field: keyof AdminEntitlementDraft, value: string | boolean) => updateEntitlement({ ...entitlement, [field]: value });
-  // Changing kind or mode re-seeds the discount from that cap; identity fields stay as typed.
-  const reseedEntitlement = (kind: AdminEntitlementDraft["kind"], pricingMode: AdminPricingMode) => {
-    const seeded = entitlementFromCap(policy, kind, pricingMode, entitlement.startsAtUtc, entitlement.endsAtUtc);
-    updateEntitlement({ ...seeded, scopeKey: entitlement.scopeKey, depositWaived: entitlement.depositWaived, reason: entitlement.reason });
+  const [draftPolicy,setDraftPolicy]=useState<AdminGrowthPolicy|null>(state.status==='ready'?state.policy:null);
+  const [mode,setMode]=useState<AdminPricingMode>('ordinary'),[dirty,setDirty]=useState(false);
+  useEffect(()=>{if(state.status==='ready'){setDraftPolicy(state.policy);setDirty(false);}},[state.status==='ready'?state.policy.version:null,state.status==='ready'?state.policy.catalog.priceVersions[0]?.id:null]);
+  if(state.status!=='ready')return stateMessage(state);
+  if(!draftPolicy)return stateMessage({status:'loading'});
+  const policy=draftPolicy,enabledModes=policy.catalog.enabledModes??[...MODES];
+  const activeMode=enabledModes.includes(mode)?mode:enabledModes[0]??'ordinary';
+  const boundPriceVersion=policy.catalog.priceVersions[0]?.id??'',editable=!!onPolicyChange&&enabledModes.length>0;
+  const rangeEditable=editable&&canEditEntitlementRanges,validation=validateAdminPolicyDraft(policy,enabledModes);
+  const updatePolicy=(next:AdminGrowthPolicy)=>{setDraftPolicy(next);setDirty(true);onPolicyChange?.(next);};
+  const updateTier=(tierName:AdminGrowthTier,patch:Partial<AdminGrowthPolicy['tiers'][number]>)=>updatePolicy({...policy,tiers:policy.tiers.map(tier=>tier.tier===tierName?{...tier,...patch}:tier)});
+  const setTierDiscount=(tier:AdminGrowthPolicy['tiers'][number],patch:Partial<Pick<AdminTotalDiscount,'payableRatio'|'costBasisRef'>>)=>updateTier(tier.tier,{[activeMode]:{...modeContractOf(tier[activeMode],activeMode,boundPriceVersion),...patch}});
+  const updateRange=(kind:'FRIEND'|'PRESTIGE',patch:Partial<Pick<AdminEntitlementRange,'minPayableRatio'|'maxPayableRatio'|'costBasisRef'>>)=>{
+    if(!rangeEditable)return;
+    const existing=policy.entitlementRanges?.[kind]?.byMode[activeMode];
+    const entry:AdminEntitlementRange=existing?.status==='CONFIGURED'?existing:{status:'CONFIGURED',kind:'TOTAL_DISCOUNT_RANGE',mode:activeMode,priceVersionId:boundPriceVersion,minPayableRatio:'',maxPayableRatio:'',costBasisRef:''};
+    const ranges=policy.entitlementRanges??{FRIEND:{byMode:{}},PRESTIGE:{byMode:{}}};
+    updatePolicy({...policy,entitlementRanges:{...ranges,[kind]:{byMode:{...ranges[kind].byMode,[activeMode]:{...entry,...patch}}}}});
   };
-  const setTierDiscount = (tierName: AdminGrowthTier, patch: Partial<Pick<AdminTotalDiscount, "payableRatio" | "costBasisRef">>) => updateTier(tierName, (current) => {
-    const contract = modeContractOf(current[mode], mode, boundPriceVersion);
-    return { ...current, [mode]: { ...contract, ...patch } };
-  });
-  const capEntry = adminCapForMode(policy.tiers.find((tier) => tier.tier === capTierFor(entitlement.kind))?.maxEntitlement ?? { status: "NOT_PRICED", reason: "未载入礼遇上限" }, entitlement.pricingMode);
-  const capRatio = isAdminTotalDiscount(capEntry) ? parsePayableRatio(capEntry.payableRatio) : null;
-  const ratio = parsePayableRatio(entitlement.payableRatio);
-  const entitlementErrors = [
-    !entitlement.scopeKey.trim() ? "请填写业务范围" : "",
-    entitlementWindowError(entitlement.startsAtUtc, entitlement.endsAtUtc),
-    !entitlement.priceVersionId.trim() ? "请选择价格方案" : "",
-    !entitlement.payableRatio.trim() ? "请填写应付比例（如 0.9 表示九折）" : ratio === null ? "应付比例须为 0–1 之间的小数" : "",
-    capRatio === null ? "对应成长档的礼遇上限未配置，不能授予无限优惠" : ratio !== null && ratio < capRatio ? "礼遇折扣深于该成长档上限" : "",
-    !entitlement.costBasisRef.trim() ? "成本依据未完成" : "",
-    entitlement.reason.trim().length < 2 ? "请填写申请原因" : "",
-  ].filter(Boolean);
   return <div className="membership-admin-view" data-testid="membership-growth-admin-view">
-    <header className="membership-admin-header"><div><p className="membership-admin-kicker">运营工作台 · 会员成长</p><h2>成长权益与人工礼遇</h2><p>会员优惠作用于“哈夫币租金＋物品资源费”的合计，按应付比例一次打折；不修改基础价与号主收入。</p></div><span className={`membership-admin-status membership-admin-status--${policy.status.toLowerCase()}`}>{policy.status === "DRAFT" ? "草稿" : "已批准版本"} · {policy.version}</span></header>
-
-    <section className="membership-admin-section" aria-labelledby="membership-admin-policy-heading">
-      <div className="membership-admin-section-heading"><div><h3 id="membership-admin-policy-heading">五档总价折扣</h3><p>应付比例作用于基础哈夫租金与物品资源费的合计，一次打折；空值保持待配置，缺成本依据可保存草稿但不能提审。</p></div><div className="membership-admin-action-row"><GrowthSelect label="编辑计价模式" value={mode} onChange={(value) => setMode(value as AdminPricingMode)} options={enabledModes.map((value) => ({ value, label: MODE_LABELS[value] }))} className="membership-admin-inline-field" /><label className="membership-admin-control membership-admin-inline-field"><span>政策生效时点（北京时间）</span><Input aria-label="政策生效时点" type="datetime-local" value={utcToBeijingInput(policy.effectiveAt ?? "")} onChange={(event) => updatePolicy({ ...policy, effectiveAt: beijingInputToUtc(event.target.value) || null })} /></label>{onPolicyChange ? <button type="button" className="membership-admin-button" onClick={() => updatePolicy(completeEntitlementCaps(policy, enabledModes))}>按档位边界补齐/修正礼遇上限</button> : null}{onSavePolicyDraft ? <button type="button" className="membership-admin-button" disabled={(!policyDirty && policySaved) || validation.errors.length > 0} onClick={onSavePolicyDraft}>保存草稿</button> : null}{onSubmitPolicy ? <button type="button" className="membership-admin-button" disabled={!validation.publishable || validation.errors.length > 0} onClick={onSubmitPolicy}>提交审批</button> : null}</div></div>
-      {policy.catalog.catalogSource === "POLICY_PAYLOAD" ? <p className="membership-admin-form-warning" role="status">绑定释放当前不可读：释放绑定与启用模式可能不完整；保存与发布仍以释放绑定校验为准。</p> : null}
-      <div className="membership-admin-table-wrap"><table className="membership-admin-table"><thead><tr><th>档位</th><th>成长门槛</th><th>免押</th><th>当前模式应付比例</th><th>成本依据</th><th>来源/礼遇上限</th></tr></thead><tbody>{policy.tiers.map((tier) => {
-        const contract = tier[mode];
-        const discount = isAdminTotalDiscount(contract) ? contract : null;
-        const legacy = isLegacyAdminPricing(contract);
-        return <tr key={tier.tier}><th>{TIER_LABELS[tier.tier]}</th><td>{tier.threshold} 分</td><td><GrowthSelect label={`${tier.tier}免押`} value={tier.tenantDeposit} onChange={(value) => updateTier(tier.tier, (current) => ({ ...current, tenantDeposit: value as "ACCOUNT_BASE" | "WAIVED" }))} options={[{ value: "ACCOUNT_BASE", label: "按账号条件" }, { value: "WAIVED", label: "免押" }]} className="membership-admin-table-select" /></td><td><Input aria-label={`${tier.tier}${mode}应付比例`} inputMode="decimal" placeholder="如 0.9" value={discount?.payableRatio ?? ""} onChange={(event) => setTierDiscount(tier.tier, { payableRatio: event.target.value })} /></td><td><Input aria-label={`${tier.tier}${mode}成本依据`} value={discount?.costBasisRef ?? ""} onChange={(event) => setTierDiscount(tier.tier, { costBasisRef: event.target.value })} /></td><td><small>{legacy ? "旧哈夫/物资合同（兼容读取）" : discount ? `应付比例 ${discount.payableRatio || "待配置"}` : "待配置"}</small>{tier.tier === "GOLD" || tier.tier === "DIAMOND" ? <small>{capStatusSummary(tier.maxEntitlement, enabledModes)}</small> : null}</td></tr>;
-      })}</tbody></table></div>
-      {validation.errors.length > 0 ? <p className="membership-admin-form-error" role="alert">配置仍需修正：{validation.errors.slice(0, 3).join("、")}</p> : null}{validation.warnings.length > 0 ? <p className="membership-admin-form-warning" role="status">可保存草稿，但不能提交批准：{validation.warnings.slice(0, 2).join("；")}</p> : null}
-      <div className="membership-admin-change-list">{policy.changes.length === 0 ? <p className="membership-admin-muted">当前没有待审差异。</p> : policy.changes.map((change) => <div key={change.label} data-risk={change.risk}><span>{change.label}</span><span>{change.before} → {change.after}</span><strong>{change.risk === "REVIEW_REQUIRED" ? "需核查" : "可审阅"}</strong></div>)}</div>
-    </section>
-
-    <div className="membership-admin-two-col">
-      <section className="membership-admin-section" aria-labelledby="membership-admin-preview-heading">
-        <div className="membership-admin-section-heading"><div><h3 id="membership-admin-preview-heading">报价预览</h3><p>比较同一主体、账号版本和数量快照下的完整方案；成长与礼遇分别按折后合计择优，不拼接项目、不叠折。</p></div></div>
-        <div className="membership-admin-preview" data-state={preview.status}><strong>{preview.status === "KNOWN" || preview.status === "LOCAL_FIXTURE" ? formatCents(preview.totalCents) : preview.status === "NOT_RUN" ? "未演算" : "未知"}</strong><dl><div><dt>价格依据</dt><dd>{BASIS_LABELS[preview.priceBasis ?? ""] ?? preview.priceBasis ?? "待确认"}</dd></div><div><dt>免押依据</dt><dd>{BASIS_LABELS[preview.depositBasis ?? ""] ?? preview.depositBasis ?? "待确认"}</dd></div></dl><p>{preview.reason ?? "完整成长方案与礼遇方案择优，不拼接项目、不叠折。"}</p></div>
-      </section>
-      <section className="membership-admin-section" aria-labelledby="membership-admin-subject-heading">
-        <div className="membership-admin-section-heading"><div><h3 id="membership-admin-subject-heading">用户成长依据</h3><p>查看授权范围内的消费来源、更正、90天退出和黑金证据。</p></div></div>
-        <SubjectFacts subject={subject} />
-      </section>
+    <header className="membership-admin-header"><div><h2>会员政策</h2><p>配置成长权益与两类礼遇的折扣范围。已批准版本保留原件，修改后保存新草稿。</p></div><Badge variant={dirty?'warning':policy.status==='DRAFT'?'secondary':'success'}>{dirty?'有未保存修改':policy.status==='DRAFT'?'政策草稿':'已批准版本'} · {policy.version}</Badge></header>
+    <div className="membership-admin-policy-toolbar"><GrowthSelect label="计价模式" value={activeMode} onChange={value=>setMode(value as AdminPricingMode)} options={enabledModes.map(value=>({value,label:MODE_LABELS[value]}))} className="membership-admin-inline-field"/>
+      <MembershipDateTimeField label="政策生效" value={policy.effectiveAt??''} disabled={!editable} onChange={value=>updatePolicy({...policy,effectiveAt:value||null})}/>
     </div>
-
-    <section key={`entitlement-${state.subject.subjectId}`} className="membership-admin-section" aria-labelledby="membership-admin-entitlement-heading">
-      <div className="membership-admin-section-heading"><div><h3 id="membership-admin-entitlement-heading">人工礼遇申请</h3><p>后台手动发放：折扣、起止与范围按实际授予填写；挚友不超过金卡、尊享不超过钻石，单次最多90天。</p></div><span className="membership-admin-status membership-admin-status--unknown">{isAdminTotalDiscount(capEntry) ? "按成长档上限内授予" : "上限未配置"}</span></div>
-      <div className="membership-admin-form-grid">
-        <GrowthSelect label="礼遇类型" value={entitlement.kind} onChange={(value) => reseedEntitlement(value as AdminEntitlementDraft["kind"], entitlement.pricingMode)} options={[{ value: "FRIEND", label: "挚友 · 金卡上限" }, { value: "PRESTIGE", label: "尊享 · 钻石上限" }]} />
-        <label>业务范围<Input aria-label="礼遇业务范围" value={entitlement.scopeKey} maxLength={200} onChange={(event) => setEntitlementField("scopeKey", event.target.value)} /></label>
-        <label>开始（北京时间）<Input type="datetime-local" value={utcToBeijingInput(entitlement.startsAtUtc)} onChange={(event) => setEntitlementField("startsAtUtc", beijingInputToUtc(event.target.value))} /></label>
-        <label>结束（北京时间）<Input type="datetime-local" value={utcToBeijingInput(entitlement.endsAtUtc)} onChange={(event) => setEntitlementField("endsAtUtc", beijingInputToUtc(event.target.value))} /></label>
-        <GrowthSelect label="计价模式" value={entitlement.pricingMode} onChange={(value) => reseedEntitlement(entitlement.kind, value as AdminPricingMode)} options={enabledModes.map((value) => ({ value, label: MODE_LABELS[value] }))} />
-        <GrowthSelect label="价格方案" value={entitlement.priceVersionId} onChange={(value) => setEntitlementField("priceVersionId", value)} options={policy.catalog.priceVersions.map((item) => ({ value: item.id, label: item.label }))} />
-        <label>礼遇应付比例<Input aria-label="礼遇应付比例" inputMode="decimal" placeholder="如 0.85" value={entitlement.payableRatio} onChange={(event) => setEntitlementField("payableRatio", event.target.value)} /></label>
-        <label>成本依据<Input aria-label="礼遇成本依据" value={entitlement.costBasisRef} onChange={(event) => setEntitlementField("costBasisRef", event.target.value)} /></label>
-        <label className="membership-admin-checkbox"><Checkbox.Root checked={entitlement.depositWaived} aria-label="独立授予免押" className="membership-admin-checkbox-control" onCheckedChange={(checked) => setEntitlementField("depositWaived", checked)}><Checkbox.Indicator>✓</Checkbox.Indicator></Checkbox.Root><span>独立授予免押</span></label>
-        <label className="membership-admin-wide">原因<textarea aria-label="礼遇原因" value={entitlement.reason} maxLength={500} onChange={(event) => setEntitlementField("reason", event.target.value)} /></label>
-      </div>
-      {entitlementErrors.length > 0 ? <p className="membership-admin-form-error" role="alert">提交前需要修正：{entitlementErrors.join("；")}</p> : null}
-      <div className="membership-admin-action-row"><button type="button" className="membership-admin-button" disabled={entitlementErrors.length > 0 || !onSubmitEntitlement} onClick={onSubmitEntitlement}>提交礼遇审批</button><span className="membership-admin-muted">未接线时按钮禁用，不显示假成功。</span></div>
+    {!enabledModes.length?<p className="membership-admin-form-warning" role="status">当前没有启用的计价模式，暂不能配置或提交政策。</p>:null}
+    {policy.catalog.catalogSource==='POLICY_PAYLOAD'?<p className="membership-admin-form-warning" role="status">当前显示政策保存的资料；保存与发布仍需核对规则绑定。</p>:null}
+    <section className="membership-admin-section" aria-labelledby="membership-admin-policy-heading"><div className="membership-admin-section-heading"><div><h3 id="membership-admin-policy-heading">成长等级权益</h3><p>应付比例作用于哈夫币租金与物资费合计，0.9 表示九折。</p></div></div>
+      <Table className="membership-admin-table"><TableHeader><TableRow><TableHead>会员等级</TableHead><TableHead>成长门槛</TableHead><TableHead>押金权益</TableHead><TableHead>{MODE_LABELS[activeMode]}应付比例</TableHead><TableHead>成本依据</TableHead></TableRow></TableHeader><TableBody>{policy.tiers.map(tier=>{
+        const contract=tier[activeMode],discount=isAdminTotalDiscount(contract)?contract:null;
+        return <TableRow key={tier.tier}><TableCell className="font-medium">{TIER_LABELS[tier.tier]}</TableCell><TableCell className="tabular-nums">{tier.threshold} 分</TableCell>
+          <TableCell><GrowthSelect label={`${tier.tier}免押`} disabled={!editable} value={tier.tenantDeposit} onChange={value=>updateTier(tier.tier,{tenantDeposit:value as 'ACCOUNT_BASE'|'WAIVED'})} options={[{value:'ACCOUNT_BASE',label:'按账号条件'},{value:'WAIVED',label:'免押'}]} className="membership-admin-table-select"/></TableCell>
+          <TableCell><Input aria-label={`${tier.tier}${activeMode}应付比例`} disabled={!editable} inputMode="decimal" value={discount?.payableRatio??''} placeholder={isLegacyAdminPricing(contract)?'旧价格合同':'待配置'} onChange={event=>setTierDiscount(tier,{payableRatio:event.target.value})}/></TableCell>
+          <TableCell><Input aria-label={`${tier.tier}${activeMode}成本依据`} disabled={!editable} value={discount?.costBasisRef??''} placeholder={isLegacyAdminPricing(contract)?'旧合同兼容':'待配置'} onChange={event=>setTierDiscount(tier,{costBasisRef:event.target.value})}/></TableCell>
+        </TableRow>;
+      })}</TableBody></Table>
     </section>
-
-    <section className="membership-admin-section" aria-labelledby="membership-admin-approval-heading">
-      <div className="membership-admin-section-heading"><div><h3 id="membership-admin-approval-heading">审批与实际生效</h3><p>批准不等于执行，执行不等于订单生效；只消费原批准参数。</p></div><span className={`membership-admin-status membership-admin-status--${approval.status.toLowerCase()}`}>{approvalLabel(approval.status)}</span></div>
-      <div className="membership-admin-approval-row"><strong>{approvalLabel(approval.status)}</strong><span>申请编号</span><code>{approval.requestId ?? "待创建"}</code><span>{approval.message ?? "当前没有可执行的批准回执。"}</span></div>
-      {approval.status === "APPLIED" ? <div className="membership-admin-revoke-row"><label>撤销原因<Input value={revokeReason} maxLength={500} onChange={(event) => setRevokeReason(event.target.value)} /></label><button type="button" className="membership-admin-button membership-admin-button--danger" disabled={revokeReason.trim().length < 2 || !onRevokeEntitlement} onClick={() => { if (window.confirm("确认提交撤销申请？")) onRevokeEntitlement?.(revokeReason.trim()); }}>撤销礼遇</button></div> : null}
+    <section className="membership-admin-section" aria-labelledby="membership-admin-range-heading"><div className="membership-admin-section-heading"><div><h3 id="membership-admin-range-heading">礼遇折扣范围</h3><p>挚友与尊享分别配置，与成长等级的折扣独立。</p></div><Badge variant="outline">{canEditEntitlementRanges?'Boss 可配置':'仅 Boss 可修改'}</Badge></div>
+      {!policy.entitlementRanges?<p className="membership-admin-form-warning" role="status">尚未配置独立范围，当前按旧政策兼容。已批准礼遇保持原条款。</p>:null}
+      <Table className="membership-admin-table membership-admin-range-table"><TableHeader><TableRow><TableHead>礼遇类型</TableHead><TableHead>最小应付比例</TableHead><TableHead>最大应付比例</TableHead><TableHead>成本依据</TableHead><TableHead>当前模式</TableHead></TableRow></TableHeader><TableBody>{(['FRIEND','PRESTIGE'] as const).map(kind=>{
+        const raw=policy.entitlementRanges?.[kind]?.byMode[activeMode],range=raw?.status==='CONFIGURED'?raw:null;
+        return <TableRow key={kind}><TableCell className="font-medium">{kind==='FRIEND'?'挚友礼遇':'尊享礼遇'}</TableCell>
+          <TableCell><Input aria-label={`${kind}${activeMode}最小应付比例`} disabled={!rangeEditable} inputMode="decimal" value={range?.minPayableRatio??''} placeholder="如 0.8" onChange={event=>updateRange(kind,{minPayableRatio:event.target.value})}/></TableCell>
+          <TableCell><Input aria-label={`${kind}${activeMode}最大应付比例`} disabled={!rangeEditable} inputMode="decimal" value={range?.maxPayableRatio??''} placeholder="如 1" onChange={event=>updateRange(kind,{maxPayableRatio:event.target.value})}/></TableCell>
+          <TableCell><Input aria-label={`${kind}${activeMode}成本依据`} disabled={!rangeEditable} value={range?.costBasisRef??''} placeholder="待配置" onChange={event=>updateRange(kind,{costBasisRef:event.target.value})}/></TableCell>
+          <TableCell><Badge variant={range?'secondary':'outline'}>{MODE_LABELS[activeMode]} · {range?'已填写':'待配置'}</Badge></TableCell>
+        </TableRow>;
+      })}</TableBody></Table><p className="membership-admin-muted">比例须大于0且不超过1，最小值不大于最大值。实际发放时仍需审批。</p>
     </section>
+    {validation.errors.length?<p className="membership-admin-form-error" role="alert">请修正：{validation.errors.slice(0,3).join('；')}</p>:null}
+    {validation.warnings.length?<p className="membership-admin-form-warning" role="status">可保存草稿，提审前需补齐：{validation.warnings.slice(0,3).join('；')}</p>:null}
+    {policy.changes.length?<div className="membership-admin-change-list">{policy.changes.map(change=><div key={change.label}><span>{change.label}</span><span>{change.before} → {change.after}</span><Badge variant={change.risk==='REVIEW_REQUIRED'?'warning':'outline'}>{change.risk==='REVIEW_REQUIRED'?'需核查':'待审阅'}</Badge></div>)}</div>:null}
+    <div className="membership-admin-action-row">{onSavePolicyDraft?<Button type="button" disabled={(!dirty&&policySaved)||validation.errors.length>0} onClick={onSavePolicyDraft}>保存草稿</Button>:null}{onSubmitPolicy?<Button type="button" variant="outline" disabled={dirty||!policySaved||policy.status!=='DRAFT'||!validation.publishable||!enabledModes.length} onClick={onSubmitPolicy}>提交审批</Button>:null}{dirty?<span className="membership-admin-muted">保存后再提交审批。</span>:null}</div>
   </div>;
 }

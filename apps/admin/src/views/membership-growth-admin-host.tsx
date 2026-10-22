@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { AdminApiError, adminRequest, hasPermission, type SessionSnapshot } from "../api";
+import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import type { WorkspaceTab } from "../workspace/tab-model";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { MembershipBenefitsWorkspace, useMembershipApprovalRequest } from "./membership-benefits-workspace";
 import {
   bootstrapGrowthPolicy,
   entitlementFromCap,
@@ -25,6 +28,7 @@ export type PolicyBootstrap = {
 };
 
 type PolicyResponse = {
+  approvedMeta?: { id: string; version: string; effectiveAtUtc: string | null } | null;
   policy: Record<string, any> | null;
   meta: { id: string; version: string; status: "DRAFT" | "APPROVED"; effectiveAtUtc: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string } | null;
   catalog: AdminGrowthCatalog;
@@ -51,6 +55,7 @@ function asPolicy(response: PolicyResponse): AdminGrowthPolicy | null {
       catalog: response.catalog,
       selectedSafeBoxCode: response.catalog.safeBoxes[0] ?? "",
       selectedMaterialId: response.catalog.materials[0]?.id ?? "",
+      ...(raw.entitlementRanges ? { entitlementRanges: raw.entitlementRanges } : {}),
       tiers: tiers.map((tier) => {
         const config = tierConfig[tier] ?? {};
         return { tier, threshold: response.thresholds[tier] ?? "0", tenantDeposit: config.tenantDeposit === "WAIVED" ? "WAIVED" : "ACCOUNT_BASE", ordinary: config.pricing?.ordinary ?? { status: "NOT_PRICED", reason: "未载入普通方案" }, custom: config.pricing?.custom ?? { status: "NOT_PRICED", reason: "未载入自定义方案" }, fast: config.pricing?.fast ?? { status: "NOT_PRICED", reason: "未载入极速方案" }, maxEntitlement: config.entitlementCap ?? { status: "NOT_PRICED", reason: "未载入礼遇上限" } };
@@ -70,8 +75,9 @@ function toGrowthPolicy(policy: AdminGrowthPolicy): Record<string, unknown> {
     status: policy.status,
     effectiveAt: policy.effectiveAt,
     sourceRef: "admin:membership-growth",
-    tiers: Object.fromEntries(policy.tiers.map((tier) => [tier.tier, { tier: tier.tier, tenantDeposit: tier.tenantDeposit, pricing: { ordinary: tier.ordinary, custom: tier.custom, fast: tier.fast }, entitlementCap: tier.maxEntitlement }])),
+    tiers: Object.fromEntries(policy.tiers.map((tier) => [tier.tier, { tier: tier.tier, tenantDeposit: tier.tenantDeposit, pricing: { ordinary: tier.ordinary, custom: tier.custom, fast: tier.fast }, entitlementCap: policy.entitlementRanges ? { status: "NOT_PRICED", reason: "礼遇使用独立范围，需要支持此合同的服务版本" } : tier.maxEntitlement }])),
     entitlementCaps: { FRIEND: "GOLD", PRESTIGE: "DIAMOND" },
+    ...(policy.entitlementRanges ? { entitlementRanges: policy.entitlementRanges } : {}),
   };
 }
 
@@ -100,19 +106,33 @@ function policyFailure(error: unknown, response: PolicyResponse | null): string 
 export function membershipGrowthAccess(snapshot: Extract<SessionSnapshot, { authenticated: true }>) {
   const boss = snapshot.security.isBoss;
   const canDraft = boss || hasPermission(snapshot, "membership.policy.draft");
-  const canRequest = canDraft || hasPermission(snapshot, "membership.policy.publish");
-  const canRead = canRequest || hasPermission(snapshot, "membership.growth.read.summary");
-  return { canRead, canDraft, canRequest };
+  const canRequest = boss || hasPermission(snapshot, "membership.policy.publish") && hasPermission(snapshot, "approval.request.create");
+  const canReadPolicy = canDraft || hasPermission(snapshot, "membership.policy.publish") || hasPermission(snapshot, "membership.growth.read.summary");
+  const canRequestEntitlement = boss || hasPermission(snapshot, "approval.request.create") && hasPermission(snapshot, "membership.entitlement.request");
+  return { canRead: canReadPolicy || canRequestEntitlement, canReadPolicy, canDraft, canRequest, canRequestEntitlement };
 }
 
-export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refreshNonce }: { tab: WorkspaceTab; snapshot: Extract<SessionSnapshot, { authenticated: true }>; onDirtyChange: (dirty: boolean) => void; refreshNonce: number }) {
+type HostProps = { tab: WorkspaceTab; snapshot: Extract<SessionSnapshot, { authenticated: true }>; onDirtyChange: (dirty: boolean) => void; refreshNonce: number; onOpenPath?: (path: string, title?: string) => void };
+
+export function MembershipGrowthAdminHost(props: HostProps) {
+  const access = membershipGrowthAccess(props.snapshot);
+  return <MembershipBenefitsWorkspace snapshot={props.snapshot} initialUserId={props.tab.query.userId} initialGameId={props.tab.query.gameId} refreshNonce={props.refreshNonce} onOpenPath={props.onOpenPath}
+    policy={access.canReadPolicy ? <MembershipGrowthPolicyHost {...props} /> : undefined} />;
+}
+
+function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce, onOpenPath }: HostProps) {
   const subjectId = tab.query.userId;
   const gameId = tab.query.gameId;
   const [state, setState] = useState<MembershipGrowthAdminState>({ status: "loading" });
   const [meta, setMeta] = useState<PolicyResponse["meta"]>(null);
   const [bootstrap, setBootstrap] = useState<PolicyBootstrap | null>(null);
   const [savedDraft, setSavedDraft] = useState<PolicyResponse["meta"]>(null);
+  const [approvedMeta, setApprovedMeta] = useState<PolicyResponse["approvedMeta"]>(null);
+  const [submittedHash, setSubmittedHash] = useState<string | null>(null);
   const [subject, setSubject] = useState<AdminGrowthSubject>({ subjectId: subjectId ?? "", status: "NOT_LOADED" });
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const approvalWrite = useMembershipApprovalRequest(snapshot);
   /** R1-02: a save receipt only marks the exact edit revision it was built from as saved. */
   const editRevisionRef = useRef(0);
   /** R1-02: late responses from a previous subject/refresh generation never write into the new context. */
@@ -120,7 +140,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const savingRef = useRef(false);
 
   useEffect(() => {
-    if (!membershipGrowthAccess(snapshot).canRead) {
+    if (!membershipGrowthAccess(snapshot).canReadPolicy) {
       setState({ status: "permission", message: "当前管理员没有会员成长配置权限" });
       return;
     }
@@ -128,6 +148,8 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
     generationRef.current += 1;
     const generation = generationRef.current;
     setState({ status: "loading" });
+    setSaving(false);
+    setSaveError(null);
     setSavedDraft(null);
     const settle = <T,>(request: Promise<T>) => request.then((value) => ({ value, error: null as unknown })).catch((error: unknown) => ({ value: null, error }));
     Promise.all([
@@ -138,6 +160,7 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
       const policy = policyResult.value ? asPolicy(policyResult.value) : null;
       const nextSubject = subjectOf(subjectResult.value, subjectId, subjectResult.error);
       setMeta(policyResult.value?.meta ?? null);
+      setApprovedMeta(policyResult.value?.approvedMeta ?? null);
       setBootstrap(policyResult.value?.bootstrap ?? null);
       setSavedDraft(policyResult.value?.meta?.status === "DRAFT" ? policyResult.value.meta : null);
       setSubject(nextSubject);
@@ -164,6 +187,8 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
   const saveDraft = async () => {
     if (!binding || savingRef.current) return;
     savingRef.current = true;
+    setSaving(true);
+    setSaveError(null);
     const revision = editRevisionRef.current;
     const generation = generationRef.current;
     try {
@@ -179,30 +204,23 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
         setState(current => current.status === "ready" ? { ...current, policy: { ...current.policy, version: draft.version, status: "DRAFT", changes: [] } } : current);
         onDirtyChange(false);
       }
+    } catch (failure) {
+      if (generation === generationRef.current) setSaveError(friendlyError(failure));
     } finally {
       savingRef.current = false;
+      if (generation === generationRef.current) setSaving(false);
     }
   };
   const submitApproval = async () => {
     if (!meta) return;
     const generation = generationRef.current;
     if (!savedDraft) { setState((current) => current.status === "ready" ? { ...current, approval: { status: "NOT_REQUESTED", message: "请先保存当前政策草稿，再提交审批" } } : current); return; }
-    const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.benefit.policy.publish", triggerCondition: "membership.policy.publish.requested", payloadVersion: 1, payload: policyDraftApprovalPayload(savedDraft!), summary: `发布会员政策 ${ready.policy.version}` });
+    const requestId = await approvalWrite.submit({ operationCode: "membership.benefit.policy.publish", triggerCondition: "membership.policy.publish.requested", payloadVersion: 1, payload: policyDraftApprovalPayload(savedDraft!), summary: `发布会员政策 ${ready.policy.version}` });
+    if (!requestId) return;
     if (generationRef.current !== generation) return;
+    setSubmittedHash(savedDraft.payloadHash);
     // Only the approval state of this generation is touched; edits made meanwhile stay untouched.
-    setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } } : current);
-  };
-  const submitEntitlement = async () => {
-    if (ready.subject.status !== "LOADED" || !gameId || !meta) return;
-    const generation = generationRef.current;
-    const draft = ready.entitlement;
-    const response = await adminRequest<{ requestId: string }>("/security/approvals/requests", { operationCode: "membership.entitlement.grant", triggerCondition: "membership.entitlement.grant.requested", payloadVersion: 1, payload: {
-      userId: ready.subject.subjectId, gameId, kind: draft.kind, scopeKey: draft.scopeKey, startsAtUtc: draft.startsAtUtc, endsAtUtc: draft.endsAtUtc, policyId: meta.id,
-      // Manual grant sets its own payable share and expiry; no second haff/material price table is sent.
-      pricing: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: draft.pricingMode, priceVersionId: draft.priceVersionId, payableRatio: draft.payableRatio, costBasisRef: draft.costBasisRef },
-      depositWaived: draft.depositWaived, reason: draft.reason }, summary: `申请${draft.kind === "FRIEND" ? "挚友" : "尊享"}礼遇` });
-    if (generationRef.current !== generation) return;
-    setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId: response.requestId, message: "已提交既有审批链" } } : current);
+    setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId, message: "已提交审批，批准并执行后生效" } } : current);
   };
   const handlePolicyChange = (policy: AdminGrowthPolicy) => {
     editRevisionRef.current += 1;
@@ -210,5 +228,14 @@ export function MembershipGrowthAdminHost({ tab, snapshot, onDirtyChange, refres
     setState((current) => current.status === "ready" ? { ...current, policy } : current);
     onDirtyChange(true);
   };
-  return <MembershipGrowthAdminView state={ready} policySaved={meta !== null} onPolicyChange={access.canDraft ? handlePolicyChange : undefined} onSavePolicyDraft={access.canDraft ? () => void saveDraft() : undefined} onSubmitPolicy={access.canRequest ? () => void submitApproval() : undefined} onEntitlementChange={access.canRequest ? (entitlement) => setState((current) => current.status === "ready" ? { ...current, entitlement } : current) : undefined} onSubmitEntitlement={access.canRequest ? () => void submitEntitlement() : undefined} />;
+  return <>
+    <p className="text-xs text-muted-foreground">{approvedMeta ? `当前生效政策 v${approvedMeta.version}，保存草稿不会改变已生效权益。` : "当前生效政策尚未读取，草稿不代表已生效。"}</p>
+    {saveError || approvalWrite.error ? <Alert variant="destructive"><AlertDescription>{saveError ?? approvalWrite.error}</AlertDescription></Alert> : null}
+    {approvalWrite.pending.state !== "absent" ? <Button variant="outline" disabled={approvalWrite.busy} onClick={() => void approvalWrite.recover()}>查询原审批申请结果</Button> : null}
+    {ready.approval.requestId ? <p className="text-sm text-muted-foreground">审批申请已提交，批准并执行后生效。{onOpenPath ? <Button variant="link" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(ready.approval.requestId!)}`)}>查看审批</Button> : null}</p> : null}
+    <MembershipGrowthAdminView key={`${gameId ?? ""}:${meta?.id ?? "bootstrap"}`} state={ready} policySaved={savedDraft !== null} canEditEntitlementRanges={snapshot.security.isBoss}
+      onPolicyChange={access.canDraft ? handlePolicyChange : undefined}
+      onSavePolicyDraft={access.canDraft && !saving && !approvalWrite.busy ? () => void saveDraft() : undefined}
+      onSubmitPolicy={access.canRequest && savedDraft !== null && submittedHash !== savedDraft.payloadHash && !saving && !approvalWrite.busy && approvalWrite.pending.state === "absent" ? () => void submitApproval() : undefined} />
+  </>;
 }

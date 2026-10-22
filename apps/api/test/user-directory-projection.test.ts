@@ -13,6 +13,7 @@ import { growthContributionSourceDigest } from '../src/auth/membership-growth-in
 import { canonicalize } from '../src/supply/content-hash';
 import { sha256Hex } from '../src/supply/supply-util';
 import { readKnownMembershipTiers } from '../src/auth/user-directory-membership';
+import { convertLegacyDisplayFields, legacyDisplayDigest } from '../src/supply/legacy-display-snapshot';
 
 const viewer:AdminDirectoryViewer={adminId:'admin-fixture',isBoss:false,phoneLookup:true,resourceRead:true,orderRead:true,auditRead:true,authorizationKey:'scope-one'};
 const client=(pool:DirectorySqlFixture)=>pool as unknown as PoolClient;
@@ -165,7 +166,7 @@ test('current user summaries require explicit directory permission, batch stable
 test('native order summaries read only page counterparties and never change the order projection or cursor',async()=>{
   const queries:{sql:string;values:unknown[]}[]=[],rows=fixtureOrderRows.slice(0,3).map((row,index)=>({...row,counterpartyName:'订单显示名',counterpartyUserId:index===2?'lookahead-user':'current-user'}));
   const c={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});
-    if(sql.includes('WHERE id=ANY'))return {rows:[{id:'current-user',name:'当前昵称',image:null,phone:'13800138000'}]};
+    if(sql.includes('directory-user-summaries'))return {rows:[{id:'current-user',name:'当前昵称',image:null,phone:'13800138000',riskFlag:false}]};
     return {rows};}} as unknown as PoolClient;
   const before:any=await listUserOrders(c,viewer,'user_dual',{limit:2});
   assert.equal(queries.length,1);assert.equal('counterpartySummary' in before.items[0],false);
@@ -173,12 +174,61 @@ test('native order summaries read only page counterparties and never change the 
   const after:any=await listUserOrders(c,{...viewer,permissions:new Set(['user.directory.read'])},'user_dual',{limit:2});
   assert.equal(queries.length,2);assert.deepEqual(queries[1]!.values,[['current-user']]);
   assert.deepEqual(after.items.map(({counterpartySummary,...row}:any)=>row),before.items);assert.equal(after.nextCursor,before.nextCursor);
-  assert.deepEqual(after.items[0].counterpartySummary,{name:'当前昵称',image:null,maskedPhone:'138****8000'});
+  assert.deepEqual(after.items[0].counterpartySummary,{name:'当前昵称',image:null,maskedPhone:'138****8000',riskFlag:false});
   assert.equal(after.items[0].counterpartyName,'订单显示名');assert.equal(after.items.length,2);
   queries.length=0;
   await listUserOrders(c,{...viewer,permissions:new Set()},'user_dual',{limit:2});assert.equal(queries.length,1);
   const empty={query:async()=>({rows:[]})} as unknown as PoolClient;
   assert.deepEqual(await listUserOrders(empty,{...viewer,permissions:new Set(['user.directory.read'])},'user_dual',{limit:2}),{items:[],nextCursor:null,limit:2});
+});
+
+test('native account facts read one origin-bound page and keep exact order duration and nullable inventory',async()=>{
+  const pool=new DirectorySqlFixture(),query=pool.query.bind(pool),hash='a'.repeat(64);
+  pool.query=async(sql,values=[])=>{
+    if(sql.includes('directory-order-account-facts')){pool.queries.push({sql,values});return {rows:[{origin:'NATIVE',orderId:'order_paid',accountId:'account_fixture',versionId:'frozen-0',attributes:{login_method_code:'legacy_login_wechat'},resources:[{code:'haff_base',name:'哈夫币',quantity:'50000000',unit:'HAFF_BASE'},{code:'coffee',name:'咖啡豆',quantity:null,unit:'PIECE'}]}],rowCount:1};}
+    const result=await query(sql,values);
+    if(sql.includes('FROM zzsh_order.rental_order o'))return {...result,rows:result.rows.map((row:(typeof fixtureOrderRows)[number],index:number)=>({...row,versionId:`frozen-${index}`,contentHash:hash,termSeconds:'86401'}))};
+    return result;
+  };
+  const page:any=await listUserOrders(client(pool),viewer,'user_normal',{limit:1});
+  assert.equal(page.items[0].orderFacts.termSeconds,'86401');assert.equal(page.items[0].accountFacts.source,'ORDER_VERSION');
+  assert.equal(page.items[0].accountFacts.loginMethodText,'微信扫码');assert.equal(page.items[0].accountFacts.resources[1].quantity,null);
+  const batch=pool.queries.filter(q=>q.sql.includes('directory-order-account-facts'));
+  assert.equal(batch.length,1);assert.deepEqual(JSON.parse(batch[0]!.values[0] as string),[{origin:'NATIVE',orderId:'order_paid',accountId:'account_fixture',versionId:'frozen-0',contentHash:hash}]);
+  assert.match(batch[0]!.sql,/v\.id=wanted\."versionId" AND v\.account_id=wanted\."accountId" AND v\.content_hash=wanted\."contentHash"/);
+  assert.doesNotMatch(batch[0]!.sql,/current_version_id/);
+  assert.match(batch[0]!.sql,/sgame\."game_id" = a\.game_id/);assert.deepEqual(batch[0]!.values.slice(1),[viewer.isBoss,viewer.adminId]);
+  pool.queries.length=0;
+  const denied:any=await listUserOrders(client(pool),{...viewer,resourceRead:false},'user_normal',{limit:1});
+  assert.equal('accountFacts' in denied.items[0],false);assert.equal(denied.items[0].orderFacts.termSeconds,'86401');
+  assert.equal(pool.queries.some(q=>q.sql.includes('directory-order-account-facts')),false);
+});
+
+test('historical account facts retain their source binding and require the current account game scope',async()=>{
+  const accountId='old-account',stamp='2026-10-01T00:00:00.000Z',sourceDigest='b'.repeat(64),extract='c'.repeat(64),observation='old-observation';
+  const snapshot=convertLegacyDisplayFields({haff:'97',coffee_num:'0',login_way:'2'}),evidenceRef=`legacy-display-v1:${extract}:old-1`;
+  const displayDigest=legacyDisplayDigest(accountId,{observationVersionId:observation,baseSourceDigest:sourceDigest,extractSha256:extract,sourceUpdatedAt:stamp,evidenceRef,snapshot});
+  const historical={account_id:accountId,observation_version_id:observation,source_digest:sourceDigest,base_updated_at:new Date(stamp),source_status:3,legacy_id:'old-1',owner_user_id:'user_normal',
+    snapshot:{schema:'legacy-listing-read-v1',resourceNo:'old-1',haffRentYuan:'20.00',goodsYuan:'0.00',depositYuan:'0.00',termDays:'10',dailyHaffBase:'10000000'},
+    display_account_id:accountId,display_version_id:observation,base_source_digest:sourceDigest,extract_sha256:extract,display_updated_at:new Date(stamp),display_evidence_ref:evidenceRef,display_snapshot:snapshot,display_digest:displayDigest};
+  const record={id:'old-order',original_order_no:'OLD',source_order_status:3,source_pay_status:1,account_id:accountId,owner_user_id:'user_normal',renter_user_id:'other',game_id:'delta',source_snapshot:{goods_money:'20.00',expend_pay_money:'0.00',expend_haff:'12.50'}};
+  let inScope=true;const queries:string[]=[];
+  const c={query:async(sql:string)=>{
+    queries.push(sql);
+    if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:false}]};
+    if(sql.includes('SELECT x.origin,x.id,x.record'))return {rows:[{origin:'LEGACY',id:'old-order',record}]};
+    if(sql.includes('directory-order-account-facts'))return {rows:inScope?[{origin:'LEGACY',orderId:'old-order',accountId,versionId:null,attributes:null,resources:[]}]:[]};
+    if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return {rows:[historical]};
+    return {rows:[{origin:'LEGACY',id:'old-order',role:'owner',sortAt:stamp}]};
+  }} as unknown as PoolClient;
+  const page:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{limit:1});
+  assert.equal(page.items[0].orderFacts.resources[0].quantity,'12.50');
+  assert.equal(page.items[0].accountFacts.source,'LEGACY_ACCOUNT');assert.equal(page.items[0].accountFacts.termDays,'10');assert.equal(page.items[0].accountFacts.loginMethodText,'微信扫码');
+  assert.deepEqual(page.items[0].accountFacts.resources.find((row:{code:string})=>row.code==='haff_base'),{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'});
+  inScope=false;queries.length=0;
+  const denied:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{limit:1});
+  assert.equal('accountFacts' in denied.items[0],false);assert.equal(denied.items[0].orderFacts.resources[0].quantity,'12.50');
+  assert.equal(queries.some(sql=>sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h')),false,'a past order never grants current account scope');
 });
 
 test('audit retains existing Boss/self object scope and sensitive detail sanitation',async()=>{
@@ -199,9 +249,9 @@ test('the user-order route forwards its authenticated directory capability to th
   const pool=new DirectorySqlFixture();pool.permissions=['user.directory.read'];
   const result=await route('/api/v1/admin/users/user_dual/orders?limit=2',pool);
   assert.equal(result.status,200);
-  assert.deepEqual(result.body.items[0].counterpartySummary,{name:'林舟',image:null,maskedPhone:'+86188****1101'});
+  assert.deepEqual(result.body.items[0].counterpartySummary,{name:'林舟',image:null,maskedPhone:'+86188****1101',riskFlag:false});
   assert.equal(result.body.items[0].counterpartyName,'另一方样本');assert.equal('accountId' in result.body.items[0],false);
-  const summaries=pool.queries.filter(query=>query.sql.includes('SELECT id,name,image,"phoneNumber" AS phone'));
+  const summaries=pool.queries.filter(query=>query.sql.includes('directory-user-summaries'));
   assert.equal(summaries.length,1);assert.deepEqual(summaries[0]!.values,[['user_normal','user_dual']]);
   assert.equal(JSON.stringify(result.body).includes('+8618800001101'),false);
 });
@@ -421,28 +471,33 @@ test('legacy current drilldown and role counters share the unified source withou
 test('mixed user orders expand only page keys, preserve source collisions and use the original cursor',async()=>{
   const queries:{sql:string;values:unknown[]}[]=[],at='2026-09-24T04:00:00.000000Z';
   const head=[{origin:'LEGACY',id:'same-id',role:'owner',sortAt:at},{origin:'NATIVE',id:'same-id',role:'renter',sortAt:at},{origin:'LEGACY',id:'lookahead',role:'owner',sortAt:at}];
-  const legacy={id:'same-id',original_order_no:'OLD-SAME',source_order_status:3,source_pay_status:1,due_amount_cents:'600',recorded_paid_amount_cents:'600',deposit_amount_cents:'0',source_snapshot:{goods_money:'6.00',expend_pay_money:'0.00'},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_user_id:'user_normal',renter_user_id:'user_dual',owner_name:'Owner',renter_name:'Renter',account_id:'account-private',game_id:'delta'};
+  const legacy={id:'same-id',original_order_no:'OLD-SAME',source_order_status:3,source_pay_status:1,due_amount_cents:'600',recorded_paid_amount_cents:'600',deposit_amount_cents:'0',source_snapshot:{goods_money:'6.00',expend_pay_money:'0.00',expend_haff:'12.50',coffee_num:'0'},source_created_at:null,source_paid_at:null,source_cancelled_at:null,source_completed_at:null,owner_user_id:'user_normal',renter_user_id:'user_dual',owner_name:'Owner',renter_name:'Renter',account_id:'account-private',game_id:'delta'};
   const quoteAmount=(amount:string)=>({currency:'CNY',unit:'yuan',amount,scale:2});
   const native={id:'same-id',display_no:'NEW-SAME',status:'PAID',rental_amount_cents:'700',deposit_amount_cents:'300',currency:'CNY',owner_user_id:'native-owner',renter_user_id:'user_normal',owner_name:'Native Owner',renter_name:'Renter',account_id:'native-account',game_id:'delta',quote_snapshot:{schemaVersion:1,currency:'CNY',lines:[],resourceTotal:quoteAmount('7.00'),tenantDeposit:quoteAmount('3.00'),ownerTotal:quoteAmount('7.00'),platformFullProfit:quoteAmount('0.00'),termSeconds:'86400',unitAmountsInformational:true,expiryDisclosures:[]},created_at:at,hold_until:at,paid_at:at,cancelled_at:null,cancel_reason:null};
   const c={query:async(sql:string,values:unknown[]=[])=>{
     queries.push({sql,values});
-    if(sql.includes('SELECT id,name,image,"phoneNumber" AS phone'))return {rows:[{id:'user_dual',name:'当前昵称',image:null,phone:'13800138000'}]};
+    if(sql.includes('directory-user-summaries'))return {rows:[{id:'user_dual',name:'当前昵称',image:null,phone:'13800138000',riskFlag:false}]};
+    if(sql.includes('directory-order-account-facts'))return {rows:[]};
+    if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return {rows:[]};
     if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true}]};
     if(sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x'))return {rows:[{origin:'NATIVE',id:'same-id',record:native},{origin:'LEGACY',id:'same-id',record:legacy}]};
     return {rows:head};
   }} as unknown as PoolClient;
   const page:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'any',status:'current',limit:2});
   assert.deepEqual(page.items.map((row:any)=>row.displayNo),['OLD-SAME','NEW-SAME']);
+  assert.deepEqual(page.items[0].orderFacts,{termSeconds:null,resources:[{code:'df_billable_haff',quantity:'12.50',unit:null},{code:'df_billable_coffee',quantity:'0',unit:null}]});
+  assert.deepEqual(page.items[1].orderFacts.resources,[],'same source id never inherits legacy quantities');
   assert.deepEqual(page.items[1].amounts.totalDue,{currency:'CNY',unit:'yuan',amount:'10.00',scale:2});
   assert.equal(page.items[0].counterpartyUserId,'user_dual');assert.equal(page.items[1].counterpartyUserId,'native-owner');
-  assert.deepEqual(queries.at(-1)!.values,[['same-id'],['same-id']]);assert.ok(!JSON.stringify(queries.at(-1)!.values).includes('lookahead'));
-  assert.equal(queries.length,3);assert.ok(page.nextCursor);
+  const records=queries.find(q=>q.sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x'))!;
+  assert.deepEqual(records.values,[['same-id'],['same-id']]);assert.ok(!JSON.stringify(records.values).includes('lookahead'));
+  assert.equal(queries.length,4);assert.ok(page.nextCursor);
   await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'any',status:'current',limit:2,cursor:page.nextCursor});
-  const nextKeys=queries.at(-2)!;assert.equal(nextKeys.values[3],at);assert.equal(nextKeys.values[4],'same-id');assert.equal(nextKeys.values.at(-1),3);
+  const nextKeys=queries.filter(q=>q.sql.includes('SELECT x.origin,x.id,CASE')).at(-1)!;assert.equal(nextKeys.values[3],at);assert.equal(nextKeys.values[4],'same-id');assert.equal(nextKeys.values.at(-1),3);
   assert.match(nextKeys.sql,/ORDER BY x\.created_at DESC NULLS LAST,x\.id DESC/);assert.ok(!nextKeys.sql.includes(' AS record'));
   queries.length=0;
   const summaryPage:any=await listUserOrders(c,{...viewer,legacyRead:true,permissions:new Set(['user.directory.read'])},'user_normal',{role:'any',status:'current',limit:2});
-  assert.equal(queries.length,4);assert.deepEqual(queries.at(-1)!.values,[['user_dual','native-owner']]);
+  assert.equal(queries.length,5);assert.deepEqual(queries.find(q=>q.sql.includes('directory-user-summaries'))!.values,[['user_dual','native-owner']]);
   assert.deepEqual(summaryPage.items.map(({counterpartySummary,...row}:any)=>row),page.items);assert.equal(summaryPage.nextCursor,page.nextCursor);
   assert.equal(summaryPage.items[0].counterpartyName,'Renter');assert.equal(summaryPage.items[0].counterpartySummary.name,'当前昵称');
   assert.equal('counterpartySummary' in summaryPage.items[1],false,'missing current user does not invent or replace a stable association');
@@ -550,6 +605,11 @@ test('original registration projection uses the SQL fact while old clients retai
   const unknown=data.items.find((row:any)=>row.userId==='user_unknown');assert.equal(unknown.registeredAt,null);assert.equal(unknown.registeredAtSource,'UNKNOWN');
   const detail:any=await readUserDirectoryDetail(client(pool),{...viewer,auditRead:false},'user_legacy','ORIGINAL');
   assert.equal(detail.registeredAt,legacy.registeredAt);assert.equal(detail.source.sourceDigest,undefined);assert.equal(detail.source.sourceCreatedAt,undefined);
+  const detailSql=pool.queries.find(q=>q.sql.includes('AS "riskRevision"'))!.sql;
+  assert.match(detailSql,/FROM zzsh_iam\.user_registration_fact fact WHERE fact\.user_id=u\.id/);
+  assert.match(detailSql,/s\.provider_reference='la_user:' \|\| registration_mig\.legacy_id[\s\S]*THEN registration_mig\.registered_at ELSE NULL END/);
+  assert.equal(detailSql.split('FROM zzsh_iam.audit_event e').length,2,'only provenance uses audit; registration reuses the accepted fact projection');
+  assert.match(detailSql,/AND \(\$2::boolean OR \(e\.actor_type='admin' AND e\.actor_id=\$3\)\)/,'provenance scope remains independent of the registration projection');
   const old:any=await listUserDirectory(client(pool),viewer,{limit:20});
   assert.equal(old.items.find((row:any)=>row.userId==='user_legacy').registeredAtSource,'LOCAL');
 });

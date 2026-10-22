@@ -155,6 +155,30 @@ test('inline native title is frozen, legacy title is current account data and mi
   assert.equal(h.calls.length, 2);
 });
 
+test('formal order facts keep original resource units and distinguish historical account rules from an order term',async t=>{
+  const original={...unknownOrder,accountDisplayNo:null,orderFacts:{termSeconds:null,resources:[{code:'df_billable_haff',quantity:'12.50',unit:null},{code:'df_billable_coffee',quantity:'0',unit:null}]},accountFacts:{source:'LEGACY_ACCOUNT',resources:[{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'}],loginMethodText:'微信扫码',termDays:'10'}};
+  const native={...knownOrder,orderFacts:{termSeconds:'86401',resources:[]},accountFacts:{source:'ORDER_VERSION',resources:[{code:'haff_base',name:'哈夫币',quantity:'50000000',unit:'HAFF_BASE'}],loginMethodText:'QQ扫码'}};
+  const h=await mount(t,{rows:[original,native]}),old=h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1],current=h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1];
+  assert.match(old.textContent,/原单资源：哈夫币 12\.50/);assert.doesNotMatch(old.textContent,/97 M|12\.50 M|咖啡豆 0/,'current inventory never replaces frozen order quantities or invents a unit');
+  assert.match(old.textContent,/历史账号租期规则：10天/);assert.match(old.textContent,/历史账号登录：微信扫码/);
+  assert.match(current.textContent,/下单账号资料：50 M 哈夫币/);assert.match(current.textContent,/租期：86401秒/,'fractional hours are never rounded into a false duration');assert.match(current.textContent,/登录：QQ扫码/);
+  assert.equal(h.calls.length,2);
+});
+
+test('same-name user preview consumes authorized membership, known zero credit and risk without another GET',async t=>{
+  const summary={name:'下单时昵称',image:null,maskedPhone:null,riskFlag:true,membershipSummary:{state:'ready',growth:{knowledge:'UNKNOWN',effectiveTier:null}},creditSummary:{state:'ready',knowledge:'KNOWN',score:0,revision:'1'}};
+  const h=await mount(t,{rows:[{...knownOrder,counterpartySummary:summary}]}),before=structuredClone(h.calls);
+  const p=await openPreview('预览用户 下单时昵称','用户预览：下单时昵称');
+  assert.match(p.card.textContent,/等级待核/);assert.match(p.card.textContent,/信用分：0/);assert.match(p.card.textContent,/高危/);assert.doesNotMatch(p.card.textContent,/安全|最后登录/);
+  assert.deepEqual(h.calls,before);await p.close();
+});
+
+test('native and legacy orders sharing an id remain distinct rows with their own source and amount',async t=>{
+  const h=await mount(t,{rows:[knownOrder,{...unknownOrder,orderId:knownOrder.orderId}]}),rows=[...h.host.querySelectorAll('[data-order-id]')];
+  assert.equal(rows.length,2);assert.equal(rows[0].dataset.orderOrigin,'NATIVE');assert.equal(rows[1].dataset.orderOrigin,'LEGACY');
+  assert.match(rows[0].textContent,/160\.00 元/);assert.match(rows[1].textContent,/旧平台订单/);assert.doesNotMatch(rows[1].textContent,/160\.00/);
+});
+
 test('legitimate zero due and deposit amounts remain zero rather than unknown', async t => {
   const zero = { ...knownOrder, amounts: { rental: money('0.00'), deposit: money('0.00'), totalDue: money('0.00') } };
   const h = await mount(t, { rows: [zero] }), cell = h.host.querySelector('tbody tr').lastElementChild;

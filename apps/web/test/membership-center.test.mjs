@@ -338,6 +338,58 @@ test("entitlements keep server states, scopes and periods separate from tier pre
   }
 });
 
+test("personal entitlement rows show actual mode and exact discount independently of deposits and tier", async () => {
+  const view = await loadView();
+  try {
+    const base = { id: "e1", kind: "FRIEND", label: "挚友礼遇", scope: "DELTA_ACCOUNT_RENTAL", startsAt: "2026-01-01T00:00:00Z", endsAt: "2026-12-31T00:00:00Z", state: "ACTIVE", depositWaived: false };
+    const entitlements = [
+      { ...base, pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "custom", payableRatio: "0.85000000", costBasisRef: "PRIVATE_COST_REFERENCE" } },
+      { ...base, id: "e2", kind: "PRESTIGE", label: "尊享礼遇", depositWaived: true, pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "fast", payableRatio: "0.12345678" } },
+      { ...base, id: "e3", pricingSummary: { knowledge: "LEGACY", kind: "LEGACY" } },
+      { ...base, id: "e4", pricingSummary: { knowledge: "UNKNOWN", kind: "UNKNOWN" } },
+    ];
+    await view.render({ state: ready({ entitlements }) });
+    const rows = view.host.querySelectorAll(".mc-entitlement-list:not(.mc-entitlement-list--history) > li");
+    assert.match(rows[0].textContent, /8\.5折.*自定义比例.*不含租客免押/);
+    assert.match(rows[0].textContent, /2026\.01\.01.*2026\.12\.31/);
+    assert.match(rows[1].textContent, /1\.2345678折.*极速比例.*含租客免押/);
+    assert.match(rows[2].textContent, /旧版计价合同/);
+    assert.match(rows[3].textContent, /折扣待核/);
+    assert.doesNotMatch(view.host.textContent, /PRIVATE_COST_REFERENCE|costBasisRef|内部成本/);
+    const before = rows[0].textContent;
+    await view.click('.mc-node[data-tier="DIAMOND"]');
+    assert.equal(view.host.querySelector(".mc-entitlement-list > li").textContent, before);
+    await view.render({ state: { status: "unknown", message: "消费来源尚未完成核验", entitlements: [{ ...base, pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "ordinary", payableRatio: "1" } }] } });
+    assert.match(view.host.textContent, /消费来源尚未完成核验/);
+    assert.match(view.host.querySelector(".mc-entitlement-row").textContent, /10折.*普通比例/);
+    assert.match(view.host.querySelector("[data-testid=membership-current-tier]").textContent, /资格待确认/);
+  } finally { await view.dispose(); }
+});
+
+test("dynamic entitlement scopes require matching game facts and preserve legacy scope labels", async () => {
+  const view = await loadView();
+  try {
+    const base = { id: "scope-1", kind: "FRIEND", label: "挚友礼遇", scope: "game:live-game", gameId: "live-game", gameName: "三角洲行动", startsAt: "2026-01-01T00:00:00Z", endsAt: "2026-12-31T00:00:00Z", state: "ACTIVE", depositWaived: false, pricingSummary: { knowledge: "UNKNOWN", kind: "UNKNOWN" } };
+    await view.render({ state: ready({ entitlements: [
+      base,
+      { ...base, id: "scope-2", scope: "game:another-game" },
+      { ...base, id: "scope-3", gameName: null },
+      { ...base, id: "scope-4", scope: "game:DELTA-UUID", gameId: null, gameName: null },
+      { ...base, id: "scope-5", scope: "DELTA_ACCOUNT_RENTAL", gameId: null, gameName: null },
+      { ...base, id: "scope-6", scope: "ALL_PLATFORM", gameId: null, gameName: null },
+    ] }) });
+    const rows = view.host.querySelectorAll(".mc-entitlement-list:not(.mc-entitlement-list--history) > li");
+    assert.match(rows[0].querySelector(".mc-entitlement-row").textContent, /三角洲行动租赁/);
+    assert.match(rows[0].querySelector('[role="dialog"]').textContent, /适用范围三角洲行动租赁/);
+    for (const index of [1, 2, 3]) {
+      assert.match(rows[index].querySelector(".mc-entitlement-row").textContent, /范围待确认/);
+      assert.doesNotMatch(rows[index].textContent, /三角洲.*租赁/);
+    }
+    assert.match(rows[4].textContent, /三角洲租赁/);
+    assert.match(rows[5].textContent, /全平台适用/);
+  } finally { await view.dispose(); }
+});
+
 test("points ledger separates real consumption records from unavailable event deltas", async () => {
   const view = await loadView();
   try {

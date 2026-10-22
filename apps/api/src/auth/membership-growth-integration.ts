@@ -5,6 +5,7 @@ import { readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 import {
   contributionFromSettlement,
   entitlementStateAt,
+  entitlementPricingSummary,
   GROWTH_THRESHOLDS,
   NORMAL_GROWTH_TIERS,
   isTotalDiscountContract,
@@ -26,6 +27,7 @@ import {
   type GrowthPricingContract,
   type GrowthProjection,
   type RentalMode,
+  type EntitlementPricingSummary,
   type SettledContributionFact,
   GrowthRuleError,
   growthWindowStartAt,
@@ -452,11 +454,14 @@ export type GrowthEntitlementSummary = {
   id: string;
   kind: "FRIEND" | "PRESTIGE";
   scopeKey: string;
+  gameId?: string | null;
+  gameName?: string | null;
   startsAtUtc: string;
   endsAtUtc: string;
   status: ExistingEntitlement["status"];
   label: string;
   depositWaived: boolean;
+  pricingSummary?: EntitlementPricingSummary;
 };
 
 export type GrowthReaderResponse = {
@@ -467,7 +472,7 @@ export type GrowthReaderResponse = {
 };
 
 type StoredContribution = GrowthContribution & { gameId: string; sourceDigest?: string | null };
-type StoredEntitlement = { id: string; kind: "FRIEND" | "PRESTIGE"; scopeKey: string; startsAt: string; endsAt: string; status: ExistingEntitlement["status"]; depositWaived: boolean };
+type StoredEntitlement = { id: string; kind: "FRIEND" | "PRESTIGE"; scopeKey: string; gameId?: string | null; gameName?: string | null; startsAt: string; endsAt: string; status: ExistingEntitlement["status"]; depositWaived: boolean; pricingPayload?: unknown };
 type StoredQuoteEntitlement = StoredEntitlement & { pricingPayload: unknown };
 type StoredGrowthState = { normalTier: string; effectiveTier: string; blackGoldState: string; lastTierDropAt: string | null };
 type StoredGrowthPolicy = { id: string; version: string; policyPayload: Record<string, unknown>; haffRule: unknown };
@@ -642,7 +647,7 @@ function projectMembershipGrowth(userId: string, rows: StoredContribution[], sto
   return {
     subjectId: userId,
     growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", completeness?.state ?? "READ_FAILED", completeness?.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN", policy?.policyPayload ?? null, policy?.version ?? null, rows, policy ? sealedEnabledRentalModes(policy.haffRule) : null),
-    entitlements: entitlements.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived })),
+    entitlements: entitlements.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, gameId: item.gameId ?? null, gameName: item.gameName ?? null, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived, pricingSummary: entitlementPricingSummary(item.pricingPayload) })),
     sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length },
   };
 }
@@ -678,8 +683,8 @@ async function readMembershipGrowthModel(client: PoolClient, userId: string, asO
       WHERE pol.status='APPROVED' AND pol.effective_at <= $1 ORDER BY pol.version DESC LIMIT 1`, [asOfUtc],
   )).rows[0];
   const entitlements = (await client.query<StoredEntitlement>(
-    `SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived"
-       FROM zzsh_iam.membership_entitlement WHERE user_id=$1 ORDER BY starts_at DESC, id DESC LIMIT 100`, [userId],
+    `SELECT e.id,e.kind,e.scope_key AS "scopeKey",e.game_id AS "gameId",g.name AS "gameName",e.starts_at::text AS "startsAt",e.ends_at::text AS "endsAt",e.status,e.deposit_waived AS "depositWaived",e.pricing_payload AS "pricingPayload"
+       FROM zzsh_iam.membership_entitlement e LEFT JOIN zzsh_supply.game g ON g.id=e.game_id WHERE e.user_id=$1 ORDER BY e.starts_at DESC,e.id DESC LIMIT 100`, [userId],
   )).rows;
   return { rows, policy, response: projectMembershipGrowth(userId, rows, storedState, completeness, policy, entitlements, asOfUtc) };
 }
@@ -731,10 +736,11 @@ export async function readMembershipGrowthBatch(client: PoolClient, userIds: rea
      WHERE pol.status='APPROVED' AND pol.effective_at<=$1 ORDER BY pol.version DESC LIMIT 1`, [asOf],
   )).rows[0];
   const entitlements = groupGrowthRows((await client.query<StoredEntitlement & { userId: string }>(
-    `SELECT /* directory-growth-entitlements */ user_id AS "userId",id,kind,scope_key AS "scopeKey",starts_at::text AS "startsAt",ends_at::text AS "endsAt",status,deposit_waived AS "depositWaived"
+    `SELECT /* directory-growth-entitlements */ ranked.user_id AS "userId",ranked.id,ranked.kind,ranked.scope_key AS "scopeKey",ranked.game_id AS "gameId",g.name AS "gameName",ranked.starts_at::text AS "startsAt",ranked.ends_at::text AS "endsAt",ranked.status,ranked.deposit_waived AS "depositWaived",ranked.pricing_payload AS "pricingPayload"
      FROM (SELECT e.*,row_number() OVER(PARTITION BY user_id ORDER BY starts_at DESC,id DESC) AS row_no
        FROM zzsh_iam.membership_entitlement e WHERE user_id=ANY($1::text[])) ranked
-     WHERE row_no<=100 ORDER BY user_id,starts_at DESC,id DESC`, [ids],
+     LEFT JOIN zzsh_supply.game g ON g.id=ranked.game_id
+     WHERE ranked.row_no<=100 ORDER BY ranked.user_id,ranked.starts_at DESC,ranked.id DESC`, [ids],
   )).rows);
   const migrated = subjects.filter(subject => subject.migrated);
   const { readLegacyGrowthCoverageAssessments } = await import("./membership-growth-legacy-store");

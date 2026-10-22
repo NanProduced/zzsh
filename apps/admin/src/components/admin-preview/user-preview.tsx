@@ -3,6 +3,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Phone } from 'lucide-react';
 import { PreviewCardShell, PreviewCopyButton, PreviewFooterAction } from './preview-card';
+import type { DirectoryUserPreview } from '@/api';
 
 export interface UserPreviewProps {
   name: string;
@@ -16,14 +17,17 @@ export interface UserPreviewProps {
   creditScore?: number | null;
   creditState?: 'KNOWN' | 'NOT_INITIALIZED' | 'DENIED' | 'OUT_OF_SCOPE' | string | null;
   riskFlag?: boolean | null;
+  membershipSummary?: DirectoryUserPreview['membershipSummary'];
+  creditSummary?: DirectoryUserPreview['creditSummary'];
   canOpen?: boolean;
   onOpen?: () => void;
   openLabel?: string;
   deniedReason?: string;
 }
 
-export function hasUsefulUserPreview(summary: Pick<UserPreviewProps, 'name' | 'image' | 'maskedPhone'> | null | undefined, rowName: string): boolean {
-  return !!(summary?.image?.trim() || summary?.maskedPhone?.trim() || summary?.name?.trim() && summary.name.trim() !== rowName.trim());
+export function hasUsefulUserPreview(summary: DirectoryUserPreview | null | undefined, rowName: string): boolean {
+  return !!(summary?.image?.trim() || summary?.maskedPhone?.trim() || summary?.name?.trim() && summary.name.trim() !== rowName.trim()
+    || summary?.membershipSummary?.state==='ready' || summary?.creditSummary?.state==='ready' || summary?.riskFlag===true);
 }
 
 /**
@@ -43,11 +47,18 @@ export function UserPreviewCard({
   creditScore,
   creditState,
   riskFlag,
+  membershipSummary,
+  creditSummary,
   canOpen,
   onOpen,
   openLabel = '查看用户资料',
   deniedReason = '无查看权限',
 }: UserPreviewProps) {
+  if (membershipSummary?.state==='ready') {
+    const tiers: Record<string,string> = {STANDARD:'普通会员',SILVER:'银卡',GOLD:'金卡',PLATINUM:'铂金',DIAMOND:'钻石',BLACK_GOLD:'黑金'};
+    membershipTier = membershipSummary.growth.knowledge==='KNOWN' ? tiers[membershipSummary.growth.effectiveTier??''] ?? '等级待核' : '等级待核';
+  }
+  if (creditSummary?.state==='ready') { creditState=creditSummary.knowledge; creditScore=creditSummary.score; }
   const initial = name.trim().slice(0, 1) || '用';
 
   const header = (

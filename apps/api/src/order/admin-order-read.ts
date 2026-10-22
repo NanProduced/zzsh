@@ -36,19 +36,24 @@ const LEGACY_RECORD = (continuationReady: boolean) => `to_jsonb(l)||jsonb_build_
 /** Restricts one source branch to its own ids; the values are the caller's
  *  parameter placeholders, so the same relation serves the page read and the
  *  single-order read. */
-export type OrderReadRestriction = { nativeIds?: string; legacyIds?: string };
+export type OrderReadRestriction = { nativeIds?: string; legacyIds?: string; participantUserId?: string };
 
-function orderReadSql(continuationReady: boolean, nativeColumns: string, legacyColumns: string, restrict?: OrderReadRestriction): string { return `
+function orderReadSql(continuationReady: boolean, nativeColumns: string, legacyColumns: string, restrict?: OrderReadRestriction): string {
+ const where = (alias: string, ids?: string) => {
+  const predicates = [ids && `${alias}.id=ANY(${ids}::text[])`, restrict?.participantUserId && `(${alias}.owner_user_id=${restrict.participantUserId} OR ${alias}.renter_user_id=${restrict.participantUserId})`].filter(Boolean);
+  return predicates.length ? ` WHERE ${predicates.join(' AND ')}` : '';
+ };
+ return `
  SELECT ${nativeColumns}
   FROM zzsh_order.rental_order o JOIN zzsh_auth_user."user" ou ON ou.id=o.owner_user_id
   JOIN zzsh_auth_user."user" ru ON ru.id=o.renter_user_id JOIN zzsh_supply.rental_account a ON a.id=o.account_id
-  LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id${restrict?.nativeIds ? ` WHERE o.id=ANY(${restrict.nativeIds}::text[])` : ""}
+  LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id${where('o',restrict?.nativeIds)}
  UNION ALL
  SELECT ${legacyColumns}
   FROM zzsh_order.legacy_order_read_snapshot l JOIN zzsh_auth_user."user" ou ON ou.id=l.owner_user_id
   ${continuationReady ? CONTINUATION_JOIN : ABSENT_CONTINUATION_JOIN}
   JOIN zzsh_auth_user."user" ru ON ru.id=l.renter_user_id JOIN zzsh_supply.rental_account a ON a.id=l.account_id
-  LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id${restrict?.legacyIds ? ` WHERE l.id=ANY(${restrict.legacyIds}::text[])` : ""}`; }
+  LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id${where('l',restrict?.legacyIds)}`; }
 
 export function orderReadRelation(continuationReady: boolean, summaryOnly = false, restrict?: OrderReadRestriction): string {
  return orderReadSql(continuationReady,
@@ -59,8 +64,8 @@ export function orderReadRelation(continuationReady: boolean, summaryOnly = fals
 /** The same rows and the same filter columns without the record projection.
  *  Authorization, filtering, counting and key selection run on this relation;
  *  only the page's own keys are read again for their full record. */
-export function orderReadKeyRelation(continuationReady: boolean): string {
- return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER);
+export function orderReadKeyRelation(continuationReady: boolean, restrict?: OrderReadRestriction): string {
+ return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER,restrict);
 }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
 export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:OrderReadViewer):Record<string,any>{

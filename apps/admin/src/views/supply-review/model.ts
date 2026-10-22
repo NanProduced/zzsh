@@ -68,7 +68,7 @@ export type SupplyListSummary = {
     recordedProof: { id: string; versionNo: string; ownerUserId: string; priceVersionId: string; policyVersion: string; status: string; requiredCents: string; coveredCents: string; validUntil: string | null; valid: boolean } | null;
   };
 };
-export type SupplyOwnerSummary = { name: string; image: string | null; maskedPhone: string | null };
+export type SupplyOwnerSummary = import('../../api').DirectoryUserPreview;
 export type SupplyWorkItem = { id: string; accountId: string; displayNo: string | null; ownerId: string; ownerName: string; revision: string; gameName: string; versionId: string | null; sequence: string | null; title: string | null; reviewState: string | null; sortAt: string; facts: SupplyFacts; accountCreatedAt?: string; accountUpdatedAt?: string | null; versionCreatedAt?: string | null; summary?: SupplyListSummary | null; ownerLink?: { state: "READY" | "DENIED" }; ownerSummary?: SupplyOwnerSummary | null };
 export type SupplyWorkPage = { contractVersion: string; contextKey: string; items: SupplyWorkItem[]; nextCursor: string | null; stationOrigins: { admin: string; user: string }; games?: Array<{ id: string; name: string }> };
 export type RestrictionEvent = { id: string; reason: string | null; occurredAt: string; actorName: string | null; beforeRevision: string | null; afterRevision: string | null; versionId: string | null; restricted: boolean | null };

@@ -12,6 +12,7 @@ import {
   quoteToGrowthOfferPlan,
   replayGrowthProjection,
   entitlementStateAt,
+  entitlementPricingSummary,
   roundHalfUpCents,
   sealedEnabledRentalModes,
   validateBenefitPolicy,
@@ -22,6 +23,50 @@ import {
   type ModePricingContract,
 } from "../src/auth/membership-growth";
 import { compatRule } from "./pricing-compat-fixture";
+
+test("public entitlement pricing exposes the real share without internal cost and preserves unknown or legacy", () => {
+  const pricing = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "custom", priceVersionId: "price-v1", payableRatio: "0.85000001", costBasisRef: "restricted-cost" };
+  assert.deepEqual(entitlementPricingSummary(pricing), { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "custom", payableRatio: "0.85000001" });
+  assert.doesNotMatch(JSON.stringify(entitlementPricingSummary(pricing)), /restricted-cost|priceVersion/);
+  for (const value of [undefined, null, { ...pricing, payableRatio: "0" }, { ...pricing, payableRatio: "0.850000001" }]) assert.deepEqual(entitlementPricingSummary(value), { knowledge: "UNKNOWN", kind: "UNKNOWN" });
+  assert.deepEqual(entitlementPricingSummary(configuredMode(policy().tiers.GOLD, "ordinary")), { knowledge: "LEGACY", kind: "LEGACY" });
+});
+
+test("independent entitlement ranges accept deeper than member tiers and enforce both exact endpoints", () => {
+  const legacy = policy(); legacy.status = "APPROVED";
+  const originalLegacy = JSON.stringify(legacy);
+  assert.equal(validateBenefitPolicy(legacy, { enabledModes: ["ordinary"] }).publishable, true);
+  assert.equal(JSON.stringify(legacy), originalLegacy, "legacy policy serialization and therefore its stored hash are unchanged");
+  assert.equal(legacy.entitlementRanges, undefined);
+  const p = policy();
+  p.status = "APPROVED";
+  const range = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT_RANGE", mode: "ordinary", priceVersionId: "price-v1", minPayableRatio: "0.65", maxPayableRatio: "0.85", costBasisRef: "independent-cost" } as const;
+  Object.assign(p, { entitlementRanges: { FRIEND: { byMode: { ordinary: range } }, PRESTIGE: { byMode: { ordinary: range } } } });
+  for (const tier of Object.values(p.tiers)) tier.entitlementCap = { status: "NOT_PRICED", reason: "Legacy cap is inert" };
+  assert.equal(validateBenefitPolicy(p, { enabledModes: ["ordinary"] }).publishable, true);
+  const before = JSON.stringify(p);
+  const candidate = { userId: "user_1", kind: "FRIEND" as const, scopeKey: "game:delta", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", reason: "人工礼遇", requestedBy: "admin_1" };
+  const pricing = (payableRatio: string) => ({ status: "CONFIGURED" as const, kind: "TOTAL_DISCOUNT" as const, mode: "ordinary" as const, priceVersionId: "price-v1", payableRatio, costBasisRef: "independent-cost" });
+  for (const ratio of ["0.65", "0.75", "0.85"]) assert.equal(validateEntitlementCandidate({ ...candidate, pricing: pricing(ratio) }, "UNKNOWN", p).valid, true, ratio);
+  for (const ratio of ["0.64999999", "0.85000001", "0.750000001"]) assert.equal(validateEntitlementCandidate({ ...candidate, pricing: pricing(ratio) }, "STANDARD", p).valid, false, ratio);
+  assert.equal(validateEntitlementCandidate({ ...candidate, pricing: { ...pricing("0.75"), costBasisRef: "forged-cost" } }, "STANDARD", p).valid, false);
+  assert.equal(JSON.stringify(p), before, "validation never rewrites approved policy bytes");
+});
+
+test("independent entitlement ranges fail closed for inverted, malformed, missing and unpriced modes", () => {
+  const base = policy(); base.status = "APPROVED";
+  const configured = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT_RANGE", mode: "ordinary", priceVersionId: "price-v1", minPayableRatio: "0.7", maxPayableRatio: "1", costBasisRef: "independent-cost" };
+  for (const patch of [{ minPayableRatio: "0" }, { minPayableRatio: "1.1" }, { minPayableRatio: "0.9", maxPayableRatio: "0.8" }, { maxPayableRatio: "0.123456789" }, { mode: "fast" }]) {
+    const p = structuredClone(base);
+    Object.assign(p, { entitlementRanges: { FRIEND: { byMode: { ordinary: { ...configured, ...patch } } }, PRESTIGE: { byMode: { ordinary: configured } } } });
+    assert.equal(validateBenefitPolicy(p, { enabledModes: ["ordinary"] }).publishable, false, JSON.stringify(patch));
+  }
+  for (const entry of [undefined, { status: "NOT_PRICED", reason: "Awaiting owner config" }]) {
+    const p = structuredClone(base);
+    Object.assign(p, { entitlementRanges: { FRIEND: { byMode: { ordinary: entry } }, PRESTIGE: { byMode: { ordinary: configured } } } });
+    assert.equal(validateBenefitPolicy(p, { enabledModes: ["ordinary"] }).publishable, false);
+  }
+});
 
 function configuredMode(tier: GrowthBenefitPolicy["tiers"]["STANDARD"], mode: "ordinary" | "custom" | "fast"): GrowthPricingContract {
   const contract = tier.pricing[mode];

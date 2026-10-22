@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { readUserDirectoryBusinessSummaries } from "../src/auth/user-directory-business-summary";
+import { readDirectoryUserSummaries } from "../src/auth/user-directory-summary";
 import { growthContributionSourceDigest, readMembershipGrowth, readMembershipGrowthBatch } from "../src/auth/membership-growth-integration";
 import { prepareLegacyGrowthBackfill, type LegacyCoverageRecord } from "../src/auth/membership-growth-legacy";
 import { readLegacyGrowthCoverageAssessment, readLegacyGrowthCoverageAssessments, type LegacyGrowthStoredContribution } from "../src/auth/membership-growth-legacy-store";
@@ -55,7 +56,7 @@ function fixture(subjects: Subject[], options: {
     if (sql.includes('SELECT source_ref AS "sourceRef"')) return { rows: current ? [{ sourceRef: current.sourceRef }] : [] };
     if (sql.includes("FROM zzsh_iam.membership_growth_state WHERE")) return { rows: current?.normalTier ? [current] : [] };
     if (sql.includes("SELECT EXISTS(SELECT 1 FROM zzsh_iam.audit_event")) return { rows: [{ migrated: current?.migrated ?? false }] };
-    if (sql.includes("FROM zzsh_iam.membership_entitlement WHERE")) return { rows: (options.entitlements ?? []).filter(row => row.userId === id) };
+    if (sql.includes("FROM zzsh_iam.membership_entitlement")) return { rows: (options.entitlements ?? []).filter(row => row.userId === id) };
     throw new Error(`Unexpected read: ${sql}`);
   } } as unknown as PoolClient;
   return { client, queries };
@@ -68,6 +69,31 @@ test("denied capabilities and empty pages do not probe business tables", async (
   });
   assert.equal((await readUserDirectoryBusinessSummaries(f.client, viewer, [], at)).size, 0);
   assert.equal(f.queries.length, 0);
+});
+
+test('related user previews batch current facts once and trim missing permissions and out-of-scope credit',async()=>{
+ const ids=['u','v'], f=fixture(ids.map(id=>subject(id)),{credits:[{userId:'u',score:0,revision:'1',inScope:true},{userId:'v',score:100,revision:'2',inScope:false}]});
+ const query=f.client.query.bind(f.client);
+ f.client.query=(async(sql:string,args:unknown[]=[])=>{
+  if(sql.includes('directory-user-summaries')){f.queries.push({sql,args});return {rows:ids.map(id=>({id,name:id,image:null,phone:'13800138000',riskFlag:id==='u'}))};}
+  return query(sql,args);
+ }) as PoolClient['query'];
+ const permissions=new Set(['user.directory.read','membership.growth.read.summary','credit.read']);
+ const result=await readDirectoryUserSummaries(f.client,[...ids,'u'],permissions,viewer);
+ assert.equal(result.get('u')!.riskFlag,true);assert.equal(result.get('u')!.maskedPhone,'138****8000');
+ assert.equal(result.get('u')!.creditSummary?.state,'ready');assert.equal((result.get('u')!.creditSummary as {score:number}).score,0,'known zero is preserved');
+ assert.equal(result.get('u')!.membershipSummary?.state,'ready');assert.equal(result.get('v')!.creditSummary,undefined,'object/game denial omits the field');
+ assert.equal(f.queries.filter(q=>q.sql.includes('directory-user-summaries')).length,1);
+ assert.equal(f.queries.filter(q=>q.sql.includes('directory-growth-subjects')).length,1);
+ assert.equal(f.queries.filter(q=>q.sql.includes('directory-credit-summaries')).length,1);
+ assert.ok(f.queries.every(q=>!q.sql.includes('directory-growth-subjects')||JSON.stringify(q.args[0])===JSON.stringify(ids)));
+ assert.equal(JSON.stringify([...result.values()]).includes('13800138000'),false);
+ f.queries.length=0;
+ const trimmed=await readDirectoryUserSummaries(f.client,ids,new Set(['user.directory.read']),viewer);
+ assert.equal(f.queries.length,1,'stale viewer flags cannot probe privileged summary tables');
+ assert.equal(trimmed.get('u')!.membershipSummary,undefined);assert.equal(trimmed.get('u')!.creditSummary,undefined);
+ f.queries.length=0;
+ assert.equal((await readDirectoryUserSummaries(f.client,ids,new Set(),viewer)).size,0);assert.equal(f.queries.length,0);
 });
 
 test("one user and fifty users share six reads, and known zero growth is independent of an absent policy", async () => {
@@ -98,7 +124,7 @@ test("unknown migrated growth retains only active independent entitlements and d
     assert.equal(result.membershipSummary.growth.knowledge, "UNKNOWN");
     assert.equal(result.membershipSummary.growth.sourceState, "BACKFILL_PENDING");
     assert.equal(result.membershipSummary.growth.normalTier, null);
-    assert.deepEqual(result.membershipSummary.entitlements, [{ id: "legacy:ACTIVE", kind: "FRIEND", scopeKey: "game-a", startsAtUtc: "2026-10-18T00:00:00.000000Z", endsAtUtc: "2026-10-20T00:00:00.000000Z", status: "ACTIVE", label: "挚友礼遇", depositWaived: true }]);
+    assert.deepEqual(result.membershipSummary.entitlements, [{ id: "legacy:ACTIVE", kind: "FRIEND", scopeKey: "game-a", gameId: null, gameName: null, startsAtUtc: "2026-10-18T00:00:00.000000Z", endsAtUtc: "2026-10-20T00:00:00.000000Z", status: "ACTIVE", label: "挚友礼遇", depositWaived: true, pricingSummary: {knowledge:'UNKNOWN',kind:'UNKNOWN'} }]);
   }
   assert.deepEqual(result.creditSummary, { state: "ready", knowledge: "NOT_INITIALIZED", score: null, revision: null });
   assert.equal(f.queries.length, 9);

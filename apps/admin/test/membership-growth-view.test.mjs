@@ -8,111 +8,131 @@ import react from "@vitejs/plugin-react";
 
 const rootPath = fileURLToPath(new URL("..", import.meta.url));
 
-test("admin membership view edits total-discount shares and manual entitlement discounts", async () => {
-  const browser = new Window({ url: "http://127.0.0.1:3101/membership-growth" });
-  Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, getComputedStyle: browser.getComputedStyle.bind(browser), requestAnimationFrame: (callback) => setTimeout(() => callback(Date.now()), 0), cancelAnimationFrame: (id) => clearTimeout(id), IS_REACT_ACT_ENVIRONMENT: true });
-  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
-  const { MembershipGrowthAdminView, beijingInputToUtc, entitlementWindowError, utcToBeijingInput } = await vite.ssrLoadModule("/src/views/membership-growth-view.tsx");
-  const host = browser.document.createElement("div");
-  browser.document.body.append(host);
-  const { createRoot } = await import("react-dom/client");
-  const root = createRoot(host);
-  const contract = (mode, payableRatio = "0.9") => ({ status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode, priceVersionId: "price-v1", payableRatio, costBasisRef: "cost-v1" });
-  const policy = { version: "b1", status: "DRAFT", effectiveAt: "2026-11-01T00:00:00.000Z", catalog: { safeBoxes: [], materials: [], priceVersions: [{ id: "price-v1", label: "当前价格方案" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD", catalogSource: "SEALED" }, selectedSafeBoxCode: "", selectedMaterialId: "", tiers: ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map((tier, index) => { const share = ["0.95", "0.90", "0.88", "0.86", "0.84"][index]; return { tier, threshold: String(index * 5000), tenantDeposit: index < 2 ? "ACCOUNT_BASE" : "WAIVED", ordinary: contract("ordinary", share), custom: contract("custom", share), fast: { status: "NOT_PRICED", reason: "权威禁用模式" }, maxEntitlement: { status: "NOT_PRICED", reason: "礼遇上限待配置" } }; }), changes: [{ label: "金卡免押", before: "按账号条件", after: "默认免押", risk: "LOW" }] };
-  const state = { status: "ready", policy, preview: { status: "LOCAL_FIXTURE", totalCents: "5", priceBasis: "GROWTH", depositBasis: "FRIEND" }, subject: { subjectId: "user-a", status: "LOADED", userLabel: "用户甲", tier: "GOLD", rollingPoints: "12000", lifetimePoints: "15000", evidence: ["结算版本 s1", "退款更正 1 条"] }, entitlement: { kind: "FRIEND", scopeKey: "game:delta", startsAtUtc: "2026-10-10T02:00:00.000Z", endsAtUtc: "2026-10-20T02:00:00.000Z", pricingMode: "ordinary", priceVersionId: "price-v1", payableRatio: "0.85", costBasisRef: "cost-ent", depositWaived: false, reason: "客服专项" }, approval: { status: "APPROVED_PENDING_EXECUTION", requestId: "approval_1", message: "已批准，等待阶段B执行接线" } };
-  const changed = [];
-  const entitlementChanges = [];
-  const saves = [];
-  const submitted = [];
-  const policysubmitted = [];
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state, onEntitlementChange: (value) => entitlementChanges.push(value), onPolicyChange: (value) => changed.push(value), onSavePolicyDraft: () => saves.push("save"), onSubmitPolicy: () => policysubmitted.push("submit-policy"), onSubmitEntitlement: () => submitted.push("submit") })));
-  assert.match(host.textContent, /成长权益与人工礼遇/);
-  assert.match(host.textContent, /五档总价折扣/);
-  assert.match(host.textContent, /¥0.05/);
-  assert.match(host.textContent, /礼遇上限/);
-  assert.doesNotMatch(host.textContent, /LOCAL_UI \/ FIXTURE/);
-  assert.doesNotMatch(host.textContent, /APPROVED_PENDING_EXECUTION/);
-  assert.match(host.textContent, /已批准，等待阶段B执行接线/);
-  assert.doesNotMatch(host.textContent, /授予成功/);
-  assert.ok(host.querySelector("input[type=datetime-local]"));
-  assert.equal(utcToBeijingInput("2026-10-10T02:00:00.000Z"), "2026-10-10T10:00");
-  assert.equal(beijingInputToUtc("2026-10-10T10:00"), "2026-10-10T02:00:00.000Z");
-  assert.equal(entitlementWindowError("2026-10-10T02:00:00.000Z", "2027-01-10T02:00:00.000Z"), "礼遇单次最多90天");
-  const reason = host.querySelector("textarea");
-  await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(reason, "新的礼遇申请原因"); reason.dispatchEvent(new browser.Event("input", { bubbles: true })); reason.dispatchEvent(new browser.Event("change", { bubbles: true })); });
-  assert.equal(entitlementChanges.at(-1).reason, "新的礼遇申请原因");
-  assert.equal(host.querySelector("textarea").value, "新的礼遇申请原因");
-  const setInput = async (element, value) => { await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(element, value); element.dispatchEvent(new browser.Event("input", { bubbles: true })); element.dispatchEvent(new browser.Event("change", { bubbles: true })); }); };
-  const inputByLabel = (label) => { const input = host.querySelector(`input[aria-label='${label}']`); assert.ok(input, `missing input ${label}`); return input; };
-  // The member discount is one payable share per tier and mode, never a second base price table.
-  await setInput(inputByLabel("SILVERordinary应付比例"), "0.92");
-  assert.equal(changed.at(-1).tiers[1].ordinary.payableRatio, "0.92");
-  await setInput(inputByLabel("SILVERordinary成本依据"), "cost-v2");
-  assert.equal(changed.at(-1).tiers[1].ordinary.costBasisRef, "cost-v2");
-  await setInput(inputByLabel("政策生效时点"), "2026-11-01T00:00");
-  assert.equal(changed.at(-1).effectiveAt, "2026-10-31T16:00:00.000Z");
-  // DRAFT with complete enabled modes can request approval once the missing caps are filled explicitly.
-  const fillCaps = [...host.querySelectorAll("button")].find((button) => button.textContent === "按档位边界补齐/修正礼遇上限");
-  assert.ok(fillCaps);
-  await act(async () => fillCaps.click());
-  assert.equal(changed.at(-1).tiers[1].maxEntitlement.byMode.ordinary.payableRatio, "0.92");
-  assert.equal(changed.at(-1).tiers[2].maxEntitlement.byMode.ordinary.payableRatio, "0.88");
-  const submitPolicy = [...host.querySelectorAll("button")].find((button) => button.textContent === "提交审批");
-  assert.ok(submitPolicy && !submitPolicy.disabled, host.textContent.slice(-800));
-  await act(async () => submitPolicy.click());
-  assert.deepEqual(policysubmitted, ["submit-policy"]);
-  // Manual entitlement discounts: a deeper share than the tier cap is blocked, a valid one submits.
-  await setInput(inputByLabel("礼遇应付比例"), "0.80");
-  assert.match(host.textContent, /礼遇折扣深于该成长档上限/);
-  assert.equal([...host.querySelectorAll("button")].find((button) => button.textContent === "提交礼遇审批").disabled, true);
-  await setInput(inputByLabel("礼遇应付比例"), "0.92");
-  await setInput(inputByLabel("礼遇成本依据"), "cost-ent-2");
-  assert.equal(entitlementChanges.at(-1).payableRatio, "0.92");
-  assert.equal(entitlementChanges.at(-1).costBasisRef, "cost-ent-2");
-  const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存草稿");
-  assert.ok(save);
-  await act(async () => save.click());
-  assert.deepEqual(saves, ["save"]);
-  const submit = [...host.querySelectorAll("button")].find((button) => button.textContent === "提交礼遇审批");
-  assert.ok(submit && !submit.disabled, host.textContent.slice(-500));
-  await act(async () => submit.click());
-  assert.deepEqual(submitted, ["submit"]);
-  let revoked = null;
-  const applied = { ...state, approval: { status: "APPLIED", requestId: "approval_2" } };
-  browser.window.confirm = () => true;
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: applied, onRevokeEntitlement: (reason) => { revoked = reason; } })));
-  const revoke = host.querySelector("button.membership-admin-button--danger");
-  const revokeInput = host.querySelector(".membership-admin-revoke-row input");
-  assert.ok(revoke && revokeInput);
-  await setInput(revokeInput, "客户要求撤销");
-  await act(async () => revoke.click());
-  assert.equal(revoked, "客户要求撤销");
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "loading" } })));
-  assert.equal(host.querySelector('[data-state="loading"]')?.getAttribute("role"), "status");
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "error", message: "读取失败" } })));
-  assert.equal(host.querySelector('[data-state="error"]')?.getAttribute("role"), "alert");
-  assert.doesNotMatch(host.textContent, /用户成长依据/);
-  // A missing policy must not hide the granted subject read (PC-READ-1 live defect).
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "error", message: "尚未读取到会员政策；功能保持未启用或等待首个草稿", subject: { subjectId: "user-1", status: "UNKNOWN", reason: "来源状态：BACKFILL_PENDING" } } })));
-  assert.match(host.textContent, /尚未读取到会员政策/);
-  assert.match(host.textContent, /用户成长依据/);
-  assert.match(host.textContent, /成长依据未知/);
-  assert.match(host.textContent, /来源状态：BACKFILL_PENDING/);
-  assert.doesNotMatch(host.textContent, /普通会员|0 分/);
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { ...state, subject: { subjectId: "user-b", status: "UNKNOWN", reason: "新对象未取得授权依据" } } })));
-  assert.match(host.textContent, /成长依据未知/);
-  assert.doesNotMatch(host.textContent, /用户甲/);
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { ...state, subject: { ...state.subject, subjectId: "user-b", userLabel: "用户甲" }, entitlement: { ...state.entitlement, scopeKey: "game:other" } } })));
-  const inputValues = [...host.querySelectorAll("input")].map((input) => input.value);
-  assert.ok(inputValues.includes("game:other"));
-  assert.equal(inputValues.includes("game:delta"), false);
-  await act(async () => root.render(createElement(MembershipGrowthAdminView, { state: { status: "permission", message: "权限已收回" } })));
-  assert.match(host.textContent, /没有会员成长管理权限/);
-  await act(async () => root.unmount());
-  await vite.close();
-  await browser.happyDOM.abort();
+async function ui(t) {
+  const previousFetch=globalThis.fetch,fetches=[];
+  globalThis.fetch=async(...args)=>{fetches.push(args);throw new Error('Unexpected component HTTP request');};
+  const browser=new Window({url:'http://127.0.0.1:3101/membership-growth'});
+  browser.matchMedia=query=>({matches:false,media:query,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}});
+  for(const name of ['document','HTMLElement','Element','Node','Event','CustomEvent','MutationObserver','ResizeObserver','localStorage','sessionStorage'])globalThis[name]=browser[name];
+  globalThis.window=browser;globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);
+  globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+  Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
+  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],resolve:{alias:{'@':fileURLToPath(new URL('../src',import.meta.url))}},server:{middlewareMode:true,hmr:false,ws:false,watch:null},optimizeDeps:{noDiscovery:true,include:[]}});
+  const view=await vite.ssrLoadModule('/src/views/membership-growth-view.tsx'),form=await vite.ssrLoadModule('/src/views/membership-entitlement-form.tsx');
+  const host=browser.document.createElement('div');browser.document.body.append(host);
+  const {createRoot}=await import('react-dom/client'),root=createRoot(host);
+  t.after(async()=>{await act(async()=>root.unmount());await vite.close();await browser.happyDOM.abort();globalThis.fetch=previousFetch;});
+  const render=async(component,props)=>{await act(async()=>root.render(createElement(component,props)));};
+  const input=label=>{const element=host.querySelector(`input[aria-label='${label}']`);assert.ok(element,`missing ${label}`);return element;};
+  const type=async(element,value)=>{await act(async()=>{const prototype=element.tagName==='TEXTAREA'?browser.HTMLTextAreaElement.prototype:browser.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(prototype,'value').set.call(element,value);element.dispatchEvent(new browser.Event('input',{bubbles:true}));element.dispatchEvent(new browser.Event('change',{bubbles:true}));});};
+  const click=async element=>{assert.ok(element);await act(async()=>element.click());};
+  const button=text=>[...host.querySelectorAll('button')].find(element=>element.textContent.trim()===text);
+  return{browser,host,root,view,form,render,input,type,click,button,fetches};
+}
+const discount=(mode,ratio='0.9')=>({status:'CONFIGURED',kind:'TOTAL_DISCOUNT',mode,priceVersionId:'price-v1',payableRatio:ratio,costBasisRef:'cost-v1'});
+const range=(mode,min='0.6',max='1')=>({status:'CONFIGURED',kind:'TOTAL_DISCOUNT_RANGE',mode,priceVersionId:'price-v1',minPayableRatio:min,maxPayableRatio:max,costBasisRef:'cost-ent'});
+function readyState(){
+  const shares=['0.95','0.90','0.88','0.86','0.84'];
+  return{status:'ready',policy:{version:'b1',status:'DRAFT',effectiveAt:'2026-11-01T00:00:00.000Z',catalog:{safeBoxes:[],materials:[],priceVersions:[{id:'price-v1',label:'当前价格方案'}],enabledModes:['ordinary','custom'],catalogSource:'SEALED'},selectedSafeBoxCode:'',selectedMaterialId:'',tiers:['STANDARD','SILVER','GOLD','PLATINUM','DIAMOND'].map((tier,index)=>({tier,threshold:String(index*5000),tenantDeposit:index<2?'ACCOUNT_BASE':'WAIVED',ordinary:discount('ordinary',shares[index]),custom:discount('custom',shares[index]),fast:{status:'NOT_PRICED',reason:'未启用'},maxEntitlement:{status:'NOT_PRICED',reason:'旧合同不用于独立范围'}})),entitlementRanges:{FRIEND:{byMode:{ordinary:range('ordinary'),custom:range('custom')}},PRESTIGE:{byMode:{ordinary:range('ordinary','0.5'),custom:range('custom','0.5')}}},changes:[]},preview:{status:'NOT_RUN'},subject:{subjectId:'u',status:'UNKNOWN'},entitlement:{kind:'FRIEND',scopeKey:'game:delta',startsAtUtc:'',endsAtUtc:'',pricingMode:'ordinary',priceVersionId:'',payableRatio:'',costBasisRef:'',depositWaived:false,reason:''},approval:{status:'NOT_REQUESTED'}};
+}
+
+test('policy view separates independent ranges from growth shares and respects Boss-only editing',async t=>{
+  const h=await ui(t),state=readyState(),changed=[],saves=[],submitted=[];
+  const props={state,canEditEntitlementRanges:true,onPolicyChange:policy=>changed.push(policy),onSavePolicyDraft:()=>saves.push(true),onSubmitPolicy:()=>submitted.push(true)};
+  await h.render(h.view.MembershipGrowthAdminView,props);
+  assert.match(h.host.textContent,/会员政策/);assert.match(h.host.textContent,/成长等级权益/);assert.match(h.host.textContent,/礼遇折扣范围/);
+  assert.doesNotMatch(h.host.textContent,/报价预览|用户成长依据|人工礼遇申请|审批与实际生效|金卡上限|钻石上限/);
+  assert.equal(h.host.querySelector('select,textarea,input[type=datetime-local]'),null,'use house controls and a Calendar date picker');
+  assert.ok(h.host.querySelector('button[aria-label="政策生效日期"]'));assert.ok(h.input('政策生效时间'));
+  assert.equal(h.view.validateAdminPolicyDraft(state.policy,['ordinary','custom']).publishable,true,'independent ranges may legitimately be deeper than growth-tier discounts');
+  await h.type(h.input('SILVERordinary应付比例'),'0.92');
+  assert.equal(changed.at(-1).tiers[1].ordinary.payableRatio,'0.92');
+  assert.deepEqual(changed.at(-1).entitlementRanges,state.policy.entitlementRanges);
+  await h.type(h.input('FRIENDordinary最小应付比例'),'0.55');
+  assert.equal(changed.at(-1).entitlementRanges.FRIEND.byMode.ordinary.minPayableRatio,'0.55');
+  assert.deepEqual(changed.at(-1).tiers.map(tier=>tier.maxEntitlement),state.policy.tiers.map(tier=>tier.maxEntitlement),'no tier cap seeding or mutation');
+  assert.equal(h.button('提交审批').disabled,true,'unsaved policy edits cannot be submitted');
+  await h.click(h.button('保存草稿'));assert.deepEqual(saves,[true]);
+  const saved={...state,policy:{...changed.at(-1),version:'b2'}};
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:saved});
+  assert.equal(h.button('提交审批').disabled,false);await h.click(h.button('提交审批'));assert.deepEqual(submitted,[true]);
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:saved,canEditEntitlementRanges:false});
+  assert.equal(h.input('FRIENDordinary最小应付比例').disabled,true);assert.equal(h.input('SILVERordinary应付比例').disabled,false);
+  assert.match(h.host.textContent,/仅 Boss 可修改/);
+  await h.render(h.view.MembershipGrowthAdminView,{state:{status:'loading'}});assert.ok(h.host.querySelector('[role=status]'));
+  await h.render(h.view.MembershipGrowthAdminView,{state:{status:'error',message:'读取失败'}});assert.match(h.host.querySelector('[role=alert]').textContent,/读取失败/);
+  await h.render(h.view.MembershipGrowthAdminView,{state:{status:'permission',message:'权限已收回'}});assert.match(h.host.textContent,/没有会员政策查看权限/);
 });
 
+test('entitlement form validates independent ranges, dates, automatic references and unknown growth without network',async t=>{
+  const h=await ui(t),state=readyState(),submitted=[];
+  const context={schema:'membership-entitlement-context.v1',subject:{userId:'u',name:'用户甲',image:null,maskedPhone:null},game:{id:'delta',name:'三角洲'},approvedMeta:{id:'approved-1',version:'1',effectiveAtUtc:'2026-10-01T00:00:00.000Z',ruleReleaseId:'release-1',priceVersionId:'price-v1',payloadHash:'a'.repeat(64),sourceRef:'fixture'},ranges:state.policy.entitlementRanges,rangeSource:'INDEPENDENT',capability:{canRequest:true,reasonCode:'OK'},existingEntitlements:[],growth:{knowledge:'UNKNOWN'}};
+  const initial={kind:'FRIEND',scopeKey:'legacy:scope',startsAtUtc:'2026-11-01T02:00:00.000Z',endsAtUtc:'2026-11-20T02:00:00.000Z',pricingMode:'ordinary',priceVersionId:'untrusted-initial',payableRatio:'0.8',costBasisRef:'untrusted-initial',depositWaived:false,reason:'用户专项礼遇'};
+  const props={context,initial,onSubmit:draft=>submitted.push(draft)};
+  await h.render(h.form.MembershipEntitlementForm,props);
+  assert.equal(h.host.querySelector('select,input[type=datetime-local],input[aria-label="礼遇成本依据"],input[aria-label="礼遇业务范围"]'),null);
+  assert.match(h.host.textContent,/独立配置/);assert.doesNotMatch(h.host.textContent,/金卡|钻石|untrusted-initial/);
+  assert.equal(h.button('提交礼遇审批').disabled,false,'UNKNOWN growth is not a grant-capability gate');
+  await h.type(h.input('礼遇应付比例'),'0.5');assert.match(h.host.textContent,/超出允许范围/);assert.equal(h.button('提交礼遇审批').disabled,true);
+  await h.type(h.input('礼遇应付比例'),'1.000000001');assert.match(h.host.textContent,/最多8位小数/);
+  await h.type(h.input('礼遇应付比例'),'0.8');
+  await h.click(h.host.querySelector('button[aria-label="开始日期"]'));
+  const day=[...h.browser.document.querySelectorAll('button[data-day]')].find(element=>element.textContent.trim()==='11');
+  assert.ok(day,'house Calendar renders interactive days');await h.click(day);
+  await h.click(h.button('提交礼遇审批'));
+  assert.equal(submitted.length,1);assert.equal(submitted[0].scopeKey,'legacy:scope');assert.equal(submitted[0].priceVersionId,'price-v1');assert.equal(submitted[0].costBasisRef,'cost-ent');
+  assert.equal(submitted[0].startsAtUtc,'2026-11-11T02:00:00.000Z');
+  await h.render(h.form.MembershipEntitlementForm,{...props,context:{...context,rangeSource:'LEGACY_TIER_CAP'}});
+  assert.match(h.host.textContent,/沿用旧政策/);assert.doesNotMatch(h.host.textContent,/独立配置/);
+  await h.render(h.form.MembershipEntitlementForm,{...props,context:{...context,subject:{...context.subject,userId:'other'}},initial:undefined});
+  assert.equal(h.input('礼遇应付比例').value,'','switching subject resets the old draft');assert.equal(h.button('提交礼遇审批').disabled,true);
+  await h.render(h.form.MembershipEntitlementForm,{...props,context:{...context,capability:{canRequest:false,reasonCode:'FEATURE_DISABLED'}},busy:true,error:'权限发生变化'});
+  assert.equal(h.button('正在提交…').disabled,true);assert.match(h.host.textContent,/礼遇功能尚未启用|权限发生变化/);
+  assert.equal(h.form.beijingInputToUtc('2026-02-30T10:00'),'');assert.equal(h.form.beijingInputToUtc('2026-11-01T10:00'),'2026-11-01T02:00:00.000Z');
+  assert.equal(h.form.utcToBeijingInput(null),'');assert.equal(h.form.parsePayableRatio(1),null,'a numeric JSON value is not an exact decimal-text contract');
+  for(const [value,expected] of [['0.85','8.5折'],['0.85000000','8.5折'],['1','10折'],['0.00000001','0.0000001折'],['0.99999999','9.9999999折'],['0','折扣待核'],['1.01','折扣待核'],[undefined,'折扣待核']])assert.equal(h.form.formatEntitlementDiscount(value),expected);
+  assert.equal(h.form.entitlementWindowError('2026-11-01T00:00:00Z','2027-01-30T00:00:00Z'),'');assert.equal(h.form.entitlementWindowError('2026-11-01T00:00:00Z','2027-01-30T00:00:00.001Z'),'礼遇单次最多90天');
+  assert.equal(h.fetches.length,0);
+});
+
+test('form switches independent kind, guards duplicate submission and blocks unavailable context',async t=>{
+  const h=await ui(t),state=readyState();let release;const waiting=new Promise(resolve=>{release=resolve;}),submitted=[];
+  const context={schema:'membership-entitlement-context.v1',subject:{userId:'u',name:null,image:null,maskedPhone:null},game:{id:'delta',name:'三角洲'},approvedMeta:{id:'approved-1',version:'1',effectiveAtUtc:'2026-10-01T00:00:00.000Z',ruleReleaseId:'r',priceVersionId:'price-v1',payloadHash:'b'.repeat(64),sourceRef:'fixture'},ranges:state.policy.entitlementRanges,rangeSource:'INDEPENDENT',capability:{canRequest:true,reasonCode:'OK'},existingEntitlements:[]};
+  const initial={...state.entitlement,startsAtUtc:'2026-11-01T00:00:00.000Z',endsAtUtc:'2026-11-20T00:00:00.000Z',payableRatio:'0.8',reason:'专项处理'};
+  const props={context,initial,onSubmit:async draft=>{submitted.push(draft);await waiting;}};
+  await h.render(h.form.MembershipEntitlementForm,props);
+  assert.equal(h.host.querySelector('[role=combobox][aria-label="礼遇类型"]').disabled,true,'replacing an existing entitlement keeps its kind fixed');
+  await h.render(h.form.MembershipEntitlementForm,{...props,initial:undefined});
+  await h.type(h.input('礼遇应付比例'),'0.8');
+  await h.click(h.host.querySelector('[role=combobox][aria-label="礼遇类型"]'));
+  const prestige=[...h.browser.document.querySelectorAll('[role=option]')].find(element=>element.textContent.trim()==='尊享礼遇');
+  assert.ok(prestige);await h.click(prestige);
+  assert.equal(h.input('礼遇应付比例').value,'','a different kind never inherits the old actual discount');
+  await h.type(h.input('礼遇应付比例'),'0.8');
+  for(const [label,day] of [['开始','1'],['结束','20']]){
+    await h.click(h.host.querySelector(`button[aria-label="${label}日期"]`));
+    await h.click([...h.browser.document.querySelectorAll('button[data-day]')].find(element=>element.textContent.trim()===day));
+  }
+  await h.type(h.host.querySelector('textarea[aria-label="礼遇原因"]'),'专项处理');
+  const deposit=h.host.querySelector('[role=checkbox][aria-label="独立授予免押"]');await h.click(deposit);
+  assert.equal(deposit.getAttribute('aria-checked'),'true',deposit.outerHTML);
+  try{
+    await h.click(h.button('提交礼遇审批'));assert.equal(submitted.length,1);assert.equal(submitted[0].kind,'PRESTIGE');assert.equal(submitted[0].depositWaived,true);
+    assert.equal(h.button('正在提交…').disabled,true);
+    await act(async()=>h.host.querySelector('form').dispatchEvent(new h.browser.Event('submit',{bubbles:true,cancelable:true})));
+    assert.equal(submitted.length,1,'an in-flight request is not submitted twice');
+  }finally{await act(async()=>{release();await waiting;});}
+  await h.render(h.form.MembershipEntitlementForm,{...props,context:{...context,approvedMeta:null}});
+  assert.equal(h.button('提交礼遇审批').disabled,true);
+  let failures=0;
+  await h.render(h.form.MembershipEntitlementForm,{...props,onSubmit:()=>{failures++;throw new Error('synthetic unconfirmed submission');}});
+  await h.click(h.button('提交礼遇审批'));assert.equal(failures,1);assert.match(h.host.textContent,/提交结果未确认/);
+  await h.type(h.input('礼遇应付比例'),'0.85');
+  assert.equal(h.button('提交礼遇审批').disabled,true,'editing a field cannot clear an unresolved submission');
+  await act(async()=>h.host.querySelector('form').dispatchEvent(new h.browser.Event('submit',{bubbles:true,cancelable:true})));
+  assert.equal(failures,1);
+  assert.equal(h.fetches.length,0);
+});
 test("empty policy bootstrap, discount gating and cap seeding stay honest", async () => {
   const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
   try {
@@ -123,6 +143,8 @@ test("empty policy bootstrap, discount gating and cap seeding stay honest", asyn
     assert.equal(policy.status, "DRAFT");
     assert.deepEqual(policy.tiers.map((tier) => tier.tenantDeposit), ["ACCOUNT_BASE", "ACCOUNT_BASE", "WAIVED", "WAIVED", "WAIVED"]);
     assert.equal(policy.tiers.every((tier) => tier.ordinary.status === "NOT_PRICED" && tier.maxEntitlement.status === "NOT_PRICED"), true);
+    assert.deepEqual(policy.entitlementRanges,{FRIEND:{byMode:{}},PRESTIGE:{byMode:{}}});
+    delete policy.entitlementRanges; // Explicitly exercise legacy helpers; the new UI never calls tier-cap seeding.
     // First draft is savable but not publishable; disabled modes never warn.
     const first = validateAdminPolicyDraft(policy, ["ordinary", "custom"]);
     assert.deepEqual(first.errors, []);
@@ -231,10 +253,15 @@ test("GAP-007 membership host gate matches nav/API read admission and hides writ
   try {
     const { membershipGrowthAccess } = await vite.ssrLoadModule("/src/views/membership-growth-admin-host.tsx");
     const snap = (permissions, isBoss = false) => ({ authenticated: true, permissions, security: { isBoss } });
-    assert.deepEqual(membershipGrowthAccess(snap(["membership.growth.read.summary"])), { canRead: true, canDraft: false, canRequest: false });
-    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.publish"])), { canRead: true, canDraft: false, canRequest: true });
-    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.draft"])), { canRead: true, canDraft: true, canRequest: true });
-    assert.deepEqual(membershipGrowthAccess(snap([], true)), { canRead: true, canDraft: true, canRequest: true });
-    assert.deepEqual(membershipGrowthAccess(snap(["membership.growth.read.detail"])), { canRead: false, canDraft: false, canRequest: false });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.growth.read.summary"])), { canRead: true, canReadPolicy: true, canDraft: false, canRequest: false, canRequestEntitlement: false });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.publish"])), { canRead: true, canReadPolicy: true, canDraft: false, canRequest: false, canRequestEntitlement: false });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.publish", "approval.request.create"])), { canRead: true, canReadPolicy: true, canDraft: false, canRequest: true, canRequestEntitlement: false });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.policy.draft"])), { canRead: true, canReadPolicy: true, canDraft: true, canRequest: false, canRequestEntitlement: false });
+    assert.deepEqual(membershipGrowthAccess(snap([], true)), { canRead: true, canReadPolicy: true, canDraft: true, canRequest: true, canRequestEntitlement: true });
+    assert.deepEqual(membershipGrowthAccess(snap(["membership.growth.read.detail"])), { canRead: false, canReadPolicy: false, canDraft: false, canRequest: false, canRequestEntitlement: false });
+    assert.deepEqual(membershipGrowthAccess(snap(["approval.request.create", "membership.entitlement.request"])), { canRead: true, canReadPolicy: false, canDraft: false, canRequest: false, canRequestEntitlement: true });
+    for (const permission of ["approval.request.create", "membership.entitlement.request"]) {
+      assert.deepEqual(membershipGrowthAccess(snap([permission])), { canRead: false, canReadPolicy: false, canDraft: false, canRequest: false, canRequestEntitlement: false });
+    }
   } finally { await vite.close(); }
 });

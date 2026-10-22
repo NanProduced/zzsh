@@ -22,35 +22,32 @@ import { SensitiveIdentity, UserNotes, UserRiskAction } from './user-detail-acti
 import { UserDetailFinance } from './user-detail-finance';
 import { financeMoney } from '../admin-finance-api';
 import { OrderStages } from '../admin-order-stages';
+import { historicalResourceText } from '../supply-review/model';
 import './user-detail.css';
 
 const SECTIONS: Record<string,string> = {orders:'订单记录',resources:'当前上架账号',growth:'会员与礼遇',credit:'信用',finance:'资金',notes:'内部记录',security:'账号安全'};
 
-function accountResourceSummary(order: any): string | null {
-  if (order.orderFacts?.materialsText || order.orderFacts?.haffText) {
-    return [order.orderFacts.haffText && `哈夫币：${order.orderFacts.haffText}`, order.orderFacts.materialsText].filter(Boolean).join(' · ');
-  }
-  if (order.haffText || order.materialsText) {
-    return [order.haffText && `哈夫币：${order.haffText}`, order.materialsText].filter(Boolean).join(' · ');
-  }
-  if (Array.isArray(order.orderFacts?.resources) && order.orderFacts.resources.length > 0) {
-    const items = order.orderFacts.resources.slice(0, 3).map((r: any) => `${r.name}${r.quantity ? '×' + r.quantity : ''}`);
-    const rest = order.orderFacts.resources.length > 3 ? ` 另${order.orderFacts.resources.length - 3}项` : '';
-    return items.join('、') + rest;
-  }
-  return null;
+function accountResourceSummary(order: Order): string | null {
+  const names: Record<string,string> = {df_billable_haff:'哈夫币',df_billable_awm_bullet:'AWM子弹',df_billable_level6_bullet:'6级子弹',df_billable_level6_helmet:'6级头盔',df_billable_level6_armor:'6级护甲',df_billable_top_insure_card:'顶级保险卡',df_billable_barrett_bullet:'巴雷特子弹',df_billable_coffee:'咖啡豆'};
+  const frozen = order.orderFacts?.resources;
+  const resources=(frozen?.length ? frozen : order.accountFacts?.resources ?? []).filter(resource=>resource.quantity!==null && !/^0+(?:\.0+)?$/.test(resource.quantity));
+  if (!resources.length) return null;
+  const label=frozen?.length?'原单资源':order.accountFacts?.source==='ORDER_VERSION'?'下单账号资料':'历史账号资料';
+  const items=resources.slice(0,3).map(resource=>resource.unit==='HAFF_BASE'?historicalResourceText({quantity:resource.quantity,unit:resource.unit}):`${resource.name??names[resource.code]??'未命名物资'} ${resource.unit ? historicalResourceText({quantity:resource.quantity,unit:resource.unit}) : resource.quantity}`);
+  return `${label}：${items.join(' · ')}${resources.length>3?` 另${resources.length-3}项`:''}`;
 }
 
-function accountTermSummary(order: any): string | null {
+function accountTermSummary(order: Order): string | null {
   const parts: string[] = [];
-  if (order.orderFacts?.termText || order.termText) {
-    parts.push(`租期：${order.orderFacts?.termText || order.termText}`);
-  } else if (typeof order.termSeconds === 'number' && order.termSeconds > 0) {
-    const hours = Math.round(order.termSeconds / 3600);
-    parts.push(`租期：${hours >= 24 ? Math.round(hours / 24) + '天' : hours + '小时'}`);
+  const seconds=order.orderFacts?.termSeconds;
+  if (seconds && /^[1-9]\d*$/.test(seconds)) {
+    const duration=BigInt(seconds);
+    parts.push(`租期：${duration%86400n===0n?`${duration/86400n}天`:duration%3600n===0n?`${duration/3600n}小时`:`${duration}秒`}`);
+  } else if (order.accountFacts?.source==='LEGACY_ACCOUNT' && order.accountFacts.termDays) {
+    parts.push(`历史账号租期规则：${order.accountFacts.termDays}天`);
   }
-  if (order.orderFacts?.loginMethodText || order.loginMethodText) {
-    parts.push(`登录：${order.orderFacts?.loginMethodText || order.loginMethodText}`);
+  if (order.accountFacts?.loginMethodText) {
+    parts.push(`${order.accountFacts.source==='ORDER_VERSION'?'登录':'历史账号登录'}：${order.accountFacts.loginMethodText}`);
   }
   return parts.length > 0 ? parts.join(' · ') : null;
 }
@@ -112,7 +109,7 @@ function Orders({adapter,user,tab,refreshNonce,onOpenPath,onQueryChange,preview=
           const canDirectory=adapter.has('user.directory.read');
           const summary=canDirectory?order.counterpartySummary:undefined;
           const counterparty=order.counterpartyName||summary?.name||'昵称未设置';
-          return <TableRow key={order.orderId} data-order-id={order.orderId}>
+          return <TableRow key={`${order.source?.origin??'NATIVE'}:${order.orderId}`} data-order-id={order.orderId} data-order-origin={order.source?.origin??'NATIVE'}>
             <TableCell>
               <div className="flex items-center gap-1.5 flex-wrap">
                 <Badge variant={order.role==='renter'?'success':order.role==='owner'?'info':'outline'} className={`udv-direction-badge ${order.role}`}>
@@ -181,6 +178,9 @@ function Orders({adapter,user,tab,refreshNonce,onOpenPath,onQueryChange,preview=
                         userId={order.counterpartyUserId}
                         image={summary.image}
                         maskedPhone={summary.maskedPhone}
+                        membershipSummary={summary.membershipSummary}
+                        creditSummary={summary.creditSummary}
+                        riskFlag={summary.riskFlag}
                         canOpen
                         onOpen={openCounterparty}
                       />

@@ -15,6 +15,138 @@ import { parseGrowthConsumptionQuery, readMembershipGrowthConsumption } from "..
 import { handleMembershipGrowthPolicyAdmin, handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
 import { selectPersonalGrowthOffer } from "../src/order/personal-growth-confirmation";
 import { computeSettlement, SETTLEMENT_ROUNDING_POLICY } from "../src/order/settlement";
+import { parseMembershipEntitlementQuery, readMembershipEntitlementContext, readMembershipEntitlements } from "../src/auth/membership-entitlement-read";
+
+test("entitlement list input uses bounded numeric pages and rejects duplicate or unknown filters", () => {
+  assert.deepEqual(parseMembershipEntitlementQuery(new URLSearchParams()), { page: 1, pageSize: 20 });
+  assert.deepEqual(parseMembershipEntitlementQuery(new URLSearchParams("page=2&pageSize=50&kind=FRIEND&status=ACTIVE&userId=user_1&gameId=game-a")), { page: 2, pageSize: 50, kind: "FRIEND", status: "ACTIVE", userId: "user_1", gameId: "game-a" });
+  for (const value of ["page=0", "page=1000001", "pageSize=101", "page=1e2", "status=UNKNOWN", "kind=GOLD", "userId=", "page=1&page=2", "phone=123", "contextKey=oops"]) assert.throws(() => parseMembershipEntitlementQuery(new URLSearchParams(value)), (error: any) => error.status === 400, value);
+});
+
+test("entitlement list shares count/page scope and filters and strips cost facts from the response", async () => {
+  const statements: Array<{ sql: string; args: unknown[] }> = [];
+  const access = { status: "ACTIVE" as const, isBoss: false, passwordChangeRequired: false, permissions: new Set([ADMIN_PERMISSION.membershipGrowthSummaryRead]) };
+  let games = ["game-a"];
+  const client = { async query(sql: string, args: unknown[] = []) {
+    statements.push({ sql, args });
+    if (sql.includes('AS "mode"')) return { rows: [{ mode: "SELECTED_GAMES", gameIds: games }] };
+    if (sql.startsWith("WITH visible")) return { rows: [{ total: "1", items: [{ id: "ent_1", userId: "user_1", gameId: "game-a", kind: "FRIEND", scopeKey: "game:delta", startsAtUtc: "2026-10-01 00:00:00+00", endsAtUtc: "2026-10-20 00:00:00+00", status: "EXPIRED", depositWaived: true, pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "ordinary", payableRatio: "0.85", priceVersionId: "price-v1", costBasisRef: "private-cost" } }] }] };
+    throw new Error(`unexpected query: ${sql}`);
+  } };
+  const query = parseMembershipEntitlementQuery(new URLSearchParams("status=EXPIRED&kind=FRIEND&page=2&pageSize=20"));
+  const page = await readMembershipEntitlements(client as never, { adminId: "reader", access }, query);
+  assert.deepEqual([page.total, page.page, page.pageSize], [1, 2, 20]);
+  assert.deepEqual(page.items[0]?.pricingSummary, { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "ordinary", payableRatio: "0.85" });
+  assert.equal(page.items[0]?.userSummary, null, "no directory permission gives no name or phone");
+  assert.doesNotMatch(JSON.stringify(page), /private-cost|pricingPayload|ownerUnitAmount/);
+  const statement = statements.find((entry) => entry.sql.startsWith("WITH visible"))!;
+  assert.match(statement.sql, /matched AS MATERIALIZED/);
+  assert.match(statement.sql, /game_scope_mode/);
+  assert.deepEqual(statement.args.slice(3), ["EXPIRED", "FRIEND", null, null, 20, 20]);
+  assert.equal(statements.filter((entry) => entry.sql.startsWith("WITH visible")).length, 1, "count and page use one statement snapshot");
+  games = ["game-b"];
+  await assert.rejects(() => readMembershipEntitlements(client as never, { adminId: "reader", access }, { ...query, contextKey: page.contextKey }), (error: any) => error.status === 409);
+  games = [];
+  await assert.rejects(() => readMembershipEntitlements(client as never, { adminId: "reader", access }, query), (error: any) => error.status === 403);
+  const requester = { ...access, permissions: new Set([ADMIN_PERMISSION.approvalRequestCreate, ADMIN_PERMISSION.membershipEntitlementRequest]) };
+  await assert.rejects(() => readMembershipEntitlements(client as never, { adminId: "reader", access: requester }, query), (error: any) => error.status === 403);
+});
+
+test("request-only entitlement context does not require known growth or expose the policy body and costs", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    const policy = readerPolicy();
+    const range = { status: "CONFIGURED" as const, kind: "TOTAL_DISCOUNT_RANGE" as const, mode: "ordinary" as const, priceVersionId: "price-v1", minPayableRatio: "0.65", maxPayableRatio: "0.85", costBasisRef: "bound-cost" };
+    policy.entitlementRanges = { FRIEND: { byMode: { ordinary: range } }, PRESTIGE: { byMode: { ordinary: range } } };
+    const rule = compatRule(); rule.compatibility!.modes.custom = { enabled: false }; rule.compatibility!.modes.fast = { enabled: false };
+    const access = { status: "ACTIVE" as const, isBoss: false, passwordChangeRequired: false, permissions: new Set([ADMIN_PERMISSION.approvalRequestCreate, ADMIN_PERMISSION.membershipEntitlementRequest]) };
+    let gameIds = ["game-a"], targetExists = true;
+    const client = { async query(sql: string) {
+      assert.doesNotMatch(sql, /membership_growth_contribution|membership_growth_state/, "manual entitlement never invents or requires growth evidence");
+      if (sql.includes('AS "mode"')) return { rows: [{ mode: "SELECTED_GAMES", gameIds }] };
+      if (sql.includes('FROM zzsh_auth_user."user"')) return { rows: targetExists ? [{ id: "user_1" }] : [] };
+      if (sql.includes("SELECT id,name FROM zzsh_supply.game")) return { rows: [{ id: "game-a", name: "测试游戏" }] };
+      if (sql.includes("WHERE pol.status='APPROVED'")) return { rows: [{ id: "policy-approved", version: "1", policy, haffRule: rule, effectiveAtUtc: "2026-01-01T00:00:00Z", priceVersionId: "price-v1", ruleReleaseId: "release-v1", payloadHash: "a".repeat(64), sourceRef: "accepted-source" }] };
+      if (sql.startsWith("WITH visible")) return { rows: [{ total: "0", items: [] }] };
+      throw new Error(`unexpected query: ${sql}`);
+    } };
+    const context = await readMembershipEntitlementContext(client as never, { adminId: "requester", access }, "user_1", "game-a");
+    assert.deepEqual(context.capability, { canRequest: true, reasonCode: "OK" });
+    assert.equal(context.rangeSource, "INDEPENDENT");
+    assert.equal(context.subject.name, null);
+    assert.equal(context.approvedMeta?.id, "policy-approved");
+    assert.equal(context.ranges?.FRIEND.byMode.ordinary?.status, "CONFIGURED");
+    assert.doesNotMatch(JSON.stringify(context), /"tiers"|"haffRule"|baseBySafeBox|ownerUnitAmount/);
+    gameIds = ["game-b"];
+    await assert.rejects(() => readMembershipEntitlementContext(client as never, { adminId: "requester", access }, "user_1", "game-a"), (error: any) => error.status === 403);
+    gameIds = ["game-a"]; targetExists = false;
+    await assert.rejects(() => readMembershipEntitlementContext(client as never, { adminId: "requester", access }, "user_1", "game-a"), (error: any) => error.status === 404);
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
+
+test("grant and replace validate recipients and lock one subject before checking overlapping periods", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    for (const mode of ["grant", "replace", "missing-user", "missing-game", "overlap", "bad-time"] as const) {
+      const queries: Array<{ sql: string; args: unknown[] }> = [];
+      const policy = discountPolicyPayload();
+      const rule = compatRule(); rule.compatibility!.modes.fast = { enabled: false };
+      const client = { async query(sql: string, args: unknown[] = []) {
+        queries.push({ sql, args });
+        if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
+        if (sql.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")) return { rows: [{ id: "policy-approved", version: 1, policyPayload: policy, sourceRef: "synthetic-cost", ruleReleaseId: "release-1", priceVersionId: "price-v1" }] };
+        if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: rule }] };
+        if (sql.includes("FROM zzsh_supply.price_line")) return { rows: [{ itemId: "item", unit: "PIECE" }] };
+        if (sql.includes('FROM zzsh_auth_user."user"')) return { rows: mode === "missing-user" ? [] : [{ id: "user-1" }] };
+        if (sql.includes("SELECT id FROM zzsh_supply.game")) return { rows: mode === "missing-game" ? [] : [{ id: "game-a" }] };
+        if (sql.includes("AND starts_at <")) return { rows: mode === "overlap" ? [{ id: "ent-existing" }] : [] };
+        if (sql.includes("FROM zzsh_iam.membership_entitlement WHERE id=$1 FOR UPDATE")) return { rows: [{ id: "ent-old", userId: "user-1", gameId: "game-a", kind: "FRIEND", scopeKey: "game:delta", status: "ACTIVE" }] };
+        if (sql.startsWith("INSERT INTO zzsh_iam.membership_entitlement") || sql.startsWith("UPDATE zzsh_iam.membership_entitlement")) return { rows: [], rowCount: 1 };
+        throw new Error(`unexpected query: ${sql}`);
+      } };
+      const input = { requestId: "approval-1", operationCode: mode === "replace" ? "membership.entitlement.replace" : "membership.entitlement.grant", requestedBy: "requester", operationPayloadHash: "b".repeat(64), operationPayload: { userId: "user-1", gameId: "game-a", kind: "FRIEND", scopeKey: "game:delta", startsAtUtc: mode === "bad-time" ? "invalid" : "2026-10-01T00:00:00Z", endsAtUtc: "2026-10-20T00:00:00Z", reason: "正式人工办理", policyId: "policy-approved", replaceEntitlementId: "ent-old", pricing: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "ordinary", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "synthetic-cost" } } };
+      const run = () => executeMembershipGrowthOperation(client as never, input as never, { userId: "boss", sessionId: "session-1" }, "test-request");
+      if (mode === "grant" || mode === "replace") {
+        const result = await run();
+        assert.equal(result.resultCode, mode === "grant" ? "MEMBERSHIP_ENTITLEMENT_GRANTED" : "MEMBERSHIP_ENTITLEMENT_REPLACED");
+        const lock = queries.findIndex((entry) => entry.sql.includes('FROM zzsh_auth_user."user"') && entry.sql.includes("FOR UPDATE"));
+        const overlap = queries.findIndex((entry) => entry.sql.includes("AND starts_at <"));
+        const insert = queries.findIndex((entry) => entry.sql.startsWith("INSERT INTO zzsh_iam.membership_entitlement"));
+        assert(lock >= 0 && lock < overlap && overlap < insert);
+        assert.deepEqual(queries[overlap]!.args.slice(0, 5), ["user-1", "game-a", "game:delta", "2026-10-01T00:00:00Z", "2026-10-20T00:00:00Z"]);
+        assert.equal(queries[overlap]!.args[5], mode === "replace" ? "ent-old" : null);
+        assert.equal(queries.filter((entry) => entry.sql.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")).length, 1, "one authoritative policy read per grant");
+      } else {
+        await assert.rejects(run, (error: any) => error.status === (mode === "missing-user" || mode === "missing-game" ? 404 : 409));
+        assert.equal(queries.filter((entry) => /^(INSERT|UPDATE)/.test(entry.sql)).length, 0);
+      }
+    }
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
+
+test("only Boss may publish changes to independent ranges while existing non-Boss policy publication remains allowed", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    for (const changeRange of [false, true]) {
+      const policy = readerPolicy(); policy.status = "DRAFT";
+      if (changeRange) {
+        const range = { status: "CONFIGURED" as const, kind: "TOTAL_DISCOUNT_RANGE" as const, mode: "ordinary" as const, priceVersionId: "price-v1", minPayableRatio: "0.8", maxPayableRatio: "1", costBasisRef: "range-cost" };
+        policy.entitlementRanges = { FRIEND: { byMode: { ordinary: range } }, PRESTIGE: { byMode: { ordinary: range } } };
+      }
+      const fixture = draftApprovalFixture(policy);
+      const original = fixture.client.query;
+      fixture.client.query = async (sql, args = []) => {
+        if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] } as any;
+        if (sql.includes('"admin_user_permission"') || sql.includes('"admin_role_permission"')) return { rows: [{ permissionCode: ADMIN_PERMISSION.membershipPolicyPublish }] } as any;
+        if (sql.includes("WHERE status='APPROVED'")) return { rows: [{ policyPayload: readerPolicy() }] } as any;
+        return original(sql, args);
+      };
+      const run = () => executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: "publisher", sessionId: "session-1" }, "publish-1");
+      if (changeRange) { await assert.rejects(run, (error: any) => error.status === 403); assert.equal(fixture.inserted.length, 0); }
+      else assert.equal((await run()).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+    }
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
 
 test("membership approval accepts ALL_GAMES and selected targets, rejects empty or unrelated scope before mutation", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED;
@@ -334,6 +466,17 @@ function growthReaderClient(state: { normalTier: string; effectiveTier: string; 
     throw new Error(`unexpected query: ${sql}`);
   } } as never;
 }
+
+test("membership entitlement scope keeps the stored game identity and name in the public summary", async () => {
+  const state = { normalTier: "STANDARD", effectiveTier: "STANDARD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const entitlement = { id: "entitlement-game", kind: "FRIEND", scopeKey: "game:game-1", gameId: "game-1", gameName: "三角洲行动", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", status: "EXECUTED_PENDING_START", depositWaived: true, pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "ordinary", priceVersionId: "price-v1", payableRatio: "0.85", costBasisRef: "private-cost" } };
+  const summary = await readMembershipGrowth(growthReaderClient(state, [], readerPolicy(), null, "a".repeat(64), false, compatRule(), [entitlement]), "user-1", "2026-10-10T00:00:00Z");
+  assert.equal(summary?.entitlements[0]?.gameId, "game-1");
+  assert.equal(summary?.entitlements[0]?.gameName, "三角洲行动");
+  assert.equal(summary?.entitlements[0]?.scopeKey, "game:game-1");
+  assert.equal(summary?.entitlements[0]?.status, "ACTIVE");
+  assert.doesNotMatch(JSON.stringify(summary?.entitlements), /private-cost|costBasisRef|pricingPayload/);
+});
 
 test("growth quote reader keeps grace tier and black-gold tier in the actual candidate path", async () => {
   const now = new Date();
@@ -843,6 +986,7 @@ test("empty policy admin GET boots a first draft from the sealed release and sav
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
         if (sql.includes('"zzsh_auth_admin"."session"')) return { rows: [{ locked: false, twoFactorEnabled: true, suspended: false }] };
         if (sql.includes('"zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
+        if (sql.includes("WHERE pol.status='APPROVED'")) return { rows: state.policyRows.filter((row: any) => row.status === "APPROVED").map((row: any) => ({ ...row, policy: row.policyPayload })) };
         if (sql.includes("FROM zzsh_iam.membership_growth_policy")) return { rows: state.policyRows };
         if (sql.includes("JOIN zzsh_supply.price_version")) return { rows: state.release ? [state.release] : [] };
         if (sql.includes("FROM zzsh_supply.price_line")) return { rows: state.priceLines };

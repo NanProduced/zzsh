@@ -16,6 +16,7 @@ globalThis.Element = browser.Element;
 globalThis.ShadowRoot = browser.ShadowRoot;
 globalThis.HTMLInputElement = browser.HTMLInputElement;
 globalThis.MutationObserver = browser.MutationObserver;
+globalThis.ResizeObserver = browser.ResizeObserver;
 globalThis.Node = browser.Node;
 globalThis.Event = browser.Event;
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });

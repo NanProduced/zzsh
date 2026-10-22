@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { ADMIN_PERMISSION, hasPermission, type EffectiveAdminAccess } from "./admin-authorization";
 import { isAllGamesScope, scopeAllowsGame, type AdminGameScope } from "./admin-scope";
+import { entitlementPricingSummary, isTotalDiscountContract } from "./membership-growth";
 
 export const APPROVAL_TEST_OPERATION = "approval.test.execute";
 export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
@@ -80,7 +81,23 @@ export type ApprovalRequestFacts = {
   status: string;
   decidedBy: string | null;
   expiresAt: Date | string;
+  /** Verified append-only decision override; the original request snapshot stays intact. */
+  finalPayload?: Record<string, unknown> | null;
+  finalPayloadHash?: string | null;
 };
+
+export function editableEntitlementApprovalPayload(payload: Record<string, unknown>): Record<string, unknown> | null {
+  if (!isTotalDiscountContract(payload.pricing) || entitlementPricingSummary(payload.pricing).knowledge !== "KNOWN") return null;
+  const fields = ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "reason", "pricing"];
+  if (Object.keys(payload).some((field) => !fields.includes(field))) return null;
+  if (["userId", "gameId", "kind", "policyId", "scopeKey", "startsAtUtc", "endsAtUtc", "reason"].some((field) => typeof payload[field] !== "string")) return null;
+  if (Object.keys(payload.pricing).some((field) => !["status", "kind", "mode", "priceVersionId", "payableRatio", "costBasisRef"].includes(field))) return null;
+  const pricing = payload.pricing;
+  const result: Record<string, unknown> = {};
+  for (const field of ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "reason"]) if (payload[field] !== undefined) result[field] = payload[field];
+  result.pricing = { status: pricing.status, kind: pricing.kind, mode: pricing.mode, priceVersionId: pricing.priceVersionId, payableRatio: pricing.payableRatio, costBasisRef: pricing.costBasisRef };
+  return result;
+}
 
 export type ApprovalProjectionViewer = {
   userId: string;
@@ -319,7 +336,7 @@ function membershipView(
   policies: { byId: Map<string, PolicyRow>; byRequestId: Map<string, PolicyRow> },
   executions: Map<string, { status: string; resultCode: string; resultDetail: string | null }>,
 ): Record<string, unknown> {
-  const payload = row.operationPayload;
+  const payload = row.finalPayload ?? row.operationPayload;
   const base: Record<string, unknown> = {
     requestId: row.id,
     businessType: "membership",
@@ -334,7 +351,11 @@ function membershipView(
   const inScope = !gameId || viewer.access.isBoss || isAllGamesScope(viewer.gameScope) || scopeAllowsGame(viewer.gameScope, false, gameId);
   if (!inScope) return restricted(base, "GAME_SCOPE_DENIED");
 
-  const summary: Record<string, unknown> = { schemaVersion: 1, changeSummary: row.summary, payloadVersion: row.payloadVersion, payloadHash: row.operationPayloadHash };
+  const summary: Record<string, unknown> = { schemaVersion: 1, changeSummary: row.summary, payloadVersion: row.payloadVersion, payloadHash: row.finalPayloadHash ?? row.operationPayloadHash, requestPayloadHash: row.operationPayloadHash, finalPayloadHash: row.finalPayloadHash ?? null, payloadSource: row.finalPayload ? "APPROVED_FINAL" : "REQUEST_ORIGINAL" };
+  if (row.operationCode === "membership.entitlement.grant" || row.operationCode === "membership.entitlement.replace") {
+    summary.pricingSummary = entitlementPricingSummary(payload.pricing);
+    if (row.finalPayload) summary.originalRequest = { startsAt: textField(row.operationPayload, "startsAtUtc"), endsAt: textField(row.operationPayload, "endsAtUtc"), depositWaived: booleanField(row.operationPayload, "depositWaived"), reason: textField(row.operationPayload, "reason"), pricingSummary: entitlementPricingSummary(row.operationPayload.pricing) };
+  }
   const refs: Record<string, unknown>[] = [{ type: "membership_game", id: gameId ?? null }];
   if (gameId) {
     const name = games.get(gameId);
@@ -439,7 +460,7 @@ function membershipView(
     const pricing = payload.pricing;
     if (pricing && typeof pricing === "object") {
       const value = pricing as Record<string, unknown>;
-      view.pricingReference = { mode: typeof value.mode === "string" ? value.mode : null, priceVersionId: textField(value, "priceVersionId"), costBasisRef: textField(value, "costBasisRef"), schema: textField(value, "haffSchema") ?? textField(value, "schema") };
+      view.pricingReference = { mode: typeof value.mode === "string" ? value.mode : null, priceVersionId: textField(value, "priceVersionId"), costBasisRef: textField(value, "costBasisRef"), schema: textField(value, "haffSchema") ?? textField(value, "schema") ?? textField(value, "kind"), payableRatio: textField(value, "payableRatio"), payloadSource: row.finalPayload ? "APPROVED_FINAL" : "REQUEST_ORIGINAL" };
     }
     if (referencedPolicy) view.costBasis = { priceVersionId: referencedPolicy.priceVersionId, ruleReleaseId: referencedPolicy.ruleReleaseId };
   } else {

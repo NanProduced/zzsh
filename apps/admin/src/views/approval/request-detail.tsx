@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
-  Ban, Check, Clock, FilePlus2, Settings2, UserPlus, X, Play, ArrowRight, TriangleAlert,
+  Ban, Check, Clock, FilePlus2, Settings2, UserPlus, X, Play, TriangleAlert,
 } from "lucide-react";
 
 import { Button } from "../../components/ui-elements";
@@ -9,6 +9,8 @@ import {
   Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogTitle,
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
+import { Checkbox } from "../../components/ui/checkbox";
+import { MembershipDateTimeField, parsePayableRatio, entitlementWindowError } from "../membership-entitlement-form";
 import { Textarea } from "../../components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
@@ -22,8 +24,10 @@ import {
   auditOutcomeView, businessProgress, canAct, candidateAvailabilityLabel, executionModeLabel,
   executionProgress, nextStepLabel, objectRefLabel, objectRefPath, personLabel, reasonLabel, statusView,
   type ActionEligibility, type AuditEvent, type Candidate, type CandidateOptions, type RequestDetail as Detail,
+  type ApprovalDecisionAmendment, type EntitlementAmendmentPayload,
 } from "./contract";
 import { BusinessSummary } from "./business-summary";
+import { RequestFlow } from "./request-flow";
 import { Fact, FactGrid, FieldLabel, NotApplicable, Section, SectionTitle, StatusFact, UnknownFact } from "./atoms";
 
 const REASON_MAX = 500;
@@ -78,58 +82,6 @@ function HistoryTimeline({ history }: { history: AuditEvent[] }) {
         );
       })}
     </Timeline>
-  );
-}
-
-/**
- * 只读规则说明：发起条件 → 候选组（任一有效决定生效）→ 业务执行条件。
- * 不接编辑写入口，不新造金额阈值、会签人数或自动跳过条件。
- * approvals-ui WorkflowCanvas 需要 @xyflow/react + dagre（均未安装），属待接画布。
- */
-function RulePreview({ detail }: { detail: Detail }) {
-  const mode = detail.operation.executionMode ?? detail.business?.executionMode;
-  const execution = mode === "SOURCE_BUSINESS"
-    ? "由来源业务流程完成（双方确认 / 客服复核 / 过账）"
-    : mode === "GENERIC_TRANSACTION"
-      ? "由平台执行器在一次事务内形成业务事实"
-      : "该操作未登记执行方式，不可执行";
-  const availability = detail.candidateAvailability;
-  const perRequest = availability
-    ? availability.blockingReasonCode
-      ? `本单当前无人可处理：${reasonLabel(availability.blockingReasonCode)}`
-      : `${availability.eligible} 人当前可处理这一单，任一人的首个有效决定生效`
-    : "本单可处理人数未提供";
-  const snapshotCount = availability?.total ?? detail.candidates.length;
-  return (
-    <Section
-      title="适用规则（申请时快照）"
-      hint="图形只读预览，不能在此编辑规则。候选组内首个合格且有效的批准或驳回生效，不是逐级必签。"
-    >
-      <ol className="flex flex-col gap-2 text-xs lg:flex-row lg:items-stretch">
-        {[
-          { step: "发起条件", body: <><span className="font-mono break-all">{detail.operation.triggerCondition}</span><span className="mt-1 block text-muted-foreground">模板快照 v{detail.template.version}</span></> },
-          { step: "候选组", body: <>{perRequest}<span className="mt-1 block text-muted-foreground">候选快照共 {snapshotCount} 人；申请人不能自批</span></> },
-          { step: "业务执行条件", body: <>{execution}<span className="mt-1 block text-muted-foreground">{executionModeLabel(mode)}</span></> },
-        ].map((item, index, all) => (
-          <li key={item.step} className="flex min-w-0 flex-1 items-stretch gap-2">
-            <div className="min-w-0 flex-1 rounded-md border border-border/60 bg-foreground/[0.02] p-3">
-              <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">{index + 1}. {item.step}</p>
-              <div className="mt-1.5 leading-relaxed text-foreground">{item.body}</div>
-            </div>
-            {index < all.length - 1 ? <ArrowRight size={14} className="mt-3 shrink-0 text-muted-foreground lg:mt-auto lg:mb-auto" aria-hidden /> : null}
-          </li>
-        ))}
-      </ol>
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        文字等价说明：本申请由触发条件 <span className="font-mono">{detail.operation.triggerCondition}</span> 在模板版本 v{detail.template.version} 下发起；
-        候选快照共 {snapshotCount} 人，其中本单当前可处理 {availability?.eligible ?? "未提供"} 人；组内任一可处理人的首个有效批准或驳回即生效，其余候选不再需要签署；
-        申请人不能审批自己发起的申请。批准后{execution}。规则版本不可得时此处显示快照版本，不以当前模板冒充历史规则。
-      </p>
-      <p className="text-xs text-muted-foreground">
-        图形画布<Badge variant="unknown">待接</Badge>
-        <span className="ml-1.5">所需依赖尚未安装，当前为只读规则图与上面的文字等价说明；不代表画布已接入。</span>
-      </p>
-    </Section>
   );
 }
 
@@ -256,24 +208,34 @@ function DecisionDialog({
   kind: "approve" | "reject" | "execute" | null;
   detail: Detail;
   onClose: () => void;
-  onSubmit: (kind: "approve" | "reject" | "execute", reason: string) => void;
+  onSubmit: (kind: "approve" | "reject" | "execute", reason: string, amendment?: ApprovalDecisionAmendment) => void;
 }) {
   const [reason, setReason] = useState("");
   const [recall, setRecall] = useState("");
+  const [editRequested, setEditRequested] = useState(false);
+  const editId = useId();
+  const depositId = useId();
+  const [finalPayload, setFinalPayload] = useState<EntitlementAmendmentPayload | null>(null);
+  const canEdit = kind === "approve" && detail.entitlementAmendment != null;
+  const editError = editRequested && finalPayload
+    ? entitlementWindowError(finalPayload.startsAtUtc, finalPayload.endsAtUtc) || (parsePayableRatio(finalPayload.pricing.payableRatio) === null ? "请填写有效的应付比例（大于0且不超过1）" : "") || (finalPayload.reason.trim().length < 2 ? "请填写礼遇办理原因" : "")
+    : "";
   const change = detail.business?.changeSummary ?? detail.summary;
   const recallTarget = detail.summary.slice(0, 8);
   const rejectRequiresReason = kind === "reject";
-  const disabled = kind === null
+  const disabled = Boolean(editError) || (kind === null
     ? true
     : rejectRequiresReason
       ? reason.trim().length < 3
       : kind === "execute"
         ? recall.trim() !== recallTarget
-        : false;
+        : false);
 
   useEffect(() => {
+    setEditRequested(false);
+    setFinalPayload(detail.entitlementAmendment?.editablePayload ?? null);
     if (kind === null) { setReason(""); setRecall(""); }
-  }, [kind]);
+  }, [kind, detail.requestId]);
 
   const title = kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : "确认执行";
   const consequence = kind === "approve"
@@ -303,6 +265,18 @@ function DecisionDialog({
             ) : null}
             <p><span className="text-muted-foreground">载荷哈希：</span><span className="font-mono break-all">{detail.operation.payloadHash}</span></p>
           </div>
+          {canEdit ? <div className="space-y-3 rounded-md border border-border p-3">
+            <div className="flex items-center gap-2"><Checkbox id={editId} checked={editRequested} onCheckedChange={checked => setEditRequested(checked === true)} /><label htmlFor={editId}>调整礼遇后批准</label></div>
+            {editRequested && finalPayload ? <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">保留原申请；以下内容将作为本次最终批准结果。</p>
+              <label className="block space-y-1.5"><FieldLabel>应付比例</FieldLabel><Input aria-label="批准应付比例" inputMode="decimal" value={finalPayload.pricing.payableRatio} onChange={event => setFinalPayload({ ...finalPayload, pricing: { ...finalPayload.pricing, payableRatio: event.target.value } })} /></label>
+              <MembershipDateTimeField label="批准开始时间" value={finalPayload.startsAtUtc} onChange={value => setFinalPayload({ ...finalPayload, startsAtUtc: value })} />
+              <MembershipDateTimeField label="批准结束时间" value={finalPayload.endsAtUtc} onChange={value => setFinalPayload({ ...finalPayload, endsAtUtc: value })} />
+              <div className="flex items-center gap-2"><Checkbox id={depositId} checked={finalPayload.depositWaived} onCheckedChange={checked => setFinalPayload({ ...finalPayload, depositWaived: checked === true })} /><label htmlFor={depositId}>独立免押</label></div>
+              <label className="block space-y-1.5"><FieldLabel>办理原因</FieldLabel><Textarea aria-label="批准礼遇原因" value={finalPayload.reason} maxLength={500} onChange={event => setFinalPayload({ ...finalPayload, reason: event.target.value })} /></label>
+              {editError ? <p role="alert" className="text-destructive">{editError}</p> : null}
+            </div> : null}
+          </div> : null}
           {kind === "approve" || kind === "reject" ? (
             <label className="block space-y-1.5">
               <FieldLabel>{rejectRequiresReason ? `驳回原因（必填，至少 3 字，最多 ${REASON_MAX} 字）` : `批准意见（可选，最多 ${REASON_MAX} 字）`}</FieldLabel>
@@ -322,7 +296,7 @@ function DecisionDialog({
         </div>
         <DialogFooter>
           <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
-          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : "danger"} disabled={disabled} onClick={() => { if (kind) onSubmit(kind, reason.trim()); }}>
+          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : "danger"} disabled={disabled} onClick={() => { if (kind) onSubmit(kind, reason.trim(), canEdit && editRequested && finalPayload ? { expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash, finalPayload } : undefined); }}>
             {kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : "确认执行"}
           </Button>
         </DialogFooter>
@@ -370,7 +344,7 @@ export function RequestDetail({
   onOpenRequest: (requestId: string, title: string) => void;
   /** 跨对象导航由工作区壳提供；未透传时来源对象只列标识，不渲染死按钮。 */
   onOpenPath?: (path: string, title: string) => void;
-  onDecide: (decision: "APPROVE" | "REJECT", reason: string) => void;
+  onDecide: (decision: "APPROVE" | "REJECT", reason: string, amendment?: ApprovalDecisionAmendment) => void;
   onExecute: () => void;
   onAppend: (username: string, reason: string) => void;
 }) {
@@ -458,7 +432,7 @@ export function RequestDetail({
         </Section>
       ) : null}
 
-      <RulePreview detail={detail} />
+      <RequestFlow detail={detail} />
       <Candidates candidates={detail.candidates} availability={detail.candidateAvailability} />
 
       {detail.decision ? (
@@ -561,12 +535,13 @@ export function RequestDetail({
       </Section>
 
       <DecisionDialog
+        key={detail.requestId}
         kind={dialog}
         detail={detail}
         onClose={() => setDialog(null)}
-        onSubmit={(kind, reason) => {
+        onSubmit={(kind, reason, amendment) => {
           setDialog(null);
-          if (kind === "approve") onDecide("APPROVE", reason);
+          if (kind === "approve") onDecide("APPROVE", reason, amendment);
           else if (kind === "reject") onDecide("REJECT", reason);
           else onExecute();
         }}

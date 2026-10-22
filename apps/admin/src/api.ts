@@ -270,6 +270,11 @@ export type UserRentalAccountItem = {
 export type UserRentalAccountPage = { items?: UserRentalAccountItem[]; nextCursor?: string | null };
 
 export type UserOrderAmount = { currency: string; unit: string; amount: string; scale: number };
+export type DirectoryUserPreview = {
+  name: string; image: string | null; maskedPhone: string | null; riskFlag?: boolean;
+  membershipSummary?: UserDirectoryMembershipSummary; creditSummary?: UserDirectoryCreditSummary;
+};
+export type UserOrderResource = {code: string; name?: string; quantity: string | null; unit: string | null};
 export type UserOrderItem = {
   orderId: string;
   displayNo: string;
@@ -281,7 +286,9 @@ export type UserOrderItem = {
   gameId: string;
   counterpartyName: string;
   counterpartyUserId?: string;
-  counterpartySummary?: { name: string; image: string | null; maskedPhone: string | null };
+  counterpartySummary?: DirectoryUserPreview;
+  orderFacts?: {termSeconds: string | null; resources: UserOrderResource[]};
+  accountFacts?: {source: 'ORDER_VERSION' | 'LEGACY_ACCOUNT'; resources: UserOrderResource[]; loginMethodText: string | null; termDays?: string};
   amounts: { rental: UserOrderAmount | null; deposit: UserOrderAmount | null; totalDue: UserOrderAmount | null };
   createdAt: string | null;
   holdUntil: string | null;

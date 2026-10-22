@@ -44,6 +44,7 @@ export class DirectorySqlFixture extends EventEmitter {
     if(this.filterSql&&sql.startsWith('SELECT u.id FROM zzsh_auth_user."user" u'))return result(this.filterSql(sql,values));
     if(this.filterSql&&sql.includes('directory-credit-summaries'))return result(this.filterSql(sql,values));
     if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return result([]);
+    if(sql.includes('directory-order-account-facts'))return result([]);
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)||sql.startsWith("SELECT set_config("))return result([]);
     if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':this.gameScopeMode,gameIds:this.isBoss?[]:this.gameIds}]);
     if(sql.startsWith('SELECT "status", "is_boss"'))return result([{status:'ACTIVE',isBoss:this.isBoss,passwordChangeRequired:false}]);
@@ -51,7 +52,7 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.includes('WITH role_permissions'))return result(this.permissions.map(permissionCode=>({permissionCode})));
     if(sql.startsWith('SELECT game_id AS'))return result(this.gameIds.map(gameId=>({gameId})));
     if(sql.includes('SELECT 1 FROM zzsh_auth_user'))return result(this.users.some(row=>row.id===values[0])?[{exists:1}]:[]);
-    if(sql.includes('SELECT id,name,image,"phoneNumber" AS phone FROM zzsh_auth_user."user" WHERE id=ANY'))return result(this.users.filter(row=>(values[0] as string[]).includes(row.id)).map(row=>({id:row.id,name:row.name,image:row.image,phone:row.phoneNumber})));
+    if(sql.includes('directory-user-summaries')||sql.includes('SELECT id,name,image,"phoneNumber" AS phone FROM zzsh_auth_user."user" WHERE id=ANY'))return result(this.users.filter(row=>(values[0] as string[]).includes(row.id)).map(row=>({id:row.id,name:row.name,image:row.image,phone:row.phoneNumber,riskFlag:row.riskFlag})));
     if(sql.includes('FROM zzsh_auth_user."user" u')) {
       const combined=sql.includes('AS directory_rows');
       const counting=!combined&&sql.includes('SELECT count(*)::int AS total FROM');

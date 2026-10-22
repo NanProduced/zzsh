@@ -120,6 +120,7 @@ function loadCenter(session) {
       child.paths = Module._nodeModulePaths(tree);
       child.require = (request) => {
         if (request === "../../lib/membership-growth-client") return module.require("@/lib/membership-growth-client");
+        if (request === "../../lib/publish-derive") return requireFromTree(path.join(tree, "apps/web/src/lib/publish-derive.ts"));
         if (request === "../ui/progress") {
           const progressPath = path.join(tree, "apps/web/src/components/ui/progress.tsx");
           const progress = new Module(progressPath);
@@ -503,6 +504,12 @@ test("membership growth displays entitlements and points progression accurately"
       pendingCount: 0,
     },
   };
+  for (const range of [
+    { scope: "DELTA_ACCOUNT_RENTAL", gameId: null, gameName: null, expected: /三角洲租赁/ },
+    { scope: "game:game-delta", gameId: "game-delta", gameName: "三角洲行动", expected: /三角洲行动租赁/ },
+  ]) {
+  const { expected, ...facts } = range;
+  Object.assign(goldGrowth.data.entitlements[0], facts);
   const probe = await createProbe(async () => json(emptyPage), {
     growthFetch: () => Promise.resolve(json(goldGrowth)),
   });
@@ -513,7 +520,7 @@ test("membership growth displays entitlements and points progression accurately"
     const entitlement = probe.host.querySelector("[data-testid=active-entitlement]");
     assert.ok(entitlement);
     assert.match(entitlement.textContent, /尊享礼遇/);
-    assert.match(entitlement.textContent, /三角洲租赁/);
+    assert.match(entitlement.textContent, expected);
     assert.match(entitlement.textContent, /2026\.12\.31/);
 
     // Points display
@@ -528,6 +535,7 @@ test("membership growth displays entitlements and points progression accurately"
     assert.match(actionLink.textContent, /查看成长与权益/);
   } finally {
     await probe.dispose();
+  }
   }
 });
 

@@ -1,6 +1,7 @@
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { formatDate } from "../../api";
+import { formatEntitlementDiscount } from "../membership-entitlement-form";
 import {
   BUSINESS_NOT_CONNECTED,
   entitlementStateView,
@@ -13,7 +14,7 @@ import {
 } from "./contract";
 import { Fact, FactGrid, NotApplicable, Section } from "./atoms";
 
-/** summary.* 全部来自 operation_payload 快照；currentStatus 等另列字段才是当前事实。 */
+/** 摘要来自申请或最终批准快照，当前业务状态另列。 */
 function text(summary: Record<string, unknown>, key: string): string | null {
   const value = summary[key];
   return typeof value === "string" && value.trim() ? value : null;
@@ -31,10 +32,16 @@ function MoneyRow({ label, value }: { label: string; value: unknown }) {
 function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
   const draft = summary.policyDraft as Record<string, unknown> | undefined;
   const inline = summary.inlinePolicy as Record<string, unknown> | undefined;
+  const pricing = summary.pricingSummary as Record<string, unknown> | undefined;
+  const original = summary.originalRequest as Record<string, unknown> | undefined;
+  const originalPricing = original?.pricingSummary as Record<string, unknown> | undefined;
   return (
     <FactGrid>
       <Fact label="游戏" value={text(summary, "gameName")} />
       <Fact label="礼遇类型" value={text(summary, "entitlementKindTitle") ?? text(summary, "entitlementKind")} />
+      {pricing ? <Fact label="实际折扣" value={pricing.knowledge === "LEGACY" ? "旧版计价合同" : formatEntitlementDiscount(text(pricing, "payableRatio") ?? undefined)} /> : null}
+      {summary.payloadSource === "APPROVED_FINAL" ? <Fact label="内容来源" value="最终批准内容（原申请保留）" /> : null}
+      {originalPricing ? <Fact label="原申请折扣" value={originalPricing.knowledge === "LEGACY" ? "旧版计价合同" : formatEntitlementDiscount(text(originalPricing, "payableRatio") ?? undefined)} /> : null}
       <Fact label="目标用户" value={text(summary, "targetUserId")} mono />
       <Fact label="作用范围标识" value={text(summary, "scopeKey")} mono />
       <Fact label="生效开始（快照）" value={formatDate(text(summary, "startsAt"))} />

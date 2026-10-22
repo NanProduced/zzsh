@@ -144,3 +144,62 @@ test("entitlement identity, timing and unknown kinds survive client mapping", as
     globalThis.fetch = original;
   }
 });
+
+test("entitlement pricing summary only consumes public exact discount facts", async () => {
+  const original = globalThis.fetch;
+  try {
+    const pricingSummary = { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "custom", payableRatio: "0.85000000", costBasisRef: "PRIVATE_COST_REFERENCE", approvalPayload: { secret: "PRIVATE_APPROVAL" } };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], pricingSummary, pricingPayload: { cost: "PRIVATE_COST" } }] }), { status: 200 });
+    const state = await readMyMembershipGrowth();
+    assert.equal(state.status, "ready");
+    assert.deepEqual(state.data.entitlements[0].pricingSummary, { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "custom", payableRatio: "0.85000000" });
+    assert.doesNotMatch(JSON.stringify(state), /PRIVATE_|costBasisRef|pricingPayload|approvalPayload/);
+    assert.equal(state.data.entitlements[0].depositWaived, false);
+    assert.equal(state.data.entitlements[0].endsAt, known.entitlements[0].endsAtUtc);
+  } finally { globalThis.fetch = original; }
+});
+
+test("missing, legacy and invalid discount projections stay explicit without changing growth knowledge", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const pricingSummary of [undefined, null, { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "future", payableRatio: "0.85" }, ...["0", "-0.5", "1.01", "1.000000001", "0.123456789", "NaN", 0.85].map(payableRatio => ({ knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "ordinary", payableRatio }))]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], pricingSummary }] }), { status: 200 });
+      const state = await readMyMembershipGrowth();
+      assert.equal(state.status, "ready");
+      assert.equal(state.data.tier, "GOLD");
+      assert.deepEqual(state.data.entitlements[0].pricingSummary, { knowledge: "UNKNOWN", kind: "UNKNOWN" });
+    }
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], pricingSummary: { knowledge: "LEGACY", kind: "LEGACY", costBasisRef: "PRIVATE_LEGACY" } }] }), { status: 200 });
+    const legacy = await readMyMembershipGrowth();
+    assert.deepEqual(legacy.data.entitlements[0].pricingSummary, { knowledge: "LEGACY", kind: "LEGACY" });
+    assert.doesNotMatch(JSON.stringify(legacy), /PRIVATE_LEGACY|costBasisRef/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("known discount survives independent unknown growth and preserves eight-decimal text", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ growth: { schema: "membership-growth-v1", knowledge: "UNKNOWN" }, entitlements: [{ ...known.entitlements[0], pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "fast", payableRatio: "0.12345678" } }] }), { status: 200 });
+    const state = await readMyMembershipGrowth();
+    assert.equal(state.status, "unknown");
+    assert.deepEqual(state.entitlements[0].pricingSummary, { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "fast", payableRatio: "0.12345678" });
+  } finally { globalThis.fetch = original; }
+});
+
+test("entitlement game facts map bounded public strings while older DTOs remain usable", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], scopeKey: "game:game-live", gameId: "game-live", gameName: "三角洲行动" }] }), { status: 200 });
+    const state = await readMyMembershipGrowth();
+    assert.equal(state.status, "ready");
+    assert.equal(state.data.entitlements[0].gameId, "game-live");
+    assert.equal(state.data.entitlements[0].gameName, "三角洲行动");
+    for (const fields of [{}, { gameId: null, gameName: null }, { gameId: " ", gameName: " " }, { gameId: 42, gameName: {} }, { gameId: "x".repeat(129), gameName: "字".repeat(201) }]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], ...fields }] }), { status: 200 });
+      const legacy = await readMyMembershipGrowth();
+      assert.equal(legacy.status, "ready");
+      assert.deepEqual([legacy.data.entitlements[0].gameId, legacy.data.entitlements[0].gameName], [null, null]);
+      assert.equal(legacy.data.entitlements[0].scope, known.entitlements[0].scopeKey);
+    }
+  } finally { globalThis.fetch = original; }
+});

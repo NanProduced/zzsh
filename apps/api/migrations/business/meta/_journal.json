@@ -666,6 +666,13 @@
       "when": 1792627200003,
       "tag": "0094_user_subject_finance_permission",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1792627200004,
+      "tag": "0095_approval_final_payload",
+      "breakpoints": true
     }
   ]
 }

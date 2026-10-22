@@ -110,7 +110,7 @@ export function WorkspacePageContent({
   }
   if (tab.kind === "support") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} onRefresh={onRefresh} onOpenPath={onOpenPath} /></>;
   if (tab.kind === "distribution-policy") return snapshot.authenticated ? <DistributionPolicyPanel key={tab.id} snapshot={snapshot} /> : null;
-  if (tab.kind === "membership-growth") return <>{tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? <Button variant="ghost" onClick={() => onOpenPath("/users/" + tab.query.fromUserId + "?section=growth")}>返回来源用户</Button> : null}<MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} /></>;
+  if (tab.kind === "membership-growth") return <>{tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? <Button variant="ghost" onClick={() => onOpenPath("/users/" + tab.query.fromUserId + "?section=growth")}>返回来源用户</Button> : null}<MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} onOpenPath={onOpenPath} /></>;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (
       <AdminDirectoryView
