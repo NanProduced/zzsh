@@ -10,6 +10,7 @@ type SavedView = { applied: FinanceFilters; draft: FinanceFilters; page: number;
 type Origin = { path: string; parent?: string };
 const savedViews = new Map<string, SavedView>(), origins = new Map<string, Origin>();
 let currentIdentity = "";
+export function financeContextIdentity(snapshot: Snapshot): string { return `${snapshot.adminUserId}:${snapshot.session.id}:${[...snapshot.permissions].sort().join("|")}`; }
 export function clearFinanceContexts(): void { savedViews.clear(); origins.clear(); currentIdentity = ""; }
 export function registerFinanceOrigin(path: string, identity?: string): string { const origin = crypto.randomUUID(); if (identity) currentIdentity = identity; origins.set(origin, { path }); return origin; }
 function scroller() { const page = document.querySelector<HTMLElement>(".workspace-page"); return page && page.scrollHeight > page.clientHeight ? page : document.scrollingElement; }
@@ -36,7 +37,7 @@ function decodeReference(value: string) { try { return decodeURIComponent(value)
 export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onRefresh, refreshNonce }: {
   tab: WorkspaceTab; snapshot: Snapshot; onOpenPath: (path: string, title?: string) => void; onQueryChange: (query: Record<string, string>) => void; onRefresh: () => Promise<SessionSnapshot>; refreshNonce: number;
 }) {
-  const identity = `${snapshot.adminUserId}:${snapshot.session.id}:${[...snapshot.permissions].sort().join("|")}`;
+  const identity = financeContextIdentity(snapshot);
   if (identity !== currentIdentity) { clearFinanceContexts(); currentIdentity = identity; }
   const period = tab.path === "/finance/period", documentId = tab.path.startsWith("/finance/documents/") ? decodeReference(tab.path.slice(19)) : null;
   const subjectId = tab.path.startsWith("/finance/users/") ? decodeReference(tab.path.slice(15)) : null, object = documentId !== null || subjectId !== null;

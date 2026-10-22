@@ -1,0 +1,42 @@
+# 管理端用户详情
+
+用户详情是用户、订单和游戏账号的查询入口。普通资料只读；信用、礼遇、账号和资金操作保留各自领域授权。BFF 只转接领域接口，不计算金额或推断实名资料。
+
+## 身份与查询
+
+- 列表、手机号查询和详情统一传 `registrationTime=ORIGINAL`。`registeredAt` 可空，来源为 `LEGACY|LOCAL|UNKNOWN`；不能以导入时间补注册时间。
+- 手机号精确查找只用 `POST /admin/users/lookup` body，不进入 URL、标签或持久化筛选。
+- 用户目录需要 `user.directory.read`。订单、账号和审计分别检查原领域读取权限与业务范围。无权限、未知和合法零值分开表达。
+- 订单、账号和审计沿现有游标分页；目录数字分页的总量不能冒充关联记录总量。用户订单复用统一订单窄键关系，先裁剪范围和选本页键，再展开本页记录。
+- 当前上架账号使用 `rental-accounts?publication=published`，与 `publishedCount` 同集合。暂停、占用或运营限制不抹掉发布事实；上架数不是可租库存。
+
+## 内部标记与备注
+
+- `POST /admin/users/{id}/risk-flag`：`user.risk.manage`，原幂等键及已读 `expectedRevision`。只改变后台高危标记，不联动信用、账号状态或发布资格。
+- `GET/POST /admin/users/{id}/notes`、`DELETE /admin/users/{id}/notes/{noteId}`：多条备注，只追加和软删除，不编辑。`user.note.write` 可添加、删除本人备注；`user.note.manage` 可删除任意备注。作者由服务端会话确定。
+- `GET /admin/users/{id}/notes/{noteId}` 用于精确回读。软删后仅返回标识、作者、正文摘要等核对信息，不返回正文。备注审计与幂等回执均不含正文。
+- 所有写入均复核管理员态和权限，业务、审计与幂等回执同事务。未知结果保留原主体、正文和幂等键；受理后只回读，不能换键重复提交。
+
+## 敏感资料
+
+`POST /admin/users/{id}/sensitive-profile` 是按需读取，需要目录权限和 `user.identity.sensitive.read`，同事务审计、响应 `no-store`。审计不记录明文；普通详情仅返回脱敏手机号。客户端不持久化明文，离开、锁屏、失权或显示到期时清除。
+
+当前实名验证仅存状态和验证引用，未保存姓名与证件号。两项返回 `null/NOT_RECORDED`，不得从昵称或验证引用伪造资料。手机号仅返回真实已存值。
+
+## 信用
+
+- `POST /admin/credit/users/{id}/deductions`：`amount` 为 1–100 整数，`expectedRevision` 为已读十进制字符串，`visibleReason` 为用户可见说明。
+- `POST /admin/credit/users/{id}/deductions/{eventId}/reverse`：追加该笔实际扣分的更正，不删除历史或任意加分。
+- 两者需要 `credit.decide`、用户对象及游戏范围、必需幂等键。未知初始分拒绝处理；不自动初始化100分，不扣负数，过期 revision 返回409。
+- 事件为 `MANUAL_DEDUCTION/MANUAL_DEDUCTION_REVERSED`，来源为 `USER_MANUAL`，不伪造订单。用户端可见说明，不返回内部依据和管理员身份。
+- 这两个非资金命令独立开放；不因此开启旧保证金收退、违约或恢复命令门禁。
+
+## 单用户资金
+
+`user.wallet.read` 仅授予可用余额读取。`user.finance.read` 授予授权用户的余额与按游戏范围裁剪的消费读取；不授予平台财务、内价、补查或资金命令。原 `finance.read` 及 Boss 可沿现有财务模块核对完整单据。
+
+`GET /admin/users/{id}/consumption` 按需读取当前有效、已过账原生结算。四项为租客承担的哈夫币实耗租金、物品实耗、提前结束补足和包赔费；总计与分页明细同集合，不重复累加已含分项的 `renterCharge`。
+
+未分摊人工调整、版本绑定异常或缺失依据保持未知。已核部分不是完整合计；原生子集不能冒充新旧全历史消费。旧账明细仍可通过现有资金查询读取，不据旧状态推断渠道到账。
+
+跨域下钻携带对象与来源，返回保留用户分区、订单角色与状态或上架集合。会员入口必须携带 `userId`。资金来源标识复用财务工作区的同一身份格式。

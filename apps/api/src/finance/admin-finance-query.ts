@@ -23,7 +23,7 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
   if (scope.documentRefs) conditions.push(`(${document})=ANY(${bind(scope.documentRefs)}::text[])`);
   if (scope.documentRef) conditions.push(`(${document})=${bind(scope.documentRef)}`);
   else if (scope.subjectId) conditions.push(`(${subject})=${bind(scope.subjectId)}`);
-  else if (scope.filters) {
+  if (!scope.documentRef && scope.filters) {
     const f = scope.filters;
     if (f.scope !== "ALL") conditions.push(`(${subject})=${bind(f.scope)}`);
     if (f.bucket !== "ALL") conditions.push(`(${bucket})=${bind(f.bucket)}`);

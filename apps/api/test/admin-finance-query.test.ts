@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {Pool} from "pg";
 import {scopedFinanceSql,financeVersionSql,financeLookupPageSql} from "../src/finance/admin-finance-query";
-import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,projectAdminFinanceObservation} from "../src/finance/admin-finance-read";
+import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,projectAdminFinanceObservation,readAdminFinanceSubject} from "../src/finance/admin-finance-read";
 import {FinanceSqlFixture} from './admin-finance-fixture';
 import {prepareOwnerGuaranteeHistory} from '../src/finance/owner-guarantee-history';
 
@@ -12,6 +12,56 @@ test("query selection is before the matched ceiling and restored content digest 
  const query=scopedFinanceSql("SELECT * FROM input ORDER BY l.id COLLATE \"C\" LIMIT $1","ledger",{filters},20001,false);
  assert.ok(query.text.indexOf("WHERE")<query.text.lastIndexOf("LIMIT"));assert.ok(query.values.includes("u1"));assert.equal(query.values.at(-1),20001);assert.ok(query.values.some(value=>typeof value==="string"&&value.includes("\\%\\_\\\\")));
  const version=financeVersionSql({withdrawals:true,native_orders:true,legacy_orders:true});assert.ok(!/LIMIT|pg_current_snapshot|current_database|count\(|max\(/i.test(version));assert.match(version,/string_agg/);assert.match(version,/controlled_payout_operation/);assert.match(version,/wallet_revision/);assert.match(version,/legacy_order_read_snapshot/);
+});
+
+test('subject finance applies the requested Beijing day before limiting both ledger and historical documents',()=>{
+ const ledger=(id:string,subject_id:string,at:string|null,account_code='WALLET_AVAILABLE')=>({id,subject_id,subject_name:subject_id,at,account_code,delta:'100',posting_id:'posting-'+id,order_id:'order-'+id,source_entity:'settlement_posting'});
+ const history=(id:string,subject_id:string,at:string|null)=>({id,subject_id,subject_name:subject_id,at,source_entity:'la_log_earnings',source_kind:'HISTORICAL_EARNINGS_LOG',source_id:id,amount:'1.00',action:'1'});
+ const fixture=new FinanceSqlFixture({ledger:[ledger('01-before','u1','2026-10-21T15:59:59.999Z'),ledger('02-start','u1','2026-10-21T16:00:00Z'),ledger('03-last','u1','2026-10-22T15:59:59.999Z'),ledger('04-after','u1','2026-10-22T16:00:00Z'),ledger('05-other','u2','2026-10-22T01:00:00Z'),ledger('06-reserved','u1','2026-10-22T01:00:00Z','WALLET_RESERVED'),ledger('07-unknown','u1',null)],
+  history:[history('01-old','u1','2026-06-01T00:00:00Z'),history('02-today','u1','2026-10-22T01:00:00Z'),history('03-other','u2','2026-10-22T01:00:00Z'),history('04-unknown','u1',null)]});
+ try{
+  const filters=parseAdminFinanceFilters(new URLSearchParams('scope=ALL&bucket=AVAILABLE&period=1&from=2026-10-22&to=2026-10-22'));
+  for(const [family,source,expected] of [['ledger',ADMIN_FINANCE_LEDGER_SQL,['02-start','03-last','07-unknown']],['history',adminFinanceObservationSql({}),['02-today','04-unknown']]] as const){
+   const query=scopedFinanceSql(source,family,{subjectId:'u1',filters},3,false);
+   assert.deepEqual(fixture.query(query.text,query.values).rows.map(row=>row.id),expected);
+   assert(query.values.includes('2026-10-22T00:00:00+08:00'));assert(query.values.includes('2026-10-22T16:00:00.000Z'));
+   assert(query.text.indexOf('r.at::timestamptz')<query.text.lastIndexOf('LIMIT'));
+   const other=scopedFinanceSql(source,family,{subjectId:'u1',filters:{...filters,scope:'u2'}},3,false);
+   assert.deepEqual(fixture.query(other.text,other.values).rows,[],'filter scope cannot override the subject in the URL');
+  }
+ }finally{fixture.close();}
+});
+
+test('subject all-time compatibility and document details retain their complete facts',()=>{
+ const fixture=new FinanceSqlFixture({ledger:[
+  {id:'one',subject_id:'u1',account_code:'WALLET_AVAILABLE',delta:'100',at:'2026-06-01T00:00:00Z',order_id:'shared'},
+  {id:'two',subject_id:'u2',account_code:'WALLET_AVAILABLE',delta:'200',at:'2026-10-22T00:00:00Z',order_id:'shared'},
+  {id:'three',subject_id:'u1',account_code:'WALLET_AVAILABLE',delta:'300',at:'2026-09-01T00:00:00Z',order_id:'other'},
+ ]});
+ try{
+  const filters=parseAdminFinanceFilters(new URLSearchParams('scope=u1&period=0&from=2026-10-22&to=2026-10-22'),new Date(),false);
+  const all=scopedFinanceSql(ADMIN_FINANCE_LEDGER_SQL,'ledger',{subjectId:'u1',filters},20,false);
+  assert.deepEqual(fixture.query(all.text,all.values).rows.map(row=>row.id),['one','three']);
+  const detail=scopedFinanceSql(ADMIN_FINANCE_LEDGER_SQL,'ledger',{subjectId:'u1',documentRef:'ORDER:shared',filters:{...filters,period:true}},20,false);
+  assert.deepEqual(fixture.query(detail.text,detail.values).rows.map(row=>row.id),['one','two'],'document detail must keep both parties and all dates');
+  assert(!detail.values.includes('2026-10-22T00:00:00+08:00'));
+ }finally{fixture.close();}
+});
+
+test('a dated subject document selection does not turn the current wallet into a period balance',async()=>{
+ const seen:{sql:string;values:unknown[]}[]=[],client={query:async(sql:string,values:unknown[]=[])=>{
+  seen.push({sql,values});
+  if(sql.includes('to_regclass'))return {rows:[{ready:true}],rowCount:1};
+  if(sql.includes('FOR SHARE'))return {rows:[{id:'u1'}],rowCount:1};
+  if(sql.includes('FROM zzsh_order.wallet_coverage c'))return {rows:[{origin:'LEGACY_IMPORT',cutoff:'2026-09-13T00:00:00Z',sourceDigest:'a'.repeat(64),coveredSetDigest:'b'.repeat(64),coverageVersion:'1'}],rowCount:1};
+  if(sql.includes('FROM zzsh_order.wallet_revision'))return {rows:[{ledgerRevision:'5',readRevision:'2'}],rowCount:1};
+  if(sql.includes('FROM zzsh_order.settlement_ledger_entry'))return {rows:[{available:'12850',reserved:'1000',pending:'0',refund:'200'}],rowCount:1};
+  throw Error('Unexpected wallet source query');
+ }};
+ const data=await readAdminFinanceSubject(client as any,{subjects:[{id:'u1',name:'用户一'}],entries:[],revisions:[],withdrawalsReady:true,asOf:'2026-10-22T00:00:00Z',version:'proof'},'u1','2026-10-22T00:00:00Z');
+ assert.deepEqual(data.documents,[]);assert.equal(data.wallet.buckets.available.amountCents,'12850');assert.equal(data.wallet.buckets.reserved.amountCents,'1000');
+ const ledger=seen.find(query=>query.sql.includes('FROM zzsh_order.settlement_ledger_entry'))!;
+ assert.deepEqual(ledger.values,['u1']);assert(!ledger.sql.includes('created_at>'));assert(!ledger.sql.includes('created_at<'));
 });
 
 test('actual native zero source branch remains visible as its distribution document without fabricating ledger rows',()=>{

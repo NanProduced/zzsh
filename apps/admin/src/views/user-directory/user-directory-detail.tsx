@@ -1,5 +1,4 @@
-import { accountNumberLabel, historicalReadSummary } from "../supply-review/model";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeftIcon, ArrowUpRightIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,532 +7,99 @@ import { Textarea } from '@/components/ui/textarea';
 import { Field } from '@/components/ui/field';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ListTable, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/admin-list/list-table';
+import { ListPagination } from '@/components/admin-list/list-pagination';
 import { restoreTabs, tabHref, tabFromLocation, type WorkspaceTab } from '@/workspace/tab-model';
 import { AdminApiError } from '../../api';
-import { PERMISSION, STATUS_LABEL, sourceLabel, type Audit, type Order, type Resource, type User } from './user-directory-data';
-import {
-  Denied,
-  DomainBlock,
-  ENTITLEMENT_STATUS_LABEL,
-  Identity,
-  IdentityStatus,
-  RegistrationCell,
-  Loading,
-  Message,
-  Status,
-  Summary,
-  MembershipSummaryCell,
-  CreditSummaryCell,
-  ORDER_CONDITION_LABEL,
-  errorText,
-  time,
-  formatBeijingDate,
-  TIER_LABEL,
-  SOURCE_STATE_LABEL,
-  useDirectoryRequest,
-  type PageProps,
-  type UserDirectoryData,
-} from './user-directory-shared';
+import { PERMISSION, STATUS_LABEL, type Order, type Resource, type Audit, type User } from './user-directory-data';
+import { Denied, Identity, IdentityStatus, Status, RegistrationCell, MembershipSummaryCell, CreditSummaryCell, Message, errorText, time, TIER_LABEL, SOURCE_STATE_LABEL, useDirectoryRequest, type PageProps, type UserDirectoryData } from './user-directory-shared';
 import { CreditPanel } from './credit-panel';
-import { financeMoney, financeTime, bucketLabels, reasonLabels } from '../admin-finance-api';
-import { registerFinanceOrigin } from '../admin-finance-view';
+import { SensitiveIdentity, UserNotes, UserRiskAction } from './user-detail-actions';
+import { UserDetailFinance } from './user-detail-finance';
+import { financeMoney } from '../admin-finance-api';
+import './user-detail.css';
 
-const SECTION_NAMES: Record<string, string> = {
-  overview: '概览',
-  orders: '订单记录',
-  resources: '名下游戏账号',
-  growth: '成长与礼遇',
-  credit: '信用与保证金',
-  finance: '资金',
-  security: '账号安全',
-};
+const SECTIONS: Record<string,string> = {overview:'概览',orders:'订单记录',resources:'当前上架账号',growth:'会员与礼遇',credit:'信用',finance:'资金',security:'账号安全'};
+const ORDER_STATES: Record<string,string> = {current:'进行中',PENDING_PAYMENT:'待付款',PAID:'已付款',COMPLETED:'已完成',CANCELLED:'已取消'};
+const auditLabels:Record<string,string> = {'user.account.restored':'恢复账号','user.account.deactivated':'停用账号','user.account.cancelled':'注销账号','user.identity.verification':'实名验证','user.legacy_owner.migrated':'旧平台迁入','user.note.create':'添加备注','user.note.delete':'删除备注','user.risk.flag.changed':'修改高危标记','user.identity.sensitive.read':'查看敏感资料'};
 
-const ORDER_STATUS: Record<string, string> = ORDER_CONDITION_LABEL.status;
+function DetailLoading() { return <div className="udv-skeleton" aria-busy="true" role="status" aria-label="正在读取用户信息"><Skeleton className="h-16 w-80"/><Skeleton className="h-24 w-full"/><Skeleton className="h-10 w-full"/><Skeleton className="h-64 w-full"/></div>; }
 
-const AUDIT_ACTION_LABEL: Record<string, string> = {
-  'user.account.restored': '账号恢复',
-  'user.account.deactivated': '账号停用',
-  'user.account.cancelled': '账号注销',
-  'user.identity.verification': '身份核验',
-  'user.legacy_owner.migrated': '旧用户迁入记录',
-};
-const auditActionLabel = (action: string) => AUDIT_ACTION_LABEL[action] ?? '未识别操作';
-
-function Orders({
-  adapter,
-  user,
-  tab,
-  refreshNonce,
-  onOpenPath,
-  onQueryChange,
-}: {
-  adapter: UserDirectoryData;
-  user: User;
-  tab: WorkspaceTab;
-  refreshNonce: number;
-  onOpenPath: PageProps["onOpenPath"];
-  onQueryChange: PageProps["onQueryChange"];
-}) {
-  const [role, setRole] = useState(tab.query.role ?? '');
-  const [status, setStatus] = useState(tab.query.status ?? '');
-
-  useEffect(() => {
-    setRole(tab.query.role ?? '');
-    setStatus(tab.query.status ?? '');
-  }, [tab.query.role, tab.query.status]);
-
-  const handleRoleChange = (nextRole: string) => {
-    setRole(nextRole);
-    onQueryChange({
-      section: 'orders',
-      ...(nextRole ? { role: nextRole } : {}),
-      ...(status ? { status } : {}),
-    });
-  };
-
-  const handleStatusChange = (nextStatus: string) => {
-    setStatus(nextStatus);
-    onQueryChange({
-      section: 'orders',
-      ...(role ? { role } : {}),
-      ...(nextStatus ? { status: nextStatus } : {}),
-    });
-  };
-
-  const filters = { ...(role ? { role } : {}), ...(status ? { status } : {}) };
-
-  return (
-    <>
-      <div className="ud-section-heading">
-        <h2>订单记录</h2>
-        <span className="ud-muted">授权游戏范围内 · 一行一单 · 支持参与角色与当前订单筛选</span>
-      </div>
-      <div className="ud-order-filters flex flex-wrap gap-4 items-center mb-4">
-        <Field label="参与角色" className="w-48" composite>
-          <Select items={{ ALL: '全部角色', ...ORDER_CONDITION_LABEL.role }} value={role || 'ALL'} onValueChange={v => handleRoleChange(!v || v === 'ALL' ? '' : String(v))}>
-            <SelectTrigger aria-label="该用户在具体订单中的参与方">
-              <SelectValue placeholder="全部角色" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ALL">全部角色</SelectItem>
-              <SelectItem value="renter">租用方</SelectItem>
-              <SelectItem value="owner">资源归属方</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
-        <Field label="订单状态" className="w-56" composite>
-          <Select items={{ ALL: '全部状态', ...ORDER_STATUS }} value={status || 'ALL'} onValueChange={v => handleStatusChange(!v || v === 'ALL' ? '' : String(v))}>
-            <SelectTrigger aria-label="订单状态">
-              <SelectValue placeholder="全部状态" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ALL">全部状态</SelectItem>
-              {Object.entries(ORDER_STATUS).map(([key, label]) => (
-                <SelectItem key={key} value={key}>{label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-      </div>
-      <DomainBlock adapter={adapter} id={user.id} domain="orders" filters={filters} refreshNonce={refreshNonce}>
-        {data => (data as Order[]).length ? (
-          <div className="ud-order-list">
-            {(data as Order[]).map(order => (
-              <article key={order.orderId} className="ud-order" data-order-id={order.orderId}>
-                <div className="ud-order-title">
-                  <Button
-                    variant="link"
-                    className="oc-link h-auto p-0 text-primary font-medium inline-flex items-center gap-1"
-                    onClick={() => onOpenPath(`/orders/${order.orderId}`, order.displayNo)}
-                  >
-                    {order.displayNo}
-                    <ArrowUpRightIcon size={13} />
-                  </Button>
-                  <Badge variant="outline">{ORDER_STATUS[order.status] ?? `未知：${order.status}`}</Badge>
-                  <Badge variant="secondary">本单{order.role === 'renter' ? '租用方' : '资源归属方'}</Badge>
-                </div>
-                <p>{order.title} · {order.accountDisplayNo == null ? '资源账号信息受限' : accountNumberLabel(order.accountDisplayNo)}</p>
-                <dl className="ud-order-facts">
-                  <div>
-                    <dt>资源预付 / 押金 / 需付（订单记录）</dt>
-                    <dd>CNY {order.amounts.rental?.amount ?? '未知'} / {order.amounts.deposit?.amount ?? '未知'} / {order.amounts.totalDue?.amount ?? '未知'}</dd>
-                  </div>
-                  <div>
-                    <dt>支付时间</dt>
-                    <dd>{order.paidAt ? time(order.paidAt) : order.payment?.state === 'RECORDED_PAID' || ['PAID', 'COMPLETED'].includes(order.status) ? '支付时间待确认' : '暂无可核验支付时间'}</dd>
-                  </div>
-                  <div>
-                    <dt>创建时间</dt>
-                    <dd>{time(order.createdAt)}</dd>
-                  </div>
-                  <div>
-                    <dt>交易另一方</dt>
-                    <dd>{order.counterpartyName || '昵称未设置'}</dd>
-                  </div>
-                  {order.status === 'CANCELLED' ? (
-                    <div>
-                      <dt>取消信息</dt>
-                      <dd>{order.cancelReason ?? '原因未知'} · {time(order.cancelledAt)}</dd>
-                    </div>
-                  ) : null}
-                  {order.expiredAwaitingCancel ? (
-                    <div>
-                      <dt>保留期</dt>
-                      <dd>已过保留期，待服务端确认取消</dd>
-                    </div>
-                  ) : null}
-                </dl>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <Message kind="empty" title="范围内暂无符合当前条件的订单">
-            调整订单参与方或状态后重新查询。
-          </Message>
-        )}
-      </DomainBlock>
-      <Message title="履约上下文暂未接入用户目录">
-        付款、加入订单群、交付与正式开租是独立事实；这里不推断履约进度。处理履约事项时须进一步核对该订单的事实记录。
-      </Message>
-    </>
-  );
+function UserCollection({adapter,user,domain,filters={},refreshNonce,preview=false,children}:{adapter:UserDirectoryData;user:User;domain:'orders'|'resources'|'audit';filters?:Record<string,string>;refreshNonce:number;preview?:boolean;children:(data:any[])=>ReactNode}) {
+  const [size,setSize]=useState(preview?5:20);
+  const signature=JSON.stringify([user.id,domain,filters,size,refreshNonce]);
+  const [paging,setPaging]=useState<{key:string;cursors:(string|undefined)[];index:number}>({key:signature,cursors:[undefined],index:0});
+  const page=paging.key===signature?paging:{key:signature,cursors:[undefined],index:0};
+  const cursor=page.cursors[page.index];
+  const {result,retry}=useDirectoryRequest(`${signature}:${cursor??''}`,signal=>adapter.section(user.id,domain,signal,cursor,{...filters,limit:String(size)}));
+  if(result.state==='loading')return <DetailLoading/>;
+  if(result.state==='error'){const rejected=result.error instanceof AdminApiError&&result.error.status===400;return <Message kind="error" title={rejected?'筛选条件不可用':'记录读取失败'} retry={rejected?undefined:retry}>{rejected?`当前筛选条件（${[filters.role==='renter'?'租客':filters.role==='owner'?'号主':'',ORDER_STATES[filters.status??'']].filter(Boolean).join('、')||'所选条件'}）未被接受，请调整后查询。`:errorText(result.error)}</Message>;}
+  if(result.data.state==='denied')return <Denied permission={result.data.permission}/>;
+  const data=result.data.data;
+  return <>{children(data)}{!preview ? <ListPagination mode="cursor" pageSize={size} loadedCount={data.length} loading={false} pageSizeOptions={[10,20,50]} itemLabel="条记录" hasPrevious={page.index>0} hasNext={!!result.data.nextCursor} onPageSizeChange={value=>setSize(value)} onPrevious={()=>setPaging({...page,index:page.index-1})} onNext={()=>setPaging({key:signature,cursors:[...page.cursors.slice(0,page.index+1),result.data.state==='ready'?result.data.nextCursor??undefined:undefined],index:page.index+1})}/> : null}</>;
 }
 
-/** 版本发布事实：版本状态，不是账号当前的有效发布事实。 */
-const PUBLICATION_VERSION_LABEL: Record<string, string> = { DRAFT: '未发布', SUBMITTED: '审核中', WITHDRAWN: '已下架', REJECTED: '已驳回', IMPORTED_UNVERIFIED: '旧资料待核' };
-
-function publicationLabel(resource: Resource) {
-  const publication = resource.publication;
-  const version = publication.versionPublished
-    ? publication.source === 'OWNER_DIRECT' ? '当前版本已直接发布' : '当前版本已按旧承接审核发布'
-    : !resource.currentVersionId
-      ? '未提交发布'
-      : PUBLICATION_VERSION_LABEL[publication.versionState ?? ''] ?? `发布事实待确认（${publication.versionState ?? '未知'}）`;
-  // currentlyPublished 是账号当前的有效发布事实；versionPublished 只是版本状态，不能代替它。
-  if (publication.currentlyPublished === undefined) return `当前上架状态待核 · ${version}`;
-  return `${publication.currentlyPublished ? '当前已上架' : '当前未上架'} · ${version}`;
+function Orders({adapter,user,tab,refreshNonce,onOpenPath,onQueryChange,preview=false}:{adapter:UserDirectoryData;user:User;tab:WorkspaceTab;refreshNonce:number;onOpenPath:PageProps['onOpenPath'];onQueryChange:PageProps['onQueryChange'];preview?:boolean}) {
+  const role=preview?'':tab.query.role??'',status=preview?'':tab.query.status??'';
+  return <section className="udv-block"><div className="udv-heading"><h2>{preview?'最近订单':'订单记录'}</h2>{preview?<Button variant="link" onClick={()=>onQueryChange({section:'orders'})}>查看订单记录<ArrowUpRightIcon size={14}/></Button>:<span className="udv-muted">按下单时间从新到旧</span>}</div>
+    {!preview?<div className="udv-filters"><Field label="本单身份" composite><Select items={{ALL:'全部',renter:'租客',owner:'号主'}} value={role||'ALL'} onValueChange={value=>onQueryChange({section:'orders',role:value&&value!=='ALL'?String(value):'',...(status?{status}:{})})}><SelectTrigger aria-label="本单身份"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="ALL">全部</SelectItem><SelectItem value="renter">租客</SelectItem><SelectItem value="owner">号主</SelectItem></SelectContent></Select></Field><Field label="订单状态" composite><Select items={{ALL:'全部',...ORDER_STATES}} value={status||'ALL'} onValueChange={value=>onQueryChange({section:'orders',...(role?{role}:{}),status:value&&value!=='ALL'?String(value):''})}><SelectTrigger aria-label="订单状态"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="ALL">全部</SelectItem>{Object.entries(ORDER_STATES).map(([key,label])=><SelectItem key={key} value={key}>{label}</SelectItem>)}</SelectContent></Select></Field></div>:null}
+    <UserCollection adapter={adapter} user={user} domain="orders" filters={{...(role?{role}:{}),...(status?{status}:{})}} refreshNonce={refreshNonce} preview={preview}>{rows=><ListTable empty={!rows.length ? "暂无符合条件的订单" : undefined}><Table><TableHeader><TableRow><TableHead>订单 / 下单时间</TableHead><TableHead>资源账号</TableHead><TableHead>本单身份 / 交易另一方</TableHead><TableHead>状态</TableHead><TableHead className="text-right">本单应付</TableHead></TableRow></TableHeader><TableBody>{(rows as Order[]).map(order=><TableRow key={order.orderId} data-order-id={order.orderId}><TableCell><Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/orders/${order.orderId}`,order.displayNo)}>{order.displayNo}<ArrowUpRightIcon size={13}/></Button><small>{time(order.createdAt)}</small>{order.source?.origin==='LEGACY'?<small>旧平台订单</small>:null}</TableCell><TableCell>{order.accountId?<Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/supply/accounts/${order.accountId}`,`账号 ${order.accountDisplayNo??''}`)}>{order.accountDisplayNo??'查看账号'}</Button>:<span>{order.accountDisplayNo===null?'账号信息受限':order.accountDisplayNo?.trim()?(/^\d+$/.test(order.accountDisplayNo)?'旧来源号 '+order.accountDisplayNo:order.accountDisplayNo):'账号编号待核'}</span>}</TableCell><TableCell><Badge variant="outline">{order.role==='renter'?'租客':'号主'}</Badge><small>{order.counterpartyUserId?<Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/users/${order.counterpartyUserId}?fromOrderId=${order.orderId}`,order.counterpartyName)}>{order.counterpartyName||'昵称未设置'}<ArrowUpRightIcon size={13}/></Button>:order.counterpartyName||'昵称未设置'}</small></TableCell><TableCell><Badge variant={order.status==='PAID'?'success':order.status==='PENDING_PAYMENT'?'warning':'outline'}>{ORDER_STATES[order.status]??'状态待核'}</Badge>{order.payment?.state==='RECORDED_PAID'?<small>支付已记录</small>:null}{order.status==='CANCELLED'&&order.paidAt?<small>付款后取消 · {time(order.paidAt)}</small>:null}{['PAID','COMPLETED'].includes(order.status)&&!order.paidAt?<small>支付时间待确认</small>:null}{order.cancelReason?<small>{order.cancelReason}{order.cancelledAt?' · '+time(order.cancelledAt):''}</small>:null}</TableCell><TableCell className="text-right tabular-nums">{order.amounts.totalDue?`${order.amounts.totalDue.amount} 元`:'待核'}<small>资源 {order.amounts.rental?.amount??'待核'} · 押金 {order.amounts.deposit?.amount??'待核'}</small></TableCell></TableRow>)}</TableBody></Table></ListTable>}</UserCollection>
+  </section>;
 }
 
-function Resources({ adapter, user, tab, refreshNonce, onOpenPath, onQueryChange }: { adapter: UserDirectoryData; user: User; tab: WorkspaceTab; refreshNonce: number; onOpenPath: PageProps["onOpenPath"]; onQueryChange: PageProps["onQueryChange"] }) {
-  const published = tab.query.publication === 'published';
-  const filters: Record<string, string> = published ? { publication: 'published' } : {};
-  return (
-    <>
-      <div className="ud-section-heading">
-        <h2>名下游戏账号</h2>
-        <span className="ud-muted">该用户关联的资源 · 授权游戏范围内</span>
-      </div>
-      <div className="ud-order-filters flex flex-wrap gap-4 items-center mb-4">
-        <Field label="账号范围" className="w-48" composite>
-          <Select items={{ ALL: '全部档案', published: '已上架' }} value={published ? 'published' : 'ALL'} onValueChange={v => onQueryChange({ section: 'resources', publication: v === 'published' ? 'published' : '' })}>
-            <SelectTrigger aria-label="账号范围">
-              <SelectValue placeholder="全部档案" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ALL">全部档案</SelectItem>
-              <SelectItem value="published">已上架</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
-      </div>
-      <DomainBlock adapter={adapter} id={user.id} domain="resources" filters={filters} refreshNonce={refreshNonce}>
-        {data => (data as Resource[]).length ? (
-          <div className="ud-resource-list">
-            {(data as Resource[]).map(resource => (
-              <article className="ud-resource" key={resource.accountId}>
-                <Button
-                  variant="link"
-                  className="oc-link h-auto p-0 text-primary font-medium inline-flex items-center gap-1"
-                  onClick={() => onOpenPath(`/supply/accounts/${resource.accountId}`, `账号 ${resource.displayNo ?? ""}`)}
-                >
-                  {resource.displayNo ?? "编号待核"}
-                  <ArrowUpRightIcon size={13} />
-                </Button>
-                {resource.historicalRead ? <p>{historicalReadSummary(resource.historicalRead)}。历史显示资料不代表当前可租。</p> : null}
-                <p>{resource.game.name} · 生命周期：{resource.lifecycle === 'ACTIVE' ? '有效' : resource.lifecycle === 'ARCHIVED' ? '已归档' : `未知：${resource.lifecycle}`}</p>
-                <p>发布者暂停：{resource.ownerPaused ? '是' : '否'} · 平台限制：{resource.staffRestricted ? '是' : '否'} · 旧平台保留：{resource.legacyHold === 'NONE' ? '无' : resource.legacyHold === 'ACTIVE_LEGACY' ? '旧单承接中' : resource.legacyHold === 'UNRESOLVED' ? '待核对' : resource.legacyHold}</p>
-                <Badge variant="outline">{publicationLabel(resource)}</Badge>
-                <p>发布事实不等于当前可租资格。</p>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <Message kind="empty" title={published ? '该用户当前没有已上架的游戏账号' : '范围内暂无名下游戏账号'}>
-            {published ? '已按已上架范围查询；名下档案仍在“全部档案”中。' : '已按供给读取权限和游戏范围查询。'}
-          </Message>
-        )}
-      </DomainBlock>
-    </>
-  );
+function Resources({adapter,user,refreshNonce,onOpenPath}:{adapter:UserDirectoryData;user:User;refreshNonce:number;onOpenPath:PageProps['onOpenPath']}) {
+  return <section className="udv-block"><div className="udv-heading"><h2>当前上架账号</h2><span className="udv-muted">已发布账号，暂停或占用仍保留上架记录</span></div><UserCollection adapter={adapter} user={user} domain="resources" filters={{publication:'published'}} refreshNonce={refreshNonce}>{rows=><ListTable empty={!rows.length ? "当前没有上架账号" : undefined}><Table><TableHeader><TableRow><TableHead>账号</TableHead><TableHead>游戏</TableHead><TableHead>当前状态</TableHead><TableHead>上架记录</TableHead><TableHead>操作</TableHead></TableRow></TableHeader><TableBody>{(rows as Resource[]).map(account=><TableRow key={account.accountId}><TableCell><Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/supply/accounts/${account.accountId}`,`账号 ${account.displayNo??''}`)}>{account.displayNo??'账号编号待核'}<ArrowUpRightIcon size={13}/></Button></TableCell><TableCell>{account.game.name}</TableCell><TableCell><div className="udv-tags">{account.staffRestricted?<Badge variant="destructive">运营限制</Badge>:null}{account.ownerPaused?<Badge variant="warning">号主暂停</Badge>:null}{account.legacyHold!=='NONE'?<Badge variant="warning">历史占用待核</Badge>:null}{!account.staffRestricted&&!account.ownerPaused&&account.legacyHold==='NONE'?<Badge variant="success">正常</Badge>:null}</div></TableCell><TableCell>{account.publication.currentlyPublished===true?'已上架':account.publication.currentlyPublished===false?'当前未上架':'上架状态待核'}</TableCell><TableCell>{adapter.has('supply.review.read')?<Button variant="outline" size="sm" onClick={()=>onOpenPath(`/supply/reviews/${account.accountId}`,`处理账号 ${account.displayNo??''}`)}>处理账号</Button>:<Button variant="outline" size="sm" onClick={()=>onOpenPath(`/supply/accounts/${account.accountId}`)}>查看详情</Button>}</TableCell></TableRow>)}</TableBody></Table></ListTable>}</UserCollection></section>;
 }
 
-function MembershipGrowthSection({
-  adapter,
-  user,
-  refreshNonce,
-  onOpenPath,
-}: {
-  adapter: UserDirectoryData;
-  user: User;
-  refreshNonce: number;
-  onOpenPath: PageProps["onOpenPath"];
-}) {
-  const hasAccess = adapter.has(PERMISSION.growthSummary) || adapter.has(PERMISSION.growthDetail) || adapter.snapshot.security.isBoss;
-  const { result, retry } = useDirectoryRequest(
-    `${user.id}:membership-growth:${refreshNonce}`,
-    signal => adapter.membershipGrowth(user.id, signal)
-  );
-
-  if (!hasAccess) return <Denied permission={PERMISSION.growthSummary} />;
-  if (result.state === 'loading') return <Loading />;
-  if (result.state === 'error') {
-    return (
-      <Message kind="error" title="成长与礼遇详情读取失败" retry={retry}>
-        {errorText(result.error)}；其他分区仍可使用。
-      </Message>
-    );
-  }
-
-  const data = result.data;
-  const growth = data.growth;
-  // DETAIL_ONLY 只授权按范围读取贡献明细，不是整主体摘要：等级与礼遇都没有读到。
-  const detailOnly = data.authorizationState === 'DETAIL_ONLY';
-  // 缺字段表示没读到；空数组表示读到且确实没有。两者都不当作"没有礼遇"。
-  const entitlementsRead = Array.isArray(data.entitlements);
-  const entitlements = entitlementsRead ? data.entitlements! : [];
-  const activeEntitlements = entitlements.filter(e => e.status === 'ACTIVE');
-  const historicalEntitlements = entitlements.filter(e => e.status !== 'ACTIVE');
-
-  return (
-    <>
-      <div className="ud-section-heading">
-        <h2>成长与礼遇</h2>
-        <span className="ud-muted">只读成长事实与独立礼遇 · 独立授权读取</span>
-      </div>
-
-      <div className="ud-overview-grid mb-4">
-        <div>
-          <h3>成长事实</h3>
-          {detailOnly ? (
-            <Message kind="denied" title="读取范围受限">当前授权只允许按游戏范围读取贡献明细，未包含等级与礼遇摘要；下面的等级与礼遇不可判读。</Message>
-          ) : null}
-          <dl className="ud-facts">
-            <div>
-              <dt>有效会员等级</dt>
-              <dd>
-                <Badge variant={growth?.knowledge === 'KNOWN' && growth.effectiveTier != null ? 'secondary' : 'unknown'}>
-                  {growth?.knowledge !== 'KNOWN' ? '等级待核' : growth.effectiveTier == null ? '等级待核' : TIER_LABEL[growth.effectiveTier] ?? '等级待核'}
-                </Badge>
-              </dd>
-            </div>
-            <div>
-              <dt>常规评定等级</dt>
-              <dd>{growth?.normalTier == null ? '未评定' : TIER_LABEL[growth.normalTier] ?? '未评定'}</dd>
-            </div>
-            <div>
-              <dt>黑金资格判定</dt>
-              <dd>
-                {growth?.blackGold === 'QUALIFIED' ? '已具备黑金资格' : growth?.blackGold === 'REVIEW_REQUIRED' ? '待人工复核' : growth?.blackGold === 'NOT_QUALIFIED' ? '未具备' : '未读取'}
-              </dd>
-            </div>
-            <div>
-              <dt>成长确知状态</dt>
-              <dd>
-                {growth?.knowledge === 'KNOWN' ? '已确知' : '成长数据未知'}
-                {growth?.sourceState && growth.sourceState !== 'COMPLETE' ? ` · ${SOURCE_STATE_LABEL[growth.sourceState] ?? growth.sourceState}` : ''}
-              </dd>
-            </div>
-            <div>
-              <dt>权益政策状态</dt>
-              <dd>
-                {growth?.benefitsState === 'CONFIGURED' ? '已配置生效' : growth?.benefitsState === 'NOT_CONFIGURED' ? '权益政策尚未配置' : '未读取'}
-              </dd>
-            </div>
-            {growth?.grace && growth.grace.state !== 'NONE' ? (
-              <div>
-                <dt>保级宽限期</dt>
-                <dd>
-                  状态：{growth.grace.state} · 原档位：{growth.grace.fromTier ? TIER_LABEL[growth.grace.fromTier] ?? growth.grace.fromTier : '无'} · 截止：{time(growth.grace.until)} · 差额：{growth.grace.gapPoints == null ? '未读取' : `${growth.grace.gapPoints} 积分`}
-                </dd>
-              </div>
-            ) : null}
-            {growth?.rollingPoints || growth?.lifetimePoints ? (
-              <div>
-                <dt>成长积分依据</dt>
-                <dd>
-                  滚动积分：{growth.rollingPoints ?? '—'} · 累计贡献：{growth.lifetimePoints ?? '—'}
-                </dd>
-              </div>
-            ) : null}
-            {data.sourceSummary ? (
-              <div>
-                <dt>贡献记录核验</dt>
-                <dd>
-                  来源记录：{data.sourceSummary.contributionCount} 条 · 待处理：{data.sourceSummary.pendingCount} 条 · 排除：{data.sourceSummary.excludedCount} 条
-                </dd>
-              </div>
-            ) : null}
-          </dl>
-        </div>
-
-        <div>
-          <h3>当前有效独立礼遇</h3>
-          {!entitlementsRead ? (
-            <Message kind="denied" title="礼遇未读取">当前读取范围没有返回礼遇字段，这里不推断用户没有礼遇。</Message>
-          ) : activeEntitlements.length > 0 ? (
-            <div className="flex flex-col gap-2">
-              {activeEntitlements.map(e => (
-                <article key={e.id} className="p-3 border rounded-md text-xs space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline">{e.label}</Badge>
-                    <Badge variant="secondary">{e.kind === 'PRESTIGE' ? '尊享礼遇' : '挚友礼遇'}</Badge>
-                    <span className="ud-muted">{e.depositWaived ? '免押金' : '标准押金'}</span>
-                  </div>
-                  <p className="text-muted-foreground">范围：{e.scopeKey}</p>
-                  <p className="text-muted-foreground">
-                    有效期：{formatBeijingDate(e.startsAtUtc)} 至 {formatBeijingDate(e.endsAtUtc)}
-                  </p>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <Message kind="empty" title="暂无有效独立礼遇">
-              已读取礼遇字段，当前没有处于有效期内的独立礼遇。
-            </Message>
-          )}
-          {historicalEntitlements.length > 0 ? (
-            <details className="ud-entitlement-history">
-              <summary>历史礼遇（{historicalEntitlements.length}）</summary>
-              <ul>
-                {historicalEntitlements.map(e => (
-                  <li key={e.id}>
-                    <Badge variant="outline">{e.label}</Badge>
-                    <span className="ud-muted">{ENTITLEMENT_STATUS_LABEL[e.status] ?? e.status}</span>
-                    <span className="ud-subline">{formatBeijingDate(e.startsAtUtc)} 至 {formatBeijingDate(e.endsAtUtc)}</span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ) : null}
-        </div>
-      </div>
-
-      {(adapter.has('membership.policy.draft') || adapter.snapshot.security.isBoss) ? (
-        <div className="mb-4">
-          <Button variant="outline" onClick={() => onOpenPath('/membership-growth')}>
-            前往会员成长工作台
-            <ArrowUpRightIcon size={14} />
-          </Button>
-        </div>
-      ) : null}
-
-      <Message title="成长与礼遇安全边界">
-        独立礼遇按授予周期单独生效，不自动升级为全局会员档位，也不替代价格与交易范围授权；本界面仅提供只读事实核对，不提供政策审批或礼遇发放操作。
-      </Message>
-    </>
-  );
+function Membership({adapter,user,refreshNonce,onOpenPath}:{adapter:UserDirectoryData;user:User;refreshNonce:number;onOpenPath:PageProps['onOpenPath']}) {
+  const {result,retry}=useDirectoryRequest(`${user.id}:growth:${refreshNonce}`,signal=>adapter.membershipGrowth(user.id,signal));
+  if(!adapter.has(PERMISSION.growthSummary)&&!adapter.has(PERMISSION.growthDetail)&&!adapter.snapshot.security.isBoss)return <Denied permission={PERMISSION.growthSummary}/>;
+  if(result.state==='loading')return <DetailLoading/>;
+  if(result.state==='error')return <Message kind="error" title="会员资料读取失败" retry={retry}>{errorText(result.error)}</Message>;
+  const data=result.data,growth=data.growth,hasSummary=data.authorizationState!=='DETAIL_ONLY';
+  const canHandle=['membership.entitlement.request','membership.entitlement.decide','membership.entitlement.execute','membership.policy.draft'].some(code=>adapter.has(code))||adapter.snapshot.security.isBoss;
+  return <section className="udv-block"><div className="udv-heading"><h2>会员与礼遇</h2>{canHandle?<Button variant="outline" onClick={()=>onOpenPath(`/membership-growth?${new URLSearchParams({userId:user.id,fromUserId:user.id,fromUserSection:'growth'})}`)}>办理此用户礼遇<ArrowUpRightIcon size={14}/></Button>:null}</div>
+    {hasSummary?<dl className="udv-facts"><div><dt>当前等级</dt><dd>{growth?.knowledge==='KNOWN'&&growth.effectiveTier?TIER_LABEL[growth.effectiveTier]??'等级待核':'等级待核'}</dd></div><div><dt>滚动积分</dt><dd>{growth?.rollingPoints??'待核'}</dd></div><div><dt>累计贡献</dt><dd>{growth?.lifetimePoints??'待核'}</dd></div>{growth?.grace&&growth.grace.state!=='NONE'?<div><dt>保级截止</dt><dd>{time(growth.grace.until)}</dd></div>:null}</dl>:<Message title="等级与礼遇读取受限">当前权限只允许查看贡献明细。</Message>}
+    <Collapsible><CollapsibleTrigger render={<Button variant="ghost"/>}>查看成长说明</CollapsibleTrigger><CollapsibleContent><dl className="udv-facts"><div><dt>成长资料</dt><dd>{growth?.sourceState?SOURCE_STATE_LABEL[growth.sourceState]??'资料待核':'资料待核'}</dd></div>{data.sourceSummary?<div><dt>贡献来源</dt><dd>来源记录 {data.sourceSummary.contributionCount} 条</dd></div>:null}<div><dt>黑金资格</dt><dd>{growth?.blackGold==='QUALIFIED'?'已具备资格':growth?.blackGold==='NOT_QUALIFIED'?'未具备资格':growth?.blackGold==='REVIEW_REQUIRED'?'待人工复核':'待核'}</dd></div><div><dt>会员权益</dt><dd>{growth?.benefitsState==='CONFIGURED'?'已配置生效':growth?.benefitsState==='NOT_CONFIGURED'?'尚未配置':'待核'}</dd></div>{growth?.grace&&growth.grace.state!=='NONE'?<div><dt>保级差额</dt><dd>{growth.grace.gapPoints==null?'待核':growth.grace.gapPoints+' 积分'}</dd></div>:null}</dl></CollapsibleContent></Collapsible>
+    <h3>礼遇记录</h3>{!Array.isArray(data.entitlements)?<p className="udv-muted">礼遇资料暂不可用</p>:<ListTable empty={!data.entitlements.length ? "暂无礼遇记录" : undefined}><Table><TableHeader><TableRow><TableHead>礼遇</TableHead><TableHead>权益</TableHead><TableHead>有效期</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{data.entitlements.map(item=><TableRow key={item.id}><TableCell>{item.kind==='PRESTIGE'?'尊享礼遇':'挚友礼遇'}<small>{item.label}</small></TableCell><TableCell>{item.depositWaived?'免押金':'按规则缴纳押金'}</TableCell><TableCell>{time(item.startsAtUtc)}<small>至 {time(item.endsAtUtc)}</small></TableCell><TableCell><Badge variant={item.status==='ACTIVE'?'success':'outline'}>{{ACTIVE:'有效',EXPIRED:'已到期',REVOKED:'已撤销',REPLACED:'已替换',PENDING:'待审批',APPROVED_PENDING_EXECUTION:'已批准待执行',EXECUTED_PENDING_START:'待生效'}[item.status]??'状态待核'}</Badge></TableCell></TableRow>)}</TableBody></Table></ListTable>}
+  </section>;
 }
 
-function UserFinanceSection({
-  adapter,
-  user,
-  refreshNonce,
-  onOpenPath,
-}: {
-  adapter: UserDirectoryData;
-  user: User;
-  refreshNonce: number;
-  onOpenPath: PageProps["onOpenPath"];
-}) {
-  const hasAccess = adapter.has(PERMISSION.finance) || adapter.snapshot.security.isBoss;
-  const { result, retry } = useDirectoryRequest(
-    `${user.id}:finance:${refreshNonce}`,
-    signal => adapter.finance(user.id, signal)
-  );
-
-  if (!hasAccess) return <Denied permission={PERMISSION.finance} />;
-  if (result.state === 'loading') return <Loading />;
-  if (result.state === 'error') {
-    return (
-      <Message kind="error" title="用户资金读取失败" retry={retry}>
-        {errorText(result.error)}；其他分区仍可使用。
-      </Message>
-    );
-  }
-
-  const data = result.data;
-  const wallet = data.wallet;
-
-  return (
-    <>
-      <div className="ud-section-heading">
-        <h2>用户资金</h2>
-        <span className="ud-muted">钱包余额、准入覆盖与可提现责任 · 整数分金额口径</span>
-      </div>
-
-      {wallet ? (
-        <div className="space-y-4 mb-4">
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {Object.entries(wallet.buckets).map(([key, bucket]) => {
-              const label = bucketLabels[key.toUpperCase()] ?? (
-                { available: '用户可用', reserved: '提现预留', restricted: '受限', pendingEarnings: '待结算收益', refundPayable: '退款应付' } as Record<string, string>
-              )[key] ?? key;
-              return (
-                <div key={key} className="p-3 border rounded-md">
-                  <span className="text-xs text-muted-foreground block mb-1">{label}</span>
-                  <strong className="text-base font-semibold tabular-nums">{financeMoney(bucket.amountCents)}</strong>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="p-3 border rounded-md flex flex-wrap justify-between items-center gap-2">
-            <div>
-              <span className="text-xs text-muted-foreground block">当前可提现金额</span>
-              <strong className="text-lg font-bold text-primary tabular-nums">{financeMoney(wallet.withdrawable?.amountCents)}</strong>
-            </div>
-            <div>
-              <span className="text-xs text-muted-foreground block">来源覆盖</span>
-              <span className="text-sm">
-                {wallet.coverage?.knowledge === 'KNOWN' ? `已准入 · 截止 ${financeTime(wallet.coverage.cutoff)}` : '未核定'}
-              </span>
-            </div>
-          </div>
-
-          {((wallet.withdrawable?.reasonCodes?.length ?? 0) > 0 || (data.gaps?.length ?? 0) > 0) ? (
-            <div className="p-3 bg-muted/40 rounded-md text-xs space-y-1">
-              <span className="font-medium text-muted-foreground block mb-1">资金缺项与核定说明</span>
-              {[...(wallet.withdrawable?.reasonCodes ?? []), ...(data.gaps ?? [])].map(code => (
-                <p key={code} className="text-muted-foreground">· {reasonLabels[code] ?? code}</p>
-              ))}
-            </div>
-          ) : null}
-
-          <div>
-            <Button
-              variant="default"
-              onClick={() => {
-                const identity = `${adapter.snapshot.adminUserId}:${adapter.snapshot.session.id}:${[...adapter.snapshot.permissions].sort().join("|")}`;
-                const origin = registerFinanceOrigin(`/users/${user.id}?section=finance`, identity);
-                onOpenPath(`/finance/users/${encodeURIComponent(user.id)}?origin=${encodeURIComponent(origin)}`, `${user.name || user.id} · 资金`);
-              }}
-            >
-              进入完整资金核对
-              <ArrowUpRightIcon size={14} />
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <Message kind="empty" title="暂无钱包数据">
-          当前用户尚未形成权威钱包记录或尚未准入资金系统。
-        </Message>
-      )}
-
-      <Message title="资金只读说明">
-        此处仅展示服务端权威分账，不以订单交易金额推算钱包余额；退款应付与已到账分开展示；本处不进行任何充值、调账、提现或写操作。
-      </Message>
-    </>
-  );
+export function UserDetail({adapter,snapshot,tab,onOpenPath,onQueryChange,refreshNonce}:PageProps&{adapter:UserDirectoryData}) {
+  const id=tab.objectId!,section=tab.query.section&&tab.query.section in SECTIONS?tab.query.section:'overview';
+  const [revision,setRevision]=useState(0);
+  const sectionRefresh=useRef<Record<string,number>>({});
+  sectionRefresh.current[section]=refreshNonce;
+  const changed=()=>setRevision(value=>value+1);
+  const {result,retry}=useDirectoryRequest(`${id}:${refreshNonce}:${revision}`,signal=>adapter.detail(id,signal));
+  const [visited,setVisited]=useState(new Set([section]));
+  useEffect(()=>setVisited(current=>new Set([...current,section])),[section]);
+  const back=()=>{const existing=restoreTabs(snapshot.adminUserId,{isBoss:snapshot.security.isBoss,permissions:snapshot.permissions})?.tabs.find(item=>item.id==='users');onOpenPath(tabHref(existing??tabFromLocation('/users')));};
+  const cached=useRef<{id:string;user:User}|null>(null);
+  if(cached.current?.id!==id)cached.current=null;
+  if(result.state==='ready')cached.current={id,user:result.data};
+  if(result.state==='error'&&result.error instanceof AdminApiError&&[401,403,404,423].includes(result.error.status))cached.current=null;
+  if(result.state==='loading'&&!cached.current)return <DetailLoading/>;
+  if(result.state==='error'&&!cached.current)return <><Button variant="ghost" onClick={back}><ArrowLeftIcon size={16}/>返回列表</Button><Message kind="error" title="用户详情加载失败" retry={retry}>{errorText(result.error)}</Message></>;
+  const user=result.state==='ready'?result.data:cached.current!.user,canMoney=adapter.has('user.wallet.read')||adapter.has('user.finance.read')||adapter.has('finance.read')||snapshot.security.isBoss;
+  return <section className="ud-detail ud-detail-v2" aria-busy={result.state==='loading'}>
+    {result.state==='error'?<Message kind="error" title="详情更新失败，保留当前内容" retry={retry}>{errorText(result.error)}</Message>:null}
+    <div className="udv-heading"><Button variant="ghost" onClick={back}><ArrowLeftIcon size={16}/>返回列表</Button><UserRiskAction adapter={adapter} user={user} changed={changed}/></div>
+    <header className="udv-user-header"><div><Identity user={user} heading/><div className="udv-tags"><Status user={user}/><IdentityStatus value={user.identityStatus}/><MembershipSummaryCell summary={user.membershipSummary}/><CreditSummaryCell summary={user.creditSummary}/></div><p className="udv-muted">注册于 <RegistrationCell user={user} includeTime/></p></div>{canMoney?<div className="udv-wallet"><span>可用余额</span><strong>{user.walletSummary?.state==='ready'?financeMoney(user.walletSummary.amountCents):user.walletSummary?.state==='denied'?'无查看权限':'待核'}</strong><Button variant="link" onClick={()=>onQueryChange({section:'finance'})}>查看资金<ArrowUpRightIcon size={13}/></Button></div>:null}</header>
+    <SensitiveIdentity adapter={adapter} user={user} active={section==='overview'}/>
+    <div className="udv-business">{user.orders.state==='ready'&&adapter.has(PERMISSION.orders)?<><Button variant="ghost" onClick={()=>onQueryChange({section:'orders',role:'renter',status:'current'})}>租入 <strong>{user.orders.renterCurrent??'待核'}</strong></Button><Button variant="ghost" onClick={()=>onQueryChange({section:'orders',role:'owner',status:'current'})}>出租 <strong>{user.orders.ownerCurrent??'待核'}</strong></Button></>:null}{user.resources.state==='ready'&&adapter.has(PERMISSION.resources)?<Button variant="ghost" onClick={()=>onQueryChange({section:'resources',publication:'published'})}>上架 <strong>{user.resources.publishedCount??'待核'}</strong></Button>:null}</div>
+    <Tabs value={section} onValueChange={value=>onQueryChange({section:String(value),...(value==='resources'?{publication:'published'}:{})})}><TabsList aria-label="用户详情分区">{Object.entries(SECTIONS).map(([key,label])=><TabsTrigger key={key} value={key}>{label}</TabsTrigger>)}</TabsList></Tabs>
+    {[...visited].map(view=><div key={view} hidden={view!==section} className="udv-tab" role="region" aria-label={SECTIONS[view]}>
+      {view==='overview'?<><Orders adapter={adapter} user={user} tab={tab} refreshNonce={refreshNonce} onOpenPath={onOpenPath} onQueryChange={onQueryChange} preview/><UserNotes adapter={adapter} user={user} refreshNonce={refreshNonce}/></>:view==='orders'?<Orders adapter={adapter} user={user} tab={tab} refreshNonce={refreshNonce} onOpenPath={onOpenPath} onQueryChange={onQueryChange}/>:view==='resources'?<Resources adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='growth'?<Membership adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='credit'?<CreditPanel adapter={adapter} user={user} refreshNonce={refreshNonce} active={view===section} changed={changed}/>:view==='finance'?<UserDetailFinance adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:<>
+        <section className="udv-block"><div className="udv-heading"><h2>账号资料</h2><Badge variant="outline">{STATUS_LABEL[user.status]??'状态待核'}</Badge></div><Field label="用户ID"><Input readOnly value={user.id} aria-label="用户ID" onFocus={event=>event.currentTarget.select()}/></Field><dl className="udv-facts"><div><dt>手机号</dt><dd>{user.phoneMasked}</dd></div>{user.legacyId?<div><dt>旧平台ID</dt><dd>{user.legacyId}</dd></div>:null}{user.displayUsername?<div><dt>用户名</dt><dd>{user.displayUsername}</dd></div>:null}{user.emailMasked?<div><dt>邮箱</dt><dd>{user.emailMasked}</dd></div>:null}</dl></section>
+        {user.status==='DEACTIVATED'||user.status==='CANCELLED'?<Restore adapter={adapter} user={user} changed={changed}/>:<p className="udv-muted">{user.status==='ACTIVE'?'账号状态正常，当前无需恢复。':'当前账号状态不支持恢复。'}</p>}
+        <Collapsible><CollapsibleTrigger render={<Button variant="outline"/>}>查看安全操作记录</CollapsibleTrigger><CollapsibleContent><UserCollection adapter={adapter} user={user} domain="audit" refreshNonce={(sectionRefresh.current[view]??0)+revision}>{rows=><ListTable empty={!rows.length ? "当前授权范围内暂无安全操作记录" : undefined}><Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>操作</TableHead><TableHead>管理员</TableHead><TableHead>结果</TableHead></TableRow></TableHeader><TableBody>{(rows as Audit[]).map(event=><TableRow key={event.eventId}><TableCell>{time(event.occurredAt)}</TableCell><TableCell>{auditLabels[event.action]??'其他安全操作'}</TableCell><TableCell>{event.actor.name||'未记录'}</TableCell><TableCell>{event.outcome==='SUCCESS'?'成功':'失败'}</TableCell></TableRow>)}</TableBody></Table></ListTable>}</UserCollection></CollapsibleContent></Collapsible>
+      </>}
+    </div>)}
+  </section>;
 }
 
 type RestoreResult = 'success' | 'rejected' | 'conflict' | 'failed' | 'pending' | 'readback-failed';
@@ -744,253 +310,5 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
         </DialogContent>
       </Dialog>
     </div>
-  );
-}
-
-export function UserDetail({
-  adapter,
-  snapshot,
-  tab,
-  onOpenPath,
-  onQueryChange,
-  refreshNonce,
-}: PageProps & { adapter: UserDirectoryData }) {
-  const id = tab.objectId!;
-  const [revision, setRevision] = useState(0);
-  const { result, retry } = useDirectoryRequest(
-    `${id}:${refreshNonce}:${revision}`,
-    signal => adapter.detail(id, signal)
-  );
-  const section = tab.query.section && tab.query.section in SECTION_NAMES ? tab.query.section : 'overview';
-  const [visited, setVisited] = useState(new Set([section]));
-  useEffect(() => setVisited(current => new Set([...current, section])), [section]);
-
-  const back = () => {
-    const existing = restoreTabs(snapshot.adminUserId, {
-      isBoss: snapshot.security.isBoss,
-      permissions: snapshot.permissions,
-    })?.tabs.find(item => item.id === 'users');
-    onOpenPath(tabHref(existing ?? tabFromLocation('/users')));
-  };
-
-  if (result.state === 'loading') return <Loading />;
-  if (result.state === 'error') {
-    return (
-      <>
-        <Button variant="ghost" onClick={back}><ArrowLeftIcon size={16} />返回列表</Button>
-        <Message kind="error" title="用户详情加载失败" retry={retry}>{errorText(result.error)}</Message>
-      </>
-    );
-  }
-
-  const user = result.data;
-
-  return (
-    <section className="ud-detail">
-      <Button variant="ghost" onClick={back}><ArrowLeftIcon size={16} />返回列表</Button>
-      <div className="ud-detail-heading">
-        <Identity user={user} full heading />
-        <Status user={user} />
-      </div>
-      <nav className="ud-sections flex flex-wrap gap-1 border-b pb-2 mb-4" aria-label="用户详情分区">
-        {Object.entries(SECTION_NAMES).map(([key, label]) => (
-          <Button
-            variant={section === key ? 'secondary' : 'ghost'}
-            key={key}
-            aria-current={section === key ? 'page' : undefined}
-            onClick={() => onQueryChange({ section: key })}
-          >
-            {label}
-          </Button>
-        ))}
-      </nav>
-
-      {[...visited].map(view => (
-        <div key={view} hidden={view !== section} className="ud-section-body">
-          {view === 'overview' ? (
-            <>
-              <div className="ud-overview-grid">
-                <div>
-                  <h2>身份与账号</h2>
-                  <dl className="ud-facts">
-                    <div><dt>用户昵称</dt><dd>{user.name || '未设置昵称'}</dd></div>
-                    <div><dt>用户ID</dt><dd className="break-all"><code>{user.id}</code></dd></div>
-                    {user.legacyId ? <div><dt>旧平台ID</dt><dd>{user.legacyId}</dd></div> : null}
-                    <div><dt>旧平台用户名</dt><dd>{user.provider === 'legacy_mysql_restore' ? user.displayUsername || user.username || '来源未提供' : '未关联旧平台用户名'}</dd></div>
-                    <div><dt>实名</dt><dd><IdentityStatus value={user.identityStatus} /></dd></div>
-                    <div><dt>年龄状态</dt><dd>{user.age}</dd></div>
-                    <div><dt>实名通过时间</dt><dd>{time(user.verifiedAt)}</dd></div>
-                    <div><dt>账号状态</dt><dd>{STATUS_LABEL[user.status]}</dd></div>
-                    <div><dt>邮箱（脱敏）</dt><dd>{user.emailMasked ?? '未绑定真实邮箱'}</dd></div>
-                    <div><dt>注册时间</dt><dd><RegistrationCell user={user} includeTime /></dd></div>
-                    <div><dt>本平台建档（北京时间）</dt><dd>{time(user.createdAt)}</dd></div>
-                  </dl>
-                </div>
-                <div>
-                  <h2>关联业务</h2>
-                  <div className="ud-business-links space-y-3">
-                    <div>
-                      <Summary kind="orders" part={user.orders} />
-                      {adapter.has(PERMISSION.orders) ? (
-                        <Button variant="outline" size="sm" onClick={() => onQueryChange({ section: 'orders' })}>
-                          查看订单记录
-                        </Button>
-                      ) : (
-                        <Denied permission={PERMISSION.orders} />
-                      )}
-                    </div>
-                    <div>
-                      <Summary kind="resources" part={user.resources} />
-                      {adapter.has(PERMISSION.resources) ? (
-                        <Button variant="outline" size="sm" onClick={() => onQueryChange({ section: 'resources' })}>
-                          查看名下游戏账号
-                        </Button>
-                      ) : (
-                        <Denied permission={PERMISSION.resources} />
-                      )}
-                    </div>
-                    <div>
-                      <span className="text-xs text-muted-foreground block mb-1">成长与礼遇</span>
-                      <MembershipSummaryCell summary={user.membershipSummary} />
-                      {(adapter.has(PERMISSION.growthSummary) || adapter.has(PERMISSION.growthDetail) || adapter.snapshot.security.isBoss) ? (
-                        <Button variant="outline" size="sm" onClick={() => onQueryChange({ section: 'growth' })}>
-                          查看成长与礼遇
-                        </Button>
-                      ) : (
-                        <Denied permission={PERMISSION.growthSummary} />
-                      )}
-                    </div>
-                    <div>
-                      <span className="text-xs text-muted-foreground block mb-1">信用状态</span>
-                      <CreditSummaryCell summary={user.creditSummary} />
-                      {adapter.has(PERMISSION.credit) ? (
-                        <Button variant="outline" size="sm" onClick={() => onQueryChange({ section: 'credit' })}>
-                          查看信用与保证金
-                        </Button>
-                      ) : (
-                        <Denied permission={PERMISSION.credit} />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="ud-overview-row">
-                <h2>资金账户</h2>
-                <div className="flex items-center gap-3">
-                  {adapter.has(PERMISSION.finance) || adapter.snapshot.security.isBoss ? (
-                    <Button variant="outline" onClick={() => onQueryChange({ section: 'finance' })}>
-                      查看用户资金
-                    </Button>
-                  ) : (
-                    <Denied permission={PERMISSION.finance} />
-                  )}
-                </div>
-              </div>
-              <div className="ud-overview-row">
-                <h2>客服上下文</h2>
-                {adapter.has(PERMISSION.support) ? (
-                  <>
-                    <Message title="用户维度完整咨询历史暂未接入">
-                      客服工作台按指派与队列处理；进入工作台后重新核对权限，群访问还需已加入该订单群。
-                    </Message>
-                    <Button variant="outline" onClick={() => onOpenPath('/support')}>
-                      进入客服工作台<ArrowUpRightIcon size={14} />
-                    </Button>
-                  </>
-                ) : (
-                  <Denied permission={PERMISSION.support} />
-                )}
-              </div>
-              <Message title="数据完整性说明">
-                订单和资源仅反映各自授权游戏范围。无权限、读取失败或暂未接入均不代表没有业务；请分别核对有权读取的订单和资源记录。
-              </Message>
-            </>
-          ) : view === 'orders' ? (
-            <Orders
-              adapter={adapter}
-              user={user}
-              tab={tab}
-              refreshNonce={refreshNonce}
-              onOpenPath={onOpenPath}
-              onQueryChange={onQueryChange}
-            />
-          ) : view === 'resources' ? (
-            <Resources
-              adapter={adapter}
-              user={user}
-              tab={tab}
-              refreshNonce={refreshNonce}
-              onOpenPath={onOpenPath}
-              onQueryChange={onQueryChange}
-            />
-          ) : view === 'growth' ? (
-            <MembershipGrowthSection
-              adapter={adapter}
-              user={user}
-              refreshNonce={refreshNonce}
-              onOpenPath={onOpenPath}
-            />
-          ) : view === 'credit' ? (
-            <CreditPanel
-              adapter={adapter}
-              user={user}
-              refreshNonce={refreshNonce}
-            />
-          ) : view === 'finance' ? (
-            <UserFinanceSection
-              adapter={adapter}
-              user={user}
-              refreshNonce={refreshNonce}
-              onOpenPath={onOpenPath}
-            />
-          ) : (
-            <>
-              <div className="ud-overview-row">
-                <h2>账号与安全状态</h2>
-                <p>账号：{STATUS_LABEL[user.status]} · 实名：{user.identity} · 年龄：{user.age}</p>
-                <p>{user.phoneMasked} · {user.emailMasked ?? '未绑定真实邮箱'}</p>
-              </div>
-              <Restore adapter={adapter} user={user} changed={() => setRevision(value => value + 1)} />
-              <div className="ud-overview-row">
-                <h2>账号安全操作审计</h2>
-                <p className="ud-muted">当前记录已按审计权限筛选。</p>
-                <DomainBlock adapter={adapter} id={id} domain="audit" refreshNonce={revision + refreshNonce}>
-                  {data => (data as Audit[]).length ? (
-                    <ul className="ud-audit">
-                      {(data as Audit[]).map(event => (
-                        <li key={event.eventId}>
-                          {auditActionLabel(event.action)} · {time(event.occurredAt)} · {event.outcome === 'SUCCESS' ? '成功' : event.outcome === 'FAILURE' ? '失败' : '结果未知'}
-                          <details>
-                            <summary>技术标识</summary>
-                            <code>{event.action} · {event.outcome} · {event.requestId ?? '无请求编号'}</code>
-                          </details>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <Message kind="empty" title="范围内暂无账号安全操作记录">
-                      不代表其他管理员没有执行过操作。
-                    </Message>
-                  )}
-                </DomainBlock>
-              </div>
-              {adapter.has(PERMISSION.audit) ? (
-                <details className="ud-trace">
-                  <summary>技术追溯 · 仅授权审计</summary>
-                  <p>来源：{sourceLabel(user.provider)}</p>
-                  {user.trace?.sourceCreatedAt ? (
-                    <p>旧来源注册时间：{time(user.trace.sourceCreatedAt)}；旧来源更新时间：{time(user.trace.sourceUpdatedAt ?? null)}</p>
-                  ) : (
-                    <p>旧来源时间：未知或未提供。</p>
-                  )}
-                  {user.legacyId ? <p>旧平台ID：{user.legacyId}</p> : null}
-                  <p>本地创建：{time(user.createdAt)}；本地更新：{time(user.updatedAt)}</p>
-                </details>
-              ) : null}
-            </>
-          )}
-        </div>
-      ))}
-    </section>
   );
 }

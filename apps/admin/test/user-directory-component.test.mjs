@@ -75,8 +75,16 @@ test('ordinary BFF list removes user classifications and shows canonical dates, 
 
 test('desktop row and Enter open Drawer; only CTA navigates, viewport changes never create a detail',async t=>{
   await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr'));const row=()=>browser.document.querySelector('tbody tr');
-  await key(row(),'Enter');await waitFor(()=>namedButton('打开完整详情'));assert.equal(browser.location.pathname,'/users');
+  const originalRow=row();await key(originalRow,'Enter');await waitFor(()=>namedButton('打开完整详情'));assert.equal(browser.location.pathname,'/users');
+  assert.ok(browser.document.querySelector('[data-user-quick-check]'),'the sheet hosts current business rather than another user summary');
+  await waitFor(()=>browser.document.querySelector('[data-user-quick-check]')?.textContent.includes('数量待核'));
+  assert.equal(browser.document.querySelector('[data-user-quick-check]').textContent.includes('当前租入 0'),false,'a missing role count is not inferred as zero');
+  for(const label of ['会员','余额','注册时间'])assert.equal(browser.document.querySelector('.ud-drawer').textContent.includes(label),false,'the sheet does not retain the retired summary mirror');
   await key(browser.document.activeElement,'Escape');await waitFor(()=>!browser.document.querySelector('.ud-drawer'));
+  assert.equal(browser.document.activeElement,originalRow,'Escape returns focus to the keyboard row opener');
+  const quickTrigger=namedButton('快速核对用户 林舟');await act(async()=>quickTrigger.focus());await click(quickTrigger);await waitFor(()=>namedButton('关闭快速核对'));
+  await click(namedButton('关闭快速核对'));await waitFor(()=>!browser.document.querySelector('.ud-drawer'));
+  assert.equal(browser.document.activeElement,quickTrigger,'the close button returns focus to the explicit quick-check opener');
   await click(row());await waitFor(()=>namedButton('打开完整详情'));await resize(390);await resize(1440);assert.equal(browser.location.pathname,'/users');
   await click(row());await waitFor(()=>namedButton('打开完整详情'));await click(namedButton('打开完整详情'));await waitFor(()=>browser.document.querySelector('.ud-detail h1'));
   assert.equal(browser.location.pathname,'/users/user_normal');assert.equal(browser.document.activeElement,browser.document.querySelector('.ud-detail h1'));
@@ -95,22 +103,31 @@ test('phone search uses a body, never URL/storage, and no permission executes no
 
 test('no domain permissions never fetch or display counts, orders, internal IDs or audit',async t=>{
   const {calls}=await mount(t,{permissions:['user.directory.read']});await waitFor(()=>browser.document.querySelector('tbody tr'));assert.ok(browser.document.querySelector('tbody').textContent.includes('无权限'));await click(browser.document.querySelector('tbody tr'));await waitFor(()=>namedButton('打开完整详情'));assert.equal(namedButton('查看订单记录'),undefined);assert.equal(namedButton('查看资源账号'),undefined);assert.equal(calls.some(call=>/\/(orders|rental-accounts|audit-events)/.test(call.url)),false);
+  const quick=browser.document.querySelector('[data-user-quick-check]');assert.ok(quick);assert.ok(quick.textContent.includes('无法查看租入记录'));
+  for(const label of ['出租','上架']){await click([...quick.querySelectorAll('[role="tab"]')].find(tab=>tab.textContent===label));assert.ok(quick.textContent.includes(`无法查看${label}记录`));}
+  assert.equal(calls.some(call=>/\/(orders|rental-accounts|audit-events)/.test(call.url)),false,'switching an unauthorized quick tab never fetches business facts');
+  assert.equal(namedButton('查看全部租入'),undefined);assert.equal(namedButton('查看全部出租'),undefined);assert.equal(namedButton('查看全部上架'),undefined);
 });
 
 test('orders retain cancelled payment, PAID/COMPLETED missing-time warning and per-order participation',async t=>{
-  await mount(t,{path:'/users/user_normal?section=orders'});await waitFor(()=>browser.document.querySelector('[data-order-id="order_cancel"]'));
+  await mount(t,{path:'/users/user_normal?section=orders',orders:[order,{...order,orderId:'order_paid',status:'PAID',paidAt:null,role:'owner'},{...order,orderId:'order_complete',status:'COMPLETED',paidAt:null,amounts:{rental:null,deposit:null,totalDue:null}}]});await waitFor(()=>browser.document.querySelector('[data-order-id="order_cancel"]'));
   assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('10:05'));for(const id of ['order_paid','order_complete'])assert.ok(browser.document.querySelector(`[data-order-id="${id}"]`).textContent.includes('支付时间待确认'));
-  assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('本单租用方'));assert.ok(browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('本单资源归属方'));
+  assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('租客'));assert.ok(browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('号主'));
+  const unknown=browser.document.querySelector('[data-order-id="order_complete"]').textContent;assert.ok(unknown.includes('待核'));assert.equal(unknown.includes('0.00'),false,'missing order amounts never become zero');
 });
 
 test('user order records label old account sources and preserve denied resource information',async t=>{
-  const cases=[['0000123','旧来源号 0000123'],['ZZ20261018000001','账号 ZZ20261018000001'],['AC9000000000002','账号 AC9000000000002'],[null,'资源账号信息受限'],['','账号编号待核']];
+  const cases=[['0000123','旧来源号 0000123'],['ZZ20261018000001','ZZ20261018000001'],['AC9000000000002','AC9000000000002'],[null,'账号信息受限'],['','账号编号待核']];
   await mount(t,{path:'/users/user_normal?section=orders',orders:cases.map(([value],i)=>({...order,orderId:'number-'+i,accountDisplayNo:value}))});await waitFor(()=>browser.document.querySelector('[data-order-id="number-4"]'));
   cases.forEach(([,label],i)=>assert(browser.document.querySelector(`[data-order-id="number-${i}"]`).textContent.includes(label),label));
 });
 
-test('canonical registration is distinct from old-source trace, with seven sections and no membership',async t=>{
-  await mount(t,{path:'/users/user_normal'});await waitFor(()=>browser.document.querySelector('.ud-detail'));const text=browser.document.querySelector('.ud-detail').textContent;assert.ok(text.includes('2026'));assert.equal(text.includes('2019'),false);assert.equal(text.includes('会员'),false);assert.deepEqual([...browser.document.querySelectorAll('.ud-sections button')].map(e=>e.textContent),['概览','订单记录','名下游戏账号','成长与礼遇','信用与保证金','资金','账号安全']);await click(namedButton('账号安全'));await waitFor(()=>browser.document.querySelector('.ud-trace'));assert.ok(browser.document.querySelector('.ud-trace').textContent.includes('2019'));
+test('canonical registration is distinct from old-source trace, with seven business sections',async t=>{
+  await mount(t,{path:'/users/user_normal'});await waitFor(()=>browser.document.querySelector('.ud-detail'));const header=browser.document.querySelector('.udv-user-header').textContent;
+  assert.ok(header.includes('2026/09/24')||header.includes('2026-09-24'));assert.equal(header.includes('2019'),false,'old source timestamps never replace the declared registration date');
+  assert.deepEqual([...browser.document.querySelectorAll('[role="tab"]')].map(e=>e.textContent),['概览','订单记录','当前上架账号','会员与礼遇','信用','资金','账号安全']);
+  await click(namedButton('账号安全'));await waitFor(()=>browser.document.querySelector('[role="region"][aria-label="账号安全"]')?.textContent.includes('88001'));
+  assert.ok(browser.document.querySelector('[role="region"][aria-label="账号安全"]').textContent.includes('旧平台ID'));
 });
 
 test('section failure does not block user detail; main-object failure has retry and no detail facts',async t=>{
@@ -145,8 +162,9 @@ test('restore write success is not overwritten by readback failure and cannot re
 });
 
 test('identity/permission changes abort old requests and reject old domain output',async t=>{
-  let release;let count=0;const {snapshot,switchActor}=await mount(t,{fetch:async(address,init)=>{if(++count<=2)return new Promise(resolve=>{release=()=>resolve(json({items:[user],nextCursor:null,limit:20}));});return json({items:[{...user,name:'新身份范围',resourceSummary:{state:'denied',permission:'supply.rental_account.read'},orderSummary:{state:'denied',permission:'order.read'}}],nextCursor:null,limit:20});}});
-  await switchActor({...snapshot,adminUserId:'different-admin',permissions:['user.directory.read']});await waitFor(()=>browser.document.querySelector('tbody tr'));if(release)release();await settle();assert.ok(browser.document.querySelector('tbody').textContent.includes('新身份范围'));assert.equal(browser.document.querySelector('tbody').textContent.includes('1 个进行中'),false);
+  let release;let count=0;let oldSignal;const {snapshot,switchActor}=await mount(t,{fetch:async(address,init)=>{if(++count===1){oldSignal=init.signal;return new Promise(resolve=>{release=()=>resolve(json({items:[user],nextCursor:null,limit:20}));});}return json({items:[{...user,name:'新身份范围',resourceSummary:{state:'denied',permission:'supply.rental_account.read'},orderSummary:{state:'denied',permission:'order.read'}}],nextCursor:null,limit:20});}});
+  assert.equal(count,1,'StrictMode cleanup must cancel the obsolete request before fetch');
+  await switchActor({...snapshot,adminUserId:'different-admin',permissions:['user.directory.read']});await waitFor(()=>browser.document.querySelector('tbody tr'));assert.equal(oldSignal.aborted,true);if(release)release();await settle();assert.ok(browser.document.querySelector('tbody').textContent.includes('新身份范围'));assert.equal(browser.document.querySelector('tbody').textContent.includes('1 个进行中'),false);
 });
 
 test('U-LIST: displays total count from API and renders role-specific order entries', async t => {
@@ -157,11 +175,13 @@ test('U-LIST: displays total count from API and renders role-specific order entr
     orderSummary: { state: 'ready', currentCount: 3, renterCurrentCount: 1, ownerCurrentCount: 2 },
     resourceSummary: { state: 'ready', count: 4, publishedCount: 2 },
   };
-  await mount(t, {
+  const {calls}=await mount(t, {
     fetch: async (address) => {
       if (address.pathname === '/api/bff/admin/users') {
         return json({ items: [customUser], total: 88, nextCursor: null, limit: 20 });
       }
+      if(address.pathname.endsWith('/orders'))return json({items:[{...order,orderId:'quick-order',status:'PAID',role:address.searchParams.get('role')??'renter'}],nextCursor:null,limit:Number(address.searchParams.get('limit')??20)});
+      if(address.pathname.endsWith('/rental-accounts'))return json({items:[],nextCursor:null,limit:Number(address.searchParams.get('limit')??20)});
       return json({ user: { ...detail, ...customUser } });
     }
   });
@@ -181,6 +201,21 @@ test('U-LIST: displays total count from API and renders role-specific order entr
   assert.ok(browser.location.search.includes('section=orders'));
   assert.ok(browser.location.search.includes('role=renter'));
   assert.ok(browser.location.search.includes('status=current'));
+  await click(namedButton('返回列表'));await waitFor(()=>namedButton('快速核对用户 周既租又租'));await click(namedButton('快速核对用户 周既租又租'));
+  await waitFor(()=>browser.document.querySelector('[aria-label="快速核对当前租入订单"]'));
+  const currentRequests=()=>calls.filter(call=>call.url.includes('/orders?')).map(call=>new URL(call.url,browser.location.href).searchParams);
+  assert.ok(currentRequests().some(params=>params.get('role')==='renter'&&params.get('status')==='current'&&params.get('limit')==='5'));
+  let quick=browser.document.querySelector('[data-user-quick-check]');await click([...quick.querySelectorAll('[role="tab"]')].find(tab=>tab.textContent==='出租'));
+  await waitFor(()=>browser.document.querySelector('[aria-label="快速核对当前出租订单"]'));
+  assert.ok(currentRequests().some(params=>params.get('role')==='owner'&&params.get('status')==='current'&&params.get('limit')==='5'));
+  await click(namedButton('查看全部出租'));await waitFor(()=>browser.location.pathname==='/users/user_both_roles');
+  assert.equal(browser.document.querySelector('.ud-drawer'),null);assert.equal(new URLSearchParams(browser.location.search).get('role'),'owner');assert.equal(new URLSearchParams(browser.location.search).get('status'),'current');
+  await click(namedButton('返回列表'));await waitFor(()=>namedButton('快速核对用户 周既租又租'));await click(namedButton('快速核对用户 周既租又租'));await waitFor(()=>browser.document.querySelector('[data-user-quick-check]'));
+  quick=browser.document.querySelector('[data-user-quick-check]');await click([...quick.querySelectorAll('[role="tab"]')].find(tab=>tab.textContent==='上架'));
+  await waitFor(()=>namedButton('查看全部上架'));
+  assert.ok(calls.some(call=>{const url=new URL(call.url,browser.location.href);return url.pathname.endsWith('/rental-accounts')&&url.searchParams.get('publication')==='published'&&url.searchParams.get('limit')==='5';}));
+  await click(namedButton('查看全部上架'));await waitFor(()=>browser.location.pathname==='/users/user_both_roles');
+  const publishedQuery=new URLSearchParams(browser.location.search);assert.equal(publishedQuery.get('section'),'resources');assert.equal(publishedQuery.get('publication'),'published');assert.equal(publishedQuery.has('role'),false);assert.equal(publishedQuery.has('status'),false);
 });
 
 test('U-LIST: displays membership growth tier, policy unconfigured badge, and active entitlements', async t => {
@@ -344,8 +379,9 @@ test('U-DETAIL: growth section performs independent read of growth facts and act
     path: '/users/user_normal?section=growth',
     permissions: [...permissions, 'membership.growth.read.summary']
   });
-  await waitFor(() => browser.document.querySelector('.ud-section-heading h2'));
-  const text = browser.document.querySelector('.ud-detail').textContent;
+  await waitFor(() => browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]')?.textContent.includes('金卡会员'));
+  await click(namedButton('查看成长说明'));
+  const text = browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]').textContent;
   assert.ok(calls.some(c => c.url.includes('/membership-growth')));
   assert.ok(text.includes('金卡会员'));
   assert.ok(text.includes('已配置生效'));
@@ -361,20 +397,26 @@ test('U-DETAIL: growth section shows denied state when lacking growth permission
   await waitFor(() => browser.document.querySelector('.ud-message-denied'));
   const text = browser.document.querySelector('.ud-detail').textContent;
   assert.ok(text.includes('无权限'));
-  assert.ok(text.includes('membership.growth.read.summary'));
+  assert.equal(namedButton('办理此用户礼遇'),undefined,'read denial never offers a business writer');
 });
 
 test('U-DETAIL: finance section performs independent read of wallet in CENT and renders amounts', async t => {
   const { calls } = await mount(t, {
     path: '/users/user_normal?section=finance',
-    permissions: [...permissions, 'finance.read']
+    permissions: [...permissions, 'finance.read'],
+    fetch: async address => address.pathname.endsWith('/consumption')
+      ? json({subjectId:'user_normal',knowledge:'UNKNOWN',amountCents:null,knownAmountCents:'0',components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},total:0,unknownCount:0,page:1,pageSize:20,items:[]})
+      : address.pathname.includes('/finance/subjects/')
+        ? json({documents:[{ref:'synthetic-withdrawal',number:'SYNTHETIC-WITHDRAWAL',kind:'WITHDRAWAL',state:'RESERVED',occurredAt:user.createdAt,requestedAmountCents:'5000',amounts:[{bucket:'RESERVED',knownNetCents:'5000',unknownCount:0}]}]})
+        : json({user:{...detail,userId:'user_normal',walletSummary:{state:'ready',amountCents:'15000'}}})
   });
-  await waitFor(() => browser.document.querySelector('.ud-section-heading h2'));
-  const text = browser.document.querySelector('.ud-detail').textContent;
+  await waitFor(() => browser.document.querySelector('[data-user-detail-finance]')?.textContent.includes('SYNTHETIC-WITHDRAWAL'));
+  const text = browser.document.querySelector('[data-user-detail-finance]').textContent;
   assert.ok(calls.some(c => c.url.includes('/finance/subjects/')));
   assert.ok(text.includes('150.00 元'));
-  assert.ok(text.includes('50.00 元'));
-  assert.ok(namedButton('进入完整资金核对'));
+  assert.ok(text.includes('50.00 元'),'reserved cents remain readable in the relevant financial document');
+  assert.ok(text.includes('待核'),'unknown consumption is not inferred from available balance');
+  assert.ok(namedButton('完整资金核对'));
 });
 
 const growthSectionFetch = (growth, entitlements) => async address => {
@@ -507,8 +549,9 @@ test('U-DETAIL-CLOSEOUT: growth section never defaults an UNKNOWN or unrecognise
     permissions: [...permissions, 'membership.growth.read.summary'],
     fetch: growthSectionFetch({ knowledge: 'KNOWN', sourceState: 'BACKFILL_PENDING', benefitsState: 'CONFIGURED', normalTier: null, effectiveTier: null, blackGold: null, grace: null }, undefined)
   });
-  await waitFor(() => browser.document.querySelector('.ud-section-heading h2'));
-  const text = browser.document.querySelector('.ud-detail').textContent;
+  await waitFor(() => browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]')?.textContent.includes('等级待核'));
+  await click(namedButton('查看成长说明'));
+  const text = browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]').textContent;
   assert.equal(calls.filter(c => /\/(orders|rental-accounts)/.test(c.url)).length, 0);
   assert.equal(text.includes('普通会员'), false, 'a permitted read with no tier never becomes the lowest tier');
   assert.ok(text.includes('等级待核'));
@@ -530,16 +573,16 @@ test('U-DETAIL-CLOSEOUT: rejected status=current names the dead condition, keeps
   });
   await waitFor(() => browser.document.querySelector('.ud-message-error'));
   const text = browser.document.querySelector('.ud-message-error').textContent;
-  assert.ok(text.includes('当前订单'), `the refused condition is named: ${text}`);
+  assert.match(text,/当前订单|进行中/,`the refused condition is named: ${text}`);
   assert.equal(text.includes('API 是否'), false, 'a value-level rejection is not reported as a service outage');
   assert.equal(namedButton('重试'), undefined, 'a refused condition is never offered as a blind retry');
   assert.equal(browser.document.querySelector('[data-order-id="order_cancel"]'), null, 'no orders are rendered while the requested condition is unexecuted');
   assert.equal(orderRequests.filter(search => !search.includes('status=')).length, 0, 'the page never drops the condition and re-queries everything');
   assert.ok(orderRequests[0].includes('role=renter'), 'the supported role condition is preserved');
   assert.ok(browser.document.querySelector('[aria-label="订单状态"]'), 'the order record entry keeps its own controls');
-  assert.ok(browser.document.querySelector('[aria-label="该用户在具体订单中的参与方"]'), 'the supported role control is still usable');
-  assert.ok(browser.document.querySelector('[aria-label="订单状态"]').textContent.includes('当前订单（待付/已付）'), 'a restored status shows its business label before the popup is opened');
-  assert.ok(browser.document.querySelector('[aria-label="该用户在具体订单中的参与方"]').textContent.includes('租用方'), 'a restored role never leaks its API enum as the label');
+  assert.ok(browser.document.querySelector('[aria-label="本单身份"]'), 'the supported role control is still usable');
+  assert.match(browser.document.querySelector('[aria-label="订单状态"]').textContent,/当前订单|进行中/,'a restored status shows its business label before the popup is opened');
+  assert.ok(browser.document.querySelector('[aria-label="本单身份"]').textContent.includes('租客'), 'a restored role never leaks its API enum as the label');
   assert.ok(browser.location.search.includes('status=current'), 'the refused condition stays visible instead of being silently rewritten');
 });
 
@@ -883,16 +926,21 @@ test('R1: an unknown registration source never becomes a registration date',asyn
 
 test('MASTER-UX03: a known local registration agrees in the detail view',async t=>{
   await mount(t,{path:'/users/user_local',fetch:async()=>json({user:{...detail,userId:'user_local',source:{kind:'LOCAL'},registeredAt:'2026-04-01T00:00:00Z',registeredAtSource:'LOCAL'}})});
-  await waitFor(()=>browser.document.querySelector('.ud-facts'));
-  const row=[...browser.document.querySelectorAll('.ud-facts>div')].find(n=>n.querySelector('dt')?.textContent==='注册时间');
-  assert.ok(row?.textContent.includes('2026-04-01')||row?.textContent.includes('2026/04/01'));
+  await waitFor(()=>browser.document.querySelector('[aria-label="用户原注册时间"]'));
+  const registration=browser.document.querySelector('[aria-label="用户原注册时间"]').textContent;
+  assert.ok(registration.includes('2026-04-01')||registration.includes('2026/04/01'));
+  assert.equal(registration.includes('2026-09-24'),false,'the source-accepted registration never falls back to the filing date');
 });
 
 test('MASTER-UX03: details provide readable IDs when copying fails without audit permission',async t=>{
   await mount(t,{path:'/users/user_normal',permissions:['user.directory.read']});
-  await waitFor(()=>browser.document.querySelector('.ud-facts'));
-  const facts=browser.document.querySelector('.ud-facts').textContent;
-  assert.ok(facts.includes('user_normal'),'the detail must offer the ID promised by the copy failure');
+  await waitFor(()=>namedButton('复制用户ID：林舟'));
+  t.mock.method(browser.navigator.clipboard,'writeText',async()=>{throw Error('synthetic clipboard rejection');});
+  await click(namedButton('复制用户ID：林舟'));await waitFor(()=>browser.document.body.textContent.includes('复制失败'));
+  await click(namedButton('账号安全'));await waitFor(()=>browser.document.querySelector('[role="region"][aria-label="账号安全"]')?.textContent.includes('88001'));
+  const security=browser.document.querySelector('[role="region"][aria-label="账号安全"]'),facts=security.textContent;
+  assert.equal(security.querySelector('[aria-label="用户ID"]')?.value,'user_normal','the detail offers a readable, selectable ID after copy failure');
+  assert.ok(security.querySelector('[aria-label="用户ID"]')?.readOnly);
   assert.ok(facts.includes('88001'),'legacy ID belongs to basic user facts, not an audit-only panel');
 });
 
@@ -1022,16 +1070,17 @@ test('ADM-SUMMARY: the growth detail separates active entitlements from history 
     sourceSummary: { contributionCount: 4, pendingCount: 1, excludedCount: 2 },
   };
   await mount(t, { path: '/users/user_normal?section=growth', permissions: [...permissions, 'membership.growth.read.summary'], fetch: async address => address.pathname.endsWith('/membership-growth') ? json(growthResponse) : json({ user: { ...detail, userId: 'user_normal' } }) });
-  await waitFor(() => browser.document.querySelector('.ud-section-heading h2'));
-  const text = browser.document.querySelector('.ud-detail').textContent;
+  await waitFor(() => browser.document.querySelector('[role="region"][aria-label="会员与礼遇"] tbody tr'));
+  await click(namedButton('查看成长说明'));
+  const panel=browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]'),text=panel.textContent;
   assert.ok(text.includes('金卡会员'));
   assert.ok(text.includes('挚友礼遇'));
-  assert.ok(text.includes('来源记录：4 条'), 'contribution rows are called source records, not effective contributions');
+  assert.match(text,/来源记录[：:\s]*4\s*条/,'contribution rows are called source records, not effective contributions');
   assert.equal(text.includes('有效贡献'), false);
-  const history = browser.document.querySelector('.ud-entitlement-history');
-  assert.ok(history, 'the historical entitlements are folded away');
-  assert.ok(history.textContent.includes('已过期') && history.textContent.includes('已撤销'), 'each history entry keeps its own state');
-  assert.equal(history.textContent.includes('暂无有效独立礼遇'), false, 'history never empties the active list');
+  const rows=[...panel.querySelectorAll('tbody tr')].map(row=>row.textContent);
+  assert.equal(rows.length,3);assert.ok(rows[0].includes('挚友礼遇')&&rows[0].includes('有效'));
+  assert.ok(rows[1].includes('已到期')&&rows[2].includes('已撤销'),'the common table preserves each historical state beside the active entitlement');
+  assert.equal(text.includes('暂无有效独立礼遇'), false, 'history never empties the active collection');
 });
 
 test('ADM-SUMMARY: a DETAIL_ONLY growth read never becomes "no entitlement"', async t => {
@@ -1042,11 +1091,11 @@ test('ADM-SUMMARY: a DETAIL_ONLY growth read never becomes "no entitlement"', as
       ? json({ subjectId: 'user_normal', authorizationState: 'DETAIL_ONLY', scopeDetails: [] })
       : json({ user: { ...detail, userId: 'user_normal' } }),
   });
-  await waitFor(() => browser.document.querySelector('.ud-section-heading h2'));
-  const text = browser.document.querySelector('.ud-detail').textContent;
-  assert.ok(text.includes('读取范围受限'), 'the limited read scope is stated');
+  await waitFor(() => browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]')?.textContent.includes('读取受限'));
+  const text = browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]').textContent;
+  assert.ok(text.includes('读取受限'), 'the limited read scope is stated');
   assert.equal(text.includes('暂无有效独立礼遇'), false, 'a limited read scope never becomes no entitlement');
-  assert.ok(text.includes('礼遇未读取'));
+  assert.match(text,/礼遇资料暂不可用|礼遇未读取/);
   assert.equal(text.includes('普通会员'), false, 'a limited read scope never invents a tier');
 });
 
@@ -1058,12 +1107,13 @@ test('ADM-SUMMARY: a missing blackGold judgement and a missing gap are not turne
       ? json({ subjectId: 'user_normal', authorizationState: 'SUMMARY_AUTHORIZED', growth: { knowledge: 'KNOWN', sourceState: 'COMPLETE', benefitsState: 'CONFIGURED', normalTier: 'GOLD', effectiveTier: 'GOLD', blackGold: null, grace: { state: 'ACTIVE', fromTier: 'GOLD', droppedAt: null, until: '2026-12-01T00:00:00Z', gapPoints: null } }, entitlements: [] })
       : json({ user: { ...detail, userId: 'user_normal' } }),
   });
-  await waitFor(() => browser.document.querySelector('.ud-section-heading h2'));
-  const text = browser.document.querySelector('.ud-detail').textContent;
-  assert.ok(text.includes('未读取'), 'a missing blackGold judgement stays unread');
+  await waitFor(() => namedButton('查看成长说明'));await click(namedButton('查看成长说明'));
+  const panel=browser.document.querySelector('[role="region"][aria-label="会员与礼遇"]'),text=panel.textContent;
+  const fact=label=>[...panel.querySelectorAll('dl>div')].find(row=>row.querySelector('dt')?.textContent===label)?.querySelector('dd')?.textContent;
+  assert.equal(fact('黑金资格'),'待核','a missing blackGold judgement stays unknown');
   assert.equal(text.includes('未具备'), false, 'a missing judgement is not a negative fact');
-  assert.ok(text.includes('差额：未读取'), 'a missing gap is not filled with zero');
-  assert.equal(text.includes('差额：0'), false);
+  assert.equal(fact('保级差额'),'待核','a missing gap is not filled with zero');
+  assert.notEqual(fact('保级差额'),'0 积分');
 });
 
 test('ADM-SUMMARY: the search keeps the old-ID hit explainable without a permanent old-ID column', async t => {
@@ -1140,7 +1190,7 @@ test('R2: the published count opens the same collection with the published filte
 
 test('R2: the resources section reads the published collection instead of filtering a full page locally',async t=>{
   const {calls}=await mount(t,{path:'/users/user_normal?section=resources&publication=published'});
-  await waitFor(()=>browser.document.querySelector('.ud-section-heading h2'));
+  await waitFor(()=>browser.document.querySelector('[role="region"][aria-label="当前上架账号"]')?.textContent.includes('当前没有上架账号'));
   const read=calls.find(c=>c.url.includes('/rental-accounts'));
   assert.ok(read,'the resources section reads the rental accounts');
   assert.ok(read.url.includes('publication=published'),'the published collection is requested explicitly');
@@ -1151,37 +1201,39 @@ test('R2: the account publication fact comes from currentlyPublished, not from t
   const account=(id,no,lifecycle,currentlyPublished)=>({accountId:id,displayNo:no,game:{id:'g',code:'g',name:'游戏'},lifecycle,ownerPaused:false,staffRestricted:false,restrictionReason:null,legacyHold:'NONE',currentVersionId:`v-${no}`,publication:{versionState:'PUBLISHED',source:'OWNER_DIRECT',versionPublished:true,...(currentlyPublished===undefined?{}:{currentlyPublished})},createdAt:'2026-10-01T00:00:00Z'});
   const accounts=[account('a_published','ACC-1','ACTIVE',true),account('a_archived','ACC-2','ARCHIVED',false),account('a_unknown','ACC-3','ACTIVE',undefined)];
   await mount(t,{path:'/users/user_normal?section=resources',fetch:async address=>address.pathname.endsWith('/rental-accounts')?json({items:accounts,nextCursor:null}):json({user:{...detail,userId:'user_normal'}})});
-  await waitFor(()=>browser.document.querySelector('.ud-resource'));
-  const articles=[...browser.document.querySelectorAll('.ud-resource')].map(a=>a.textContent);
-  assert.ok(articles[0].includes('当前已上架'),'a published account says so');
-  assert.ok(articles[1].includes('当前未上架'),'an archived account is not currently published even though its version is');
-  assert.ok(articles[1].includes('当前版本已直接发布'),'the version state stays readable next to it');
-  assert.ok(articles[2].includes('当前上架状态待核'),'a missing publication fact stays unknown');
+  await waitFor(()=>browser.document.querySelector('[role="region"][aria-label="当前上架账号"] tbody tr'));
+  const rows=[...browser.document.querySelectorAll('[role="region"][aria-label="当前上架账号"] tbody tr')].map(row=>row.textContent);
+  assert.ok(rows[0].includes('已上架'),'a currently published account says so');
+  assert.match(rows[1],/未上架|未发布/,'an explicit false publication remains false even when the version is published');
+  assert.ok(rows[2].includes('待核'),'a missing publication fact stays unknown');
 });
 
-test('R2: switching the account scope clears the cursor and the old rows',async t=>{
+test('R2: changing published-account capacity clears the cursor and keeps the collection',async t=>{
   const calls=[];
   const account=id=>({accountId:id,displayNo:id,game:{id:'g',code:'g',name:'游戏'},lifecycle:'ACTIVE',ownerPaused:false,staffRestricted:false,restrictionReason:null,legacyHold:'NONE',currentVersionId:`v-${id}`,publication:{versionState:'PUBLISHED',source:'OWNER_DIRECT',versionPublished:true,currentlyPublished:true},createdAt:'2026-10-01T00:00:00Z'});
   const detailUser={id:'user_normal',name:'林舟',username:null,displayUsername:null,phoneMasked:'188****1101',emailMasked:null,image:null,status:'ACTIVE',suspended:false,identityStatus:'UNKNOWN',identity:'未知',age:'未知',verifiedAt:null,createdAt:'2026-09-24T04:00:00Z',updatedAt:'2026-09-24T04:00:00Z',registeredAt:'2026-09-24T04:00:00Z',registeredAtSource:'LOCAL',orders:{state:'ready',data:[],current:0},resources:{state:'ready',data:[],count:2,publishedCount:1}};
   const allowed=['user.directory.read','supply.rental_account.read'];
-  const adapter={snapshot:{adminUserId:'admin-A',session:{id:'s-A'},security:{isBoss:false},permissions:allowed},has:p=>allowed.includes(p),hasCreditGuaranteeRead:()=>false,hasCreditGuaranteeManage:()=>false,detail:async()=>detailUser,section:async(id,domain,signal,cursor,filters)=>{calls.push({cursor,filters});return {state:'ready',data:[account(filters.publication==='published'?'a-published':'a-all')],nextCursor:'NEXT'};},membershipGrowth:async()=>({}),finance:async()=>({})};
+  const adapter={snapshot:{adminUserId:'admin-A',session:{id:'s-A'},security:{isBoss:false},permissions:allowed},has:p=>allowed.includes(p),hasCreditGuaranteeRead:()=>false,hasCreditGuaranteeManage:()=>false,detail:async()=>detailUser,section:async(id,domain,signal,cursor,filters)=>{calls.push({cursor,filters});return {state:'ready',data:[account(filters.limit==='50'?'a-wide':cursor?'a-next':'a-published')],nextCursor:'NEXT'};},membershipGrowth:async()=>({}),finance:async()=>({})};
   const container=browser.document.createElement('div');browser.document.body.appendChild(container);const root=createRoot(container);
   const tab=query=>({id:'user:user_normal',title:'林舟',path:'/users/user_normal',query,closable:true,kind:'user-object',objectType:'user',objectId:'user_normal'});
   t.after(async()=>{await act(async()=>root.unmount());container.remove();await settle();});
   const render=async query=>{await act(async()=>root.render(createElement(StrictMode,null,createElement(UserDetail,{adapter,snapshot:adapter.snapshot,tab:tab(query),onOpenPath:()=>{},onQueryChange:()=>{},refreshNonce:0}))));await settle();};
   await render({section:'resources',publication:'published'});
-  await waitFor(()=>container.querySelector('.ud-resource'));
+  await waitFor(()=>container.querySelector('[role="region"][aria-label="当前上架账号"] tbody tr'));
   assert.ok(container.textContent.includes('a-published'),'the published collection is read');
   await click(namedButton('下一页'));
   await waitFor(()=>calls.some(c=>c.cursor==='NEXT'));
+  await waitFor(()=>container.querySelector('tbody')?.textContent.includes('a-next'));
   const before=calls.length;
-  await render({section:'resources'});
+  await click(namedButton('每页容量'));await waitFor(()=>browser.document.querySelector('[role="option"]'));
+  await key([...browser.document.querySelectorAll('[role="option"]')].find(option=>option.textContent.trim()==='50 条/页'),'Enter');
   await waitFor(()=>calls.length>before);
   const after=calls.slice(before);
-  assert.ok(after.every(c=>c.cursor===undefined),'the cursor from the previous scope is not reused');
-  assert.ok(after.every(c=>c.filters.publication===undefined),'the new scope reads the whole collection');
-  assert.ok(container.textContent.includes('a-all'),'the new scope shows its own rows');
-  assert.equal(container.textContent.includes('a-published'),false,'the rows of the previous scope are gone');
+  assert.ok(after.every(c=>c.cursor===undefined),'the cursor from the previous capacity is not reused');
+  assert.ok(after.every(c=>c.filters.publication==='published'),'a capacity change never leaves the published collection');
+  assert.ok(after.every(c=>c.filters.limit==='50'));
+  await waitFor(()=>container.querySelector('tbody')?.textContent.includes('a-wide'));
+  assert.equal(container.querySelector('tbody').textContent.includes('a-next'),false,'the rows of the previous page are gone');
 });
 
 // ADM-USER-LIST-REPAIR-01：可用余额、内部高危标识、表头排序与紧凑行内筛选。

@@ -25,6 +25,7 @@ function UserDirectorySurface({ adapter, props }: { adapter: UserDirectoryData; 
 }
 
 export function UserDirectoryView(props:PageProps) {
+  if (props.snapshot.session.locked || props.snapshot.security.status !== 'ACTIVE' || props.snapshot.security.passwordChangeRequired) return null;
   const {key,adapter}=directoryAdapter(props.snapshot);
   return <UserDirectorySurface key={`${key}:${props.tab.id}`} adapter={adapter} props={props}/>;
 }

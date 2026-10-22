@@ -94,18 +94,20 @@ async function mount(t, initialTab, snap, followNavigation = false) {
   const opened = [];
   const queries = [];
   let locks = 0;
-  let currentTab = initialTab, replaceTab;
+  let currentTab = initialTab, replaceTab, replaceSnapshot;
   function Harness() {
     const [tab, setTab] = useState(initialTab);
+    const [actor, setActor] = useState(snap);
     currentTab = tab;
     replaceTab = setTab;
+    replaceSnapshot = setActor;
     return createElement(WorkspacePageContent, {
       tab,
-      snapshot: snap,
+      snapshot: actor,
       idleMinutes: 10,
       onIdleMinutes: () => {},
       onLock: () => { locks += 1; },
-      onRefresh: async () => snap,
+      onRefresh: async () => actor,
       onRecoveryCompleted: () => {},
       onOpenPath: (path, title) => {
         opened.push({ path, title });
@@ -122,7 +124,9 @@ async function mount(t, initialTab, snap, followNavigation = false) {
   t.after(async () => { await act(async () => root.unmount()); container.remove(); await settle(); });
   await act(async () => root.render(createElement(Harness)));
   await settle();
-  return { opened, queries, locks: () => locks, tab: () => currentTab, replaceTab: async (next) => { await act(async () => replaceTab(next)); await settle(); } };
+  return { container, opened, queries, locks: () => locks, tab: () => currentTab,
+    replaceSnapshot: async (next) => { await act(async () => replaceSnapshot(next)); await settle(); },
+    replaceTab: async (next) => { await act(async () => replaceTab(next)); await settle(); } };
 }
 
 const userTab = { id: 'user:user_normal', title: 'user_normal', path: '/users/user_normal', query: {}, closable: true, kind: 'user-object', objectType: 'user', objectId: 'user_normal' };
@@ -236,6 +240,71 @@ test('user detail section changes retain order and supply origin context', async
   await waitFor(() => namedButton('查看订单记录'));
   await click(namedButton('查看订单记录'));
   assert.deepEqual(h.queries.at(-1), { ...origin, section: 'orders' }, 'detail sections still send partial query changes');
+});
+
+test('clearing detail order filters through the workspace removes both request filters and retains its origin', async (t) => {
+  const reads = [];
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    const address = new URL(String(url), browser.location.href);
+    if (address.pathname === '/api/bff/admin/users/user_normal/orders') reads.push(address.searchParams);
+    return readFixture(url, init);
+  });
+  const origin = { fromOrderId: 'order_source', fromSupplyId: 'account_source', fromSupplyContext: 'archive' };
+  const h = await mount(t, { ...userTab, query: { ...origin, section: 'orders', role: 'renter', status: 'current' } }, snapshot(['user.directory.read', 'order.read']));
+  await waitFor(() => reads.length && namedButton('本单身份'));
+  assert.equal(reads.at(-1).get('role'), 'renter');
+  assert.equal(reads.at(-1).get('status'), 'current');
+
+  for (const [label, cleared] of [['本单身份', 'role'], ['订单状态', 'status']]) {
+    const before = reads.length;
+    await click(namedButton(label));
+    const openOptions = () => [...browser.document.querySelectorAll('[data-slot="select-content"][data-open] [role="option"]')];
+    await waitFor(() => openOptions().length);
+    const all = openOptions().find(option => option.textContent.trim() === '全部');
+    assert.ok(all);
+    await act(async () => { all.focus(); all.dispatchEvent(new browser.KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); });
+    await waitFor(() => reads.length > before);
+    assert.equal(reads.at(-1).has(cleared), false, `${cleared} is omitted from the actual BFF request`);
+    for (const [key, value] of Object.entries(origin)) assert.equal(h.tab().query[key], value, key);
+    assert.equal(h.tab().query.section, 'orders');
+  }
+  assert.equal(reads.at(-1).has('role'), false);
+  assert.equal(reads.at(-1).has('status'), false);
+});
+
+for (const transition of [
+  { name: 'session locks', change: actor => ({ ...actor, session: { ...actor.session, locked: true } }) },
+  { name: 'administrator is frozen', change: actor => ({ ...actor, security: { ...actor.security, status: 'FROZEN' } }) },
+  { name: 'password change becomes required', change: actor => ({ ...actor, security: { ...actor.security, passwordChangeRequired: true } }) },
+]) test(`the real directory adapter clears disclosed data and stops business I/O when ${transition.name}`, async (t) => {
+  const disclosedPhone = 'SYNTHETIC-PHONE-PLAINTEXT';
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', (url, init = {}) => {
+    const address = new URL(String(url), browser.location.href);
+    calls.push({ path: address.pathname, method: init.method ?? 'GET' });
+    if (address.pathname === '/api/bff/admin/users/user_normal/sensitive-profile') return json({
+      userId: 'user_normal', phoneNumber: disclosedPhone, realName: null, identityNumber: null,
+      availability: { phoneNumber: 'AVAILABLE', realName: 'NOT_RECORDED', identityNumber: 'NOT_RECORDED' },
+    });
+    if (address.pathname.endsWith('/notes')) return json({ items: [], nextCursor: null, capabilities: { canCreate: false, canManage: false } });
+    return readFixture(url, init);
+  });
+  const actor = snapshot(['user.directory.read', 'user.identity.sensitive.read']);
+  const h = await mount(t, userTab, actor);
+  await waitFor(() => namedButton('查看明文'));
+  await click(namedButton('查看明文'));
+  await waitFor(() => h.container.textContent.includes(disclosedPhone));
+  const before = calls.length;
+
+  await h.replaceSnapshot(transition.change(actor));
+  assert.equal(h.container.textContent.includes(disclosedPhone), false, 'plaintext leaves the DOM immediately');
+  assert.equal(calls.length, before, 'an inactive or locked surface must not start another business read or command');
+
+  await h.replaceSnapshot(actor);
+  await waitFor(() => namedButton('查看明文'));
+  assert.equal(h.container.textContent.includes(disclosedPhone), false, 'restoring the same session never restores disclosed plaintext');
+  assert.equal(calls.filter(call => call.path.endsWith('/sensitive-profile')).length, 1, 'disclosure requires a fresh explicit click');
+  assert.deepEqual(calls.filter(call => call.method !== 'GET'), [{ path: '/api/bff/admin/users/user_normal/sensitive-profile', method: 'POST' }], 'no user write is dispatched by lifecycle changes');
 });
 
 test('a successful order title update retains the source user and its return path', async (t) => {

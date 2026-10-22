@@ -383,3 +383,18 @@ test('order party history labels follow order origin for both renter and owner',
   }
 });
 
+
+
+test('channel payment summary keeps local acceptance and simulated evidence distinct from receipt',async t=>{
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const base={contractVersion:'admin-order-payment-summary.v1',productionPaymentCapability:false,originalRequest:null,latestTrustedObservation:null,acceptance:null,conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
+  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要尚未接入'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'本地已接纳'},{integration:'JOINPAY',acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'本地受控接纳，付款来源与渠道请求不同'}];
+  for(const [index,item] of cases.entries()){
+    const current={...chainOrder,id:'channel-'+index,displayNo:'CHANNEL-'+index,source:{origin:'NATIVE'}};
+    globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:current,paymentSummary:{...base,...item}}):response({error:{code:'NOT_FOUND'}},404);
+    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('channel-'+index),objectOnly:true,initialOrderId:current.id})));
+    await until(()=>node.textContent.includes(item.text));
+    assert.equal(node.textContent.includes('汇聚已收款'),false);assert.equal(node.textContent.includes('渠道已到账'),false);
+    assert.equal([...node.querySelectorAll('button')].some(button=>button.textContent.includes('人工补查')),false);
+  }
+});

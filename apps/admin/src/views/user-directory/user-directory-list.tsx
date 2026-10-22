@@ -1,3 +1,4 @@
+import { UserQuickCheck } from './user-quick-check';
 import { AdminApiError } from '../../api';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, ArrowUpRightIcon, CalendarDaysIcon, ChevronDownIcon, FilterIcon, RotateCcwIcon, XIcon } from 'lucide-react';
@@ -144,7 +145,7 @@ const CREDIT_PRESETS = [
   { label: '100 满分', min: '100', max: '100' },
   { label: '≥80 良好', min: '80', max: '100' },
   { label: '60–79 警示', min: '60', max: '79' },
-  { label: '<60 高危', min: '0', max: '59' },
+  { label: '<60 低信用', min: '0', max: '59' },
 ] as const;
 
 /**
@@ -840,10 +841,10 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
 
 
       <Sheet open={!!selected} onOpenChange={value => { if (!value) setSelected(undefined); }}>
-        <SheetContent className="ud-sheet ud-drawer" showCloseButton={false}>
+        <SheetContent className="ud-sheet ud-drawer ud-detail-v2" showCloseButton={false}>
           <SheetHeader>
             <SheetTitle>快速核对</SheetTitle>
-            <SheetDescription>核对用户主体及关联业务；完整记录在详情中查看。</SheetDescription>
+            <SheetDescription>查看当前租入、出租订单和上架账号。</SheetDescription>
           </SheetHeader>
           <SheetClose render={<Button variant="ghost" size="icon-sm" className="ud-close" aria-label="关闭快速核对" />}>
             <XIcon size={18} />
@@ -852,6 +853,9 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
             <QuickCheck
               adapter={adapter}
               id={selected}
+              refreshNonce={refreshNonce}
+              onChanged={retry}
+              onOpenPath={(path,title)=>{setSelected(undefined);onOpenPath(path,title);}}
               open={section => {
                 const id = selected;
                 setSelected(undefined);
@@ -865,57 +869,9 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
   );
 }
 
-/**
- * 注册时间：只显示服务端声明的来源。
- * 迁入用户的 LOCAL 只是本地建档别名（实测旧注册 2026-07-29、本地建档 2026-10-12），
- * 因此显示待核；本平台原生用户的建档时间就是其注册时间。
- * 不从 updatedAt、审计时间或列表顺序反推注册时间。
- */
-function QuickCheck({ adapter, id, open }: { adapter: UserDirectoryData; id: string; open: (section?: string) => void }) {
-  const { result, retry } = useDirectoryRequest(id, signal => adapter.detail(id, signal, true));
-  if (result.state === 'loading') return <Loading />;
-  if (result.state === 'error') return <Message kind="error" title="核对信息加载失败" retry={retry}>{errorText(result.error)}</Message>;
-  const user = result.data;
-  return (
-    <div className="ud-sheet-body">
-      <Identity user={user} full />
-      <div className="ud-quick-facts"><Status user={user} /><IdentityStatus value={user.identityStatus} /></div>
-      <div className="ud-summary-line">
-        <span className="text-xs text-muted-foreground">会员与礼遇</span>
-        <MembershipSummaryCell summary={user.membershipSummary} />
-      </div>
-      <div className="ud-summary-line">
-        <span className="text-xs text-muted-foreground">信用状态</span>
-        <CreditSummaryCell summary={user.creditSummary} />
-      </div>
-      <div className="ud-summary-line">
-        <span className="text-xs text-muted-foreground">注册时间</span>
-        <RegistrationCell user={user} />
-      </div>
-      {user.orders.state === 'denied' ? (
-        <Denied permission={PERMISSION.orders} />
-      ) : (
-        <div className="ud-summary-line">
-          <Summary part={user.orders} kind="orders" />
-          <Button variant="outline" onClick={() => open('orders')}>查看订单记录</Button>
-        </div>
-      )}
-      {user.resources.state === 'denied' ? (
-        <Denied permission={PERMISSION.resources} />
-      ) : (
-        <div className="ud-summary-line">
-          <Summary part={user.resources} kind="resources" />
-          <Button variant="outline" onClick={() => open('resources')}>查看资源账号</Button>
-        </div>
-      )}
-      <Button onClick={() => open()}>打开完整详情<ArrowUpRightIcon size={16} /></Button>
-      {user.status === 'DEACTIVATED' ? (
-        adapter.has('user.account.restore') ? (
-          <Button variant="outline" onClick={() => open('security')}>进入账号恢复评估</Button>
-        ) : (
-          <Denied permission="user.account.restore" />
-        )
-      ) : null}
-    </div>
-  );
+function QuickCheck({adapter,id,open,onOpenPath,onChanged,refreshNonce}:{adapter:UserDirectoryData;id:string;open:(section?:string)=>void;onOpenPath:PageProps['onOpenPath'];onChanged:()=>void;refreshNonce:number}) {
+  const {result,retry}=useDirectoryRequest(id+':quick:'+refreshNonce,signal=>adapter.detail(id,signal,true));
+  if(result.state==='loading')return <Loading/>;
+  if(result.state==='error')return <Message kind="error" title="当前业务读取失败" retry={retry}>{errorText(result.error)}</Message>;
+  return <div className="ud-sheet-body"><Identity user={result.data}/><UserQuickCheck adapter={adapter} user={result.data} refreshNonce={refreshNonce} onOpenPath={onOpenPath} onChanged={onChanged}/><Button variant="outline" onClick={()=>open()}>打开完整详情<ArrowUpRightIcon size={16}/></Button></div>;
 }

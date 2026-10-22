@@ -1,5 +1,5 @@
 import { adminRequest, AdminApiError, type SessionSnapshot, type UserDirectoryItem, type UserDirectoryDetail, type UserOrderItem, type UserRentalAccountItem, type UserAuditEventItem, type UserDirectorySort, type UserDirectoryWalletSummary } from '../../api';
-import { financeRead, defaultFinanceFilters, type FinanceResponse } from '../admin-finance-api';
+import { financeRead, defaultFinanceFilters, type FinanceResponse, type FinanceFilters } from '../admin-finance-api';
 
 export const PERMISSION = {
   orders: 'order.read',
@@ -12,6 +12,7 @@ export const PERMISSION = {
   growthDetail: 'membership.growth.read.detail',
   finance: 'finance.read',
   walletRead: 'user.wallet.read',
+  userFinanceRead: 'user.finance.read',
   riskManage: 'user.risk.manage',
 } as const;
 export const CREDIT_GUARANTEE_PERMISSION = { read: 'credit.guarantee.read', manage: 'credit.guarantee.manage' } as const;
@@ -95,6 +96,7 @@ export type User = {
   walletSummary?: UserDirectoryWalletSummary;
   /** 内部高危标识：只读展示。 */
   riskFlag: boolean;
+  riskRevision?: number;
   match?: string;
 };
 
@@ -160,6 +162,7 @@ function project(row: UserDirectoryItem | UserDirectoryDetail, has:(permission:s
     creditSummary: row.creditSummary,
     walletSummary: row.walletSummary,
     riskFlag: row.riskFlag === true,
+    riskRevision: detail?.riskRevision,
   };
 }
 
@@ -237,6 +240,9 @@ export class UserDirectoryBff {
   constructor(readonly snapshot: Snapshot) {}
   has(permission: string) { return this.snapshot.permissions.includes(permission); }
   private async request<T>(path:string, signal:AbortSignal, body?:Record<string,unknown>, extraHeaders:Record<string,string>={}) {
+    // Let the effect's immediate cleanup cancel an obsolete read before it reaches the server.
+    await Promise.resolve();
+    if (signal.aborted) throw new DOMException('Request cancelled','AbortError');
     try { const result=await adminRequest<T>(path,body,undefined,extraHeaders,signal); if(signal.aborted) throw new DOMException('Request cancelled','AbortError'); return result; }
     catch(error) { if(signal.aborted) throw new DOMException('Request cancelled','AbortError'); throw error; }
   }
@@ -380,7 +386,7 @@ export class UserDirectoryBff {
     if(!this.has(PERMISSION[domain])) return {state:'denied',permission:PERMISSION[domain]};
     if(domain==='support') return {state:'ready',data:[]};
     const segment=domain==='resources'?'rental-accounts':domain==='audit'?'audit-events':'orders';
-    const params=new URLSearchParams({...filters,limit:'20'}); if(cursor)params.set('cursor',cursor);
+    const params=new URLSearchParams({limit:'20',...filters}); if(cursor)params.set('cursor',cursor);
     let data:Page<Order|Resource|Audit>;
     try {data=await this.request<Page<Order|Resource|Audit>>(`/users/${encodeURIComponent(id)}/${segment}?${params}`,signal);}
     catch(failure){if(failure instanceof AdminApiError&&failure.status===403)return {state:'denied',permission:PERMISSION[domain]};throw failure;}
@@ -409,17 +415,38 @@ export class UserDirectoryBff {
     if(!this.has(PERMISSION.growthSummary) && !this.has(PERMISSION.growthDetail) && !this.snapshot.security.isBoss) throw new AdminApiError(403,'FORBIDDEN');
     return this.request<MembershipGrowthRead>(`/users/${encodeURIComponent(id)}/membership-growth`,signal);
   }
-  async finance(id:string,signal:AbortSignal) {
+  async finance(id:string,signal:AbortSignal,filters:FinanceFilters=defaultFinanceFilters(false)) {
     if(!this.has(PERMISSION.finance) && !this.snapshot.security.isBoss) throw new AdminApiError(403,'FORBIDDEN');
-    return financeRead(`subjects/${encodeURIComponent(id)}`, defaultFinanceFilters(false), signal);
+    return financeRead(`subjects/${encodeURIComponent(id)}`, filters, signal);
+  }
+  async notes(id:string,signal:AbortSignal,cursor?:string) {
+    return this.request<UserNotePage>(`/users/${encodeURIComponent(id)}/notes?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,signal);
+  }
+  async note(id:string,noteId:string,signal:AbortSignal) {
+    return this.request<{id:string;userId:string;deleted:boolean;text?:string|null;bodyDigest:string;author?:{id:string;displayName:string}|null;createdAt?:string}>(`/users/${encodeURIComponent(id)}/notes/${encodeURIComponent(noteId)}`,signal);
+  }
+  async sensitiveProfile(id:string,signal:AbortSignal) {
+    if (!this.has('user.identity.sensitive.read')) throw new AdminApiError(403,'FORBIDDEN');
+    return this.request<SensitiveProfile>(`/users/${encodeURIComponent(id)}/sensitive-profile`,signal,{});
+  }
+  async userCommand(path:string,body:Record<string,unknown>|undefined,method:'POST'|'DELETE',key:string,signal:AbortSignal) {
+    return adminRequest<Record<string,unknown>>(`/users/${path}`,body,method,{'idempotency-key':key},signal);
+  }
+  async consumption(id:string,signal:AbortSignal,page=1,pageSize=20) {
+    return this.request<UserConsumption>(`/users/${encodeURIComponent(id)}/consumption?page=${page}&pageSize=${pageSize}`,signal);
   }
   user(id:string) { const user=this.users.get(id); if(!user)throw new Error('用户尚未读取');return user; }
 }
 
+export type UserNotePage = { items: {id:string;text:string;author:{id:string;displayName:string};createdAt:string;canDelete:boolean}[]; nextCursor:string|null; capabilities:{canCreate:boolean;canManage:boolean} };
+export type SensitiveProfile = {userId:string;phoneNumber:string|null;realName:null;identityNumber:null;availability:{phoneNumber:'AVAILABLE'|'NOT_RECORDED';realName:'NOT_RECORDED';identityNumber:'NOT_RECORDED'}};
+export type UserConsumptionComponents = {haffRentCents:string|null;itemConsumptionCents:string|null;earlyMakeupCents:string|null;renterFeeCents:string|null};
+export type UserConsumption = {contractVersion:'admin-user-consumption.v1';subjectId:string;currency:'CNY';amountUnit:'CENT';scope:'CURRENT_POSTED_NATIVE_SETTLEMENTS';asOfUtc:string;knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null;knownAmountCents:string;components:UserConsumptionComponents;total:number;unknownCount:number;page:number;pageSize:number;items:(UserConsumptionComponents & {orderId:string;displayNo:string;gameId:string;postingId:string;settlementVersionId:string;versionHash:string;postedAt:string;documentRef:string;knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null;reasonCodes:string[]})[];legacyHistory:{knowledge:'UNKNOWN';amountCents:null;reason:'LEGACY_COMPONENT_BREAKDOWN_NOT_AVAILABLE'}};
+
 // Preserve non-sensitive navigation context only while the same authenticated session owns it.
 let current:{key:string;adapter:UserDirectoryBff}|undefined;
 export function directoryAdapter(snapshot:Snapshot) {
-  const key=JSON.stringify([snapshot.adminUserId,snapshot.session.id,snapshot.security.isBoss,[...snapshot.permissions].sort()]);
+  const key=JSON.stringify([snapshot.adminUserId,snapshot.session.id,snapshot.security.isBoss,snapshot.session.locked,snapshot.security.status,snapshot.security.passwordChangeRequired,[...snapshot.permissions].sort()]);
   if(current?.key!==key) current={key,adapter:new UserDirectoryBff(snapshot)};
   return {key,adapter:current.adapter};
 }
