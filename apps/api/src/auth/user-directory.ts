@@ -8,7 +8,7 @@ import { notFound } from "../supply/supply-util";
 import { orderReadKeyRelation, orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
 import { legacyContinuationReady } from "../order/legacy-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
-import { readUserDirectoryBusinessSummaries } from "./user-directory-business-summary";
+import { readUserDirectoryBusinessSummaries, directoryCreditScopeSql, directoryCreditNotInitializedSql } from "./user-directory-business-summary";
 import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTORY_WALLET_SORT_JOINS, DIRECTORY_WALLET_SORT_KEY } from "./user-directory-wallet";
 import { readKnownMembershipTiers, DIRECTORY_MEMBERSHIP_TIERS, type DirectoryMembershipTierFilter } from "./user-directory-membership";
 import { maskPhoneNumber, readDirectoryUserSummaries } from "./user-directory-summary";
@@ -381,24 +381,20 @@ export async function listUserDirectory(
   if (filter.identityVerified !== undefined) conditions.push(`(COALESCE(s.identity_status,'UNKNOWN')='VERIFIED')=$${values.push(filter.identityVerified)}`);
   if (filter.ageStatus) conditions.push(`COALESCE(s.age_status,'UNKNOWN')=$${values.push(filter.ageStatus)}`);
   if (filter.riskState) conditions.push(`COALESCE((SELECT r.flagged FROM zzsh_iam.user_risk_flag r WHERE r.user_id = u.id), false)=$${values.push(filter.riskState === "FLAGGED")}`);
-  if (filter.creditState) {
-    // 信用摘要按对象范围裁剪：范围外的管理员没有可显示的信用事实，不能命中任何信用状态。
-    // 授权参数随条件一起入参，计数查询的同一份条件因此保持同一口径。
-    const bossParam = `$${values.push(viewer.isBoss)}`;
-    const adminParam = `$${values.push(viewer.adminId)}`;
-    conditions.push(`(EXISTS (SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id = u.id AND (c.revision IS NOT NULL) = $${values.push(filter.creditState === "KNOWN")})
-      AND (EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id = u.id AND ${gameScopeSql("a.game_id", adminParam, bossParam)})
-        OR EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id = u.id OR o.renter_user_id = u.id) AND ${gameScopeSql("o.game_id", adminParam, bossParam)})))`);
+  if (filter.creditState || filter.creditMin !== undefined || filter.creditMax !== undefined) {
+    if (!viewer.isBoss && viewer.businessScopeUsable === false) conditions.push("FALSE");
+    else {
+      const bossParam = `$${values.push(viewer.isBoss)}`;
+      const adminParam = `$${values.push(viewer.adminId)}`;
+      conditions.push(directoryCreditScopeSql("u.id",adminParam,bossParam));
+    }
   }
-  if (filter.creditMin !== undefined || filter.creditMax !== undefined) {
+  if (filter.creditState === "NOT_INITIALIZED") conditions.push(directoryCreditNotInitializedSql("u.id"));
+  if (filter.creditState === "KNOWN" || filter.creditMin !== undefined || filter.creditMax !== undefined) {
     const scoreBounds = ["c.revision IS NOT NULL"];
     if (filter.creditMin !== undefined) scoreBounds.push(`c.score >= $${values.push(filter.creditMin)}`);
     if (filter.creditMax !== undefined) scoreBounds.push(`c.score <= $${values.push(filter.creditMax)}`);
     conditions.push(`EXISTS (SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id=u.id AND ${scoreBounds.join(" AND ")})`);
-    const bossParam = `$${values.push(viewer.isBoss)}`;
-    const adminParam = `$${values.push(viewer.adminId)}`;
-    conditions.push(`(${bossParam}::boolean OR EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.owner_user_id=u.id AND ${gameScopeSql("a.game_id", adminParam, bossParam)})
-      OR EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE (o.owner_user_id=u.id OR o.renter_user_id=u.id) AND ${gameScopeSql("o.game_id", adminParam, bossParam)}))`);
   }
   if (filter.entitlement) {
     const asOfParameter = `$${values.push(asOfUtc)}`;
@@ -413,7 +409,7 @@ export async function listUserDirectory(
     }
   }
   if (filter.membershipTier) {
-    const known = await readKnownMembershipTiers(client, asOfUtc);
+    const known = await readKnownMembershipTiers(client, asOfUtc, filter.userId);
     if (filter.membershipTier === "PENDING") {
       // 待核 = 投影没有给出可显示等级的用户；已确知等级的用户全部排除，不把缺字段当待核之外的任何事实。
       const graded = [...known.known.entries()].filter(([, tier]) => tier !== "UNKNOWN").map(([id]) => id);

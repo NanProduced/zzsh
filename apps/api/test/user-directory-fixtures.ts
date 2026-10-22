@@ -30,6 +30,8 @@ export class DirectorySqlFixture extends EventEmitter {
   gameIds=['delta'];queries:{sql:string;values:unknown[]}[]=[];
   users=fixtureUserRows.map(row=>({...row}));
   scenario='normal';fault='';
+  // Optional in-memory execution of the real narrow filter/page SQL; not a PostgreSQL proof.
+  filterSql?: (sql:string,values:unknown[])=>Record<string,any>[];
   walletCoverage:{userId:string;origin:string;sourceKind:string|null;openingAmount:string|null;coveredCount:number|null}[]=[];
   walletLedger:{userId:string;availableCents:string|null}[]=[];
   async connect(){return this;} release(){}
@@ -38,6 +40,9 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')"))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
+    if(sql.startsWith('WITH membership_candidates AS MATERIALIZED'))return result(this.filterSql?this.filterSql(sql,values):[]);
+    if(this.filterSql&&sql.startsWith('SELECT u.id FROM zzsh_auth_user."user" u'))return result(this.filterSql(sql,values));
+    if(this.filterSql&&sql.includes('directory-credit-summaries'))return result(this.filterSql(sql,values));
     if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return result([]);
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)||sql.startsWith("SELECT set_config("))return result([]);
     if(sql.startsWith('SELECT s."game_scope_mode"'))return result([{mode:this.isBoss?'ALL_GAMES':this.gameScopeMode,gameIds:this.isBoss?[]:this.gameIds}]);
@@ -53,6 +58,12 @@ export class DirectorySqlFixture extends EventEmitter {
       if(!counting&&sql.includes('WHERE u.id = $1')) {
         if(this.fault==='detail')throw new Error('Injected detail failure');
         return result(this.users.filter(row=>row.id===values[0]));
+      }
+      if(this.filterSql){
+        if(counting)return result(this.filterSql(sql,values));
+        const page=sql.match(/page AS MATERIALIZED \(([\s\S]*?)\),\s*migration AS MATERIALIZED/);
+        if(!page)throw new Error('Relational filter fixture expects the actual local-time narrow page');
+        return result(this.filterSql(page[1]!,values).map(row=>this.users.find(user=>user.id===row.id)!));
       }
       if(this.fault==='list')throw new Error('Injected list failure');
       let rows=this.scenario==='empty'?[]:[...this.users];

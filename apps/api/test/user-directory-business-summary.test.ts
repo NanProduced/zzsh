@@ -18,7 +18,7 @@ const entitlement = (userId: string, status = "ACTIVE", endsAt = "2026-10-20T00:
 
 function fixture(subjects: Subject[], options: {
   entitlements?: ReturnType<typeof entitlement>[];
-  credits?: { userId: string; score: number | null; revision: string | null; inScope: boolean }[];
+  credits?: { userId: string; score: number | null; revision: string | null; inScope: boolean; notInitialized?: boolean }[];
   records?: LegacyCoverageRecord[];
   contributions?: LegacyGrowthStoredContribution[];
   sources?: { settlementVersionId: string; versionNo: number; versionHash: string; userId: string; gameId: string; inputSnapshot: Record<string, unknown> }[];
@@ -43,7 +43,7 @@ function fixture(subjects: Subject[], options: {
     if (sql.includes("directory-growth-sources")) return { rows: options.sources ?? [] };
     if (sql.includes("directory-growth-policy") || sql.includes("FROM zzsh_iam.membership_growth_policy pol")) return { rows: options.policy ? [options.policy] : [] };
     if (sql.includes("directory-growth-entitlements")) return { rows: options.entitlements ?? [] };
-    if (sql.includes("directory-credit-summaries")) return { rows: options.credits ?? subjects.map(row => ({ userId: row.userId, score: 80, revision: "3", inScope: true })) };
+    if (sql.includes("directory-credit-summaries")) return { rows: (options.credits ?? subjects.map(row => ({ userId: row.userId, score: 80, revision: "3", inScope: true, notInitialized:false }))).map(row=>({...row,notInitialized:row.notInitialized??(row.score===null&&row.revision===null)})) };
     if (sql.includes("legacy-growth-schema")) return { rows: [{ coverage: true, sources: true }] };
     if (sql.includes("legacy-growth-batch-versions")) return { rows: records };
     if (sql.includes("legacy-growth-versions")) return { rows: records.filter(row => row.userId === id) };
@@ -110,6 +110,21 @@ test("no-game and out-of-scope credit remain denied without exposing a stored sc
   assert.deepEqual(noGames.creditSummary, { state: "denied", permission: "credit.read", reason: "NO_GAME_SCOPE" }); assert.equal(f.queries.length, 0);
   const out = (await readUserDirectoryBusinessSummaries(f.client, { ...viewer, membershipSummaryRead: false }, ["u"], at)).get("u")!;
   assert.deepEqual(out.creditSummary, { state: "denied", permission: "credit.read", reason: "OUT_OF_SCOPE" }); assert.equal(f.queries.length, 1);
+});
+
+test("a missing credit state with an existing event is unavailable, while legitimate zero remains known", async () => {
+  const orphan=fixture([subject("u")],{credits:[{userId:"u",score:null,revision:null,inScope:true,notInitialized:false}]});
+  await assert.rejects(readUserDirectoryBusinessSummaries(orphan.client,{...viewer,membershipSummaryRead:false},["u"],at),(error:unknown)=>(error as {code:string}).code==="EVIDENCE_UNAVAILABLE");
+  const zero=fixture([subject("u")],{credits:[{userId:"u",score:0,revision:"1",inScope:true,notInitialized:false}]});
+  assert.deepEqual((await readUserDirectoryBusinessSummaries(zero.client,{...viewer,membershipSummaryRead:false},["u"],at)).get("u")!.creditSummary,{state:"ready",knowledge:"KNOWN",score:0,revision:"1"});
+  const hidden=fixture([subject("u")],{credits:[{userId:"u",score:null,revision:null,inScope:false,notInitialized:false}]});
+  assert.deepEqual((await readUserDirectoryBusinessSummaries(hidden.client,{...viewer,membershipSummaryRead:false},["u"],at)).get("u")!.creditSummary,{state:"denied",permission:"credit.read",reason:"OUT_OF_SCOPE"});
+});
+
+test("Boss credit summaries retain broad read when no game relationships exist", async () => {
+  const f=fixture([subject("u")],{credits:[{userId:"u",score:85,revision:"2",inScope:true,notInitialized:false}]});
+  const result=(await readUserDirectoryBusinessSummaries(f.client,{...viewer,isBoss:true,membershipSummaryRead:false,businessScopeUsable:false},["u"],at)).get("u")!;
+  assert.deepEqual(result.creditSummary,{state:"ready",knowledge:"KNOWN",score:85,revision:"2"});assert.equal(f.queries.length,1);
 });
 
 test("batch growth is identical to the existing subject reader for native and unknown migrated subjects", async () => {
