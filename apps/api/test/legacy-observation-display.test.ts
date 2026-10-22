@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { canonicalize } from '../src/supply/content-hash';
 import { previewFrozenFinanceObservation } from '../src/finance/legacy-finance-source-preparation';
-import { projectAdminFinanceObservation, financePeriodProjection } from '../src/finance/admin-finance-read';
+import { projectAdminFinanceObservation, financePeriodProjection, financeDocuments } from '../src/finance/admin-finance-read';
 import type { FinanceOrderFact } from '../src/finance/admin-finance-order-read';
 import { enrichHistoricalObservations, historicalObservationDisplay, type HistoricalRelationAccess } from '../src/finance/legacy-observation-display';
 
@@ -108,6 +108,7 @@ test('application and its debit remain distinct historical rows with no current 
   const raw = withdrawal(), application = projectAdminFinanceObservation(raw);
   const debit = enrich(log({ action: 2, amount: '734.00', sourceId: 5053, changeType: 1002 }), [raw]);
   assert.equal(application.historical!.purposeCode, 'WITHDRAWAL_APPLICATION');
+  assert.equal(financeDocuments([application])[0]!.requestedAmountCents,'73400');
   assert.equal(application.historical!.originalStatus, '3');
   assert.equal(application.historical!.originalStatusLabel, '旧平台记为成功');
   assert.equal(debit.historical!.association.documentRef, application.documentRef);
