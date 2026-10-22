@@ -340,3 +340,22 @@ test('the registration sort in the workspace query drives the directory request'
   await waitFor(() => browser.document.querySelector('.ud-directory tbody tr'));
   assert.deepEqual(h.queries.at(-1), { sort: 'registered_asc' }, 'the applied sort stays in the workspace query');
 });
+
+
+test('MASTER: published account origin survives the resource detail return', async (t) => {
+  const snap = snapshot(['user.directory.read', 'supply.rental_account.read']);
+  const opened = [];
+  const tab = { ...userTab, query: { section: 'resources', publication: 'published' } };
+  const surface = WorkspacePageContent({ tab, snapshot: snap, onOpenPath: (value) => opened.push(value), onQueryChange: () => {}, refreshNonce: 0 });
+  const userView = surface.props.children.find((child) => child?.props?.tab?.kind === 'user-object');
+  userView.props.onOpenPath('/supply/accounts/account_1', '账号');
+  const target = new URL(opened.at(-1), browser.location.href);
+  assert.equal(target.searchParams.get('fromUserPublication'), 'published');
+  const h = await mount(t, tabFromLocation(target.pathname, target.search), snap);
+  await waitFor(() => namedButton('返回来源用户'));
+  await click(namedButton('返回来源用户'));
+  const returned = new URL(h.opened.at(-1).path, browser.location.href);
+  assert.equal(returned.pathname, '/users/user_normal');
+  assert.equal(returned.searchParams.get('section'), 'resources');
+  assert.equal(returned.searchParams.get('publication'), 'published');
+});
