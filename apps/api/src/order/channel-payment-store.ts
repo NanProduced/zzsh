@@ -8,7 +8,8 @@ import type { PaymentDistributionStore } from "../finance/distribution-payment-s
 import { conflict, fingerprintRequest, invalid, notFound, withIdempotency, type IdempotentResult } from "../supply/supply-util";
 import {
   JoinpayProtocolError, centsToJoinpayYuan, decodeJoinpayQuery, evaluateJoinpayNotify, evaluateJoinpayQueryResponse,
-  evaluateJoinpaySyncResponse, joinpayTransition, type JoinpayOutcome, type JoinpayPersistedRequest, type RequestState,
+  evaluateJoinpaySyncResponse, evaluateJoinpayTransportFailure, joinpayTransition, type JoinpayOutcome, type JoinpayPersistedRequest, type RequestState,
+  type JoinpayTransportFailure,
 } from "./joinpay-protocol";
 import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation";
 
@@ -82,7 +83,7 @@ function requestFailure(paymentReason: PaymentRequestFailureReason, message: str
 }
 const closed = () => requestFailure("PAYMENT_CHANNEL_NOT_ENABLED", "Channel payment capability is closed");
 
-async function assertCapability(client: PoolClient, capability: unknown): Promise<SyntheticRequestCapability["evidenceLevel"]> {
+export async function assertSyntheticChannelRequestCapability(client: PoolClient, capability: unknown): Promise<SyntheticRequestCapability["evidenceLevel"]> {
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
@@ -95,22 +96,26 @@ type RequestRow = {
   id: string; order_id: string; channel: PaymentChannel; merchant_identity_id: string; config_profile_id: string;
   protocol_version: string; key_version_ref: string; platform_order_no: string; channel_order_no: string;
   amount_cents: string; currency: string; wire_amount_yuan: string; method: PaymentMethod; evidence_level: string;
-  state: RequestState; revision: string; lease_version: string; lease_owner: string | null;
+  state: RequestState; revision: string; lease_version: string; lease_owner: string | null; created_at: string; updated_at: string;
 };
 const REQUEST_COLUMNS = `id, order_id, channel, merchant_identity_id, config_profile_id, protocol_version, key_version_ref,
   platform_order_no, channel_order_no, amount_cents::text AS amount_cents, currency, wire_amount_yuan, method, evidence_level,
-  state, revision::text AS revision, lease_version::text AS lease_version, lease_owner`;
+  state, revision::text AS revision, lease_version::text AS lease_version, lease_owner,
+  to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
+  to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at`;
 
 export type PaymentRequestView = Readonly<{
   requestId: string; orderId: string; channel: PaymentChannel; channelOrderNo: string; amountCents: string; wireAmountYuan: string;
   method: PaymentMethod; state: RequestState; existing: boolean;
+  currency: string; evidenceLevel: string; createdAt: string; updatedAt: string;
 }>;
 const view = (row: RequestRow, existing: boolean): PaymentRequestView => ({
   requestId: row.id, orderId: row.order_id, channel: row.channel, channelOrderNo: row.channel_order_no, amountCents: row.amount_cents,
   wireAmountYuan: row.wire_amount_yuan, method: row.method, state: row.state, existing,
+  currency: row.currency, evidenceLevel: row.evidence_level, createdAt: row.created_at, updatedAt: row.updated_at,
 });
 
-function checkBinding(binding: ChannelBinding): void {
+function checkBinding(binding: ChannelBinding | undefined): asserts binding is ChannelBinding {
   if (!binding || (binding.channel !== "JOINPAY" && binding.channel !== "CONTROLLED")
     || ![binding.merchantIdentityId, binding.configProfileId, binding.keyVersionRef].every((v) => typeof v === "string" && ID.test(v))
     || typeof binding.protocolVersion !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$/.test(binding.protocolVersion)) {
@@ -123,12 +128,11 @@ function checkBinding(binding: ChannelBinding): void {
  * 不同 key 先恢复同 method 原请求，再检查能力和可付款状态，不能因后续状态变化丢失原意图。
  */
 export async function createPaymentRequest(client: PoolClient, input: {
-  actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string; binding: ChannelBinding; capability?: unknown;
+  actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string; binding?: ChannelBinding; capability?: unknown;
 }): Promise<IdempotentResult> {
   const key = validateIdempotencyKey(input.idempotencyKey);
   if (!input.actor || !ID.test(input.actor.userId) || !ID.test(input.orderId)) throw invalid();
   if (!(METHODS as readonly string[]).includes(input.method)) throw invalid("Unsupported payment method", "method");
-  checkBinding(input.binding);
   const { actor, orderId, binding } = input;
   const scope = { realm: "user" as const, principalId: actor.userId, operation: "order.payment.channel-request", resourceId: orderId };
   const fingerprint = fingerprintRequest(scope.operation, orderId, { method: input.method });
@@ -143,7 +147,8 @@ export async function createPaymentRequest(client: PoolClient, input: {
       if (existing.method !== input.method) throw requestFailure("PAYMENT_REQUEST_EXISTS", "Payment request already exists for a different method");
       return { status: 200, body: view(existing, true) };
     }
-    const evidenceLevel = await assertCapability(client, input.capability);
+    const evidenceLevel = await assertSyntheticChannelRequestCapability(client, input.capability);
+    checkBinding(binding);
     if ((binding.channel === "JOINPAY") !== (evidenceLevel === "SYNTHETIC_PROTOCOL")) throw closed();
     const order = (await client.query(`SELECT renter_user_id, status, display_no, currency,
         (rental_amount_cents+deposit_amount_cents)::text AS total
@@ -304,6 +309,29 @@ async function persistOutcome(client: PoolClient, row: RequestRow | null, outcom
 const persisted = (row: RequestRow, merchantNo: string): JoinpayPersistedRequest =>
   ({ state: row.state, merchantNo, orderNo: row.channel_order_no, amountCents: row.amount_cents, frpCode: row.method });
 
+type ExecutorIdentity = { requestId: string; leaseVersion: string; leaseOwner: string };
+async function lockExecutorRequest(client: PoolClient, input: ExecutorIdentity): Promise<{ row: RequestRow; current: boolean }> {
+  if (!ID.test(input.requestId) || !/^[1-9]\d{0,18}$/.test(input.leaseVersion) || !ID.test(input.leaseOwner)) throw invalid();
+  const row = await lockRequest(client, `SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE id=$1 FOR UPDATE`, [input.requestId]);
+  if (!row) throw notFound();
+  if (row.channel !== "JOINPAY") throw invalid("Executor results are JOINPAY synthetic observations only");
+  // 行锁可能等待到租约过期，必须在取得锁之后另取 PG 时钟。
+  const current = (await client.query(`SELECT (lease_version=$2::bigint AND lease_owner=$3 AND lease_until > clock_timestamp()) AS lease_current
+      FROM zzsh_order.payment_request WHERE id=$1`, [input.requestId, input.leaseVersion, input.leaseOwner])).rows[0]?.lease_current === true;
+  return { row, current };
+}
+
+/** 传输失败不读取钥、不伪装为坏 JSON；事务失败交调用方保留未知并按原请求恢复。 */
+export async function recordExecutorFailure(client: PoolClient, input: ExecutorIdentity & {
+  operation: "SYNC_RESPONSE" | "QUERY_RESPONSE"; reason: JoinpayTransportFailure; rawRef: string;
+}): Promise<ChannelObservationResult> {
+  const { row, current } = await lockExecutorRequest(client, input);
+  const outcome = evaluateJoinpayTransportFailure(input.operation, row.state, current, input.reason);
+  return persistOutcome(client, row, outcome, { operation: input.operation, source: "EXECUTOR",
+    rawSha256: sha256(JSON.stringify({ operation: input.operation, transportFailure: input.reason })), rawRef: input.rawRef,
+    leaseVersion: input.leaseVersion, merchantIdentityId: row.merchant_identity_id });
+}
+
 /**
  * 执行者带回的同步响应/查单结果。必须比较当前 lease（版本、持有者、PG 时钟有效期）；
  * 旧 lease 只追加 STALE（E9），不改请求状态、不覆盖新 lease 或原付款。
@@ -313,13 +341,7 @@ export async function recordExecutorResult(client: PoolClient, input: {
   requestId: string; leaseVersion: string; leaseOwner: string; operation: "SYNC_RESPONSE" | "QUERY_RESPONSE"; body: string | Uint8Array; rawRef: string;
   merchantNo: string; keyFor: (keyVersionRef: string) => string;
 }): Promise<ChannelObservationResult> {
-  if (!/^[1-9]\d{0,18}$/.test(input.leaseVersion) || !ID.test(input.leaseOwner)) throw invalid();
-  const row = await lockRequest(client, `SELECT ${REQUEST_COLUMNS},
-      (lease_version=$2::bigint AND lease_owner=$3 AND lease_until > clock_timestamp()) AS lease_current
-      FROM zzsh_order.payment_request WHERE id=$1 FOR UPDATE`, [input.requestId, input.leaseVersion, input.leaseOwner]);
-  if (!row) throw notFound();
-  if (row.channel !== "JOINPAY") throw invalid("Executor results are JOINPAY synthetic observations only");
-  const current = row.lease_current === true;
+  const { row, current } = await lockExecutorRequest(client, input);
   // E9 在协议入口优先返回，无需读取已退役或不可用的旧版本钥。
   const ctx = { key: current ? input.keyFor(row.key_version_ref) : "", request: persisted(row, input.merchantNo), leaseCurrent: current };
   const outcome = input.operation === "SYNC_RESPONSE" ? evaluateJoinpaySyncResponse(input.body, ctx) : evaluateJoinpayQueryResponse(input.body, ctx);

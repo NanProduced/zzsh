@@ -60,6 +60,7 @@ import { assertLocalDistributionAssembly, type LocalDistributionScope } from '..
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
 import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
+import { mountChannelPayments } from "../order/channel-payment-routes";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
 import { mountDistributionPolicyRoutes } from "../finance/distribution-policy-routes";
 
@@ -1095,6 +1096,7 @@ export async function mountAuthHandlers(
       : undefined,
   });
   if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
+  else mountChannelPayments(app, securityOptions);
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);

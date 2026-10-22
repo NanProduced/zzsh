@@ -14,7 +14,7 @@ import type { PaymentDistributionStore } from "../src/finance/distribution-payme
 import { JOINPAY_SIGNATURE_ORDER } from "../src/order/joinpay-protocol";
 import {
   acceptControlledPayment, bindChannelTransaction, claimPaymentRequestLease, createPaymentRequest, createSyntheticChannelRequestCapability,
-  mapChannelOrderNo, readRecoverablePaymentRequest, recordExecutorResult, recordJoinpayNotify, wireAmountForCents, type ChannelBinding,
+  mapChannelOrderNo, readRecoverablePaymentRequest, recordExecutorResult, recordExecutorFailure, recordJoinpayNotify, wireAmountForCents, type ChannelBinding,
 } from "../src/order/channel-payment-store";
 
 const KEY = "SYNTHETIC_KEY_NOT_REAL_0003";
@@ -29,7 +29,7 @@ const controlledCap = () => createSyntheticChannelRequestCapability({ config, re
 
 type Row = Record<string, any>;
 /** 内存 PoolClient：仅实现本模块与原 confirmOrderPayment 会发出的语句；未知写语句直接失败，防止静默通过。 */
-function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; confirmationAfterOrderLock?: boolean } = {}) {
+function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; confirmationAfterOrderLock?: boolean; expireDuringRequestLock?: boolean } = {}) {
   const s = {
     now: 1_000_000,
     orders: new Map<string, Row>([["order_1", { id: "order_1", renter_user_id: "renter", owner_user_id: "owner", account_id: "acct", status: "PENDING_PAYMENT", display_no: "ZZ261022-000123", currency: "CNY", total: "12345", holdOpen: true }]]),
@@ -57,7 +57,8 @@ function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; 
     if (sql.includes("FROM zzsh_order.payment_request WHERE order_id=$1")) return one([...s.requests.values()].find((r) => r.order_id === p[0]));
     if (sql.startsWith("SELECT 1 FROM zzsh_order.payment_request WHERE channel=")) return one([...s.requests.values()].find((r) => r.channel === p[0] && r.merchant_identity_id === p[1] && r.channel_order_no === p[2]));
     if (sql.startsWith("INSERT INTO zzsh_order.payment_request")) {
-      const r = { id: p[0], order_id: p[1], channel: p[2], merchant_identity_id: p[3], config_profile_id: p[4], protocol_version: p[5], key_version_ref: p[6], platform_order_no: p[7], channel_order_no: p[8], amount_cents: p[9], currency: "CNY", wire_amount_yuan: p[10], method: p[11], evidence_level: p[12], state: "SUBMITTING", revision: "1", lease_version: "0", lease_owner: null, lease_until: null };
+      const r = { id: p[0], order_id: p[1], channel: p[2], merchant_identity_id: p[3], config_profile_id: p[4], protocol_version: p[5], key_version_ref: p[6], platform_order_no: p[7], channel_order_no: p[8], amount_cents: p[9], currency: "CNY", wire_amount_yuan: p[10], method: p[11], evidence_level: p[12], state: "SUBMITTING", revision: "1", lease_version: "0", lease_owner: null, lease_until: null,
+        created_at: "2026-10-23T01:00:00.000000Z", updated_at: "2026-10-23T01:00:00.000000Z" };
       s.requests.set(r.id, r); return one({ ...r });
     }
     if (sql.startsWith("UPDATE zzsh_order.payment_request\n      SET lease_version")) {
@@ -66,8 +67,16 @@ function fakeDb(opts: { auditFailure?: boolean; expireAfterOrderLock?: boolean; 
       Object.assign(r, { lease_version: String(BigInt(r.lease_version) + 1n), lease_owner: p[1], lease_until: s.now + p[2] * 1000, revision: String(BigInt(r.revision) + 1n) });
       return one({ id: r.id, lease_version: r.lease_version, channel_order_no: r.channel_order_no, state: r.state });
     }
-    if (sql.includes("AS lease_current")) { const r = s.requests.get(p[0]); return one(r && { ...reqView(r), lease_current: r.lease_version === p[1] && r.lease_owner === p[2] && r.lease_until > s.now }); }
-    if (sql.includes("FROM zzsh_order.payment_request WHERE id=$1")) return one(s.requests.get(p[0]) && { ...s.requests.get(p[0]) });
+    if (sql.includes("AS lease_current")) {
+      const r = s.requests.get(p[0]);
+      const result = one(r && { ...reqView(r), lease_current: r.lease_version === p[1] && r.lease_owner === p[2] && r.lease_until > s.now });
+      if (sql.includes("FOR UPDATE") && opts.expireDuringRequestLock) s.now += 60_000;
+      return result;
+    }
+    if (sql.includes("FROM zzsh_order.payment_request WHERE id=$1")) {
+      if (sql.includes("FOR UPDATE") && opts.expireDuringRequestLock) s.now += 60_000;
+      return one(s.requests.get(p[0]) && { ...s.requests.get(p[0]) });
+    }
     if (sql.includes("WHERE channel='JOINPAY' AND merchant_identity_id=$1 AND channel_order_no=$2 FOR UPDATE")) return one([...s.requests.values()].find((r) => r.channel === "JOINPAY" && r.merchant_identity_id === p[0] && r.channel_order_no === p[1]));
     if (sql.startsWith("UPDATE zzsh_order.payment_request SET state=")) {
       const r = s.requests.get(p[0]);
@@ -403,6 +412,21 @@ test("Master：同 key 重放使用原回执，不把当前配置 channel 放进
   assert.equal(db.s.requests.get(original.requestId)!.channel, "JOINPAY");
 });
 
+test("PAY04：配置已撤下仍重放原回执与原时间；不同键只恢复同一持久请求", async () => {
+  const db = fakeDb();
+  const first = await newRequest(db);
+  const row = db.s.requests.get(first.requestId)!;
+  row.state = "ACCEPTED"; row.updated_at = "2026-10-23T02:00:00.000000Z";
+  const replay = await createPaymentRequest(db.client, { actor: { userId: "renter" }, orderId: "order_1", idempotencyKey: "idem-1", method: "ALIPAY_NATIVE" });
+  assert.equal(replay.replayed, true);
+  assert.equal((replay.body as { state: string }).state, "SUBMITTING");
+  assert.equal((replay.body as { updatedAt: string }).updatedAt, "2026-10-23T01:00:00.000000Z");
+  const existing = await createPaymentRequest(db.client, { actor: { userId: "renter" }, orderId: "order_1", idempotencyKey: "other-key", method: "ALIPAY_NATIVE" });
+  assert.equal((existing.body as { state: string }).state, "ACCEPTED");
+  assert.equal((existing.body as { updatedAt: string }).updatedAt, row.updated_at);
+  assert.equal(db.s.requests.size, 1);
+});
+
 test("Master：旧 lease 不依赖已退役的钥，只追加 STALE", async () => {
   const db = fakeDb();
   const r = await newRequest(db);
@@ -412,6 +436,57 @@ test("Master：旧 lease 不依赖已退役的钥，只追加 STALE", async () =
   const result = await recordExecutorResult(db.client, { requestId: r.requestId, leaseVersion: a.leaseVersion, leaseOwner: "old", operation: "QUERY_RESPONSE", body: "not JSON", rawRef: "synthetic:stale", merchantNo: MER, keyFor: () => { throw Error("retired key must not be read"); } });
   assert.equal(result.outcome.event, "E9");
   assert.equal(db.s.requests.get(r.requestId)!.lease_version, b.leaseVersion);
+  assert.equal(db.s.observations.length, 1);
+  assert.equal(db.s.anchors.size, 0);
+});
+
+test("PAY04：等待请求行锁期间过期，取得锁后重查时钟，不读钥或推进状态", async () => {
+  const db = fakeDb({ expireDuringRequestLock: true });
+  const r = await newRequest(db);
+  const lease = (await claimPaymentRequestLease(db.client, { requestId: r.requestId, owner: "worker", ttlSeconds: 30 }))!;
+  const result = await recordExecutorResult(db.client, { requestId: r.requestId, leaseVersion: lease.leaseVersion, leaseOwner: lease.leaseOwner,
+    operation: "SYNC_RESPONSE", body: syncBody(r.channelOrderNo), rawRef: "synthetic:wait-expired", merchantNo: MER,
+    keyFor: () => { throw Error("expired lease must not read a key"); } });
+  assert.equal(result.outcome.event, "E9");
+  assert.equal(result.stateAfter, "SUBMITTING");
+  assert.equal(db.s.observations.length, 1);
+  assert.equal(db.s.observations[0]!.stale, true);
+  assert.equal(db.s.anchors.size, 0);
+});
+
+test("PAY04：下单超时保存原请求 UNKNOWN，查单失败不伪造失败或新流水", async () => {
+  const db = fakeDb();
+  const r = await newRequest(db);
+  const lease = (await claimPaymentRequestLease(db.client, { requestId: r.requestId, owner: "worker", ttlSeconds: 30 }))!;
+  const identity = { requestId: r.requestId, leaseVersion: lease.leaseVersion, leaseOwner: lease.leaseOwner };
+  const timedOut = await recordExecutorFailure(db.client, { ...identity, operation: "SYNC_RESPONSE", reason: "TIMEOUT", rawRef: "transport:timeout" });
+  assert.equal(timedOut.outcome.event, "E3");
+  assert.equal(timedOut.stateAfter, "UNKNOWN");
+  const failedQuery = await recordExecutorFailure(db.client, { ...identity, operation: "QUERY_RESPONSE", reason: "NETWORK_ERROR", rawRef: "transport:network" });
+  assert.equal(failedQuery.outcome.event, "E6X");
+  assert.equal(failedQuery.stateAfter, "UNKNOWN");
+  assert.equal(db.s.requests.size, 1);
+  assert.equal(db.s.anchors.size, 0);
+  assert.equal(db.s.confirmations.length, 0);
+  assert.equal((await readRecoverablePaymentRequest(db.client, r.requestId))!.channelOrderNo, r.channelOrderNo);
+  assert.deepEqual(db.s.observations.map(o => [o.evidence_level, o.verify_outcome, o.reason]),
+    [["UNVERIFIED", "NOT_CHECKED", "TIMEOUT"], ["UNVERIFIED", "NOT_CHECKED", "NETWORK_ERROR"]]);
+  db.s.now += 31_000;
+  const stale = await recordExecutorFailure(db.client, { ...identity, operation: "SYNC_RESPONSE", reason: "TIMEOUT", rawRef: "transport:late" });
+  assert.equal(stale.outcome.event, "E9");
+  assert.equal(stale.stateAfter, "UNKNOWN");
+});
+
+test("PAY04：迟到超时不能降级已接纳状态，未知错误文本不得写入观察", async () => {
+  const db = fakeDb();
+  const r = await newRequest(db);
+  const lease = (await claimPaymentRequestLease(db.client, { requestId: r.requestId, owner: "worker", ttlSeconds: 30 }))!;
+  db.s.requests.get(r.requestId)!.state = "ACCEPTED";
+  const input = { requestId: r.requestId, leaseVersion: lease.leaseVersion, leaseOwner: lease.leaseOwner,
+    operation: "SYNC_RESPONSE" as const, reason: "HTTP_STATUS" as const, rawRef: "transport:http" };
+  assert.equal((await recordExecutorFailure(db.client, input)).stateAfter, "ACCEPTED");
+  await assert.rejects(recordExecutorFailure(db.client, { ...input, reason: "untrusted error text" as never }),
+    { code: "PROTOCOL_TRANSPORT_FAILURE_INVALID" });
   assert.equal(db.s.observations.length, 1);
   assert.equal(db.s.anchors.size, 0);
 });

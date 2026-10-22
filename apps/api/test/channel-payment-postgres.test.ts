@@ -243,7 +243,15 @@ export async function runChannelPaymentPostgres(t: TestContext, o: ChannelPaymen
     await migrationPool.query(`REVOKE INSERT ON ${target} FROM "${config.database.user}"`);
     try {
       await assert.rejects(accept(pool, f, await input(f), req.requestId), { code: "42501" });
-    } finally { await migrationPool.query(`GRANT INSERT ON ${target} TO "${config.database.user}"`); }
+    } finally {
+      const insert = target === "zzsh_order.payment_distribution_basis"
+        ? "INSERT(id,order_id,payment_confirmation_id,admission_id,admission_revision,canonical_basis,basis_digest)" : "INSERT";
+      await migrationPool.query(`GRANT ${insert} ON ${target} TO "${config.database.user}"`);
+    }
+    const tableInsert = target === "zzsh_iam.audit_event";
+    const restored = (await pool.query(`SELECT has_table_privilege(current_user,$1,'INSERT') AS table_insert,
+      has_column_privilege(current_user,$1,$2,'INSERT') AS server_time_insert`, [target, tableInsert ? "recorded_at" : "created_at"])).rows[0];
+    assert.deepEqual(restored, { table_insert: tableInsert, server_time_insert: tableInsert });
     assert.deepEqual(await order(f.orderId), before);
     assert.equal(await observations(req.requestId), obs);
     assert.deepEqual(await counts(f.orderId), { applied: 0, basis: 0, confirmedAudit: 0, basisAudit: 0, waiting: 0, requests: 1, anchors: 0 });

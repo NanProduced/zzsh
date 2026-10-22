@@ -41,6 +41,27 @@ const FIXED_QUERY_JSON = '{"r0_Version":"2.6","r1_MerchantNo":"888000000000001",
 const req = (state: RequestState = "SUBMITTING"): JoinpayPersistedRequest => ({ state, merchantNo: MER, orderNo: ORD, amountCents: "12345", frpCode: FRP });
 const ctx = (state: RequestState = "SUBMITTING", leaseCurrent = true) => ({ key: KEY, request: req(state), leaseCurrent });
 
+test("传输失败：同步仅 SUBMITTING 转 UNKNOWN，查单不改状态，旧租约只记 STALE", () => {
+  for (const state of REQUEST_STATES) {
+    for (const reason of ["TIMEOUT", "NETWORK_ERROR", "HTTP_STATUS", "BODY_TOO_LARGE"] as const) {
+      for (const operation of ["SYNC_RESPONSE", "QUERY_RESPONSE"] as const) {
+        const result = jp.evaluateJoinpayTransportFailure(operation, state, true, reason);
+        assert.equal(result.nextState, operation === "SYNC_RESPONSE" && state === "SUBMITTING" ? "UNKNOWN" : state);
+        assert.equal(result.event, operation === "SYNC_RESPONSE" ? "E3" : "E6X");
+        assert.equal(result.reason, reason);
+        assert.equal(result.observation, "UNVERIFIED");
+        assert.equal(result.signature, "NOT_CHECKED");
+        assert.equal(result.formalAcceptance, false);
+        const stale = jp.evaluateJoinpayTransportFailure(operation, state, false, reason);
+        assert.equal(stale.event, "E9");
+        assert.equal(stale.nextState, state);
+      }
+    }
+  }
+  assert.throws(() => jp.evaluateJoinpayTransportFailure("QUERY_RESPONSE", "UNKNOWN", true, "secret-bearing error" as never),
+    { code: "PROTOCOL_TRANSPORT_FAILURE_INVALID" });
+});
+
 function json(base: Vals, patch: Record<string, string | null | undefined> = {}, opts: { sign?: boolean; order?: readonly string[] } = {}): string {
   const v: Record<string, string | null> = {};
   for (const [k, x] of Object.entries({ ...base, ...patch })) if (x !== undefined) v[k] = x;

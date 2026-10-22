@@ -286,6 +286,20 @@ function outcome(op: JoinpayOutcome["operation"], event: JoinpayEvent, state: Re
 export type JoinpayPersistedRequest = { state: RequestState; merchantNo: string; orderNo: string; amountCents: string; frpCode: string };
 export type JoinpayInboundContext = { key: string; request: JoinpayPersistedRequest; leaseCurrent: boolean };
 
+export type JoinpayTransportFailure = "TIMEOUT" | "NETWORK_ERROR" | "HTTP_STATUS" | "BODY_TOO_LARGE";
+
+/** 没有可用响应时只记录未知；不伪造响应、验签或渠道失败。 */
+export function evaluateJoinpayTransportFailure(operation: "SYNC_RESPONSE" | "QUERY_RESPONSE", state: RequestState,
+  leaseCurrent: boolean, reason: JoinpayTransportFailure): JoinpayOutcome {
+  if ((operation !== "SYNC_RESPONSE" && operation !== "QUERY_RESPONSE")
+    || !["TIMEOUT", "NETWORK_ERROR", "HTTP_STATUS", "BODY_TOO_LARGE"].includes(reason)) {
+    throw new JoinpayProtocolError("PROTOCOL_TRANSPORT_FAILURE_INVALID");
+  }
+  const op = operation === "SYNC_RESPONSE" ? "uniPaySyncResponse" : "queryOrder";
+  if (!leaseCurrent) return outcome(op, "E9", state, { result: "STALE_LEASE" });
+  return outcome(op, operation === "SYNC_RESPONSE" ? "E3" : "E6X", state, { result: "TRANSPORT_UNKNOWN", reason });
+}
+
 function verify(fields: readonly Field[], s: Extract<Schema, { ok: true }>, key: string): boolean {
   return joinpayMd5Sign(fields.map((f) => f.name), s.values, key) === s.hmac.toLowerCase();
 }

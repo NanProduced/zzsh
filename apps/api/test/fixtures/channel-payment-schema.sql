@@ -167,6 +167,9 @@ BEGIN
   IF runtime_role !~ '^zzsh_order_[a-z][a-z0-9_]{0,20}_r$' THEN
     RAISE EXCEPTION 'pay03a runtime role not set to an isolated order role' USING ERRCODE = '22023';
   END IF;
+  -- 默认授权包含UPDATE；必须先收紧新表权限，后续GRANT不会撤销既有权限。
+  EXECUTE format('REVOKE DELETE, TRUNCATE ON zzsh_order.payment_request FROM %I', runtime_role);
+  EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.payment_channel_observation, zzsh_order.payment_channel_transaction FROM %I', runtime_role);
   EXECUTE format('GRANT SELECT, INSERT, UPDATE ON zzsh_order.payment_request TO %I', runtime_role);
   EXECUTE format('GRANT SELECT, INSERT ON zzsh_order.payment_channel_observation TO %I', runtime_role);
   EXECUTE format('GRANT SELECT, INSERT ON zzsh_order.payment_channel_transaction TO %I', runtime_role);
