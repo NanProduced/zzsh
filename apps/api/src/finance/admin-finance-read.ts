@@ -5,9 +5,11 @@ import { canonicalize } from "../supply/content-hash";
 import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN } from "./personal-finance-read";
-import { loadFinanceOrderFacts, matchFinanceOrderReference, type FinanceOrderFact } from "./admin-finance-order-read";
+import { loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
 import { scopedFinanceSql, financeVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL, type FinanceLoadScope } from "./admin-finance-query";
 import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
+import { historicalObservationDisplay,enrichHistoricalObservations,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
+export type { HistoricalFinanceDisplay,HistoricalRelationAccess } from './legacy-observation-display';
 
 export const ADMIN_FINANCE_VERSION = "admin-finance.read.v1";
 export const FINANCE_BUCKETS = ["AVAILABLE", "RESERVED", "GUARANTEE_HELD", "REFUND_PAYABLE", "PENDING_EARNINGS", "PLATFORM", "CLEARING"] as const;
@@ -22,6 +24,7 @@ export type FinanceEntry = {
   sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null;
   reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>;
   related: { ref: string; label: string; path?: string }[];
+  historical?: HistoricalFinanceDisplay;
 };
 export type FinanceFacts = { entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; asOf: string; version: string };
 const MAX_FACTS = 20_000;
@@ -94,7 +97,7 @@ export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_i
   ${utc("o.source_event_at")} AS at,${utc("o.imported_at")} AS imported_at,
   o.snapshot->>'amount' AS amount,o.snapshot->>'action' AS action,o.snapshot->>'sourceStatus' AS source_status,
   o.snapshot->>'referenceId' AS reference_id,o.snapshot->>'referenceSn' AS reference_no,
-  o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after,'LEGACY_MYSQL'::text AS observation_origin,NULL::jsonb AS extra_evidence
+  o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after,'LEGACY_MYSQL'::text AS observation_origin,jsonb_build_object('snapshot',o.snapshot,'canonical',o.source_canonical,'legacyUserId',o.legacy_user_id) AS extra_evidence
   FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} LEFT JOIN zzsh_auth_user."user" u ON u.id=o.user_id ORDER BY o.id COLLATE "C" LIMIT $1`;
 export function adminFinanceObservationSql(ready:{native_distribution?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean}){
  if(!ready.native_distribution&&!ready.legacy_duty_finance&&!ready.guarantee_history)return ADMIN_FINANCE_OBSERVATION_SQL;
@@ -151,13 +154,15 @@ export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
   const unsigned = cents(row.amount, true), direction = earnings ? row.action === "1" ? "IN" : row.action === "2" ? "OUT" : "UNKNOWN" : distribution ? "IN" : "OUT";
   const amount = unsigned === null || direction === "UNKNOWN" ? null : direction === "OUT" && unsigned !== "0" ? `-${unsigned}` : unsigned;
   const kind = earnings ? "EARNINGS" : distribution ? "DISTRIBUTION" : "WITHDRAWAL";
-  return { id: `history:${row.id}`, documentRef: `HISTORY_${kind}:${row.id}`, documentNumber: row.reference_no ?? row.source_id, subjectId: row.subject_id, subjectName: displayName(row.subject_name, row.subject_id),
+  const historical=historicalObservationDisplay(row);
+  const distributionNumber=distribution?row.extra_evidence?.snapshot?.sourceNumber:null;
+  return { id: `history:${row.id}`, documentRef: `HISTORY_${kind}:${row.id}`, documentNumber: earnings?historical.originalLogNumber??row.source_id:row.reference_no??distributionNumber??row.source_id, subjectId: row.subject_id, subjectName: displayName(row.subject_name, row.subject_id),
     bucket: distribution ? "PENDING_EARNINGS" : "AVAILABLE", direction, deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind,
     state: "HISTORICAL_OBSERVED", classification: row.included_in_opening ? "HISTORICAL_COVERED" : "HISTORICAL_UNCOVERED", affectsCurrentWallet: false, affectsCurrentLedger: false,
     occurredAt: row.at, importedAt: row.imported_at, sourceType: row.source_type, sourceSystem: row.source_system ?? "SOURCE_SYSTEM_UNKNOWN", sourceEntity: row.source_entity, sourceId: row.source_id, sourceDigest: row.source_digest, basisId: row.basis_id,
     reasonCodes: [...(row.included_in_opening ? [] : ["HISTORICAL_NOT_ADMITTED"]), ...(!earnings ? ["HISTORICAL_STATUS_NOT_CHANNEL_RESULT"] : []), ...(amount === null ? ["AMOUNT_OR_DIRECTION_UNKNOWN"] : [])], accountCode: null,
     evidence: { originalReference: row.reference_id ?? null, originalNumber: row.reference_no ?? null, originalStatus: row.source_status ?? null,
-      originalNetCents: signedSourceCents(row.net), originalFeeCents: signedSourceCents(row.fee), historicalBalanceAfterCents: signedSourceCents(row.balance_after), dueAt: null, policyVersion: null }, related: [] };
+      originalNetCents: signedSourceCents(row.net), originalFeeCents: signedSourceCents(row.fee), historicalBalanceAfterCents: signedSourceCents(row.balance_after), dueAt: null, policyVersion: null }, related: [],historical };
 }
 export async function readFinanceSourceVersion(client: PoolClient) {
   const ready = (await client.query(`SELECT to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AND to_regclass('zzsh_order.wallet_revision') IS NOT NULL AND to_regclass('zzsh_order.finance_economic_root') IS NOT NULL AND to_regclass('zzsh_order.finance_event') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AS ready,
@@ -171,7 +176,27 @@ export async function readFinanceSourceVersion(client: PoolClient) {
   const asOf=(await client.query(`SELECT ${utc("clock_timestamp()")} AS at`)).rows[0].at;
   return {ready,version,asOf};
 }
-export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {}): Promise<FinanceFacts> {
+async function loadHistoricalReferenceRows(client:PoolClient,history:Raw[]):Promise<Raw[]> {
+  const present=new Set(history.map(row=>[row.source_system,row.subject_id,row.source_entity,row.source_id].join('\u0000'))),references=new Map<string,string[]>();
+  for(const row of history){
+    const fact=row.extra_evidence?.snapshot,type=String(fact?.legacyChangeType??''),entity=type==='1001'?'la_distribution_order':type==='1002'?'la_withdraw_apply':null;
+    if(row.source_type!=='LEGACY_MYSQL'||row.source_entity!=='la_log_earnings'||!entity||typeof fact?.referenceId!=='string'||! /^[1-9]\d{0,23}$/.test(fact.referenceId))continue;
+    const reference=[String(row.source_system),String(row.subject_id),entity,fact.referenceId],key=reference.join('\u0000');
+    if(!present.has(key))references.set(key,reference);
+  }
+  const refs=[...references.values()],rows:Raw[]=[],source=ADMIN_FINANCE_OBSERVATION_SQL.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
+  // A bounded VALUES batch retains exact source/subject/entity identity and stays below PG's parameter ceiling.
+  for(let offset=0;offset<refs.length;offset+=16_000){
+    const values:unknown[]=[],tuples=refs.slice(offset,offset+16_000).map(reference=>'('+reference.map(value=>'$'+values.push(value)).join(',')+')');
+    const query=`WITH finance_reference_rows AS (${source}) SELECT r.* FROM finance_reference_rows r
+      WHERE (r.source_system,r.subject_id,r.source_entity,r.source_id) IN (VALUES ${tuples.join(',')}) ORDER BY r.id COLLATE "C" LIMIT $${values.push(MAX_FACTS+1)}`;
+    rows.push(...(await client.query(query,values)).rows);
+    if(rows.length>MAX_FACTS)throw unavailable('Historical reference size limit reached');
+  }
+  return rows;
+}
+
+export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {},relations?:HistoricalRelationAccess): Promise<FinanceFacts> {
   const {ready,version,asOf}=await readFinanceSourceVersion(client);
   let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;const ledgerSource=adminFinanceLedgerSql(ready.native_distribution===true),historySource=adminFinanceObservationSql(ready);
   if(scope.lookup){
@@ -185,7 +210,9 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
   const ledger=(await client.query(ledgerQuery.text,ledgerQuery.values)).rows,history=(await client.query(historyQuery.text,historyQuery.values)).rows;
   if(ledger.length+history.length>MAX_FACTS)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Matching finance result exceeds 20000; apply a narrower subject, period or query",[{path:"finance.matchingLimit.20000",code:"INVALID_FIELD"}]);
   const orderScope=lookupPage?{...scope,orderRefs:lookupPage.refs}:scope.documentRef||scope.filters?.q.startsWith("ORDER_LINK:")?scope:{...scope,orderRefs:[]};
-  const orders=await loadFinanceOrderFacts(client,ready,orderScope,history);
+  const orderReferences=history.filter(row=>row.source_entity==='la_log_earnings'&&String(row.extra_evidence?.snapshot?.legacyChangeType)==='1001');
+  const orders=await loadFinanceOrderFacts(client,ready,orderScope,orderReferences,relations);
+  const referenceRows=await loadHistoricalReferenceRows(client,history);
   const subjectIds=[...new Set([...ledger.map(row=>row.subject_id),...history.map(row=>row.subject_id),...orders.flatMap(order=>[order.ownerId,order.renterId]),scope.subjectId,scope.filters?.scope!=="ALL"?scope.filters?.scope:undefined].filter((id):id is string=>typeof id==="string"))];
   const subjects=(await client.query(`SELECT id,COALESCE(name,id) AS name FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C"`,[subjectIds])).rows.map(row=>({id:String(row.id),name:displayName(row.name,String(row.id))}));
   let subjectCandidates:FinanceFacts["subjectCandidates"];
@@ -202,10 +229,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
     f.id AS query_ref,${utc("f.observed_at")} AS queried_at FROM zzsh_order.withdrawal_intent i LEFT JOIN zzsh_order.withdrawal_provider_fact f ON f.id=i.last_provider_fact_id WHERE i.id=ANY($1::text[]) ORDER BY i.id COLLATE "C"`,[intentIds])).rows:[];
   const operations=ready.withdrawals&&intentIds.length?(await client.query(`SELECT id,intent_id,final_evidence_digest,${utc("recorded_at")} AS at,final_evidence_canonical::jsonb->>'outcome' AS outcome,final_evidence_canonical::jsonb->>'reference' AS reference FROM zzsh_order.controlled_payout_operation WHERE intent_id=ANY($1::text[]) ORDER BY id COLLATE "C"`,[intentIds])).rows:[];
   const entries=[...ledger.map(projectAdminFinanceLedger),...history.map(projectAdminFinanceObservation)];
-  for(const entry of entries.filter(row=>row.sourceType==="LEGACY_MYSQL")){
-    const linked=matchFinanceOrderReference(entry,orders);entry.related.push(...linked.map(order=>({ref:order.ref,label:linked.length>1?`${order.number} · ${order.sourceId}`:order.number})));
-    if(entry.evidence.originalReference||entry.evidence.originalNumber){if(!linked.length)entry.reasonCodes.push("ORIGINAL_ORDER_REFERENCE_UNRESOLVED");if(linked.length>1)entry.reasonCodes.push("ORIGINAL_ORDER_REFERENCE_AMBIGUOUS");}
-  }
+  enrichHistoricalObservations(entries,[...history,...referenceRows],orders,relations);
   const intentById = new Map(withdrawals.map(row => [row.id, row]));
   const operationByIntent = new Map(operations.map(row => [row.intent_id, row]));
   for (const entry of entries) if (entry.documentRef.startsWith("WITHDRAWAL:")) {
@@ -257,7 +281,7 @@ export function financeDocuments(entries: FinanceEntry[]) {
   return [...groups].map(([ref, lines]) => ({ ref, number: lines[0]!.documentNumber, kind: lines[0]!.kind, state: lines[0]!.state, occurredAt: lines[0]!.occurredAt,
     requestedAmountCents: lines.find(entry => entry.evidence.grossCents !== undefined)?.evidence.grossCents ?? null,
     subjects: [...new Map(lines.map(entry => [entry.subjectId, { id: entry.subjectId, name: entry.subjectName }])).values()], entryCount: lines.length,
-    amounts: [...new Map(lines.map(entry => [entry.bucket, entry.bucket])).values()].map(bucket => ({ bucket, knownNetCents: lines.filter(entry => entry.bucket === bucket && entry.deltaCents !== null).reduce((sum, entry) => sum + BigInt(entry.deltaCents!), 0n).toString(), unknownCount: lines.filter(entry => entry.bucket === bucket && entry.deltaCents === null).length })) }));
+    amounts: [...new Map(lines.map(entry => [entry.bucket, entry.bucket])).values()].map(bucket => ({ bucket, knownNetCents: lines.filter(entry => entry.bucket === bucket && entry.deltaCents !== null).reduce((sum, entry) => sum + BigInt(entry.deltaCents!), 0n).toString(), unknownCount: lines.filter(entry => entry.bucket === bucket && entry.deltaCents === null).length })),...(lines.length===1&&lines[0]!.historical?{historical:lines[0]!.historical}:{}) }));
 }
 export function financeOrderDocuments(facts: FinanceFacts, filter: FinanceFilters) {
   const query = filter.q.toLocaleLowerCase("zh-CN"), from = Date.parse(filter.from + "T00:00:00+08:00"), end = Date.parse(filter.to + "T00:00:00+08:00") + 86400_000;
@@ -311,7 +335,8 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
   const related = [...new Map(entries.flatMap(entry => entry.related).map(link => [link.ref, link])).values()].filter(link => link.ref !== ref || link.path);
   if (order) {
     Object.assign(evidence, { originalOrderNumber: order.number, originalOrderId: order.sourceId, originalOrderStatus: order.originalOrderStatus, ...(order.sourceType === "LEGACY_MYSQL" ? { originalPaymentStatus: order.originalPaymentStatus, recordedPaidCents: order.recordedPaidCents } : {}), ownerSubjectId: order.ownerId, renterSubjectId: order.renterId, recordedDueCents: order.dueCents, recordedDepositCents: order.depositCents, orderSourceType: order.sourceType, orderSourceSystem: order.sourceSystem, orderSourceDigest: order.sourceDigest });
-    related.push({ ref, label: "订单详情", path: `/orders/${encodeURIComponent(order.id)}` }, { ref: order.accountId, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(order.accountId)}` });
+    if(order.objectReadable)related.push({ ref, label: "订单详情", path: `/orders/${encodeURIComponent(order.id)}` });
+    if(order.accountReadable)related.push({ ref: order.accountId, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(order.accountId)}` });
     related.push(...facts.entries.filter(entry => entry.related.some(link => link.ref === ref)).map(entry => ({ ref: entry.documentRef, label: entry.documentNumber })));
   }
   return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],

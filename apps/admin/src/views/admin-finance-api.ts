@@ -37,8 +37,38 @@ export function financeMoney(cents: string | null | undefined): string {
   return `${value < 0n ? "−" : ""}${(abs / 100n).toLocaleString("zh-CN")}.${(abs % 100n).toString().padStart(2, "0")} 元`;
 }
 export function financeTime(value: string | null | undefined): string { return !value || !Number.isFinite(Date.parse(value)) ? "时间未核定" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
-export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null> };
-export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[] };
+export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME' | 'OWNER_RENTAL_INCOME' | 'DISTRIBUTION_INCOME' | 'WITHDRAWAL_APPLICATION' | 'WITHDRAWAL_DEBIT' | 'WITHDRAWAL_REJECTED_RETURN' | 'TRANSFER_FAILED_RETURN' | 'WECHAT_WITHDRAWAL_FAILED_RETURN' | 'PLATFORM_CREDIT' | 'PLATFORM_DEBIT' | 'DEPOSIT_COMPENSATION' | 'TASK_SETTLEMENT' | 'UNKNOWN';
+export type HistoricalFinanceDisplay = {
+  changeType: string | null; purposeCode: HistoricalFinancePurpose; purposeLabel: string; originalLogNumber: string | null;
+  recordedAmountCents: string | null; balanceAfterCents: string | null; feeCents: string | null; netCents: string | null;
+  originalStatus: string | null; originalStatusLabel: string | null; channelState: 'UNVERIFIED';
+  association: { state: 'MATCHED' | 'UNRESOLVED' | 'AMBIGUOUS' | 'DENIED'; kind: 'ORDER' | 'WITHDRAWAL' | 'DISTRIBUTION' | 'TASK' | 'UNKNOWN'; documentRef: string | null; number: string | null; path: string | null; role: 'OWNER' | 'BENEFICIARY' | 'WITHDRAWER' | null; originalStatus: string | null; originalStatusLabel: string | null };
+};
+type FinanceRecord = { kind: string; state: string; historical?: HistoricalFinanceDisplay };
+export function financeIsHistorical(record: FinanceRecord): boolean { return !!record.historical || record.state.startsWith('HISTORICAL_'); }
+export function financeBusinessLabel(record: FinanceRecord): string { return record.historical?.purposeLabel?.trim() || kindLabels[record.kind] || '资金记录'; }
+export function financeRecordNumber(record: FinanceRecord, fallback: string): string {
+  return record.historical?.originalLogNumber ? `原流水号 ${record.historical.originalLogNumber}` : financeIsHistorical(record) ? `记录编号 ${fallback}` : fallback;
+}
+export function financeRecordState(record: FinanceRecord): string {
+  const original = record.historical?.originalStatusLabel;
+  return financeIsHistorical(record) ? original ? original.startsWith('旧平台') ? original : `旧平台状态：${original}` : '旧平台记录' : stateLabels[record.state] ?? '状态待核';
+}
+export function historicalAssociationPath(historical: HistoricalFinanceDisplay | undefined, access: { orderRead: boolean; documentRead: boolean }): string | null {
+  const association = historical?.association;
+  if (!association || association.state !== 'MATCHED' || association.kind === 'UNKNOWN' || association.kind === 'ORDER' && !access.orderRead) return null;
+  if (association.path) {
+    if (association.kind === 'ORDER' && association.path.startsWith('/orders/') && access.orderRead || association.path.startsWith('/finance/documents/') && access.documentRead) return association.path;
+    return null;
+  }
+  return association.documentRef && access.documentRead ? `/finance/documents/${encodeURIComponent(association.documentRef)}` : null;
+}
+export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [string, string][] {
+  return [['原流水号', historical.originalLogNumber || '未取得'], ['原金额', financeMoney(historical.recordedAmountCents)], ['变动后余额（旧）', financeMoney(historical.balanceAfterCents)],
+    ['手续费', financeMoney(historical.feeCents)], ['净额', financeMoney(historical.netCents)], ['原用途码', historical.changeType ?? '未取得'], ['原状态码', historical.originalStatus ?? '未取得']];
+}
+export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
+export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay };
 export type FinanceResponse = {
   contractVersion: string; applied: FinanceFilters; snapshot: string; asOf: string; contextKey: string; snapshotVersion: string;
   documents?: FinanceDocument[]; document?: FinanceDocument; subjects?: { id: string; name: string }[]; subject?: { id: string; name: string };

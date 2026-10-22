@@ -3,15 +3,18 @@ import { exactCents } from "./personal-finance-read";
 import { SecurityApiError } from "../auth/security-core";
 import { escapeLike } from "../supply/catalog";
 import type { FinanceLoadScope } from "./admin-finance-query";
+import { gameScopeSql } from "../auth/admin-scope";
+import type { HistoricalRelationAccess } from "./legacy-observation-display";
 
-export type FinanceOrderFact = { ref: string; id: string; number: string; sourceType: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; kind: "SETTLEMENT"; state: "ORDER_RECORDED" | "HISTORICAL_ORDER_RECORDED"; occurredAt: string | null; importedAt: string; ownerId: string; renterId: string; accountId: string; dueCents: string | null; recordedPaidCents: string | null; depositCents: string | null; originalOrderStatus: string; originalPaymentStatus: string | null };
+export type FinanceOrderFact = { ref: string; id: string; number: string; sourceType: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; kind: "SETTLEMENT"; state: "ORDER_RECORDED" | "HISTORICAL_ORDER_RECORDED"; occurredAt: string | null; importedAt: string; ownerId: string; renterId: string; accountId: string; dueCents: string | null; recordedPaidCents: string | null; depositCents: string | null; originalOrderStatus: string; originalPaymentStatus: string | null;
+  objectReadable?:boolean;accountReadable?:boolean;legacySource?:{entity:string;snapshot:Record<string,unknown>;completedAt:string|null} };
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 function amount(value: unknown) { try { return exactCents(value); } catch { return null; } }
-export function financeOrderSql(legacy: boolean, scope: FinanceLoadScope, related: Record<string, any>[] = [], limit: number | null = 20001) {
-  const sql = legacy ? `SELECT id,source_system,legacy_id,source_digest,original_order_no,owner_user_id,renter_user_id,account_id,
+export function financeOrderSql(legacy: boolean, scope: FinanceLoadScope, related: Record<string, any>[] = [], limit: number | null = 20001,access?:HistoricalRelationAccess) {
+  const sql = legacy ? `SELECT id,source_system,source_entity,legacy_id,source_digest,original_order_no,owner_user_id,renter_user_id,account_id,game_id,source_snapshot,
     due_amount_cents::text AS due,recorded_paid_amount_cents::text AS recorded_paid,deposit_amount_cents::text AS deposit,
-    source_order_status::text AS order_status,source_pay_status::text AS pay_status,${utc("source_created_at")} AS at,${utc("imported_at")} AS imported_at
-    FROM zzsh_order.legacy_order_read_snapshot` : `SELECT id,display_no,owner_user_id,renter_user_id,account_id,status,revision::text,
+    source_order_status::text AS order_status,source_pay_status::text AS pay_status,${utc("source_completed_at")} AS completed_at,${utc("source_created_at")} AS at,${utc("imported_at")} AS imported_at
+    FROM zzsh_order.legacy_order_read_snapshot` : `SELECT id,display_no,owner_user_id,renter_user_id,account_id,game_id,status,revision::text,
     (rental_amount_cents+deposit_amount_cents)::text AS due,deposit_amount_cents::text AS deposit,${utc("created_at")} AS at FROM zzsh_order.rental_order`;
   const values: unknown[] = [], predicates: string[] = [], bind = (value: unknown) => `$${values.push(value)}`;
   if(scope.orderRefs)predicates.push(`('${legacy?"LEGACY_ORDER:":"ORDER:"}'||r.id)=ANY(${bind(scope.orderRefs)}::text[])`);
@@ -27,17 +30,19 @@ export function financeOrderSql(legacy: boolean, scope: FinanceLoadScope, relate
     }}
   const main=predicates.length?predicates.join(" AND "):"TRUE", links:string[]=[];
   if(legacy)for(const row of related){if(row.reference_id||row.reference_no){const fields=[`r.source_system=${bind(row.source_system)}`];if(row.reference_id)fields.push(`r.legacy_id=${bind(row.reference_id)}`);if(row.reference_no)fields.push(`r.original_order_no=${bind(row.reference_no)}`);links.push("("+fields.join(" AND ")+")");}}
-  return {text:`WITH finance_order_rows AS (${sql}) SELECT r.* FROM finance_order_rows r WHERE (${main})${links.length?" OR "+links.join(" OR "):""}${limit===null?"":` ORDER BY r.id COLLATE "C" LIMIT ${limit}`}`,values};
+  const scoped=access&&(access.isBoss||access.orderRead||access.resourceRead)?gameScopeSql('r.game_id',bind(access.adminId),bind(access.isBoss)):'false';
+  return {text:`WITH finance_order_rows AS (${sql}) SELECT r.*,(${access?.isBoss||access?.orderRead?scoped:'false'}) AS object_readable,(${access?.isBoss||access?.resourceRead?scoped:'false'}) AS account_readable FROM finance_order_rows r WHERE (${main})${links.length?" OR "+links.join(" OR "):""}${limit===null?"":` ORDER BY r.id COLLATE "C" LIMIT ${limit}`}`,values};
 }
-export async function loadFinanceOrderFacts(client: PoolClient, ready: { native_orders?: boolean; legacy_orders?: boolean }, scope: FinanceLoadScope = {}, related: Record<string, any>[] = []): Promise<FinanceOrderFact[]> {
+export async function loadFinanceOrderFacts(client: PoolClient, ready: { native_orders?: boolean; legacy_orders?: boolean }, scope: FinanceLoadScope = {}, related: Record<string, any>[] = [],access?:HistoricalRelationAccess): Promise<FinanceOrderFact[]> {
   const records: FinanceOrderFact[] = [];
   if (ready.native_orders) {
-    const query=financeOrderSql(false,scope,related);const rows=(await client.query(query.text,query.values)).rows;
-    for (const row of rows) records.push({ ref: `ORDER:${row.id}`, id: row.id, number: row.display_no, sourceType: "NATIVE", sourceSystem: "zzsh", sourceId: row.id, sourceDigest: null, kind: "SETTLEMENT", state: "ORDER_RECORDED", occurredAt: row.at, importedAt: row.at, ownerId: row.owner_user_id, renterId: row.renter_user_id, accountId: row.account_id, dueCents: amount(row.due), recordedPaidCents: null, depositCents: amount(row.deposit), originalOrderStatus: row.status, originalPaymentStatus: null });
+    const query=financeOrderSql(false,scope,related,20001,access);const rows=(await client.query(query.text,query.values)).rows;
+    for (const row of rows) records.push({ ref: `ORDER:${row.id}`, id: row.id, number: row.display_no, sourceType: "NATIVE", sourceSystem: "zzsh", sourceId: row.id, sourceDigest: null, kind: "SETTLEMENT", state: "ORDER_RECORDED", occurredAt: row.at, importedAt: row.at, ownerId: row.owner_user_id, renterId: row.renter_user_id, accountId: row.account_id, dueCents: amount(row.due), recordedPaidCents: null, depositCents: amount(row.deposit), originalOrderStatus: row.status, originalPaymentStatus: null,objectReadable:row.object_readable===true||row.object_readable===1,accountReadable:row.account_readable===true||row.account_readable===1 });
   }
   if (ready.legacy_orders) {
-    const query=financeOrderSql(true,scope,related);const rows=(await client.query(query.text,query.values)).rows;
-    for (const row of rows) records.push({ ref: `LEGACY_ORDER:${row.id}`, id: row.id, number: row.original_order_no, sourceType: "LEGACY_MYSQL", sourceSystem: row.source_system, sourceId: row.legacy_id, sourceDigest: row.source_digest, kind: "SETTLEMENT", state: "HISTORICAL_ORDER_RECORDED", occurredAt: row.at, importedAt: row.imported_at, ownerId: row.owner_user_id, renterId: row.renter_user_id, accountId: row.account_id, dueCents: amount(row.due), recordedPaidCents: amount(row.recorded_paid), depositCents: amount(row.deposit), originalOrderStatus: row.order_status, originalPaymentStatus: row.pay_status });
+    const query=financeOrderSql(true,scope,related,20001,access);const rows=(await client.query(query.text,query.values)).rows;
+    for (const row of rows) records.push({ ref: `LEGACY_ORDER:${row.id}`, id: row.id, number: row.original_order_no, sourceType: "LEGACY_MYSQL", sourceSystem: row.source_system, sourceId: row.legacy_id, sourceDigest: row.source_digest, kind: "SETTLEMENT", state: "HISTORICAL_ORDER_RECORDED", occurredAt: row.at, importedAt: row.imported_at, ownerId: row.owner_user_id, renterId: row.renter_user_id, accountId: row.account_id, dueCents: amount(row.due), recordedPaidCents: amount(row.recorded_paid), depositCents: amount(row.deposit), originalOrderStatus: row.order_status, originalPaymentStatus: row.pay_status,objectReadable:row.object_readable===true||row.object_readable===1,accountReadable:row.account_readable===true||row.account_readable===1,
+      legacySource:{entity:row.source_entity,snapshot:row.source_snapshot,completedAt:row.completed_at??null} });
   }
   if (records.length > 20000) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Finance order reference size limit reached");
   return records;

@@ -1,27 +1,20 @@
-import { createHash } from "node:crypto";
+import { authorizeAdminFinance } from "./admin-finance-access";
+export { authorizeAdminFinance } from "./admin-finance-access";
 import type { INestApplication } from "@nestjs/common";
-import type { PoolClient } from "pg";
-import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
-import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
+
+import { readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
+
+
 import { SecurityApiError, withTransaction } from "../auth/security-core";
-import { canonicalize } from "../supply/content-hash";
+
 import { forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import type { ListingCursorKey } from "../supply/listing-cursor";
-import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, financePeriodProjection,readAdminFinancePeriodBalances, readAdminFinanceSubject, readAdminFinanceDocument, type FinanceActor } from "./admin-finance-read";
+import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, financePeriodProjection,readAdminFinancePeriodBalances, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
 
 export type AdminFinanceOptions = AuthSecurityOptions & { listingCursorKey?: ListingCursorKey };
-export async function authorizeAdminFinance(client: PoolClient, context: { userId: string; sessionId: string }, operation: "lookup" | "document" | "complete"): Promise<FinanceActor & { complete: boolean }> {
-  await assertAdminContextInTransaction(client, context);
-  const access = await loadEffectiveAdminAccess(client, context.userId);
-  if (access?.passwordChangeRequired) throw new SecurityApiError(403, "FORBIDDEN", "Password change required");
-  const full = access?.status === "ACTIVE" && access.permissions.has(ADMIN_PERMISSION.financeRead);
-  const documents = access?.status === "ACTIVE" && access.permissions.has(ADMIN_PERMISSION.financeDocumentRead);
-  if (operation === "complete" ? !full : operation === "document" ? !documents : !full && !documents) throw new SecurityApiError(403, "FORBIDDEN", "Finance permission required");
-  return { ...context, complete: full, authorizationKey: createHash("sha256").update(canonicalize([...access!.permissions].sort())).digest("hex") };
-}
 function pageNumber(query: URLSearchParams, name: string, fallback: number, max: number): number {
   const value = query.get(name) ?? String(fallback);
   if (!/^[1-9]\d{0,5}$/.test(value) || Number(value) > max) throw invalid("Invalid finance page");
@@ -52,7 +45,7 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const actor = await authorizeAdminFinance(client, context, operation);
       if (route === "lookup" && !actor.complete && !filters.q) throw invalid("A document lookup reference is required");
-      const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize}), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
+      const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize},actor.relations), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
       const common = { contractVersion: ADMIN_FINANCE_VERSION, currency: "CNY", amountUnit: "CENT", timezone: "Asia/Shanghai", applied: filters, snapshot: snapshot.token, asOf: snapshot.asOf, contextKey: actor.authorizationKey, snapshotVersion: facts.version };
       if (route.startsWith("subjects/")) return { actor, body: { ...common, ...await readAdminFinanceSubject(client, facts, reference(route.slice(9)), snapshot.asOf) } };
       if (route.startsWith("documents/")) return { actor, body: { ...common, ...readAdminFinanceDocument(facts, reference(route.slice(10)), url.searchParams.get("entry")) } };

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { SecurityApiError, recordAudit, withTransaction } from "../auth/security-core";
-import { assertAdminContextInTransaction } from "../auth/auth-security";
-import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
+import { authorizeAdminFinance } from "./admin-finance-access";
 import { canonicalize } from "../supply/content-hash";
 import { financeSnapshot, readFinanceSourceVersion, type FinanceActor, type FinanceEntry, type FinanceFilters } from "./admin-finance-read";
 import type { AdminFinanceOptions } from "./admin-finance-routes";
@@ -41,12 +40,9 @@ export function observeAdminFinanceDelivery(response: SupplyResponse, options: A
 export async function prepareAdminFinanceExport(options: AdminFinanceOptions, actor: FinanceActor, filters: FinanceFilters, token: string, generated: ReturnType<typeof generateAdminFinanceCsv>, requestId: string) {
   return withTransaction(options.pool, async client => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-    await assertAdminContextInTransaction(client, actor);
-    const access = await loadEffectiveAdminAccess(client, actor.userId);
-    if (access?.status !== "ACTIVE" || access.passwordChangeRequired || !access.permissions.has(ADMIN_PERMISSION.financeRead)) throw new SecurityApiError(403, "FORBIDDEN", "Finance permission required");
-    const authorizationKey = createHash("sha256").update(canonicalize([...access.permissions].sort())).digest("hex");
+    const current = await authorizeAdminFinance(client, actor, "complete");
     const source = await readFinanceSourceVersion(client), facts = { ...source, entries:[],subjects:[],revisions:[],withdrawalsReady:source.ready.withdrawals };
-    const snapshot = financeSnapshot(facts, filters, { ...actor, authorizationKey }, options.listingCursorKey, token);
+    const snapshot = financeSnapshot(facts, filters, current, options.listingCursorKey, token);
     await recordAudit(client, { actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, action: "finance.export.prepared", objectType: "finance_export", outcome: "SUCCESS", requestId,
       details: { phase: "PREPARED", contractVersion: "admin-finance.read.v1", filterHash: createHash("sha256").update(canonicalize(filters)).digest("hex"),
         asOf: snapshot.asOf, rowCount: generated.rowCount, fileDigest: generated.sha256 } });

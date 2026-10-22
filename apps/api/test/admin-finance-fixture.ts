@@ -14,15 +14,17 @@ export class FinanceSqlFixture {
     // SQLite floating SUM cannot represent the 24-digit cents contract. The relational FILTER runs in SQL;
     // only PG numeric aggregation is substituted with exact BigInt, still not a PG numeric/plan proof.
     this.db.aggregate('exact_cents_sum',{start:'0',step:(sum,value)=>(BigInt(String(sum))+BigInt(String(value))).toString()});
-    this.db.exec(`ATTACH DATABASE ':memory:' AS zzsh_order; ATTACH DATABASE ':memory:' AS zzsh_auth_user; BEGIN`);
+    this.db.exec(`ATTACH DATABASE ':memory:' AS zzsh_order; ATTACH DATABASE ':memory:' AS zzsh_auth_user; ATTACH DATABASE ':memory:' AS zzsh_iam; ATTACH DATABASE ':memory:' AS zzsh_supply; BEGIN`);
+    this.table('zzsh_iam.admin_security','admin_user_id game_scope_mode',[]);
+    this.table('zzsh_supply.admin_supply_scope','admin_user_id game_id',[]);
     const ledger=(data.ledger??[]).map(row=>{const delta=typeof row.delta==="string"&&/^-?\d+$/.test(row.delta)?BigInt(row.delta):null;return {...row,counterparty_user_id:row.subject_id,credit_cents:delta===null?null:delta>=0n?String(delta):"0",debit_cents:delta===null?null:delta<0n?String(-delta):"0",finance_event_id:row.finance_event_id??row.event_kind,created_at:row.at};});
     this.table("zzsh_order.fixture_ledger", "id account_code subject_id subject_name delta at posting_id event_kind source_kind source_type source_system source_entity source_id source_digest basis_id order_id display_no account_id opening_cutoff covered_count payment_confirmation_id settlement_version_id version_hash captured_cents renter_refund_cents platform_contribution_cents refund_due_at counterparty_user_id credit_cents debit_cents finance_event_id created_at economic_root_id beneficiary_role earning_state earning_role earning_amount earning_disposition earning_recovery earning_due_at earning_version", ledger);
     this.table("zzsh_order.fixture_history", "id subject_id subject_name source_kind source_type source_system source_entity source_id source_digest basis_id included_in_opening at imported_at amount action source_status reference_id reference_no net fee balance_after observation_origin extra_evidence", (data.history ?? []).map(r=>({observation_origin:'LEGACY_MYSQL',...r})));
     this.table('zzsh_order.rental_referral_earning','id economic_root_id beneficiary_user_id beneficiary_role amount_cents state funds_disposition recovery_required_cents version seed_digest order_id created_at due_at',data.earnings??[]);
     this.table('zzsh_order.legacy_owner_guarantee_observation','id user_id account_id legacy_account_id source_canonical source_digest source_cutoff imported_at',data.guaranteeHistory??[]);
     this.table('zzsh_order.legacy_owner_guarantee_coverage','id body_digest',[]);
-    this.table("zzsh_order.rental_order", "id display_no owner_user_id renter_user_id account_id status revision rental_amount_cents deposit_amount_cents created_at", data.native ?? []);
-    this.table("zzsh_order.legacy_order_read_snapshot", "id source_system legacy_id source_digest binding_digest original_order_no owner_user_id renter_user_id account_id due_amount_cents recorded_paid_amount_cents deposit_amount_cents source_order_status source_pay_status source_created_at imported_at", data.legacy ?? []);
+    this.table("zzsh_order.rental_order", "id display_no owner_user_id renter_user_id account_id game_id status revision rental_amount_cents deposit_amount_cents created_at", data.native ?? []);
+    this.table("zzsh_order.legacy_order_read_snapshot", "id source_system source_entity legacy_id source_digest binding_digest original_order_no owner_user_id renter_user_id account_id game_id source_snapshot source_completed_at due_amount_cents recorded_paid_amount_cents deposit_amount_cents source_order_status source_pay_status source_created_at imported_at", data.legacy ?? []);
     this.table('zzsh_auth_user."user"', "id name", data.subjects ?? [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }]);
     this.table("zzsh_order.withdrawal_intent", "id state operation_version funds_disposition last_provider_fact_id", data.withdrawals??[]);
     this.table("zzsh_order.withdrawal_provider_fact", "id evidence_digest", []);
@@ -40,7 +42,7 @@ export class FinanceSqlFixture {
     const names = columns.split(" ");
     this.db.exec(`CREATE TABLE ${name}(${names.map(name => '"' + name + '" TEXT').join(",")})`);
     const insert = this.db.prepare(`INSERT INTO ${name} VALUES(${names.map(() => "?").join(",")})`);
-    for (const row of rows) insert.run(...names.map(name => row[name] == null ? null : typeof row[name] === "boolean" ? row[name] ? 1 : 0 : String(row[name])));
+    for (const row of rows) insert.run(...names.map(name => row[name] == null ? null : typeof row[name] === "boolean" ? row[name] ? 1 : 0 : typeof row[name]==='object'?JSON.stringify(row[name]):String(row[name])));
   }
   query(sql: string, values: unknown[]):{rows:Record<string,any>[];rowCount:number} {
     if(sql.includes("AS finance_version"))return {rows:[{finance_version:this.sourceVersion(sql)}],rowCount:1};
@@ -50,14 +52,15 @@ export class FinanceSqlFixture {
       .replace(/=ANY\((\$\d+)::text\[\]\)/g, " IN(SELECT value FROM json_each($1))")
       .replace(/([\w.]+|\$\d+)::timestamptz/g, "julianday($1)")
       .replace(/::text\b/g, "")
+      .replace(/::boolean\b/g, "")
       .replace(/::jsonb\b/g, "").replaceAll('jsonb_build_object(','json_object(').replaceAll('jsonb_array_length(','json_array_length(')
       .replaceAll('sum(r.delta::numeric)','exact_cents_sum(r.delta)').replace(/::numeric\b/g, "")
       .replace(/to_char\(([\w.]+) AT TIME ZONE 'UTC','[^']*'\)/g, "$1")
       .replace(/([\w.]+) ~ ('[^']*')/g, "regexp($2,$1)")
       .replace(/left\(([^,]+),3\)/g, "substr($1,1,3)").replace(/right\(([^,]+),4\)/g, "substr($1,-4)")
       .replaceAll(' COLLATE "C"', "");
-    const bindings = Object.fromEntries(values.map((value, index) => ["$" + (index + 1), Array.isArray(value) ? JSON.stringify(value) : value as string | number]));
-    const rows = this.db.prepare(text).all(bindings).map(raw=>{const row:Record<string,any>=typeof raw.extra_evidence==='string'?{...raw,extra_evidence:JSON.parse(raw.extra_evidence)}:raw;return sql.includes('finance period complete ledger balances')?{...row,opening:String(row.opening),closing:String(row.closing),movement:String(row.movement)}:Object.hasOwn(row,"included_in_opening")?{...row,included_in_opening:row.included_in_opening==="1"}:row;});
+    const bindings = Object.fromEntries(values.map((value, index) => ["$" + (index + 1), Array.isArray(value) ? JSON.stringify(value) : typeof value==='boolean'?Number(value):value as string | number]));
+    const rows = this.db.prepare(text).all(bindings).map(raw=>{const row:Record<string,any>={...raw};for(const field of ['extra_evidence','source_snapshot'])if(typeof row[field]==='string')row[field]=JSON.parse(row[field]);return sql.includes('finance period complete ledger balances')?{...row,opening:String(row.opening),closing:String(row.closing),movement:String(row.movement)}:Object.hasOwn(row,"included_in_opening")?{...row,included_in_opening:row.included_in_opening==="1"}:row;});
     this.reads.push({ family: sql.startsWith("WITH finance_lookup") ? "keys" : sql.startsWith("WITH finance_order") ? "orders" : "entries", rows: rows.length });
     return { rows, rowCount: rows.length };
   }
