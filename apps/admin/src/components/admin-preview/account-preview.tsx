@@ -9,6 +9,11 @@ export interface AccountPreviewProps {
   title?: string | null;
   gameName?: string | null;
   tag?: string;
+  haffText?: string | null;
+  materialsText?: string | null;
+  termText?: string | null;
+  loginMethodText?: string | null;
+  sourceText?: string | null;
   facts?: {
     ownerPaused?: boolean;
     staffRestricted?: boolean;
@@ -30,7 +35,12 @@ export function AccountPreviewCard({
   displayNo,
   title,
   gameName,
-  tag = '本单账号',
+  tag,
+  haffText,
+  materialsText,
+  termText,
+  loginMethodText,
+  sourceText,
   facts,
   canOpen,
   onOpen,
@@ -86,6 +96,28 @@ export function AccountPreviewCard({
       {title && (
         <div className="text-[11px] text-muted-foreground line-clamp-2 leading-relaxed" title={title}>
           {title}
+        </div>
+      )}
+
+      {(haffText || materialsText) && (
+        <div className="flex items-center gap-2 text-[11px] text-foreground font-medium">
+          {haffText && <span>哈夫币：{haffText}</span>}
+          {haffText && materialsText && <span aria-hidden="true" className="text-muted-foreground">·</span>}
+          {materialsText && <span>{materialsText}</span>}
+        </div>
+      )}
+
+      {(termText || loginMethodText) && (
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          {termText && <span>租期：{termText}</span>}
+          {termText && loginMethodText && <span aria-hidden="true">·</span>}
+          {loginMethodText && <span>登录：{loginMethodText}</span>}
+        </div>
+      )}
+
+      {sourceText && (
+        <div className="text-[10px] text-muted-foreground font-mono">
+          资料来源：{sourceText}
         </div>
       )}
 

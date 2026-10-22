@@ -116,53 +116,49 @@ async function mount(t, options = {}) {
   return { host, calls, opened, snapshot };
 }
 
-test('Orders exposes all three explicit House previews from inline authorized facts without extra GETs', async t => {
+test('Orders keeps order/account facts inline and only previews the related user without extra business GETs', async t => {
   const h = await mount(t), initialReads = structuredClone(h.calls);
   assert.deepEqual(h.snapshot.permissions, permissions);
   assert.equal(initialReads.length, 2, 'only user detail and its paginated orders are read');
   assert.equal(initialReads[0].params.registrationTime, 'ORIGINAL');
   assert.equal(initialReads[1].params.limit, '20');
-  for (const [label, regionLabel] of [
-    ['预览订单 SYNTHETIC-ORDER-1', '订单预览：SYNTHETIC-ORDER-1'],
-    ['预览账号 SYNTHETIC-ACCOUNT-1', '账号预览：SYNTHETIC-ACCOUNT-1'],
-    ['预览用户 下单时昵称', '用户预览：下单时昵称'],
-  ]) {
-    const preview = await openPreview(label, regionLabel);
-    assert.equal(h.opened.length, 0, 'explicit info control does not navigate');
-    assert.deepEqual(h.calls, initialReads, 'opening a preview must not fetch the other object');
-    await preview.close();
-    assert.deepEqual(h.calls, initialReads, 'closing a preview also stays local');
-  }
+  assert.equal(h.host.querySelector('[aria-label^="预览订单"]'), null); assert.equal(h.host.querySelector('[aria-label^="预览账号"]'), null);
+  assert.ok(namedButton('SYNTHETIC-ORDER-1', h.host)); assert.ok(namedButton('账号 SYNTHETIC-ACCOUNT-1', h.host));
+  const preview = await openPreview('预览用户 下单时昵称', '用户预览：下单时昵称');
+  assert.equal(h.opened.length, 0, 'explicit info control does not navigate');
+  assert.deepEqual(h.calls, initialReads, 'opening the related user preview must not fetch business detail');
+  await preview.close(); assert.deepEqual(h.calls, initialReads);
 });
 
-test('order card preserves this order due amount and unknown amounts instead of deriving payment or zero', async t => {
+test('inline order amounts preserve due/deposit and distinguish unknown from a legitimate zero', async t => {
   const h = await mount(t);
-  const known = await openPreview('预览订单 SYNTHETIC-ORDER-1', '订单预览：SYNTHETIC-ORDER-1');
-  assert.match(known.card.textContent, /本单应付 160\.00 元/);
-  assert.match(known.card.textContent, /本单身份：租客/);
-  assert.equal(/实付|到账|号主收益/.test(known.card.textContent), false);
-  await click(namedButton('查看订单详情', known.card));
+  const known = h.host.querySelector('[data-order-id="synthetic-preview-order-1"]');
+  assert.match(h.host.querySelector('thead').textContent, /本单应付/); assert.match(known.textContent, /160\.00 元/);
+  assert.match(known.textContent, /资源 60\.00 元 · 押金 100\.00 元/); assert.match(known.textContent, /租入/);
+  assert.equal(/实付|到账|号主收益/.test(known.textContent), false);
+  await click(namedButton('SYNTHETIC-ORDER-1', known));
   assert.equal(h.opened.at(-1).target, '/orders/synthetic-preview-order-1');
-  await known.close();
-  const unknown = await openPreview('预览订单 SYNTHETIC-ORDER-2', '订单预览：SYNTHETIC-ORDER-2');
-  assert.match(unknown.card.textContent, /本单应付 待核/);
-  assert.match(unknown.card.textContent, /旧单/);
-  assert.equal(/0\.00|本单应付 0|实付|到账/.test(unknown.card.textContent), false);
-  assert.match(h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').textContent, /资源 待核 · 押金 待核/);
+  const unknown = h.host.querySelector('[data-order-id="synthetic-preview-order-2"]');
+  assert.match(unknown.textContent, /待核/); assert.match(unknown.textContent, /旧平台订单/);
+  assert.equal(/0\.00|实付|到账/.test(unknown.textContent), false); assert.match(unknown.textContent, /资源 待核 · 押金 待核/);
 });
 
-test('account preview describes only the frozen order account and uses its stable identity for navigation', async t => {
+test('inline native title is frozen, legacy title is current account data and missing resource fields are not invented', async t => {
   const h = await mount(t);
-  const p = await openPreview('预览账号 SYNTHETIC-ACCOUNT-1', '账号预览：SYNTHETIC-ACCOUNT-1');
-  assert.match(p.card.textContent, /本单账号/); assert.match(p.card.textContent, /本单冻结账号快照/);
-  assert.equal(/已上架|可租|报价|号主暂停|平台限制|皮肤/.test(p.card.textContent), false);
-  assert.equal(p.card.querySelector('img'), null, 'orders never supply a skin or current listing image');
-  await click(namedButton('查看账号详情', p.card));
-  assert.equal(h.opened.at(-1).target, '/supply/accounts/synthetic-preview-account-1');
-  await p.close();
-  await click(namedButton('SYNTHETIC-ACCOUNT-1', h.host));
+  const cell = h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1];
+  assert.match(cell.textContent, /本单冻结账号快照/); assert.equal(cell.textContent.includes('当前账号资料'), false);
+  assert.equal(/已上架|可租|报价|号主暂停|平台限制|皮肤|哈夫币|租期：|登录：/.test(cell.textContent), false);
+  assert.equal(cell.querySelector('img'), null, 'order rows never supply a skin or current listing image');
+  assert.match(h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1].textContent, /当前账号资料/);
+  await click(namedButton('账号 SYNTHETIC-ACCOUNT-1', h.host));
   assert.equal(h.opened.at(-1).target, '/supply/accounts/synthetic-preview-account-1');
   assert.equal(h.calls.length, 2);
+});
+
+test('legitimate zero due and deposit amounts remain zero rather than unknown', async t => {
+  const zero = { ...knownOrder, amounts: { rental: money('0.00'), deposit: money('0.00'), totalDue: money('0.00') } };
+  const h = await mount(t, { rows: [zero] }), cell = h.host.querySelector('tbody tr').lastElementChild;
+  assert.match(cell.textContent, /0\.00 元/); assert.match(cell.textContent, /资源 0\.00 元 · 押金 0\.00 元/); assert.equal(cell.textContent.includes('待核'), false);
 });
 
 test('counterparty preview distinguishes current nickname and links to the same user/order as the original name', async t => {
@@ -170,7 +166,7 @@ test('counterparty preview distinguishes current nickname and links to the same 
   const p = await openPreview('预览用户 下单时昵称', '用户预览：下单时昵称');
   assert.match(p.card.textContent, /当前昵称：现在的昵称/);
   assert.match(p.card.textContent, /188\*\*\*\*1101/);
-  assert.match(p.card.textContent, /号主/);
+  assert.equal(p.card.textContent.includes('号主'), false, 'the shared user card is neutral');
   assert.equal(p.card.textContent.includes(knownOrder.counterpartyUserId), false);
   assert.ok(namedButton('复制用户 ID', p.card));
   await click(namedButton('查看用户资料', p.card));
@@ -198,13 +194,12 @@ test('old DTOs keep ordinary names; missing stable IDs never create empty previe
   assert.equal(h.calls.length, 2, 'missing summary must not trigger a directory reverse lookup');
 });
 
-test('without account read permission the inline snapshot may preview but neither original nor footer opens an account', async t => {
+test('without account read permission the inline title remains readable but the account link does not open', async t => {
   const h = await mount(t, { permissions: ['user.directory.read', 'order.read'] });
-  const link = namedButton('SYNTHETIC-ACCOUNT-1', h.host);
+  const link = namedButton('账号 SYNTHETIC-ACCOUNT-1', h.host);
   assert.equal(link.getAttribute('aria-disabled'), 'true'); await click(link); assert.equal(h.opened.length, 0);
-  const p = await openPreview('预览账号 SYNTHETIC-ACCOUNT-1', '账号预览：SYNTHETIC-ACCOUNT-1');
-  assert.match(p.card.textContent, /本单冻结账号快照/); assert.match(p.card.textContent, /无查看权限/);
-  assert.equal(namedButton('查看账号详情', p.card), undefined);
+  assert.match(h.host.querySelector('tbody tr').children[1].textContent, /本单冻结账号快照/);
+  assert.equal(h.host.querySelector('[aria-label^="预览账号"]'), null);
   assert.equal(h.opened.length, 0); assert.equal(h.calls.length, 2);
 });
 
@@ -222,16 +217,16 @@ test('workspace original links and card actions preserve the same user filters a
   assert.equal(h.calls.find(call => call.path.endsWith('/orders')).params.role, 'renter');
   assert.equal(h.calls.find(call => call.path.endsWith('/orders')).params.status, 'PAID');
   for (const entry of [
-    { label: '预览订单 SYNTHETIC-ORDER-1', region: '订单预览：SYNTHETIC-ORDER-1', footer: '查看订单详情', original: 'SYNTHETIC-ORDER-1', pathname: '/orders/synthetic-preview-order-1', userOrigin: true },
-    { label: '预览账号 SYNTHETIC-ACCOUNT-1', region: '账号预览：SYNTHETIC-ACCOUNT-1', footer: '查看账号详情', original: 'SYNTHETIC-ACCOUNT-1', pathname: '/supply/accounts/synthetic-preview-account-1', userOrigin: true },
+    { original: 'SYNTHETIC-ORDER-1', pathname: '/orders/synthetic-preview-order-1', userOrigin: true },
+    { original: '账号 SYNTHETIC-ACCOUNT-1', pathname: '/supply/accounts/synthetic-preview-account-1', userOrigin: true },
     { label: '预览用户 下单时昵称', region: '用户预览：下单时昵称', footer: '查看用户资料', original: '下单时昵称', pathname: '/users/synthetic-preview-owner-1' },
   ]) {
     const before = h.opened.length;
-    const p = await openPreview(entry.label, entry.region); assert.equal(h.opened.length, before);
-    await click(namedButton(entry.footer, p.card)); const viaCard = h.opened.at(-1);
-    await p.close(); await click(namedButton(entry.original, h.host));
-    assert.deepEqual(h.opened.at(-1), viaCard, 'card action keeps the original link callback and title');
-    const target = new URL(viaCard.target, browser.location.href);
+    let viaCard;
+    if (entry.label) { const p = await openPreview(entry.label, entry.region); assert.equal(h.opened.length, before); await click(namedButton(entry.footer, p.card)); viaCard = h.opened.at(-1); await p.close(); }
+    await click(namedButton(entry.original, h.host));
+    if (viaCard) assert.deepEqual(h.opened.at(-1), viaCard, 'card action keeps the original link callback and title');
+    const target = new URL(h.opened.at(-1).target, browser.location.href);
     assert.equal(target.pathname, entry.pathname);
     assert.equal(target.searchParams.get('fromSupplyId'), 'synthetic-source-supply');
     assert.equal(target.searchParams.get('fromSupplyContext'), 'archive');
@@ -268,7 +263,7 @@ test('explicit counterpart origin B wins over inherited order A while unspecifie
 
   for (const [name, pathname] of [
     ['SYNTHETIC-ORDER-1', '/orders/' + knownOrder.orderId],
-    ['SYNTHETIC-ACCOUNT-1', '/supply/accounts/' + knownOrder.accountId],
+    ['账号 SYNTHETIC-ACCOUNT-1', '/supply/accounts/' + knownOrder.accountId],
   ]) {
     await click(namedButton(name, h.host));
     const target = new URL(h.opened.at(-1).target, browser.location.href);

@@ -8,7 +8,11 @@ export interface OrderPreviewProps {
   displayNo?: string | null;
   status?: string | null;
   statusLabel?: string | null;
+  renterName?: string | null;
+  ownerName?: string | null;
+  /** @deprecated 仅为旧调用方兼容，优先使用中性 renterName / ownerName */
   role?: 'renter' | 'owner' | null;
+  /** @deprecated 仅为旧调用方兼容，优先使用中性 renterName / ownerName */
   roleLabel?: string | null;
   title?: string | null;
   counterpartyName?: string | null;
@@ -24,12 +28,15 @@ export interface OrderPreviewProps {
 /**
  * 订单基础预览卡片：只吃当前行已有金额与状态事实。
  * 严禁混用应付/押金/渠道资金，缺失即留白或标示待核，支持单动作复制订单号。
+ * 中性呈现租客与号主双方受权名称，去本单身份/对方主观视角。
  */
 export function OrderPreviewCard({
   orderId,
   displayNo,
   status,
   statusLabel,
+  renterName,
+  ownerName,
   role,
   roleLabel,
   title,
@@ -45,7 +52,6 @@ export function OrderPreviewCard({
   const numberText = displayNo || '订单编号待核';
   const isPaid = status === 'PAID' || status === 'COMPLETED';
   const isPending = status === 'PENDING_PAYMENT';
-  const roleText = roleLabel || (role === 'renter' ? '租客' : role === 'owner' ? '号主' : null);
 
   const header = (
     <>
@@ -97,11 +103,12 @@ export function OrderPreviewCard({
         </div>
       )}
 
-      {(roleText || counterpartyName) && (
+      {(renterName || ownerName || counterpartyName) && (
         <div className="text-[11px] text-muted-foreground flex items-center gap-1.5 truncate">
-          {roleText && <span>本单身份：{roleText}</span>}
-          {roleText && counterpartyName && <span aria-hidden="true">·</span>}
-          {counterpartyName && <span>对方：@{counterpartyName}</span>}
+          {renterName && <span>租客：{renterName}</span>}
+          {renterName && ownerName && <span aria-hidden="true">·</span>}
+          {ownerName && <span>号主：{ownerName}</span>}
+          {!renterName && !ownerName && counterpartyName && <span>关联方：{counterpartyName}</span>}
         </div>
       )}
 

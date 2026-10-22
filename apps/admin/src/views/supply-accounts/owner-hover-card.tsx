@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { EntityPreviewTrigger, UserPreviewCard } from "@/components/admin-preview";
+import { EntityPreviewTrigger, UserPreviewCard, hasUsefulUserPreview } from "@/components/admin-preview";
 import type { SupplyOwnerSummary } from "../supply-review/model";
 
 /**
@@ -38,6 +38,7 @@ export function OwnerHoverCard({
     </Button>
   );
 
+  if (!hasUsefulUserPreview(summary, ownerName)) return trigger;
   return (
     <EntityPreviewTrigger
       trigger={trigger}
@@ -48,7 +49,6 @@ export function OwnerHoverCard({
           userId={ownerId}
           image={summary?.image}
           maskedPhone={summary?.maskedPhone}
-          roleTag="号主"
           canOpen={canOpen}
           onOpen={onOpenOwner}
           openLabel="查看号主资料"

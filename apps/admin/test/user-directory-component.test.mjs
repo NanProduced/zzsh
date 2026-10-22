@@ -112,7 +112,7 @@ test('no domain permissions never fetch or display counts, orders, internal IDs 
 test('orders retain cancelled payment, PAID/COMPLETED missing-time warning and per-order participation',async t=>{
   await mount(t,{path:'/users/user_normal?section=orders',orders:[order,{...order,orderId:'order_paid',status:'PAID',paidAt:null,role:'owner'},{...order,orderId:'order_complete',status:'COMPLETED',paidAt:null,amounts:{rental:null,deposit:null,totalDue:null}}]});await waitFor(()=>browser.document.querySelector('[data-order-id="order_cancel"]'));
   assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('10:05'));for(const id of ['order_paid','order_complete'])assert.ok(browser.document.querySelector(`[data-order-id="${id}"]`).textContent.includes('支付时间待确认'));
-  assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('租客'));assert.ok(browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('号主'));
+  assert.ok(browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('租入') || browser.document.querySelector('[data-order-id="order_cancel"]').textContent.includes('租客'));assert.ok(browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('租出') || browser.document.querySelector('[data-order-id="order_paid"]').textContent.includes('号主'));
   const unknown=browser.document.querySelector('[data-order-id="order_complete"]').textContent;assert.ok(unknown.includes('待核'));assert.equal(unknown.includes('0.00'),false,'missing order amounts never become zero');
 });
 
@@ -125,13 +125,13 @@ test('user order records label old account sources and preserve denied resource 
 test('canonical registration is distinct from old-source trace, with seven business sections',async t=>{
   await mount(t,{path:'/users/user_normal'});await waitFor(()=>browser.document.querySelector('.ud-detail'));const header=browser.document.querySelector('.udv-user-header').textContent;
   assert.ok(header.includes('2026/09/24')||header.includes('2026-09-24'));assert.equal(header.includes('2019'),false,'old source timestamps never replace the declared registration date');
-  assert.deepEqual([...browser.document.querySelectorAll('[role="tab"]')].map(e=>e.textContent),['概览','订单记录','当前上架账号','会员与礼遇','信用','资金','账号安全']);
+  assert.deepEqual([...browser.document.querySelectorAll('[role="tab"]')].map(e=>e.textContent),['订单记录','当前上架账号','会员与礼遇','信用','资金','内部记录','账号安全']);
   await click(namedButton('账号安全'));await waitFor(()=>browser.document.querySelector('[role="region"][aria-label="账号安全"]')?.textContent.includes('88001'));
   assert.ok(browser.document.querySelector('[role="region"][aria-label="账号安全"]').textContent.includes('旧平台ID'));
 });
 
 test('section failure does not block user detail; main-object failure has retry and no detail facts',async t=>{
-  await mount(t,{path:'/users/user_normal?section=orders',ordersError:true});await waitFor(()=>browser.document.querySelector('.ud-message-error'));assert.ok(browser.document.querySelector('.ud-detail h1'));assert.ok(namedButton('概览'));assert.ok(namedButton('重试'));
+  await mount(t,{path:'/users/user_normal?section=orders',ordersError:true});await waitFor(()=>browser.document.querySelector('.ud-message-error'));assert.ok(browser.document.querySelector('.ud-detail h1'));assert.ok(namedButton('订单记录'));assert.ok(namedButton('重试'));
 });
 
 test('primary object failure never renders detail navigation or stale user facts',async t=>{
@@ -580,9 +580,10 @@ test('U-DETAIL-CLOSEOUT: rejected status=current names the dead condition, keeps
   assert.equal(orderRequests.filter(search => !search.includes('status=')).length, 0, 'the page never drops the condition and re-queries everything');
   assert.ok(orderRequests[0].includes('role=renter'), 'the supported role condition is preserved');
   assert.ok(browser.document.querySelector('[aria-label="订单状态"]'), 'the order record entry keeps its own controls');
-  assert.ok(browser.document.querySelector('[aria-label="本单身份"]'), 'the supported role control is still usable');
+  const roleFilter = browser.document.querySelector('[aria-label="交易方向"]') || browser.document.querySelector('[aria-label="本单身份"]');
+  assert.ok(roleFilter, 'the supported role control is still usable');
   assert.match(browser.document.querySelector('[aria-label="订单状态"]').textContent,/当前订单|进行中/,'a restored status shows its business label before the popup is opened');
-  assert.ok(browser.document.querySelector('[aria-label="本单身份"]').textContent.includes('租客'), 'a restored role never leaks its API enum as the label');
+  assert.ok(roleFilter.textContent.includes('租入') || roleFilter.textContent.includes('租客'), 'a restored role never leaks its API enum as the label');
   assert.ok(browser.location.search.includes('status=current'), 'the refused condition stays visible instead of being silently rewritten');
 });
 

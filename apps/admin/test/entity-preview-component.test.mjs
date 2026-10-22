@@ -58,6 +58,7 @@ const {
   AccountPreviewCard,
   OrderPreviewCard,
   EntityPreviewTrigger,
+  hasUsefulUserPreview,
 } = await vite.ssrLoadModule('/src/components/admin-preview/index.ts');
 const { OwnerHoverCard } = await vite.ssrLoadModule('/src/views/supply-accounts/owner-hover-card.tsx');
 
@@ -77,7 +78,7 @@ async function waitFor(check) {
   throw new Error('Entity preview condition timed out');
 }
 
-test('UserPreviewCard renders authentic owner summary with initial fallback, tags, and zero network calls', async (t) => {
+test('UserPreviewCard renders neutral authorized summary with initial fallback and no extra business detail request', async (t) => {
   let fetchCalled = false;
   globalThis.fetch = async () => {
     fetchCalled = true;
@@ -100,7 +101,6 @@ test('UserPreviewCard renders authentic owner summary with initial fallback, tag
           name: '凉介',
           userId: 'user_1e937dc575d8b73453',
           maskedPhone: '+86153****5095',
-          roleTag: '号主',
           canOpen: true,
           onOpen: () => { opened = true; },
           openLabel: '查看号主资料',
@@ -110,13 +110,13 @@ test('UserPreviewCard renders authentic owner summary with initial fallback, tag
   });
   await settle();
 
-  // 1. Zero requests made
-  assert.equal(fetchCalled, false, 'Preview rendering must make 0 network requests');
+  // This fixture has no avatar asset; opening the card never fetches business detail.
+  assert.equal(fetchCalled, false, 'Preview rendering must make no extra business detail request');
 
-  // 2. Name, roleTag, masked phone
+  // 2. Neutral name and masked phone, without a host relationship badge.
   const text = container.textContent;
   assert.ok(text.includes('凉介'), 'Renders user name');
-  assert.ok(text.includes('号主'), 'Renders custom role tag');
+  assert.equal(container.querySelector('[data-slot="badge"]'), null, 'user identity does not inherit a row relationship');
   assert.ok(text.includes('+86153****5095'), 'Renders masked phone');
   assert.equal(text.includes('user_1e937dc575d8b73453'), false, 'UUID is not displayed');
   assert.equal(text.includes('ID:'), false, 'UUID snippets do not add display noise');
@@ -148,7 +148,6 @@ test('UserPreviewCard handles missing phone and unauthorized downgrade gracefull
           name: '匿名用户',
           userId: undefined,
           maskedPhone: null,
-          roleTag: '买家',
           canOpen: false,
           deniedReason: '当前身份没有查看该用户权限。',
         })
@@ -159,7 +158,7 @@ test('UserPreviewCard handles missing phone and unauthorized downgrade gracefull
 
   const text = container.textContent;
   assert.ok(text.includes('匿名用户'));
-  assert.ok(text.includes('买家'));
+  assert.equal(container.querySelector('[data-slot="badge"]'), null, 'no relationship badge is supplied by the host');
   assert.equal(text.includes('脱敏联系方式未提供'), false, 'missing optional contact data adds no noise');
   assert.ok(text.includes('当前身份没有查看该用户权限'), 'Shows clear denied reason');
 
@@ -218,7 +217,7 @@ test('AccountPreviewCard displays numbers, title, known facts and omits speculat
   assert.equal(accountOpened, true);
 });
 
-test('OrderPreviewCard displays order state, role, counterparty and exact amount', async (t) => {
+test('OrderPreviewCard neutrally displays order state, renter, owner and exact amount', async (t) => {
   const container = browser.document.createElement('div');
   browser.document.body.appendChild(container);
   const root = createRoot(container);
@@ -236,8 +235,8 @@ test('OrderPreviewCard displays order state, role, counterparty and exact amount
           displayNo: 'ORD-20261022-001',
           status: 'PAID',
           statusLabel: '已支付',
-          role: 'renter',
-          counterpartyName: '号主老王',
+          renterName: '租客小李',
+          ownerName: '号主老王',
           title: '三角洲行动优质账号',
           createdAt: '2026-10-22 14:00',
           amountText: '本单应付 68.00 元',
@@ -253,8 +252,10 @@ test('OrderPreviewCard displays order state, role, counterparty and exact amount
   const text = container.textContent;
   assert.ok(text.includes('ORD-20261022-001'), 'Renders order display number');
   assert.ok(text.includes('已支付'), 'Renders status label');
-  assert.ok(text.includes('本单身份：租客'), 'Renders role');
-  assert.ok(text.includes('对方：@号主老王'), 'Renders counterparty');
+  assert.ok(text.includes('租客：租客小李'), 'Renders neutral renter name');
+  assert.ok(text.includes('号主：号主老王'), 'Renders neutral owner name');
+  assert.equal(text.includes('本单身份'), false, 'Subjective host role text removed');
+  assert.equal(text.includes('对方：@'), false, 'Subjective counterparty prefix removed');
   assert.ok(text.includes('本单应付 68.00 元'), 'Renders exact amount without alteration');
   assert.ok(text.includes('旧单'), 'Renders legacy order badge');
 
@@ -265,6 +266,77 @@ test('OrderPreviewCard displays order state, role, counterparty and exact amount
   });
   await settle();
   assert.equal(orderOpened, true);
+});
+
+test('UserPreviewCard renders membership, credit and risk facts when available', async (t) => {
+  const container = browser.document.createElement('div');
+  browser.document.body.appendChild(container);
+  const root = createRoot(container);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  await act(async () => {
+    root.render(
+      createElement(StrictMode, null,
+        createElement(UserPreviewCard, {
+          name: '高危VIP用户',
+          membershipTier: '黄金会员',
+          creditState: 'KNOWN',
+          creditScore: 85,
+          riskFlag: true,
+          accountStatus: '正常',
+        })
+      )
+    );
+  });
+  await settle();
+
+  const text = container.textContent;
+  assert.ok(text.includes('高危VIP用户'));
+  assert.ok(text.includes('会员：黄金会员'));
+  assert.ok(text.includes('信用分：85'));
+  assert.ok(text.includes('高危'));
+  assert.equal(text.includes('安全'), false, 'Unflagged or flagged must never say safe');
+});
+
+test('AccountPreviewCard displays haff, materials, term and login method neutrally without default tag', async (t) => {
+  const container = browser.document.createElement('div');
+  browser.document.body.appendChild(container);
+  const root = createRoot(container);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  await act(async () => {
+    root.render(
+      createElement(StrictMode, null,
+        createElement(AccountPreviewCard, {
+          accountId: 'acc_test_1',
+          displayNo: 'ACC-20261022-888',
+          title: '顶级全装账号',
+          gameName: '三角洲行动',
+          haffText: '1500万',
+          materialsText: '6级甲×2',
+          termText: '2天',
+          loginMethodText: '扫码登录',
+          sourceText: '本单快照',
+        })
+      )
+    );
+  });
+  await settle();
+
+  const text = container.textContent;
+  assert.ok(text.includes('ACC-20261022-888'));
+  assert.ok(text.includes('哈夫币：1500万'));
+  assert.ok(text.includes('6级甲×2'));
+  assert.ok(text.includes('租期：2天'));
+  assert.ok(text.includes('登录：扫码登录'));
+  assert.ok(text.includes('资料来源：本单快照'));
+  assert.equal(text.includes('本单账号'), false, 'Default tag 本单账号 must be removed');
 });
 
 test('OwnerHoverCard in supply view prevents event bubbling to row drawer', async (t) => {
@@ -315,6 +387,19 @@ test('OwnerHoverCard in supply view prevents event bubbling to row drawer', asyn
   assert.equal(rowClicked, false, 'Clicking trigger MUST NOT bubble to parent row container');
 });
 
+test('both callers share an objective preview gate and an empty supply summary preserves only its original link', async t => {
+  assert.equal(hasUsefulUserPreview({ name: '同名', image: null, maskedPhone: null, riskFlag: false }, '同名'), false);
+  assert.equal(hasUsefulUserPreview({ name: ' 同名 ', image: '', maskedPhone: ' ' }, '同名'), false);
+  assert.equal(hasUsefulUserPreview({ name: '当前新名', image: null, maskedPhone: null }, '历史旧名'), true);
+  const container = browser.document.createElement('div'); browser.document.body.append(container); const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  let opened = 0, rows = 0;
+  await act(async () => root.render(createElement('div', { onClick: () => rows++ }, createElement(OwnerHoverCard, { ownerName: '同名', ownerId: 'synthetic-owner-id', summary: { name: '同名', image: null, maskedPhone: null }, canOpen: true, onOpenOwner: () => opened++ }))));
+  assert.equal(container.querySelector('[aria-label^="预览号主"]'), null);
+  await act(async () => container.querySelector('button').dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })));
+  assert.equal(opened, 1); assert.equal(rows, 0);
+});
+
 test('explicit preview opens in the workspace portal and its copy and detail actions never open the row', async t => {
   const container = browser.document.createElement('div'); container.className = 'workspace-root'; browser.document.body.append(container);
   const root = createRoot(container);
@@ -328,6 +413,7 @@ test('explicit preview opens in the workspace portal and its copy and detail act
   await waitFor(() => container.querySelector('[data-slot="popover-content"][data-open]'));
   const popup = container.querySelector('[data-slot="popover-content"]');
   assert.equal(popup.closest('.workspace-root'), container);
+  assert.equal([...popup.querySelectorAll('[data-slot="badge"]')].some(badge => badge.textContent.trim() === '号主'), false, 'the shared user card does not inherit the supply row relationship');
   const copy = popup.querySelector('[aria-label^="复制用户"]');
   await act(async () => copy.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })));
   await waitFor(() => globalThis.__lastCopied === 'synthetic-owner-id');

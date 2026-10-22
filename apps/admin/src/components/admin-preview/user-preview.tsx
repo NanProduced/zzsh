@@ -10,18 +10,26 @@ export interface UserPreviewProps {
   userId?: string;
   image?: string | null;
   maskedPhone?: string | null;
-  roleTag?: string;
   accountStatus?: string | null;
   realNameStatus?: string | null;
+  membershipTier?: string | null;
+  creditScore?: number | null;
+  creditState?: 'KNOWN' | 'NOT_INITIALIZED' | 'DENIED' | 'OUT_OF_SCOPE' | string | null;
+  riskFlag?: boolean | null;
   canOpen?: boolean;
   onOpen?: () => void;
   openLabel?: string;
   deniedReason?: string;
 }
 
+export function hasUsefulUserPreview(summary: Pick<UserPreviewProps, 'name' | 'image' | 'maskedPhone'> | null | undefined, rowName: string): boolean {
+  return !!(summary?.image?.trim() || summary?.maskedPhone?.trim() || summary?.name?.trim() && summary.name.trim() !== rowName.trim());
+}
+
 /**
  * 用户基础预览卡片：只展示调用点已有的真实受权摘要。
- * 去除 UUID 长文本噪音，保留单动作复制 ID、业务角色标签和脱敏联系方式。
+ * 去除 UUID 长文本噪音，保留单动作复制 ID 和脱敏联系方式。
+ * 补充会员等级、信用分与内部高危标识；已知值才显示，未标记不称“安全”。
  */
 export function UserPreviewCard({
   name,
@@ -29,9 +37,12 @@ export function UserPreviewCard({
   userId,
   image,
   maskedPhone,
-  roleTag,
   accountStatus,
   realNameStatus,
+  membershipTier,
+  creditScore,
+  creditState,
+  riskFlag,
   canOpen,
   onOpen,
   openLabel = '查看用户资料',
@@ -53,15 +64,12 @@ export function UserPreviewCard({
             {name}
           </span>
           {userId ? <PreviewCopyButton value={userId} tooltip="复制用户 ID" /> : null}
-          {roleTag && (
-            <Badge variant="secondary" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">
-              {roleTag}
-            </Badge>
-          )}
         </div>
       </div>
     </>
   );
+
+  const hasCreditInfo = creditState || typeof creditScore === 'number';
 
   return (
     <PreviewCardShell
@@ -82,10 +90,33 @@ export function UserPreviewCard({
           <span>{maskedPhone}</span>
         </div>
       ) : null}
-      {currentName && currentName !== name ? <p>当前昵称：{currentName}</p> : null}
+      {currentName && currentName !== name ? (
+        <p className="text-[11px] text-muted-foreground">当前昵称：{currentName}</p>
+      ) : null}
 
-      {(accountStatus || realNameStatus) && (
+      {(membershipTier || hasCreditInfo) && (
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          {membershipTier && <span>会员：{membershipTier}</span>}
+          {membershipTier && hasCreditInfo && <span aria-hidden="true">·</span>}
+          {creditState === 'KNOWN' && typeof creditScore === 'number' ? (
+            <span>信用分：{creditScore}</span>
+          ) : creditState === 'NOT_INITIALIZED' ? (
+            <span>信用：未初始化</span>
+          ) : creditState === 'DENIED' || creditState === 'OUT_OF_SCOPE' ? (
+            <span>信用：无权限</span>
+          ) : typeof creditScore === 'number' ? (
+            <span>信用分：{creditScore}</span>
+          ) : null}
+        </div>
+      )}
+
+      {(accountStatus || realNameStatus || riskFlag === true) && (
         <div className="flex items-center gap-1.5 pt-0.5">
+          {riskFlag === true && (
+            <Badge variant="destructive" className="text-[10px] h-4 px-1 py-0 font-medium">
+              高危
+            </Badge>
+          )}
           {accountStatus && (
             <Badge variant="outline" className="text-[10px] h-4 px-1 py-0">
               {accountStatus}

@@ -134,8 +134,6 @@ const orderTab = (query) => ({ id: 'order:order_cancel', title: 'TEST-1003', pat
 
 test('user detail order link carries the origin user and the order page offers a return path', async (t) => {
   const h = await mount(t, userTab, snapshot(['user.directory.read', 'order.read']));
-  await waitFor(() => namedButton('查看订单记录'));
-  await click(namedButton('查看订单记录'));
   await waitFor(() => namedButton('TEST-1003'));
   await click(namedButton('TEST-1003'));
   assert.equal(h.opened.at(-1).path, '/orders/order_cancel?fromUserId=user_normal&fromUserSection=orders', 'order link carries the source user context');
@@ -237,8 +235,10 @@ test('phone lookup removes an older public search without persisting the phone',
 test('user detail section changes retain order and supply origin context', async (t) => {
   const origin = { fromOrderId: 'order_source', fromSupplyId: 'account_source', fromSupplyContext: 'archive', fromSupplyVersionId: 'version_source' };
   const h = await mount(t, { ...userTab, query: origin }, snapshot(['user.directory.read', 'order.read', 'supply.review.read']));
-  await waitFor(() => namedButton('查看订单记录'));
-  await click(namedButton('查看订单记录'));
+  await waitFor(() => namedButton('账号安全'));
+  await click(namedButton('账号安全'));
+  assert.deepEqual(h.queries.at(-1), { ...origin, section: 'security' });
+  await click(namedButton('订单记录'));
   assert.deepEqual(h.queries.at(-1), { ...origin, section: 'orders' }, 'detail sections still send partial query changes');
 });
 
@@ -251,11 +251,11 @@ test('clearing detail order filters through the workspace removes both request f
   });
   const origin = { fromOrderId: 'order_source', fromSupplyId: 'account_source', fromSupplyContext: 'archive' };
   const h = await mount(t, { ...userTab, query: { ...origin, section: 'orders', role: 'renter', status: 'current' } }, snapshot(['user.directory.read', 'order.read']));
-  await waitFor(() => reads.length && namedButton('本单身份'));
+  await waitFor(() => reads.length && namedButton('交易方向'));
   assert.equal(reads.at(-1).get('role'), 'renter');
   assert.equal(reads.at(-1).get('status'), 'current');
 
-  for (const [label, cleared] of [['本单身份', 'role'], ['订单状态', 'status']]) {
+  for (const [label, cleared] of [['交易方向', 'role'], ['订单状态', 'status']]) {
     const before = reads.length;
     await click(namedButton(label));
     const openOptions = () => [...browser.document.querySelectorAll('[data-slot="select-content"][data-open] [role="option"]')];
@@ -291,6 +291,8 @@ for (const transition of [
   });
   const actor = snapshot(['user.directory.read', 'user.identity.sensitive.read']);
   const h = await mount(t, userTab, actor);
+  await waitFor(() => namedButton('展开实名与联系方式'));
+  await click(namedButton('展开实名与联系方式'));
   await waitFor(() => namedButton('查看明文'));
   await click(namedButton('查看明文'));
   await waitFor(() => h.container.textContent.includes(disclosedPhone));
@@ -301,6 +303,8 @@ for (const transition of [
   assert.equal(calls.length, before, 'an inactive or locked surface must not start another business read or command');
 
   await h.replaceSnapshot(actor);
+  await waitFor(() => namedButton('展开实名与联系方式'));
+  await click(namedButton('展开实名与联系方式'));
   await waitFor(() => namedButton('查看明文'));
   assert.equal(h.container.textContent.includes(disclosedPhone), false, 'restoring the same session never restores disclosed plaintext');
   assert.equal(calls.filter(call => call.path.endsWith('/sensitive-profile')).length, 1, 'disclosure requires a fresh explicit click');
