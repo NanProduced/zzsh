@@ -13,6 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { InlineStatus } from "@/components/ui/badge";
+import { EntityPreviewEnabledContext } from "@/components/admin-preview/entity-preview-trigger";
 import { SupplyActionDialog, type ActionFeedback } from "./supply-review/action-bar";
 import { SupplyDetailPane } from "./supply-review/detail-pane";
 import { AccountCards, IdLine, KindHint, KindSelect, MoreFilters, QuickView, ReasonCell, RowActions, RowMenu, SavedViewsMenu, StatusBadge, TimeText, useSavedViews } from "./supply-accounts/account-list-parts";
@@ -82,7 +83,8 @@ const fail = (error: unknown) => error instanceof AdminApiError && error.status 
 export function SupplyListingReviewView(props: Props) {
     if (!hasPermission(props.snapshot, "supply.review.read"))
         return <p className="p-6 text-sm text-muted-foreground">没有账号供给读取权限，未读取对象数据。</p>;
-    return <SupplyWork key={[props.snapshot.adminUserId, props.snapshot.session.id, props.snapshot.security.isBoss, [...props.snapshot.permissions].sort().join(","), props.initialAccountId ?? "list"].join("|")} {...props}/>;
+    const previewEnabled = !props.snapshot.session.locked && props.snapshot.security.status === "ACTIVE" && !props.snapshot.security.passwordChangeRequired;
+    return <EntityPreviewEnabledContext.Provider value={previewEnabled}><SupplyWork key={[props.snapshot.adminUserId, props.snapshot.session.id, props.snapshot.security.isBoss, [...props.snapshot.permissions].sort().join(","), props.initialAccountId ?? "list"].join("|")} {...props}/></EntityPreviewEnabledContext.Provider>;
 }
 function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, initialQuery, onOpenPath, onQueryChange }: Props) {
     const identity = snapshot.adminUserId + "|" + snapshot.session.id, can = (permission: string) => hasPermission(snapshot, permission), saved = positions.get(identity);

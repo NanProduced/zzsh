@@ -12,6 +12,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Skeleton } from '@/components/ui/skeleton';
 import { ListTable, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/admin-list/list-table';
 import { ListPagination } from '@/components/admin-list/list-pagination';
+import { EntityPreviewTrigger, UserPreviewCard, AccountPreviewCard, OrderPreviewCard } from '@/components/admin-preview';
 import { restoreTabs, tabHref, tabFromLocation, type WorkspaceTab } from '@/workspace/tab-model';
 import { AdminApiError } from '../../api';
 import { PERMISSION, STATUS_LABEL, type Order, type Resource, type Audit, type User } from './user-directory-data';
@@ -44,9 +45,55 @@ function UserCollection({adapter,user,domain,filters={},refreshNonce,preview=fal
 
 function Orders({adapter,user,tab,refreshNonce,onOpenPath,onQueryChange,preview=false}:{adapter:UserDirectoryData;user:User;tab:WorkspaceTab;refreshNonce:number;onOpenPath:PageProps['onOpenPath'];onQueryChange:PageProps['onQueryChange'];preview?:boolean}) {
   const role=preview?'':tab.query.role??'',status=preview?'':tab.query.status??'';
-  return <section className="udv-block"><div className="udv-heading"><h2>{preview?'最近订单':'订单记录'}</h2>{preview?<Button variant="link" onClick={()=>onQueryChange({section:'orders'})}>查看订单记录<ArrowUpRightIcon size={14}/></Button>:<span className="udv-muted">按下单时间从新到旧</span>}</div>
-    {!preview?<div className="udv-filters"><Field label="本单身份" composite><Select items={{ALL:'全部',renter:'租客',owner:'号主'}} value={role||'ALL'} onValueChange={value=>onQueryChange({section:'orders',role:value&&value!=='ALL'?String(value):'',...(status?{status}:{})})}><SelectTrigger aria-label="本单身份"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="ALL">全部</SelectItem><SelectItem value="renter">租客</SelectItem><SelectItem value="owner">号主</SelectItem></SelectContent></Select></Field><Field label="订单状态" composite><Select items={{ALL:'全部',...ORDER_STATES}} value={status||'ALL'} onValueChange={value=>onQueryChange({section:'orders',...(role?{role}:{}),status:value&&value!=='ALL'?String(value):''})}><SelectTrigger aria-label="订单状态"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="ALL">全部</SelectItem>{Object.entries(ORDER_STATES).map(([key,label])=><SelectItem key={key} value={key}>{label}</SelectItem>)}</SelectContent></Select></Field></div>:null}
-    <UserCollection adapter={adapter} user={user} domain="orders" filters={{...(role?{role}:{}),...(status?{status}:{})}} refreshNonce={refreshNonce} preview={preview}>{rows=><ListTable empty={!rows.length ? "暂无符合条件的订单" : undefined}><Table><TableHeader><TableRow><TableHead>订单 / 下单时间</TableHead><TableHead>资源账号</TableHead><TableHead>本单身份 / 交易另一方</TableHead><TableHead>状态</TableHead><TableHead className="text-right">本单应付</TableHead></TableRow></TableHeader><TableBody>{(rows as Order[]).map(order=><TableRow key={order.orderId} data-order-id={order.orderId}><TableCell><Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/orders/${order.orderId}`,order.displayNo)}>{order.displayNo}<ArrowUpRightIcon size={13}/></Button><small>{time(order.createdAt)}</small>{order.source?.origin==='LEGACY'?<small>旧平台订单</small>:null}</TableCell><TableCell>{order.accountId?<Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/supply/accounts/${order.accountId}`,`账号 ${order.accountDisplayNo??''}`)}>{order.accountDisplayNo??'查看账号'}</Button>:<span>{order.accountDisplayNo===null?'账号信息受限':order.accountDisplayNo?.trim()?(/^\d+$/.test(order.accountDisplayNo)?'旧来源号 '+order.accountDisplayNo:order.accountDisplayNo):'账号编号待核'}</span>}</TableCell><TableCell><Badge variant="outline">{order.role==='renter'?'租客':'号主'}</Badge><small>{order.counterpartyUserId?<Button variant="link" className="udv-link" onClick={()=>onOpenPath(`/users/${order.counterpartyUserId}?fromOrderId=${order.orderId}`,order.counterpartyName)}>{order.counterpartyName||'昵称未设置'}<ArrowUpRightIcon size={13}/></Button>:order.counterpartyName||'昵称未设置'}</small></TableCell><TableCell><Badge variant={order.status==='PAID'?'success':order.status==='PENDING_PAYMENT'?'warning':'outline'}>{ORDER_STATES[order.status]??'状态待核'}</Badge>{order.payment?.state==='RECORDED_PAID'?<small>支付已记录</small>:null}{order.status==='CANCELLED'&&order.paidAt?<small>付款后取消 · {time(order.paidAt)}</small>:null}{['PAID','COMPLETED'].includes(order.status)&&!order.paidAt?<small>支付时间待确认</small>:null}{order.cancelReason?<small>{order.cancelReason}{order.cancelledAt?' · '+time(order.cancelledAt):''}</small>:null}</TableCell><TableCell className="text-right tabular-nums">{order.amounts.totalDue?`${order.amounts.totalDue.amount} 元`:'待核'}<small>资源 {order.amounts.rental?.amount??'待核'} · 押金 {order.amounts.deposit?.amount??'待核'}</small></TableCell></TableRow>)}</TableBody></Table></ListTable>}</UserCollection>
+  return <section className="udv-block">
+    <div className="udv-heading"><h2>{preview?'最近订单':'订单记录'}</h2>{preview?<Button variant="link" onClick={()=>onQueryChange({section:'orders'})}>查看订单记录<ArrowUpRightIcon size={14}/></Button>:<span className="udv-muted">按下单时间从新到旧</span>}</div>
+    {!preview?<div className="udv-filters">
+      <Field label="本单身份" composite><Select items={{ALL:'全部',renter:'租客',owner:'号主'}} value={role||'ALL'} onValueChange={value=>onQueryChange({section:'orders',role:value&&value!=='ALL'?String(value):'',...(status?{status}:{})})}><SelectTrigger aria-label="本单身份"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="ALL">全部</SelectItem><SelectItem value="renter">租客</SelectItem><SelectItem value="owner">号主</SelectItem></SelectContent></Select></Field>
+      <Field label="订单状态" composite><Select items={{ALL:'全部',...ORDER_STATES}} value={status||'ALL'} onValueChange={value=>onQueryChange({section:'orders',...(role?{role}:{}),status:value&&value!=='ALL'?String(value):''})}><SelectTrigger aria-label="订单状态"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="ALL">全部</SelectItem>{Object.entries(ORDER_STATES).map(([key,label])=><SelectItem key={key} value={key}>{label}</SelectItem>)}</SelectContent></Select></Field>
+    </div>:null}
+    <UserCollection adapter={adapter} user={user} domain="orders" filters={{...(role?{role}:{}),...(status?{status}:{})}} refreshNonce={refreshNonce} preview={preview}>
+      {rows=><ListTable empty={!rows.length ? "暂无符合条件的订单" : undefined}><Table>
+        <TableHeader><TableRow><TableHead>订单 / 下单时间</TableHead><TableHead>资源账号</TableHead><TableHead>本单身份 / 交易另一方</TableHead><TableHead>状态</TableHead><TableHead className="text-right">本单应付</TableHead></TableRow></TableHeader>
+        <TableBody>{(rows as Order[]).map(order=>{
+          const openOrder=()=>onOpenPath('/orders/'+encodeURIComponent(order.orderId),order.displayNo);
+          const openAccount=()=>onOpenPath('/supply/accounts/'+encodeURIComponent(order.accountId!), '账号 '+(order.accountDisplayNo??''));
+          const openCounterparty=()=>onOpenPath('/users/'+encodeURIComponent(order.counterpartyUserId!)+'?fromOrderId='+encodeURIComponent(order.orderId),order.counterpartyName);
+          const canAccount=adapter.has(PERMISSION.resources);
+          const canDirectory=adapter.has('user.directory.read');
+          const summary=canDirectory?order.counterpartySummary:undefined;
+          const counterparty=order.counterpartyName||summary?.name||'昵称未设置';
+          return <TableRow key={order.orderId} data-order-id={order.orderId}>
+            <TableCell>
+              <EntityPreviewTrigger touchLabel={'预览订单 '+order.displayNo}
+                trigger={<Button variant="link" className="udv-link" onClick={openOrder}>{order.displayNo}<ArrowUpRightIcon size={13}/></Button>}
+                content={<OrderPreviewCard orderId={order.orderId} displayNo={order.displayNo} status={order.status}
+                  statusLabel={ORDER_STATES[order.status]??'状态待核'} title={order.title} role={order.role} counterpartyName={order.counterpartyName}
+                  createdAt={time(order.createdAt)} amountText={'本单应付 '+(order.amounts.totalDue?order.amounts.totalDue.amount+' 元':'待核')}
+                  sourceOrigin={order.source?.origin} canOpen onOpen={openOrder}/>}
+              />
+              <small>{time(order.createdAt)}</small>{order.source?.origin==='LEGACY'?<small>旧平台订单</small>:null}
+            </TableCell>
+            <TableCell>
+              {order.accountId?<EntityPreviewTrigger touchLabel={'预览账号 '+(order.accountDisplayNo??'')}
+                trigger={<Button variant="link" className="udv-link" aria-disabled={!canAccount} onClick={()=>{if(canAccount)openAccount();}}>{order.accountDisplayNo??'查看账号'}</Button>}
+                content={<AccountPreviewCard accountId={order.accountId} displayNo={order.accountDisplayNo} title={order.title}
+                  tag="本单账号" canOpen={canAccount} onOpen={canAccount?openAccount:undefined}/>}
+              />:<span>{order.accountDisplayNo===null?'账号信息受限':order.accountDisplayNo?.trim()?(/^\d+$/.test(order.accountDisplayNo)?'旧来源号 '+order.accountDisplayNo:order.accountDisplayNo):'账号编号待核'}</span>}
+            </TableCell>
+            <TableCell><Badge variant="outline">{order.role==='renter'?'租客':'号主'}</Badge><small>
+              {order.counterpartyUserId&&summary?<EntityPreviewTrigger touchLabel={'预览用户 '+counterparty}
+                trigger={<Button variant="link" className="udv-link" onClick={openCounterparty}>{counterparty}<ArrowUpRightIcon size={13}/></Button>}
+                content={<UserPreviewCard name={counterparty} currentName={summary.name} userId={order.counterpartyUserId}
+                  image={summary.image} maskedPhone={summary.maskedPhone} roleTag={order.role==='renter'?'号主':'租客'}
+                  canOpen onOpen={openCounterparty}/>}
+              />:order.counterpartyUserId&&canDirectory?<Button variant="link" className="udv-link" onClick={openCounterparty}>{counterparty}<ArrowUpRightIcon size={13}/></Button>:counterparty}
+            </small></TableCell>
+            <TableCell><Badge variant={order.status==='PAID'?'success':order.status==='PENDING_PAYMENT'?'warning':'outline'}>{ORDER_STATES[order.status]??'状态待核'}</Badge>{order.payment?.state==='RECORDED_PAID'?<small>支付已记录</small>:null}{order.status==='CANCELLED'&&order.paidAt?<small>付款后取消 · {time(order.paidAt)}</small>:null}{['PAID','COMPLETED'].includes(order.status)&&!order.paidAt?<small>支付时间待确认</small>:null}{order.cancelReason?<small>{order.cancelReason}{order.cancelledAt?' · '+time(order.cancelledAt):''}</small>:null}</TableCell>
+            <TableCell className="text-right tabular-nums">{order.amounts.totalDue?order.amounts.totalDue.amount+' 元':'待核'}<small>资源 {order.amounts.rental?.amount??'待核'} · 押金 {order.amounts.deposit?.amount??'待核'}</small></TableCell>
+          </TableRow>;
+        })}</TableBody>
+      </Table></ListTable>}
+    </UserCollection>
   </section>;
 }
 

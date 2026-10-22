@@ -4,7 +4,7 @@ import type { PoolClient } from "pg";
 import type { EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { queryAdminReadOrders } from "../order/admin-order-read";
-import { maskPhoneNumber } from "../auth/user-directory";
+import { readDirectoryUserSummaries } from "../auth/user-directory-summary";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
@@ -201,19 +201,6 @@ async function guaranteeFactsBatch(client: PoolClient, accountIds: string[]) {
     return result;
 }
 
-/** 号主下钻所需的脱敏资料；无 user.directory.read 时整块不返回。 */
-async function ownerSummaryBatch(client: PoolClient, userIds: string[]) {
-    if (!userIds.length)
-        return new Map<string, { name: string; image: string | null; maskedPhone: string | null }>();
-    const rows = (await client.query<{
-        id: string;
-        name: string;
-        image: string | null;
-        phone: string | null;
-    }>(`SELECT id,name,image,"phoneNumber" AS phone FROM zzsh_auth_user."user" WHERE id=ANY($1::text[])`, [userIds])).rows;
-    return new Map(rows.map(row => [row.id, { name: row.name, image: row.image, maskedPhone: maskPhoneNumber(row.phone) }]));
-}
-
 /**
  * 要求轴跟随当前启用机制：gate 快照带 creditGuarantee 时，信用/覆盖关系才是
  * 本账号的现行要求（旧固定政策的 NOT_REQUIRED 不能顶替它）；信用上下文未知、
@@ -333,11 +320,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     // inventing a cheaper, divergent eligibility rule in a SQL list projection.
     const guarantees = await guaranteeFactsBatch(client, visible.map(row => row.id));
     const canDirectory = viewer.access.permissions.has("user.directory.read");
-    const owners = canDirectory ? await ownerSummaryBatch(client, [...new Set(visible.map(row => row.ownerId))]) : new Map<string, {
-        name: string;
-        image: string | null;
-        maskedPhone: string | null;
-    }>();
+    const owners = await readDirectoryUserSummaries(client, visible.map(row => row.ownerId), viewer.access.permissions);
     // publicationBlockers already invokes the gate for every row with a current
     // version, so recording its result costs no extra read.
     const gates = new Map<string, SupplyGate>();

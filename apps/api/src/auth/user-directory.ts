@@ -11,6 +11,8 @@ import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/l
 import { readUserDirectoryBusinessSummaries } from "./user-directory-business-summary";
 import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTORY_WALLET_SORT_JOINS, DIRECTORY_WALLET_SORT_KEY } from "./user-directory-wallet";
 import { readKnownMembershipTiers, DIRECTORY_MEMBERSHIP_TIERS, type DirectoryMembershipTierFilter } from "./user-directory-membership";
+import { maskPhoneNumber, readDirectoryUserSummaries } from "./user-directory-summary";
+export { maskPhoneNumber } from "./user-directory-summary";
 
 export const USER_DIRECTORY_SOURCE = {
   LOCAL: "LOCAL",
@@ -47,16 +49,6 @@ const LEGACY_PROVIDER = "legacy_mysql_restore";
 
 /** Synthetic addresses produced by phone registration / migration / anonymization are not contact facts. */
 const SYNTHETIC_EMAIL = /@(phone\.zzsh\.invalid|anonymized\.invalid)$/i;
-
-export function maskPhoneNumber(phone: string | null): string | null {
-  if (!phone) return null;
-  const compact = phone.trim();
-  if (compact.length === 0) return null;
-  if (compact.length <= 4) return "****";
-  const head = compact.startsWith("+86") ? compact.slice(0, 6) : compact.slice(0, 3);
-  const tail = compact.slice(-4);
-  return `${head}****${tail}`;
-}
 
 export function maskEmail(email: string | null): string | null {
   if (!email) return null;
@@ -100,6 +92,7 @@ function encodeKeysetCursor(filterKey: string, row: { sortAt: string | null; id:
 export type AdminDirectoryViewer = {
   adminId: string;
   isBoss: boolean;
+  permissions?: ReadonlySet<string>;
   phoneLookup: boolean;
   resourceRead?: boolean;
   orderRead?: boolean;
@@ -867,6 +860,7 @@ type UserOrderRow = {
   depositAmountCents: string;
   currency: string;
   counterpartyName: string;
+  counterpartyUserId: string;
   createdAt: string;
   holdUntil: string;
   paidAt: string | null;
@@ -934,6 +928,7 @@ export async function listUserOrders(
     )
   ).rows;
   const items = rows.slice(0, filter.limit);
+  const counterparties = await readDirectoryUserSummaries(client, items.map(row => row.counterpartyUserId), viewer.permissions);
   const hasMore = rows.length > filter.limit;
   const last = items.at(-1);
   const toYuan = (cents: string) => {
@@ -952,7 +947,8 @@ export async function listUserOrders(
       title: row.title,
       gameId: row.gameId,
       counterpartyName: row.counterpartyName,
-      counterpartyUserId: (row as UserOrderRow & {counterpartyUserId:string}).counterpartyUserId,
+      counterpartyUserId: row.counterpartyUserId,
+      ...(counterparties.has(row.counterpartyUserId) ? { counterpartySummary: counterparties.get(row.counterpartyUserId)! } : {}),
       amounts: {
         rental: { currency: row.currency, unit: "yuan", amount: toYuan(row.rentalAmountCents), scale: 2 },
         deposit: { currency: row.currency, unit: "yuan", amount: toYuan(row.depositAmountCents), scale: 2 },
@@ -992,8 +988,7 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
     const records=(await client.query<{origin:string;id:string;record:Record<string,unknown>}>(`WITH all_orders AS(${orderReadRelation(continuationReady,false,{nativeIds:'$1',legacyIds:'$2'})}) SELECT x.origin,x.id,x.record FROM all_orders x`,recordValues)).rows;
     for(const row of records)recordsByKey.set(`${row.origin}\u0000${row.id}`,row.record);
   }
-  return {
-    items:items.map(row=>{
+  const projected=items.map(row=>{
       const record=recordsByKey.get(`${row.origin}\u0000${row.id}`);
       if(!record)throw notFound();
       const order=projectAdminReadOrder(row.origin,record,{adminId:viewer.adminId,isBoss:viewer.isBoss,internalQuote:false,authorizationKey:viewer.authorizationKey??''});
@@ -1005,7 +1000,11 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
         createdAt:order.createdAt,paidAt:order.paidAt,cancelledAt:order.cancelledAt,cancelReason:order.cancelReason,
         holdUntil:order.holdUntil,expiredAwaitingCancel:order.expiredAwaitingCancel,
         payment:order.payment,source:order.source};
-    }),nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit,
+    });
+  const counterparties=await readDirectoryUserSummaries(client,projected.flatMap(row=>typeof row.counterpartyUserId==='string'?[row.counterpartyUserId]:[]),viewer.permissions);
+  return {
+    items:projected.map(row=>({...row,...(counterparties.has(row.counterpartyUserId)?{counterpartySummary:counterparties.get(row.counterpartyUserId)!}:{})})),
+    nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit,
   };
 }
 

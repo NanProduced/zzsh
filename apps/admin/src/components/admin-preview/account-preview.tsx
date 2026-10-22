@@ -35,9 +35,9 @@ export function AccountPreviewCard({
   canOpen,
   onOpen,
   openLabel = '查看账号详情',
-  deniedReason = '当前身份没有该账号读取授权或该行未开放下钻，未读取完整资料。',
+  deniedReason = '无查看权限',
 }: AccountPreviewProps) {
-  const numberText = displayNo?.trim() || (accountId ? `账号 ${accountId.slice(0, 8)}…` : '编号待核');
+  const numberText = displayNo?.trim() || '账号编号待核';
 
   const header = (
     <>
@@ -57,8 +57,7 @@ export function AccountPreviewCard({
         </div>
         {(displayNo || accountId) && (
           <div className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono">
-            <span className="truncate">编号复制</span>
-            <PreviewCopyButton value={displayNo || accountId || ''} tooltip="复制账号编号" />
+            <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />
           </div>
         )}
       </div>
@@ -109,7 +108,7 @@ export function AccountPreviewCard({
           )}
           {facts.reviewState && (
             <Badge variant="outline" className="text-[10px] h-4 px-1 py-0">
-              {facts.reviewState === 'APPROVED' ? '已发布' : facts.reviewState}
+              {({APPROVED:'审核通过',PENDING:'待审核',REJECTED:'已驳回',DRAFT:'草稿'} as Record<string,string>)[facts.reviewState] ?? '审核状态待核'}
             </Badge>
           )}
         </div>

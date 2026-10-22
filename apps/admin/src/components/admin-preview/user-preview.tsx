@@ -6,6 +6,7 @@ import { PreviewCardShell, PreviewCopyButton, PreviewFooterAction } from './prev
 
 export interface UserPreviewProps {
   name: string;
+  currentName?: string;
   userId?: string;
   image?: string | null;
   maskedPhone?: string | null;
@@ -24,6 +25,7 @@ export interface UserPreviewProps {
  */
 export function UserPreviewCard({
   name,
+  currentName,
   userId,
   image,
   maskedPhone,
@@ -33,7 +35,7 @@ export function UserPreviewCard({
   canOpen,
   onOpen,
   openLabel = '查看用户资料',
-  deniedReason = '当前身份没有该用户目录读取授权或该行未开放下钻，未读取用户资料。',
+  deniedReason = '无查看权限',
 }: UserPreviewProps) {
   const initial = name.trim().slice(0, 1) || '用';
 
@@ -50,20 +52,13 @@ export function UserPreviewCard({
           <span className="font-semibold text-sm text-foreground truncate" title={name}>
             {name}
           </span>
+          {userId ? <PreviewCopyButton value={userId} tooltip="复制用户 ID" /> : null}
           {roleTag && (
             <Badge variant="secondary" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">
               {roleTag}
             </Badge>
           )}
         </div>
-        {userId && (
-          <div className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono">
-            <span className="truncate" title={`ID: ${userId}`}>
-              ID: {userId.length > 16 ? `${userId.slice(0, 8)}…${userId.slice(-4)}` : userId}
-            </span>
-            <PreviewCopyButton value={userId} tooltip="复制用户 ID" />
-          </div>
-        )}
       </div>
     </>
   );
@@ -86,11 +81,8 @@ export function UserPreviewCard({
           <Phone className="size-3 text-muted-foreground shrink-0" aria-hidden="true" />
           <span>{maskedPhone}</span>
         </div>
-      ) : (
-        <div className="text-[11px] text-muted-foreground">
-          脱敏联系方式未提供
-        </div>
-      )}
+      ) : null}
+      {currentName && currentName !== name ? <p>当前昵称：{currentName}</p> : null}
 
       {(accountStatus || realNameStatus) && (
         <div className="flex items-center gap-1.5 pt-0.5">

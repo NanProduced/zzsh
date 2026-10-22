@@ -5,6 +5,9 @@ import { Button } from '@/components/ui/button';
 import { Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+// Reset preview overlays at the session boundary without remounting business forms.
+export const EntityPreviewEnabledContext = React.createContext(true);
+
 export interface EntityPreviewTriggerProps {
   trigger: React.ReactElement;
   content: React.ReactNode;
@@ -33,6 +36,8 @@ export function EntityPreviewTrigger({
   className,
   enableTouchButton = true,
 }: EntityPreviewTriggerProps) {
+  const enabled = React.useContext(EntityPreviewEnabledContext);
+  if (!enabled) return trigger;
   return (
     <span className={cn('inline-flex items-center gap-0.5 group/preview', className)}>
       <HoverCard>
@@ -59,7 +64,7 @@ export function EntityPreviewTrigger({
                 size="icon-xs"
                 aria-label={touchLabel}
                 onClick={(e) => e.stopPropagation()}
-                className="size-5 p-0 text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 cursor-pointer sm:opacity-0 sm:group-hover/preview:opacity-80 sm:focus-visible:opacity-100 transition-opacity"
+                className="size-5 p-0 text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 cursor-pointer [@media(hover:hover)_and_(pointer:fine)]:opacity-0 [@media(hover:hover)_and_(pointer:fine)]:group-hover/preview:opacity-80 focus-visible:opacity-100 transition-opacity"
               >
                 <Info className="size-3" aria-hidden="true" />
               </Button>

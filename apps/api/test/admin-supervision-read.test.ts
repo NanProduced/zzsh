@@ -244,7 +244,7 @@ const summaryDetail = {
     },
 };
 function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean } = {}) {
-    const sql: string[] = [];
+    const sql: string[] = [], ownerRequests: unknown[][] = [];
     const client = { query: async (text: string, values?: unknown[]) => {
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
@@ -257,12 +257,13 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
         if (text.includes("account_guarantee_proof")) return { rows: options.proof === undefined ? [] : [options.proof] };
         if (text.includes('FROM zzsh_auth_user."user" WHERE id=ANY')) {
             if (!options.users) throw Error("owner summary must not be read without user.directory.read");
+            ownerRequests.push(values ?? []);
             return { rows: [{ id: "u-1", name: "阿洛", image: "https://cdn.example/avatar.png", phone: "13800138000" }, { id: "u-2", name: "阿洛乙", image: null, phone: null }] };
         }
         return { rows: [], rowCount: 0 };
     }, } as never;
     const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(viewerPermissions) } };
-    return { sql, client, viewer };
+    return { sql, client, viewer, ownerRequests };
 }
 
 /** Mirrors the real quote projection: a public viewer never receives internal owner amounts. */
@@ -323,6 +324,8 @@ test("list summary gates internal amounts and owner contact projection behind th
     assert.equal(first.ownerLink.state, "READY");
     assert.equal(first.ownerSummary.maskedPhone, "138****8000", "only the existing masked projection leaves the server");
     assert.equal(second.ownerSummary.maskedPhone, null);
+    assert.deepEqual(internal.ownerRequests, [[['u-1','u-2']]], "the shared user reader is one batch for visible owners");
+    assert.deepEqual(Object.keys(first.ownerSummary).sort(), ['image','maskedPhone','name']);
     assert.equal(second.summary.guarantee.requirement, null, "no policy row means 未提供, not 0");
     assert.equal(second.summary.guarantee.requirementSource, "UNAVAILABLE");
 });

@@ -5,7 +5,8 @@ import { listUserDirectory,readUserDirectoryDetail,listUserRentalAccounts,listUs
 import { handleUserDirectoryAdmin } from '../src/auth/user-directory-routes';
 import { handleAdminBff, type AdminBffOptions } from '../src/bff/admin-bff';
 import { sanitizeDetail } from '../src/auth/admin-audit';
-import { DirectorySqlFixture,directorySecurityFixture } from './user-directory-fixtures';
+import { DirectorySqlFixture,directorySecurityFixture,fixtureOrderRows } from './user-directory-fixtures';
+import { readDirectoryUserSummaries } from '../src/auth/user-directory-summary';
 
 const viewer:AdminDirectoryViewer={adminId:'admin-fixture',isBoss:false,phoneLookup:true,resourceRead:true,orderRead:true,auditRead:true,authorizationKey:'scope-one'};
 const client=(pool:DirectorySqlFixture)=>pool as unknown as PoolClient;
@@ -140,6 +141,40 @@ test('order snapshots retain paid cancellation and missing paid timestamps; inte
   assert.ok(pool.queries.at(-1)!.sql.includes('sgame."game_id" = o.game_id'));
 });
 
+test('current user summaries require explicit directory permission, batch stable IDs and contain only masked fields',async()=>{
+  const queries:{sql:string;values:unknown[]}[]=[];
+  const c={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});return {rows:[{id:'u1',name:'当前昵称',image:'https://example.test/avatar.png',phone:'+8613800138000',identityNumber:'fixture-private',availableCents:'999'}]};}} as unknown as PoolClient;
+  for(const permissions of [undefined,new Set<string>()])assert.equal((await readDirectoryUserSummaries(c,['u1'],permissions)).size,0);
+  const allowed=new Set(['user.directory.read']);
+  assert.equal((await readDirectoryUserSummaries(c,[],allowed)).size,0);assert.equal(queries.length,0);
+  const summaries=await readDirectoryUserSummaries(c,['u1','u1','missing'],allowed);
+  assert.equal(queries.length,1);assert.deepEqual(queries[0]!.values,[['u1','missing']]);
+  assert.match(queries[0]!.sql,/WHERE id=ANY\(\$1::text\[\]\)/);
+  assert.deepEqual(summaries.get('u1'),{name:'当前昵称',image:'https://example.test/avatar.png',maskedPhone:'+86138****8000'});
+  assert.equal(summaries.has('missing'),false);
+  assert.equal(JSON.stringify([...summaries.values()]).includes('fixture-private'),false);
+  assert.equal(JSON.stringify([...summaries.values()]).includes('999'),false);
+});
+
+test('native order summaries read only page counterparties and never change the order projection or cursor',async()=>{
+  const queries:{sql:string;values:unknown[]}[]=[],rows=fixtureOrderRows.slice(0,3).map((row,index)=>({...row,counterpartyName:'订单显示名',counterpartyUserId:index===2?'lookahead-user':'current-user'}));
+  const c={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});
+    if(sql.includes('WHERE id=ANY'))return {rows:[{id:'current-user',name:'当前昵称',image:null,phone:'13800138000'}]};
+    return {rows};}} as unknown as PoolClient;
+  const before:any=await listUserOrders(c,viewer,'user_dual',{limit:2});
+  assert.equal(queries.length,1);assert.equal('counterpartySummary' in before.items[0],false);
+  queries.length=0;
+  const after:any=await listUserOrders(c,{...viewer,permissions:new Set(['user.directory.read'])},'user_dual',{limit:2});
+  assert.equal(queries.length,2);assert.deepEqual(queries[1]!.values,[['current-user']]);
+  assert.deepEqual(after.items.map(({counterpartySummary,...row}:any)=>row),before.items);assert.equal(after.nextCursor,before.nextCursor);
+  assert.deepEqual(after.items[0].counterpartySummary,{name:'当前昵称',image:null,maskedPhone:'138****8000'});
+  assert.equal(after.items[0].counterpartyName,'订单显示名');assert.equal(after.items.length,2);
+  queries.length=0;
+  await listUserOrders(c,{...viewer,permissions:new Set()},'user_dual',{limit:2});assert.equal(queries.length,1);
+  const empty={query:async()=>({rows:[]})} as unknown as PoolClient;
+  assert.deepEqual(await listUserOrders(empty,{...viewer,permissions:new Set(['user.directory.read'])},'user_dual',{limit:2}),{items:[],nextCursor:null,limit:2});
+});
+
 test('audit retains existing Boss/self object scope and sensitive detail sanitation',async()=>{
   const pool=new DirectorySqlFixture();const self:any=await listUserAuditEvents(client(pool),viewer,'user_normal',{limit:20},sanitizeDetail);
   assert.equal(self.scope,undefined);assert.equal(self.items[0].details.phoneNumber,undefined);
@@ -152,6 +187,17 @@ test('directory permission does not grant supply/audit, while order core read is
   for(const section of ['rental-accounts','audit-events']) {const response=await route(`/api/v1/admin/users/user_normal/${section}`,pool);assert.equal(response.status,403);}
   assert.equal((await route('/api/v1/admin/users/user_normal/orders',pool)).status,200);
   const list=await route('/api/v1/admin/users',pool);assert.equal(list.status,200);assert.equal(list.body.items[0].resourceSummary.state,'denied');
+});
+
+test('the user-order route forwards its authenticated directory capability to the inline summary',async()=>{
+  const pool=new DirectorySqlFixture();pool.permissions=['user.directory.read'];
+  const result=await route('/api/v1/admin/users/user_dual/orders?limit=2',pool);
+  assert.equal(result.status,200);
+  assert.deepEqual(result.body.items[0].counterpartySummary,{name:'林舟',image:null,maskedPhone:'+86188****1101'});
+  assert.equal(result.body.items[0].counterpartyName,'另一方样本');assert.equal('accountId' in result.body.items[0],false);
+  const summaries=pool.queries.filter(query=>query.sql.includes('SELECT id,name,image,"phoneNumber" AS phone'));
+  assert.equal(summaries.length,1);assert.deepEqual(summaries[0]!.values,[['user_normal','user_dual']]);
+  assert.equal(JSON.stringify(result.body).includes('+8618800001101'),false);
 });
 
 test('phone lookup is read-only POST/body, independently authorized, mirrored by same-origin BFF',async()=>{
@@ -374,6 +420,7 @@ test('mixed user orders expand only page keys, preserve source collisions and us
   const native={id:'same-id',display_no:'NEW-SAME',status:'PAID',rental_amount_cents:'700',deposit_amount_cents:'300',currency:'CNY',owner_user_id:'native-owner',renter_user_id:'user_normal',owner_name:'Native Owner',renter_name:'Renter',account_id:'native-account',game_id:'delta',quote_snapshot:{schemaVersion:1,currency:'CNY',lines:[],resourceTotal:quoteAmount('7.00'),tenantDeposit:quoteAmount('3.00'),ownerTotal:quoteAmount('7.00'),platformFullProfit:quoteAmount('0.00'),termSeconds:'86400',unitAmountsInformational:true,expiryDisclosures:[]},created_at:at,hold_until:at,paid_at:at,cancelled_at:null,cancel_reason:null};
   const c={query:async(sql:string,values:unknown[]=[])=>{
     queries.push({sql,values});
+    if(sql.includes('SELECT id,name,image,"phoneNumber" AS phone'))return {rows:[{id:'user_dual',name:'当前昵称',image:null,phone:'13800138000'}]};
     if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true}]};
     if(sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x'))return {rows:[{origin:'NATIVE',id:'same-id',record:native},{origin:'LEGACY',id:'same-id',record:legacy}]};
     return {rows:head};
@@ -387,6 +434,12 @@ test('mixed user orders expand only page keys, preserve source collisions and us
   await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'any',status:'current',limit:2,cursor:page.nextCursor});
   const nextKeys=queries.at(-2)!;assert.equal(nextKeys.values[3],at);assert.equal(nextKeys.values[4],'same-id');assert.equal(nextKeys.values.at(-1),3);
   assert.match(nextKeys.sql,/ORDER BY x\.created_at DESC NULLS LAST,x\.id DESC/);assert.ok(!nextKeys.sql.includes(' AS record'));
+  queries.length=0;
+  const summaryPage:any=await listUserOrders(c,{...viewer,legacyRead:true,permissions:new Set(['user.directory.read'])},'user_normal',{role:'any',status:'current',limit:2});
+  assert.equal(queries.length,4);assert.deepEqual(queries.at(-1)!.values,[['user_dual','native-owner']]);
+  assert.deepEqual(summaryPage.items.map(({counterpartySummary,...row}:any)=>row),page.items);assert.equal(summaryPage.nextCursor,page.nextCursor);
+  assert.equal(summaryPage.items[0].counterpartyName,'Renter');assert.equal(summaryPage.items[0].counterpartySummary.name,'当前昵称');
+  assert.equal('counterpartySummary' in summaryPage.items[1],false,'missing current user does not invent or replace a stable association');
 });
 
 test('empty mixed user-order pages skip records and a missing selected record never falls back to full projection',async()=>{
@@ -394,7 +447,7 @@ test('empty mixed user-order pages skip records and a missing selected record ne
   const c={query:async(sql:string)=>{queries.push(sql);if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:false}]};
     if(sql.includes('SELECT x.origin,x.id,x.record FROM all_orders x'))return {rows:[]};
     return {rows:populated?[{origin:'LEGACY',id:'missing',role:'renter',sortAt:'0001-01-01T00:00:00.000000Z'}]:[]};}} as unknown as PoolClient;
-  const empty:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'renter',status:'current',limit:5});
+  const empty:any=await listUserOrders(c,{...viewer,legacyRead:true,permissions:new Set(['user.directory.read'])},'user_normal',{role:'renter',status:'current',limit:5});
   assert.deepEqual(empty,{items:[],nextCursor:null,limit:5});assert.equal(queries.length,2);
   populated=true;queries.length=0;
   await assert.rejects(listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{role:'renter',status:'current',limit:5}),{status:404});

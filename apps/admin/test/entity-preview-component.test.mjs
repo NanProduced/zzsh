@@ -72,6 +72,11 @@ async function settle() {
   });
 }
 
+async function waitFor(check) {
+  for (let tries = 0; tries < 100; tries++) { if (check()) return; await settle(); }
+  throw new Error('Entity preview condition timed out');
+}
+
 test('UserPreviewCard renders authentic owner summary with initial fallback, tags, and zero network calls', async (t) => {
   let fetchCalled = false;
   globalThis.fetch = async () => {
@@ -113,7 +118,9 @@ test('UserPreviewCard renders authentic owner summary with initial fallback, tag
   assert.ok(text.includes('凉介'), 'Renders user name');
   assert.ok(text.includes('号主'), 'Renders custom role tag');
   assert.ok(text.includes('+86153****5095'), 'Renders masked phone');
-  assert.ok(text.includes('ID: user_1e9…7343') || text.includes('ID:'), 'Renders compact ID');
+  assert.equal(text.includes('user_1e937dc575d8b73453'), false, 'UUID is not displayed');
+  assert.equal(text.includes('ID:'), false, 'UUID snippets do not add display noise');
+  assert.ok(container.querySelector('[aria-label^="复制用户"]'), 'stable ID remains available through the explicit copy action');
 
   // 3. Detail link action and stopPropagation
   const linkBtn = [...container.querySelectorAll('button')].find(b => b.textContent.includes('查看号主资料'));
@@ -153,7 +160,7 @@ test('UserPreviewCard handles missing phone and unauthorized downgrade gracefull
   const text = container.textContent;
   assert.ok(text.includes('匿名用户'));
   assert.ok(text.includes('买家'));
-  assert.ok(text.includes('脱敏联系方式未提供'), 'Shows missing contact notice when phone is absent');
+  assert.equal(text.includes('脱敏联系方式未提供'), false, 'missing optional contact data adds no noise');
   assert.ok(text.includes('当前身份没有查看该用户权限'), 'Shows clear denied reason');
 
   const linkBtn = [...container.querySelectorAll('button')].find(b => b.textContent.includes('查看用户资料'));
@@ -182,6 +189,7 @@ test('AccountPreviewCard displays numbers, title, known facts and omits speculat
           facts: {
             staffRestricted: true,
             ownerPaused: true,
+            reviewState: 'APPROVED',
           },
           canOpen: true,
           onOpen: () => { accountOpened = true; },
@@ -198,6 +206,8 @@ test('AccountPreviewCard displays numbers, title, known facts and omits speculat
   assert.ok(text.includes('本单账号'), 'Displays context tag');
   assert.ok(text.includes('平台限制'), 'Displays staffRestricted fact badge');
   assert.ok(text.includes('号主暂停'), 'Displays ownerPaused fact badge');
+  assert.ok(text.includes('审核通过'), 'APPROVED is an approval fact');
+  assert.equal(text.includes('已发布'), false, 'approval alone does not establish publication');
 
   const detailBtn = [...container.querySelectorAll('button')].find(b => b.textContent.includes('查看账号详情'));
   assert.ok(detailBtn);
@@ -303,4 +313,92 @@ test('OwnerHoverCard in supply view prevents event bubbling to row drawer', asyn
 
   assert.equal(ownerOpened, true, 'onOpenOwner is triggered');
   assert.equal(rowClicked, false, 'Clicking trigger MUST NOT bubble to parent row container');
+});
+
+test('explicit preview opens in the workspace portal and its copy and detail actions never open the row', async t => {
+  const container = browser.document.createElement('div'); container.className = 'workspace-root'; browser.document.body.append(container);
+  const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  let rows = 0, opened = 0, requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('Preview must not fetch'); });
+  await act(async () => root.render(createElement('div', { onClick: () => rows++, onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') rows++; } },
+    createElement(OwnerHoverCard, { ownerName: '预览号主', ownerId: 'synthetic-owner-id', summary: { name: '预览号主', image: null, maskedPhone: 'SYNTHETIC-***-PHONE' }, canOpen: true, onOpenOwner: () => opened++ }))));
+  const trigger = container.querySelector('[aria-label="预览号主 @预览号主 信息"]');
+  await act(async () => { trigger.focus(); trigger.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })); });
+  await waitFor(() => container.querySelector('[data-slot="popover-content"][data-open]'));
+  const popup = container.querySelector('[data-slot="popover-content"]');
+  assert.equal(popup.closest('.workspace-root'), container);
+  const copy = popup.querySelector('[aria-label^="复制用户"]');
+  await act(async () => copy.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })));
+  await waitFor(() => globalThis.__lastCopied === 'synthetic-owner-id');
+  await waitFor(() => popup.querySelector('[role="status"]')?.textContent === '已复制');
+  t.mock.method(navigator.clipboard, 'writeText', async () => { throw new Error('SYNTHETIC_CLIPBOARD_REJECTION'); });
+  await act(async () => copy.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })));
+  await waitFor(() => popup.querySelector('[role="status"]')?.textContent === '复制失败，请重试');
+  const detail = [...popup.querySelectorAll('button')].find(button => button.textContent.includes('查看号主资料'));
+  await act(async () => {
+    detail.dispatchEvent(new browser.KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+    detail.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+  assert.equal(opened, 1); assert.equal(rows, 0); assert.equal(requests, 0);
+  await act(async () => popup.dispatchEvent(new browser.KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })));
+  await waitFor(() => !container.querySelector('[data-slot="popover-content"][data-open]'));
+  assert.equal(browser.document.activeElement, trigger);
+});
+
+test('preview button opacity is conditioned on pointer capability rather than viewport width', async t => {
+  const { compile } = await import('@tailwindcss/node');
+  const container = browser.document.createElement('div'); browser.document.body.append(container);
+  const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  width = 1024;
+  await act(async () => root.render(createElement(EntityPreviewTrigger, { trigger: createElement('button', null, '对象'), content: createElement('div', null, '预览'), touchLabel: '显式对象预览' })));
+  const button = container.querySelector('[aria-label="显式对象预览"]');
+  assert.ok(button, 'wide touch devices still have an explicit preview control');
+  const candidates = button.className.split(/\s+/).filter(value => value.endsWith(':opacity-0'));
+  const compiler = await compile('@import "tailwindcss";', { base: rootPath, onDependency() {} });
+  for (const candidate of candidates) {
+    const css = compiler.build([candidate]);
+    assert.match(css, /hover:\s*hover/, 'hiding requires a device that can hover');
+    assert.match(css, /pointer:\s*fine/, 'coarse touch pointers keep the explicit button visible');
+  }
+});
+
+test('the real supply session boundary unmounts previews without changing the business child or reviving an open card', async t => {
+  const { SupplyListingReviewView } = await vite.ssrLoadModule('/src/views/supply-listing-review-view.tsx');
+  const actor = { authenticated: true, adminUserId: 'synthetic-preview-admin', session: { id: 'synthetic-preview-session', locked: false }, security: { isBoss: false, status: 'ACTIVE', passwordChangeRequired: false }, permissions: ['supply.review.read'] };
+  const boundary = (state = {}) => SupplyListingReviewView({ snapshot: { ...actor, session: { ...actor.session, locked: state.locked ?? false }, security: { ...actor.security, ...state } }, refreshNonce: 0, initialQuery: {}, onDirtyChange() {}, onOpenPath() {}, onQueryChange() {} });
+  const initial = boundary();
+  assert.ok([Symbol.for('react.context'), Symbol.for('react.provider')].includes(initial.type.$$typeof), 'production owns the session boundary, not a test enabled formula');
+  const container = browser.document.createElement('div'); container.className = 'workspace-root'; browser.document.body.append(container);
+  const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('Preview must not fetch'); });
+  function WorkProbe() {
+    return createElement('div', null, createElement('input', { 'aria-label': '未提交的处理说明', defaultValue: '尚未提交' }),
+      createElement(OwnerHoverCard, { ownerName: '会话测试号主', ownerId: 'synthetic-owner-id', summary: { name: '会话测试号主', image: null, maskedPhone: 'SYNTHETIC-***-PHONE' }, canOpen: false }));
+  }
+  const render = async state => {
+    const next = boundary(state);
+    assert.equal(next.type, initial.type);
+    assert.equal(next.props.children.type, initial.props.children.type, 'the original SupplyWork component is retained');
+    assert.equal(next.props.children.key, initial.props.children.key, 'security changes do not remount the business child');
+    await act(async () => root.render(createElement(next.type, next.props, createElement(WorkProbe))));
+  };
+  await render();
+  const input = container.querySelector('input');
+  for (const state of [{ locked: true }, { status: 'FROZEN' }, { passwordChangeRequired: true }]) {
+    const button = container.querySelector('[aria-label="预览号主 @会话测试号主 信息"]');
+    await act(async () => button.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })));
+    await waitFor(() => container.querySelector('[data-slot="popover-content"][data-open]'));
+    await render(state);
+    assert.equal(container.querySelector('[data-slot="popover-content"]'), null);
+    assert.equal(container.querySelector('[data-slot="hover-card-content"]'), null);
+    assert.equal(container.querySelector('input'), input, 'unrelated work remains mounted');
+    await render();
+    assert.equal(container.querySelector('[data-slot="popover-content"]'), null, 'unlock does not revive the card');
+    assert.equal(input.value, '尚未提交');
+  }
+  assert.equal(requests, 0);
 });

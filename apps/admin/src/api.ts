@@ -281,6 +281,7 @@ export type UserOrderItem = {
   gameId: string;
   counterpartyName: string;
   counterpartyUserId?: string;
+  counterpartySummary?: { name: string; image: string | null; maskedPhone: string | null };
   amounts: { rental: UserOrderAmount | null; deposit: UserOrderAmount | null; totalDue: UserOrderAmount | null };
   createdAt: string | null;
   holdUntil: string | null;

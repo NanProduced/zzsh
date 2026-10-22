@@ -40,9 +40,9 @@ export function OrderPreviewCard({
   canOpen,
   onOpen,
   openLabel = '查看订单详情',
-  deniedReason = '当前身份没有该订单读取授权或该行未开放下钻，未读取完整资料。',
+  deniedReason = '无查看权限',
 }: OrderPreviewProps) {
-  const numberText = displayNo || orderId;
+  const numberText = displayNo || '订单编号待核';
   const isPaid = status === 'PAID' || status === 'COMPLETED';
   const isPending = status === 'PENDING_PAYMENT';
   const roleText = roleLabel || (role === 'renter' ? '租客' : role === 'owner' ? '号主' : null);
@@ -67,8 +67,7 @@ export function OrderPreviewCard({
           )}
         </div>
         <div className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono">
-          <span className="truncate">订单号复制</span>
-          <PreviewCopyButton value={numberText} tooltip="复制订单号" />
+          <PreviewCopyButton value={displayNo || orderId} tooltip={displayNo ? '复制订单号' : '复制订单 ID'} />
           {sourceOrigin === 'LEGACY' && (
             <Badge variant="outline" className="text-[9px] h-3.5 px-1 py-0 ml-auto">
               旧单

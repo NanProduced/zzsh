@@ -57,24 +57,27 @@ export function PreviewCardShell({
  */
 export function PreviewCopyButton({
   value,
-  label = '复制',
   tooltip = '复制 ID',
   className,
 }: {
   value: string;
-  label?: string;
   tooltip?: string;
   className?: string;
 }) {
-  const [copied, setCopied] = React.useState(false);
+  const [state, setState] = React.useState<'idle' | 'copied' | 'failed'>('idle');
+  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!value) return;
-    void navigator.clipboard?.writeText(value).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }).catch(() => undefined);
+    const reset = (next: 'copied' | 'failed') => {
+      setState(next);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setState('idle'), 1500);
+    };
+    if (!navigator.clipboard?.writeText) { reset('failed'); return; }
+    void navigator.clipboard.writeText(value).then(() => reset('copied')).catch(() => reset('failed'));
   };
 
   return (
@@ -89,11 +92,12 @@ export function PreviewCopyButton({
             onClick={handleCopy}
             className={cn('size-5 p-0 text-muted-foreground hover:text-foreground cursor-pointer', className)}
           >
-            {copied ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+            {state === 'copied' ? <Check className="size-3 text-foreground" /> : <Copy className="size-3" />}
           </Button>
         }
       />
-      <TooltipContent side="top">{copied ? '已复制' : tooltip}</TooltipContent>
+      <TooltipContent side="top">{state === 'copied' ? '已复制' : state === 'failed' ? '复制失败，请重试' : tooltip}</TooltipContent>
+      {state !== 'idle' ? <span role="status" className="sr-only">{state === 'copied' ? '已复制' : '复制失败，请重试'}</span> : null}
     </Tooltip>
   );
 }
@@ -105,7 +109,7 @@ export function PreviewFooterAction({
   canOpen,
   onOpen,
   label = '查看详情',
-  deniedReason = '当前身份没有该对象读取授权或该行未开放下钻，未读取完整资料。',
+  deniedReason = '无查看权限',
 }: {
   canOpen?: boolean;
   onOpen?: () => void;

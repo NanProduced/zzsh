@@ -200,6 +200,7 @@ export async function handleUserDirectoryAdmin(
       const viewer = {
         adminId: context.userId,
         isBoss: access.isBoss,
+        permissions: access.permissions,
         phoneLookup: hasPermission(access, ADMIN_PERMISSION.userPhoneLookup),
         resourceRead: hasPermission(access, ADMIN_PERMISSION.supplyRentalAccountRead),
         orderRead: hasPermission(access, ADMIN_PERMISSION.orderRead),

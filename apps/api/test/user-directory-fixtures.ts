@@ -20,7 +20,7 @@ export const fixtureOrderRows=[
   {id:'order_complete',displayNo:'TEST-1002',status:'COMPLETED',role:'owner',paidAt:null},
   {id:'order_cancel',displayNo:'TEST-1003',status:'CANCELLED',role:'renter',paidAt:'2026-09-19T02:05:00.000000Z'},
   {id:'order_pending',displayNo:'TEST-1004',status:'PENDING_PAYMENT',role:'renter',paidAt:null},
-].map(row=>({accountId:'account_fixture',accountDisplayNo:'资源账号01',title:'三角洲行动 · 隔离测试账号',gameId:'delta',rentalAmountCents:'6000',depositAmountCents:'10000',currency:'CNY',counterpartyName:'另一方样本',createdAt:date,holdUntil:date,cancelledAt:row.status==='CANCELLED'?date:null,cancelReason:row.status==='CANCELLED'?'支付后取消（测试）':null,expiredAwaitingCancel:false,...row}));
+].map(row=>({accountId:'account_fixture',accountDisplayNo:'资源账号01',title:'三角洲行动 · 隔离测试账号',gameId:'delta',rentalAmountCents:'6000',depositAmountCents:'10000',currency:'CNY',counterpartyName:'另一方样本',counterpartyUserId:row.role==='owner'?'user_dual':'user_normal',createdAt:date,holdUntil:date,cancelledAt:row.status==='CANCELLED'?date:null,cancelReason:row.status==='CANCELLED'?'支付后取消（测试）':null,expiredAwaitingCancel:false,...row}));
 
 export class DirectorySqlFixture extends EventEmitter {
   actorId='admin-fixture';isBoss=false;
@@ -46,6 +46,7 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.includes('WITH role_permissions'))return result(this.permissions.map(permissionCode=>({permissionCode})));
     if(sql.startsWith('SELECT game_id AS'))return result(this.gameIds.map(gameId=>({gameId})));
     if(sql.includes('SELECT 1 FROM zzsh_auth_user'))return result(this.users.some(row=>row.id===values[0])?[{exists:1}]:[]);
+    if(sql.includes('SELECT id,name,image,"phoneNumber" AS phone FROM zzsh_auth_user."user" WHERE id=ANY'))return result(this.users.filter(row=>(values[0] as string[]).includes(row.id)).map(row=>({id:row.id,name:row.name,image:row.image,phone:row.phoneNumber})));
     if(sql.includes('FROM zzsh_auth_user."user" u')) {
       const combined=sql.includes('AS directory_rows');
       const counting=!combined&&sql.includes('SELECT count(*)::int AS total FROM');

@@ -52,7 +52,7 @@ export function OwnerHoverCard({
           canOpen={canOpen}
           onOpen={onOpenOwner}
           openLabel="查看号主资料"
-          deniedReason="当前身份没有号主目录读取授权或该行未开放下钻，未读取用户资料。"
+          deniedReason="暂无法查看号主详情。"
         />
       }
     />
