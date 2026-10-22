@@ -279,7 +279,7 @@ export function financeDocuments(entries: FinanceEntry[]) {
   const groups = new Map<string, FinanceEntry[]>();
   for (const entry of entries) groups.set(entry.documentRef, [...(groups.get(entry.documentRef) ?? []), entry]);
   return [...groups].map(([ref, lines]) => ({ ref, number: lines[0]!.documentNumber, kind: lines[0]!.kind, state: lines[0]!.state, occurredAt: lines[0]!.occurredAt,
-    requestedAmountCents: lines.find(entry => entry.evidence.grossCents !== undefined)?.evidence.grossCents ?? null,
+    requestedAmountCents: lines.find(entry => entry.evidence.grossCents !== undefined)?.evidence.grossCents ?? lines.find(entry => entry.historical?.purposeCode === 'WITHDRAWAL_APPLICATION')?.historical?.recordedAmountCents ?? null,
     subjects: [...new Map(lines.map(entry => [entry.subjectId, { id: entry.subjectId, name: entry.subjectName }])).values()], entryCount: lines.length,
     amounts: [...new Map(lines.map(entry => [entry.bucket, entry.bucket])).values()].map(bucket => ({ bucket, knownNetCents: lines.filter(entry => entry.bucket === bucket && entry.deltaCents !== null).reduce((sum, entry) => sum + BigInt(entry.deltaCents!), 0n).toString(), unknownCount: lines.filter(entry => entry.bucket === bucket && entry.deltaCents === null).length })),...(lines.length===1&&lines[0]!.historical?{historical:lines[0]!.historical}:{}) }));
 }
