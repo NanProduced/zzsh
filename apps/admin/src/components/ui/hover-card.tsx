@@ -15,6 +15,8 @@ function HoverCardTrigger({ ...props }: PreviewCardPrimitive.Trigger.Props) {
 function HoverCardContent({
   className,
   align = "center",
+  alignOffset = 0,
+  side = "bottom",
   sideOffset = 4,
   ...props
 }: PreviewCardPrimitive.Popup.Props &
@@ -26,6 +28,8 @@ function HoverCardContent({
     <PreviewCardPrimitive.Portal container={workspacePortalContainer()}>
       <PreviewCardPrimitive.Positioner
         align={align}
+        alignOffset={alignOffset}
+        side={side}
         sideOffset={sideOffset}
         className="isolate z-50"
       >

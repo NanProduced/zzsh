@@ -1,0 +1,122 @@
+import * as React from 'react';
+import { Badge } from '@/components/ui/badge';
+import { Receipt } from 'lucide-react';
+import { PreviewCardShell, PreviewCopyButton, PreviewFooterAction } from './preview-card';
+
+export interface OrderPreviewProps {
+  orderId: string;
+  displayNo?: string | null;
+  status?: string | null;
+  statusLabel?: string | null;
+  role?: 'renter' | 'owner' | null;
+  roleLabel?: string | null;
+  title?: string | null;
+  counterpartyName?: string | null;
+  createdAt?: string | null;
+  amountText?: string | null;
+  sourceOrigin?: string | null;
+  canOpen?: boolean;
+  onOpen?: () => void;
+  openLabel?: string;
+  deniedReason?: string;
+}
+
+/**
+ * 订单基础预览卡片：只吃当前行已有金额与状态事实。
+ * 严禁混用应付/押金/渠道资金，缺失即留白或标示待核，支持单动作复制订单号。
+ */
+export function OrderPreviewCard({
+  orderId,
+  displayNo,
+  status,
+  statusLabel,
+  role,
+  roleLabel,
+  title,
+  counterpartyName,
+  createdAt,
+  amountText,
+  sourceOrigin,
+  canOpen,
+  onOpen,
+  openLabel = '查看订单详情',
+  deniedReason = '当前身份没有该订单读取授权或该行未开放下钻，未读取完整资料。',
+}: OrderPreviewProps) {
+  const numberText = displayNo || orderId;
+  const isPaid = status === 'PAID' || status === 'COMPLETED';
+  const isPending = status === 'PENDING_PAYMENT';
+  const roleText = roleLabel || (role === 'renter' ? '租客' : role === 'owner' ? '号主' : null);
+
+  const header = (
+    <>
+      <div className="size-9 rounded-lg border border-border bg-muted/40 flex items-center justify-center shrink-0 text-muted-foreground">
+        <Receipt className="size-4.5" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="font-semibold text-sm font-mono text-foreground truncate" title={numberText}>
+            {numberText}
+          </span>
+          {statusLabel && (
+            <Badge
+              variant={isPaid ? 'secondary' : isPending ? 'outline' : 'outline'}
+              className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0"
+            >
+              {statusLabel}
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono">
+          <span className="truncate">订单号复制</span>
+          <PreviewCopyButton value={numberText} tooltip="复制订单号" />
+          {sourceOrigin === 'LEGACY' && (
+            <Badge variant="outline" className="text-[9px] h-3.5 px-1 py-0 ml-auto">
+              旧单
+            </Badge>
+          )}
+        </div>
+      </div>
+    </>
+  );
+
+  return (
+    <PreviewCardShell
+      ariaLabel={`订单预览：${numberText}`}
+      header={header}
+      footer={
+        <PreviewFooterAction
+          canOpen={canOpen}
+          onOpen={onOpen}
+          label={openLabel}
+          deniedReason={deniedReason}
+        />
+      }
+    >
+      {title && (
+        <div className="text-[11px] text-foreground font-medium line-clamp-1" title={title}>
+          {title}
+        </div>
+      )}
+
+      {(roleText || counterpartyName) && (
+        <div className="text-[11px] text-muted-foreground flex items-center gap-1.5 truncate">
+          {roleText && <span>本单身份：{roleText}</span>}
+          {roleText && counterpartyName && <span aria-hidden="true">·</span>}
+          {counterpartyName && <span>对方：@{counterpartyName}</span>}
+        </div>
+      )}
+
+      {createdAt && (
+        <div className="text-[11px] text-muted-foreground font-mono">
+          下单时间：{createdAt}
+        </div>
+      )}
+
+      {amountText && (
+        <div className="text-[11px] text-foreground font-medium font-mono pt-0.5">
+          {amountText}
+        </div>
+      )}
+    </PreviewCardShell>
+  );
+}
