@@ -652,6 +652,13 @@
       "when": 1792627200001,
       "tag": "0092_user_registration_read_projection",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1792627200002,
+      "tag": "0093_user_detail_operations",
+      "breakpoints": true
     }
   ]
 }

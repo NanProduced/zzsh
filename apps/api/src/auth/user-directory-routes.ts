@@ -8,6 +8,9 @@ import { sanitizeDetail } from "./admin-audit";
 import { withDirectoryRead, withDirectoryReadTransaction } from "./user-directory-read";
 import { withTransaction } from "./security-core";
 import { parseUserRiskFlagBody, writeUserRiskFlag } from "./user-directory-risk";
+import { parseUserNoteBody, parseUserNotePage, listUserNotes, createUserNote, deleteUserNote } from "./user-directory-notes";
+import { readUserSensitiveProfile } from "./user-directory-sensitive";
+import { readAdminUserConsumption } from "../finance/admin-user-consumption-read";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import { decodeId, requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
@@ -117,10 +120,17 @@ export async function handleUserDirectoryAdmin(
   const method = (request.method ?? "GET").toUpperCase();
   const detailMatch = path === null ? null : /^\/([^/]+)(\/(rental-accounts|orders|audit-events))?$/.exec(path);
   const riskFlagMatch = path === null ? null : /^\/([^/]+)\/risk-flag$/.exec(path);
+  const noteMatch = path === null ? null : /^\/([^/]+)\/notes(?:\/([^/]+))?$/.exec(path);
+  const sensitiveMatch = path === null ? null : /^\/([^/]+)\/sensitive-profile$/.exec(path);
+  const consumptionMatch = path === null ? null : /^\/([^/]+)\/consumption$/.exec(path);
+  const noteRead = method === "GET" && noteMatch !== null;
+  const noteWrite = noteMatch !== null && (method === "POST" && !noteMatch[2] || method === "DELETE" && !!noteMatch[2]);
+  const sensitiveRead = method === "POST" && sensitiveMatch !== null;
+  const consumptionRead = method === "GET" && consumptionMatch !== null;
   const lookup = method === "POST" && path === "/lookup";
   const riskFlagWrite = method === "POST" && riskFlagMatch !== null;
   const resourceMatch=path===null?null:/^\/resource-accounts\/([A-Za-z0-9._:-]+)$/.exec(path);
-  const mine = lookup || riskFlagWrite || method === "GET" && (resourceMatch!==null || path === "/" || path !== "/lookup" && detailMatch !== null);
+  const mine = lookup || riskFlagWrite || noteRead || noteWrite || sensitiveRead || consumptionRead || method === "GET" && (resourceMatch!==null || path === "/" || path !== "/lookup" && detailMatch !== null);
   if (!mine) {
     if (next) {
       next();
@@ -132,6 +142,8 @@ export async function handleUserDirectoryAdmin(
     return;
   }
   await safely(response, requestId, async () => {
+    const origin = request.headers.origin;
+    if (method !== "GET" && origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin) throw forbidden("Origin is not allowed");
     const query = new URLSearchParams(raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : "");
     if (query.has("phone")) throw invalid("Phone lookup must use a request body");
     if (lookup) {
@@ -150,6 +162,19 @@ export async function handleUserDirectoryAdmin(
     await withDirectoryRead(options.pool, request, response, async (signal) => {
     const context = await readAdminContext(request, options);
     let dataToSend: unknown;
+    if (noteWrite || sensitiveRead) {
+      const userId = decodeId((noteMatch ?? sensitiveMatch)![1]!);
+      const actor = { adminId: context.userId, sessionId: context.sessionId, requestId };
+      const result = await withTransaction(options.pool, async client => {
+        await assertAdminContextInTransaction(client, context);
+        const access = await requireAdminAccess(client, context.userId);
+        if (sensitiveRead) return {status:200,body:await readUserSensitiveProfile(client,actor,access,userId)};
+        const key = validateIdempotencyKey(request.headers["idempotency-key"]);
+        return method === "POST" ? createUserNote(client,actor,access,{userId,...parseUserNoteBody(request.body)},key)
+          : deleteUserNote(client,actor,access,{userId,noteId:decodeId(noteMatch![2]!)},key);
+      });
+      signal.throwIfAborted(); sendJson(response,result.status,result.body,requestId); return;
+    }
     if (riskFlagWrite) {
       const userId = decodeId(riskFlagMatch![1]!);
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(userId)) throw invalid("User id is invalid");
@@ -188,6 +213,28 @@ export async function handleUserDirectoryAdmin(
       };
       const enableLegacyRead=async()=>{viewer.legacyRead=(await client.query("SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS present")).rows[0]?.present===true;};
       const cursor = query.get("cursor") ?? undefined;
+      if (noteRead || consumptionRead) {
+        const userId = decodeId((noteMatch ?? consumptionMatch)![1]!);
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(userId)) throw invalid("User id is invalid");
+        if (!(await client.query(`SELECT 1 FROM zzsh_auth_user."user" WHERE id=$1`,[userId])).rowCount) throw notFound();
+        if (noteRead && noteMatch![2]) {
+          const noteId=decodeId(noteMatch![2]);
+          if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(noteId))throw invalid("Note id is invalid");
+          const note=(await client.query(`SELECT n.id,n.user_id AS "userId",n.deleted_at IS NOT NULL AS deleted,n.body AS "internalText",
+            CASE WHEN n.deleted_at IS NULL THEN n.body END AS text,
+            jsonb_build_object('id',n.author_admin_id,'displayName',COALESCE(a.name,'未知管理员')) AS author,
+            to_char(n.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt"
+            FROM zzsh_iam.user_note n LEFT JOIN zzsh_auth_admin."user" a ON a.id=n.author_admin_id WHERE n.id=$1 AND n.user_id=$2`,[noteId,userId])).rows[0];
+          if(!note)throw notFound(); const {internalText,...publicNote}=note; dataToSend={...publicNote,bodyDigest:sha256Hex(internalText)};
+        }
+        else if (noteRead) dataToSend = await listUserNotes(client,{adminId:context.userId,sessionId:context.sessionId,requestId},access,userId,parseUserNotePage(query));
+        else {
+          for (const key of query.keys()) if (!["page","pageSize"].includes(key) || query.getAll(key).length !== 1) throw invalid("Consumption pagination is invalid");
+          const positive = (key:string,fallback:number) => {const raw=query.get(key);if(raw===null)return fallback;if(!/^[1-9]\d*$/.test(raw)||!Number.isSafeInteger(Number(raw)))throw invalid("Consumption pagination is invalid");return Number(raw);};
+          dataToSend = await readAdminUserConsumption(client,{adminId:context.userId,isBoss:access.isBoss,subjectFinancialRead:viewer.walletRead,businessScopeUsable:viewer.businessScopeUsable},userId,{page:positive("page",1),pageSize:positive("pageSize",20)});
+        }
+        return;
+      }
       const pagination = parseDirectoryPage(query, path === "/" || lookup);
       if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);dataToSend = await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!));return;}
       const limit = pagination?.pageSize ?? parseLimit(query.get("limit"));

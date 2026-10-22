@@ -660,7 +660,7 @@ export async function readUserDirectoryDetail(
               CASE WHEN $5::boolean THEN current_orders.current_count ELSE NULL END AS "currentOrderCount",
               CASE WHEN $5::boolean THEN current_orders.renter_count ELSE NULL END AS "renterCurrentOrderCount",
               CASE WHEN $5::boolean THEN current_orders.owner_count ELSE NULL END AS "ownerCurrentOrderCount",
-              COALESCE(risk_flag.flagged,false) AS "riskFlag"
+              COALESCE(risk_flag.flagged,false) AS "riskFlag", COALESCE(risk_flag.revision,0) AS "riskRevision"
          FROM zzsh_auth_user."user" u
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
          ${RISK_FLAG_JOIN}
@@ -748,6 +748,7 @@ export async function readUserDirectoryDetail(
     localCreatedAt: row.localCreatedAt,
     localUpdatedAt: row.localUpdatedAt,
     riskFlag: row.riskFlag === true,
+    riskRevision: (row as UserDetailRow & {riskRevision:number}).riskRevision,
     walletSummary: wallets.get(userId) ?? { state: "denied", permission: DIRECTORY_WALLET_PERMISSION },
     ...projectRelationshipSummaries(row, viewer),
     ...summaries.get(userId),

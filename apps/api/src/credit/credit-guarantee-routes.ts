@@ -23,6 +23,7 @@ import {
   createGuaranteePaymentIntent,
   readGuaranteeTransactions,
   decideGuaranteeRefund,
+  writeManualCreditAdjustment,
 } from "./credit-guarantee";
 
 function originAllowed(request: SupplyNodeRequest, options: AuthSecurityOptions, admin: boolean): void {
@@ -39,7 +40,7 @@ function pathOf(request: SupplyNodeRequest, prefix: string): { path: string; url
 }
 
 function userEvent(event: Record<string, unknown>) {
-  const { internalBasis: _internalBasis, actorAdminId: _actorAdminId, payloadHash: _payloadHash, ...visible } = event;
+  const { internalBasis: _internalBasis, actorAdminId: _actorAdminId, actorAdminName: _actorAdminName, payloadHash: _payloadHash, ...visible } = event;
   return visible;
 }
 
@@ -155,11 +156,31 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
         originAllowed(request, options, true);
         const { path, url } = pathOf(request, prefix);
         const method = (request.method ?? "GET").toUpperCase();
-        if (method !== "GET" && !commandsEnabled) throw notFound();
+        const manualDeduction = method === "POST" ? /^\/users\/([^/]+)\/deductions$/.exec(path) : null;
+        const manualReversal = method === "POST" ? /^\/users\/([^/]+)\/deductions\/([^/]+)\/reverse$/.exec(path) : null;
+        if (method !== "GET" && !commandsEnabled && !manualDeduction && !manualReversal) throw notFound();
         const context = await readAdminContext(request, options);
         const body = await withTransaction(options.pool, async (client) => {
           await assertAdminContextInTransaction(client, context);
           const access = await requireAdminAccess(client, context.userId);
+          if (manualDeduction || manualReversal) {
+            requirePermission(access, ADMIN_PERMISSION.creditDecide);
+            if (url.search) throw invalid("信用操作不接受查询参数");
+            const input = bodyOf(request);
+            ensureOnlyFields(input, manualDeduction ? ["amount", "expectedRevision", "visibleReason"] : ["expectedRevision", "visibleReason"]);
+            const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
+            const userId = decodeId((manualDeduction || manualReversal)![1]!);
+            await assertCreditUserScope(client, { userId: context.userId, isBoss: access.isBoss }, userId);
+            const common = { userId, actorAdminId: context.userId, expectedRevision: requiredString(input, "expectedRevision", 19), visibleReason: requiredString(input, "visibleReason", 500) };
+            const result = await writeManualCreditAdjustment(client,
+              manualDeduction ? { ...common, kind: "DEDUCT", amount: input.amount as number }
+                : { ...common, kind: "REVERSE", eventId: decodeId(manualReversal![2]!) }, key);
+            const recorded = result.body as { event: Record<string, unknown> };
+            await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
+              action: manualDeduction ? "credit.manual.deducted" : "credit.manual.reversed", objectType: "credit_event", objectId: String(recorded.event.id),
+              outcome: "SUCCESS", requestId, reason: common.visibleReason, details: { userId, result: result.replayed ? "REPLAY" : "APPLIED", scoreBefore: recorded.event.scoreBefore, scoreAfter: recorded.event.scoreAfter, appliedDeltaScore: recorded.event.appliedDeltaScore } });
+            return { event: userEvent(recorded.event), duplicate: result.replayed };
+          }
           const historyMatch = /^\/users\/([^/]+)\/guarantee-history$/.exec(path);
           if (method === "GET" && historyMatch) {
             for (const key of url.searchParams.keys()) {

@@ -3,11 +3,12 @@ import type { PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
 import { gameScopeSql } from "../auth/admin-scope";
+import { validateIdempotencyKey } from "../contracts/api-v1";
 import type { UserObligationReader } from "../auth/user-identity";
 import { canonicalize } from "../supply/content-hash";
 import { parseNonNegativeDecimal } from "../supply/decimal";
 import { validateFundingPolicy, type FundingPolicy } from "../supply/funding-policy";
-import { conflict, invalid, notFound } from "../supply/supply-util";
+import { conflict, fingerprintRequest, invalid, notFound, withIdempotency } from "../supply/supply-util";
 
 export const CREDIT_INITIAL_SCORE = 100;
 export const CREDIT_BREACH_DELTA = -10;
@@ -31,7 +32,7 @@ function guaranteeReference(input: {
   return `credit-guarantee-v1:${createHash("sha256").update(canonicalize(input)).digest("hex")}`;
 }
 
-export type CreditEventType = "INITIALIZED" | "BREACH_CONFIRMED" | "BREACH_REVERSED" | "RECOVERY_APPROVED";
+export type CreditEventType = "INITIALIZED" | "BREACH_CONFIRMED" | "BREACH_REVERSED" | "RECOVERY_APPROVED" | "MANUAL_DEDUCTION" | "MANUAL_DEDUCTION_REVERSED";
 export type CreditSubjectRole = "OWNER" | "RENTER";
 export type GuaranteeState = "NOT_REQUIRED" | "REQUIRED" | "PAYMENT_PENDING" | "SATISFIED" | "REFUND_REQUESTED" | "REFUND_PROCESSING" | "REFUNDED" | "FAILED" | "UNKNOWN";
 
@@ -50,6 +51,7 @@ export type CreditEvent = {
   visibleReason: string;
   internalBasis?: string;
   actorAdminId?: string | null;
+  actorAdminName?: string | null;
   reversalOfId?: string | null;
   reversed?: boolean;
   createdAt: string;
@@ -99,6 +101,7 @@ function rowEvent(row: CreditEventRow): CreditEvent {
     visibleReason: row.visibleReason,
     ...(row.internalBasis === undefined ? {} : { internalBasis: row.internalBasis }),
     actorAdminId: row.actorAdminId,
+    ...(row.actorAdminName ? {actorAdminName:row.actorAdminName} : {}),
     reversalOfId: row.reversalOfId,
     reversed: row.reversed,
     createdAt: row.createdAt,
@@ -169,10 +172,10 @@ export async function readCreditSnapshot(client: PoolClient, userId: string, ini
             e.source_type AS "sourceType",e.source_id AS "sourceId",e.subject_role AS "subjectRole",
             e.delta_score AS "deltaScore",e.applied_delta_score AS "appliedDeltaScore",
             e.score_before AS "scoreBefore",e.score_after AS "scoreAfter",e.visible_reason AS "visibleReason",
-            e.internal_basis AS "internalBasis",e.actor_admin_id AS "actorAdminId",e.reversal_of_id AS "reversalOfId",
+            e.internal_basis AS "internalBasis",e.actor_admin_id AS "actorAdminId",CASE WHEN $2::boolean IS NOT NULL THEN actor.name END AS "actorAdminName",e.reversal_of_id AS "reversalOfId",
             e.payload_hash AS "payloadHash",e.created_at::text AS "createdAt",
             EXISTS(SELECT 1 FROM zzsh_credit.credit_event r WHERE r.reversal_of_id=e.id) AS reversed
-       FROM zzsh_credit.credit_event e WHERE e.user_id=$1
+       FROM zzsh_credit.credit_event e LEFT JOIN zzsh_auth_admin."user" actor ON actor.id=e.actor_admin_id WHERE e.user_id=$1
          AND ($2::boolean IS NULL OR e.source_type NOT IN ('ACCOUNT','ORDER') OR $2::boolean OR
            (e.source_type='ACCOUNT' AND EXISTS (SELECT 1 FROM zzsh_supply.rental_account a WHERE a.id=e.source_id AND ${gameScopeSql("a.game_id","$3","$2")})) OR
            (e.source_type='ORDER' AND EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE o.id=e.source_id AND ${gameScopeSql("o.game_id","$3","$2")})))
@@ -182,21 +185,80 @@ export async function readCreditSnapshot(client: PoolClient, userId: string, ini
   return { userId: state.userId, score: state.score, revision: state.revision, initializedAt: state.initializedAt, events: events.map(rowEvent) };
 }
 
-async function lockCreditAccount(client: PoolClient, userId: string): Promise<CreditStateRow> {
-  const state = await ensureCreditAccount(client, userId);
+async function lockCreditAccount(client: PoolClient, userId: string, initialize = true): Promise<CreditStateRow> {
+  if (initialize) await ensureCreditAccount(client, userId);
   await client.query(`SELECT set_config('zzsh.credit_mutation','1',true)`);
   const row = (await client.query<CreditStateRow>(
     `SELECT user_id AS "userId",score,revision::text,initialized_at AS "initializedAt"
        FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR UPDATE`,
     [userId],
   )).rows[0];
-  if (!row) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Credit state is unavailable");
-  return row ?? state;
+  if (!row) {
+    if (!initialize) throw conflict("该用户的信用分尚未初始化，暂不能进行信用操作");
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Credit state is unavailable");
+  }
+  return row;
 }
 
 function clippedScore(score: number, delta: number): { score: number; applied: number } {
   const next = Math.max(0, Math.min(100, score + delta));
   return { score: next, applied: next - score };
+}
+
+type ManualCreditInput = {
+  userId: string;
+  actorAdminId: string;
+  expectedRevision: string;
+  visibleReason: string;
+} & ({ kind: "DEDUCT"; amount: number } | { kind: "REVERSE"; eventId: string });
+
+export async function writeManualCreditAdjustment(client: PoolClient, input: ManualCreditInput, idempotencyKey: string) {
+  const userId = id(input.userId, "userId");
+  const actorAdminId = id(input.actorAdminId, "actorAdminId");
+  const visibleReason = reason(input.visibleReason, "visibleReason");
+  if (typeof input.expectedRevision !== "string" || !/^[1-9]\d{0,18}$/.test(input.expectedRevision) || BigInt(input.expectedRevision) > 9223372036854775807n) throw invalid("Credit revision is invalid");
+  const key = validateIdempotencyKey(idempotencyKey);
+  if (input.kind !== "DEDUCT" && input.kind !== "REVERSE") throw invalid("Credit action is invalid");
+  if (input.kind === "DEDUCT" && (!Number.isSafeInteger(input.amount) || input.amount < 1 || input.amount > 100)) throw invalid("扣分数量须为 1 至 100 的整数");
+  const eventId = input.kind === "REVERSE" ? id(input.eventId, "eventId") : null;
+  const operation = input.kind === "DEDUCT" ? "credit.manual.deduct" : "credit.manual.reverse";
+  const payload = { expectedRevision: input.expectedRevision, visibleReason, ...(input.kind === "DEDUCT" ? { amount: input.amount } : { eventId }) };
+  return withIdempotency(client, { realm: "admin", principalId: actorAdminId, operation, resourceId: userId }, key,
+    fingerprintRequest(operation, userId, payload), async () => undefined, async () => {
+      // Replays resolve before CAS; a new command must never invent an initial score.
+      const state = await lockCreditAccount(client, userId, false);
+      if (state.revision !== input.expectedRevision) throw conflict("信用分已变化，请刷新后重试");
+      let delta: number;
+      if (input.kind === "DEDUCT") {
+        if (input.amount > state.score) throw conflict("扣分数量不能超过当前信用分");
+        delta = -input.amount;
+      } else {
+        const original = (await client.query<{ appliedDeltaScore: number; reversed: boolean }>(
+          `SELECT e.applied_delta_score AS "appliedDeltaScore",
+                  EXISTS(SELECT 1 FROM zzsh_credit.credit_event r WHERE r.reversal_of_id=e.id) AS reversed
+             FROM zzsh_credit.credit_event e WHERE e.id=$1 AND e.user_id=$2
+              AND e.event_type='MANUAL_DEDUCTION' AND e.source_type='USER_MANUAL' AND e.source_id=$2`,
+          [eventId, userId],
+        )).rows[0];
+        if (!original) throw notFound();
+        if (original.reversed) throw conflict("这笔扣分已更正，请刷新后查看");
+        delta = -original.appliedDeltaScore;
+      }
+      const applied = clippedScore(state.score, delta);
+      const eventType = input.kind === "DEDUCT" ? "MANUAL_DEDUCTION" : "MANUAL_DEDUCTION_REVERSED";
+      const eventKey = input.kind === "DEDUCT" ? `manual:${hash([actorAdminId, key])}` : `manual-reverse:${eventId}`;
+      const payloadHash = hash([eventKey, payload]);
+      const event = (await client.query<CreditEventRow>(
+        `INSERT INTO zzsh_credit.credit_event
+          (id,user_id,event_key,event_type,source_type,source_id,subject_role,delta_score,applied_delta_score,score_before,score_after,visible_reason,internal_basis,actor_admin_id,reversal_of_id,payload_hash)
+         VALUES($1,$2,$3,$4,'USER_MANUAL',$2,NULL,$5,$6,$7,$8,$9,'credit-policy-v1:user-manual',$10,$11,$12)
+         RETURNING id,user_id AS "userId",event_key AS "eventKey",event_type AS "eventType",source_type AS "sourceType",source_id AS "sourceId",subject_role AS "subjectRole",delta_score AS "deltaScore",applied_delta_score AS "appliedDeltaScore",score_before AS "scoreBefore",score_after AS "scoreAfter",visible_reason AS "visibleReason",internal_basis AS "internalBasis",actor_admin_id AS "actorAdminId",reversal_of_id AS "reversalOfId",payload_hash AS "payloadHash",created_at::text AS "createdAt",false AS reversed`,
+        [`credit_evt_${randomUUID().replaceAll("-", "")}`, userId, eventKey, eventType, delta, applied.applied, state.score, applied.score, visibleReason, actorAdminId, eventId, payloadHash],
+      )).rows[0];
+      if (!event) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Credit event was not recorded");
+      await client.query(`UPDATE zzsh_credit.user_credit_state SET score=$2,revision=revision+1,updated_at=clock_timestamp() WHERE user_id=$1`, [userId, applied.score]);
+      return { status: 200, body: { event: rowEvent(event), duplicate: false } };
+    });
 }
 
 async function assertBreachSubject(client: PoolClient, userId: string, sourceType: string, sourceId: string, role: CreditSubjectRole): Promise<void> {
@@ -306,7 +368,7 @@ export async function recoveryEligibility(client: PoolClient, userId: string, ob
   const current = state ?? await lockCreditAccount(client, userId);
   const reasons: string[] = [];
   if (current.score >= 100) reasons.push("SCORE_ALREADY_MAX");
-  const recentBreach = (await client.query(`SELECT 1 FROM zzsh_credit.credit_event e WHERE e.user_id=$1 AND e.event_type='BREACH_CONFIRMED' AND e.created_at>clock_timestamp()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM zzsh_credit.credit_event r WHERE r.reversal_of_id=e.id) LIMIT 1`, [userId])).rowCount;
+  const recentBreach = (await client.query(`SELECT 1 FROM zzsh_credit.credit_event e WHERE e.user_id=$1 AND e.event_type IN ('BREACH_CONFIRMED','MANUAL_DEDUCTION') AND e.created_at>clock_timestamp()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM zzsh_credit.credit_event r WHERE r.reversal_of_id=e.id) LIMIT 1`, [userId])).rowCount;
   if (recentBreach) reasons.push("RECENT_CONFIRMED_BREACH");
   const completed = (await client.query<{ count: string }>(`SELECT count(*)::text AS count FROM zzsh_order.rental_order WHERE status='COMPLETED' AND (owner_user_id=$1 OR renter_user_id=$1) AND updated_at>clock_timestamp()-interval '7 days'`, [userId])).rows[0]?.count ?? "0";
   if (completed === "0") reasons.push("NO_COMPLETED_ORDER");
