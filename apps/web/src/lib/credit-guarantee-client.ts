@@ -2,7 +2,7 @@ export type CreditEvent = {
   id: string;
   userId: string;
   eventKey: string;
-  eventType: "INITIALIZED" | "BREACH_CONFIRMED" | "BREACH_REVERSED" | "RECOVERY_APPROVED";
+  eventType: "INITIALIZED" | "BREACH_CONFIRMED" | "BREACH_REVERSED" | "RECOVERY_APPROVED" | "MANUAL_DEDUCTION" | "MANUAL_DEDUCTION_REVERSED";
   sourceType: string;
   sourceId: string;
   subjectRole: "OWNER" | "RENTER" | null;
@@ -74,7 +74,7 @@ function score(value: unknown): number {
 }
 function event(value: unknown): CreditEvent {
   const row = object(value);
-  if (!["INITIALIZED", "BREACH_CONFIRMED", "BREACH_REVERSED", "RECOVERY_APPROVED"].includes(row.eventType)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
+  if (!["INITIALIZED", "BREACH_CONFIRMED", "BREACH_REVERSED", "RECOVERY_APPROVED", "MANUAL_DEDUCTION", "MANUAL_DEDUCTION_REVERSED"].includes(row.eventType)) throw new CreditRequestError(502, "CREDIT_CONTRACT_REQUIRED");
   return { id: text(row.id), userId: text(row.userId), eventKey: text(row.eventKey), eventType: row.eventType, sourceType: text(row.sourceType), sourceId: text(row.sourceId), subjectRole: row.subjectRole === null ? null : row.subjectRole, deltaScore: Number(row.deltaScore), appliedDeltaScore: Number(row.appliedDeltaScore), scoreBefore: score(row.scoreBefore), scoreAfter: score(row.scoreAfter), visibleReason: text(row.visibleReason, 500), reversalOfId: row.reversalOfId ?? null, reversed: row.reversed === true, createdAt: text(row.createdAt, 40) };
 }
 function guarantee(value: unknown): CreditGuarantee {

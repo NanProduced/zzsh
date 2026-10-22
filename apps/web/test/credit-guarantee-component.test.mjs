@@ -527,3 +527,15 @@ test("E-F-016 owner guarantee history stays readable when the main credit read f
     await React.act(async () => root.unmount());
   } finally { globalThis.fetch = original; }
 });
+
+
+test("manual credit events keep the actual user-visible explanation and remain readable", async () => {
+  const original=globalThis.fetch,client=loadTs(clientPath);
+  const event={id:"event-manual",userId:"user-A",eventKey:"manual:opaque",eventType:"MANUAL_DEDUCTION",sourceType:"USER_MANUAL",sourceId:"user-A",subjectRole:null,deltaScore:-7,appliedDeltaScore:-7,scoreBefore:100,scoreAfter:93,visibleReason:"客服核实后扣分",createdAt:"2026-10-22T00:00:00Z"};
+  try {
+    for(const eventType of ["MANUAL_DEDUCTION","MANUAL_DEDUCTION_REVERSED"]) {
+      globalThis.fetch=async()=>Response.json({creditState:"INITIALIZED",credit:{userId:"user-A",score:93,revision:"2",initializedAt:event.createdAt,events:[{...event,eventType}]},recoveryRequests:[],guarantees:[],transactions:[]});
+      const result=await client.readMyCredit();assert.equal(result.credit.events[0].eventType,eventType);assert.equal(result.credit.events[0].visibleReason,event.visibleReason);
+    }
+  } finally {globalThis.fetch=original;}
+});

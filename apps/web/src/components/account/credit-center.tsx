@@ -18,7 +18,7 @@ type AccountSummaryState = { scope: string; entries: Record<string, AccountSumma
 const SUMMARY_PAGE_LIMIT = "50";
 const SUMMARY_MAX_PAGES = 6;
 
-const eventLabels: Record<string, string> = { INITIALIZED: "初始信用", BREACH_CONFIRMED: "确认违约", BREACH_REVERSED: "撤销误判", RECOVERY_APPROVED: "审核恢复" };
+const eventLabels: Record<string, string> = { INITIALIZED: "初始信用", BREACH_CONFIRMED: "确认违约", BREACH_REVERSED: "撤销误判", RECOVERY_APPROVED: "审核恢复", MANUAL_DEDUCTION: "人工扣分", MANUAL_DEDUCTION_REVERSED: "扣分更正" };
 const guaranteeLabels: Record<string, string> = { NOT_REQUIRED: "当前绑定无需缴纳", REQUIRED: "当前保证金责任待满足", PAYMENT_PENDING: "支付结果待确认", SATISFIED: "当前责任已覆盖", REFUND_REQUESTED: "退还申请待处理", REFUND_PROCESSING: "原路退还处理中", REFUNDED: "当前责任已退还", FAILED: "状态失败，需核对", UNKNOWN: "当前责任待确认" };
 const recoveryLabels = { PENDING: "待处理", APPROVED: "已通过", REJECTED: "已驳回" };
 /** 状态语义由服务端枚举决定，不从金额正负或字符串猜。 */
