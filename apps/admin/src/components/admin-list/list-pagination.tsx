@@ -103,8 +103,8 @@ export function ListPagination(props: ListPaginationProps) {
         <div className="admin-list-pagination-left">
           <span>
             {isTrustedTotal
-              ? `共 ${total} ${itemLabel} · 当前页已加载 ${loadedCount} 条`
-              : `当前页已加载 ${loadedCount} 条 · 总数待更新`}
+              ? `共 ${total} ${itemLabel} · 已加载 ${loadedCount} 条`
+              : `已加载 ${loadedCount} 条 · 总数待更新`}
             {loading ? " · 正在翻页" : ""}
           </span>
           <Select
@@ -202,11 +202,11 @@ export function ListPagination(props: ListPaginationProps) {
       aria-label="分页导航"
     >
       <div className="admin-list-pagination-left">
-        <span>
+        <span title={rangeLabel}>
           {safeTotal === 0 ? (
             `共 0 ${itemLabel} · 暂无分页`
           ) : (
-            `共 ${safeTotal} ${itemLabel} · ${rangeLabel} · 当前页已加载 ${displayCount} 条 · 第 ${page} / ${totalPages} 页`
+            `共 ${safeTotal} ${itemLabel} · 第 ${page} / ${totalPages} 页`
           )}
           {loading ? " · 正在翻页" : ""}
         </span>

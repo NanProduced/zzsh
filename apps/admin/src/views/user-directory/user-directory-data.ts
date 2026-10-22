@@ -1,4 +1,4 @@
-import { adminRequest, AdminApiError, type SessionSnapshot, type UserDirectoryItem, type UserDirectoryDetail, type UserOrderItem, type UserRentalAccountItem, type UserAuditEventItem } from '../../api';
+import { adminRequest, AdminApiError, type SessionSnapshot, type UserDirectoryItem, type UserDirectoryDetail, type UserOrderItem, type UserRentalAccountItem, type UserAuditEventItem, type UserDirectorySort, type UserDirectoryWalletSummary } from '../../api';
 import { financeRead, defaultFinanceFilters, type FinanceResponse } from '../admin-finance-api';
 
 export const PERMISSION = {
@@ -11,18 +11,31 @@ export const PERMISSION = {
   growthSummary: 'membership.growth.read.summary',
   growthDetail: 'membership.growth.read.detail',
   finance: 'finance.read',
+  walletRead: 'user.wallet.read',
+  riskManage: 'user.risk.manage',
 } as const;
 export const CREDIT_GUARANTEE_PERMISSION = { read: 'credit.guarantee.read', manage: 'credit.guarantee.manage' } as const;
 export type Domain = keyof typeof PERMISSION;
 export type Part<T> = { state: 'ready'; data: T; count?: number; publishedCount?: number; current?: number; nextCursor?: string | null } | { state: 'denied'; permission: string; reason?: string };
 /** The age filter is no longer offered: the server gate and the DTO stay, the operator surface drops it. */
-export type Filters = { q: string; status: string; from: string; to: string; identity: string; source: string; sort: string };
-export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', source: '', sort: 'registered_desc' };
+export type Filters = { q: string; status: string; from: string; to: string; identity: string; source: string; sort: string; tier: string; entitlement: string; credit: string; risk: string };
+export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', source: '', sort: 'registered_desc', tier: '', entitlement: '', credit: '', risk: '' };
 /** The directory always reads the server-declared original registration time; the local filing date is a different fact. */
 export const REGISTRATION_TIME_ORIGINAL = 'ORIGINAL';
 export const REGISTRATION_SORT = { desc: 'registered_desc', asc: 'registered_asc' } as const;
-/** The registration sort the directory supports; the old `created` sort normalises into the default. */
-export const normalizeRegistrationSort = (value: string | undefined) => value === REGISTRATION_SORT.asc ? REGISTRATION_SORT.asc : REGISTRATION_SORT.desc;
+/** 目录支持的排序。旧 `created` 排序归一到注册时间默认，其余按服务端合同取值。 */
+export const DIRECTORY_SORTS: readonly UserDirectorySort[] = [
+  'registered_desc', 'registered_asc',
+  'balance_desc', 'balance_asc',
+  'credit_desc', 'credit_asc',
+  'renter_current_desc', 'renter_current_asc',
+  'owner_current_desc', 'owner_current_asc',
+  'published_desc', 'published_asc',
+];
+export const normalizeRegistrationSort = (value: string | undefined): UserDirectorySort =>
+  DIRECTORY_SORTS.includes(value as UserDirectorySort) ? (value as UserDirectorySort) : REGISTRATION_SORT.desc;
+/** 排序的升降方向由取值后缀决定；注册时间之外的新排序都是服务端真实全量排序。 */
+export const sortDirection = (value: string | undefined) => value?.endsWith('_asc') ? 'asc' : 'desc';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 /** A real calendar day. UTC midnight arithmetic on a date-only string keeps it free of browser timezone drift. */
 const isCalendarDay = (value: string) => {
@@ -77,6 +90,10 @@ export type User = {
   resources: Part<Resource[]> & { count?: number; publishedCount?: number; reason?: string };
   membershipSummary?: UserDirectoryItem['membershipSummary'];
   creditSummary?: UserDirectoryItem['creditSummary'];
+  /** 可用余额摘要：精确整数分；未知与无权限都不是 0。 */
+  walletSummary?: UserDirectoryWalletSummary;
+  /** 内部高危标识：只读展示。 */
+  riskFlag: boolean;
   match?: string;
 };
 
@@ -140,6 +157,8 @@ function project(row: UserDirectoryItem | UserDirectoryDetail, has:(permission:s
     resources: resourcesPart,
     membershipSummary: row.membershipSummary,
     creditSummary: row.creditSummary,
+    walletSummary: row.walletSummary,
+    riskFlag: row.riskFlag === true,
   };
 }
 
@@ -239,6 +258,10 @@ export class UserDirectoryBff {
         accountStatus: filters.status,
         identityStatus: filters.identity,
         source: filters.source,
+        membershipTier: filters.tier,
+        entitlement: filters.entitlement,
+        creditState: filters.credit,
+        riskState: filters.risk,
       })) {
         if (value) p.set(key, value);
       }
@@ -373,6 +396,11 @@ export class UserDirectoryBff {
   async creditDecide(path:string,body:Record<string,unknown>,signal:AbortSignal,idempotencyKey?:string) {
     if(!this.has(PERMISSION.creditDecide) && !(path.startsWith('guarantees/') && this.hasCreditGuaranteeManage())) throw new AdminApiError(403,'FORBIDDEN');
     return this.request<Record<string,unknown>>(`/credit/${path}`,signal,body,idempotencyKey?{'idempotency-key':idempotencyKey}:{});
+  }
+  /** 内部高危标识：只标记/取消这一个布尔事实。幂等键由调用方持有，重试不换键。 */
+  async setRiskFlag(id:string,flagged:boolean,expectedRevision:number|null,idempotencyKey:string,signal:AbortSignal) {
+    if(!this.has(PERMISSION.riskManage)) throw new AdminApiError(403,'FORBIDDEN');
+    return this.request<{userId:string;flagged:boolean;revision:number;changed:boolean}>(`/users/${encodeURIComponent(id)}/risk-flag`,signal,{flagged,expectedRevision},{'idempotency-key':idempotencyKey});
   }
   async membershipGrowth(id:string,signal:AbortSignal) {
     if(!this.has(PERMISSION.growthSummary) && !this.has(PERMISSION.growthDetail) && !this.snapshot.security.isBoss) throw new AdminApiError(403,'FORBIDDEN');

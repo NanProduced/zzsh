@@ -163,6 +163,25 @@ export type UserDirectoryCreditSummary =
       reason?: "NO_GAME_SCOPE" | "OUT_OF_SCOPE";
     };
 
+/** 目录用的可用余额摘要：精确整数分；未知、无权限与真实 0 分开。 */
+export type UserDirectoryWalletSummary =
+  | { state: "ready"; amountCents: string; currency: "CNY"; asOfUtc: string }
+  | { state: "unknown"; reason: string }
+  | { state: "denied"; permission: string };
+
+/** 目录支持的排序：筛选与排序都先在授权集合上执行，再分页。 */
+export type UserDirectorySort =
+  | "registered_desc" | "registered_asc"
+  | "balance_desc" | "balance_asc"
+  | "credit_desc" | "credit_asc"
+  | "renter_current_desc" | "renter_current_asc"
+  | "owner_current_desc" | "owner_current_asc"
+  | "published_desc" | "published_asc";
+export type UserDirectoryMembershipTier = "PENDING" | "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND" | "BLACK_GOLD";
+export type UserDirectoryEntitlementFilter = "FRIEND" | "PRESTIGE" | "ANY" | "NONE";
+export type UserDirectoryCreditState = "KNOWN" | "NOT_INITIALIZED";
+export type UserDirectoryRiskState = "FLAGGED" | "NOT_FLAGGED";
+
 export type UserDirectoryItem = {
   userId: string;
   name: string;
@@ -184,6 +203,9 @@ export type UserDirectoryItem = {
   orderSummary: UserDirectoryOrderSummary;
   membershipSummary?: UserDirectoryMembershipSummary;
   creditSummary?: UserDirectoryCreditSummary;
+  walletSummary?: UserDirectoryWalletSummary;
+  /** 内部高危标识：只读展示，标记动作另有受权接口。 */
+  riskFlag?: boolean;
   lastBusinessActivity: { state: "not_connected"; domains: string[] };
 };
 export type UserDirectoryNumberedPage = {

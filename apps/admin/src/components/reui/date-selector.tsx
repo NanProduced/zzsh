@@ -344,13 +344,14 @@ export function DateSelector({
   return (
     <div className={cn("ud-date-selector", className)}>
       {label ? <span className="ud-date-label">{label}</span> : null}
-      <DateSelectorFilterToggle
-        value={filterType}
-        onChange={setFilterType}
-        showBetween={allowRange}
-        presetMode={presetMode}
-        i18n={mergedI18n}
-      />
+      {presetMode === undefined ? (
+        <DateSelectorFilterToggle
+          value={filterType}
+          onChange={setFilterType}
+          showBetween={allowRange}
+          i18n={mergedI18n}
+        />
+      ) : null}
       {showInput ? (
         <div className="ud-date-input">
           <Input

@@ -64,10 +64,12 @@ async function mount(t,options={}) {
 test('ordinary BFF list removes user classifications and shows canonical dates, explicit activity gap and source',async t=>{
   const {calls}=await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr'));
   assert.ok(calls.every(call=>call.url.startsWith('/api/bff/admin/')));
-  assert.deepEqual([...browser.document.querySelectorAll('th')].map(e=>e.textContent),['用户','账号与实名','会员与礼遇','信用','当前业务','注册时间','操作']);
+  assert.deepEqual([...browser.document.querySelectorAll('th')].map(e=>e.textContent),['用户','账号与实名','会员与礼遇','信用↕','可用余额↕','当前业务租入↕出租↕上架↕','注册时间↓','操作']);
   const text=browser.document.querySelector('.ud-directory').textContent;assert.equal(text.includes('业务关系'),false);assert.equal(text.includes('租客'),false);assert.equal(text.includes('号主'),false);
   assert.equal(text.includes('业务活动暂未接入'),false,'the list no longer repeats a not-connected notice');
-  await click(namedButton('更多筛选'));const filters=browser.document.querySelector('.ud-filter-sheet').textContent;for(const label of ['业务关系','有无订单','有无资源','年龄状态'])assert.equal(filters.includes(label),false);
+  const toolbar=browser.document.querySelector('.ud-directory').textContent;for(const label of ['业务关系','有无订单','有无资源','年龄状态'])assert.equal(toolbar.includes(label),false);
+  assert.equal(namedButton('更多筛选'),undefined,'the filter drawer is gone; filters sit inline in the toolbar');
+  for(const label of ['账号状态','注册日期','实名状态','来源','会员等级','有效礼遇','信用','内部标识'])assert.ok(toolbar.includes(label),`inline filter ${label}`);
 });
 
 test('desktop row and Enter open Drawer; only CTA navigates, viewport changes never create a detail',async t=>{
@@ -165,7 +167,7 @@ test('U-LIST: displays total count from API and renders role-specific order entr
   await waitFor(() => browser.document.querySelector('tbody tr'));
   const text = browser.document.querySelector('.ud-directory').textContent;
   assert.ok(text.includes('共 88 位用户'));
-  assert.ok(text.includes('当前页已加载 1 条'));
+  assert.ok(text.includes('共 88 位用户 · 已加载 1 条'));
   assert.ok(text.includes('租入 1'));
   assert.ok(text.includes('出租 2'));
   assert.equal(text.includes('共 3 个进行中'),false,'role counts are never summed into a de-duplicated total');
@@ -422,7 +424,7 @@ for (const [value, trusted] of [[1234, true], [0, true], [12.5, false], [-3, fal
   const text = browser.document.querySelector('.ud-pagination').textContent;
   assert.equal(text.includes('位用户'), trusted, text);
   if (!trusted) assert.ok(text.includes('总数待更新'), 'a page length never stands in for the server total');
-  else assert.ok(text.includes('当前页已加载 1 条'), 'the loaded-page count stays separate from the total');
+  else assert.ok(text.includes(`共 ${value} 位用户`), 'the server total is the only stated count');
 });
 
 test('U-LIST-CLOSEOUT: a last page emptied by refresh keeps the way back instead of hiding every pagination exit', async t => {
@@ -564,7 +566,7 @@ test('U-LIST-PAGE: numbered pagination renders total, page window, navigates and
   await waitFor(() => browser.document.querySelectorAll('tbody tr').length === 20);
   const paginationText = browser.document.querySelector('.ud-pagination').textContent;
   assert.ok(paginationText.includes('共 55 位用户'), 'displays total count from page API');
-  assert.ok(paginationText.includes('当前页已加载 20 条'));
+  assert.ok(paginationText.includes('共 55 位用户 · 第 1 / 3 页'));
   assert.ok(paginationText.includes('第 1 / 3 页'));
 
   // First & Prev disabled on page 1
@@ -852,7 +854,7 @@ test('MASTER-UX03: quick ranges use the Beijing date in a UTC browser',async t=>
 test('R1: the registration sort is available and the legacy created sort normalises into the default',async t=>{
   const {calls}=await mount(t,{path:'/users?sort=created'});
   await waitFor(()=>browser.document.querySelector('tbody tr'));
-  assert.ok(browser.document.querySelector('[aria-label="注册时间排序"]'),'the registration sort entry is available');
+  assert.ok(browser.document.querySelector('[aria-label="按注册时间排序"]'),'the registration sort lives on the column header');
   const call=calls.find(c=>c.url.includes('/users?'));
   const url=new URL(call.url,browser.location.href);
   assert.equal(url.searchParams.get('sort'),'registered_desc','the old created sort normalises into the registration default');
@@ -873,7 +875,7 @@ test('R1: an unknown registration source never becomes a registration date',asyn
   const unknown={...user,source:{kind:'UNKNOWN'},registeredAt:null,registeredAtSource:'UNKNOWN'};
   await mount(t,{fetch:async()=>json({items:[unknown],nextCursor:null,limit:20})});
   await waitFor(()=>browser.document.querySelector('tbody tr'));
-  const dateCell=browser.document.querySelector('tbody tr').children[5];
+  const dateCell=browser.document.querySelector('tbody tr').children[6];
   assert.ok(dateCell.textContent.includes('待核'));
   assert.ok(!dateCell.textContent.includes('2026-09-24'),'the local filing date is never printed as a registration date');
 });
@@ -1179,4 +1181,87 @@ test('R2: switching the account scope clears the cursor and the old rows',async 
   assert.ok(after.every(c=>c.filters.publication===undefined),'the new scope reads the whole collection');
   assert.ok(container.textContent.includes('a-all'),'the new scope shows its own rows');
   assert.equal(container.textContent.includes('a-published'),false,'the rows of the previous scope are gone');
+});
+
+// ADM-USER-LIST-REPAIR-01：可用余额、内部高危标识、表头排序与紧凑行内筛选。
+test('R2: the balance column shows the exact amount and keeps unknown and denied apart from zero',async t=>{
+  const users=[
+    { ...user, userId:'w_zero', name:'零余额用户', walletSummary:{state:'ready',amountCents:'0',currency:'CNY',asOfUtc:'2026-10-22T00:00:00Z'} },
+    { ...user, userId:'w_big', name:'大额用户', walletSummary:{state:'ready',amountCents:'9007199254740993',currency:'CNY',asOfUtc:'2026-10-22T00:00:00Z'} },
+    { ...user, userId:'w_unknown', name:'余额待核用户', walletSummary:{state:'unknown',reason:'SOURCE_COVERAGE_NOT_ADMITTED'} },
+    { ...user, userId:'w_denied', name:'余额无权限用户', walletSummary:{state:'denied',permission:'user.wallet.read'} },
+  ];
+  await mount(t,{fetch:async()=>json({items:users,total:4,nextCursor:null,limit:20})});
+  await waitFor(()=>browser.document.querySelectorAll('tbody tr').length===4);
+  const rows=[...browser.document.querySelectorAll('tbody tr')].map(r=>r.textContent);
+  assert.ok(rows[0].includes('¥0.00'),'a real zero stays zero');
+  assert.ok(rows[1].includes('¥90071992547409.93'),'a large exact amount is not rounded through a float');
+  assert.ok(rows[2].includes('待核'),'an unknown balance is not a zero');
+  assert.ok(rows[3].includes('无权限'),'a denied balance is not a zero');
+});
+
+test('R2: the internal risk flag sits next to the nickname and only for flagged users',async t=>{
+  const users=[
+    { ...user, userId:'r_flagged', name:'高危用户', riskFlag:true },
+    { ...user, userId:'r_plain', name:'普通用户', riskFlag:false },
+  ];
+  await mount(t,{fetch:async()=>json({items:users,total:2,nextCursor:null,limit:20})});
+  await waitFor(()=>browser.document.querySelectorAll('tbody tr').length===2);
+  const rows=[...browser.document.querySelectorAll('tbody tr')];
+  assert.ok(rows[0].textContent.includes('高危'),'the flagged user carries the internal tag');
+  assert.equal(rows[1].textContent.includes('高危'),false,'an unflagged user carries no tag');
+});
+
+test('R1/R2: the column headers sort immediately, go back to page 1 and expose aria-sort',async t=>{
+  const {calls}=await mount(t);
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  const sortButton=browser.document.querySelector('[aria-label="按可用余额排序"]');
+  assert.ok(sortButton,'the balance column carries its own sort control');
+  await click(sortButton);
+  await waitFor(()=>calls.some(c=>c.url.includes('sort=balance_asc')));
+  const header=sortButton.closest('th');
+  assert.ok(header,'the sorted column declares aria-sort');
+  assert.equal(header.getAttribute('aria-sort'),'ascending');
+  const call=calls.find(c=>c.url.includes('sort=balance_asc'));
+  assert.equal(new URL(call.url,browser.location.href).searchParams.get('page'),'1','a new sort starts at the first page');
+});
+
+test('R2: the business column sorts renting, lending and published separately',async t=>{
+  const {calls}=await mount(t);
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  for(const label of ['按租入排序','按出租排序','按上架排序']){
+    const button=browser.document.querySelector(`[aria-label="${label}"]`);
+    assert.ok(button,`${label} is available`);
+  }
+  await click(browser.document.querySelector('[aria-label="按上架排序"]'));
+  await waitFor(()=>calls.some(c=>c.url.includes('sort=published_asc')));
+  assert.ok(calls.some(c=>c.url.includes('sort=published_asc')),'the published count has its own server sort');
+});
+
+test('R1: the applied date range is one condition and the draft only warns until 查询',async t=>{
+  const {calls}=await mount(t,{path:'/users?from=2026-10-18&to=2026-10-18'});
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  const chips=[...browser.document.querySelectorAll('.admin-list-toolbar-applied button')].map(b=>b.getAttribute('aria-label'));
+  assert.equal(chips.length,1,'the date range is a single applied condition');
+  assert.ok(chips[0].includes('注册日期'),'the applied condition is a readable Chinese label');
+  assert.equal(browser.document.querySelector('.ud-draft-hint'),null,'an applied range leaves no pending draft');
+  const before=calls.length;
+  await input(browser.document.querySelector('[aria-label="查找用户"]'),'林舟');
+  await waitFor(()=>browser.document.querySelector('.ud-draft-hint'));
+  assert.equal(calls.length,before,'typing a draft never queries by itself');
+  await click(namedButton('查询'));
+  await waitFor(()=>calls.length>before);
+});
+
+test('R1: a refresh keeps the previous rows and says 更新中',async t=>{
+  let release;let block=false;
+  const {calls}=await mount(t,{fetch:async()=>{ if(block)await new Promise(resolve=>{release=resolve;}); return json({items:[user],total:1,nextCursor:null,limit:20}); }});
+  await waitFor(()=>browser.document.querySelector('tbody tr'));
+  await input(browser.document.querySelector('[aria-label="查找用户"]'),'林舟');
+  block=true;
+  await click(namedButton('查询'));
+  await waitFor(()=>browser.document.querySelector('.ud-updating'));
+  assert.ok(browser.document.querySelector('tbody tr'),'the previous rows stay visible while the new query runs');
+  assert.ok(browser.document.querySelector('.ud-updating').textContent.includes('更新中'));
+  if(release)await act(async()=>{release();});
 });

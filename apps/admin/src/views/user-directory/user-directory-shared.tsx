@@ -7,7 +7,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { WorkspacePageContent } from '@/workspace/page-content';
 import { PERMISSION, STATUS_LABEL, knownCount, type Audit, type Domain, type Order, type Part, type Resource, type User, type UserDirectoryBff } from './user-directory-data';
-import { AdminApiError, friendlyError } from '../../api';
+import { AdminApiError, friendlyError, type UserDirectoryWalletSummary } from '../../api';
 import { BEIJING_TIME_ZONE } from '../../workspace/beijing-time';
 export type PageProps = Pick<Parameters<typeof WorkspacePageContent>[0], 'tab' | 'snapshot' | 'onOpenPath' | 'onQueryChange' | 'refreshNonce'>;
 export type UserDirectoryData = UserDirectoryBff;
@@ -149,6 +149,7 @@ export function Identity({ user, full = false, heading = false, onOpenDetail }: 
           ) : (
             <strong>{nickname}</strong>
           )}
+          <RiskBadge flagged={user.riskFlag === true} />
           {migrated ? (
             <Tooltip>
               <TooltipTrigger render={<span className="ud-source-icon" aria-label="旧平台迁入" tabIndex={0} onClick={e => e.stopPropagation()} />}>
@@ -176,11 +177,39 @@ export const formatBeijingDate = (value: string | null | undefined) => !value ? 
 export function RegistrationCell({ user, includeTime = false }: { user: User; includeTime?: boolean }) {
   if (user.registeredAtSource === 'UNKNOWN' || !user.registeredAt || !Number.isFinite(Date.parse(user.registeredAt))) return <Badge variant="unknown">待核</Badge>;
   return (
-    <div className="ud-registered-cell flex flex-col gap-0.5 items-start">
-      <span className="text-xs tabular-nums">{includeTime ? time(user.registeredAt) : formatBeijingDate(user.registeredAt)}</span>
-      <span className="ud-subline">{user.registeredAtSource === 'LEGACY' ? '旧平台注册' : '本平台注册'}</span>
-    </div>
+    <Tooltip>
+      <TooltipTrigger render={<span className="ud-registered-cell text-xs tabular-nums" tabIndex={0} aria-label="用户原注册时间" />}>
+        {includeTime ? time(user.registeredAt) : formatBeijingDate(user.registeredAt)}
+      </TooltipTrigger>
+      <TooltipContent>用户原注册时间</TooltipContent>
+    </Tooltip>
   );
+}
+
+/** 可用余额：精确整数分。未知与无权限都不是 0；金额不经过浮点。 */
+export function WalletCell({ summary }: { summary?: UserDirectoryWalletSummary }) {
+  if (!summary) return <span className="ud-muted">待核</span>;
+  if (summary.state === 'denied') return <span className="ud-muted">无权限</span>;
+  if (summary.state === 'unknown') return <span className="ud-muted">待核</span>;
+  const cents = summary.amountCents;
+  if (!/^-?(0|[1-9]\d{0,23})$/.test(cents)) return <span className="ud-muted">待核</span>;
+  const negative = cents.startsWith('-');
+  const absolute = (negative ? cents.slice(1) : cents).padStart(3, '0');
+  const yuan = `${absolute.slice(0, -2)}.${absolute.slice(-2)}`;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="ud-wallet-cell text-xs tabular-nums" tabIndex={0} aria-label="当前可用余额" />}>
+        {negative ? '-' : ''}¥{yuan}
+      </TooltipTrigger>
+      <TooltipContent>当前可用余额，不含已申请提现部分</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** 内部高危标识：只读展示，与昵称同排；不联动账号状态、信用、上架或订单资格。 */
+export function RiskBadge({ flagged }: { flagged: boolean }) {
+  if (!flagged) return null;
+  return <Badge variant="destructive" className="ud-risk-badge"><TriangleAlertIcon size={12} aria-hidden />高危</Badge>;
 }
 
 /** 正式等级名：普通、银卡、金卡、铂金、钻石；黑金是独立资格事实，不写作会员档位。 */
@@ -292,26 +321,20 @@ export function OrdersCurrentCell({
   return (
     <div className="ud-orders-cell flex flex-wrap items-center gap-1">
       {renter === undefined ? <span className="ud-muted text-xs">租入待更新</span> : (
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-6 px-1.5 text-xs tabular-nums"
-          onClick={e => { e.stopPropagation(); onDrillDown('renter'); }}
-          aria-label={`查看用户 ${user.name} 租入订单`}
-        >
-          租入 {renter}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger render={<Button variant="outline" size="sm" className="h-6 px-1.5 text-xs tabular-nums" onClick={e => { e.stopPropagation(); onDrillDown('renter'); }} aria-label={`查看用户 ${user.name} 租入订单`} />}>
+            租入 {renter}
+          </TooltipTrigger>
+          <TooltipContent>进行中的订单，含待付款</TooltipContent>
+        </Tooltip>
       )}
       {owner === undefined ? <span className="ud-muted text-xs">出租待更新</span> : (
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-6 px-1.5 text-xs tabular-nums"
-          onClick={e => { e.stopPropagation(); onDrillDown('owner'); }}
-          aria-label={`查看用户 ${user.name} 出租订单`}
-        >
-          出租 {owner}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger render={<Button variant="outline" size="sm" className="h-6 px-1.5 text-xs tabular-nums" onClick={e => { e.stopPropagation(); onDrillDown('owner'); }} aria-label={`查看用户 ${user.name} 出租订单`} />}>
+            出租 {owner}
+          </TooltipTrigger>
+          <TooltipContent>进行中的订单，含待付款</TooltipContent>
+        </Tooltip>
       )}
     </div>
   );
@@ -332,15 +355,12 @@ export function PublishedCountCell({
   const published = resources.publishedCount;
   if (published === undefined) return <span className="ud-muted">上架数待更新</span>;
   return (
-    <Button
-      variant="outline"
-      size="sm"
-      className="h-6 px-1.5 text-xs tabular-nums"
-      onClick={e => { e.stopPropagation(); onDrillDown(); }}
-      aria-label={`查看用户 ${user.name} 已上架游戏账号`}
-    >
-      上架 {published}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger render={<Button variant="outline" size="sm" className="h-6 px-1.5 text-xs tabular-nums" onClick={e => { e.stopPropagation(); onDrillDown(); }} aria-label={`查看用户 ${user.name} 已上架游戏账号`} />}>
+        上架 {published}
+      </TooltipTrigger>
+      <TooltipContent>已发布账号数，不代表当前可租</TooltipContent>
+    </Tooltip>
   );
 }
 

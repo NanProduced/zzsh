@@ -203,7 +203,7 @@ test('ListPagination cursor mode: displays notice and handles prev/next cursor e
   await settle();
 
   assert.ok(container.textContent.includes('当前服务暂未提供跳页能力'));
-  assert.ok(container.textContent.includes('当前页已加载 15 条 · 总数待更新'));
+  assert.ok(container.textContent.includes('已加载 15 条 · 总数待更新'));
   assert.equal(container.querySelector('[aria-label="跳转页码"]'), null, 'no jump input in cursor mode');
 
   const prevBtn = [...container.querySelectorAll('button')].find(b => b.textContent.includes('上一页'));
@@ -222,7 +222,7 @@ test('MASTER: range uses received rows and navigation respects the API maximum',
   const changes=[];
   const {container}=mountComponent(t,createElement(ListPagination,{mode:'page',page:2,pageSize:20,total:20_000_001,loadedCount:3,loading:false,pageSizeOptions:[10,20,50],onPageChange:p=>changes.push(p),onPageSizeChange:()=>{}}));
   await settle();
-  assert.ok(container.textContent.includes('第 21–23 位'),'received row range');
+  assert.equal(container.querySelector('.admin-list-pagination-left span')?.getAttribute('title'),'第 21–23 位','received row range');
   const last=container.querySelector('[aria-label="末页"]');
   await act(async()=>last.dispatchEvent(new browser.MouseEvent('click',{bubbles:true})));
   assert.equal(changes.at(-1),1_000_000);
