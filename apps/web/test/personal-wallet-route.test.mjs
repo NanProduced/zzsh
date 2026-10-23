@@ -29,3 +29,19 @@ test('wallet proxy rejects foreign origins, caller identities, duplicate filters
   assert.equal((await GET(new Request(root+'/guarantees?bucket=ALL'),context(['guarantees']))).status,400);assert.equal((await GET(new Request(root,{headers:{origin:'https://foreign.test'}}),context())).status,403);assert.equal((await GET(new Request(root,{headers:{'sec-fetch-site':'cross-site'}}),context())).status,403);assert.equal((await GET(new Request(root+'/guarantees/x'),context(['guarantees','x']))).status,404);assert.equal(POST().status,404);assert.equal(calls,0);
  }finally{globalThis.fetch=original;}
 });
+
+test('wallet BFF preserves authoritative timestamps including explicit unknown and old-service absence',async()=>{
+ const previous=globalThis.fetch,at=page.asOf,base={schemaVersion:1,id:'ledger:time',occurredAt:at,importedAt:at,bucket:'AVAILABLE',deltaCents:'100',kind:'POSTED',includedInOpening:false,sourceKind:'NATIVE_SETTLEMENT',source:{type:'NATIVE',system:'zzsh',entity:'settlement_posting',id:'p'},businessReference:{type:'UNKNOWN',id:null,number:null},balanceAfterCents:null};
+ try{
+  for(const times of [{},{postedAt:null,recordedAt:at},{postedAt:null,recordedAt:null},{postedAt:'2026-10-03T15:59:59.000Z',recordedAt:at}]){
+   globalThis.fetch=async()=>Response.json({...page,entry:{...base,...times}});
+   const result=await GET(new Request(root+'/entries/ledger%3Atime'),context(['entries','ledger:time'])),body=await result.json();
+   assert.equal(result.status,200);assert.equal(Object.hasOwn(body.entry,'postedAt'),Object.hasOwn(times,'postedAt'));
+   if(Object.hasOwn(times,'postedAt'))assert.equal(body.entry.postedAt,times.postedAt);
+   assert.equal(Object.hasOwn(body.entry,'recordedAt'),Object.hasOwn(times,'recordedAt'));
+   if(Object.hasOwn(times,'recordedAt'))assert.equal(body.entry.recordedAt,times.recordedAt);
+  }
+  globalThis.fetch=async()=>Response.json({...page,entry:{...base,postedAt:'not-a-time'}});
+  assert.equal((await GET(new Request(root+'/entries/ledger%3Atime'),context(['entries','ledger:time']))).status,502);
+ }finally{globalThis.fetch=previous;}
+});

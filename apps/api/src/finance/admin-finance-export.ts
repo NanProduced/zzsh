@@ -12,10 +12,10 @@ export function financeCsvCell(value: string | null): string {
   return '"' + (/^[\s\uFEFF]*[=+\-@\t\r\n]/.test(text) ? "'" + text : text).replaceAll('"', '""') + '"';
 }
 export function generateAdminFinanceCsv(entries: readonly FinanceEntry[], filters: FinanceFilters, asOf: string, version: string) {
-  const header = ["分录引用", "业务引用", "原编号", "主体ID", "主体", "资金类别", "方向", "变动金额_分", "金额状态", "业务", "状态", "分类", "改变用户资金", "当前账内分录", "来源类型", "来源系统", "来源实体", "来源ID", "事实时间_UTC", "采集时间_UTC", "核验时间_UTC", "缺项", "生效范围", "起日_AsiaShanghai", "止日_AsiaShanghai", "数据截止_UTC", "快照版本", "币种"];
+  const header = ["分录引用", "业务引用", "原编号", "主体ID", "主体", "资金类别", "方向", "变动金额_分", "金额状态", "业务", "当前业务状态", "分类", "改变用户资金", "当前账内分录", "来源类型", "来源系统", "来源实体", "来源ID", "事实时间_UTC", "采集时间_UTC", "核验时间_UTC", "缺项", "生效范围", "起日_AsiaShanghai", "止日_AsiaShanghai", "数据截止_UTC", "快照版本", "币种", "本次记账事件", "计划转可用时间_UTC", "原行记录时间_UTC"];
   const lines = entries.map(entry => [entry.id, entry.documentRef, entry.documentNumber, entry.subjectId, entry.subjectName, entry.bucket, entry.direction,
     entry.deltaCents, entry.knowledge, entry.kind, entry.state, entry.classification, String(entry.affectsCurrentWallet), String(entry.affectsCurrentLedger), entry.sourceType, entry.sourceSystem, entry.sourceEntity, entry.sourceId,
-    entry.occurredAt, entry.importedAt, entry.evidence.queriedAt ?? null, entry.reasonCodes.join("|"), filters.scope, filters.from, filters.to, asOf, version, "CNY"]
+    entry.occurredAt, entry.importedAt, entry.evidence.queriedAt ?? null, entry.reasonCodes.join("|"), filters.scope, filters.from, filters.to, asOf, version, "CNY",entry.evidence.eventAction??entry.evidence.eventKind??null,entry.evidence.dueAt??null,entry.evidence.recordedAt??null]
     .map((value, index) => index === 7 && value !== null ? '"' + exactCents(value) + '"' : financeCsvCell(value)).join(","));
   const bytes = Buffer.from("\uFEFF" + [header.map(financeCsvCell).join(","), ...lines].join("\r\n") + "\r\n", "utf8");
   if (bytes.length > 12 * 1024 * 1024) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Finance export size limit reached",[{path:"finance.exportLimit.12MiB",code:"INVALID_FIELD"}]);

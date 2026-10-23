@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowUpRightIcon, CalendarDaysIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,12 +8,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DateSelector, type DateSelectorValue } from "@/components/reui/date-selector";
 import { ListPagination } from "@/components/admin-list/list-pagination";
 import { ListTable, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/admin-list/list-table";
-import { bucketLabels, defaultFinanceFilters, financeMoney, financeTime, financeBusinessLabel, financeIsHistorical, financeRecordNumber, financeRecordState, type FinanceFilters } from "../admin-finance-api";
+import { bucketLabels, defaultFinanceFilters, financeMoney, financeTime, financeBusinessLabel, financeIsHistorical, financeRecordNumber, financeRecordState, financeEntryScope, type FinanceFilters } from "../admin-finance-api";
 import { HistoricalFinanceDetail, financeContextIdentity, registerFinanceOrigin } from "../admin-finance-view";
 import { PERMISSION, type User } from "./user-directory-data";
 import { errorText, Message, useDirectoryRequest, type PageProps, type UserDirectoryData } from "./user-directory-shared";
+import { sanitizeFinanceReturn, type WorkspaceTab } from '@/workspace/tab-model';
 
-type Props = Pick<PageProps,"refreshNonce"|"onOpenPath"> & { adapter:UserDirectoryData; user:User };
+type Props = Pick<PageProps,"refreshNonce"|"onOpenPath"> & { adapter:UserDirectoryData; user:User; tab?:WorkspaceTab; onQueryChange?:(query:Record<string,string>)=>void };
 const components = {haffRentCents:"哈夫币实耗租金",itemConsumptionCents:"物品实耗费用",earlyMakeupCents:"提前结束补足",renterFeeCents:"租客承担包赔费"} as const;
 const money = (value:string|null|undefined) => value == null ? "待核" : financeMoney(value);
 const day = (date:Date) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
@@ -59,26 +60,29 @@ function Consumption({adapter,user,refreshNonce,onOpenPath}:Props) {
   </section>;
 }
 
-function FinanceDocuments({adapter,user,refreshNonce,onOpenPath}:Props) {
-  const [draft,setDraft]=useState(()=>({...defaultFinanceFilters(true),scope:user.id}));
+function FinanceDocuments({adapter,user,refreshNonce,onOpenPath,tab,onQueryChange}:Props) {
+  const incoming={...defaultFinanceFilters(true),scope:user.id,...(tab?.query.financeFrom?{from:tab.query.financeFrom}:{}),...(tab?.query.financeTo?{to:tab.query.financeTo}:{})};
+  const navigation=JSON.stringify([user.id,incoming.from,incoming.to]),previousNavigation=useRef(navigation);
+  const [draft,setDraft]=useState<FinanceFilters>(incoming);
   const [applied,setApplied]=useState<FinanceFilters>(draft);
   const [dateOpen,setDateOpen]=useState(false);
   const [selectedDate,setSelectedDate]=useState<DateSelectorValue>(()=>({period:"day",operator:"between",startDate:new Date(`${draft.from}T00:00:00`),endDate:new Date(`${draft.to}T00:00:00`)}));
+  useLayoutEffect(()=>{if(previousNavigation.current===navigation)return;previousNavigation.current=navigation;setDraft(incoming);setApplied(incoming);setSelectedDate({period:'day',operator:'between',startDate:new Date(`${incoming.from}T00:00:00`),endDate:new Date(`${incoming.to}T00:00:00`)});},[navigation]);
   const {result,retry}=useDirectoryRequest(`${identity(adapter)}:${user.id}:finance-documents:${applied.from}:${applied.to}:${refreshNonce}`,
     signal=>adapter.finance(user.id,signal,applied));
   const canDocument=adapter.snapshot.security.isBoss||adapter.has("finance.document.read");
-  const open=(ref?:string)=>{
-    const origin=registerFinanceOrigin(`/users/${encodeURIComponent(user.id)}?section=finance`,financeContextIdentity(adapter.snapshot));
-    onOpenPath(ref?`/finance/documents/${encodeURIComponent(ref)}?origin=${encodeURIComponent(origin)}`:`/finance/users/${encodeURIComponent(user.id)}?origin=${encodeURIComponent(origin)}`,ref?"资金单据":`${user.name} · 资金`);
-  };
   const openRelated=(path:string,title?:string)=>{
-    if(!path.startsWith('/finance/documents/')){onOpenPath(path,title);return;}
-    const origin=registerFinanceOrigin(`/users/${encodeURIComponent(user.id)}?section=finance`,financeContextIdentity(adapter.snapshot));
-    onOpenPath(`${path}${path.includes('?')?'&':'?'}origin=${encodeURIComponent(origin)}`,title);
+    const source=sanitizeFinanceReturn(`/users/${encodeURIComponent(user.id)}?${new URLSearchParams({section:'finance',financeFrom:applied.from,financeTo:applied.to})}`),target=sanitizeFinanceReturn(path);
+    if(!source||!target)return;
+    const origin=registerFinanceOrigin(source,financeContextIdentity(adapter.snapshot)),url=new URL(target,window.location.origin);
+    url.searchParams.set(url.pathname.startsWith('/finance/')?'origin':'financeOrigin',origin);url.searchParams.set('financeReturn',source);
+    onOpenPath(url.pathname+'?'+url.searchParams,title);
   };
+  const open=(ref?:string)=>openRelated(ref?`/finance/documents/${encodeURIComponent(ref)}`:`/finance/users/${encodeURIComponent(user.id)}`,ref?'资金单据':`${user.name} · 资金`);
+  const apply=(next:FinanceFilters)=>{setApplied(next);onQueryChange?.({...tab?.query,section:'finance',financeFrom:next.from,financeTo:next.to});if(applied.from===next.from&&applied.to===next.to)retry();};
   return <section className="space-y-4 border-t pt-6" aria-labelledby="user-finance-documents-heading">
     <div className="flex flex-wrap items-center justify-between gap-3"><h3 id="user-finance-documents-heading" className="text-base font-semibold">资金单据</h3><Button variant="outline" size="sm" onClick={()=>open()}>完整资金核对<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button></div>
-    <form className="flex flex-wrap items-end gap-3" onSubmit={event=>{event.preventDefault();if(draft.from&&draft.to){setApplied({...draft,scope:user.id});retry();}}}>
+    <form className="flex flex-wrap items-end gap-3" onSubmit={event=>{event.preventDefault();if(draft.from&&draft.to)apply({...draft,scope:user.id});}}>
       <Field label="单据日期" composite>
         <Popover open={dateOpen} onOpenChange={setDateOpen}>
           <PopoverTrigger render={<Button type="button" variant="outline" aria-label="选择单据日期"/>}><CalendarDaysIcon aria-hidden className="size-4"/>{draft.from===draft.to?draft.from:`${draft.from} 至 ${draft.to||"请选择结束日期"}`}</PopoverTrigger>
@@ -90,7 +94,7 @@ function FinanceDocuments({adapter,user,refreshNonce,onOpenPath}:Props) {
         </Popover>
       </Field>
       <Button type="submit" disabled={!draft.from||!draft.to||result.state==="loading"}>查询</Button>
-      <Button type="button" variant="ghost" onClick={()=>{const today={...defaultFinanceFilters(true),scope:user.id};setDraft(today);setApplied(today);setSelectedDate({period:"day",operator:"between",startDate:new Date(`${today.from}T00:00:00`),endDate:new Date(`${today.to}T00:00:00`)});retry();}}>回到今天</Button>
+      <Button type="button" variant="ghost" onClick={()=>{const today={...defaultFinanceFilters(true),scope:user.id};setDraft(today);apply(today);setSelectedDate({period:"day",operator:"between",startDate:new Date(`${today.from}T00:00:00`),endDate:new Date(`${today.to}T00:00:00`)});}}>回到今天</Button>
     </form>
     <p className="text-xs text-muted-foreground">{applied.from===applied.to?`${applied.from} 当天`:`${applied.from} 至 ${applied.to}`} · 北京时间</p>
     {result.state==="loading"?<FinanceLoading label="正在读取资金单据"/>:result.state==="error"?
@@ -99,7 +103,7 @@ function FinanceDocuments({adapter,user,refreshNonce,onOpenPath}:Props) {
           <Table aria-label="用户资金单据" className="min-w-[620px]"><TableHeader><TableRow><TableHead>时间 / 记录</TableHead><TableHead>用途</TableHead><TableHead>金额</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
             <TableBody>{result.data.documents?.map(document=><TableRow key={document.ref}>
               <TableCell className="min-w-52 whitespace-normal align-top"><span className="font-medium">{financeRecordNumber(document,document.number)}</span><span className="mt-1 block text-xs text-muted-foreground">{financeTime(document.occurredAt)}</span><HistoricalFinanceDetail historical={document.historical} recordKind={document.kind} orderRead={adapter.snapshot.security.isBoss||adapter.has(PERMISSION.orders)} documentRead={canDocument} onOpenPath={openRelated}/></TableCell>
-              <TableCell className="whitespace-normal align-top">{financeBusinessLabel(document)}</TableCell>
+              <TableCell className="whitespace-normal align-top">{financeBusinessLabel(document)}<small className="mt-1 block text-muted-foreground">{financeEntryScope(document)}</small></TableCell>
               <TableCell className="tabular-nums align-top">{financeIsHistorical(document)&&document.kind==='WITHDRAWAL'&&document.requestedAmountCents!==null?`原申请 ${money(document.requestedAmountCents)}`:document.amounts.length?document.amounts.map(amount=><span key={amount.bucket} className="block text-sm">{financeIsHistorical(document)?'历史变动':bucketLabels[amount.bucket]??"其他科目"} {amount.unknownCount?"待核":money(amount.knownNetCents)}</span>):document.requestedAmountCents===null?"待核":`${financeIsHistorical(document)?'原申请':'申请'} ${money(document.requestedAmountCents)}`}</TableCell>
               <TableCell className="whitespace-normal align-top"><Badge variant={financeIsHistorical(document)?'outline':document.state==="RECONCILIATION_REQUIRED"||document.state==="UNKNOWN"?"warning":"secondary"}>{financeRecordState(document)}</Badge></TableCell>
               <TableCell className="text-right">{canDocument?<Button size="sm" variant="ghost" aria-label={financeIsHistorical(document)?`查看历史记录 ${document.historical?.originalLogNumber||document.number}`:`查看资金单据 ${document.number}`} onClick={()=>open(document.ref)}>查看<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button>:<span className="text-xs text-muted-foreground">无单据查看权限</span>}</TableCell>

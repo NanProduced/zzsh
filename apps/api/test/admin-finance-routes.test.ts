@@ -194,7 +194,7 @@ test("mixed lookup deduplicates funds/order refs, preserves source types and equ
  const exact=await request(env.options,"lookup","period=0&q=ORDER_LINK%3AL00");assert.equal(exact.status,200);assert.deepEqual(exact.json.documents.map((d:any)=>d.ref),["ORDER:L00","LEGACY_ORDER:L00"]);
  const detail=await request(env.options,"documents/LEGACY_ORDER%3AL00","period=0");assert.equal(detail.status,200);assert.equal(detail.json.evidence.recordedPaidCents,"9000");assert.equal(detail.json.entries.length,0);assert(detail.json.reasonCodes.includes("ORDER_RECORD_NOT_CHANNEL_RESULT"));
  const historical=await request(env.options,"documents/HISTORY_EARNINGS%3Aunknown","period=0");assert.equal(historical.status,200);assert(!historical.json.related.some((r:any)=>r.ref==="LEGACY_ORDER:L01"));assert.equal(historical.json.entries[0].historical.association.state,"UNRESOLVED");assert.equal(historical.json.entries[0].deltaCents,null);
- const period=await request(env.options,"period");assert.equal(period.status,200);assert.equal(period.json.entryCount,3);assert(period.json.reconciliation.every((r:any)=>r.knowledge==="KNOWN"&&r.scope==='CURRENT_LEDGER_ONLY'));assert.equal(period.json.reconciliation.find((r:any)=>r.bucket==='AVAILABLE').closingBalance,'900719925474099312344');assert(period.json.gaps.includes('CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY'));
+ const period=await request(env.options,"period");assert.equal(period.status,200);assert.equal(period.json.entryCount,3);assert(period.json.reconciliation.every((r:any)=>r.knowledge==="UNKNOWN"&&r.openingBalance===null&&r.closingBalance===null&&r.ledgerDifference==="0"&&r.scope==='CURRENT_LEDGER_ONLY'));assert.equal(period.json.reconciliation.find((r:any)=>r.bucket==='AVAILABLE').ledgerClosingBalance,'900719925474099312344');assert(period.json.gaps.includes('CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY'));
  const filtered=await request(env.options,"lookup","period=0&state=HISTORICAL_ORDER_RECORDED");assert.equal(filtered.status,200);assert.equal(filtered.json.documentCount,43);assert.equal(filtered.json.entryCount,0);
  const byBucket=await request(env.options,"lookup","period=0&bucket=AVAILABLE");assert.equal(byBucket.status,200);assert.equal(byBucket.json.documentCount,2);assert.equal(byBucket.json.entryCount,3);
 });
@@ -285,10 +285,10 @@ test("source-content version invalidates additions, deletions and non-last off-p
   ["ledger-content","UPDATE fixture_ledger SET credit_cents='999' WHERE id='a-line'"],
   ["historical-observation","UPDATE fixture_history SET source_digest='changed-history' WHERE id='h00'"],
   ["wallet-revision","INSERT INTO zzsh_order.wallet_revision VALUES('u1','1','2')"],
-  ["wallet-coverage","INSERT INTO zzsh_order.wallet_coverage VALUES('u1','basis1','1')"],
-  ["opening-basis","INSERT INTO zzsh_order.finance_opening_basis VALUES('basis1','source','covered-set','cutoff')"],
-  ["economic-root","INSERT INTO zzsh_order.finance_economic_root VALUES('root1','source','policy1')"],
-  ["posting-version","INSERT INTO zzsh_order.settlement_posting VALUES('post1','changed-version')"],
+  ["wallet-coverage","INSERT INTO zzsh_order.wallet_coverage(user_id,basis_id,coverage_version) VALUES('u1','basis1','1')"],
+  ["opening-basis","INSERT INTO zzsh_order.finance_opening_basis(id,source_digest,covered_set_digest,source_cutoff) VALUES('basis1','source','covered-set','cutoff')"],
+  ["economic-root","INSERT INTO zzsh_order.finance_economic_root(id,source_digest,policy_version) VALUES('root1','source','policy1')"],
+  ["posting-version","INSERT INTO zzsh_order.settlement_posting(id,version_hash) VALUES('post1','changed-version')"],
   ["withdrawal-version","UPDATE zzsh_order.withdrawal_intent SET operation_version='2',state='PROCESSING' WHERE id='w1'"],
   ["provider-fact","INSERT INTO zzsh_order.withdrawal_provider_fact VALUES('fact1','source-evidence')"],
   ["controlled-operation","INSERT INTO zzsh_order.controlled_payout_operation VALUES('operation1','final-evidence')"],

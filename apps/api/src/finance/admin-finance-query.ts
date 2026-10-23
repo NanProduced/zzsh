@@ -6,8 +6,8 @@ export type FinanceLoadScope = { filters?: FinanceFilters; documentRef?: string;
 export const FINANCE_LEDGER_BUCKET_SQL = `CASE WHEN r.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE') THEN 'AVAILABLE' WHEN r.account_code='WALLET_RESERVED' THEN 'RESERVED' WHEN r.account_code='GUARANTEE_HELD' THEN 'GUARANTEE_HELD' WHEN r.account_code='WALLET_PENDING_EARNINGS' THEN 'PENDING_EARNINGS' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE' WHEN r.account_code LIKE 'PLATFORM_%' OR r.account_code='WITHDRAW_FEE' THEN 'PLATFORM' ELSE 'CLEARING' END`;
 const historyBucket = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_HELD' WHEN r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='RENTER_REFUND' THEN 'REFUND_PAYABLE' WHEN r.source_entity='la_distribution_order' OR r.observation_origin='NATIVE_EARNING_ZERO' AND r.source_status='PENDING' THEN 'PENDING_EARNINGS' ELSE 'AVAILABLE' END`;
 const ledgerKind = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING' WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL' WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' OR r.source_kind='LEGACY_CONTINUATION_DUTY' AND r.beneficiary_role='COMMISSION' THEN 'DISTRIBUTION' WHEN r.source_kind='NATIVE_GUARANTEE' THEN 'GUARANTEE' WHEN r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND' ELSE 'SETTLEMENT' END`;
-const historyKind = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE' WHEN r.observation_origin='NATIVE_EARNING_ZERO' OR r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='COMMISSION' THEN 'DISTRIBUTION' WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN CASE WHEN r.action='RENTER_REFUND' THEN 'REFUND' ELSE 'SETTLEMENT' END WHEN r.source_entity='la_log_earnings' THEN 'EARNINGS' WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' ELSE 'WITHDRAWAL' END`;
-const historyDocument=`CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_SOURCE:'||r.id WHEN r.observation_origin='NATIVE_EARNING_ZERO' THEN 'DISTRIBUTION:'||r.source_id WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN 'LEGACY_DUTY:'||r.source_id ELSE 'HISTORY_'||(${historyKind})||':'||r.id END`;
+const historyKind = `CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE' WHEN r.observation_origin='NATIVE_EARNING_ZERO' OR r.observation_origin='LEGACY_DUTY_ZERO' AND r.action='COMMISSION' THEN 'DISTRIBUTION' WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN CASE WHEN r.action='RENTER_REFUND' THEN 'REFUND' ELSE 'SETTLEMENT' END WHEN r.source_entity='la_log_earnings' THEN CASE WHEN r.extra_evidence->'snapshot'->>'legacyChangeType' IN('1002','1003','1004','1005') THEN 'WITHDRAWAL' ELSE 'EARNINGS' END WHEN r.source_entity='la_distribution_order' THEN 'DISTRIBUTION' ELSE 'WITHDRAWAL' END`;
+const historyDocument=`CASE WHEN r.observation_origin='LEGACY_GUARANTEE_HISTORY' THEN 'GUARANTEE_SOURCE:'||r.id WHEN r.observation_origin='NATIVE_EARNING_ZERO' THEN 'DISTRIBUTION:'||r.source_id WHEN r.observation_origin='LEGACY_DUTY_ZERO' THEN 'LEGACY_DUTY:'||r.source_id ELSE (CASE WHEN r.source_entity='la_log_earnings' THEN 'HISTORY_EARNINGS:' WHEN r.source_entity='la_distribution_order' THEN 'HISTORY_DISTRIBUTION:' ELSE 'HISTORY_WITHDRAWAL:' END)||r.id END`;
 const ledgerSubject = `COALESCE(r.subject_id,CASE WHEN (${FINANCE_LEDGER_BUCKET_SQL})='PLATFORM' THEN 'PLATFORM' ELSE 'SYSTEM' END)`;
 const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN 'DISTRIBUTION:'||r.economic_root_id WHEN r.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_DUTY:'||r.source_id WHEN r.source_entity='owner_guarantee_payment' THEN 'GUARANTEE_PAYMENT:'||r.source_id WHEN r.source_entity='owner_guarantee_refund' THEN 'GUARANTEE_REFUND:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
 
@@ -30,11 +30,11 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
     if (f.kind !== "ALL") conditions.push(`(${kind})=${bind(f.kind)}`);
     if (f.state !== "ALL") conditions.push(`(${state})=${bind(f.state)}`);
     if (f.period) { const start = bind(`${f.from}T00:00:00+08:00`), end = bind(new Date(Date.parse(`${f.to}T00:00:00+08:00`) + 86400_000).toISOString()); conditions.push(`(r.at IS NULL OR (r.at::timestamptz>=${start}::timestamptz AND r.at::timestamptz<${end}::timestamptz))`); }
-    if (f.q.startsWith("ORDER_LINK:")) conditions.push(family === "ledger" ? `r.order_id=${bind(f.q.slice(11))}` : "FALSE");
+    if (f.q.startsWith("ORDER_LINK:")) conditions.push(family==='ledger'?`r.order_id=${bind(f.q.slice(11))}`:'FALSE');
     else if (f.q) {
       const masked = `CASE WHEN r.subject_name ~ '^1[3-9][0-9]{9}$' THEN left(r.subject_name,3)||'****'||right(r.subject_name,4) ELSE COALESCE(r.subject_name,${subject}) END`;
       const name = family === "ledger" ? `CASE WHEN r.subject_id IS NULL THEN CASE WHEN (${bucket})='PLATFORM' THEN '平台' ELSE '对照科目' END ELSE ${masked} END` : masked;
-      const fields = [subject, name, document, number, family === "ledger" ? "COALESCE(r.source_id,r.posting_id,r.id)" : "r.source_id", `'${family}:'||r.id`];
+      const fields = [subject, name, document, number, family === "ledger" ? "COALESCE(r.source_id,r.posting_id,r.id)" : "r.source_id", `'${family}:'||r.id`,...(family==='history'?['r.reference_no']:[])];
       const exact = scope.lookup?.exact, p = bind(exact ? f.q : `%${escapeLike(f.q.toLocaleLowerCase("zh-CN"))}%`);
       conditions.push(`(${fields.map(field => exact ? `(${field})=${p}` : `lower(${field}) LIKE ${p} ESCAPE '\\'`).join(" OR ")})`);
     }
@@ -45,20 +45,26 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
 }
 
 /** A DB-side digest, not a second ledger/version store. New rows outside a page also invalidate it. */
-export function financeVersionSql(ready: { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean;native_distribution?:boolean;history_coverage?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean }): string {
+export function financeVersionSql(ready: { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean;native_distribution?:boolean;earning_basis?:boolean;earning_transitions?:boolean;history_coverage?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean }): string {
   const relations = [
+    `SELECT 'admin-finance-proof.r1' AS id`,
     `SELECT id,name FROM zzsh_auth_user."user"`,
     `SELECT id,account_code,counterparty_user_id,credit_cents::text,debit_cents::text,posting_id,finance_event_id,created_at FROM zzsh_order.settlement_ledger_entry`,
-    `SELECT id,user_id,basis_id,source_digest,included_in_opening,source_event_at,imported_at FROM zzsh_order.personal_finance_observation`,
+    `SELECT id,user_id,basis_id,source_system,source_entity,source_id,source_digest,source_canonical,snapshot,included_in_opening,source_event_at,imported_at FROM zzsh_order.personal_finance_observation`,
     `SELECT user_id AS id,ledger_revision::text,read_revision::text FROM zzsh_order.wallet_revision`,
-    `SELECT user_id AS id,basis_id,coverage_version::text FROM zzsh_order.wallet_coverage`,
-    `SELECT id,source_digest,covered_set_digest,source_cutoff FROM zzsh_order.finance_opening_basis`,
-    `SELECT id,source_digest,policy_version FROM zzsh_order.finance_economic_root`,
-    `SELECT id,version_hash FROM zzsh_order.settlement_posting`,
+    `SELECT user_id AS id,origin,basis_id,opening_event_id,coverage_version::text FROM zzsh_order.wallet_coverage`,
+    `SELECT id,user_id,source_kind,source_system,source_entity,source_id,source_digest,identity_source_digest,covered_set_digest,source_cutoff,available_cents::text,covered_count,native_origin_canonical FROM zzsh_order.finance_opening_basis`,
+    `SELECT id,basis_id,subject_user_id,source_kind,source_type,source_system,source_entity,source_id,beneficiary_role,source_digest,policy_version FROM zzsh_order.finance_economic_root`,
+    `SELECT id,economic_root_id,kind,subject_user_id,created_at FROM zzsh_order.finance_event`,
+    `SELECT id,order_id,payment_confirmation_id,version_hash,early,manual_reason,captured_cents::text,owner_net_cents::text,renter_refund_cents::text,platform_contribution_cents::text,compensation_fee_cents::text,posted_at FROM zzsh_order.settlement_posting`,
   ];
   if (ready.native_orders) relations.push(`SELECT id,revision::text,status FROM zzsh_order.rental_order`);
   if (ready.legacy_orders) relations.push(`SELECT id,source_digest,binding_digest FROM zzsh_order.legacy_order_read_snapshot`);
-  if (ready.native_distribution) relations.push(`SELECT id,version::text,state,funds_disposition,recovery_required_cents::text,seed_digest,beneficiary_user_id,beneficiary_role,amount_cents::text,order_id,created_at,due_at FROM zzsh_order.rental_referral_earning`);
+  if (ready.native_distribution){
+    relations.push(`SELECT id,economic_root_id,version::text,state,funds_disposition,recovery_required_cents::text,canonical_seed,seed_digest,basis_digest,posting_digest,economic_key,posting_id,payment_confirmation_id,beneficiary_user_id,beneficiary_role,amount_cents::text,order_id,created_at,due_at FROM zzsh_order.rental_referral_earning`);
+    if(ready.earning_basis!==false)relations.push(`SELECT id,order_id,payment_confirmation_id,canonical_basis,basis_digest FROM zzsh_order.payment_distribution_basis`);
+    if(ready.earning_transitions!==false)relations.push(`SELECT id,earning_id,action,expected_version::text,result_version::text,finance_event_id,source_digest FROM zzsh_order.rental_referral_transition`);
+  }
   if (ready.history_coverage) relations.push(`SELECT id,body_digest FROM zzsh_order.personal_finance_observation_coverage`);
   if(ready.legacy_duty_finance)relations.push(`SELECT duty_id AS id,facts_digest,event_id,ref_type,ref_id FROM zzsh_order.legacy_duty_finance_fact`,`SELECT id,revision::text,status,settled_by,settled_ref_type,settled_ref_id,settled_ref_digest FROM zzsh_order.legacy_order_duty`);
   if(ready.guarantee_history)relations.push(`SELECT id,body_digest FROM zzsh_order.legacy_owner_guarantee_coverage`,`SELECT id,source_digest,source_cutoff,imported_at FROM zzsh_order.legacy_owner_guarantee_observation`);

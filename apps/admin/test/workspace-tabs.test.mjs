@@ -9,6 +9,7 @@ import {
   persistTabs,
   restoreTabs,
   sanitizeTabQuery,
+  sanitizeFinanceReturn,
   tabFromKeyboard,
   tabFromLocation,
   tabPresentation,
@@ -17,6 +18,29 @@ import {
 
 const nav = { isBoss: true, permissions: ["admin.account.read", "admin.role.read", "approval.request.read", "admin.audit.read", "user.account.restore"] };
 const limited = { isBoss: false, permissions: [] };
+
+test('finance business numbers retain full digits while phone tokens never enter workspace query storage', () => {
+  const business='20260913125844629986';
+  assert.equal(sanitizeTabQuery({q:business}).q,business);
+  assert.equal(sanitizeTabQuery({q:'ZZ261019-000002'}).q,'ZZ261019-000002');
+  for(const q of ['13812345678','+86 138-1234-5678','用户 13812345678 资金','x+86 13812345678y']) assert.equal(sanitizeTabQuery({q}).q,undefined);
+  const tab=tabFromLocation('/finance',`q=${business}&page=2&kind=SETTLEMENT`);
+  assert.equal(tab.query.q,business);assert.equal(tab.query.page,'2');
+});
+
+test('finance reload return is bounded, local, non-nested and strips no phone into storage',()=>{
+  const path='/finance?q=20260913125844629986&page=2&kind=WITHDRAWAL';
+  assert.equal(sanitizeFinanceReturn(path),path);assert.equal(sanitizeTabQuery({financeReturn:path}).financeReturn,path);
+  for(const value of ['https://example.com/finance','//example.com/finance','/\\example.com/finance','/supply/accounts/a1','/finance?financeReturn=%2Ffinance','/finance?q='+encodeURIComponent('+86 138-1234-5678'),'/finance?token=private','/finance?q='+'x'.repeat(2048)]) assert.equal(sanitizeFinanceReturn(value),undefined,value);
+  assert.equal(sanitizeFinanceReturn('/orders/order-one?cookie=private'),'/orders/order-one');
+});
+test('R1 formatted phone clues cannot be persisted or embedded in return paths while long business IDs remain',()=>{
+  for(const q of ['+86 (138) 1234-5678','138.1234.5678','＋８６（１３８）１２３４－５６７８','查询 138.1234.5678 退款']){
+    assert.equal(sanitizeTabQuery({q}).q,undefined,q);assert.equal(sanitizeFinanceReturn('/finance?q='+encodeURIComponent(q)),undefined,q);
+  }
+  assert.equal(sanitizeTabQuery({q:'20260913125844629986'}).q,'20260913125844629986');
+  for(const q of ['13812345-678a-4abc-8abc-0123456789ab','user_aa13812345678bb0123456789abcdef012345678','ORDER:order_aa13812345678bb0123456789abcdef012345678','http://127.0.0.1:4221/orders/13812345-678a-4abc-8abc-0123456789ab']){assert.equal(sanitizeTabQuery({q}).q,q);assert.ok(sanitizeFinanceReturn('/finance?q='+encodeURIComponent(q)));}
+});
 
 test("settings section or preview switches require leave protection within the same tab", () => {
   const profile = tabFromLocation("/settings", "?section=profile");

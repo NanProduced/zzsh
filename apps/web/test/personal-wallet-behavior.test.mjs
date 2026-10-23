@@ -9,6 +9,31 @@ const reply=(b,status=200)=>Response.json(b,{status}),deferred=()=>{let resolve;
 async function probe(fetcher,query=''){const w=new Window({url:'http://127.0.0.1:4200/account?view=wallet'});Object.assign(globalThis,{window:w,localStorage:w.localStorage,document:w.document,HTMLElement:w.HTMLElement,Element:w.Element,Node:w.Node,Event:w.Event,MouseEvent:w.MouseEvent,DOMException:w.DOMException,IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,'navigator',{value:w.navigator,configurable:true});const previous=globalThis.fetch;globalThis.fetch=fetcher;const session={status:'authenticated',userId:'user_A',identityVersion:1,revalidations:0,revalidate(){this.revalidations++;}},store={getSnapshot:()=>session};let params=new URLSearchParams(query);const m=new Module(tree+'/wallet-probe.cjs');m.filename=tree+'/wallet-probe.cjs';m.paths=Module._nodeModulePaths(tree);m.require=name=>{if(name==='./owner-guarantee-history')return{OwnerGuaranteeHistory:()=>null};if(name==='next/link')return({scroll:_scroll,...props})=>React.createElement('a',props);if(name==='next/navigation')return{useSearchParams:()=>params};if(name==='@/components/session/user-session-provider')return{useUserSession:()=>session,useUserSessionStore:()=>store};if(name==='./controlled-withdrawal'){const child=new Module(tree+'/withdrawal-probe.cjs');child.filename=tree+'/withdrawal-probe.cjs';child.paths=m.paths;child.require=n=>n==='@/lib/controlled-withdrawal-client'?require(tree+'/apps/web/src/lib/controlled-withdrawal-client.ts'):m.require(n);child._compile(ts.transpileModule(readFileSync(tree+'/apps/web/src/components/account/controlled-withdrawal.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,child.filename);return child.exports;}if(name==='@/lib/personal-wallet-client')return client;if(name==='@/lib/order-client')return require(tree+'/apps/web/src/lib/order-client.ts');if(name==='@/components/ui/information')return information;if(name.endsWith('.css'))return{};return require(name);};m._compile(compiled,m.filename);const host=w.document.createElement('div');w.document.body.append(host);const root=require('react-dom/client').createRoot(host),settle=async()=>{for(let i=0;i<3;i++)await React.act(async()=>{await new Promise(setImmediate);});};const render=async()=>{await React.act(async()=>root.render(React.createElement(m.exports.PersonalWallet,{scope:`${session.userId}:${session.identityVersion}`})));await settle();};return{host,session,render,settle,async fill(selector,value){const target=host.querySelector(selector);assert(target,selector);const proto=target.tagName==='SELECT'?w.HTMLSelectElement.prototype:w.HTMLInputElement.prototype;await React.act(async()=>{Object.getOwnPropertyDescriptor(proto,'value').set.call(target,value);target.dispatchEvent(new w.Event(target.tagName==='SELECT'?'change':'input',{bubbles:true}));});await settle();},async click(selector){const target=host.querySelector(selector);assert(target,selector);await React.act(async()=>{target.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));await new Promise(setImmediate);});await settle();},async setQuery(q){params=new URLSearchParams(q);await render();},async close(){await React.act(async()=>root.unmount());await w.happyDOM.abort();globalThis.fetch=previous;}};}
 test('exact large amounts and UNKNOWN are distinct from known zero',()=>{assert.equal(client.walletMoney('999999999999999999999999'),'¥9,999,999,999,999,999,999,999.99');assert.equal(client.walletMoney(null),'待确认');assert.equal(client.walletMoney('0'),'¥0.00');assert.equal(client.walletMoney('-1',true),'− ¥0.01');assert.throws(()=>client.walletMoney('-0'));});
 
+test('wallet timestamps distinguish authoritative day, explicit unknown and compatible record time',async()=>{
+ const previous=globalThis.fetch;
+ try{
+  for(const times of [{},{postedAt:null,recordedAt:at},{postedAt:null,recordedAt:null},{postedAt:'2026-10-02T15:59:59.000Z',recordedAt:at}]){
+   globalThis.fetch=async()=>reply({...ctx(),entry:{...entry,...times}});
+   const parsed=(await client.readMyWalletEntry('user_A',entry.id)).entry;
+   assert.equal(Object.hasOwn(parsed,'postedAt'),Object.hasOwn(times,'postedAt'));
+   if(Object.hasOwn(times,'postedAt'))assert.equal(parsed.postedAt,times.postedAt);
+   assert.equal(Object.hasOwn(parsed,'recordedAt'),Object.hasOwn(times,'recordedAt'));if(Object.hasOwn(times,'recordedAt'))assert.equal(parsed.recordedAt,times.recordedAt);
+   const p=await probe(async url=>reply(String(url).includes('/entries/')?{...ctx(),entry:{...entry,...times}}:String(url).includes('/entries?')?{...page(),items:[{...entry,...times}]}:wallet()),'wallet=entries');
+   try{
+    await p.render();const record=p.host.querySelector('.wallet-record');
+    if(!Object.hasOwn(times,'postedAt'))assert.match(record.textContent,/记录时间/);
+    else if(times.postedAt===null){assert.match(record.textContent,/入账时间待核/);assert.equal(record.querySelector('time'),null);}
+    else assert.equal(record.querySelector('time').getAttribute('dateTime'),times.postedAt);
+    await p.setQuery('wallet=entry&entry=ledger%3Aentry_A');
+    const detail=p.host.querySelector('.wallet-entry-detail');
+    assert.match(detail.textContent,Object.hasOwn(times,'postedAt')?times.postedAt===null?/入账时间待核/:/入账时间/:/记录时间/);
+   }finally{await p.close();}
+  }
+  globalThis.fetch=async()=>reply({...ctx(),entry:{...entry,postedAt:'invalid-date'}});
+  await assert.rejects(client.readMyWalletEntry('user_A',entry.id),e=>e.code==='FINANCE_CONTRACT_REQUIRED');
+ }finally{globalThis.fetch=previous;}
+});
+
 test('wallet list distinguishes exact known empty proof, uncovered zero and actual partial records without POST',async()=>{
  for(const known of [false,true]){
   const empty={...page(),items:[],nextCursor:null,totals:{...page().totals,count:'0',byBucket:[]},...(known?{listCoverage:{knowledge:'KNOWN',count:'0',mappedRecordCount:'0',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',cutoff:'2026-10-03T00:00:00.000Z',version:'coverage-v1'}}:{})},methods=[];

@@ -1,5 +1,6 @@
 import { ADMIN_AUTH_FAILURE_EVENT, API_ROOT, AdminApiError, adminRequest } from "../api";
 import { beijingCalendarDate } from "../workspace/beijing-time";
+import { findPhoneClue } from "../workspace/tab-model";
 
 export const FINANCE_ACCESS_FAILURE_EVENT = "zzsh-admin-finance-access-failure";
 export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台分项", CLEARING: "对照科目" };
@@ -10,6 +11,18 @@ Object.assign(stateLabels, { ORDER_RECORDED: "订单记录", HISTORICAL_ORDER_RE
 Object.assign(stateLabels,{PENDING:'待结算',SETTLED:'已结算',REVOKED:'已撤销',RECOVERY_REQUIRED:'待追回'});
 stateLabels.REFUND_PAYABLE_RECORDED = "应退责任已记录";
 export const reasonLabels: Record<string, string> = {
+  ALL_SUBJECTS_PERIOD_BALANCE_NOT_PROVABLE: '全平台集合未提供各主体完整的期间余额依据，请按具体用户核对',
+  FILTERED_PERIOD_BALANCE_NOT_PROVABLE: '业务或状态筛选仅覆盖部分分录，不能据此核定完整期间余额',
+  HISTORICAL_PERIOD_BALANCE_NOT_PROVABLE: '所选期间早于新账承接入账时刻，历史余额未核定',
+  POSTED_LEDGER_ONLY: '仅证明已准入的新账分录，不代表完整历史或渠道余额',
+  WALLET_ORIGIN_NOT_VERIFIED: '钱包期初来源未通过核定',
+  OPENING_ORIGIN_BINDING_NOT_VERIFIED: '期初、主体与原入账关联未通过核定',
+  OPENING_ORIGIN_SOURCE_NOT_VERIFIED: '原始期初来源未通过核定',
+  OPENING_ORIGIN_TIME_NOT_VERIFIED: '期初来源截止与新账入账时刻未通过核定',
+  AMBIGUOUS_OPENING_ORIGIN: '期初依据存在多个候选，余额未核定',
+  ORIGINAL_BASIS_UNAVAILABLE: '未取得原计佣依据',
+  AMBIGUOUS_ORIGINAL_BASIS: '原计佣依据存在多个候选',
+  FROZEN_CALCULATION_NOT_VERIFIED: '冻结计佣依据未通过完整校验',
   PERIOD_BALANCE_PROOF_NOT_AVAILABLE: "所选期间起止余额尚无完整依据",
   CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY:'当前勾稽仅覆盖已入账分录，待承接的历史责任另行核对',
   ZERO_FACT_NO_LEDGER_OR_CHANNEL_PAYMENT:'这是有依据的零额事实，没有资金分录或渠道支付',
@@ -30,7 +43,10 @@ export const reasonLabels: Record<string, string> = {
 };
 export type FinanceFilters = { scope: string; from: string; to: string; period: boolean; bucket: string; kind: string; state: string; q: string };
 export function defaultFinanceFilters(period: boolean): FinanceFilters { const today = beijingCalendarDate(); return { scope: "ALL", from: today, to: today, period, bucket: "ALL", kind: "ALL", state: "ALL", q: "" }; }
-export function financeQuery(filters: FinanceFilters): URLSearchParams { return new URLSearchParams({ ...filters, period: filters.period ? "1" : "0" }); }
+export function financeQuery(filters: FinanceFilters): URLSearchParams {
+  if (findPhoneClue(filters.q) || findPhoneClue(filters.scope)) throw new Error("手机号须通过授权用户查找定位，不能进入资金查询地址");
+  return new URLSearchParams({ ...filters, period: filters.period ? "1" : "0" });
+}
 export function financeMoney(cents: string | null | undefined): string {
   if (cents === null || cents === undefined || !/^-?\d+$/.test(cents)) return "未核定";
   const value = BigInt(cents), abs = value < 0n ? -value : value;
@@ -68,14 +84,25 @@ export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [s
     ['手续费', financeMoney(historical.feeCents)], ['净额', financeMoney(historical.netCents)], ['原用途码', historical.changeType ?? '未取得'], ['原状态码', historical.originalStatus ?? '未取得']];
 }
 export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
-export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay };
+export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; summaryScope?: 'DOCUMENT' | 'SUBJECT'; subjectEntryCount?: number; documentEntryCount?: number | null; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay };
+export function financeEntryScope(document: FinanceDocument): string {
+  return document.summaryScope === 'SUBJECT' ? `本人相关 ${document.subjectEntryCount ?? document.entryCount} 条${document.documentEntryCount == null ? ' · 全单条数未读取' : ` / 全单 ${document.documentEntryCount} 条`}` : `${document.entryCount} 条${financeIsHistorical(document) ? '历史记录' : '分录'}`;
+}
+export function financeEntryEvent(entry: FinanceEntry): string {
+  if (entry.kind !== 'DISTRIBUTION') return financeBusinessLabel(entry);
+  const evidence = entry.evidence ?? {};
+  if (Object.hasOwn(evidence,'eventAction')) return ({ACCRUE:'分销计提',SETTLE:'分销转可用',REVOKE:'分销撤销',RECOVER:'分销追偿'} as Record<string,string>)[evidence.eventAction??'']??'分销事件待核';
+  // Old APIs have no action field; EARNING_REVOKED cannot distinguish revoke from recover.
+  return ({EARNING_PENDING:'分销计提',EARNING_SETTLED:'分销转可用'} as Record<string,string>)[evidence.eventKind??'']??'分销事件待核';
+}
 export type FinanceResponse = {
   contractVersion: string; applied: FinanceFilters; snapshot: string; asOf: string; contextKey: string; snapshotVersion: string;
   documents?: FinanceDocument[]; document?: FinanceDocument; subjects?: { id: string; name: string }[]; subject?: { id: string; name: string };
   entries?: FinanceEntry[]; evidence?: Record<string, string | null>; related?: { ref: string; label: string; path?: string }[];
-  wallet?: { buckets: Record<string, { amountCents: string | null; knowledge: string }>; withdrawable: { amountCents: string | null; reasonCodes: string[] }; coverage: { knowledge: string; cutoff?: string; coverageVersion?: string; reason?: string }; snapshotVersion: string };
+  wallet?: { buckets: Record<string, { amountCents: string | null; knowledge: string; scope?: string }>; withdrawable: { amountCents: string | null; reasonCodes: string[] }; coverage: { knowledge: string; origin?: string; cutoff?: string; coverageVersion?: string; reason?: string }; snapshotVersion: string };
+  distributionCalculation?: { knowledge: 'KNOWN' | 'UNKNOWN'; policyVersion: string | null; levelCode: string | null; percent: string | null; baseCents: string | null; formula: string | null; reasonCodes: string[] };
   documentCount?: number; subjectCount?: number; entryCount?: number; page?: number; pageSize?: number; hasMore?: boolean; reasonCodes?: string[]; gaps?: string[];
-  reconciliation?: { bucket: string; openingBalance: string | null; knownInflows: string; knownOutflows: string; migrationMovement: string; closingBalance: string | null; difference: string | null; knowledge: string; reasonCodes: string[]; unknownCount: number; unknownTimeCount: number; coveredHistoricalCount: number; uncoveredHistoricalCount: number }[];
+  reconciliation?: { bucket: string; openingBalance: string | null; knownInflows: string; knownOutflows: string; migrationMovement: string; closingBalance: string | null; difference: string | null; ledgerOpeningBalance?: string | null; ledgerClosingBalance?: string | null; ledgerDifference?: string | null; balanceBasis?: { knowledge: 'KNOWN' | 'UNKNOWN'; origin: string | null; sourceCutoff: string | null; openingPostedAt: string | null; reasonCodes: string[] }; knowledge: string; reasonCodes: string[]; unknownCount: number; unknownTimeCount: number; coveredHistoricalCount: number; uncoveredHistoricalCount: number }[];
 };
 export function financeRead(route: string, filters: FinanceFilters, signal: AbortSignal, extras: Record<string, string> = {}) {
   const query = financeQuery(filters); for (const [key, value] of Object.entries(extras)) if (value) query.set(key, value);

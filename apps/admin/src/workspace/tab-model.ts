@@ -2,7 +2,23 @@ export const WORKBENCH_TAB_ID = "workbench";
 const STORAGE_PREFIX = "zzsh-admin-workspace-tabs:";
 const SENSITIVE_QUERY = /(password|pin|otp|totp|backup|credential|token|secret|temporary|phone)/i;
 const NON_PERSISTED_ORDER_QUERY = /^(displayNo|renterUserId|ownerUserId|createdFrom|createdTo|qKind|qValue)$/i;
-const PHONE_VALUE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
+const PHONE_TOKEN = String.raw`(?:\+?86[\s().-]*)?1[\s().-]*[3-9](?:[\s().-]*\d){9}`;
+export const PHONE_VALUE = new RegExp(`(?<!\\d)${PHONE_TOKEN}(?!\\d)`,'u');
+const EXACT_PHONE_VALUE = new RegExp(`^[\\s().-]*${PHONE_TOKEN}[\\s().-]*$`,'u');
+const STABLE_BUSINESS_ID = /^(?:(?:ORDER|LEGACY_ORDER|ORDER_LINK):)?(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:user|order|legacy_order|account)_[0-9a-f]{32}(?:[0-9a-f]{8})?)$/i;
+export function findPhoneClue(value: string): { phone: string; exact: boolean } | null {
+  const normalized = value.normalize('NFKC');
+  if (STABLE_BUSINESS_ID.test(normalized.trim())) return null;
+  let scan = normalized;
+  try {
+    const url=new URL(normalized),path=/^\/(?:users|orders|finance\/users|finance\/documents)\/([^/]+)$/.exec(url.pathname);
+    if (['http:','https:'].includes(url.protocol)&&!url.username&&!url.password&&!url.search&&!url.hash&&path&&STABLE_BUSINESS_ID.test(decodeURIComponent(path[1]!))) scan=url.origin;
+  } catch { /* Other inputs still pass through the phone gate. */ }
+  const match = scan.match(PHONE_VALUE);
+  if (!match) return null;
+  const digits = match[0].replace(/\D/g,'');
+  return {phone:digits.length===13&&digits.startsWith('86')?digits.slice(2):digits,exact:EXACT_PHONE_VALUE.test(normalized.trim())};
+}
 
 export type WorkspaceRouteKind =
   | "workbench"
@@ -108,11 +124,31 @@ export function sanitizeTabQuery(query: Record<string, string> | URLSearchParams
   const source = query instanceof URLSearchParams ? Object.fromEntries(query.entries()) : query;
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (!key || (key.toLowerCase() === "theme" && value !== "light" && value !== "dark") || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || PHONE_VALUE.test(value) || NON_PERSISTED_ORDER_QUERY.test(key)) continue;
+    if (key === 'financeReturn') { const path = sanitizeFinanceReturn(value); if (path) result[key] = path; continue; }
+    if (!key || (key.toLowerCase() === "theme" && value !== "light" && value !== "dark") || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(value) || findPhoneClue(value) || NON_PERSISTED_ORDER_QUERY.test(key)) continue;
     if (value.length > (key === "cursor" ? 2048 : key === "supplyCursorHistory" ? 8192 : 200)) continue;
     result[key] = value;
   }
   return result;
+}
+
+/** One public return target; its query is navigation only and never grants access. */
+export function sanitizeFinanceReturn(value: string | undefined): string | undefined {
+  if (!value || value.length > 2048 || !value.startsWith('/') || value.startsWith('//')) return undefined;
+  try {
+    const url = new URL(value, 'https://workspace.invalid');
+    const route=parseWorkspacePath(url.pathname);
+    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-lookup','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
+    const allowed = new Set(['scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','financeFrom','financeTo']);
+    const query: Record<string,string> = {};
+    for (const [key,item] of url.searchParams) {
+      if (findPhoneClue(item) || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(item)) return undefined;
+      if (allowed.has(key)) query[key] = item;
+    }
+    const params = new URLSearchParams(sanitizeTabQuery(query));
+    const path = url.pathname + (params.size ? `?${params}` : '');
+    return path.length <= 2048 ? path : undefined;
+  } catch { return undefined; }
 }
 
 export function sanitizePersistedTabQuery(query: Record<string, string> | URLSearchParams): Record<string, string> {

@@ -15,7 +15,7 @@ function walletShell(){
 
 test('entries list issues one statement with one entries materialization carrying totals and page together',async()=>{
  const totals=[{bucket:'AVAILABLE',count:'3',postedNetCents:'100',coveredHistoricalNetCents:'0',uncoveredHistoricalNetCents:'-20',coveredCount:'0',uncoveredCount:'1'}];
- const base={at,imported_at:at,kind:'POSTED',included:false,source_kind:'NATIVE_SETTLEMENT',source_type:'NATIVE',source_system:'zzsh',source_entity:'settlement_posting',source_id:'s',balance_after:null,business_type:'RENTAL_ORDER',business_id:'o',business_no:null,sort_at:at};
+ const base={at,imported_at:at,posted_at:null,recorded_at:at,kind:'POSTED',included:false,source_kind:'NATIVE_SETTLEMENT',source_type:'NATIVE',source_system:'zzsh',source_entity:'settlement_posting',source_id:'s',balance_after:null,business_type:'RENTAL_ORDER',business_id:'o',business_no:null,sort_at:at};
  const page=[{...base,id:'ledger:c',bucket:'AVAILABLE',delta:'100'},{...base,id:'ledger:b',bucket:'AVAILABLE',delta:'-20'}];
  const shell=walletShell();
  shell.client.query=async(sql:string,args:any[]=[])=>{shell.seen.push({sql,args});
@@ -32,6 +32,7 @@ test('entries list issues one statement with one entries materialization carryin
  assert(statements[0]!.sql.includes(`o.source_kind='HISTORICAL_EARNINGS_LOG' AND o.source_entity='la_log_earnings'`),'history branch carries the exact kind/entity pair');
  assert.equal(result.items.length,2);assert.equal(result.totals.count,'3');assert.equal(result.totals.byBucket[0]!.uncoveredHistoricalNetCents,'-20');
  assert.deepEqual(result.items.map(i=>i.id),['ledger:c','ledger:b']);
+ assert.equal(result.items[0]!.postedAt,null);assert.equal(result.items[0]!.recordedAt,at);assert.equal(result.items[0]!.occurredAt,at);
 });
 
 test('totals survive an empty keyset page and stay on the same statement',async()=>{
@@ -51,7 +52,7 @@ test('totals survive an empty keyset page and stay on the same statement',async(
 
 test('detail reads route by exact id prefix to their own branch without scanning the union',async()=>{
  const seen:{sql:string;args:any[]}[]=[];
- const row={id:'ledger:x',at,imported_at:at,bucket:'AVAILABLE',delta:'5',kind:'POSTED',included:false,source_kind:'NATIVE_SETTLEMENT',source_type:'NATIVE',source_system:'zzsh',source_entity:'settlement_posting',source_id:'s',balance_after:null,business_id:null,business_no:null,business_type:'UNKNOWN'};
+ const row={id:'ledger:x',at,imported_at:at,posted_at:new Date('2026-10-14T23:00:00.000Z'),recorded_at:new Date(at),bucket:'AVAILABLE',delta:'5',kind:'POSTED',included:false,source_kind:'NATIVE_SETTLEMENT',source_type:'NATIVE',source_system:'zzsh',source_entity:'settlement_posting',source_id:'s',balance_after:null,business_id:null,business_no:null,business_type:'UNKNOWN'};
  const client={async query(sql:string,args:any[]=[]){seen.push({sql,args});
   if(sql.includes('to_regclass'))return{rows:[{ready:true}]};
   if(sql.includes('FOR SHARE'))return{rowCount:1,rows:[]};
@@ -61,6 +62,7 @@ test('detail reads route by exact id prefix to their own branch without scanning
   return{rows:[]};}};
  const detail=await readPersonalFinanceEntry(client as any,'u1','ledger:x');
  assert.equal(detail.entry.id,'ledger:x');assert.equal(detail.entry.deltaCents,'5');
+ assert.equal(detail.entry.postedAt,'2026-10-14T23:00:00.000Z');assert.equal(detail.entry.recordedAt,new Date(at).toISOString());
  const ledgerSql=seen.find(q=>q.sql.includes(`'ledger:'||l.id`))!.sql;
  assert(ledgerSql.includes('AND l.id=$2')&&!ledgerSql.includes('UNION ALL'),'ledger detail is a primary-key branch read');
  assert(ledgerSql.includes(`l.account_code IN ('OWNER_AVAILABLE','WALLET_AVAILABLE','RENTER_REFUND_PAYABLE')`)&&!ledgerSql.includes('WALLET_RESERVED'),'v1 detail keeps the v1 account set');

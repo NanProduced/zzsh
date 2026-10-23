@@ -75,7 +75,9 @@ test('historical earnings searches the original log number rather than pretendin
 });
 
 test('actual native zero source branch remains visible as its distribution document without fabricating ledger rows',()=>{
- const fixture=new FinanceSqlFixture({earnings:[{id:'zero-earning',economic_root_id:'zero-earning',beneficiary_user_id:'u1',beneficiary_role:'RENTER_REFERRAL',amount_cents:'0',state:'SETTLED',funds_disposition:'SETTLED',version:'2',seed_digest:'a'.repeat(64),order_id:'native-order',created_at:'2026-10-03T01:00:00.000000Z'}]});
+ const fixture=new FinanceSqlFixture({earnings:[{id:'zero-earning',economic_root_id:'zero-earning',beneficiary_user_id:'u1',beneficiary_role:'RENTER_REFERRAL',amount_cents:'0',state:'SETTLED',funds_disposition:'SETTLED',version:'2',seed_digest:'a'.repeat(64),posting_digest:'b'.repeat(64),order_id:'native-order',created_at:'2026-10-03T01:00:00.000000Z'}],
+  financeEvents:[{id:'zero-accrue',economic_root_id:'zero-earning',kind:'EARNING_PENDING',subject_user_id:'u1',created_at:'2026-10-03T01:00:00.000001Z'}],
+  earningTransitions:[{id:'zero-receipt',earning_id:'zero-earning',action:'ACCRUE',expected_version:'0',result_version:'1',finance_event_id:'zero-accrue',source_digest:'b'.repeat(64)}]});
  try{
   const filters=parseAdminFinanceFilters(new URLSearchParams('scope=u1&kind=DISTRIBUTION&state=SETTLED&from=2026-10-03&to=2026-10-03')),source=adminFinanceObservationSql({native_distribution:true}),q=scopedFinanceSql(source,'history',{filters},20,false),rows=fixture.query(q.text,q.values).rows;assert.equal(rows.length,1);
   const row=projectAdminFinanceObservation(rows[0]!);assert.equal(row.documentRef,'DISTRIBUTION:zero-earning');assert.equal(row.deltaCents,'0');assert.equal(row.affectsCurrentLedger,false);assert.equal(row.classification,'ZERO_AMOUNT_FACT');

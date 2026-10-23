@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type {PoolClient} from 'pg';
+import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {previewFrozenFinanceObservation} from '../src/finance/legacy-finance-source-preparation';
-import {loadAdminFinanceFacts,financeDocuments,financePeriodProjection} from '../src/finance/admin-finance-read';
+import {loadAdminFinanceFacts,financeDocuments,financePeriodProjection,readAdminFinanceDocument} from '../src/finance/admin-finance-read';
 import {financeOrderSql} from '../src/finance/admin-finance-order-read';
 import {FinanceSqlFixture,legacyFinanceOrder} from './admin-finance-fixture';
 
@@ -18,11 +19,11 @@ function observation(kind:'HISTORICAL_EARNINGS_LOG'|'HISTORICAL_WITHDRAWAL',raw:
 }
 const log=(id='11437')=>observation('HISTORICAL_EARNINGS_LOG',{id,sn:'ORIGINAL-FLOW-'+id,action:2,amount:'734.00',userId:'11',sourceId:'5053',createdAt:at,changeType:1002,leftAmount:'10.00'},'log-'+id);
 const withdrawal=()=>observation('HISTORICAL_WITHDRAWAL',{id:'5053',sn:'WITHDRAW-BUSINESS',type:0,money:'734.00',status:3,userId:'11',batch_no:'',is_delete:0,left_money:'733.00',create_time:at,handling_fee:'1.00',payment_time:0},'withdraw-5053');
-function reader(fixture:FinanceSqlFixture){
+function reader(fixture:FinanceSqlFixture,ready:{legacy_orders?:boolean;native_orders?:boolean}={}){
  const queries:{sql:string;values:unknown[]}[]=[];
  const client={query:async(sql:string,values:unknown[]=[])=>{
   queries.push({sql,values});
-  if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true,withdrawals:false,native_orders:false,legacy_orders:false}],rowCount:1};
+  if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true,withdrawals:false,native_orders:false,legacy_orders:false,...ready}],rowCount:1};
   if(sql.includes('AS finance_version'))return {rows:[{finance_version:'fixture-content-version'}],rowCount:1};
   if(sql.includes('clock_timestamp()'))return {rows:[{at:'2026-10-22T00:00:00.000000Z'}],rowCount:1};
   return fixture.query(sql,values);
@@ -30,6 +31,34 @@ function reader(fixture:FinanceSqlFixture){
  return{client,queries};
 }
 const access={adminId:'admin-fixture',isBoss:false,orderRead:false,financeDocumentRead:true};
+
+test('withdrawal detail batches reverse debit evidence by original source and subject without adding or double counting historical rows',async()=>{
+ const w=withdrawal(),h=log(),fixture=new FinanceSqlFixture({history:[w,h,{...h,id:'wrong-system',source_system:'other-system'},{...h,id:'wrong-subject',subject_id:'u2'}]});
+ try{
+  const r=reader(fixture),facts=await loadAdminFinanceFacts(r.client,{documentRef:'HISTORY_WITHDRAWAL:'+w.id},access),detail=readAdminFinanceDocument(facts,'HISTORY_WITHDRAWAL:'+w.id);
+  assert.equal(facts.entries.length,1);assert.equal(facts.entries[0]!.historical!.association.state,'MATCHED');assert(detail.related.some(link=>link.ref==='HISTORY_EARNINGS:'+h.id));assert(!JSON.stringify(detail.related).includes('wrong-'));
+  const queries=r.queries.filter(query=>query.sql.startsWith('WITH finance_reverse_candidates'));assert.equal(queries.length,1);assert(queries[0]!.values.includes('legacy_mysql_restore'));assert(queries[0]!.values.includes('u1'));assert(queries[0]!.values.includes('5053'));assert(queries[0]!.values.includes('1002'));
+  assert.equal(detail.document.kind,'WITHDRAWAL');assert(facts.entries.every(entry=>!entry.affectsCurrentLedger&&!entry.affectsCurrentWallet));
+ }finally{fixture.close();}
+});
+
+test('legacy order detail resolves its exact owner income through immutable source bytes and retains a missing current posting',async()=>{
+ const source={id:71,order_sn:'OLD-BUSINESS',sale_user_id:11,order_status:4,pay_is:1,sale_earnings:'80.00',full_payout_money:'3.00',confirm_time:at};
+ const h=observation('HISTORICAL_EARNINGS_LOG',{id:'501',sn:'OWNER-INCOME',action:1,amount:'77.00',userId:'11',sourceId:'71',createdAt:at,changeType:1001,leftAmount:'77.00'},'owner-income');
+ const order=legacyFinanceOrder('old-order',{source_system:'legacy_mysql_restore',source_entity:'la_order',legacy_id:'71',original_order_no:'OLD-BUSINESS',owner_user_id:'u1',source_snapshot:source,source_digest:createHash('sha256').update(canonicalize(source)).digest('hex'),source_completed_at:new Date(at*1000).toISOString()});
+ const fixture=new FinanceSqlFixture({history:[h],legacy:[order]});
+ try{const r=reader(fixture,{legacy_orders:true}),facts=await loadAdminFinanceFacts(r.client,{documentRef:'LEGACY_ORDER:old-order'},{...access,isBoss:true,orderRead:true}),detail=readAdminFinanceDocument(facts,'LEGACY_ORDER:old-order');
+  assert.equal(detail.entries.length,0);assert(detail.related.some(link=>link.ref==='HISTORY_EARNINGS:owner-income'));assert(detail.reasonCodes.includes('ORDER_NO_CURRENT_POSTING'));assert(!detail.reasonCodes.includes('ORIGINAL_ORDER_REFERENCE_UNRESOLVED'));
+  assert.equal(r.queries.filter(query=>query.sql.startsWith('WITH finance_reverse_candidates')).length,1);
+ }finally{fixture.close();}
+});
+
+test('ambiguous reverse debit stays unresolved rather than choosing one record or claiming a second withdrawal',async()=>{
+ const w=withdrawal(),fixture=new FinanceSqlFixture({history:[w,log('11437'),log('11438')]});
+ try{const r=reader(fixture),facts=await loadAdminFinanceFacts(r.client,{documentRef:'HISTORY_WITHDRAWAL:'+w.id},access),detail=readAdminFinanceDocument(facts,'HISTORY_WITHDRAWAL:'+w.id);
+  assert.equal(facts.entries.length,1);assert.equal(facts.entries[0]!.historical!.association.state,'AMBIGUOUS');assert.equal(detail.related.length,0);assert(detail.reasonCodes.includes('ORIGINAL_ORDER_REFERENCE_AMBIGUOUS'));
+ }finally{fixture.close();}
+});
 
 test('selected log document uses one exact source/subject/entity batch to link its withdrawal and preserves original rows',async()=>{
  const h=log(),w=withdrawal(),fixture=new FinanceSqlFixture({history:[h,w,{...w,id:'different-system',source_system:'other-system'}]});

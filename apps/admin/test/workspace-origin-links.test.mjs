@@ -395,6 +395,29 @@ test('finance origin link and return navigation preserves user detail section', 
   assert.equal(h.opened.at(-1).path, '/users/user_normal?section=finance', 'return path lands back on user detail finance section');
 });
 
+test('finance to order and title refresh retain original business filters and return context',async t=>{
+  const {registerFinanceOrigin,financeContextIdentity}=await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');
+  const snap=snapshot(['order.read','finance.read','finance.document.read']);
+  const source='/finance?q=20260913125844629986&kind=WITHDRAWAL&from=2026-06-01&to=2026-06-30&period=1&page=2';
+  const token=registerFinanceOrigin(source,financeContextIdentity(snap));const h=await mount(t,orderTab({financeOrigin:token}),snap,true);
+  await waitFor(()=>h.container.textContent.includes('TEST-1003'));
+  assert.equal(h.tab().query.financeOrigin,token,'title update must not discard source');
+  const button=[...h.container.querySelectorAll('button')].find(button=>button.textContent.trim()==='返回来源资金');await click(button);assert.equal(h.opened.at(-1).path,source);
+});
+test('order funds entry uses source-qualified root and returns to the same order',async t=>{
+  const {financeOriginPath}=await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');const snap=snapshot(['order.read','finance.document.read']);
+  const h=await mount(t,orderTab({}),snap);await waitFor(()=>h.container.textContent.includes('TEST-1003'));
+  await click([...h.container.querySelectorAll('button')].find(button=>button.textContent.includes('查看资金凭证')));
+  const target=new URL(h.opened.at(-1).path,browser.location.href);assert.equal(decodeURIComponent(target.pathname),'/finance/documents/LEGACY_ORDER:order_cancel');assert.equal(financeOriginPath(target.searchParams.get('origin'),snap),'/orders/order_cancel');
+});
+test('order reload retains a safe public finance return without the in-memory origin',async t=>{
+  const {clearFinanceContexts}=await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');clearFinanceContexts();const source='/finance?q=20260913125844629986&page=2&kind=WITHDRAWAL';const h=await mount(t,orderTab({financeOrigin:'lost-token',financeReturn:source}),snapshot(['order.read','finance.read']),true);await waitFor(()=>h.container.textContent.includes('TEST-1003'));assert.equal(h.tab().query.financeReturn,source);await click([...h.container.querySelectorAll('button')].find(button=>button.textContent==='返回来源资金'));assert.equal(h.opened.at(-1).path,source);
+});
+test('user detail credit tab has a finance return while a non-financial role has none',async t=>{
+  const source='/finance?q=20260913125844629986&page=2';const tab={...userTab,query:{section:'credit',financeReturn:source}};const h=await mount(t,tab,snapshot(['user.directory.read','finance.read']));await waitFor(()=>h.container.textContent.includes('林舟'));await click([...h.container.querySelectorAll('button')].find(button=>button.textContent.includes('返回来源资金')));assert.equal(h.opened.at(-1).path,source);
+  const limited=await mount(t,tab,snapshot(['user.directory.read']));await waitFor(()=>limited.container.textContent.includes('林舟'));assert.equal([...limited.container.querySelectorAll('button')].some(button=>button.textContent.includes('返回来源资金')),false);
+});
+
 
 test('the published drill-down keeps the collection scope and the published filter', async (t) => {
   const list = { ...tabFromLocation('/users'), query: { sort: 'registered_desc' } };

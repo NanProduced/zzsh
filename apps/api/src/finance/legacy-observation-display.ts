@@ -75,7 +75,8 @@ function originalSource(row:Raw):Raw|null {
 }
 
 type Match={kind:'ORDER'|'WITHDRAWAL'|'DISTRIBUTION';number:string;ref:string;path:string|null;role:'OWNER'|'BENEFICIARY'|'WITHDRAWER';status:string|null;statusLabel:string|null;allowed:boolean;purpose?:[HistoricalFinancePurpose,string];fee?:string|null;net?:string|null};
-function orderMatch(entry:FinanceEntry,log:Raw,source:Raw,order:FinanceOrderFact):Match|null {
+type RelationEntry=Pick<FinanceEntry,'sourceSystem'|'subjectId'> & {evidence:{originalNumber?:string|null};historical:Pick<HistoricalFinanceDisplay,'recordedAmountCents'>};
+function orderMatch(entry:RelationEntry,log:Raw,source:Raw,order:FinanceOrderFact):Match|null {
   const proof=order.legacySource;
   if(!proof||order.sourceType!=='LEGACY_MYSQL'||order.sourceSystem!==entry.sourceSystem||proof.entity!=='la_order'
     ||order.sourceId!==String(log.sourceId)||order.ownerId!==entry.subjectId||!order.sourceDigest)return null;
@@ -91,7 +92,7 @@ function orderMatch(entry:FinanceEntry,log:Raw,source:Raw,order:FinanceOrderFact
   }catch{return null;}
 }
 
-function observationMatch(entry:FinanceEntry,log:Raw,source:Raw,candidate:Raw,access?:HistoricalRelationAccess):Match|null {
+function observationMatch(entry:RelationEntry,log:Raw,source:Raw,candidate:Raw,access?:HistoricalRelationAccess):Match|null {
   if(candidate.source_type!=='LEGACY_MYSQL'||candidate.source_system!==entry.sourceSystem||candidate.subject_id!==entry.subjectId
     ||candidate.source_id!==String(log.sourceId))return null;
   const original=originalSource(candidate);if(!original)return null;
@@ -99,12 +100,12 @@ function observationMatch(entry:FinanceEntry,log:Raw,source:Raw,candidate:Raw,ac
   if(value===null||value!==entry.historical!.recordedAmountCents||logAt===null||Date.parse(source.at??'')!==logAt)return null;
   const permitted=access?.isBoss===true||access?.financeDocumentRead===true;
   if(String(log.changeType)==='1002'&&String(log.action)==='2'&&candidate.source_entity==='la_withdraw_apply'
-    &&['1','2','3','4','5'].includes(String(original.status))&&epoch(original.create_time)===logAt){
+    &&String(original.userId)===String(log.userId)&&['1','2','3','4','5'].includes(String(original.status))&&epoch(original.create_time)===logAt){
     const number=text(original.sn);if(!number||entry.evidence.originalNumber&&entry.evidence.originalNumber!==number)return null;
     return {kind:'WITHDRAWAL',number,ref:`HISTORY_WITHDRAWAL:${candidate.id}`,path:`/finance/documents/${encodeURIComponent('HISTORY_WITHDRAWAL:'+candidate.id)}`,role:'WITHDRAWER',status:String(original.status),statusLabel:withdrawalStates[String(original.status)]??null,allowed:permitted,fee:money(candidate.fee,true),net:money(candidate.net,true)};
   }
   if(String(log.changeType)==='1001'&&String(log.action)==='1'&&candidate.source_entity==='la_distribution_order'
-    &&String(original.status)==='2'&&String(original.is_delete)==='0'&&['1','2'].includes(String(original.order_type))
+    &&String(original.user_id)===String(log.userId)&&String(original.status)==='2'&&String(original.is_delete)==='0'&&['1','2'].includes(String(original.order_type))
     &&['1','2','3'].includes(String(original.level))&&epoch(original.settle_time)===logAt){
     const number=text(original.sn);if(!number||entry.evidence.originalNumber&&entry.evidence.originalNumber!==number)return null;
     return {kind:'DISTRIBUTION',number,ref:`HISTORY_DISTRIBUTION:${candidate.id}`,path:`/finance/documents/${encodeURIComponent('HISTORY_DISTRIBUTION:'+candidate.id)}`,role:'BENEFICIARY',status:'2',statusLabel:distributionStates['2']!,allowed:permitted,purpose:['DISTRIBUTION_INCOME','分销收入']};
@@ -112,25 +113,94 @@ function observationMatch(entry:FinanceEntry,log:Raw,source:Raw,candidate:Raw,ac
   return null;
 }
 
+type ReverseLinks={state:HistoricalFinanceDisplay['association']['state'];related:FinanceEntry['related'];reasonCodes:string[]};
+const relationKey=(system:unknown,subject:unknown,reference:unknown)=>[system,subject,reference].join('\u0000');
+function relationIndex(sources:Raw[],orders:FinanceOrderFact[]){
+  const rows=new Map<string,Raw>(),references=new Map<string,Raw[]>(),logs=new Map<string,Raw[]>(),orderReferences=new Map<string,FinanceOrderFact[]>();
+  for(const row of sources){
+    if(rows.has(String(row.id)))continue;rows.set(String(row.id),row);
+    const key=relationKey(row.source_system,row.subject_id,row.source_id);
+    if(['la_distribution_order','la_withdraw_apply'].includes(row.source_entity)){const group=references.get(key);if(group)group.push(row);else references.set(key,[row]);}
+    if(row.source_type==='LEGACY_MYSQL'&&row.source_entity==='la_log_earnings'){
+      const reference=relationKey(row.source_system,row.subject_id,snapshot(row).referenceId),group=logs.get(reference);if(group)group.push(row);else logs.set(reference,[row]);
+    }
+  }
+  for(const order of orders){const key=relationKey(order.sourceSystem,order.ownerId,order.sourceId),group=orderReferences.get(key);if(group)group.push(order);else orderReferences.set(key,[order]);}
+  return{rows,references,logs,orderReferences,orders};
+}
+type RelationIndex=ReturnType<typeof relationIndex>;
+function logEntry(row:Raw):RelationEntry{return{sourceSystem:row.source_system,subjectId:row.subject_id,evidence:{originalNumber:row.reference_no??null},historical:historicalObservationDisplay(row)};}
+function logMatches(row:Raw,original:Raw,index:RelationIndex,access?:HistoricalRelationAccess):Match[]{
+  const entry=logEntry(row),key=relationKey(row.source_system,row.subject_id,original.sourceId),matches:Match[]=[];
+  if(String(original.changeType)==='1001')for(const order of index.orderReferences.get(key)??[]){const match=orderMatch(entry,original,row,order);if(match)matches.push(match);}
+  for(const candidate of index.references.get(key)??[]){const match=observationMatch(entry,original,row,candidate,access);if(match)matches.push(match);}
+  return[...new Map(matches.map(match=>[match.kind+'\u0000'+match.ref,match])).values()];
+}
+const historyLink=(row:Raw):FinanceEntry['related'][number]=>({ref:`HISTORY_EARNINGS:${row.id}`,label:text(snapshot(row).legacyLogNumber)??String(row.source_id),path:`/finance/documents/${encodeURIComponent('HISTORY_EARNINGS:'+row.id)}`});
+function reverseLinks(documentRef:string,index:RelationIndex,access?:HistoricalRelationAccess):ReverseLinks{
+  const result=(state:ReverseLinks['state'],reasonCodes:string[]=[]):ReverseLinks=>({state,related:[],reasonCodes});
+  if(!(access?.isBoss||access?.financeDocumentRead))return result('DENIED');
+  const application=documentRef.startsWith('HISTORY_WITHDRAWAL:')?index.rows.get(documentRef.slice('HISTORY_WITHDRAWAL:'.length)):undefined;
+  const order=documentRef.startsWith('LEGACY_ORDER:')?index.orders.find(order=>order.ref===documentRef):undefined;
+  if(!application&&!order)return result('UNRESOLVED');
+  const root=application?originalSource(application):null;
+  if(application&&(application.source_entity!=='la_withdraw_apply'||!root))return result('UNRESOLVED',['HISTORICAL_RELATION_EVIDENCE_UNAVAILABLE']);
+  if(order&&order.objectReadable!==true)return result('DENIED');
+  const key=application?relationKey(application.source_system,application.subject_id,application.source_id):relationKey(order!.sourceSystem,order!.ownerId,order!.sourceId);
+  const candidates=index.logs.get(key)??[],matches:Raw[]=[];let ambiguous=false;
+  for(const row of candidates){
+    const original=originalSource(row);if(!original||String(original.changeType)!==(application?'1002':'1001'))continue;
+    const targets=logMatches(row,original,index,access);
+    if(targets.some(match=>match.ref===documentRef)){if(targets.length!==1)ambiguous=true;else matches.push(row);}
+  }
+  if(ambiguous||matches.length>1)return result('AMBIGUOUS',['ORIGINAL_ORDER_REFERENCE_AMBIGUOUS']);
+  if(matches.length!==1)return result('UNRESOLVED',['ORIGINAL_ORDER_REFERENCE_UNRESOLVED']);
+  const debit=matches[0]!,related=[historyLink(debit)];
+  if(application){
+    const returns=candidates.filter(row=>['1003','1004','1005'].includes(String(snapshot(row).legacyChangeType)));
+    if(returns.length>1)return result('AMBIGUOUS',['ORIGINAL_ORDER_REFERENCE_AMBIGUOUS']);
+    if(returns.length){
+      const row=returns[0]!,original=originalSource(row),debitOriginal=originalSource(debit)!,eventAt=original?epoch(original.createdAt):null;
+      // This proves an original display link only; it grants no opening admission or channel payment fact.
+      if(!original||!['1003','1004'].includes(String(original.changeType))||String(root!.status)!=='4'||String(original.action)!=='1'
+        ||String(original.userId)!==String(root!.userId)||money(original.amount)!==money(root!.money)||eventAt===null
+        ||eventAt<epoch(debitOriginal.createdAt)!||eventAt<epoch(root!.create_time)!||Date.parse(row.at??'')!==eventAt
+        ||row.reference_no&&row.reference_no!==root!.sn)return result('UNRESOLVED',['HISTORICAL_RETURN_EVENT_TIME_UNAVAILABLE']);
+      related.push(historyLink(row));
+    }
+  }
+  return{state:'MATCHED',related,reasonCodes:[]};
+}
+
+/** Exact source/party/amount/event proofs only; no query, accounting effect or mutation of supplied facts. */
+export function resolveHistoricalReverseLinks(documentRef:string,sources:Raw[],orders:FinanceOrderFact[],access?:HistoricalRelationAccess):ReverseLinks{
+  return reverseLinks(documentRef,relationIndex(sources,orders),access);
+}
+
 /** Enrichment only; the original entries, financial effect and source identity are never replaced. */
 export function enrichHistoricalObservations(entries:FinanceEntry[],sources:Raw[],orders:FinanceOrderFact[],access?:HistoricalRelationAccess):void {
-  const rows=new Map(sources.map(row=>[String(row.id),row]));
-  const candidateRows=new Map<string,Raw[]>(),candidateOrders=new Map<string,FinanceOrderFact[]>();
-  for(const row of sources){if(!['la_distribution_order','la_withdraw_apply'].includes(row.source_entity))continue;const key=[row.source_system,row.subject_id,row.source_id].join('\u0000');candidateRows.set(key,[...(candidateRows.get(key)??[]),row]);}
-  for(const order of orders){const key=[order.sourceSystem,order.ownerId,order.sourceId].join('\u0000');candidateOrders.set(key,[...(candidateOrders.get(key)??[]),order]);}
+  const index=relationIndex(sources,orders),reverse=new Map<string,ReverseLinks>();
+  const resolve=(ref:string)=>{let value=reverse.get(ref);if(!value){value=reverseLinks(ref,index,access);reverse.set(ref,value);}return value;};
   for(const entry of entries){
     if(!entry.historical)continue;
-    const source=rows.get(entry.id.slice('history:'.length)),original=source?originalSource(source):null;
+    const source=index.rows.get(entry.id.slice('history:'.length)),original=source?originalSource(source):null;
     if(!source||!original){entry.reasonCodes.push('HISTORICAL_RELATION_EVIDENCE_UNAVAILABLE');continue;}
+    if(source.source_entity==='la_withdraw_apply'){
+      const result=resolve(entry.documentRef);entry.historical.association={...emptyAssociation(result.state),...(result.state==='MATCHED'?{kind:'WITHDRAWAL' as const,documentRef:result.related[0]!.ref,number:result.related[0]!.label,path:result.related[0]!.path??null,role:'WITHDRAWER' as const}:{})};
+      entry.related.push(...result.related);entry.reasonCodes.push(...result.reasonCodes);continue;
+    }
     if(source.source_entity!=='la_log_earnings')continue;
     const type=entry.historical.changeType;
-    if(['1003','1004','1005'].includes(type??'')){entry.reasonCodes.push('HISTORICAL_RETURN_EVENT_TIME_UNAVAILABLE');continue;}
+    if(['1003','1004','1005'].includes(type??'')){
+      const candidates=index.references.get(relationKey(entry.sourceSystem,entry.subjectId,original.sourceId))??[];
+      const matched=candidates.filter(candidate=>candidate.source_entity==='la_withdraw_apply').map(candidate=>({candidate,result:resolve(`HISTORY_WITHDRAWAL:${candidate.id}`)}));
+      const links=matched.filter(({result})=>result.state==='MATCHED'&&result.related.some(link=>link.ref===entry.documentRef));
+      if(links.length!==1){entry.historical.association=emptyAssociation(links.length>1||matched.some(({result})=>result.state==='AMBIGUOUS')?'AMBIGUOUS':matched.some(({result})=>result.state==='DENIED')?'DENIED':'UNRESOLVED');entry.reasonCodes.push('HISTORICAL_RETURN_EVENT_TIME_UNAVAILABLE');continue;}
+      const candidate=links[0]!.candidate,number=text(originalSource(candidate)!.sn)!,ref=`HISTORY_WITHDRAWAL:${candidate.id}`,path=`/finance/documents/${encodeURIComponent(ref)}`;
+      entry.historical.association={state:'MATCHED',kind:'WITHDRAWAL',documentRef:ref,number,path,role:'WITHDRAWER',originalStatus:'4',originalStatusLabel:withdrawalStates['4']!};entry.related.push({ref,label:number,path});continue;
+    }
     if(type!=='1001'&&type!=='1002')continue;
-    const matches:Match[]=[];
-    const candidateKey=[entry.sourceSystem,entry.subjectId,String(original.sourceId)].join('\u0000');
-    if(type==='1001')for(const order of candidateOrders.get(candidateKey)??[]){const match=orderMatch(entry,original,source,order);if(match)matches.push(match);}
-    for(const candidate of candidateRows.get(candidateKey)??[]){const match=observationMatch(entry,original,source,candidate,access);if(match)matches.push(match);}
-    const unique=[...new Map(matches.map(match=>[match.kind+'\u0000'+match.ref,match])).values()];
+    const unique=logMatches(source,original,index,access);
     if(unique.length!==1){entry.historical.association=emptyAssociation(unique.length?'AMBIGUOUS':'UNRESOLVED');entry.reasonCodes.push(unique.length?'ORIGINAL_ORDER_REFERENCE_AMBIGUOUS':'ORIGINAL_ORDER_REFERENCE_UNRESOLVED');continue;}
     const match=unique[0]!;
     if(!match.allowed){entry.historical.association=emptyAssociation('DENIED');continue;}

@@ -18,7 +18,7 @@ globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);
 globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 const {createRoot}=await import("react-dom/client");
-const vite=await createServer({root:rootPath,configFile:false,plugins:[react()],resolve:{alias:{"@":path.join(rootPath,"src"),"@brand":path.resolve(rootPath,"../../assets/brand")}},server:{middlewareMode:true,hmr:false}});
+const vite=await createServer({root:rootPath,configFile:false,plugins:[react()],resolve:{alias:{"@":path.join(rootPath,"src"),"@brand":path.resolve(rootPath,"../../assets/brand")}},optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
 const {UserDetailFinance}=await vite.ssrLoadModule("/src/views/user-directory/user-detail-finance.tsx");
 const {AdminFinanceView,clearFinanceContexts}=await vite.ssrLoadModule("/src/views/admin-finance-view.tsx");
 const {tabFromLocation}=await vite.ssrLoadModule("/src/workspace/tab-model.ts");
@@ -31,18 +31,26 @@ const consumption={contractVersion:"admin-user-consumption.v1",subjectId:"user-o
 const document={ref:"ORDER:order-one",number:"ZZ001",kind:"SETTLEMENT",state:"POSTED",occurredAt:now,requestedAmountCents:null,subjects:[{id:"user-one",name:"用户一"}],entryCount:1,amounts:[{bucket:"AVAILABLE",knownNetCents:"500",unknownCount:0}]};
 const waitFor=async(condition)=>{for(let i=0;i<80;i++){if(condition())return;await act(async()=>new Promise(setImmediate));}throw Error("User finance condition timed out");};
 let serial=0;
-async function mount(t,{permissions=["user.finance.read"],consume,finance,wallet,realFinance=false}={}){
-  const calls={consumption:[],finance:[]},opened=[];
+async function mount(t,{permissions=["user.finance.read"],consume,finance,wallet,realFinance=false,tabQuery={}}={}){
+  const calls={consumption:[],finance:[]},opened=[],queries=[];
   const adapter={snapshot:{authenticated:true,adminUserId:`admin-${++serial}`,user:{name:"运营甲",username:"OPERATOR"},session:{id:`session-${serial}`,locked:false},security:{isBoss:false,status:"ACTIVE",passwordChangeRequired:false},permissions},has:permission=>permissions.includes(permission),
     consumption:async(...args)=>{calls.consumption.push(args);return consume?consume(...args):consumption;},
     finance:async(...args)=>{calls.finance.push(args);return finance?finance(...args):{documents:[document]};}};
   if(realFinance){const bff=new UserDirectoryBff(adapter.snapshot);adapter.finance=async(...args)=>{calls.finance.push(args);return bff.finance(...args);};}
   const host=browser.document.createElement("div");browser.document.body.append(host);const root=createRoot(host);
-  const props={adapter,user:{id:"user-one",name:"用户一",walletSummary:wallet??{state:"ready",amountCents:"15000",currency:"CNY",asOfUtc:now}},refreshNonce:0,onOpenPath:(...args)=>opened.push(args)};
+  const props={adapter,user:{id:"user-one",name:"用户一",walletSummary:wallet??{state:"ready",amountCents:"15000",currency:"CNY",asOfUtc:now}},tab:tabFromLocation('/users/user-one',new URLSearchParams({section:'finance',...tabQuery}).toString()),onQueryChange:query=>queries.push(query),refreshNonce:0,onOpenPath:(...args)=>opened.push(args)};
   await act(async()=>root.render(createElement(UserDetailFinance,props)));
   t.after(async()=>{await act(async()=>root.unmount());host.remove();});
-  return{host,calls,opened,props,root,render:async()=>act(async()=>root.render(createElement(UserDetailFinance,props)))};
+  return{host,calls,opened,queries,props,root,render:async()=>act(async()=>root.render(createElement(UserDetailFinance,props)))};
 }
+
+test('R1 user finance date query survives document and related order reload return',async t=>{
+  const history={changeType:'1001',purposeCode:'OWNER_RENTAL_INCOME',purposeLabel:'号主租赁收入',originalLogNumber:'OLD-LOG',recordedAmountCents:'7700',balanceAfterCents:null,feeCents:null,netCents:null,originalStatus:null,originalStatusLabel:null,channelState:'UNVERIFIED',association:{state:'MATCHED',kind:'ORDER',documentRef:'LEGACY_ORDER:old-one',number:'OLD-ORDER',path:'/orders/old-one',role:'OWNER',originalStatus:'4',originalStatusLabel:'已完成'}};
+  const ui=await mount(t,{permissions:['finance.read','finance.document.read','order.read'],tabQuery:{financeFrom:'2026-06-01',financeTo:'2026-06-30'},finance:()=>({documents:[{...document,ref:'HISTORY_EARNINGS:old-log',historical:history}]})});await waitFor(()=>ui.calls.finance.length>0);assert.equal(ui.calls.finance[0][2].from,'2026-06-01');assert.equal(ui.calls.finance[0][2].to,'2026-06-30');
+  await waitFor(()=>ui.host.querySelector('[aria-label="查看历史记录 OLD-LOG"]'));await act(async()=>ui.host.querySelector('[aria-label="查看历史记录 OLD-LOG"]').click());let target=new URL(ui.opened.at(-1)[0],browser.location.href),source=new URL(target.searchParams.get('financeReturn'),browser.location.href);assert.equal(source.pathname,'/users/user-one');assert.equal(source.searchParams.get('financeFrom'),'2026-06-01');assert.equal(source.searchParams.get('financeTo'),'2026-06-30');
+  await act(async()=>[...ui.host.querySelectorAll('button')].find(button=>button.textContent.includes('查看关联记录')).click());target=new URL(ui.opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,'/orders/old-one');assert.ok(target.searchParams.get('financeOrigin'));assert.equal(target.searchParams.get('financeReturn'),source.pathname+source.search);
+  await act(async()=>ui.host.querySelector('form').dispatchEvent(new browser.Event('submit',{bubbles:true,cancelable:true})));assert.equal(ui.queries.at(-1).financeFrom,'2026-06-01');
+});
 
 test("wallet permission grants balance only and never requests consumption or full finance",async t=>{
   const ui=await mount(t,{permissions:["user.wallet.read"]});await act(async()=>new Promise(setImmediate));
@@ -116,7 +124,7 @@ test("real finance target retains the source-user return link for operator and B
     await act(async()=>ui.root.render(createElement(AdminFinanceView,{tab:tabFromLocation(url.pathname,url.search),snapshot:ui.props.adapter.snapshot,onOpenPath:(...args)=>back.push(args),onQueryChange:()=>{},onRefresh:async()=>ui.props.adapter.snapshot,refreshNonce:0})));
     await waitFor(()=>fetched>0&&ui.host.textContent.includes("ZZ001"));
     const returnButton=[...ui.host.querySelectorAll("button")].find(button=>button.textContent==="返回来源");assert(returnButton);
-    await act(async()=>returnButton.click());assert.equal(back.at(-1)[0],"/users/user-one?section=finance");
+    await act(async()=>returnButton.click());const source=new URL(back.at(-1)[0],browser.location.href);assert.equal(source.pathname,'/users/user-one');assert.equal(source.searchParams.get('section'),'finance');assert.equal(source.searchParams.get('financeFrom'),beijingCalendarDate());assert.equal(source.searchParams.get('financeTo'),beijingCalendarDate());
     await act(async()=>ui.root.render(null));
   }
 });

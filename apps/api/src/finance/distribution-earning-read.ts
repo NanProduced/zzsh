@@ -10,6 +10,7 @@ import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-
 import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,type LegacyCommissionFinance} from './legacy-duty-finance-store';
 import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';
 import {referralPercent,validateDistributionPolicy} from './distribution-policy';
+import {prepareAccrualFromFrozenPayment} from './distribution-accrual';
 
 const states=['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'] as const;
 export type EarningsQuery={state:typeof states[number];limit:number;cursor:string|null;projectionVersion?:2};
@@ -27,6 +28,21 @@ export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string
  knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string;percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';
  baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED';orderNumber:string|null;
 };
+function verifiedFrozenCalculation(f:Record<string,any>){
+ if(hash(f.canonical_seed)!==f.seed_digest||f.basis_digest!==f.payment_basis_digest)throw unavailable();
+ const seed=JSON.parse(f.canonical_seed),basis={...JSON.parse(f.canonical_basis),digest:f.payment_basis_digest} as PaymentDistributionBasis;
+ readOriginalPaymentDistributionBasis(basis,{orderId:f.order_id,confirmationId:f.payment_confirmation_id,paymentDigest:basis.paymentDigest});
+ if(seed.id!==f.id||seed.beneficiaryUserId!==f.beneficiary_user_id||seed.role!==f.beneficiary_role||seed.amountCents!==exactCents(f.amount_cents)
+  ||seed.source?.id!==f.order_id||seed.source?.digest!==f.posting_digest||seed.policyVersion!==basis.policyVersion||seed.policyDigest!==basis.policyDigest
+  ||!basis.policyVersion||!basis.policyConfig||hash(canonicalize(basis.policyConfig))!==basis.policyDigest)throw unavailable();
+ const policy=validateDistributionPolicy(basis.policyConfig as unknown as Record<string,unknown>);
+ const roles=basis.roles.filter(r=>r.role===f.beneficiary_role&&r.beneficiaryUserId===f.beneficiary_user_id);
+ if(roles.length!==1)throw unavailable();const role=roles[0]!;
+ const level=policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);
+ if(role.status!=='ELIGIBLE'||!level||!role.ratio||canonicalize(role.ratio)!==canonicalize(percent.ratio)||seed.relationDigest!==role.relationDigest
+  ||referralPercent(role.role==='RENTER_REFERRAL'?level.renterPercent:level.ownerPercent).percent!==percent.percent)throw unavailable();
+ return{seed,basis,level,percent,policyVersion:basis.policyVersion};
+}
 /** Only the beneficiary's frozen terms; the private posting/base and other parties never leave this reader. */
 export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:Record<string,any>,installed:boolean):Promise<EarningCalculation>{
  if(row.origin==='LEGACY_MYSQL')return{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'};
@@ -41,22 +57,75 @@ export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:
  if(!f?.canonical_basis)return{knowledge:'UNKNOWN',reason:'ORIGINAL_BASIS_UNAVAILABLE'};
  try{
   if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
-   ||hash(f.canonical_seed)!==f.seed_digest||f.basis_digest!==f.payment_basis_digest)throw unavailable();
-  const seed=JSON.parse(f.canonical_seed),basis={...JSON.parse(f.canonical_basis),digest:f.payment_basis_digest} as PaymentDistributionBasis;
-  readOriginalPaymentDistributionBasis(basis,{orderId:f.order_id,confirmationId:f.payment_confirmation_id,paymentDigest:basis.paymentDigest});
-  if(seed.id!==f.id||seed.beneficiaryUserId!==actor.userId||seed.role!==f.beneficiary_role||seed.amountCents!==exactCents(f.amount_cents)
-   ||seed.source?.id!==f.order_id||seed.source?.digest!==f.posting_digest||seed.policyVersion!==basis.policyVersion||seed.policyDigest!==basis.policyDigest
-   ||!basis.policyVersion||!basis.policyConfig||hash(canonicalize(basis.policyConfig))!==basis.policyDigest)throw unavailable();
-  const policy=validateDistributionPolicy(basis.policyConfig as unknown as Record<string,unknown>);
-  const roles=basis.roles.filter(r=>r.role===f.beneficiary_role&&r.beneficiaryUserId===actor.userId);
-  if(roles.length!==1)throw unavailable();const role=roles[0]!;
-  const level=policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);
-  if(role.status!=='ELIGIBLE'||!level||!role.ratio||canonicalize(role.ratio)!==canonicalize(percent.ratio)||seed.relationDigest!==role.relationDigest
-   ||referralPercent(role.role==='RENTER_REFERRAL'?level.renterPercent:level.ownerPercent).percent!==percent.percent)throw unavailable();
-  return{knowledge:'KNOWN',policyVersion:basis.policyVersion,beneficiaryLevelCode:level.code,percent:percent.percent,
+   )throw unavailable();
+  const {policyVersion,level,percent}=verifiedFrozenCalculation(f);
+  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,percent:percent.percent,
    basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
    cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'LOCAL_CONTROLLED',orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
  }catch{return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};}
+}
+export type AdminEarningCalculation={knowledge:'KNOWN'|'UNKNOWN';policyVersion:string|null;levelCode:string|null;percent:string|null;baseCents:string|null;formula:string|null;reasonCodes:string[]};
+export type AdminEarningEventAction={knowledge:'KNOWN'|'UNKNOWN';action:'ACCRUE'|'SETTLE'|'REVOKE'|'RECOVER'|null;reasonCodes:string[]};
+const unknownCalculation=(reason:string):AdminEarningCalculation=>({knowledge:'UNKNOWN',policyVersion:null,levelCode:null,percent:null,baseCents:null,formula:null,reasonCodes:[reason]});
+function readKeys(ids:string[]){
+ if(ids.length>20000||ids.some(id=>typeof id!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(id)))throw invalid('Bounded original finance keys required');
+ return[...new Set(ids)];
+}
+/** The caller supplies only already-authorized page roots and the current transaction client. */
+export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:string[]):Promise<Map<string,AdminEarningCalculation>>{
+ const ids=readKeys(earningRootIds),result=new Map(ids.map(id=>[id,unknownCalculation('ORIGINAL_BASIS_UNAVAILABLE')]));if(!ids.length)return result;
+ const rows=(await c.query(`SELECT e.id,e.order_id,e.payment_confirmation_id,e.posting_id,e.economic_key,e.beneficiary_user_id,e.beneficiary_role,e.amount_cents::text,
+  e.canonical_seed,e.seed_digest,e.basis_digest,e.posting_digest,b.canonical_basis,b.basis_digest AS payment_basis_digest,
+  CASE WHEN p.id IS NULL THEN NULL ELSE jsonb_build_object('id',p.id,'order_id',p.order_id,'payment_confirmation_id',p.payment_confirmation_id,
+   'version_hash',p.version_hash,'early',p.early,'manual_reason',p.manual_reason,'captured_cents',p.captured_cents::text,'owner_net_cents',p.owner_net_cents::text,
+   'renter_refund_cents',p.renter_refund_cents::text,'platform_contribution_cents',p.platform_contribution_cents::text,'compensation_fee_cents',p.compensation_fee_cents::text,
+   'posted_at',to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) END AS posting
+  FROM zzsh_order.rental_referral_earning e
+  LEFT JOIN zzsh_order.payment_distribution_basis b ON b.order_id=e.order_id AND b.payment_confirmation_id=e.payment_confirmation_id
+  LEFT JOIN zzsh_order.settlement_posting p ON p.id=e.posting_id AND p.order_id=e.order_id AND p.payment_confirmation_id=e.payment_confirmation_id
+  WHERE e.id=ANY($1::text[])`,[ids])).rows;
+ const seen=new Set<string>();
+ for(const f of rows){
+  if(!result.has(f.id))continue;
+  if(seen.has(f.id)){result.set(f.id,unknownCalculation('AMBIGUOUS_ORIGINAL_BASIS'));continue;}seen.add(f.id);
+  if(!f.canonical_basis||!f.posting)continue;
+  try{
+   const {seed,basis,level,percent}=verifiedFrozenCalculation(f),p=f.posting;
+   if(p.id!==f.posting_id||p.order_id!==f.order_id||p.payment_confirmation_id!==f.payment_confirmation_id||hash(canonicalize(p))!==f.posting_digest
+    ||typeof p.early!=='boolean'||p.manual_reason!==null&&typeof p.manual_reason!=='string')throw unavailable();
+   const allocation=prepareAccrualFromFrozenPayment(basis,{origin:'NATIVE',orderId:f.order_id,confirmationId:f.payment_confirmation_id,postingId:p.id,
+    postingDigest:f.posting_digest,postedAt:p.posted_at,classification:p.early?'EARLY':'NORMAL',calculationMode:p.manual_reason===null?'SYSTEM':'MANUAL',
+    capturedCents:p.captured_cents,ownerNetCents:p.owner_net_cents,renterRefundCents:p.renter_refund_cents,platformContributionCents:p.platform_contribution_cents,compensationFeeCents:p.compensation_fee_cents});
+   if(allocation.knowledge!=='KNOWN'||seed.baseDigest!==allocation.digest)throw unavailable();
+   const items=allocation.items.filter(item=>item.beneficiaryUserId===f.beneficiary_user_id&&item.role===f.beneficiary_role);
+   if(items.length!==1)throw unavailable();const item=items[0]!;
+   if(item.amountCents!==exactCents(f.amount_cents)||item.economicKey!==f.economic_key||seed.economicKey!==item.economicKey||seed.dueAt!==item.dueAt)throw unavailable();
+   result.set(f.id,{knowledge:'KNOWN',policyVersion:basis.policyVersion,levelCode:level.code,percent:percent.percent,baseCents:allocation.baseCents,
+    formula:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
+  }catch{result.set(f.id,unknownCalculation('FROZEN_CALCULATION_NOT_VERIFIED'));}
+ }
+ return result;
+}
+/** RECOVER and REVOKE share the ledger kind; only the original transition distinguishes them. */
+export async function readAdminEarningEventActions(c:PoolClient,eventIds:string[]):Promise<Map<string,AdminEarningEventAction>>{
+ const ids=readKeys(eventIds),result=new Map<string,AdminEarningEventAction>(ids.map(id=>[id,{knowledge:'UNKNOWN',action:null,reasonCodes:['ORIGINAL_TRANSITION_UNAVAILABLE']}]));if(!ids.length)return result;
+ const rows=(await c.query(`SELECT t.finance_event_id AS event_id,t.earning_id,t.action,t.expected_version::text,t.result_version::text,t.source_digest,
+  e.economic_root_id,e.kind,e.subject_user_id,r.beneficiary_user_id
+  FROM zzsh_order.rental_referral_transition t LEFT JOIN zzsh_order.finance_event e ON e.id=t.finance_event_id
+  LEFT JOIN zzsh_order.rental_referral_earning r ON r.id=t.earning_id WHERE t.finance_event_id=ANY($1::text[])`,[ids])).rows;
+ const seen=new Set<string>(),kinds:Record<string,string>={ACCRUE:'EARNING_PENDING',SETTLE:'EARNING_SETTLED',REVOKE:'EARNING_REVOKED',RECOVER:'EARNING_REVOKED'};
+ for(const row of rows){
+  if(!result.has(row.event_id))continue;
+  const duplicate=seen.has(row.event_id);seen.add(row.event_id);
+  if(duplicate||!Object.hasOwn(kinds,row.action)||row.kind!==kinds[row.action]||row.economic_root_id!==row.earning_id
+   ||!row.beneficiary_user_id||row.subject_user_id!==row.beneficiary_user_id||!/^[0-9a-f]{64}$/.test(row.source_digest)
+   ||!/^(0|[1-9]\d{0,18})$/.test(row.expected_version)||!/^[1-9]\d{0,18}$/.test(row.result_version)
+   ||BigInt(row.result_version)!==BigInt(row.expected_version)+1n||(row.action==='ACCRUE')!==(row.expected_version==='0')){
+   result.set(row.event_id,{knowledge:'UNKNOWN',action:null,reasonCodes:[duplicate?'AMBIGUOUS_ORIGINAL_TRANSITION':'ORIGINAL_TRANSITION_NOT_VERIFIED']});continue;
+  }
+  result.set(row.event_id,{knowledge:'KNOWN',action:row.action,reasonCodes:[]});
+ }
+ return result;
 }
 /** History is an observation, never a fresh ledger credit or a channel-paid claim. */
 export function earningProjection(row:Record<string,any>,currentFinance?:LegacyCommissionFinance,projectionVersion:1|2=1){

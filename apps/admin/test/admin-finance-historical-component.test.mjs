@@ -13,7 +13,7 @@ for(const key of ['window','document','HTMLElement','Element','Node','Event','Cu
 Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
 globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 const {createRoot}=await import('react-dom/client');
-const vite=await createServer({root:rootPath,configFile:false,plugins:[react()],resolve:{alias:{'@':path.join(rootPath,'src'),'@brand':path.resolve(rootPath,'../../assets/brand')}},server:{middlewareMode:true,hmr:false,ws:false}});
+const vite=await createServer({root:rootPath,configFile:false,plugins:[react()],resolve:{alias:{'@':path.join(rootPath,'src'),'@brand':path.resolve(rootPath,'../../assets/brand')}},optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
 const formats=await vite.ssrLoadModule('/src/views/admin-finance-api.ts');
 const {AdminFinanceView,HistoricalFinanceDetail,clearFinanceContexts}=await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');
 const {UserDetailFinance}=await vite.ssrLoadModule('/src/views/user-directory/user-detail-finance.tsx');
@@ -100,7 +100,7 @@ test('the owner-income samples retain distinct API order paths instead of derivi
   const documents=samples.map(([_yuan,cents,legacyId],index)=>({...debit,ref:`HISTORY_EARNINGS:sample-${index}`,number:`ROW-${index}`,amounts:[{bucket:'AVAILABLE',knownNetCents:cents,unknownCount:0}],historical:{...historical,purposeCode:'OWNER_RENTAL_INCOME',purposeLabel:'号主租赁收入',originalLogNumber:`SYNTHETIC-INCOME-${index}`,recordedAmountCents:cents,association:{...association,kind:'ORDER',documentRef:`ORDER:stable-${index}`,number:`BUSINESS-ORDER-${legacyId}`,path:`/orders/stable-${index}`,role:'OWNER'}}}));
   const ui=await mount(t,{documents});await waitFor(()=>ui.host.querySelectorAll('[data-historical-association] button').length===3);
   for(const [yuan]of samples)assert.ok(ui.host.textContent.includes(`${yuan} 元`),yuan);
-  for(const [index,node]of [...ui.host.querySelectorAll('[data-historical-association] button')].entries()){await click(node);assert.equal(ui.opened.at(-1)[0],`/orders/stable-${index}`);}
+  for(const [index,node]of [...ui.host.querySelectorAll('[data-historical-association] button')].entries()){await click(node);const path=new URL(ui.opened.at(-1)[0],'http://fixture.invalid');assert.equal(path.pathname,`/orders/stable-${index}`);assert.ok(path.searchParams.get('financeOrigin'));}
 });
 
 test('old DTOs remain readable without fabricating fee, association or a business number',async t=>{
