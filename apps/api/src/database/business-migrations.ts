@@ -279,6 +279,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
   await configureContinuityFinancePrivileges(pool, runtimeRole);
+  await configureChannelRefundPrivileges(pool, runtimeRole);
 }
 
 /** Optional schema (ADM-SECURITY-BACKEND-1): command identity rows never need UPDATE/DELETE;
@@ -488,4 +489,28 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   if (v4.present) {
     await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order) TO ${role}`);
   }
+}
+
+/** 退款可选表在宽授权之后重新收窄；调用方保有原ACL事务，不在旧前缀创建对象。 */
+export async function configureChannelRefundPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const names = ["zzsh_order.channel_refund_intent", "zzsh_order.channel_refund_observation"];
+  const found = (await pool.query<{ name: string; present: boolean }>(
+    "SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [names]
+  )).rows;
+  if (found.length !== names.length || new Set(found.map(row => row.name)).size !== names.length
+    || found.some(row => !names.includes(row.name) || typeof row.present !== "boolean")) {
+    throw new Error("Channel refund schema inventory is incomplete");
+  }
+  if (found.every(row => !row.present)) return;
+  if (found.some(row => !row.present)) throw new Error("Channel refund schema is partially deployed");
+  for (const table of names) await resetRuntimeTablePrivileges(pool, table, role);
+  await pool.query(`
+    GRANT INSERT(id,posting_id,order_id,payment_confirmation_id,renter_user_id,payment_source,merchant_identity_id,
+      original_payment_trx_no,original_payment_order_no,responsibility_version_hash,refund_order_no,amount_cents,
+      currency,idempotency_key,request_fingerprint,due_at) ON zzsh_order.channel_refund_intent TO ${role};
+    GRANT UPDATE(state,revision,lease_version,lease_owner,lease_until) ON zzsh_order.channel_refund_intent TO ${role};
+    GRANT INSERT(id,intent_id,event,failure_reason,lease_version,lease_owner,state_before,state_after,request_id)
+      ON zzsh_order.channel_refund_observation TO ${role};
+  `);
 }

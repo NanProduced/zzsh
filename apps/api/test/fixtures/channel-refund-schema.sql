@@ -69,7 +69,7 @@ BEGIN
       IF (OLD.lease_until IS NOT NULL AND OLD.lease_until > clock_timestamp()) OR OLD.due_at > clock_timestamp()
          OR NEW.lease_owner IS NULL OR NEW.lease_until IS NULL OR NEW.lease_until <= clock_timestamp()
          OR NEW.lease_until > clock_timestamp() + interval '3600 seconds'
-         OR NEW.state IS DISTINCT FROM CASE WHEN OLD.state = 'READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END THEN
+         OR NEW.state IS DISTINCT FROM (CASE WHEN OLD.state = 'READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END) THEN
         RAISE EXCEPTION 'refund lease is not claimable' USING ERRCODE = '40001';
       END IF;
     ELSIF NEW.lease_version = OLD.lease_version THEN
