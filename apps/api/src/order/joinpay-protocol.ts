@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 
 /**
  * 汇聚 JoinPay 2.6 MD5 离线协议（PAY-02，合同 PAY-01 R3）。
- * 仅 SYNTHETIC_PROTOCOL：纯解析/校验/签名函数；不读配置、钥库、环境变量，不连 DB、网络或服务。
+ * 纯解析/校验/签名及中性计算；旧build/evaluate API固定SYNTHETIC_PROTOCOL。
+ * 不读配置、钥库、环境变量，不连 DB、网络或服务。
  * 这里的任何结果都不是付款事实，不授予正式接纳或 JOINPAY APPLIED。
  */
 export const JOINPAY_PROFILE = Object.freeze({
@@ -323,26 +324,56 @@ const SYNC_UNKNOWN_CODES = new Set(["0", "4", "10080000", "10080002"]);
 // 合同 §1.2 显式列出的拒绝码；其余为本 profile 未映射 → E3（完整清单未核）。
 const SYNC_REJECT_CODES = new Set(["10080003", "10080004", "10080005", "10080007", "10080013", "10080014", "10080017", "10080018", "10080042", "10080059", "10080064"]);
 
+/** 中性协议计算不授予商户准入、官方验签或任何资金状态。旧合成包装与正式服务端profile共用。 */
+export type JoinpayCollectionDecision = {
+  schema: "VALID" | "INVALID"; signature: "MATCH" | "MISMATCH" | "NOT_CHECKED"; binding: "MATCH" | "MISMATCH" | "NOT_CHECKED";
+  event: JoinpayEvent; result: string; reason?: string; field?: string; rawStatus?: string;
+  values?: Readonly<Record<string, string | undefined>>; numberTokens?: readonly string[]; providerPaidAtRaw?: string; paymentParamUrl?: string;
+};
+export function computeJoinpayCollectionDecision(operation: "SUBMIT" | "QUERY", body: string | Uint8Array,
+  request: JoinpayPersistedRequest, key: string): JoinpayCollectionDecision {
+  if (operation !== "SUBMIT" && operation !== "QUERY") throw new JoinpayProtocolError("PROTOCOL_OPERATION_INVALID");
+  const sync = operation === "SUBMIT", unknown = sync ? "E3" as const : "E6X" as const;
+  const base = { schema: "INVALID" as const, signature: "NOT_CHECKED" as const, binding: "NOT_CHECKED" as const, event: unknown };
+  const decoded = decodeJoinpayJson(body);
+  if (!decoded.ok) return { ...base, result: sync ? "SYNC_SCHEMA_REJECTED" : "QUERY_SCHEMA_REJECTED", reason: decoded.reason };
+  const fields = sync ? SYNC_RESPONSE : QUERY_RESPONSE, checked = checkSchema(fields, decoded.raw);
+  if (!checked.ok) return { ...base, result: sync ? "SYNC_SCHEMA_REJECTED" : "QUERY_SCHEMA_REJECTED", reason: checked.reason, field: checked.field };
+  if (!verify(fields, checked, key)) return { ...base, schema: "VALID", signature: "MISMATCH", result: "SIGNATURE_INVALID" };
+  const signed = { ...base, schema: "VALID" as const, signature: "MATCH" as const };
+  const v = checked.values, common = { values: v, numberTokens: checked.numberTokens };
+  if (sync) {
+    if (v.r1_MerchantNo !== request.merchantNo || v.r2_OrderNo !== request.orderNo || v.r3_Amount !== centsToJoinpayYuan(request.amountCents)
+      || v.r4_Cur !== "1" || v.r6_FrpCode !== request.frpCode) return { ...signed, binding: "MISMATCH", result: "BINDING_MISMATCH" };
+    const bound = { ...signed, binding: "MATCH" as const }, code = v.ra_Code as string;
+    if (code === "100") return { ...bound, ...common, event: "E1", result: "ACTION_READY", paymentParamUrl: v.rc_Result };
+    if (code === "102" || code === "10083001") return { ...bound, ...common, event: "E1P", result: "PROCESSING_UNCONFIRMED" };
+    if (SYNC_REJECT_CODES.has(code)) return { ...bound, ...common, event: "E2", result: "REJECTED_BY_CHANNEL", rawStatus: code };
+    return { ...bound, ...common, result: SYNC_UNKNOWN_CODES.has(code) ? "SYNC_UNKNOWN" : "SYNC_UNMAPPED_CODE", rawStatus: code };
+  }
+  if (v.rb_Code !== "100") return { ...signed, ...common, result: "QUERY_FAILED", rawStatus: v.rb_Code };
+  const status = v.ra_Status;
+  if (status === undefined) return { ...signed, ...common, result: "QUERY_EVIDENCE_INCOMPLETE", reason: "STATUS_MISSING" };
+  if (!["100", "101", "102"].includes(status)) return { ...signed, ...common, result: "QUERY_EVIDENCE_INCOMPLETE", reason: "STATUS_UNKNOWN", rawStatus: status };
+  if (v.r1_MerchantNo !== request.merchantNo || v.r2_OrderNo !== request.orderNo) return { ...signed, ...common, binding: "MISMATCH", result: "BINDING_MISMATCH" };
+  const bound = { ...signed, binding: "MATCH" as const };
+  if (status === "101") return { ...bound, ...common, event: "E5", result: "CHANNEL_REPORTED_FAILED" };
+  if (status === "102") return { ...bound, ...common, event: "E6", result: "CHANNEL_CREATED_UNPAID" };
+  const missing = ["r3_Amount", "r5_TrxNo", "r8_FrpCode"].find(name => v[name] === undefined);
+  if (missing) return { ...signed, ...common, result: "QUERY_EVIDENCE_INCOMPLETE", reason: "SUCCESS_FIELD_MISSING", field: missing };
+  if (v.r3_Amount !== centsToJoinpayYuan(request.amountCents) || v.r8_FrpCode !== request.frpCode) return { ...signed, ...common, binding: "MISMATCH", result: "BINDING_MISMATCH" };
+  return { ...bound, ...common, event: "E4", result: "QUERY_SUCCEEDED", providerPaidAtRaw: v.rf_PayTime };
+}
+function syntheticCollectionOutcome(operation: "SUBMIT" | "QUERY", body: string | Uint8Array, ctx: JoinpayInboundContext): JoinpayOutcome {
+  const op = operation === "SUBMIT" ? "uniPaySyncResponse" : "queryOrder";
+  if (!ctx.leaseCurrent) return outcome(op, "E9", ctx.request.state, { result: "STALE_LEASE" });
+  const { schema: _schema, binding: _binding, signature, event, paymentParamUrl, ...part } = computeJoinpayCollectionDecision(operation, body, ctx.request, ctx.key);
+  return outcome(op, event, ctx.request.state, { ...part, signature: signature === "MATCH" ? operation === "QUERY" && event === "E6X" ? "NOT_CHECKED" : "SYNTHETIC_SELF_CONSISTENT" : signature,
+    ...(paymentParamUrl === undefined ? {} : { paymentParam: { url: paymentParamUrl, usableNow: false as const, reason: "QR_HOST_ALLOWLIST_NOT_OBTAINED" as const } }) });
+}
 /** uniPay 同步 JSON 响应。100 仅表示参数受理，绝不是付款。 */
 export function evaluateJoinpaySyncResponse(body: string | Uint8Array, ctx: JoinpayInboundContext): JoinpayOutcome {
-  const op = "uniPaySyncResponse";
-  const st = ctx.request.state;
-  if (!ctx.leaseCurrent) return outcome(op, "E9", st, { result: "STALE_LEASE" });
-  const d = decodeJoinpayJson(body);
-  if (!d.ok) return outcome(op, "E3", st, { result: "SYNC_SCHEMA_REJECTED", reason: d.reason });
-  const s = checkSchema(SYNC_RESPONSE, d.raw);
-  if (!s.ok) return outcome(op, "E3", st, { result: "SYNC_SCHEMA_REJECTED", reason: s.reason, field: s.field });
-  if (!verify(SYNC_RESPONSE, s, ctx.key)) return outcome(op, "E3", st, { result: "SIGNATURE_INVALID", signature: "MISMATCH" });
-  const v = s.values;
-  const r = ctx.request;
-  if (v.r1_MerchantNo !== r.merchantNo || v.r2_OrderNo !== r.orderNo || v.r3_Amount !== centsToJoinpayYuan(r.amountCents) || v.r4_Cur !== "1" || v.r6_FrpCode !== r.frpCode)
-    return outcome(op, "E3", st, { result: "BINDING_MISMATCH", signature: "SYNTHETIC_SELF_CONSISTENT" });
-  const code = v.ra_Code as string;
-  const common = { values: v, numberTokens: s.numberTokens };
-  if (code === "100") return outcome(op, "E1", st, { ...common, result: "ACTION_READY", paymentParam: { url: v.rc_Result as string, usableNow: false, reason: "QR_HOST_ALLOWLIST_NOT_OBTAINED" } });
-  if (code === "102" || code === "10083001") return outcome(op, "E1P", st, { ...common, result: "PROCESSING_UNCONFIRMED" });
-  if (SYNC_REJECT_CODES.has(code)) return outcome(op, "E2", st, { ...common, result: "REJECTED_BY_CHANNEL", rawStatus: code });
-  return outcome(op, "E3", st, { ...common, result: SYNC_UNKNOWN_CODES.has(code) ? "SYNC_UNKNOWN" : "SYNC_UNMAPPED_CODE", rawStatus: code, signature: "SYNTHETIC_SELF_CONSISTENT" });
+  return syntheticCollectionOutcome("SUBMIT", body, ctx);
 }
 
 /** GET 异步通知。request 为 null 即绑定不到（E11）。ack 只能在持久化成功后发送。 */
@@ -367,61 +398,50 @@ export function evaluateJoinpayNotify(rawQuery: string, ctx: { key: string; requ
   return reject("NOTIFY_STATUS_UNKNOWN", { rawStatus: v.r6_Status });
 }
 
-/** queryOrder JSON 响应：R3 statusBranch A–F；E4/E5/E6/E6X，lease 过期 E9 优先。 */
+/** queryOrder 的旧合成API保持固定证据标签及租约优先级。 */
 export function evaluateJoinpayQueryResponse(body: string | Uint8Array, ctx: JoinpayInboundContext): JoinpayOutcome {
-  const op = "queryOrder";
-  const st = ctx.request.state;
-  if (!ctx.leaseCurrent) return outcome(op, "E9", st, { result: "STALE_LEASE" });
-  const x = (result: string, extra: Partial<JoinpayOutcome> = {}) => outcome(op, "E6X", st, { result, ...extra });
-  const d = decodeJoinpayJson(body);
-  if (!d.ok) return x("QUERY_SCHEMA_REJECTED", { reason: d.reason });
-  const s = checkSchema(QUERY_RESPONSE, d.raw);
-  if (!s.ok) return x("QUERY_SCHEMA_REJECTED", { reason: s.reason, field: s.field });
-  if (!verify(QUERY_RESPONSE, s, ctx.key)) return x("SIGNATURE_INVALID", { signature: "MISMATCH" });
-  const v = s.values;
-  const r = ctx.request;
-  const common = { values: v, numberTokens: s.numberTokens };
-  if (v.rb_Code !== "100") return x("QUERY_FAILED", { ...common, rawStatus: v.rb_Code });
-  const status = v.ra_Status;
-  if (status === undefined) return x("QUERY_EVIDENCE_INCOMPLETE", { ...common, reason: "STATUS_MISSING" });
-  if (status !== "100" && status !== "101" && status !== "102") return x("QUERY_EVIDENCE_INCOMPLETE", { ...common, reason: "STATUS_UNKNOWN", rawStatus: status });
-  if (v.r1_MerchantNo !== r.merchantNo || v.r2_OrderNo !== r.orderNo) return x("BINDING_MISMATCH", common);
-  if (status === "101") return outcome(op, "E5", st, { ...common, result: "CHANNEL_REPORTED_FAILED" });
-  if (status === "102") return outcome(op, "E6", st, { ...common, result: "CHANNEL_CREATED_UNPAID" });
-  const missing = ["r3_Amount", "r5_TrxNo", "r8_FrpCode"].find((n) => v[n] === undefined);
-  if (missing) return x("QUERY_EVIDENCE_INCOMPLETE", { ...common, reason: "SUCCESS_FIELD_MISSING", field: missing });
-  if (v.r3_Amount !== centsToJoinpayYuan(r.amountCents) || v.r8_FrpCode !== r.frpCode) return x("BINDING_MISMATCH", common);
-  return outcome(op, "E4", st, { ...common, result: "QUERY_SUCCEEDED", providerPaidAtRaw: v.rf_PayTime });
+  return syntheticCollectionOutcome("QUERY", body, ctx);
 }
 
 // ---------- 出站请求（只构造；本模块从不发送）----------
 export type JoinpaySignedForm = { fields: ReadonlyArray<readonly [string, string]>; hmac: string; evidenceLevel: "SYNTHETIC_PROTOCOL"; sendable: false; blockers: readonly string[] };
 
-function signForm(fields: readonly Field[], values: Record<string, string | undefined>, key: string, blockers: readonly string[]): JoinpaySignedForm {
+export type JoinpayComputedForm = { fields: ReadonlyArray<readonly [string, string]>; hmac: string };
+function validateFormValues(fields: readonly Field[], values: Record<string, string | undefined>): void {
   for (const f of fields) {
     const v = values[f.name];
     if (v === undefined || v === "") { if (f.required) throw new JoinpayProtocolError("PROTOCOL_FIELD_MISSING", f.name); continue; }
-    if (v !== v.trim()) throw new JoinpayProtocolError("PROTOCOL_FIELD_PATTERN", f.name);
+    if (typeof v !== "string" || v !== v.trim()) throw new JoinpayProtocolError("PROTOCOL_FIELD_PATTERN", f.name);
     const bad = boundOk(f.bound, v);
     if (bad) throw new JoinpayProtocolError(bad, f.name);
+    if (!wellFormed(v)) throw new JoinpayProtocolError("PROTOCOL_NOT_WELL_FORMED_UTF16");
   }
+}
+function computeForm(fields: readonly Field[], values: Record<string, string | undefined>, key: string): JoinpayComputedForm {
+  validateFormValues(fields, values);
   const hmac = joinpayMd5Sign(fields.map((f) => f.name), values, key);
   const out = fields.filter((f) => values[f.name]).map((f) => [f.name, values[f.name] as string] as const);
-  return { fields: [...out, ["hmac", hmac] as const], hmac, evidenceLevel: "SYNTHETIC_PROTOCOL", sendable: false, blockers };
+  return { fields: [...out, ["hmac", hmac] as const], hmac };
 }
 
 export type JoinpayUniPayInput = { merchantNo: string; orderNo: string; amountCents: string; currency: "CNY"; productName: string; notifyUrl: string; frpCode: "ALIPAY_NATIVE" | "WEIXIN_NATIVE"; tradeMerchantNo: string };
 
-/** 首期 native uniPay 表单；可选字段一律不送（合同 §1.1）。 */
-export function buildJoinpayUniPayRequest(input: JoinpayUniPayInput, key: string): JoinpaySignedForm {
+function uniPayValues(input: JoinpayUniPayInput): Record<string, string> {
   if (input.currency !== "CNY") throw new JoinpayProtocolError("CURRENCY_NOT_SUPPORTED");
   if (input.frpCode !== "ALIPAY_NATIVE" && input.frpCode !== "WEIXIN_NATIVE") throw new JoinpayProtocolError("FRP_CODE_NOT_ALLOWED");
-  return signForm(UNIPAY_REQUEST, {
-    p0_Version: "2.6", p1_MerchantNo: input.merchantNo, p2_OrderNo: input.orderNo, p3_Amount: centsToJoinpayYuan(input.amountCents), p4_Cur: "1",
-    p5_ProductName: input.productName, p9_NotifyUrl: input.notifyUrl, q1_FrpCode: input.frpCode, qa_TradeMerchantNo: input.tradeMerchantNo,
-  }, key, ["U-01", "U-04", "U-06", "U-11"]);
+  return { p0_Version: "2.6", p1_MerchantNo: input.merchantNo, p2_OrderNo: input.orderNo, p3_Amount: centsToJoinpayYuan(input.amountCents), p4_Cur: "1",
+    p5_ProductName: input.productName, p9_NotifyUrl: input.notifyUrl, q1_FrpCode: input.frpCode, qa_TradeMerchantNo: input.tradeMerchantNo };
 }
-
+const queryValues = (input: { merchantNo: string; orderNo: string }) => ({ p0_Version: "2.6", p1_MerchantNo: input.merchantNo, p2_OrderNo: input.orderNo });
+/** 与签名构造共用同一字段规则，不需要钥且不生成任何发送能力。 */
+export function validateJoinpayUniPayInput(input: JoinpayUniPayInput): void { validateFormValues(UNIPAY_REQUEST, uniPayValues(input)); }
+export function validateJoinpayQueryInput(input: { merchantNo: string; orderNo: string }): void { validateFormValues(QUERY_REQUEST, queryValues(input)); }
+/** 首期 native uniPay 表单；可选字段一律不送（合同 §1.1）。 */
+export function computeJoinpayUniPayRequest(input: JoinpayUniPayInput, key: string): JoinpayComputedForm { return computeForm(UNIPAY_REQUEST, uniPayValues(input), key); }
+export function computeJoinpayQueryRequest(input: { merchantNo: string; orderNo: string }, key: string): JoinpayComputedForm { return computeForm(QUERY_REQUEST, queryValues(input), key); }
+export function buildJoinpayUniPayRequest(input: JoinpayUniPayInput, key: string): JoinpaySignedForm {
+  return { ...computeJoinpayUniPayRequest(input, key), evidenceLevel: "SYNTHETIC_PROTOCOL", sendable: false, blockers: ["U-01", "U-04", "U-06", "U-11"] };
+}
 export function buildJoinpayQueryRequest(input: { merchantNo: string; orderNo: string }, key: string): JoinpaySignedForm {
-  return signForm(QUERY_REQUEST, { p0_Version: "2.6", p1_MerchantNo: input.merchantNo, p2_OrderNo: input.orderNo }, key, ["U-01", "U-06", "U-14"]);
+  return { ...computeJoinpayQueryRequest(input, key), evidenceLevel: "SYNTHETIC_PROTOCOL", sendable: false, blockers: ["U-01", "U-06", "U-14"] };
 }

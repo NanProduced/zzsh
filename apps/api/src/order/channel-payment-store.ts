@@ -12,6 +12,7 @@ import {
   type JoinpayTransportFailure,
 } from "./joinpay-protocol";
 import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation";
+import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpay-collection-profile";
 
 /**
  * PAY-03A：持久请求、只追加观察与资金归属锚点（payment_request / payment_channel_observation /
@@ -130,26 +131,50 @@ function checkBinding(binding: ChannelBinding | undefined): asserts binding is C
 export async function createPaymentRequest(client: PoolClient, input: {
   actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string; binding?: ChannelBinding; capability?: unknown;
 }): Promise<IdempotentResult> {
+  return createRequest(client, input, ["SYNTHETIC_PROTOCOL", "CONTROLLED_TEST"], async () => {
+    const evidenceLevel = await assertSyntheticChannelRequestCapability(client, input.capability);
+    checkBinding(input.binding);
+    if ((input.binding.channel === "JOINPAY") !== (evidenceLevel === "SYNTHETIC_PROTOCOL")) throw closed();
+    return { binding: input.binding, evidenceLevel };
+  });
+}
+
+/** 独立候选入口；旧合成行只能读回原件，不能经此入口改名提升。原始wire绑定由同事务调用方保存。 */
+export async function createCollectionPaymentRequest(client: PoolClient, input: {
+  actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string; profile: BoundCollectionProfile;
+}): Promise<IdempotentResult> {
+  return createRequest(client, input, ["JOINPAY_CANDIDATE"], async () => {
+    const profile = describeCollectionProfile(input.profile, "SUBMIT");
+    if (profile.evidenceMode !== "OFFICIAL") throw closed();
+    const binding: ChannelBinding = { channel: "JOINPAY", merchantIdentityId: profile.merchantIdentityId,
+      configProfileId: profile.profileId, protocolVersion: profile.protocolVersion, keyVersionRef: profile.keyVersionRef };
+    checkBinding(binding);
+    return { binding, evidenceLevel: "JOINPAY_CANDIDATE" };
+  });
+}
+
+async function createRequest(client: PoolClient, input: {
+  actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string;
+}, allowedEvidence: readonly string[], admit: () => Promise<{ binding: ChannelBinding; evidenceLevel: string }>): Promise<IdempotentResult> {
   const key = validateIdempotencyKey(input.idempotencyKey);
   if (!input.actor || !ID.test(input.actor.userId) || !ID.test(input.orderId)) throw invalid();
   if (!(METHODS as readonly string[]).includes(input.method)) throw invalid("Unsupported payment method", "method");
-  const { actor, orderId, binding } = input;
+  const { actor, orderId } = input;
   const scope = { realm: "user" as const, principalId: actor.userId, operation: "order.payment.channel-request", resourceId: orderId };
   const fingerprint = fingerprintRequest(scope.operation, orderId, { method: input.method });
   const ownsOrder = async () => {
     const row = (await client.query(`SELECT renter_user_id FROM zzsh_order.rental_order WHERE id=$1`, [orderId])).rows[0];
     if (!row || row.renter_user_id !== actor.userId) throw notFound();
   };
-  return withIdempotency(client, scope, key, fingerprint, ownsOrder, async () => {
+  const result = await withIdempotency(client, scope, key, fingerprint, ownsOrder, async () => {
     await xactLock(client, ["zzsh:payment-request:v1", orderId]);
     const existing = (await client.query<RequestRow>(`SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE order_id=$1`, [orderId])).rows[0];
     if (existing) {
+      if (!allowedEvidence.includes(existing.evidence_level)) throw closed();
       if (existing.method !== input.method) throw requestFailure("PAYMENT_REQUEST_EXISTS", "Payment request already exists for a different method");
       return { status: 200, body: view(existing, true) };
     }
-    const evidenceLevel = await assertSyntheticChannelRequestCapability(client, input.capability);
-    checkBinding(binding);
-    if ((binding.channel === "JOINPAY") !== (evidenceLevel === "SYNTHETIC_PROTOCOL")) throw closed();
+    const { binding, evidenceLevel } = await admit();
     const order = (await client.query(`SELECT renter_user_id, status, display_no, currency,
         (rental_amount_cents+deposit_amount_cents)::text AS total
         FROM zzsh_order.rental_order o WHERE id=$1 FOR UPDATE OF o`, [orderId])).rows[0];
@@ -180,6 +205,8 @@ export async function createPaymentRequest(client: PoolClient, input: {
       JSON.stringify([scope.realm, scope.principalId, scope.operation, orderId]), key, fingerprint])).rows[0]!;
     return { status: 202, body: view(row, false) };
   });
+  if (!result.body || typeof result.body !== "object" || !allowedEvidence.includes((result.body as PaymentRequestView).evidenceLevel)) throw closed();
+  return result;
 }
 
 // ---------- lease：PG 时钟 + 条件更新 ----------
@@ -187,13 +214,22 @@ export type PaymentLease = Readonly<{ requestId: string; leaseVersion: string; l
 
 /** 仅在无有效 lease 且状态可恢复时领取；返回持久原号，绝不重新生成或换号。null 表示未领取。 */
 export async function claimPaymentRequestLease(client: PoolClient, input: { requestId: string; owner: string; ttlSeconds: number }): Promise<PaymentLease | null> {
+  return claimRequestLease(client, input, ["SYNTHETIC_PROTOCOL", "CONTROLLED_TEST"]);
+}
+
+/** 仅供候选执行器在原请求行锁与profile检查后调用；提交前还须保存对应attempt。 */
+export async function claimCollectionPaymentRequestLease(client: PoolClient, input: { requestId: string; owner: string; ttlSeconds: number }): Promise<PaymentLease | null> {
+  return claimRequestLease(client, input, ["JOINPAY_CANDIDATE"]);
+}
+
+async function claimRequestLease(client: PoolClient, input: { requestId: string; owner: string; ttlSeconds: number }, evidence: readonly string[]): Promise<PaymentLease | null> {
   if (!ID.test(input.requestId) || !ID.test(input.owner) || !Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds < 1 || input.ttlSeconds > 3600) throw invalid();
   const row = (await client.query(`UPDATE zzsh_order.payment_request
       SET lease_version=lease_version+1, lease_owner=$2, lease_until=clock_timestamp()+make_interval(secs => $3),
           revision=revision+1, updated_at=clock_timestamp()
-      WHERE id=$1 AND state = ANY($4::text[]) AND (lease_until IS NULL OR lease_until <= clock_timestamp())
+      WHERE id=$1 AND state = ANY($4::text[]) AND evidence_level = ANY($5::text[]) AND (lease_until IS NULL OR lease_until <= clock_timestamp())
       RETURNING id, lease_version::text AS lease_version, channel_order_no, state`,
-  [input.requestId, input.owner, input.ttlSeconds, CLAIMABLE])).rows[0];
+  [input.requestId, input.owner, input.ttlSeconds, CLAIMABLE, evidence])).rows[0];
   return row ? { requestId: row.id, leaseVersion: row.lease_version, leaseOwner: input.owner, channelOrderNo: row.channel_order_no, state: row.state } : null;
 }
 
@@ -217,6 +253,12 @@ export async function bindChannelTransaction(client: PoolClient, input: {
   confirmationId: string | null; evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST";
 }): Promise<AnchorResult> {
   if (!ID.test(input.merchantIdentityId) || typeof input.channelTrxNo !== "string" || input.channelTrxNo.length < 1 || input.channelTrxNo.length > 128) throw invalid();
+  if (input.channel === "JOINPAY") {
+    const request = (await client.query(input.requestId === null
+      ? `SELECT evidence_level FROM zzsh_order.payment_request WHERE order_id=$1`
+      : `SELECT evidence_level FROM zzsh_order.payment_request WHERE id=$1`, [input.requestId ?? input.orderId])).rows[0];
+    if (request && request.evidence_level !== "SYNTHETIC_PROTOCOL") throw closed();
+  }
   const fundsKey = [input.channel, input.merchantIdentityId, input.channelTrxNo] as const;
   await xactLock(client, ["zzsh:payment-channel-transaction:v1", ...fundsKey]);
   const anchorId = `paytrx_${sha256(JSON.stringify(fundsKey)).slice(0, 32)}`;
@@ -314,7 +356,7 @@ async function lockExecutorRequest(client: PoolClient, input: ExecutorIdentity):
   if (!ID.test(input.requestId) || !/^[1-9]\d{0,18}$/.test(input.leaseVersion) || !ID.test(input.leaseOwner)) throw invalid();
   const row = await lockRequest(client, `SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request WHERE id=$1 FOR UPDATE`, [input.requestId]);
   if (!row) throw notFound();
-  if (row.channel !== "JOINPAY") throw invalid("Executor results are JOINPAY synthetic observations only");
+  if (row.channel !== "JOINPAY" || row.evidence_level !== "SYNTHETIC_PROTOCOL") throw invalid("Executor results are JOINPAY synthetic observations only");
   // 行锁可能等待到租约过期，必须在取得锁之后另取 PG 时钟。
   const current = (await client.query(`SELECT (lease_version=$2::bigint AND lease_owner=$3 AND lease_until > clock_timestamp()) AS lease_current
       FROM zzsh_order.payment_request WHERE id=$1`, [input.requestId, input.leaseVersion, input.leaseOwner])).rows[0]?.lease_current === true;
@@ -362,6 +404,7 @@ export async function recordJoinpayNotify(client: PoolClient, input: {
   const identity = merchantNo ? input.resolveMerchant(merchantNo) : null;
   const row = identity && orderNo ? await lockRequest(client, `SELECT ${REQUEST_COLUMNS} FROM zzsh_order.payment_request
       WHERE channel='JOINPAY' AND merchant_identity_id=$1 AND channel_order_no=$2 FOR UPDATE`, [identity, orderNo]) ?? null : null;
+  if (row && row.evidence_level !== "SYNTHETIC_PROTOCOL") throw closed();
   // 无绑定时协议层在验签前即返回 BINDING_NOT_FOUND，不使用钥
   const outcome = row && merchantNo
     ? evaluateJoinpayNotify(input.rawQuery, { key: input.keyFor(row.key_version_ref), request: persisted(row, merchantNo) })
