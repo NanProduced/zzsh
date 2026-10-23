@@ -13,10 +13,11 @@ import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
 import { types as pgTypes } from "pg";
 import { parseGrowthConsumptionQuery, readMembershipGrowthConsumption } from "../src/auth/membership-growth-integration";
 import { handleMembershipGrowthPolicyAdmin, handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
-import { selectPersonalGrowthOffer } from "../src/order/personal-growth-confirmation";
+import { selectPersonalGrowthOffer, frozenPersonalGrowthV4Valid } from "../src/order/personal-growth-confirmation";
 import { computeSettlement, SETTLEMENT_ROUNDING_POLICY } from "../src/order/settlement";
 import { parseMembershipEntitlementQuery, readMembershipEntitlementContext, readMembershipEntitlements } from "../src/auth/membership-entitlement-read";
-import { normalizeUnifiedMembershipPolicy } from "../src/auth/membership-unified-pricing";
+import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "../src/auth/membership-unified-pricing";
+import { signConfirmation, verifyConfirmation } from "../src/order/confirmation-token";
 
 test("entitlement list input uses bounded numeric pages and rejects duplicate or unknown filters", () => {
   assert.deepEqual(parseMembershipEntitlementQuery(new URLSearchParams()), { page: 1, pageSize: 20 });
@@ -507,6 +508,147 @@ function growthReaderClient(state: { normalTier: string; effectiveTier: string; 
     throw new Error(`unexpected query: ${sql}`);
   } } as never;
 }
+
+function globalCarryoverFixture(policy: GrowthBenefitPolicy, entitlements: unknown[] = [], patch?: (input: QuoteInput) => void) {
+  const at = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const fact = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-10T00:00:00Z", recordedAt: "2026-10-10T00:00:00Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const contribution = { ...fact, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", fact) }, input = quoteInput();
+  input.priceVersionId = "price-v2"; input.haffRule = compatRule("50"); input.haffRule.compatibility!.modes.fast = { enabled: false };
+  input.lines = [...input.lines, { itemId: "item", quantity: "2", pricingKind: "FIXED_UNIT", unit: "PIECE", customerTier: "STANDARD", unitQuantity: "1", buyerUnitAmount: "10", ownerUnitAmount: "6" }];
+  input.deposits = { tenantDepositCents: "40000", publisherBailRequirementCents: "0" }; patch?.(input);
+  const base = computeDeltaQuote(input); assert(base.quotable, JSON.stringify(base));
+  const policyRule = compatRule(); policyRule.compatibility!.modes.fast = { enabled: false };
+  const client = growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, policyRule, entitlements);
+  const binding = { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", listingVersionId: "listing-v2", ruleReleaseId: "release-v2", quantityDigest: "d".repeat(64) };
+  const request = { ...binding, gameId: "game-1", listingHash: "a".repeat(64), priceVersionId: input.priceVersionId, baseQuote: base.quote, quoteInput: input, asOfUtc: at };
+  return { at, input, base: base.quote, binding, request, client, read: () => readMembershipGrowthQuoteCandidatesAt(client, request) };
+}
+function globalCarryoverPolicy(explicit = false) {
+  const policy = normalizeUnifiedMembershipPolicy(readerPolicy(), unifiedTestPricing(), { enabledModes: ["ordinary", "custom"], priceVersionId: "price-v1" });
+  if (!explicit) delete policy.pricingScope;
+  policy.sourceRef = "TEST_ONLY_NEUTRAL:fixture-price-v1";
+  Object.values(policy.tiers).forEach(tier => { tier.tenantDeposit = "ACCOUNT_BASE"; tier.depositAllowanceCents = "20000"; });
+  return policy;
+}
+function globalCarryoverEntitlement() {
+  return { id: "ent-global", kind: "FRIEND", scopeKey: "game:game-1", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", status: "ACTIVE", depositWaived: false, depositAllowanceCents: "30000", pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "price-v1" } };
+}
+
+test("proven uniform approved legacy TOTAL tiers carry their ratio to the actual new price without rewriting source or stacking deposit allowances", async () => {
+  const policy = globalCarryoverPolicy(), entitlement = globalCarryoverEntitlement(), beforePolicy = canonicalize(policy), beforeEntitlement = canonicalize(entitlement);
+  assert.equal(policy.pricingScope, undefined); assert.equal(projectUnifiedMembershipPricing(policy, ["ordinary", "custom"]).knowledge, "KNOWN");
+  const f = globalCarryoverFixture(policy, [entitlement]), inputBefore = canonicalize(f.input), result = await f.read();
+  assert.equal(result.knowledge, "KNOWN", JSON.stringify(result)); if (result.knowledge !== "KNOWN") return;
+  const growth = result.candidates.find(c => c.plan.source === "GROWTH")!, gift = result.candidates.find(c => c.plan.source === "FRIEND")!;
+  assert.equal(growth.quote.priceVersionId, "price-v2"); assert.equal(growth.quote.resourceTotal.amount, f.base.resourceTotal.amount);
+  const cents = BigInt(f.base.resourceTotal.amount.replace(".", "")); assert.equal(gift.plan.rentalTotalCents, ((cents * 95n + 50n) / 100n).toString());
+  for (const candidate of result.candidates) { assert.equal(candidate.quote.ownerTotal.amount, f.base.ownerTotal.amount); assert.equal(candidate.plan.priceVersion, "price-v2"); }
+  const selected = selectPersonalGrowthOffer({ ...result }, f.binding, f.at, f.base);
+  assert.equal(selected.quote.tenantDeposit?.amount, "100.00", "max(200,300), not 200+300"); assert.equal(selected.growth.selectedSource, "FRIEND");
+  assert.equal(canonicalize(policy), beforePolicy); assert.equal(canonicalize(entitlement), beforeEntitlement); assert.equal(canonicalize(f.input), inputBefore);
+  assert.equal(policy.sourceRef, "TEST_ONLY_NEUTRAL:fixture-price-v1");
+});
+
+test("explicit ALL entitlement carries its approved ratio across price versions on each actual enabled rental mode", async () => {
+  for (const rentalMode of ["ordinary", "custom"] as const) {
+    const policy = globalCarryoverPolicy(true);
+    // Isolate the entitlement seam: the tier already uses the current price, while the gift is still bound to its approval price.
+    Object.values(policy.tiers).forEach(tier => { for (const contract of Object.values(tier.pricing)) if (contract && "priceVersionId" in contract) { contract.priceVersionId = "price-v2"; if ("costBasisRef" in contract) contract.costBasisRef = "price-v2"; } });
+    const f = globalCarryoverFixture(policy, [globalCarryoverEntitlement()], input => { input.conditions.rentalPricing = { rentalMode, ...(rentalMode === "custom" ? { ownerRatioB: "48" } : {}) }; });
+    const result = await f.read(); assert.equal(result.knowledge, "KNOWN", JSON.stringify(result)); if (result.knowledge !== "KNOWN") continue;
+    assert.equal(result.candidates[1]?.quote.priceVersionId, "price-v2"); assert.equal(result.candidates[1]?.quote.ownerTotal.amount, f.base.ownerTotal.amount);
+  }
+});
+
+test("a proven uniform approved tier does not depend on an unrelated legacy gift range being projectable", async () => {
+  const policy = discountPolicyPayload();
+  Object.values(policy.tiers).forEach(tier => { tier.entitlementCap = structuredClone(tier.pricing.ordinary!); });
+  const valid = validateBenefitPolicy(policy, { enabledModes: ["ordinary", "custom"] });
+  assert.equal(valid.valid && valid.publishable, true, JSON.stringify(valid));
+  const projection = projectUnifiedMembershipPricing(policy, ["ordinary", "custom"]);
+  assert.equal(projection.tiers.GOLD.knowledge, "KNOWN"); assert.equal(projection.entitlementRanges.FRIEND.knowledge, "UNKNOWN"); assert.equal(projection.knowledge, "UNKNOWN");
+  const f = globalCarryoverFixture(policy), result = await f.read(); assert.equal(result.knowledge, "KNOWN", JSON.stringify(result));
+  if (result.knowledge === "KNOWN") { assert.equal(result.candidates[0]!.plan.priceVersion, "price-v2"); assert.equal(result.candidates[0]!.quote.ownerTotal.amount, f.base.ownerTotal.amount); }
+});
+
+test("new-price owner floor failures stay UNKNOWN for both a uniform tier and an ACTIVE global gift without fallback or a changed ratio", async () => {
+  const highCost = (input: QuoteInput) => { input.lines = [...input.lines.filter(line => line.itemId !== "item"), { itemId: "item", quantity: "1000", pricingKind: "FIXED_UNIT", unit: "PIECE", customerTier: "STANDARD", unitQuantity: "1", buyerUnitAmount: "10", ownerUnitAmount: "9.8" }]; };
+  const policy = globalCarryoverPolicy();
+  Object.values(policy.tiers).forEach(tier => { for (const contract of Object.values(tier.pricing)) if (contract && "payableRatio" in contract) contract.payableRatio = "0.95"; });
+  const before = canonicalize(policy), tierFailure = await globalCarryoverFixture(policy, [], highCost).read();
+  assert.equal(tierFailure.knowledge, "UNKNOWN"); if (tierFailure.knowledge === "UNKNOWN") assert.equal(tierFailure.reason, "GROWTH_QUOTE_UNAVAILABLE");
+  assert.equal(canonicalize(policy), before);
+  const gift = globalCarryoverEntitlement(), giftBefore = canonicalize(gift), giftFailure = await globalCarryoverFixture(globalCarryoverPolicy(true), [gift], highCost).read();
+  assert.equal(giftFailure.knowledge, "UNKNOWN"); if (giftFailure.knowledge === "UNKNOWN") assert.equal(giftFailure.reason, "ENTITLEMENT_QUOTE_UNAVAILABLE");
+  assert.equal(canonicalize(gift), giftBefore);
+});
+
+test("nonuniform or incomplete legacy policies and unknown sources cannot become a default global ratio", async () => {
+  const policies = [readerPolicy(), globalCarryoverPolicy(), globalCarryoverPolicy(), globalCarryoverPolicy(), globalCarryoverPolicy()];
+  (policies[1] as any).pricingScope = null;
+  (policies[2]!.tiers.GOLD.pricing.custom as any).payableRatio = "0.99";
+  delete policies[3]!.tiers.GOLD.pricing.ordinary;
+  (policies[4]!.tiers.GOLD.pricing.ordinary as any).costBasisRef = "";
+  for (const policy of policies) assert.equal((await globalCarryoverFixture(policy).read()).knowledge, "UNKNOWN");
+  const f = globalCarryoverFixture(globalCarryoverPolicy()), original = (f.client as any).query;
+  const badSource = { query: (sql: string) => sql.includes("FROM zzsh_order.rental_order") ? Promise.resolve({ rows: [] }) : original(sql) };
+  assert.equal((await readMembershipGrowthQuoteCandidatesAt(badSource as never, f.request)).knowledge, "UNKNOWN");
+  const disabled = globalCarryoverFixture(globalCarryoverPolicy()); disabled.input.conditions.rentalPricing = { rentalMode: "fast", ownerRatioB: "50" };
+  const closed = await disabled.read(); assert.equal(closed.knowledge, "UNKNOWN"); if (closed.knowledge === "UNKNOWN") assert.equal(closed.reason, "RENTAL_MODE_DISABLED");
+});
+
+test("approved legacy mode-limited TOTAL gifts follow the new price only in their own mode while expired or malformed gifts are never guessed", async () => {
+  const limited: any = globalCarryoverEntitlement(); delete limited.pricingPayload.scope; limited.pricingPayload.mode = "ordinary";
+  let result = await globalCarryoverFixture(globalCarryoverPolicy(), [limited]).read();
+  assert.equal(result.knowledge, "KNOWN", JSON.stringify(result)); if (result.knowledge === "KNOWN") assert.equal(result.candidates[1]!.quote.priceVersionId, "price-v2");
+  assert.equal(limited.pricingPayload.priceVersionId, "price-v1", "approval source is not rewritten");
+  const custom = globalCarryoverFixture(globalCarryoverPolicy(), [limited], input => { input.conditions.rentalPricing = { rentalMode: "custom", ownerRatioB: "48" }; });
+  assert.equal((await custom.read()).knowledge, "UNKNOWN", "a matching price does not expand the gift's mode");
+  limited.pricingPayload.priceVersionId = "price-v2";
+  assert.equal((await globalCarryoverFixture(globalCarryoverPolicy(), [limited]).read()).knowledge, "KNOWN", "the existing own-mode/current-price path remains usable");
+  for (const field of ["costBasisRef", "priceVersionId", "payableRatio"] as const) { const gift = globalCarryoverEntitlement(); gift.pricingPayload[field] = ""; assert.equal((await globalCarryoverFixture(globalCarryoverPolicy(), [gift]).read()).knowledge, "UNKNOWN"); }
+  const expired = globalCarryoverEntitlement(); expired.endsAt = "2026-10-17T00:00:00Z"; expired.pricingPayload.payableRatio = "";
+  result = await globalCarryoverFixture(globalCarryoverPolicy(), [expired]).read(); assert.equal(result.knowledge, "KNOWN"); if (result.knowledge === "KNOWN") assert.equal(result.candidates.length, 1);
+  const fixed: any = globalCarryoverEntitlement(); fixed.pricingPayload = readerPolicy().tiers.GOLD.pricing.ordinary;
+  const legacy = await globalCarryoverFixture(globalCarryoverPolicy(), [fixed]).read(); assert.equal(legacy.knowledge, "UNKNOWN"); if (legacy.knowledge === "UNKNOWN") assert.equal(legacy.reason, "ENTITLEMENT_QUOTE_UNAVAILABLE");
+});
+
+test("carried quotes retain current price and exact confirmation binding; old tokens conflict and frozen v4 facts stay unchanged", async () => {
+  const policy = globalCarryoverPolicy(), f = globalCarryoverFixture(policy, [globalCarryoverEntitlement()]), result = await f.read(); assert.equal(result.knowledge, "KNOWN"); if (result.knowledge !== "KNOWN") return;
+  const selection = selectPersonalGrowthOffer(result, f.binding, f.at, f.base), digest = createHash("sha256").update(canonicalize({ quote: selection.quote, growth: selection.growth })).digest("hex");
+  const expected = { userId: "user-1", sessionId: "session-1", accountId: "account-1", versionId: "listing-v2", releaseId: "release-v2", listingHash: "a".repeat(64), quoteDigest: digest }, key = { keyId: "fixture", secret: "fixture-offline-only-key-32-characters" }, signed = signConfirmation(expected, 100, key);
+  assert.equal(verifyConfirmation(signed.token, expected, 101, key).quoteDigest, digest);
+  for (const patch of [{ versionId: "listing-v3" }, { releaseId: "release-v3" }, { listingHash: "b".repeat(64) }, { quoteDigest: "c".repeat(64) }]) assert.throws(() => verifyConfirmation(signed.token, { ...expected, ...patch }, 101, key), (error: any) => error.status === 409 && error.code === "CONFIRMATION_CHANGED");
+  const personal = { schema: "personal-quote-v4", userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", listingVersionId: "listing-v2", listingHash: "a".repeat(64), ruleRefs: { releaseId: "release-v2" }, membershipGrowth: selection.growth }, frozen = canonicalize({ personal, quote: selection.quote });
+  assert(frozenPersonalGrowthV4Valid(personal, { ...f.binding, listingHash: "a".repeat(64) }, "10000"));
+  for (const tier of Object.values(policy.tiers)) for (const contract of Object.values(tier.pricing)) if (contract && "payableRatio" in contract) contract.payableRatio = "0.8";
+  f.input.priceVersionId = "price-v3";
+  assert.equal(canonicalize({ personal, quote: selection.quote }), frozen, "current policy/price updates cannot mutate a stored order quote");
+  assert(frozenPersonalGrowthV4Valid(personal, { ...f.binding, listingHash: "a".repeat(64) }, "10000"));
+});
+
+test("only the current approved effective policy changes new carried quotes; saved drafts and approval-pending proposals leave the current price intact", async () => {
+  const policy = globalCarryoverPolicy(), f = globalCarryoverFixture(policy), draft = structuredClone(policy);
+  draft.version = "policy-v2"; draft.status = "DRAFT";
+  Object.values(draft.tiers).forEach(tier => { for (const contract of Object.values(tier.pricing)) if (contract && "payableRatio" in contract) contract.payableRatio = "0.95"; });
+  let approved = { id: "policy-approved-1", version: "1", policyPayload: policy, haffRule: f.input.haffRule }, pending = draft;
+  const underlying = (f.client as any).query, queries: string[] = [];
+  const client = { query: (sql: string, args?: unknown[]) => {
+    queries.push(sql);
+    if (sql.includes("FROM zzsh_iam.membership_growth_policy")) { assert.match(sql, /pol\.status='APPROVED' AND pol\.effective_at <= \$1/); assert.deepEqual(args, [f.at]); assert.match(sql, /ORDER BY pol\.version DESC LIMIT 1/); return Promise.resolve({ rows: [approved] }); }
+    return underlying(sql, args);
+  } } as never;
+  const read = () => readMembershipGrowthQuoteCandidatesAt(client, f.request), first = await read(); assert.equal(first.knowledge, "KNOWN"); if (first.knowledge !== "KNOWN") return;
+  const frozen = canonicalize(first.candidates[0]!.quote);
+  assert.equal(pending.status, "DRAFT"); assert.equal(canonicalize((await read() as typeof first).candidates[0]!.quote), frozen);
+  pending = { ...pending, sourceRef: "pending-approval-source" }; assert.equal(canonicalize((await read() as typeof first).candidates[0]!.quote), frozen);
+  approved = { ...approved, id: "policy-approved-2", version: "2", policyPayload: { ...draft, status: "APPROVED", effectiveAt: "2026-10-18T00:00:00.000000Z" } };
+  const next = await read(); assert.equal(next.knowledge, "KNOWN", JSON.stringify(next)); if (next.knowledge !== "KNOWN") return;
+  assert.equal(next.policyVersion, "2"); assert.equal(next.candidates[0]!.plan.benefitVersion, "2");
+  const baseCents = BigInt(f.base.resourceTotal.amount.replace(".", "")); assert.equal(next.candidates[0]!.plan.rentalTotalCents, ((baseCents * 95n + 50n) / 100n).toString());
+  assert.equal(next.candidates[0]!.quote.ownerTotal.amount, f.base.ownerTotal.amount); assert.equal(canonicalize(first.candidates[0]!.quote), frozen);
+  assert.equal(queries.filter(sql => sql.includes("FROM zzsh_iam.membership_growth_policy")).length, 4, "one existing policy read per quote, no per-benefit query");
+});
 
 test("formal growth reader applies finite member and entitlement allowances to one base without extra queries", async () => {
   const asOf = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };

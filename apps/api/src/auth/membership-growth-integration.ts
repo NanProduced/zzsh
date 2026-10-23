@@ -37,6 +37,7 @@ import {
 } from "./membership-growth";
 import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { applyTotalDiscountToQuote } from "./membership-total-discount";
+import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 import { canonicalize, normalizeTime } from "../supply/content-hash";
 import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { type MembershipGrowthConfirmationReader } from "../order/personal-confirmation";
@@ -544,13 +545,18 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract):
   return { ...base, customerTier: "STANDARD", lines, haffRule };
 }
 
-function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
   const depositCents = tenantDepositAfterBenefit(base.deposits?.tenantDepositCents ?? null, depositWaived, allowanceCents);
   base = { ...base, deposits: { ...base.deposits, ...(depositCents === null ? {} : { tenantDepositCents: depositCents }) } };
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
   if (isTotalDiscountContract(contract)) {
     const rentalMode = base.conditions.rentalPricing?.rentalMode ?? "ordinary";
-    if ((!isUnifiedTotalDiscountContract(contract) && contract.mode !== rentalMode) || contract.priceVersionId !== base.priceVersionId) return null;
+    const unified = isUnifiedTotalDiscountContract(contract);
+    if (!unified && contract.mode !== rentalMode) return null;
+    // Carry only proven approved global ratios, retaining the approval's immutable price/cost references.
+    // Actual amounts and owner floors always come from this listing's sealed base, never the old contract.
+    const carryRatio = approvedUniformTier || unified || source !== "GROWTH";
+    if ((carryRatio && entitlementPricingSummary(contract).knowledge !== "KNOWN") || (!carryRatio && contract.priceVersionId !== base.priceVersionId)) return null;
     const result = computeDeltaQuote(base);
     if (!result.quotable) return null;
     const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
@@ -859,6 +865,9 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   const policy = policyRow.policyPayload as GrowthBenefitPolicy;
   const policyValidation = validateBenefitPolicy(policy, { enabledModes });
   if (!policyValidation.valid || !policyValidation.publishable) return { knowledge: "UNKNOWN", reason: "POLICY_NOT_PUBLISHABLE", asOfUtc };
+  // Older approved storage has no pricingScope marker; reuse the existing strict uniform projection
+  // across the actual enabled modes instead of changing its payload or assuming a default ratio.
+  const uniformPolicy = projectUnifiedMembershipPricing(policy, enabledModes);
   const effectiveTier = growth.growth.effectiveTier;
   const policyTier = policyTierForGrowthProjection({ normalTier: growth.growth.normalTier, effectiveTier, grace: growth.growth.grace });
   if (!policyTier || effectiveTier === "UNKNOWN") return { knowledge: "UNKNOWN", reason: "EFFECTIVE_TIER_UNKNOWN", asOfUtc };
@@ -866,7 +875,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   const growthContract = tier?.pricing?.[rentalMode];
   if (!configuredModeContract(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
-  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents);
+  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN");
   if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
   let rows: StoredQuoteEntitlement[];
   try {
