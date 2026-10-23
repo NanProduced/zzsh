@@ -3,6 +3,7 @@ export type GrowthGraceState = "NONE" | "ACTIVE" | "RECOVERED" | "EXPIRED" | "UN
 export type EntitlementState = "PENDING" | "APPROVED_PENDING_EXECUTION" | "EXECUTED_PENDING_START" | "ACTIVE" | "EXPIRED" | "REPLACED" | "REVOKED" | "UNKNOWN";
 export type EntitlementKind = "FRIEND" | "PRESTIGE" | "UNKNOWN";
 export type EntitlementPricingSummary =
+  | { knowledge: "KNOWN"; kind: "TOTAL_DISCOUNT"; scope: "ALL_ENABLED_RENTAL_MODES"; payableRatio: string }
   | { knowledge: "KNOWN"; kind: "TOTAL_DISCOUNT"; mode: "ordinary" | "custom" | "fast"; payableRatio: string }
   | { knowledge: "LEGACY"; kind: "LEGACY" }
   | { knowledge: "UNKNOWN"; kind: "UNKNOWN" };
@@ -88,12 +89,18 @@ function requiredRecords(value: unknown, field: string): RecordValue[] {
 function entitlementPricing(value: unknown): EntitlementPricingSummary {
   if (isRecord(value)) {
     if (value.knowledge === "LEGACY" && value.kind === "LEGACY") return { knowledge: "LEGACY", kind: "LEGACY" };
-    if (value.knowledge === "KNOWN" && value.kind === "TOTAL_DISCOUNT"
-      && (value.mode === "ordinary" || value.mode === "custom" || value.mode === "fast") && typeof value.payableRatio === "string") {
+    if (value.knowledge === "KNOWN" && value.kind === "TOTAL_DISCOUNT" && typeof value.payableRatio === "string") {
       const match = /^(0|1)(?:\.(\d{1,8}))?$/.exec(value.payableRatio);
       if (match) {
         const scaled = BigInt(`${match[1]}${(match[2] ?? "").padEnd(8, "0")}`);
-        if (scaled > 0n && scaled <= 100_000_000n) return { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: value.mode, payableRatio: value.payableRatio };
+        if (scaled > 0n && scaled <= 100_000_000n) {
+          if (value.scope === "ALL_ENABLED_RENTAL_MODES" && value.mode === undefined) {
+            return { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", scope: value.scope, payableRatio: value.payableRatio };
+          }
+          if (value.scope === undefined && (value.mode === "ordinary" || value.mode === "custom" || value.mode === "fast")) {
+            return { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: value.mode, payableRatio: value.payableRatio };
+          }
+        }
       }
     }
   }

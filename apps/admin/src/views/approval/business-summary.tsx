@@ -1,7 +1,7 @@
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { formatDate } from "../../api";
-import { formatEntitlementDiscount } from "../membership-entitlement-form";
+import { formatDiscountLabel } from "../membership-entitlement-form";
 import {
   BUSINESS_NOT_CONNECTED,
   entitlementStateView,
@@ -29,6 +29,28 @@ function MoneyRow({ label, value }: { label: string; value: unknown }) {
   return <Fact label={label} value={moneyLabel(value)} />;
 }
 
+function depositBenefitSummary(summary: Record<string, unknown>): string | null {
+  if (summary.depositWaived === true) return "完全免押";
+  const allowance = text(summary, "depositAllowanceCents");
+  if (allowance && allowance !== "0" && /^[1-9]\d*$/.test(allowance)) {
+    const val = BigInt(allowance);
+    const whole = val / 100n;
+    const rem = val % 100n;
+    const yuan = rem === 0n ? whole.toString() : `${whole}.${rem.toString().padStart(2, "0").replace(/0$/, "")}`;
+    return `减免${yuan}元`;
+  }
+  if (summary.depositWaived === false) return "不减免";
+  return null;
+}
+
+function pricingScopeLabel(pricing: Record<string, unknown>): string {
+  const scope = typeof pricing.scope === "string" ? pricing.scope : null;
+  const mode = typeof pricing.mode === "string" ? pricing.mode : null;
+  if (scope === "ALL_ENABLED_RENTAL_MODES") return "全部已启用租赁方式统一";
+  if (mode) return `旧版 · ${({ ordinary: "普通", custom: "自定义", fast: "极速" } as Record<string, string>)[mode] ?? mode}`;
+  return "范围待核";
+}
+
 function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
   const draft = summary.policyDraft as Record<string, unknown> | undefined;
   const inline = summary.inlinePolicy as Record<string, unknown> | undefined;
@@ -39,14 +61,16 @@ function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
     <FactGrid>
       <Fact label="游戏" value={text(summary, "gameName")} />
       <Fact label="礼遇类型" value={text(summary, "entitlementKindTitle") ?? text(summary, "entitlementKind")} />
-      {pricing ? <Fact label="实际折扣" value={pricing.knowledge === "LEGACY" ? "旧版计价合同" : formatEntitlementDiscount(text(pricing, "payableRatio") ?? undefined)} /> : null}
+      {pricing ? <Fact label="实际折扣" value={pricing.knowledge === "LEGACY" ? "旧版计价合同" : formatDiscountLabel(text(pricing, "payableRatio") ?? undefined)} /> : null}
+      {pricing ? <Fact label="适用范围" value={pricingScopeLabel(pricing)} /> : null}
       {summary.payloadSource === "APPROVED_FINAL" ? <Fact label="内容来源" value="最终批准内容（原申请保留）" /> : null}
-      {originalPricing ? <Fact label="原申请折扣" value={originalPricing.knowledge === "LEGACY" ? "旧版计价合同" : formatEntitlementDiscount(text(originalPricing, "payableRatio") ?? undefined)} /> : null}
+      {originalPricing ? <Fact label="原申请折扣" value={originalPricing.knowledge === "LEGACY" ? "旧版计价合同" : formatDiscountLabel(text(originalPricing, "payableRatio") ?? undefined)} /> : null}
       <Fact label="目标用户" value={text(summary, "targetUserId")} mono />
       <Fact label="作用范围标识" value={text(summary, "scopeKey")} mono />
       <Fact label="生效开始（快照）" value={formatDate(text(summary, "startsAt"))} />
       <Fact label="生效结束（快照）" value={formatDate(text(summary, "endsAt"))} />
-      <Fact label="是否免押金" value={bool(summary, "depositWaived")} />
+      <Fact label="押金权益" value={depositBenefitSummary(summary) ?? bool(summary, "depositWaived")} />
+      {original && depositBenefitSummary(original) ? <Fact label="原申请押金权益" value={depositBenefitSummary(original)} /> : null}
       <Fact label="关联政策" value={
         text(summary, "policyId")
           ? `${text(summary, "policyId")}${typeof summary.policyVersion === "number" ? ` · v${summary.policyVersion}` : ""}${text(summary, "policyStatus") ? ` · ${policyStatusLabel(text(summary, "policyStatus"))}` : ""}`
@@ -310,7 +334,7 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
             <Fact label="载荷版本" value={typeof summary.payloadVersion === "number" ? `v${summary.payloadVersion}` : null} />
             <Fact label="载荷哈希" value={text(summary, "payloadHash")} mono />
             <Fact label="申请理由" value={text(summary, "reason")} />
-            {pricing ? <Fact label="定价口径引用" value={[text(pricing, "mode"), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
+            {pricing ? <Fact label="定价口径引用" value={[pricingScopeLabel(pricing), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
             {costBasis ? <Fact label="成本依据" value={[text(costBasis, "priceVersionId"), text(costBasis, "ruleReleaseId")].filter(Boolean).join(" · ") || null} mono /> : null}
           </FactGrid>
           {business.businessType === "settlement" ? <SettlementCompare summary={summary} /> : null}

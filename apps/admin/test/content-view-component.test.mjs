@@ -185,8 +185,69 @@ async function mountHarness(t, { fetchImpl, perms }) {
     await browser.happyDOM.abort();
   };
   t.after(cleanup);
-  return { browser, el, root, render, settle, click, btn, textOf, gets, writes, dirtyLog, queryLog };
+  return { browser, el, root, source, render, settle, click, btn, textOf, gets, writes, dirtyLog, queryLog };
 }
+
+async function mountWithdrawalEditor(t, { holdSort = false } = {}) {
+  let releaseSort;
+  const sortResult = new Promise(resolve => { releaseSort = resolve; });
+  const h = await mountHarness(t, {
+    perms: PLATFORM_PERMS,
+    fetchImpl: router([
+      { match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) },
+      { method: "POST", match: /^\/api\/bff\/admin\/content\/items\/[^/]+\/withdraw$/, response: () => json({ withdrawn: true }) },
+      { method: "PUT", match: "/api/bff/admin/content/items/item_ann_1", response: () => holdSort ? sortResult : json({ saved: true }) },
+    ]),
+  });
+  for (const name of ["alert", "confirm", "prompt"]) h.browser[name] = () => { throw Error("NATIVE_DIALOG_PROHIBITED"); };
+  const { ItemEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-item-editor.tsx");
+  let changed = 0;
+  const item = itemRow(), props = { detail: { item, versions: [item.published] }, games: [], canEdit: true, canPublish: true, mediaReadable: false, onClose() {}, onChanged: async () => { changed++; }, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) };
+  const renderEditor = async overrides => { Object.assign(props, overrides); await act(async () => h.root.render(createElement(ItemEditor, props))); await h.settle(); };
+  await renderEditor({});
+  return { ...h, item, renderEditor, releaseSort: () => releaseSort(json({ saved: true })), get changed() { return changed; } };
+}
+
+for (const boundary of ["item", "published", "revision"]) {
+  test(`withdraw confirmation is invalidated when ${boundary} changes instead of withdrawing the replacement`, async t => {
+    const h = await mountWithdrawalEditor(t); await h.click(h.btn("撤回线上版本")); assert.ok(h.btn("确定撤回"));
+    const replacement = boundary === "item" ? itemRow({ id: "item_other", revision: "rev_other", published: version({ id: "ver_other", itemId: "item_other" }) })
+      : boundary === "published" ? itemRow({ published: version({ id: "ver_replacement", sequence: 2 }) })
+      : itemRow({ revision: "rev_item_changed" });
+    await h.renderEditor({ detail: { item: replacement, versions: [replacement.published] } });
+    const confirm = h.btn("确定撤回"); if (confirm) await h.click(confirm);
+    assert.equal(h.writes.filter(w => w.path.endsWith("/withdraw")).length, 0, "old consent cannot authorize a new target or revision");
+  });
+}
+
+test("withdraw uses the unified alert dialog, cancel keeps content and normal double confirmation sends one original CAS payload", async t => {
+  const h = await mountWithdrawalEditor(t); await h.click(h.btn("撤回线上版本"));
+  assert.ok(h.browser.document.querySelector('[role="alertdialog"]'));
+  assert.equal(h.browser.document.activeElement?.textContent.trim(), "取消");
+  await h.click(h.btn("取消")); assert.equal(h.writes.length, 0);
+  await h.click(h.btn("撤回线上版本")); const confirm = h.btn("确定撤回");
+  await act(async () => { for (let i = 0; i < 2; i++) confirm.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true, cancelable: true })); }); await h.settle();
+  assert.equal(h.writes.length, 1); assert.equal(h.writes[0].path, "/api/bff/admin/content/items/item_ann_1/withdraw");
+  assert.equal(h.writes[0].method, "POST"); assert.deepEqual(h.writes[0].body, { versionId: "ver_pub", expectedRevision: "rev_item" }); assert.equal(h.changed, 1);
+});
+
+test("publish permission loss clears a pending withdrawal before any request", async t => {
+  const h = await mountWithdrawalEditor(t); await h.click(h.btn("撤回线上版本"));
+  await h.renderEditor({ canPublish: false }); const confirm = h.btn("确定撤回"); if (confirm) await h.click(confirm);
+  assert.equal(h.writes.filter(w => w.path.endsWith("/withdraw")).length, 0); assert.equal(h.changed, 0);
+});
+
+test("a save becoming busy cancels pending withdrawal rather than running two commands", async t => {
+  const h = await mountWithdrawalEditor(t, { holdSort: true }); await h.click(h.btn("撤回线上版本"));
+  await h.click(h.btn("保存排序")); const confirm = h.btn("确定撤回"); if (confirm) await h.click(confirm);
+  assert.equal(h.writes.filter(w => w.path.endsWith("/withdraw")).length, 0); assert.equal(h.writes.length, 1);
+  h.releaseSort(); await h.settle();
+});
+
+test("unmounting an editor with pending withdrawal never sends the command", async t => {
+  const h = await mountWithdrawalEditor(t); await h.click(h.btn("撤回线上版本"));
+  await act(async () => h.root.unmount()); await h.settle(); assert.equal(h.writes.length, 0); assert.equal(h.changed, 0);
+});
 
 test("公告 tab：请求 scope=platform&type=ANNOUNCEMENT&limit=20；渲染标题与状态；loading、空态、错误后重试", async (t) => {
   let listCalls = 0;

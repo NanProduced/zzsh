@@ -10,7 +10,7 @@ import {
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Checkbox } from "../../components/ui/checkbox";
-import { MembershipDateTimeField, parsePayableRatio, entitlementWindowError } from "../membership-entitlement-form";
+import { MembershipDateTimeField, parsePayableRatio, entitlementWindowError, formatCentsToYuan } from "../membership-entitlement-form";
 import { Textarea } from "../../components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
@@ -216,9 +216,19 @@ function DecisionDialog({
   const editId = useId();
   const depositId = useId();
   const [finalPayload, setFinalPayload] = useState<EntitlementAmendmentPayload | null>(null);
+  const [depositAllowanceInput, setDepositAllowanceInput] = useState(() => {
+    const payload = detail.entitlementAmendment?.editablePayload;
+    return payload?.depositAllowanceCents && payload.depositAllowanceCents !== "0" && !payload?.depositWaived
+      ? formatCentsToYuan(payload.depositAllowanceCents)
+      : "";
+  });
   const canEdit = kind === "approve" && detail.entitlementAmendment != null;
+  const allowanceValid = !depositAllowanceInput || /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(depositAllowanceInput.trim());
   const editError = editRequested && finalPayload
-    ? entitlementWindowError(finalPayload.startsAtUtc, finalPayload.endsAtUtc) || (parsePayableRatio(finalPayload.pricing.payableRatio) === null ? "请填写有效的应付比例（大于0且不超过1）" : "") || (finalPayload.reason.trim().length < 2 ? "请填写礼遇办理原因" : "")
+    ? entitlementWindowError(finalPayload.startsAtUtc, finalPayload.endsAtUtc)
+      || (parsePayableRatio(finalPayload.pricing.payableRatio) === null ? "请填写有效的应付比例（大于0且不超过1）" : "")
+      || (!allowanceValid ? "押金减免额度须为合法人民币金额（最多2位小数）" : "")
+      || (finalPayload.reason.trim().length < 2 ? "请填写礼遇办理原因" : "")
     : "";
   const change = detail.business?.changeSummary ?? detail.summary;
   const recallTarget = detail.summary.slice(0, 8);
@@ -233,9 +243,16 @@ function DecisionDialog({
 
   useEffect(() => {
     setEditRequested(false);
-    setFinalPayload(detail.entitlementAmendment?.editablePayload ?? null);
+    const payload = detail.entitlementAmendment?.editablePayload ?? null;
+    setFinalPayload(payload);
+    const initialCents = payload?.depositAllowanceCents;
+    if (initialCents && initialCents !== "0" && !payload?.depositWaived) {
+      setDepositAllowanceInput(formatCentsToYuan(initialCents));
+    } else {
+      setDepositAllowanceInput("");
+    }
     if (kind === null) { setReason(""); setRecall(""); }
-  }, [kind, detail.requestId]);
+  }, [kind, detail.requestId, detail.entitlementAmendment?.editablePayload]);
 
   const title = kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : "确认执行";
   const consequence = kind === "approve"
@@ -270,9 +287,21 @@ function DecisionDialog({
             {editRequested && finalPayload ? <div className="space-y-3">
               <p className="text-xs text-muted-foreground">保留原申请；以下内容将作为本次最终批准结果。</p>
               <label className="block space-y-1.5"><FieldLabel>应付比例</FieldLabel><Input aria-label="批准应付比例" inputMode="decimal" value={finalPayload.pricing.payableRatio} onChange={event => setFinalPayload({ ...finalPayload, pricing: { ...finalPayload.pricing, payableRatio: event.target.value } })} /></label>
+              <p className="text-[11px] text-muted-foreground">
+                适用范围：{finalPayload.pricing.scope === "ALL_ENABLED_RENTAL_MODES"
+                  ? "全部已启用租赁方式统一"
+                  : typeof finalPayload.pricing.mode === "string"
+                    ? `旧版 · ${({ ordinary: "普通", custom: "自定义", fast: "极速" } as Record<string, string>)[finalPayload.pricing.mode] ?? finalPayload.pricing.mode}`
+                    : "范围待核"}（不可修改）。受益人、游戏、礼遇类型、政策与成本引用同样不可修改。
+              </p>
               <MembershipDateTimeField label="批准开始时间" value={finalPayload.startsAtUtc} onChange={value => setFinalPayload({ ...finalPayload, startsAtUtc: value })} />
               <MembershipDateTimeField label="批准结束时间" value={finalPayload.endsAtUtc} onChange={value => setFinalPayload({ ...finalPayload, endsAtUtc: value })} />
-              <div className="flex items-center gap-2"><Checkbox id={depositId} checked={finalPayload.depositWaived} onCheckedChange={checked => setFinalPayload({ ...finalPayload, depositWaived: checked === true })} /><label htmlFor={depositId}>独立免押</label></div>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2"><Checkbox id={depositId} checked={finalPayload.depositWaived} onCheckedChange={checked => { setFinalPayload({ ...finalPayload, depositWaived: checked === true }); if (checked) setDepositAllowanceInput(""); }} /><label htmlFor={depositId}>独立免押</label></div>
+                {!finalPayload.depositWaived ? (
+                  <label className="block space-y-1.5"><FieldLabel>押金减免额度（元）</FieldLabel><Input aria-label="批准押金减免额度" inputMode="decimal" placeholder="0 表示不减免" value={depositAllowanceInput} onChange={event => setDepositAllowanceInput(event.target.value)} /></label>
+                ) : null}
+              </div>
               <label className="block space-y-1.5"><FieldLabel>办理原因</FieldLabel><Textarea aria-label="批准礼遇原因" value={finalPayload.reason} maxLength={500} onChange={event => setFinalPayload({ ...finalPayload, reason: event.target.value })} /></label>
               {editError ? <p role="alert" className="text-destructive">{editError}</p> : null}
             </div> : null}
@@ -296,7 +325,27 @@ function DecisionDialog({
         </div>
         <DialogFooter>
           <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
-          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : "danger"} disabled={disabled} onClick={() => { if (kind) onSubmit(kind, reason.trim(), canEdit && editRequested && finalPayload ? { expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash, finalPayload } : undefined); }}>
+          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : "danger"} disabled={disabled} onClick={() => {
+            if (!kind) return;
+            const amendment = canEdit && editRequested && finalPayload ? {
+              expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash,
+              finalPayload: (() => {
+                const base = { ...finalPayload };
+                const trimmed = depositAllowanceInput.trim();
+                if (base.depositWaived) {
+                  if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
+                } else if (trimmed && /^(0|[1-9]\d*)(\.\d{1,2})?$/.test(trimmed)) {
+                  const [whole = "0", fraction = ""] = trimmed.split(".");
+                  base.depositAllowanceCents = (BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"))).toString();
+                  base.depositWaived = false;
+                } else {
+                  if (base.depositAllowanceCents !== undefined) base.depositAllowanceCents = "0";
+                }
+                return base;
+              })()
+            } : undefined;
+            onSubmit(kind, reason.trim(), amendment);
+          }}>
             {kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : "确认执行"}
           </Button>
         </DialogFooter>

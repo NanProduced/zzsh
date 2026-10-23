@@ -178,6 +178,22 @@ test("entitlement pricing summary only consumes public exact discount facts", as
   } finally { globalThis.fetch = original; }
 });
 
+test("unified scope pricing maps scope-only and rejects mixed scope+mode", async () => {
+  const original = globalThis.fetch;
+  try {
+    const unified = { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", payableRatio: "0.95000000", costBasisRef: "PRIVATE_COST" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], pricingSummary: unified }] }), { status: 200 });
+    const state = await readMyMembershipGrowth();
+    assert.equal(state.status, "ready");
+    assert.deepEqual(state.data.entitlements[0].pricingSummary, { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", payableRatio: "0.95000000" });
+    assert.doesNotMatch(JSON.stringify(state), /PRIVATE_COST|costBasisRef/);
+    const mixed = { ...unified, mode: "ordinary" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [{ ...known.entitlements[0], pricingSummary: mixed }] }), { status: 200 });
+    const mixedState = await readMyMembershipGrowth();
+    assert.deepEqual(mixedState.data.entitlements[0].pricingSummary, { knowledge: "UNKNOWN", kind: "UNKNOWN" }, "a mixed scope+mode summary is never guessed");
+  } finally { globalThis.fetch = original; }
+});
+
 test("missing, legacy and invalid discount projections stay explicit without changing growth knowledge", async () => {
   const original = globalThis.fetch;
   try {

@@ -37,7 +37,7 @@ const stubs = {
   },
   load(id) {
     if (id === "\0membership-approval-host") return 'import {createElement} from "react";export function ApprovalAuditView(props){globalThis.__approvalProps=props;return createElement("div",{"data-testid":"existing-approval-host"},props.initialRequestId||"原请求恢复")}';
-    if (id === "\0membership-domain-form") return 'import {createElement} from "react";export function MembershipEntitlementForm(props){globalThis.__entitlementFormProps=props;return createElement("div",{"data-testid":"domain-form"},props.error||"领域表单")}';
+    if (id === "\0membership-domain-form") return 'import {createElement} from "react";export function MembershipEntitlementForm(props){globalThis.__entitlementFormProps=props;return createElement("div",{"data-testid":"domain-form"},props.error||"领域表单")}export function InfoHint(props){return createElement("span",{"data-testid":"info-hint"},props.label)}';
   },
 };
 const vite = await createServer({ configFile: false, root: rootPath, cacheDir, plugins: [react(), stubs], resolve: { alias: { "@": path.join(rootPath, "src") } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
@@ -282,7 +282,7 @@ test("a refresh403 removes visible old rows rather than retaining an unauthorize
   const view = await mounted(MembershipBenefitsWorkspace, { snapshot: snapshot() });
   try {
     await until(() => view.host.querySelector("tbody tr"));
-    denied = true; await click(button("刷新", view.host));
+    denied = true; await click(button("刷新礼遇", view.host));
     await until(() => view.host.textContent.includes("无权查看这部分内容"));
     assert.equal(view.host.querySelector("tbody tr"), null);
   } finally { await view.dispose(); }

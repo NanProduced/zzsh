@@ -146,7 +146,7 @@ export type BusinessView = {
   };
   pendingConditionCodes?: string[];
   /** 会员定价与成本口径引用；仅在持有 membership.growth.read.detail 时返回。 */
-  pricingReference?: { mode: string | null; priceVersionId: string | null; costBasisRef: string | null; schema: string | null; payableRatio?: string | null; payloadSource?: string };
+  pricingReference?: { mode: string | null; scope?: string | null; priceVersionId: string | null; costBasisRef: string | null; schema: string | null; payableRatio?: string | null; payloadSource?: string };
   costBasis?: { priceVersionId: string | null; ruleReleaseId: string | null };
 };
 
@@ -196,7 +196,7 @@ export type RequestDetail = RequestSummary & {
 };
 
 export type EntitlementAmendmentPayload = Record<string, unknown> & {
-  startsAtUtc: string; endsAtUtc: string; depositWaived: boolean; reason: string;
+  startsAtUtc: string; endsAtUtc: string; depositWaived: boolean; depositAllowanceCents?: string; reason: string;
   pricing: Record<string, unknown> & { payableRatio: string };
 };
 export type ApprovalDecisionAmendment = { expectedPayloadHash: string; finalPayload: EntitlementAmendmentPayload };

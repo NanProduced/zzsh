@@ -497,8 +497,26 @@ function entitlementDiscountLabel(summary: MembershipGrowthData["entitlements"][
   if (summary?.knowledge !== "KNOWN") return "折扣待核";
   const [integer = "0", fraction = ""] = summary.payableRatio.split(".");
   const scaled = BigInt(`${integer}${fraction.padEnd(8, "0")}`);
+  if (scaled === 100_000_000n) return "原价";
   const decimal = (scaled % 10_000_000n).toString().padStart(7, "0").replace(/0+$/, "");
   return `${scaled / 10_000_000n}${decimal ? `.${decimal}` : ""}折`;
+}
+
+function entitlementScopeLabel(summary: MembershipGrowthData["entitlements"][number]["pricingSummary"]): string {
+  if (summary?.knowledge !== "KNOWN") return "范围待核";
+  if ("scope" in summary && summary.scope === "ALL_ENABLED_RENTAL_MODES") return "全部已启用租赁方式统一";
+  if ("mode" in summary && summary.mode) return `旧版 · ${rentalModeLabel(summary.mode)}`;
+  return "范围待核";
+}
+
+function formatDepositAllowanceYuan(cents: string): string {
+  if (!cents || !/^[1-9]\d*$/.test(cents)) return "0";
+  const val = BigInt(cents);
+  const whole = val / 100n;
+  const rem = val % 100n;
+  if (rem === 0n) return whole.toString();
+  const frac = rem.toString().padStart(2, "0").replace(/0$/, "");
+  return `${whole}.${frac}`;
 }
 
 function EntitlementRow({ item, detailed }: { item: MembershipGrowthData["entitlements"][number]; detailed?: boolean }) {
@@ -516,7 +534,16 @@ function EntitlementRow({ item, detailed }: { item: MembershipGrowthData["entitl
           <em data-state={item.state}>{ENTITLEMENT_STATE_LABELS[item.state]}</em>
         </span>
         <span className="mc-entitlement-meta">{formatScopeName(item.scope, item.gameId, item.gameName)} · {period}</span>
-        <span className="mc-entitlement-meta">{entitlementDiscountLabel(item.pricingSummary)}{item.pricingSummary?.knowledge === "KNOWN" ? ` · ${rentalModeLabel(item.pricingSummary.mode)}` : ""} · {item.depositWaived ? "含租客免押" : "不含租客免押"}</span>
+        <span className="mc-entitlement-meta">
+          {entitlementDiscountLabel(item.pricingSummary)}
+          {item.pricingSummary?.knowledge === "KNOWN" ? ` · ${entitlementScopeLabel(item.pricingSummary)}` : ""} · {
+            item.depositWaived
+              ? "含租客免押"
+              : item.depositAllowanceCents && item.depositAllowanceCents !== "0" && /^[1-9]\d*$/.test(item.depositAllowanceCents)
+              ? `减免押金 ¥${formatDepositAllowanceYuan(item.depositAllowanceCents)} 元`
+              : "不含租客免押"
+          }
+        </span>
       </div>
     </div>
   );
@@ -562,8 +589,14 @@ function EntitlementSection({ data, entitlements }: { data?: MembershipGrowthDat
                       <div><dt>生效时间</dt><dd>{formatBeijingDateTime(item.startsAt)}</dd></div>
                       <div><dt>到期时间</dt><dd>{formatBeijingDateTime(item.endsAt)}</dd></div>
                       <div><dt>租赁优惠</dt><dd>{entitlementDiscountLabel(item.pricingSummary)}</dd></div>
-                      {item.pricingSummary?.knowledge === "KNOWN" ? <div><dt>适用模式</dt><dd>{rentalModeLabel(item.pricingSummary.mode)}</dd></div> : null}
-                      <div><dt>租客押金</dt><dd>{item.depositWaived ? "含租客押金减免，以生效记录为准" : "不包含租客押金减免"}</dd></div>
+                      {item.pricingSummary?.knowledge === "KNOWN" ? <div><dt>适用范围</dt><dd>{entitlementScopeLabel(item.pricingSummary)}</dd></div> : null}
+                      <div><dt>租客押金</dt><dd>{
+                        item.depositWaived
+                          ? "含租客完全免押，以生效记录为准"
+                          : item.depositAllowanceCents && item.depositAllowanceCents !== "0" && /^[1-9]\d*$/.test(item.depositAllowanceCents)
+                          ? `每单最高减免押金 ¥${formatDepositAllowanceYuan(item.depositAllowanceCents)} 元，实缴不低于0元`
+                          : "不包含租客押金减免"
+                      }</dd></div>
                     </dl>
                     <p id="mc-entitlement-dialog-note" className="mc-quiet-note">礼遇由平台人工核发，范围与期限以生效记录为准；审批通过不等于已享受。</p>
                     <Dialog.Close asChild>

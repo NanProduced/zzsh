@@ -347,6 +347,7 @@ test("personal entitlement rows show actual mode and exact discount independentl
       { ...base, id: "e2", kind: "PRESTIGE", label: "尊享礼遇", depositWaived: true, pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "fast", payableRatio: "0.12345678" } },
       { ...base, id: "e3", pricingSummary: { knowledge: "LEGACY", kind: "LEGACY" } },
       { ...base, id: "e4", pricingSummary: { knowledge: "UNKNOWN", kind: "UNKNOWN" } },
+      { ...base, id: "e5", pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", payableRatio: "0.95000000" } },
     ];
     await view.render({ state: ready({ entitlements }) });
     const rows = view.host.querySelectorAll(".mc-entitlement-list:not(.mc-entitlement-list--history) > li");
@@ -355,13 +356,14 @@ test("personal entitlement rows show actual mode and exact discount independentl
     assert.match(rows[1].textContent, /1\.2345678折.*极速比例.*含租客免押/);
     assert.match(rows[2].textContent, /旧版计价合同/);
     assert.match(rows[3].textContent, /折扣待核/);
+    assert.match(rows[4].textContent, /9\.5折.*全部已启用租赁方式统一/);
     assert.doesNotMatch(view.host.textContent, /PRIVATE_COST_REFERENCE|costBasisRef|内部成本/);
     const before = rows[0].textContent;
     await view.click('.mc-node[data-tier="DIAMOND"]');
     assert.equal(view.host.querySelector(".mc-entitlement-list > li").textContent, before);
     await view.render({ state: { status: "unknown", message: "消费来源尚未完成核验", entitlements: [{ ...base, pricingSummary: { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: "ordinary", payableRatio: "1" } }] } });
     assert.match(view.host.textContent, /消费来源尚未完成核验/);
-    assert.match(view.host.querySelector(".mc-entitlement-row").textContent, /10折.*普通比例/);
+    assert.match(view.host.querySelector(".mc-entitlement-row").textContent, /原价.*普通比例/);
     assert.match(view.host.querySelector("[data-testid=membership-current-tier]").textContent, /资格待确认/);
   } finally { await view.dispose(); }
 });

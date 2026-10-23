@@ -36,8 +36,8 @@ export function dirtyTitles(
   return tabs.filter((tab) => dirtyIds[tab.id]).map((tab) => tab.title);
 }
 
-export function confirmDiscard(titles: string[]): boolean {
-  if (titles.length === 0) return true;
+export function discardConfirmMessage(titles: string[]): string {
+  if (titles.length === 0) return "";
   const names = titles.join("、");
-  return window.confirm(`离开后将丢弃未保存的更改：${names}。确定丢弃并继续？`);
+  return `离开后将丢弃未保存的更改：${names}。确定放弃修改并离开？`;
 }

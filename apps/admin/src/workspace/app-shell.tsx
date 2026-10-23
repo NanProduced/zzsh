@@ -3,10 +3,12 @@ import { clearFinanceContexts } from "../views/admin-finance-view";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import type { SessionSnapshot, Theme, ThemeMode } from "../api";
 import type { ThemeStorageStatus } from "../lib/theme";
 
-import { applyDirtyMap, clearDirtyForTabs, confirmDiscard } from "./dirty-state";
+import { applyDirtyMap, clearDirtyForTabs } from "./dirty-state";
 import { searchableWorkspacePages } from "./nav-config";
 import type { NavLocation } from "./nav-path";
 import { WorkspacePageContent } from "./page-content";
@@ -38,6 +40,8 @@ function navOf(snapshot: Extract<SessionSnapshot, { authenticated: true }>): Nav
 function currentLocationTab(): WorkspaceTab {
   return tabFromLocation(window.location.pathname, window.location.search);
 }
+
+type DiscardIntent = { titles: string[]; execute: () => void; cancel?: () => void; accessKey: string };
 
 export function WorkspaceApp({
   snapshot,
@@ -86,15 +90,35 @@ export function WorkspaceApp({
     return canOpenKind(locationTab.kind, nav) ? locationTab.id : WORKBENCH_TAB_ID;
   });
   const [dirtyIds, setDirtyIds] = useState<Record<string, boolean>>({});
+  const [discardIntent, setDiscardIntent] = useState<DiscardIntent | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   const tabsRef = useRef(tabs);
   const activeIdRef = useRef(activeId);
   const dirtyIdsRef = useRef(dirtyIds);
+  const discardIntentRef = useRef<DiscardIntent | null>(null);
+  const accessKey = JSON.stringify([snapshot.adminUserId, snapshot.session?.id, snapshot.session?.locked, snapshot.security.status, snapshot.security.isBoss, [...snapshot.permissions].sort()]);
+  const accessRef = useRef({ key: accessKey, nav, locked: snapshot.session?.locked === true });
   tabsRef.current = tabs;
   activeIdRef.current = activeId;
   dirtyIdsRef.current = dirtyIds;
+  accessRef.current = { key: accessKey, nav, locked: snapshot.session?.locked === true };
+
+  const cancelDiscard = useCallback(() => {
+    const pending = discardIntentRef.current;
+    discardIntentRef.current = null;
+    setDiscardIntent(null);
+    pending?.cancel?.();
+  }, []);
+  const queueDiscard = useCallback((intent: Omit<DiscardIntent, "accessKey">) => {
+    discardIntentRef.current?.cancel?.();
+    const pending = { ...intent, accessKey: accessRef.current.key };
+    discardIntentRef.current = pending;
+    setDiscardIntent(pending);
+  }, []);
+
+  useEffect(() => { cancelDiscard(); }, [accessKey, cancelDiscard]);
 
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0] ?? tabFromLocation("/workbench");
   // 侧栏唯一活动入口按真实地址（含 query）判定：/settings?section=security 只点亮账号安全。
@@ -128,20 +152,54 @@ export function WorkspaceApp({
     persistTabs(snapshot.adminUserId, { tabs, activeId });
   }, [activeId, snapshot.adminUserId, tabs]);
 
-  useEffect(()=>{const revoke=()=>{clearFinanceContexts();const next=tabsRef.current.filter(tab=>!tab.kind.startsWith("finance-"));setTabs(next);setActiveId(WORKBENCH_TAB_ID);replaceUrl(tabFromLocation("/workbench"),true);};window.addEventListener(FINANCE_ACCESS_FAILURE_EVENT,revoke);return()=>window.removeEventListener(FINANCE_ACCESS_FAILURE_EVENT,revoke);},[replaceUrl]);
+  useEffect(() => {
+    const revoke = () => {
+      cancelDiscard();
+      clearFinanceContexts();
+      const removed = tabsRef.current.filter(tab => tab.kind.startsWith("finance-"));
+      const next = tabsRef.current.filter(tab => !tab.kind.startsWith("finance-"));
+      tabsRef.current = next;
+      activeIdRef.current = WORKBENCH_TAB_ID;
+      setTabs(next);
+      setActiveId(WORKBENCH_TAB_ID);
+      setDirtyIds(current => clearDirtyForTabs(current, removed.map(tab => tab.id)));
+      replaceUrl(tabFromLocation("/workbench"), true);
+    };
+    window.addEventListener(FINANCE_ACCESS_FAILURE_EVENT, revoke);
+    return () => window.removeEventListener(FINANCE_ACCESS_FAILURE_EVENT, revoke);
+  }, [cancelDiscard, replaceUrl]);
   useEffect(() => {
     const next = filterTabsByPermission(tabs, nav);
     if (next.length !== tabs.length || next.some((tab, index) => tab.id !== tabs[index]?.id)) {
+      cancelDiscard();
       const removed = tabs.filter((tab) => !next.some((item) => item.id === tab.id));
+      tabsRef.current = next;
       setTabs(next);
       setDirtyIds((current) => clearDirtyForTabs(current, removed.map((tab) => tab.id)));
       if (!next.some((tab) => tab.id === activeId)) {
+        activeIdRef.current = WORKBENCH_TAB_ID;
         setActiveId(WORKBENCH_TAB_ID);
         const workbench = next.find((tab) => tab.id === WORKBENCH_TAB_ID) ?? tabFromLocation("/workbench");
         replaceUrl(workbench, true);
       }
     }
-  }, [activeId, nav, replaceUrl, tabs]);
+  }, [activeId, cancelDiscard, nav, replaceUrl, tabs]);
+
+  const confirmLeave = useCallback((tabId: string, proceed: () => boolean): boolean => {
+    if (!dirtyIdsRef.current[tabId]) {
+      return proceed();
+    }
+    const tab = tabsRef.current.find((item) => item.id === tabId);
+    queueDiscard({
+      titles: [tab?.title ?? "当前页"],
+      execute: () => {
+        const current = tabsRef.current.find(item => item.id === tabId);
+        if (activeIdRef.current !== tabId || !current || !canOpenKind(current.kind, accessRef.current.nav)) return;
+        if (proceed()) markDirty(tabId, false);
+      },
+    });
+    return false;
+  }, [markDirty, queueDiscard]);
 
   useEffect(() => {
     const onPop = () => {
@@ -149,39 +207,51 @@ export function WorkspaceApp({
       const next = currentLocationTab();
       const currentId = activeIdRef.current;
       const currentTab = tabsRef.current.find((tab) => tab.id === currentId);
-      if (currentTab && dirtyIdsRef.current[currentId] && (next.id !== currentId || changesSettingsContent(currentTab, next))) {
-        if (!confirmDiscard([currentTab.title])) {
-          window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
-          return;
-        }
-        markDirty(currentId, false);
+      const hasDirty = currentTab && dirtyIdsRef.current[currentId] && (next.id !== currentId || changesSettingsContent(currentTab, next));
+      if (hasDirty) {
+        window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
+        if (accessRef.current.locked || !canOpenKind(next.kind, accessRef.current.nav)) return;
+        queueDiscard({
+          titles: [currentTab.title],
+          execute: () => {
+            const access = accessRef.current;
+            const source = tabsRef.current.find(tab => tab.id === currentId);
+            if (access.locked || activeIdRef.current !== currentId || !source || !canOpenKind(source.kind, access.nav) || !canOpenKind(next.kind, access.nav)) return;
+            const updated = upsertTab(filterTabsByPermission(tabsRef.current, access.nav), next);
+            tabsRef.current = updated;
+            activeIdRef.current = next.id;
+            markDirty(currentId, false);
+            setTabs(updated);
+            setActiveId(next.id);
+            replaceUrl(next, true);
+          },
+        });
+        return;
       }
-      if (!canOpenKind(next.kind, nav)) {
+      if (accessRef.current.locked || !canOpenKind(next.kind, accessRef.current.nav)) {
         const workbench = tabFromLocation("/workbench");
-        setTabs((current) => upsertTab(current, workbench));
+        const updated = upsertTab(tabsRef.current, workbench);
+        tabsRef.current = updated;
+        activeIdRef.current = WORKBENCH_TAB_ID;
+        setTabs(updated);
         setActiveId(WORKBENCH_TAB_ID);
         replaceUrl(workbench, true);
         return;
       }
-      setTabs((current) => upsertTab(current, next));
+      const updated = upsertTab(tabsRef.current, next);
+      tabsRef.current = updated;
+      activeIdRef.current = next.id;
+      setTabs(updated);
       setActiveId(next.id);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [markDirty, nav, replaceUrl]);
+  }, [markDirty, queueDiscard, replaceUrl]);
 
   useEffect(() => {
     const href = tabHref(active);
     if (`${window.location.pathname}${window.location.search}` !== href) replaceUrl(active, true);
   }, [active, replaceUrl]);
-
-  const confirmLeave = useCallback((tabId: string) => {
-    if (!dirtyIdsRef.current[tabId]) return true;
-    const tab = tabsRef.current.find((item) => item.id === tabId);
-    if (!confirmDiscard([tab?.title ?? "当前页"])) return false;
-    markDirty(tabId, false);
-    return true;
-  }, [markDirty]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -195,14 +265,29 @@ export function WorkspaceApp({
   }, [dirtyIds]);
 
   const openTab = useCallback((next: WorkspaceTab, replace = false): boolean => {
-    if (!canOpenKind(next.kind, nav)) return false;
+    if (accessRef.current.locked || !canOpenKind(next.kind, accessRef.current.nav)) return false;
+    const proceed = () => {
+      const access = accessRef.current;
+      if (access.locked || !canOpenKind(next.kind, access.nav)) return false;
+      const updated = upsertTab(filterTabsByPermission(tabsRef.current, access.nav), next);
+      tabsRef.current = updated;
+      activeIdRef.current = next.id;
+      setTabs(updated);
+      setActiveId(next.id);
+      replaceUrl(next, replace);
+      return true;
+    };
     const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
-    if ((next.id !== activeIdRef.current || (current && changesSettingsContent(current, next))) && !confirmLeave(activeIdRef.current)) return false;
-    setTabs((current) => upsertTab(current, next));
-    setActiveId(next.id);
-    replaceUrl(next, replace);
-    return true;
-  }, [confirmLeave, nav, replaceUrl]);
+    const currentHref = current ? tabHref(current) : "";
+    const nextHref = tabHref(next);
+    if (next.id === activeIdRef.current && currentHref === nextHref) {
+      return true;
+    }
+    if (next.id === activeIdRef.current && (!current || !changesSettingsContent(current, next))) {
+      return proceed();
+    }
+    return confirmLeave(activeIdRef.current, proceed);
+  }, [confirmLeave, replaceUrl]);
 
   const openPath = useCallback((path: string, title?: string): boolean => {
     const [pathname, search = ""] = path.split("?");
@@ -211,24 +296,47 @@ export function WorkspaceApp({
   }, [openTab]);
 
   const activate = (tabId: string): boolean => {
-    const tab = tabs.find((item) => item.id === tabId);
-    if (!tab || !canOpenKind(tab.kind, nav)) return false;
-    if (tabId !== activeId && !confirmLeave(activeId)) return false;
-    setActiveId(tabId);
-    replaceUrl(tab);
-    return true;
+    const tab = tabsRef.current.find((item) => item.id === tabId);
+    if (accessRef.current.locked || !tab || !canOpenKind(tab.kind, accessRef.current.nav)) return false;
+    if (tabId === activeIdRef.current) return true;
+    return confirmLeave(activeIdRef.current, () => {
+      const latest = tabsRef.current.find(item => item.id === tabId);
+      if (accessRef.current.locked || !latest || !canOpenKind(latest.kind, accessRef.current.nav)) return false;
+      activeIdRef.current = tabId;
+      setActiveId(tabId);
+      replaceUrl(latest);
+      return true;
+    });
   };
 
   const close = (action: TabCloseAction, targetId: string) => {
-    const removed = tabsRemovedBy(tabs, action, targetId);
-    const dirtyRemoved = removed.filter((tab) => dirtyIds[tab.id]);
-    if (dirtyRemoved.length > 0 && !confirmDiscard(dirtyRemoved.map((tab) => tab.title))) return;
-    const result = closeTabs(tabs, activeId, action, targetId);
-    setTabs(result.tabs);
-    setActiveId(result.activeId);
-    const next = result.tabs.find((tab) => tab.id === result.activeId);
-    if (next) replaceUrl(next, true);
-    setDirtyIds((current) => clearDirtyForTabs(current, removed.map((tab) => tab.id)));
+    if (accessRef.current.locked) return;
+    const removed = tabsRemovedBy(tabsRef.current, action, targetId);
+    const dirtyRemoved = removed.filter((tab) => dirtyIdsRef.current[tab.id]);
+    const confirmedDirtyIds = new Set(dirtyRemoved.map(tab => tab.id));
+    const executeClose = () => {
+      const access = accessRef.current;
+      const latest = filterTabsByPermission(tabsRef.current, access.nav);
+      if (access.locked || !latest.some(tab => tab.id === targetId)) return;
+      const removedNow = tabsRemovedBy(latest, action, targetId);
+      if (removedNow.some(tab => dirtyIdsRef.current[tab.id] && !confirmedDirtyIds.has(tab.id))) return;
+      const result = closeTabs(latest, activeIdRef.current, action, targetId);
+      tabsRef.current = result.tabs;
+      activeIdRef.current = result.activeId;
+      setTabs(result.tabs);
+      setActiveId(result.activeId);
+      const next = result.tabs.find((tab) => tab.id === result.activeId);
+      if (next) replaceUrl(next, true);
+      setDirtyIds((curr) => clearDirtyForTabs(curr, removedNow.map((tab) => tab.id)));
+    };
+    if (dirtyRemoved.length > 0) {
+      queueDiscard({
+        titles: dirtyRemoved.map((tab) => tab.title),
+        execute: executeClose,
+      });
+      return;
+    }
+    executeClose();
   };
 
   const refreshPage = async () => {
@@ -257,6 +365,7 @@ export function WorkspaceApp({
   }, [active.kind, hasSupportRead, onRefresh]);
 
   const signOutAndClear = () => {
+    cancelDiscard();
     clearTabs(snapshot.adminUserId);
     onSignOut();
   };
@@ -365,6 +474,38 @@ export function WorkspaceApp({
           </div>
         </SidebarInset>
       </SidebarProvider>
+      <Dialog open={discardIntent !== null} onOpenChange={(open) => { if (!open) cancelDiscard(); }}>
+        <DialogContent showCloseButton={false} role="alertdialog">
+          <DialogTitle>有修改尚未保存</DialogTitle>
+          <DialogDescription>
+            离开后将丢弃未保存的更改{discardIntent?.titles?.length ? `（${discardIntent.titles.join("、")}）` : ""}。确定放弃修改并离开？
+          </DialogDescription>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              autoFocus
+              onClick={cancelDiscard}
+            >
+              继续编辑
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                const pending = discardIntentRef.current;
+                if (!pending || pending !== discardIntent) { cancelDiscard(); return; }
+                discardIntentRef.current = null;
+                setDiscardIntent(null);
+                if (pending.accessKey !== accessRef.current.key || accessRef.current.locked) { pending.cancel?.(); return; }
+                pending.execute();
+              }}
+            >
+              放弃修改并离开
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

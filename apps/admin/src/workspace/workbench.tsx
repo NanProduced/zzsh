@@ -12,6 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { useSidebar } from "@/components/ui/sidebar";
 import {
   adminRequest,
@@ -539,6 +540,7 @@ export function WorkbenchPage({
   const [layout, setLayout] = useState<WorkspaceLayoutPayload>();
   const [draft, setDraft] = useState<WorkspaceWidgetPlacement[]>();
   const [editing, setEditing] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [pageTime, setPageTime] = useState<WorkspaceTimeRange>("today");
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
@@ -717,9 +719,7 @@ export function WorkbenchPage({
           {editing ? (
             <>
               <Button type="button" size="sm" variant="outline" onClick={cancel}>取消</Button>
-              <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => {
-                if (window.confirm("恢复默认会替换当前个人配置。确定继续？")) void save(true);
-              }}>恢复默认</Button>
+              <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => setResetConfirmOpen(true)}>恢复默认</Button>
               <Button type="button" size="sm" disabled={loading} onClick={() => void save(false)}>保存</Button>
             </>
           ) : narrow ? null : (
@@ -776,6 +776,16 @@ export function WorkbenchPage({
           </Card>
         ) : null}
       </WorkbenchCardsContext.Provider>
+      <Dialog open={resetConfirmOpen} onOpenChange={setResetConfirmOpen}>
+        <DialogContent>
+          <DialogTitle>恢复默认工作台配置</DialogTitle>
+          <DialogDescription>恢复默认会替换当前个人配置。确定继续？</DialogDescription>
+          <DialogFooter>
+            <Button type="button" size="sm" variant="outline" autoFocus onClick={() => setResetConfirmOpen(false)}>取消</Button>
+            <Button type="button" size="sm" variant="default" onClick={() => { setResetConfirmOpen(false); void save(true); }}>确定恢复</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

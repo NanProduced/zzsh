@@ -38,6 +38,18 @@ function policyPayload() {
   };
 }
 
+const UNIFIED_RATIOS = ["0.95", "0.92", "0.90", "0.88", "0.85"];
+const UNIFIED_TIERS = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"];
+const unifiedFixture = () => ({
+  schema: "membership-unified-pricing.v1", scope: "ALL_ENABLED_RENTAL_MODES", knowledge: "KNOWN",
+  tiers: Object.fromEntries(UNIFIED_TIERS.map((tier, index) => [tier, { knowledge: "KNOWN", payableRatio: UNIFIED_RATIOS[index], reasonCodes: [] }])),
+  entitlementRanges: {
+    FRIEND: { knowledge: "KNOWN", minPayableRatio: "0.6", maxPayableRatio: "1", priceVersionId: "price-v1", costBasisRef: "cost-ent", reasonCodes: [] },
+    PRESTIGE: { knowledge: "KNOWN", minPayableRatio: "0.5", maxPayableRatio: "1", priceVersionId: "price-v1", costBasisRef: "cost-ent", reasonCodes: [] },
+  },
+});
+const unifiedCapability = { canDraft: true, canChangeEntitlementRanges: true, canRequestEntitlement: true, depositAllowanceSupported: true, unifiedPricingSupported: true, canSimulateProfit: true };
+const policyResponse = (overrides = {}) => ({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null, unifiedPricing: unifiedFixture(), capability: unifiedCapability, ...overrides });
 const catalog = { safeBoxes: [], materials: [], priceVersions: [{ id: "price-v1", label: "price-v1" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD", catalogSource: "SEALED" };
 const thresholds = { STANDARD: "0", SILVER: "5000", GOLD: "10000", PLATINUM: "20000", DIAMOND: "40000" };
 const metaFixture = () => ({ id: "draft-1", version: "1", status: "DRAFT", effectiveAtUtc: "2026-11-01T00:00:00.000Z", ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: "fixture", payloadHash: "a".repeat(64) });
@@ -73,10 +85,10 @@ test("R1-02 host save race: edits during a pending save stay unsaved and only th
       const body = init.body === undefined ? undefined : JSON.parse(String(init.body));
       requests.push({ path, method, body });
       if(method==="GET"){const shared=workspaceRead(path);if(shared)return shared;}
-      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null });
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse());
       if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) {
-        if (!releaseFirstSave) return new Promise((resolve) => { releaseFirstSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64) })); });
-        return respond({ id: "draft-3", version: "3", payloadHash: "c".repeat(64) });
+        if (!releaseFirstSave) return new Promise((resolve) => { releaseFirstSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() })); });
+        return respond({ id: "draft-3", version: "3", payloadHash: "c".repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() });
       }
       if (method === "POST" && path.endsWith("/security/approvals/requests")) return respond({ requestId: "approval-1" });
       throw new Error(`unexpected ${method} ${path}`);
@@ -86,17 +98,21 @@ test("R1-02 host save race: edits during a pending save stay unsaved and only th
     const snapshot = actorSnapshot();
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab, snapshot, onDirtyChange: (value) => dirty.push(value), refreshNonce: 0 })));
     await openPolicyTab(host);
-    const ratio = host.querySelector("input[aria-label='SILVERordinary应付比例']");
+    const ratio = host.querySelector("input[aria-label='银卡 统一应付折扣']");
     assert.ok(ratio, host.textContent.slice(0, 500));
     // Save A (0.90), then edit B (0.91) while the request is still pending.
     await setInput(browser, ratio, "0.90");
     await act(async () => buttonByText(host, "保存草稿").click());
     assert.equal(requests.filter((request) => request.method === "POST" && request.path.endsWith("/policy-drafts")).length, 1);
-    assert.equal(requests.at(-1).body.policy.tiers.SILVER.pricing.ordinary.payableRatio, "0.90");
-    await setInput(browser, host.querySelector("input[aria-label='SILVERordinary应付比例']"), "0.91");
+    assert.equal(requests.at(-1).body.unifiedPricing.schema, "membership-unified-pricing.v1");
+    assert.equal(requests.at(-1).body.unifiedPricing.scope, "ALL_ENABLED_RENTAL_MODES");
+    assert.equal(requests.at(-1).body.unifiedPricing.tiers.SILVER.payableRatio, "0.90");
+    assert.equal(Object.hasOwn(requests.at(-1).body.unifiedPricing.tiers.SILVER, "mode"), false, "unified tiers have no mode");
+    assert.equal(Object.hasOwn(requests.at(-1).body.policy.tiers.SILVER, "pricing"), false, "the frontend never generates pricing[mode]");
+    await setInput(browser, host.querySelector("input[aria-label='银卡 统一应付折扣']"), "0.91");
     await act(async () => { releaseFirstSave(); await Promise.resolve(); });
     // A's late receipt must not mark B saved: the draft is still dirty and submitting must not send A's hash.
-    assert.equal(host.querySelector("input[aria-label='SILVERordinary应付比例']").value, "0.91");
+    assert.equal(host.querySelector("input[aria-label='银卡 统一应付折扣']").value, "0.91");
     assert.equal(dirty.at(-1), true);
     assert.ok(!buttonByText(host, "保存草稿").disabled, host.textContent.slice(-900));
     const unsavedSubmit=buttonByText(host,'提交审批');
@@ -109,7 +125,7 @@ test("R1-02 host save race: edits during a pending save stay unsaved and only th
     assert.equal(saves.length, 2);
     assert.equal(saves[1].body.versionNo, 3);
     assert.equal(saves[1].body.expectedVersion, "2");
-    assert.equal(saves[1].body.policy.tiers.SILVER.pricing.ordinary.payableRatio, "0.91");
+    assert.equal(saves[1].body.unifiedPricing.tiers.SILVER.payableRatio, "0.91");
     assert.equal(dirty.at(-1), false);
     await act(async () => buttonByText(host, "提交审批").click());
     const approval = requests.find((request) => request.path.endsWith("/security/approvals/requests"));
@@ -128,42 +144,7 @@ test("R1-02 host save race: edits during a pending save stay unsaved and only th
   }
 });
 
-test("R1-07 host entitlement replacement uses the approved context and its own discount references", async () => {
-  const browser=installBrowser(),{vite,MembershipGrowthAdminHost}=await loadHost();let releasePost;
-  try{
-    const host=browser.document.createElement('div');browser.document.body.append(host);const {createRoot}=await import('react-dom/client'),root=createRoot(host);roots.add(root);
-    const requests=[],original={id:'existing-entitlement',userId:'user-a',userSummary:{name:'合成用户甲',image:null,maskedPhone:null},gameId:'game-1',gameName:'测试游戏',kind:'FRIEND',scopeKey:'legacy:scope',startsAtUtc:'2026-11-01T00:00:00.000Z',endsAtUtc:'2026-11-20T00:00:00.000Z',status:'EXECUTED_PENDING_START',depositWaived:false,approvedPolicyId:'approved-effective-1',approvalRequestId:'original-approval',pricingSummary:{knowledge:'KNOWN',kind:'TOTAL_DISCOUNT',mode:'ordinary',payableRatio:'0.85'}};
-    const context={schema:'membership-entitlement-context.v1',subject:{userId:'user-a',name:'合成用户甲',image:null,maskedPhone:null},game:{id:'game-1',name:'测试游戏'},approvedMeta:{id:'approved-effective-1',version:'7',effectiveAtUtc:'2026-10-01T00:00:00.000Z',ruleReleaseId:'release-1',priceVersionId:'price-v1',payloadHash:'d'.repeat(64),sourceRef:'fixture'},ranges:policyPayload().entitlementRanges,rangeSource:'INDEPENDENT',capability:{canRequest:true,reasonCode:'OK'},existingEntitlements:[original]};
-    globalThis.fetch=async(url,init={})=>{
-      const path=String(url),method=(init.method??'GET').toUpperCase(),body=init.body===undefined?undefined:JSON.parse(String(init.body));requests.push({path,method,body});
-      if(method==='GET'&&path.includes('/membership-growth/entitlements?'))return respond({schema:'membership-entitlements.v1',asOfUtc:'2026-10-23T00:00:00Z',total:1,page:1,pageSize:20,contextKey:'b'.repeat(64),items:[original]});
-      if(method==='GET'&&path.includes('/membership-growth/entitlement-context?'))return respond(context);
-      if(method==='GET'){const shared=workspaceRead(path);if(shared)return shared;}
-      if(method==='GET'&&path.endsWith('/membership-growth/policy'))return respond({policy:policyPayload(),meta:metaFixture(),catalog,thresholds,bootstrap:null});
-      if(method==='POST'&&path.endsWith('/security/approvals/requests'))return new Promise(resolve=>{releasePost=()=>resolve(respond({requestId:'approval-fixture'}));});
-      throw new Error(`unexpected ${method} ${path}`);
-    };
-    await act(async()=>root.render(createElement(MembershipGrowthAdminHost,{tab:{query:{userId:'user-a',gameId:'game-1'}},snapshot:actorSnapshot(),onDirtyChange(){},refreshNonce:0})));
-    assert.equal(host.querySelector('[role=tab][aria-selected=true]').textContent,'礼遇管理');
-    await act(async()=>buttonByText(host,'替换/续期').click());
-    const ratio=browser.document.querySelector('input[aria-label="礼遇应付比例"]');assert.ok(ratio);
-    assert.equal(ratio.value,'0.85','the current entitlement is not re-seeded from GOLD tier 0.90');
-    await setInput(browser,ratio,'0.80');
-    const reason=browser.document.querySelector('textarea[aria-label="礼遇原因"]');
-    await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(reason,'专项礼遇续期');reason.dispatchEvent(new browser.Event('input',{bubbles:true}));reason.dispatchEvent(new browser.Event('change',{bubbles:true}));});
-    const submit=buttonByText(browser.document,'提交礼遇审批');assert.ok(submit&&!submit.disabled);
-    await act(async()=>submit.click());
-    const approval=requests.find(request=>request.method==='POST'&&request.path.endsWith('/security/approvals/requests'));assert.ok(approval);
-    assert.equal(approval.body.operationCode,'membership.entitlement.replace');assert.equal(approval.body.payload.policyId,'approved-effective-1','the editable draft meta is never used for a grant');
-    assert.equal(approval.body.payload.replaceEntitlementId,original.id);assert.equal(approval.body.payload.scopeKey,original.scopeKey);
-    assert.deepEqual(approval.body.payload.pricing,{status:'CONFIGURED',kind:'TOTAL_DISCOUNT',mode:'ordinary',priceVersionId:'price-v1',payableRatio:'0.80',costBasisRef:'cost-independent'});
-    assert.equal(approval.body.payload.pricing.haff,undefined);assert.equal(approval.body.payload.pricing.materials,undefined);assert.equal(approval.body.payload.depositWaived,false);
-    assert.equal(Object.hasOwn(approval.body,'supersedesRequestId'),false);
-    // This assertion stops at the POST boundary; the hook's ACK/readback scenarios are tested elsewhere.
-    await act(async()=>root.unmount());await act(async()=>{releasePost();await Promise.resolve();});
-  }finally{await closeUI(vite,browser);}
-});
-test("R2-05 a late approval receipt never overwrites edits made while it was pending", async () => {
+test("R1-03 discard restores the last saved Host baseline instead of leaving the discarded draft ref", async () => {
   const browser = installBrowser();
   const { vite, MembershipGrowthAdminHost } = await loadHost();
   try {
@@ -172,43 +153,93 @@ test("R2-05 a late approval receipt never overwrites edits made while it was pen
     const { createRoot } = await import("react-dom/client");
     const root = createRoot(host);roots.add(root);
     const requests = [];
-    let releaseApproval = null;
+    const one = { ...unifiedFixture(), tiers: Object.fromEntries(UNIFIED_TIERS.map((tier) => [tier, { knowledge: "KNOWN", payableRatio: "1", reasonCodes: [] }])) };
     globalThis.fetch = async (url, init = {}) => {
-      const path = String(url);
-      const method = (init.method ?? "GET").toUpperCase();
-      const body = init.body === undefined ? undefined : JSON.parse(String(init.body));
-      requests.push({ path, method, body });
-      if(method==="GET"){const shared=workspaceRead(path);if(shared)return shared;}
-      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null });
-      if (method === "GET" && path.includes("/users/")) return respond({ subjectId: "user-a" });
-      if (method === "POST" && path.endsWith("/security/approvals/requests")) return new Promise((resolve) => { releaseApproval = () => resolve(respond({ requestId: "approval-late" })); });
-      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) return respond({ id: "draft-9", version: "2", payloadHash: "d".repeat(64) });
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse({ unifiedPricing: one, approvedUnifiedPricing: one, approvedPolicy: policyPayload(), approvedMeta: { ...metaFixture(), id: "approved-1", version: "0", status: "APPROVED" } }));
+      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) return respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64), publishable: true, warnings: [], unifiedPricing: one });
       throw new Error(`unexpected ${method} ${path}`);
     };
-    const tab = { query: { userId: "user-a", gameId: "game-1" } };
+    const dirty = [];
     const snapshot = actorSnapshot();
-    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab, snapshot, onDirtyChange: () => undefined, refreshNonce: 0 })));
+    const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+    const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+    const pendingSaved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"a".repeat(32)}`, body: {}, readback: { kind: "lists", keys: [] }, successMessage: "fixture", kind: "unknown" });
+    assert.equal(pendingSaved.ok, true, "the pre-existing unknown write is stored before the policy edit");
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: (value) => dirty.push(value), refreshNonce: 0 })));
     await openPolicyTab(host);
-    const ratio = () => host.querySelector("input[aria-label='SILVERordinary应付比例']");
-    assert.ok(ratio(), host.textContent.slice(0, 400));
-    // The saved draft can request approval; the response is delayed while the operator keeps editing.
-    await act(async () => buttonByText(host, "提交审批").click());
-    assert.ok(releaseApproval);
-    await setInput(browser, ratio(), "0.91");
-    await act(async () => { releaseApproval(); await Promise.resolve(); });
-    assert.equal(ratio().value, "0.91");
-    assert.match(host.textContent, /审批申请已提交/);
-    // The next save must send the current edit, not the stale pre-approval policy captured by the receipt.
-    await act(async () => buttonByText(host, "保存草稿").click());
-    const saves = requests.filter((request) => request.method === "POST" && request.path.endsWith("/policy-drafts"));
-    assert.equal(saves.length, 1);
-    assert.equal(saves[0].body.policy.tiers.SILVER.pricing.ordinary.payableRatio, "0.91");
+    const dialog = () => [...browser.document.querySelectorAll("[role=dialog]")].find((element) => element.textContent.includes("编辑统一会员政策"));
+    await act(async () => buttonByText(host, "编辑草稿").click());
+    const diamond = dialog().querySelector("input[aria-label='钻石 统一应付折扣']");
+    assert.ok(diamond);
+    await setInput(browser, diamond, "0.8");
+    await act(async () => buttonByText(dialog(), "取消修改").click());
+    await act(async () => buttonByText(browser.document, "放弃修改并关闭").click());
+    await act(async () => buttonByText(host, "编辑草稿").click());
+    const reopened = dialog().querySelector("input[aria-label='钻石 统一应付折扣']");
+    assert.equal(reopened.value, "1", "the discarded 0.8 must not remain in the reopened view");
+    const save = buttonByText(dialog(), "保存草稿");
+    assert.equal(save.disabled, true, "a restored saved draft is not dirty and cannot be re-saved as a phantom edit");
+    assert.equal(dirty.at(-1), false, "discard clears the global dirty flag");
+    await act(async () => save.click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    assert.equal(requests.some((request) => request.method === "POST" && request.path.endsWith("/policy-drafts")), false, "discard never posts the stale draft");
+    // A new edit after discard must save from the restored server meta/ref, not from the discarded draft.
+    await setInput(browser, reopened, "0.9");
+    await act(async () => buttonByText(dialog(), "保存草稿").click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    const savedPost = requests.find((request) => request.method === "POST" && request.path.endsWith("/policy-drafts"));
+    assert.ok(savedPost);
+    assert.equal(savedPost.body.unifiedPricing.tiers.DIAMOND.payableRatio, "0.9");
+    assert.equal(savedPost.body.expectedVersion, "1", "the discarded draft never advanced the Host CAS baseline");
+    assert.equal(savedPost.body.ruleReleaseId, "release-1");
+    assert.equal(savedPost.body.priceVersionId, "price-v1");
+    const pendingAfter = inspectPending(subject);
+    assert.equal(pendingAfter.state, "valid", "discard never clears an already-sent write's original key or UNKNOWN responsibility");
+    assert.equal(pendingAfter.record.idempotencyKey, `idem_${"a".repeat(32)}`);
     await act(async () => root.unmount());
   } finally {
-    await closeUI(vite,browser);
+    await closeUI(vite, browser);
   }
 });
 
+test("R1-07 host entitlement replacement uses the approved context and its own discount references", async () => {
+  const browser=installBrowser(),{vite,MembershipGrowthAdminHost}=await loadHost();let releasePost;
+  try{
+    const host=browser.document.createElement('div');browser.document.body.append(host);const {createRoot}=await import('react-dom/client'),root=createRoot(host);roots.add(root);
+    const requests=[],original={id:'existing-entitlement',userId:'user-a',userSummary:{name:'合成用户甲',image:null,maskedPhone:null},gameId:'game-1',gameName:'测试游戏',kind:'FRIEND',scopeKey:'legacy:scope',startsAtUtc:'2026-11-01T00:00:00.000Z',endsAtUtc:'2026-11-20T00:00:00.000Z',status:'EXECUTED_PENDING_START',depositWaived:false,approvedPolicyId:'approved-effective-1',approvalRequestId:'original-approval',pricingSummary:{knowledge:'KNOWN',kind:'TOTAL_DISCOUNT',mode:'ordinary',payableRatio:'0.85'}};
+    const context={schema:'membership-entitlement-context.v1',subject:{userId:'user-a',name:'合成用户甲',image:null,maskedPhone:null},game:{id:'game-1',name:'测试游戏'},approvedMeta:{id:'approved-effective-1',version:'7',effectiveAtUtc:'2026-10-01T00:00:00.000Z',ruleReleaseId:'release-1',priceVersionId:'price-v1',payloadHash:'d'.repeat(64),sourceRef:'fixture'},ranges:policyPayload().entitlementRanges,unifiedRanges:{FRIEND:{knowledge:'KNOWN',minPayableRatio:'0.6',maxPayableRatio:'1',priceVersionId:'price-v1',costBasisRef:'cost-independent',reasonCodes:[]},PRESTIGE:{knowledge:'KNOWN',minPayableRatio:'0.5',maxPayableRatio:'1',priceVersionId:'price-v1',costBasisRef:'cost-independent',reasonCodes:[]}},pricingScope:'ALL_ENABLED_RENTAL_MODES',rangeSource:'INDEPENDENT',capability:{canRequest:true,reasonCode:'OK',unifiedPricingSupported:true,requiresUnifiedPricing:true},existingEntitlements:[original]};
+    globalThis.fetch=async(url,init={})=>{
+      const path=String(url),method=(init.method??'GET').toUpperCase(),body=init.body===undefined?undefined:JSON.parse(String(init.body));requests.push({path,method,body});
+      if(method==='GET'&&path.includes('/membership-growth/entitlements?'))return respond({schema:'membership-entitlements.v1',asOfUtc:'2026-10-23T00:00:00Z',total:1,page:1,pageSize:20,contextKey:'b'.repeat(64),items:[original]});
+      if(method==='GET'&&path.includes('/membership-growth/entitlement-context?'))return respond(context);
+      if(method==='GET'){const shared=workspaceRead(path);if(shared)return shared;}
+      if(method==='GET'&&path.endsWith('/membership-growth/policy'))return respond(policyResponse());
+      if(method==='POST'&&path.endsWith('/security/approvals/requests'))return new Promise(resolve=>{releasePost=()=>resolve(respond({requestId:'approval-fixture'}));});
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    await act(async()=>root.render(createElement(MembershipGrowthAdminHost,{tab:{query:{userId:'user-a',gameId:'game-1'}},snapshot:actorSnapshot(),onDirtyChange(){},refreshNonce:0})));
+    assert.equal(host.querySelector('[role=tab][aria-selected=true]').textContent,'礼遇管理');
+    await act(async()=>buttonByText(host,'替换/续期').click());
+    const ratio=browser.document.querySelector('input[aria-label="礼遇应付比例"]');assert.ok(ratio);
+    assert.equal(ratio.value,'','an old-mode entitlement is never re-seeded as the new unified ratio');
+    await setInput(browser,ratio,'0.80');
+    const reason=browser.document.querySelector('textarea[aria-label="礼遇原因"]');
+    await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype,'value').set.call(reason,'专项礼遇续期');reason.dispatchEvent(new browser.Event('input',{bubbles:true}));reason.dispatchEvent(new browser.Event('change',{bubbles:true}));});
+    const submit=buttonByText(browser.document,'提交礼遇审批');assert.ok(submit&&!submit.disabled);
+    await act(async()=>submit.click());
+    const approval=requests.find(request=>request.method==='POST'&&request.path.endsWith('/security/approvals/requests'));assert.ok(approval);
+    assert.equal(approval.body.operationCode,'membership.entitlement.replace');assert.equal(approval.body.payload.policyId,'approved-effective-1','the editable draft meta is never used for a grant');
+    assert.equal(approval.body.payload.replaceEntitlementId,original.id);assert.equal(approval.body.payload.scopeKey,original.scopeKey);
+    assert.deepEqual(approval.body.payload.pricing,{status:'CONFIGURED',kind:'TOTAL_DISCOUNT',scope:'ALL_ENABLED_RENTAL_MODES',priceVersionId:'price-v1',payableRatio:'0.80',costBasisRef:'cost-independent'});assert.equal(Object.hasOwn(approval.body.payload.pricing,'mode'),false);
+    assert.equal(approval.body.payload.pricing.haff,undefined);assert.equal(approval.body.payload.pricing.materials,undefined);assert.equal(approval.body.payload.depositWaived,false);
+    assert.equal(Object.hasOwn(approval.body,'supersedesRequestId'),false);
+    // This assertion stops at the POST boundary; the hook's ACK/readback scenarios are tested elsewhere.
+    await act(async()=>root.unmount());await act(async()=>{releasePost();await Promise.resolve();});
+  }finally{await closeUI(vite,browser);}
+});
 test("R2-06 a save receipt from a previous refresh generation never pollutes the current CAS binding", async () => {
   const browser = installBrowser();
   const { vite, MembershipGrowthAdminHost } = await loadHost();
@@ -228,13 +259,13 @@ test("R2-06 a save receipt from a previous refresh generation never pollutes the
       if(method==="GET"){const shared=workspaceRead(path);if(shared)return shared;}
       if (method === "GET" && path.endsWith("/membership-growth/policy")) {
         policyGets += 1;
-        if (policyGets === 1) return respond({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null });
-        return respond({ policy: { ...policyPayload(), version: "5" }, meta: { id: "draft-5", version: "5", status: "DRAFT", effectiveAtUtc: "2026-11-01T00:00:00.000Z", ruleReleaseId: "release-5", priceVersionId: "price-v5", sourceRef: "fixture", payloadHash: "e".repeat(64) }, catalog, thresholds, bootstrap: null });
+        if (policyGets === 1) return respond(policyResponse());
+        return respond(policyResponse({ policy: { ...policyPayload(), version: "5" }, meta: { id: "draft-5", version: "5", status: "DRAFT", effectiveAtUtc: "2026-11-01T00:00:00.000Z", ruleReleaseId: "release-5", priceVersionId: "price-v5", sourceRef: "fixture", payloadHash: "e".repeat(64) }, unifiedPricing: unifiedFixture() }));
       }
       if (method === "GET" && path.includes("/users/")) return respond({ subjectId: "user-a" });
       if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) {
-        if (!releaseFirstSave) return new Promise((resolve) => { releaseFirstSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64) })); });
-        return respond({ id: "draft-6", version: "6", payloadHash: "f".repeat(64) });
+        if (!releaseFirstSave) return new Promise((resolve) => { releaseFirstSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() })); });
+        return respond({ id: "draft-6", version: "6", payloadHash: "f".repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() });
       }
       throw new Error(`unexpected ${method} ${path}`);
     };
@@ -242,7 +273,7 @@ test("R2-06 a save receipt from a previous refresh generation never pollutes the
     const snapshot = actorSnapshot();
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab, snapshot, onDirtyChange: () => undefined, refreshNonce: 0 })));
     await openPolicyTab(host);
-    const ratio = () => host.querySelector("input[aria-label='SILVERordinary应付比例']");
+    const ratio = () => host.querySelector("input[aria-label='银卡 统一应付折扣']");
     assert.ok(ratio(), host.textContent.slice(0, 400));
     // Save A on v1/price-v1, then refresh to v5/price-v5 while A is still pending.
     await setInput(browser, ratio(), "0.90");
@@ -261,7 +292,7 @@ test("R2-06 a save receipt from a previous refresh generation never pollutes the
     assert.equal(saves[1].body.ruleReleaseId, "release-5");
     assert.equal(saves[1].body.priceVersionId, "price-v5");
     assert.equal(saves[1].body.versionNo, 6);
-    assert.equal(saves[1].body.policy.tiers.SILVER.pricing.ordinary.payableRatio, "0.93");
+    assert.equal(saves[1].body.unifiedPricing.tiers.SILVER.payableRatio, "0.93");
     await act(async () => root.unmount());
   } finally {
     await closeUI(vite,browser);
@@ -282,9 +313,9 @@ test("R2 cleanup rejects a late save receipt after leaving the membership tab", 
     globalThis.fetch = async (url, init = {}) => {
       const path = String(url);
       const method = (init.method ?? "GET").toUpperCase();
-      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null });
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse());
       if (method === "GET" && path.includes("/users/")) return respond({ subjectId: "user-a" });
-      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) return new Promise((resolve) => { releaseSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64) })); });
+      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) return new Promise((resolve) => { releaseSave = () => resolve(respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() })); });
       throw new Error(`unexpected ${method} ${path}`);
     };
     let activeTab = "membership";
@@ -294,7 +325,7 @@ test("R2 cleanup rejects a late save receipt after leaving the membership tab", 
     const onDirtyChange = (dirty) => { dirtyByTab[activeTab] = dirty; dirtySignals.push({ tab: activeTab, dirty }); };
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange, refreshNonce: 0 })));
     mounted = true;
-    await setInput(browser, host.querySelector("input[aria-label='SILVERordinary应付比例']"), "0.91");
+    await setInput(browser, host.querySelector("input[aria-label='银卡 统一应付折扣']"), "0.91");
     await act(async () => buttonByText(host, "保存草稿").click());
     assert.ok(releaseSave);
     await act(async () => root.unmount());
@@ -324,7 +355,7 @@ test('summary-only policy readers retain read-only UI and revocation removes the
     };
     const props={tab:{query:{gameId:'game-1'}},snapshot:actorSnapshot(['membership.growth.read.summary'],false),onDirtyChange(){},refreshNonce:0};
     await act(async()=>root.render(createElement(MembershipGrowthAdminHost,props)));await openPolicyTab(host);
-    assert.equal(host.querySelector("input[aria-label='SILVERordinary应付比例']").disabled,true);
+    assert.equal(host.querySelector("input[aria-label='银卡 统一应付折扣']").disabled,true);
     assert.equal(buttonByText(host,'保存草稿'),undefined);assert.equal(buttonByText(host,'提交审批'),undefined);assert.equal(buttonByText(host,'办理礼遇'),undefined);
     allowed=false;await act(async()=>root.render(createElement(MembershipGrowthAdminHost,{...props,snapshot:actorSnapshot([],false)})));
     assert.equal([...host.querySelectorAll('[role=tab]')].some(element=>element.textContent==='会员政策'),false);

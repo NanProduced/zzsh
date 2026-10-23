@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   adminRequest,
@@ -12,9 +12,11 @@ import {
   type ContentMediaOptionsPage,
 } from "../api";
 import { Button, StatusMessage } from "../components/ui-elements";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";
 
 const inputClass = "w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs";
 const textAreaClass = "w-full min-h-40 px-3 py-2 rounded border border-border bg-surface-raised text-xs leading-relaxed";
+type WithdrawalTarget = { itemId: string; versionId: string; expectedRevision: string };
 
 export function itemStateLabel(item: ContentItemRow): string {
   if (item.published) return "已发布";
@@ -60,6 +62,13 @@ export function ItemEditor({
   const [success, setSuccess] = useState<string>();
   const [preview, setPreview] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [withdrawIntent, setWithdrawIntent] = useState<WithdrawalTarget | null>(null);
+  const withdrawIntentRef = useRef<WithdrawalTarget | null>(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const targetRef = useRef({ itemId: item.id, versionId: published?.id, expectedRevision: item.revision, canPublish });
+  targetRef.current = { itemId: item.id, versionId: published?.id, expectedRevision: item.revision, canPublish };
+  const cancelWithdraw = useCallback(() => { withdrawIntentRef.current = null; setWithdrawIntent(null); }, []);
   const [options, setOptions] = useState<ContentMediaOption[]>([]);
   const [optionsCursor, setOptionsCursor] = useState<string | null>(null);
   const [optionsLoading, setOptionsLoading] = useState(false);
@@ -71,6 +80,14 @@ export function ItemEditor({
     onDirtyChange(JSON.stringify(model) !== baseline);
   }, [baseline, model, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+  useEffect(() => {
+    const pending = withdrawIntentRef.current;
+    if (pending && (busy || !canPublish || pending.itemId !== item.id || pending.versionId !== published?.id || pending.expectedRevision !== item.revision)) cancelWithdraw();
+  }, [busy, canPublish, cancelWithdraw, item.id, item.revision, published?.id]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; withdrawIntentRef.current = null; };
+  }, []);
 
   const loadOptions = async (cursor: string | null) => {
     if (!cursor) {
@@ -104,6 +121,9 @@ export function ItemEditor({
   };
 
   const run = async (action: () => Promise<void>, successText: string, conflictText?: string): Promise<void> => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    cancelWithdraw();
     setBusy(true);
     setError(undefined);
     setSuccess(undefined);
@@ -114,6 +134,7 @@ export function ItemEditor({
     } catch (failure) {
       setError(conflictText && failure instanceof AdminApiError && failure.code === "CONFLICT" ? conflictText : friendlyError(failure));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -153,9 +174,19 @@ export function ItemEditor({
   };
 
   const withdraw = () => {
-    if (!published || !window.confirm("撤回后公共接口立即不可读，历史版本保留。确定撤回？")) return;
+    const target = targetRef.current;
+    if (!mountedRef.current || busyRef.current || !target.canPublish || !target.versionId) return;
+    const pending = { itemId: target.itemId, versionId: target.versionId, expectedRevision: target.expectedRevision };
+    withdrawIntentRef.current = pending;
+    setWithdrawIntent(pending);
+  };
+
+  const confirmWithdraw = () => {
+    const pending = withdrawIntentRef.current, target = targetRef.current;
+    cancelWithdraw();
+    if (!pending || !mountedRef.current || busyRef.current || !target.canPublish || pending.itemId !== target.itemId || pending.versionId !== target.versionId || pending.expectedRevision !== target.expectedRevision) return;
     void run(async () => {
-      await adminRequest(`/content/items/${item.id}/withdraw`, { versionId: published.id, expectedRevision: item.revision });
+      await adminRequest(`/content/items/${pending.itemId}/withdraw`, { versionId: pending.versionId, expectedRevision: pending.expectedRevision });
     }, "已撤回；公共接口不再返回该内容。");
   };
 
@@ -293,6 +324,16 @@ export function ItemEditor({
           </table>
         </div>
       </details>
+      <Dialog open={withdrawIntent !== null} onOpenChange={open => { if (!open) cancelWithdraw(); }}>
+        <DialogContent showCloseButton={false} role="alertdialog">
+          <DialogTitle>确认撤回内容</DialogTitle>
+          <DialogDescription>撤回后公共接口立即不可读，历史版本保留。确定撤回？</DialogDescription>
+          <DialogFooter>
+            <Button type="button" size="sm" variant="secondary" autoFocus onClick={cancelWithdraw}>取消</Button>
+            <Button type="button" size="sm" variant="danger" disabled={busy || !canPublish} onClick={confirmWithdraw}>确定撤回</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
