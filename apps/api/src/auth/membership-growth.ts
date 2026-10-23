@@ -110,6 +110,22 @@ function parseCents(value: string, field: string, signed = true): bigint {
   return BigInt(value);
 }
 
+/** A missing field is the immutable legacy zero allowance; malformed or conflicting benefits fail closed. */
+export function parseDepositAllowanceCents(value: unknown, depositWaived: unknown = false): string {
+  if (typeof depositWaived !== "boolean") fail("INVALID_AMOUNT", "depositWaived must be boolean");
+  const allowance = value === undefined ? 0n : parseCents(value as string, "depositAllowanceCents", false);
+  if (depositWaived && allowance !== 0n) fail("INVALID_AMOUNT", "A full waiver cannot carry a finite allowance");
+  return allowance.toString();
+}
+
+export function tenantDepositAfterBenefit(baseCents: string | null, depositWaived: boolean, allowanceCents?: string): string | null {
+  const allowance = BigInt(parseDepositAllowanceCents(allowanceCents, depositWaived));
+  if (depositWaived) return "0";
+  if (baseCents === null) return null;
+  const base = parseCents(baseCents, "tenantDepositCents", false);
+  return (base > allowance ? base - allowance : 0n).toString();
+}
+
 function parseId(value: string, field: string, maxLength = 127): string {
   if (typeof value !== "string" || value.length > maxLength || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)) fail("INVALID_REFERENCE", `${field} is invalid`);
   return value;
@@ -518,6 +534,7 @@ export type EntitlementCap = ModePricingContract | EntitlementCapByMode;
 export type TierBenefitConfig = {
   tier: NormalGrowthTier;
   tenantDeposit: "ACCOUNT_BASE" | "WAIVED";
+  depositAllowanceCents?: string;
   /** A mode disabled by the bound SEALED release may omit its contract; enabled modes must be CONFIGURED to publish. */
   pricing: Partial<Record<RentalMode, ModePricingContract>>;
   entitlementCap: EntitlementCap;
@@ -786,6 +803,8 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
       continue;
     }
     if (config.tenantDeposit !== "ACCOUNT_BASE" && config.tenantDeposit !== "WAIVED") result.errors.push(`tiers.${tier}.tenantDeposit`);
+    try { parseDepositAllowanceCents(config.depositAllowanceCents, config.tenantDeposit === "WAIVED"); }
+    catch { result.errors.push(`tiers.${tier}.depositAllowanceCents`); }
     for (const mode of ["ordinary", "custom", "fast"] as const) {
       const contract = config.pricing?.[mode];
       const path = `tiers.${tier}.pricing.${mode}`;
@@ -896,6 +915,9 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
     const higher = value?.tiers?.[NORMAL_GROWTH_TIERS[index]!];
     if (!lower || !higher) continue;
     if (lower.tenantDeposit === "WAIVED" && higher.tenantDeposit !== "WAIVED") result.errors.push(`tiers.${higher.tier}.tenantDeposit.not_monotonic`);
+    try {
+      if (higher.tenantDeposit !== "WAIVED" && BigInt(parseDepositAllowanceCents(higher.depositAllowanceCents)) < BigInt(parseDepositAllowanceCents(lower.depositAllowanceCents))) result.errors.push(`tiers.${higher.tier}.depositAllowanceCents.not_monotonic`);
+    } catch { /* Each invalid field is reported above. */ }
     for (const mode of enabled) {
       const lowerContract = lower.pricing?.[mode];
       const higherContract = higher.pricing?.[mode];
@@ -938,6 +960,7 @@ export type EntitlementCandidate = {
   /** Legacy haff/materials contract or the owner total-discount contract. */
   pricing: ModePricingContract;
   depositWaived?: boolean;
+  depositAllowanceCents?: string;
   reason: string;
   requestedBy: string;
 };
@@ -972,6 +995,8 @@ function pricingWithinCap(candidate: GrowthPricingContract, cap: GrowthPricingCo
 
 export function validateEntitlementCandidate(candidate: EntitlementCandidate, _membershipTier: GrowthTier, policy: GrowthBenefitPolicy): EntitlementValidation {
   const errors: string[] = [];
+  try { parseDepositAllowanceCents(candidate.depositAllowanceCents, candidate.depositWaived ?? false); }
+  catch { errors.push("depositAllowanceCents"); }
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(candidate.userId)) errors.push("userId");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(candidate.scopeKey)) errors.push("scopeKey");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$/.test(candidate.requestedBy)) errors.push("requestedBy");
@@ -1072,6 +1097,7 @@ export type GrowthOfferBuildInput = {
   entitlementId?: string;
   validUntil?: string | null;
   depositWaivedOverride?: boolean;
+  depositAllowanceCents?: string;
 };
 
 export function computeGrowthOfferPlan(input: GrowthOfferBuildInput): { knowledge: "KNOWN"; plan: GrowthOfferPlan } | { knowledge: "UNKNOWN"; reason: "QUOTE_UNAVAILABLE"; reasonCodes: string[] } {
@@ -1084,7 +1110,8 @@ export function computeGrowthOfferPlan(input: GrowthOfferBuildInput): { knowledg
     ...(input.entitlementId === undefined ? {} : { entitlementId: input.entitlementId }),
     ...(input.validUntil === undefined ? {} : { validUntil: input.validUntil }),
   });
-  return { knowledge: "KNOWN", plan: input.depositWaivedOverride === true ? { ...plan, depositWaived: true } : plan };
+  const depositCents = tenantDepositAfterBenefit(plan.depositCents, input.depositWaivedOverride === true, input.depositAllowanceCents);
+  return { knowledge: "KNOWN", plan: { ...plan, depositCents, depositWaived: depositCents === "0" } };
 }
 
 export type OfferChoice =
@@ -1107,8 +1134,12 @@ export function chooseCompleteOffer(plans: readonly GrowthOfferPlan[], asOf: str
     if (amount !== 0n) return amount < 0n ? -1 : 1;
     return a.source === "GROWTH" ? -1 : b.source === "GROWTH" ? 1 : 0;
   })[0]!;
-  const waiver = valid.find((plan) => plan.depositWaived);
-  const depositBasis = waiver?.source ?? (selected.depositCents === null ? "UNKNOWN" : selected.source);
-  if (depositBasis === "UNKNOWN") return { knowledge: "UNKNOWN", reason: "DEPOSIT_UNKNOWN" };
-  return { knowledge: "KNOWN", selected, priceBasis: selected.source, depositBasis, depositCents: waiver ? "0" : selected.depositCents };
+  // Independently choose the lowest payable deposit: allowances share one base and never add together.
+  const deposits = valid.filter(plan => plan.depositWaived || plan.depositCents !== null).sort((a, b) => {
+    const difference = parseCents(a.depositWaived ? "0" : a.depositCents!, "depositCents", false) - parseCents(b.depositWaived ? "0" : b.depositCents!, "depositCents", false);
+    return difference < 0n ? -1 : difference > 0n ? 1 : a.source === "GROWTH" ? -1 : b.source === "GROWTH" ? 1 : 0;
+  });
+  const deposit = deposits[0];
+  if (!deposit || valid.some(plan => plan.depositCents === null && !plan.depositWaived) && !deposit.depositWaived && deposit.depositCents !== "0") return { knowledge: "UNKNOWN", reason: "DEPOSIT_UNKNOWN" };
+  return { knowledge: "KNOWN", selected, priceBasis: selected.source, depositBasis: deposit.source, depositCents: deposit.depositWaived ? "0" : deposit.depositCents };
 }

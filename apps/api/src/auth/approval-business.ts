@@ -65,6 +65,10 @@ export function membershipBusinessPermission(operationCode: string, stage: "REQU
       : ADMIN_PERMISSION.membershipEntitlementExecute;
 }
 
+export function membershipDecisionRequiresBoss(operationCode: string): boolean {
+  return operationCode === "membership.benefit.policy.publish";
+}
+
 /** 执行侧是否要求游戏对象范围：与会员执行器实际校验保持一致，不机械加严审批前置。 */
 export function membershipOperationRequiresGameScope(operationCode: string): boolean {
   return operationCode !== "membership.benefit.policy.publish";
@@ -88,13 +92,13 @@ export type ApprovalRequestFacts = {
 
 export function editableEntitlementApprovalPayload(payload: Record<string, unknown>): Record<string, unknown> | null {
   if (!isTotalDiscountContract(payload.pricing) || entitlementPricingSummary(payload.pricing).knowledge !== "KNOWN") return null;
-  const fields = ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "reason", "pricing"];
+  const fields = ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "depositAllowanceCents", "reason", "pricing"];
   if (Object.keys(payload).some((field) => !fields.includes(field))) return null;
   if (["userId", "gameId", "kind", "policyId", "scopeKey", "startsAtUtc", "endsAtUtc", "reason"].some((field) => typeof payload[field] !== "string")) return null;
   if (Object.keys(payload.pricing).some((field) => !["status", "kind", "mode", "priceVersionId", "payableRatio", "costBasisRef"].includes(field))) return null;
   const pricing = payload.pricing;
   const result: Record<string, unknown> = {};
-  for (const field of ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "reason"]) if (payload[field] !== undefined) result[field] = payload[field];
+  for (const field of ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "depositAllowanceCents", "reason"]) if (payload[field] !== undefined) result[field] = payload[field];
   result.pricing = { status: pricing.status, kind: pricing.kind, mode: pricing.mode, priceVersionId: pricing.priceVersionId, payableRatio: pricing.payableRatio, costBasisRef: pricing.costBasisRef };
   return result;
 }
@@ -354,7 +358,7 @@ function membershipView(
   const summary: Record<string, unknown> = { schemaVersion: 1, changeSummary: row.summary, payloadVersion: row.payloadVersion, payloadHash: row.finalPayloadHash ?? row.operationPayloadHash, requestPayloadHash: row.operationPayloadHash, finalPayloadHash: row.finalPayloadHash ?? null, payloadSource: row.finalPayload ? "APPROVED_FINAL" : "REQUEST_ORIGINAL" };
   if (row.operationCode === "membership.entitlement.grant" || row.operationCode === "membership.entitlement.replace") {
     summary.pricingSummary = entitlementPricingSummary(payload.pricing);
-    if (row.finalPayload) summary.originalRequest = { startsAt: textField(row.operationPayload, "startsAtUtc"), endsAt: textField(row.operationPayload, "endsAtUtc"), depositWaived: booleanField(row.operationPayload, "depositWaived"), reason: textField(row.operationPayload, "reason"), pricingSummary: entitlementPricingSummary(row.operationPayload.pricing) };
+    if (row.finalPayload) summary.originalRequest = { startsAt: textField(row.operationPayload, "startsAtUtc"), endsAt: textField(row.operationPayload, "endsAtUtc"), depositWaived: booleanField(row.operationPayload, "depositWaived"), depositAllowanceCents: textField(row.operationPayload, "depositAllowanceCents"), reason: textField(row.operationPayload, "reason"), pricingSummary: entitlementPricingSummary(row.operationPayload.pricing) };
   }
   const refs: Record<string, unknown>[] = [{ type: "membership_game", id: gameId ?? null }];
   if (gameId) {
@@ -372,6 +376,8 @@ function membershipView(
   }
   const depositWaived = booleanField(payload, "depositWaived");
   if (depositWaived !== null) summary.depositWaived = depositWaived;
+  const depositAllowance = textField(payload, "depositAllowanceCents");
+  if (depositAllowance !== null && /^(0|[1-9]\d{0,23})$/.test(depositAllowance)) summary.depositAllowanceCents = depositAllowance;
 
   const policyId = textField(payload, "policyId");
   const draftId = textField(payload, "policyDraftId");

@@ -13,6 +13,7 @@ import {
   APPROVAL_TEST_OPERATION,
   approvalRegistration,
   membershipBusinessPermission,
+  membershipDecisionRequiresBoss,
   membershipOperationRequiresGameScope,
   editableEntitlementApprovalPayload,
   projectApprovalBusinesses,
@@ -303,6 +304,7 @@ export function evaluateApprovalActions(input: ApprovalActionContext): ApprovalA
     if (!input.twoFactorEnabled) return build(action, "TWO_FACTOR_REQUIRED", approvePermission);
     if (!input.isCandidate) return build(action, "NOT_CANDIDATE", approvePermission);
     if (selfRequester) return build(action, "SELF_REQUEST_NOT_ALLOWED", approvePermission);
+    if (membershipDecisionRequiresBoss(row.operationCode) && !access.isBoss) return build(action, "BUSINESS_PERMISSION_REQUIRED", businessPermission, "BOSS_REVIEW_REQUIRED");
     if (businessPermission && !access.isBoss && !hasPermission(access, businessPermission)) return build(action, "BUSINESS_PERMISSION_REQUIRED", businessPermission);
     if (scopeDenied) return build(action, "GAME_SCOPE_DENIED", businessPermission);
     if (withState && status === "EXPIRED") return build(action, "EXPIRED", approvePermission);
@@ -475,7 +477,7 @@ function immutablePayload(body: Record<string, unknown>): { value: Record<string
 function assertFinalPayloadTarget(row: RequestRow, final: Record<string, unknown>, expectedHash: string): void {
   if (!AMENDABLE_ENTITLEMENTS.has(row.operationCode)) invalid("This operation does not support amended approval");
   if (row.operationPayloadHash !== expectedHash) conflict("Approval request payload changed; reload before deciding");
-  const mutable = new Set(["startsAtUtc", "endsAtUtc", "pricing", "depositWaived", "reason"]);
+  const mutable = new Set(["startsAtUtc", "endsAtUtc", "pricing", "depositWaived", "depositAllowanceCents", "reason"]);
   const fixed = (payload: Record<string, unknown>) => Object.fromEntries(Object.entries(payload).filter(([key]) => !mutable.has(key)));
   if (hashApprovalPayload(fixed(row.operationPayload)).hash !== hashApprovalPayload(fixed(final)).hash) conflict("An amended approval must keep the original recipient and business references");
   const pricingFixed = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "payableRatio")) : {};
@@ -1246,6 +1248,7 @@ function candidateReasonCode(state: CandidateAccessState, row?: RequestRow): str
   if (!state.twoFactorEnabled) return "TWO_FACTOR_REQUIRED";
   if (!row) return "OK";
   const business = membershipBusinessPermission(row.operationCode, "DECIDE");
+  if (membershipDecisionRequiresBoss(row.operationCode) && !state.isBoss) return "BUSINESS_PERMISSION_REQUIRED";
   if (business && !candidatePermission(state, business)) return "BUSINESS_PERMISSION_REQUIRED";
   if (businessScopeDenied({ isBoss: state.isBoss, gameScope: state.gameScope }, row.operationCode, row.operationPayload)) return "GAME_SCOPE_DENIED";
   return "OK";

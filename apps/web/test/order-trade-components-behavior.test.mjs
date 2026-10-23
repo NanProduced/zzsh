@@ -263,6 +263,25 @@ function loadPanelForSession(sessionObject, optionsResponder, extraSupplyApi) {
   }).RentalConfirmPanel;
 }
 
+test("a partially reduced deposit freezes the actual payable deposit in the unknown-create receipt", async () => {
+  await withDom(async window => {
+    const accountId = "allowance_account", log = [];
+    const partial = { ...confirmation, quote: { ...confirmation.quote, tenantDeposit: money("100.00"), tenantPayableTotal: money("270.00") } };
+    const fetchImpl = router([
+      { match: "/api/order-confirmations", method: "POST", respond: () => json(partial) },
+      { match: "/api/v2/orders", method: "POST", respond: () => { throw new TypeError("unknown create"); } },
+    ], log);
+    const Panel = loadPanel("user_A", async () => publishingOptions);
+    const probe = createProbe(window, Panel, { accountId, gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees }, fetchImpl);
+    try {
+      await probe.render();await probe.click("查看我的报价");await probe.click("确认并创建订单");
+      const original = intents.loadIntent("user_A", "order.create.v2", accountId);
+      assert.equal(original.context.deposit, "100.00", "never freeze the 300-yuan original deposit after a 200-yuan allowance");
+      assert.equal(original.context.payable, "270.00");assert.equal(log.filter(entry => entry.url.endsWith("/api/v2/orders")).length, 1);
+    } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", accountId)); }
+  });
+});
+
 function loadPanel(sessionUser, optionsResponder) {
   return loadPanelForSession(session(sessionUser), optionsResponder);
 }

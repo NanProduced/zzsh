@@ -20,7 +20,7 @@ export type MembershipGrowthData = {
   nextExpiryAt: string | null;
   benefits: Array<{ label: string; value: string; sourceVersion?: string }>;
   comparison?: Array<{ tier: string; deposit: string; pricing: string }>;
-  entitlements: Array<{ id: string; kind: EntitlementKind; label: string; scope: string; gameId?: string | null; gameName?: string | null; startsAt: string; endsAt: string; state: EntitlementState; depositWaived: boolean; pricingSummary: EntitlementPricingSummary }>;
+  entitlements: Array<{ id: string; kind: EntitlementKind; label: string; scope: string; gameId?: string | null; gameName?: string | null; startsAt: string; endsAt: string; state: EntitlementState; depositWaived: boolean; depositAllowanceCents?: string; pricingSummary: EntitlementPricingSummary }>;
   contributions: Array<{ label: string; effectiveAt: string; amountCents: string; exitsAt: string; kind: "CONSUMPTION" | "CORRECTION" }>;
   pendingCount: number;
 };
@@ -108,6 +108,8 @@ function entitlementRecords(body: RecordValue): MembershipGrowthData["entitlemen
   const entitlements = requiredRecords(body.entitlements, "entitlements");
   return entitlements.filter(isRecord).map((item) => {
     const kind: EntitlementKind = item.kind === "PRESTIGE" ? "PRESTIGE" : item.kind === "FRIEND" ? "FRIEND" : "UNKNOWN";
+    const allowance = item.depositAllowanceCents === undefined ? "0" : item.depositAllowanceCents;
+    if (typeof allowance !== "string" || !/^(0|[1-9]\d{0,23})$/.test(allowance) || item.depositWaived === true && allowance !== "0") throw new MembershipGrowthRequestError(200, { error: { code: "MEMBERSHIP_CONTRACT_REQUIRED", message: "押金权益数据待核" } });
     return {
       id: text(item.id, "entitlements.id"),
       kind,
@@ -119,6 +121,7 @@ function entitlementRecords(body: RecordValue): MembershipGrowthData["entitlemen
       endsAt: text(item.endsAtUtc, "entitlements.endsAtUtc"),
       state: (ENTITLEMENT_STATES as readonly string[]).includes(item.status as string) ? (item.status as EntitlementState) : "UNKNOWN",
       depositWaived: item.depositWaived === true,
+      depositAllowanceCents: allowance,
       pricingSummary: entitlementPricing(item.pricingSummary),
     };
   });

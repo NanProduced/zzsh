@@ -14,6 +14,25 @@ const known = {
   entitlements: [{ id: "e1", kind: "FRIEND", label: "挚友礼遇", scopeKey: "game:delta", startsAtUtc: "2026-10-01T00:00:00.000Z", endsAtUtc: "2026-10-20T00:00:00.000Z", status: "ACTIVE", depositWaived: false }],
 };
 
+test("deposit allowance preserves exact cents, legacy full waiver and fails closed for malformed benefits", async () => {
+  const original = globalThis.fetch;
+  try {
+    let entitlement = { ...known.entitlements[0], depositWaived: false, depositAllowanceCents: "20000" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...known, entitlements: [entitlement] }), { status: 200 });
+    const partial = await readMyMembershipGrowth();
+    assert.equal(partial.status, "ready");assert.equal(partial.data.entitlements[0].depositAllowanceCents, "20000");
+    entitlement = { ...known.entitlements[0], depositWaived: true };
+    const legacy = await readMyMembershipGrowth();
+    assert.equal(legacy.data.entitlements[0].depositWaived, true);assert.equal(legacy.data.entitlements[0].depositAllowanceCents, "0");
+    for (const value of ["1.5", -1, null, "0200", "9".repeat(25)]) {
+      entitlement = { ...known.entitlements[0], depositAllowanceCents: value };
+      await assert.rejects(() => readMyMembershipGrowth(), error => error.code === "MEMBERSHIP_CONTRACT_REQUIRED");
+    }
+    entitlement = { ...known.entitlements[0], depositWaived: true, depositAllowanceCents: "20000" };
+    await assert.rejects(() => readMyMembershipGrowth());
+  } finally { globalThis.fetch = original; }
+});
+
 function consumptionPage(patch = {}) {
   return { contractVersion: "membership-growth.consumption.v1", subjectId: "user_1", scope: "LIFETIME", asOfUtc: "2026-10-18T00:00:00.123456Z", windowStartUtc: "2026-07-20T00:00:00.123456Z", snapshotVersion: "a".repeat(64), knowledge: "KNOWN", sourceState: "COMPLETE", amountCents: "98", points: "1", total: 2, nextCursor: null, sourceSummary: { contributionCount: 2, pendingCount: 0, excludedCount: 0 }, items: [0, 1].map((n) => ({ id: "growth_source_" + String(n).repeat(48), label: "租赁结算消费", amountCents: "49", effectiveAt: "2026-05-10T00:00:00Z", recordedAt: "2026-05-10T00:00:00Z", expiresAt: "2026-08-08T00:00:00Z", withinWindow: false, corrected: false, revision: 0 })), ...patch };
 }

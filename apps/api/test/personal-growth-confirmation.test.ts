@@ -10,6 +10,16 @@ import {compatRule} from "./pricing-compat-fixture";
 const asOf="2026-10-16T04:00:00.123456Z",binding:OfferBinding={userId:"user-1",ownerUserId:"owner-1",accountId:"account-1",listingVersionId:"version-1",ruleReleaseId:"release-1",quantityDigest:"a".repeat(64)};
 function input(base="47",deposit="30000"):QuoteInput{return {priceVersionId:"price-v1",mode:"SPREAD",roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD",haffRule:compatRule(base),lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",unit:"HAFF_BASE",customerTier:"STANDARD"}],conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"ordinary"}},termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"},deposits:{tenantDepositCents:deposit,publisherBailRequirementCents:"0"}};}
 function quote(base="47",deposit="30000"):InternalQuote{const result=computeDeltaQuote(input(base,deposit));assert(result.quotable,result.quotable?"":result.reasonCodes.join(","));return result.quote;}
+
+test("partial deposit source freezes its own identity and expiry without adding allowances or altering rental lines",()=>{
+ const growth=quote("55","20000"),friend=quote("47","10000");
+ const data:GrowthConfirmationKnown={knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:asOf,policyVersion:"1",entitlementIds:["friend-1"],candidates:[{quote:growth,plan:quoteToGrowthOfferPlan(growth,{source:"GROWTH",benefitVersion:"1",binding})},{quote:friend,plan:quoteToGrowthOfferPlan(friend,{source:"FRIEND",benefitVersion:"2",binding,entitlementId:"friend-1",validUntil:"2026-10-20T00:00:00.000000Z"})}]};
+ const before=JSON.stringify(data),selected=selectPersonalGrowthOffer(data,binding,asOf,quote("47","40000"));
+ assert.equal(selected.benefits.priceSource,"GROWTH");assert.equal(selected.benefits.depositSource,"FRIEND");
+ assert.equal(selected.quote.tenantDeposit?.amount,"100.00");assert.equal(selected.growth.depositCents,"10000");
+ assert.equal(selected.growth.depositEntitlementId,"friend-1");assert.equal(selected.growth.depositValidUntil,"2026-10-20T00:00:00.000000Z");
+ assert.deepEqual(selected.quote.lines,growth.lines);assert.equal(JSON.stringify(data),before);
+});
 function known():GrowthConfirmationKnown{
  const growth=quote("47","0"),friend=quote("55","30000");
  return {knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:asOf,policyVersion:"1",entitlementIds:["friend-1"],candidates:[{quote:growth,plan:quoteToGrowthOfferPlan(growth,{source:"GROWTH",benefitVersion:"1",binding})},{quote:friend,plan:quoteToGrowthOfferPlan(friend,{source:"FRIEND",benefitVersion:"1",binding,entitlementId:"friend-1",validUntil:"2026-10-17T00:00:00.000000Z"})}]};

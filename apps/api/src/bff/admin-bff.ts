@@ -463,7 +463,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleDistributionPolicyAdmin(request, response as never, { ...options.adminSecurityOptions, distributionScope: options.distributionScope, distributionReadScope: options.distributionReadScope });
     return;
   }
-  const membershipGrowthPolicy = /^\/membership-growth\/(policy|policy-drafts|backfill|entitlements|entitlement-context|entitlement-options)$/.test(path);
+  const membershipGrowthPolicy = /^\/membership-growth\/(policy|policy-drafts|backfill|entitlements|entitlement-context|entitlement-options|profit-simulation|profit-simulation-context)$/.test(path);
   if (membershipGrowthPolicy) {
     if ((path.endsWith("/policy") && method !== "GET") || (path.endsWith("/policy-drafts") && method !== "POST") || (path.endsWith("/backfill") && method !== "POST")) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);

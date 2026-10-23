@@ -220,7 +220,7 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
     const context: StoredContext = {
       payable: quote.quote?.tenantPayableTotal?.amount,
       tier: personalMembershipLabel(quote),
-      deposit: quote.depositWaived ? undefined : quote.baseTenantDeposit?.amount,
+      deposit: quote.depositWaived ? undefined : quote.quote?.tenantDeposit?.amount,
       expiresAt: quote.expiresAt,
       ...(quote.compensationDisclosure ? { disclosure: quote.compensationDisclosure.disclosureVersion } : {}),
     };

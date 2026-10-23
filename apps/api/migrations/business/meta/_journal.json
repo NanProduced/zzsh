@@ -673,6 +673,13 @@
       "when": 1792627200004,
       "tag": "0095_approval_final_payload",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1792713600000,
+      "tag": "0096_membership_deposit_allowance",
+      "breakpoints": true
     }
   ]
 }

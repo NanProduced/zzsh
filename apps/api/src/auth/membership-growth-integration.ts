@@ -10,6 +10,8 @@ import {
   NORMAL_GROWTH_TIERS,
   isTotalDiscountContract,
   quoteToGrowthOfferPlan,
+  parseDepositAllowanceCents,
+  tenantDepositAfterBenefit,
   replayGrowthProjection,
   projectGrowthConsumptionSources,
   sealedEnabledRentalModes,
@@ -35,7 +37,7 @@ import {
 import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { applyTotalDiscountToQuote } from "./membership-total-discount";
 import { canonicalize, normalizeTime } from "../supply/content-hash";
-import { decimalToBigInt, parseNonNegativeDecimal } from "../supply/decimal";
+import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { type MembershipGrowthConfirmationReader } from "../order/personal-confirmation";
 import { recordAudit, SecurityApiError, withTransaction } from "./security-core";
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "./admin-authorization";
@@ -461,6 +463,7 @@ export type GrowthEntitlementSummary = {
   status: ExistingEntitlement["status"];
   label: string;
   depositWaived: boolean;
+  depositAllowanceCents?: string;
   pricingSummary?: EntitlementPricingSummary;
 };
 
@@ -472,7 +475,7 @@ export type GrowthReaderResponse = {
 };
 
 type StoredContribution = GrowthContribution & { gameId: string; sourceDigest?: string | null };
-type StoredEntitlement = { id: string; kind: "FRIEND" | "PRESTIGE"; scopeKey: string; gameId?: string | null; gameName?: string | null; startsAt: string; endsAt: string; status: ExistingEntitlement["status"]; depositWaived: boolean; pricingPayload?: unknown };
+type StoredEntitlement = { id: string; kind: "FRIEND" | "PRESTIGE"; scopeKey: string; gameId?: string | null; gameName?: string | null; startsAt: string; endsAt: string; status: ExistingEntitlement["status"]; depositWaived: boolean; depositAllowanceCents?: string | null; pricingPayload?: unknown };
 type StoredQuoteEntitlement = StoredEntitlement & { pricingPayload: unknown };
 type StoredGrowthState = { normalTier: string; effectiveTier: string; blackGoldState: string; lastTierDropAt: string | null };
 type StoredGrowthPolicy = { id: string; version: string; policyPayload: Record<string, unknown>; haffRule: unknown };
@@ -502,7 +505,7 @@ function configuredMaterial(value: unknown): value is Exclude<MaterialPricingPar
   return isObject(value) && value.status === "CONFIGURED" && value.kind === "FIXED_UNIT" && typeof value.itemId === "string" && typeof value.unit === "string" && typeof value.unitQuantity === "string" && typeof value.buyerUnitAmount === "string" && typeof value.ownerUnitAmount === "string";
 }
 
-function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract, depositWaived: boolean): QuoteInput | null {
+function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract): QuoteInput | null {
   const rentalMode = base.conditions.rentalPricing?.rentalMode ?? "ordinary";
   if (contract.mode !== rentalMode || contract.priceVersionId !== base.priceVersionId) return null;
   if (!configuredHaff(contract.haff)) return null;
@@ -537,21 +540,23 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract, 
   } else if (base.haffRule) {
     haffRule = { ...base.haffRule, baseBySafeBox: haff.baseBySafeBox, ...(base.mode === "SPREAD" ? { spreadDelta: haff.spreadDelta } : {}) };
   }
-  return { ...base, customerTier: "STANDARD", lines, haffRule, deposits: { ...base.deposits, ...(depositWaived ? { tenantDepositCents: "0" } : {}) } };
+  return { ...base, customerTier: "STANDARD", lines, haffRule };
 }
 
-function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string): { plan: GrowthOfferPlan; quote: InternalQuote } | null {
+  const depositCents = tenantDepositAfterBenefit(base.deposits?.tenantDepositCents ?? null, depositWaived, allowanceCents);
+  base = { ...base, deposits: { ...base.deposits, ...(depositCents === null ? {} : { tenantDepositCents: depositCents }) } };
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
   if (isTotalDiscountContract(contract)) {
     const rentalMode = base.conditions.rentalPricing?.rentalMode ?? "ordinary";
     if (contract.mode !== rentalMode || contract.priceVersionId !== base.priceVersionId) return null;
-    const result = computeDeltaQuote({ ...base, deposits: { ...base.deposits, ...(depositWaived ? { tenantDepositCents: "0" } : {}) } });
+    const result = computeDeltaQuote(base);
     if (!result.quotable) return null;
     const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
     if (!discounted) return null;
     return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput) };
   }
-  const input = quoteInputForGrowth(base, contract, depositWaived);
+  const input = quoteInputForGrowth(base, contract);
   if (!input) return null;
   const result = computeDeltaQuote(input);
   if (!result.quotable) return null;
@@ -597,7 +602,14 @@ function policySummaries(policyPayload: Record<string, unknown> | null, policyVe
   if (!policyPayload || benefitsState !== "CONFIGURED") return { benefits: [{ label: "成长权益", value: "尚未发布" }], comparison: [] };
   const tiers = isObject(policyPayload.tiers) ? policyPayload.tiers : {};
   const current = tier && isObject(tiers[tier]) ? tiers[tier] : undefined;
-  const deposit = current?.tenantDeposit === "WAIVED" ? "免租客押金" : "租客押金按账号条件缴纳";
+  const depositLabel = (config: Record<string, unknown> | undefined) => {
+    if (!config) return "押金权益待核";
+    try {
+      const allowance = parseDepositAllowanceCents(config.depositAllowanceCents, config.tenantDeposit === "WAIVED");
+      return config.tenantDeposit === "WAIVED" ? "免租客押金" : allowance === "0" ? "租客押金按账号条件缴纳" : `租客押金最高减免 ${formatScaledInteger(BigInt(allowance), 2)} 元`;
+    } catch { return "押金权益待核"; }
+  };
+  const deposit = depositLabel(current);
   const modesReady = policyModesReady(current, enabledModes);
   const benefits = [
     { label: "租客押金", value: deposit, ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
@@ -605,7 +617,7 @@ function policySummaries(policyPayload: Record<string, unknown> | null, policyVe
   ];
   const comparison = NORMAL_GROWTH_TIERS.map((candidate) => {
     const item = isObject(tiers[candidate]) ? tiers[candidate] : undefined;
-    return { tier: tierLabel(candidate), deposit: item?.tenantDeposit === "WAIVED" ? "免租客押金" : "租客押金按账号条件缴纳", pricing: policyModesReady(item, enabledModes) ? "完整方案可比价" : "价格方案未就绪" };
+    return { tier: tierLabel(candidate), deposit: depositLabel(item), pricing: policyModesReady(item, enabledModes) ? "完整方案可比价" : "价格方案未就绪" };
   });
   return { benefits, comparison };
 }
@@ -647,7 +659,7 @@ function projectMembershipGrowth(userId: string, rows: StoredContribution[], sto
   return {
     subjectId: userId,
     growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", completeness?.state ?? "READ_FAILED", completeness?.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN", policy?.policyPayload ?? null, policy?.version ?? null, rows, policy ? sealedEnabledRentalModes(policy.haffRule) : null),
-    entitlements: entitlements.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, gameId: item.gameId ?? null, gameName: item.gameName ?? null, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived, pricingSummary: entitlementPricingSummary(item.pricingPayload) })),
+    entitlements: entitlements.map(normalizeStoredEntitlement).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey, gameId: item.gameId ?? null, gameName: item.gameName ?? null, startsAtUtc: item.startsAt, endsAtUtc: item.endsAt, status: entitlementStateAt(item, asOfUtc), label: item.kind === "FRIEND" ? "挚友礼遇" : "尊享礼遇", depositWaived: item.depositWaived, depositAllowanceCents: parseDepositAllowanceCents(item.depositAllowanceCents ?? undefined, item.depositWaived), pricingSummary: entitlementPricingSummary(item.pricingPayload) })),
     sourceSummary: { contributionCount: rows.length, pendingCount: projection.pending.length, excludedCount: projection.excluded.length },
   };
 }
@@ -683,7 +695,7 @@ async function readMembershipGrowthModel(client: PoolClient, userId: string, asO
       WHERE pol.status='APPROVED' AND pol.effective_at <= $1 ORDER BY pol.version DESC LIMIT 1`, [asOfUtc],
   )).rows[0];
   const entitlements = (await client.query<StoredEntitlement>(
-    `SELECT e.id,e.kind,e.scope_key AS "scopeKey",e.game_id AS "gameId",g.name AS "gameName",e.starts_at::text AS "startsAt",e.ends_at::text AS "endsAt",e.status,e.deposit_waived AS "depositWaived",e.pricing_payload AS "pricingPayload"
+    `SELECT e.id,e.kind,e.scope_key AS "scopeKey",e.game_id AS "gameId",g.name AS "gameName",e.starts_at::text AS "startsAt",e.ends_at::text AS "endsAt",e.status,e.deposit_waived AS "depositWaived",e.deposit_allowance_cents::text AS "depositAllowanceCents",e.pricing_payload AS "pricingPayload"
        FROM zzsh_iam.membership_entitlement e LEFT JOIN zzsh_supply.game g ON g.id=e.game_id WHERE e.user_id=$1 ORDER BY e.starts_at DESC,e.id DESC LIMIT 100`, [userId],
   )).rows;
   return { rows, policy, response: projectMembershipGrowth(userId, rows, storedState, completeness, policy, entitlements, asOfUtc) };
@@ -736,7 +748,7 @@ export async function readMembershipGrowthBatch(client: PoolClient, userIds: rea
      WHERE pol.status='APPROVED' AND pol.effective_at<=$1 ORDER BY pol.version DESC LIMIT 1`, [asOf],
   )).rows[0];
   const entitlements = groupGrowthRows((await client.query<StoredEntitlement & { userId: string }>(
-    `SELECT /* directory-growth-entitlements */ ranked.user_id AS "userId",ranked.id,ranked.kind,ranked.scope_key AS "scopeKey",ranked.game_id AS "gameId",g.name AS "gameName",ranked.starts_at::text AS "startsAt",ranked.ends_at::text AS "endsAt",ranked.status,ranked.deposit_waived AS "depositWaived",ranked.pricing_payload AS "pricingPayload"
+    `SELECT /* directory-growth-entitlements */ ranked.user_id AS "userId",ranked.id,ranked.kind,ranked.scope_key AS "scopeKey",ranked.game_id AS "gameId",g.name AS "gameName",ranked.starts_at::text AS "startsAt",ranked.ends_at::text AS "endsAt",ranked.status,ranked.deposit_waived AS "depositWaived",ranked.deposit_allowance_cents::text AS "depositAllowanceCents",ranked.pricing_payload AS "pricingPayload"
      FROM (SELECT e.*,row_number() OVER(PARTITION BY user_id ORDER BY starts_at DESC,id DESC) AS row_no
        FROM zzsh_iam.membership_entitlement e WHERE user_id=ANY($1::text[])) ranked
      LEFT JOIN zzsh_supply.game g ON g.id=ranked.game_id
@@ -853,11 +865,11 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   const growthContract = tier?.pricing?.[rentalMode];
   if (!configuredModeContract(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
-  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED");
+  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents);
   if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
   let rows: StoredQuoteEntitlement[];
   try {
-    rows = (await client.query<StoredQuoteEntitlement>(`SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived", pricing_payload AS "pricingPayload" FROM zzsh_iam.membership_entitlement WHERE user_id=$1 AND game_id=$2 ORDER BY starts_at, id`, [input.userId, input.gameId])).rows.map(normalizeStoredEntitlement);
+    rows = (await client.query<StoredQuoteEntitlement>(`SELECT id, kind, scope_key AS "scopeKey", starts_at::text AS "startsAt", ends_at::text AS "endsAt", status, deposit_waived AS "depositWaived", deposit_allowance_cents::text AS "depositAllowanceCents", pricing_payload AS "pricingPayload" FROM zzsh_iam.membership_entitlement WHERE user_id=$1 AND game_id=$2 ORDER BY starts_at, id`, [input.userId, input.gameId])).rows.map(normalizeStoredEntitlement);
   } catch {
     return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_READ_FAILED", asOfUtc };
   }
@@ -868,7 +880,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     if (state !== "ACTIVE") continue; // proven expired / revoked / replaced / pending / not started: excluded normally
     if (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_KIND_UNKNOWN", asOfUtc, entitlementId: entitlement.id };
     if (!configuredModeContract(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
-    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt);
+    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined);
     if (!candidate) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_QUOTE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     candidates.push(candidate);
     entitlementIds.push(entitlement.id);

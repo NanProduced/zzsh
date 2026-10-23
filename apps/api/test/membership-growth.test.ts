@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   chooseCompleteOffer,
+  parseDepositAllowanceCents,
+  tenantDepositAfterBenefit,
   computeGrowthOfferPlan,
   contributionFromSettlement,
   hasOverlappingEntitlement,
@@ -23,6 +25,51 @@ import {
   type ModePricingContract,
 } from "../src/auth/membership-growth";
 import { compatRule } from "./pricing-compat-fixture";
+
+test("finite deposit reduction clamps to zero, preserves unknown bases and rejects non-cent input", () => {
+  assert.equal(tenantDepositAfterBenefit("40000", false, "20000"), "20000");
+  assert.equal(tenantDepositAfterBenefit("40000", false, "50000"), "0");
+  assert.equal(tenantDepositAfterBenefit("40000", false), "40000");
+  assert.equal(tenantDepositAfterBenefit(null, false, "20000"), null);
+  assert.equal(tenantDepositAfterBenefit(null, true), "0");
+  assert.equal(parseDepositAllowanceCents(undefined, true), "0");
+  for (const value of ["-1", "0.01", 20000, "0200", null, "1e5", "9".repeat(25)]) assert.throws(() => parseDepositAllowanceCents(value));
+  assert.throws(() => parseDepositAllowanceCents("20000", true));
+  assert.throws(() => parseDepositAllowanceCents("0", null));
+});
+
+test("deposit allowance selects the largest valid reduction independently from the cheapest rental", () => {
+  const binding = { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", listingVersionId: "listing-1", ruleReleaseId: "release-1", quantityDigest: "quantity-1" };
+  const growth = { source: "GROWTH" as const, rentalTotalCents: "8000", depositCents: "20000", depositWaived: false, priceVersion: "price-1", benefitVersion: "1", binding };
+  const friend = { ...growth, source: "FRIEND" as const, rentalTotalCents: "9000", depositCents: "10000", entitlementId: "friend-1", validUntil: "2026-11-01T00:00:00Z" };
+  const choice = chooseCompleteOffer([growth, friend], "2026-10-23T00:00:00Z");
+  assert.equal(choice.knowledge, "KNOWN");
+  if (choice.knowledge !== "KNOWN") return;
+  assert.equal(choice.priceBasis, "GROWTH");
+  assert.equal(choice.depositBasis, "FRIEND");
+  assert.equal(choice.depositCents, "10000", "200 and 300 allowances on a 400 deposit take max, not sum");
+  const expired = chooseCompleteOffer([growth, { ...friend, validUntil: "2026-10-23T00:00:00Z" }], "2026-10-23T00:00:00Z");
+  assert.equal(expired.knowledge === "KNOWN" && expired.depositCents, "20000");
+});
+
+test("policy validates exact deposit allowances and monotonic benefits without changing legacy policies", () => {
+  const legacy = policy(), before = JSON.stringify(legacy);
+  assert.equal(validateBenefitPolicy(legacy).valid, true);
+  assert.equal(JSON.stringify(legacy), before);
+  const finite = policy();
+  for (const tier of Object.values(finite.tiers)) Object.assign(tier, { tenantDeposit: "ACCOUNT_BASE", depositAllowanceCents: "20000" });
+  assert.equal(validateBenefitPolicy(finite).valid, true);
+  Object.assign(finite.tiers.SILVER, { depositAllowanceCents: "10000" });
+  assert.equal(validateBenefitPolicy(finite).valid, false, "a higher tier must not reduce the allowance");
+  for (const value of ["-1", "1.5", 20000, "020000", null, "1e4", "9999999999999999999999999"]) {
+    const invalid = policy();
+    Object.assign(invalid.tiers.GOLD, { tenantDeposit: "ACCOUNT_BASE", depositAllowanceCents: value });
+    assert.equal(validateBenefitPolicy(invalid).valid, false, String(value));
+  }
+  const conflict = policy();
+  Object.assign(conflict.tiers.GOLD, { tenantDeposit: "WAIVED", depositAllowanceCents: "20000" });
+  assert.equal(validateBenefitPolicy(conflict).valid, false, "full waiver and a positive allowance are mutually exclusive");
+});
 
 test("public entitlement pricing exposes the real share without internal cost and preserves unknown or legacy", () => {
   const pricing = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "custom", priceVersionId: "price-v1", payableRatio: "0.85000001", costBasisRef: "restricted-cost" };

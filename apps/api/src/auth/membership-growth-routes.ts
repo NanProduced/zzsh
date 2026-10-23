@@ -16,6 +16,7 @@ import { backfillAcceptedSettlementAfterPosting, membershipGrowthEnabled, parseG
 import { canonicalize } from "../supply/content-hash";
 import { GROWTH_THRESHOLDS, NORMAL_GROWTH_TIERS, validateBenefitPolicy, type GrowthBenefitPolicy } from "./membership-growth";
 import { parseMembershipEntitlementQuery, readApprovedMembershipPolicy, readMembershipEntitlementContext, readMembershipEntitlementOptions, readMembershipEntitlements } from "./membership-entitlement-read";
+import { canSimulateMembershipProfit, readMembershipProfitSimulation, readMembershipProfitSimulationContext } from "./membership-profit-simulation";
 
 function originAllowed(request: SupplyNodeRequest, options: AuthSecurityOptions, admin: boolean): boolean {
   const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
@@ -70,6 +71,22 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
     if (!originAllowed(request, options, true) || (request.method !== "GET" && !membershipGrowthEnabled())) throw notFound();
     const path = (request.originalUrl ?? request.url ?? "").split("?", 1)[0] ?? "";
     const context = await readAdminContext(request, options);
+    if (request.method === "POST" && path === "/api/v1/admin/membership-growth/profit-simulation"
+      || request.method === "GET" && path === "/api/v1/admin/membership-growth/profit-simulation-context") {
+      const result = await withTransaction(options.pool, async client => {
+        await client.query("SET TRANSACTION READ ONLY");
+        await assertAdminContextInTransaction(client, context);
+        const access = await loadEffectiveAdminAccess(client, context.userId);
+        if (!access || !canSimulateMembershipProfit(access)) throw forbidden();
+        const viewer = { adminId: context.userId, access };
+        if (request.method === "POST") return readMembershipProfitSimulation(client, viewer, bodyRecord(request));
+        const query = new URL(request.originalUrl ?? request.url ?? "", "http://127.0.0.1").searchParams;
+        for (const key of query.keys()) if (!["ruleReleaseId", "priceVersionId"].includes(key) || query.getAll(key).length !== 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Simulation context query is invalid");
+        return readMembershipProfitSimulationContext(client, viewer, query.get("ruleReleaseId") ?? "", query.get("priceVersionId") ?? "");
+      });
+      sendJson(response, 200, result, requestId);
+      return;
+    }
     if (request.method === "GET" && ["entitlements", "entitlement-context", "entitlement-options"].some(name => path === `/api/v1/admin/membership-growth/${name}`)) {
       const query = new URL(request.originalUrl ?? request.url ?? "", "http://127.0.0.1").searchParams;
       const result = await withTransaction(options.pool, async (client) => {
@@ -113,7 +130,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
         const approvedFields = {
           approvedPolicy: approved?.policy ?? null,
           approvedMeta: approved ? { id: approved.id, version: approved.version, status: "APPROVED", effectiveAtUtc: approved.effectiveAtUtc, ruleReleaseId: approved.ruleReleaseId, priceVersionId: approved.priceVersionId, sourceRef: approved.sourceRef, payloadHash: approved.payloadHash } : null,
-          capability: { canDraft: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canChangeEntitlementRanges: access?.isBoss === true, canRequestEntitlement: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.approvalRequestCreate) && hasPermission(access, ADMIN_PERMISSION.membershipEntitlementRequest) },
+          capability: { canDraft: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canChangeEntitlementRanges: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canRequestEntitlement: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.approvalRequestCreate) && hasPermission(access, ADMIN_PERMISSION.membershipEntitlementRequest), depositAllowanceSupported: true, canSimulateProfit: canSimulateMembershipProfit(access) },
         };
         const thresholds = Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()]));
         const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string; policyPayload: GrowthBenefitPolicy }>(
@@ -172,7 +189,6 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
       const validation = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
       if (!validation.valid) throw new SecurityApiError(409, "CONFLICT", validation.errors.join(","));
       const current = (await client.query<{ version: string; policyPayload: GrowthBenefitPolicy }>(`SELECT version::text AS version,policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy ORDER BY version DESC,created_at DESC LIMIT 1`)).rows[0];
-      if (!access?.isBoss && canonicalize(current?.policyPayload?.entitlementRanges ?? null) !== canonicalize((policy as GrowthBenefitPolicy).entitlementRanges ?? null)) throw new SecurityApiError(403, "FORBIDDEN", "Only Boss may change entitlement ranges");
       if (expectedVersion !== undefined && (typeof expectedVersion !== "string" || expectedVersion !== (current?.version ?? "0"))) throw new SecurityApiError(409, "CONFLICT", "Membership policy version changed");
       await client.query(
         `INSERT INTO zzsh_iam.membership_growth_policy (id,version,status,effective_at,rule_release_id,price_version_id,source_ref,policy_schema,policy_payload,payload_hash)

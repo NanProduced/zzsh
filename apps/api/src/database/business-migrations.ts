@@ -413,7 +413,7 @@ export async function configureMembershipGrowthPrivileges(pool: Pick<Pool, "quer
       ON zzsh_iam.membership_growth_policy TO ${role};
     GRANT INSERT(id,user_id,game_id,source_key,source_type,source_id,settlement_version,revision,effective_at,recorded_at,amount_cents,previous_amount_cents,correction_of_source_key,correction_mode,state,eligible,source_digest)
       ON zzsh_iam.membership_growth_contribution TO ${role};
-    GRANT INSERT(id,user_id,game_id,kind,scope_key,starts_at,ends_at,pricing_schema,pricing_payload,price_version_id,cost_basis_ref,deposit_waived,approved_policy_id,approval_request_id,approved_payload_hash,status)
+    GRANT INSERT(id,user_id,game_id,kind,scope_key,starts_at,ends_at,pricing_schema,pricing_payload,price_version_id,cost_basis_ref,deposit_waived,deposit_allowance_cents,approved_policy_id,approval_request_id,approved_payload_hash,status)
       ON zzsh_iam.membership_entitlement TO ${role};
     GRANT UPDATE(status,revoked_reason,replaced_by_id,updated_at) ON zzsh_iam.membership_entitlement TO ${role};
   `);

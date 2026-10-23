@@ -27,9 +27,9 @@ export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:
   let choice:ReturnType<typeof chooseCompleteOffer>;try{choice=chooseCompleteOffer(known.candidates.map(c=>c.plan),asOfUtc);}catch{return fail("Benefit evidence is invalid");}
   if(choice.knowledge!=="KNOWN" || choice.depositCents===null || choice.depositBasis==="UNKNOWN")return fail("Growth or entitlement offer is unavailable");
   const selected=known.candidates.find(c=>c.plan===choice.selected);if(!selected)return fail("Selected offer cannot be recovered");
-  const depositPlan=known.candidates.find(c=>c.plan.depositWaived && (c.plan.validUntil==null || normalizeTime(c.plan.validUntil)!>normalizeTime(asOfUtc)!))?.plan??choice.selected;
+  const depositPlan=known.candidates.find(c=>c.plan.source===choice.depositBasis && (c.plan.depositWaived?"0":c.plan.depositCents)===choice.depositCents && (c.plan.validUntil==null || normalizeTime(c.plan.validUntil)!>normalizeTime(asOfUtc)!))?.plan;
   if(!depositPlan)return fail("Deposit benefit evidence is unavailable");
-  // Whole price plan wins; the independent valid waiver only changes deposit and derived payable total.
+  // Whole price plan wins; the independent maximum allowance changes only deposit and derived payable total.
   const quote=normalizeQuote({...selected.quote,tenantDeposit:yuanAmountObject(BigInt(choice.depositCents))});
   const benefits:PersonalGrowthBenefits={schema:"membership-benefits-v1",effectiveTier:known.effectiveTier,policyTier:known.policyTier,priceSource:choice.priceBasis,depositSource:choice.depositBasis,policyVersion:known.policyVersion};
   const growth={schema:"membership-growth-v2" as const,policyVersion:known.policyVersion,effectiveTier:known.effectiveTier,policyTier:known.policyTier,selectedSource:choice.priceBasis,depositSource:choice.depositBasis,

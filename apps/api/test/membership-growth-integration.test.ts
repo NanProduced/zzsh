@@ -124,14 +124,15 @@ test("grant and replace validate recipients and lock one subject before checking
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
 
-test("only Boss may publish changes to independent ranges while existing non-Boss policy publication remains allowed", async () => {
+test("an authorized operator may execute an already approved policy with independent ranges", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
   try {
     for (const changeRange of [false, true]) {
       const policy = readerPolicy(); policy.status = "DRAFT";
       if (changeRange) {
         const range = { status: "CONFIGURED" as const, kind: "TOTAL_DISCOUNT_RANGE" as const, mode: "ordinary" as const, priceVersionId: "price-v1", minPayableRatio: "0.8", maxPayableRatio: "1", costBasisRef: "range-cost" };
-        policy.entitlementRanges = { FRIEND: { byMode: { ordinary: range } }, PRESTIGE: { byMode: { ordinary: range } } };
+        const byMode = Object.fromEntries((["ordinary", "custom", "fast"] as const).map(mode => [mode, { ...range, mode }]));
+        policy.entitlementRanges = { FRIEND: { byMode }, PRESTIGE: { byMode } };
       }
       const fixture = draftApprovalFixture(policy);
       const original = fixture.client.query;
@@ -142,8 +143,8 @@ test("only Boss may publish changes to independent ranges while existing non-Bos
         return original(sql, args);
       };
       const run = () => executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: "publisher", sessionId: "session-1" }, "publish-1");
-      if (changeRange) { await assert.rejects(run, (error: any) => error.status === 403); assert.equal(fixture.inserted.length, 0); }
-      else assert.equal((await run()).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+      assert.equal((await run()).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+      assert.equal(fixture.inserted.length, 1);
     }
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
@@ -466,6 +467,29 @@ function growthReaderClient(state: { normalTier: string; effectiveTier: string; 
     throw new Error(`unexpected query: ${sql}`);
   } } as never;
 }
+
+test("formal growth reader applies finite member and entitlement allowances to one base without extra queries", async () => {
+  const asOf = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+  const fact = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-10T00:00:00.000Z", recordedAt: "2026-10-10T00:00:00.000Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+  const contributions = [{ ...fact, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", fact) }];
+  const policy = discountPolicyPayload(), haffRule = compatRule(); haffRule.compatibility!.modes.fast = { enabled: false };
+  Object.values(policy.tiers).forEach((tier, index) => { tier.tenantDeposit = "ACCOUNT_BASE"; tier.depositAllowanceCents = String(index * 10000); });
+  const entitlement = { id: "ent-allowance", kind: "FRIEND", scopeKey: "game:game-1", startsAt: "2026-10-01T00:00:00.000Z", endsAt: "2026-10-20T00:00:00.000Z", status: "ACTIVE", depositWaived: false, depositAllowanceCents: "30000", pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", mode: "ordinary", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "synthetic-cost" } };
+  const fixture = growthReaderClient(state, contributions, policy, "10000.00", "a".repeat(64), false, haffRule, [entitlement]) as unknown as { query(sql: string): Promise<unknown> };
+  const queries: string[] = [], client = { query: async (sql: string) => { queries.push(sql); return fixture.query(sql); } } as never;
+  const input = { ...quoteInput(), haffRule, deposits: { tenantDepositCents: "40000", publisherBailRequirementCents: "0" } }, before = JSON.stringify(input);
+  const base = computeDeltaQuote(input); assert(base.quotable);
+  const result = await readMembershipGrowthQuoteCandidatesAt(client, { userId: "user-1", ownerUserId: "owner-1", accountId: "account-1", gameId: "game-1", listingVersionId: "listing-1", listingHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-v1", quantityDigest: "quantity-1", baseQuote: base.quote, quoteInput: input, asOfUtc: asOf });
+  assert.equal(result.knowledge, "KNOWN", JSON.stringify(result)); if (result.knowledge !== "KNOWN") return;
+  assert.equal(result.candidates[0]!.quote.tenantDeposit?.amount, "200.00");
+  assert.equal(result.candidates[1]!.quote.tenantDeposit?.amount, "100.00");
+  const choice = chooseCompleteOffer(result.candidates.map(candidate => candidate.plan), asOf);
+  assert.equal(choice.knowledge === "KNOWN" && choice.depositCents, "10000");
+  assert.equal(choice.knowledge === "KNOWN" && choice.priceBasis, "GROWTH");
+  assert.equal(queries.filter(sql => sql.includes("FROM zzsh_iam.membership_growth_policy")).length, 1);
+  assert.equal(queries.filter(sql => sql.includes("FROM zzsh_iam.membership_entitlement")).length, 2, "one summary batch and one authoritative read, not per benefit");
+  assert.equal(JSON.stringify(input), before);
+});
 
 test("membership entitlement scope keeps the stored game identity and name in the public summary", async () => {
   const state = { normalTier: "STANDARD", effectiveTier: "STANDARD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };

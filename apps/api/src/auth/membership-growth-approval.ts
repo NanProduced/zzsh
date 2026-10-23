@@ -44,16 +44,18 @@ async function assertGameScope(client: PoolClient, access: EffectiveAdminAccess,
 }
 
 export type SealedReleaseFacts = {
+  gameId?: string;
+  termVersionId?: string;
   enabledModes: RentalMode[];
   releaseMode: "SPREAD" | "PERCENT";
   haffSchema: string | null;
   /** Bound release catalog used to require complete policy contracts at publish time. */
-  catalog: { safeBoxes: string[]; materials: Array<{ itemId: string; unit?: "ROUND" | "PIECE" | "DAY"; name?: string; unitQuantity?: string }> };
+  catalog: { safeBoxes: string[]; materials: Array<{ itemId: string; unit?: "ROUND" | "PIECE" | "DAY"; name?: string; unitQuantity?: string }>; resources?: Array<{ itemId: string; name: string; unit: string; pricingKind: string }> };
 };
 
 export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId: string, priceVersionId: string): Promise<SealedReleaseFacts> {
-  const row = (await client.query<{ releaseId: string; priceVersionId: string; status: string; mode: string; haffRule: unknown }>(
-    `SELECT r.id AS "releaseId", r.price_version_id AS "priceVersionId", p.status, p.mode, p.haff_rule AS "haffRule"
+  const row = (await client.query<{ releaseId: string; gameId?: string; termVersionId?: string; priceVersionId: string; status: string; mode: string; haffRule: unknown }>(
+    `SELECT r.id AS "releaseId", r.game_id AS "gameId", r.term_version_id AS "termVersionId", r.price_version_id AS "priceVersionId", p.status, p.mode, p.haff_rule AS "haffRule"
        FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
       WHERE r.id=$1`, [ruleReleaseId],
   )).rows[0];
@@ -64,18 +66,19 @@ export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId:
   const haffRule = row.haffRule as Record<string, unknown>;
   const baseBySafeBox = haffRule.baseBySafeBox;
   const safeBoxes = baseBySafeBox && typeof baseBySafeBox === "object" && !Array.isArray(baseBySafeBox) ? Object.keys(baseBySafeBox).sort() : [];
-  const materials = (await client.query<{ itemId: string; unit: string; name: string; unitQuantity: string | null }>(
-    `SELECT l.item_id AS "itemId", i.unit, i.name, l.unit_quantity::text AS "unitQuantity"
+  const resources = (await client.query<{ itemId: string; unit: string; name: string; pricingKind: string; unitQuantity: string | null }>(
+    `SELECT l.item_id AS "itemId", i.unit, i.name, l.pricing_kind AS "pricingKind", l.unit_quantity::text AS "unitQuantity"
        FROM zzsh_supply.price_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id
-      WHERE l.price_version_id=$1 AND l.customer_tier='STANDARD' AND l.pricing_kind='FIXED_UNIT'
+      WHERE l.price_version_id=$1 AND l.customer_tier='STANDARD'
       ORDER BY l.item_id`, [priceVersionId],
-  )).rows.map((material): { itemId: string; unit?: "ROUND" | "PIECE" | "DAY"; name?: string; unitQuantity?: string } => ({
+  )).rows;
+  const materials = resources.filter(resource => resource.pricingKind !== "HAFF_RATIO").map((material): { itemId: string; unit?: "ROUND" | "PIECE" | "DAY"; name?: string; unitQuantity?: string } => ({
     itemId: material.itemId,
     ...(material.unit === "ROUND" || material.unit === "PIECE" || material.unit === "DAY" ? { unit: material.unit } : {}),
     ...(typeof material.name === "string" && material.name.length > 0 ? { name: material.name } : {}),
     ...(typeof material.unitQuantity === "string" && material.unitQuantity.length > 0 ? { unitQuantity: material.unitQuantity } : {}),
   }));
-  return { enabledModes, releaseMode: row.mode, haffSchema: typeof haffRule.schema === "string" ? haffRule.schema : null, catalog: { safeBoxes, materials } };
+  return { gameId: row.gameId, termVersionId: row.termVersionId, enabledModes, releaseMode: row.mode, haffSchema: typeof haffRule.schema === "string" ? haffRule.schema : null, catalog: { safeBoxes, materials, resources: resources.map(({ itemId, name, unit, pricingKind }) => ({ itemId, name, unit, pricingKind })) } };
 }
 
 type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string };
@@ -128,7 +131,7 @@ function candidateFromPayload(payload: Record<string, unknown>, requestedBy: str
   const reason = text(payload, "reason", 500);
   const pricingValue = pricing(payload);
   if (payload.depositWaived !== undefined && typeof payload.depositWaived !== "boolean") conflict("depositWaived is invalid");
-  return { userId, kind, scopeKey, startsAt, endsAt, pricing: pricingValue, depositWaived: payload.depositWaived === true, reason, requestedBy };
+  return { userId, kind, scopeKey, startsAt, endsAt, pricing: pricingValue, depositWaived: payload.depositWaived === true, ...(payload.depositAllowanceCents === undefined ? {} : { depositAllowanceCents: payload.depositAllowanceCents as string }), reason, requestedBy };
 }
 
 /** Decision and execution share the exact immutable policy/range validation; execution adds locks and mutations. */
@@ -171,9 +174,9 @@ async function insertEntitlement(client: PoolClient, candidate: EntitlementCandi
   } else conflict("Entitlement pricing is not configured");
   await client.query(
     `INSERT INTO zzsh_iam.membership_entitlement
-       (id,user_id,game_id,kind,scope_key,starts_at,ends_at,pricing_schema,pricing_payload,price_version_id,cost_basis_ref,deposit_waived,approved_policy_id,approval_request_id,approved_payload_hash,status)
-     VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7::timestamptz,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,'EXECUTED_PENDING_START')`,
-    [id, candidate.userId, gameId, candidate.kind, candidate.scopeKey, candidate.startsAt, candidate.endsAt, pricingSchema, JSON.stringify(candidate.pricing), configured.priceVersionId, costBasisRef, candidate.depositWaived === true, policyId, input.requestId, input.operationPayloadHash],
+       (id,user_id,game_id,kind,scope_key,starts_at,ends_at,pricing_schema,pricing_payload,price_version_id,cost_basis_ref,deposit_waived,approved_policy_id,approval_request_id,approved_payload_hash,deposit_allowance_cents,status)
+     VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7::timestamptz,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16::numeric,'EXECUTED_PENDING_START')`,
+    [id, candidate.userId, gameId, candidate.kind, candidate.scopeKey, candidate.startsAt, candidate.endsAt, pricingSchema, JSON.stringify(candidate.pricing), configured.priceVersionId, costBasisRef, candidate.depositWaived === true, policyId, input.requestId, input.operationPayloadHash, candidate.depositAllowanceCents ?? null],
   );
   return id;
 }
@@ -208,10 +211,6 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
     const priceVersionId = draft?.priceVersionId ?? text(payload, "priceVersionId");
     const effectiveAtUtc = draft?.effectiveAt ?? text(payload, "effectiveAtUtc");
     const sourceRef = draft?.sourceRef ?? text(payload, "sourceRef");
-    if (!effective.isBoss) {
-      const previous = (await client.query<{ policyPayload: GrowthBenefitPolicy }>(`SELECT policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' ORDER BY version DESC,created_at DESC LIMIT 1`)).rows[0];
-      if (canonicalize(previous?.policyPayload.entitlementRanges ?? null) !== canonicalize((policy as GrowthBenefitPolicy).entitlementRanges ?? null)) throw new SecurityApiError(403, "FORBIDDEN", "Only Boss may change entitlement ranges");
-    }
     const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
     const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
     if (!result.valid || !result.publishable) conflict(`Membership policy is not publishable: ${[...result.errors, ...result.warnings].slice(0, 5).join(",")}`);

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { ADMIN_PERMISSION, hasPermission, type EffectiveAdminAccess } from "./admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope, scopeAllowsGame } from "./admin-scope";
-import { entitlementCapForMode, entitlementPricingSummary, isNotPriced, isTotalDiscountContract, sealedEnabledRentalModes, validateBenefitPolicy, type EntitlementRanges, type GrowthBenefitPolicy } from "./membership-growth";
+import { entitlementCapForMode, entitlementPricingSummary, isNotPriced, isTotalDiscountContract, parseDepositAllowanceCents, sealedEnabledRentalModes, validateBenefitPolicy, type EntitlementRanges, type GrowthBenefitPolicy } from "./membership-growth";
 import { membershipGrowthEnabled, normalizeGrowthInstant } from "./membership-growth-integration";
 import { SecurityApiError } from "./security-core";
 import { readDirectoryUserSummaries } from "./user-directory-summary";
@@ -64,7 +64,7 @@ async function entitlementPage(client: PoolClient, viewer: Viewer, query: Member
        SELECT * FROM matched ORDER BY starts_at DESC,id DESC LIMIT $8 OFFSET $9
      ), page AS (
        SELECT e.id,e.user_id AS "userId",e.game_id AS "gameId",e.kind,e.scope_key AS "scopeKey",e.starts_at::text AS "startsAtUtc",e.ends_at::text AS "endsAtUtc",
-         k.effective_status AS status,e.deposit_waived AS "depositWaived",e.pricing_payload AS "pricingPayload",e.approved_policy_id AS "approvedPolicyId",e.approval_request_id AS "approvalRequestId"
+         k.effective_status AS status,e.deposit_waived AS "depositWaived",e.deposit_allowance_cents::text AS "depositAllowanceCents",e.pricing_payload AS "pricingPayload",e.approved_policy_id AS "approvedPolicyId",e.approval_request_id AS "approvalRequestId"
        FROM page_keys k JOIN zzsh_iam.membership_entitlement e ON e.id=k.id
      ) SELECT (SELECT count(*)::text FROM matched) AS total,COALESCE((SELECT jsonb_agg(to_jsonb(p) || jsonb_build_object('gameName',g.name) ORDER BY p."startsAtUtc"::timestamptz DESC,p.id DESC)
        FROM page p LEFT JOIN zzsh_supply.game g ON g.id=p."gameId"),'[]'::jsonb) AS items`,
@@ -74,7 +74,7 @@ async function entitlementPage(client: PoolClient, viewer: Viewer, query: Member
   const summaries = await readDirectoryUserSummaries(client, result.items.map((row) => String(row.userId)), viewer.access.permissions);
   return {
     schema: "membership-entitlements.v1" as const, asOfUtc, total: Number(result.total), page: query.page, pageSize: query.pageSize, contextKey,
-    items: result.items.map(({ pricingPayload, ...row }) => ({ ...row, startsAtUtc: normalizeGrowthInstant(String(row.startsAtUtc), "startsAt"), endsAtUtc: normalizeGrowthInstant(String(row.endsAtUtc), "endsAt"), userSummary: summaries.get(String(row.userId)) ?? null, pricingSummary: entitlementPricingSummary(pricingPayload) })),
+    items: result.items.map(({ pricingPayload, ...row }) => ({ ...row, depositAllowanceCents: parseDepositAllowanceCents(row.depositAllowanceCents ?? undefined, row.depositWaived), startsAtUtc: normalizeGrowthInstant(String(row.startsAtUtc), "startsAt"), endsAtUtc: normalizeGrowthInstant(String(row.endsAtUtc), "endsAt"), userSummary: summaries.get(String(row.userId)) ?? null, pricingSummary: entitlementPricingSummary(pricingPayload) })),
   };
 }
 

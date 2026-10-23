@@ -702,7 +702,8 @@ test("eligibility covers business permission, game scope and executor assembly",
   const publishRow = requestFixture({ operationCode: "membership.benefit.policy.publish", operationPayload: { policyDraftId: "policy_1" } });
   const publishAccess = { ...access, permissions: new Set([...access.permissions, "membership.policy.publish"]) };
   assert.equal(evaluateApprovalActions({ ...base, row: publishRow, access }).find((item) => item.action === "approve")?.reasonCode, "BUSINESS_PERMISSION_REQUIRED");
-  assert.equal(evaluateApprovalActions({ ...base, row: publishRow, access: publishAccess, gameScope: { mode: "SELECTED_GAMES", gameIds: [] } }).find((item) => item.action === "approve")?.allowed, true, "policy publish is not game scoped");
+  assert.equal(evaluateApprovalActions({ ...base, row: publishRow, access: publishAccess, gameScope: { mode: "SELECTED_GAMES", gameIds: [] } }).find((item) => item.action === "approve")?.nextStepCode, "BOSS_REVIEW_REQUIRED", "operators may draft and request, but policy approval belongs to Boss");
+  assert.equal(evaluateApprovalActions({ ...base, row: publishRow, access: { ...publishAccess, isBoss: true }, gameScope: { mode: "SELECTED_GAMES", gameIds: [] } }).find((item) => item.action === "approve")?.allowed, true, "Boss approval keeps the existing non-game-scoped policy contract");
 
   const noExecutor = evaluateApprovalActions({ ...base, access: grantedAccess, executorAssembled: false });
   assert.equal(noExecutor.find((item) => item.action === "execute")?.reasonCode, "EXECUTOR_NOT_ASSEMBLED");

@@ -5,6 +5,38 @@ import { computeDeltaQuote, type InternalQuote, type QuoteInput } from "../src/s
 import { projectDeltaQuote } from "../src/supply/delta-rental";
 import { computeSettlement, SETTLEMENT_ROUNDING_POLICY, type SettlementInventoryLine } from "../src/order/settlement";
 import { compatRule } from "./pricing-compat-fixture";
+import { simulateMembershipProfit, canSimulateMembershipProfit } from "../src/auth/membership-profit-simulation";
+
+test("profit simulation uses the same exact aggregate discount and never treats deposit or costs as profit", () => {
+  const input = threePlusThree();
+  input.deposits = { tenantDepositCents: "40000", publisherBailRequirementCents: "20000" };
+  const base = computeDeltaQuote(input); assert(base.quotable);
+  const projected = projectDeltaQuote(base.quote, "admin"), before = JSON.stringify(projected);
+  const result = simulateMembershipProfit(projected, ["1", "0.9", "0.5", "0.01"]);
+  assert.equal(result.baseline.rentalCents, "6");assert.equal(result.baseline.haffRentalCents, "3");assert.equal(result.baseline.materialFeesCents, "3");
+  assert.equal(result.baseline.depositCents, "40000");assert.equal(result.baseline.platformSpreadCents, (6n-BigInt(result.baseline.ownerIncomeCents)).toString());
+  for (const point of result.points) {
+    assert.equal(point.payableRentalCents, payableCentsFor(6n, point.payableRatio)!.toString());
+    assert.equal(BigInt(point.ownerIncomeCents)+BigInt(point.platformSpreadCents),BigInt(point.payableRentalCents));
+    const actual=applyTotalDiscountToQuote(base.quote,point.payableRatio);
+    if(actual) assert.equal(point.payableRentalCents, actual.payableCents.toString());
+  }
+  assert.equal(result.points.at(-1)!.ownerFloorSatisfied,false);
+  assert.equal(result.estimateOnly,true);assert.equal(result.calculation,"RENTAL_SPREAD_BEFORE_FEES");
+  assert(result.excluded.includes("DEPOSIT"));assert(result.excluded.includes("DISTRIBUTION_COMMISSION"));
+  assert.equal(JSON.stringify(projected),before);
+  for(const ratios of [[],["0"],["1.01"],[0.9],["0.123456789"],Array(33).fill("1")]) assert.throws(()=>simulateMembershipProfit(projected,ratios));
+  assert.throws(()=>simulateMembershipProfit({...projected,ownerTotal:undefined},["0.9"]));
+});
+
+test("profit costs require internal quote read together with membership policy access",()=>{
+  const access={status:"ACTIVE" as const,isBoss:false,passwordChangeRequired:false,permissions:new Set(["membership.policy.draft"])};
+  assert.equal(canSimulateMembershipProfit(access),false);
+  assert.equal(canSimulateMembershipProfit({...access,permissions:new Set(["membership.policy.draft","supply.quote.internal.read"])}),true);
+  assert.equal(canSimulateMembershipProfit({...access,permissions:new Set(["supply.quote.internal.read"])}),false);
+  assert.equal(canSimulateMembershipProfit(null),false);
+  assert.equal(canSimulateMembershipProfit({...access,status:"FROZEN",isBoss:true}),false);
+});
 
 /** 3-cent haff + 3-cent item base quote (owner side low enough for a 90% synthetic payable share). */
 function threePlusThree(): QuoteInput {
