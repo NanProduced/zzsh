@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertLegacyDisplayFields } from "../src/supply/legacy-display-snapshot";
-import { prepareLegacyTradeIntake, takeoverLegacyTrade, finalizeLegacyTradeTakeover, buildLegacyTradeDeclaration, applyLegacyOrdinaryDraft, type LegacyTradeTakeoverInput, type LegacyTradeIntake, type TradeCatalogItem } from "../src/supply/legacy-trade-takeover";
+import { prepareLegacyTradeIntake, prepareLegacyTradeTakeover, takeoverLegacyTrade, finalizeLegacyTradeTakeover, buildLegacyTradeDeclaration, applyLegacyOrdinaryDraft, type LegacyTradeTakeoverInput, type LegacyTradeIntake, type TradeCatalogItem } from "../src/supply/legacy-trade-takeover";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { canonicalize, computeContentHash, normalizeContentPayload, type ContentDeclaration } from "../src/supply/content-hash";
 import { fingerprintRequest, sha256Hex } from "../src/supply/supply-util";
@@ -33,7 +33,7 @@ function catalog(): TradeCatalogItem[] {
   return DELTA_LEGACY_RESOURCES.map(([field, codes], i) => ({ id: "fixture_item_" + i, code: codes[0], unit: field === "haff" ? "HAFF_BASE" : field.includes("bullet") ? "ROUND" : field === "top_insure_card_num" ? "DAY" : "PIECE", quantityScale: 0 }));
 }
 
-function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean; selected?: boolean; originalTitle?: string } = {}) {
+function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean; selected?: boolean; originalTitle?: string; bumpDraft?: boolean } = {}) {
   const publishing: typeof import("../src/supply/publishing") = require("../src/supply/publishing");
   const legacy: typeof import("../src/supply/legacy-observation") = require("../src/supply/legacy-observation");
   const auth: typeof import("../src/auth/auth-security") = require("../src/auth/auth-security");
@@ -48,14 +48,14 @@ function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean;
   let stored = { ...buildLegacyTradeDeclaration(intake, catalog()).declaration!, mediaBindings: [] } as unknown as ContentDeclaration;
   if (options.native && !intake.title.trim()) stored.title = `历史资料待核实-${intake.accountId.slice(0, 8)}`;
   const version: any = { id: account.current_version_id, origin: options.native ? "NATIVE" : "LEGACY_OBSERVATION", review_state: options.native ? "DRAFT" : "IMPORTED_UNVERIFIED", attributes: stored.attributes, payload: null, content_hash: null, rule_release_id: null };
-  const controls = { priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false };
+  const controls = { priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false, reviewPermission: true };
   const receipts = new Map<string, unknown>();
   const sourceUpdatedAt = new Date("2026-10-15T00:00:00Z"), extractSha256 = "e".repeat(64), evidenceRef = "FIXTURE_DISPLAY";
   const displayDigest = legacyDisplayDigest(account.id, { observationVersionId: original.source.expectedObservationVersionId, baseSourceDigest: original.source.sourceDigest, extractSha256, sourceUpdatedAt: sourceUpdatedAt.toISOString(), evidenceRef, snapshot: original.display });
   const client = { query: async (sql: string, values: unknown[] = []) => {
     queries.push({ sql, values });
-    if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) { const row = receipts.get(String(values[1])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
-    if (sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"')) { receipts.set(String(values[1]), { requestFingerprint: values[2], responseStatus: values[3], responseBody: JSON.parse(String(values[4])), publishRequired: values[5] }); return { rows: [], rowCount: 1 }; }
+    if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) { const row = receipts.get(String(values[0])+":"+String(values[1])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
+    if (sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"')) { receipts.set(String(values[0])+":"+String(values[1]), { requestFingerprint: values[2], responseStatus: values[3], responseBody: JSON.parse(String(values[4])), publishRequired: values[5] }); return { rows: [], rowCount: 1 }; }
     if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { const details = JSON.parse(String(values[10])); audits.push({ action: values[4], details }); if (values[4] === "supply.legacy.trade_takeover") controls.formalDone = true; return { rows: [], rowCount: 1 }; }
     if (sql.includes("legacy_listing_display_snapshot")) return { rows: [{ observation_version_id: original.source.expectedObservationVersionId, base_source_digest: original.source.sourceDigest, extract_sha256: extractSha256, source_updated_at: sourceUpdatedAt, evidence_ref: evidenceRef, snapshot: original.display, display_digest: controls.displayMismatch ? "0".repeat(64) : displayDigest }], rowCount: 1 };
     if (sql.includes("SELECT title,description")) return { rows: [{ title: controls.observationMismatch ? "different original" : original.title, description: original.description }], rowCount: 1 };
@@ -75,18 +75,143 @@ function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean;
   t.mock.method(legacy, "readLegacyMap", async () => ({ account_id: account.id, source_digest: controls.sourceMismatch ? "c".repeat(64) : original.source.sourceDigest, version_id: original.source.expectedObservationVersionId }));
   t.mock.method(legacy, "resolveLegacyObservationToDraft", async () => { calls.push("resolve"); account.current_version_id = "fixture_draft"; account.legacy_hold = "NONE"; version.id = "fixture_draft"; version.origin = "NATIVE"; version.review_state = "DRAFT"; return {} as any; });
   t.mock.method(auth, "assertAdminContextInTransaction", async () => { if (!controls.authorized) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Denied"); });
-  t.mock.method(access, "loadEffectiveAdminAccess", async () => ({ status: "ACTIVE", isBoss: true, permissions: new Set(["supply.catalog.manage", "supply.review.decide"]) }));
+  t.mock.method(access, "loadEffectiveAdminAccess", async () => ({ status: "ACTIVE", isBoss: true, permissions: new Set(controls.reviewPermission ? ["supply.catalog.manage", "supply.review.decide"] : ["supply.catalog.manage"]) }));
   t.mock.method(funding, "readFundingPolicyForRelease", async () => ({ ownerDepositRules: { normal: { minCents: "1" }, fullPayoutSelected: { minCents: "30000" }, capCents: "999999" } } as any));
-  t.mock.method(publishing, "saveListingDraft", async (_c: unknown, _a: unknown, body: Record<string, unknown>) => { calls.push("save"); const { expectedRevision: _revision, ...declaration } = body; stored = { ...declaration, mediaBindings: original.media.map(m => ({ assetId: m.assetId, byteHash: m.byteHash, position: m.position, purpose: "ACCOUNT_DISPLAY" })) } as unknown as ContentDeclaration; });
+  t.mock.method(publishing, "saveListingDraft", async (_c: unknown, _a: unknown, body: Record<string, unknown>) => { calls.push("save"); const { expectedRevision: _revision, ...declaration } = body; stored = { ...declaration, mediaBindings: original.media.map(m => ({ assetId: m.assetId, byteHash: m.byteHash, position: m.position, purpose: "ACCOUNT_DISPLAY" })) } as unknown as ContentDeclaration; if (options.bumpDraft) { Object.assign(version, { payload: null, content_hash: null, rule_release_id: null }); account.revision = (BigInt(account.revision) + 1n).toString(); } });
   t.mock.method(publishing, "quoteListing", async (_c: unknown, _a: unknown, _r: unknown, grading: import("../src/supply/publishing").LegacyTakeoverGradingContext | undefined) => {
     assert.deepEqual(grading, { kind: "VERIFIED_LEGACY_TAKEOVER", accountId: account.id, sourceDigest: original.source.sourceDigest, observationVersionId: original.source.expectedObservationVersionId, gradingCode: original.display.attributes.grading_code, gradingDivision: null });
     calls.push("quote"); const priced = computeDeltaQuote({ priceVersionId: "fixture_price", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1", customerTier: "STANDARD", haffRule: compatRule(), lines: [{ itemId: "fixture_item_0", quantity: "3000000", pricingKind: "HAFF_RATIO", unit: "HAFF_BASE", customerTier: "STANDARD" }], conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } }, termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } }); assert(priced.quotable);
     const payload = normalizeContentPayload({ schemaVersion: 2, accountId: account.id, gameId: account.game_id, declaration: stored, ruleRefs: { releaseId: "fixture_release", catalogRevision: "1", priceVersionId: "fixture_price", termVersionId: "fixture_term", agreementVersionId: "fixture_agreement", agreementDigest: "d".repeat(64) }, quoteValues: priced.quote });
     Object.assign(version, { attributes: payload.declaration.attributes, payload, content_hash: computeContentHash(payload), rule_release_id: "fixture_release" });
+    if (options.bumpDraft) account.revision = (BigInt(account.revision) + 1n).toString();
   });
   t.mock.method(publishing, "reviewListing", async (_c: unknown, _a: unknown, _id: unknown, _body: unknown, _gate: unknown, grading: import("../src/supply/publishing").LegacyTakeoverGradingContext | undefined) => { assert.equal(grading?.gradingDivision, null); assert.equal(grading?.sourceDigest, original.source.sourceDigest); calls.push("review"); });
   return { intake, original, client, actor, gate, account, version, controls, calls, queries, audits, displayDigest, getStored: () => stored };
 }
+
+function mediaCloseoutFixture(t: TestContext, selected = false) {
+  const f = reviewedMaintenanceFixture(t, { native: true, selected, originalTitle: "已核来源标题", bumpDraft: true });
+  const p: typeof import("../src/supply/publishing") = require("../src/supply/publishing");
+  const auth: typeof import("../src/auth/auth-security") = require("../src/auth/auth-security");
+  t.mock.method(auth, "readAdminContext", async () => ({ userId: f.actor.id, sessionId: f.actor.sessionId }));
+  const asset: any = { id: f.intake.media[0]!.assetId, accountId: f.account.id, ownerUserId: f.account.owner_user_id, gameId: f.account.game_id, purpose: "ACCOUNT_DISPLAY", ownershipKind: "USER_SUPPLY", contentHash: f.intake.media[0]!.byteHash, revision: "1", technicalState: "READY", publicStorageKey: "fixture_public_derivative", reviewState: "UNREVIEWED", accessClass: "PRIVATE_REVIEW", reviewReason: null };
+  const controls = { reviewFailure: false }, originalQuery = f.client.query.bind(f.client) as any;
+  f.client.query = (async (sql: string, values: unknown[] = []) => {
+    if (sql.includes("/* legacy-prepared-media */")) {
+      const bindings = f.getStored().mediaBindings.filter(m => m.assetId === asset.id);
+      return { rows: bindings.map(m => ({ assetId: asset.id, accountId: asset.accountId, ownerUserId: asset.ownerUserId, gameId: asset.gameId, purpose: asset.purpose, ownershipKind: asset.ownershipKind, byteHash: asset.contentHash, assetRevision: asset.revision, technicalState: asset.technicalState, reviewState: asset.reviewState, accessClass: asset.accessClass, publicDerivative: Boolean(asset.publicStorageKey), validReviewReason: typeof asset.reviewReason === "string" && asset.reviewReason.trim().length >= 2, position: m.position })), rowCount: bindings.length };
+    }
+    if (sql.includes("/* legacy-prepared-draft */")) {
+      const token = JSON.parse(String(values[4]));
+      const rows = f.audits.filter(a => a.action === "supply.legacy.trade_takeover.prepare" && a.details.batchId === values[1] && a.details.inputDigest === values[3] && canonicalize(a.details.source) === canonicalize(JSON.parse(String(values[2]))) && ["accountRevision", "versionId", "releaseId", "contentHash"].every(key => a.details.preparedDraft[key] === token[key])).map(a => ({ details: a.details }));
+      return { rows, rowCount: rows.length };
+    }
+    if (sql.includes("/* legacy-prepared-media-review */")) {
+      const rows = f.audits.filter(a => a.action === "supply.media.reviewed").map(a => ({ object_id: a.objectId, details: a.details })); return { rows, rowCount: rows.length };
+    }
+    if (sql.includes('FROM "zzsh_supply"."media_asset"')) return { rows: values[0] === asset.id ? [{ ...asset }] : [], rowCount: values[0] === asset.id ? 1 : 0 };
+    if (sql.includes('FROM zzsh_supply."media_asset"')) return { rows: [{ id: asset.id, game_id: asset.gameId, purpose: asset.purpose, ownership_kind: asset.ownershipKind, owner_user_id: asset.ownerUserId, content_hash: asset.contentHash, review_state: asset.reviewState, access_class: asset.accessClass, revision: asset.revision, review_reason: asset.reviewReason }], rowCount: 1 };
+    if (sql.startsWith("SELECT revision::text,current_version_id,owner_user_id")) return { rows: [{ revision: f.account.revision, current_version_id: f.account.current_version_id, owner_user_id: f.account.owner_user_id }], rowCount: 1 };
+    if (sql.startsWith("SELECT 1 FROM zzsh_supply.listing_media WHERE")) { const bound = values[0] === f.version.id && f.getStored().mediaBindings.some(m => m.assetId === values[1]); return { rows: bound ? [{}] : [], rowCount: bound ? 1 : 0 }; }
+    if (sql.includes('UPDATE "zzsh_supply"."media_asset"')) {
+      if (controls.reviewFailure) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixture review failed");
+      Object.assign(asset, { reviewState: values[0], reviewReason: values[2], accessClass: values[3], revision: (BigInt(asset.revision) + 1n).toString() }); return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith("SELECT details FROM zzsh_iam.audit_event") && sql.includes("action='supply.legacy.trade_takeover'")) { const rows = f.audits.filter(a => a.action === "supply.legacy.trade_takeover" && a.details.state === "OWNER_ACCEPTANCE_REQUIRED").map(a => ({ details: a.details })); return { rows, rowCount: rows.length }; }
+    const result = await originalQuery(sql, values);
+    if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) f.audits.at(-1)!.objectId = values[6];
+    return result;
+  }) as any;
+  const token = () => ({ accountRevision: f.account.revision, versionId: f.version.id, releaseId: f.version.rule_release_id!, contentHash: f.version.content_hash! });
+  async function formalReview() {
+    const accountContext = { accountId: f.account.id, accountRevision: f.account.revision, versionId: f.version.id, assetRevision: asset.revision, byteHash: asset.contentHash };
+    const http = { headersSent: false, statusCode: 0, payload: undefined as any, status(n: number) { this.statusCode = n; return this; }, setHeader() { return this; }, json(body: unknown) { this.payload = body; this.headersSent = true; return this; } };
+    const pool = { connect: async () => Object.assign(f.client, { release() {} }) };
+    await handleSupplyAdminRoute({ method: "POST", originalUrl: `/api/v1/admin/supply/media/${asset.id}/review`, headers: { origin: "http://admin.invalid", "idempotency-key": sha256Hex(JSON.stringify(accountContext)), "x-request-id": f.actor.requestId }, body: { decision: "APPROVE", reason: "核对新稿与本地联调图片", visibility: "PUBLIC_DISPLAY", accountContext } } as never, http as unknown as SupplyResponse, { pool, apiOrigin: "http://api.invalid", userOrigin: "http://user.invalid", adminOrigin: "http://admin.invalid", mediaStorage: { available: false } } as never);
+    if (http.statusCode !== 200) throw new SecurityApiError(http.statusCode, http.payload?.error?.code ?? "EVIDENCE_UNAVAILABLE", http.payload?.error?.message ?? "Fixture review failed");
+    return accountContext;
+  }
+  async function primeQuotedDraft() {
+    const plan = prepareLegacyTradeIntake(f.intake, catalog()); assert.equal(plan.admission, "TRADE_CANDIDATE");
+    await p.saveListingDraft(f.client, f.account, { ...plan.draft, expectedRevision: f.account.revision }, f.gate);
+    await p.quoteListing(f.client, f.account, f.account.revision, { kind: "VERIFIED_LEGACY_TAKEOVER", accountId: f.account.id, sourceDigest: f.intake.source.sourceDigest, observationVersionId: f.intake.source.expectedObservationVersionId, gradingCode: "4", gradingDivision: null });
+  }
+  return { ...f, asset, mediaControls: controls, token, formalReview, primeQuotedDraft };
+}
+
+test("old reviewed tuple cannot authorize a takeover that clears and rebuilds the quote; forged prepared token is rejected", async t => {
+  const f = mediaCloseoutFixture(t); await f.primeQuotedDraft(); await f.formalReview();
+  const old = f.token(), writes = f.calls.length;
+  await assert.rejects(() => takeoverLegacyTrade(f.client, f.actor, { batchId: "fixture_old_review", intake: f.intake, preparedDraft: old } as any, f.gate), /PREPARED/);
+  assert.equal(f.calls.length, writes, "a prior image approval cannot be carried across another save/quote");
+});
+
+test("prepare accepts actual private media; final requires the ordinary audited exact-tuple review and never saves or quotes again", async t => {
+  const f = mediaCloseoutFixture(t); f.intake.media[0]!.accessClass = "PRIVATE_REVIEW";
+  const input = { batchId: "fixture_prepared", intake: f.intake };
+  const prepared = await prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate);
+  assert.equal((prepared.body as any).state, "MEDIA_REVIEW_REQUIRED"); assert.deepEqual(f.calls, ["save", "quote"]);
+  assert.equal(f.asset.reviewState, "UNREVIEWED"); assert.equal(f.audits.some(a => a.action === "supply.media.reviewed"), false);
+  const token = (prepared.body as any).preparedDraft;
+  const final = { ...input, intake: structuredClone(input.intake), preparedDraft: token }; final.intake.media[0]!.accessClass = "PUBLIC_DISPLAY";
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_MEDIA_REVIEW_REQUIRED/);
+  f.mediaControls.reviewFailure = true; await assert.rejects(f.formalReview(), { status: 503 }); f.mediaControls.reviewFailure = false;
+  assert.deepEqual(f.calls, ["save", "quote"]);
+  await f.formalReview();
+  const actualReview = f.audits.find(a => a.action === "supply.media.reviewed"); assert.deepEqual(actualReview.details.mediaContext, { accountId: f.account.id, accountRevision: token.accountRevision, versionId: token.versionId, assetRevision: "1", byteHash: f.asset.contentHash });
+  const result = await takeoverLegacyTrade(f.client, f.actor, final, f.gate);
+  assert.equal((result.body as any).state, "PUBLISHED"); assert.deepEqual(f.calls, ["save", "quote", "review"]);
+  assert.deepEqual(f.audits.find(a => a.action === "supply.legacy.trade_takeover").details.preparedDraft, token);
+  f.asset.accessClass = "PRIVATE_REVIEW";
+  assert.equal((await takeoverLegacyTrade(f.client, f.actor, final, f.gate)).replayed, true);
+  assert.deepEqual(f.calls, ["save", "quote", "review"]);
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, { ...final, preparedDraft: { ...token, accountRevision: "999" } }, f.gate), (e: any) => e.code === API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED);
+  f.controls.reviewPermission = false;
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), { status: 403 });
+});
+
+test("prepared source, declaration, exact media identity, audit tuple and current revision cannot be forged", async t => {
+  const f = mediaCloseoutFixture(t), input = { batchId: "fixture_prepared", intake: f.intake };
+  const prepared = await prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate), token = (prepared.body as any).preparedDraft;
+  await f.formalReview(); const final = { ...input, preparedDraft: token }, writes = f.calls.length;
+  const audit = f.audits.find(a => a.action === "supply.media.reviewed"), proof = f.audits.find(a => a.action === "supply.legacy.trade_takeover.prepare");
+  const oldContext = structuredClone(audit.details.mediaContext);
+  audit.details.mediaContext.accountRevision = "999"; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_MEDIA_REVIEW_REQUIRED/); audit.details.mediaContext = oldContext;
+  f.asset.revision = "3"; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_MEDIA_REVIEW_REQUIRED/); f.asset.revision = "2";
+  f.asset.accountId = "another_account"; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_MEDIA_BINDING_MISMATCH/); f.asset.accountId = f.account.id;
+  f.asset.contentHash = "c".repeat(64); await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_MEDIA_BINDING_MISMATCH/); f.asset.contentHash = f.intake.media[0]!.byteHash;
+  f.account.revision = "99"; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_DRAFT_CHANGED/); f.account.revision = token.accountRevision;
+  proof.details.declarationDigest = "c".repeat(64); await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /PREPARED_DRAFT_AUDIT_REQUIRED/); proof.details.declarationDigest = sha256Hex(canonicalize(f.version.payload.declaration));
+  f.getStored().description = "another draft"; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /MATERIALIZATION_MISMATCH/); f.getStored().description = null;
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, { ...final, reviewedDeclaration: { title: "另一个标题", reason: "另一次核对" } }, f.gate), /MATERIALIZATION_MISMATCH/);
+  f.controls.sourceMismatch = true; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), /SOURCE_BINDING_MISMATCH/); f.controls.sourceMismatch = false;
+  f.controls.reviewPermission = false; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, final, f.gate), { status: 403 }); f.controls.reviewPermission = true;
+  for (const preparedDraft of [null, {}, { ...token, accountRevision: 3 }]) await assert.rejects(takeoverLegacyTrade(f.client, f.actor, { ...final, preparedDraft } as any, f.gate), { status: 400 });
+  assert.equal(f.calls.length, writes); assert.equal((await takeoverLegacyTrade(f.client, f.actor, final, f.gate)).status, 200);
+});
+
+test("preparation is separately idempotent and reauthorizes replay; missing title/reason and actual readiness fail closed", async t => {
+  const f = mediaCloseoutFixture(t), input = { batchId: "fixture_prepared", intake: f.intake };
+  f.asset.technicalState = "PENDING"; await assert.rejects(prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate), /PREPARED_MEDIA_BINDING_MISMATCH/); f.asset.technicalState = "READY";
+  f.controls.priorOrdinary = false; await assert.rejects(prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate), /TAKEOVER_DRAFT_SOURCE_MISMATCH/); f.controls.priorOrdinary = true;
+  const prepared = await prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate); const writes = f.calls.length;
+  assert.equal((await prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate)).replayed, true); assert.equal(f.calls.length, writes);
+  await assert.rejects(prepareLegacyTradeTakeover(f.client, f.actor, { ...input, reviewedDeclaration: { title: "已核标题", reason: "" } }, f.gate), (e: any) => e.code === API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED);
+  await assert.rejects(prepareLegacyTradeTakeover(f.client, f.actor, { ...input, preparedDraft: (prepared.body as any).preparedDraft } as any, f.gate), { status: 400 });
+  f.controls.reviewPermission = false; await assert.rejects(prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate), { status: 403 }); assert.equal(f.calls.length, writes);
+});
+
+test("prepared full payout still requires owner acceptance and a fresh formal media review after its account revision changes", async t => {
+  const f = mediaCloseoutFixture(t, true), input = { batchId: "fixture_full_prepared", intake: f.intake };
+  const prepared = await prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate); await f.formalReview();
+  assert.equal(((await takeoverLegacyTrade(f.client, f.actor, { ...input, preparedDraft: (prepared.body as any).preparedDraft }, f.gate)).body as any).state, "OWNER_ACCEPTANCE_REQUIRED");
+  const finalize = { accountId: f.account.id, source: f.intake.source, batchId: input.batchId, expectedRevision: f.account.revision, versionId: f.version.id, contentHash: f.version.content_hash, releaseId: f.version.rule_release_id };
+  await assert.rejects(finalizeLegacyTradeTakeover(f.client, f.actor, finalize, f.gate), /TERMS_ACCEPTANCE_REQUIRED/);
+  f.controls.accepted = true; f.account.revision = (BigInt(f.account.revision) + 1n).toString(); finalize.expectedRevision = f.account.revision;
+  await assert.rejects(finalizeLegacyTradeTakeover(f.client, f.actor, finalize, f.gate), /PREPARED_MEDIA_REVIEW_REQUIRED/);
+  await f.formalReview(); assert.equal((await finalizeLegacyTradeTakeover(f.client, f.actor, finalize, f.gate)).status, 200);
+  assert.deepEqual(f.calls, ["save", "quote", "review"]);
+});
 
 test("reviewed title is explicit and audited while original source/title/hash stay untouched; original key replays only identical review", async t => {
   const f = reviewedMaintenanceFixture(t), before = canonicalize(f.intake), sourceFields = canonicalize(f.intake.sourceFieldEvidence);

@@ -38,10 +38,13 @@ Web 客户端的预算校验与 `listingQuery` 共用序列化：分别计算 `/
 |---|---|
 | resources | `[{itemId,minQuantity?,maxQuantity?}]`，每行至少提供一端；同资源两端是闭区间并作用于同一库存行，不同资源 AND |
 | safeBoxCodes / gradingCodes / loginMethodCodes | code 数组，同类 OR |
+| gradingRanks | 精确组合数组，如 `["4:3","6:2","8"]`；巅峰为 `8`，其余为大段位code与小等级；同类 OR，与gradingCodes取交集 |
 | vitality / bear | `{min:6}`，目录规则及配置允许的等级下限 |
 | regions | `[{province,city}]`，成对 OR，禁止省市笛卡尔组合 |
 | skinGroups | `[{categoryId,ids,match:'ANY'或'ALL'}]`，组间 AND，皮肤必须属于当前可见分类或其子分类 |
 | serviceWindow | `{startMinute,endMinute,crossMidnight,timezone:'Asia/Shanghai'}`，账号时段完整覆盖请求时段 |
+
+精确段位只匹配有明确小等级的对应组合；原 `gradingCodes` 仍涵盖该大段位下小等级未知的历史记录。QQ扫码使用 `login_qq_qr`，QQ账密继续为 `legacy_login_qq`。新增筛选项须由维护者实际更新当前筛选配置后开放；源码支持不等于环境配置已生效。
 
 资源上下限均包含边界；只填一端合法，两端相等表示精确数量，未提供的端点不施加约束。每个提供的端点按当前 metadata 对应资源的配置 min/max 校验；空条件不发送，只有 `itemId` 的行非法。资源数量是 numeric(24,0) 范围内的非负整数文本，不接受浮点、指数、负数、前导零或客户端 unit；0 有效，未知/缺失库存不能按 0 满足上限。目录 HAFF_BASE 按基础币传输；M 展示换算为 1,000,000 基础币，60 发/组由客户端明确换算为 ROUND。顶级保险卡统一沿原 `df_billable_top_insure_card`/DAY 身份，数量和筛选范围按天，不乘租期。金额只使用服务端 quote。
 

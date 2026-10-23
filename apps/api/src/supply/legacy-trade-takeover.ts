@@ -131,7 +131,7 @@ async function assertMediaBindingSubject(client: PoolClient, a: PublishingAccoun
   if (!media.length
     || media.some(m => m.account_id !== a.id || m.owner_user_id !== a.owner_user_id || m.purpose !== "ACCOUNT_DISPLAY")) throw conflict("MEDIA_BINDING_SUBJECT_MISMATCH");
 }
-async function assertMaterialized(client: PoolClient, a: PublishingAccount, plan: LegacyTradePlan) {
+async function assertMaterialized(client: PoolClient, a: PublishingAccount, plan: Pick<LegacyTradePlan, "draft" | "expectedMedia">) {
   const v = await currentVersion(client, a);
   if (!v.payload || !v.content_hash || computeContentHash(v.payload) !== v.content_hash || canonicalize(v.attributes) !== canonicalize(v.payload.declaration.attributes)) throw conflict("MATERIALIZATION_MISMATCH");
   const declaration = await readDeclaration(client, v);
@@ -255,7 +255,8 @@ export async function applyLegacyOrdinaryDraft(client: PoolClient, actor: TradeA
   }
   return { status: 200 as const, body: result };
 }
-export type LegacyTradeTakeoverInput = { batchId: string; intake: LegacyTradeIntake; reviewedDeclaration?: { title: string; reason: string } };
+export type LegacyPreparedDraft = { accountRevision: string; versionId: string; releaseId: string; contentHash: string };
+export type LegacyTradeTakeoverInput = { batchId: string; intake: LegacyTradeIntake; reviewedDeclaration?: { title: string; reason: string }; preparedDraft?: LegacyPreparedDraft };
 function reviewedTakeoverDeclaration(value: LegacyTradeTakeoverInput["reviewedDeclaration"]) {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("受审标题格式错误", "reviewedDeclaration");
@@ -294,24 +295,27 @@ export async function takeoverLegacyTrade(client: PoolClient, actor: TradeActor,
     }, async () => {
       const a = account!;
       const reviewed = reviewedTakeoverDeclaration(input.reviewedDeclaration);
+      const preparedToken = input.preparedDraft === undefined ? undefined : parsePreparedDraft(input.preparedDraft);
       const declarationIntake = reviewed ? { ...intake, title: reviewed.title } : intake;
       const catalog = (await client.query<TradeCatalogItem>(`SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY id`, [a.game_id])).rows;
-      const plan = prepareLegacyTradeIntake(declarationIntake, catalog);
+      const plan = preparedToken ? preparedDeclarationPlan(declarationIntake, catalog, input.batchId) : prepareLegacyTradeIntake(declarationIntake, catalog);
       if (plan.admission !== "TRADE_CANDIDATE") throw conflict(plan.reasons.join(","));
-      const v = a.current_version_id ? await currentVersion(client, a) : null;
-      if (v?.origin === "LEGACY_OBSERVATION") await resolveLegacyObservationToDraft(client, a.id, intake.source, actor, gate);
-      else if (!v || v.origin !== "NATIVE" || v.review_state !== "DRAFT") throw conflict("TAKEOVER_DRAFT_REQUIRED");
-      else await assertSameSourceOrdinaryDraft(client, a, v, intake, buildLegacyTradeDeclaration(ordinaryDraftIntake(intake), catalog).declaration, plan);
-      const current = await lockPublishingAccount(client, a.id);
-      await saveListingDraft(client, current, { ...plan.draft, expectedRevision: current.revision }, gate);
+      let current: PublishingAccount, materialized: ListingVersion;
+      if (preparedToken) {
+        const token = preparedToken;
+        if (a.revision !== token.accountRevision) throw conflict("PREPARED_DRAFT_CHANGED");
+        current = a; materialized = await assertMaterialized(client, current, plan);
+        await assertPreparedDraft(client, current, intake.source, input.batchId, token, plan.inputDigest, true);
+      } else {
+        ({ current, materialized } = await materializeTakeoverDraft(client, actor, a, intake, plan, catalog, display!, gate));
+      }
       const grading = legacyGradingContext(current.id, intake.source, display!);
-      await quoteListing(client, current, current.revision, grading);
-      const materialized = await assertMaterialized(client, current, plan);
       const selected = intake.isFullPayout === "1";
       const result = selected ? { accountId: current.id, versionId: materialized.id, releaseId: materialized.rule_release_id, contentHash: materialized.content_hash, state: "OWNER_ACCEPTANCE_REQUIRED" as const }
         : await publishTakenOverDraft(client, current, actor, intake.source, input.batchId, gate, grading);
       await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: operation, objectType: "rental_account", objectId: current.id, outcome: "SUCCESS", details: { batchId: input.batchId, source: intake.source, inputDigest: plan.inputDigest,
-        ...(reviewed ? { reviewedDeclaration: { originalTitle: intake.title, title: reviewed.title, reason: reviewed.reason } } : {}), ...result } });
+        ...(reviewed ? { reviewedDeclaration: { originalTitle: intake.title, title: reviewed.title, reason: reviewed.reason } } : {}),
+        ...(preparedToken ? { preparedDraft: preparedToken, preparedInputDigest: plan.inputDigest } : {}), ...result } });
       return { status: 200, body: result };
     });
 }
@@ -328,11 +332,96 @@ export async function finalizeLegacyTradeTakeover(client: PoolClient, actor: Tra
       const mapping = await readLegacyMap(client, input.source);
       const v = await currentVersion(client, a!);
       if (!mapping || mapping.account_id !== input.accountId || mapping.source_digest !== input.source.sourceDigest || mapping.version_id !== input.source.expectedObservationVersionId || a!.revision !== input.expectedRevision || v.id !== input.versionId || v.content_hash !== input.contentHash || v.rule_release_id !== input.releaseId) throw conflict("SOURCE_BINDING_MISMATCH");
-      if(!(await client.query(`SELECT 1 FROM zzsh_iam.audit_event WHERE action='supply.legacy.trade_takeover' AND object_id=$1 AND outcome='SUCCESS' AND details->>'batchId'=$2 AND details->>'versionId'=$3 AND details->>'contentHash'=$4 AND details->>'state'='OWNER_ACCEPTANCE_REQUIRED'`,[input.accountId,input.batchId,input.versionId,input.contentHash])).rowCount)throw conflict("TAKEOVER_DRAFT_REQUIRED");
+      const prior = await client.query(`SELECT details FROM zzsh_iam.audit_event WHERE action='supply.legacy.trade_takeover' AND object_id=$1 AND outcome='SUCCESS' AND details->>'batchId'=$2 AND details->>'versionId'=$3 AND details->>'contentHash'=$4 AND details->>'state'='OWNER_ACCEPTANCE_REQUIRED' LIMIT 2`,[input.accountId,input.batchId,input.versionId,input.contentHash]);
+      if (prior.rowCount !== 1) throw conflict("TAKEOVER_DRAFT_REQUIRED");
+      const prepared = prior.rows[0]?.details;
+      if (prepared?.preparedDraft) await assertPreparedDraft(client, a!, input.source, input.batchId, parsePreparedDraft(prepared.preparedDraft), prepared.preparedInputDigest, true);
       await assertTierCoverage(client, a!);
       const display = await readBoundLegacyDisplay(client, input.accountId, input.source);
       const result = await publishTakenOverDraft(client, a!, actor, input.source, input.batchId, gate, legacyGradingContext(input.accountId, input.source, display));
       await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: operation, objectType: "rental_account", objectId: input.accountId, outcome: "SUCCESS", details: result });
+      return { status: 200, body: result };
+    });
+}
+
+function parsePreparedDraft(value: LegacyPreparedDraft): LegacyPreparedDraft {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("准备稿凭证格式错误", "preparedDraft");
+  ensureOnlyFields(value, ["accountRevision", "versionId", "releaseId", "contentHash"]);
+  if (![value.accountRevision, value.versionId, value.releaseId, value.contentHash].every(v => typeof v === "string") || !/^[1-9]\d{0,24}$/.test(value.accountRevision) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.versionId)
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.releaseId) || !/^[a-f0-9]{64}$/.test(value.contentHash)) throw invalid("准备稿凭证不完整", "preparedDraft");
+  return value;
+}
+function preparedDeclarationPlan(intake: LegacyTradeIntake, catalog: readonly TradeCatalogItem[], batchId: string): LegacyTradePlan {
+  const built = buildLegacyTradeDeclaration(intake, catalog), reasons = [...built.blockers, ...built.deferred];
+  if (!intake.media.length || intake.media.length > 20) reasons.push("MEDIA_ASSET_COUNT_INVALID");
+  if (!intake.termOptionCode) reasons.push("TERM_OPTION_UNPROVEN");
+  // Approval/visibility are mutable database facts. Bind only the normalized declaration and immutable media identity.
+  const inputDigest = sha256Hex(canonicalize({ batchId, source: intake.source, sourceFieldEvidence: intake.sourceFieldEvidence,
+    declaration: built.declaration && { ...built.declaration, mediaBindings: built.expectedMedia } }));
+  return { admission: reasons.length ? "BLOCKED" : "TRADE_CANDIDATE", reasons, draft: built.declaration, expectedMedia: built.expectedMedia, inputDigest };
+}
+async function materializeTakeoverDraft(client: PoolClient, actor: TradeActor, a: PublishingAccount, intake: LegacyTradeIntake, plan: LegacyTradePlan, catalog: readonly TradeCatalogItem[], display: LegacyDisplaySnapshot, gate: SupplyGateReader) {
+  const v = a.current_version_id ? await currentVersion(client, a) : null;
+  if (v?.origin === "LEGACY_OBSERVATION") await resolveLegacyObservationToDraft(client, a.id, intake.source, actor, gate);
+  else if (!v || v.origin !== "NATIVE" || v.review_state !== "DRAFT") throw conflict("TAKEOVER_DRAFT_REQUIRED");
+  else await assertSameSourceOrdinaryDraft(client, a, v, intake, buildLegacyTradeDeclaration(ordinaryDraftIntake(intake), catalog).declaration, plan);
+  const current = await lockPublishingAccount(client, a.id);
+  await saveListingDraft(client, current, { ...plan.draft, expectedRevision: current.revision }, gate);
+  await quoteListing(client, current, current.revision, legacyGradingContext(current.id, intake.source, display));
+  return { current, materialized: await assertMaterialized(client, current, plan) };
+}
+type PreparedMedia = { assetId: string; position: number; byteHash: string; assetRevision: string };
+async function readPreparedMedia(client: PoolClient, a: PublishingAccount, v: ListingVersion, approved: boolean): Promise<PreparedMedia[]> {
+  const expected = v.payload!.declaration.mediaBindings;
+  const rows = (await client.query(`/* legacy-prepared-media */ SELECT a.id AS "assetId",a.account_id AS "accountId",a.owner_user_id AS "ownerUserId",a.game_id AS "gameId",a.purpose,a.ownership_kind AS "ownershipKind",a.content_hash AS "byteHash",a.revision::text AS "assetRevision",a.technical_state AS "technicalState",a.review_state AS "reviewState",a.access_class AS "accessClass",(length(trim(a.public_storage_key))>0) AS "publicDerivative",(length(trim(a.review_reason)) BETWEEN 2 AND 500) AS "validReviewReason",m.position
+    FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position,a.id FOR UPDATE OF a`, [v.id])).rows;
+  if (!expected.length || expected.length > 20 || rows.length !== expected.length || new Set(rows.map(r => r.assetId)).size !== rows.length) throw conflict("PREPARED_MEDIA_BINDING_MISMATCH");
+  const result: PreparedMedia[] = [];
+  for (const m of expected) {
+    const r = rows.find(row => row.assetId === m.assetId && row.position === m.position);
+    if (!r || r.accountId !== a.id || r.ownerUserId !== a.owner_user_id || r.gameId !== a.game_id || r.purpose !== "ACCOUNT_DISPLAY" || r.ownershipKind !== "USER_SUPPLY"
+      || r.byteHash !== m.byteHash || !/^[1-9]\d{0,24}$/.test(r.assetRevision) || r.technicalState !== "READY" || r.publicDerivative !== true) throw conflict("PREPARED_MEDIA_BINDING_MISMATCH");
+    if (approved && (r.reviewState !== "APPROVED" || r.accessClass !== "PUBLIC_DISPLAY" || r.validReviewReason !== true)) throw conflict("PREPARED_MEDIA_REVIEW_REQUIRED");
+    result.push({ assetId: r.assetId, position: r.position, byteHash: r.byteHash, assetRevision: r.assetRevision });
+  }
+  return result;
+}
+async function assertPreparedDraft(client: PoolClient, a: PublishingAccount, source: LegacyDraftResolutionInput, batchId: string, token: LegacyPreparedDraft, inputDigest: string, approved: boolean) {
+  const v = await currentVersion(client, a);
+  if (v.origin !== "NATIVE" || v.review_state !== "DRAFT" || v.id !== token.versionId || v.rule_release_id !== token.releaseId || v.content_hash !== token.contentHash || !v.payload
+    || computeContentHash(v.payload) !== token.contentHash || canonicalize(await readDeclaration(client, v)) !== canonicalize(v.payload.declaration)) throw conflict("PREPARED_DRAFT_CHANGED");
+  if (typeof inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(inputDigest)) throw conflict("PREPARED_DRAFT_AUDIT_REQUIRED");
+  const proof = await client.query(`/* legacy-prepared-draft */ SELECT details FROM zzsh_iam.audit_event WHERE action='supply.legacy.trade_takeover.prepare' AND object_type='rental_account' AND object_id=$1 AND outcome='SUCCESS' AND details->>'batchId'=$2 AND details->'source'=$3::jsonb AND details->>'inputDigest'=$4 AND details->'preparedDraft'=$5::jsonb LIMIT 2`, [a.id, batchId, JSON.stringify(source), inputDigest, JSON.stringify(token)]);
+  const details = proof.rows[0]?.details;
+  if (proof.rowCount !== 1 || details?.declarationDigest !== sha256Hex(canonicalize(v.payload.declaration)) || !Array.isArray(details.media)) throw conflict("PREPARED_DRAFT_AUDIT_REQUIRED");
+  const media = await readPreparedMedia(client, a, v, approved);
+  if (details.media.length !== media.length || media.some(m => !details.media.some((p: PreparedMedia) => p.assetId === m.assetId && p.byteHash === m.byteHash && p.position === m.position && /^[1-9]\d{0,24}$/.test(p.assetRevision) && BigInt(p.assetRevision) <= BigInt(m.assetRevision)))) throw conflict("PREPARED_MEDIA_BINDING_MISMATCH");
+  if (approved) {
+    const audits = (await client.query(`/* legacy-prepared-media-review */ SELECT e.object_id,e.details FROM zzsh_iam.audit_event e JOIN unnest($1::text[],$5::text[],$6::text[]) AS expected(asset_id,asset_revision,byte_hash) ON expected.asset_id=e.object_id AND e.details#>>'{mediaContext,assetRevision}'=expected.asset_revision AND e.details#>>'{mediaContext,byteHash}'=expected.byte_hash WHERE e.action='supply.media.reviewed' AND e.actor_type='admin' AND e.object_type='media_asset' AND e.outcome='SUCCESS' AND e.details#>>'{mediaContext,accountId}'=$2 AND e.details#>>'{mediaContext,accountRevision}'=$3 AND e.details#>>'{mediaContext,versionId}'=$4 LIMIT 41`, [media.map(m => m.assetId), a.id, a.revision, v.id, media.map(m => (BigInt(m.assetRevision)-1n).toString()), media.map(m => m.byteHash)])).rows;
+    for (const m of media) {
+      const matching = audits.filter(row => { const d = row.details, c = d?.mediaContext, after = d?.after; return row.object_id === m.assetId && d?.operation === "supply.media.review" && d?.result === "APPLIED" && after?.id === m.assetId && after?.review_state === "APPROVED" && after?.access_class === "PUBLIC_DISPLAY" && after?.content_hash === m.byteHash && String(after?.revision) === m.assetRevision && c?.accountId === a.id && c?.accountRevision === a.revision && c?.versionId === v.id && c?.byteHash === m.byteHash && typeof c.assetRevision === "string" && /^[1-9]\d{0,24}$/.test(c.assetRevision) && BigInt(c.assetRevision) + 1n === BigInt(m.assetRevision); });
+      if (matching.length !== 1) throw conflict("PREPARED_MEDIA_REVIEW_REQUIRED");
+    }
+  }
+}
+/** Prepare and quote one same-source draft. The returned tuple must be reviewed through the ordinary media route before takeover. */
+export async function prepareLegacyTradeTakeover(client: PoolClient, actor: TradeActor, input: Omit<LegacyTradeTakeoverInput, "preparedDraft">, gate: SupplyGateReader) {
+  input = structuredClone(input);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$/.test(input.batchId) || Object.hasOwn(input, "preparedDraft")) throw invalid("Invalid preparation input");
+  const { intake } = input, operation = "supply.legacy.trade_takeover.prepare";
+  let account: PublishingAccount, display: LegacyDisplaySnapshot;
+  return withIdempotency(client, { realm: "admin", principalId: actor.id, operation, resourceId: intake.accountId }, sha256Hex(JSON.stringify([intake.accountId, intake.source.expectedObservationVersionId, sha256Hex(canonicalize(intake))])), fingerprintRequest(operation, intake.accountId, input),
+    async () => { await lockResolveDraftIdempotency(client, actor.id, intake.accountId, intake.source); account = await lockPublishingAccount(client, intake.accountId); await authorize(client, actor, account); display = await assertLegacyTradeBindings(client, account, intake); },
+    async () => {
+      const reviewed = reviewedTakeoverDeclaration(input.reviewedDeclaration), declarationIntake = reviewed ? { ...intake, title: reviewed.title } : intake;
+      const catalog = (await client.query<TradeCatalogItem>(`SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY id`, [account!.game_id])).rows;
+      const plan = preparedDeclarationPlan(declarationIntake, catalog, input.batchId);
+      if (plan.admission !== "TRADE_CANDIDATE") throw conflict(plan.reasons.join(","));
+      const { current, materialized: v } = await materializeTakeoverDraft(client, actor, account!, intake, plan, catalog, display!, gate);
+      const media = await readPreparedMedia(client, current, v, false);
+      const preparedDraft: LegacyPreparedDraft = { accountRevision: current.revision, versionId: v.id, releaseId: v.rule_release_id!, contentHash: v.content_hash! };
+      const result = { accountId: current.id, preparedDraft, mediaReviewBindings: media.map(m => ({ ...m, accountId: current.id, accountRevision: current.revision, versionId: v.id })), state: "MEDIA_REVIEW_REQUIRED" as const };
+      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: operation, objectType: "rental_account", objectId: current.id, outcome: "SUCCESS", details: { batchId: input.batchId, source: intake.source, inputDigest: plan.inputDigest, declarationDigest: sha256Hex(canonicalize(v.payload!.declaration)), media, ...(reviewed ? { reviewedDeclaration: { originalTitle: intake.title, ...reviewed } } : {}), ...result } });
       return { status: 200, body: result };
     });
 }

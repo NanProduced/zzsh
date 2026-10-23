@@ -1,5 +1,13 @@
 # 用户供给表单数据契约
 
+## 三角洲账号属性与资源
+
+`login_qq_qr` 表示 QQ扫码，`legacy_login_qq` 仍为 QQ账密。发布选项、公开属性与筛选使用同一编码，不涉及平台 QQ 登录或自动上号。
+
+`attributes.grading_code` 保留既有大段位，新增可选整数 `grading_division`：青铜/白银为3、2、1，黄金/铂金为4、3、2、1，钻石/黑鹰为5、4、3、2、1，巅峰无小等级。草稿可未填，新核价与发布须补齐；旧快照缺字段不补0或最低级，也不向原规范化声明注入null。编辑已有小等级时须保留该字段；切换巅峰可显式传null清除，旧客户端省略会返回冲突。已核旧号接管仅由服务端验证原来源后保留小段位未知，普通请求无豁免开关。
+
+当前保险资源名称为“九格保险体验卡”，沿用 `df_billable_top_insure_card` 及原itemId、DAY/scale0/unitQuantity1；历史快照保留当时名称。`df_billable_turtle_backpack_45` 为“45格乌龟包”，PIECE/scale0/FIXED_UNIT/unitQuantity1，中文单位“个”；45不是计价份量。物资沿原全量预付、双方期初/期末确认与实耗结算，不计入哈夫币净消耗、不自动扣押金。新增目录不向旧账号补0库存，未申报保持未知；实际经营价格须经既有价目封存与发布生效，不以代码常量代替。
+
 ## 定价兼容 API（PC-1）
 
 `haff-ratio-v1` 的声明、报价和内容摘要保持原结构。`haff-ratio-v2` 仅使用 SPREAD；现有价格版本保存 `compatibility.ordinary` 与 `compatibility.fast` 的 `spreadDelta` 和四档 `discounts`（STANDARD/VIP/SVIP/DISCOUNT_USER）。custom 共用 ordinary 参数。`compatibility.modes` 保存三种模式的 enabled；custom/fast 的 min/max 为 `{base:"C"|"ABSOLUTE",value:"精确十进制文本"}`。无生产默认参数。
