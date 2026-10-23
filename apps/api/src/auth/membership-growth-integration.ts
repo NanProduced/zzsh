@@ -9,6 +9,7 @@ import {
   GROWTH_THRESHOLDS,
   NORMAL_GROWTH_TIERS,
   isTotalDiscountContract,
+  isUnifiedTotalDiscountContract,
   quoteToGrowthOfferPlan,
   parseDepositAllowanceCents,
   tenantDepositAfterBenefit,
@@ -549,7 +550,7 @@ function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract,
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
   if (isTotalDiscountContract(contract)) {
     const rentalMode = base.conditions.rentalPricing?.rentalMode ?? "ordinary";
-    if (contract.mode !== rentalMode || contract.priceVersionId !== base.priceVersionId) return null;
+    if ((!isUnifiedTotalDiscountContract(contract) && contract.mode !== rentalMode) || contract.priceVersionId !== base.priceVersionId) return null;
     const result = computeDeltaQuote(base);
     if (!result.quotable) return null;
     const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);

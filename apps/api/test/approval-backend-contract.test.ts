@@ -6,6 +6,8 @@ import type { Pool, PoolClient } from "pg";
 import { handleAdminApprovalRoute, evaluateApprovalActions, assertApprovalAction, hashApprovalPayload } from "../src/auth/approval-audit";
 import { projectApprovalBusinesses, approvalRegistration, APPROVAL_EXECUTION_MODE } from "../src/auth/approval-business";
 
+const unifiedPricingFixture = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price_fixture", payableRatio: "1", costBasisRef: "price_fixture" };
+
 type Status = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED" | "EXPIRED" | "EXECUTED" | "EXECUTION_FAILED";
 
 type FixtureActor = {
@@ -869,7 +871,7 @@ test("operations and candidate-options reads gate on their own permissions", asy
 
 test("R2-1 game scope gates the create POST exactly like the recovery GET", async () => {
   const creator: FixtureActor = { id: "admin_creator", username: "zz00012", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.create", "approval.request.read", "membership.entitlement.request"] };
-  const grantPayload = { gameId: "game_a", userId: "user_a", kind: "FRIEND", scopeKey: "s", startsAtUtc: FUTURE, endsAtUtc: FUTURE, policyId: "policy_a" };
+  const grantPayload = { gameId: "game_a", userId: "user_a", kind: "FRIEND", scopeKey: "s", startsAtUtc: FUTURE, endsAtUtc: FUTURE, policyId: "policy_a", pricing: unifiedPricingFixture };
   const createBody = { operationCode: "membership.entitlement.grant", triggerCondition: "manual", payloadVersion: 1, payload: grantPayload, summary: "越范围创建必须当场拒绝" };
   const outOfScopeCreator = { ...creator, gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_other"] } };
   const outOfScope = harness(baseFixture({
@@ -964,7 +966,7 @@ for (const change of ["unchanged", "old-scope-revoked", "old-permission-revoked"
       templates: [{ id: "approval_tpl_1", operationCode: "membership.entitlement.grant", triggerCondition: "manual", version: 1 }],
     }));
     const body = { operationCode: "membership.entitlement.grant", triggerCondition: "manual", payloadVersion: 1,
-      payload: { gameId: "game_b" }, summary: "替代申请恢复授权", supersedesRequestId: previous.id };
+      payload: { gameId: "game_b", pricing: unifiedPricingFixture }, summary: "替代申请恢复授权", supersedesRequestId: previous.id };
     const headers = { "idempotency-key": "idem_r3_replacement" };
     const first = await call(view, actor.id, "POST", "/approvals/requests", body, headers);
     assert.equal(first.status, 200, JSON.stringify(first.body));

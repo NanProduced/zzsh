@@ -7,6 +7,7 @@ import { membershipGrowthEnabled, normalizeGrowthInstant } from "./membership-gr
 import { SecurityApiError } from "./security-core";
 import { readDirectoryUserSummaries } from "./user-directory-summary";
 import { canonicalize } from "../supply/content-hash";
+import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const STATES = ["PENDING", "APPROVED_PENDING_EXECUTION", "EXECUTED_PENDING_START", "ACTIVE", "EXPIRED", "REPLACED", "REVOKED"] as const;
@@ -126,9 +127,12 @@ export async function readMembershipEntitlementContext(client: PoolClient, viewe
     }
   }
   const usable = ranges && Object.values(ranges).some((range) => Object.values(range.byMode).some((entry) => entry?.status === "CONFIGURED"));
+  const unifiedPricing = projectUnifiedMembershipPricing(policyReady ? approved.policy : null, enabled);
+  const unifiedRanges = unifiedPricing.entitlementRanges;
+  const unifiedUsable = Object.values(unifiedRanges).some(range => range.knowledge === "KNOWN");
   const meta: ApprovedMembershipMeta | null = approved ? { id: approved.id, version: approved.version, effectiveAtUtc: approved.effectiveAtUtc, ruleReleaseId: approved.ruleReleaseId, priceVersionId: approved.priceVersionId, payloadHash: approved.payloadHash, sourceRef: approved.sourceRef } : null;
   const existing = await entitlementPage(client, viewer, { userId, gameId, page: 1, pageSize: 100 }, asOfUtc);
   const summary = existing.items.find((item) => item.userSummary)?.userSummary ?? (await readDirectoryUserSummaries(client, [userId], viewer.access.permissions)).get(userId);
-  const reasonCode = !membershipGrowthEnabled() ? "FEATURE_DISABLED" : !approved ? "POLICY_UNAVAILABLE" : !usable ? "RANGE_UNAVAILABLE" : "OK";
-  return { schema: "membership-entitlement-context.v1" as const, subject: { userId, name: null, image: null, maskedPhone: null, ...summary }, game, approvedMeta: meta, ranges, rangeSource: !ranges ? null : approved?.policy.entitlementRanges !== undefined ? "INDEPENDENT" : "LEGACY_TIER_CAP", capability: { canRequest: reasonCode === "OK", reasonCode }, existingEntitlements: existing.items };
+  const reasonCode = !membershipGrowthEnabled() ? "FEATURE_DISABLED" : !approved ? "POLICY_UNAVAILABLE" : !usable ? "RANGE_UNAVAILABLE" : !unifiedUsable ? "UNIFIED_RANGE_REQUIRED" : "OK";
+  return { schema: "membership-entitlement-context.v1" as const, pricingScope: "ALL_ENABLED_RENTAL_MODES" as const, subject: { userId, name: null, image: null, maskedPhone: null, ...summary }, game, approvedMeta: meta, ranges, unifiedRanges, rangeSource: !ranges ? null : approved?.policy.entitlementRanges !== undefined ? "INDEPENDENT" : "LEGACY_TIER_CAP", capability: { canRequest: reasonCode === "OK", reasonCode, unifiedPricingSupported: true, requiresUnifiedPricing: true }, existingEntitlements: existing.items };
 }

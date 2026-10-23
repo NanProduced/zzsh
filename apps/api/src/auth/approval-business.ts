@@ -95,11 +95,11 @@ export function editableEntitlementApprovalPayload(payload: Record<string, unkno
   const fields = ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "depositAllowanceCents", "reason", "pricing"];
   if (Object.keys(payload).some((field) => !fields.includes(field))) return null;
   if (["userId", "gameId", "kind", "policyId", "scopeKey", "startsAtUtc", "endsAtUtc", "reason"].some((field) => typeof payload[field] !== "string")) return null;
-  if (Object.keys(payload.pricing).some((field) => !["status", "kind", "mode", "priceVersionId", "payableRatio", "costBasisRef"].includes(field))) return null;
+  if (Object.keys(payload.pricing).some((field) => !["status", "kind", "mode", "scope", "priceVersionId", "payableRatio", "costBasisRef"].includes(field))) return null;
   const pricing = payload.pricing;
   const result: Record<string, unknown> = {};
   for (const field of ["userId", "gameId", "kind", "policyId", "scopeKey", "replaceEntitlementId", "startsAtUtc", "endsAtUtc", "depositWaived", "depositAllowanceCents", "reason"]) if (payload[field] !== undefined) result[field] = payload[field];
-  result.pricing = { status: pricing.status, kind: pricing.kind, mode: pricing.mode, priceVersionId: pricing.priceVersionId, payableRatio: pricing.payableRatio, costBasisRef: pricing.costBasisRef };
+  result.pricing = { status: pricing.status, kind: pricing.kind, ...(pricing.scope === undefined ? { mode: pricing.mode } : { scope: pricing.scope }), priceVersionId: pricing.priceVersionId, payableRatio: pricing.payableRatio, costBasisRef: pricing.costBasisRef };
   return result;
 }
 
@@ -466,7 +466,7 @@ function membershipView(
     const pricing = payload.pricing;
     if (pricing && typeof pricing === "object") {
       const value = pricing as Record<string, unknown>;
-      view.pricingReference = { mode: typeof value.mode === "string" ? value.mode : null, priceVersionId: textField(value, "priceVersionId"), costBasisRef: textField(value, "costBasisRef"), schema: textField(value, "haffSchema") ?? textField(value, "schema") ?? textField(value, "kind"), payableRatio: textField(value, "payableRatio"), payloadSource: row.finalPayload ? "APPROVED_FINAL" : "REQUEST_ORIGINAL" };
+      view.pricingReference = { mode: typeof value.mode === "string" ? value.mode : null, ...(typeof value.scope === "string" ? { scope: value.scope } : {}), priceVersionId: textField(value, "priceVersionId"), costBasisRef: textField(value, "costBasisRef"), schema: textField(value, "haffSchema") ?? textField(value, "schema") ?? textField(value, "kind"), payableRatio: textField(value, "payableRatio"), payloadSource: row.finalPayload ? "APPROVED_FINAL" : "REQUEST_ORIGINAL" };
     }
     if (referencedPolicy) view.costBasis = { priceVersionId: referencedPolicy.priceVersionId, ruleReleaseId: referencedPolicy.ruleReleaseId };
   } else {

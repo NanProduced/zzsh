@@ -1,5 +1,5 @@
 import { computeDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
-import { decimalToBigInt, parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
+import { decimalToBigInt, formatDecimalExact, parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
 import { normalizeTime } from "../supply/content-hash";
 
 export const MEMBERSHIP_GROWTH_SCHEMA = "membership-growth-v1" as const;
@@ -494,15 +494,18 @@ export type GrowthPricingContract = {
  * haff rent + item resource fees once, expressed as a payable share (e.g. "0.9" pays 90%).
  * It never rewrites the base haff rule or per-item unit prices.
  */
-export type TotalDiscountContract = {
+type TotalDiscountTerms = {
   status: "CONFIGURED";
   kind: "TOTAL_DISCOUNT";
-  mode: RentalMode;
   priceVersionId: string;
   /** Payable share of the combined base total; decimal text in (0, 1]. */
   payableRatio: string;
   costBasisRef: string;
 };
+export type TotalDiscountContract = TotalDiscountTerms & (
+  | {mode:RentalMode;scope?:never}
+  | {scope:'ALL_ENABLED_RENTAL_MODES';mode?:never}
+);
 export type ModePricingContract = GrowthPricingContract | TotalDiscountContract | NotPricedParameter;
 
 export type EntitlementDiscountRange = {
@@ -518,12 +521,16 @@ export type EntitlementRanges = Record<"FRIEND" | "PRESTIGE", { byMode: Partial<
 
 export function isTotalDiscountContract(value: unknown): value is TotalDiscountContract {
   return Boolean(value && typeof value === "object" && !Array.isArray(value)
-    && (value as Record<string, unknown>).status === "CONFIGURED" && (value as Record<string, unknown>).kind === "TOTAL_DISCOUNT");
+    && (value as Record<string, unknown>).status === "CONFIGURED" && (value as Record<string, unknown>).kind === "TOTAL_DISCOUNT"
+    && !(Object.hasOwn(value,'mode')&&Object.hasOwn(value,'scope')));
+}
+export function isUnifiedTotalDiscountContract(value:unknown):value is Extract<TotalDiscountContract,{scope:'ALL_ENABLED_RENTAL_MODES'}>{
+  return isTotalDiscountContract(value)&&value.scope==='ALL_ENABLED_RENTAL_MODES'&&!Object.hasOwn(value,'mode');
 }
 export function isLegacyPricingContract(value: unknown): value is GrowthPricingContract {
   return Boolean(value && typeof value === "object" && !Array.isArray(value)
     && (value as Record<string, unknown>).haff !== undefined && (value as Record<string, unknown>).materials !== undefined
-    && !isTotalDiscountContract(value) && !notPriced(value));
+    && !Object.hasOwn(value,'scope') && !isTotalDiscountContract(value) && !notPriced(value));
 }
 /**
  * A single legacy cap only bounds its own mode. The `byMode` shape keeps one cap entry per mode so
@@ -573,6 +580,7 @@ export function sealedEnabledRentalModes(haffRule: unknown): RentalMode[] | null
 }
 export type GrowthBenefitPolicy = {
   schema: typeof MEMBERSHIP_GROWTH_SCHEMA;
+  pricingScope?: 'ALL_ENABLED_RENTAL_MODES';
   version: string;
   status: "DRAFT" | "APPROVED";
   effectiveAt: string | null;
@@ -645,7 +653,7 @@ function validateMaterialPricing(value: MaterialPricingParameter, path: string, 
 
 function validatePricingContract(value: GrowthPricingContract | NotPricedParameter, path: string, result: PolicyValidation): void {
   if (notPriced(value)) return validateNotPriced(value, path, result);
-  if (!value || !["ordinary", "custom", "fast"].includes(value.mode) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.priceVersionId) || !value.materials || typeof value.materials !== "object") {
+  if (!value || Object.hasOwn(value,'scope') || !["ordinary", "custom", "fast"].includes(value.mode) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.priceVersionId) || !value.materials || typeof value.materials !== "object") {
     result.errors.push(path);
     return;
   }
@@ -691,7 +699,7 @@ function validateConfiguredContract(contract: GrowthPricingContract, path: strin
 
 /** Payable ratio as an exact 8-decimal integer; null for pending/malformed/out-of-range values. */
 function discountRatio(value: string | undefined): bigint | null {
-  if (value === undefined || value === "") return null;
+  if (typeof value !== 'string' || value === "") return null;
   try {
     const parsed = parseNonNegativeDecimal(value, 8, "payableRatio");
     const unit = 10n ** BigInt(parsed.scale);
@@ -701,12 +709,12 @@ function discountRatio(value: string | undefined): bigint | null {
 
 /** Owner total-discount contract: combined base total × payable ratio, applied once by the quote adapter. */
 function validateTotalDiscount(contract: TotalDiscountContract, path: string, result: PolicyValidation): void {
-  if (!["ordinary", "custom", "fast"].includes(contract.mode)) result.errors.push(path);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(contract.priceVersionId ?? "")) result.errors.push(`${path}.priceVersionId`);
+  if (contract.scope==='ALL_ENABLED_RENTAL_MODES'?Object.hasOwn(contract,'mode'):Object.hasOwn(contract,'scope')||typeof contract.mode!=='string'||!["ordinary", "custom", "fast"].includes(contract.mode)) result.errors.push(path);
+  if (typeof contract.priceVersionId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(contract.priceVersionId)) result.errors.push(`${path}.priceVersionId`);
   if (contract.payableRatio === undefined || contract.payableRatio === "") result.warnings.push(`${path}.payableRatio.value_pending`);
   else if (discountRatio(contract.payableRatio) === null) result.errors.push(`${path}.payableRatio`);
   if (contract.costBasisRef === undefined || contract.costBasisRef === "") result.warnings.push(`${path}.cost_basis_missing`);
-  else if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(contract.costBasisRef)) result.errors.push(`${path}.costBasisRef`);
+  else if (typeof contract.costBasisRef!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(contract.costBasisRef)) result.errors.push(`${path}.costBasisRef`);
 }
 
 function validateEntitlementRanges(value: EntitlementRanges, enabled: ReadonlySet<RentalMode>, result: PolicyValidation): void {
@@ -724,15 +732,46 @@ function validateEntitlementRanges(value: EntitlementRanges, enabled: ReadonlySe
       if (range.status !== "CONFIGURED" || range.kind !== "TOTAL_DISCOUNT_RANGE" || range.mode !== mode) result.errors.push(path);
       validateTotalDiscount({ ...range, kind: "TOTAL_DISCOUNT", payableRatio: range.minPayableRatio }, path, result);
       const min = discountRatio(range.minPayableRatio), max = discountRatio(range.maxPayableRatio);
-      if (min === null) result.errors.push(`${path}.minPayableRatio`);
-      if (max === null) result.errors.push(`${path}.maxPayableRatio`);
+      if (min === null) (range.minPayableRatio===''?result.warnings:result.errors).push(`${path}.minPayableRatio${range.minPayableRatio===''?'.value_pending':''}`);
+      if (max === null) (range.maxPayableRatio===''?result.warnings:result.errors).push(`${path}.maxPayableRatio${range.maxPayableRatio===''?'.value_pending':''}`);
       if (min !== null && max !== null && min > max) result.errors.push(`${path}.range`);
     }
   }
 }
 
+export type UnifiedEntitlementRangeProjection={knowledge:'KNOWN'|'UNKNOWN';minPayableRatio:string|null;maxPayableRatio:string|null;priceVersionId:string|null;costBasisRef:string|null;reasonCodes:string[]};
+function validEnabledModes(modes:readonly RentalMode[]|null|undefined):modes is readonly RentalMode[]{
+  return Array.isArray(modes)&&modes.length>0&&modes.length<=3&&new Set(modes).size===modes.length&&modes.every(mode=>['ordinary','custom','fast'].includes(mode));
+}
+/** One original range must apply identically in every real enabled path; neither union nor first-slot fallback is approval evidence. */
+export function projectUniformEntitlementRange(policy:GrowthBenefitPolicy,kind:'FRIEND'|'PRESTIGE',enabledModes:readonly RentalMode[]|null|undefined):UnifiedEntitlementRangeProjection{
+  const unknown=(reason:string):UnifiedEntitlementRangeProjection=>({knowledge:'UNKNOWN',minPayableRatio:null,maxPayableRatio:null,priceVersionId:null,costBasisRef:null,reasonCodes:[reason]});
+  if(!validEnabledModes(enabledModes))return unknown('ENABLED_MODES_UNAVAILABLE');
+  const terms:{min:bigint;max:bigint;price:string;cost:string}[]=[];
+  for(const mode of enabledModes){
+    let range:EntitlementDiscountRange|NotPricedParameter|undefined;
+    if(policy?.entitlementRanges!==undefined)range=entitlementRangeForMode(policy,kind,mode);
+    else{
+      const cap=policy?.tiers?.[kind==='FRIEND'?'GOLD':'DIAMOND']?.entitlementCap,entry=cap?entitlementCapForMode(cap,mode):undefined;
+      if(!entry||notPriced(entry)||!isTotalDiscountContract(entry))return unknown('LEGACY_PRICING_REQUIRES_REVIEW');
+      if(entry.mode!==mode||Object.hasOwn(entry,'scope'))return unknown('UNIFIED_RANGE_UNAVAILABLE');
+      range={...entry,kind:'TOTAL_DISCOUNT_RANGE',mode,minPayableRatio:entry.payableRatio,maxPayableRatio:'1'};
+    }
+    if(!range||notPriced(range)||range.status!=='CONFIGURED'||range.kind!=='TOTAL_DISCOUNT_RANGE'||range.mode!==mode)return unknown('UNIFIED_RANGE_UNAVAILABLE');
+    const checked:PolicyValidation={valid:true,publishable:true,errors:[],warnings:[]};
+    validateTotalDiscount({...range,kind:'TOTAL_DISCOUNT',payableRatio:range.minPayableRatio},'range',checked);
+    const min=discountRatio(range.minPayableRatio),max=discountRatio(range.maxPayableRatio);
+    if(checked.errors.length||checked.warnings.length||min===null||max===null||min>max)return unknown('UNIFIED_RANGE_UNAVAILABLE');
+    terms.push({min,max,price:range.priceVersionId,cost:range.costBasisRef});
+  }
+  if(new Set(terms.map(t=>[t.min,t.max,t.price,t.cost].join('\u0000'))).size!==1)return unknown('LEGACY_MODE_VALUES_DIFFER');
+  const term=terms[0]!;
+  return{knowledge:'KNOWN',minPayableRatio:formatDecimalExact({value:term.min,scale:8}),maxPayableRatio:formatDecimalExact({value:term.max,scale:8}),priceVersionId:term.price,costBasisRef:term.cost,reasonCodes:[]};
+}
+
 export type EntitlementPricingSummary =
   | { knowledge: "KNOWN"; kind: "TOTAL_DISCOUNT"; mode: RentalMode; payableRatio: string }
+  | { knowledge: "KNOWN"; kind: "TOTAL_DISCOUNT"; scope:'ALL_ENABLED_RENTAL_MODES'; payableRatio: string }
   | { knowledge: "LEGACY"; kind: "LEGACY" }
   | { knowledge: "UNKNOWN"; kind: "UNKNOWN" };
 
@@ -741,7 +780,9 @@ export function entitlementPricingSummary(value: unknown): EntitlementPricingSum
   if (isTotalDiscountContract(value)) {
     const validation: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
     validateTotalDiscount(value, "pricing", validation);
-    if (!validation.errors.length && !validation.warnings.length) return { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: value.mode, payableRatio: value.payableRatio };
+    if (!validation.errors.length && !validation.warnings.length) return value.scope==='ALL_ENABLED_RENTAL_MODES'
+      ? {knowledge:'KNOWN',kind:'TOTAL_DISCOUNT',scope:value.scope,payableRatio:value.payableRatio}
+      : { knowledge: "KNOWN", kind: "TOTAL_DISCOUNT", mode: value.mode, payableRatio: value.payableRatio };
   } else if (isLegacyPricingContract(value)) return { knowledge: "LEGACY", kind: "LEGACY" };
   return { knowledge: "UNKNOWN", kind: "UNKNOWN" };
 }
@@ -787,6 +828,7 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
   const result: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };
   const enabled = new Set<RentalMode>(context.enabledModes ?? ["ordinary", "custom", "fast"]);
   if (!value || value.schema !== MEMBERSHIP_GROWTH_SCHEMA) result.errors.push("schema");
+  if (value?.pricingScope !== undefined && value.pricingScope !== 'ALL_ENABLED_RENTAL_MODES') result.errors.push('pricingScope');
   if (!value || !["DRAFT", "APPROVED"].includes(value.status)) result.errors.push("status");
   if (!value || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.version)) result.errors.push("version");
   if (!value || !/^[A-Za-z0-9][A-Za-z0-9._:-]{1,199}$/.test(value.sourceRef)) result.errors.push("sourceRef");
@@ -855,7 +897,7 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
           result.warnings.push(`${capPath}.byMode.${mode}.cost_basis_missing`);
         }
       }
-    } else if (isTotalDiscountContract(cap)) validateTotalDiscount(cap, capPath, result);
+    } else if (isTotalDiscountContract(cap)) {validateTotalDiscount(cap, capPath, result);if(cap.scope==='ALL_ENABLED_RENTAL_MODES')result.errors.push(capPath);}
     else validatePricingContract(cap, capPath, result);
     // R1-01: the consumed caps (GOLD/DIAMOND) must not be more generous than the tier boundary they derive from.
     if (tier === "GOLD" || tier === "DIAMOND") for (const mode of enabled) {
@@ -874,6 +916,23 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
         continue;
       }
       if (!capWithinTierBoundary(capEntry, tierContract)) result.warnings.push(`${capPath}.${mode}.below_tier_boundary`);
+    }
+  }
+  if (value?.pricingScope === 'ALL_ENABLED_RENTAL_MODES') {
+    for (const tier of NORMAL_GROWTH_TIERS) {
+      const terms = new Set<string>();
+      for (const mode of enabled) {
+        const contract = value.tiers?.[tier]?.pricing?.[mode];
+        if (!contract || notPriced(contract)) continue;
+        if (!isTotalDiscountContract(contract)) { result.errors.push(`tiers.${tier}.unified_pricing_required`); continue; }
+        const ratio = discountRatio(contract.payableRatio);
+        if (ratio !== null) terms.add([ratio, contract.priceVersionId, contract.costBasisRef].join('\u0000'));
+      }
+      if (terms.size > 1) result.errors.push(`tiers.${tier}.unified_pricing_differs`);
+    }
+    if (!independentRanges) result.errors.push('entitlementRanges.unified_range_required');
+    else for (const kind of ['FRIEND','PRESTIGE'] as const) {
+      if (projectUniformEntitlementRange(value, kind, [...enabled]).reasonCodes.includes('LEGACY_MODE_VALUES_DIFFER')) result.errors.push(`entitlementRanges.${kind}.unified_range_differs`);
     }
   }
   const pricingDecimalDifference = (left: string, right: string): bigint | null => {
@@ -993,7 +1052,7 @@ function pricingWithinCap(candidate: GrowthPricingContract, cap: GrowthPricingCo
   return true;
 }
 
-export function validateEntitlementCandidate(candidate: EntitlementCandidate, _membershipTier: GrowthTier, policy: GrowthBenefitPolicy): EntitlementValidation {
+export function validateEntitlementCandidate(candidate: EntitlementCandidate, _membershipTier: GrowthTier, policy: GrowthBenefitPolicy,context?:{enabledModes?:readonly RentalMode[]}): EntitlementValidation {
   const errors: string[] = [];
   try { parseDepositAllowanceCents(candidate.depositAllowanceCents, candidate.depositWaived ?? false); }
   catch { errors.push("depositAllowanceCents"); }
@@ -1005,6 +1064,19 @@ export function validateEntitlementCandidate(candidate: EntitlementCandidate, _m
   const endsAt = parseInstant(candidate.endsAt, "endsAt");
   if (endsAt <= startsAt || endsAt - startsAt > GROWTH_WINDOW_US) errors.push("duration");
   const pricing = candidate.pricing;
+  if(isTotalDiscountContract(pricing)&&Object.hasOwn(pricing,'scope')){
+    const checked:PolicyValidation={valid:true,publishable:true,errors:[],warnings:[]};validateTotalDiscount(pricing,'candidate.pricing',checked);
+    if(checked.errors.length||checked.warnings.length)errors.push('pricingInvalid');
+    if(!validEnabledModes(context?.enabledModes))errors.push('enabledModesRequired');
+    else{
+      const range=projectUniformEntitlementRange(policy,candidate.kind,context.enabledModes);if(range.knowledge!=='KNOWN')errors.push(...range.reasonCodes);
+      for(const mode of context.enabledModes){
+        const bound:TotalDiscountContract={status:'CONFIGURED',kind:'TOTAL_DISCOUNT',mode,priceVersionId:pricing.priceVersionId,costBasisRef:pricing.costBasisRef,payableRatio:pricing.payableRatio};
+        errors.push(...validateEntitlementCandidate({...candidate,pricing:bound},_membershipTier,policy).errors);
+      }
+    }
+    return{valid:errors.length===0,errors:[...new Set(errors)],depositWaived:candidate.depositWaived===true};
+  }
   const candidateMode = !notPriced(pricing) && typeof (pricing as { mode?: unknown }).mode === "string" && ["ordinary", "custom", "fast"].includes((pricing as { mode: string }).mode)
     ? (pricing as { mode: RentalMode }).mode : null;
   const strict: PolicyValidation = { valid: true, publishable: true, errors: [], warnings: [] };

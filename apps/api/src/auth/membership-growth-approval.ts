@@ -8,6 +8,7 @@ import { entitlementCapForMode, entitlementRangeForMode, GrowthRuleError, isNotP
 import { membershipGrowthEnabled } from "./membership-growth-integration";
 import { SecurityApiError } from "./security-core";
 import { canonicalize } from "../supply/content-hash";
+import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 
 const OPERATION_CODES = new Set(["membership.benefit.policy.publish", "membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -27,10 +28,10 @@ function text(payload: Record<string, unknown>, field: string, max = 512): strin
   return value;
 }
 
-function pricing(payload: Record<string, unknown>): GrowthPricingContract {
+function pricing(payload: Record<string, unknown>): EntitlementCandidate["pricing"] {
   const value = payload.pricing;
   if (!value || typeof value !== "object" || Array.isArray(value)) conflict("pricing is invalid");
-  return value as GrowthPricingContract;
+  return value as EntitlementCandidate["pricing"];
 }
 
 function checkBusinessPermission(access: EffectiveAdminAccess, code: string): void {
@@ -81,7 +82,7 @@ export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId:
   return { gameId: row.gameId, termVersionId: row.termVersionId, enabledModes, releaseMode: row.mode, haffSchema: typeof haffRule.schema === "string" ? haffRule.schema : null, catalog: { safeBoxes, materials, resources: resources.map(({ itemId, name, unit, pricingKind }) => ({ itemId, name, unit, pricingKind })) } };
 }
 
-type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string };
+type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string; enabledModes: RentalMode[] };
 
 async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: string): Promise<ApprovedPolicyPayload> {
   // Approved policy versions are append-only for runtime; entitlement FK keeps the referenced version.
@@ -94,7 +95,7 @@ async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: 
   const sealed = await assertSealedRuleRelease(client, row.ruleReleaseId, row.priceVersionId);
   const validation = validateBenefitPolicy(row.policyPayload, { enabledModes: sealed.enabledModes });
   if (!validation.valid || !validation.publishable) conflict("Approved membership policy is not publishable");
-  return { id: row.id, version: row.version, policy: row.policyPayload, sourceRef: row.sourceRef };
+  return { id: row.id, version: row.version, policy: row.policyPayload, sourceRef: row.sourceRef, enabledModes: sealed.enabledModes };
 }
 
 type DraftPolicyForApproval = { id: string; version: number; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; policyPayload: GrowthBenefitPolicy; payloadHash: string; approvedPayloadHash?: string };
@@ -134,13 +135,22 @@ function candidateFromPayload(payload: Record<string, unknown>, requestedBy: str
   return { userId, kind, scopeKey, startsAt, endsAt, pricing: pricingValue, depositWaived: payload.depositWaived === true, ...(payload.depositAllowanceCents === undefined ? {} : { depositAllowanceCents: payload.depositAllowanceCents as string }), reason, requestedBy };
 }
 
+/** New submissions use unified pricing; previously approved immutable requests retain their original contract. */
+export async function validateUnifiedMembershipPolicySubmission(client: PoolClient, payload: Record<string, unknown>): Promise<void> {
+  const draft = await loadDraftPolicyForApproval(client, payload);
+  const sealed = await assertSealedRuleRelease(client, draft.ruleReleaseId, draft.priceVersionId);
+  if (draft.policyPayload.pricingScope !== "ALL_ENABLED_RENTAL_MODES" || projectUnifiedMembershipPricing(draft.policyPayload, sealed.enabledModes).knowledge !== "KNOWN") conflict("请先保存统一总价折扣政策，再提交审批");
+  const validation = validateBenefitPolicy(draft.policyPayload, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
+  if (!validation.publishable) conflict("统一会员政策仍有待配置或不符合规则的权益");
+}
+
 /** Decision and execution share the exact immutable policy/range validation; execution adds locks and mutations. */
 export async function validateMembershipEntitlementPayload(client: PoolClient, payload: Record<string, unknown>, requestedBy: string): Promise<{ candidate: EntitlementCandidate; gameId: string; policyId: string }> {
   const policyId = text(payload, "policyId"), gameId = text(payload, "gameId");
   if (!ID.test(policyId) || !ID.test(gameId)) conflict("Entitlement policy or game is invalid");
   const candidate = candidateFromPayload(payload, requestedBy), policy = await loadApprovedPolicy(client, policyId, gameId);
   try {
-    const validation = validateEntitlementCandidate(candidate, "UNKNOWN", policy.policy);
+    const validation = validateEntitlementCandidate(candidate, "UNKNOWN", policy.policy, { enabledModes: policy.enabledModes });
     if (!validation.valid) conflict(`Membership entitlement is invalid: ${validation.errors.join(",")}`);
   } catch (error) {
     if (error instanceof GrowthRuleError) conflict("Membership entitlement contains invalid values");
@@ -214,6 +224,7 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
     const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
     const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
     if (!result.valid || !result.publishable) conflict(`Membership policy is not publishable: ${[...result.errors, ...result.warnings].slice(0, 5).join(",")}`);
+    if (policy.pricingScope !== undefined && projectUnifiedMembershipPricing(policy, sealed.enabledModes).knowledge !== "KNOWN") conflict("Membership policy requires one total discount and one entitlement range across enabled rental paths");
     for (const tier of Object.values((policy as GrowthBenefitPolicy).tiers)) {
       // Only modes the sealed release enabled carry spendable prices; a disabled mode never blocks a publish.
       for (const mode of sealed.enabledModes) {

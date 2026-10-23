@@ -21,7 +21,8 @@ import {
   type ApprovalRequestFacts,
 } from "./approval-business";
 import type { AdminContext, AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
-import { validateMembershipEntitlementPayload } from "./membership-growth-approval";
+import { validateMembershipEntitlementPayload, validateUnifiedMembershipPolicySubmission } from "./membership-growth-approval";
+import { isUnifiedTotalDiscountContract } from "./membership-growth";
 
 const IDEMPOTENCY_KEY_PATTERN = new RegExp(API_V1_TOKEN_PATTERN);
 
@@ -784,6 +785,8 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
       await assertCreateAuthorization(client, options, context, access, op, payload.value, supersedes);
     },
     action: async (client) => {
+      if (AMENDABLE_ENTITLEMENTS.has(op) && !isUnifiedTotalDiscountContract(payload.value.pricing)) throw new SecurityApiError(409, "CONFLICT", "礼遇办理已改为统一总价折扣，请刷新并使用新版表单", [{ path: "pricing.scope", code: "INVALID_FIELD" }]);
+      if (op === "membership.benefit.policy.publish") await validateUnifiedMembershipPolicySubmission(client, payload.value as Record<string, unknown>);
       const templateResult = await client.query<TemplateRow>(
         `SELECT "id", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "version", "created_at" AS "createdAt", "updated_at" AS "updatedAt"
            FROM "zzsh_iam"."approval_template" WHERE "operation_code" = $1 AND "trigger_condition" = $2 FOR UPDATE`,

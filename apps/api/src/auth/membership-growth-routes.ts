@@ -14,7 +14,8 @@ import { decodeId, safely, type SupplyResponse } from "../supply/supply-routes";
 import { forbidden, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { backfillAcceptedSettlementAfterPosting, membershipGrowthEnabled, parseGrowthConsumptionQuery, readMembershipGrowth, readMembershipGrowthConsumption, readMembershipGrowthScopeDetail } from "./membership-growth-integration";
 import { canonicalize } from "../supply/content-hash";
-import { GROWTH_THRESHOLDS, NORMAL_GROWTH_TIERS, validateBenefitPolicy, type GrowthBenefitPolicy } from "./membership-growth";
+import { GROWTH_THRESHOLDS, NORMAL_GROWTH_TIERS, sealedEnabledRentalModes, validateBenefitPolicy, type GrowthBenefitPolicy } from "./membership-growth";
+import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 import { parseMembershipEntitlementQuery, readApprovedMembershipPolicy, readMembershipEntitlementContext, readMembershipEntitlementOptions, readMembershipEntitlements } from "./membership-entitlement-read";
 import { canSimulateMembershipProfit, readMembershipProfitSimulation, readMembershipProfitSimulationContext } from "./membership-profit-simulation";
 
@@ -129,8 +130,9 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
         const approved = await readApprovedMembershipPolicy(client);
         const approvedFields = {
           approvedPolicy: approved?.policy ?? null,
+          approvedUnifiedPricing: projectUnifiedMembershipPricing(approved?.policy ?? null, approved ? sealedEnabledRentalModes(approved.haffRule) : null),
           approvedMeta: approved ? { id: approved.id, version: approved.version, status: "APPROVED", effectiveAtUtc: approved.effectiveAtUtc, ruleReleaseId: approved.ruleReleaseId, priceVersionId: approved.priceVersionId, sourceRef: approved.sourceRef, payloadHash: approved.payloadHash } : null,
-          capability: { canDraft: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canChangeEntitlementRanges: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canRequestEntitlement: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.approvalRequestCreate) && hasPermission(access, ADMIN_PERMISSION.membershipEntitlementRequest), depositAllowanceSupported: true, canSimulateProfit: canSimulateMembershipProfit(access) },
+          capability: { canDraft: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canChangeEntitlementRanges: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canRequestEntitlement: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.approvalRequestCreate) && hasPermission(access, ADMIN_PERMISSION.membershipEntitlementRequest), depositAllowanceSupported: true, unifiedPricingSupported: true, canSimulateProfit: canSimulateMembershipProfit(access) },
         };
         const thresholds = Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()]));
         const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string; policyPayload: GrowthBenefitPolicy }>(
@@ -144,7 +146,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
           const catalog = sealed
             ? { ...bootstrapCatalog(sealed, row.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const }
             : { ...policyCatalog(row.policyPayload, row.priceVersionId), releaseMode: null, catalogSource: "POLICY_PAYLOAD" as const };
-          return { ...approvedFields, policy: row.policyPayload, meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog, thresholds, bootstrap: null };
+          return { ...approvedFields, policy: row.policyPayload, unifiedPricing: projectUnifiedMembershipPricing(row.policyPayload, sealed?.enabledModes ?? null), meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog, thresholds, bootstrap: null };
         }
         const sealedRelease = (await client.query<{ releaseId: string; priceVersionId: string }>(
           `SELECT r.id AS "releaseId", r.price_version_id AS "priceVersionId"
@@ -154,10 +156,11 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
             LIMIT 1`,
         )).rows[0];
         const sealed = sealedRelease ? await sealedFactsOrNull(client, sealedRelease.releaseId, sealedRelease.priceVersionId) : null;
-        if (!sealed) return { ...approvedFields, policy: null, meta: null, catalog: { ...policyCatalog(null, null), releaseMode: null, catalogSource: null }, thresholds, bootstrap: null };
+        if (!sealed) return { ...approvedFields, policy: null, unifiedPricing: projectUnifiedMembershipPricing(null, null), meta: null, catalog: { ...policyCatalog(null, null), releaseMode: null, catalogSource: null }, thresholds, bootstrap: null };
         return {
           ...approvedFields,
           policy: null,
+          unifiedPricing: projectUnifiedMembershipPricing(null, sealed.enabledModes),
           meta: null,
           catalog: { ...bootstrapCatalog(sealed, sealedRelease!.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const },
           thresholds,
@@ -169,9 +172,9 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
     }
     if (request.method !== "POST" || path !== "/api/v1/admin/membership-growth/policy-drafts") throw notFound();
     const body = bodyRecord(request);
-    const policy = body.policy;
-    if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new SecurityApiError(400, "INVALID_ARGUMENT", "policy is invalid");
-    if ((policy as Record<string, unknown>).status !== "DRAFT") throw new SecurityApiError(400, "INVALID_ARGUMENT", "policy.status must be DRAFT");
+    const requestedPolicy = body.policy;
+    if (!requestedPolicy || typeof requestedPolicy !== "object" || Array.isArray(requestedPolicy)) throw new SecurityApiError(400, "INVALID_ARGUMENT", "policy is invalid");
+    if ((requestedPolicy as Record<string, unknown>).status !== "DRAFT") throw new SecurityApiError(400, "INVALID_ARGUMENT", "policy.status must be DRAFT");
     const versionNo = body.versionNo;
     if (typeof versionNo !== "number" || !Number.isSafeInteger(versionNo) || versionNo < 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "versionNo is invalid");
     const ruleReleaseId = requiredText(body, "ruleReleaseId");
@@ -179,15 +182,22 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
     const sourceRef = requiredText(body, "sourceRef", 200);
     const expectedVersion = body.expectedVersion;
     const effectiveAtUtc = optionalText(body, "effectiveAtUtc");
-    const digest = createHash("sha256").update(canonicalize({ schema: "membership-growth-draft-v1", policy, versionNo, ruleReleaseId, priceVersionId, sourceRef, effectiveAtUtc })).digest("hex");
-    const draftId = `growth_policy_draft_${digest.slice(0, 40)}`;
     const result = await withTransaction(options.pool, async (client) => {
       await assertAdminContextInTransaction(client, context);
       const access = await loadEffectiveAdminAccess(client, context.userId);
       if (!hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft)) throw forbidden();
       const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
+      let policy = requestedPolicy as GrowthBenefitPolicy;
+      if (body.unifiedPricing !== undefined) {
+        try { policy = normalizeUnifiedMembershipPolicy(policy, body.unifiedPricing, { enabledModes: sealed.enabledModes, priceVersionId }); }
+        catch (error) { if (error instanceof TypeError) throw new SecurityApiError(400, "INVALID_ARGUMENT", error.message); throw error; }
+      }
       const validation = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
       if (!validation.valid) throw new SecurityApiError(409, "CONFLICT", validation.errors.join(","));
+      const unifiedPricing = projectUnifiedMembershipPricing(policy, sealed.enabledModes);
+      const publishable = validation.publishable && unifiedPricing.knowledge === "KNOWN";
+      const digest = createHash("sha256").update(canonicalize({ schema: "membership-growth-draft-v1", policy, versionNo, ruleReleaseId, priceVersionId, sourceRef, effectiveAtUtc })).digest("hex");
+      const draftId = `growth_policy_draft_${digest.slice(0, 40)}`;
       const current = (await client.query<{ version: string; policyPayload: GrowthBenefitPolicy }>(`SELECT version::text AS version,policy_payload AS "policyPayload" FROM zzsh_iam.membership_growth_policy ORDER BY version DESC,created_at DESC LIMIT 1`)).rows[0];
       if (expectedVersion !== undefined && (typeof expectedVersion !== "string" || expectedVersion !== (current?.version ?? "0"))) throw new SecurityApiError(409, "CONFLICT", "Membership policy version changed");
       await client.query(
@@ -198,7 +208,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
       );
       await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
       await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "membership.policy.draft.saved", objectType: "membership_growth_policy", objectId: draftId, outcome: "SUCCESS", requestId, details: { version: versionNo, payloadHash: digest } });
-      return { id: draftId, version: String(versionNo), status: "DRAFT", payloadHash: digest, publishable: validation.publishable, warnings: validation.warnings };
+      return { id: draftId, version: String(versionNo), status: "DRAFT", payloadHash: digest, publishable, unifiedPricing, warnings: [...validation.warnings, ...(unifiedPricing.knowledge === "KNOWN" ? [] : ["UNIFIED_PRICING_REQUIRED"])] };
     });
     sendJson(response, 200, result, requestId);
   });

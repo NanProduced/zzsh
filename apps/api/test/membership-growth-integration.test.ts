@@ -16,6 +16,7 @@ import { handleMembershipGrowthPolicyAdmin, handleMembershipGrowthUser } from ".
 import { selectPersonalGrowthOffer } from "../src/order/personal-growth-confirmation";
 import { computeSettlement, SETTLEMENT_ROUNDING_POLICY } from "../src/order/settlement";
 import { parseMembershipEntitlementQuery, readMembershipEntitlementContext, readMembershipEntitlements } from "../src/auth/membership-entitlement-read";
+import { normalizeUnifiedMembershipPolicy } from "../src/auth/membership-unified-pricing";
 
 test("entitlement list input uses bounded numeric pages and rejects duplicate or unknown filters", () => {
   assert.deepEqual(parseMembershipEntitlementQuery(new URLSearchParams()), { page: 1, pageSize: 20 });
@@ -71,7 +72,7 @@ test("request-only entitlement context does not require known growth or expose t
       throw new Error(`unexpected query: ${sql}`);
     } };
     const context = await readMembershipEntitlementContext(client as never, { adminId: "requester", access }, "user_1", "game-a");
-    assert.deepEqual(context.capability, { canRequest: true, reasonCode: "OK" });
+    assert.deepEqual(context.capability, { canRequest: true, reasonCode: "OK", unifiedPricingSupported: true, requiresUnifiedPricing: true });
     assert.equal(context.rangeSource, "INDEPENDENT");
     assert.equal(context.subject.name, null);
     assert.equal(context.approvedMeta?.id, "policy-approved");
@@ -426,6 +427,45 @@ test("legal tenant-early minimum billing is a separate growth component", () => 
 test("effective policy tier preserves grace and black-gold benefits", () => {
   assert.equal(policyTierForGrowthProjection({ effectiveTier: "GOLD", normalTier: "SILVER", grace: { state: "ACTIVE", fromTier: "GOLD", droppedAt: "2026-10-01T00:00:00.000Z", until: "2026-10-08T00:00:00.000Z", gapPoints: "1" } }), "GOLD");
   assert.equal(policyTierForGrowthProjection({ effectiveTier: "BLACK_GOLD", normalTier: "STANDARD", grace: { state: "NONE", fromTier: null, droppedAt: null, until: null, gapPoints: null } }), "DIAMOND");
+});
+
+function unifiedTestPricing() {
+  return { schema: "membership-unified-pricing.v1", scope: "ALL_ENABLED_RENTAL_MODES", tiers: Object.fromEntries(["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"].map(tier => [tier, { payableRatio: "1" }])), entitlementRanges: { FRIEND: { minPayableRatio: "0.9", maxPayableRatio: "1" }, PRESTIGE: { minPayableRatio: "0.9", maxPayableRatio: "1" } } };
+}
+
+test("one unified entitlement discounts the actual ordinary, custom and fast base total once", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    const at = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+    const fact = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-10T00:00:00Z", recordedAt: "2026-10-10T00:00:00Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+    const contribution = { ...fact, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", fact) };
+    const policy = normalizeUnifiedMembershipPolicy(readerPolicy(), unifiedTestPricing(), { enabledModes: ["ordinary", "custom", "fast"], priceVersionId: "price-v1" });
+    const entitlement = { id: "ent-unified", kind: "FRIEND", scopeKey: "game:game-1", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", status: "ACTIVE", depositWaived: false, depositAllowanceCents: "20000", pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "price-v1" } };
+    for (const rentalMode of ["ordinary", "custom", "fast"] as const) {
+      const input = quoteInput(); input.conditions.rentalPricing = { rentalMode, ...(rentalMode === "custom" ? { ownerRatioB: "45" } : rentalMode === "fast" ? { ownerRatioB: "60" } : {}) };
+      input.lines = [...input.lines, { itemId: "item", quantity: "5", pricingKind: "FIXED_UNIT", unit: "PIECE", customerTier: "STANDARD", unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1" }];
+      const before = JSON.stringify(input), base = computeDeltaQuote(input); assert.equal(base.quotable, true, rentalMode); if (!base.quotable) throw Error(rentalMode);
+      const output = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, input.haffRule, [entitlement]), { userId: "user-1", gameId: "game-1", accountId: "account-1", listingVersionId: "listing-1", listingHash: "h".repeat(64), priceVersionId: "price-v1", baseQuote: base.quote, ruleReleaseId: "release-1", ownerUserId: "owner-1", quantityDigest: "quantity-1", quoteInput: input, asOfUtc: at });
+      assert.equal(output.knowledge, "KNOWN", JSON.stringify(output)); if (output.knowledge !== "KNOWN") throw Error(rentalMode);
+      const gift = output.candidates.find(x => x.plan.source === "FRIEND"); assert(gift, rentalMode);
+      const gross = BigInt(base.quote.resourceTotal.amount.replace(".", ""));
+      assert.equal(gift.plan.rentalTotalCents, ((gross * 95n + 50n) / 100n).toString());
+      assert.equal(gift.quote.ownerTotal.amount, base.quote.ownerTotal.amount);
+      assert.equal(gift.plan.depositCents, "10000");
+      assert.equal(JSON.stringify(input), before, "membership never rewrites base pricing input");
+    }
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
+
+test("new policy publication refuses a per-path discount conflict without inserting a policy", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    const policy = discountPolicyPayload(), rule = compatRule(); policy.pricingScope = "ALL_ENABLED_RENTAL_MODES"; rule.compatibility!.modes.fast = { enabled: false };
+    const custom = policy.tiers.GOLD.pricing.custom; assert(custom && "payableRatio" in custom); custom.payableRatio = "0.91";
+    const fixture = draftApprovalFixture(policy, { haffRule: rule });
+    await assert.rejects(executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: "boss" } as never, "reject-split-pricing"), (e: any) => e.status === 409);
+    assert.equal(fixture.inserted.length, 0);
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
 
 function readerPolicy(): GrowthBenefitPolicy {
