@@ -4,6 +4,12 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import type { PoolClient } from "pg";
 import { readChannelPaymentRequest, readOrderPaymentSummary } from "../src/order/channel-payment-read";
+import { allowedQrUrl, readFormalPaymentEvidence } from "../src/order/channel-payment-formal-read";
+import { createHash } from "node:crypto";
+import { bindFormalJoinpayCollectionAdmission, bindJoinpayCollectionProfile, COLLECTION_REQUIRED_RULES,
+  describeCollectionProfile, readCollectionProfileEvidence, readFormalCollectionAdmission,
+  type CollectionProfileOperation, type CollectionServerProfile } from "../src/order/joinpay-collection-profile";
+import { JOINPAY_SIGNATURE_ORDER, joinpayMd5Sign } from "../src/order/joinpay-protocol";
 
 const USER = { userId: "usr_renter", sessionId: "session_read" };
 const AT = "2026-10-22T03:00:00.000000Z";
@@ -14,7 +20,7 @@ const request = (patch: Record<string, unknown> = {}) => ({
   evidence_level: "SYNTHETIC_PROTOCOL", created_at: AT, updated_at: AT, ...patch,
 });
 const confirmation = (patch: Record<string, unknown> = {}) => ({
-  id: "payment_1", source: "CONTROLLED", disposition: "APPLIED", reason_code: null,
+  id: "payment_1", order_id: "ord_1", source: "CONTROLLED", disposition: "APPLIED", reason_code: null,
   amount_cents: "9999999999999999", currency: "CNY", accepted_at: AT, ...patch,
 });
 const observation = (patch: Record<string, unknown> = {}) => ({
@@ -25,7 +31,7 @@ const observation = (patch: Record<string, unknown> = {}) => ({
   observed_at: AT, stale: false, late: false, conflict: false, ...patch,
 });
 const snapshot = (patch: Record<string, unknown> = {}) => ({
-  order: { id: "ord_1", display_no: "ZZ261022-000123", status: "PENDING_PAYMENT", paid_at: null, hold_expired: false, created_at: AT },
+  order: { id: "ord_1", display_no: "ZZ261022-000123", status: "PENDING_PAYMENT", paid_at: null, paid_confirmation_id: "payment_1", hold_expired: false, created_at: AT },
   request: request(), confirmation: null, observations: [observation()], conflicts: [], conflicts_truncated: false, latest_observed_at: AT, ...patch,
 });
 
@@ -218,6 +224,7 @@ test("SQL 同语句读取事实，先 readiness，再按来源/renter/订单约�
   assert.deepEqual(values, ["ord_1", "usr_renter"]); assert.match(sql, /id=\$1 AND \(\$2::text IS NULL OR renter_user_id=\$2\)/);
   assert.match(sql, /hold_until<=statement_timestamp\(\)/); assert.match(sql, /amount_cents::text/);
   assert.match(sql, /ORDER BY \(p.disposition='APPLIED'\) DESC,p.accepted_at DESC,p.id DESC LIMIT 1/);
+  assert.match(sql, /p.order_id=o.id/); assert.match(sql, /p.id=o.paid_confirmation_id AND p.currency='CNY'/);
   assert.match(sql, /x.config_profile_id=r.config_profile_id/); assert.match(sql, /x.key_version_ref=r.key_version_ref/);
   assert.match(sql, /AND NOT x.stale AND NOT x.conflict/); assert.match(sql, /LIMIT 100/);
   assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK|BEGIN|COMMIT)\b|FOR SHARE|advisory|legacy_order|raw_ref|verify_outcome|lease_owner|idempotency_key/i);
@@ -249,4 +256,117 @@ test("既有错误基础链加载后，支付模块导入与成功调用不建�
     readModule.readOrderPaymentSummary({query:async()=>{throw Error('unexpected_sql')}},{origin:'LEGACY',orderId:'ord_1',financeReadable:false}).then(r=>{if(r.integration!=='NOT_INTEGRATED')throw Error('unexpected_result')});`;
   const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("来源显式回退；历史正式确认不受当前新付款能力关闭影响，错绑/非CNY不当实付", async () => {
+  const formal = snapshot({ confirmation: confirmation({ source: "JOINPAY", amount_cents: "15908" }), request: request({ evidence_level: "JOINPAY_CANDIDATE" }) });
+  const view = await user(formal), summary = await admin(fixture(formal));
+  assert.equal(view.dataOrigin, "JOINPAY_PROVIDER"); assert.equal(view.payment?.amount?.cents, "15908");
+  assert.equal(summary.dataOrigin, "JOINPAY_PROVIDER"); assert.equal(summary.productionPaymentCapability, false);
+  assert.equal(summary.acceptance?.state, "APPLIED"); assert.equal(summary.latestTrustedObservation, null);
+  const mixed = snapshot({ confirmation: confirmation({ source: "JOINPAY", amount_cents: "15908" }), request: request({ channel: "CONTROLLED", evidence_level: "CONTROLLED_TEST" }) });
+  assert.equal((await user(mixed)).dataOrigin, "JOINPAY_PROVIDER");
+  const mixedSummary = await admin(fixture(mixed)); assert.equal(mixedSummary.dataOrigin, "JOINPAY_PROVIDER");
+  assert.ok(mixedSummary.unknowns?.includes("PAYMENT_SOURCE_DIFFERS_FROM_REQUEST"));
+  assert.equal((await user(snapshot({ request: request({ channel: "CONTROLLED", evidence_level: "CONTROLLED_TEST" }) }))).dataOrigin, "LOCAL_CONTROLLED");
+  for (const patch of [{ currency: "USD" }, { id: "other_confirmation" }, { order_id: "other_order" }]) {
+    assert.equal((await user(snapshot({ confirmation: confirmation({ source: "JOINPAY", ...patch }) }))).payment, null);
+  }
+  const unknown = await user(snapshot({ request: request({ evidence_level: "FUTURE" }) }));
+  assert.equal(unknown.dataOrigin, "UNKNOWN"); assert.equal(unknown.projection.actionBlockedReason, "UNKNOWN_SOURCE"); assert.equal(unknown.paymentAction, null);
+  const bad = await user(snapshot({ confirmation: confirmation({ source: "FUTURE" }) }));
+  assert.equal(bad.dataOrigin, "UNKNOWN"); assert.equal(bad.payment, null);
+});
+
+test("QR精确主机门禁拒绝协议/子域/凭据/片段/端口/控制字符/超长与rd_Pic替代", () => {
+  assert.equal(allowedQrUrl("https://qr.fixture.test/pay?t=1", ["qr.fixture.test"]), "https://qr.fixture.test/pay?t=1");
+  for (const value of ["http://qr.fixture.test/pay", "https://qr.fixture.test.evil/pay", "https://sub.qr.fixture.test/pay", "https://user@qr.fixture.test/pay",
+    "https://qr.fixture.test/pay#x", "https://qr.fixture.test:444/pay", "https://qr.fixture.test/pa\ny", "https://qr.fixture.test/" + "a".repeat(2048)])
+    assert.equal(allowedQrUrl(value, ["qr.fixture.test"]), null, value);
+  for (const hosts of [[], ["https://qr.fixture.test"], ["*.fixture.test"], ["qr.fixture.test:443"]]) assert.equal(allowedQrUrl("https://qr.fixture.test/pay", hosts), null);
+});
+
+// Only an offline assumption that the trusted server reviewed these inputs; no official evidence or provider success is asserted.
+function readAssembly(operations: readonly CollectionProfileOperation[] = ["SUBMIT", "QUERY", "NOTIFY"]) {
+  const evidence = { source: "JOINPAY_OFFICIAL" as const, reference: "fixture_document", sha256: "1".repeat(64) };
+  const answer = (names: readonly string[]) => { const values = Object.fromEntries(names.map((name, i) => [name, "v" + i]));
+    return { ...evidence, values, vectorKey: "fixture_only", expectedHmac: joinpayMd5Sign(names, values, "fixture_only") }; };
+  const descriptor: CollectionServerProfile = { profileId: "fixture_profile", merchantIdentityId: "fixture_merchant", wireMerchantNo: "123456789", tradeMerchantNo: "fixture_trade",
+    notifyUrl: "https://merchant.fixture.test/notify", purpose: "COLLECTION", evidenceMode: "OFFICIAL", operations: Object.fromEntries(operations.map(op => [op, {
+      keyVersionRef: "fixture_key", rules: Object.fromEntries(COLLECTION_REQUIRED_RULES[op].map(rule => [rule, evidence])),
+      requestKnownAnswer: op === "NOTIFY" ? "NOT_OBTAINED" : answer(JOINPAY_SIGNATURE_ORDER[op === "SUBMIT" ? "uniPayRequest" : "queryOrderRequest"]),
+      responseKnownAnswer: answer(JOINPAY_SIGNATURE_ORDER[op === "SUBMIT" ? "uniPaySyncResponse" : op === "QUERY" ? "queryOrderResponse" : "asyncNotify"]),
+      ...(op === "SUBMIT" ? {} : { timeOffsetMinutes: 480 }), ...(op === "NOTIFY" ? { notificationDecoding: { ra_PayTime: 0, rb_DealTime: 0 } } : {}) }])) };
+  const profile = bindJoinpayCollectionProfile(descriptor), admission = bindFormalJoinpayCollectionAdmission({ kind: "JOINPAY_FORMAL_SERVER_REVIEW", reference: "fixture_review",
+    reviewSha256: "2".repeat(64), appId: "fixture_app", database: "fixture_database", runtimeUser: "fixture_runtime", merchantIdentityId: descriptor.merchantIdentityId,
+    wireMerchantNo: descriptor.wireMerchantNo, profiles: [profile] });
+  return { profile, admission, descriptor };
+}
+const hash = (raw: string) => createHash("sha256").update(raw).digest("hex");
+function formalFixture() {
+  const a = readAssembly(), v = readFormalCollectionAdmission(a.admission), sub = describeCollectionProfile(a.profile, "SUBMIT");
+  const r = request({ evidence_level: "JOINPAY_CANDIDATE", state: "ACTION_READY", amount_cents: "12345", merchant_identity_id: a.descriptor.merchantIdentityId,
+    config_profile_id: a.descriptor.profileId, key_version_ref: "fixture_key" });
+  const raw = JSON.stringify({ r1_MerchantNo: a.descriptor.wireMerchantNo, r2_OrderNo: r.channel_order_no, r3_Amount: "123.45", r4_Cur: "1", r6_FrpCode: "ALIPAY_NATIVE", ra_Code: "100", rc_Result: "https://qr.fixture.test/pay" });
+  const b: Record<string, any> = { request_id: r.id, wire_merchant_no: a.descriptor.wireMerchantNo, initial_profile_sha256: sub.profileSha256,
+    formal_admission_ref: v.reference, formal_admission_sha256: v.sha256, formal_admission_canonical: v.canonical, observation: null,
+    qr: { request_id: r.id, raw_base64: Buffer.from(raw).toString("base64"), raw_sha256: hash(raw), profile_id: sub.profileId, profile_sha256: sub.profileSha256, key_version_ref: sub.keyVersionRef } };
+  const calls: string[] = [], state = { ready: true, database: v.database, runtime_user: v.runtimeUser };
+  const client = { query: async (sql: string) => { calls.push(sql); return { rows: [sql.includes("formal_ready") ? { formal_ready: state.ready, ...state } : b] }; } } as unknown as Pick<PoolClient, "query">;
+  return { ...a, b, r, calls, state, client, order: { id: "ord_1", status: "PENDING_PAYMENT", hold_expired: false, has_confirmation: false },
+    options: { formalAdmission: a.admission, formalWriteRouteReady: true, qrHostAllowlist: ["qr.fixture.test"] } };
+}
+
+test("正式QR只读假设模型：完整品牌/写路由/部署/可信主机及原始SUBMIT齐备才给动作", async () => {
+  const f = formalFixture();
+  assert.equal((await readFormalPaymentEvidence(f.client, f.order, f.r, f.options)).qrUrl, "https://qr.fixture.test/pay");
+  for (const options of [{}, { ...f.options, formalWriteRouteReady: false }, { ...f.options, qrHostAllowlist: [] },
+    { ...f.options, formalAdmission: { ...f.admission } }, { ...f.options, formalAdmission: readAssembly(["QUERY"]).admission }]) {
+    const result = await readFormalPaymentEvidence(f.client, f.order, f.r, options as typeof f.options);
+    assert.equal(result.capability, false); assert.equal(result.qrUrl, null);
+  }
+  f.state.ready = false; assert.equal((await readFormalPaymentEvidence(f.client, f.order, f.r, f.options)).capability, false);
+  f.state.ready = true; f.state.runtime_user = "other_runtime"; assert.equal((await readFormalPaymentEvidence(f.client, f.order, f.r, f.options)).qrUrl, null);
+  assert.ok(f.calls.every(sql => !/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK|BEGIN|COMMIT)\b|FOR SHARE|FOR UPDATE|advisory/i.test(sql)));
+});
+
+test("QR遵从订单/hold/确认优先级；原件SHA、初始准入、profile和请求绑定错误不回填", async () => {
+  for (const order of [{ status: "CANCELLED" }, { hold_expired: true }, { has_confirmation: true }]) {
+    const f = formalFixture(); assert.equal((await readFormalPaymentEvidence(f.client, { ...f.order, ...order }, f.r, f.options)).qrUrl, null);
+  }
+  for (const mutate of [(b: any) => b.formal_admission_sha256 = "f".repeat(64), (b: any) => b.qr.raw_sha256 = "f".repeat(64),
+    (b: any) => b.qr.profile_sha256 = "f".repeat(64), (b: any) => b.qr.request_id = "other", (b: any) => b.qr.key_version_ref = "other",
+    (b: any) => { const raw = JSON.stringify({ rd_Pic: "https://qr.fixture.test/pay" }); b.qr.raw_base64 = Buffer.from(raw).toString("base64"); b.qr.raw_sha256 = hash(raw); }]) {
+    const f = formalFixture(); mutate(f.b); assert.equal((await readFormalPaymentEvidence(f.client, f.order, f.r, f.options)).qrUrl, null);
+  }
+});
+
+test("正式观察仅用原件/准入/profile明示offset，finance裁剪后仍不返回raw或私密元数据", async () => {
+  const f = formalFixture(), a = readFormalCollectionAdmission(f.admission), p = describeCollectionProfile(f.profile, "NOTIFY"), raw = "fixture_raw_notification";
+  f.b.observation = { id: "jpe_fixture", request_id: f.r.id, operation: "NOTIFY", event: "E4", schema_outcome: "VALID", signature_outcome: "MATCH", binding_outcome: "MATCH",
+    initial_admission_ref: a.reference, initial_admission_sha256: a.sha256, admission_ref: a.reference, admission_sha256: a.sha256, admission_canonical: a.canonical,
+    profile_id: p.profileId, profile_sha256: p.profileSha256, profile_canonical: readCollectionProfileEvidence(f.profile, "NOTIFY"), key_version_ref: p.keyVersionRef,
+    raw_base64: Buffer.from(raw).toString("base64"), raw_sha256: hash(raw), channel_trx_no: "fixture_trx", provider_paid_at_raw: "2026-10-23 10:00:00", provider_paid_at: "2026-10-23T02:00:00Z", observed_at: AT };
+  const result = await readFormalPaymentEvidence(f.client, f.order, f.r, f.options);
+  assert.equal(result.observation?.evidenceLevel, "JOINPAY_VERIFIED"); assert.equal(result.observation?.providerTimeZone, "EXPLICIT_OFFSET");
+  assert.equal(result.observation?.providerTimeOffsetMinutes, 480); assert.equal(result.observation?.providerPaidAt, "2026-10-23T02:00:00.000Z");
+  assert.doesNotMatch(JSON.stringify(result), /fixture_raw_notification|profile_canonical|admission_canonical|fixture_key/);
+  const localQuery = f.client.query.bind(f.client);
+  const client = { query: async (sql: string, values?: unknown[]) => sql.startsWith("WITH scoped")
+    ? { rows: [snapshot({ request: f.r, observations: [], order: { ...snapshot().order, paid_confirmation_id: null } })] }
+    : sql.includes("AS ready") && !sql.includes("formal_ready") ? { rows: [{ ready: true }] } : localQuery(sql, values) } as unknown as Pick<PoolClient, "query">;
+  const hidden = await readOrderPaymentSummary(client, { origin: "NATIVE", orderId: "ord_1", financeReadable: false }, f.options);
+  for (const field of ["amount", "channelOrderNo", "merchantIdentityId", "keyVersionRef"] as const) assert.equal(hidden.originalRequest?.[field], null);
+  assert.equal(hidden.latestTrustedObservation?.channelTrxNo, null); assert.equal(hidden.latestTrustedObservation?.evidenceLevel, "JOINPAY_VERIFIED");
+  assert.doesNotMatch(JSON.stringify(hidden), /fixture_raw_notification|profile_canonical|admission_canonical|fixture_key|fixture_trx/);
+  for (const [field, value] of [["provider_paid_at", "2026-10-23T10:00:00Z"], ["raw_sha256", "f".repeat(64)], ["initial_admission_ref", "other"], ["profile_sha256", "f".repeat(64)]]) {
+    const before = f.b.observation[field!]; f.b.observation[field!] = value;
+    assert.equal((await readFormalPaymentEvidence(f.client, f.order, f.r, f.options)).observation, null); f.b.observation[field!] = before;
+  }
+});
+
+test("正式关系权限/SQL错误不能吞成无原件", async () => {
+  const error = Object.assign(new Error("sql_denied"), { code: "42501" }), f = formalFixture();
+  const client = { query: async () => { throw error; } } as unknown as Pick<PoolClient, "query">;
+  await assert.rejects(readFormalPaymentEvidence(client, f.order, f.r, f.options), e => e === error);
 });

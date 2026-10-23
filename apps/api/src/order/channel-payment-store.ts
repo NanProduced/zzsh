@@ -13,6 +13,7 @@ import {
 } from "./joinpay-protocol";
 import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation";
 import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpay-collection-profile";
+import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 
 /**
  * PAY-03A：持久请求、只追加观察与资金归属锚点（payment_request / payment_channel_observation /
@@ -141,9 +142,10 @@ export async function createPaymentRequest(client: PoolClient, input: {
 
 /** 独立候选入口；旧合成行只能读回原件，不能经此入口改名提升。原始wire绑定由同事务调用方保存。 */
 export async function createCollectionPaymentRequest(client: PoolClient, input: {
-  actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string; profile: BoundCollectionProfile;
+  actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string; profile?: BoundCollectionProfile;
 }): Promise<IdempotentResult> {
   return createRequest(client, input, ["JOINPAY_CANDIDATE"], async () => {
+    if (!input.profile) throw closed();
     const profile = describeCollectionProfile(input.profile, "SUBMIT");
     if (profile.evidenceMode !== "OFFICIAL") throw closed();
     const binding: ChannelBinding = { channel: "JOINPAY", merchantIdentityId: profile.merchantIdentityId,
@@ -272,6 +274,24 @@ export async function bindChannelTransaction(client: PoolClient, input: {
   if (!owner) throw conflict("Channel transaction anchor unavailable");
   return { anchorId: owner.id, binding: owner.native_order_id === input.orderId ? "SAME" : "OWNED_ELSEWHERE",
     ownerOrderId: owner.native_order_id, confirmationId: owner.confirmation_id };
+}
+
+/** 只认同事务原件重验的正式品牌；与合成共享稳定资金键，不改旧锚点或补confirmation。 */
+export async function bindFormalJoinpayTransaction(client: PoolClient, fact: FormalJoinpayPaymentFact): Promise<AnchorResult> {
+  await readVerifiedJoinpayFactScope(client, fact);
+  const fundsKey = ["JOINPAY", fact.merchantScopeId, fact.providerTransactionId];
+  await xactLock(client, ["zzsh:payment-channel-transaction:v1", ...fundsKey]);
+  const inserted = (await client.query(`INSERT INTO zzsh_order.payment_channel_transaction
+    (id,channel,merchant_identity_id,channel_trx_no,order_origin,native_order_id,request_id,confirmation_id,evidence_level)
+    VALUES($1,'JOINPAY',$2,$3,'NATIVE',$4,$5,NULL,'JOINPAY_VERIFIED') ON CONFLICT(channel,merchant_identity_id,channel_trx_no) DO NOTHING RETURNING id`,
+    [fact.anchorId, fact.merchantScopeId, fact.providerTransactionId, fact.orderId, fact.paymentRequestId])).rows[0];
+  const owner = inserted ? { id: fact.anchorId, native_order_id: fact.orderId, request_id: fact.paymentRequestId, evidence_level: "JOINPAY_VERIFIED" }
+    : (await client.query(`SELECT id,native_order_id,request_id,evidence_level FROM zzsh_order.payment_channel_transaction
+      WHERE channel='JOINPAY' AND merchant_identity_id=$1 AND channel_trx_no=$2`, [fact.merchantScopeId, fact.providerTransactionId])).rows[0];
+  if (!owner) throw conflict("Formal channel transaction anchor unavailable");
+  if (owner.evidence_level !== "JOINPAY_VERIFIED") throw conflict("A synthetic transaction anchor cannot become formal");
+  return { anchorId: owner.id, binding: owner.native_order_id === fact.orderId && owner.request_id === fact.paymentRequestId ? inserted ? "NEW" : "SAME" : "OWNED_ELSEWHERE",
+    ownerOrderId: owner.native_order_id, confirmationId: null };
 }
 
 // ---------- 只追加观察 ----------

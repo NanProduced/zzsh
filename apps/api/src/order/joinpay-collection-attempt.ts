@@ -2,11 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
 import { conflict, invalid, notFound } from "../supply/supply-util";
-import { createCollectionPaymentRequest, claimCollectionPaymentRequestLease, type PaymentActor, type PaymentRequestView } from "./channel-payment-store";
+import { createCollectionPaymentRequest, claimCollectionPaymentRequestLease, bindFormalJoinpayTransaction, type PaymentActor, type PaymentRequestView } from "./channel-payment-store";
 import { evaluateJoinpayTransportFailure, joinpayTransition, type JoinpayEvent, type RequestState } from "./joinpay-protocol";
 import { JoinpayCollectionProfileError, describeCollectionProfile, assertCollectionRequestBinding, readCollectionProfileEvidence, produceJoinpayCollectionRequest, inspectJoinpayCollectionResponse,
-  type BoundCollectionProfile, type CollectionOperation, type CollectionPersistedBinding, type CollectionProfileSnapshot } from "./joinpay-collection-profile";
+  assertFormalCollectionProfile, assertFormalCollectionStart, readFormalCollectionAdmission,
+  type FormalCollectionAdmission, type BoundCollectionProfile, type CollectionOperation, type CollectionPersistedBinding, type CollectionProfileSnapshot } from "./joinpay-collection-profile";
 import { exchangeJoinpayCollection } from "./joinpay-collection-transport";
+import { captureJoinpayCollectionEvidence, readFormalJoinpayPaymentFact, readFormalCollectionRequest, type FormalCollectionSourceOptions } from "./joinpay-collection-source";
+import { createNativePaymentDistributionAdmission, createNativePaymentDistributionStore } from "../finance/distribution-payment-store";
+import { confirmOrderPayment } from "./payment-confirmation";
 
 const collectionLeaseConflict = Symbol("collection lease conflict");
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -17,10 +21,10 @@ type Original = CollectionPersistedBinding & { orderId: string; state: RequestSt
 type OriginalRow = { request_id: string; order_id: string; state: RequestState; revision: string; lease_version: string; evidence_level: string; channel: string;
   channel_order_no: string; amount_cents: string; method: "ALIPAY_NATIVE" | "WEIXIN_NATIVE"; merchant_identity_id: string;
   config_profile_id: string; key_version_ref: string; wire_merchant_no: string; trade_merchant_no: string; product_name: string; notify_url: string;
-  evidence_mode: "OFFICIAL" | "SYNTHETIC" };
+  evidence_mode: "OFFICIAL" | "SYNTHETIC"; formal_admission_ref: string | null };
 const ORIGINAL_SQL = `SELECT r.id AS request_id,r.order_id,r.state,r.revision::text,r.lease_version::text,r.evidence_level,r.channel,
  r.channel_order_no,r.amount_cents::text,r.method,r.merchant_identity_id,r.config_profile_id,r.key_version_ref,
- b.wire_merchant_no,b.trade_merchant_no,b.product_name,b.notify_url,b.evidence_mode
+ b.wire_merchant_no,b.trade_merchant_no,b.product_name,b.notify_url,b.evidence_mode,to_jsonb(b)->>'formal_admission_ref' AS formal_admission_ref
  FROM zzsh_order.payment_request r JOIN zzsh_order.joinpay_collection_binding b ON b.request_id=r.id WHERE r.id=$1`;
 
 function original(row: OriginalRow): Original {
@@ -31,22 +35,35 @@ function original(row: OriginalRow): Original {
     wireMerchantNo: row.wire_merchant_no, tradeMerchantNo: row.trade_merchant_no, productName: row.product_name, notifyUrl: row.notify_url, evidenceMode: row.evidence_mode };
 }
 /** 同事务复用原幂等/对象/hold/原号创建；重放只读原wire，配置变化不重算或修复缺失绑定。 */
-export async function createJoinpayCollectionRequest(pool: Pool, input: {
+export type JoinpayCollectionRequestInput = {
   actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: "ALIPAY_NATIVE" | "WEIXIN_NATIVE";
-  profile: BoundCollectionProfile; wire: InitialWire;
-}): Promise<{ replayed: boolean; status: number; request: PaymentRequestView }> {
-  return withTransaction(pool, async client => {
+  profile?: BoundCollectionProfile; wire?: InitialWire; admission?: FormalCollectionAdmission;
+};
+export async function createJoinpayCollectionRequest(pool: Pool, input: JoinpayCollectionRequestInput) {
+  return withTransaction(pool, client => createJoinpayCollectionRequestInTransaction(client, input));
+}
+/** 已认证route可复用同一client；不另开事务，也不把认证挪到持久请求之后。 */
+export async function createJoinpayCollectionRequestInTransaction(client: PoolClient, input: JoinpayCollectionRequestInput): Promise<{ replayed: boolean; status: number; request: PaymentRequestView }> {
     const result = await createCollectionPaymentRequest(client, input);
     const request = result.body as PaymentRequestView;
-    const existing = (await client.query(`SELECT request_id FROM zzsh_order.joinpay_collection_binding WHERE request_id=$1`, [request.requestId])).rows[0];
+    const existing = (await client.query(`SELECT request_id,to_jsonb(b)->>'formal_admission_ref' AS formal_admission_ref,
+      to_jsonb(b)->>'formal_admission_sha256' AS formal_admission_sha256 FROM zzsh_order.joinpay_collection_binding b WHERE request_id=$1`, [request.requestId])).rows[0];
     if (!existing) {
       if (result.replayed || request.existing) throw conflict("Original collection wire evidence is missing");
+      if (!input.profile || !input.wire) throw new JoinpayCollectionProfileError("COLLECTION_OPERATION_NOT_CONFIRMED");
       const profile = describeCollectionProfile(input.profile, "SUBMIT");
+      if (input.admission) assertFormalCollectionStart(input.admission);
+      const formal = input.admission ? assertFormalCollectionProfile(input.admission, input.profile, "SUBMIT") : null;
       const wire = Object.freeze({ tradeMerchantNo: input.wire.tradeMerchantNo, productName: input.wire.productName, notifyUrl: input.wire.notifyUrl });
       assertCollectionRequestBinding(input.profile, "SUBMIT", { requestId: request.requestId, originalOrderNo: request.channelOrderNo,
         amountCents: request.amountCents, method: request.method, merchantIdentityId: profile.merchantIdentityId, wireMerchantNo: profile.wireMerchantNo,
         profileId: profile.profileId, keyVersionRef: profile.keyVersionRef, ...wire });
-      await client.query(`INSERT INTO zzsh_order.joinpay_collection_binding
+      if (input.admission) await createNativePaymentDistributionAdmission(client, input.admission, request.orderId);
+      if (formal) await client.query(`INSERT INTO zzsh_order.joinpay_collection_binding
+        (request_id,wire_merchant_no,trade_merchant_no,product_name,notify_url,initial_profile_sha256,evidence_mode,formal_admission_ref,formal_admission_sha256,formal_admission_canonical)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [request.requestId, profile.wireMerchantNo, wire.tradeMerchantNo,
+        wire.productName, wire.notifyUrl, profile.profileSha256, profile.evidenceMode, formal.reference, formal.sha256, formal.canonical]);
+      else await client.query(`INSERT INTO zzsh_order.joinpay_collection_binding
         (request_id,wire_merchant_no,trade_merchant_no,product_name,notify_url,initial_profile_sha256,evidence_mode)
         VALUES ($1,$2,$3,$4,$5,$6,$7)`, [request.requestId, profile.wireMerchantNo, wire.tradeMerchantNo,
         wire.productName, wire.notifyUrl, profile.profileSha256, profile.evidenceMode]);
@@ -55,7 +72,6 @@ export async function createJoinpayCollectionRequest(pool: Pool, input: {
         details: { profileId: profile.profileId, evidenceMode: profile.evidenceMode, formalAcceptance: false } });
     }
     return { replayed: result.replayed, status: result.status, request };
-  });
 }
 
 export class CollectionAttemptCommitUnknown extends Error {
@@ -75,6 +91,7 @@ export type JoinpayCollectionExecution = {
   profileFor: (operation: CollectionOperation, original: CollectionPersistedBinding) => BoundCollectionProfile;
   keyFor: (keyVersionRef: string) => string;
   fetch?: typeof globalThis.fetch;
+  formal?: FormalCollectionSourceOptions;
 };
 type Prepared = { attemptId: string; request: Original; profile: BoundCollectionProfile; snapshot: CollectionProfileSnapshot;
   binding: CollectionPersistedBinding; key: string; operation: CollectionOperation; lease: { leaseVersion: string; leaseOwner: string };
@@ -84,6 +101,7 @@ async function prepare(options: JoinpayCollectionExecution, id: string, workerId
   return confirmed(options.pool, id, "CLAIM", async client => {
     const row = (await client.query<OriginalRow>(`${ORIGINAL_SQL} FOR UPDATE OF r`, [id])).rows[0];
     if (!row) throw notFound();
+    if (row.formal_admission_ref != null && !options.formal) throw conflict("Formal request requires explicit source admission");
     const request = original(row);
     const operation: CollectionOperation = row.lease_version === "0" && row.state === "SUBMITTING" ? "SUBMIT" : "QUERY";
     if (operation === "SUBMIT") {
@@ -99,6 +117,11 @@ async function prepare(options: JoinpayCollectionExecution, id: string, workerId
       || snapshot.evidenceMode !== "OFFICIAL" || snapshot.evidenceMode !== request.evidenceMode) throw conflict("Current profile differs from the original merchant provenance");
     if (operation === "SUBMIT" && (snapshot.profileId !== request.profileId || snapshot.keyVersionRef !== request.keyVersionRef)) throw conflict("First submit must use the original profile and key version");
     const binding: CollectionPersistedBinding = Object.freeze({ ...request });
+    if (options.formal) {
+      assertFormalCollectionProfile(options.formal.admission, profile, operation);
+      const admitted = await readFormalCollectionRequest(client, options.formal.admission, id);
+      for (const name of Object.keys(admitted) as (keyof CollectionPersistedBinding)[]) if (admitted[name] !== binding[name]) throw conflict("Formal original binding differs");
+    }
     let key: string;
     try { key = options.keyFor(snapshot.keyVersionRef); }
     catch { throw new JoinpayCollectionProfileError("COLLECTION_KEY_UNAVAILABLE"); }
@@ -201,7 +224,48 @@ export async function executeJoinpayCollectionAttempt(options: JoinpayCollection
   const response = await exchangeJoinpayCollection(attempt.outbound, { fetch: options.fetch });
   if (response.requestSha256 !== attempt.outbound.requestSha256) throw conflict("Transport changed the committed request bytes");
   const observation = await record(options, attempt, response);
+  if (options.formal && observation.event === "E4" && attempt.operation === "QUERY") {
+    await acceptJoinpayCollectionEvidence(options.pool, options.formal, { operation: "QUERY", requestId: input.requestId, observationId: observation.observationId });
+  }
   return { kind: "OBSERVED", operation: attempt.operation, observation };
+}
+
+type AcceptanceInput = { operation: "NOTIFY"; rawQuery: string } | { operation: "QUERY"; requestId: string; observationId: string };
+/** 资金效果与证据/basis/audit同事务；调用方不得把未确认COMMIT当ACK成功。 */
+export async function acceptJoinpayCollectionEvidence(pool: Pool, options: FormalCollectionSourceOptions, input: AcceptanceInput) {
+  const commandId = input.operation === "QUERY" ? input.observationId : `notify_${sha(input.rawQuery).slice(0, 32)}`;
+  return confirmed(pool, commandId, "RESULT", async client => {
+    const captured = await captureJoinpayCollectionEvidence(client, options, input);
+    if (captured.event !== "E4") return { ...captured, payment: null, conflict: false };
+    const fact = await readFormalJoinpayPaymentFact(client, options, captured.evidenceId, commandId);
+    // 唯独此FK延迟到COMMIT，避免先锁order KEY SHARE再等邀请图/用户，与取消的用户→order锁形成环。
+    await client.query("SET CONSTRAINTS zzsh_order.payment_channel_transaction_native_order_id_fkey DEFERRED");
+    const anchor = await bindFormalJoinpayTransaction(client, fact);
+    let payment: Awaited<ReturnType<typeof confirmOrderPayment>> | null = null;
+    if (anchor.binding !== "OWNED_ELSEWHERE") payment = await confirmOrderPayment(client, fact, createNativePaymentDistributionStore(options.admission));
+    else await recordAudit(client, { actorType: "system", action: "order.payment.collection.transaction.conflict", objectType: "payment_request",
+      objectId: fact.paymentRequestId, requestId: commandId, outcome: "FAILURE", reason: "TRANSACTION_OWNED_ELSEWHERE", details: { evidenceId: fact.evidenceId, anchorId: anchor.anchorId } });
+    const next = payment?.disposition === "APPLIED" ? "ACCEPTED" : "REVIEW_REQUIRED";
+    await client.query(`SELECT set_config('zzsh.joinpay_evidence',$1,true)`, [captured.evidenceId]);
+    const changed = await client.query(`UPDATE zzsh_order.payment_request SET state=$2,revision=revision+1,updated_at=clock_timestamp()
+      WHERE id=$1 AND evidence_level='JOINPAY_CANDIDATE' AND state NOT IN('ACCEPTED','REVIEW_REQUIRED') RETURNING state`, [captured.requestId, next]);
+    const actualState = changed.rows[0]?.state ?? (await client.query(`SELECT state FROM zzsh_order.payment_request WHERE id=$1`, [captured.requestId])).rows[0]?.state;
+    if (actualState !== "ACCEPTED" && actualState !== "REVIEW_REQUIRED") throw conflict("Original collection request acceptance state is unavailable");
+    await recordAudit(client, { actorType: "system", action: "order.payment.collection.accepted", objectType: "payment_request", objectId: captured.requestId,
+      requestId: commandId, outcome: "SUCCESS", details: { evidenceId: captured.evidenceId, anchorId: anchor.anchorId, confirmationId: payment?.confirmationId ?? null,
+        disposition: payment?.disposition ?? "CONFLICT", state: actualState } });
+    return { ...captured, payment, conflict: anchor.binding === "OWNED_ELSEWHERE" || payment?.disposition === "CONFLICT" };
+  });
+}
+
+export async function receiveJoinpayCollectionNotification(pool: Pool, options: FormalCollectionSourceOptions, rawQuery: string): Promise<{ status: 200 | 503; body: "success" | "fail" }> {
+  try {
+    // 在SQL/私有钥回调前校验品牌；单独OFFICIAL、拷贝对象和默认未装配均不能进入。
+    readFormalCollectionAdmission(options.admission);
+    if (typeof rawQuery !== "string" || Buffer.byteLength(rawQuery, "utf8") > 65536) return { status: 200, body: "fail" };
+    const result = await acceptJoinpayCollectionEvidence(pool, options, { operation: "NOTIFY", rawQuery });
+    return { status: 200, body: result.acknowledgement };
+  } catch { return { status: 503, body: "fail" }; }
 }
 
 /** 内部恢复只读摘要；不返回签名表单/原响应，普通用户GET不能直接暴露内部原件reader。 */

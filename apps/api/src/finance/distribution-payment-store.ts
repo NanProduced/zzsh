@@ -1,26 +1,39 @@
 import {createHash} from 'node:crypto';import type {PoolClient} from 'pg';
 import {SecurityApiError,recordAudit} from '../auth/security-core';import {conflict,invalid,notFound} from '../supply/supply-util';import {canonicalize,withoutContentHash} from '../supply/content-hash';import {sourceYuanToCents} from './personal-finance-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';import {readDistributionParentInTransaction} from './invitation-store';import {freezePaymentDistributionBasis,readOriginalPaymentDistributionBasis,type PaymentDistributionBasis,type PaymentReferralFacts} from './distribution-payment-basis';
+import {readFormalCollectionAdmission,assertFormalInitialAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type DistributionOrderScope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
 type Prepared={orderId:string};
 /** Candidate integration seam. Caller is the verified payment gate on its original transaction.
  * No route or default scope. Null means no admission; explicit composition must reject it.
  * Old payment callers that do not install this store retain their original behavior. */
-export function createPaymentDistributionStore(scope:DistributionOrderScope){
- if(!/^[a-z][a-z0-9_]{0,20}$/.test(scope.resourceSet)||!Number.isSafeInteger(scope.resourceOid)||scope.resourceOid<=0||!/^[0-9a-f]{64}$/.test(scope.approvalDigest)||!scope.allowedOrderIds.length||scope.allowedOrderIds.some(id=>!ID.test(id)))throw invalid('Exact reviewed order resource and allowlist required');
- const allowed=new Set(scope.allowedOrderIds),name='zzsh_test_order_'+scope.resourceSet,role='zzsh_order_'+scope.resourceSet+'_r',prepared=new WeakMap<object,{client:PoolClient;transactionId:string;input:Omit<Parameters<typeof freezePaymentDistributionBasis>[0],'confirmationId'|'acceptedAt'|'paymentDigest'>}>();
- async function resource(c:PoolClient){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||Number(r.oid)!==scope.resourceOid||r.name!==name||r.role!==role||r.marker!=='zzsh:order-reservation-test:v1')throw conflict('Distribution payment resource differs');}
+const nativeStores=new WeakMap<object,string>();
+export function createPaymentDistributionStore(scope:DistributionOrderScope){return paymentStore(scope);}
+/** 原生来源不是local scope别名；必须持正式商户服务端准入，默认本地factory不变。 */
+export function createNativePaymentDistributionStore(admission:FormalCollectionAdmission){
+ const view=readFormalCollectionAdmission(admission),store=Object.freeze(paymentStore(null,admission));nativeStores.set(store,view.sha256);return store;
+}
+export function assertNativePaymentDistributionStore(store:unknown,admissionSha256:string){
+ if(!store||typeof store!=='object'||nativeStores.get(store)!==admissionSha256)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native distribution payment admission unavailable');
+}
+function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollectionAdmission){
+ const native=formal?readFormalCollectionAdmission(formal):null;
+ if(!native&&(!scope||!/^[a-z][a-z0-9_]{0,20}$/.test(scope.resourceSet)||!Number.isSafeInteger(scope.resourceOid)||scope.resourceOid<=0||!/^[0-9a-f]{64}$/.test(scope.approvalDigest)||!scope.allowedOrderIds.length||scope.allowedOrderIds.some(id=>!ID.test(id))))throw invalid('Exact reviewed order resource and allowlist required');
+ const allowed=new Set(scope?.allowedOrderIds??[]),name=native?.database??'zzsh_test_order_'+scope!.resourceSet,role=native?.runtimeUser??'zzsh_order_'+scope!.resourceSet+'_r',prepared=new WeakMap<object,{client:PoolClient;transactionId:string;input:Omit<Parameters<typeof freezePaymentDistributionBasis>[0],'confirmationId'|'acceptedAt'|'paymentDigest'>}>();
+ async function resource(c:PoolClient){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||r.name!==name||r.role!==role||!native&&(Number(r.oid)!==scope!.resourceOid||r.marker!=='zzsh:order-reservation-test:v1'))throw conflict('Distribution payment resource differs');}
  async function prepare(c:PoolClient,orderId:string):Promise<Prepared|null>{
-  if(!allowed.has(orderId))return null;await resource(c);
+  if(!native&&!allowed.has(orderId))return null;await resource(c);
   const complete=(await c.query(`SELECT to_regclass('zzsh_order.distribution_order_admission') IS NOT NULL AND to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AND to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete`)).rows[0]?.complete;if(!complete)return null;
-  const admission=(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND active AND resource_oid=$2 AND resource_name=$3 AND resource_marker='zzsh:order-reservation-test:v1' AND approval_digest=$4 AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,[orderId,scope.resourceOid,name,scope.approvalDigest])).rows[0];if(!admission)return null;
+  const admission=native?(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='NATIVE' AND active AND resource_name=$2 AND resource_oid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND admitted_at<=clock_timestamp()`,[orderId,name])).rows[0]
+   :(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND active AND resource_oid=$2 AND resource_name=$3 AND resource_marker='zzsh:order-reservation-test:v1' AND approval_digest=$4 AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,[orderId,scope!.resourceOid,name,scope!.approvalDigest])).rows[0];if(!admission)return null;
+  if(native)assertFormalInitialAdmission(formal!,admission.source_admission_ref,admission.approval_digest);
   await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");
   const order=(await c.query('SELECT id,renter_user_id,owner_user_id,game_id,currency,quote_snapshot FROM zzsh_order.rental_order WHERE id=$1',[orderId])).rows[0];if(!order)throw notFound();
   if(!(await c.query("SELECT id FROM zzsh_iam.audit_event WHERE id=$1 AND action='order.reservation.created' AND object_type='rental_order' AND object_id=$2 AND outcome='SUCCESS'",[admission.native_creation_audit_id,orderId])).rowCount)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native order origin is not proved');
   const relations=(await c.query("SELECT r.*,p.leader_knowledge FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_order.invitation_relation r ON r.child_user_id=p.user_id AND r.type='DISTRIBUTION_LEADER' WHERE p.user_id=ANY($1::text[])",[[order.renter_user_id,order.owner_user_id]])).rows;
   const ids=[...new Set([order.renter_user_id,order.owner_user_id,...relations.map(r=>r.parent_user_id).filter(Boolean)])];const locked=(await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids])).rows;if(locked.length!==ids.length)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Payment party or beneficiary is missing');await c.query('SELECT user_id FROM zzsh_order.distribution_participant WHERE user_id=ANY($1::text[]) ORDER BY user_id FOR SHARE',[ids]);
-  let policy:Awaited<ReturnType<typeof readDistributionPolicyRowInTransaction>>;try{policy=await readDistributionPolicyRowInTransaction(c,true);}catch(e){if(!(e instanceof SecurityApiError&&e.status===503))throw e;policy={knowledge:'UNKNOWN',policy:null,reason:'POLICY_SOURCE_NOT_CLOSED'};}
+  let policy:Awaited<ReturnType<typeof readDistributionPolicyRowInTransaction>>;try{policy=await readDistributionPolicyRowInTransaction(c,true,native?'NATIVE':'LOCAL_CONTROLLED');}catch(e){if(!(e instanceof SecurityApiError&&e.status===503))throw e;policy={knowledge:'UNKNOWN',policy:null,reason:'POLICY_SOURCE_NOT_CLOSED'};}
   const facts:PaymentReferralFacts[]=[];for(const[role,party]of [['RENTER_REFERRAL',order.renter_user_id],['OWNER_REFERRAL',order.owner_user_id]] as const){
    const own=(await c.query('SELECT leader_knowledge FROM zzsh_order.distribution_participant WHERE user_id=$1',[party])).rows[0],r=relations.find(r=>r.child_user_id===party),parent=r?.parent_user_id?await readDistributionParentInTransaction(c,r.parent_user_id):null;
    const knowledge=own?.leader_knowledge==='KNOWN_NONE'&&!r?'KNOWN_NONE':own?.leader_knowledge==='KNOWN_PARENT'&&r&&parent?.graphComplete?'KNOWN_PARENT':'UNKNOWN';
@@ -38,3 +51,18 @@ export function createPaymentDistributionStore(scope:DistributionOrderScope){
  return{prepare,record,readOriginal};
 }
 export type PaymentDistributionStore=ReturnType<typeof createPaymentDistributionStore>;
+
+/** 仅在首次正式请求已持订单锁的原事务调用，付款prepare不临时写FK而逆转用户/订单锁序。 */
+export async function createNativePaymentDistributionAdmission(c:PoolClient,formal:FormalCollectionAdmission,orderId:string){
+ const view=readFormalCollectionAdmission(formal);if(!ID.test(orderId))throw invalid('Original order identifier required');
+ const resource=(await c.query("SELECT oid::int AS oid,current_database() AS name,current_user AS role FROM pg_database WHERE datname=current_database()")).rows[0];
+ if(resource?.name!==view.database||resource?.role!==view.runtimeUser)throw conflict('Native payment admission resource differs');
+ const order=(await c.query("SELECT id,renter_user_id,status FROM zzsh_order.rental_order WHERE id=$1",[orderId])).rows[0];
+ if(!order||order.status!=='PENDING_PAYMENT')throw conflict('Native payment requires original pending creation');
+ const audit=(await c.query("SELECT id FROM zzsh_iam.audit_event WHERE action='order.reservation.created' AND object_type='rental_order' AND object_id=$1 AND actor_type='user' AND actor_id=$2 AND outcome='SUCCESS' ORDER BY occurred_at,id LIMIT 2",[orderId,order.renter_user_id])).rows;
+ if(audit.length!==1)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Unique native creation audit is unavailable');
+ await c.query(`INSERT INTO zzsh_order.distribution_order_admission(id,order_id,mode,resource_oid,resource_name,resource_marker,approval_digest,
+  source_admission_ref,native_creation_audit_id,revision,active,admitted_at,expires_at,created_by_admin_id,reason)
+  VALUES($1,$2,'NATIVE',$3,$4,'NATIVE_CREATED_ORDER_V1',$5,$6,$7,1,true,clock_timestamp(),'infinity'::timestamptz,NULL,'Native formal collection original creation')`,
+  ['native_payment_admission_'+sha(orderId).slice(0,40),orderId,resource.oid,view.database,view.sha256,view.reference,audit[0].id]);
+}

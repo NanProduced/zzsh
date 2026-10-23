@@ -60,7 +60,9 @@ import { assertLocalDistributionAssembly, type LocalDistributionScope } from '..
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
 import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
-import { mountChannelPayments } from "../order/channel-payment-routes";
+import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
+import { mountJoinpayCollectionNotifications } from "../order/joinpay-collection-notification-routes";
+import type { FormalCollectionSourceOptions } from "../order/joinpay-collection-source";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
 import { mountDistributionPolicyRoutes } from "../finance/distribution-policy-routes";
 
@@ -94,6 +96,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   nativeWalletOrigin?: NativeOriginResource;
   /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
   localControlledPayments?: LocalControlledPaymentOptions;
+  /** Explicit trusted composition only; ordinary configuration leaves collection closed. */
+  joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions };
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   legacyPublicAdmission?: LegacyPublicAdmission;
@@ -740,6 +744,9 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions> {
+  if (options.localControlledPayments && options.joinpayCollection) {
+    throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
+  }
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);
   if(options.distributionEarnings){
@@ -1046,8 +1053,13 @@ export async function mountAuthHandlers(
     const parsed = Number(raw);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
   })();
+  const collection = options.joinpayCollection;
+  const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
+    && collection.notifications.admission === collection.routes?.initial?.admission
+    && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
+    channelPaymentReadOptions: paymentReadOptions,
     distributionEarnings: options.distributionEarnings,
     orderHoldSeconds,
     legacyDutyFinalizationReader: readLegacyDutyFinalization,
@@ -1096,7 +1108,8 @@ export async function mountAuthHandlers(
       : undefined,
   });
   if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
-  else mountChannelPayments(app, securityOptions);
+  else mountChannelPayments(app, securityOptions, collection?.routes, paymentReadOptions);
+  if (collection?.notifications) mountJoinpayCollectionNotifications(app, { pool: options.pool, source: collection.notifications });
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,securityOptions);

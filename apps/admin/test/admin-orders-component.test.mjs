@@ -389,7 +389,16 @@ test('order party history labels follow order origin for both renter and owner',
 test('channel payment summary keeps local acceptance and simulated evidence distinct from receipt',async t=>{
   const {root,node,AdminOrderChainView}=await setup(t);
   const base={contractVersion:'admin-order-payment-summary.v1',productionPaymentCapability:false,originalRequest:null,latestTrustedObservation:null,acceptance:null,conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
-  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要尚未接入'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'本地已接纳'},{integration:'JOINPAY',acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'本地受控接纳，付款来源与渠道请求不同'}];
+  const cases=[{integration:'NOT_INTEGRATED',text:'渠道付款摘要尚未接入'},{integration:'CONTROLLED_LOCAL',acceptance:{state:'APPLIED'},text:'本地已接纳'},
+    {integration:'JOINPAY',acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'本地受控接纳，付款来源与渠道请求不同'},
+    {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:true,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳'},
+    {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:false,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳'},
+    {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:false,acceptance:{state:'APPLIED'},unknowns:['PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'],text:'汇聚原确认，付款来源与渠道请求不同'},
+    {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:false,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳',
+      latestTrustedObservation:{source:'QUERY',evidenceLevel:'JOINPAY_VERIFIED',providerTimeZone:'EXPLICIT_OFFSET',providerTimeOffsetMinutes:480,providerPaidAt:'2026-10-23T02:00:00Z'}},
+    {integration:'JOINPAY',dataOrigin:'JOINPAY_CANDIDATE',productionPaymentCapability:true,acceptance:{state:'NONE'},text:'汇聚请求候选不构成已付款'},
+    {integration:'JOINPAY',dataOrigin:'FUTURE_SOURCE',productionPaymentCapability:true,text:'摘要版本待核对'},
+    {integration:'JOINPAY',dataOrigin:'UNKNOWN',unknowns:['UNKNOWN_PAYMENT_SOURCE'],acceptance:{state:'APPLIED'},text:'付款来源待核'}];
   for(const [index,item] of cases.entries()){
     const current={...chainOrder,id:'channel-'+index,displayNo:'CHANNEL-'+index,source:{origin:'NATIVE'}};
     globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:current,paymentSummary:{...base,...item}}):response({error:{code:'NOT_FOUND'}},404);
@@ -397,5 +406,13 @@ test('channel payment summary keeps local acceptance and simulated evidence dist
     await until(()=>node.textContent.includes(item.text));
     assert.equal(node.textContent.includes('汇聚已收款'),false);assert.equal(node.textContent.includes('渠道已到账'),false);
     assert.equal([...node.querySelectorAll('button')].some(button=>button.textContent.includes('人工补查')),false);
+    if(item.dataOrigin==='JOINPAY_PROVIDER'||item.dataOrigin==='JOINPAY_CANDIDATE')assert.equal(node.textContent.includes('当前为本地协议验证环境'),false);
+    if(item.dataOrigin==='JOINPAY_PROVIDER')assert.equal(node.textContent.includes('摘要版本待核对'),false);
+    if(item.dataOrigin==='JOINPAY_PROVIDER'&&item.unknowns?.includes('PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'))assert.equal(node.textContent.includes('本地受控接纳'),false);
+    if(item.latestTrustedObservation){
+      const toggle=[...node.querySelectorAll('button')].find(button=>button.textContent.includes('查看付款依据'));
+      await act(async()=>toggle.click()); await until(()=>node.textContent.includes('已存汇聚查询签名与绑定证据'));
+      assert(node.textContent.includes('按已核时区换算')); assert.equal(node.textContent.includes('协议模拟观察'),false);
+    }
   }
 });

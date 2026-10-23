@@ -376,26 +376,42 @@ export function evaluateJoinpaySyncResponse(body: string | Uint8Array, ctx: Join
   return syntheticCollectionOutcome("SUBMIT", body, ctx);
 }
 
-/** GET 异步通知。request 为 null 即绑定不到（E11）。ack 只能在持久化成功后发送。 */
-export function evaluateJoinpayNotify(rawQuery: string, ctx: { key: string; request: JoinpayPersistedRequest | null }): JoinpayOutcome {
-  const op = "asyncNotify";
-  const st = ctx.request?.state ?? "NONE";
-  const reject = (result: string, extra: Partial<JoinpayOutcome> = {}) => outcome(op, "E11", st, { result, ack: "fail", ...extra });
+export type JoinpayNotificationDecoding = Readonly<{ ra_PayTime: 0 | 1; rb_DealTime: 0 | 1 }>;
+/** raw URI只先解一层；仅接受已明确的两个时间字段额外次数，不尝试备用协议或钥。 */
+export function computeJoinpayNotificationDecision(rawQuery: string, request: JoinpayPersistedRequest | null, key: string,
+  decoding: JoinpayNotificationDecoding = { ra_PayTime: 0, rb_DealTime: 0 }): JoinpayCollectionDecision & { ack: "success" | "fail" } {
+  const base = { schema: "INVALID" as const, signature: "NOT_CHECKED" as const, binding: "NOT_CHECKED" as const, event: "E11" as const, ack: "fail" as const };
+  const reject = (result: string, extra: Partial<JoinpayCollectionDecision> = {}) => ({ ...base, result, ...extra });
+  if (!decoding || Object.keys(decoding).some(name => name !== "ra_PayTime" && name !== "rb_DealTime")
+    || ![0, 1].includes(decoding.ra_PayTime) || ![0, 1].includes(decoding.rb_DealTime)) return reject("NOTIFY_DECODE_RULE_INVALID");
   const d = decodeJoinpayQuery(rawQuery);
   if (!d.ok) return reject("NOTIFY_SCHEMA_REJECTED", { reason: d.reason });
+  for (const name of ["ra_PayTime", "rb_DealTime"] as const) {
+    const value = d.raw.get(name);
+    if (decoding[name] === 1 && value && value.value !== null) value.value = formDecodeOnce(value.value);
+  }
   const s = checkSchema(NOTIFY, d.raw);
   if (!s.ok) return reject("NOTIFY_SCHEMA_REJECTED", { reason: s.reason, field: s.field });
-  const r = ctx.request;
-  if (!r) return reject("BINDING_NOT_FOUND");
-  if (!verify(NOTIFY, s, ctx.key)) return reject("SIGNATURE_INVALID", { signature: "MISMATCH" });
+  if (!request) return reject("BINDING_NOT_FOUND");
+  if (!verify(NOTIFY, s, key)) return reject("SIGNATURE_INVALID", { schema: "VALID", signature: "MISMATCH" });
+  const signed = { schema: "VALID" as const, signature: "MATCH" as const };
   const v = s.values;
-  if (v.r1_MerchantNo !== r.merchantNo || v.r2_OrderNo !== r.orderNo || v.r3_Amount !== centsToJoinpayYuan(r.amountCents) || v.r4_Cur !== "1" || v.rk_FrpCode !== r.frpCode)
-    return reject("BINDING_MISMATCH");
-  if (v.re_DiscountAmount !== "0.00") return reject("DISCOUNT_REVIEW_U-12");
-  const common = { values: v, providerPaidAtRaw: v.ra_PayTime, ack: "success" as const };
-  if (v.r6_Status === "100") return outcome(op, "E4", st, { ...common, result: "CHANNEL_SIGNED_SYNTHETIC" });
-  if (v.r6_Status === "101") return outcome(op, "E5", st, { ...common, result: "CHANNEL_REPORTED_FAILED" });
-  return reject("NOTIFY_STATUS_UNKNOWN", { rawStatus: v.r6_Status });
+  if (v.r1_MerchantNo !== request.merchantNo || v.r2_OrderNo !== request.orderNo || v.r3_Amount !== centsToJoinpayYuan(request.amountCents) || v.r4_Cur !== "1" || v.rk_FrpCode !== request.frpCode)
+    return reject("BINDING_MISMATCH", { ...signed, binding: "MISMATCH" });
+  const bound = { ...signed, binding: "MATCH" as const };
+  if (v.re_DiscountAmount !== "0.00") return reject("DISCOUNT_REVIEW_U-12", bound);
+  const common = { ...bound, values: v, providerPaidAtRaw: v.ra_PayTime, ack: "success" as const };
+  if (v.r6_Status === "100") return { ...common, event: "E4", result: "NOTIFY_SUCCEEDED" };
+  if (v.r6_Status === "101") return { ...common, event: "E5", result: "CHANNEL_REPORTED_FAILED" };
+  return reject("NOTIFY_STATUS_UNKNOWN", { ...bound, rawStatus: v.r6_Status });
+}
+
+/** 旧合成API继续固定标签与一次解码，不因正式profile规则改变。 */
+export function evaluateJoinpayNotify(rawQuery: string, ctx: { key: string; request: JoinpayPersistedRequest | null }): JoinpayOutcome {
+  const { schema: _schema, binding: _binding, signature, ...decision } = computeJoinpayNotificationDecision(rawQuery, ctx.request, ctx.key);
+  return outcome("asyncNotify", decision.event, ctx.request?.state ?? "NONE", { ...decision,
+    result: decision.event === "E4" ? "CHANNEL_SIGNED_SYNTHETIC" : decision.result,
+    signature: signature === "MATCH" ? decision.ack === "success" ? "SYNTHETIC_SELF_CONSISTENT" : "NOT_CHECKED" : signature });
 }
 
 /** queryOrder 的旧合成API保持固定证据标签及租约优先级。 */

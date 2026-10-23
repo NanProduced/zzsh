@@ -26,12 +26,16 @@ type Row = Record<string, any>;
 function db() {
   const state = { now: 1_000_000, requests: new Map<string, Row>(), bindings: new Map<string, Row>(), attempts: [] as Row[], observations: [] as Row[],
     idem: new Map<string, Row>(), audit: [] as Row[], payable: true, confirmation: false, claimOrderOverride: null as string | null };
-  const trace: string[] = []; let nextCommitLoss: "CLAIM" | "RESULT" | null = null, failAudit: "CLAIM" | "RESULT" | null = null;
+  const trace: string[] = []; let nextCommitLoss: "CLAIM" | "RESULT" | null = null, failAudit: "CLAIM" | "RESULT" | null = null, strictG1Schema = false;
   let expiresOn: "STATE_UPDATE" | "OBSERVATION_INSERT" | null = null, rejectObservation = false;
   const one = (r?: Row) => ({ rows: r ? [structuredClone(r)] : [], rowCount: r ? 1 : 0 });
   function client() { let local: typeof state | null = null, saved: typeof state | null = null, txPhase = "";
     const data = () => local ?? state;
     return { query: async (sql: string, p: any[] = []) => {
+      if (strictG1Schema && (/\bb\.formal_admission_/.test(sql) || /SELECT request_id,formal_admission_/.test(sql)
+        || sql.startsWith("INSERT INTO zzsh_order.joinpay_collection_binding") && (sql.includes("formal_admission_") || p.length !== 7))) {
+        throw Object.assign(Error("SYNTHETIC_G1_ONLY_SCHEMA"), { code: "42703" });
+      }
       trace.push(sql); const s = data();
       if (sql === "BEGIN") { local = structuredClone(state); txPhase = ""; return one(); }
       if (sql === "ROLLBACK") { local = null; return one(); }
@@ -51,7 +55,7 @@ function db() {
       if (sql.startsWith("INSERT INTO zzsh_order.payment_request")) { const names = ["id", "order_id", "channel", "merchant_identity_id", "config_profile_id", "protocol_version", "key_version_ref", "platform_order_no", "channel_order_no", "amount_cents", "wire_amount_yuan", "method", "evidence_level"];
         const r: Row = { ...Object.fromEntries(names.map((n, i) => [n, p[i]])), currency: "CNY", state: "SUBMITTING", revision: "1", lease_version: "0", lease_owner: null, lease_until: null,
           created_at: "2026-10-23T00:00:00.000000Z", updated_at: "2026-10-23T00:00:00.000000Z" }; s.requests.set(r.id, r); return one(r); }
-      if (sql.startsWith("SELECT request_id FROM zzsh_order.joinpay_collection_binding")) return one(s.bindings.get(p[0]));
+      if (sql.startsWith("SELECT request_id,") && sql.includes("FROM zzsh_order.joinpay_collection_binding")) return one(s.bindings.get(p[0]));
       if (sql.startsWith("INSERT INTO zzsh_order.joinpay_collection_binding")) { const names = ["request_id", "wire_merchant_no", "trade_merchant_no", "product_name", "notify_url", "initial_profile_sha256", "evidence_mode"];
         s.bindings.set(p[0], Object.fromEntries(names.map((n, i) => [n, p[i]]))); return one(); }
       if (sql.startsWith("SELECT r.id AS request_id")) { const r = s.requests.get(p[0]), b = s.bindings.get(p[0]); return one(r && b && { ...r, ...b, request_id: r.id }); }
@@ -80,6 +84,7 @@ function db() {
     }, release: () => {} } as unknown as PoolClient;
   }
   return { state, trace, pool: { connect: async () => client() } as Pool, client,
+    requireOriginalG1Schema: () => { strictG1Schema = true; },
     loseCommit: (phase: "CLAIM" | "RESULT") => { nextCommitLoss = phase; }, denyAudit: (phase: "CLAIM" | "RESULT") => { failAudit = phase; },
     expireDuringRecord: (phase: "STATE_UPDATE" | "OBSERVATION_INSERT") => { expiresOn = phase; }, rejectOtherConstraint: () => { rejectObservation = true; } };
 }
@@ -107,6 +112,22 @@ test("新入口复用对象/幂等/hold；重放保留原wire和初始profile，
   await assert.rejects(createJoinpayCollectionRequest(model.pool, { actor: { userId: "outsider" }, orderId: ORDER, idempotencyKey: "model_idem1", method: "ALIPAY_NATIVE", profile: first.profile,
     wire: { tradeMerchantNo: "MODEL_TRADE", productName: "商品", notifyUrl: "https://example.invalid/notify" } }), { code: "NOT_FOUND" });
   const closed = db(); closed.state.payable = false; await assert.rejects(created(closed), { code: "CONFLICT", paymentReason: "ORDER_NOT_PAYABLE" }); assert.equal(closed.state.requests.size, 0);
+});
+test("同键有效原请求在当前profile/wire/admission不可用时仍重放，原formal/null字段不补写", async () => {
+  const model = db(), first = await created(model);
+  model.state.payable = false;
+  const before = structuredClone(model.state.bindings.get(first.id));
+  const replay = await createJoinpayCollectionRequest(model.pool, { actor: { userId: "renter" }, orderId: ORDER,
+    idempotencyKey: "model_idem1", method: "ALIPAY_NATIVE" });
+  assert.equal(replay.replayed, true); assert.equal(replay.request.requestId, first.id);
+  assert.deepEqual(model.state.bindings.get(first.id), before); assert.equal(model.state.attempts.length, 0);
+});
+test("仅原G1 schema的拒绝适配器模型仍可create/replay/claim，非正式路径不引用新增物理列", async () => {
+  const model = db(); model.requireOriginalG1Schema(); const first = await created(model);
+  const replay = await createJoinpayCollectionRequest(model.pool, { actor: { userId: "renter" }, orderId: ORDER, idempotencyKey: "model_idem1", method: "ALIPAY_NATIVE" });
+  assert.equal(replay.replayed, true);
+  const result = await executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response())), { requestId: first.id, workerId: "worker" });
+  assert.equal(result.kind, "OBSERVED"); assert.equal(model.state.attempts.length, 1); assert.equal(model.state.observations.length, 1);
 });
 test("旧SYNTHETIC/A2/伪造profile不能创建正式候选，旧行也不能提升", async () => {
   for (const mode of ["synthetic", "a2", "forged"] as const) {

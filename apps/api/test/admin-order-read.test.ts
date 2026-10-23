@@ -171,7 +171,7 @@ test("detail adds the undeployed payment summary beside the unchanged order and 
  const detail=await getAdminReadOrder(client,viewer,native.id);
  assert.equal(detail.order.id,native.id);assert.equal(detail.order.payment.state,"RECORDED_PAID");assert.equal(detail.order.paymentSummary,undefined);
  assert.equal(detail.contextKey,viewer.authorizationKey);
- assert.deepEqual(detail.paymentSummary,{contractVersion:"admin-order-payment-summary.v1",integration:"NOT_INTEGRATED",productionPaymentCapability:false,
+ assert.deepEqual(detail.paymentSummary,{contractVersion:"admin-order-payment-summary.v1",integration:"NOT_INTEGRATED",productionPaymentCapability:false,dataOrigin:"UNKNOWN",
   originalRequest:null,latestTrustedObservation:null,acceptance:null,conflicts:null,recovery:null,settlement:"NOT_INTEGRATED",unknowns:null,updatedAt:null});
  assert.equal(statements.some(s=>s.sql.includes("WITH scoped AS")),false);
 });
@@ -215,7 +215,8 @@ test("payment readiness and fact read failures propagate instead of becoming NON
 
 test("mixed JoinPay requests and controlled acceptance retain the nonproduction source warning",async()=>{
  const {client}=orderClient({records:[{origin:"NATIVE",id:native.id,record:native}],channelReady:true,paymentSnapshot:{...paymentSnapshot,
-  confirmation:{id:"controlled-confirmation",source:"CONTROLLED",disposition:"APPLIED",reason_code:null,amount_cents:"12345",currency:"CNY",accepted_at:native.created_at}}});
+  order:{...paymentSnapshot.order,paid_confirmation_id:"controlled-confirmation"},
+  confirmation:{id:"controlled-confirmation",order_id:native.id,source:"CONTROLLED",disposition:"APPLIED",reason_code:null,amount_cents:"12345",currency:"CNY",accepted_at:native.created_at}}});
  const summary=(await getAdminReadOrder(client,{...viewer,financeReadable:true},native.id)).paymentSummary;
  assert.equal(summary.integration,"JOINPAY");assert.equal(summary.acceptance!.state,"APPLIED");assert.equal(summary.productionPaymentCapability,false);
  assert.ok(summary.unknowns!.includes("PAYMENT_SOURCE_DIFFERS_FROM_REQUEST"));assert.equal(summary.latestTrustedObservation!.evidenceLevel,"SYNTHETIC_PROTOCOL");
@@ -236,12 +237,21 @@ test("原生实付仅来自原APPLIED付款；金额权限、原ID、币种与�
  assert.equal(paid.source.origin,'NATIVE');assert.equal(paid.payment.state,'RECORDED_PAID');
  assert.equal('native_payment_record' in paid,false);
  for(const financeReadable of [undefined,false])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount,null);
- for(const change of [{id:'other'},{order_id:'other'},{source:'JOINPAY'},{source:'UNKNOWN'},{disposition:'REVIEW_REQUIRED'},
+ for(const change of [{id:'other'},{order_id:'other'},{source:'JOINPAY_CANDIDATE'},{source:'UNKNOWN'},{disposition:'REVIEW_REQUIRED'},
   {currency:'USD'},{amount_cents:'-1'},{amount_cents:'1.5'},{amount_cents:15908},{amount_cents:'01'},{amount_cents:'9'.repeat(26)}])
   assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,...change}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
  for(const status of ['PENDING_PAYMENT','CANCELLED'])assert.equal(projectAdminReadOrder('NATIVE',{...row,status},{...viewer,financeReadable:true}).payment.recordedAmount,null);
  assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:null},{...viewer,financeReadable:true}).payment.recordedAmount,null);
  assert.equal(projectAdminReadOrder('NATIVE',{...row,currency:'USD'},{...viewer,financeReadable:true}).payment.recordedAmount,null);
+});
+
+test("正式JOINPAY原实付在新收款关闭后仍可读，但权限和原绑定不放宽",()=>{
+ const payment={id:'payment_joinpay',order_id:native.id,source:'JOINPAY',disposition:'APPLIED',amount_cents:'15908',currency:'CNY'};
+ const row={...native,paid_confirmation_id:payment.id,native_payment_record:payment};
+ assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:true}).payment.recordedAmount.amount,'159.08');
+ assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:false}).payment.recordedAmount,null);
+ for(const change of [{id:'other'},{order_id:'other'},{currency:'USD'},{disposition:'REVIEW_REQUIRED'},{source:'UNKNOWN'}])
+  assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,...change}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
 });
 
 test("实付合法0与大金额保持精确；缺原付款不回填订单应付",()=>{

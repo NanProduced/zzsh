@@ -6,6 +6,8 @@ import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { ConfigurationError, type AppConfig } from "../config/config";
 import { invalid, notFound } from "../supply/supply-util";
 import { cancelExpiredReservation, lockOrderPartiesInOrder } from "./order";
+import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
+import { assertNativePaymentDistributionStore } from "../finance/distribution-payment-store";
 
 export type PaymentInput = Readonly<{
   orderId: string;
@@ -16,7 +18,8 @@ export type PaymentInput = Readonly<{
   providerPaidAt: string;
   requestId: string;
 }>;
-type VerifiedPaymentFact = PaymentInput & { readonly source: "CONTROLLED"; readonly merchantScopeId: string };
+type ControlledPaymentFact = PaymentInput & { readonly source: "CONTROLLED"; readonly merchantScopeId: string };
+type VerifiedPaymentFact = ControlledPaymentFact | FormalJoinpayPaymentFact;
 const verifiedFacts = new WeakMap<object, { appId: string; database: string; runtimeUser: string }>();
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INPUT_KEYS = ["orderId", "merchantOrderNo", "providerTransactionId", "amountCents", "currency", "providerPaidAt", "requestId"];
@@ -28,7 +31,7 @@ export function createControlledPaymentSource(options: {
   appId: string;
   merchantScopeId: string;
   allowedOrderIds: readonly string[];
-}): (input: PaymentInput) => VerifiedPaymentFact {
+}): (input: PaymentInput) => ControlledPaymentFact {
   const { config, resourceSet, appId, merchantScopeId } = options;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
     || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
@@ -71,8 +74,10 @@ export type PaymentResult = {
 
 /** Caller owns one transaction; audit failure rolls back the entire acceptance. */
 export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact, distribution?: PaymentDistributionStore): Promise<PaymentResult> {
-  const scope = fact && verifiedFacts.get(fact);
+  const formalScope = fact?.source === "JOINPAY" ? await readVerifiedJoinpayFactScope(client, fact) : null;
+  const scope = formalScope ?? (fact && verifiedFacts.get(fact));
   if (!scope) throw invalid("Payment fact is not verified");
+  if (formalScope) assertNativePaymentDistributionStore(distribution, formalScope.admissionSha256);
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (identity.db !== scope.database || identity.actor !== scope.runtimeUser) throw invalid("Payment resource mismatch");
   // No network inside this gate. 2B must also adapt old consultation close/recovery lock paths.
@@ -119,7 +124,7 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   // Capture the decision clock AFTER waiting for row locks. Provider time never revives an expired hold.
   const timing = (await client.query(`SELECT to_char(t AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS accepted,
       t < $1::timestamptz AS open FROM (SELECT clock_timestamp() AS t) clock`, [order.hold])).rows[0];
-  const mismatch = order.display_no !== fact.merchantOrderNo || order.currency !== fact.currency || order.total !== fact.amountCents;
+  const mismatch = (formalScope ? formalScope.merchantOrderNo : order.display_no) !== fact.merchantOrderNo || order.currency !== fact.currency || order.total !== fact.amountCents;
   const reasonCode = mismatch ? "BINDING_MISMATCH" : order.status === "PAID" ? "DUPLICATE_PAYMENT"
     : order.status !== "PENDING_PAYMENT" || !timing.open ? "LATE_PAYMENT" : null;
   if (order.status === "PENDING_PAYMENT" && !timing.open) {
@@ -127,7 +132,14 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   }
   const confirmationId = `payment_${randomUUID().replaceAll("-", "")}`;
   const disposition = reasonCode ? "REVIEW_REQUIRED" : "APPLIED";
-  await client.query(`INSERT INTO zzsh_order.payment_confirmation
+  if (formalScope) await client.query(`INSERT INTO zzsh_order.payment_confirmation
+      (id,source,merchant_scope_id,provider_transaction_id,merchant_order_no,order_id,amount_cents,currency,
+       provider_paid_at,accepted_at,disposition,reason_code,request_id,joinpay_request_id,joinpay_evidence_id,joinpay_anchor_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+    [confirmationId, fact.source, fact.merchantScopeId, fact.providerTransactionId, fact.merchantOrderNo, fact.orderId,
+      fact.amountCents, fact.currency, fact.providerPaidAt, timing.accepted, disposition, reasonCode, fact.requestId,
+      formalScope.paymentRequestId, formalScope.evidenceId, formalScope.anchorId]);
+  else await client.query(`INSERT INTO zzsh_order.payment_confirmation
       (id,source,merchant_scope_id,provider_transaction_id,merchant_order_no,order_id,amount_cents,currency,
        provider_paid_at,accepted_at,disposition,reason_code,request_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,

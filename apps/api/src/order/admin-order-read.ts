@@ -1,4 +1,4 @@
-import { readOrderPaymentSummary } from "./channel-payment-read";
+import { readOrderPaymentSummary, type ChannelPaymentReadOptions } from "./channel-payment-read";
 import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
@@ -71,11 +71,11 @@ export function orderReadKeyRelation(continuationReady: boolean, restrict?: Orde
  return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER,restrict);
 }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
-// 只投影原APPLIED付款；报价和订单状态不能补出实收，受控事实也不代表真实渠道到账。
+// 只投影精确绑定的原APPLIED付款；报价不能补出实收，确认也不代表结算或到账。
 function nativeRecordedAmount(r:Record<string,any>,viewer:OrderReadViewer){
  const p=r.native_payment_record;
  return viewer.financeReadable===true&&['PAID','COMPLETED'].includes(r.status)&&p&&p.id===r.paid_confirmation_id&&p.order_id===r.id
-  &&p.disposition==='APPLIED'&&p.source==='CONTROLLED'&&p.currency==='CNY'&&p.currency===r.currency
+  &&p.disposition==='APPLIED'&&['CONTROLLED','JOINPAY'].includes(p.source)&&p.currency==='CNY'&&p.currency===r.currency
   &&typeof p.amount_cents==='string'&&/^(0|[1-9]\d{0,24})$/.test(p.amount_cents)?centsToYuan(p.amount_cents):null;
 }
 export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:OrderReadViewer):Record<string,any>{
@@ -126,10 +126,10 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
  }
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
 }
-export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string){
+export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions){
  const relation=orderReadRelation(await legacyContinuationReady(client),false,{nativeIds:'$1',legacyIds:'$1'});
  const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${relation}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=ANY($1::text[]) AND ${gameScopeSql("x.game_id","$3","$2")}`,[[id],viewer.isBoss,viewer.adminId])).rows[0];
  if(!row)throw notFound();
- const paymentSummary=await readOrderPaymentSummary(client,{orderId:id,origin:row.origin==="NATIVE"?"NATIVE":"LEGACY",financeReadable:viewer.financeReadable===true});
+ const paymentSummary=await readOrderPaymentSummary(client,{orderId:id,origin:row.origin==="NATIVE"?"NATIVE":"LEGACY",financeReadable:viewer.financeReadable===true},paymentReadOptions);
  return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey,paymentSummary};
 }

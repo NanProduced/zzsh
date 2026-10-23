@@ -921,12 +921,14 @@ export function makeRecoveryCredential(): string {
 
 export type AdminOrderPaymentSummary = {
   contractVersion: "admin-order-payment-summary.v1"; integration: "NOT_INTEGRATED" | "CONTROLLED_LOCAL" | "JOINPAY";
-  productionPaymentCapability: false;
+  productionPaymentCapability: boolean;
+  dataOrigin?: "SYNTHETIC_PROTOCOL" | "LOCAL_CONTROLLED" | "JOINPAY_CANDIDATE" | "JOINPAY_PROVIDER" | "UNKNOWN";
   originalRequest: { id: string; channelOrderNo: string | null; method: string; amount: { cents:string; currency:string } | null;
     merchantIdentityId: string | null; protocolVersion: string; keyVersionRef: string | null; createdAt: string } | null;
-  latestTrustedObservation: { source: "NOTIFY" | "QUERY" | "SYNC_RESPONSE"; evidenceLevel: "SYNTHETIC_PROTOCOL";
+  latestTrustedObservation: { source: "NOTIFY" | "QUERY" | "SYNC_RESPONSE"; evidenceLevel: "SYNTHETIC_PROTOCOL" | "JOINPAY_VERIFIED";
     channelStatus: "SUCCEEDED" | "FAILED" | "CREATED_UNPAID" | null; channelTrxNo: string | null;
-    providerPaidAtRaw: string | null; providerTimeZone: "UNCONFIRMED"; evidenceRef: string; observedAt: string } | null;
+    providerPaidAtRaw: string | null; providerTimeZone: "UNCONFIRMED" | "EXPLICIT_OFFSET"; providerPaidAt?: string | null;
+    providerTimeOffsetMinutes?: number; evidenceRef: string; observedAt: string } | null;
   acceptance: { state: "APPLIED" | "REVIEW_REQUIRED" | "PENDING" | "NONE"; confirmationId: string | null; reasonCode: string | null } | null;
   conflicts: { kind: "CHANNEL_STATUS_CONFLICT" | "STALE" | "LATE" | "DUPLICATE"; observedAt: string; evidenceRef: string | null }[] | null;
   recovery: { mode: "NONE" | "ORIGINAL_NUMBER_QUERY"; manualQueryOpen: false; lastAttemptAt: null; attempts: null } | null;
