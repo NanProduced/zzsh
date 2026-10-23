@@ -9,6 +9,7 @@ import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { assertReplayAuthorization } from "./order";
 import { readChannelPaymentRequest, type ChannelPaymentReadOptions } from "./channel-payment-read";
 import { createPaymentRequest, type PaymentRequestView } from "./channel-payment-store";
+import { readFormalPaymentEvidence } from "./channel-payment-formal-read";
 import { createJoinpayCollectionRequestInTransaction, executeJoinpayCollectionAttempt,
   type JoinpayCollectionRequestInput, type JoinpayCollectionExecution } from "./joinpay-collection-attempt";
 
@@ -95,6 +96,11 @@ export async function handleChannelPaymentRoute(request: SupplyNodeRequest, resp
         if (!readiness) return null;
         const prior = (await client.query("SELECT evidence_level FROM zzsh_order.payment_request WHERE order_id=$1", [orderId])).rows[0];
         if (prior?.evidence_level === "JOINPAY_CANDIDATE" || (!prior && collection?.initial)) {
+          if (!prior) {
+            // Only a new request reads current readiness; original-key recovery must not touch current configuration.
+            const current = await readFormalPaymentEvidence(client, {}, null, readOptions ?? channelPaymentReadOptions(collection));
+            if (current.capability !== true) return null;
+          }
           // Original-key recovery must not consult today's configuration or payment eligibility.
           const initial = prior ? {} : collection?.initial ?? {};
           const original = await createJoinpayCollectionRequestInTransaction(client, { actor, orderId, idempotencyKey: key,

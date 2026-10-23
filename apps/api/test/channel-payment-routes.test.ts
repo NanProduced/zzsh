@@ -5,6 +5,7 @@ import type { AuthSecurityOptions } from "../src/auth/auth-security";
 import * as identity from "../src/auth/user-identity";
 import * as order from "../src/order/order";
 import * as read from "../src/order/channel-payment-read";
+import * as formalRead from "../src/order/channel-payment-formal-read";
 import * as store from "../src/order/channel-payment-store";
 import * as collection from "../src/order/joinpay-collection-attempt";
 import { SecurityApiError } from "../src/auth/security-core";
@@ -21,6 +22,7 @@ function fixture(t: TestContext) {
   const s = { status: 0, result: null as any, headers: {} as Record<string, unknown>, calls: [] as string[], commandCalls: 0,
     available: true, owned: true, active: true, commandError: null as unknown, authorizationError: null as unknown,
     commitError: null as unknown, priorEvidence: null as string | null,
+    formalCapability: true, formalReadCalls: 0, formalReadOptions: null as read.ChannelPaymentReadOptions | null,
     queryOverride: null as null | ((sql: string, p: unknown[]) => { rows: any[]; rowCount?: number } | undefined) };
   t.mock.method(identity, "readUserContext", async () => {
     s.calls.push("session"); if (!s.active) throw new SecurityApiError(401, "UNAUTHENTICATED", "Expired session");
@@ -34,6 +36,13 @@ function fixture(t: TestContext) {
     if (!s.owned) throw notFound();
     return s.available ? { available: true, view: { contractVersion: "order-payment-request.v1", paymentAction: null } as never }
       : { available: false, reason: "SCHEMA_NOT_DEPLOYED" };
+  });
+  // Opaque local readiness-reader model only; no admission/profile fact or actual database readiness is asserted.
+  t.mock.method(formalRead, "readFormalPaymentEvidence", async (_c: Parameters<typeof formalRead.readFormalPaymentEvidence>[0],
+    _order: Parameters<typeof formalRead.readFormalPaymentEvidence>[1], request: Parameters<typeof formalRead.readFormalPaymentEvidence>[2],
+    options: Parameters<typeof formalRead.readFormalPaymentEvidence>[3]) => {
+    s.formalReadCalls++; s.formalReadOptions = options; s.calls.push("formal-readiness"); assert.equal(request, null);
+    return { capability: s.formalCapability, qrUrl: null, observation: null, unknowns: [] };
   });
   t.mock.method(store, "createPaymentRequest", async (_c: Parameters<typeof store.createPaymentRequest>[0], input: Parameters<typeof store.createPaymentRequest>[1]) => {
     s.commandCalls++; assert.equal(input.actor.userId, "renter"); assert.equal(input.orderId, "order_1");
@@ -57,8 +66,8 @@ function fixture(t: TestContext) {
   const response = { headersSent: false, setHeader(k: string, v: unknown) { s.headers[k] = v; return this; },
     status(code: number) { s.status = code; return this; }, json(v: unknown) { s.result = v; return this; } } as unknown as SupplyResponse;
   const security = { pool, userOrigin: ORIGIN } as unknown as AuthSecurityOptions;
-  const invoke = async (patch: Partial<SupplyNodeRequest> = {}, assembly?: ChannelPaymentCollectionAssembly) => handleChannelPaymentRoute({ method: "POST", originalUrl: "/api/v1/orders/order_1/channel-payment-requests",
-    headers: { origin: ORIGIN, "idempotency-key": "key_1" }, body: { method: "ALIPAY_NATIVE" }, ...patch } as SupplyNodeRequest, response, security, "/api/v1/orders", assembly);
+  const invoke = async (patch: Partial<SupplyNodeRequest> = {}, assembly?: ChannelPaymentCollectionAssembly, readOptions?: read.ChannelPaymentReadOptions) => handleChannelPaymentRoute({ method: "POST", originalUrl: "/api/v1/orders/order_1/channel-payment-requests",
+    headers: { origin: ORIGIN, "idempotency-key": "key_1" }, body: { method: "ALIPAY_NATIVE" }, ...patch } as SupplyNodeRequest, response, security, "/api/v1/orders", assembly, readOptions);
   return { s, invoke, response, security };
 }
 
@@ -198,6 +207,7 @@ test("G2 真实原键重放先核归属，当前能力缺失或订单已不可�
   assert.equal(f.s.result.error.code, "IDEMPOTENCY_KEY_REUSED");
   owner = "another_renter"; await f.invoke({}, assembly); assert.equal(f.s.status, 404);
   assert.equal(ownershipChecks, 3); assert.equal(payableChecks, 0); assert.equal(configurationReads, 0); assert.equal(f.s.commandCalls, 0);
+  assert.equal(f.s.formalReadCalls, 0);
 });
 
 test("G2 首次事务确认COMMIT后只执行一次；mount把同装配传给BFF，原键重放不再次执行", async t => {
@@ -263,4 +273,40 @@ test("默认四参仍走既有存储，CONTROLLED原回执不会转成正式JOIN
     headers: { origin: ORIGIN, "idempotency-key": "key_1" }, body: { method: "ALIPAY_NATIVE" } } as SupplyNodeRequest, f.response, f.security, "/api/v1/orders");
   assert.equal(f.s.status, 202); assert.equal(f.s.result.dataOrigin, "LOCAL_CONTROLLED");
   assert.equal(f.s.result.payment, null); assert.equal(collectionCommands, 0); assert.equal(executions, 0);
+});
+
+// Route-level reader-result models: the actual metadata/QR/DDL qualification remains covered by reader/wiring suites.
+test("G2 新请求在通知缺失/错绑、QR或DDL未齐时能力false，零创建零执行零fetch", async t => {
+  for (const reason of ["NOTIFICATION_MISSING", "NOTIFICATION_ADMISSION_MISMATCH", "QR_NOT_ACCEPTED", "FORMAL_DDL_NOT_READY"] as const) {
+    await t.test(reason, async child => {
+      const f = fixture(child), assembly = collectionAssembly(); let creates = 0, executions = 0, fetches = 0;
+      f.s.formalCapability = false;
+      const options: read.ChannelPaymentReadOptions = { formalAdmission: assembly.initial!.admission,
+        formalWriteRouteReady: reason !== "NOTIFICATION_MISSING" && reason !== "NOTIFICATION_ADMISSION_MISMATCH",
+        qrHostAllowlist: reason === "QR_NOT_ACCEPTED" ? undefined : ["qr.example.invalid"] };
+      assembly.execution!.fetch = async () => { fetches++; throw Error("Unexpected provider access"); };
+      child.mock.method(collection, "createJoinpayCollectionRequestInTransaction", async () => { creates++; return { replayed: false, status: 202, request: candidate }; });
+      child.mock.method(collection, "executeJoinpayCollectionAttempt", async () => { executions++; return { kind: "SKIPPED" as const }; });
+      await f.invoke({}, assembly, options);
+      assert.equal(f.s.status, 503); assert.equal(f.s.result.error.code, "PAYMENT_CHANNEL_NOT_ENABLED");
+      assert.equal(creates, 0); assert.equal(executions, 0); assert.equal(fetches, 0); assert.equal(f.s.commandCalls, 0);
+      assert.equal(f.s.formalReadCalls, 1); assert.equal(f.s.formalReadOptions, options);
+      assert(f.s.calls.indexOf("fresh-authorization") < f.s.calls.indexOf("scoped-read"));
+      assert(f.s.calls.indexOf("scoped-read") < f.s.calls.indexOf("formal-readiness"));
+    });
+  }
+});
+
+test("G2 新请求仅在受信reader能力严格true后创建，原创建COMMIT后执行一次", async t => {
+  const f = fixture(t), assembly = collectionAssembly(); let creates = 0, executions = 0;
+  const options: read.ChannelPaymentReadOptions = { formalAdmission: assembly.initial!.admission, formalWriteRouteReady: true, qrHostAllowlist: ["qr.example.invalid"] };
+  t.mock.method(collection, "createJoinpayCollectionRequestInTransaction", async () => {
+    creates++; assert.equal(f.s.calls.at(-1), "formal-readiness"); return { replayed: false, status: 202, request: candidate };
+  });
+  t.mock.method(collection, "executeJoinpayCollectionAttempt", async () => {
+    executions++; assert.equal(f.s.calls.at(-1), "COMMIT"); return { kind: "SKIPPED" as const };
+  });
+  await f.invoke({}, assembly, options);
+  assert.equal(f.s.status, 202); assert.equal(creates, 1); assert.equal(executions, 1);
+  assert.equal(f.s.formalReadCalls, 1); assert.equal(f.s.formalReadOptions, options);
 });
