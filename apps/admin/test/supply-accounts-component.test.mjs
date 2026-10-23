@@ -73,6 +73,59 @@ test('quick view reuses loaded attributes and marks quote provenance without fet
   assert.equal(h.writes.length, 0);
 });
 
+test('historical list, mobile card and quick view expose existing source facts without new queries or current-quote claims', async (t) => {
+  const historicalRead = {
+    resourceNo: 'OLD-7', canCreateOrder: false, trade: 'UNKNOWN', quote: null,
+    historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10', dailyHaffBase: '10000000' },
+    display: { state: 'KNOWN', facts: {
+      schema: 'legacy-listing-display-v1', rentalMode: 'custom', attributes: { vit_level: 0 },
+      resources: [{ code: 'haff', name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }, { code: 'ammo', name: '弹药', quantity: null, unit: 'ROUND' }],
+      attributeDisplay: { safeBox: { code: 'box', displayName: '基础安全箱', mappingStatus: 'CONFIRMED', issueCode: null }, grading: null, loginMethod: { code: 'wechat', displayName: '微信扫码', mappingStatus: 'CONFIRMED', issueCode: null }, serviceWindow: null },
+      sourceUpdatedAt: '2026-09-09T10:38:00Z',
+    } },
+  };
+  const historicalRow = { ...row, versionId: null, sequence: null, summary: null, facts: { ...facts, historicalRead } };
+  const value = workDetail();
+  value.version = null;
+  value.supervision.facts = historicalRow.facts;
+  let detailReads = 0;
+  const h = await mountHarness(t, { permissions, fetchImpl: async url => {
+    if (url.pathname.endsWith('/listing-reviews')) return json({ ...page, items: [historicalRow] });
+    detailReads++; return json(value);
+  } });
+  await tick(h);
+  for (const selector of ['#supply-open-a', '#supply-card-a']) {
+    const text = h.el.querySelector(selector).textContent;
+    assert.match(text, /历史租金 ¥125.30/);
+    assert.match(text, /历史物资费 ¥0.00/);
+    assert.match(text, /历史 ¥0.00/);
+    assert.match(text, /历史 97 M 哈夫币/);
+    assert.match(text, /历史编号 OLD-7.*基础安全箱/);
+  }
+  assert.equal(detailReads, 0, 'existing row projection is enough for both list layouts');
+  await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
+  const section = h.el.querySelector('[data-historical-summary]');
+  assert.ok(section, 'historical details are separate from current declarations');
+  assert.match(section.textContent, /历史租金.*¥125.30/);
+  assert.match(section.textContent, /历史物资费.*¥0.00/);
+  assert.match(section.textContent, /历史押金.*¥0.00/);
+  assert.match(section.textContent, /历史租期.*10 天/);
+  assert.match(section.textContent, /历史编号 OLD-7/);
+  assert.match(section.textContent, /来源更新：/);
+  assert.ok(!section.textContent.includes('体力等级'), 'historical attributes are collapsed initially');
+  const toggle = [...section.querySelectorAll('button')].find(button => button.textContent.trim() === '历史属性与物资');
+  assert.ok(toggle);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  await h.click(toggle); await tick(h);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.match(section.textContent, /体力等级.*0 级/);
+  assert.match(section.textContent, /登录方式.*微信扫码/);
+  assert.match(section.textContent, /弹药.*数量待核/);
+  assert.ok(!section.textContent.includes('冻结报价'));
+  assert.equal(detailReads, 1, 'only the existing quick-view detail read is used');
+  assert.equal(h.writes.length, 0);
+});
+
 test('detail failure remains unknown in quick view instead of empty or perpetual loading', async (t) => {
   const h = await mountHarness(t, { permissions, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json(page) : json({ message: 'fixture failure' }, 500) });
   await tick(h); await h.click(h.el.querySelector('#supply-open-a')); await tick(h);

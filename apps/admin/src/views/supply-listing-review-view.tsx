@@ -363,7 +363,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
                <TableHead className="min-w-[240px] px-3 py-2 text-xs font-normal text-muted-foreground">账号</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal tabular-nums text-muted-foreground">哈夫币</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">资源金额</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">押金（号主申报）</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">押金</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">号主保证金</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">状态</TableHead>
                <TableHead className="px-3 py-2 text-center text-xs font-normal text-muted-foreground">全额包赔（申报）</TableHead>
@@ -404,6 +404,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
                      <div className="mt-0.5">
                        <IdLine row={row} onOpenOwner={rowOwnerTarget}/>
                      </div>
+                     {row.facts.historicalRead ? <p className="mt-1 text-xs text-muted-foreground">{historicalReadSummary(row.facts.historicalRead)}</p> : null}
                      <div className="mt-1 text-xs">
                        <ReasonCell facts={row.facts} onMore={() => viewRow(row)}/>
                      </div>
@@ -414,18 +415,18 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
                      )}
                    </TableCell>
 
-                   {/* 哈夫币精确数量（当前资料版本申报值 + 目录单位） */}
+                   {/* 当前库存优先，历史显示量显式带来源 */}
                    <TableCell className="px-3 py-3 font-mono font-medium tabular-nums text-amber-900 dark:text-amber-300">
                      {rowHaffText(row)}
                    </TableCell>
 
-                   {/* 资源金额（资料版本冻结报价） */}
+                   {/* 当前冻结报价优先，历史租金与物资费分别显示 */}
                    <TableCell className="px-3 py-3 tabular-nums">
                      <div className="font-semibold text-primary">{quote.total}</div>
-                     <div className="whitespace-nowrap text-[10px] text-muted-foreground">{quote.note}</div>
+                     <div className="max-w-60 whitespace-normal text-[10px] text-muted-foreground">{quote.note}</div>
                    </TableCell>
 
-                   {/* 号主申报的基础押金 */}
+                   {/* 历史押金只补显示，不替代当前申报或租客最终应付 */}
                    <TableCell className="px-3 py-3 tabular-nums text-muted-foreground">
                      {rowDepositText(row)}
                    </TableCell>

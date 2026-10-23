@@ -130,3 +130,30 @@ test('declared payout and frozen amounts keep their exact three states and decim
   assert.match(rowQuoteText(money).note, /非下单应付/);
   assert.equal(rowDepositText(money), '¥50.00');
 });
+
+const historicalRead = {
+  resourceNo: 'OLD-7', canCreateOrder: false, trade: 'UNKNOWN', quote: null,
+  historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10', dailyHaffBase: '10000000' },
+  display: { state: 'KNOWN', facts: { resources: [{ code: 'haff', name: '哈夫币', quantity: '0', unit: 'HAFF_BASE' }] } },
+};
+
+test('historical display fills missing list facts with explicit provenance and preserves zero', () => {
+  const historical = rowOf({ facts: facts({ historicalRead }) });
+  assert.equal(rowHaffText(historical), '历史 0 M 哈夫币');
+  assert.equal(rowDepositText(historical), '历史 ¥0.00');
+  assert.equal(rowQuoteText(historical).total, '历史租金 ¥125.30');
+  assert.match(rowQuoteText(historical).note, /历史物资费 ¥0.00.*10 天.*非当前报价/);
+  const notImported = rowOf({ facts: facts({ historicalRead: { ...historicalRead, display: { state: 'NOT_IMPORTED', facts: null } } }) });
+  assert.equal(rowHaffText(notImported), '未提供', 'daily consumption is never read as inventory');
+});
+
+test('current list facts stay authoritative when separate historical facts also exist', () => {
+  const current = rowOf({ facts: facts({ historicalRead }), summary: {
+    haff: { quantity: '12500000' }, baseDeposit: { amountCents: '5000' },
+    quote: { resourceTotal: { amount: '212.77' }, personalised: false },
+  } });
+  assert.equal(rowHaffText(current), '12.5 M 哈夫币');
+  assert.equal(rowDepositText(current), '¥50.00');
+  assert.equal(rowQuoteText(current).total, '¥212.77');
+  assert.equal(rowHaffText({ ...current, summary: { ...current.summary, haff: { quantity: null } } }), '未确认', 'a current unknown does not silently become historical inventory');
+});

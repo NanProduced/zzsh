@@ -3,7 +3,7 @@
  * 原则：查找类型以用户选择为准，识别只作建议；待核条件单独计数；
  * 公开、占用、运营限制、号主暂停、新单资格各自读取，不由单一状态推导。
  */
-import { formatAmount, formatFundingCents, quantityText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
+import { formatAmount, formatFundingCents, historicalResourceText, quantityText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
 
 export const KIND_LABELS: Record<SupplyQueryKind, string> = { account: "编号", legacy: "旧编号", order: "订单号", owner: "号主", nickname: "昵称", link: "本站链接" };
 
@@ -147,24 +147,32 @@ export function fullShanghaiTime(iso: string): string {
 
 /* ---------- 列表事实投影（只读正式摘要；缺值即“未提供”，不猜、不补齐、不压成终态） ---------- */
 
-/** 哈夫币精确数量：来自当前资料版本的 inventory 行与目录单位，不按 itemId 名称或标题猜。 */
+/** 当前库存优先；缺当前记录才补历史显示量，不把每日消耗当库存。 */
 export function rowHaffText(row: SupplyWorkItem): string {
   const haff = row.summary?.haff;
-  return haff ? quantityText(haff.quantity) : "未提供";
+  if (haff) return quantityText(haff.quantity);
+  const display = row.facts.historicalRead?.display;
+  const historical = display?.state === "KNOWN" && Array.isArray(display.facts?.resources) ? display.facts.resources.find(item => item.unit === "HAFF_BASE") : null;
+  return historical ? "历史 " + historicalResourceText(historical) : "未提供";
 }
 
-/** 冻结报价金额：保持接口十进制字符串，不整元舍入，不称会员个性化应付。 */
+/** 当前冻结报价优先，历史租金与物资费分开，均不称下单应付。 */
 export function rowQuoteText(row: SupplyWorkItem): { total: string; note: string } {
   const quote = row.summary?.quote;
+  const historical = row.facts.historicalRead?.historicalQuote;
+  if (!quote?.resourceTotal && historical) return { total: `历史租金 ¥${formatAmount(historical.haffRentYuan)}`, note: `历史物资费 ¥${formatAmount(historical.goodsYuan)} · ${historical.termDays} 天 · 非当前报价` };
   if (!quote?.resourceTotal) return { total: "未提供", note: row.summary ? "冻结报价未提供" : "列表摘要未装配" };
   return { total: `¥${formatAmount(quote.resourceTotal.amount)}`, note: quote.personalised ? "该金额标记为个人化口径" : "资料版本冻结报价 · 非下单应付" };
 }
 
 /** 号主申报的基础押金；不是租客会员个性化最终应付。摘要未装配时不能说“未申报”。 */
 export function rowDepositText(row: SupplyWorkItem): string {
+  const declared = row.summary?.baseDeposit;
+  if (declared) return formatFundingCents(declared.amountCents);
+  const historical = row.facts.historicalRead?.historicalQuote;
+  if (historical) return `历史 ¥${formatAmount(historical.depositYuan)}`;
   if (!row.summary) return "摘要未装配";
-  const declared = row.summary.baseDeposit;
-  return declared ? formatFundingCents(declared.amountCents) : "未申报";
+  return "未申报";
 }
 
 /** 保证金要求轴：按当前启用机制投影，并带上依据来源；只有权威写明 NOT_REQUIRED 才称“不要求”。 */

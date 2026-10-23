@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
-import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, historicalReadSummary, formatAmount, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, historicalAttributeFacts, historicalReadSummary, historicalResourceText, formatAmount, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
 import {
   fullShanghaiTime,
   KIND_LABELS,
@@ -27,6 +27,7 @@ import {
   versionText,
   type SavedView,
   rowHaffText,
+  rowQuoteText,
   rowDepositText,
   rowGuaranteeRequirementText,
   rowGuaranteeEligibilityText,
@@ -152,7 +153,10 @@ export function useSavedViews(adminId: string) {
 
 export function AccountCards({ items, onView }: { items: SupplyWorkItem[]; onView: (row: SupplyWorkItem, trigger?: HTMLElement) => void }) {
   return <div className="grid gap-2">{items.map(row => { const rule = row.facts.reasons.includes("CONFIRMATION_OR_MEDIA_REQUIRED") || row.facts.reasons.includes("RULE_CHANGED");
+    const quote = rowQuoteText(row);
     return <Card size="sm" key={row.id} id={"supply-card-" + row.id} role="button" tabIndex={0} aria-label={"快速查看 " + supplyObjectLabel(row)} onClick={e => onView(row, e.currentTarget)} onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView(row, e.currentTarget); } }} className="cursor-pointer gap-0 p-4 outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><div className="break-words font-semibold">{row.title ?? "资料未提供"}</div><IdLine row={row}/></div><ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden="true"/></div>
+      {row.facts.historicalRead ? <p className="mt-1 text-xs text-muted-foreground">{historicalReadSummary(row.facts.historicalRead)}</p> : null}
+      {row.facts.historicalRead ? <div className="mt-2 space-y-0.5 text-xs tabular-nums"><p>{rowHaffText(row)} · 押金 {rowDepositText(row)}</p><p>{quote.total}</p><p className="text-muted-foreground">{quote.note}</p></div> : null}
       <div className="mt-2 flex items-start gap-2"><StatusBadge facts={row.facts}/><ReasonCell facts={row.facts} onMore={() => onView(row, document.getElementById("supply-card-" + row.id) ?? undefined)}/></div>
       {rule && <p className="mt-2 text-xs text-muted-foreground">规则确认或展示图片仍需核对，详情中逐项查看。</p>}
       <div className="mt-1 text-xs text-muted-foreground">{versionText(row.sequence)} · 资料排序 <TimeText iso={row.sortAt} label="资料排序时间"/></div></Card>; })}</div>;
@@ -174,14 +178,38 @@ export function QuickViewAssetSummary({
   const facts = detail?.version ? attributeFacts(detail.version).filter(f => ["安全箱配置", "体力等级", "负重等级", "潜水等级", "角色等级", "段位", "绝密 KD"].includes(f.label)) : [];
   const fullPayout = rowFullPayout(row);
   const inventory = (detail?.version?.declaration?.inventory ?? []).filter(item => item.itemId !== row.summary?.haff?.itemId);
+  const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
+  const display = historical?.display?.state === "KNOWN" ? historical.display.facts : null;
 
   return (
     <div className="my-3 space-y-3.5">
-      {historicalReadSummary(detail?.supervision.facts.historicalRead ?? row.facts.historicalRead) ? <p className="text-xs text-muted-foreground">{historicalReadSummary(detail?.supervision.facts.historicalRead ?? row.facts.historicalRead)} · 历史显示记录，不代表当前报价或可租资格。</p> : null}
+      {historical ? <section data-historical-summary="" className="space-y-2 rounded-lg border bg-muted/20 p-3">
+        <h3 className="text-sm font-semibold">历史来源记录</h3>
+        <p className="text-xs text-muted-foreground">{historicalReadSummary(historical)}</p>
+        <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+          <div><dt className="text-xs text-muted-foreground">历史租金</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.haffRentYuan)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">历史物资费</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.goodsYuan)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">历史押金</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.depositYuan)}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div>
+        </dl>
+        {display?.attributes && Array.isArray(display.resources) ? <>
+          <p className="text-xs text-muted-foreground">来源更新：<TimeText iso={display.sourceUpdatedAt} label="历史来源更新时间"/></p>
+          <Collapsible className="border-t">
+            <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm py-2 text-left text-xs font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+              历史属性与物资<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <dl className="grid grid-cols-2 gap-2 pb-2 text-sm sm:grid-cols-3">{historicalAttributeFacts(historical).filter(fact => fact.label !== "租期规则").map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
+              <ul className="flex flex-wrap gap-x-3 gap-y-1 pb-2 text-xs">{display.resources.map(resource => <li key={resource.code}>{resource.name}：{historicalResourceText(resource)}</li>)}</ul>
+            </CollapsibleContent>
+          </Collapsible>
+        </> : <p className="text-xs text-muted-foreground">历史扩展资料尚待接入，缺失数量不按零显示。</p>}
+        <p className="text-xs text-muted-foreground">历史记录仅供核对，不代表当前报价、下单应付或可租资格。</p>
+      </section> : null}
       <div>
         <div className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
           <span>核心游戏资产</span>
-          <span className="text-[10px] text-muted-foreground">来源：当前资料版本申报值</span>
+          {!historical ? <span className="text-[10px] text-muted-foreground">来源：当前资料版本申报值</span> : null}
         </div>
         <div className="grid grid-cols-3 gap-2">
           <div className="rounded-lg border bg-card p-2.5 shadow-xs">
@@ -211,9 +239,9 @@ export function QuickViewAssetSummary({
             <span className="mt-0.5 block text-[10px] text-muted-foreground">资料版本保存值，非下单应付</span>
           </div>
           <div className="rounded-lg border bg-muted/30 p-2.5">
-            <span className="block text-[11px] text-muted-foreground">押金（号主申报）</span>
+            <span className="block text-[11px] text-muted-foreground">{historical ? "押金" : "押金（号主申报）"}</span>
             <span className="mt-0.5 block text-sm font-semibold tabular-nums">{rowDepositText(row)}</span>
-            <span className="mt-0.5 block text-[10px] text-muted-foreground">基础申报押金，不含会员个性化减免</span>
+            <span className="mt-0.5 block text-[10px] text-muted-foreground">{!row.summary?.baseDeposit && historical ? "历史来源值，不替代当前申报或应付" : "基础申报押金，不含会员个性化减免"}</span>
           </div>
           <div className="rounded-lg border bg-muted/30 p-2.5">
             <span className="block text-[11px] text-muted-foreground">号主保证金</span>
