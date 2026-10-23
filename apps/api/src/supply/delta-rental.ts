@@ -29,26 +29,49 @@ export type DeltaCompatPricing = {
 };
 export const DELTA_HAFF_BASE_PER_MILLION = 1_000_000n;
 export const DELTA_ROUNDING_POLICY = "HALF_UP_CENT_V1";
-export const DELTA_RESOURCE_UNITS: Readonly<Record<string, "ROUND" | "DAY">> = {
-  df_billable_barrett_bullet:"ROUND", df_billable_top_insure_card:"DAY",
+export const DELTA_RESOURCE_UNITS: Readonly<Record<string, "ROUND" | "DAY" | "PIECE">> = {
+  df_billable_barrett_bullet:"ROUND", df_billable_top_insure_card:"DAY", df_billable_turtle_backpack_45:"PIECE",
 };
 export function isRetiredDeltaInsurance(code: string): boolean {
   return code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece";
 }
 // Current declarations/configuration only; frozen quotes keep their recorded units and amounts.
 export function assertDeltaResourceUnit(code: string, unit: string, quantityScale: unknown = 0): void {
-  if (isRetiredDeltaInsurance(code)) throw invalid("顶级保险卡基础单位为天，请使用现有按天资源", "unit");
+  if (isRetiredDeltaInsurance(code)) throw invalid("九格保险体验卡基础单位为天，请使用现有按天资源", "unit");
   const expected = DELTA_RESOURCE_UNITS[code];
   if (expected && (unit !== expected || quantityScale !== 0)) throw invalid("该资源的基础单位与数量精度固定", "unit");
 }
 export const DELTA_PUBLISH_LEVELS = [4, 5, 6, 7] as const;
+export const DELTA_GRADING_DIVISIONS: Readonly<Record<string, readonly number[]>> = {
+  "1": [], "2": [3, 2, 1], "3": [3, 2, 1], "4": [4, 3, 2, 1],
+  "5": [4, 3, 2, 1], "6": [5, 4, 3, 2, 1], "7": [5, 4, 3, 2, 1], "8": [],
+};
+export const DELTA_LOGIN_METHOD_CODES = ["legacy_login_qq", "login_qq_qr", "legacy_login_wechat", "legacy_login_steam_cn", "legacy_login_steam_global"] as const;
+
+export function isDeltaGradingDivision(code: unknown, division: unknown): division is number {
+  return typeof code === "string" && typeof division === "number" && Number.isSafeInteger(division)
+    && Object.hasOwn(DELTA_GRADING_DIVISIONS, code) && DELTA_GRADING_DIVISIONS[code]!.includes(division);
+}
+
+export function validateDeltaGradingAttributes(attributes: Record<string, unknown>, requireDivision = true): void {
+  const code = attributes.grading_code, division = attributes.grading_division;
+  if (typeof code !== "string" || !Object.hasOwn(DELTA_GRADING_DIVISIONS, code))
+    throw invalid("请选择有效大段位", "attributes.grading_code");
+  if (division !== null && division !== undefined && !isDeltaGradingDivision(code, division))
+    throw invalid("小段位与大段位不匹配", "attributes.grading_division");
+  if (requireDivision && DELTA_GRADING_DIVISIONS[code]!.length && division == null)
+    throw invalid("请补齐小段位", "attributes.grading_division");
+}
 
 export function deltaPublicationLevels(map: Record<string, unknown> | undefined): number[] {
   return DELTA_PUBLISH_LEVELS.filter(level => Object.hasOwn(map ?? {}, String(level)));
 }
 
 // New quote/publication validation is separate from historical normalization.
-export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>): void {
+export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean } = {}): void {
+  validateDeltaGradingAttributes(attributes, options.requireGradingDivision !== false);
+  if (!(DELTA_LOGIN_METHOD_CODES as readonly unknown[]).includes(attributes.login_method_code))
+    throw invalid("请选择有效登录方式", "attributes.login_method_code");
   const characterLevel=attributes.character_level;
   if(characterLevel!==null&&characterLevel!==undefined&&(!Number.isSafeInteger(characterLevel)||Number(characterLevel)<0||Number(characterLevel)>60))throw invalid("账号等级须为0–60的整数","attributes.character_level");
   for (const [field, alias, min, max] of [["vit_level", "vitLevel", 4, 7], ["bear_level", "bearLevel", 4, 7], ["dive_level", "dive_level", 0, 3]] as const) {
@@ -393,6 +416,7 @@ const DELTA_TEXT_FIELDS = ["safe_box_code", "grading_code", "login_method_code",
 // Optional legacy keys are emitted only when present so the frozen content-hash
 // byte contract of previously accepted declarations is preserved.
 const DELTA_OPTIONAL_TEXT_FIELDS = ["legacy_resource_no"] as const;
+const DELTA_OPTIONAL_INTEGER_FIELDS = ["grading_division"] as const;
 const DELTA_BOOLEAN_FIELDS = ["ban_record", "face_is_self", "service_window_cross_midnight"] as const;
 
 function deltaFields(value: object, allowed: readonly string[]): void {
@@ -415,12 +439,13 @@ function deltaDecimalText(value: unknown): string {
 }
 
 export function normalizeDeltaAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration", "media_categories"];
+  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration", "media_categories"];
   deltaFields(value, allowed);
   const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration" && key !== "media_categories"
-    && !((DELTA_OPTIONAL_TEXT_FIELDS as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
+    && !((([...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS]) as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
     const child = value[key] ?? null;
     if (child === null) return [key, null];
+    if (key === "grading_division" && !isDeltaGradingDivision(value.grading_code, child)) throw new DeltaDeclarationError("Invalid Delta grading division");
     if ((DELTA_LEVEL_FIELDS as readonly string[]).includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new DeltaDeclarationError("Invalid Delta level");
     if ((DELTA_BOOLEAN_FIELDS as readonly string[]).includes(key) && typeof child !== "boolean") throw new DeltaDeclarationError("Invalid Delta flag");
     if (key === "secret_kd") return [key, deltaDecimalText(child)];

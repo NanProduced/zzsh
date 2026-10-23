@@ -41,7 +41,7 @@ import {
   notFound,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService, type GameServiceState } from "./game-services";
-import { assertDeltaResourceUnit, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
+import { assertDeltaResourceUnit, isDeltaGradingDivision, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import type { DepositSkinFacts } from "./deposit-recommendation";
@@ -732,6 +732,9 @@ export async function saveListingDraft(
     body.description == null ? null : humanText(body.description as string);
   if (description && description.length > 4000)
     throw invalid("说明过长", "description");
+  if (isDeltaGradingDivision(v.attributes.grading_code, v.attributes.grading_division)
+    && (!body.attributes || typeof body.attributes !== "object" || !Object.hasOwn(body.attributes, "grading_division")))
+    throw conflict("客户端未保留已申报的小段位，请更新客户端后重试");
   let normalized: ContentDeclaration;
   try {
     normalized = normalizeDeclaration({
@@ -980,10 +983,27 @@ export async function readResourceIncomePreview(client: PoolClient, gameId: stri
   return {available:true,binding:{gameId,releaseId:release.releaseId,releaseGeneration:release.generation,priceVersionId:release.priceVersionId,catalogRevision:release.catalogRevision},lines,ownerTotal:declared&&unpricedItemIds.length===0?yuanAmountObject(total):null,unreportedItemIds:lines.filter(row=>row.quantity===null).map(row=>row.itemId),unpricedItemIds,informationalOnly:true};
 }
 
+// Only the formal takeover writer supplies this after checking the immutable source map/observation.
+export type LegacyTakeoverGradingContext = {
+  kind: "VERIFIED_LEGACY_TAKEOVER";
+  accountId: string;
+  sourceDigest: string;
+  observationVersionId: string;
+  gradingCode: string | null;
+  gradingDivision: number | null;
+};
+function validatePublicationAttributes(a: PublishingAccount, attributes: Record<string, unknown>, legacy?: LegacyTakeoverGradingContext): void {
+  if (legacy && (legacy.kind !== "VERIFIED_LEGACY_TAKEOVER" || legacy.accountId !== a.id
+    || !/^[a-f0-9]{64}$/.test(legacy.sourceDigest) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(legacy.observationVersionId)
+    || legacy.gradingCode !== (attributes.grading_code ?? null) || legacy.gradingDivision !== (attributes.grading_division ?? null)))
+    throw conflict("旧账号段位来源与当前申报不一致");
+  validateDeltaPublicationAttributes(attributes, { requireGradingDivision: legacy === undefined });
+}
 export async function quoteListing(
   client: PoolClient,
   a: PublishingAccount,
   expected: unknown,
+  legacyGrading?: LegacyTakeoverGradingContext,
 ): Promise<void> {
   checkAccountRevision(a, expected);
   await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
@@ -991,7 +1011,7 @@ export async function quoteListing(
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可为新申报草稿报价");
   const d = await readDeclaration(client, v);
-  validateDeltaPublicationAttributes(d.attributes);
+  validatePublicationAttributes(a, d.attributes, legacyGrading);
   if (d.inventory.some((i) => i.quantity === null))
     throw invalid("请补齐库存，未知数量不能当作零", "inventory");
   const missing = await client.query(
@@ -1424,6 +1444,7 @@ export async function reviewListing(
   actorId: string,
   body: Record<string, unknown>,
   gate: SupplyGateReader,
+  legacyGrading?: LegacyTakeoverGradingContext,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
   const v = await currentVersion(client, a);
@@ -1436,6 +1457,7 @@ export async function reviewListing(
   if (reason.length < 2 || reason.length > 500)
     throw invalid("请填写具体审核理由");
   if (body.decision === "APPROVE") {
+    validatePublicationAttributes(a, v.payload!.declaration.attributes, legacyGrading);
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
@@ -1803,6 +1825,7 @@ export async function listingDetail(
         "dive_level",
         "character_level",
         "grading_code",
+        ...(Object.hasOwn(attrs, "grading_division") ? ["grading_division"] : []),
         "login_method_code",
         "region_province",
         "region_city",

@@ -17,6 +17,7 @@ import { adminRequest, AdminApiError, friendlyError, hasPermission, type AdminCa
 import { StatusMessage } from "../components/ui-elements";
 import { skinContractReady, skinValues, skinPayload, ownerPayload, catalogReceipt, ownerKinds, rarityOptions, defaultStates } from "./catalog-skin-fields";
 import { SkinMetadataFields } from "./supply-catalog/skin-metadata-fields";
+import { unitText } from "./supply-review/model";
 import { CatalogObjectTable, CellSelect } from "./supply-catalog/catalog-table";
 import { CatalogObjectNav } from "./supply-catalog/object-nav";
 import {
@@ -767,7 +768,7 @@ export function SupplyCatalogView({
     }
     if (key === "appearance") return <div className="space-y-1 text-xs"><p>{defaultStates[(row.defaultState as keyof typeof defaultStates) ?? "UNKNOWN"]}</p><p className="text-muted-foreground">{row.isCollectible == null ? "典藏待确认" : row.isCollectible ? "典藏" : "非典藏"}</p></div>;
     if (key === "required") return <span className="text-xs">{row.required ? "必填" : "可选"}</span>;
-    if (key === "unit") return <span className="text-xs">{UNIT_LABEL[String(row.unit)] ?? "单位未登记"}</span>;
+    if (key === "unit") return <span className="text-xs">{row.unit === "PIECE" ? unitText("PIECE", String(row.code)) : UNIT_LABEL[String(row.unit)] ?? "单位未登记"}</span>;
     if (key === "valueKind") return <span className="text-xs">{VALUE_KIND_LABEL[String(row.valueKind)] ?? "类型未登记"}</span>;
     if (key === "expiryKind") return <span className="text-xs">{EXPIRY_KIND_LABEL[String(row.expiryKind)] ?? "类型未登记"}</span>;
     if (key === "quantityScale") return <span className="text-xs">{Number.isInteger(row.quantityScale) ? row.quantityScale === 0 ? "整数（例 1）" : `最多${row.quantityScale}位小数` : "未提供"}</span>;
@@ -798,7 +799,7 @@ export function SupplyCatalogView({
     unitItems: [
       { value: "HAFF_BASE", label: "哈夫币基础单位" },
       { value: "ROUND", label: "发" },
-      { value: "PIECE", label: "件" },
+      { value: "PIECE", label: "件/个（整数物品）" },
       { value: "DAY", label: "天" },
     ],
     boolItems: [{ value: "true", label: "是" }, { value: "false", label: "否" }],

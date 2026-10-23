@@ -165,6 +165,28 @@ test('formal order facts keep original resource units and distinguish historical
   assert.equal(h.calls.length,2);
 });
 
+test('resource names respect legacy originals and native frozen names with dynamic backpack units', async t => {
+  const legacy = { ...unknownOrder, orderFacts: { termSeconds: null, resources: [{ code: 'df_billable_top_insure_card', quantity: '7', unit: 'DAY' }] } };
+  const native = { ...knownOrder, source: { origin: 'NATIVE' }, accountFacts: { source: 'ORDER_VERSION', loginMethodText: 'QQ扫码', resources: [
+    { code: 'df_billable_top_insure_card', name: '九格保险体验卡', quantity: '7', unit: 'DAY' },
+    { code: 'df_billable_turtle_backpack_45', name: '45格乌龟包', quantity: '2', unit: 'PIECE' },
+  ] } };
+  const h = await mount(t, { rows: [legacy, native] });
+  const old = h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1].textContent;
+  const current = h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1].textContent;
+  assert.match(old, /顶级保险卡 7 天/); assert.doesNotMatch(old, /九格保险体验卡/);
+  assert.match(current, /九格保险体验卡 7 天/); assert.match(current, /45格乌龟包 2 个/); assert.doesNotMatch(current, /顶级保险卡/);
+  assert.equal(h.calls.length, 2);
+});
+
+test('native resource without a frozen name never inherits the legacy insurance label', async t => {
+  const native = { ...knownOrder, source: { origin: 'NATIVE' }, accountFacts: { source: 'ORDER_VERSION', resources: [
+    { code: 'df_billable_top_insure_card', quantity: '7', unit: 'DAY' },
+  ] } };
+  const h = await mount(t, { rows: [native] }), text = h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1].textContent;
+  assert.match(text, /物资名称未提供 7 天/); assert.doesNotMatch(text, /顶级保险卡|九格保险体验卡/);
+});
+
 test('same-name user preview consumes authorized membership, known zero credit and risk without another GET',async t=>{
   const summary={name:'下单时昵称',image:null,maskedPhone:null,riskFlag:true,membershipSummary:{state:'ready',growth:{knowledge:'UNKNOWN',effectiveTier:null}},creditSummary:{state:'ready',knowledge:'KNOWN',score:0,revision:'1'}};
   const h=await mount(t,{rows:[{...knownOrder,counterpartySummary:summary}]}),before=structuredClone(h.calls);

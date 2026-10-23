@@ -287,7 +287,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                     <TableBody>{itemRows.map(({ item, line }) => (
                       <TableRow key={item.id}>
                         <TableCell>{item.name}{!item.enabled ? <Badge variant="unknown" className="ml-1">已停用</Badge> : null}</TableCell>
-                        <TableCell>{line?.unitQuantity && line.unitQuantity !== "1" ? `每 ${line.unitQuantity} ${unitLabel(item.unit)}` : `每${unitLabel(item.unit)}`}</TableCell>
+                        <TableCell>{line?.unitQuantity && line.unitQuantity !== "1" ? `每 ${line.unitQuantity} ${unitLabel(item.unit, item.code)}` : `每${unitLabel(item.unit, item.code)}`}</TableCell>
                         <TableCell className="text-right tabular-nums">{V(`item.${item.id}.buyer`, unitYuan(line?.buyerUnitAmount), { unit: "元" })}</TableCell>
                         <TableCell className="text-right tabular-nums">{V(`item.${item.id}.owner`, unitYuan(line?.ownerUnitAmount), { unit: "元" })}</TableCell>
                         <TableCell className="text-right tabular-nums">{spread(editing ? val(`item.${item.id}.buyer`) : line?.buyerUnitAmount, editing ? val(`item.${item.id}.owner`) : line?.ownerUnitAmount)}</TableCell>

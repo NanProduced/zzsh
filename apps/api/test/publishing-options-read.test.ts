@@ -21,6 +21,10 @@ test('draft attribute dictionary does not inherit TEST_ONLY pricing keys or omit
   assert.deepEqual(r.body.safeBoxCodes,['safe_box_1x2','safe_box_2x2','safe_box_2x3','safe_box_3x3']);
   assert(r.body.safeBoxOptions.every((o:any)=>o.mappingStatus==='CONFIRMED'&&o.displayName));
   assert.deepEqual(r.body.vitalityLevels,[4,5,6,7]);assert.deepEqual(r.body.bearLevels,[4,5,6,7]);
+  assert.deepEqual(r.body.gradingOptions.find((o:any)=>o.code==='4').divisions,[4,3,2,1]);
+  assert.deepEqual(r.body.gradingOptions.find((o:any)=>o.code==='8').divisions,[]);
+  assert.equal(r.body.loginMethodOptions.find((o:any)=>o.code==='login_qq_qr').displayName,'QQ扫码');
+  assert.equal(r.body.loginMethodOptions.find((o:any)=>o.code==='legacy_login_qq').displayName,'QQ账密');
   assert.deepEqual(r.body.pricingInputOptions,{safeBoxCodes:[],vitalityLevels:[6,7],bearLevels:[6,7]});
   assert(!JSON.stringify(r.body).includes('"50"'));assert(r.queries.every(q=>!/^\s*(INSERT|UPDATE|DELETE)/.test(q)));
 });

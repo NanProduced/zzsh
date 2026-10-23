@@ -29,12 +29,13 @@ import './user-detail.css';
 const SECTIONS: Record<string,string> = {orders:'订单记录',resources:'当前上架账号',growth:'会员与礼遇',credit:'信用',finance:'资金',notes:'内部记录',security:'账号安全'};
 
 function accountResourceSummary(order: Order): string | null {
-  const names: Record<string,string> = {df_billable_haff:'哈夫币',df_billable_awm_bullet:'AWM子弹',df_billable_level6_bullet:'6级子弹',df_billable_level6_helmet:'6级头盔',df_billable_level6_armor:'6级护甲',df_billable_top_insure_card:'顶级保险卡',df_billable_barrett_bullet:'巴雷特子弹',df_billable_coffee:'咖啡豆'};
+  const legacyNames: Record<string,string> = {df_billable_haff:'哈夫币',df_billable_awm_bullet:'AWM子弹',df_billable_level6_bullet:'6级子弹',df_billable_level6_helmet:'6级头盔',df_billable_level6_armor:'6级护甲',df_billable_top_insure_card:'顶级保险卡',df_billable_barrett_bullet:'巴雷特子弹',df_billable_coffee:'咖啡豆'};
   const frozen = order.orderFacts?.resources;
+  const legacyOriginal = order.source?.origin === 'LEGACY' && Boolean(frozen?.length);
   const resources=(frozen?.length ? frozen : order.accountFacts?.resources ?? []).filter(resource=>resource.quantity!==null && !/^0+(?:\.0+)?$/.test(resource.quantity));
   if (!resources.length) return null;
   const label=frozen?.length?'原单资源':order.accountFacts?.source==='ORDER_VERSION'?'下单账号资料':'历史账号资料';
-  const items=resources.slice(0,3).map(resource=>resource.unit==='HAFF_BASE'?historicalResourceText({quantity:resource.quantity,unit:resource.unit}):`${resource.name??names[resource.code]??'未命名物资'} ${resource.unit ? historicalResourceText({quantity:resource.quantity,unit:resource.unit}) : resource.quantity}`);
+  const items=resources.slice(0,3).map(resource=>resource.unit==='HAFF_BASE'?historicalResourceText({quantity:resource.quantity,unit:resource.unit,code:resource.code}):`${resource.name??(legacyOriginal?legacyNames[resource.code]:undefined)??'物资名称未提供'} ${resource.unit ? historicalResourceText({quantity:resource.quantity,unit:resource.unit,code:resource.code}) : resource.quantity}`);
   return `${label}：${items.join(' · ')}${resources.length>3?` 另${resources.length-3}项`:''}`;
 }
 

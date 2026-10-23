@@ -35,6 +35,11 @@ export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:
     where.push(group.match==="ALL"?`(SELECT count(DISTINCT s.skin_id) ${skins} WHERE s.skin_id=ANY(${ids}::text[]))=cardinality(${ids}::text[])`:`EXISTS(SELECT 1 ${skins} WHERE s.skin_id=ANY(${ids}::text[]))`);
   }
   for(const [key,attr] of [["safeBoxCodes","safe_box_code"],["gradingCodes","grading_code"],["loginMethodCodes","login_method_code"]] as const)if(filters[key]?.length)where.push(`${attribute(attr)}=ANY(${p(filters[key])}::text[])`);
+  if(filters.gradingRanks?.length)where.push(`(${filters.gradingRanks.map(token=>{
+    const [major,division]=token.split(":");
+    return token==="8"?`(${attribute("grading_code")}=${p(major)} AND ((${attrs})->'grading_division' IS NULL OR (${attrs})->'grading_division'='null'::jsonb))`
+      :`(${attribute("grading_code")}=${p(major)} AND (${numericAttribute("grading_division",1)})=${p(Number(division))}::numeric)`;
+  }).join(" OR ")})`);
   for(const [key,attr,legacy] of [["vitality","vit_level","vitLevel"],["bear","bear_level","bearLevel"]] as const)if(filters[key]){
     const n=`COALESCE((${numericAttribute(attr,10)}),(${numericAttribute(legacy,10)}))`;
     where.push(`${n}>=${p(filters[key]!.min)}::numeric AND ${n}<=2147483647`);

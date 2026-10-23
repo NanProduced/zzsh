@@ -47,7 +47,7 @@ test("Barrett and insurance catalog identities reject incorrect units and fracti
 
 test("resource price configuration refuses a grouped price for per-round Barrett and per-day insurance",async()=>{
   for(const code of ['df_billable_barrett_bullet','df_billable_top_insure_card']){
-    const client={query:async(sql:string)=>sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'i',code,unit:code==='df_billable_top_insure_card'?'DAY':'ROUND',gameId:'g'}]}:{rows:[],rowCount:0}};
+    const client={query:async(sql:string)=>sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'i',code,unit:code==='df_billable_top_insure_card'?'DAY':'ROUND',quantityScale:0,gameId:'g'}]}:{rows:[],rowCount:0}};
     await assert.rejects(()=>updatePriceDraft(client as never,'admin',true,'p',{expectedRevision:'1',lines:[{itemId:'i',pricingKind:'FIXED_UNIT',unitQuantity:'60',buyerUnitAmount:'5',ownerUnitAmount:'3'}]}),/份量必须为1/);
   }
 });
@@ -66,7 +66,7 @@ test("retired insurance cannot acquire a new price or income projection even wit
   const client={query:async(sql:string)=>({rows:sql.includes('commission_rate')?[{releaseId:'r',generation:'1',priceVersionId:'p',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1'}]:[row]})};
   const empty=await readResourceIncomePreview(client as never,'g',[],{releaseId:'r',catalogRevision:'1'});assert.deepEqual(empty.lines,[]);assert.equal(empty.ownerTotal,null);
   await assert.rejects(()=>readResourceIncomePreview(client as never,'g',[{itemId:'wrong',quantity:'3'}],{releaseId:'r',catalogRevision:'1'}),/基础单位为天/);
-  const queries:string[]=[],priceClient={query:async(sql:string)=>{queries.push(sql);return sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'wrong',code,unit:'PIECE',gameId:'g'}]}:{rows:[],rowCount:0};}};
+  const queries:string[]=[],priceClient={query:async(sql:string)=>{queries.push(sql);return sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'wrong',code,unit:'PIECE',quantityScale:0,gameId:'g'}]}:{rows:[],rowCount:0};}};
   await assert.rejects(()=>updatePriceDraft(priceClient as never,'admin',true,'p',{expectedRevision:'1',lines:[{itemId:'wrong',pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:'5',ownerUnitAmount:'3'}]}),/基础单位为天/);
   assert.equal(queries.some(sql=>/^(INSERT INTO|DELETE FROM) "zzsh_supply"."price_line"/.test(sql)),false);
  }

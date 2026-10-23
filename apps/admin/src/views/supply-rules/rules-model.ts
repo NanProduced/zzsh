@@ -1,4 +1,5 @@
 import type { CatalogItem, PriceLineRecord, PriceVersionRecord, RulesResponse } from "../../api";
+import { unitText } from "../supply-review/model.ts";
 
 /** haff-ratio-v2 shape as returned by the API (read-only view model; the server stays the source of truth). */
 export type RatioBound = { base: "C" | "ABSOLUTE"; value: string };
@@ -81,8 +82,8 @@ export function haffCount(raw: string | null | undefined): string {
   return n % 1_000_000 === 0 ? `${n / 1_000_000}M` : n.toLocaleString("zh-CN");
 }
 
-export function unitLabel(unit: string): string {
-  return ({ ROUND: "发", PIECE: "件", DAY: "天", HAFF_BASE: "哈夫币" } as Record<string, string>)[unit] ?? unit;
+export function unitLabel(unit: string, itemCode?: string): string {
+  return ({ ROUND: "发", PIECE: unitText("PIECE", itemCode), DAY: "天", HAFF_BASE: "哈夫币" } as Record<string, string>)[unit] ?? unit;
 }
 
 export type ItemPriceRow = { item: CatalogItem; line: PriceLineRecord | null };

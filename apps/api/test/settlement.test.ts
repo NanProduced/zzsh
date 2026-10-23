@@ -1,5 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { computeQuote } from "../src/supply/pricing";
+import { compatRule } from "./pricing-compat-fixture";
 import {
   computeSettlement,
   settlementConfirmationReady,
@@ -81,6 +83,47 @@ function money(
   assert.ok(result.amounts, result.reasons.join(","));
   return result.amounts![key].amount;
 }
+
+function turtleSettlement(): ComputeSettlementInput {
+  const result = computeQuote({ priceVersionId: "fixture_turtle_price", mode: "SPREAD", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1", haffRule: compatRule("47"),
+    conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } },
+    termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
+    lines: [{ itemId: "fixture_haff", customerTier: "STANDARD", quantity: HAFF, unit: "HAFF_BASE", pricingKind: "HAFF_RATIO" },
+      { itemId: "fixture_turtle45", customerTier: "STANDARD", quantity: "2", unit: "PIECE", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" }] });
+  assert(result.quotable); const quote = result.quote, haff = quote.lines.find(l => l.itemId === "fixture_haff")!, turtle = quote.lines.find(l => l.itemId === "fixture_turtle45")!;
+  const input = baseInput({ remainingHaff: "0", remainingItems: "1", endReason: "NORMAL", fullPayout: "NOT_SELECTED", capturedAmount: quote.resourceTotal.amount, depositAmount: "0.00", haffBuyer: haff.buyerAmount.amount, haffOwner: haff.ownerAmount.amount });
+  input.haff = { ...input.haff, itemId: haff.itemId, unitQuantity: haff.unitQuantity, exactRatio: quote.pricingInputs.exactRatios.find(r => r.itemId === haff.itemId)! };
+  input.items = [{ itemId: turtle.itemId, unit: "PIECE", pricingKind: "FIXED_UNIT", openingQuantity: turtle.quantity, remainingQuantity: "1", unitQuantity: turtle.unitQuantity,
+    buyerUnitAmount: turtle.buyerUnitAmount.amount, ownerUnitAmount: turtle.ownerUnitAmount.amount, prepaidBuyerAmount: turtle.buyerAmount.amount, prepaidOwnerAmount: turtle.ownerAmount.amount }];
+  return input;
+}
+
+test("turtle quantity2 prepaid20/12, remaining1 consumes10/6 and returns unused10 without fees or deposit", () => {
+  const input = turtleSettlement(), before = structuredClone(input), r = computeSettlement(input);
+  assert.equal(r.ok, true, r.reasons.join(","));
+  assert.equal(money(r, "itemConsumedBuyer"), "10.00"); assert.equal(money(r, "itemConsumedOwner"), "6.00"); assert.equal(money(r, "unusedItemRefund"), "10.00");
+  assert.equal(money(r, "itemSpread"), "4.00"); assert.equal(money(r, "renterRefund"), "10.00");
+  assert.equal(money(r, "depositRefund"), "0.00"); assert.equal(money(r, "feeAmount"), "0.00");
+  assert.deepEqual(r.consumed!.items, [{ itemId: "fixture_turtle45", consumed: "1", remaining: "1" }]);
+  assert.equal(r.consumed!.haff, HAFF, "backpack consumption does not change the haff consumption ratio");
+  assert.deepEqual(input, before, "settlement consumes its frozen quote and does not mutate it");
+});
+
+test("turtle remaining/opening facts preserve zero and reject missing, fractional, excess or mismatched prepayment", () => {
+  for (const [remaining, buyer, owner, refund] of [["2", "0.00", "0.00", "20.00"], ["0", "20.00", "12.00", "0.00"]]) {
+    const input = turtleSettlement(); input.items[0]!.remainingQuantity = remaining!;
+    const result = computeSettlement(input); assert.equal(result.ok, true, result.reasons.join(","));
+    assert.equal(money(result, "itemConsumedBuyer"), buyer); assert.equal(money(result, "itemConsumedOwner"), owner); assert.equal(money(result, "unusedItemRefund"), refund);
+  }
+  for (const remaining of [null, undefined, "-1", "0.5", "3", "9".repeat(25)]) {
+    const input = turtleSettlement(); input.items[0]!.remainingQuantity = remaining as string;
+    const result = computeSettlement(input); assert.equal(result.ok, false); assert.equal(result.amounts, null);
+  }
+  for (const patch of [{ openingQuantity: "1.5" }, { openingQuantity: "-1" }, { prepaidBuyerAmount: "0.00" }, { prepaidOwnerAmount: "0.00" }]) {
+    const input = turtleSettlement(); Object.assign(input.items[0]!, patch);
+    assert.equal(computeSettlement(input).ok, false);
+  }
+});
 
 test("normal 80M/2 items selected payout matches Owner vector", () => {
   const r = computeSettlement(baseInput({ remainingHaff: "20000000", remainingItems: "8", endReason: "NORMAL" }));

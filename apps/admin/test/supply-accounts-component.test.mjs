@@ -73,6 +73,26 @@ test('quick view reuses loaded attributes and marks quote provenance without fet
   assert.equal(h.writes.length, 0);
 });
 
+test('quick resource chips use loaded frozen names and code-aware units without another request', async t => {
+  const value = workDetail(); let detailReads = 0;
+  value.version.declaration.inventory = [{ itemId: 'dynamic-backpack-probe', quantity: '2' }, { itemId: 'old-insurance-probe', quantity: '0' }, { itemId: 'unknown-probe', quantity: null }, { itemId: 'fraction-probe', quantity: '1.50' }];
+  value.version.presentation.items = [
+    { id: 'dynamic-backpack-probe', code: 'df_billable_turtle_backpack_45', name: '45格乌龟包', unit: 'PIECE' },
+    { id: 'old-insurance-probe', code: 'df_billable_top_insure_card', name: '顶级保险卡', unit: 'DAY' },
+    { id: 'fraction-probe', code: 'another-resource', name: '其他动态资源', unit: 'PIECE' },
+  ];
+  const h = await mountHarness(t, { permissions, fetchImpl: async url => {
+    if (url.pathname.endsWith('/listing-reviews')) return json(page);
+    detailReads++; return json(value);
+  } });
+  await tick(h); await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
+  const text = h.el.querySelector('[data-slot="sheet-content"]').textContent;
+  assert.match(text, /45格乌龟包.*2 个/); assert.match(text, /顶级保险卡.*0 天/);
+  assert.match(text, /物品名称待核.*数量待核/); assert.doesNotMatch(text, /dynamic-backpack-probe|old-insurance-probe|九格保险体验卡/);
+  assert.match(text, /其他动态资源.*1\.50 件/);
+  assert.equal(detailReads, 1); assert.equal(h.writes.length, 0);
+});
+
 test('historical list, mobile card and quick view expose existing source facts without new queries or current-quote claims', async (t) => {
   const historicalRead = {
     resourceNo: 'OLD-7', canCreateOrder: false, trade: 'UNKNOWN', quote: null,

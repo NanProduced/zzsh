@@ -233,7 +233,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
                     {fixed.map(item => (
                       <Num
                         key={item.id}
-                        label={`${item.name}（${unitLabel(item.unit)}）`}
+                        label={`${item.name}（${unitLabel(item.unit, item.code)}）`}
                         value={account.items[item.id] ?? ""}
                         placeholder="0"
                         error={validation.errors[`item.${item.id}`]}
@@ -317,7 +317,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
                               return (
                                 <TableRow key={item.id}>
                                   <TableCell className="font-medium whitespace-nowrap">{item.name}</TableCell>
-                                  <TableCell className="text-muted-foreground whitespace-nowrap">每{unitLabel(item.unit)}</TableCell>
+                                  <TableCell className="text-muted-foreground whitespace-nowrap">每{unitLabel(item.unit, item.code)}</TableCell>
                                   <TableCell className="text-right">
                                     <Input
                                       aria-label={`${item.name} 租客单价`}

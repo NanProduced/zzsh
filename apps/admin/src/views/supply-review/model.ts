@@ -146,7 +146,7 @@ export type AttributeDisplay = {
   serviceWindow: { startMinute: number; endMinute: number; displayName: string } | null;
 };
 
-export type PresentationItem = { id: string; name: string; unit: string };
+export type PresentationItem = { id: string; code?: string; name: string; unit: string };
 export type PresentationSkin = { id: string; name: string; categoryCode?: string; categoryName?: string; ownerKind?: "AGENT" | "FIREARM" | "MELEE_TYPE" | null; rarityName?: string | null; rarityBasis?: "OFFICIAL" | "PLATFORM_REFERENCE" | null; isCollectible?: boolean | null; defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT" };
 export type Presentation = {
   items?: PresentationItem[];
@@ -406,11 +406,11 @@ export function quantityText(value: string | null | undefined): string {
     : `${millions}.${remainder.toString().padStart(6, "0").replace(/0+$/, "")} M 哈夫币`;
 }
 
-export function unitText(unit: string | null | undefined): string {
+export function unitText(unit: string | null | undefined, itemCode?: string): string {
   if (unit === "HAFF_BASE") return "哈夫币";
   if (unit === "ROUND") return "发";
   if (unit === "DAY") return "天";
-  if (unit === "PIECE") return "件";
+  if (unit === "PIECE") return itemCode === "df_billable_turtle_backpack_45" ? "个" : "件";
   return "单位待核";
 }
 
@@ -496,9 +496,9 @@ export function historicalReadSummary(read: LegacyHistoricalRead | null | undefi
   return prefix + " · " + mode + " · " + (facts.attributeDisplay?.safeBox?.displayName ?? "安全箱待核");
 }
 
-export function historicalResourceText(resource: { quantity: string | null; unit: string }): string {
+export function historicalResourceText(resource: { quantity: string | null; unit: string; code?: string }): string {
   if (resource.quantity === null || !/^[0-9]{1,24}$/.test(resource.quantity)) return "数量待核";
-  return resource.unit === "HAFF_BASE" ? quantityText(resource.quantity) : BigInt(resource.quantity).toLocaleString("zh-CN") + " " + unitText(resource.unit);
+  return resource.unit === "HAFF_BASE" ? quantityText(resource.quantity) : BigInt(resource.quantity).toLocaleString("zh-CN") + " " + unitText(resource.unit, resource.code);
 }
 
 export type InventoryRow = {
@@ -534,7 +534,7 @@ export function inventoryRows(
     return {
       itemId,
       name: presentation?.name ?? previousItems?.find((entry) => entry.id === itemId)?.name ?? "历史物品",
-      unit: unitText(presentation?.unit),
+      unit: unitText(presentation?.unit, presentation?.code),
       previous: quantityOrLabel(previousQuantity, "未申报"),
       current: item ? quantityOrLabel(item.quantity, "数量未知") : "本次未申报",
       changed: previousQuantity !== undefined && previousQuantity !== item?.quantity,

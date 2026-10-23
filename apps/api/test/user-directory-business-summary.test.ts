@@ -124,7 +124,7 @@ test("unknown migrated growth retains only active independent entitlements and d
     assert.equal(result.membershipSummary.growth.knowledge, "UNKNOWN");
     assert.equal(result.membershipSummary.growth.sourceState, "BACKFILL_PENDING");
     assert.equal(result.membershipSummary.growth.normalTier, null);
-    assert.deepEqual(result.membershipSummary.entitlements, [{ id: "legacy:ACTIVE", kind: "FRIEND", scopeKey: "game-a", gameId: null, gameName: null, startsAtUtc: "2026-10-18T00:00:00.000000Z", endsAtUtc: "2026-10-20T00:00:00.000000Z", status: "ACTIVE", label: "挚友礼遇", depositWaived: true, pricingSummary: {knowledge:'UNKNOWN',kind:'UNKNOWN'} }]);
+    assert.deepEqual(result.membershipSummary.entitlements, [{ id: "legacy:ACTIVE", kind: "FRIEND", scopeKey: "game-a", gameId: null, gameName: null, startsAtUtc: "2026-10-18T00:00:00.000000Z", endsAtUtc: "2026-10-20T00:00:00.000000Z", status: "ACTIVE", label: "挚友礼遇", depositWaived: true, depositAllowanceCents: '0', pricingSummary: {knowledge:'UNKNOWN',kind:'UNKNOWN'} }]);
   }
   assert.deepEqual(result.creditSummary, { state: "ready", knowledge: "NOT_INITIALIZED", score: null, revision: null });
   assert.equal(f.queries.length, 9);

@@ -1,9 +1,9 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertLegacyDisplayFields } from "../src/supply/legacy-display-snapshot";
-import { prepareLegacyTradeIntake, takeoverLegacyTrade, finalizeLegacyTradeTakeover, buildLegacyTradeDeclaration, applyLegacyOrdinaryDraft, type LegacyTradeIntake, type TradeCatalogItem } from "../src/supply/legacy-trade-takeover";
+import { prepareLegacyTradeIntake, takeoverLegacyTrade, finalizeLegacyTradeTakeover, buildLegacyTradeDeclaration, applyLegacyOrdinaryDraft, type LegacyTradeTakeoverInput, type LegacyTradeIntake, type TradeCatalogItem } from "../src/supply/legacy-trade-takeover";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { canonicalize, computeContentHash, normalizeContentPayload, type ContentDeclaration } from "../src/supply/content-hash";
 import { fingerprintRequest, sha256Hex } from "../src/supply/supply-util";
@@ -32,6 +32,135 @@ function fixture(): LegacyTradeIntake {
 function catalog(): TradeCatalogItem[] {
   return DELTA_LEGACY_RESOURCES.map(([field, codes], i) => ({ id: "fixture_item_" + i, code: codes[0], unit: field === "haff" ? "HAFF_BASE" : field.includes("bullet") ? "ROUND" : field === "top_insure_card_num" ? "DAY" : "PIECE", quantityScale: 0 }));
 }
+
+function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean; selected?: boolean; originalTitle?: string } = {}) {
+  const publishing: typeof import("../src/supply/publishing") = require("../src/supply/publishing");
+  const legacy: typeof import("../src/supply/legacy-observation") = require("../src/supply/legacy-observation");
+  const auth: typeof import("../src/auth/auth-security") = require("../src/auth/auth-security");
+  const access: typeof import("../src/auth/admin-authorization") = require("../src/auth/admin-authorization");
+  const funding: typeof import("../src/supply/funding-authority") = require("../src/supply/funding-authority");
+  const intake = fixture(); intake.title = options.originalTitle ?? "历史资料待核实"; intake.termOptionCode = "daily-10m";
+  if (options.selected) { intake.isFullPayout = "1"; bindSource(intake); }
+  const original = structuredClone(intake), calls: string[] = [], queries: Array<{ sql: string; values: unknown[] }> = [], audits: any[] = [];
+  const actor = { id: "fixture_admin", sessionId: "fixture_session", requestId: "req_fixture" };
+  const gate: import("../src/supply/publishing").SupplyGateReader = async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "FIXTURE_ONLY" });
+  const account: any = { id: intake.accountId, owner_user_id: intake.source.expectedOwnerUserId, game_id: intake.source.expectedGameId, current_version_id: options.native ? "fixture_draft" : intake.source.expectedObservationVersionId, revision: "1", legacy_hold: options.native ? "NONE" : "UNRESOLVED", lifecycle: "ACTIVE" };
+  let stored = { ...buildLegacyTradeDeclaration(intake, catalog()).declaration!, mediaBindings: [] } as unknown as ContentDeclaration;
+  if (options.native && !intake.title.trim()) stored.title = `历史资料待核实-${intake.accountId.slice(0, 8)}`;
+  const version: any = { id: account.current_version_id, origin: options.native ? "NATIVE" : "LEGACY_OBSERVATION", review_state: options.native ? "DRAFT" : "IMPORTED_UNVERIFIED", attributes: stored.attributes, payload: null, content_hash: null, rule_release_id: null };
+  const controls = { priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false };
+  const receipts = new Map<string, unknown>();
+  const sourceUpdatedAt = new Date("2026-10-15T00:00:00Z"), extractSha256 = "e".repeat(64), evidenceRef = "FIXTURE_DISPLAY";
+  const displayDigest = legacyDisplayDigest(account.id, { observationVersionId: original.source.expectedObservationVersionId, baseSourceDigest: original.source.sourceDigest, extractSha256, sourceUpdatedAt: sourceUpdatedAt.toISOString(), evidenceRef, snapshot: original.display });
+  const client = { query: async (sql: string, values: unknown[] = []) => {
+    queries.push({ sql, values });
+    if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) { const row = receipts.get(String(values[1])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
+    if (sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"')) { receipts.set(String(values[1]), { requestFingerprint: values[2], responseStatus: values[3], responseBody: JSON.parse(String(values[4])), publishRequired: values[5] }); return { rows: [], rowCount: 1 }; }
+    if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { const details = JSON.parse(String(values[10])); audits.push({ action: values[4], details }); if (values[4] === "supply.legacy.trade_takeover") controls.formalDone = true; return { rows: [], rowCount: 1 }; }
+    if (sql.includes("legacy_listing_display_snapshot")) return { rows: [{ observation_version_id: original.source.expectedObservationVersionId, base_source_digest: original.source.sourceDigest, extract_sha256: extractSha256, source_updated_at: sourceUpdatedAt, evidence_ref: evidenceRef, snapshot: original.display, display_digest: controls.displayMismatch ? "0".repeat(64) : displayDigest }], rowCount: 1 };
+    if (sql.includes("SELECT title,description")) return { rows: [{ title: controls.observationMismatch ? "different original" : original.title, description: original.description }], rowCount: 1 };
+    if (sql.includes("SELECT id,code,unit")) return { rows: catalog(), rowCount: catalog().length };
+    if (sql.includes("e.action='supply.legacy.trade_draft_write'")) return { rows: controls.priorOrdinary && !controls.formalDone ? [{}] : [], rowCount: controls.priorOrdinary && !controls.formalDone ? 1 : 0 };
+    if (sql.includes("FROM zzsh_supply.listing_media m JOIN")) return { rows: original.media.map(m => ({ id: m.assetId, account_id: account.id, owner_user_id: account.owner_user_id, purpose: "ACCOUNT_DISPLAY" })), rowCount: original.media.length };
+    if (sql.includes("unnest($2::text[])")) return { rows: [], rowCount: 0 };
+    if (sql.includes("acceptance_kind='OWNER_ACCEPTED'")) return { rows: controls.accepted ? [{}] : [], rowCount: controls.accepted ? 1 : 0 };
+    if (sql.includes("details->>'batchId'")) return { rows: controls.formalDone ? [{}] : [], rowCount: controls.formalDone ? 1 : 0 };
+    return { rows: [], rowCount: 0 };
+  } } as unknown as import("pg").PoolClient;
+  t.mock.method(publishing, "lockPublishingAccount", async () => account);
+  t.mock.method(publishing, "currentVersion", async () => version);
+  t.mock.method(publishing, "assertCurrentRelease", async () => {});
+  t.mock.method(publishing, "readDeclaration", async () => stored);
+  t.mock.method(legacy, "lockLegacySource", async () => {});
+  t.mock.method(legacy, "readLegacyMap", async () => ({ account_id: account.id, source_digest: controls.sourceMismatch ? "c".repeat(64) : original.source.sourceDigest, version_id: original.source.expectedObservationVersionId }));
+  t.mock.method(legacy, "resolveLegacyObservationToDraft", async () => { calls.push("resolve"); account.current_version_id = "fixture_draft"; account.legacy_hold = "NONE"; version.id = "fixture_draft"; version.origin = "NATIVE"; version.review_state = "DRAFT"; return {} as any; });
+  t.mock.method(auth, "assertAdminContextInTransaction", async () => { if (!controls.authorized) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Denied"); });
+  t.mock.method(access, "loadEffectiveAdminAccess", async () => ({ status: "ACTIVE", isBoss: true, permissions: new Set(["supply.catalog.manage", "supply.review.decide"]) }));
+  t.mock.method(funding, "readFundingPolicyForRelease", async () => ({ ownerDepositRules: { normal: { minCents: "1" }, fullPayoutSelected: { minCents: "30000" }, capCents: "999999" } } as any));
+  t.mock.method(publishing, "saveListingDraft", async (_c: unknown, _a: unknown, body: Record<string, unknown>) => { calls.push("save"); const { expectedRevision: _revision, ...declaration } = body; stored = { ...declaration, mediaBindings: original.media.map(m => ({ assetId: m.assetId, byteHash: m.byteHash, position: m.position, purpose: "ACCOUNT_DISPLAY" })) } as unknown as ContentDeclaration; });
+  t.mock.method(publishing, "quoteListing", async (_c: unknown, _a: unknown, _r: unknown, grading: import("../src/supply/publishing").LegacyTakeoverGradingContext | undefined) => {
+    assert.deepEqual(grading, { kind: "VERIFIED_LEGACY_TAKEOVER", accountId: account.id, sourceDigest: original.source.sourceDigest, observationVersionId: original.source.expectedObservationVersionId, gradingCode: original.display.attributes.grading_code, gradingDivision: null });
+    calls.push("quote"); const priced = computeDeltaQuote({ priceVersionId: "fixture_price", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1", customerTier: "STANDARD", haffRule: compatRule(), lines: [{ itemId: "fixture_item_0", quantity: "3000000", pricingKind: "HAFF_RATIO", unit: "HAFF_BASE", customerTier: "STANDARD" }], conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } }, termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } }); assert(priced.quotable);
+    const payload = normalizeContentPayload({ schemaVersion: 2, accountId: account.id, gameId: account.game_id, declaration: stored, ruleRefs: { releaseId: "fixture_release", catalogRevision: "1", priceVersionId: "fixture_price", termVersionId: "fixture_term", agreementVersionId: "fixture_agreement", agreementDigest: "d".repeat(64) }, quoteValues: priced.quote });
+    Object.assign(version, { attributes: payload.declaration.attributes, payload, content_hash: computeContentHash(payload), rule_release_id: "fixture_release" });
+  });
+  t.mock.method(publishing, "reviewListing", async (_c: unknown, _a: unknown, _id: unknown, _body: unknown, _gate: unknown, grading: import("../src/supply/publishing").LegacyTakeoverGradingContext | undefined) => { assert.equal(grading?.gradingDivision, null); assert.equal(grading?.sourceDigest, original.source.sourceDigest); calls.push("review"); });
+  return { intake, original, client, actor, gate, account, version, controls, calls, queries, audits, displayDigest, getStored: () => stored };
+}
+
+test("reviewed title is explicit and audited while original source/title/hash stay untouched; original key replays only identical review", async t => {
+  const f = reviewedMaintenanceFixture(t), before = canonicalize(f.intake), sourceFields = canonicalize(f.intake.sourceFieldEvidence);
+  const input: LegacyTradeTakeoverInput = { batchId: "fixture_reviewed", intake: f.intake, reviewedDeclaration: { title: "黄金 · 3M哈夫币 · QQ账密", reason: "依据同源账号属性核对标题" } };
+  assert.equal(prepareLegacyTradeIntake(f.intake, catalog()).admission, "BLOCKED");
+  const result = await takeoverLegacyTrade(f.client, f.actor, input, f.gate);
+  assert.equal((result.body as any).state, "PUBLISHED"); assert.deepEqual(f.calls, ["resolve", "save", "quote", "review"]);
+  assert.equal(f.getStored().title, input.reviewedDeclaration!.title);
+  assert.equal(Object.hasOwn(f.getStored().attributes, "grading_division"), false);
+  assert.equal(canonicalize(f.intake), before); assert.equal(canonicalize(f.intake.sourceFieldEvidence), sourceFields);
+  assert.equal(f.intake.source.sourceDigest, "a".repeat(64)); assert.equal(f.intake.title, "历史资料待核实");
+  assert.deepEqual(f.audits.find(a => a.action === "supply.legacy.trade_takeover").details.reviewedDeclaration, { originalTitle: "历史资料待核实", title: input.reviewedDeclaration!.title, reason: input.reviewedDeclaration!.reason });
+  const inserted = f.queries.find(q => q.sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"'))!;
+  assert.equal(inserted.values[1], sha256Hex(JSON.stringify([f.intake.accountId, f.intake.source.expectedObservationVersionId, sha256Hex(canonicalize(f.intake))])));
+  const writes = f.calls.length; assert.equal((await takeoverLegacyTrade(f.client, f.actor, input, f.gate)).replayed, true); assert.equal(f.calls.length, writes);
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, { ...input, reviewedDeclaration: { ...input.reviewedDeclaration!, reason: "另一个理由" } }, f.gate), (error: any) => error.status === 409 && error.code === API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED);
+  assert.equal(f.calls.length, writes);
+  assert.equal(f.queries.some(q => /UPDATE\s+zzsh_supply\.legacy_listing_display_snapshot|UPDATE\s+zzsh_supply\.listing_version\s+SET\s+title/i.test(q.sql)), false);
+});
+
+test("missing or malformed reviewed title never turns the original placeholder into a publishable title", async t => {
+  const f = reviewedMaintenanceFixture(t);
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, { batchId: "no_review", intake: f.intake }, f.gate), /TITLE_REVIEW_REQUIRED/);
+  for (const reviewedDeclaration of [{ title: "历史资料待核实", reason: "核对" }, { title: "已核标题", reason: "" }, { title: "", reason: "核对" }, { title: "已核标题", reason: "核对", bypass: true }, null])
+    await assert.rejects(takeoverLegacyTrade(f.client, f.actor, { batchId: "invalid_review", intake: f.intake, reviewedDeclaration } as any, f.gate), { status: 400 });
+  assert.deepEqual(f.calls, []);
+});
+
+test("a reviewed title cannot bypass source map, display digest, original observation or admin authorization", async t => {
+  const f = reviewedMaintenanceFixture(t), input = { batchId: "fixture_reviewed", intake: f.intake, reviewedDeclaration: { title: "已核属性标题", reason: "核对原件" } };
+  for (const [flag, expected] of [["sourceMismatch", /SOURCE_BINDING_MISMATCH/], ["displayMismatch", /DISPLAY_SOURCE_BINDING_MISMATCH/], ["observationMismatch", /OBSERVATION_DECLARATION_MISMATCH/]] as const) {
+    f.controls[flag] = true; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, input, f.gate), expected); f.controls[flag] = false;
+  }
+  f.controls.authorized = false; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, input, f.gate), { status: 403 });
+  assert.deepEqual(f.calls, []);
+});
+
+test("existing Native drafts require matching ordinary source audit and unchanged declaration before takeover", async t => {
+  const f = reviewedMaintenanceFixture(t, { native: true }), input = { batchId: "fixture_reviewed", intake: f.intake, reviewedDeclaration: { title: "同源已核属性标题", reason: "核对原件" } };
+  f.controls.priorOrdinary = false; await assert.rejects(takeoverLegacyTrade(f.client, f.actor, input, f.gate), /TAKEOVER_DRAFT_SOURCE_MISMATCH/);
+  f.controls.priorOrdinary = true; f.getStored().description = "another task changed this";
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, input, f.gate), /已有草稿与本次来源声明不一致/);
+  f.getStored().description = f.original.description;
+  f.getStored().mediaBindings = [{ assetId: "foreign_asset", byteHash: "b".repeat(64), purpose: "ACCOUNT_DISPLAY", position: 0 }];
+  await assert.rejects(takeoverLegacyTrade(f.client, f.actor, input, f.gate), /已有草稿与本次来源声明不一致/);
+  assert.deepEqual(f.calls, []);
+  f.getStored().mediaBindings = [];
+  assert.equal((await takeoverLegacyTrade(f.client, f.actor, input, f.gate)).status, 200);
+  assert.deepEqual(f.calls, ["save", "quote", "review"]);
+  const audit = f.queries.find(q => q.sql.includes("e.action='supply.legacy.trade_draft_write'"))!;
+  assert.deepEqual(audit.values, [f.account.id, "fixture_draft", "legacy_mysql_restore", "la_rental_accounts", "33", "a".repeat(64), "fixture_observation"]);
+});
+
+test("selected payout finalization rechecks the bound display once and retains unknown division until genuine owner acceptance", async t => {
+  const f = reviewedMaintenanceFixture(t, { selected: true }), input = { batchId: "fixture_reviewed", intake: f.intake, reviewedDeclaration: { title: "包赔已核属性标题", reason: "核对原件" } };
+  const result = await takeoverLegacyTrade(f.client, f.actor, input, f.gate); assert.equal((result.body as any).state, "OWNER_ACCEPTANCE_REQUIRED");
+  const finalize = { accountId: f.account.id, source: f.intake.source, batchId: input.batchId, expectedRevision: "1", versionId: f.version.id, contentHash: f.version.content_hash, releaseId: f.version.rule_release_id };
+  f.controls.displayMismatch = true; await assert.rejects(finalizeLegacyTradeTakeover(f.client, f.actor, finalize, f.gate), /DISPLAY_SOURCE_BINDING_MISMATCH/);
+  f.controls.displayMismatch = false; await assert.rejects(finalizeLegacyTradeTakeover(f.client, f.actor, finalize, f.gate), /TERMS_ACCEPTANCE_REQUIRED/);
+  assert.deepEqual(f.calls, ["resolve", "save", "quote"]);
+  f.controls.accepted = true; const before = f.queries.length;
+  assert.equal((await finalizeLegacyTradeTakeover(f.client, f.actor, finalize, f.gate)).status, 200);
+  assert.deepEqual(f.calls, ["resolve", "save", "quote", "review"]);
+  assert.equal(f.queries.slice(before).filter(q => q.sql.includes("legacy_listing_display_snapshot")).length, 1);
+  assert.equal(Object.hasOwn(f.getStored().attributes, "grading_division"), false);
+});
+
+test("a same-source ordinary draft keeps the established blank-title fallback until its explicit reviewed title", async t => {
+  const f = reviewedMaintenanceFixture(t, { native: true, originalTitle: "" });
+  assert.equal(f.getStored().title, `历史资料待核实-${f.account.id.slice(0, 8)}`);
+  const result = await takeoverLegacyTrade(f.client, f.actor, { batchId: "blank_original", intake: f.intake, reviewedDeclaration: { title: "已核属性标题", reason: "核对真实属性补齐原空标题" } }, f.gate);
+  assert.equal(result.status, 200); assert.equal(f.intake.title, ""); assert.equal(f.getStored().title, "已核属性标题");
+  assert.equal(f.audits.find(a => a.action === "supply.legacy.trade_takeover").details.reviewedDeclaration.originalTitle, "");
+});
 test("formal intake uses native item IDs, exact base quantities and materialized funding declarations", () => {
   const input = fixture(), plan = prepareLegacyTradeIntake(input, catalog());
   assert.equal(plan.admission, "TRADE_CANDIDATE", plan.reasons.join(",")); assert(plan.draft);
@@ -265,12 +394,12 @@ test("actual maintenance chain saves and quotes formal native fields before publ
   const payload=normalizeContentPayload({schemaVersion:2,accountId:input.accountId,gameId:input.source.expectedGameId,declaration,ruleRefs:{releaseId:"fixture_release",catalogRevision:"1",priceVersionId:"fixture_price",termVersionId:"fixture_term",agreementVersionId:"fixture_agreement",agreementDigest:"d".repeat(64)},quoteValues:priced.quote});
   const a={id:input.accountId,owner_user_id:input.source.expectedOwnerUserId,game_id:input.source.expectedGameId,current_version_id:"fixture_draft",revision:"1",owner_paused:false,staff_restricted:false,restriction_reason:null,legacy_hold:"NONE",lifecycle:"ACTIVE",display_no:null},version={id:"fixture_draft",origin:"NATIVE",review_state:"DRAFT",content_hash:computeContentHash(payload),rule_release_id:"fixture_release",attributes:payload.declaration.attributes,payload} as import("../src/supply/publishing").ListingVersion,calls:string[]=[],queries:string[]=[];let accepted=false,badDisplay=false,foreignMedia=false,missingTier=false;
   t.mock.method(p,"lockPublishingAccount",async()=>a);t.mock.method(p,"currentVersion",async()=>version);t.mock.method(p,"assertCurrentRelease",async()=>{});t.mock.method(p,"readDeclaration",async()=>payload.declaration);
-  t.mock.method(p,"saveListingDraft",async(_c:import("pg").PoolClient,_a:import("../src/supply/publishing").PublishingAccount,body:Record<string,unknown>)=>{calls.push("save");assert.deepEqual(body,{...plan.draft,expectedRevision:"1"});});t.mock.method(p,"quoteListing",async()=>{calls.push("quote");});t.mock.method(p,"reviewListing",async()=>{calls.push("review");});
+  t.mock.method(p,"saveListingDraft",async(_c:import("pg").PoolClient,_a:import("../src/supply/publishing").PublishingAccount,body:Record<string,unknown>)=>{calls.push("save");assert.deepEqual(body,{...plan.draft,expectedRevision:"1"});});t.mock.method(p,"quoteListing",async(_c:unknown,_a:unknown,_r:unknown,ctx:import("../src/supply/publishing").LegacyTakeoverGradingContext|undefined)=>{assert.deepEqual(ctx,{kind:"VERIFIED_LEGACY_TAKEOVER",accountId:a.id,sourceDigest:input.source.sourceDigest,observationVersionId:input.source.expectedObservationVersionId,gradingCode:"4",gradingDivision:null});calls.push("quote");});t.mock.method(p,"reviewListing",async(_c:unknown,_a:unknown,_id:unknown,_b:unknown,_g:unknown,ctx:import("../src/supply/publishing").LegacyTakeoverGradingContext|undefined)=>{assert.equal(ctx?.gradingCode,"4");assert.equal(ctx?.gradingDivision,null);assert.equal(ctx?.sourceDigest,input.source.sourceDigest);calls.push("review");});
   t.mock.method(auth,"assertAdminContextInTransaction",async()=>{});t.mock.method(access,"loadEffectiveAdminAccess",async()=>({status:"ACTIVE",isBoss:true,permissions:new Set(["supply.catalog.manage","supply.review.decide"])} as Awaited<ReturnType<typeof access.loadEffectiveAdminAccess>>));
   t.mock.method(legacy,"lockLegacySource",async()=>{});t.mock.method(legacy,"readLegacyMap",async()=>({account_id:a.id,source_digest:input.source.sourceDigest,version_id:input.source.expectedObservationVersionId}) as Awaited<ReturnType<typeof legacy.readLegacyMap>>);
   t.mock.method(funding,"readFundingPolicyForRelease",async()=>({ownerDepositRules:{normal:{minCents:"1"},fullPayoutSelected:{minCents:"30000"},capCents:"999999"}} as import("../src/supply/funding-policy").FundingPolicy));
   const sourceUpdatedAt=new Date("2026-10-15T00:00:00Z"),extractSha256="e".repeat(64),evidenceRef="FIXTURE_DISPLAY",displayDigest=legacyDisplayDigest(a.id,{observationVersionId:input.source.expectedObservationVersionId,baseSourceDigest:input.source.sourceDigest,extractSha256,sourceUpdatedAt:sourceUpdatedAt.toISOString(),evidenceRef,snapshot:input.display});
-  const client={query:async(sql:string)=>{queries.push(sql);if(sql.includes("legacy_listing_display_snapshot"))return {rows:[{observation_version_id:input.source.expectedObservationVersionId,base_source_digest:input.source.sourceDigest,extract_sha256:extractSha256,source_updated_at:sourceUpdatedAt,evidence_ref:evidenceRef,snapshot:input.display,display_digest:badDisplay?"0".repeat(64):displayDigest}],rowCount:1};if(sql.includes("SELECT title,description"))return {rows:[{title:input.title,description:input.description}],rowCount:1};if(sql.includes("SELECT id,code,unit"))return {rows:catalog(),rowCount:catalog().length};if(sql.includes("FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a")){const rows=plan.expectedMedia.map(m=>({id:m.assetId,account_id:foreignMedia?"foreign_account":a.id,owner_user_id:foreignMedia?"foreign_owner":a.owner_user_id,purpose:"ACCOUNT_DISPLAY"}));return {rows,rowCount:rows.length};}if(sql.includes("unnest($2::text[])"))return {rows:missingTier?[{}]:[],rowCount:missingTier?1:0};if(sql.includes("acceptance_kind='OWNER_ACCEPTED'"))return {rows:accepted?[{}]:[],rowCount:accepted?1:0};if(sql.includes("details->>'batchId'"))return {rows:[{}],rowCount:1};return {rows:[],rowCount:0};}} as unknown as import("pg").PoolClient;
+  const client={query:async(sql:string)=>{queries.push(sql);if(sql.includes("e.action='supply.legacy.trade_draft_write'"))return {rows:[{}],rowCount:1};if(sql.includes("legacy_listing_display_snapshot"))return {rows:[{observation_version_id:input.source.expectedObservationVersionId,base_source_digest:input.source.sourceDigest,extract_sha256:extractSha256,source_updated_at:sourceUpdatedAt,evidence_ref:evidenceRef,snapshot:input.display,display_digest:badDisplay?"0".repeat(64):displayDigest}],rowCount:1};if(sql.includes("SELECT title,description"))return {rows:[{title:input.title,description:input.description}],rowCount:1};if(sql.includes("SELECT id,code,unit"))return {rows:catalog(),rowCount:catalog().length};if(sql.includes("FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a")){const rows=plan.expectedMedia.map(m=>({id:m.assetId,account_id:foreignMedia?"foreign_account":a.id,owner_user_id:foreignMedia?"foreign_owner":a.owner_user_id,purpose:"ACCOUNT_DISPLAY"}));return {rows,rowCount:rows.length};}if(sql.includes("unnest($2::text[])"))return {rows:missingTier?[{}]:[],rowCount:missingTier?1:0};if(sql.includes("acceptance_kind='OWNER_ACCEPTED'"))return {rows:accepted?[{}]:[],rowCount:accepted?1:0};if(sql.includes("details->>'batchId'"))return {rows:[{}],rowCount:1};return {rows:[],rowCount:0};}} as unknown as import("pg").PoolClient;
   const result=await takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate);assert.deepEqual(calls,selected?["save","quote"]:["save","quote","review"]);assert.equal((result.body as {state:string}).state,selected?"OWNER_ACCEPTANCE_REQUIRED":"PUBLISHED");
   assert.equal(queries.some(q=>q.includes("'LEGACY_TAKEOVER_AUTHORIZED'")),!selected);assert(!queries.some(q=>/INSERT INTO zzsh_order\.rental_order|ledger_entry/.test(q)));
   if(selected){const finalize={accountId:a.id,source:input.source,batchId:"fixture_batch",expectedRevision:"1",versionId:version.id,contentHash:version.content_hash!,releaseId:version.rule_release_id!};await assert.rejects(()=>finalizeLegacyTradeTakeover(client,actor,finalize,gate),/TERMS_ACCEPTANCE_REQUIRED/);assert.deepEqual(calls,["save","quote"]);accepted=true;assert.equal((await finalizeLegacyTradeTakeover(client,actor,finalize,gate)).status,200);assert.deepEqual(calls,["save","quote","review"]);}
@@ -384,7 +513,8 @@ test("ordinary draft chain saves the converted declaration without a quote and a
       return { rows: [], rowCount: 0 };
     },
   } as unknown as import("pg").PoolClient;
-  await assert.rejects(() => publishing.quoteListing(quoteClient, account, account.revision), /申报物品不在当前可用价目中/);
+  await assert.rejects(() => publishing.quoteListing(quoteClient, account, account.revision), /请补齐小段位/);
+  await assert.rejects(() => publishing.quoteListing(quoteClient, account, account.revision, {kind:"VERIFIED_LEGACY_TAKEOVER",accountId:account.id,sourceDigest:input.source.sourceDigest,observationVersionId:input.source.expectedObservationVersionId,gradingCode:"4",gradingDivision:null}), /申报物品不在当前可用价目中/);
 });
 
 test("ordinary draft command saves one legacy observation without quote, review, takeover or an observation update", async (t) => {
@@ -558,7 +688,8 @@ test("submit and review stop on a placeholder title before any publication write
   bindSource(input);
   const plan = prepareLegacyTradeIntake(input, catalog());
   assert(plan.draft);
-  const declaration = { ...plan.draft, title: "历史资料待核实", mediaBindings: plan.expectedMedia } as ContentDeclaration;
+  const baseDeclaration = plan.draft as unknown as ContentDeclaration;
+  const declaration: ContentDeclaration = { ...baseDeclaration, title: "历史资料待核实", attributes: { ...baseDeclaration.attributes, grading_division: 3 }, mediaBindings: plan.expectedMedia };
   const priced = computeDeltaQuote({ priceVersionId: "fixture_price", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1", customerTier: "STANDARD", haffRule: compatRule(), lines: [{ itemId: "fixture_item_0", quantity: "3000000", pricingKind: "HAFF_RATIO", unit: "HAFF_BASE", customerTier: "STANDARD" }], conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } }, termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } });
   assert(priced.quotable);
   const payload = normalizeContentPayload({ schemaVersion: 2, accountId: input.accountId, gameId: input.source.expectedGameId, declaration, ruleRefs: { releaseId: "fixture_release", catalogRevision: "1", priceVersionId: "fixture_price", termVersionId: "fixture_term", agreementVersionId: "fixture_agreement", agreementDigest: "d".repeat(64) }, quoteValues: priced.quote });

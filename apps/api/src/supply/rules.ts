@@ -203,8 +203,8 @@ export async function updatePriceDraft(
     ],
   );
   if (lines !== undefined) {
-    const items = await client.query<{ id: string; code: string; unit: string; gameId: string }>(
-      `SELECT "id", "code", "unit", "game_id" AS "gameId" FROM "zzsh_supply"."billable_item" WHERE "id" = ANY($1::text[])`,
+    const items = await client.query<{ id: string; code: string; unit: string; quantityScale: number; gameId: string }>(
+      `SELECT "id", "code", "unit", "quantity_scale" AS "quantityScale", "game_id" AS "gameId" FROM "zzsh_supply"."billable_item" WHERE "id" = ANY($1::text[])`,
       [lines.map((line) => line.itemId)],
     );
     const itemById = new Map(items.rows.map((item) => [item.id, item]));
@@ -212,9 +212,9 @@ export async function updatePriceDraft(
     for (const line of lines) {
       const item = itemById.get(line.itemId)!;
       if (item.gameId !== String(current.game_id)) throw invalid("Price line item belongs to another game");
-      assertDeltaResourceUnit(item.code, item.unit);
+      assertDeltaResourceUnit(item.code, item.unit, item.quantityScale ?? null);
       if ((item.unit === "HAFF_BASE") !== (line.pricingKind === "HAFF_RATIO")) throw invalid("Haff items must use the haff ratio pricing kind");
-      if (DELTA_RESOURCE_UNITS[item.code] && (line.pricingKind !== "FIXED_UNIT" || line.unitQuantity !== "1")) throw invalid("巴雷特每发、保险资源每基础数量计价，份量必须为1", "lines");
+      if (DELTA_RESOURCE_UNITS[item.code] && (line.pricingKind !== "FIXED_UNIT" || line.unitQuantity !== "1")) throw invalid("该固定资源按基础单位计价，份量必须为1", "lines");
     }
     await client.query(`DELETE FROM "zzsh_supply"."price_line" WHERE "price_version_id" = $1`, [versionId]);
     for (const line of lines) {

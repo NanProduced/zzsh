@@ -1,5 +1,6 @@
 import { invalid } from "./supply-util";
 import { escapeLike } from "./catalog";
+import { DELTA_GRADING_DIVISIONS, isDeltaGradingDivision } from "./delta-rental";
 
 export const LISTING_SEARCH_MAX_LENGTH = 120;
 
@@ -48,7 +49,7 @@ export type PublicCodeLabel = {
 };
 export type PublicAttributeDisplay = {
   safeBox: PublicCodeLabel | null;
-  grading: PublicCodeLabel | null;
+  grading: (PublicCodeLabel & { division?: number }) | null;
   loginMethod: PublicCodeLabel | null;
   serviceWindow: {
     startMinute: number;
@@ -85,6 +86,7 @@ const GRADING_DISPLAY_NAMES: Record<string, string> = {
 };
 const LOGIN_METHOD_DISPLAY_NAMES: Record<string, string> = {
   legacy_login_qq: "QQ账密",
+  login_qq_qr: "QQ扫码",
   legacy_login_wechat: "微信扫码",
   legacy_login_steam_cn: "Steam国服",
   legacy_login_steam_global: "Steam国际服",
@@ -110,12 +112,18 @@ export function publicSafeBoxCodes(): string[] {
   return Object.keys(SAFE_BOX_DISPLAY_NAMES);
 }
 
-export function publicGradingOptions(): PublicCodeLabel[] {
+export function publicGradingOptions(): Array<PublicCodeLabel & { divisions: readonly number[] }> {
   return codeOptions(
     GRADING_DISPLAY_NAMES,
     Object.keys(GRADING_DISPLAY_NAMES),
     "GRADING_CODE_UNMAPPED",
-  );
+  ).map(option => ({ ...option, divisions: DELTA_GRADING_DIVISIONS[option.code]! }));
+}
+
+export function publicGradingRankOptions(): PublicCodeLabel[] {
+  return publicGradingOptions().flatMap(option => option.code === "1" ? [] : option.divisions.length
+    ? option.divisions.map(division => ({ ...option, code: `${option.code}:${division}`, displayName: `${option.displayName}${division}` }))
+    : [option]);
 }
 
 export function publicLoginMethodOptions(): PublicCodeLabel[] {
@@ -142,7 +150,7 @@ function codeLabel(
 ): PublicCodeLabel | null {
   const code = attributeCode(value);
   if (!code) return null;
-  const displayName = names[code] ?? null;
+  const displayName = Object.hasOwn(names, code) ? names[code]! : null;
   return {
     code,
     displayName,
@@ -165,9 +173,12 @@ export function projectPublicAttributeDisplay(
 ): PublicAttributeDisplay {
   const startMinute = displayMinute(attributes.service_window_start_minute);
   const endMinute = displayMinute(attributes.service_window_end_minute);
+  const grading = codeLabel(attributes.grading_code, GRADING_DISPLAY_NAMES, "GRADING_CODE_UNMAPPED");
+  const division = attributes.grading_division;
   return {
     safeBox: codeLabel(attributes.safe_box_code, SAFE_BOX_DISPLAY_NAMES, "SAFE_BOX_CODE_UNMAPPED"),
-    grading: codeLabel(attributes.grading_code, GRADING_DISPLAY_NAMES, "GRADING_CODE_UNMAPPED"),
+    grading: grading && isDeltaGradingDivision(grading.code, division)
+      ? { ...grading, division, displayName: `${grading.displayName}${division}` } : grading,
     loginMethod: codeLabel(attributes.login_method_code, LOGIN_METHOD_DISPLAY_NAMES, "LOGIN_METHOD_CODE_UNMAPPED"),
     serviceWindow:
       startMinute === null || endMinute === null

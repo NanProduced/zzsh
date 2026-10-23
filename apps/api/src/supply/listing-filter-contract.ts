@@ -1,12 +1,13 @@
 import { invalid } from "./supply-util";
 import { parsePublicListingSearch } from "./listing-query";
+import { DELTA_GRADING_DIVISIONS } from "./delta-rental";
 
 export const LISTING_URL_BYTES=8192;
-export const LISTING_OPERATORS={resources:"AND_MIN",safeBoxCodes:"ANY",vitality:"MIN",bear:"MIN",gradingCodes:"ANY",loginMethodCodes:"ANY",regions:"PAIRS_ANY",serviceWindow:"COVERS",skinGroups:"GROUPS"} as const;
+export const LISTING_OPERATORS={resources:"AND_MIN",safeBoxCodes:"ANY",vitality:"MIN",bear:"MIN",gradingCodes:"ANY",gradingRanks:"PAIRS_ANY",loginMethodCodes:"ANY",regions:"PAIRS_ANY",serviceWindow:"COVERS",skinGroups:"GROUPS"} as const;
 export type FilterKey=keyof typeof LISTING_OPERATORS;
 export type Region={province:string;city:string};
 export type ServiceWindow={startMinute:number;endMinute:number;crossMidnight:boolean;timezone:"Asia/Shanghai"};
-export type ListingFilters={resources?:{itemId:string;minQuantity?:string;maxQuantity?:string}[];safeBoxCodes?:string[];vitality?:{min:number};bear?:{min:number};gradingCodes?:string[];loginMethodCodes?:string[];regions?:Region[];serviceWindow?:ServiceWindow;skinGroups?:{categoryId:string;ids:string[];match:"ANY"|"ALL"}[]};
+export type ListingFilters={resources?:{itemId:string;minQuantity?:string;maxQuantity?:string}[];safeBoxCodes?:string[];vitality?:{min:number};bear?:{min:number};gradingCodes?:string[];gradingRanks?:string[];loginMethodCodes?:string[];regions?:Region[];serviceWindow?:ServiceWindow;skinGroups?:{categoryId:string;ids:string[];match:"ANY"|"ALL"}[]};
 export type ListingSort="latest"|"resourceTotal"|"coreQuantity";
 export type FilterField={key:FilterKey;operator:string;label:string;enabled:boolean;order:number;items?:{itemId:string;min:string;max:string}[];options?:{value:string;label:string}[];levels?:number[];regions?:Region[];categoryIds?:string[]};
 export type FilterConfig={schemaVersion:1;fields:FilterField[];sorts:{key:ListingSort;label:string;enabled:boolean;order:number;itemIds?:string[]}[]};
@@ -38,6 +39,7 @@ export function parseListingFilters(v:unknown):ListingFilters {
   const o=checkedObject(v,"filters",Object.keys(LISTING_OPERATORS)),f:ListingFilters={};
   if(o.resources!==undefined){const values=unique(array(o.resources,"filters.resources",16).map(x=>{const r=checkedObject(x,"filters.resources",["itemId","minQuantity","maxQuantity"]);const itemId=checkedId(r.itemId,"filters.resources.itemId");if(r.minQuantity===undefined&&r.maxQuantity===undefined)throw invalid("At least one quantity bound is required","filters.resources.minQuantity");const minQuantity=r.minQuantity===undefined?undefined:checkedQuantity(r.minQuantity,"filters.resources.minQuantity");const maxQuantity=r.maxQuantity===undefined?undefined:checkedQuantity(r.maxQuantity,"filters.resources.maxQuantity");if(minQuantity!==undefined&&maxQuantity!==undefined&&BigInt(minQuantity)>BigInt(maxQuantity))throw invalid("Minimum quantity exceeds maximum quantity","filters.resources.maxQuantity");return {itemId,...(minQuantity===undefined?{}:{minQuantity}),...(maxQuantity===undefined?{}:{maxQuantity})};}),"filters.resources",x=>x.itemId);if(values.length)f.resources=values;}
   for(const key of ["safeBoxCodes","gradingCodes","loginMethodCodes"] as const)if(o[key]!==undefined){const a=codes(o[key],"filters."+key);if(a.length)f[key]=a;}
+  if(o.gradingRanks!==undefined){const a=codes(o.gradingRanks,"filters.gradingRanks",25);for(const token of a){const [major,division]=token.split(":");if(token!=="8"&&(!/^[2-7]:[1-5]$/.test(token)||!DELTA_GRADING_DIVISIONS[major!]?.includes(Number(division))))throw invalid("Invalid exact grading rank","filters.gradingRanks");}if(a.length)f.gradingRanks=a;}
   for(const key of ["vitality","bear"] as const)if(o[key]!==undefined){const r=checkedObject(o[key],"filters."+key,["min"]);f[key]={min:integer(r.min,"filters."+key+".min")};}
   if(o.regions!==undefined){const a=regions(o.regions,"filters.regions",20);if(a.length)f.regions=a;}
   if(o.serviceWindow!==undefined)f.serviceWindow=parseServiceWindow(o.serviceWindow);
@@ -63,7 +65,7 @@ export function parseListingQueryV2(q:URLSearchParams,raw:string):ListingQueryV2
 }
 export function parseFilterConfig(value:unknown):FilterConfig {
   const c=checkedObject(value,"config",["schemaVersion","fields","sorts"]);if(c.schemaVersion!==1)throw invalid("Unsupported config schema","config.schemaVersion");
-  const fields=unique(array(c.fields,"config.fields",9).map(x=>{
+  const fields=unique(array(c.fields,"config.fields",Object.keys(LISTING_OPERATORS).length).map(x=>{
     const f=checkedObject(x,"config.fields",["key","operator","label","enabled","order","items","options","levels","regions","categoryIds"]),key=f.key as FilterKey;
     if(typeof key!=="string"||!Object.hasOwn(LISTING_OPERATORS,key)||f.operator!==LISTING_OPERATORS[key])throw invalid("Unsupported filter logic","config.fields.key");
     const optionKey=key==="resources"?"items":key==="skinGroups"?"categoryIds":key==="regions"?"regions":key==="vitality"||key==="bear"?"levels":key==="serviceWindow"?null:"options";

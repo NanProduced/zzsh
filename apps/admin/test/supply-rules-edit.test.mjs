@@ -33,6 +33,17 @@ test("rules model: complete changes, honest estimates, original request fingerpr
     const write = await vite.ssrLoadModule("/src/views/supply-rules/rules-write.ts");
     const next = () => { const rules = fixture(); rules.priceVersions.push({ ...structuredClone(rules.priceVersions[0]), id: "p2" }); rules.priceLines.push(...rules.priceLines.map(line => ({ ...line, priceVersionId: "p2" }))); return rules; };
     const account = () => ({ haffM: "100", box: "box-a", vit: "6", bear: "6", dive: "0", term: "d10", items: {} });
+    await t.test("dynamic backpack uses per-piece label and supplied four-tier prices only", () => {
+      const item = { id: "new-dynamic-id", code: "df_billable_turtle_backpack_45", name: "45格乌龟包", unit: "PIECE", enabled: true };
+      const rules = fixture(); rules.items.push(item);
+      for (const customerTier of tiers) rules.priceLines.push({ priceVersionId: "p1", itemId: item.id, customerTier, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" });
+      assert.equal(model.unitLabel(item.unit, item.code), "个"); assert.equal(model.unitLabel("PIECE", "unrecognized"), "件");
+      const row = model.standardItemRows(rules, "p1").find(row => row.item.id === item.id);
+      assert.equal(row.line.buyerUnitAmount, "10.00"); assert.equal(row.line.ownerUnitAmount, "6.00");
+      assert.equal(rules.priceLines.filter(line => line.itemId === item.id).length, 4);
+      rules.priceLines = rules.priceLines.filter(line => line.itemId !== item.id);
+      assert.equal(model.standardItemRows(rules, "p1").find(row => row.item.id === item.id).line, null, "missing price is never inferred from another resource");
+    });
     await t.test("edit keeps a local baseline and removes the unsafe unused write sequencer", () => {
       const bl = edit.baseline(fixture()); assert.equal(bl.values["dep.cap"], "1200"); assert.equal(bl.values["term.d10.daily"], "10");
       assert.equal(bl.fields.some(field => field.key.startsWith("dep.skin.")), false, "original v1 skin groups have no editable fields");

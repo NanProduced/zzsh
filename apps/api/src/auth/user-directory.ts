@@ -866,7 +866,7 @@ type UserOrderRow = {
 };
 
 type OrderAccountBinding = { origin: 'NATIVE' | 'LEGACY'; orderId: string; accountId: string; versionId?: string | null; contentHash?: string | null };
-type OrderAccountFacts = { source: 'ORDER_VERSION' | 'LEGACY_ACCOUNT'; resources: Array<{code: string; name: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string };
+type OrderAccountFacts = { source: 'ORDER_VERSION' | 'LEGACY_ACCOUNT'; resources: Array<{code: string; name?: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string };
 
 /** Page-selected accounts only: never substitute current inventory for the frozen native version. */
 async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryViewer, bindings: OrderAccountBinding[]) {
@@ -874,9 +874,9 @@ async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryV
   if (!viewer.resourceRead || viewer.businessScopeUsable === false || !bindings.length) return facts;
   const selected = bindings.filter(row=>row.origin==='LEGACY' || row.versionId && row.contentHash);
   if (!selected.length) return facts;
-  const rows = (await client.query<{origin: 'NATIVE'|'LEGACY'; orderId: string; accountId: string; versionId: string | null; attributes: Record<string, unknown>; resources: OrderAccountFacts['resources']}>(
-      `SELECT /* directory-order-account-facts */ wanted.origin,wanted."orderId",wanted."accountId",v.id AS "versionId",v.attributes,
-        COALESCE(jsonb_agg(jsonb_build_object('code',i.code,'name',i.name,'quantity',l.quantity::text,'unit',i.unit) ORDER BY i.sort_order,i.id) FILTER (WHERE i.id IS NOT NULL),'[]'::jsonb) AS resources
+  const rows = (await client.query<{origin: 'NATIVE'|'LEGACY'; orderId: string; accountId: string; versionId: string | null; attributes: Record<string, unknown>; presentationItems: unknown; resources: Array<{itemId: string; code: string; quantity: string | null; unit: string}>}>(
+      `SELECT /* directory-order-account-facts */ wanted.origin,wanted."orderId",wanted."accountId",v.id AS "versionId",v.attributes,v.presentation->'items' AS "presentationItems",
+        COALESCE(jsonb_agg(jsonb_build_object('itemId',l.item_id,'code',i.code,'quantity',l.quantity::text,'unit',i.unit) ORDER BY i.sort_order,i.id) FILTER (WHERE i.id IS NOT NULL),'[]'::jsonb) AS resources
        FROM jsonb_to_recordset($1::jsonb) AS wanted(origin text,"orderId" text,"accountId" text,"versionId" text,"contentHash" text)
        JOIN zzsh_supply.rental_account a ON a.id=wanted."accountId"
        LEFT JOIN zzsh_supply.listing_version v ON wanted.origin='NATIVE' AND v.id=wanted."versionId" AND v.account_id=wanted."accountId" AND v.content_hash=wanted."contentHash"
@@ -885,7 +885,20 @@ async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryV
        WHERE ${gameScopeSql('a.game_id','$3','$2')}
        GROUP BY wanted.origin,wanted."orderId",wanted."accountId",v.id`, [JSON.stringify(selected),viewer.isBoss,viewer.adminId],
   )).rows;
-  for (const row of rows) if (row.origin==='NATIVE' && row.versionId) facts.set(`NATIVE\u0000${row.orderId}`, {source:'ORDER_VERSION',resources:row.resources,loginMethodText:projectPublicAttributeDisplay(row.attributes).loginMethod?.displayName ?? null});
+  for (const row of rows) if (row.origin==='NATIVE' && row.versionId) {
+    const frozen = new Map<string, Record<string, unknown> | null>();
+    for (const item of Array.isArray(row.presentationItems) ? row.presentationItems : []) {
+      if (item && typeof item==='object' && typeof item.id==='string') frozen.set(item.id,frozen.has(item.id)?null:item);
+    }
+    const resources = row.resources.map(item=>{
+      const original = frozen.get(item.itemId);
+      // A missing/ambiguous frozen name must not become today's renamed catalog label.
+      return {code:typeof original?.code==='string'?original.code:item.code,
+        ...(typeof original?.name==='string' && original.name.trim()?{name:original.name}:{}),
+        quantity:item.quantity,unit:typeof original?.unit==='string'?original.unit:item.unit};
+    });
+    facts.set(`NATIVE\u0000${row.orderId}`, {source:'ORDER_VERSION',resources,loginMethodText:projectPublicAttributeDisplay(row.attributes).loginMethod?.displayName ?? null});
+  }
   const legacy = rows.filter(row => row.origin==='LEGACY');
   const historical = await loadLegacyHistoricalReads(client, legacy.map(row => row.accountId));
   for (const row of legacy) {

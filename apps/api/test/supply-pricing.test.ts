@@ -5,6 +5,10 @@ import { compatRule } from "./pricing-compat-fixture";
 import { CUSTOMER_TIERS, parseDeltaPriceLines, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
 import { computeDepositRecommendation, type FundingPolicy } from "../src/supply/funding-policy";
 import type { QuoteInput } from "../src/supply/pricing";
+import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
+import { updatePriceDraft } from "../src/supply/rules";
+import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
+import { readResourceIncomePreview } from "../src/supply/publishing";
 
 test("price line parser distinguishes omitted tier from null and invalid values", () => {
   const line = {itemId:"round",pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"10",ownerUnitAmount:"4"};
@@ -21,6 +25,111 @@ function compatInput(base: string, selection: RentalPricingSelection, tier: Cust
     lines: [{ itemId: "haff", pricingKind: "HAFF_RATIO", customerTier: tier, quantity: "100000000" }],
     termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } };
 }
+
+// Pure writer models only: these fixture IDs and price amounts are not an installed catalog.
+const TURTLE_FIXTURE = { id: "fixture_item_turtle45", gameId: "fixture_game_delta", code: "df_billable_turtle_backpack_45", unit: "PIECE", quantityScale: 0 };
+function resourceWriterClient(item = TURTLE_FIXTURE) {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { query: async (sql: string, values: unknown[] = []) => {
+    calls.push({ sql, values });
+    if (sql.startsWith("SELECT *") && sql.includes('"price_version"')) return { rows: [{ id: "fixture_price", game_id: item.gameId, status: "DRAFT", revision: "1", mode: "SPREAD", haff_rule: compatRule() }], rowCount: 1 };
+    if (sql.startsWith("SELECT *") && sql.includes('"billable_item"')) return { rows: [{ ...item, game_id: item.gameId, quantity_scale: item.quantityScale }], rowCount: 1 };
+    if (sql.includes('FROM "zzsh_supply"."billable_item"') && sql.includes("ANY($1::text[])")) return { rows: [item], rowCount: 1 };
+    if (sql.includes('FROM "zzsh_supply"."game"')) return { rows: [{ id: item.gameId, catalogRevision: "1" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }} as never;
+  return { calls, client };
+}
+
+test("current insurance renames through its existing identity without changing frozen history or DAY units", async () => {
+  const item = { ...TURTLE_FIXTURE, id: "fixture_existing_insurance", code: "df_billable_top_insure_card", unit: "DAY" };
+  const f = resourceWriterClient(item);
+  await updateCatalogEntry(f.client, "fixture_admin", true, "items", item.id, { name: "九格保险体验卡" });
+  const update = f.calls.find(c => c.sql.includes('UPDATE "zzsh_supply"."billable_item"'))!;
+  assert.equal(update.values[0], "九格保险体验卡"); assert.equal(update.values[8], item.id);
+  assert.equal(update.values[1], null); assert.equal(update.values[5], null);
+  assert(!update.sql.includes('"code" ='));
+  assert(f.calls.every(c => !/listing_version|rental_order|legacy_|price_line/.test(c.sql)), "a current display-name edit never rewrites stored order/listing prices or names");
+  for (const quantity of ["7", "0"]) {
+    const input = compatInput("47", { rentalMode: "ordinary" });
+    const quote = quoteOf(computeQuote({ ...input, lines: [...input.lines, { itemId: item.id, customerTier: "STANDARD", quantity, unit: "DAY", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "5", ownerUnitAmount: "3" }] }));
+    const line = quote.lines.find(l => l.itemId === item.id)!;
+    assert.equal(line.quantity, quantity); assert.equal(line.unit, "DAY"); assert.equal(line.buyerAmount.amount, quantity === "7" ? "35.00" : "0.00");
+  }
+  for (const unit of ["PIECE", "ROUND"]) await assert.rejects(() => createCatalogEntry(resourceWriterClient(item).client, "fixture_admin", true, "items", item.gameId, { code: item.code, name: "九格保险体验卡", unit, quantityScale: 0 }));
+});
+
+test("turtle catalog keeps PIECE scale0 and retired insurance cannot become the new resource", async () => {
+  const f = resourceWriterClient();
+  await createCatalogEntry(f.client, "fixture_admin", true, "items", TURTLE_FIXTURE.gameId, { code: TURTLE_FIXTURE.code, name: "45格乌龟包", unit: "PIECE", quantityScale: 0 });
+  const insert = f.calls.find(c => c.sql.includes('INSERT INTO "zzsh_supply"."billable_item"'))!;
+  assert.equal(insert.values[2], TURTLE_FIXTURE.code); assert.equal(insert.values[4], "PIECE"); assert.equal(insert.values[5], 0);
+  for (const patch of [{ unit: "DAY" }, { unit: "ROUND" }, { quantityScale: 1 }, { quantityScale: 0.5 }]) {
+    await assert.rejects(() => createCatalogEntry(resourceWriterClient().client, "fixture_admin", true, "items", TURTLE_FIXTURE.gameId, { code: TURTLE_FIXTURE.code, name: "45格乌龟包", unit: "PIECE", quantityScale: 0, ...patch }));
+  }
+  for (const code of ["top_insure_card_piece", "df_billable_top_insure_card_piece"]) await assert.rejects(() => createCatalogEntry(resourceWriterClient().client, "fixture_admin", true, "items", TURTLE_FIXTURE.gameId, { code, name: "九格保险体验卡", unit: "PIECE", quantityScale: 0 }));
+  assert(!DELTA_LEGACY_RESOURCES.some(([, codes]) => (codes as readonly string[]).includes(TURTLE_FIXTURE.code)), "new inventory is never backfilled as a legacy zero");
+});
+
+test("turtle price writer uses stored scale and unit plus FIXED_UNIT unitQuantity1", async () => {
+  const lines = CUSTOMER_TIERS.map(customerTier => ({ itemId: TURTLE_FIXTURE.id, customerTier, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" }));
+  const f = resourceWriterClient();
+  await updatePriceDraft(f.client, "fixture_admin", true, "fixture_price", { expectedRevision: "1", lines });
+  const inserted = f.calls.filter(c => c.sql.includes('INSERT INTO "zzsh_supply"."price_line"'));
+  assert.equal(inserted.length, 4); assert.deepEqual(inserted.map(c => c.values[7]), [...CUSTOMER_TIERS]);
+  for (const row of inserted) assert.deepEqual(row.values.slice(2, 7), [TURTLE_FIXTURE.id, "FIXED_UNIT", "1", "10.00", "6.00"]);
+  for (const patch of [{ unit: "DAY" }, { quantityScale: 1 }, { quantityScale: undefined }]) {
+    const bad = resourceWriterClient({ ...TURTLE_FIXTURE, ...patch } as typeof TURTLE_FIXTURE);
+    await assert.rejects(() => updatePriceDraft(bad.client, "fixture_admin", true, "fixture_price", { expectedRevision: "1", lines }));
+    assert(!bad.calls.some(c => c.sql.startsWith("DELETE") || c.sql.includes('INSERT INTO "zzsh_supply"."price_line"')));
+  }
+  for (const unitQuantity of ["45", "2"]) await assert.rejects(() => updatePriceDraft(resourceWriterClient().client, "fixture_admin", true, "fixture_price", { expectedRevision: "1", lines: lines.map(l => ({ ...l, unitQuantity })) }));
+});
+
+test("turtle quantity2 quotes buyer20 owner12 in all four tiers; invalid/missing facts never become zero", () => {
+  for (const tier of CUSTOMER_TIERS) {
+    const input = compatInput("47", { rentalMode: "ordinary" }, tier);
+    const turtle = { itemId: TURTLE_FIXTURE.id, customerTier: tier, quantity: "2", unit: "PIECE" as const, pricingKind: "FIXED_UNIT" as const, unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" };
+    const quoted = quoteOf(computeQuote({ ...input, lines: [...input.lines, turtle] }));
+    const line = quoted.lines.find(l => l.itemId === TURTLE_FIXTURE.id)!;
+    assert.equal(line.buyerAmount.amount, "20.00"); assert.equal(line.ownerAmount.amount, "12.00"); assert.equal(line.unitQuantity, "1"); assert.equal(line.unit, "PIECE");
+    const publicQuote = projectQuote(quoted, "public");
+    assert.equal(publicQuote.ownerTotal, undefined); assert.equal(publicQuote.platformFullProfit, undefined);
+    assert.equal((publicQuote.lines.find(l => l.itemId === TURTLE_FIXTURE.id) as { ownerAmount?: unknown }).ownerAmount, undefined);
+    for (const quantity of [undefined, null, "-1", "1.5", "1e3"]) assert.equal(computeQuote({ ...input, lines: [...input.lines, { ...turtle, quantity: quantity as string }] }).quotable, false);
+    for (const patch of [{ customerTier: undefined }, { buyerUnitAmount: undefined }, { ownerUnitAmount: undefined }]) assert.equal(computeQuote({ ...input, lines: [...input.lines, { ...turtle, ...patch }] }).quotable, false);
+    const zero = quoteOf(computeQuote({ ...input, lines: [...input.lines, { ...turtle, quantity: "0" }] })).lines.find(l => l.itemId === TURTLE_FIXTURE.id)!;
+    assert.equal(zero.quantity, "0"); assert.equal(zero.buyerAmount.amount, "0.00");
+    const frozen = structuredClone(quoted);
+    quoteOf(computeQuote({ ...input, priceVersionId: "fixture_later_price", lines: [...input.lines, { ...turtle, buyerUnitAmount: "11.00", ownerUnitAmount: "7.00" }] }));
+    assert.deepEqual(quoted, frozen, "a later price cannot rewrite the frozen old quote");
+  }
+});
+
+test("resource preview keeps dynamic turtle stock unknown/zero distinct and rejects out-of-range direct API inventory", async () => {
+  const expected = { catalogRevision: "1", releaseId: "fixture_release" };
+  const item = { itemId: TURTLE_FIXTURE.id, code: TURTLE_FIXTURE.code, name: "45格乌龟包", unit: "PIECE", enabled: true, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" };
+  const previewClient = (priced = true) => ({ query: async (sql: string) => ({ rows: sql.includes("FROM zzsh_supply.game")
+    ? [{ releaseId: expected.releaseId, catalogRevision: expected.catalogRevision, priceVersionId: "fixture_price", generation: "1", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1" }]
+    : [{ ...item, ...(priced ? {} : { ownerUnitAmount: null }) }] }) }) as never;
+  const known = await readResourceIncomePreview(previewClient(), TURTLE_FIXTURE.gameId, [{ itemId: item.itemId, quantity: "2" }], expected);
+  assert.equal(known.available, true); assert(known.lines);
+  assert.equal(known.lines[0]!.code, TURTLE_FIXTURE.code); assert.equal(known.lines[0]!.ownerAmount!.amount, "12.00");
+  for (const inventory of [[], [{ itemId: item.itemId, quantity: null }]]) {
+    const unknown = await readResourceIncomePreview(previewClient(), TURTLE_FIXTURE.gameId, inventory, expected);
+    assert(unknown.available); assert(unknown.lines); assert.equal(unknown.lines[0]!.quantity, null); assert.equal(unknown.lines[0]!.ownerAmount, null); assert.equal(unknown.ownerTotal, null);
+  }
+  const zero = await readResourceIncomePreview(previewClient(), TURTLE_FIXTURE.gameId, [{ itemId: item.itemId, quantity: "0" }], expected);
+  assert(zero.available); assert(zero.lines); assert.equal(zero.lines[0]!.quantity, "0"); assert.equal(zero.ownerTotal!.amount, "0.00");
+  const unpriced = await readResourceIncomePreview(previewClient(false), TURTLE_FIXTURE.gameId, [{ itemId: item.itemId, quantity: "2" }], expected);
+  assert(unpriced.available); assert.deepEqual(unpriced.unpricedItemIds, [item.itemId]); assert.equal(unpriced.ownerTotal, null);
+  for (const quantity of [undefined, "-1", "0.5", "9".repeat(25)]) {
+    let reads = 0;
+    await assert.rejects(() => readResourceIncomePreview({ query: async () => { reads++; throw Error("must reject before SQL"); } } as never, TURTLE_FIXTURE.gameId, [{ itemId: item.itemId, quantity }], expected));
+    assert.equal(reads, 0);
+  }
+  await assert.rejects(() => readResourceIncomePreview(previewClient(), TURTLE_FIXTURE.gameId, [{ itemId: "fixture_unknown_resource", quantity: "2" }], expected));
+});
 
 test("PC1 reviewed 42 vectors, per-line cent rounding and legacy integer difference", () => {
   const bs = [44,45,46,47,53,60,99];

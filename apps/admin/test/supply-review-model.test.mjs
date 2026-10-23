@@ -29,6 +29,7 @@ import {
   reviewStateLabel,
   skinsText,
   supplyObjectLabel,
+  unitText,
 } from "../src/views/supply-review/model.ts";
 
 test("mixed account numbers keep canonical ZZ/AC separate from numeric legacy sources", () => {
@@ -168,6 +169,22 @@ test("inventory rows mark only real quantity changes and keep history names", ()
   assert.equal(byId.round.changed, true);
   assert.equal(byId.legacy.current, "本次未申报");
   assert.equal(inventoryRows(version, null).find((row) => row.itemId === "haff").previous, "未申报");
+});
+
+test("delta resource code labels preserve dynamic inventory, frozen names, zero and unknown", () => {
+  const code = "df_billable_turtle_backpack_45";
+  assert.equal(unitText("PIECE", code), "个");
+  assert.equal(unitText("PIECE", "unrecognized_resource"), "件");
+  assert.equal(unitText("DAY", code), "天", "code never overrides the recorded unit");
+  assert.equal(historicalResourceText({ code, quantity: "2", unit: "PIECE" }), "2 个");
+  assert.equal(historicalResourceText({ code, quantity: "0", unit: "PIECE" }), "0 个");
+  assert.equal(historicalResourceText({ code, quantity: null, unit: "PIECE" }), "数量待核");
+  assert.equal(historicalResourceText({ code: "df_billable_top_insure_card", quantity: "7", unit: "DAY" }), "7 天");
+  const version = { declaration: { inventory: [{ itemId: "dynamic-id", quantity: "2" }, { itemId: "old-card", quantity: "0" }] },
+    presentation: { items: [{ id: "dynamic-id", code, name: "45格乌龟包", unit: "PIECE" },
+      { id: "old-card", code: "df_billable_top_insure_card", name: "顶级保险卡", unit: "DAY" }] } };
+  const rows = inventoryRows(version, null);
+  assert.deepEqual(rows.map(row => [row.name, row.current, row.unit]), [["45格乌龟包", "2", "个"], ["顶级保险卡", "0", "天"]]);
 });
 
 test("amounts, terms and quantities format without floats; skins tolerate missing data", () => {

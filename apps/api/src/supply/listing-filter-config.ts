@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { checkedId,parseFilterConfig,type FilterConfig,type ListingQueryV2 } from "./listing-filter-contract";
 import { invalid,notFound } from "./supply-util";
-import { publicGradingOptions,publicLoginMethodOptions,publicSafeBoxCodes } from "./listing-query";
+import { publicGradingOptions,publicGradingRankOptions,publicLoginMethodOptions,publicSafeBoxCodes } from "./listing-query";
 import { GAME_SERVICE,requirePublicGameService } from "./game-services";
 
 export async function listingCatalogContext(client:PoolClient,gameId:string) {
@@ -24,7 +24,7 @@ function allowedCodes(c:Catalog,field:CodeField,legacy=false):string[] {
     const configured=(field.options??[]).map(o=>o.value).filter(v=>publicSafeBoxCodes().includes(v));
     return [...new Set([...priced,...configured])];
   }
-  return (field.key==="gradingCodes"?publicGradingOptions():publicLoginMethodOptions()).map(o=>o.code);
+  return (field.key==="gradingCodes"?publicGradingOptions():field.key==="gradingRanks"?publicGradingRankOptions():publicLoginMethodOptions()).map(o=>o.code);
 }
 function allowedLevels(c:Catalog,key:string):number[]{return Object.keys(c.game.rule?.[key==="vitality"?"vitalityDeltaByLevel":"bearDeltaByLevel"]??{}).map(Number);}
 export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false) {
@@ -63,7 +63,7 @@ export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,st
   for(const [key,value] of Object.entries(q.filters)) {
     const f=config.fields.find(f=>f.key===key&&f.enabled);if(!f)throw invalid("Filter is disabled","filters."+key);
     if(key==="resources")for(const r of q.filters.resources!) {const item=f.items?.find(i=>i.itemId===r.itemId);if(!item||!c.items.some(i=>i.id===r.itemId))throw invalid("Resource is unavailable or outside configured bounds","filters.resources.itemId");for(const bound of ["minQuantity","maxQuantity"] as const){const quantity=r[bound];if(quantity!==undefined&&(BigInt(quantity)<BigInt(item.min)||BigInt(quantity)>BigInt(item.max)))throw invalid("Resource is unavailable or outside configured bounds",`filters.resources.${bound}`);}}
-    if(key==="safeBoxCodes"||key==="gradingCodes"||key==="loginMethodCodes")if((value as string[]).some(v=>!f.options?.some(o=>o.value===v)||!allowedCodes(c,f,legacy).includes(v)))throw invalid("Unavailable option","filters."+key);
+    if(key==="safeBoxCodes"||key==="gradingCodes"||key==="gradingRanks"||key==="loginMethodCodes")if((value as string[]).some(v=>!f.options?.some(o=>o.value===v)||!allowedCodes(c,f,legacy).includes(v)))throw invalid("Unavailable option","filters."+key);
     if(key==="vitality"||key==="bear"){const min=(value as {min:number}).min;if(!f.levels?.includes(min)||(!legacy&&!allowedLevels(c,key).includes(min)))throw invalid("Unavailable level","filters."+key);}
     if(key==="regions")if(q.filters.regions!.some(r=>!f.regions?.some(a=>a.province===r.province&&a.city===r.city)))throw invalid("Unavailable region pair","filters.regions");
     if(key==="skinGroups") {

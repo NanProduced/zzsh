@@ -204,6 +204,21 @@ test('native account facts read one origin-bound page and keep exact order durat
   assert.equal(pool.queries.some(q=>q.sql.includes('directory-order-account-facts')),false);
 });
 
+test('native resource names stay frozen across catalog rename; missing or ambiguous snapshot names stay unknown',async()=>{
+  for(const items of [[{id:'insurance',code:'df_billable_top_insure_card',name:'顶级保险卡',unit:'DAY'}],[],[{id:'insurance',name:'甲'},{id:'insurance',name:'乙'}]]){
+    const pool=new DirectorySqlFixture(),query=pool.query.bind(pool);
+    pool.query=async(sql,values=[])=>{
+      if(sql.includes('directory-order-account-facts')){pool.queries.push({sql,values});return {rows:[{origin:'NATIVE',orderId:'order_paid',accountId:'account_fixture',versionId:'frozen-0',attributes:{},presentationItems:items,resources:[{itemId:'insurance',code:'df_billable_top_insure_card',name:'九格保险体验卡',quantity:'0',unit:'DAY'}]}],rowCount:1};}
+      const result=await query(sql,values);
+      if(sql.includes('FROM zzsh_order.rental_order o'))return {...result,rows:result.rows.map((row:(typeof fixtureOrderRows)[number],index:number)=>({...row,versionId:`frozen-${index}`,contentHash:'a'.repeat(64)}))};
+      return result;
+    };
+    const page:any=await listUserOrders(client(pool),viewer,'user_normal',{limit:1}),resource=page.items[0].accountFacts.resources[0];
+    assert.equal(resource.name,items.length===1?'顶级保险卡':undefined);assert.equal(resource.quantity,'0');assert.equal(resource.unit,'DAY');
+    assert.equal('itemId' in resource,false);assert.equal(pool.queries.filter(q=>q.sql.includes('directory-order-account-facts')).length,1);
+  }
+});
+
 test('historical account facts retain their source binding and require the current account game scope',async()=>{
   const accountId='old-account',stamp='2026-10-01T00:00:00.000Z',sourceDigest='b'.repeat(64),extract='c'.repeat(64),observation='old-observation';
   const snapshot=convertLegacyDisplayFields({haff:'97',coffee_num:'0',login_way:'2'}),evidenceRef=`legacy-display-v1:${extract}:old-1`;
