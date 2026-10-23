@@ -9,7 +9,7 @@ export class FinanceSqlFixture {
   readonly db = new DatabaseSync(":memory:");
   readonly reads: { family: string; rows: number }[] = [];
   clusterSnapshot = "100:100:";
-  constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];guaranteeHistory?:Row[] } = {}) {
+  constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];guaranteeHistory?:Row[];legacyDutyFacts?:Row[];legacyDuties?:Row[] } = {}) {
     this.db.function("regexp", (pattern, value) => typeof value === "string" && new RegExp(String(pattern)).test(value) ? 1 : 0);
     // SQLite floating SUM cannot represent the 24-digit cents contract. The relational FILTER runs in SQL;
     // only PG numeric aggregation is substituted with exact BigInt, still not a PG numeric/plan proof.
@@ -18,7 +18,7 @@ export class FinanceSqlFixture {
     this.table('zzsh_iam.admin_security','admin_user_id game_scope_mode',[]);
     this.table('zzsh_supply.admin_supply_scope','admin_user_id game_id',[]);
     const ledger=(data.ledger??[]).map(row=>{const delta=typeof row.delta==="string"&&/^-?\d+$/.test(row.delta)?BigInt(row.delta):null;return {...row,counterparty_user_id:row.subject_id,credit_cents:delta===null?null:delta>=0n?String(delta):"0",debit_cents:delta===null?null:delta<0n?String(-delta):"0",finance_event_id:row.finance_event_id??row.event_kind,created_at:row.at};});
-    this.table("zzsh_order.fixture_ledger", "id account_code subject_id subject_name delta at posting_id event_kind source_kind source_type source_system source_entity source_id source_digest basis_id order_id display_no account_id opening_cutoff covered_count payment_confirmation_id settlement_version_id version_hash captured_cents renter_refund_cents platform_contribution_cents refund_due_at counterparty_user_id credit_cents debit_cents finance_event_id created_at economic_root_id beneficiary_role earning_state earning_role earning_amount earning_disposition earning_recovery earning_due_at earning_version", ledger);
+    this.table("zzsh_order.fixture_ledger", "id account_code subject_id subject_name delta at posting_id event_kind source_kind source_type source_system source_entity source_id source_digest basis_id order_id display_no account_id opening_cutoff covered_count payment_confirmation_id settlement_version_id version_hash captured_cents owner_net_cents renter_refund_cents platform_contribution_cents refund_due_at counterparty_user_id credit_cents debit_cents finance_event_id details created_at economic_root_id beneficiary_role earning_state earning_role earning_amount earning_disposition earning_recovery earning_due_at earning_version", ledger);
     this.table("zzsh_order.fixture_history", "id subject_id subject_name source_kind source_type source_system source_entity source_id source_digest basis_id included_in_opening at imported_at amount action source_status reference_id reference_no net fee balance_after observation_origin extra_evidence", (data.history ?? []).map(r=>({observation_origin:'LEGACY_MYSQL',...r})));
     this.table('zzsh_order.rental_referral_earning','id economic_root_id beneficiary_user_id beneficiary_role amount_cents state funds_disposition recovery_required_cents version canonical_seed seed_digest basis_digest posting_digest economic_key posting_id payment_confirmation_id order_id created_at due_at',data.earnings??[]);
     this.table('zzsh_order.payment_distribution_basis','id order_id payment_confirmation_id canonical_basis basis_digest',[]);
@@ -36,8 +36,10 @@ export class FinanceSqlFixture {
     this.table("zzsh_order.finance_opening_basis", "id user_id source_kind source_system source_entity source_id source_digest identity_source_digest covered_set_digest source_cutoff available_cents covered_count native_origin_canonical", []);
     this.table("zzsh_order.finance_economic_root", "id basis_id subject_user_id source_kind source_type source_system source_entity source_id beneficiary_role source_digest policy_version", []);
     this.table('zzsh_order.finance_event','id economic_root_id kind subject_user_id created_at',data.financeEvents??[]);
-    this.table("zzsh_order.settlement_posting", "id order_id payment_confirmation_id version_hash early manual_reason captured_cents owner_net_cents renter_refund_cents platform_contribution_cents compensation_fee_cents posted_at", []);
-    this.db.exec(`CREATE VIEW zzsh_order.settlement_ledger_entry AS SELECT id,account_code,counterparty_user_id,credit_cents,debit_cents,posting_id,finance_event_id,created_at FROM fixture_ledger`);
+    this.table("zzsh_order.settlement_posting", "id order_id payment_confirmation_id settlement_version_id version_hash early manual_reason captured_cents owner_net_cents renter_refund_cents platform_contribution_cents compensation_fee_cents refund_due_at posted_at", []);
+    this.table('zzsh_order.legacy_duty_finance_fact','duty_id order_id kind subject_user_id root_id event_id amount_cents zero_finalization facts_canonical facts_digest ref_type ref_id created_at',data.legacyDutyFacts??[]);
+    this.table('zzsh_order.legacy_order_duty','id order_id kind source_record_id counterparty_user_id amount_cents currency source source_status continuation_version_id admission_id revision status maturity_at settled_by settled_ref_type settled_ref_id settled_ref_digest',data.legacyDuties??[]);
+    this.db.exec(`CREATE VIEW zzsh_order.settlement_ledger_entry AS SELECT id,account_code,counterparty_user_id,credit_cents,debit_cents,posting_id,finance_event_id,details,created_at FROM fixture_ledger`);
     this.db.exec(`CREATE VIEW zzsh_order.personal_finance_observation AS SELECT id,subject_id AS user_id,basis_id,source_system,source_entity,source_id,source_digest,extra_evidence->>'canonical' AS source_canonical,extra_evidence->>'snapshot' AS snapshot,included_in_opening,at AS source_event_at,imported_at FROM fixture_history`);
     this.db.exec("COMMIT");
   }

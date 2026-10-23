@@ -14,6 +14,25 @@ test("query selection is before the matched ceiling and restored content digest 
  const version=financeVersionSql({withdrawals:true,native_orders:true,legacy_orders:true});assert.ok(!/LIMIT|pg_current_snapshot|current_database|count\(|max\(/i.test(version));assert.match(version,/string_agg/);assert.match(version,/controlled_payout_operation/);assert.match(version,/wallet_revision/);assert.match(version,/legacy_order_read_snapshot/);
 });
 
+test('restored finance content changes for original responsibility evidence, not unrelated cluster activity',()=>{
+ const fixture=new FinanceSqlFixture({ledger:[{id:'line1',subject_id:'u1',delta:'100',at:'2026-10-03T01:00:00Z',details:{legacyDutyId:'duty1'}}],legacy:[{id:'old1',source_snapshot:{return_order_money:'1.00',unrelatedNote:'before'}}],legacyDutyFacts:[{duty_id:'duty1',order_id:'old1',facts_canonical:'original',facts_digest:'a'.repeat(64)}],legacyDuties:[{id:'duty1',order_id:'old1',counterparty_user_id:'u1',amount_cents:'100',maturity_at:'2026-10-03T01:00:00Z'}]});
+ try{
+  fixture.db.exec("INSERT INTO zzsh_order.settlement_posting(id,settlement_version_id,refund_due_at) VALUES('posting1','version1','2026-10-03T01:00:00Z')");
+  const sql=financeVersionSql({legacy_orders:true,legacy_duty_finance:true}),version=()=>fixture.query(sql,[]).rows[0]!.finance_version;
+  let previous=version();fixture.clusterSnapshot='200:300:201';assert.equal(version(),previous);
+  fixture.db.prepare("UPDATE zzsh_order.legacy_order_read_snapshot SET source_snapshot=? WHERE id='old1'").run(JSON.stringify({return_order_money:'1.00',unrelatedNote:'after'}));assert.equal(version(),previous);
+  for(const statement of [
+   "UPDATE zzsh_order.settlement_posting SET settlement_version_id='version2' WHERE id='posting1'",
+   "UPDATE zzsh_order.settlement_posting SET refund_due_at='2026-10-04T01:00:00Z' WHERE id='posting1'",
+   "UPDATE zzsh_order.legacy_order_duty SET maturity_at='2026-10-05T01:00:00Z' WHERE id='duty1'",
+   "UPDATE zzsh_order.legacy_order_duty SET counterparty_user_id='u2' WHERE id='duty1'",
+   "UPDATE zzsh_order.legacy_duty_finance_fact SET facts_canonical='changed' WHERE duty_id='duty1'",
+   "UPDATE zzsh_order.fixture_ledger SET details='{}' WHERE id='line1'",
+   "UPDATE zzsh_order.legacy_order_read_snapshot SET source_snapshot='{\"return_order_money\":\"2.00\"}' WHERE id='old1'"
+  ]){fixture.db.exec(statement);const next=version();assert.notEqual(next,previous,statement);previous=next;}
+ }finally{fixture.close();}
+});
+
 test('subject finance applies the requested Beijing day before limiting both ledger and historical documents',()=>{
  const ledger=(id:string,subject_id:string,at:string|null,account_code='WALLET_AVAILABLE')=>({id,subject_id,subject_name:subject_id,at,account_code,delta:'100',posting_id:'posting-'+id,order_id:'order-'+id,source_entity:'settlement_posting'});
  const history=(id:string,subject_id:string,at:string|null)=>({id,subject_id,subject_name:subject_id,at,source_entity:'la_log_earnings',source_kind:'HISTORICAL_EARNINGS_LOG',source_id:id,amount:'1.00',action:'1'});

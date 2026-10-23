@@ -319,19 +319,20 @@ test('session change and permission revocation discard private lookup state and 
   assert.equal(node.querySelector('[aria-label="查找线索"]').value,'');assert(!new URL(calls.at(-1),'http://localhost').searchParams.has('qValue'));
 });
 
-test('optional settlement/group read slowly or fail independently; retry and stale objects cannot replace the body', async t => {
-  const {root,node,AdminOrderChainView}=await setup(t);const calls=[];let finishSettlement,mode='slow';
+test('optional finance/group reads are independent and never call controlled settlement or infer rental start', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);const calls=[];let finishFinance,mode='slow';
   const native={...chainOrder,id:'native-old',displayNo:'NATIVE-OLD',status:'PAID',source:{origin:'NATIVE'}};
-  globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/settlement'))return mode==='slow'?new Promise(resolve=>{finishSettlement=resolve;}):response({rentalStarted:true,ready:false,posting:null});if(p.includes('/im?'))return response({error:{code:'FORBIDDEN'}},403);return response({order:p.includes('native-current')?{...native,id:'native-current',displayNo:'NATIVE-CURRENT'}:native});};
-  const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
+  const proof=p=>({document:{ref:'ORDER:'+decodeURIComponent(p).match(/ORDER:([^?]+)/)[1]},orderSettlement:undefined});
+  globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/finance/'))return mode==='slow'?new Promise(resolve=>{finishFinance=resolve;}):response(proof(p));if(p.includes('/im?'))return response({error:{code:'FORBIDDEN'}},403);return response({order:p.includes('native-current')?{...native,id:'native-current',displayNo:'NATIVE-CURRENT'}:native});};
+  const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','finance.document.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
   await act(async () => root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('金额口径')&&node.textContent.includes('当前身份无权读取本单群'));
   assert(node.textContent.includes(native.displayNo));assert.equal(node.querySelectorAll('[aria-busy="true"]').length,1);
-  await act(async () => finishSettlement(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('结算记录暂不可用'));
-  const bodyReads=calls.filter(p=>p.includes('readMode')).length;mode='ready';await act(async () => buttonNamed(node,'重试结算读取').click());await until(()=>node.textContent.includes('已开始'));
-  assert.equal(calls.filter(p=>p.includes('readMode')).length,bodyReads);assert(node.textContent.includes('已开租'));
-  mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('金额口径'));const stale=finishSettlement;
+  await act(async () => finishFinance(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('未找到当前范围内可读的资金单据'));
+  const bodyReads=calls.filter(p=>p.includes('readMode')).length;mode='ready';await act(async () => buttonNamed(node,'重新读取资金依据').click());await until(()=>node.textContent.includes('尚未提供受权订单资金依据'));
+  assert.equal(calls.filter(p=>p.includes('readMode')).length,bodyReads);assert(node.textContent.includes('开租待核'));
+  mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('金额口径'));const stale=finishFinance;
   mode='ready';await act(async () => root.render(createElement(AdminOrderChainView,{...props,initialOrderId:'native-current'})));await until(()=>node.textContent.includes('NATIVE-CURRENT'));
-  await act(async () => stale(response({rentalStarted:false,ready:true,posting:null})));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('已开租'));
+  await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租待核'));assert(!calls.some(p=>p.includes('/settlement')));
 });
 
 test('resource read uses human labels and returns to the exact originating user section and order', async t => {

@@ -95,12 +95,23 @@ export function financeEntryEvent(entry: FinanceEntry): string {
   // Old APIs have no action field; EARNING_REVOKED cannot distinguish revoke from recover.
   return ({EARNING_PENDING:'分销计提',EARNING_SETTLED:'分销转可用'} as Record<string,string>)[evidence.eventKind??'']??'分销事件待核';
 }
+export type OrderSettlementMoney = { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; reasonCodes: string[] };
+export type OrderSettlementEvidence = {
+  schema: 'admin-order-settlement-evidence.v1'; documentRef: string; readiness: 'READY' | 'UNAVAILABLE';
+  posting: { state: 'POSTED' | 'FINALIZED_ZERO' | 'NOT_POSTED' | 'UNKNOWN'; ref: string | null; postedAt: string | null };
+  captured: OrderSettlementMoney; ownerNet: OrderSettlementMoney; refundPayable: OrderSettlementMoney;
+  refunded: OrderSettlementMoney; historicalRefund: OrderSettlementMoney; refundDueAt: string | null;
+  channel: { state: 'UNKNOWN'; reference: null };
+  dutyRefs: { documentRef: string | null; kind: string; state: string; amount: OrderSettlementMoney }[];
+  reasonCodes: string[];
+};
 export type FinanceResponse = {
   contractVersion: string; applied: FinanceFilters; snapshot: string; asOf: string; contextKey: string; snapshotVersion: string;
   documents?: FinanceDocument[]; document?: FinanceDocument; subjects?: { id: string; name: string }[]; subject?: { id: string; name: string };
   entries?: FinanceEntry[]; evidence?: Record<string, string | null>; related?: { ref: string; label: string; path?: string }[];
   wallet?: { buckets: Record<string, { amountCents: string | null; knowledge: string; scope?: string }>; withdrawable: { amountCents: string | null; reasonCodes: string[] }; coverage: { knowledge: string; origin?: string; cutoff?: string; coverageVersion?: string; reason?: string }; snapshotVersion: string };
   distributionCalculation?: { knowledge: 'KNOWN' | 'UNKNOWN'; policyVersion: string | null; levelCode: string | null; percent: string | null; baseCents: string | null; formula: string | null; reasonCodes: string[] };
+  orderSettlement?: OrderSettlementEvidence;
   documentCount?: number; subjectCount?: number; entryCount?: number; page?: number; pageSize?: number; hasMore?: boolean; reasonCodes?: string[]; gaps?: string[];
   reconciliation?: { bucket: string; openingBalance: string | null; knownInflows: string; knownOutflows: string; migrationMovement: string; closingBalance: string | null; difference: string | null; ledgerOpeningBalance?: string | null; ledgerClosingBalance?: string | null; ledgerDifference?: string | null; balanceBasis?: { knowledge: 'KNOWN' | 'UNKNOWN'; origin: string | null; sourceCutoff: string | null; openingPostedAt: string | null; reasonCodes: string[] }; knowledge: string; reasonCodes: string[]; unknownCount: number; unknownTimeCount: number; coveredHistoricalCount: number; uncoveredHistoricalCount: number }[];
 };

@@ -64,6 +64,13 @@ async function lock(c:PoolClient,b:Binding,t:LegacyDutyTradeReader){
 const economicKey=(orderId:string,dutyId:string)=>'legacy-duty-finalize-'+sha(canonicalize([orderId,dutyId])).slice(0,40);
 const originalFactSql=`SELECT f.*,e.kind AS event_kind,e.subject_user_id AS event_subject,r.source_kind AS root_kind,r.source_type AS root_type,r.source_system AS root_system,r.source_entity AS root_entity,r.source_id AS root_source,r.subject_user_id AS root_subject,r.beneficiary_role AS root_role,r.source_digest AS root_digest,r.policy_version AS root_policy,r.basis_id
  FROM zzsh_order.legacy_duty_finance_fact f JOIN zzsh_order.finance_event e ON e.id=f.event_id AND e.economic_root_id=f.root_id JOIN zzsh_order.finance_economic_root r ON r.id=f.root_id`;
+const completeDutyColumns=`to_jsonb(d)||jsonb_build_object('amount_cents',d.amount_cents::text,'revision',d.revision::text) AS actual_duty,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('id',l.id,'line',l.line_no,'account',l.account_code,'debit',l.debit_cents::text,'credit',l.credit_cents::text,'subject',l.counterparty_user_id,'details',l.details) ORDER BY l.line_no) FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=observed.event_id),'[]'::jsonb) AS actual_lines,
+ to_char(d.maturity_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS maturity`;
+function dutyFromFinanceRow(row:Record<string,any>):LegacyFinanceDuty{
+ const d=row.actual_duty;
+ return{id:d.id,orderId:d.order_id,kind:d.kind,sourceRecordId:d.source_record_id,counterpartyUserId:d.counterparty_user_id,amountCents:String(d.amount_cents),currency:d.currency,revision:String(d.revision),status:d.status,source:d.source,sourceStatus:d.source_status,continuationVersionId:d.continuation_version_id,admissionId:d.admission_id,maturityAt:row.maturity,settledBy:d.settled_by,settledRefType:d.settled_ref_type,settledRefId:d.settled_ref_id,settledRefDigest:d.settled_ref_digest};
+}
 function verifyStoredFact(duty:LegacyFinanceDuty,fact:Record<string,any>,rawLines:Record<string,any>[]):LegacyDutyFinalization{
  if(fact.root_kind!=='LEGACY_CONTINUATION_DUTY'||fact.root_type!=='LEGACY_CONTINUATION'||fact.root_system!=='zzsh'||fact.root_entity!=='legacy_order_duty'||fact.root_source!==duty.id||fact.root_subject!==duty.counterpartyUserId||fact.event_subject!==duty.counterpartyUserId||fact.root_role!==duty.kind||fact.root_digest!==fact.facts_digest||fact.root_policy!==null||fact.basis_id!==null)return'UNKNOWN';
  let funding:LegacyDutyFundingProof;try{funding=JSON.parse(fact.facts_canonical).funding;if(!funding||typeof funding!=='object')return'UNKNOWN';}catch{return'UNKNOWN';}
@@ -79,6 +86,34 @@ async function verifyOriginal(c:PoolClient,duty:LegacyFinanceDuty):Promise<Legac
  return verifyStoredFact(duty,fact,rawLines);
 }
 export type LegacyCommissionFinance= {knowledge:'UNKNOWN';reason:string}|{knowledge:'KNOWN';state:'SETTLED';amountCents:string;zeroFinalization:boolean;reference:LegacyDutyRef};
+export type AdminLegacyDutyFinance={dutyId:string;orderId:string;kind:LegacyFinanceDuty['kind'];subjectId:string|null;state:string;knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null;finalization:'POSTED'|'FINALIZED_ZERO'|'UNKNOWN';reference:LegacyDutyRef|null;postedAt:string|null;parentSourceId:string|null;parentSourceDigest:string|null;reasonCodes:string[]};
+/** The caller supplies current document/object authority; one exact root read never advances a duty. */
+export async function readAdminLegacyDutyFinances(c:PoolClient,target:{orderId:string}|{dutyId:string}):Promise<Map<string,AdminLegacyDutyFinance>>{
+ const byOrder='orderId'in target,key=byOrder?target.orderId:target.dutyId;
+ if(typeof key!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(key))throw invalid('Exact original duty/order reference required');
+ const rows=(await c.query(`/* admin exact legacy duty complete financial facts */ SELECT observed.*,d.id AS requested_duty_id,${completeDutyColumns},
+  to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at
+  FROM zzsh_order.legacy_order_duty d LEFT JOIN (${originalFactSql}) observed ON observed.duty_id=d.id
+  LEFT JOIN zzsh_order.finance_event e ON e.id=observed.event_id AND e.economic_root_id=observed.root_id
+  WHERE d.${byOrder?'order_id':'id'}=$1 ORDER BY d.id COLLATE "C" LIMIT 20001`,[key])).rows;
+ if(rows.length>20000)throw unavailable('Matching legacy duty evidence exceeds 20000');
+ const out=new Map<string,AdminLegacyDutyFinance>();
+ for(const row of rows){
+  const d=row.actual_duty;
+  if(!d||typeof d!=='object'||typeof d.id!=='string'||typeof d.order_id!=='string'||!['RENTER_REFUND','OWNER_CREDIT','COMMISSION','DEPOSIT_COMPENSATION'].includes(d.kind)
+   ||d.id!==row.requested_duty_id||(byOrder?d.order_id!==key:d.id!==key))throw unavailable('Original duty selection is inconsistent');
+  const base:AdminLegacyDutyFinance={dutyId:d.id,orderId:d.order_id,kind:d.kind,subjectId:d.counterparty_user_id??null,state:d.status,knowledge:'UNKNOWN',amountCents:null,finalization:'UNKNOWN',reference:null,postedAt:null,parentSourceId:null,parentSourceDigest:null,reasonCodes:['ORIGINAL_DUTY_FINANCE_UNAVAILABLE']};
+  if(out.has(d.id)){out.set(d.id,{...base,reasonCodes:['ORIGINAL_DUTY_FINANCE_AMBIGUOUS']});continue;}
+  const valid=typeof d.amount_cents==='string'&&/^(0|[1-9]\d{0,23})$/.test(d.amount_cents)&&typeof d.revision==='string'&&/^[1-9]\d{0,18}$/.test(d.revision)
+   &&d.status==='SETTLED'&&d.settled_by==='FINANCE'&&row.duty_id===d.id&&row.order_id===d.order_id&&row.kind===d.kind&&row.subject_user_id===d.counterparty_user_id
+   &&Array.isArray(row.actual_lines)&&typeof row.posted_at==='string';
+  if(!valid){out.set(d.id,base);continue;}
+  const duty=dutyFromFinanceRow(row),verified=verifyStoredFact(duty,row,row.actual_lines);
+  const basis=verified==='UNKNOWN'?null:JSON.parse(row.facts_canonical).basis;
+  out.set(d.id,verified==='UNKNOWN'?base:{...base,knowledge:'KNOWN',amountCents:duty.amountCents,finalization:verified==='FINALIZED_ZERO'?'FINALIZED_ZERO':'POSTED',reference:{type:duty.settledRefType as LegacyDutyRef['type'],id:duty.settledRefId!,digest:duty.settledRefDigest!},postedAt:row.posted_at,parentSourceId:basis.parentSourceId,parentSourceDigest:basis.parentSourceDigest,reasonCodes:[]});
+ }
+ return out;
+}
 export async function readLegacyCommissionFinanceVersion(c:PoolClient,userId:string){
  if(typeof userId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(userId))throw invalid('Original earning subject required');
  const row=(await c.query(`/* own legacy commission financial version */ SELECT md5(COALESCE(string_agg(f.duty_id||':'||f.facts_digest||':'||d.revision::text||':'||COALESCE(d.settled_ref_type,'')||':'||COALESCE(d.settled_ref_id,'')||':'||COALESCE(d.settled_ref_digest,''),chr(10) ORDER BY f.duty_id COLLATE "C"),'')) AS version
@@ -89,15 +124,13 @@ export async function readLegacyCommissionFinanceVersion(c:PoolClient,userId:str
 export async function readLegacyCommissionFinance(c:PoolClient,userId:string,sourceIds:string[]):Promise<Map<string,LegacyCommissionFinance>>{
  if(typeof userId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(userId)||sourceIds.length>50||sourceIds.some(id=>!/^[1-9]\d{0,23}$/.test(id))||new Set(sourceIds).size!==sourceIds.length)throw invalid('Bounded original commission sources required');
  const out=new Map<string,LegacyCommissionFinance>();if(!sourceIds.length)return out;
- const rows=(await c.query(`/* own legacy commission complete financial facts */ SELECT observed.*,to_jsonb(d)||jsonb_build_object('amount_cents',d.amount_cents::text,'revision',d.revision::text) AS actual_duty,
-  COALESCE((SELECT jsonb_agg(jsonb_build_object('id',l.id,'line',l.line_no,'account',l.account_code,'debit',l.debit_cents::text,'credit',l.credit_cents::text,'subject',l.counterparty_user_id,'details',l.details) ORDER BY l.line_no) FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=observed.event_id),'[]'::jsonb) AS actual_lines,
-  to_char(d.maturity_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS maturity
+ const rows=(await c.query(`/* own legacy commission complete financial facts */ SELECT observed.*,${completeDutyColumns}
   FROM (${originalFactSql} WHERE f.subject_user_id=$1 AND f.kind='COMMISSION') observed JOIN zzsh_order.legacy_order_duty d ON d.id=observed.duty_id
   WHERE d.counterparty_user_id=$1 AND d.kind='COMMISSION' AND d.source_record_id=ANY($2::text[]) ORDER BY d.id COLLATE "C" LIMIT 51`,[userId,sourceIds])).rows;
  if(rows.length>50)throw unavailable('Legacy commission financial source is ambiguous');
  for(const row of rows){const d=row.actual_duty;if(!d||typeof d!=='object'||!Array.isArray(row.actual_lines)||out.has(d.source_record_id)||!sourceIds.includes(d.source_record_id)||d.counterparty_user_id!==userId
    ||typeof d.amount_cents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(d.amount_cents)||typeof d.revision!=='string'||!/^[1-9]\d{0,18}$/.test(d.revision))throw unavailable('Legacy commission financial subject/source changed');
-  const duty:LegacyFinanceDuty={id:d.id,orderId:d.order_id,kind:d.kind,sourceRecordId:d.source_record_id,counterpartyUserId:d.counterparty_user_id,amountCents:String(d.amount_cents),currency:d.currency,revision:String(d.revision),status:d.status,source:d.source,sourceStatus:d.source_status,continuationVersionId:d.continuation_version_id,admissionId:d.admission_id,maturityAt:row.maturity,settledBy:d.settled_by,settledRefType:d.settled_ref_type,settledRefId:d.settled_ref_id,settledRefDigest:d.settled_ref_digest};
+  const duty=dutyFromFinanceRow(row);
   if(duty.status!=='SETTLED'||duty.settledBy!=='FINANCE'||verifyStoredFact(duty,row,row.actual_lines)==='UNKNOWN')throw unavailable('Legacy commission final financial facts require reconciliation');
   out.set(duty.sourceRecordId,{knowledge:'KNOWN',state:'SETTLED',amountCents:duty.amountCents,zeroFinalization:duty.amountCents==='0',reference:{type:duty.settledRefType as LegacyDutyRef['type'],id:duty.settledRefId!,digest:duty.settledRefDigest!}});
  }return out;
