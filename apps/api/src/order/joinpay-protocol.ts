@@ -80,7 +80,8 @@ export function joinpayYuanToCents(yuan: string): string {
 
 // ---------- 各操作 schema（字段顺序即签名顺序）----------
 type Bound = { kind: "MAX"; n: number } | { kind: "RE"; re: RegExp } | { kind: "FIXED"; value: string } | { kind: "URL"; max: number } | { kind: "TIME" };
-type Field = { name: string; required: boolean; empty: "REJECT" | "EQUIV" | "ALLOWED"; bound: Bound };
+export type JoinpayField = { name: string; required: boolean; empty: "REJECT" | "EQUIV" | "ALLOWED"; bound: Bound };
+type Field = JoinpayField;
 const ORDER_NO = /^[A-Za-z0-9_]{1,50}$/;
 const TRX_NO = /^[A-Za-z0-9_-]{1,64}$/;
 const TIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -113,7 +114,11 @@ export const JOINPAY_SIGNATURE_ORDER = Object.freeze({
 /** md5Hex(按签名顺序拼接非空值 + 钥)，小写；U-01 取得前仅为合成。不可无损编码为 UTF-8 的值/钥直接拒绝（R1-02）。 */
 export function joinpayMd5Sign(order: readonly string[], values: Readonly<Record<string, string | undefined>>, key: string): string {
   if (typeof key !== "string" || key.length === 0) throw new JoinpayProtocolError("KEY_REQUIRED");
-  const parts = order.map((n) => values[n] ?? "");
+  const parts = order.map((n) => {
+    const value = values[n];
+    if (value !== undefined && typeof value !== "string") throw new JoinpayProtocolError("SIGNATURE_VALUE_NOT_STRING");
+    return value ?? "";
+  });
   // 逐字段检查，避免相邻孤立代理在拼接后互相补成合法字符。
   if (!parts.every(wellFormed) || !wellFormed(key)) throw new JoinpayProtocolError("PROTOCOL_NOT_WELL_FORMED_UTF16");
   return createHash("md5").update(parts.join("") + key, "utf8").digest("hex");
@@ -211,11 +216,17 @@ function boundOk(b: Bound, v: string): string | null {
     case "RE": return b.re.test(v) ? null : "PROTOCOL_FIELD_PATTERN";
     case "FIXED": return v === b.value ? null : "PROTOCOL_FIELD_PATTERN";
     case "URL": return v.startsWith("https://") && codePoints(v) <= b.max && URL.canParse(v) ? null : "ACTION_REJECTED_LOCAL";
-    case "TIME": return codePoints(v) > 64 ? "PROTOCOL_FIELD_TOO_LONG" : TIME.test(v) ? null : "PROTOCOL_FIELD_PATTERN";
+    case "TIME": {
+      if (codePoints(v) > 64) return "PROTOCOL_FIELD_TOO_LONG";
+      if (!TIME.test(v)) return "PROTOCOL_FIELD_PATTERN";
+      // UTC 只用于校验日历往返，不推定渠道时区或输出正式时间。
+      const t = Date.parse(v.replace(" ", "T") + "Z");
+      return Number.isFinite(t) && new Date(t).toISOString().slice(0, 19).replace("T", " ") === v ? null : "PROTOCOL_FIELD_PATTERN";
+    }
   }
 }
 
-function checkSchema(fields: readonly Field[], raw: Map<string, RawValue>): Schema {
+export function validateJoinpaySignedFields(fields: readonly JoinpayField[], raw: Map<string, RawValue>): Schema {
   for (const [k, r] of raw) if (r.value !== null && r.value !== r.value.trim()) return { ok: false, reason: "PROTOCOL_DECODE_REJECTED", field: k };
   for (const f of fields) if (f.required && !raw.has(f.name)) return { ok: false, reason: "PROTOCOL_FIELD_MISSING", field: f.name };
   if (!raw.has("hmac")) return { ok: false, reason: "PROTOCOL_FIELD_MISSING", field: "hmac" };
@@ -236,9 +247,13 @@ function checkSchema(fields: readonly Field[], raw: Map<string, RawValue>): Sche
   if (!/^[0-9a-fA-F]{32}$/.test(hmac)) return { ok: false, reason: hmac === "" ? "PROTOCOL_REQUIRED_EMPTY" : "PROTOCOL_FIELD_PATTERN", field: "hmac" };
   const known = new Set(fields.map((f) => f.name).concat("hmac"));
   for (const [k, r] of raw) if (!known.has(k) && r.value !== null && r.value !== "") return { ok: false, reason: "UNKNOWN_FIELD_REVIEW", field: k };
-  if (values.r5_Mp !== undefined) return { ok: false, reason: "MP_REVIEW", field: "r5_Mp" };
   const numberTokens = [...raw].filter(([, r]) => r.numberToken).map(([k]) => k);
   return { ok: true, values, hmac, numberTokens };
+}
+
+function checkSchema(fields: readonly Field[], raw: Map<string, RawValue>): Schema {
+  const result = validateJoinpaySignedFields(fields, raw);
+  return result.ok && result.values.r5_Mp !== undefined ? { ok: false, reason: "MP_REVIEW", field: "r5_Mp" } : result;
 }
 
 // ---------- 判定结果 ----------

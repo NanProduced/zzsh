@@ -24,6 +24,9 @@ const NATIVE_FILTER = `a.display_no AS account_no,NULL::text AS renter_no,NULL::
 const LEGACY_FILTER = `l.legacy_account_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text`;
 const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.rental_amount_cents::text,'deposit_amount_cents',o.deposit_amount_cents::text,
     'term_seconds',o.term_seconds::text,'revision',o.revision::text,'created_at',${utc('o.created_at')},'hold_until',${utc('o.hold_until')},'paid_at',${utc('o.paid_at')},'cancelled_at',${utc('o.cancelled_at')},
+    'native_payment_record',(SELECT jsonb_build_object('id',p.id,'order_id',p.order_id,'source',p.source,'disposition',p.disposition,
+      'amount_cents',p.amount_cents::text,'currency',p.currency) FROM zzsh_order.payment_confirmation p
+      WHERE p.id=o.paid_confirmation_id AND p.order_id=o.id AND p.disposition='APPLIED'),
     'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no,'expired',o.status='PENDING_PAYMENT' AND o.hold_until<=clock_timestamp(),
     'dispatch_state',g.provision_state,'wait_reason',g.wait_reason,'assigned_at',${utc('g.assigned_at')},'team_state',g.team_state,
     'first_response_at',to_jsonb(g)->>'first_response_at','remind_due_at',to_jsonb(g)->>'remind_due_at',
@@ -68,11 +71,18 @@ export function orderReadKeyRelation(continuationReady: boolean, restrict?: Orde
  return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER,restrict);
 }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
+// 只投影原APPLIED付款；报价和订单状态不能补出实收，受控事实也不代表真实渠道到账。
+function nativeRecordedAmount(r:Record<string,any>,viewer:OrderReadViewer){
+ const p=r.native_payment_record;
+ return viewer.financeReadable===true&&['PAID','COMPLETED'].includes(r.status)&&p&&p.id===r.paid_confirmation_id&&p.order_id===r.id
+  &&p.disposition==='APPLIED'&&p.source==='CONTROLLED'&&p.currency==='CNY'&&p.currency===r.currency
+  &&typeof p.amount_cents==='string'&&/^(0|[1-9]\d{0,24})$/.test(p.amount_cents)?centsToYuan(p.amount_cents):null;
+}
 export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:OrderReadViewer):Record<string,any>{
  if(origin==='NATIVE'){
   const row:OrderRow={id:r.id,displayNo:r.display_no,accountId:r.account_id,versionId:r.listing_version_id,ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,gameId:r.game_id,releaseId:r.rule_release_id,contentHash:r.content_hash,termOptionCode:r.term_option_code,status:r.status,rentalAmountCents:r.rental_amount_cents,depositAmountCents:r.deposit_amount_cents,currency:r.currency,termSeconds:r.term_seconds,quoteSnapshot:r.quote_snapshot,title:r.title,holdUntil:r.hold_until,paidAt:r.paid_at,dispatchState:r.dispatch_state,dispatchWaitReason:r.wait_reason,assignedAt:r.assigned_at,teamState:r.team_state,firstResponseAt:r.first_response_at??null,remindDueAt:r.remind_due_at??null,addRound:r.add_round??0,escalationState:r.escalation_state??'NOT_STARTED',cancelReason:r.cancel_reason,cancelledAt:r.cancelled_at,createdAt:r.created_at,revision:r.revision,expiredAwaitingCancel:r.expired,ownerName:r.owner_name,renterName:r.renter_name};
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
-  return {...result,source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:null}};
+  return {...result,source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;

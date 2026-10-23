@@ -104,6 +104,14 @@ test("four operations have distinct fixed signature orders matching contract §1
   assert.ok(ORDER.queryOrderResponse.includes("ra_Status") && ORDER.uniPaySyncResponse.includes("ra_Code"));
 });
 
+test("共用签名入口拒绝隐式字符串转换，时间只校验日历而不猜渠道时区", () => {
+  for (const bad of [1, true, null, {}, []]) assert.throws(() => jp.joinpayMd5Sign(["value"], { value: bad as never }, KEY), { code: "SIGNATURE_VALUE_NOT_STRING" });
+  for (const date of ["2026-02-29 10:00:00", "2026-04-31 10:00:00", "2026-13-01 10:00:00", "2026-01-01 24:00:00"]) {
+    assert.equal(evaluateJoinpayNotify(notifyQs({ ra_PayTime: date }), { key: KEY, request: req() }).result, "NOTIFY_SCHEMA_REJECTED");
+  }
+  assert.equal(evaluateJoinpayNotify(notifyQs({ ra_PayTime: "2024-02-29 23:59:59" }), { key: KEY, request: req() }).providerPaidAtRaw, "2024-02-29 23:59:59");
+});
+
 test("fixed synthetic vectors (expected values computed independently, not self-signed)", () => {
   const uni = buildJoinpayUniPayRequest({ merchantNo: MER, orderNo: ORD, amountCents: "12345", currency: "CNY", productName: "洲洲测试商品", notifyUrl: NOTIFY_URL, frpCode: FRP, tradeMerchantNo: "SYNTH_TRADE_MER_01" }, KEY);
   assert.equal(uni.hmac, "5e500f6d56b7637b130c346836915aa7");

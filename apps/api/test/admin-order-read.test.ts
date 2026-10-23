@@ -226,3 +226,35 @@ test("native absent or unready group does not expose support escalation",()=>{
   assert.equal(Object.hasOwn(row,"supportEscalation"),false);
  }
 });
+
+
+test("原生实付仅来自原APPLIED付款；金额权限、原ID、币种与来源逐项守卫",()=>{
+ const payment={id:'payment_1',order_id:native.id,source:'CONTROLLED',disposition:'APPLIED',amount_cents:'15908',currency:'CNY'};
+ const row={...native,paid_confirmation_id:payment.id,native_payment_record:payment};
+ const paid=projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:true});
+ assert.equal(paid.payment.recordedAmount.amount,'159.08');assert.equal(paid.payment.recordedAmount.currency,'CNY');
+ assert.equal(paid.source.origin,'NATIVE');assert.equal(paid.payment.state,'RECORDED_PAID');
+ assert.equal('native_payment_record' in paid,false);
+ for(const financeReadable of [undefined,false])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount,null);
+ for(const change of [{id:'other'},{order_id:'other'},{source:'JOINPAY'},{source:'UNKNOWN'},{disposition:'REVIEW_REQUIRED'},
+  {currency:'USD'},{amount_cents:'-1'},{amount_cents:'1.5'},{amount_cents:15908},{amount_cents:'01'},{amount_cents:'9'.repeat(26)}])
+  assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,...change}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
+ for(const status of ['PENDING_PAYMENT','CANCELLED'])assert.equal(projectAdminReadOrder('NATIVE',{...row,status},{...viewer,financeReadable:true}).payment.recordedAmount,null);
+ assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:null},{...viewer,financeReadable:true}).payment.recordedAmount,null);
+ assert.equal(projectAdminReadOrder('NATIVE',{...row,currency:'USD'},{...viewer,financeReadable:true}).payment.recordedAmount,null);
+});
+
+test("实付合法0与大金额保持精确；缺原付款不回填订单应付",()=>{
+ for(const [amount,expected]of [['0','0.00'],['9007199254740993123456','90071992547409931234.56']]){
+  const p={id:'payment_1',order_id:native.id,source:'CONTROLLED',disposition:'APPLIED',amount_cents:amount,currency:'CNY'};
+  assert.equal(projectAdminReadOrder('NATIVE',{...native,paid_confirmation_id:p.id,native_payment_record:p},{...viewer,financeReadable:true}).payment.recordedAmount.amount,expected);
+ }
+ assert.equal(projectAdminReadOrder('NATIVE',native,{...viewer,financeReadable:true}).payment.recordedAmount,null);
+});
+
+test("原生付款记录只在已选页面记录投影中按主键读取；不扩张筛选或旧单关联",()=>{
+ const full=orderReadRelation(true),keys=orderReadKeyRelation(true),summary=orderReadRelation(true,true);
+ assert.match(full,/p.id=o.paid_confirmation_id AND p.order_id=o.id AND p.disposition='APPLIED'/);
+ assert.match(full,/'amount_cents',p.amount_cents::text/);assert.doesNotMatch(keys,/native_payment_record|payment_confirmation/);
+ assert.doesNotMatch(summary,/native_payment_record|payment_confirmation/);
+});
