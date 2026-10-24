@@ -6,6 +6,7 @@ import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 import {ModuleKind,ScriptTarget,transpileModule} from 'typescript';
 import {createHash} from 'node:crypto';
+import {readMigrationFiles} from 'drizzle-orm/migrator';
 
 test('0087 fixes the legacy-duty audit alias and preserves the full admission and transition guards',()=>{
  const prior=readFileSync(resolve('migrations/business/0074_legacy_trade_continuation.sql'),'utf8');
@@ -23,6 +24,21 @@ test('0087 fixes the legacy-duty audit alias and preserves the full admission an
 });
 
 const runnerPath=resolve('src/database/business-migrations.ts');
+test('0097 through 0100 append the formal payment groups without changing the prior journal',()=>{
+ const directory=resolve('migrations/business');
+ const journal=JSON.parse(readFileSync(resolve(directory,'meta/_journal.json'),'utf8'));
+ assert.equal(createHash('sha256').update(JSON.stringify(journal.entries.slice(0,97))).digest('hex'),'8dc5fdfdba72441b4e1f0642135371659c3cb70a57a1cea3bf861d1d0f2b3a42');
+ const tags=['0097_joinpay_collection_core','0098_joinpay_rental_refund','0099_joinpay_native_payout','0100_joinpay_merchant_accounts'];
+ const migrations=readMigrationFiles({migrationsFolder:directory});
+ for(const [offset,tag] of tags.entries()){
+  const entry=journal.entries[97+offset],prior=journal.entries[96+offset];
+  assert.equal(entry.idx,97+offset);assert.equal(entry.tag,tag);assert(entry.when>prior.when);
+  const migration=migrations.find(item=>item.folderMillis===entry.when);assert(migration);
+  assert.equal(migration.hash,createHash('sha256').update(readFileSync(resolve(directory,tag+'.sql'))).digest('hex'));
+  assert.equal(migration.sql.length,[60,55,57,8][offset]);
+  assert.match(migration.sql[0]!,/DO \$payment_schema_before\$/);
+ }
+});
 test('0090 adds only the two PG-measured subject indexes and retains the journal prefix',()=>{
  const sql=readFileSync(resolve('migrations/business/0090_personal_finance_read_indexes.sql'),'utf8');
  assert.equal(sql.match(/CREATE INDEX/g)?.length,2);assert.equal(sql.match(/id COLLATE "C"/g)?.length,2);
@@ -57,7 +73,10 @@ test('0092 keeps the newest success even when its date is invalid and exposes on
 const runnerSource=readFileSync(runnerPath,'utf8');
 const lastMigration=readFileSync(resolve('migrations/business/0079_owner_guarantee_history.sql'),'utf8');
 const names=['legacy_continuation_evidence','legacy_continuation_version','legacy_order_duty','legacy_order_duty_revision','legacy_order_duty_admission','legacy_inflight_register','personal_finance_observation_coverage','finance_stored_opening_review','legacy_duty_finance_contract','legacy_duty_finance_fact','legacy_owner_guarantee_observation','legacy_owner_guarantee_coverage'].map(n=>'zzsh_order.'+n);
-const profiles=[...runnerSource.matchAll(/^\s+(\{"name":"zzsh_order\.[^\n]+\}),?\r?$/gm)].map(m=>JSON.parse(m[1]!));
+const continuityStart=runnerSource.indexOf('export async function configureContinuityFinancePrivileges(');
+const continuityEnd=runnerSource.indexOf('\nexport async function ',continuityStart+1);
+assert(continuityStart>=0&&continuityEnd>continuityStart);
+const profiles=[...runnerSource.slice(continuityStart,continuityEnd).matchAll(/^\s+(\{"name":"zzsh_order\.[^\n]+\}),?\r?$/gm)].map(m=>JSON.parse(m[1]!));
 assert.deepEqual(profiles.map(p=>p.name).sort(),[...names].sort());
 const columns=new Map<string,string[]>(profiles.map(p=>[p.name,[...new Set<string>(['id','unlisted_column',...(p.insert??[]),...(p.update??[])])]]));
 const runtime='runtime_role',owner='migration_owner';

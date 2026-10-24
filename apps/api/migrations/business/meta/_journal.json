@@ -680,6 +680,34 @@
       "when": 1792713600000,
       "tag": "0096_membership_deposit_allowance",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1792877354027,
+      "tag": "0097_joinpay_collection_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1792877354028,
+      "tag": "0098_joinpay_rental_refund",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1792877354029,
+      "tag": "0099_joinpay_native_payout",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1792877354030,
+      "tag": "0100_joinpay_merchant_accounts",
+      "breakpoints": true
     }
   ]
 }

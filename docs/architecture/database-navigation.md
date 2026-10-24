@@ -4,9 +4,9 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，共 **91 份 SQL**，`meta/_journal.json` **91 条**登记（idx 0…90，tag 与文件名一一对应）。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **101 份 SQL**，`meta/_journal.json` **101 条**登记（idx 0…100，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
-下列计数是 0000–0090 全链的静态扫描结果（**不是真实 PostgreSQL 目录核验**）：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
+下列计数仅为 0000–0090 的历史静态扫描基线，不含 0091–0100，**不是真实 PostgreSQL 目录核验**：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
 
 > 计数用于导航，不替代逐对象清单。创建/修改/删除/重建事件、源文件行号和跨 schema 依赖由按需生成的静态结构索引给出；该索引是只读派生资料，不进入迁移链，也不随正式文档发布。
 
@@ -35,8 +35,13 @@
 | 0081–0083, 0086–0087 | 公开编号序列/计数器、pricing compat 禁用模式、日期编号、旧皮肤持有、旧责任审计别名 |
 | 0088–0089 | 皮肤品质证据、典藏/默认状态与素材来源；按类型和品质配置的推荐押金合同 |
 | 0090 | 个人流水与历史财务观察按主体读取的复合索引，keyset ID 使用 C collation |
+| 0091–0096 | 用户目录与注册投影、用户详情操作和资金权限、审批最终载荷、会员押金减免额度 |
+| 0097 | 收款请求、观察、流水锚点及原生收款凭据，7 个新关系 |
+| 0098 | 原生租赁退款意图、观察及证据，5 个新关系 |
+| 0099 | 原生提现意图、尝试、观察及证据，依赖0098父守卫，4 个新关系 |
+| 0100 | 商户账户只读观察，1 个新关系 |
 
-### 按 schema 查对象（静态、当前存在）
+### 按 schema 查对象（0000–0090 历史静态基线）
 
 | schema | 职责 | 表 | 序列 | 函数 | 触发器 | 显式索引 | 约束 |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -51,6 +56,8 @@
 `zzsh_business_meta`（业务迁移记账）和 `zzsh_meta`（test metadata 线）由 migrator 使用，不是这 7 个业务 schema 的一部分；`zzsh_credit` 不在 `BUSINESS_SCHEMAS` 的 USAGE 循环内，走独立授权分支。
 
 按对象查源头的顺序：先按 `schema.table` 找到 `CREATE TABLE` 所在迁移，再沿该对象的后续 `ALTER TABLE`/`DROP`/重建事件读；函数按输入类型签名、触发器按目标表+名称、索引按 schema+名称区分。创建位置只是定义出现处，不是当前完整定义。
+
+0097–0100的fresh-install前检要求本组新关系均不存在，并核对被替换父函数的准确签名及正文；已有支付fixture不能直接重装。运行角色窄权统一由 `configureJoinpayFinancialPrivileges` 在既有独立ACL事务中收敛，迁移SQL不使用测试角色GUC授予权限。Schema提交与ACL提交/未知分别报告；本源码登记不授权安装、服务切换或渠道启用。
 
 ## 权限与不可变性模型
 

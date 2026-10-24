@@ -516,10 +516,20 @@ export async function configureChannelRefundPrivileges(pool: Pick<Pool, "query">
   `);
 }
 
-/** Optional G3/G4/G5 contracts only; all metadata is verified before this helper changes any ACL. */
+/** Optional collection/refund/payout/account groups; verify every metadata group before changing ACL. */
 export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole), words = (value = "") => value.split(" ").filter(Boolean);
   type Table = { name: string; insert: string; update?: string; metadata: string; select?: string };
+  const collection: Table[] = [
+    {"name":"zzsh_order.payment_request","insert":"id order_id channel merchant_identity_id config_profile_id protocol_version key_version_ref platform_order_no channel_order_no amount_cents currency wire_amount_yuan method evidence_level idempotency_scope_key idempotency_key request_fingerprint","metadata":"created_at","update":"state revision lease_version lease_owner lease_until updated_at"},
+    {"name":"zzsh_order.payment_channel_observation","insert":"id request_id channel merchant_identity_id channel_order_no channel_trx_no config_profile_id protocol_version key_version_ref operation source evidence_level event result reason channel_status provider_paid_at_raw raw_sha256 raw_ref verify_outcome lease_version state_before state_after stale late conflict","metadata":"observed_at"},
+    {"name":"zzsh_order.payment_channel_transaction","insert":"id channel merchant_identity_id channel_trx_no order_origin native_order_id request_id confirmation_id evidence_level","metadata":"created_at"},
+    {"name":"zzsh_order.joinpay_collection_binding","insert":"request_id wire_merchant_no trade_merchant_no product_name notify_url initial_profile_sha256 evidence_mode formal_admission_ref formal_admission_sha256 formal_admission_canonical","metadata":"created_at"},
+    {"name":"zzsh_order.joinpay_collection_attempt","insert":"id request_id lease_version lease_owner operation profile_id profile_canonical profile_sha256 key_version_ref evidence_mode request_body request_sha256","metadata":"created_at"},
+    {"name":"zzsh_order.joinpay_collection_observation","insert":"id attempt_id request_id raw_body raw_sha256 http_status response_complete received_bytes transport_failure event result schema_outcome signature_outcome binding_outcome verified state_before state_after channel_status provider_paid_at_raw channel_trx_no","metadata":"created_at"},
+    {"name":"zzsh_order.joinpay_collection_evidence","insert":"id request_id operation origin_observation_id raw_query raw_sha256 profile_id profile_sha256 profile_canonical key_version_ref initial_admission_ref initial_admission_sha256 admission_ref admission_sha256 admission_canonical event result schema_outcome signature_outcome binding_outcome channel_trx_no provider_paid_at_raw provider_paid_at","metadata":"created_at"},
+    {"name":"zzsh_order.distribution_order_admission","insert":"id order_id mode resource_oid resource_name resource_marker approval_digest source_admission_ref native_creation_audit_id revision active admitted_at expires_at created_by_admin_id reason","metadata":""},
+  ];
   const refund: Table[] = [
     { name: "zzsh_order.channel_refund_intent", insert: "id posting_id order_id payment_confirmation_id renter_user_id payment_source merchant_identity_id original_payment_trx_no original_payment_order_no responsibility_version_hash refund_order_no amount_cents currency idempotency_key request_fingerprint due_at evidence_level initial_admission_ref initial_admission_sha256 initial_admission_canonical wire_merchant_no initial_profile_id initial_profile_sha256 initial_key_version_ref notify_url funds_account refund_reason", update: "state revision lease_version lease_owner lease_until updated_at budget_disposition requires_review terminal_evidence_id terminal_root_id terminal_event_id provider_refund_trx_no completed_at", metadata: "created_at" },
     { name: "zzsh_order.joinpay_refund_attempt", insert: "id intent_id operation lease_version lease_owner profile_id profile_canonical profile_sha256 key_version_ref admission_sha256 request_body request_sha256", metadata: "created_xid created_at" },
@@ -533,20 +543,26 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
     { name: "zzsh_order.joinpay_payout_evidence", insert: "id intent_id observation_id operation terminal platform_serial_no provider_fee_raw provider_fee_cents facts_canonical facts_digest", metadata: "created_xid created_at" },
   ];
   const account: Table[] = [{ name: "zzsh_order.joinpay_account_observation", insert: "attempt_id merchant_identity_id operation profile_id profile_sha256 rules_sha256 key_version_ref review_ref review_sha256 request_sha256 requested_at received_at http_status response_complete received_bytes transport_failure raw_body raw_sha256 evidence_level decision schema_status signature_status binding_status reason status_code error_code amounts", metadata: "recorded_at", select: "attempt_id merchant_identity_id operation evidence_level decision reason requested_at received_at recorded_at response_complete http_status status_code error_code amounts" }];
-  const optional = [...refund.slice(1), ...payout, ...account].map(t => t.name);
+  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account].map(t => t.name);
   const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial optional tables */", [optional])).rows;
   const validInventory = (rows: typeof found, names: string[]) => rows.length === names.length && new Set(rows.map(r => r.name)).size === names.length && rows.every(r => names.includes(r.name) && typeof r.present === "boolean");
   if (!validInventory(found, optional)) throw new Error("JoinPay financial inventory is incomplete");
   const complete = (tables: Table[]) => { const rows = tables.map(t => found.find(r => r.name === t.name)!); if (rows.every(r => !r.present)) return false; if (rows.some(r => !r.present)) throw new Error("JoinPay financial group is partially deployed"); return true; };
-  const hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account);
-  if (!hasRefund && !hasPayout && !hasAccount) return;
+  const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account);
+  if (!hasCollection && !hasRefund && !hasPayout && !hasAccount) return;
   if (hasPayout && !hasRefund) throw new Error("JoinPay payout requires the complete formal refund parent");
+  if (hasCollection) {
+    const parentNames = [collection[7]!.name];
+    const parent = (await pool.query<{name:string;present:boolean}>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [parentNames])).rows;
+    if (!validInventory(parent,parentNames) || parent[0]!.present !== true) throw new Error("JoinPay collection admission parent is incomplete");
+  }
   if (hasRefund) {
     const parent = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [[refund[0]!.name]])).rows;
     if (!validInventory(parent, [refund[0]!.name]) || parent[0]!.present !== true) throw new Error("JoinPay refund intent parent is incomplete");
   }
-  const tables = [...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : [])];
+  const tables = [...(hasCollection ? collection : []), ...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : [])];
   const functions = [
+    ...(hasCollection ? ["zzsh_order.joinpay_formal_request_effect(text,text)"] : []),
     ...(hasRefund ? ["zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)", "zzsh_order.native_refund_terminal_complete(text)"] : []),
     ...(hasPayout ? ["zzsh_order.assert_joinpay_payout_scope(text,text,text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_payout_profile(text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_withdrawal_admission(zzsh_order.joinpay_withdrawal_intent,boolean)", "zzsh_order.joinpay_payout_raw_data(zzsh_order.joinpay_payout_observation)", "zzsh_order.joinpay_withdrawal_expected_lines(text)", "zzsh_order.joinpay_withdrawal_complete(text)"] : []),
   ];
