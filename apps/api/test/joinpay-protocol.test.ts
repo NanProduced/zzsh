@@ -72,6 +72,9 @@ function json(base: Vals, patch: Record<string, string | null | undefined> = {},
 }
 const syncJson = (patch: Record<string, string | null | undefined> = {}) => json(SYNC, patch, { order: ORDER.uniPaySyncResponse });
 const queryJson = (patch: Record<string, string | null | undefined> = {}) => json(QUERY, patch, { order: ORDER.queryOrderResponse });
+// SYNTHETIC_PROTOCOL错误信封；真实A2原文未另存，此处不是官方向量或原报文重放。
+const queryErrorJson = (patch: Record<string, string | null | undefined> = {}) => json({ r0_Version: "2.6", r1_MerchantNo: MER,
+  r2_OrderNo: ORD, rb_Code: "10080003", rc_CodeMsg: "synthetic query rejection" }, patch, { order: ORDER.queryOrderResponse });
 function notifyQs(patch: Record<string, string | undefined> = {}, hmac?: string): string {
   const v: Vals = { ...NOTIFY, ...patch };
   const pairs = Object.entries(v).filter((e): e is [string, string] => e[1] !== undefined);
@@ -211,6 +214,39 @@ test("R3-02: query branches A–F", () => {
   const signedNum = json({ ...QUERY }, {}, { order: ORDER.queryOrderResponse }).replace('"rb_Code":"100"', '"rb_Code":100');
   assert.equal(evaluateJoinpayQueryResponse(signedNum, ctx()).result, "QUERY_SUCCEEDED");
   assert.deepEqual(evaluateJoinpayQueryResponse(signedNum, ctx()).numberTokens, ["rb_Code"]);
+});
+
+test("查询API报错信封可缺付款字段，任何请求状态和原付款事实均不改变", () => {
+  for (const state of REQUEST_STATES) {
+    const decision = jp.computeJoinpayCollectionDecision("QUERY", queryErrorJson(), req(state), KEY);
+    assert.equal(decision.schema, "VALID"); assert.equal(decision.signature, "MATCH");
+    assert.equal(decision.binding, "NOT_CHECKED"); assert.equal(decision.result, "QUERY_FAILED");
+    assert.equal(decision.rawStatus, "10080003"); assert.equal(decision.event, "E6X");
+    assert.equal(decision.providerPaidAtRaw, undefined); assert.equal(decision.values?.r3_Amount, undefined);
+    const legacy = evaluateJoinpayQueryResponse(queryErrorJson(), ctx(state));
+    assert.equal(legacy.nextState, state); assert.equal(legacy.formalAcceptance, false);
+    assert.equal(legacy.observation, "UNVERIFIED"); assert.equal(legacy.signature, "NOT_CHECKED");
+    const stale = evaluateJoinpayQueryResponse(queryErrorJson(), ctx(state, false));
+    assert.equal(stale.event, "E9"); assert.equal(stale.nextState, state);
+  }
+  const successWithoutPayment = evaluateJoinpayQueryResponse(queryErrorJson({rb_Code:"100"}), ctx());
+  assert.equal(successWithoutPayment.result,"QUERY_SCHEMA_REJECTED");
+  const misleading = jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson({ra_Status:"100",r3_Amount:"123.45",r5_TrxNo:"SYNTHETIC_TRX",r8_FrpCode:FRP}),req(),KEY);
+  assert.equal(misleading.result,"QUERY_FAILED"); assert.equal(misleading.event,"E6X");
+  assert.equal(misleading.providerPaidAtRaw,undefined);
+});
+
+test("查询错误仍须验签与原商户原号一致，提供的金额或产品不能错绑", () => {
+  for (const patch of [{r1_MerchantNo:"888000000000002"},{r2_OrderNo:"ANOTHER_ORDER"},{r3_Amount:"0.01"},{r8_FrpCode:"WEIXIN_NATIVE"}]) {
+    assert.equal(jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson(patch),req(),KEY).result,"BINDING_MISMATCH");
+  }
+  for(const field of ["r0_Version","r1_MerchantNo","r2_OrderNo","rb_Code"]) {
+    assert.equal(jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson({[field]:undefined}),req(),KEY).schema,"INVALID");
+  }
+  const badHmac=JSON.stringify({...JSON.parse(queryErrorJson()),hmac:"0".repeat(32)});
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",badHmac,req(),KEY).signature,"MISMATCH");
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson({r7_Fee:"not-money"}),req(),KEY).schema,"INVALID");
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson({unmapped:"value"}),req(),KEY).reason,"UNKNOWN_FIELD_REVIEW");
 });
 
 test("terminal guard and stale lease precedence (E9)", () => {

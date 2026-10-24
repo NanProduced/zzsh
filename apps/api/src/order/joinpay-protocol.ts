@@ -101,6 +101,9 @@ const SYNC_RESPONSE: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", 
 const NOTIFY: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", m(15)), R("r2_OrderNo", re(ORDER_NO)), R("r3_Amount", Y), R("r4_Cur", m(10)), OA("r5_Mp", m(200)), R("r6_Status", m(10)), R("r7_TrxNo", re(TRX_NO)), O("r8_BankOrderNo", m(20)), O("r9_BankTrxNo", m(30)), R("ra_PayTime", T), R("rb_DealTime", T), R("rc_BankCode", m(10)), O("rd_OpenId", m(128)), R("re_DiscountAmount", Y), O("rh_cardType", m(2)), O("rj_Fee", Y), R("rk_FrpCode", m(50)), O("rl_ContractId", m(32)), O("rm_SpecialInfo", m(256)), R("ro_SettleAmount", Y)];
 const QUERY_REQUEST: readonly Field[] = [R("p0_Version", V), R("p1_MerchantNo", m(15)), R("p2_OrderNo", re(ORDER_NO))];
 const QUERY_RESPONSE: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", m(15)), R("r2_OrderNo", re(ORDER_NO)), O("r3_Amount", Y), O("r4_ProductName", m(10)), O("r5_TrxNo", re(TRX_NO)), O("r6_BankTrxNo", m(30)), R("r7_Fee", Y), O("r8_FrpCode", m(50)), O("ra_Status", m(20)), R("rb_Code", m(20)), RA("rc_CodeMsg", m(256)), R("rd_OpenId", m(10)), R("re_DiscountAmount", m(10)), R("rf_PayTime", T), O("rh_cardType", m(2)), R("rj_BankCode", m(10)), O("rl_ContractId", m(32)), O("rm_SpecialInfo", m(256)), R("ro_SettleAmount", Y)];
+// 查询API错误回包可无付款详情；身份、原号、错误码及原签名顺序仍保留。
+const QUERY_ERROR_RESPONSE: readonly Field[] = QUERY_RESPONSE.map((field): Field =>
+  ["r0_Version", "r1_MerchantNo", "r2_OrderNo", "rb_Code"].includes(field.name) ? field : { ...field, required: false, empty: "EQUIV" });
 
 /** 各操作签名顺序（合同 §1；不含 hmac）。 */
 export const JOINPAY_SIGNATURE_ORDER = Object.freeze({
@@ -366,7 +369,9 @@ export function computeJoinpayCollectionDecision(operation: "SUBMIT" | "QUERY", 
   const base = { schema: "INVALID" as const, signature: "NOT_CHECKED" as const, binding: "NOT_CHECKED" as const, event: unknown };
   const decoded = decodeJoinpayJson(body);
   if (!decoded.ok) return { ...base, result: sync ? "SYNC_SCHEMA_REJECTED" : "QUERY_SCHEMA_REJECTED", reason: decoded.reason };
-  const fields = sync ? SYNC_RESPONSE : QUERY_RESPONSE, checked = checkSchema(fields, decoded.raw);
+  const rawCode = decoded.raw.get("rb_Code")?.value;
+  const apiError = !sync && rawCode !== undefined && rawCode !== null && rawCode !== "" && rawCode !== "100";
+  const fields = sync ? SYNC_RESPONSE : apiError ? QUERY_ERROR_RESPONSE : QUERY_RESPONSE, checked = checkSchema(fields, decoded.raw);
   if (!checked.ok) return { ...base, result: sync ? "SYNC_SCHEMA_REJECTED" : "QUERY_SCHEMA_REJECTED", reason: checked.reason, field: checked.field };
   if (!verify(fields, checked, key)) return { ...base, schema: "VALID", signature: "MISMATCH", result: "SIGNATURE_INVALID" };
   const signed = { ...base, schema: "VALID" as const, signature: "MATCH" as const };
@@ -380,7 +385,14 @@ export function computeJoinpayCollectionDecision(operation: "SUBMIT" | "QUERY", 
     if (SYNC_REJECT_CODES.has(code)) return { ...bound, ...common, event: "E2", result: "REJECTED_BY_CHANNEL", rawStatus: code };
     return { ...bound, ...common, result: SYNC_UNKNOWN_CODES.has(code) ? "SYNC_UNKNOWN" : "SYNC_UNMAPPED_CODE", rawStatus: code };
   }
-  if (v.rb_Code !== "100") return { ...signed, ...common, result: "QUERY_FAILED", rawStatus: v.rb_Code };
+  if (v.rb_Code !== "100") {
+    if (v.r1_MerchantNo !== request.merchantNo || v.r2_OrderNo !== request.orderNo
+      || (v.r3_Amount !== undefined && v.r3_Amount !== centsToJoinpayYuan(request.amountCents))
+      || (v.r8_FrpCode !== undefined && v.r8_FrpCode !== request.frpCode))
+      return { ...signed, ...common, binding: "MISMATCH", result: "BINDING_MISMATCH" };
+    // API错误不证明原交易付款字段齐全，整体binding仍NOT_CHECKED，不产生verified付款依据。
+    return { ...signed, ...common, result: "QUERY_FAILED", rawStatus: v.rb_Code };
+  }
   const status = v.ra_Status;
   if (status === undefined) return { ...signed, ...common, result: "QUERY_EVIDENCE_INCOMPLETE", reason: "STATUS_MISSING" };
   if (!["100", "101", "102"].includes(status)) return { ...signed, ...common, result: "QUERY_EVIDENCE_INCOMPLETE", reason: "STATUS_UNKNOWN", rawStatus: status };

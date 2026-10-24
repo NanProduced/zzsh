@@ -185,6 +185,15 @@ test("旧合成builder/判断API/商户准入语义保持原值", () => {
   const rejected = protocol.evaluateJoinpayQueryResponse(signed("QUERY", { ...QUERY, rb_Code: "101" }), ctx); assert.equal(rejected.signature, "NOT_CHECKED");
 });
 
+test("签名一致的查询API错误不成为已验证付款依据或发送能力", () => {
+  const input=modelProfile(),profile=bindJoinpayCollectionProfile(input);
+  const response=signed("QUERY",{r0_Version:"2.6",r1_MerchantNo:MERCHANT,r2_OrderNo:ORDER,rb_Code:"10080003",rc_CodeMsg:"synthetic error"});
+  const inspected=inspectJoinpayCollectionResponse(profile,"QUERY",response,binding(input),KEY);
+  assert.equal(inspected.schema,"VALID");assert.equal(inspected.signature,"MATCH");assert.equal(inspected.result,"QUERY_FAILED");
+  assert.equal(inspected.event,"E6X");assert.equal(inspected.binding,"NOT_CHECKED");assert.equal(inspected.verified,false);
+  assert.equal(inspected.providerPaidAtRaw,undefined);assert.equal(inspected.values?.r3_Amount,undefined);
+});
+
 test("公开profile原件与摘要同字节且禁止夹带未知商户密钥属性", () => {
   const input = modelProfile(), profile = bindJoinpayCollectionProfile(input), canonical = readCollectionProfileEvidence(profile, "SUBMIT");
   assert.equal(createHash("sha256").update(canonical).digest("hex"), describeCollectionProfile(profile, "SUBMIT").profileSha256);

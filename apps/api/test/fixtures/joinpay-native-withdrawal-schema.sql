@@ -9,9 +9,10 @@ BEGIN
   IF to_regclass(name) IS NULL THEN RAISE EXCEPTION 'G4 requires complete accepted G3 parent: %',name USING ERRCODE='55000';END IF;
  END LOOP;
  FOR x IN SELECT * FROM(VALUES
-  ('zzsh_order.guard_joinpay_refund_intent()','aad84781a9f8385a31daa05c4e829ac162dbdee4ce67c88931a06fe14511acf9'),
+  ('zzsh_order.guard_controlled_channel_refund_intent_v1()','1214c9caa05138d90340c7936c607f8bd6f6396b4505d57cc245f0c43e96563d'),
+  ('zzsh_order.guard_joinpay_refund_intent()','1d439d2eff9c7b39c6b06de380eb7161696f210f8afed9c2b959fe1fd450f1eb'),
   ('zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)','20eb5637b082b5533581529701d090cf53cbf45db1385267fffd8b8c07f91762'),
-  ('zzsh_order.guard_joinpay_refund_attempt()','0a31f5ee7765a1591125034028faca550cb8b5614b6a1a96121ad5227b7e1b1d'),
+  ('zzsh_order.guard_joinpay_refund_attempt()','bc519429a8f57490b4a5c4cc5f7ce3c1e492af09621e1435c205a0ddbf6b8713'),
   ('zzsh_order.guard_joinpay_refund_observation()','51e78865a41b09cb48003b27e316c0798a6594f57fe3eb64fd94392241fa86cf'),
   ('zzsh_order.guard_joinpay_refund_evidence()','3e83ad5b2696fb5684ebfc2afcfd9c938f4b61c7e086e4488b6b4d6bbcfeb83e'),
   ('zzsh_order.guard_native_refund_root()','8d5bb7abd32f0a628f2097eab600641ec7e395475642da20cf5c46752a827716'),
@@ -26,7 +27,9 @@ BEGIN
   THEN RAISE EXCEPTION 'accepted G3 function differs: %',x.signature USING ERRCODE='55000';END IF;
  END LOOP;
  FOR x IN SELECT * FROM(VALUES
-  ('zzsh_order.channel_refund_intent','channel_refund_controlled_write_guard','zzsh_order.guard_joinpay_refund_intent()',23,false),
+  ('zzsh_order.channel_refund_intent','channel_refund_joinpay_write_guard','zzsh_order.guard_joinpay_refund_intent()',23,false),
+  ('zzsh_order.channel_refund_intent','channel_refund_controlled_write_guard','zzsh_order.guard_controlled_channel_refund_intent_v1()',23,false),
+  ('zzsh_order.channel_refund_intent','channel_refund_controlled_delete_guard','zzsh_order.guard_controlled_channel_refund_intent_v1()',11,false),
   ('zzsh_order.channel_refund_intent','channel_refund_joinpay_delete_guard','zzsh_order.guard_joinpay_refund_intent()',11,false),
   ('zzsh_order.joinpay_refund_attempt','joinpay_refund_attempt_guard','zzsh_order.guard_joinpay_refund_attempt()',7,false),
   ('zzsh_order.joinpay_refund_observation','joinpay_refund_observation_guard','zzsh_order.guard_joinpay_refund_observation()',7,false),
