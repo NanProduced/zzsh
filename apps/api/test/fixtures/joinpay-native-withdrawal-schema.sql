@@ -375,9 +375,9 @@ BEGIN
   SELECT * INTO e FROM zzsh_order.joinpay_payout_evidence WHERE id=NEW.terminal_evidence_id AND intent_id=OLD.id;
   SELECT * INTO o FROM zzsh_order.joinpay_payout_observation WHERE id=e.observation_id;
   IF OLD.requires_review OR NEW.requires_review OR e.id IS NULL OR e.created_xid<>pg_current_xact_id()
-   OR NEW.state IS DISTINCT FROM CASE e.terminal WHEN 'PAID' THEN 'SUCCEEDED' ELSE 'FAILED' END
-   OR NEW.funds_disposition IS DISTINCT FROM CASE e.terminal WHEN 'PAID' THEN 'PAYOUT_POSTED' ELSE 'RELEASE_POSTED' END
-   OR NEW.terminal_event_id IS DISTINCT FROM 'jwd_event_'||substr(encode(sha256(convert_to(OLD.id,'UTF8')),'hex'),1,40)||CASE e.terminal WHEN 'PAID' THEN '_paid' ELSE '_release' END
+   OR NEW.state IS DISTINCT FROM (CASE e.terminal WHEN 'PAID' THEN 'SUCCEEDED' ELSE 'FAILED' END)
+   OR NEW.funds_disposition IS DISTINCT FROM (CASE e.terminal WHEN 'PAID' THEN 'PAYOUT_POSTED' ELSE 'RELEASE_POSTED' END)
+   OR NEW.terminal_event_id IS DISTINCT FROM 'jwd_event_'||substr(encode(sha256(convert_to(OLD.id,'UTF8')),'hex'),1,40)||(CASE e.terminal WHEN 'PAID' THEN '_paid' ELSE '_release' END)
    OR NEW.platform_serial_no IS DISTINCT FROM e.platform_serial_no OR NEW.provider_fee_raw IS DISTINCT FROM e.provider_fee_raw
    OR NEW.provider_fee_cents IS DISTINCT FROM e.provider_fee_cents
    OR (NEW.lease_version,NEW.lease_owner,NEW.lease_until) IS DISTINCT FROM(OLD.lease_version,OLD.lease_owner,OLD.lease_until)
@@ -390,7 +390,7 @@ BEGIN
   IF(OLD.state='RESERVED' AND OLD.requires_review) OR NEW.requires_review IS DISTINCT FROM OLD.requires_review
    OR(OLD.lease_until IS NOT NULL AND OLD.lease_until>clock_timestamp()) OR NEW.lease_owner IS NULL OR NEW.lease_until IS NULL
    OR NEW.lease_until<=clock_timestamp() OR NEW.lease_until>clock_timestamp()+interval '3600 seconds'
-   OR NEW.state IS DISTINCT FROM CASE WHEN OLD.state='RESERVED' THEN 'SUBMITTING' WHEN OLD.state='SUBMITTING' THEN 'UNKNOWN' ELSE OLD.state END
+   OR NEW.state IS DISTINCT FROM (CASE WHEN OLD.state='RESERVED' THEN 'SUBMITTING' WHEN OLD.state='SUBMITTING' THEN 'UNKNOWN' ELSE OLD.state END)
    OR NEW.funds_disposition<>'RESERVED' OR num_nonnulls(NEW.terminal_evidence_id,NEW.terminal_event_id,NEW.provider_fee_raw,NEW.provider_fee_cents)<>0
    OR NEW.platform_serial_no IS DISTINCT FROM OLD.platform_serial_no
   THEN RAISE EXCEPTION 'withdrawal claim changes original funds/binding' USING ERRCODE='40001';END IF;
@@ -442,7 +442,7 @@ BEGIN
  SELECT * INTO i FROM zzsh_order.joinpay_withdrawal_intent WHERE id=NEW.intent_id;
  IF i.id IS NULL OR i.state IN('RESERVED','SUCCEEDED','FAILED') OR i.funds_disposition<>'RESERVED'
   OR(NEW.operation='SUBMIT' AND i.requires_review)
-  OR NEW.operation IS DISTINCT FROM CASE WHEN i.lease_version=1 AND i.state='SUBMITTING' THEN 'SUBMIT' ELSE 'QUERY' END
+  OR NEW.operation IS DISTINCT FROM (CASE WHEN i.lease_version=1 AND i.state='SUBMITTING' THEN 'SUBMIT' ELSE 'QUERY' END)
  THEN RAISE EXCEPTION 'payout attempt original operation invalid' USING ERRCODE='23514';END IF;
  IF (NEW.lease_version,NEW.lease_owner) IS DISTINCT FROM(i.lease_version,i.lease_owner) OR i.lease_until IS NULL OR i.lease_until<=clock_timestamp()
  THEN RAISE EXCEPTION 'payout attempt lease expired' USING ERRCODE='23514',CONSTRAINT='joinpay_payout_live_lease';END IF;
@@ -719,8 +719,8 @@ BEGIN
  THEN RETURN false;END IF;
  SELECT count(*),count(*) FILTER(WHERE kind='JOINPAY_WITHDRAWAL_RESERVED'),count(*) FILTER(WHERE kind='JOINPAY_WITHDRAWAL_PAID'),
   count(*) FILTER(WHERE kind='JOINPAY_WITHDRAWAL_RELEASED') INTO total_count,reserve_count,paid_count,release_count FROM zzsh_order.finance_event WHERE economic_root_id=r.id;
- IF reserve_count<>1 OR paid_count<>CASE WHEN i.funds_disposition='PAYOUT_POSTED' THEN 1 ELSE 0 END
-  OR release_count<>CASE WHEN i.funds_disposition='RELEASE_POSTED' THEN 1 ELSE 0 END OR total_count<>reserve_count+paid_count+release_count
+ IF reserve_count<>1 OR paid_count<>(CASE WHEN i.funds_disposition='PAYOUT_POSTED' THEN 1 ELSE 0 END)
+  OR release_count<>(CASE WHEN i.funds_disposition='RELEASE_POSTED' THEN 1 ELSE 0 END) OR total_count<>reserve_count+paid_count+release_count
  THEN RETURN false;END IF;
  SELECT ledger_revision INTO rev FROM zzsh_order.wallet_revision WHERE user_id=i.user_id;
  IF rev IS NULL THEN RETURN false;END IF;
@@ -728,8 +728,8 @@ BEGIN
  IF i.state IN('SUCCEEDED','FAILED') THEN
   IF e.id IS NULL OR i.terminal_evidence_id IS DISTINCT FROM e.id OR i.platform_serial_no IS DISTINCT FROM e.platform_serial_no
    OR i.provider_fee_raw IS DISTINCT FROM e.provider_fee_raw OR i.provider_fee_cents IS DISTINCT FROM e.provider_fee_cents
-   OR i.state IS DISTINCT FROM CASE e.terminal WHEN 'PAID' THEN 'SUCCEEDED' ELSE 'FAILED' END
-   OR i.funds_disposition IS DISTINCT FROM CASE e.terminal WHEN 'PAID' THEN 'PAYOUT_POSTED' ELSE 'RELEASE_POSTED' END
+   OR i.state IS DISTINCT FROM (CASE e.terminal WHEN 'PAID' THEN 'SUCCEEDED' ELSE 'FAILED' END)
+   OR i.funds_disposition IS DISTINCT FROM (CASE e.terminal WHEN 'PAID' THEN 'PAYOUT_POSTED' ELSE 'RELEASE_POSTED' END)
   THEN RETURN false;END IF;
  ELSE
   IF i.funds_disposition<>'RESERVED' OR e.id IS NOT NULL OR i.terminal_evidence_id IS NOT NULL OR i.terminal_event_id IS NOT NULL

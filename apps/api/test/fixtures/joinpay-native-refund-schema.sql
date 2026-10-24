@@ -154,8 +154,8 @@ BEGIN
    THEN RAISE EXCEPTION 'refund terminal lease expired' USING ERRCODE='23514',CONSTRAINT='joinpay_refund_live_lease';END IF;
    IF OLD.state NOT IN('SUBMITTING','UNKNOWN','PROCESSING') OR OLD.requires_review OR NEW.requires_review
     OR proof.id IS NULL OR proof.created_xid<>pg_current_xact_id()
-    OR NEW.state IS DISTINCT FROM CASE proof.terminal WHEN 'SUCCEEDED' THEN 'SUCCEEDED' ELSE 'FAILED' END
-    OR NEW.budget_disposition IS DISTINCT FROM CASE proof.terminal WHEN 'SUCCEEDED' THEN 'CONSUMED' ELSE 'RELEASED' END
+    OR NEW.state IS DISTINCT FROM (CASE proof.terminal WHEN 'SUCCEEDED' THEN 'SUCCEEDED' ELSE 'FAILED' END)
+    OR NEW.budget_disposition IS DISTINCT FROM (CASE proof.terminal WHEN 'SUCCEEDED' THEN 'CONSUMED' ELSE 'RELEASED' END)
     OR NEW.provider_refund_trx_no IS DISTINCT FROM proof.refund_transaction_no OR NEW.completed_at IS DISTINCT FROM proof.completed_at
     OR NEW.lease_version<>OLD.lease_version OR NEW.lease_owner IS DISTINCT FROM OLD.lease_owner OR NEW.lease_until IS DISTINCT FROM OLD.lease_until
    THEN RAISE EXCEPTION 'formal refund terminal lacks same transaction proof' USING ERRCODE='23514';END IF;
@@ -163,7 +163,7 @@ BEGIN
    IF (OLD.state='READY' AND OLD.requires_review) OR NEW.requires_review IS DISTINCT FROM OLD.requires_review OR OLD.due_at>clock_timestamp()
     OR(OLD.lease_until IS NOT NULL AND OLD.lease_until>clock_timestamp()) OR NEW.lease_owner IS NULL OR NEW.lease_until<=clock_timestamp()
     OR NEW.lease_until>clock_timestamp()+interval '3600 seconds'
-    OR NEW.state IS DISTINCT FROM CASE WHEN OLD.state='READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END
+    OR NEW.state IS DISTINCT FROM (CASE WHEN OLD.state='READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END)
     OR NEW.budget_disposition<>'ALLOCATED'
    THEN RAISE EXCEPTION 'formal refund lease not claimable' USING ERRCODE='40001';END IF;
    IF OLD.state='READY' AND EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent x WHERE x.payment_source='JOINPAY'
@@ -251,7 +251,7 @@ BEGIN
  IF i.id IS NULL OR i.payment_source<>'JOINPAY' OR i.evidence_level<>'JOINPAY_FORMAL' OR(NEW.operation='SUBMIT' AND i.requires_review)
   OR i.state NOT IN('SUBMITTING','UNKNOWN') OR i.budget_disposition<>'ALLOCATED'
   OR(NEW.operation='SUBMIT' AND NEW.admission_sha256<>i.initial_admission_sha256)
-  OR NEW.operation IS DISTINCT FROM CASE WHEN i.lease_version=1 AND i.state='SUBMITTING' THEN 'SUBMIT' ELSE 'QUERY' END
+  OR NEW.operation IS DISTINCT FROM (CASE WHEN i.lease_version=1 AND i.state='SUBMITTING' THEN 'SUBMIT' ELSE 'QUERY' END)
  THEN RAISE EXCEPTION 'refund attempt original binding missing' USING ERRCODE='23514';END IF;
  IF NEW.lease_version<>i.lease_version OR NEW.lease_owner<>i.lease_owner OR i.lease_until IS NULL OR i.lease_until<=clock_timestamp()
  THEN RAISE EXCEPTION 'refund attempt lease is stale' USING ERRCODE='23514',CONSTRAINT='joinpay_refund_live_lease';END IF;
