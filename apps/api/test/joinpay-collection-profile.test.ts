@@ -194,6 +194,15 @@ test("签名一致的查询API错误不成为已验证付款依据或发送能�
   assert.equal(inspected.providerPaidAtRaw,undefined);assert.equal(inspected.values?.r3_Amount,undefined);
 });
 
+test("未支付回包可确认原单状态，不产生付款成功事件或时间", () => {
+  const input=modelProfile(),profile=bindJoinpayCollectionProfile(input);
+  const response=signed("QUERY",{r0_Version:"2.6",r1_MerchantNo:MERCHANT,r2_OrderNo:ORDER,r3_Amount:"123.45",r4_ProductName:"A2SignatureTest",
+    r5_TrxNo:"",r6_BankTrxNo:"",r7_Fee:"0.00",r8_FrpCode:"ALIPAY_NATIVE",ra_Status:"102",rb_Code:"100",rc_CodeMsg:"",rf_PayTime:""});
+  const result=inspectJoinpayCollectionResponse(profile,"QUERY",response,binding(input),KEY);
+  assert.equal(result.verified,true);assert.equal(result.event,"E6");assert.equal(result.result,"CHANNEL_CREATED_UNPAID");
+  assert.equal(result.providerPaidAtRaw,undefined);assert.equal(result.values?.r5_TrxNo,undefined);assert.equal(result.values?.rf_PayTime,undefined);
+});
+
 test("公开profile原件与摘要同字节且禁止夹带未知商户密钥属性", () => {
   const input = modelProfile(), profile = bindJoinpayCollectionProfile(input), canonical = readCollectionProfileEvidence(profile, "SUBMIT");
   assert.equal(createHash("sha256").update(canonical).digest("hex"), describeCollectionProfile(profile, "SUBMIT").profileSha256);

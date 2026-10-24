@@ -74,7 +74,7 @@ BEGIN
    AND pg_get_constraintdef(oid) LIKE '%lease_version IS NOT NULL%')
  THEN RAISE EXCEPTION 'accepted G3 nullable raw/lease guard missing' USING ERRCODE='55000';END IF;
  FOREACH name IN ARRAY ARRAY['finance_entry_guard','finance_entry_batch_guard'] LOOP
-  SELECT pg_get_expr(tgqual,tgrelid) INTO definition FROM pg_trigger WHERE tgrelid='zzsh_order.settlement_ledger_entry'::regclass AND tgname=name;
+  SELECT substring(pg_get_triggerdef(oid) FROM ' WHEN \((.*)\) EXECUTE FUNCTION ') INTO definition FROM pg_trigger WHERE tgrelid='zzsh_order.settlement_ledger_entry'::regclass AND tgname=name AND tgnargs=0;
   IF definition IS NULL OR position('intentId' IN definition)=0 OR position('earningId' IN definition)=0
    OR position('guaranteeId' IN definition)=0 OR position('legacyDutyId' IN definition)=0 OR position('nativeRefundIntentId' IN definition)=0
   THEN RAISE EXCEPTION 'accepted G3 generic namespace gate missing: %',name USING ERRCODE='55000';END IF;

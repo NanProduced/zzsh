@@ -100,10 +100,14 @@ const UNIPAY_REQUEST: readonly Field[] = [R("p0_Version", V), R("p1_MerchantNo",
 const SYNC_RESPONSE: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", m(15)), R("r2_OrderNo", re(ORDER_NO)), R("r3_Amount", Y), R("r4_Cur", m(10)), OA("r5_Mp", m(100)), R("r6_FrpCode", m(50)), R("r7_TrxNo", re(TRX_NO)), OA("r8_MerchantBankCode", m(20)), O("r9_SubMerchantNo", m(20)), R("ra_Code", m(10)), RA("rb_CodeMsg", m(256)), R("rc_Result", { kind: "URL", max: 2048 }), O("rd_Pic", m(2048))];
 const NOTIFY: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", m(15)), R("r2_OrderNo", re(ORDER_NO)), R("r3_Amount", Y), R("r4_Cur", m(10)), OA("r5_Mp", m(200)), R("r6_Status", m(10)), R("r7_TrxNo", re(TRX_NO)), O("r8_BankOrderNo", m(20)), O("r9_BankTrxNo", m(30)), R("ra_PayTime", T), R("rb_DealTime", T), R("rc_BankCode", m(10)), O("rd_OpenId", m(128)), R("re_DiscountAmount", Y), O("rh_cardType", m(2)), O("rj_Fee", Y), R("rk_FrpCode", m(50)), O("rl_ContractId", m(32)), O("rm_SpecialInfo", m(256)), R("ro_SettleAmount", Y)];
 const QUERY_REQUEST: readonly Field[] = [R("p0_Version", V), R("p1_MerchantNo", m(15)), R("p2_OrderNo", re(ORDER_NO))];
-const QUERY_RESPONSE: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", m(15)), R("r2_OrderNo", re(ORDER_NO)), O("r3_Amount", Y), O("r4_ProductName", m(10)), O("r5_TrxNo", re(TRX_NO)), O("r6_BankTrxNo", m(30)), R("r7_Fee", Y), O("r8_FrpCode", m(50)), O("ra_Status", m(20)), R("rb_Code", m(20)), RA("rc_CodeMsg", m(256)), R("rd_OpenId", m(10)), R("re_DiscountAmount", m(10)), R("rf_PayTime", T), O("rh_cardType", m(2)), R("rj_BankCode", m(10)), O("rl_ContractId", m(32)), O("rm_SpecialInfo", m(256)), R("ro_SettleAmount", Y)];
+// 描述性元数据复用出站商品名/通知OpenId上限，不使用查询表的10字符限制拒绝合法回显。
+const QUERY_RESPONSE: readonly Field[] = [R("r0_Version", V), R("r1_MerchantNo", m(15)), R("r2_OrderNo", re(ORDER_NO)), O("r3_Amount", Y), O("r4_ProductName", m(30)), O("r5_TrxNo", re(TRX_NO)), O("r6_BankTrxNo", m(30)), R("r7_Fee", Y), O("r8_FrpCode", m(50)), O("ra_Status", m(20)), R("rb_Code", m(20)), RA("rc_CodeMsg", m(256)), R("rd_OpenId", m(128)), R("re_DiscountAmount", m(10)), R("rf_PayTime", T), O("rh_cardType", m(2)), R("rj_BankCode", m(10)), O("rl_ContractId", m(32)), O("rm_SpecialInfo", m(256)), R("ro_SettleAmount", Y)];
 // 查询API错误回包可无付款详情；身份、原号、错误码及原签名顺序仍保留。
 const QUERY_ERROR_RESPONSE: readonly Field[] = QUERY_RESPONSE.map((field): Field =>
   ["r0_Version", "r1_MerchantNo", "r2_OrderNo", "rb_Code"].includes(field.name) ? field : { ...field, required: false, empty: "EQUIV" });
+// 101/102尚无已付款详情；只选固定状态分支，不尝试第二种签名或解码协议。
+const QUERY_NONPAYMENT_RESPONSE: readonly Field[] = QUERY_RESPONSE.map((field): Field =>
+  ["r0_Version", "r1_MerchantNo", "r2_OrderNo", "ra_Status", "rb_Code"].includes(field.name) ? field : { ...field, required: false, empty: "EQUIV" });
 
 /** 各操作签名顺序（合同 §1；不含 hmac）。 */
 export const JOINPAY_SIGNATURE_ORDER = Object.freeze({
@@ -371,7 +375,9 @@ export function computeJoinpayCollectionDecision(operation: "SUBMIT" | "QUERY", 
   if (!decoded.ok) return { ...base, result: sync ? "SYNC_SCHEMA_REJECTED" : "QUERY_SCHEMA_REJECTED", reason: decoded.reason };
   const rawCode = decoded.raw.get("rb_Code")?.value;
   const apiError = !sync && rawCode !== undefined && rawCode !== null && rawCode !== "" && rawCode !== "100";
-  const fields = sync ? SYNC_RESPONSE : apiError ? QUERY_ERROR_RESPONSE : QUERY_RESPONSE, checked = checkSchema(fields, decoded.raw);
+  const rawStatus = decoded.raw.get("ra_Status")?.value;
+  const nonpayment = !sync && rawCode === "100" && (rawStatus === "101" || rawStatus === "102");
+  const fields = sync ? SYNC_RESPONSE : apiError ? QUERY_ERROR_RESPONSE : nonpayment ? QUERY_NONPAYMENT_RESPONSE : QUERY_RESPONSE, checked = checkSchema(fields, decoded.raw);
   if (!checked.ok) return { ...base, result: sync ? "SYNC_SCHEMA_REJECTED" : "QUERY_SCHEMA_REJECTED", reason: checked.reason, field: checked.field };
   if (!verify(fields, checked, key)) return { ...base, schema: "VALID", signature: "MISMATCH", result: "SIGNATURE_INVALID" };
   const signed = { ...base, schema: "VALID" as const, signature: "MATCH" as const };
@@ -398,6 +404,8 @@ export function computeJoinpayCollectionDecision(operation: "SUBMIT" | "QUERY", 
   if (!["100", "101", "102"].includes(status)) return { ...signed, ...common, result: "QUERY_EVIDENCE_INCOMPLETE", reason: "STATUS_UNKNOWN", rawStatus: status };
   if (v.r1_MerchantNo !== request.merchantNo || v.r2_OrderNo !== request.orderNo) return { ...signed, ...common, binding: "MISMATCH", result: "BINDING_MISMATCH" };
   const bound = { ...signed, binding: "MATCH" as const };
+  if ((status === "101" || status === "102") && ((v.r3_Amount !== undefined && v.r3_Amount !== centsToJoinpayYuan(request.amountCents))
+    || (v.r8_FrpCode !== undefined && v.r8_FrpCode !== request.frpCode))) return { ...signed, ...common, binding: "MISMATCH", result: "BINDING_MISMATCH" };
   if (status === "101") return { ...bound, ...common, event: "E5", result: "CHANNEL_REPORTED_FAILED" };
   if (status === "102") return { ...bound, ...common, event: "E6", result: "CHANNEL_CREATED_UNPAID" };
   const missing = ["r3_Amount", "r5_TrxNo", "r8_FrpCode"].find(name => v[name] === undefined);

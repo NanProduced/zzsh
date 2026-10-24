@@ -75,6 +75,10 @@ const queryJson = (patch: Record<string, string | null | undefined> = {}) => jso
 // SYNTHETIC_PROTOCOL错误信封；真实A2原文未另存，此处不是官方向量或原报文重放。
 const queryErrorJson = (patch: Record<string, string | null | undefined> = {}) => json({ r0_Version: "2.6", r1_MerchantNo: MER,
   r2_OrderNo: ORD, rb_Code: "10080003", rc_CodeMsg: "synthetic query rejection" }, patch, { order: ORDER.queryOrderResponse });
+// 按实际A2未支付字段shape转录，身份/金额改为虚构值并重签；不是官方向量。
+const nonpaidQueryJson = (patch: Record<string, string | null | undefined> = {}) => json({ r0_Version:"2.6",r1_MerchantNo:MER,r2_OrderNo:ORD,
+  r3_Amount:"123.45",r4_ProductName:"A2SignatureTest",r5_TrxNo:"",r6_BankTrxNo:"",r7_Fee:"0.00",r8_FrpCode:FRP,
+  ra_Status:"102",rb_Code:"100",rc_CodeMsg:"",rf_PayTime:"" },patch,{order:ORDER.queryOrderResponse});
 function notifyQs(patch: Record<string, string | undefined> = {}, hmac?: string): string {
   const v: Vals = { ...NOTIFY, ...patch };
   const pairs = Object.entries(v).filter((e): e is [string, string] => e[1] !== undefined);
@@ -193,8 +197,8 @@ test("R3-02: query branches A–F", () => {
     [{ r8_FrpCode: "" }, "QUERY_EVIDENCE_INCOMPLETE", "SUCCESS_FIELD_MISSING", "E6X"],
     [{ ra_Status: "101", r3_Amount: undefined, r5_TrxNo: undefined, r8_FrpCode: undefined }, "CHANNEL_REPORTED_FAILED", undefined, "E5"],
     [{ ra_Status: "102", r3_Amount: undefined, r5_TrxNo: undefined, r8_FrpCode: undefined }, "CHANNEL_CREATED_UNPAID", undefined, "E6"],
-    [{ ra_Status: "101", rf_PayTime: undefined }, "QUERY_SCHEMA_REJECTED", "PROTOCOL_FIELD_MISSING", "E6X"],
-    [{ ra_Status: "102", rf_PayTime: undefined }, "QUERY_SCHEMA_REJECTED", "PROTOCOL_FIELD_MISSING", "E6X"],
+    [{ ra_Status: "101", rf_PayTime: undefined }, "CHANNEL_REPORTED_FAILED", undefined, "E5"],
+    [{ ra_Status: "102", rf_PayTime: undefined }, "CHANNEL_CREATED_UNPAID", undefined, "E6"],
     [{ rf_PayTime: undefined }, "QUERY_SCHEMA_REJECTED", "PROTOCOL_FIELD_MISSING", "E6X"],
     [{ r3_Amount: "123.46" }, "BINDING_MISMATCH", undefined, "E6X"],
   ];
@@ -247,6 +251,33 @@ test("查询错误仍须验签与原商户原号一致，提供的金额或产�
   assert.equal(jp.computeJoinpayCollectionDecision("QUERY",badHmac,req(),KEY).signature,"MISMATCH");
   assert.equal(jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson({r7_Fee:"not-money"}),req(),KEY).schema,"INVALID");
   assert.equal(jp.computeJoinpayCollectionDecision("QUERY",queryErrorJson({unmapped:"value"}),req(),KEY).reason,"UNKNOWN_FIELD_REVIEW");
+});
+
+test("已签名非付款结果不要求尚未产生的付款详情，已付款仍走完整schema", () => {
+  for(const status of ["101","102"]){
+    const decision=jp.computeJoinpayCollectionDecision("QUERY",nonpaidQueryJson({ra_Status:status}),req(),KEY);
+    assert.equal(decision.schema,"VALID");assert.equal(decision.signature,"MATCH");assert.equal(decision.binding,"MATCH");
+    assert.equal(decision.event,status==="101"?"E5":"E6");assert.equal(decision.result,status==="101"?"CHANNEL_REPORTED_FAILED":"CHANNEL_CREATED_UNPAID");
+    assert.equal(decision.providerPaidAtRaw,undefined);assert.equal(decision.values?.rf_PayTime,undefined);assert.equal(decision.values?.ro_SettleAmount,undefined);
+    for(const state of REQUEST_STATES){const result=evaluateJoinpayQueryResponse(nonpaidQueryJson({ra_Status:status}),ctx(state));assert.equal(result.formalAcceptance,false);assert.notEqual(result.event,"E4");const stale=evaluateJoinpayQueryResponse(nonpaidQueryJson({ra_Status:status}),ctx(state,false));assert.equal(stale.event,"E9");assert.equal(stale.nextState,state);}
+  }
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",nonpaidQueryJson({ra_Status:"100"}),req(),KEY).schema,"INVALID");
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",nonpaidQueryJson({ra_Status:"999"}),req(),KEY).schema,"INVALID");
+});
+
+test("非付款状态同样拒绝错商户、错原号、错金额、错产品及伪造签名", () => {
+  for(const patch of [{r1_MerchantNo:"888000000000002"},{r2_OrderNo:"OTHER_ORDER"},{r3_Amount:"123.46"},{r8_FrpCode:"WEIXIN_NATIVE"}]){
+    assert.equal(jp.computeJoinpayCollectionDecision("QUERY",nonpaidQueryJson(patch),req(),KEY).result,"BINDING_MISMATCH");
+  }
+  const bad=JSON.stringify({...JSON.parse(nonpaidQueryJson()),hmac:"0".repeat(32)});
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",bad,req(),KEY).signature,"MISMATCH");
+  assert.equal(jp.computeJoinpayCollectionDecision("QUERY",nonpaidQueryJson({r7_Fee:"bad"}),req(),KEY).schema,"INVALID");
+});
+
+test("查询文字元数据复用出站商品名及通知OpenId上限，边界仍拒绝", () => {
+  assert.equal(evaluateJoinpayQueryResponse(queryJson({r4_ProductName:"a".repeat(30),rd_OpenId:"o".repeat(128)}),ctx()).result,"QUERY_SUCCEEDED");
+  assert.equal(evaluateJoinpayQueryResponse(queryJson({r4_ProductName:"a".repeat(31)}),ctx()).reason,"PROTOCOL_FIELD_TOO_LONG");
+  assert.equal(evaluateJoinpayQueryResponse(queryJson({rd_OpenId:"o".repeat(129)}),ctx()).reason,"PROTOCOL_FIELD_TOO_LONG");
 });
 
 test("terminal guard and stale lease precedence (E9)", () => {
