@@ -494,7 +494,10 @@ export async function publicationBlockers(
     ? await shared.rentalService(a.game_id)
     : await readGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
-  if (!v.rule_release_id || game?.current_release_id !== v.rule_release_id)
+  // A native draft that has never been bound to a release is not a rule change.
+  // A bound release that is no longer current still stops new orders.
+  const unboundNativeDraft = v.origin === "NATIVE" && v.review_state === "DRAFT" && !v.rule_release_id;
+  if (!unboundNativeDraft && (!v.rule_release_id || game?.current_release_id !== v.rule_release_id))
     reasons.push("RULE_CHANGED");
   if (purpose === "WRITE" && v.payload && v.origin === "NATIVE") {
     const lines = normalizeQuote(v.payload.quoteValues).lines;
@@ -557,9 +560,8 @@ export async function publicationBlockers(
     reasons.push(
       external.occupancy === "OCCUPIED" ? "OCCUPIED" : "OCCUPANCY_UNKNOWN",
     );
-  // Publish/submit/review only. A missing title property is not a stored empty title.
-  // READ and evaluatePublication(READ) keep a placeholder title visible.
-  if (purpose === "WRITE" && typeof v.title === "string" && (!v.title.trim() || v.title.includes("历史资料待核实"))) {
+  // Native titles may be empty. The migration placeholder still cannot publish on any origin.
+  if (purpose === "WRITE" && typeof v.title === "string" && (v.title.includes("历史资料待核实") || (!v.title.trim() && v.origin !== "NATIVE"))) {
     reasons.push("TITLE_REVIEW_REQUIRED");
   }
   return reasons;
@@ -1568,10 +1570,17 @@ export async function evaluatePublication(
   if (a.staff_restricted) blockers.push("STAFF_RESTRICTED");
   try {
     await assertAccepted(client, a, v);
+  } catch (error) {
+    if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
+    // Acceptance failed before media was read, so this is not a confirmed missing image.
+    blockers.push(v.payload && v.content_hash && v.rule_release_id ? "ACCEPTANCE_REQUIRED" : "QUOTE_REQUIRED");
+    return blockers;
+  }
+  try {
     await assertMediaReady(client, v, "direct", false, purpose === "READ" ? a : undefined, media ? await media() : undefined);
   } catch (error) {
     if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
-    blockers.push("CONFIRMATION_OR_MEDIA_REQUIRED");
+    blockers.push("MEDIA_REQUIRED");
   }
   return blockers;
 }
@@ -1689,9 +1698,56 @@ export async function readDraftSkinSummary(client: PoolClient, gameId: string, s
   return { source: "CURRENT_DRAFT_SELECTION", catalogRevision: found.revision, items: found.items.map(freezePresentationSkin), withheld: skinIds.length - found.items.length };
 }
 
+const PUBLIC_LISTING_ATTRIBUTE_KEYS = ["vit_level", "bear_level", "dive_level", "character_level", "grading_code", "login_method_code", "region_province", "region_city", "safe_box_code", "secret_kd", "service_window_start_minute", "service_window_end_minute", "service_window_timezone", "service_window_cross_midnight"] as const;
+
+/** Public read of the stored declaration. Absent booleans stay null; this does not write the payload or its hash. */
+export function publicListingAttributes(attrs: Record<string, unknown>): Record<string, unknown> {
+  const declared = (key: string) => attrs[key] === true ? true : attrs[key] === false ? false : null;
+  return {
+    ...Object.fromEntries([...PUBLIC_LISTING_ATTRIBUTE_KEYS, ...(Object.hasOwn(attrs, "grading_division") ? ["grading_division"] as const : [])].map((key) => [key, attrs[key] ?? null])),
+    face_is_self: declared("face_is_self"),
+    ban_record: declared("ban_record"),
+  };
+}
+
+const MIGRATION_TITLE = "历史资料待核实";
+/** Order snapshot title and the account's current title are different facts. A placeholder is not either title. */
+/** Fields the renter already received. Admin keeps its own current version beside this. */
+export function publicListingBasis(listing: Record<string, unknown>) {
+  const id = typeof listing.versionId === "string" ? listing.versionId : null;
+  if (!id) return null;
+  return {
+    id,
+    accountId: typeof listing.id === "string" ? listing.id : null,
+    title: typeof listing.title === "string" ? listing.title : null,
+    description: typeof listing.description === "string" ? listing.description : null,
+    attributes: listing.attributes && typeof listing.attributes === "object" ? listing.attributes : null,
+    attributeDisplay: listing.attributeDisplay && typeof listing.attributeDisplay === "object" ? listing.attributeDisplay : null,
+    presentation: listing.presentation && typeof listing.presentation === "object" ? listing.presentation : null,
+    media: Array.isArray(listing.media) ? listing.media : [],
+    quote: listing.quote && typeof listing.quote === "object" ? listing.quote : null,
+    termOption: listing.termOption && typeof listing.termOption === "object" ? listing.termOption : null,
+    fullPayoutSelected: listing.fullPayoutSelected === true ? true : listing.fullPayoutSelected === false ? false : null,
+    publishedAt: typeof listing.publishedAt === "string" ? listing.publishedAt : null,
+  };
+}
+
+export function orderAccountTitleFact(input: { snapshotTitle?: unknown; currentTitle?: unknown; resourceSummary?: unknown }) {
+  const text = (value: unknown) => typeof value === "string" ? value.trim() : "";
+  const missing = (value: string) => !value || value.includes(MIGRATION_TITLE);
+  const snapshot = text(input.snapshotTitle), current = text(input.currentTitle), summary = text(input.resourceSummary);
+  return {
+    orderTitle: missing(snapshot) ? null : snapshot,
+    orderTitleSource: missing(snapshot) ? "UNKNOWN" as const : "SNAPSHOT" as const,
+    currentAccountTitle: missing(current) ? null : current,
+    currentAccountSource: missing(current) ? "UNKNOWN" as const : "CURRENT_ACCOUNT" as const,
+    neutralSummary: summary || null,
+  };
+}
+
 export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
 export type PublicListingReadMode = "RENTABLE" | "DETAIL";
-const READABLE_NON_RENTAL_BLOCKERS = new Set(["OWNER_PAUSED", "OCCUPIED", "OCCUPANCY_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "RULE_CHANGED", "CONFIRMATION_OR_MEDIA_REQUIRED"]);
+const READABLE_NON_RENTAL_BLOCKERS = new Set(["OWNER_PAUSED", "OCCUPIED", "OCCUPANCY_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "RULE_CHANGED", "CONFIRMATION_OR_MEDIA_REQUIRED", "QUOTE_REQUIRED", "ACCEPTANCE_REQUIRED", "MEDIA_REQUIRED"]);
 
 export function publicAvailability(blockers: readonly string[], current: boolean, gate: SupplyGate | null): PublicAvailabilityState {
   if (!current || blockers.includes("OWNER_PAUSED")) return "OFFLINE";
@@ -1818,25 +1874,7 @@ export async function listingDetail(
     const fullPayoutDeclaration = attrs.full_payout_declaration as { schema?: unknown; selected?: unknown } | undefined;
     const fullPayoutSelected = fullPayoutDeclaration?.schema === "full-payout-declaration-v1" && typeof fullPayoutDeclaration.selected === "boolean"
       ? fullPayoutDeclaration.selected : null;
-    const publicAttrs = Object.fromEntries(
-      [
-        "vit_level",
-        "bear_level",
-        "dive_level",
-        "character_level",
-        "grading_code",
-        ...(Object.hasOwn(attrs, "grading_division") ? ["grading_division"] : []),
-        "login_method_code",
-        "region_province",
-        "region_city",
-        "safe_box_code",
-        "secret_kd",
-        "service_window_start_minute",
-        "service_window_end_minute",
-        "service_window_timezone",
-        "service_window_cross_midnight",
-      ].map((k) => [k, attrs[k] ?? null]),
-    );
+    const publicAttrs = publicListingAttributes(attrs);
     const game = prefetch?.shared
       ? ((await prefetch.shared.game(a.game_id)) as ListingGameRow | undefined)
       : (
@@ -1949,6 +1987,7 @@ export async function listingDetail(
     },
     available: !blockers.length,
     blockers,
+    occupancyKind: observed.gate?.occupancy === "OCCUPIED" ? (observed.gate.occupancyKind === "PENDING_PAYMENT" || observed.gate.occupancyKind === "RENTED" ? observed.gate.occupancyKind : "OCCUPIED") : null,
     decisions,
   };
 }

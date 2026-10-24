@@ -4,7 +4,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { attributeFacts, blockerLabel, formatAmount, formatFundingCents, formatTermDays, quantityText, type SupplyFacts, type Version } from "../supply-review/model";
+import { attributeFacts, blockerLabel, formatAmount, formatFundingCents, formatTermDays, quantityText, quoteLineFacts, type SupplyFacts, type Version } from "../supply-review/model";
 import { conditionHeadline, groupConditions } from "./account-list-model";
 
 const PENDING_TEXT: Record<string, string> = { PUBLIC_UNKNOWN: "公开状态待核", NEW_ORDERS_UNKNOWN: "新单资格待核", RESTRICTION_UNKNOWN: "运营限制待核", PAUSE_UNKNOWN: "号主暂停待核" };
@@ -68,7 +68,8 @@ export function FactsCard({ version }: { version: Version | null | undefined }) 
   const dep = obj(version?.declaration.attributes.owner_deposit_declaration), fp = obj(version?.declaration.attributes.full_payout_declaration), q = version?.quote;
   const term = version?.termOption;
   return <Card className="gap-2 px-4"><div className="flex items-center justify-between"><h2 className="text-base font-semibold">当前资料</h2><span className="text-xs text-muted-foreground">{version ? "第" + version.sequence + "版" : "版本未提供"}</span></div>
-    {version ? <dl className="text-sm">{kv("上号时间", version.attributeDisplay?.serviceWindow?.displayName ?? "未确认")}{kv("每日消耗", term?.dailyConsumption ? quantityText(term.dailyConsumption.quantity) : "未确认")}{kv("号主申报押金", dep && typeof dep.amountCents === "string" ? formatFundingCents(dep.amountCents) : "未申报")}{kv("全额包赔", fp && typeof fp.selected === "boolean" ? (fp.selected ? "已选" : "未选") : "未申报")}{kv("报价", q ? "¥" + formatAmount(q.resourceTotal.amount) + " · " + formatTermDays(q.termSeconds) : "未提供")}</dl> : <p className="mt-2 text-sm text-muted-foreground">当前资料版本未提供。</p>}
+    {version ? <dl className="text-sm">{kv("上号时间", version.attributeDisplay?.serviceWindow?.displayName ?? "未确认")}{attributeFacts(version).filter(fact => ["本人脸声明", "封禁记录声明", "小段位"].includes(fact.label)).map(fact => kv(fact.label, fact.value))}{kv("每日消耗", term?.dailyConsumption ? quantityText(term.dailyConsumption.quantity) : "未确认")}{kv("号主申报押金", dep && typeof dep.amountCents === "string" ? formatFundingCents(dep.amountCents) : "未申报")}{kv("全额包赔", fp && typeof fp.selected === "boolean" ? (fp.selected ? "已选" : "未选") : "未申报")}{kv("报价", q ? "¥" + formatAmount(q.resourceTotal.amount) + " · " + formatTermDays(q.termSeconds) : "未提供")}</dl> : <p className="mt-2 text-sm text-muted-foreground">当前资料版本未提供。</p>}
+    {version && quoteLineFacts(version).length ? <ul className="text-xs text-muted-foreground">{quoteLineFacts(version).map(line => <li key={line.itemId}>{line.name} · {line.quantity}{line.amount ? ` · ¥${formatAmount(line.amount)}` : ""}</li>)}</ul> : null}
     {q && <p className="text-xs text-muted-foreground">报价依据：资料第{version!.sequence}版保存值 · 规则 {version!.releaseId ?? "版本未提供"}；非当前规则重新试算，租客档位口径未提供。</p>}
-    <p className="text-xs text-muted-foreground">暂未提供：押金上限核验、租客价/号主得分项、每单押金、已确认规则版本。</p></Card>;
+    <p className="text-xs text-muted-foreground">暂未提供：押金上限核验、每单押金、已确认规则版本。声明不是平台核验。</p></Card>;
 }

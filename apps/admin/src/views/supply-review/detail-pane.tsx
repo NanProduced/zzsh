@@ -25,14 +25,41 @@ import {
   mediaReviewLabel,
   publicationSourceLabel,
   quantityText,
+  quoteLineFacts,
+  publicBasisVersion,
   reviewStateLabel,
-  skinsText,
+  skinFacts,
+  entitlementTermText,
   type Detail,
   type LegacyHistoricalRead,
   type MediaBinding,
+  type PublicBasis,
   type QueueItem,
   type ZoomTarget,
 } from "./model";
+
+function CatalogSkinImage({ mediaId }: { mediaId: string | null }) {
+  if (!mediaId) return null;
+  return <span className="mt-1 block"><img src={`/api/v1/supply/media/${mediaId}/content`} alt="" className="h-16 w-16 rounded border border-border object-contain" loading="lazy" /><span className="block text-xs text-muted-foreground">目录参考图，不是持有证明</span></span>;
+}
+
+function SkinList({ version }: { version: Detail["version"] }) {
+  const skins = skinFacts(version);
+  if (!skins.rows.length) return <p className="text-sm text-muted-foreground">{skins.source === "CURRENT_DRAFT_SELECTION" ? "当前草稿没有已选皮肤。" : version.declaration.skins.length ? "皮肤名称或归属尚未核齐" : "未申报皮肤"}{skins.withheld ? `另有 ${skins.withheld} 项未准入，不显示名称。` : ""}</p>;
+  return <ul className="space-y-1 text-sm">{skins.source === "CURRENT_DRAFT_SELECTION" ? <li className="text-xs text-muted-foreground">未发布修改中的当前选择{skins.withheld ? `；另有 ${skins.withheld} 项未准入，不显示名称` : ""}</li> : null}{skins.rows.map(skin => <li key={skin.id}>{skin.text}<CatalogSkinImage mediaId={skin.mediaId} /></li>)}</ul>;
+}
+
+function triState(value: unknown): string {
+  return value === true ? "是" : value === false ? "否" : "未申报";
+}
+
+/** Same detail helpers as the archive. Draft fields are not consulted. */
+export function PublicBasisView({ basis }: { basis: PublicBasis }) {
+  const version = publicBasisVersion(basis);
+  const skins = skinFacts(version);
+  const payout = basis.fullPayoutSelected;
+  return <section className="mb-4 space-y-3 rounded-lg border border-border p-4" aria-label="租客当前看到的版本"><h2 className="text-base font-semibold">租客当前看到的版本</h2><p className="text-sm text-muted-foreground">版本 {basis.id}。这一版不混入当前草稿。</p><p className="text-sm">{version.declaration.title || "标题未提供"}</p><p className="whitespace-pre-wrap text-sm">{version.declaration.description || "说明未提供"}</p><dl className="grid grid-cols-2 gap-3 text-sm">{attributeFacts(version).map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd>{fact.value}</dd></div>)}<div><dt className="text-xs text-muted-foreground">号主声明本人脸</dt><dd>{triState(basis.attributes?.face_is_self)}</dd></div><div><dt className="text-xs text-muted-foreground">号主声明封禁记录</dt><dd>{triState(basis.attributes?.ban_record)}</dd></div><div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payout === true ? "已选" : payout === false ? "未选" : "未申报"}</dd></div><div><dt className="text-xs text-muted-foreground">对外报价</dt><dd>{version.quote ? `¥${version.quote.resourceTotal.amount}` : "报价未提供"}</dd></div></dl><ul className="text-sm">{inventoryRows(version, null).map(row => <li key={row.itemId}>{row.name} · {row.current} {row.unit}</li>)}</ul>{version.declaration.entitlements.map(item => <p key={item.entitlementId} className="text-sm">{version.presentation.entitlements?.find(entry => entry.id === item.entitlementId)?.name ?? "权益名称未提供"} · {entitlementTermText(item)}</p>)}{basis.media.length ? <ul className="grid gap-2 sm:grid-cols-3">{basis.media.map((item, index) => <li key={item.assetId ?? index}>{item.url ? <img src={item.url} alt={item.category === "PENALTY" ? "处罚公示" : "账号展示图"} className="aspect-[4/3] w-full rounded border border-border object-contain" loading="lazy" /> : <span>图片地址未提供</span>}<span className="block text-xs text-muted-foreground">{item.category === "PENALTY" ? "处罚公示" : "账号展示图"}</span></li>)}</ul> : <p className="text-sm">这次公开读取没有展示图。</p>}<ul className="space-y-1 text-sm">{skins.rows.length ? skins.rows.map(skin => <li key={skin.id}>{skin.text}<CatalogSkinImage mediaId={skin.mediaId} /></li>) : <li>这次公开读取没有皮肤。</li>}</ul></section>;
+}
 
 function StateBadge({ state }: { state: string }) {
   const variant = state === "SUBMITTED" || state === "IMPORTED_UNVERIFIED" ? "warning" : state === "REJECTED" ? "destructive" : "secondary";
@@ -87,7 +114,7 @@ function MediaCard({
   onRestore: (assetId: string) => void;
 }) {
   const evidence = binding.purpose !== "ACCOUNT_DISPLAY";
-  const label = mediaPurposeLabel(binding);
+  const label = mediaPurposeLabel(binding) + (binding.category === "PENALTY" ? " · 处罚公示" : binding.category === "SHOWCASE" ? " · 展示" : "");
   const caption = evidence ? `${label} · 仅审核可见,始终不公开` : label;
   const quarantined = binding.reviewState === "QUARANTINED";
   return (
@@ -177,7 +204,7 @@ export function SupplyDetailPane({
   releaseGeneration,
   onRefresh,
   refreshing,
-  tab, onTabChange, actions,
+  tab, onTabChange, actions, entryNote,
 }: {
   detail?: Detail;
   historicalRead?: LegacyHistoricalRead | null;
@@ -199,6 +226,7 @@ export function SupplyDetailPane({
   onRefresh: () => void;
   refreshing: boolean;
   tab: "data" | "media" | "history";
+  entryNote?: string;
   onTabChange: (tab: "data" | "media" | "history") => void;
   actions?: ReactNode;
 }) {
@@ -233,6 +261,7 @@ export function SupplyDetailPane({
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <h2 className="break-words text-lg font-semibold">{version.declaration.title || "未命名资料"}</h2>
+          {entryNote ? <p className="mt-1 text-sm text-muted-foreground">{entryNote}</p> : null}
           <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <span>
               {detail.ownerName} · {version.sequence ? `第 ${version.sequence} 版` : ""}
@@ -343,7 +372,7 @@ export function SupplyDetailPane({
             </TableBody>
           </Table>
         </div>
-        <p className="text-sm text-muted-foreground">皮肤:{skinsText(version)}</p>
+        <SkinList version={version} />
         {version.declaration.entitlements.length ? (
           <ul className="space-y-2 text-sm">
             {version.declaration.entitlements.map((entitlement) => (
@@ -354,10 +383,7 @@ export function SupplyDetailPane({
                     ? "已声明持有"
                     : "未持有"
                   : String(entitlement.value ?? "未知")}{" "}
-                ·{" "}
-                {entitlement.expiresAt
-                  ? `到期 ${new Date(entitlement.expiresAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`
-                  : "未声明到期时间"}
+                · {entitlementTermText(entitlement)}
               </li>
             ))}
           </ul>
@@ -398,6 +424,7 @@ export function SupplyDetailPane({
           来自第 {version.sequence} 版资料保存的报价；非按当前规则重新试算，租客档位口径未提供。租期 {formatTermDays(version.quote.termSeconds)} · 每日消耗 {quantityText(version.termOption?.dailyConsumption?.quantity)}；不等同已成立订单的冻结价
         </p>
       ) : null}
+      {quoteLineFacts(version).length ? <ul className="space-y-1 text-sm">{quoteLineFacts(version).map(line => <li key={line.itemId}>{line.name} · {line.quantity}{line.amount ? ` · 参考 ¥${formatAmount(line.amount)}` : " · 分项未提供"}{line.ownerAmount ? ` · 号主侧 ¥${formatAmount(line.ownerAmount)}（不是净利润）` : ""}</li>)}</ul> : null}
 
       </CollapsibleContent></Collapsible>
       </TabsContent>

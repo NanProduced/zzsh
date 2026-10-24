@@ -10,6 +10,23 @@ const page=items=>({contractVersion:'admin-supervision.read.v1',contextKey:'fixt
 const tick=async h=>{for(let i=0;i<5;i++)await h.settle();};
 async function prepare(t,fetchImpl,options={}){const h=await mountHarness(t,{permissions,initialAccountId:'a',initialQuery:{context:'review'},fetchImpl,strict:true,...options});await tick(h);await h.fillReason('fixture: verify account/version and retain independent blockers');await h.click(h.btn('核对后确认运营限制'));await tick(h);return h;}
 const confirm=h=>h.click(h.btn('确认'+ '施加运营限制'));
+test('detail pane renders declaration, catalog resources and quote lines', async t => {
+  const value = detail({ ...accountA, display_no: 'TEST-A', owner_user_id: 'owner-a' }, 'PUBLISHED');
+  value.version.declaration.attributes = { ...value.version.declaration.attributes, face_is_self: false, ban_record: true };
+  value.version.declaration.inventory = [{ itemId: 'barrett', quantity: '2' }];
+  value.version.presentation.items = [];
+  value.version.catalogItems = [{ id: 'barrett', name: '巴雷特', unit: 'ROUND', code: 'df_billable_barrett_bullet' }];
+  value.version.quote.lines = [{ itemId: 'barrett', quantity: '2', unit: 'ROUND', buyerAmount: { amount: '1.00' } }];
+  value.supervision = { historical: false, facts: { publicVisible: true, newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', publicSource: 'NATIVE_PUBLICATION', sources: [], legacyNumbers: [] }, changes: null, previousVersion: null, restrictionHistory: { state: 'NOT_RECORDED', items: [], limit: 20 }, ownerLink: { state: 'READY', userId: 'owner-a' }, orders: { state: 'READY', items: [], total: 0 } };
+  value.contextKey = 'fixture-context';
+  const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'archive' }, fetchImpl: async () => json(value) });
+  await tick(h);
+  assert.match(h.el.textContent, /号主声明非本人脸/);
+  assert.match(h.el.textContent, /号主声明有封禁记录/);
+  assert.match(h.el.textContent, /巴雷特/);
+  assert.match(h.el.textContent, /参考 ¥1\.00/);
+});
+
 test('StrictMode discards an aborted old query after a work view changes',async t=>{
  const deferred=[];const h=await mountHarness(t,{permissions,strict:true,fetchImpl:async url=>{if(url.searchParams.get('view')==='paused')return json(page([item('b',true)]));return await new Promise(resolve=>deferred.push(()=>resolve(json(page([item('a')])))));}});
  await h.click(h.btn('号主暂停'));await tick(h);for(const finish of deferred)finish();await tick(h);

@@ -1,6 +1,7 @@
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import type { SupplyGateReader } from "../supply/publishing";
 
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import {
@@ -157,6 +158,8 @@ export type AuthSecurityOptions = {
   imProvisioner?: ImIdentityProvisioner;
   imIdentityRepository?: ImIdentityIntentRepository;
   imAppId?: string;
+  /** Existing read-only supply gate. Absent means the directory cannot claim a public version. */
+  supplyGateReader?: SupplyGateReader;
 };
 
 type Credentials = {

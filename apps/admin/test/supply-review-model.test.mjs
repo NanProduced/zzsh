@@ -13,8 +13,11 @@ import {
   effectiveRentable,
   formatAmount,
   formatTermDays,
+  entitlementTermText,
   inventoryRows,
   isHistorical,
+  quoteLineFacts,
+  skinFacts,
   lightboxKeyAction,
   mediaCanQuarantine,
   mediaCanRestore,
@@ -28,6 +31,7 @@ import {
   reasonIsDirty,
   reviewStateLabel,
   skinsText,
+  orderTitleText,
   supplyObjectLabel,
   unitText,
 } from "../src/views/supply-review/model.ts";
@@ -58,7 +62,8 @@ test("supervision views, sources and state labels are explicit", () => {
 test("blocker labels and rentability separate pause, restriction and qualification", () => {
   assert.equal(blockerLabel("RULE_CHANGED"), "规则已切换(需新版本)");
   assert.equal(blockerLabel("OCCUPANCY_UNKNOWN"), "占用状态未知");
-  assert.equal(blockerLabel("CONFIRMATION_OR_MEDIA_REQUIRED"), "规则接受或展示图不满足");
+  assert.equal(blockerLabel("CONFIRMATION_OR_MEDIA_REQUIRED"), "规则接受或展示图尚未同时满足");
+  assert.equal(blockerLabel("MEDIA_REQUIRED"), "展示图不满足");
   assert.equal(blockerLabel("OWNER_PAUSED"), "号主已暂停");
   assert.equal(blockerLabel("STAFF_RESTRICTED"), "运营限制中");
   assert.equal(blockerLabel("CUSTOM_CODE"), "CUSTOM_CODE");
@@ -150,7 +155,10 @@ test("attribute facts mirror the API fields and flag unconfirmed codes", () => {
   };
   const facts = attributeFacts(version);
   const byLabel = Object.fromEntries(facts.map((fact) => [fact.label, fact]));
-  assert.equal(facts.length, 12);
+  assert.equal(facts.length, 15);
+  assert.equal(byLabel["小段位"].value, "未申报");
+  assert.equal(byLabel["本人脸声明"].value, "未提供");
+  assert.equal(byLabel["封禁记录声明"].value, "未提供");
   assert.deepEqual(byLabel["安全箱配置"], { label: "安全箱配置", value: "未确认(代码 box-a)", unconfirmed: true });
   assert.equal(byLabel["段位"].value, "传奇");
   assert.equal(byLabel["每日消耗"].value, "10 M 哈夫币");
@@ -247,4 +255,25 @@ test("ADM-R1-04：编号分列——displayNo 只认 canonical，旧来源号单
   assert.match(supplyObjectLabel({ id: "a3", displayNo: null, facts: { legacyNumbers: ["0000123", "0000124"] } }), /^账号 /);
   // 前导零保留
   assert.equal(supplyObjectLabel({ id: "a4", displayNo: null, facts: { legacyNumbers: ["0000123"] } }).endsWith("0000123"), true);
+});
+
+test("declarations stay tri-state and an empty draft skin selection does not revive the old list", () => {
+  const version = { declaration: { attributes: { face_is_self: true, ban_record: null, grading_division: null }, inventory: [{ itemId: "barrett", quantity: "2" }, { itemId: "six", quantity: "120" }, { itemId: "helm", quantity: "0" }, { itemId: "armor", quantity: null }, { itemId: "coffee", quantity: "1" }, { itemId: "pack", quantity: "3" }], skins: ["old"], entitlements: [] }, presentation: { items: [], skins: [{ id: "old", name: "旧皮肤" }] }, catalogItems: [{ id: "barrett", name: "巴雷特", unit: "ROUND", code: "df_billable_barrett_bullet" }, { id: "six", name: "六级弹", unit: "ROUND" }, { id: "helm", name: "六级头", unit: "PIECE" }, { id: "armor", name: "六级甲", unit: "PIECE" }, { id: "coffee", name: "咖啡", unit: "PIECE" }, { id: "pack", name: "背包", unit: "PIECE", code: "df_billable_turtle_backpack_45" }], draftSkinSummary: { items: [], withheld: 2 }, quote: { resourceTotal: { amount: "10.00" }, termSeconds: "86400", lines: [{ itemId: "barrett", quantity: "2", unit: "ROUND", buyerAmount: { amount: "1.00" }, ownerAmount: { amount: "0.40" } }] } };
+  const facts = attributeFacts(version);
+  assert.equal(facts.find(fact => fact.label === "本人脸声明").value, "号主声明本人脸");
+  assert.equal(facts.find(fact => fact.label === "封禁记录声明").value, "未提供");
+  assert.equal(facts.find(fact => fact.label === "小段位").value, "未知");
+  const rows = inventoryRows(version, null);
+  assert.deepEqual(rows.map(row => row.name), ["巴雷特", "六级弹", "六级头", "六级甲", "咖啡", "背包"]);
+  assert.equal(rows.at(-1).unit, "个");
+  assert.equal(skinFacts(version).rows.length, 0);
+  assert.equal(skinFacts(version).source, "CURRENT_DRAFT_SELECTION");
+  assert.equal(entitlementTermText({ expiresAt: null, expiryKnowledge: "UNKNOWN" }), "期限未知");
+  assert.match(entitlementTermText({ expiresAt: "2026-01-02T00:00:00.000Z", expiryKnowledge: "KNOWN" }), /到期/);
+  const line = quoteLineFacts(version)[0];
+  assert.equal(line.name, "巴雷特");
+  assert.equal(line.ownerAmount, "0.40");
+  assert.equal(orderTitleText({ title: "历史资料待核实", accountTitle: { source: "CURRENT_ACCOUNT", title: "当前号" } }), "当前账号资料：当前号（不是本单原标题）");
+  assert.equal(orderTitleText({ title: "本单原题" }), "本单原题");
+  assert.equal(orderTitleText({ title: null }), "本单原标题未提供");
 });

@@ -230,7 +230,7 @@ export async function handleUserDirectoryAdmin(
         return;
       }
       const pagination = parseDirectoryPage(query, path === "/" || lookup);
-      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);dataToSend = await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!));return;}
+      if(resourceMatch){requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);requirePermission(access,ADMIN_PERMISSION.supplyRentalAccountRead);assertGameScopeUsable(gameScope, access.isBoss);dataToSend = await readDirectoryRentalAccount(client,viewer,decodeId(resourceMatch[1]!),options.supplyGateReader);return;}
       const limit = pagination?.pageSize ?? parseLimit(query.get("limit"));
 
       if (path === "/" || lookup) {

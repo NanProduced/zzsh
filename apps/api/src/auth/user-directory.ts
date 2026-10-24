@@ -9,6 +9,7 @@ import { orderReadKeyRelation, orderReadRelation, projectAdminReadOrder } from "
 import { legacyContinuationReady } from "../order/legacy-order-read";
 import { legacyUserOrderResources } from "../order/legacy-user-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
+import { publicListingBasis, readPublicListing, readPublishingAccount, type SupplyGateReader } from "../supply/publishing";
 import { readUserDirectoryBusinessSummaries, directoryCreditScopeSql, directoryCreditNotInitializedSql } from "./user-directory-business-summary";
 import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTORY_WALLET_SORT_JOINS, DIRECTORY_WALLET_SORT_KEY } from "./user-directory-wallet";
 import { readKnownMembershipTiers, DIRECTORY_MEMBERSHIP_TIERS, type DirectoryMembershipTierFilter } from "./user-directory-membership";
@@ -820,14 +821,24 @@ export async function listUserRentalAccounts(
   };
 }
 
-export async function readDirectoryRentalAccount(client:PoolClient,viewer:AdminDirectoryViewer,accountId:string) {
+export async function readDirectoryRentalAccount(client:PoolClient,viewer:AdminDirectoryViewer,accountId:string,gate?:SupplyGateReader) {
   if(!viewer.resourceRead)throw forbidden("Resource reading requires supply.rental_account.read");
   const account=(await client.query(`SELECT a.id AS "accountId",COALESCE(a.display_no,(SELECT l.legacy_account_no FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=a.id AND l.legacy_account_no IS NOT NULL ORDER BY l.imported_at DESC LIMIT 1)) AS "displayNo",
     a.owner_user_id AS "ownerUserId",u.name AS "ownerName",a.lifecycle,a.owner_paused AS "ownerPaused",a.staff_restricted AS "staffRestricted",a.legacy_hold AS "legacyHold",v.title,v.id AS "versionId",v.review_state AS "versionState",g.name AS "gameName",g.id AS "gameId"
     FROM zzsh_supply.rental_account a JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
     WHERE a.id=$1 AND ${gameScopeSql("a.game_id","$3","$2")}`,[accountId,viewer.isBoss,viewer.adminId])).rows[0];
   if(!account)throw notFound();
-  return {account:{...account,historicalRead:await loadLegacyHistoricalRead(client,accountId)},contextKey:viewer.authorizationKey};
+  let publicVisible: boolean | null = null, publicBasis: ReturnType<typeof publicListingBasis> = null;
+  if (gate) {
+    try {
+      publicBasis = publicListingBasis(await readPublicListing(client, await readPublishingAccount(client, accountId), gate, undefined, false, "DETAIL"));
+      publicVisible = true;
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) publicVisible = false;
+      else throw error;
+    }
+  }
+  return {account:{...account,historicalRead:await loadLegacyHistoricalRead(client,accountId),publicVisible,publicVersionId:publicBasis?.id ?? null,publicBasis},contextKey:viewer.authorizationKey};
 }
 
 const USER_ORDER_ROLES = ["renter", "owner", "any"] as const;

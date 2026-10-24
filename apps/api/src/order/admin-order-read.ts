@@ -3,6 +3,7 @@ import { readAdminOrderRefundSummary } from '../finance/channel-finance-read';
 import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
+import { orderAccountTitleFact } from "../supply/publishing";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
@@ -31,11 +32,12 @@ const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.r
     'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no,'expired',o.status='PENDING_PAYMENT' AND o.hold_until<=clock_timestamp(),
     'dispatch_state',g.provision_state,'wait_reason',g.wait_reason,'assigned_at',${utc('g.assigned_at')},'team_state',g.team_state,
     'first_response_at',to_jsonb(g)->>'first_response_at','remind_due_at',to_jsonb(g)->>'remind_due_at',
-    'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED'))`;
+    'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED'),
+    'current_account_title',(SELECT cv.title FROM zzsh_supply.listing_version cv WHERE cv.id=a.current_version_id AND cv.account_id=a.id))`;
 const LEGACY_RECORD = (continuationReady: boolean) => `to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
     'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? CONTINUATION_COMPLETED_AT : "l.source_completed_at")},
     'continuation_stage',h.stage,
-    'owner_name',ou.name,'renter_name',ru.name,'title',v.title)`;
+    'owner_name',ou.name,'renter_name',ru.name,'current_account_title',v.title)`;
 
 /** Restricts one source branch to its own ids; the values are the caller's
  *  parameter placeholders, so the same relation serves the page read and the
@@ -72,6 +74,31 @@ export function orderReadKeyRelation(continuationReady: boolean, restrict?: Orde
  return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER,restrict);
 }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
+function legacyResourceSummary(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  const named: Array<[string, string]> = [["expend_haff", "哈夫币"], ["awm_bullet_num", "AWM子弹"], ["level6_bullet_num", "6级子弹"], ["level6_helmet_num", "6级头盔"], ["level6_armor_num", "6级护甲"], ["top_insure_card_num", "顶级保险"], ["barrett_bullet_num", "巴雷特子弹"], ["coffee_num", "咖啡豆"]];
+  const parts = named.flatMap(([key, name]) => typeof row[key] === "string" && row[key].trim() ? [`${name} ${row[key].trim()}`] : []);
+  return parts.length ? `本单资源：${parts.join("、")}` : null;
+}
+function frozenQuoteSummary(quote: unknown): string | null {
+  if (!quote || typeof quote !== "object" || Array.isArray(quote)) return null;
+  const lines = (quote as { lines?: unknown }).lines;
+  if (!Array.isArray(lines)) return null;
+  const parts = lines.flatMap(line => {
+    if (!line || typeof line !== "object") return [];
+    const row = line as { quantity?: unknown; unit?: unknown; name?: unknown };
+    if (typeof row.quantity !== "string" || !row.quantity.trim()) return [];
+    const unit = typeof row.unit === "string" ? row.unit : "";
+    const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : unit === "HAFF_BASE" ? "哈夫币" : "物资";
+    return [`${name} ${row.quantity.trim()}${unit ? " " + unit : ""}`];
+  });
+  return parts.length ? `本单资源：${parts.join("、")}` : null;
+}
+function accountTitleFact(snapshotTitle: unknown, currentTitle: unknown, resourceSummary: string | null) {
+  const titles = orderAccountTitleFact({ snapshotTitle, currentTitle, resourceSummary });
+  return { title: titles.orderTitle, accountTitle: { source: titles.currentAccountSource, title: titles.currentAccountTitle, neutralSummary: titles.neutralSummary } };
+}
 // 只投影精确绑定的原APPLIED付款；报价不能补出实收，确认也不代表结算或到账。
 function nativeRecordedAmount(r:Record<string,any>,viewer:OrderReadViewer){
  const p=r.native_payment_record;
@@ -83,12 +110,14 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
  if(origin==='NATIVE'){
   const row:OrderRow={id:r.id,displayNo:r.display_no,accountId:r.account_id,versionId:r.listing_version_id,ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,gameId:r.game_id,releaseId:r.rule_release_id,contentHash:r.content_hash,termOptionCode:r.term_option_code,status:r.status,rentalAmountCents:r.rental_amount_cents,depositAmountCents:r.deposit_amount_cents,currency:r.currency,termSeconds:r.term_seconds,quoteSnapshot:r.quote_snapshot,title:r.title,holdUntil:r.hold_until,paidAt:r.paid_at,dispatchState:r.dispatch_state,dispatchWaitReason:r.wait_reason,assignedAt:r.assigned_at,teamState:r.team_state,firstResponseAt:r.first_response_at??null,remindDueAt:r.remind_due_at??null,addRound:r.add_round??0,escalationState:r.escalation_state??'NOT_STARTED',cancelReason:r.cancel_reason,cancelledAt:r.cancelled_at,createdAt:r.created_at,revision:r.revision,expiredAwaitingCancel:r.expired,ownerName:r.owner_name,renterName:r.renter_name};
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
-  return {...result,source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
+  const titles = accountTitleFact(r.title, r.current_account_title, frozenQuoteSummary(r.quote_snapshot));
+  return {...result,...titles,source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;
  const goods=legacyMoneyCents(raw.goods_money),items=legacyMoneyCents(raw.expend_pay_money);
- return {id:r.id,displayNo:r.original_order_no,status,title:r.title??'资源资料待核',accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
+ const titles = accountTitleFact(undefined, r.current_account_title, legacyResourceSummary(raw));
+ return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,

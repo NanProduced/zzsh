@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { suggestKind, kindHint, groupConditions, liftSummary, conditionHeadline, independentFacts, parseSavedViews, serializeSavedViews } from '../src/views/supply-accounts/account-list-model.ts';
+import { suggestKind, kindHint, groupConditions, liftSummary, conditionHeadline, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason } from '../src/views/supply-accounts/account-list-model.ts';
 
 const facts = (o = {}) => ({ publicVisible: true, publicSource: null, newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', sources: [], legacyNumbers: [], ...o });
 
@@ -47,11 +47,11 @@ test('saved views validate corrupt, stale, foreign and partial data', () => {
   assert.deepEqual(parseSavedViews(null, 'me'), { views: [] });
 });
 
-import { primaryReason, nextStep, compactTime, versionText, idTail } from '../src/views/supply-accounts/account-list-model.ts';
+import { compactTime, versionText, idTail } from '../src/views/supply-accounts/account-list-model.ts';
 test('row reason: primary + others, concrete next steps, compact time', () => {
   const r = primaryReason(facts({ staffRestricted: true, primaryReasonCode: 'STAFF_RESTRICTED', newOrders: false, reasons: ['STAFF_RESTRICTED', 'OCCUPIED', 'FUNDING_UNKNOWN'] }));
   assert.equal(r.code, 'STAFF_RESTRICTED'); assert.equal(r.others, 2);
-  assert.equal(nextStep('RULE_CHANGED'), '号主按新规则重建资料');
+  assert.equal(nextStep('RULE_CHANGED'), '按新规则重新核价并确认');
   assert.ok(!['STAFF_RESTRICTED','OWNER_PAUSED','RULE_CHANGED','FUNDING_UNKNOWN','X'].map(nextStep).includes('平台'));
   assert.equal(compactTime('2026-10-12T12:11:00.000000Z', new Date('2026-10-12T00:00:00Z')), '10-12 20:11');
   assert.equal(versionText(null), '版本未提供'); assert.equal(idTail('account_362b3c1f8efe'), '…1f8efe');
@@ -59,8 +59,8 @@ test('row reason: primary + others, concrete next steps, compact time', () => {
 
 /* ---------- F2：列表事实只来自正式摘要，缺值保持未提供 ---------- */
 import {
-  rowHaffText, rowQuoteText, rowDepositText, rowGuaranteeRequirementText,
-  rowGuaranteeEligibilityText, rowGuaranteeProofText, rowFullPayout, rowListingStatus,
+  alignedQuickRow, rowHaffText, rowQuoteText, rowDepositText, rowGuaranteeRequirementText,
+  rowGuaranteeEligibilityText, rowGuaranteeProofText, rowFullPayout,
 } from '../src/views/supply-accounts/account-list-model.ts';
 
 const rowOf = (over = {}) => ({ id: 'a', accountId: 'a', displayNo: 'A-1', ownerId: 'u-1', ownerName: '阿洛', revision: '3', gameName: 'g', versionId: 'v-1', sequence: '2', title: '100M 不包赔账号 3x3箱', reviewState: 'PUBLISHED', sortAt: '2026-10-03T00:00:00.000000Z', facts: facts(), ...over });
@@ -103,7 +103,24 @@ test('unknown axes stay unknown instead of collapsing into 已下架', () => {
     assert.notEqual(rowListingStatus(state).label, '已下架');
   }
   assert.equal(rowListingStatus(rowOf({ facts: facts({ staffRestricted: true, reasons: ['STAFF_RESTRICTED'] }) })).label, '运营限制');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', publicVisible: true }) })).label, '已出租');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', publicVisible: true }) })).label, '占用中');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'PENDING_PAYMENT', publicVisible: true, newOrders: false }) })).label, '待付款预留');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'RENTED', publicVisible: true, newOrders: false }) })).label, '租用中');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false, occupancy: 'FREE' }) })).label, '可查看');
+  assert.notEqual(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false }) })).label, '上架中');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: true, occupancy: 'FREE' }) })).label, '可接新单');
+});
+
+test('an unfinished draft is one step, not three operational faults', () => {
+  const draft = facts({ publicVisible: false, newOrders: false, reasons: ['RULE_CHANGED', 'PUBLICATION_REQUIRED', 'CONFIRMATION_OR_MEDIA_REQUIRED', 'QUOTE_REQUIRED'] });
+  const g = groupConditions(draft);
+  assert.equal(g.blocked.filter(item => ['RULE_CHANGED', 'PUBLICATION_REQUIRED', 'CONFIRMATION_OR_MEDIA_REQUIRED', 'QUOTE_REQUIRED'].includes(item.code)).length, 1);
+  assert.equal(primaryReason(draft).code, 'QUOTE_REQUIRED');
+  assert.match(nextStep('QUOTE_REQUIRED'), /草稿/);
+  assert.doesNotMatch(nextStep('RULE_CHANGED'), /重建资料/);
+  const bail = facts({ publicVisible: true, newOrders: null, reasons: ['PUBLISHER_BAIL_UNCONFIRMED'] });
+  assert.equal(groupConditions(bail).pending.length, 1);
+  assert.equal(groupConditions(bail).pending[0].code, 'PUBLISHER_BAIL_UNCONFIRMED');
 });
 
 test('guarantee requirement, eligibility and recorded proof are three separate statements', () => {
@@ -156,4 +173,17 @@ test('current list facts stay authoritative when separate historical facts also 
   assert.equal(rowDepositText(current), '¥50.00');
   assert.equal(rowQuoteText(current).total, '¥212.77');
   assert.equal(rowHaffText({ ...current, summary: { ...current.summary, haff: { quantity: null } } }), '未确认', 'a current unknown does not silently become historical inventory');
+});
+
+test('cross-version quickview keeps the loaded declaration and separates zero, absent and unknown deposits', () => {
+  const row = rowOf({ summary: { versionId: 'v-1', baseDeposit: { amountCents: '11100' } } });
+  const read = (declaration) => alignedQuickRow(row, { version: { id: 'v-3', quote: null, presentation: { items: [] }, catalogItems: [], declaration: { inventory: [], attributes: { owner_deposit_declaration: declaration } } } });
+  const declaration = (amountCents) => ({ schema: 'owner-deposit-declaration-v1', declarationVersion: 'v-3', amountCents });
+  assert.equal(rowDepositText(read(declaration('9900'))), '¥99.00');
+  assert.equal(rowDepositText(read(declaration('0'))), '¥0.00');
+  assert.equal(rowDepositText(read(null)), '未申报');
+  for (const value of [undefined, declaration('1e2'), declaration('1.1'), declaration('-1'), { ...declaration('9900'), schema: 'unknown' }]) {
+    assert.equal(rowDepositText(read(value)), '未提供');
+  }
+  assert.equal(rowDepositText(alignedQuickRow(row)), '¥111.00');
 });

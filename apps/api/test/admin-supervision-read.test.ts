@@ -226,30 +226,22 @@ test("account route lets the owner read history and stops another user first", a
 /* ---------- API A：列表最小受权摘要 ---------- */
 
 const summaryRow = { id: "a-1", accountId: "a-1", displayNo: "A-1", ownerId: "u-1", revision: "3", sortAt: "2026-10-03T00:00:00.000000Z", accountCreatedAt: "2026-01-02T03:04:05.000000Z", accountUpdatedAt: null, versionId: "v-1", sequence: "2", title: "100M 不包赔账号", reviewState: "PUBLISHED", versionCreatedAt: "2026-02-02T02:02:02.000000Z", ruleReleaseId: "release-1", priceVersionId: "price-1", ownerName: "阿洛", gameName: "三角洲" };
-const summaryDetail = {
-    ownerName: "阿洛", available: false, blockers: ["PUBLISHER_BAIL_UNCONFIRMED"],
-    version: {
-        id: "v-1", sequence: "2", contentHash: "hash-1", releaseId: "release-1",
-        publication: { source: "OWNER_DIRECT", publishedAt: "2026-02-03T00:00:00.000Z" },
-        declaration: { attributes: {}, inventory: [{ itemId: "haff-unit-1", quantity: "12500000" }, { itemId: "bullets", quantity: "120" }] },
-        catalogItems: [{ id: "haff-unit-1", unit: "HAFF_BASE" }, { id: "bullets", unit: "ROUND" }],
-        quote: {
-            currency: "CNY", ruleReleaseId: "release-1", catalogRevision: "9",
-            resourceTotal: { amount: "212.77", currency: "CNY", unit: "yuan", scale: "2" },
-            tenantDeposit: { amount: "50.00", currency: "CNY", unit: "yuan", scale: "2" },
-            tenantPayableTotal: { amount: "262.77", currency: "CNY", unit: "yuan", scale: "2" },
-            ownerTotal: { amount: "190.00", currency: "CNY", unit: "yuan", scale: "2" },
-            publisherBailRequirement: { amount: "300.00", currency: "CNY", unit: "yuan", scale: "2" },
-        },
-    },
-};
+const yuan = (amount: string) => ({ currency: "CNY" as const, unit: "yuan" as const, amount, scale: 2 as const });
+function summaryVersion(id: string) {
+    const unit = (amount: string) => ({ currency: "CNY" as const, unit: "yuan" as const, amount, scale: 8 as const });
+    const line = (itemId: string, quantity: string, itemUnit: "HAFF_BASE" | "ROUND", buyer: string) => ({ itemId, quantity, unit: itemUnit, unitQuantity: "1", pricingKind: "FIXED_UNIT" as const, buyerUnitAmount: unit(buyer), ownerUnitAmount: unit("0.10000000"), buyerAmount: yuan(buyer), ownerAmount: yuan("1.00"), platformAmount: yuan("0.10") });
+    return { id, account_id: id.replace(/^version-/, ""), sequence: "2", origin: "NATIVE", review_state: "PUBLISHED", title: "100M", description: null, attributes: {}, term_option_code: "daily", pricing_option_code: "standard", rule_release_id: "release-1", content_hash: "hash-1", schema_version: 1, revision: "1", submitted_at: null, presentation: {}, payload: { schemaVersion: 1, accountId: id.replace(/^version-/, ""), gameId: "fixture-game", declaration: { title: "100M", description: null, attributes: {}, inventory: [{ itemId: "haff-unit-1", quantity: "12500000" }, { itemId: "bullets", quantity: "120" }], skins: [], entitlements: [], termOptionCode: "daily", pricingOptionCode: "standard", mediaBindings: [] }, ruleRefs: { releaseId: "release-1", priceVersionId: "price-1", termVersionId: "term", agreementVersionId: "ag", agreementDigest: "d".repeat(64), catalogRevision: "9" }, quoteValues: { schemaVersion: 1, currency: "CNY", priceVersionId: "price-1", ruleReleaseId: "release-1", mode: "SPREAD", lines: [line("haff-unit-1", "12500000", "HAFF_BASE", "200.00"), line("bullets", "120", "ROUND", "12.77")], resourceTotal: yuan("212.77"), ownerTotal: yuan("190.00"), platformFullProfit: yuan("22.77"), tenantDeposit: yuan("50.00"), publisherBailRequirement: yuan("300.00"), termSeconds: "86400", expiryDisclosures: [], unitAmountsInformational: true, roundingPolicy: "HALF_UP_CENT_V1", pricingInputs: { haffRatioSchema: null } } } };
+}
 function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean } = {}) {
     const sql: string[] = [], ownerRequests: unknown[][] = [];
     const client = { query: async (text: string, values?: unknown[]) => {
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
-        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: batchVersionRows((values?.[0] ?? []) as string[]) };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) };
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
+        if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         if (text.includes("p.funding_policy AS policy,p.status AS status")) {
             if (options.policy === undefined) return { rows: [] };
             return { rows: [{ accountId: "a-1", status: "SEALED", policy: options.policy }] };
@@ -266,18 +258,7 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
     return { sql, client, viewer, ownerRequests };
 }
 
-/** Mirrors the real quote projection: a public viewer never receives internal owner amounts. */
-const publicOrAdminQuote = (quoteViewer: string) => quoteViewer === "admin" ? summaryDetail
-    : { ...summaryDetail, version: { ...summaryDetail.version, quote: { ...summaryDetail.version.quote, ownerTotal: undefined, publisherBailRequirement: undefined } } };
-
-/** publishing.publicationBlockers always asks the gate for the row; the mock must too. */
-const detailThatReadsGate = async (_c: unknown, account: PublishingAccount, _v: string, gate: unknown, quoteViewer: string) => {
-    if (typeof gate === "function") await (gate as (client: unknown, account: PublishingAccount) => Promise<unknown>)(null, account);
-    return publicOrAdminQuote(quoteViewer);
-};
-
 test("list summary reports only authoritative facts and keeps every missing fact unprovided", async t => {
-    t.mock.method(publishing, "listingDetail", detailThatReadsGate);
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });
     const { sql, client, viewer } = summaryHarness(["supply.review.read"]);
     const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
@@ -303,10 +284,11 @@ test("list summary reports only authoritative facts and keeps every missing fact
     // 页级补读只跑一次，不随行数增长。
     assert.equal(sql.filter(s => s.includes("account_guarantee_proof")).length, 1);
     assert.equal(sql.filter(s => s.includes("p.funding_policy AS policy,p.status AS status")).length, 1);
+    assert.equal(sql.filter(s => s.includes("agreement_version") || s.includes("review_decision")).length, 0, "list does not load agreement or review history");
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game WHERE id=$1")).length, 1, "the page shares one game read");
 });
 
 test("list summary gates internal amounts and owner contact projection behind their own permissions", async t => {
-    t.mock.method(publishing, "listingDetail", detailThatReadsGate);
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const internal = summaryHarness(["supply.review.read", "supply.quote.internal.read", "user.directory.read"], {
         policy: fundingPolicyFixture("FIXED_CENTS"),
@@ -331,7 +313,6 @@ test("list summary gates internal amounts and owner contact projection behind th
 });
 
 test("R1 the guarantee requirement follows the enabled mechanism, never the stale fixed policy", async t => {
-    t.mock.method(publishing, "listingDetail", detailThatReadsGate);
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const waiver = fundingPolicyFixture("NOT_REQUIRED"), fixed = fundingPolicyFixture("FIXED_CENTS");
     const fixedPolicyGate: SupplyGateReader = async () => ({ publisherBail: "SATISFIED", occupancy: "FREE", reference: "proof-1" });
@@ -429,20 +410,18 @@ test("the admin detail and the supervision facts share one public projection", a
 });
 
 test("the supervision page reads its accounts, versions, publication probe and legacy facts once per page", async t => {
-    const seen: Array<{ id: string; version: string | null; hasPublication: boolean; shared: boolean }> = [];
-    t.mock.method(publishing, "listingDetail", async (_c: unknown, account: PublishingAccount, _v: string, gate: unknown, _q: string, _pa: unknown, _s: boolean, _m: string, prefetch: any) => {
-        seen.push({ id: account.id, version: prefetch?.version?.id ?? null, hasPublication: prefetch?.hasPublication ?? null, shared: Boolean(prefetch?.shared) });
-        if (typeof gate === "function") await (gate as (client: unknown, account: PublishingAccount) => Promise<unknown>)(null, account);
-        return summaryDetail;
-    });
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const sql: string[] = [];
     const client = { query: async (text: string, values?: unknown[]) => {
         sql.push(text);
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow, { ...summaryRow, id: "a-2", accountId: "a-2", ownerId: "u-2" }] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
-        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: batchVersionRows((values?.[0] ?? []) as string[]) };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [{ id: "version-moved" }] };
         if (text.includes("SELECT DISTINCT account_id FROM zzsh_supply.listing_publication")) return { rows: [{ account_id: "a-1" }] };
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
+        if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         return { rows: [], rowCount: 0 };
     } } as never;
     const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(["supply.review.read"]) } };
@@ -454,33 +433,59 @@ test("the supervision page reads its accounts, versions, publication probe and l
     assert.equal(sql.filter(s => s.includes("legacy_supply_map")).length, 1, "the legacy source rows are one batch");
     assert.equal(sql.filter(s => s.includes("legacy_order_read_snapshot")).length, 1, "the old account numbers are one batch");
     assert.equal(sql.filter(s => s.includes("source_status::int")).length, 1, "the historical reads are one batch");
-    // The first-read version tuple stays bound to the row.
-    assert.deepEqual(seen.map(entry => entry.version), ["version-a-1", "version-a-2"]);
-    assert.deepEqual(seen.map(entry => entry.hasPublication), [true, false]);
-    assert.ok(seen.every(entry => entry.shared), "the page shares its game and release reads");
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.listing_version WHERE id=$1")).length, 0, "the list keeps the batched version and does not re-read a moved current");
+    assert.equal(sql.filter(s => s.includes("agreement_version") || s.includes("review_decision") || s.includes("draftSkin")).length, 0, "complete detail text stays off the list");
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game WHERE id=$1")).length, 1, "the page shares one game read");
+});
+
+test("saved unquoted draft stock is one page read and keeps 0, unknown and undeclared apart", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
+    const stock = new Map<string, string | null>([["version-a-9", "9000000"], ["version-a-0", "0"], ["version-a-u", null]]);
+    let inventoryReads = 0;
+    const ids = ["a-9", "a-0", "a-u", "a-n"];
+    const client = { query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT a.id,")) return { rows: ids.map(id => ({ ...summaryRow, id, accountId: id, ownerId: "u-1", versionId: `version-${id}` })) };
+        if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(id => ({ ...summaryVersion(id), payload: null, content_hash: null, rule_release_id: null, review_state: "DRAFT", origin: "NATIVE" })) };
+        if (text.includes("/* page-inventory */")) {
+            inventoryReads++;
+            const wanted = (values?.[0] ?? []) as string[];
+            return { rows: wanted.flatMap(id => stock.has(id) ? [{ versionId: id, itemId: "haff-a", quantity: stock.get(id), unit: "HAFF_BASE", code: "haff", name: "哈夫币" }] : []) };
+        }
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
+        if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
+        return { rows: [], rowCount: 0 };
+    } } as never;
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(["supply.review.read"]) } };
+    const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "fixture" }), queryKey);
+    const haff = (id: string) => (page.items.find(item => (item as { summary?: { versionId?: string } }).summary?.versionId === id) as { summary?: { haff?: { quantity?: string | null } | null; quote?: unknown } } | undefined)?.summary;
+    assert.equal(inventoryReads, 1, "unfrozen stock is one page query");
+    assert.equal(haff("version-a-9")?.haff?.quantity, "9000000");
+    assert.equal(haff("version-a-0")?.haff?.quantity, "0");
+    assert.equal(haff("version-a-u")?.haff?.quantity, null);
+    assert.equal(haff("version-a-n")?.haff ?? null, null);
+    assert.equal(haff("version-a-9")?.quote, null);
 });
 
 test("the batch read keeps the first-read version tuple when current moves twice", async t => {
-    const seen: Array<string | null> = [];
-    let versionReads = 0;
-    t.mock.method(publishing, "listingDetail", async (_c: unknown, account: PublishingAccount, _v: string, gate: unknown, _q: string, _pa: unknown, _s: boolean, _m: string, prefetch: any) => {
-        seen.push(prefetch?.version?.id ?? null);
-        if (typeof gate === "function") await (gate as (client: unknown, account: PublishingAccount) => Promise<unknown>)(null, account);
-        return summaryDetail;
-    });
+    let versionReads = 0, movedReads = 0;
     t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION" }));
     const client = { query: async (text: string, values?: unknown[]) => {
         if (text.startsWith("SELECT a.id,")) return { rows: [summaryRow] };
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
-        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) { versionReads++; return { rows: batchVersionRows((values?.[0] ?? []) as string[]) }; }
-        // A later single read of the same account would answer the moved current version.
-        if (text.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [{ ...batchVersionRows(["version-a-1"])[0], id: "version-moved" }] };
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) { versionReads++; return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) }; }
+        if (text.includes("FROM zzsh_supply.listing_version WHERE id=$1")) { movedReads++; return { rows: [{ id: "version-moved" }] }; }
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
+        if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         return { rows: [], rowCount: 0 };
     } } as never;
     const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(["supply.review.read"]) } };
-    await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
     assert.equal(versionReads, 1, "the current version is read once for the page");
-    assert.deepEqual(seen, ["version-a-1"], "the row keeps the version the page first selected");
+    assert.equal(movedReads, 0, "a later current version is not substituted into the page");
+    assert.equal((page.items[0] as { summary?: { haff?: { quantity?: string } } }).summary?.haff?.quantity, "12500000");
 });
 
 test("the supervision detail reads one public projection for the viewed, current and restricted versions", async () => {

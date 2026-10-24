@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertCurrentRelease, freezePresentationSkin, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
+import { assertCurrentRelease, evaluatePublication, freezePresentationSkin, orderAccountTitleFact, publicListingAttributes, publicListingBasis, publicationBlockers, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview } from "../src/supply/publishing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
 import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS } from "../src/supply/delta-rental";
@@ -215,5 +215,65 @@ test("new presentation freezes media kind alone, including unknown, without expo
     assert.equal(JSON.stringify(frozen).includes("private.example"), false);
     const result = await readPresentation({ query: async () => { throw new Error("Frozen media kind must not query today's catalog"); } } as never, { presentation: { items: [], skins: [frozen] } } as never);
     assert.equal((result.skins as Record<string, unknown>[])[0]!.mediaKind, mediaKind);
+  }
+});
+
+const nativeGate = async () => ({ publisherBail: "NOT_REQUIRED" as const, occupancy: "FREE" as const, reference: "fixture" });
+function nativeGateClient(acceptance = false) {
+  return { query: async (sql: string) => {
+    if (sql.includes("zzsh_auth_user")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }], rowCount: 1 };
+    if (sql.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "g", code: "delta", name: "三角洲", enabled: true, current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: "g", gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
+    if (sql.includes("rule_acceptance")) return { rows: acceptance ? [{ ok: 1 }] : [], rowCount: acceptance ? 1 : 0 };
+    return { rows: [], rowCount: 0 };
+  } };
+}
+const nativeAccount = { id: "a", owner_user_id: "o", game_id: "g", current_version_id: "v", lifecycle: "ACTIVE", legacy_hold: "NONE", revision: "1", owner_paused: false, staff_restricted: false, display_no: null };
+
+test("native empty title is not a write blocker; a legacy placeholder still is", async () => {
+  const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
+  const write = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, nativeGate, "WRITE");
+  assert.equal(write.includes("TITLE_REVIEW_REQUIRED"), false, JSON.stringify(write));
+  const legacy = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "UNRESOLVED" } as never, { ...draft, origin: "LEGACY_OBSERVATION", title: "历史资料待核实" } as never, nativeGate, "WRITE");
+  assert.equal(legacy.includes("TITLE_REVIEW_REQUIRED"), true, JSON.stringify(legacy));
+  assert.equal(legacy.includes("ACCOUNT_NOT_PUBLISHABLE"), true);
+});
+
+test("an unquoted native draft is one quote step, and a stale release still blocks new orders", async () => {
+  const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
+  const open = await evaluatePublication(nativeGateClient() as never, nativeAccount as never, draft as never, nativeGate, "READ");
+  assert.equal(open.includes("RULE_CHANGED"), false, JSON.stringify(open));
+  assert.equal(open.includes("CONFIRMATION_OR_MEDIA_REQUIRED"), false, JSON.stringify(open));
+  assert.equal(open.includes("QUOTE_REQUIRED"), true, JSON.stringify(open));
+  assert.equal(open.includes("MEDIA_REQUIRED"), false, JSON.stringify(open));
+  const stale = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, { ...draft, review_state: "PUBLISHED", rule_release_id: "old-release", payload: { ruleRefs: { catalogRevision: "1" } } } as never, nativeGate, "READ");
+  assert.equal(stale.includes("RULE_CHANGED"), true, JSON.stringify(stale));
+  const published = { ...draft, review_state: "PUBLISHED", rule_release_id: "rel", content_hash: "a".repeat(64), payload: { ruleRefs: { catalogRevision: "1" }, declaration: { attributes: {} } } };
+  const acceptance = await evaluatePublication(nativeGateClient(false) as never, nativeAccount as never, published as never, nativeGate, "READ");
+  assert.equal(acceptance.includes("ACCEPTANCE_REQUIRED"), true, JSON.stringify(acceptance));
+  assert.equal(acceptance.includes("MEDIA_REQUIRED"), false, JSON.stringify(acceptance));
+  assert.equal(acceptance.includes("CONFIRMATION_OR_MEDIA_REQUIRED"), false, JSON.stringify(acceptance));
+  const media = await evaluatePublication(nativeGateClient(true) as never, nativeAccount as never, published as never, nativeGate, "READ");
+  assert.equal(media.includes("MEDIA_REQUIRED"), true, JSON.stringify(media));
+  assert.equal(media.includes("CONFIRMATION_OR_MEDIA_REQUIRED"), false, JSON.stringify(media));
+  assert.equal(media.includes("QUOTE_REQUIRED"), false, JSON.stringify(media));
+});
+
+test("public declaration reads face and ban as tri-state without inventing a verified face", () => {
+  assert.equal(publicListingAttributes({}).face_is_self, null);
+  assert.equal(publicListingAttributes({}).ban_record, null);
+  assert.equal(publicListingAttributes({ face_is_self: false, ban_record: true }).face_is_self, false);
+  assert.equal(publicListingAttributes({ face_is_self: false, ban_record: true }).ban_record, true);
+  assert.equal(Object.hasOwn(publicListingAttributes({}), "face_recognition"), false);
+  assert.equal(Object.hasOwn(publicListingAttributes({}), "grading_division"), false);
+  const titles = orderAccountTitleFact({ snapshotTitle: "历史资料待核实", currentTitle: "当前标题", resourceSummary: "哈夫币 30M" });
+  assert.equal(titles.orderTitle, null);
+  assert.equal(titles.orderTitleSource, "UNKNOWN");
+  assert.equal(titles.currentAccountTitle, "当前标题");
+  assert.equal(titles.currentAccountSource, "CURRENT_ACCOUNT");
+  assert.equal(titles.neutralSummary, "哈夫币 30M");
+  for (const selected of [false, true, null]) {
+    const basis = publicListingBasis({ versionId: "version-a", id: "a", fullPayoutSelected: selected, attributes: { full_payout_declaration: { selected: !selected } } });
+    assert.equal(basis?.fullPayoutSelected, selected);
   }
 });

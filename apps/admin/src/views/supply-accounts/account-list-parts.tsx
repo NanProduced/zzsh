@@ -9,14 +9,15 @@ import { Input } from "@/components/ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
-import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, historicalAttributeFacts, historicalReadSummary, historicalResourceText, formatAmount, unitText, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, historicalAttributeFacts, historicalReadSummary, historicalResourceText, inventoryRows, formatAmount, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
 import {
   fullShanghaiTime,
   KIND_LABELS,
   compactTime,
+  alignedQuickRow,
   groupConditions,
   kindHint,
   parseSavedViews,
@@ -47,9 +48,8 @@ export function KindHint({ q, kind, onKind }: { q: string; kind: SupplyQueryKind
   if (!hint) return null;
   return <p className="mt-1 text-xs text-amber-700 dark:text-amber-400" role="status">{hint}{s && s !== kind && <Button type="button" variant="link" size="xs" className="ml-1" onClick={() => onKind(s)}>改按{KIND_LABELS[s]}</Button>}</p>;
 }
-const MORE = ["新单资格", "占用状态", "公开状态", "待规则确认", "保险箱", "体力/负重等级", "哈夫币库存", "押金范围", "最近变更时间"];
 export function MoreFilters() {
-  return <DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" size="lg">更多筛选<ChevronDown data-icon="inline-end"/></Button>}/><DropdownMenuContent align="end" className="w-56"><DropdownMenuGroup><DropdownMenuLabel>以下条件需后端支持，暂不可用</DropdownMenuLabel></DropdownMenuGroup><DropdownMenuSeparator/><DropdownMenuGroup>{MORE.map(m => <DropdownMenuItem key={m} disabled className="justify-between">{m}<span className="text-xs text-muted-foreground">待接入</span></DropdownMenuItem>)}</DropdownMenuGroup></DropdownMenuContent></DropdownMenu>;
+  return null;
 }
 
 export function StatusBadge({ facts }: { facts: SupplyWorkItem["facts"] }) {
@@ -174,11 +174,11 @@ export function QuickViewAssetSummary({
   row: SupplyWorkItem;
   detail?: SupplyWorkDetail;
 }) {
-  const resourceTotal = row.summary?.quote?.resourceTotal ?? detail?.version?.quote?.resourceTotal ?? null;
+  const viewed = alignedQuickRow(row, detail);
+  const resourceTotal = viewed === row ? (row.summary?.quote?.resourceTotal ?? detail?.version?.quote?.resourceTotal ?? null) : (detail?.version?.quote?.resourceTotal ?? null);
   const facts = detail?.version ? attributeFacts(detail.version).filter(f => ["安全箱配置", "体力等级", "负重等级", "潜水等级", "角色等级", "段位", "绝密 KD"].includes(f.label)) : [];
-  const fullPayout = rowFullPayout(row);
-  const inventory = (detail?.version?.declaration?.inventory ?? []).filter(item => item.itemId !== row.summary?.haff?.itemId);
-  const presentationById = new Map((detail?.version?.presentation.items ?? []).map(item => [item.id, item] as const));
+  const fullPayout = rowFullPayout(viewed);
+  const inventory = detail?.version ? inventoryRows(detail.version, null).filter(item => item.itemId !== viewed.summary?.haff?.itemId) : [];
   const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
   const display = historical?.display?.state === "KNOWN" ? historical.display.facts : null;
 
@@ -215,7 +215,7 @@ export function QuickViewAssetSummary({
         <div className="grid grid-cols-3 gap-2">
           <div className="rounded-lg border bg-card p-2.5 shadow-xs">
             <span className="block text-[11px] text-muted-foreground">哈夫币数量</span>
-            <span className="mt-0.5 block font-mono text-sm font-bold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</span>
+            <span className="mt-0.5 block font-mono text-sm font-bold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(viewed)}</span>
           </div>
           {facts.map(fact => (
             <div className="rounded-lg border bg-card p-2.5 shadow-xs" key={fact.label}>
@@ -241,7 +241,7 @@ export function QuickViewAssetSummary({
           </div>
           <div className="rounded-lg border bg-muted/30 p-2.5">
             <span className="block text-[11px] text-muted-foreground">{historical ? "押金" : "押金（号主申报）"}</span>
-            <span className="mt-0.5 block text-sm font-semibold tabular-nums">{rowDepositText(row)}</span>
+            <span className="mt-0.5 block text-sm font-semibold tabular-nums">{rowDepositText(viewed)}</span>
             <span className="mt-0.5 block text-[10px] text-muted-foreground">{!row.summary?.baseDeposit && historical ? "历史来源值，不替代当前申报或应付" : "基础申报押金，不含会员个性化减免"}</span>
           </div>
           <div className="rounded-lg border bg-muted/30 p-2.5">
@@ -259,18 +259,12 @@ export function QuickViewAssetSummary({
             <span>物品与装备资源 ({inventory.length} 种)</span>
           </div>
           <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-lg border bg-muted/20 p-2">
-            {inventory.map(item => {
-              const presentation = presentationById.get(item.itemId);
-              const quantity = item.quantity == null ? "数量待核" : presentation?.unit === "HAFF_BASE"
-                ? historicalResourceText({ quantity: item.quantity, unit: presentation.unit })
-                : `${item.quantity} ${unitText(presentation?.unit, presentation?.code)}`;
-              return (
+            {inventory.map(item => (
               <span key={item.itemId} className="inline-flex items-center gap-1 rounded border bg-background px-2 py-1 text-xs font-medium text-foreground shadow-2xs">
-                <span>{presentation?.name ?? "物品名称待核"}</span>
-                <span className="font-mono text-muted-foreground">{quantity}</span>
+                <span>{item.name}</span>
+                <span className="font-mono text-muted-foreground">{item.current} {item.unit}</span>
               </span>
-              );
-            })}
+            ))}
           </div>
         </div>
       )}

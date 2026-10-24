@@ -88,7 +88,7 @@ test('quick resource chips use loaded frozen names and code-aware units without 
   await tick(h); await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   const text = h.el.querySelector('[data-slot="sheet-content"]').textContent;
   assert.match(text, /45格乌龟包.*2 个/); assert.match(text, /顶级保险卡.*0 天/);
-  assert.match(text, /物品名称待核.*数量待核/); assert.doesNotMatch(text, /dynamic-backpack-probe|old-insurance-probe|九格保险体验卡/);
+  assert.match(text, /名称待核.*数量未知/); assert.doesNotMatch(text, /dynamic-backpack-probe|old-insurance-probe|九格保险体验卡/);
   assert.match(text, /其他动态资源.*1\.50 件/);
   assert.equal(detailReads, 1); assert.equal(h.writes.length, 0);
 });

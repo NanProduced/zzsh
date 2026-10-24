@@ -3,7 +3,7 @@
  * 原则：查找类型以用户选择为准，识别只作建议；待核条件单独计数；
  * 公开、占用、运营限制、号主暂停、新单资格各自读取，不由单一状态推导。
  */
-import { formatAmount, formatFundingCents, historicalResourceText, quantityText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
+import { formatAmount, formatFundingCents, historicalResourceText, operationalReasons, quantityText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
 
 export const KIND_LABELS: Record<SupplyQueryKind, string> = { account: "编号", legacy: "旧编号", order: "订单号", owner: "号主", nickname: "昵称", link: "本站链接" };
 
@@ -42,13 +42,14 @@ export function whoHandles(code: string): string {
 
 /** 三组分别展示：已确认阻塞 / 待核 / 已满足。待核不并入“已满足”。 */
 export function groupConditions(facts: SupplyFacts): ConditionGroups {
-  const codes = [...new Set(facts.reasons)];
+  const codes = operationalReasons(facts.reasons);
   if (facts.staffRestricted && !codes.includes("STAFF_RESTRICTED")) codes.push("STAFF_RESTRICTED");
   if (facts.ownerPaused && !codes.includes("OWNER_PAUSED")) codes.push("OWNER_PAUSED");
   const blocked = codes.filter(c => !PENDING.has(c)).map(code => ({ code, who: whoHandles(code) }));
   const pending = codes.filter(c => PENDING.has(c)).map(code => ({ code, who: nextStep(code) }));
   if (facts.publicVisible === null) pending.push({ code: "PUBLIC_UNKNOWN", who: nextStep("PUBLIC_UNKNOWN") });
-  if (facts.newOrders === null) pending.push({ code: "NEW_ORDERS_UNKNOWN", who: nextStep("NEW_ORDERS_UNKNOWN") });
+  const explainsNewOrders = codes.includes("PUBLISHER_BAIL_UNCONFIRMED");
+  if (facts.newOrders === null && !explainsNewOrders) pending.push({ code: "NEW_ORDERS_UNKNOWN", who: nextStep("NEW_ORDERS_UNKNOWN") });
   if (facts.occupancy === "UNKNOWN" && !codes.includes("OCCUPANCY_UNKNOWN")) pending.push({ code: "OCCUPANCY_UNKNOWN", who: nextStep("OCCUPANCY_UNKNOWN") });
   if (typeof facts.staffRestricted !== "boolean") pending.push({ code: "RESTRICTION_UNKNOWN", who: nextStep("RESTRICTION_UNKNOWN") });
   if (typeof facts.ownerPaused !== "boolean") pending.push({ code: "PAUSE_UNKNOWN", who: nextStep("PAUSE_UNKNOWN") });
@@ -105,8 +106,9 @@ export function serializeSavedViews(views: SavedView[], adminId: string): string
 
 /* ---------- 原因与下一步 ---------- */
 const NEXT_STEP: Record<string, string> = {
-  STAFF_RESTRICTED: "运营复核限制", OWNER_PAUSED: "号主自行恢复", CONFIRMATION_OR_MEDIA_REQUIRED: "号主重新确认规则或补展示图",
-  RULE_CHANGED: "号主按新规则重建资料", ACCOUNT_NOT_PUBLISHABLE: "资料重建", CURRENT_VERSION_MISSING: "号主填写资料", PUBLICATION_REQUIRED: "号主重新发布",
+  STAFF_RESTRICTED: "运营复核限制", OWNER_PAUSED: "号主自行恢复", CONFIRMATION_OR_MEDIA_REQUIRED: "核对规则接受或展示图；没查到的部分不要当成已经缺图",
+  QUOTE_REQUIRED: "沿用已有草稿继续核价", ACCEPTANCE_REQUIRED: "确认本次报价与条款", MEDIA_REQUIRED: "补齐展示图后再上架",
+  RULE_CHANGED: "按新规则重新核价并确认", ACCOUNT_NOT_PUBLISHABLE: "资料不能发布", CURRENT_VERSION_MISSING: "号主填写资料", PUBLICATION_REQUIRED: "确认上架",
   IDENTITY_REQUIRED: "号主完成实名", ADULT_REQUIRED: "号主不满足年龄要求，不能接单", OWNER_UNAVAILABLE: "运营核对号主账号状态",
   GAME_UNAVAILABLE: "运营核对游戏配置", GAME_SERVICE_UNAVAILABLE: "运营核对租赁服务开关", OCCUPIED: "占用解除后重新检查接单资格",
   OCCUPANCY_UNKNOWN: "运营核对占用状态", FUNDING_UNKNOWN: "运营核对押金与包赔申报", PUBLISHER_BAIL_UNCONFIRMED: "运营核对号主保证金",
@@ -147,6 +149,22 @@ export function fullShanghaiTime(iso: string): string {
 
 /* ---------- 列表事实投影（只读正式摘要；缺值即“未提供”，不猜、不补齐、不压成终态） ---------- */
 
+/** Detail that belongs to another version must not keep the list row's amounts. */
+type QuickViewRow = SupplyWorkItem & { depositDeclarationUnknown?: boolean };
+export function alignedQuickRow(row: SupplyWorkItem, detail?: SupplyWorkDetail): QuickViewRow {
+  const version = detail?.version;
+  if (!version || !row.summary?.versionId || version.id === row.summary.versionId) return row;
+  const named = [...(version.presentation.items ?? []), ...(version.catalogItems ?? [])];
+  const haff = version.declaration.inventory.find(line => named.some(item => item.id === line.itemId && item.unit === "HAFF_BASE"));
+  const declared = version.declaration.attributes.full_payout_declaration;
+  const selected = declared && typeof declared === "object" && !Array.isArray(declared) && typeof (declared as { selected?: unknown }).selected === "boolean" ? (declared as { selected: boolean }).selected : null;
+  const rawDeposit = version.declaration.attributes.owner_deposit_declaration;
+  const deposit = rawDeposit && typeof rawDeposit === "object" && !Array.isArray(rawDeposit) ? rawDeposit as Record<string, unknown> : null;
+  const amount = deposit?.amountCents;
+  const baseDeposit = deposit?.schema === "owner-deposit-declaration-v1" && typeof deposit.declarationVersion === "string" && deposit.declarationVersion.trim() && typeof amount === "string" && amount.length <= 24 && formatFundingCents(amount) !== "未提供" ? { amountCents: amount } : null;
+  return { ...row, depositDeclarationUnknown: rawDeposit !== null && !baseDeposit, summary: { ...row.summary, versionId: version.id, haff: haff ? { itemId: haff.itemId, quantity: haff.quantity, unit: "HAFF_BASE" } : null, quote: version.quote?.resourceTotal?.amount ? { currency: null, resourceTotal: { amount: version.quote.resourceTotal.amount, currency: null, unit: null, scale: null }, tenantDeposit: null, tenantPayableTotal: null, frozen: true, personalised: false } : null, baseDeposit, fullPayout: selected === null ? "NOT_DECLARED" : selected ? "SELECTED" : "NOT_SELECTED" } };
+}
+
 /** 当前库存优先；缺当前记录才补历史显示量，不把每日消耗当库存。 */
 export function rowHaffText(row: SupplyWorkItem): string {
   const haff = row.summary?.haff;
@@ -166,12 +184,13 @@ export function rowQuoteText(row: SupplyWorkItem): { total: string; note: string
 }
 
 /** 号主申报的基础押金；不是租客会员个性化最终应付。摘要未装配时不能说“未申报”。 */
-export function rowDepositText(row: SupplyWorkItem): string {
+export function rowDepositText(row: QuickViewRow): string {
   const declared = row.summary?.baseDeposit;
   if (declared) return formatFundingCents(declared.amountCents);
   const historical = row.facts.historicalRead?.historicalQuote;
   if (historical) return `历史 ¥${formatAmount(historical.depositYuan)}`;
   if (!row.summary) return "摘要未装配";
+  if (row.depositDeclarationUnknown) return "未提供";
   return "未申报";
 }
 
@@ -222,8 +241,13 @@ export function rowListingStatus(row: SupplyWorkItem): { label: string; tone: "s
   const f = row.facts;
   if (f.staffRestricted === true) return { label: "运营限制", tone: "warning" };
   if (f.ownerPaused === true) return { label: "号主暂停", tone: "neutral" };
-  if (f.occupancy === "OCCUPIED") return { label: "已出租", tone: "info" };
-  if (f.publicVisible === true) return { label: "上架中", tone: "success" };
+  if (f.occupancy === "OCCUPIED") {
+    if (f.occupancyKind === "PENDING_PAYMENT") return { label: "待付款预留", tone: "info" };
+    if (f.occupancyKind === "RENTED") return { label: "租用中", tone: "info" };
+    return { label: "占用中", tone: "info" };
+  }
+  if (f.newOrders === true) return { label: "可接新单", tone: "success" };
+  if (f.publicVisible === true) return { label: f.newOrders === null ? "可查看 · 接单待核" : "可查看", tone: "neutral" };
   if (f.publicVisible === false) return { label: "未公开", tone: "neutral" };
   return { label: "公开状态待核", tone: "neutral" };
 }

@@ -10,7 +10,8 @@ import { canonicalize } from "./content-hash";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, type LegacyHistoricalRead } from "./legacy-listing-read";
 import { validateFundingPolicy } from "./funding-policy";
-import { listingCandidatePage, listingDetail, listingPageShared, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { projectDeltaQuote } from "./delta-rental";
+import { evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 export const SUPERVISION_READ_VERSION = "admin-supervision.read.v1";
 export type SupervisionViewer = {
@@ -120,9 +121,9 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
         value: string;
     }>(oldNumberSql, [a.id])).rows.map(r => r.value);
     const blockers: string[] = detail.version ? detail.blockers ?? [] : ["CURRENT_VERSION_MISSING"];
-    let publicVisible: boolean | null = null, publicSource: string | null = null;
+    let publicVisible: boolean | null = null, publicSource: string | null = null, publicRead: Record<string, unknown> | null = null;
     try {
-        const publicRead = await readPublicListing(client, a, gate, admission, false, "DETAIL", detailIndex, context?.prefetch);
+        publicRead = await readPublicListing(client, a, gate, admission, false, "DETAIL", detailIndex, context?.prefetch);
         publicVisible = true;
         publicSource = publicRead.source === "LEGACY_READ_ONLY" ? "LEGACY_READ_ONLY" : "NATIVE_PUBLICATION";
     }
@@ -136,9 +137,12 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     }
     const unknown = ["OCCUPANCY_UNKNOWN", "FUNDING_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED"], definite = blockers.filter(r => !unknown.includes(r));
     const newOrders = definite.length ? false : blockers.length ? null : Boolean(detail.available);
-    const primaryReasonCode = a.staff_restricted ? "STAFF_RESTRICTED" : a.owner_paused ? "OWNER_PAUSED" : blockers.includes("CURRENT_VERSION_MISSING") ? "CURRENT_VERSION_MISSING" : blockers.includes("PUBLICATION_REQUIRED") ? "PUBLICATION_REQUIRED" : blockers[0] ?? null;
+    const flow = ["RULE_CHANGED", "QUOTE_REQUIRED", "ACCEPTANCE_REQUIRED", "MEDIA_REQUIRED", "CONFIRMATION_OR_MEDIA_REQUIRED", "PUBLICATION_REQUIRED"].find(code => blockers.includes(code));
+    const primaryReasonCode = a.staff_restricted ? "STAFF_RESTRICTED" : a.owner_paused ? "OWNER_PAUSED" : blockers.includes("CURRENT_VERSION_MISSING") ? "CURRENT_VERSION_MISSING" : flow ?? blockers[0] ?? null;
     const historicalRead = context?.page ? (context.page.historical.get(a.id) ?? null) : await loadLegacyHistoricalRead(client, a.id);
-    return { publicVisible, publicSource, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
+    const occupancyKind = detail.occupancyKind === "PENDING_PAYMENT" || detail.occupancyKind === "RENTED" || detail.occupancyKind === "OCCUPIED" ? detail.occupancyKind : null;
+    const publicBasis = publicVisible ? publicListingBasis(publicRead ?? {}) : null;
+    return { publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
@@ -278,6 +282,54 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility },
     };
 }
+/** List rows need the same blockers and the quote already stored on the version.
+ *  They do not load agreement text, review history, presentation or draft skins. */
+type PageStockLine = { itemId: string; quantity: string | null; unit?: string | null; code?: string | null; name?: string | null };
+async function loadPageInventory(client: PoolClient, versionIds: string[], accountIds: string[]) {
+    const stock = new Map<string, PageStockLine[]>();
+    if (!versionIds.length) return stock;
+    const rows = (await client.query<PageStockLine & { versionId: string }>(`SELECT /* page-inventory */ l.version_id AS "versionId", l.item_id AS "itemId", l.quantity::text AS quantity, i.unit, i.code, i.name
+       FROM zzsh_supply.inventory_line l
+       JOIN zzsh_supply.listing_version v ON v.id=l.version_id
+       JOIN zzsh_supply.rental_account a ON a.id=v.account_id AND a.current_version_id=v.id
+       LEFT JOIN zzsh_supply.billable_item i ON i.id=l.item_id AND i.game_id=a.game_id
+      WHERE l.version_id=ANY($1::text[]) AND a.id=ANY($2::text[])
+      ORDER BY l.version_id, i.sort_order NULLS LAST, l.item_id`, [versionIds, accountIds])).rows;
+    for (const row of rows) {
+        const list = stock.get(row.versionId) ?? [];
+        list.push({ itemId: row.itemId, quantity: row.quantity ?? null, unit: row.unit ?? null, code: row.code ?? null, name: row.name ?? null });
+        stock.set(row.versionId, list);
+    }
+    return stock;
+}
+async function listVersionProjection(client: PoolClient, account: PublishingAccount, version: ListingVersion, gate: SupplyGateReader, quoteViewer: "admin" | "public", shared: ListingPageShared, pageStock?: Map<string, PageStockLine[]>) {
+    const observed: { publication?: ListingPublication | null } = {};
+    const seen: { gate: SupplyGate | null } = { gate: null };
+    const blockers = await evaluatePublication(client, account, version, async (db, row, purpose) => {
+        seen.gate = await gate(db, row, purpose);
+        return seen.gate;
+    }, "READ", false, shared, undefined, observed);
+    const payload = version.payload;
+    const quoteValues = payload?.quoteValues as { lines?: Array<{ itemId?: unknown; unit?: unknown }> } | undefined;
+    const quote = quoteValues ? { ...projectDeltaQuote({ ...quoteValues, contentHash: version.content_hash } as never, quoteViewer), ...(payload?.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: payload.ruleRefs.catalogRevision }) } : null;
+    const lines = Array.isArray(quoteValues?.lines) ? quoteValues.lines : [];
+    const savedInventory = payload?.declaration && Array.isArray(payload.declaration.inventory) ? payload.declaration.inventory : null;
+    const stock = savedInventory ?? pageStock?.get(version.id) ?? [];
+    return {
+        occupancyKind: seen.gate?.occupancy === "OCCUPIED" ? (seen.gate.occupancyKind === "PENDING_PAYMENT" || seen.gate.occupancyKind === "RENTED" ? seen.gate.occupancyKind : "OCCUPIED") : null,
+        available: blockers.length === 0,
+        blockers,
+        version: {
+            id: version.id,
+            sequence: version.sequence,
+            contentHash: version.content_hash,
+            publication: observed.publication ? { source: observed.publication.source, publishedAt: observed.publication.published_at.toISOString() } : null,
+            declaration: { attributes: version.attributes ?? {}, inventory: stock.map(line => ({ itemId: line.itemId, quantity: line.quantity ?? null })) },
+            catalogItems: savedInventory ? lines.flatMap(line => typeof line.itemId === "string" ? [{ id: line.itemId, unit: typeof line.unit === "string" ? line.unit : "" }] : []) : stock.filter(line => line.itemId).map(line => ({ id: line.itemId, unit: line.unit ?? "", code: line.code ?? undefined, name: line.name ?? undefined })),
+            quote,
+        },
+    };
+}
 export async function listSupervision(client: PoolClient, viewer: SupervisionViewer, q: SupervisionQuery, gate: SupplyGateReader, key: ListingCursorKey | undefined, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
     const canOrder = viewer.access.permissions.has("order.read");
     if ((q.view === "orders" || q.queryKind === "order" && q.q) && !canOrder)
@@ -336,6 +388,8 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     await page.load(visible.map(row => row.id), true);
     const publicMemo = publicListingMemo(client, recordGate);
     const pageFacts = await loadSupervisionPageFacts(client, visible.map(row => row.id));
+    const unfrozenIds = visible.map(row => page.version(row.id)).filter((version): version is ListingVersion => Boolean(version && !(version.payload?.declaration && Array.isArray(version.payload.declaration.inventory)))).map(version => version.id);
+    const pageStock = await loadPageInventory(client, unfrozenIds, visible.map(row => row.id));
     for (const row of visible) {
         const a = page.account(row.id);
         if (!a) throw notFound();
@@ -344,7 +398,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         // object, exactly as the single read reported it.
         if (a.current_version_id && !version) throw notFound();
         const prefetch: ListingDetailPrefetch = { version, shared: page.shared, hasPublication: page.hasPublication(row.id), publicListing: (account) => publicMemo.read(account, prefetch) };
-        const detail = await listingDetail(client, a, "admin", recordGate, quoteViewer, a, false, "RENTABLE", prefetch);
+        const detail = version ? await listVersionProjection(client, a, version, recordGate, quoteViewer, page.shared, pageStock) : { version: null, blockers: ["CURRENT_VERSION_MISSING"], available: false, occupancyKind: null };
         const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex, { page: pageFacts, prefetch });
         const ownerSummary = owners.get(row.ownerId);
         items.push({ ...row, facts, summary: listingSummary(detail, facts, guarantees.get(row.id), gates.get(row.id), { accountCreatedAt: row.accountCreatedAt, accountUpdatedAt: row.accountUpdatedAt, versionCreatedAt: row.versionCreatedAt, refs: { ruleReleaseId: row.ruleReleaseId ?? null, priceVersionId: row.priceVersionId ?? null } }), ownerLink: canDirectory ? { state: "READY" as const } : { state: "DENIED" as const }, ...(ownerSummary ? { ownerSummary } : {}) });
