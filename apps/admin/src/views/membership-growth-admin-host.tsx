@@ -3,7 +3,7 @@ import { AdminApiError, adminRequest, friendlyError, hasPermission, type Session
 import type { WorkspaceTab } from "../workspace/tab-model";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { MembershipBenefitsWorkspace, useMembershipApprovalRequest } from "./membership-benefits-workspace";
+import { MembershipBenefitsWorkspace, membershipPendingLabel, useMembershipApprovalRequest } from "./membership-benefits-workspace";
 import {
   bootstrapGrowthPolicy,
   MembershipGrowthAdminView,
@@ -188,7 +188,7 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [policyResetNonce, setPolicyResetNonce] = useState(0);
-  const approvalWrite = useMembershipApprovalRequest(snapshot);
+  const approvalWrite = useMembershipApprovalRequest(snapshot, "policy");
   const editRevisionRef = useRef(0);
   const generationRef = useRef(0);
   const savingRef = useRef(false);
@@ -256,7 +256,7 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
         capability: response.capability ?? {},
         preview: { status: "NOT_RUN", reason: "真实报价预览需在正式quote与主体快照接线后执行" },
         subject: nextSubject,
-        approval: { status: "NOT_REQUESTED" },
+        approval: loadedSavedDraft ? { status: "UNKNOWN", message: "关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。" } : { status: "NOT_REQUESTED" },
       });
     });
     return () => {
@@ -264,6 +264,52 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
       generationRef.current += 1;
     };
   }, [refreshNonce, subjectId, snapshot]);
+
+  const currentDraft = state.status === "ready" ? savedDraft ?? (meta?.status === "DRAFT" ? meta : null) : null;
+  const currentDraftKey = currentDraft ? `${currentDraft.id}|${currentDraft.version}|${currentDraft.payloadHash}` : "";
+  const verifiedReference = approvalWrite.verifiedReference;
+  const referencedDraftMatches = Boolean(verifiedReference && currentDraft
+    && verifiedReference.policyDraftId === currentDraft.id
+    && verifiedReference.policyDraftVersion === currentDraft.version
+    && verifiedReference.policyDraftHash === currentDraft.payloadHash);
+  const verifiedMessage = approvalWrite.detailStatus === "REJECTED"
+    ? "审批已驳回；请核对原因后决定是否重新提交。"
+    : approvalWrite.detailStatus === "APPROVED"
+      ? "审批已通过，等待执行/发布；批准不等于已发布。"
+      : approvalWrite.detailStatus === "PENDING"
+        ? "已提交审批，等待审批中心处理。"
+        : approvalWrite.detailStatus
+          ? `服务端审批状态：${approvalWrite.detailStatus}。`
+          : "已提交审批，等待审批中心处理。";
+
+  useEffect(() => {
+    if (state.status !== "ready" || !approvalWrite.requestId) return;
+    setState((current) => {
+      if (current.status !== "ready") return current;
+      if (referencedDraftMatches) {
+        const next = {
+          status: approvalWrite.detailStatus === "REJECTED" ? "REJECTED" as const : "REQUESTED" as const,
+          requestId: approvalWrite.requestId ?? undefined,
+          message: verifiedMessage,
+        };
+        if (current.approval.requestId === next.requestId && current.approval.status === next.status && current.approval.message === next.message) return current;
+        return { ...current, approval: next };
+      }
+      // An accepted ID only proves a request exists; only a verified same-draft reference may mark this draft requested.
+      if (current.approval.status === "UNKNOWN") return current;
+      return {
+        ...current,
+        approval: {
+          status: "UNKNOWN",
+          message: verifiedReference
+            ? "原申请属于另一份草稿；当前草稿关联未知，请以审批中心为准。"
+            : "申请已受理，详情待核；当前草稿关联未知，请查询原结果或到审批中心核对。",
+        },
+      };
+    });
+    // Scalar dependencies only: the whole state object changes on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approvalWrite.requestId, approvalWrite.detailStatus, verifiedReference?.policyDraftId, verifiedReference?.policyDraftVersion, verifiedReference?.policyDraftHash, state.status, currentDraftKey, refreshNonce]);
 
   if (state.status !== "ready") return <MembershipGrowthAdminView state={state} />;
   const access = membershipGrowthAccess(snapshot);
@@ -313,7 +359,11 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
           ...current,
           policy: savedPolicy,
           unifiedPricing: savedUnifiedPricing,
-          approval: current.approval.status === "REJECTED" ? { status: "NOT_REQUESTED", message: "新草稿已保存，可重新提交审批。" } : current.approval,
+          approval: current.approval.status === "REJECTED"
+            ? { status: "NOT_REQUESTED", message: "新草稿已保存，可重新提交审批。" }
+            : current.approval.status === "REQUESTED"
+              ? { status: "UNKNOWN", requestId: current.approval.requestId, message: "当前草稿已保存为新修订；原申请可能对应旧修订，请到审批中心核对。" }
+              : current.approval,
         } : current);
         onDirtyChange(false);
       }
@@ -335,7 +385,6 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     if (!requestId) return;
     if (generationRef.current !== generation) return;
     setSubmittedHash(savedDraft.payloadHash);
-    setState((current) => current.status === "ready" ? { ...current, approval: { status: "REQUESTED", requestId, message: "已提交审批，等待审批中心处理；审批通过并执行后才会影响线上折扣。" } } : current);
   };
 
   const handlePolicyChange = (policy: AdminGrowthPolicy, unified: UnifiedDraft) => {
@@ -360,9 +409,40 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     onDirtyChange(false);
   };
 
+  const ownPendingRecord = approvalWrite.pending.state === "valid" ? approvalWrite.pending.record : null;
+  const foreignPendingRecord = approvalWrite.foreignPending?.state === "valid" ? approvalWrite.foreignPending.record : null;
   return <>
-    {saveError || approvalWrite.error ? <Alert variant="destructive"><AlertDescription>{saveError ?? approvalWrite.error}</AlertDescription></Alert> : null}
-    {approvalWrite.pending.state !== "absent" ? <Button variant="outline" disabled={approvalWrite.busy} onClick={() => void approvalWrite.recover()}>查询原审批申请结果</Button> : null}
+    {saveError || approvalWrite.error ? <Alert variant={saveError ? "destructive" : "warning"}><AlertDescription>{saveError ?? approvalWrite.error}</AlertDescription></Alert> : null}
+    {foreignPendingRecord ? (
+      <Alert variant="warning">
+        <AlertDescription>
+          另有礼遇申请待核对：{membershipPendingLabel(foreignPendingRecord)}。请到「礼遇管理」子页处理，政策责任不会当作礼遇记录。
+        </AlertDescription>
+      </Alert>
+    ) : approvalWrite.legacyPending ? (
+      <Alert variant="warning"><AlertDescription>原请求记录缺少业务类型，无法自动解除；原记录保留，请到审批中心核对。</AlertDescription></Alert>
+    ) : ownPendingRecord ? (
+      <Alert variant="warning">
+        <AlertDescription>
+          <span className="font-medium">会员政策申请待核对：{membershipPendingLabel(ownPendingRecord)}</span>
+          <span className="mt-1 block text-xs">原请求记录保留，核清前不会新建政策申请。</span>
+          <span className="mt-2 flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" disabled={approvalWrite.busy} onClick={() => void approvalWrite.recover()}>查询原结果</Button>
+            {approvalWrite.requestId && onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(approvalWrite.requestId!)}?from=membership-growth&fromTab=policy`)}>查看原申请</Button> : null}
+          </span>
+        </AlertDescription>
+      </Alert>
+    ) : null}
+    {approvalWrite.requestId && state.status === "ready" && !referencedDraftMatches ? (
+      <Alert variant="warning">
+        <AlertDescription>
+          {verifiedReference
+            ? `原申请已核对，但引用的是另一份草稿（${verifiedReference.policyDraftId} v${verifiedReference.policyDraftVersion}）；它不是当前草稿（${currentDraft ? `${currentDraft.id} v${currentDraft.version}` : "无可用草稿"}）的申请。当前草稿关联仍未知。`
+            : "原申请号已保留，但原草稿引用或详情尚未核清；当前草稿关联仍未知。"}
+          {onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(approvalWrite.requestId!)}?from=membership-growth&fromTab=policy`, "审批详情")}>查看原申请</Button> : null}
+        </AlertDescription>
+      </Alert>
+    ) : null}
     <MembershipGrowthAdminView
       key={`${gameId ?? ""}:${subjectId ?? ""}`}
       state={ready}
@@ -377,7 +457,7 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
       canEditEntitlementRanges={ready.capability.canChangeEntitlementRanges ?? (snapshot.security.isBoss || hasPermission(snapshot, "membership.policy.draft"))}
       canSimulateProfit={(snapshot.security.status === "ACTIVE" && snapshot.security.isBoss) || (hasPermission(snapshot, "supply.quote.internal.read") && (hasPermission(snapshot, "membership.policy.draft") || hasPermission(snapshot, "membership.policy.publish")))}
       onOpenPath={onOpenPath}
-      onOpenApproval={ready.approval.requestId && onOpenPath ? () => onOpenPath(`/approvals/${encodeURIComponent(ready.approval.requestId!)}`) : undefined}
+      onOpenApproval={ready.approval.requestId && onOpenPath ? () => onOpenPath(`/approvals/${encodeURIComponent(ready.approval.requestId!)}?from=membership-growth&fromTab=policy`, "审批详情") : undefined}
       onPolicyChange={access.canDraft && unifiedSupported ? handlePolicyChange : undefined}
       onSavePolicyDraft={access.canDraft && unifiedSupported && !saving && !approvalWrite.busy ? () => void saveDraft() : undefined}
       onSubmitPolicy={access.canRequest && unifiedSupported && savedDraft !== null && submittedHash !== savedDraft.payloadHash && !saving && !approvalWrite.busy && approvalWrite.pending.state === "absent" ? () => void submitApproval() : undefined}

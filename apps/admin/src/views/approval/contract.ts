@@ -180,7 +180,7 @@ export type AuditEvent = {
   details: Record<string, unknown>;
 };
 
-export type RequestDetail = RequestSummary & {
+export type RequestDetail = Omit<RequestSummary, "operationCode"> & {
   entitlementAmendment?: { expectedPayloadHash: string; editablePayload: EntitlementAmendmentPayload } | null;
   operation: {
     code: string; triggerCondition: string; payloadVersion: number; payloadHash: string;

@@ -11,8 +11,9 @@ let actorSerial=0;
 const roots=new Set(),originalFetch=globalThis.fetch;
 async function closeUI(vite,browser){await act(async()=>{for(const root of roots)root.unmount();roots.clear();});await vite.close();await browser.happyDOM.abort();globalThis.fetch=originalFetch;}
 const actorSnapshot=(permissions=[],isBoss=true)=>({authenticated:true,adminUserId:"admin-host-fixture",permissions,security:{status:"ACTIVE",isBoss,passwordChangeRequired:false},session:{id:`host-session-${actorSerial}`,locked:false,pinConfigured:true}});
-function workspaceRead(path){const url=new URL(path,"http://127.0.0.1:3101");if(url.pathname.endsWith("/membership-growth/entitlement-options"))return respond({games:[{id:"game-1",name:"测试游戏"}],capability:{canRead:true,canRequest:true}});if(url.pathname.endsWith("/membership-growth/entitlements"))return respond({schema:"membership-entitlements.v1",asOfUtc:"2026-10-23T00:00:00Z",total:0,page:1,pageSize:20,contextKey:"a".repeat(64),items:[]});if(url.pathname.endsWith("/security/approvals/requests/detail"))return respond({requestId:url.searchParams.get("requestId"),operationCode:"membership.benefit.policy.publish"});if(url.pathname.includes("/users/"))return respond({subjectId:"user-a",growth:{knowledge:"UNKNOWN",effectiveTier:null,rollingPoints:null,lifetimePoints:null,sourceState:"BACKFILL_PENDING"}});return undefined;}
+function workspaceRead(path){const url=new URL(path,"http://127.0.0.1:3101");if(url.pathname.endsWith("/membership-growth/entitlement-options"))return respond({games:[{id:"game-1",name:"测试游戏"}],capability:{canRead:true,canRequest:true}});if(url.pathname.endsWith("/membership-growth/entitlements"))return respond({schema:"membership-entitlements.v1",asOfUtc:"2026-10-23T00:00:00Z",total:0,page:1,pageSize:20,contextKey:"a".repeat(64),items:[]});if(url.pathname.includes("/users/"))return respond({subjectId:"user-a",growth:{knowledge:"UNKNOWN",effectiveTier:null,rollingPoints:null,lifetimePoints:null,sourceState:"BACKFILL_PENDING"}});return undefined;}
 async function openPolicyTab(host){const tab=[...host.querySelectorAll("[role=tab]")].find(element=>element.textContent==="会员政策");assert.ok(tab,"membership policy tab is authorized");await act(async()=>tab.click());await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});}
+async function flushUntil(predicate,label='condition'){for(let index=0;index<60;index+=1){if(predicate())return;await act(async()=>{await Promise.resolve();await Promise.resolve();});}assert.fail(`timed out flushing ${label}`);}
 
 function installBrowser() {
   actorSerial++;
@@ -170,14 +171,14 @@ test("R1-03 discard restores the last saved Host baseline instead of leaving the
     assert.equal(pendingSaved.ok, true, "the pre-existing unknown write is stored before the policy edit");
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: (value) => dirty.push(value), refreshNonce: 0 })));
     await openPolicyTab(host);
-    const dialog = () => [...browser.document.querySelectorAll("[role=dialog]")].find((element) => element.textContent.includes("编辑统一会员政策"));
-    await act(async () => buttonByText(host, "编辑草稿").click());
+    const dialog = () => [...browser.document.querySelectorAll("[role=dialog]")].find((element) => element.textContent.includes("调整会员政策"));
+    await act(async () => buttonByText(host, "调整会员政策").click());
     const diamond = dialog().querySelector("input[aria-label='钻石 统一应付折扣']");
     assert.ok(diamond);
     await setInput(browser, diamond, "0.8");
     await act(async () => buttonByText(dialog(), "取消修改").click());
     await act(async () => buttonByText(browser.document, "放弃修改并关闭").click());
-    await act(async () => buttonByText(host, "编辑草稿").click());
+    await act(async () => buttonByText(host, "调整会员政策").click());
     const reopened = dialog().querySelector("input[aria-label='钻石 统一应付折扣']");
     assert.equal(reopened.value, "1", "the discarded 0.8 must not remain in the reopened view");
     const save = buttonByText(dialog(), "保存草稿");
@@ -203,6 +204,320 @@ test("R1-03 discard restores the last saved Host baseline instead of leaving the
   } finally {
     await closeUI(vite, browser);
   }
+});
+
+test("policy pending after remount auto-recovers the accepted id without posting a second request", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    const requests = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse());
+      if (method === "GET" && path.includes("/security/approvals/recovery")) return respond({ knowledge: "KNOWN", key: new URL(path, "http://test").searchParams.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "policy-approval", status: "PENDING" } });
+      if (method === "GET" && path.includes("/security/approvals/requests/detail")) return respond({ requestId: "policy-approval", status: "PENDING", operation: { code: "membership.benefit.policy.publish" } });
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const snapshot = actorSnapshot();
+    const opened = [];
+    const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+    const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"e".repeat(32)}`, body: { operationCode: "membership.benefit.policy.publish", payload: { policyDraftId: "draft-1", policyDraftVersion: 1, policyDraftHash: "a".repeat(64) } }, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+    assert.equal(saved.ok, true);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+    await openPolicyTab(host);
+    for (let index = 0; index < 20 && !host.textContent.includes("已提交审批"); index += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+    assert.match(host.textContent, /已提交审批/);
+    assert.doesNotMatch(host.textContent, /关联申请暂未读到/);
+    assert.equal(inspectPending(pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create")).state, "absent", "verified recovery clears the original responsibility");
+    assert.equal(requests.some((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")), false, "recovery is read-only and never re-sends the approval");
+    assert.ok(requests.some((request) => request.method === "GET" && request.path.includes("/security/approvals/requests/detail")));
+    await act(async () => buttonByText(host, "查看审批").click());
+    assert.equal(opened.at(-1).path, "/approvals/policy-approval?from=membership-growth&fromTab=policy");
+    assert.equal(opened.at(-1).title, "审批详情");
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("recovery that finishes before policy load still binds once the current draft is known", async () => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    const requests = [];
+    let releasePolicy;
+    const policyPending = new Promise(resolve => { releasePolicy = () => resolve(respond(policyResponse())); });
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return policyPending;
+      if (method === "GET" && path.includes("/security/approvals/recovery")) return respond({ knowledge: "KNOWN", key: new URL(path, "http://test").searchParams.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "policy-approval", status: "PENDING" } });
+      if (method === "GET" && path.includes("/security/approvals/requests/detail")) return respond({ requestId: "policy-approval", status: "PENDING", operation: { code: "membership.benefit.policy.publish" } });
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const snapshot = actorSnapshot();
+    const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+    const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+    const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"f".repeat(32)}`, body: { operationCode: "membership.benefit.policy.publish", payload: { policyDraftId: "draft-1", policyDraftVersion: 1, policyDraftHash: "a".repeat(64) } }, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+    assert.equal(saved.ok, true);
+    const opened = [];
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+    await openPolicyTab(host);
+    await flushUntil(() => inspectPending(subject).state === "absent", "recovery clears pending before policy ready");
+    releasePolicy();
+    await flushUntil(() => host.textContent.includes("已提交审批"), "recovered request binds after policy ready");
+    assert.equal(inspectPending(subject).state, "absent");
+    assert.match(host.textContent, /已提交审批/);
+    assert.doesNotMatch(host.textContent, /关联申请暂未读到/);
+    assert.equal(requests.some((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")), false);
+    await act(async () => buttonByText(host, "查看审批").click());
+    assert.equal(opened.at(-1).path, "/approvals/policy-approval?from=membership-growth&fromTab=policy");
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 1, onOpenPath: (path, title) => opened.push({ path, title }) })));
+    await flushUntil(() => host.textContent.includes("已提交审批"), "same-draft refresh keeps the binding");
+    assert.match(host.textContent, /已提交审批/);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("a verified request for another draft never binds the current draft", async () => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+  const cases = [
+    { name: "different id", reference: { policyDraftId: "draft-old", policyDraftVersion: 1, policyDraftHash: "a".repeat(64) } },
+    { name: "different version", reference: { policyDraftId: "draft-1", policyDraftVersion: 2, policyDraftHash: "a".repeat(64) } },
+    { name: "different hash", reference: { policyDraftId: "draft-1", policyDraftVersion: 1, policyDraftHash: "b".repeat(64) } },
+  ];
+  try {
+    for (const testCase of cases) {
+      const host = browser.document.createElement("div"); browser.document.body.append(host);
+      const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+      const requests = [];
+      globalThis.fetch = async (url, init = {}) => {
+        const path = String(url), method = (init.method ?? "GET").toUpperCase();
+        requests.push({ path, method });
+        if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+        if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse());
+        if (method === "GET" && path.includes("/security/approvals/recovery")) return respond({ knowledge: "KNOWN", key: new URL(path, "http://test").searchParams.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "old-draft-approval", status: "PENDING" } });
+        if (method === "GET" && path.includes("/security/approvals/requests/detail")) return respond({ requestId: "old-draft-approval", status: "PENDING", operation: { code: "membership.benefit.policy.publish" } });
+        throw new Error(`unexpected ${method} ${path}`);
+      };
+      const snapshot = actorSnapshot(), subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+      const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${testCase.name.length.toString(16).padStart(2, "0").repeat(16)}`, body: { operationCode: "membership.benefit.policy.publish", payload: testCase.reference }, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+      assert.equal(saved.ok, true, testCase.name);
+      const opened = [];
+      await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+      await openPolicyTab(host);
+      await flushUntil(() => inspectPending(subject).state === "absent", testCase.name);
+      await flushUntil(() => host.textContent.includes("原申请已核对"), testCase.name);
+      assert.match(host.textContent, /原申请已核对/, testCase.name);
+      assert.match(host.textContent, /不是当前草稿/, testCase.name);
+      assert.match(host.textContent, /当前草稿关联仍未知/, testCase.name);
+      assert.doesNotMatch(host.textContent, /已提交审批/, testCase.name);
+      const link = buttonByText(host, "查看原申请"); assert.ok(link, testCase.name);
+      await act(async () => link.click());
+      assert.equal(opened.at(-1).path, "/approvals/old-draft-approval?from=membership-growth&fromTab=policy", testCase.name);
+      assert.equal(requests.some((request) => request.method === "POST"), false, testCase.name);
+      await act(async () => root.unmount()); roots.delete(root); host.remove();
+    }
+  } finally { await closeUI(vite, browser); }
+});
+
+test("wrong detail id or operation keeps the original key/body and does not bind the current draft", async () => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+  const cases = [
+    { name: "wrong id", detail: { requestId: "other-approval", status: "PENDING", operation: { code: "membership.benefit.policy.publish" } } },
+    { name: "wrong code", detail: { requestId: "policy-approval", status: "PENDING", operation: { code: "membership.entitlement.grant" } } },
+  ];
+  const originalBody = { operationCode: "membership.benefit.policy.publish", payload: { policyDraftId: "draft-1", policyDraftVersion: 1, policyDraftHash: "a".repeat(64) } };
+  try {
+    for (const testCase of cases) {
+      const host = browser.document.createElement("div"); browser.document.body.append(host);
+      const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+      const requests = [];
+      globalThis.fetch = async (url, init = {}) => {
+        const path = String(url), method = (init.method ?? "GET").toUpperCase();
+        requests.push({ path, method });
+        if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+        if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse());
+        if (method === "GET" && path.includes("/security/approvals/recovery")) return respond({ knowledge: "KNOWN", key: new URL(path, "http://test").searchParams.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "policy-approval", status: "PENDING" } });
+        if (method === "GET" && path.includes("/security/approvals/requests/detail")) return respond(testCase.detail);
+        throw new Error(`unexpected ${method} ${path}`);
+      };
+      const snapshot = actorSnapshot();
+      snapshot.adminUserId = `${snapshot.adminUserId}-${testCase.name.replaceAll(" ", "-")}`;
+      snapshot.session.id = `${snapshot.session.id}-${testCase.name.replaceAll(" ", "-")}`;
+      const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+      const key = `idem_${(testCase.name === "wrong id" ? "1" : "2").repeat(32)}`;
+      const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: key, body: originalBody, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+      assert.equal(saved.ok, true, testCase.name);
+      await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
+      await openPolicyTab(host);
+      await flushUntil(() => host.textContent.includes("原申请号已保留"), testCase.name);
+      const pending = inspectPending(subject);
+      assert.equal(pending.state, "valid", testCase.name);
+      assert.equal(pending.record.idempotencyKey, key, testCase.name);
+      assert.deepEqual(pending.record.body, originalBody, testCase.name);
+      assert.doesNotMatch(host.textContent, /已提交审批/, testCase.name);
+      assert.equal(requests.some((request) => request.method === "POST"), false, testCase.name);
+      await act(async () => root.unmount()); roots.delete(root); host.remove();
+    }
+  } finally { await closeUI(vite, browser); }
+});
+
+test("R2 an accepted id without a verified same-draft detail never marks the current draft requested", async () => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  const { inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+  const cases = [
+    { mode: "verified", detail: (id) => respond({ requestId: id, status: "PENDING", operation: { code: "membership.benefit.policy.publish" } }) },
+    { mode: "404", failure: () => respond({ error: { code: "DETAIL_UNAVAILABLE" } }, 404) },
+    { mode: "403", failure: () => respond({ error: { code: "FORBIDDEN" } }, 403) },
+    { mode: "wrong-code", failure: (id) => respond({ requestId: id, status: "PENDING", operation: { code: "membership.entitlement.grant" } }) },
+  ];
+  try {
+    for (const testCase of cases) {
+      const host = browser.document.createElement("div"); browser.document.body.append(host);
+      const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+      const id = `r2-delayed-${testCase.mode}`;
+      const snapshot = actorSnapshot();
+      snapshot.adminUserId = `${snapshot.adminUserId}-${testCase.mode}`;
+      snapshot.session.id = `${snapshot.session.id}-${testCase.mode}`;
+      const requests = [];
+      let releaseDetail = null, postedKey = null, postedBody = null;
+      globalThis.fetch = async (url, init = {}) => {
+        const path = String(url), method = (init.method ?? "GET").toUpperCase();
+        requests.push({ path, method });
+        if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+        if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse());
+        if (method === "POST" && path.endsWith("/security/approvals/requests")) {
+          postedKey = init.headers?.["idempotency-key"] ?? init.headers?.get?.("idempotency-key");
+          postedBody = init.body === undefined ? undefined : JSON.parse(String(init.body));
+          return respond({ requestId: id });
+        }
+        if (method === "GET" && path.includes("/security/approvals/requests/detail")) {
+          if (testCase.detail) return testCase.detail(id);
+          return new Promise((resolve) => { releaseDetail = () => resolve(testCase.failure(id)); });
+        }
+        throw new Error(`unexpected ${method} ${path}`);
+      };
+      const opened = [];
+      await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path) => opened.push(path) })));
+      await openPolicyTab(host);
+      const submit = buttonByText(host, "提交审批"); assert.ok(submit && !submit.disabled, testCase.mode);
+      await act(async () => submit.click());
+      await flushUntil(() => postedBody !== null, `${testCase.mode} approval POST`);
+      if (testCase.detail) {
+        await flushUntil(() => host.textContent.includes("已提交审批"), `${testCase.mode} verified same-draft detail`);
+        assert.match(host.textContent, /已提交审批/, testCase.mode);
+        assert.doesNotMatch(host.textContent, /当前草稿关联未知/, testCase.mode);
+        assert.equal(inspectPending(pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create")).state, "absent", testCase.mode);
+        await act(async () => buttonByText(host, "查看审批").click());
+        assert.equal(opened.at(-1), `/approvals/${id}?from=membership-growth&fromTab=policy`, testCase.mode);
+      } else {
+        await flushUntil(() => releaseDetail !== null && host.textContent.includes("原申请号已保留"), `${testCase.mode} accepted id rendered before detail`);
+        assert.match(host.textContent, /关联申请待核对/, `${testCase.mode}: an accepted id alone is not a verified current-draft approval`);
+        assert.doesNotMatch(host.textContent, /已提交审批/, testCase.mode);
+        await act(async () => releaseDetail());
+        await flushUntil(() => host.textContent.includes(`申请号 ${id} 已保留`) && buttonByText(host, "查询原结果") && !buttonByText(host, "查询原结果").disabled, `${testCase.mode} detail failure settled`);
+        const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+        const record = inspectPending(subject);
+        assert.equal(record.state, "valid", testCase.mode);
+        assert.equal(record.record.idempotencyKey, postedKey, testCase.mode);
+        assert.deepEqual(record.record.body, postedBody, testCase.mode);
+        assert.match(host.textContent, /关联申请待核对/, testCase.mode);
+        assert.match(host.textContent, /当前草稿关联仍未知/, testCase.mode);
+        assert.doesNotMatch(host.textContent, /已提交审批/, testCase.mode);
+        const link = buttonByText(host, "查看原申请"); assert.ok(link, testCase.mode);
+        await act(async () => link.click());
+        assert.equal(opened.at(-1), `/approvals/${id}?from=membership-growth&fromTab=policy`, testCase.mode);
+      }
+      assert.equal(requests.filter((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")).length, 1, testCase.mode);
+      await act(async () => root.unmount()); roots.delete(root); host.remove();
+    }
+  } finally { await closeUI(vite, browser); }
+});
+
+test("a recovery finishing after a policy refresh cannot bind the new current draft", async () => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    let releaseRecovery; let recoveryPending = new Promise(resolve => { releaseRecovery = () => resolve(respond({ knowledge: "KNOWN", key: "idem_99999999999999999999999999999999", operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "old-refresh-approval", status: "PENDING" } })); });
+    let policyCalls = 0;
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+        policyCalls += 1;
+        return respond(policyResponse(policyCalls === 1 ? {} : { meta: { ...metaFixture(), id: "draft-2", version: "2", payloadHash: "c".repeat(64) } }));
+      }
+      if (method === "GET" && path.includes("/security/approvals/recovery")) return recoveryPending;
+      if (method === "GET" && path.includes("/security/approvals/requests/detail")) return respond({ requestId: "old-refresh-approval", status: "PENDING", operation: { code: "membership.benefit.policy.publish" } });
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const snapshot = actorSnapshot();
+    const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+    const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+    const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: "idem_99999999999999999999999999999999", body: { operationCode: "membership.benefit.policy.publish", payload: { policyDraftId: "draft-1", policyDraftVersion: 1, policyDraftHash: "a".repeat(64) } }, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+    assert.equal(saved.ok, true);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    await flushUntil(() => policyCalls === 1, "first policy load");
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 1 })));
+    await flushUntil(() => policyCalls === 2, "policy refresh");
+    releaseRecovery();
+    await flushUntil(() => host.textContent.includes("原申请已核对"), "late recovery mismatch");
+    assert.match(host.textContent, /当前草稿关联仍未知/);
+    assert.doesNotMatch(host.textContent, /已提交审批/);
+    assert.equal(inspectPending(subject).state, "absent");
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("a saved new draft does not inherit an old-draft request after remount", async () => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    let host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); let root = createRoot(host); roots.add(root);
+    const requests = [];
+    let reloadPolicy = policyResponse();
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(reloadPolicy);
+      if (method === "POST" && path.endsWith("/membership-growth/policy-drafts")) return respond({ id: "draft-2", version: "2", payloadHash: "b".repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() });
+      if (method === "GET" && path.includes("/security/approvals/recovery")) return respond({ knowledge: "KNOWN", key: new URL(path, "http://test").searchParams.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "old-save-approval", status: "PENDING" } });
+      if (method === "GET" && path.includes("/security/approvals/requests/detail")) return respond({ requestId: "old-save-approval", status: "PENDING", operation: { code: "membership.benefit.policy.publish" } });
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const snapshot = actorSnapshot();
+    const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    const silver = host.querySelector("input[aria-label='银卡 统一应付折扣']"); assert.ok(silver);
+    await setInput(browser, silver, "0.91");
+    await act(async () => buttonByText(host, "保存草稿").click());
+    await flushUntil(() => requests.some(request => request.method === "POST" && request.path.endsWith("/membership-growth/policy-drafts")), "new draft save");
+    await act(async () => root.unmount()); roots.delete(root); host.remove();
+    reloadPolicy = policyResponse({ meta: { ...metaFixture(), id: "draft-2", version: "2", payloadHash: "b".repeat(64) } });
+    const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
+    const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: "idem_"+ "7".repeat(32), body: { operationCode: "membership.benefit.policy.publish", payload: { policyDraftId: "draft-1", policyDraftVersion: 1, policyDraftHash: "a".repeat(64) } }, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+    assert.equal(saved.ok, true);
+    host = browser.document.createElement("div"); browser.document.body.append(host); root = createRoot(host); roots.add(root);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("原申请已核对"), "old request after saved draft");
+    assert.match(host.textContent, /当前草稿关联仍未知/);
+    assert.doesNotMatch(host.textContent, /已提交审批/);
+    assert.equal(inspectPending(subject).state, "absent");
+    assert.equal(requests.some(request => request.method === "POST" && request.path.endsWith("/security/approvals/requests")), false);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
 });
 
 test("R1-07 host entitlement replacement uses the approved context and its own discount references", async () => {

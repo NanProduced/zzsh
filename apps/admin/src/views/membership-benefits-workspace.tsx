@@ -9,12 +9,11 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Skeleton } from "../components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "../components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { ListPagination } from "../components/admin-list/list-pagination";
-import { ApprovalAuditView } from "./approval-audit-view";
 import { receiptEnvelopeIssue, type RecoveryResult, type RequestDetail } from "./approval/contract";
 import { dropPendingWrite, inspectPending, pendingWriteSubject, savePendingWrite, updatePendingWriteKind, type PendingInspection } from "./approval/pending-writes";
 import { directoryAdapter, EMPTY_FILTERS, type User } from "./user-directory/user-directory-data";
@@ -60,31 +59,85 @@ const KINDS: Record<string, string> = { FRIEND: "挚友礼遇", PRESTIGE: "尊�
 const CREATE_PATH = "/security/approvals/requests";
 const CREATE_OPERATION = "approval.request.create";
 const MEMBERSHIP_OPERATIONS = new Set(["membership.benefit.policy.publish", "membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
+const POLICY_OPERATIONS = new Set(["membership.benefit.policy.publish"]);
+const ENTITLEMENT_OPERATIONS = new Set(["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
+const PENDING_EVENT = "zzsh:membership-approval-pending";
+export type VerifiedPolicyDraftReference = { policyDraftId: string; policyDraftVersion: string; policyDraftHash: string };
+export function policyDraftReferenceOf(body: Record<string, unknown>): VerifiedPolicyDraftReference | null {
+  if (body.operationCode !== "membership.benefit.policy.publish") return null;
+  const payload = body.payload && typeof body.payload === "object" ? body.payload as Record<string, unknown> : null;
+  const id = payload && typeof payload.policyDraftId === "string" ? payload.policyDraftId : "";
+  const version = payload && (typeof payload.policyDraftVersion === "string" || typeof payload.policyDraftVersion === "number") ? String(payload.policyDraftVersion) : "";
+  const hash = payload && typeof payload.policyDraftHash === "string" ? payload.policyDraftHash : "";
+  return id && version && hash ? { policyDraftId: id, policyDraftVersion: version, policyDraftHash: hash } : null;
+}
+export type MembershipApprovalBusiness = "policy" | "entitlement";
+const BUSINESS_OPERATIONS: Record<MembershipApprovalBusiness, Set<string>> = { policy: POLICY_OPERATIONS, entitlement: ENTITLEMENT_OPERATIONS };
+
+function notifyPendingChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(PENDING_EVENT));
+}
+
+function approvalDetailError(error: unknown): string {
+  if (error instanceof AdminApiError) {
+    if (error.status === 403) return "无权读取原申请（403）；原记录保留，请到审批中心核对";
+    if (error.status === 404) return "原申请暂未读到（404）；原记录保留，请稍后重试";
+    if (error.status === 409) return "申请范围已变化（409）；原记录保留，请到审批中心核对";
+    if (error.status === 0) return "原申请暂时无法读取（网络）；原记录保留";
+  }
+  return error instanceof Error ? error.message : "原申请暂时无法读取；原记录保留";
+}
+
+export function membershipPendingLabel(record: { body: Record<string, unknown> }): string {
+  const operation = typeof record.body.operationCode === "string" ? record.body.operationCode : "";
+  const payload = record.body.payload && typeof record.body.payload === "object" ? record.body.payload as Record<string, unknown> : {};
+  const kind = payload.kind === "PRESTIGE" ? "尊享礼遇" : payload.kind === "FRIEND" ? "挚友礼遇" : "礼遇";
+  const user = typeof payload.userId === "string" ? payload.userId : "用户待核";
+  if (operation === "membership.benefit.policy.publish") return `会员政策发布 · 草稿 ${String(payload.policyDraftId ?? "待核").slice(0, 8)} v${String(payload.policyDraftVersion ?? "?")}`;
+  if (operation === "membership.entitlement.grant") return `礼遇发放 · ${kind} · ${user}`;
+  if (operation === "membership.entitlement.replace") return `礼遇替换/续期 · ${kind} · ${user}`;
+  if (operation === "membership.entitlement.revoke") return `礼遇撤销 · 对象 ${String(payload.entitlementId ?? "待核").slice(0, 8)}`;
+  return "会员申请 · 业务类型待核";
+}
 
 function identityOf(snapshot: Snapshot) {
   return JSON.stringify([snapshot.adminUserId, snapshot.session.id, snapshot.session.locked, snapshot.security.status, snapshot.security.isBoss, snapshot.security.passwordChangeRequired, [...snapshot.permissions].sort()]);
 }
 
 /** Only existing approval.request.create; policy and entitlement hosts share the same original-key responsibility. */
-export function useMembershipApprovalRequest(snapshot: Snapshot) {
+export function useMembershipApprovalRequest(snapshot: Snapshot, business: MembershipApprovalBusiness = "entitlement") {
   const identity = identityOf(snapshot);
   const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", CREATE_OPERATION);
   const live = useRef(identity); live.current = identity;
   const mounted = useRef(true);
   const inFlight = useRef(false);
-  const [state, setState] = useState(() => ({ identity, busy: false, error: null as string | null, pending: inspectPending(subject), requestId: null as string | null }));
-  if (state.identity !== identity) setState({ identity, busy: false, error: null, pending: inspectPending(subject), requestId: null });
+  const autoRecoveredRef = useRef<string | null>(null);
+  const operations = BUSINESS_OPERATIONS[business];
+  const [state, setState] = useState(() => ({ identity, busy: false, error: null as string | null, pending: inspectPending(subject), requestId: null as string | null, detailStatus: null as string | null, verifiedReference: null as VerifiedPolicyDraftReference | null }));
+  if (state.identity !== identity) setState({ identity, busy: false, error: null, pending: inspectPending(subject), requestId: null, detailStatus: null, verifiedReference: null });
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    const refresh = () => { if (current()) setState((previous) => ({ ...previous, pending: inspectPending(subject) })); };
+    window.addEventListener(PENDING_EVENT, refresh);
+    return () => window.removeEventListener(PENDING_EVENT, refresh);
+  }, [identity, subject]);
   const current = () => mounted.current && live.current === identity;
   const update = (patch: Partial<typeof state>) => { if (current()) setState(previous => ({ ...previous, ...patch })); };
   const refreshPending = () => inspectPending(subject);
+  const recordOperation = (record: { body: Record<string, unknown> }) => typeof record.body.operationCode === "string" ? record.body.operationCode : "";
+  const ownPending = (pending: PendingInspection) => pending.state === "valid" && (operations.has(recordOperation(pending.record)) || !recordOperation(pending.record));
+  const foreignPending = (pending: PendingInspection) => pending.state === "valid" && Boolean(recordOperation(pending.record)) && !operations.has(recordOperation(pending.record));
 
-  async function confirm(id: string, key: string, operationCode?: unknown) {
+  async function confirm(id: string, key: string, operationCode: string | undefined, body: Record<string, unknown>) {
     const detail = await adminRequest<RequestDetail>("/security/approvals/requests/detail?requestId=" + encodeURIComponent(id));
     if (!current()) return false;
-    if (detail.requestId !== id || operationCode !== undefined && detail.operationCode !== operationCode) throw new Error("审批详情与原请求不一致，原记录保留");
+    const actualOperation = typeof detail.operation?.code === "string" ? detail.operation.code : "";
+    if (detail.requestId !== id) throw new Error("审批详情与申请号不一致；原记录保留");
+    if (typeof operationCode !== "string" || !operationCode) throw new Error("原请求缺少业务类型，无法自动解除；原记录保留，请到审批中心核对");
+    if (actualOperation !== operationCode) throw new Error("审批详情的业务类型与原请求不一致；原记录保留");
     dropPendingWrite(subject, key);
-    update({ pending: refreshPending(), requestId: id, error: null });
+    notifyPendingChanged();
+    update({ pending: refreshPending(), requestId: id, detailStatus: typeof detail.status === "string" ? detail.status : null, verifiedReference: policyDraftReferenceOf(body), error: null });
     return true;
   }
 
@@ -93,28 +146,34 @@ export function useMembershipApprovalRequest(snapshot: Snapshot) {
     if (snapshot.session.locked || snapshot.security.status !== "ACTIVE" || snapshot.security.passwordChangeRequired || !snapshot.security.isBoss && !hasPermission(snapshot, "approval.request.create")) { update({ error: "当前身份不能提交审批" }); return null; }
     if (typeof body.operationCode !== "string" || !MEMBERSHIP_OPERATIONS.has(body.operationCode)) { update({ error: "不支持的会员审批操作" }); return null; }
     const existing = refreshPending();
-    if (existing.state !== "absent") { update({ pending: existing, error: existing.state === "valid" ? "还有原请求未核清，请先查询原结果" : "原请求记录不可读，本次未提交" }); return null; }
+    if (existing.state !== "absent") {
+      const foreign = foreignPending(existing);
+      update({ pending: existing, error: existing.state === "valid" ? foreign ? "另有会员申请待核对，请先到对应子页或审批中心处理" : "还有原请求未核清，请先查询原结果" : "原请求记录不可读，本次未提交" });
+      return null;
+    }
     if (!globalThis.crypto?.randomUUID) { update({ error: "无法生成请求标识，本次未提交" }); return null; }
     const key = "idem_" + crypto.randomUUID().replaceAll("-", "");
     const saved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: CREATE_OPERATION, path: CREATE_PATH, idempotencyKey: key, body, readback: { kind: "lists", keys: ["mine"] }, successMessage: "已提交审批", kind: "unknown" });
     if (!saved.ok) { update({ pending: refreshPending(), error: "无法可靠保存原请求标识，本次未提交" }); return null; }
+    notifyPendingChanged();
     inFlight.current = true;
-    update({ busy: true, error: null, pending: refreshPending(), requestId: null });
+    update({ busy: true, error: null, pending: refreshPending(), requestId: null, detailStatus: null, verifiedReference: null });
     let acceptedId: string | null = null;
     try {
       const result = await adminRequest<{ requestId?: string; approvalRequestId?: string }>(CREATE_PATH, body, "POST", { "idempotency-key": key });
       if (!current()) return null;
       acceptedId = result.approvalRequestId ?? result.requestId ?? null;
       updatePendingWriteKind(subject, key, "readback");
+      notifyPendingChanged();
       update({ pending: refreshPending(), requestId: acceptedId });
       if (!acceptedId) throw new Error("审批已受理，但申请编号未读到，请查询原结果");
-      await confirm(acceptedId, key, body.operationCode);
+      await confirm(acceptedId, key, body.operationCode, body);
       return current() ? acceptedId : null;
     } catch (error) {
       if (!current()) return null;
       const rejected = !acceptedId && error instanceof AdminApiError && error.status >= 400 && error.status < 500 && !error.code.includes("UNKNOWN");
-      if (rejected) dropPendingWrite(subject, key);
-      update({ pending: refreshPending(), error: rejected ? friendlyError(error) : acceptedId ? "已提交审批，最新详情未确认；请查询原结果" : "提交结果未知，请查询原结果，勿重新办理" });
+      if (rejected) { dropPendingWrite(subject, key); notifyPendingChanged(); }
+      update({ pending: refreshPending(), requestId: acceptedId, error: rejected ? friendlyError(error) : acceptedId ? `${approvalDetailError(error)}；申请号 ${acceptedId} 已保留` : "提交结果未知，请查询原结果，勿重新办理" });
       return acceptedId;
     } finally { inFlight.current = false; update({ busy: false }); }
   }
@@ -124,7 +183,9 @@ export function useMembershipApprovalRequest(snapshot: Snapshot) {
     const pending = refreshPending();
     update({ pending });
     if (pending.state !== "valid") { update({ error: pending.state === "unreadable" ? "原请求记录不可读，请保留现场核对" : null }); return; }
+    if (foreignPending(pending)) { update({ error: "原申请属于另一业务，请到对应子页处理" }); return; }
     const original = pending.record;
+    if (typeof original.body.operationCode !== "string") { update({ error: "原请求缺少业务类型，无法自动核验；原记录保留，请到审批中心核对" }); return; }
     inFlight.current = true; update({ busy: true, error: null });
     try {
       const params = new URLSearchParams({ operation: CREATE_OPERATION, key: original.idempotencyKey });
@@ -135,19 +196,38 @@ export function useMembershipApprovalRequest(snapshot: Snapshot) {
       if (issue) { update({ error: issue }); return; }
       if (result.outcome === "REJECTED") {
         dropPendingWrite(subject, original.idempotencyKey);
-        update({ pending: refreshPending(), error: "原申请已被明确拒绝，可核对原因后重新办理", requestId: null });
+        notifyPendingChanged();
+        update({ pending: refreshPending(), error: "原申请已被明确拒绝，可核对原因后重新办理", requestId: null, detailStatus: null, verifiedReference: null });
       } else {
         const id = result.receipt?.approvalRequestId;
         if (!id) throw new Error("申请编号缺失");
         updatePendingWriteKind(subject, original.idempotencyKey, "readback");
+        notifyPendingChanged();
         update({ pending: refreshPending(), requestId: id });
-        await confirm(id, original.idempotencyKey, original.body.operationCode);
+        await confirm(id, original.idempotencyKey, original.body.operationCode, original.body);
       }
-    } catch (failure) { update({ pending: refreshPending(), error: failure instanceof AdminApiError && failure.status === 403 ? "当前无权查询原结果，原记录保留" : "原结果或最新详情暂未读到，原记录保留" }); }
+    } catch (failure) { update({ pending: refreshPending(), error: approvalDetailError(failure) }); }
     finally { inFlight.current = false; update({ busy: false }); }
   }
-  const visible = state.identity === identity ? state : { busy: false, error: null, pending: inspectPending(subject), requestId: null };
-  return { submit, recover, busy: visible.busy, error: visible.error, pending: visible.pending, requestId: visible.requestId };
+
+  useEffect(() => {
+    if (state.identity !== identity) return;
+    const pending = inspectPending(subject);
+    if (pending.state !== "valid" || pending.record.kind !== "readback") return;
+    if (foreignPending(pending) || typeof pending.record.body.operationCode !== "string") return;
+    if (autoRecoveredRef.current === identity) return;
+    autoRecoveredRef.current = identity;
+    void recover();
+    // The identity/pending key is the only event that starts one read-only recovery attempt per mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity, subject]);
+
+  const rawVisible = state.identity === identity ? state.pending : inspectPending(subject);
+  const visiblePending = ownPending(rawVisible) ? rawVisible : rawVisible.state === "unreadable" ? rawVisible : { state: "absent" as const };
+  const visibleForeign = foreignPending(rawVisible) ? rawVisible : null;
+  const visibleLegacy = rawVisible.state === "valid" && !recordOperation(rawVisible.record);
+  const visible = state.identity === identity ? state : { busy: false, error: null, pending: rawVisible, requestId: null, detailStatus: null, verifiedReference: null };
+  return { submit, recover, busy: visible.busy, error: visible.error, pending: visiblePending, foreignPending: visibleForeign, legacyPending: visibleLegacy, requestId: visible.requestId, detailStatus: visible.detailStatus, verifiedReference: visible.verifiedReference };
 }
 
 function ErrorBox({ error, retry }: { error: unknown; retry?: () => void }) {
@@ -458,8 +538,11 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
   const [editor, setEditor] = useState<Editor | null>(null), [editorRetry, setEditorRetry] = useState(0);
   const [form, setForm] = useState<{ key: string; data?: MembershipEntitlementContext; error?: unknown }>({ key: "" });
   const [formError, setFormError] = useState<string | null>(null), [revokeReason, setRevokeReason] = useState("");
-  const [approvalId, setApprovalId] = useState<string | null>(null);
-  const command = useMembershipApprovalRequest(snapshot);
+  const command = useMembershipApprovalRequest(snapshot, "entitlement");
+  const openApproval = (id?: string | null) => {
+    if (!id || !onOpenPath) return;
+    onOpenPath(`/approvals/${encodeURIComponent(id)}?from=membership-growth&fromTab=entitlements`, "审批详情");
+  };
   const filterKey = JSON.stringify([filters.status, filters.kind, filters.gameId, filters.userId, filters.pageSize]);
   const queryKey = JSON.stringify([filterKey, filters.page]);
   const formKey = editor ? JSON.stringify([editor.userId, editor.gameId, editor.action, editor.target?.id]) : "";
@@ -545,16 +628,16 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
       },
       summary: `申请${editor.action === "replace" ? "替换/续期" : "发放"}${KINDS[draft.kind]}`
     });
-    if (id && currentEditor.current === formKey) { setEditor(null); setApprovalId(id); setReload(value => value + 1); }
+    if (id && currentEditor.current === formKey) { setEditor(null); setReload(value => value + 1); }
   }
   async function submitRevoke() {
     if (!editor?.target || revokeReason.trim().length < 2) return;
     const target = editor.target;
     const id = await command.submit({ operationCode: "membership.entitlement.revoke", triggerCondition: "membership.entitlement.revoke.requested", payloadVersion: 1, payload: { entitlementId: target.id, gameId: target.gameId, scopeKey: target.scopeKey, reason: revokeReason.trim() }, summary: `申请撤销${KINDS[target.kind]}` });
-    if (id && currentEditor.current === formKey) { setEditor(null); setApprovalId(id); }
+    if (id && currentEditor.current === formKey) { setEditor(null); }
   }
   const visible = list.key === queryKey ? list : { loading: true, data: undefined, error: undefined };
-  const blocked = command.busy || command.pending.state !== "absent";
+  const blocked = command.busy || command.pending.state !== "absent" || command.foreignPending !== null || command.legacyPending;
   const canRevoke = snapshot.security.isBoss || hasPermission(snapshot, "membership.entitlement.revoke");
   return <div className="space-y-5">
     <Tabs value={tab} onValueChange={value => setTab(String(value))}>
@@ -580,23 +663,37 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
         </div>
         {optionsError ? <ErrorBox error={optionsError} retry={() => setReload(value => value + 1)} /> : null}
         {command.error ? <Alert variant="warning"><AlertTitle>{command.error}</AlertTitle></Alert> : null}
-        {command.pending.state !== "absent" ? (
+        {command.foreignPending?.state === "valid" ? (
           <Alert variant="warning">
-            <AlertTitle>还有原申请需要核对</AlertTitle>
+            <AlertTitle>另有会员政策变更待核对</AlertTitle>
             <AlertDescription>
-              原请求记录保留，核清前不创建新申请。
-              <div className="mt-2 flex gap-2">
-                <Button size="sm" variant="outline" disabled={command.busy || command.pending.state !== "valid"} onClick={() => void command.recover()}>查询原结果</Button>
-                <Button size="sm" variant="outline" onClick={() => setApprovalId(command.requestId ?? "")}>查看审批处理</Button>
+              {membershipPendingLabel(command.foreignPending.record)}。请到「会员政策」子页处理；政策责任不写入礼遇记录，也不清除原请求。
+            </AlertDescription>
+          </Alert>
+        ) : command.legacyPending ? (
+          <Alert variant="warning">
+            <AlertTitle>原请求记录缺少业务类型</AlertTitle>
+            <AlertDescription>原请求记录保留，无法自动判断是政策还是礼遇；请到审批中心核对。</AlertDescription>
+          </Alert>
+        ) : command.pending.state === "valid" ? (
+          <Alert variant="warning">
+            <AlertTitle>礼遇申请待核对</AlertTitle>
+            <AlertDescription>
+              {membershipPendingLabel(command.pending.record)}。原请求记录保留，核清前不创建新申请。
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" disabled={command.busy} onClick={() => void command.recover()}>查询原结果</Button>
+                {command.requestId && onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(command.requestId!)}?from=membership-growth&fromTab=entitlements`)}>查看原申请</Button> : null}
               </div>
             </AlertDescription>
           </Alert>
+        ) : command.pending.state === "unreadable" ? (
+          <Alert variant="warning"><AlertTitle>原请求记录不可读</AlertTitle><AlertDescription>原记录保留，核清前不创建新申请；请保留现场并到审批中心核对。</AlertDescription></Alert>
         ) : command.requestId ? (
           <Alert variant="success">
-            <AlertTitle>已提交审批</AlertTitle>
+            <AlertTitle>{command.detailStatus === "REJECTED" ? "审批已驳回" : command.detailStatus && command.detailStatus !== "PENDING" ? "审批状态已读取" : "已提交审批"}</AlertTitle>
             <AlertDescription>
-              审批通过后仍需确认业务执行结果。
-              <Button size="sm" variant="link" onClick={() => setApprovalId(command.requestId)}>查看审批</Button>
+              {command.detailStatus === "PENDING" ? "审批通过并执行后才会生效。" : command.detailStatus === "REJECTED" ? "请核对原因后重新办理。" : command.detailStatus ? `服务端状态：${command.detailStatus}。` : "审批通过后仍需确认业务执行结果。"}
+              {onOpenPath ? <Button size="sm" variant="link" onClick={() => openApproval(command.requestId)}>查看审批</Button> : null}
             </AlertDescription>
           </Alert>
         ) : null}
@@ -665,7 +762,7 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-wrap justify-end gap-1.5">
-                            {item.approvalRequestId ? <Button size="sm" variant="ghost" onClick={() => setApprovalId(item.approvalRequestId)}>审批</Button> : null}
+                            {item.approvalRequestId ? <Button size="sm" variant="ghost" onClick={() => openApproval(item.approvalRequestId)}>审批</Button> : null}
                             {options.capability.canRequest && ["ACTIVE", "EXECUTED_PENDING_START"].includes(item.status) ? (
                               <>
                                 <Button size="sm" variant="outline" disabled={blocked} onClick={() => openEditor(item, "replace")}>替换/续期</Button>
@@ -905,15 +1002,6 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
               )}
             </>
           ) : null}
-        </div>
-      </DialogContent>
-    </Dialog>
-    <Dialog open={approvalId !== null} onOpenChange={open => { if (!open) { setApprovalId(null); setReload(value => value + 1); } }}>
-      <DialogContent className="w-full max-w-5xl max-h-[90vh] overflow-y-auto">
-        <DialogTitle>审批与办理记录</DialogTitle>
-        <DialogDescription>复用现有审批流程、执行和原请求恢复。</DialogDescription>
-        <div className="px-1 pb-2">
-          {approvalId !== null ? <ApprovalAuditView snapshot={snapshot} initialRequestId={approvalId || undefined} objectOnly onOpenPath={onOpenPath} /> : null}
         </div>
       </DialogContent>
     </Dialog>

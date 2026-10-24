@@ -26,6 +26,10 @@ test("R1-01 formatSpreadRate renders valid percentage and safe placeholder witho
       formatDepositBenefitText,
       parseYuanToCents,
       formatCentsToYuan,
+      parseHumanDiscount,
+      parseHaffMillions,
+      exactPercentTenths,
+      formatTenthsPercent,
     } = await vite.ssrLoadModule("/src/views/membership-growth-view.tsx");
 
     const point = {
@@ -93,6 +97,23 @@ test("R1-01 formatSpreadRate renders valid percentage and safe placeholder witho
     assert.equal(parsePolicyAllowanceYuan("1e3").cents, null);
     assert.equal(parsePolicyAllowanceYuan("0").cents, null);
     assert.equal(parsePolicyAllowanceYuan(`${"9".repeat(23)}.99`).cents, null);
+
+    // Human discount and Haff-M inputs convert exactly, never through floating multiplication.
+    assert.equal(parseHumanDiscount("8折"), "0.8");
+    assert.equal(parseHumanDiscount("8.5折"), "0.85");
+    assert.equal(parseHumanDiscount("8.1234折"), "0.81234");
+    assert.equal(parseHumanDiscount("原价"), "1");
+    assert.equal(parseHumanDiscount("0.8"), "0.8");
+    assert.equal(parseHumanDiscount("0折"), null);
+    assert.equal(parseHumanDiscount("abc"), null);
+    assert.equal(parseHaffMillions("60"), "60000000");
+    assert.equal(parseHaffMillions("60M"), "60000000");
+    assert.equal(parseHaffMillions("0.5"), "500000");
+    assert.equal(parseHaffMillions("0"), null);
+    assert.equal(parseHaffMillions("1.1234567"), null);
+    assert.equal(exactPercentTenths(1n, 3n), 333n);
+    assert.equal(formatTenthsPercent(-333n), "-33.3%");
+    assert.equal(formatTenthsPercent(0n), "0.0%");
   } finally {
     await vite.close();
   }

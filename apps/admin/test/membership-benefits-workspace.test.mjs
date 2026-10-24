@@ -42,7 +42,7 @@ const stubs = {
 };
 const vite = await createServer({ configFile: false, root: rootPath, cacheDir, plugins: [react(), stubs], resolve: { alias: { "@": path.join(rootPath, "src") } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
 const { MembershipBenefitsWorkspace, useMembershipApprovalRequest } = await vite.ssrLoadModule("/src/views/membership-benefits-workspace.tsx");
-const { inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+const { inspectPending, pendingWriteSubject, savePendingWrite } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
 after(async () => {
   await vite.close(); await browser.happyDOM.abort();
   assert.equal(path.dirname(path.resolve(cacheDir)), cacheParent);
@@ -73,7 +73,7 @@ function installFetch(handler = () => undefined) {
     if (pathname.endsWith("entitlement-options")) return json(options);
     if (pathname.endsWith("/entitlements")) return json(page({ page: Number(parsed.searchParams.get("page") || 1) }));
     if (pathname.endsWith("entitlement-context")) return json(context);
-    if (pathname.endsWith("requests/detail")) return json({ requestId: parsed.searchParams.get("requestId"), operationCode: "membership.entitlement.replace" });
+    if (pathname.endsWith("requests/detail")) return json({ requestId: parsed.searchParams.get("requestId"), operation: { code: "membership.entitlement.replace" } });
     throw new Error("Unexpected fixture request " + pathname);
   };
   return calls;
@@ -97,7 +97,7 @@ test("create hook locks synchronously, preserves original key on UNKNOWN, and on
   const calls = installFetch(call => {
     if (call.path === "/security/approvals/requests") throw new Error("network acknowledgement lost");
     if (call.path.endsWith("/recovery")) return json({ knowledge: accept ? "KNOWN" : "UNRESOLVED", key: call.params.get("key"), operation: "approval.request.create", targetRequestId: null, ...(accept ? { originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "original-request", status: "PENDING" } } : {}) });
-    if (call.path.endsWith("requests/detail")) return json({ requestId: "original-request", operationCode: createBody.operationCode });
+    if (call.path.endsWith("requests/detail")) return json({ requestId: "original-request", operation: { code: createBody.operationCode } });
   });
   const actor = snapshot(), view = await mounted(HookHost, { actor });
   try {
@@ -117,11 +117,66 @@ test("create hook locks synchronously, preserves original key on UNKNOWN, and on
   } finally { await view.dispose(); }
 });
 
+test("real nested detail operation.code confirms, mismatches and read failures stay layered", async () => {
+  let detailFailure = null;
+  let detail = { requestId: "accepted-nested", status: "PENDING", operation: { code: createBody.operationCode } };
+  installFetch(call => {
+    if (call.path === "/security/approvals/requests") return json({ requestId: "accepted-nested" });
+    if (call.path.endsWith("requests/detail")) return detailFailure ? json({ error: { code: detailFailure === 404 ? "NOT_FOUND" : "CONFLICT" } }, detailFailure) : json(detail);
+    if (call.path.endsWith("/recovery")) return json({ knowledge: "KNOWN", key: call.params.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "accepted-nested", status: "PENDING" } });
+  });
+  const firstActor = snapshot(), first = await mounted(HookHost, { actor: firstActor });
+  try {
+    await act(async () => { await hook.submit(createBody); });
+    assert.equal(hook.pending.state, "absent"); assert.equal(hook.requestId, "accepted-nested"); assert.equal(hook.detailStatus, "PENDING");
+  } finally { await first.dispose(); }
+
+  detailFailure = 404;
+  const actor = snapshot(), view = await mounted(HookHost, { actor });
+  const subject = pendingWriteSubject(actor.adminUserId, actor.session.id, "", "approval.request.create");
+  try {
+    const saved = savePendingWrite({ actorId: actor.adminUserId, sessionId: actor.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"b".repeat(32)}`, body: createBody, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+    assert.equal(saved.ok, true);
+  } finally { await view.dispose(); }
+  // Remount with the accepted-but-unreadable record; the read-only auto recovery starts immediately.
+  const second = await mounted(HookHost, { actor });
+  try {
+    await settle();
+    assert.equal(hook.pending.state, "valid"); assert.match(hook.error, /原申请暂未读到（404）/); assert.equal(hook.requestId, "accepted-nested");
+    detailFailure = 409; await act(async () => { await hook.recover(); });
+    assert.equal(hook.pending.state, "valid"); assert.match(hook.error, /申请范围已变化（409）/);
+    detailFailure = null; detail = { requestId: "accepted-nested", status: "PENDING", operation: { code: "membership.entitlement.grant.other" } };
+    await act(async () => { await hook.recover(); });
+    assert.equal(hook.pending.state, "valid"); assert.match(hook.error, /业务类型与原请求不一致/); assert.equal(inspectPending(subject).state, "valid");
+    detail = { requestId: "accepted-nested", status: "PENDING", operation: { code: createBody.operationCode } };
+    await act(async () => { await hook.recover(); });
+    assert.equal(hook.pending.state, "absent"); assert.equal(inspectPending(subject).state, "absent"); assert.equal(hook.requestId, "accepted-nested");
+  } finally { await second.dispose(); }
+});
+
+test("policy responsibility is foreign to entitlement, while a legacy record is shown but not treated as a grant", async () => {
+  function HookState({ actor }) { hook = useMembershipApprovalRequest(actor, "entitlement"); return createElement("span", null, JSON.stringify({ pending: hook.pending.state, foreign: hook.foreignPending?.state ?? null, legacy: hook.legacyPending })); }
+  const actor = snapshot();
+  const saved = savePendingWrite({ actorId: actor.adminUserId, sessionId: actor.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"c".repeat(32)}`, body: { operationCode: "membership.benefit.policy.publish", payload: { policyDraftId: "draft-1", policyDraftVersion: 2 } }, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "readback" });
+  assert.equal(saved.ok, true);
+  const view = await mounted(HookState, { actor });
+  try {
+    assert.equal(hook.pending.state, "absent"); assert.equal(hook.foreignPending.state, "valid"); assert.equal(hook.legacyPending, false);
+  } finally { await view.dispose(); }
+  const legacyActor = snapshot();
+  const legacy = savePendingWrite({ actorId: legacyActor.adminUserId, sessionId: legacyActor.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"d".repeat(32)}`, body: {}, readback: { kind: "lists", keys: ["mine"] }, successMessage: "fixture", kind: "unknown" });
+  assert.equal(legacy.ok, true);
+  const legacyView = await mounted(HookState, { actor: legacyActor });
+  try {
+    assert.equal(hook.pending.state, "valid"); assert.equal(hook.legacyPending, true); assert.equal(hook.foreignPending, null);
+  } finally { await legacyView.dispose(); }
+});
+
 test("accepted-but-unreadable keeps responsibility, and late actor responses cannot expose an old request", async () => {
   let readFails = true;
   const calls = installFetch(call => {
     if (call.path === "/security/approvals/requests") return json({ requestId: "accepted-request" });
-    if (call.path.endsWith("requests/detail")) return readFails ? json({ error: { code: "INTERNAL_ERROR" } }, 500) : json({ requestId: "accepted-request", operationCode: createBody.operationCode });
+    if (call.path.endsWith("requests/detail")) return readFails ? json({ error: { code: "INTERNAL_ERROR" } }, 500) : json({ requestId: "accepted-request", operation: { code: createBody.operationCode } });
     if (call.path.endsWith("/recovery")) return json({ knowledge: "KNOWN", key: call.params.get("key"), operation: "approval.request.create", targetRequestId: null, originalResponseStatus: 200, outcome: "ACCEPTED", receipt: { approvalRequestId: "accepted-request", status: "PENDING" } });
   });
   const actor = snapshot(), view = await mounted(HookHost, { actor });
@@ -189,14 +244,15 @@ test("a first explicit rejection clears its responsibility while denied recovery
     const key = hook.pending.record.idempotencyKey;
     await act(async () => { await hook.recover(); });
     assert.equal(hook.pending.state, "valid"); assert.equal(hook.pending.record.idempotencyKey, key);
-    assert.match(hook.error, /无权查询原结果/);
+    assert.match(hook.error, /无权读取原申请（403）/);
   } finally { await view.dispose(); }
 });
 
-test("replacement keeps target and approved policy, reuses approval host, and policy stays mounted", async () => {
+test("replacement keeps target and approved policy, opens the unique approval detail, and policy stays mounted", async () => {
   const calls = installFetch(call => call.path === "/security/approvals/requests" ? json({ requestId: "replacement-approval" }) : undefined);
   function Policy() { const [count, setCount] = useState(0); return createElement("button", { onClick: () => setCount(value => value + 1) }, "草稿" + count); }
-  const actor = snapshot(), view = await mounted(MembershipBenefitsWorkspace, { snapshot: actor, policy: createElement(Policy) });
+  const opened = [];
+  const actor = snapshot(), view = await mounted(MembershipBenefitsWorkspace, { snapshot: actor, policy: createElement(Policy), onOpenPath: (path, title) => opened.push({ path, title }) });
   try {
     await until(() => button("替换/续期", view.host));
     await click(button("会员政策", view.host)); await click(button("草稿0", view.host));
@@ -214,9 +270,10 @@ test("replacement keeps target and approved policy, reuses approval host, and po
     assert.equal(write.body.payload.replaceEntitlementId, record.id);
     assert.equal(write.body.payload.policyId, "policy-approved");
     assert.equal(write.body.payload.scopeKey, record.scopeKey);
-    assert.equal(globalThis.__approvalProps.initialRequestId, "replacement-approval");
-    assert.equal(globalThis.__approvalProps.objectOnly, true);
     assert.match(view.host.textContent, /已提交审批/);
+    await click(button("查看审批", view.host));
+    assert.equal(opened.at(-1).path, "/approvals/replacement-approval?from=membership-growth&fromTab=entitlements");
+    assert.equal(opened.at(-1).title, "审批详情");
     assert.equal(record.status, "ACTIVE");
   } finally { await view.dispose(); }
 });
@@ -258,7 +315,7 @@ test("request-only operators use the authorized source user and never probe dire
 test("revocation is a target-bound approval request, never an optimistic status mutation", async () => {
   const calls = installFetch(call => {
     if (call.path === "/security/approvals/requests") return json({ requestId: "revoke-approval" });
-    if (call.path.endsWith("requests/detail")) return json({ requestId: "revoke-approval", operationCode: "membership.entitlement.revoke" });
+    if (call.path.endsWith("requests/detail")) return json({ requestId: "revoke-approval", operation: { code: "membership.entitlement.revoke" } });
   });
   const view = await mounted(MembershipBenefitsWorkspace, { snapshot: snapshot() });
   try {

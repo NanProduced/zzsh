@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
+import { renderToString } from "react-dom/server";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -18,7 +19,7 @@ async function ui(t) {
   globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);globalThis.IS_REACT_ACT_ENVIRONMENT=true;
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],resolve:{alias:{'@':fileURLToPath(new URL('../src',import.meta.url))}},server:{middlewareMode:true,hmr:false,ws:false,watch:null},optimizeDeps:{noDiscovery:true,include:[]}});
-  const view=await vite.ssrLoadModule('/src/views/membership-growth-view.tsx'),form=await vite.ssrLoadModule('/src/views/membership-entitlement-form.tsx');
+  const view=await vite.ssrLoadModule('/src/views/membership-growth-view.tsx'),form=await vite.ssrLoadModule('/src/views/membership-entitlement-form.tsx'),businessSummary=await vite.ssrLoadModule('/src/views/approval/business-summary.tsx');
   const host=browser.document.createElement('div');browser.document.body.append(host);
   const {createRoot}=await import('react-dom/client'),root=createRoot(host);
   t.after(async()=>{await act(async()=>root.unmount());await vite.close();await browser.happyDOM.abort();globalThis.fetch=previousFetch;});
@@ -27,8 +28,11 @@ async function ui(t) {
   const type=async(element,value)=>{await act(async()=>{const prototype=element.tagName==='TEXTAREA'?browser.HTMLTextAreaElement.prototype:browser.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(prototype,'value').set.call(element,value);element.dispatchEvent(new browser.Event('input',{bubbles:true}));element.dispatchEvent(new browser.Event('change',{bubbles:true}));});};
   const click=async element=>{assert.ok(element);await act(async()=>element.click());};
   const button=text=>[...host.querySelectorAll('button')].find(element=>element.textContent.trim()===text);
-  return{browser,host,root,view,form,render,input,type,click,button,fetches};
+  return{browser,host,root,view,form,businessSummary,render,input,type,click,button,fetches};
 }
+const addMaterial=async(h,label='哈夫币',scenario='场景 1')=>{const combo=h.browser.document.querySelector(`[role=combobox][aria-label="${scenario} 添加物资"]`);assert.ok(combo,`missing material selector for ${scenario}`);await h.click(combo);const option=[...h.browser.document.querySelectorAll('[role=option]')].find(element=>element.textContent.includes(label));assert.ok(option,`missing material option ${label}`);await h.click(option);};
+const setScenarioQuantity=async(h,label,unit,value,scenario='场景 1')=>{const input=h.browser.document.querySelector(`input[aria-label="${scenario} ${label} 数量（${unit}）"]`);assert.ok(input,`missing quantity for ${scenario}/${label}`);await h.type(input,value);};
+const openSimulator=async h=>{await h.click(h.button('租金价差试算'));await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});};
 const TIERS=['STANDARD','SILVER','GOLD','PLATINUM','DIAMOND'];
 const UNIFIED_RATIOS=['0.95','0.92','0.90','0.88','0.85'];
 const catalog={safeBoxes:[],materials:[],priceVersions:[{id:'price-v1',label:'当前价格方案'}],enabledModes:['ordinary','custom'],catalogSource:'SEALED'};
@@ -56,7 +60,7 @@ test('policy view shows only effective unified values and edits a mode-free unif
   assert.match(h.host.textContent,/9\.5折/);assert.match(h.host.textContent,/实付 95%/);
   assert.doesNotMatch(h.host.textContent,/普通租赁|自定义方案|极速租赁|计价模式/,'the policy page has no entitlement mode selector');
   assert.match(h.host.textContent,/所有已启用租赁方式统一/);assert.match(h.host.textContent,/适配全部已启用租赁方式/);assert.match(h.host.textContent,/6折 – 原价/);assert.doesNotMatch(h.host.textContent,/10折/);
-  assert.ok(h.host.querySelector('button[aria-label="草稿说明"]'),'the saved draft states that it cannot be deleted');
+  assert.match(h.host.textContent,/待处理变更/);
   assert.doesNotMatch(h.host.textContent,/报价预览|用户成长依据|人工礼遇申请|金卡上限|钻石上限/);
   assert.equal(h.host.querySelector('select,textarea,input[type=datetime-local]'),null,'use house controls and a Calendar date picker');
   assert.ok(h.host.querySelector('button[aria-label="政策生效日期"]'));assert.ok(h.input('政策生效时间'));
@@ -82,7 +86,7 @@ test('policy view shows only effective unified values and edits a mode-free unif
 test('edit stepper cannot skip an incomplete stage one and revisits the diff before filing',async t=>{
   const h=await ui(t),state=readyState();
   await h.render(h.view.MembershipGrowthAdminView,{state,canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{}});
-  await h.click(h.button('编辑草稿'));
+  await h.click(h.button('调整会员政策'));
   const step=label=>h.browser.document.querySelector(`button[aria-label="${label}"]`);
   assert.ok(step('第 2 步，共 3 步：变更核对'));assert.equal(step('第 2 步，共 3 步：变更核对').disabled,false,'a complete stage one unlocks the diff');
   assert.equal(step('第 3 步，共 3 步：生效与提审').disabled,true,'stage three waits for the diff to be visited');
@@ -96,39 +100,53 @@ test('edit stepper cannot skip an incomplete stage one and revisits the diff bef
   assert.equal(step('第 2 步，共 3 步：变更核对').disabled,false);
 });
 
-test('rent simulator compares original and discounted spread without safe-box or term controls',async t=>{
+test('manual two scenarios and three discounts show renter, owner and platform gross profit with one request per scenario',async t=>{
   const h=await ui(t),state=readyState();
-  const context={schema:'membership-profit-simulation-context.v1',gameId:'delta',ruleReleaseId:'release-1',priceVersionId:'price-v1',termVersionId:'term-v1',enabledModes:['ordinary'],safeBoxes:['small','large'],resources:[{itemId:'haff',name:'哈夫币',pricingKind:'HAFF_RATIO',unit:'PIECE'},{itemId:'item-1',name:'六级甲',pricingKind:'FIXED_UNIT',unit:'PIECE'}],termOptions:[{code:'day',dailyConsumption:'1000000'}]};
-  const point=(ratio,spread)=>({payableRatio:ratio,payableRentalCents:ratio==='1'?'189605':'151684',discountCents:ratio==='1'?'0':'37921',ownerIncomeCents:'87347',platformSpreadCents:spread,ownerFloorSatisfied:true,spreadRate:null});
-  const full={schema:'membership-profit-simulation.v1',baseQuotable:true,baseline:{platformSpreadCents:'102258',rentalCents:'189605',ownerIncomeCents:'87347'},points:[point('1','102258'),point('0.8','64337')]};
-  const haff={schema:'membership-profit-simulation.v1',baseQuotable:true,baseline:{platformSpreadCents:'1538',rentalCents:'11538',ownerIncomeCents:'10000'},points:[point('1','1538')]};
+  const context={schema:'membership-profit-simulation-context.v1',gameId:'delta',ruleReleaseId:'release-1',priceVersionId:'price-v1',termVersionId:'term-v1',enabledModes:['ordinary'],safeBoxes:['small'],resources:[{itemId:'haff',name:'哈夫币',pricingKind:'HAFF_RATIO',unit:'PIECE'},{itemId:'item-1',name:'六级甲',pricingKind:'FIXED_UNIT',unit:'PIECE'}],termOptions:[{code:'day',dailyConsumption:'1000000'}]};
+  const point=(ratio,renter,owner,floor=true)=>({payableRatio:ratio,payableRentalCents:renter,discountCents:'0',ownerIncomeCents:owner,platformSpreadCents:(BigInt(renter)-BigInt(owner)).toString(),ownerFloorSatisfied:floor,spreadRate:null});
+  const resultFor=haff=>{const scale=haff==='120000000'?2:1,owner=String(87347*scale),base=String(189605*scale);return{schema:'membership-profit-simulation.v1',baseQuotable:true,baseline:{platformSpreadCents:String(102258*scale),rentalCents:base,ownerIncomeCents:owner},points:[point('1',base,owner),point('0.8',String(151684*scale),owner),point('0.9',String(170645*scale),owner,false)]};};
+  const requests=[];
   globalThis.fetch=async (url,init)=>{
     const text=String(url);
     if(text.includes('/profit-simulation-context'))return new Response(JSON.stringify(context),{status:200,headers:{'content-type':'application/json'}});
     if(text.includes('/profit-simulation')){
-      const body=JSON.parse(init?.body??'{}');
-      const onlyHaff=body.quoteInput?.inventory?.length===1;
-      return new Response(JSON.stringify(onlyHaff?haff:full),{status:200,headers:{'content-type':'application/json'}});
+      const body=JSON.parse(init?.body??'{}');requests.push(body);
+      const haff=body.quoteInput?.inventory?.find(item=>item.itemId==='haff')?.quantity;
+      return new Response(JSON.stringify(resultFor(haff)),{status:200,headers:{'content-type':'application/json'}});
     }
     throw new Error('Unexpected component HTTP request');
   };
   await h.render(h.view.MembershipGrowthAdminView,{state,canSimulateProfit:true,binding:{ruleReleaseId:'release-1',priceVersionId:'price-v1'},onPolicyChange:()=>{}});
-  await h.click(h.button('租金价差试算'));
-  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
-  const body=()=>h.browser.document.body.textContent;
-  assert.match(body(),/拟设折扣/);assert.match(body(),/试算只改变拟设折扣与数量/);
-  assert.doesNotMatch(body(),/保险箱规格|租期方案|计价模式/,'sealed defaults are not exposed as decision controls');
-  assert.equal([...h.browser.document.querySelectorAll('[role=combobox]')].filter(element=>/保险箱|租期/.test(element.getAttribute('aria-label')??'')).length,0);
-  const modalButton=text=>[...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()===text);
-  await h.click(modalButton('开始试算'));
+  await openSimulator(h);
+  await addMaterial(h,'哈夫币','场景 1');await setScenarioQuantity(h,'哈夫币','M','60','场景 1');
+  await addMaterial(h,'六级甲','场景 1');await setScenarioQuantity(h,'六级甲','件','1','场景 1');
+  await h.type(h.browser.document.querySelector('#simulation-discount'),'9折');
+  await h.click([...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='添加'));
+  await h.click([...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='新增场景'));
+  await addMaterial(h,'哈夫币','场景 2');await setScenarioQuantity(h,'哈夫币','M','120','场景 2');
+  const start=[...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='开始试算');
+  await h.click(start);
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,60));});
-  assert.match(body(),/折后平台价差 ¥643\.37/);assert.match(body(),/较原价减少 ¥379\.21/);assert.match(body(),/哈夫币价差 ¥15\.38/);assert.match(body(),/物品价差 ¥1007\.20/);
-  assert.equal((body().match(/哈夫币 ¥15\.38 · 物品 ¥1007\.20/g)??[]).length,2,'each scenario shows its own Haff/item split');
-  assert.match(body(),/原价价差/);assert.match(body(),/折后价差/);assert.match(body(),/利润变化/);assert.match(body(),/号主保底/);
-  assert.match(body(),/保底全部满足/);assert.doesNotMatch(body(),/10折/);
+  assert.equal(requests.length,2,'one quote request per manual scenario');
+  assert.deepEqual(requests[0].payableRatios,['1','0.8','0.9']);
+  assert.equal(requests[0].quoteInput.inventory.find(item=>item.itemId==='haff').quantity,'60000000');
+  assert.equal(requests[0].quoteInput.inventory.find(item=>item.itemId==='item-1').quantity,'1');
+  assert.equal(requests[1].quoteInput.inventory.find(item=>item.itemId==='haff').quantity,'120000000');
+  const dialog=[...h.browser.document.querySelectorAll('[role=dialog]')].find(element=>element.textContent.includes('三方试算'));
+  assert.ok(dialog);
+  assert.match(dialog.textContent,/租客租赁费用/);assert.match(dialog.textContent,/号主应得/);assert.match(dialog.textContent,/平台租赁毛利/);
+  assert.match(dialog.textContent,/原价/);assert.match(dialog.textContent,/8折/);assert.match(dialog.textContent,/9折/);
+  assert.match(dialog.textContent,/¥1896\.05/);assert.match(dialog.textContent,/¥873\.47/);assert.match(dialog.textContent,/¥1022\.58/);
+  assert.match(dialog.textContent,/¥1516\.84/);assert.match(dialog.textContent,/¥643\.37/);assert.match(dialog.textContent,/¥1706\.45/);assert.match(dialog.textContent,/¥832\.98/);
+  assert.match(dialog.textContent,/-¥379\.21/);assert.match(dialog.textContent,/-¥189\.60/);
+  assert.equal(dialog.querySelectorAll('tbody tr').length,6,'two scenarios by three discounts');
+  assert.equal((dialog.textContent.match(/闭合/g)??[]).length,6,'each row proves renter = owner + platform');
+  assert.match(dialog.textContent,/2 行需注意/);assert.match(dialog.textContent,/低于底线/);
+  assert.doesNotMatch(dialog.textContent,/标准租赁|重度高耗损/);
+  assert.doesNotMatch(dialog.textContent,/拟设折扣|haff-only/);
 });
 
-test('a stale simulation response is discarded and a missing proposed point stays unknown',async t=>{
+test('a stale simulation response is discarded and a missing discount point stays unknown',async t=>{
   const h=await ui(t),state=readyState();
   const context={schema:'membership-profit-simulation-context.v1',gameId:'delta',ruleReleaseId:'release-1',priceVersionId:'price-v1',termVersionId:'term-1',enabledModes:['ordinary'],safeBoxes:['basic'],resources:[{itemId:'haff',name:'哈夫币',pricingKind:'HAFF_RATIO',unit:'PIECE'}],termOptions:[{code:'day',dailyConsumption:'1'}]};
   const point=(ratio,spread)=>({payableRatio:ratio,payableRentalCents:spread==='10000'?'20000':'16000',discountCents:ratio==='1'?'0':'4000',ownerIncomeCents:'10000',platformSpreadCents:spread,ownerFloorSatisfied:true,spreadRate:null});
@@ -141,43 +159,39 @@ test('a stale simulation response is discarded and a missing proposed point stay
       if(holdNext){holdNext=false;return new Promise(resolve=>{releaseHeld=()=>resolve(new Response(JSON.stringify(full()),{status:200,headers:{'content-type':'application/json'}}));});}
       const body=JSON.parse(init?.body??'{}');
       if(missing)return new Response(JSON.stringify(full(['1'])),{status:200,headers:{'content-type':'application/json'}});
-      return new Response(JSON.stringify(full(body.payableRatios.includes('0.5')?['1','0.5']:['1','0.8'])),{status:200,headers:{'content-type':'application/json'}});
+      return new Response(JSON.stringify(full(body.payableRatios.includes('0.9')?['1','0.8','0.9']:['1','0.8'])),{status:200,headers:{'content-type':'application/json'}});
     }
     throw new Error('Unexpected component HTTP request');
   };
   await h.render(h.view.MembershipGrowthAdminView,{state,canSimulateProfit:true,binding:{ruleReleaseId:'release-1',priceVersionId:'price-v1'},onPolicyChange:()=>{}});
-  await h.click(h.button('租金价差试算'));
-  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
-  const modalButton=text=>[...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()===text);
-  assert.ok(modalButton('开始试算'));
-  // Hold the 0.8 run, change to 0.5, then release the stale response.
-  holdNext=true;
-  await h.click(modalButton('开始试算'));
+  await openSimulator(h);
+  await addMaterial(h,'哈夫币','场景 1');await setScenarioQuantity(h,'哈夫币','M','60','场景 1');
+  const start=()=>[...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='开始试算');
+  holdNext=true;await h.click(start());
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
   assert.ok(releaseHeld,'the first simulation is held');
-  await h.type(h.browser.document.querySelector('#simulation-proposed-ratio'),'0.5');
+  await setScenarioQuantity(h,'哈夫币','M','120','场景 1');
   releaseHeld();
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
-  assert.doesNotMatch(h.browser.document.body.textContent,/拟设 5折 · [12] 个有效场景|较原价减少 ¥0\.00/,'the old 0.8 response is never shown as a 0.5 comparison');
-  assert.match(h.browser.document.body.textContent,/填写拟设折扣后点击/);
-  // A second, real 0.5 run is allowed and uses an exact 0.5 point.
-  await h.click(modalButton('开始试算'));
+  assert.doesNotMatch(h.browser.document.body.textContent,/¥0\.00/,'the old 60M response is never shown for 120M');
+  assert.match(h.browser.document.body.textContent,/添加场景与物资/);
+  await h.click(start());
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
-  assert.match(h.browser.document.body.textContent,/拟设 5折/);
-  // Missing proposed point must not fall back to the original point.
+  assert.match(h.browser.document.body.textContent,/¥200\.00/);
   missing=true;
-  await h.click(modalButton('开始试算'));
+  await h.click(start());
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
-  assert.match(h.browser.document.body.textContent,/响应缺少拟设折扣点/);
-  assert.doesNotMatch(h.browser.document.body.textContent,/保底全部满足/,'a missing discount point cannot claim the original point\'s floor');
+  assert.match(h.browser.document.body.textContent,/响应缺少该折扣点/);
+  assert.match(h.browser.document.body.textContent,/1 行待核/);
+  assert.doesNotMatch(h.browser.document.body.textContent,/保底均满足/,'a missing discount point cannot claim the original point\'s floor');
 });
 
-test('exact-cent reduction keeps the Master extreme counterexample at one cent',async t=>{
+test('exact-cent three-party amounts keep the Master extreme counterexample at one cent',async t=>{
   const h=await ui(t),state=readyState();
   const context={schema:'membership-profit-simulation-context.v1',gameId:'delta',ruleReleaseId:'release-1',priceVersionId:'price-v1',termVersionId:'term-1',enabledModes:['ordinary'],safeBoxes:['basic'],resources:[{itemId:'haff',name:'哈夫币',pricingKind:'HAFF_RATIO',unit:'PIECE'}],termOptions:[{code:'day',dailyConsumption:'1'}]};
   const result={schema:'membership-profit-simulation.v1',baseQuotable:true,baseline:{platformSpreadCents:'9007199254740993'},points:[
-    {payableRatio:'1',payableRentalCents:'9007199254741093',discountCents:'0',ownerIncomeCents:'0',platformSpreadCents:'9007199254740993',ownerFloorSatisfied:true,spreadRate:null},
-    {payableRatio:'0.8',payableRentalCents:'9007199254739993',discountCents:'1',ownerIncomeCents:'0',platformSpreadCents:'9007199254740992',ownerFloorSatisfied:true,spreadRate:null},
+    {payableRatio:'1',payableRentalCents:'9007199254741093',discountCents:'0',ownerIncomeCents:'100',platformSpreadCents:'9007199254740993',ownerFloorSatisfied:true,spreadRate:null},
+    {payableRatio:'0.8',payableRentalCents:'9007199254741092',discountCents:'1',ownerIncomeCents:'100',platformSpreadCents:'9007199254740992',ownerFloorSatisfied:true,spreadRate:null},
   ]};
   globalThis.fetch=async (url)=>{
     const text=String(url);
@@ -186,15 +200,14 @@ test('exact-cent reduction keeps the Master extreme counterexample at one cent',
     throw new Error('Unexpected component HTTP request');
   };
   await h.render(h.view.MembershipGrowthAdminView,{state,canSimulateProfit:true,binding:{ruleReleaseId:'release-1',priceVersionId:'price-v1'},onPolicyChange:()=>{}});
-  await h.click(h.button('租金价差试算'));
-  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
-  const start=[...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='开始试算');
-  await h.click(start);
+  await openSimulator(h);
+  await addMaterial(h,'哈夫币','场景 1');await setScenarioQuantity(h,'哈夫币','M','60','场景 1');
+  await h.click([...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='开始试算'));
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,30));});
   const text=h.browser.document.body.textContent;
-  assert.match(text,/较原价减少 ¥0\.01/);
+  assert.match(text,/¥90071992547409\.93/);
   assert.match(text,/-¥0\.01/);
-  assert.doesNotMatch(text,/较原价减少 ¥0\.00/);
+  assert.doesNotMatch(text,/-¥0\.00/);
   assert.equal(h.view.formatSpreadRate({numerator:'9007199254740993',denominator:'9007199254740992'}),'100%');
   assert.equal(h.view.formatCents('9007199254740993'),'¥90071992547409.93');
 });
@@ -210,24 +223,24 @@ test('losing simulation permission unmounts the dialog and discards its pending 
     throw new Error('Unexpected component HTTP request');
   };
   await h.render(h.view.MembershipGrowthAdminView,{state,canSimulateProfit:true,binding:{ruleReleaseId:'release-1',priceVersionId:'price-v1'},onPolicyChange:()=>{}});
-  await h.click(h.button('租金价差试算'));
+  await openSimulator(h);
+  await addMaterial(h,'哈夫币','场景 1');await setScenarioQuantity(h,'哈夫币','M','60','场景 1');
+  await h.click([...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='开始试算'));
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
-  const start=[...h.browser.document.querySelectorAll('button')].find(element=>element.textContent.trim()==='开始试算');
-  await h.click(start);
-  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
+  assert.ok(release,'the quote request is pending');
   await h.render(h.view.MembershipGrowthAdminView,{state,canSimulateProfit:false,binding:{ruleReleaseId:'release-1',priceVersionId:'price-v1'},onPolicyChange:()=>{}});
-  assert.equal([...h.browser.document.querySelectorAll('[role=dialog]')].some(element=>element.textContent.includes('租金价差试算')),false,'permission loss removes the dialog');
+  assert.equal([...h.browser.document.querySelectorAll('[role=dialog]')].some(element=>element.textContent.includes('三方试算')),false,'permission loss removes the dialog');
   release();
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
-  assert.equal(h.browser.document.body.textContent.includes('租金价差试算'),false);
+  assert.equal(h.browser.document.body.textContent.includes('三方试算'),false);
 });
 
 test('invalid raw allowance is shown at the field and blocks save before any stale cents can be posted',async t=>{
   const h=await ui(t),base=readyState(),saves=[],changes=[];
   const state={...base,policy:{...base.policy,tiers:base.policy.tiers.map(tier=>tier.tier==='GOLD'?{...tier,tenantDeposit:'ACCOUNT_BASE',depositAllowanceCents:'20000'}:tier)}};
   await h.render(h.view.MembershipGrowthAdminView,{state,canEditEntitlementRanges:true,onPolicyChange:(policy,unified)=>changes.push({policy,unified}),onSavePolicyDraft:()=>saves.push(true)});
-  await h.click(h.button('编辑草稿'));
-  const dialog=()=>[...h.browser.document.querySelectorAll('[role=dialog]')].find(element=>element.textContent.includes('编辑统一会员政策'));
+  await h.click(h.button('调整会员政策'));
+  const dialog=()=>[...h.browser.document.querySelectorAll('[role=dialog]')].find(element=>element.textContent.includes('调整会员政策'));
   const allowance=dialog().querySelector('input[aria-label="金卡 每单减免额度"]');
   assert.equal(allowance.value,'200');
   const save=()=>[...dialog().querySelectorAll('button')].find(element=>element.textContent==='保存草稿');
@@ -257,8 +270,8 @@ test('invalid raw allowance is shown at the field and blocks save before any sta
 test('tier monotonicity errors are visible and associated in the current step, not only in locked step three',async t=>{
   const h=await ui(t),state=readyState();
   await h.render(h.view.MembershipGrowthAdminView,{state,canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{}});
-  await h.click(h.button('编辑草稿'));
-  const dialog=()=>[...h.browser.document.querySelectorAll('[role=dialog]')].find(element=>element.textContent.includes('编辑统一会员政策'));
+  await h.click(h.button('调整会员政策'));
+  const dialog=()=>[...h.browser.document.querySelectorAll('[role=dialog]')].find(element=>element.textContent.includes('调整会员政策'));
   const silver=dialog().querySelector('input[aria-label="银卡 统一应付折扣"]');
   const gold=dialog().querySelector('input[aria-label="金卡 统一应付折扣"]');
   await h.type(silver,'0.8');await h.type(gold,'1');
@@ -269,6 +282,37 @@ test('tier monotonicity errors are visible and associated in the current step, n
   assert.match(dialog().textContent,/请先修正以下问题/);
   assert.equal([...dialog().querySelectorAll('button')].find(element=>element.textContent==='下一步').disabled,true);
   assert.equal(dialog().querySelector('button[aria-label="第 3 步，共 3 步：生效与提审"]').disabled,true);
+});
+
+test('policy page keeps one pending card, one edit entry and an honest unknown linked-request state',async t=>{
+  const h=await ui(t),base=readyState(),opened=[];
+  const pendingState={...base,approval:{status:'UNKNOWN',message:'关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。'}};
+  const props={state:pendingState,canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{},onOpenApproval:()=>opened.push('approval')};
+  await h.render(h.view.MembershipGrowthAdminView,props);
+  assert.match(h.host.textContent,/待处理变更/);
+  assert.match(h.host.textContent,/关联申请暂未读到/);
+  assert.match(h.host.textContent,/不代表从未申请/);
+  assert.doesNotMatch(h.host.textContent,/草稿 v\d|生效 v\d/);
+  assert.equal([...h.host.querySelectorAll('button')].filter(button=>button.textContent.includes('调整会员政策')).length,1,'one primary edit entry');
+  assert.equal([...h.host.querySelectorAll('button')].filter(button=>button.textContent.includes('编辑草稿')||button.textContent.includes('继续编辑')).length,0);
+  assert.match(h.host.textContent,/当前生效/);
+  const requested={...base,approval:{status:'REQUESTED',requestId:'approval-real',message:'服务端审批状态：PENDING。'}};
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:requested});
+  assert.match(h.host.textContent,/已提交审批/);assert.match(h.host.textContent,/PENDING/);
+  await h.click(h.button('查看审批'));
+  assert.deepEqual(opened,['approval']);
+  const legacy={...base,approval:{status:'NOT_REQUESTED'}};
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:legacy});
+  assert.doesNotMatch(h.host.textContent,/关联申请暂未读到/,'no draft means no pending card');
+});
+
+test('policy publish approval summary hides entitlement target fields and does not invent policy values',async t=>{
+  const h=await ui(t);
+  const business={businessType:'membership',summaryAvailable:true,summary:{gameName:'不应显示的游戏',targetUserId:'不应显示的用户',entitlementKind:'FRIEND',startsAt:'2026-11-01T00:00:00Z',endsAt:'2026-11-20T00:00:00Z',policyDraft:{id:'draft-policy-1',version:3,effectiveAtUtc:'2026-10-31T04:07:00Z',ruleReleaseId:'release-1',priceVersionId:'price-1',hash:'a'.repeat(64)},reason:'发布会员政策'}};
+  const html=renderToString(createElement(h.businessSummary.BusinessSummary,{business,operationCode:'membership.benefit.policy.publish'}));
+  assert.match(html,/政策草稿/);assert.match(html,/draft-policy-1/);assert.match(html,/v3/);assert.match(html,/2026年10月31日/);
+  assert.doesNotMatch(html,/不应显示的游戏|不应显示的用户|礼遇类型/);
+  assert.match(html,/需要服务端按申请引用/);
 });
 
 test('policy view renders legacy/unknown unified projections without inventing values and disables unsupported contracts',async t=>{

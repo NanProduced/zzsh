@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from "react";
-import { CheckCircle2, ChevronRight, LineChart, Lock, Pencil, TriangleAlert, X, History, AlertCircle, FileEdit, Send } from "lucide-react";
+import { CheckCircle2, ChevronRight, Copy, LineChart, Lock, Pencil, Plus, Trash2, TriangleAlert, X, History, AlertCircle, FileEdit, Send } from "lucide-react";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -439,53 +439,85 @@ function formatApiError(err: unknown): string {
 }
 
 type SimulationResource = ProfitSimulationContext["resources"][number];
-type SimulationScenario = { key: string; label: string; quantities: Record<string, string> };
+type SimulationLine = { resourceId: string; quantity: string };
+type SimulationScenario = { id: string; name: string; lines: SimulationLine[] };
+type SimulationDiscount = { id: string; label: string; ratio: string };
 
 function simulationResourceName(resource: SimulationResource): string {
   return resource.name?.trim() || (resource.pricingKind === "HAFF_RATIO" ? "哈夫币" : `物资 #${resource.itemId.slice(-6)}`);
 }
 
 function simulationUnit(resource: SimulationResource): string {
-  if (resource.pricingKind === "HAFF_RATIO") return "哈夫币";
+  if (resource.pricingKind === "HAFF_RATIO") return "M";
   return resource.unit === "ROUND" ? "发" : resource.unit === "DAY" ? "天" : "件";
 }
 
-function presetQuantities(context: ProfitSimulationContext, kind: "standard" | "heavy"): Record<string, string> {
-  const quantities: Record<string, string> = {};
-  for (const resource of context.resources) {
-    quantities[resource.itemId] = resource.pricingKind === "HAFF_RATIO"
-      ? kind === "heavy" ? "120000000" : "60000000"
-      : resource.unit === "ROUND" ? kind === "heavy" ? "3000" : "1000" : kind === "heavy" ? "5" : "1";
-  }
-  return quantities;
+function ratioTextFromUnits(units: bigint): string {
+  const whole = units / 100_000_000n;
+  const fraction = (units % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
 }
 
-function sameQuantities(context: ProfitSimulationContext, left: Record<string, string>, right: Record<string, string>): boolean {
-  return context.resources.every((resource) => (left[resource.itemId] ?? "1") === (right[resource.itemId] ?? "1"));
+/** Human discount input ("8折", "8.5折", "原价", or a payable ratio like 0.8) to the API's exact payable ratio. */
+export function parseHumanDiscount(value: string): string | null {
+  const text = value.trim();
+  if (text === "原价" || text === "100%") return "1";
+  const payable = parsePayableRatio(text);
+  if (payable !== null) return ratioTextFromUnits(payable);
+  const match = text.match(/^(\d{1,2})(?:\.(\d{1,4}))?折$/);
+  if (!match) return null;
+  const fraction = match[2] ?? "";
+  const digits = BigInt(match[1]! + fraction);
+  const denominator = 10n * 10n ** BigInt(fraction.length);
+  const scaled = digits * 100_000_000n;
+  if (scaled % denominator !== 0n) return null;
+  const units = scaled / denominator;
+  return units > 0n && units <= 100_000_000n ? ratioTextFromUnits(units) : null;
 }
 
-function buildScenarios(context: ProfitSimulationContext, custom: Record<string, string>): SimulationScenario[] {
-  const standard = presetQuantities(context, "standard");
-  const heavy = presetQuantities(context, "heavy");
-  const scenarios: SimulationScenario[] = [
-    { key: "standard", label: "标准租赁", quantities: standard },
-    { key: "heavy", label: "重度高耗损", quantities: heavy },
-    { key: "custom", label: "当前输入", quantities: custom },
-  ];
-  return scenarios.filter((scenario, index) => scenarios.findIndex((candidate) => sameQuantities(context, candidate.quantities, scenario.quantities)) === index);
+/** Haff input is expressed in M; convert exact decimal text to the server's raw integer units. */
+export function parseHaffMillions(value: string): string | null {
+  const text = value.trim().replace(/\s*[Mm]$/, "");
+  const match = text.match(/^(\d{1,9})(?:\.(\d{1,6}))?$/);
+  if (!match) return null;
+  const fraction = match[2] ?? "";
+  const raw = BigInt(match[1]!) * 1_000_000n + BigInt(fraction.padEnd(6, "0") || "0");
+  return raw > 0n ? raw.toString() : null;
 }
 
-function scenarioSummary(context: ProfitSimulationContext, quantities: Record<string, string>): string {
-  const parts = context.resources
-    .filter((resource) => Number(quantities[resource.itemId] ?? "1") > 0)
-    .map((resource) => `${simulationResourceName(resource)} ${Number(quantities[resource.itemId] ?? "1").toLocaleString("zh-CN")}${resource.pricingKind === "HAFF_RATIO" ? "" : simulationUnit(resource)}`);
-  return parts.length ? `${parts.slice(0, 3).join(" · ")}${parts.length > 3 ? ` · +${parts.length - 3} 项` : ""}` : "默认物资组合";
+function parseItemQuantity(value: string): string | null {
+  const text = value.trim();
+  return /^[1-9]\d{0,8}$/.test(text) ? text : null;
 }
 
 function simulationInventory(context: ProfitSimulationContext, quantities: Record<string, string>) {
   return context.resources
-    .filter((resource) => quantities[resource.itemId] !== undefined && Number(quantities[resource.itemId]) > 0)
+    .filter((resource) => quantities[resource.itemId] !== undefined && /^[1-9]\d*$/.test(quantities[resource.itemId]!))
     .map((resource) => ({ itemId: resource.itemId, quantity: quantities[resource.itemId]! }));
+}
+
+function scenarioQuantities(context: ProfitSimulationContext, scenario: SimulationScenario): { quantities: Record<string, string>; error?: string } {
+  const quantities: Record<string, string> = {};
+  for (const line of scenario.lines) {
+    const resource = context.resources.find((entry) => entry.itemId === line.resourceId);
+    if (!resource) continue;
+    const raw = resource.pricingKind === "HAFF_RATIO" ? parseHaffMillions(line.quantity) : parseItemQuantity(line.quantity);
+    if (raw === null) return { quantities, error: `${simulationResourceName(resource)}：请填写大于 0 的${resource.pricingKind === "HAFF_RATIO" ? "M 数量（最多 6 位小数）" : "整数数量"}` };
+    quantities[resource.itemId] = raw;
+  }
+  return { quantities, error: Object.keys(quantities).length ? undefined : "请至少添加一项物资并填写数量" };
+}
+
+function scenarioSummary(context: ProfitSimulationContext, scenario: SimulationScenario): string {
+  const parts = scenario.lines
+    .map((line) => {
+      const resource = context.resources.find((entry) => entry.itemId === line.resourceId);
+      if (!resource) return "";
+      const value = line.quantity.trim() || "待填写";
+      return `${simulationResourceName(resource)} ${value}${simulationUnit(resource)}`;
+    })
+    .filter(Boolean);
+  return parts.length ? parts.slice(0, 4).join(" · ") + (parts.length > 4 ? ` · +${parts.length - 4} 项` : "") : "尚未添加物资";
 }
 
 function simulationQuoteInput(context: ProfitSimulationContext, quantities: Record<string, string>, options: { mode: AdminPricingMode; safeBoxCode: string; termOptionCode: string; priceVersionId: string }) {
@@ -520,12 +552,15 @@ function ProfitSimulationModal({
   const [context, setContext] = useState<ProfitSimulationContext | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
   const [simulating, setSimulating] = useState(false);
-  const [scenarioResults, setScenarioResults] = useState<Array<{ key: string; label: string; summary: string; result?: ProfitSimulationResult; haffResult?: ProfitSimulationResult | null; error?: string }>>([]);
-  const [ratioError, setRatioError] = useState<string | null>(null);
-
-  // Operational scene inputs
-  const [resourceQuantities, setResourceQuantities] = useState<Record<string, string>>({});
-  const [proposedRatio, setProposedRatio] = useState<string>("0.8");
+  const [scenarioResults, setScenarioResults] = useState<Array<{ id: string; name: string; summary: string; result?: ProfitSimulationResult; error?: string }>>([]);
+  const [inputError, setInputError] = useState<string | null>(null);
+  const [scenarios, setScenarios] = useState<SimulationScenario[]>([]);
+  const [discounts, setDiscounts] = useState<SimulationDiscount[]>([{ id: "discount-8", label: "8折", ratio: "0.8" }]);
+  const [discountDraft, setDiscountDraft] = useState("9折");
+  const [discountError, setDiscountError] = useState<string | null>(null);
+  const enabledModesKey = enabledModes.join(",");
+  const sceneSeqRef = useRef(1);
+  const discountSeqRef = useRef(1);
   const runSeqRef = useRef(0);
   const runControllerRef = useRef<AbortController | null>(null);
   const runKeyRef = useRef<string | null>(null);
@@ -547,7 +582,7 @@ function ProfitSimulationModal({
   useEffect(() => {
     if (!open) return;
     if (!ruleReleaseId) {
-      setContextError("当前未绑定有效的规则发布 (ruleReleaseId 缺失)，无法发起试算。");
+      setContextError("当前未绑定有效的规则发布，无法发起试算。");
       return;
     }
     const controller = new AbortController();
@@ -555,7 +590,8 @@ function ProfitSimulationModal({
     invalidateSimulation();
     setLoadingContext(true);
     setContextError(null);
-    setRatioError(null);
+    setInputError(null);
+    setDiscountError(null);
     adminRequest<ProfitSimulationContext>(
       `/membership-growth/profit-simulation-context?ruleReleaseId=${encodeURIComponent(ruleReleaseId)}&priceVersionId=${encodeURIComponent(priceVersionId)}`,
       undefined,
@@ -566,17 +602,8 @@ function ProfitSimulationModal({
       .then((data) => {
         if (!active || controller.signal.aborted) return;
         setContext(data);
-        const defaultQuantities: Record<string, string> = {};
-        for (const res of data.resources || []) {
-          if (res.pricingKind === "HAFF_RATIO") {
-            defaultQuantities[res.itemId] = "60000000";
-          } else if (res.unit === "ROUND") {
-            defaultQuantities[res.itemId] = "1000";
-          } else {
-            defaultQuantities[res.itemId] = "1";
-          }
-        }
-        setResourceQuantities(defaultQuantities);
+        setScenarios([{ id: `scene-${sceneSeqRef.current++}`, name: "场景 1", lines: [] }]);
+        setDiscounts([{ id: "discount-8", label: "8折", ratio: "0.8" }]);
       })
       .catch((err: unknown) => {
         if (!active || controller.signal.aborted) return;
@@ -590,70 +617,102 @@ function ProfitSimulationModal({
       controller.abort();
       invalidateSimulation();
     };
-  }, [open, ruleReleaseId, priceVersionId]);
+  }, [open, ruleReleaseId, priceVersionId, enabledModesKey]);
 
   const handleConditionChange = (updater: () => void) => {
     invalidateSimulation();
+    setInputError(null);
     updater();
+  };
+
+  const addScenario = () => {
+    if (scenarios.length >= 4) return;
+    handleConditionChange(() => setScenarios((previous) => [...previous, { id: `scene-${sceneSeqRef.current++}`, name: `场景 ${previous.length + 1}`, lines: [] }]));
+  };
+
+  const duplicateScenario = (scenario: SimulationScenario) => {
+    if (scenarios.length >= 4) return;
+    handleConditionChange(() => setScenarios((previous) => [...previous, { id: `scene-${sceneSeqRef.current++}`, name: `场景 ${previous.length + 1}`, lines: scenario.lines.map((line) => ({ ...line })) }]));
+  };
+
+  const removeScenario = (id: string) => {
+    if (scenarios.length <= 1) return;
+    handleConditionChange(() => setScenarios((previous) => previous.filter((scenario) => scenario.id !== id)));
+  };
+
+  const addLine = (scenarioId: string, resourceId: string) => {
+    const resource = context?.resources.find((entry) => entry.itemId === resourceId);
+    if (!resource) return;
+    handleConditionChange(() => setScenarios((previous) => previous.map((scenario) => scenario.id === scenarioId && !scenario.lines.some((line) => line.resourceId === resourceId)
+      ? { ...scenario, lines: [...scenario.lines, { resourceId, quantity: "" }] }
+      : scenario)));
+  };
+
+  const updateLine = (scenarioId: string, resourceId: string, quantity: string) => {
+    handleConditionChange(() => setScenarios((previous) => previous.map((scenario) => scenario.id === scenarioId
+      ? { ...scenario, lines: scenario.lines.map((line) => line.resourceId === resourceId ? { ...line, quantity } : line) }
+      : scenario)));
+  };
+
+  const removeLine = (scenarioId: string, resourceId: string) => {
+    handleConditionChange(() => setScenarios((previous) => previous.map((scenario) => scenario.id === scenarioId
+      ? { ...scenario, lines: scenario.lines.filter((line) => line.resourceId !== resourceId) }
+      : scenario)));
+  };
+
+  const addDiscount = () => {
+    const ratio = parseHumanDiscount(discountDraft);
+    if (ratio === null) { setDiscountError("请输入类似 8折、8.5折 或原价；不支持负数或指数"); return; }
+    if (ratio === "1") { setDiscountError("原价已作为基准列显示，无需重复添加"); return; }
+    if (discounts.some((discount) => discount.ratio === ratio)) { setDiscountError("该折扣已添加"); return; }
+    if (discounts.length >= 5) { setDiscountError("最多添加 5 个折扣列"); return; }
+    handleConditionChange(() => setDiscounts((previous) => [...previous, { id: `discount-${discountSeqRef.current++}`, label: /折$/.test(discountDraft.trim()) ? discountDraft.trim() : formatDiscountLabel(ratio), ratio }]));
+    setDiscountDraft("");
+    setDiscountError(null);
   };
 
   const handleSimulate = async () => {
     if (!context) return;
-    const ratioText = proposedRatio.trim();
-    if (!ratioText || parsePayableRatio(ratioText) === null) {
-      setRatioError("请输入 0–1 之间的小数，如 0.8 表示 8 折。");
+    if (!scenarios.some((scenario) => scenario.lines.some((line) => line.quantity.trim()))) {
+      setInputError("请至少在一个场景中添加物资并填写数量");
       return;
     }
     invalidateSimulation();
     const runId = runSeqRef.current;
     const controller = new AbortController();
     runControllerRef.current = controller;
-    setRatioError(null);
+    setInputError(null);
     setSimulating(true);
     const contextSnapshot = context;
-    const scenarios = buildScenarios(contextSnapshot, resourceQuantities);
+    const scenarioSnapshot = scenarios.map((scenario) => ({ ...scenario, lines: scenario.lines.map((line) => ({ ...line })) }));
+    const discountSnapshot = discounts.map((discount) => ({ ...discount }));
     const defaultCondition = { mode: enabledModes[0] ?? "ordinary", safeBoxCode: contextSnapshot.safeBoxes[0] ?? "", termOptionCode: contextSnapshot.termOptions[0]?.code ?? "", priceVersionId };
-    const haffResources = contextSnapshot.resources.filter((resource) => resource.pricingKind === "HAFF_RATIO");
-    const ratios = [...new Set(["1", ratioText])];
-    const inputKey = JSON.stringify([ruleReleaseId, priceVersionId, ratioText, resourceQuantities, enabledModes, contextSnapshot.termVersionId, contextSnapshot.safeBoxes, contextSnapshot.termOptions]);
+    const ratios = [...new Set(["1", ...discountSnapshot.map((discount) => discount.ratio)])];
+    const inputKey = JSON.stringify([ruleReleaseId, priceVersionId, enabledModes, contextSnapshot.termVersionId, contextSnapshot.safeBoxes, contextSnapshot.termOptions, scenarioSnapshot, discountSnapshot]);
     runKeyRef.current = inputKey;
     const current = () => runSeqRef.current === runId && runKeyRef.current === inputKey && !controller.signal.aborted;
-    const rows: Array<{ key: string; label: string; summary: string; result?: ProfitSimulationResult; haffResult?: ProfitSimulationResult | null; error?: string }> = [];
+    const rows: Array<{ id: string; name: string; summary: string; result?: ProfitSimulationResult; error?: string }> = [];
     try {
-      for (const scenario of scenarios) {
+      for (const scenario of scenarioSnapshot) {
         if (!current()) return;
-        const summary = scenarioSummary(contextSnapshot, scenario.quantities);
-        if (!simulationInventory(contextSnapshot, scenario.quantities).length) {
-          rows.push({ key: scenario.key, label: scenario.label, summary, error: "请至少填写一项大于 0 的数量" });
+        const summary = scenarioSummary(contextSnapshot, scenario);
+        const { quantities, error } = scenarioQuantities(contextSnapshot, scenario);
+        if (error) {
+          rows.push({ id: scenario.id, name: scenario.name, summary, error });
           setScenarioResults([...rows]);
           continue;
         }
         try {
           const result = await adminRequest<ProfitSimulationResult>("/membership-growth/profit-simulation", {
             ruleReleaseId,
-            quoteInput: simulationQuoteInput(contextSnapshot, scenario.quantities, defaultCondition),
+            quoteInput: simulationQuoteInput(contextSnapshot, quantities, defaultCondition),
             payableRatios: ratios,
           }, undefined, {}, controller.signal);
           if (!current()) return;
-          const haffQuantities = Object.fromEntries(haffResources.map((resource) => [resource.itemId, scenario.quantities[resource.itemId] ?? "1"]));
-          let haffResult: ProfitSimulationResult | null = null;
-          if (haffResources.length && Number(haffQuantities[haffResources[0]!.itemId] ?? "1") > 0) {
-            try {
-              haffResult = await adminRequest<ProfitSimulationResult>("/membership-growth/profit-simulation", {
-                ruleReleaseId,
-                quoteInput: simulationQuoteInput(contextSnapshot, haffQuantities, defaultCondition),
-                payableRatios: ["1"],
-              }, undefined, {}, controller.signal);
-              if (!current()) return;
-            } catch {
-              if (!current()) return;
-              haffResult = null;
-            }
-          }
-          rows.push({ key: scenario.key, label: scenario.label, summary, result, haffResult });
+          rows.push({ id: scenario.id, name: scenario.name, summary, result });
         } catch (err: unknown) {
           if (!current()) return;
-          rows.push({ key: scenario.key, label: scenario.label, summary, error: formatApiError(err) });
+          rows.push({ id: scenario.id, name: scenario.name, summary, error: formatApiError(err) });
         }
         if (!current()) return;
         setScenarioResults([...rows]);
@@ -671,251 +730,254 @@ function ProfitSimulationModal({
     onOpenChange(nextOpen);
   };
 
-  const pointFor = (row: (typeof scenarioResults)[number], ratio: string) => {
-    const target = parsePayableRatio(ratio);
-    if (target === null || row.result?.baseQuotable === false) return null;
-    return row.result?.points?.find((point) => parsePayableRatio(point.payableRatio) === target) ?? null;
-  };
   const centsOf = (value: string | undefined | null): bigint | null => {
     if (typeof value !== "string" || !/^-?(0|[1-9]\d*)$/.test(value)) return null;
     return BigInt(value);
   };
-  const comparedRows = scenarioResults.map((row) => {
-    const original = pointFor(row, "1");
-    const discounted = pointFor(row, proposedRatio.trim());
-    const originalSpread = original ? centsOf(original.platformSpreadCents) : null;
-    const discountedSpread = discounted ? centsOf(discounted.platformSpreadCents) : null;
-    const reduction = originalSpread !== null && discountedSpread !== null ? originalSpread - discountedSpread : null;
-    const reductionTenths = reduction !== null && originalSpread !== null && originalSpread !== 0n ? exactPercentTenths(reduction, originalSpread) : null;
-    const haffSpread = row.haffResult?.baseline ? centsOf(row.haffResult.baseline.platformSpreadCents) : null;
-    const itemSpread = originalSpread !== null && haffSpread !== null ? originalSpread - haffSpread : null;
-    const missing = row.error
-      ? row.error
-      : row.result?.baseQuotable === false
-        ? row.result.reasonCodes?.join("；") || "无法报价"
-        : !original
-          ? "响应缺少原价点"
-          : !discounted
-            ? "响应缺少拟设折扣点"
-            : originalSpread === null || discountedSpread === null
-              ? "响应缺少有效价差"
-              : "";
-    return { ...row, original, discounted, originalSpread, discountedSpread, reduction, reductionTenths, haffSpread, itemSpread, missing };
-  });
-  const successfulResults = comparedRows.filter((row) => row.originalSpread !== null && row.discountedSpread !== null);
-  const maxSpreadAbs = comparedRows.reduce((max, row) => {
-    if (row.discountedSpread === null) return max;
-    const abs = row.discountedSpread < 0n ? -row.discountedSpread : row.discountedSpread;
-    return abs > max ? abs : max;
-  }, 1n);
-  const riskyCount = successfulResults.filter((row) => row.discountedSpread! < 0n || !row.discounted!.ownerFloorSatisfied).length;
-  const standardRow = successfulResults[0];
-  const haffSpreadCents = standardRow?.haffSpread ?? null;
-  const itemSpreadCents = standardRow?.itemSpread ?? null;
-  const compositionTotal = haffSpreadCents !== null && itemSpreadCents !== null ? (haffSpreadCents < 0n ? -haffSpreadCents : haffSpreadCents) + (itemSpreadCents < 0n ? -itemSpreadCents : itemSpreadCents) : 0n;
-  const haffShare = compositionTotal > 0n && haffSpreadCents !== null ? Number(((haffSpreadCents < 0n ? -haffSpreadCents : haffSpreadCents) * 10_000n) / compositionTotal) / 100 : 0;
-  const discountedSpreads = successfulResults.map((row) => row.discountedSpread!);
-  const reductions = successfulResults.map((row) => row.reduction!);
-  const reductionTenths = successfulResults.map((row) => row.reductionTenths!).filter((value): value is bigint => value !== null);
-  const minOf = (values: bigint[]) => values.length ? values.reduce((min, value) => value < min ? value : min) : null;
-  const maxOf = (values: bigint[]) => values.length ? values.reduce((max, value) => value > max ? value : max) : null;
-  const minDiscounted = minOf(discountedSpreads), maxDiscounted = maxOf(discountedSpreads);
-  const minReduction = minOf(reductions), maxReduction = maxOf(reductions);
-  const minReductionPct = minOf(reductionTenths), maxReductionPct = maxOf(reductionTenths);
-  const centsRange = (min: bigint | null, max: bigint | null) => min === null || max === null ? "—" : min === max ? formatCents(min.toString()) : `${formatCents(min.toString())} ～ ${formatCents(max.toString())}`;
-  const barWidth = (value: bigint) => {
-    const abs = value < 0n ? -value : value;
-    return Math.min(100, Math.max(4, Number((abs * 10_000n) / maxSpreadAbs) / 100));
+  const pointFor = (result: ProfitSimulationResult, ratio: string): ProfitSimulationPoint | null => {
+    const target = parsePayableRatio(ratio);
+    if (target === null || result.baseQuotable === false) return null;
+    return result.points?.find((point) => parsePayableRatio(point.payableRatio) === target) ?? null;
   };
+  const displayRows = scenarioResults.flatMap((row) => {
+    if (row.error || !row.result || row.result.baseQuotable === false) {
+      return [{ key: `${row.id}:error`, scene: row.name, summary: row.summary, ratio: "—", renter: null, owner: null, platform: null, originalPlatform: null, reduction: null, reductionTenths: null, floor: null, closed: null, missing: row.error ?? row.result?.reasonCodes?.join("；") ?? "无法报价" }];
+    }
+    const originalPoint = pointFor(row.result, "1");
+    const originalPlatform = originalPoint ? centsOf(originalPoint.platformSpreadCents) : null;
+    return [{ id: "original", label: "原价", ratio: "1" }, ...discounts.map((discount) => ({ id: discount.id, label: discount.label, ratio: discount.ratio }))].map((discount) => {
+      const point = pointFor(row.result!, discount.ratio);
+      const renter = point ? centsOf(point.payableRentalCents) : null;
+      const owner = point ? centsOf(point.ownerIncomeCents) : null;
+      const platform = point ? centsOf(point.platformSpreadCents) : null;
+      const reduction = originalPlatform !== null && platform !== null ? originalPlatform - platform : null;
+      const reductionTenths = reduction !== null && originalPlatform !== null && originalPlatform !== 0n ? exactPercentTenths(reduction, originalPlatform) : null;
+      const closed = renter !== null && owner !== null && platform !== null ? renter === owner + platform : null;
+      return {
+        key: `${row.id}:${discount.ratio}`,
+        scene: row.name,
+        summary: row.summary,
+        ratio: formatDiscountLabel(discount.ratio),
+        renter,
+        owner,
+        platform,
+        originalPlatform,
+        reduction,
+        reductionTenths,
+        floor: point?.ownerFloorSatisfied ?? null,
+        closed,
+        missing: point ? "" : "响应缺少该折扣点",
+      };
+    });
+  });
+  const amountRows = displayRows.filter((row) => row.renter !== null && row.owner !== null && row.platform !== null);
+  const riskyRows = amountRows.filter((row) => row.platform !== null && (row.platform < 0n || row.floor === false));
+  const openRows = displayRows.filter((row) => row.missing);
+  const discountsWithOriginal = [{ id: "original", label: "原价", ratio: "1" }, ...discounts];
+  const basisShort = (value: string) => value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent size="xl" className="max-h-[90vh] overflow-y-auto p-6 space-y-5">
+      <DialogContent size="xl" className="max-h-[90vh] min-w-0 max-w-[calc(100vw-2rem)] overflow-y-auto p-5 sm:p-6 space-y-5">
         <div className="flex items-start justify-between border-b pb-4">
           <div className="space-y-1">
             <DialogTitle className="text-lg font-bold flex flex-wrap items-center gap-2">
               <LineChart className="size-5 text-primary" />
-              <span>租金价差试算</span>
-              <Badge variant="outline" className="text-xs">纯只读辅助分析</Badge>
+              <span>三方试算</span>
+              <Badge variant="outline" className="text-xs">纯只读</Badge>
               <Badge variant="secondary" className="text-xs">不建单 / 不预留</Badge>
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              输入一个拟设折扣，比较不同哈夫币与物资数量场景下的平台租金价差，用于判断该折扣是否可设置。不含押金、手续费、分佣和运营成本。
+              自定义少量场景与折扣，对照租客租赁费用、号主应得和平台租赁毛利。押金不计入；平台毛利未扣渠道费、分佣和运营成本。
             </DialogDescription>
           </div>
         </div>
 
-        <div className="space-y-4 text-xs">
+        <div className="min-w-0 space-y-4 text-xs">
           {loadingContext ? (
             <div className="space-y-3 p-4 rounded-xl border border-border">
-              <div className="text-xs text-muted-foreground">正在读取当前价格方案与可用场景…</div>
+              <div className="text-xs text-muted-foreground">正在读取试算价目与可用物资…</div>
               <Skeleton className="h-32 w-full rounded-lg" />
             </div>
           ) : contextError ? (
             <div className="rounded-xl border border-warning/40 bg-warning/5 p-4 space-y-2 text-warning-foreground">
               <div className="flex items-center gap-2 font-medium">
                 <TriangleAlert className="h-4 w-4" />
-                <span>试算环境待连接</span>
+                <span>试算依据暂不可用</span>
               </div>
               <p className="text-muted-foreground">{contextError}</p>
-              <p className="text-[11px] text-muted-foreground">如实展示当前环境状态，不伪造全0虚假曲线。</p>
+              <p className="text-[11px] text-muted-foreground">未读取到价目时不生成结果，不以全 0 或旧结果代替。</p>
             </div>
           ) : context ? (
             <div className="space-y-4">
               <div className="rounded-xl border border-border bg-card/60 p-4 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
-                  <span className="flex items-center gap-1 font-semibold text-foreground">拟设折扣<InfoHint label="拟设折扣说明">0.8 = 实付 80%；1 = 原价。</InfoHint></span>
-                  <span className="text-[11px] text-muted-foreground">按当前系统价格计算</span>
-                </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,260px)_minmax(0,1fr)] items-end">
-                  <div className="flex items-center gap-2">
-                    <Input
-                      id="simulation-proposed-ratio"
-                      aria-label="拟设折扣"
-                      inputMode="decimal"
-                      value={proposedRatio}
-                      onChange={(event) => { handleConditionChange(() => setProposedRatio(event.target.value)); setRatioError(null); }}
-                      placeholder="如 0.8"
-                      className="h-9 bg-background font-mono text-xs"
-                    />
-                    <Badge variant="secondary" className="shrink-0 font-mono">{formatDiscountLabel(proposedRatio)}</Badge>
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-3">
+                  <div className="space-y-1">
+                    <p className="font-semibold text-foreground">本次试算依据</p>
+                    <p className="text-[11px] text-muted-foreground">按打开试算时绑定的封存价目计算；不是实时订单，也不代表当前发布价目。</p>
                   </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    试算只改变拟设折扣与数量；价差按系统当前配置。
-                    <InfoHint label="价差来源说明">哈夫币价差按当前启用的价格方案；如需调整，请先更新价格规则。物品价差按当前系统配置。保险箱与租期采用系统默认值，不参与本次折扣判断。押金、手续费、分佣和运营成本不计入。</InfoHint>
-                  </p>
+                  <Badge variant="outline" className="shrink-0 text-[10px]">只读假设</Badge>
                 </div>
-                {ratioError ? <p className="text-xs text-destructive" role="alert">{ratioError}</p> : null}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[11px] text-muted-foreground">将比较：标准租赁、重度高耗损，以及下方当前输入（与预设不重复时）。</p>
-                  <Button type="button" className="h-9 px-4" onClick={() => void handleSimulate()} disabled={simulating || !context.resources.length}>
-                    {simulating ? "正在试算…" : "开始试算"}
-                  </Button>
-                </div>
+                <details className="rounded-lg border border-border/70 bg-background/60 p-2.5">
+                  <summary className="cursor-pointer text-[11px] text-muted-foreground">价目与固定报价条件</summary>
+                  <dl className="mt-2 grid gap-1.5 text-[11px] text-muted-foreground sm:grid-cols-2">
+                    <div><dt className="inline text-foreground">规则发布：</dt><dd className="inline font-mono">{basisShort(context.ruleReleaseId)}</dd></div>
+                    <div><dt className="inline text-foreground">价格版本：</dt><dd className="inline font-mono">{basisShort(context.priceVersionId)}</dd></div>
+                    <div><dt className="inline text-foreground">租期版本：</dt><dd className="inline font-mono">{basisShort(context.termVersionId)}</dd></div>
+                    <div><dt className="inline text-foreground">固定条件：</dt><dd className="inline">{enabledModes[0] ?? "ordinary"} · {context.safeBoxes[0] ?? "未提供"} · {context.termOptions[0]?.code ?? "未提供"}</dd></div>
+                  </dl>
+                  <p className="mt-2 text-[10px] text-muted-foreground">接口未提供可选租期/保险箱；本页不把它们伪装成可调变量。当前发布价目是否与本次封存价目一致，需服务端后续提供投影。</p>
+                </details>
               </div>
 
               <div className="rounded-xl border border-border bg-card/60 p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
-                  <span className="font-semibold text-foreground">当前输入场景：物资与哈夫币数量</span>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="mr-1 text-[11px] text-muted-foreground">填入预设：</span>
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => handleConditionChange(() => setResourceQuantities(presetQuantities(context, "standard")))}>标准租赁</Button>
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => handleConditionChange(() => setResourceQuantities(presetQuantities(context, "heavy")))}>重度高耗损</Button>
+                  <span className="font-semibold text-foreground">对照折扣</span>
+                  <span className="text-[11px] text-muted-foreground">原价始终保留；可输入 8折、8.5折</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="secondary" className="font-mono">原价</Badge>
+                  {discounts.map((discount) => (
+                    <span key={discount.id} className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-1 text-[11px]">
+                      {discount.label}
+                      <button type="button" aria-label={`移除折扣 ${discount.label}`} className="rounded-full text-muted-foreground hover:text-foreground" onClick={() => handleConditionChange(() => setDiscounts((previous) => previous.filter((entry) => entry.id !== discount.id)))}>
+                        <X className="size-3" aria-hidden />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-end gap-2">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                    <label htmlFor="simulation-discount" className="text-[11px] font-medium text-muted-foreground">添加折扣</label>
+                    <div className="flex items-center gap-2">
+                      <Input id="simulation-discount" aria-label="添加折扣" value={discountDraft} onChange={(event) => { setDiscountDraft(event.target.value); setDiscountError(null); }} placeholder="如 8折" className="h-9 max-w-40 bg-background text-xs" />
+                      <Button type="button" size="sm" variant="outline" className="h-9" onClick={addDiscount}><Plus className="size-3.5 mr-1" aria-hidden />添加</Button>
+                    </div>
                   </div>
+                  <p className="basis-full text-[11px] text-muted-foreground">输入人类折扣标尺，提交前转换为服务端精确应付比例。</p>
                 </div>
-                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                  {context.resources.map((resource) => {
-                    const name = simulationResourceName(resource);
-                    const unit = simulationUnit(resource);
-                    const inputId = `simulation-qty-${resource.itemId}`;
-                    return (
-                      <div key={resource.itemId} className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background p-2.5">
-                        <div className="min-w-0 flex-1">
-                          <label htmlFor={inputId} className="block truncate text-xs font-medium text-foreground" title={name}>{name}</label>
-                          <div className="text-[10px] text-muted-foreground">按{unit}</div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1">
-                          <Input
-                            id={inputId}
-                            aria-label={`${name}数量（${unit}）`}
-                            type="number"
-                            min="0"
-                            value={resourceQuantities[resource.itemId] ?? "1"}
-                            onChange={(event) => handleConditionChange(() => setResourceQuantities((previous) => ({ ...previous, [resource.itemId]: event.target.value })))}
-                            className="h-8 w-24 bg-card text-right font-mono text-xs"
-                          />
-                          <span className="w-8 text-[11px] text-muted-foreground">{unit}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className="text-[11px] text-muted-foreground">押金不计入本次平台价差；计算未扣手续费、分佣和运营成本。</p>
+                {discountError ? <p className="text-xs text-destructive" role="alert">{discountError}</p> : null}
               </div>
 
-              {scenarioResults.length ? (
-                <div className="space-y-3">
-                  <div className="rounded-lg border bg-muted/20 p-3 text-xs space-y-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="font-semibold text-foreground">拟设 {formatDiscountLabel(proposedRatio)} · {successfulResults.length} 个有效场景</p>
-                      {successfulResults.length ? <Badge variant={riskyCount ? "warning" : "success"}>{riskyCount ? `${riskyCount} 个场景需注意` : "保底全部满足"}</Badge> : null}
-                    </div>
-                    {successfulResults.length ? (
-                      <p className="text-muted-foreground">
-                        折后平台价差 {centsRange(minDiscounted, maxDiscounted)}；较原价减少 {centsRange(minReduction, maxReduction)}
-                        {minReductionPct !== null && maxReductionPct !== null ? `（${formatTenthsPercent(minReductionPct)} ～ ${formatTenthsPercent(maxReductionPct)}）` : ""}。
-                      </p>
-                    ) : <p className="text-muted-foreground">没有形成有效基准报价，请检查物资数量。</p>}
-                    {haffSpreadCents !== null && itemSpreadCents !== null ? (
-                      <div className="space-y-1.5 pt-1">
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                          <span className="text-foreground">原价利润构成（{standardRow?.label}）</span>
-                          <span className="text-muted-foreground">哈夫币价差 {formatCents(haffSpreadCents.toString())} · 物品价差 {formatCents(itemSpreadCents.toString())}</span>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold text-foreground">试算场景</span>
+                  <Button type="button" size="sm" variant="outline" disabled={scenarios.length >= 4} onClick={addScenario}><Plus className="size-3.5 mr-1" aria-hidden />新增场景</Button>
+                </div>
+                {scenarios.map((scenario, index) => {
+                  const available = context.resources.filter((resource) => !scenario.lines.some((line) => line.resourceId === resource.itemId));
+                  return (
+                    <div key={scenario.id} className="rounded-xl border border-border bg-card/60 p-3.5 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Badge variant="outline" className="shrink-0 text-[10px]">场景 {index + 1}</Badge>
+                          <Input aria-label={`场景 ${index + 1} 名称`} value={scenario.name} onChange={(event) => handleConditionChange(() => setScenarios((previous) => previous.map((entry) => entry.id === scenario.id ? { ...entry, name: event.target.value } : entry)))} className="h-8 min-w-0 max-w-48 bg-background text-xs" />
                         </div>
-                        <div className="flex h-1.5 overflow-hidden rounded bg-muted">
-                          <div className="h-full bg-primary" style={{ width: `${Math.min(100, haffShare)}%` }} />
-                          <div className="h-full bg-emerald-500" style={{ width: `${Math.min(100, 100 - haffShare)}%` }} />
+                        <div className="flex items-center gap-1">
+                          <Button type="button" size="sm" variant="ghost" className="h-8 px-2 text-[11px]" disabled={scenarios.length >= 4} onClick={() => duplicateScenario(scenario)}><Copy className="size-3 mr-1" aria-hidden />复制</Button>
+                          <Button type="button" size="sm" variant="ghost" className="h-8 px-2 text-[11px] text-destructive" disabled={scenarios.length <= 1} onClick={() => removeScenario(scenario.id)}><Trash2 className="size-3 mr-1" aria-hidden />删除</Button>
                         </div>
-                        <p className="text-[10px] text-muted-foreground">哈夫币价差按当前价格方案，物品价差按系统配置；折扣由平台承担，号主收入不变。</p>
                       </div>
-                    ) : null}
-                  </div>
-                  <Table className="text-xs">
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>场景 / 物资数量</TableHead>
-                        <TableHead>原价价差</TableHead>
-                        <TableHead>折后价差</TableHead>
-                        <TableHead>利润变化</TableHead>
-                        <TableHead className="text-right">号主保底</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {comparedRows.map((row) => {
-                        const discounted = row.discounted;
-                        const risky = discounted && row.discountedSpread !== null ? row.discountedSpread < 0n || !discounted.ownerFloorSatisfied : false;
-                        return (
-                          <TableRow key={row.key} className={risky ? "bg-destructive/5" : undefined}>
-                            <TableCell>
-                              <div className="font-medium text-foreground">{row.label}</div>
-                              <div className="text-[10px] text-muted-foreground">{row.summary}</div>
-                            </TableCell>
-                            <TableCell className="font-mono tabular-nums">
-                              <div>{row.originalSpread !== null ? formatCents(row.originalSpread.toString()) : "—"}</div>
-                              {row.haffSpread !== null && row.itemSpread !== null ? <div className="text-[10px] font-sans text-muted-foreground">哈夫币 {formatCents(row.haffSpread.toString())} · 物品 {formatCents(row.itemSpread.toString())}</div> : null}
-                            </TableCell>
-                            <TableCell>
-                              {discounted ? (
-                                <div className="space-y-1">
-                                  <span className={risky ? "font-semibold text-destructive" : "font-semibold text-emerald-600 dark:text-emerald-400"}>{row.discountedSpread !== null ? formatCents(row.discountedSpread.toString()) : "—"}</span>
-                                  <div className="h-1.5 w-24 overflow-hidden rounded bg-muted"><div className={risky ? "h-full bg-destructive" : "h-full bg-emerald-500"} style={{ width: `${row.discountedSpread !== null ? barWidth(row.discountedSpread) : 4}%` }} /></div>
+                      {scenario.lines.length ? (
+                        <div className="space-y-2">
+                          {scenario.lines.map((line) => {
+                            const resource = context.resources.find((entry) => entry.itemId === line.resourceId);
+                            if (!resource) return null;
+                            const unit = simulationUnit(resource);
+                            const label = simulationResourceName(resource);
+                            return (
+                              <div key={line.resourceId} className="flex min-w-0 flex-wrap items-end gap-2 rounded-lg border border-border/70 bg-background p-2.5">
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-xs font-medium text-foreground" title={label}>{label}</div>
+                                  <div className="text-[10px] text-muted-foreground">{resource.pricingKind === "HAFF_RATIO" ? "按 M 填写，自动换算原始哈夫币数量" : `按${unit}填写整数数量`}</div>
                                 </div>
-                              ) : "—"}
-                            </TableCell>
-                            <TableCell className={`font-mono tabular-nums ${row.reduction !== null && row.reduction > 0n ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>
-                              {row.reduction !== null && row.reduction !== undefined ? `${row.reduction >= 0n ? "-" : "+"}${formatCents((row.reduction < 0n ? -row.reduction : row.reduction).toString())}${row.reductionTenths !== null ? `（${row.reductionTenths >= 0n ? "-" : "+"}${formatTenthsPercent(row.reductionTenths < 0n ? -row.reductionTenths : row.reductionTenths)}）` : ""}` : "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {discounted ? (
-                                discounted.ownerFloorSatisfied
-                                  ? <Badge variant="outline" className="border-emerald-300 text-emerald-600">满足保底</Badge>
-                                  : <Badge variant="destructive">低于号主底线</Badge>
-                              ) : (
-                                <span className="text-[11px] text-destructive">{row.missing || "不可用"}</span>
-                              )}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                  <p className="text-[11px] text-muted-foreground">计算口径：平台租金价差，未扣押金、支付手续费、分佣和运营成本；价差为正不等于净利润。</p>
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <Input aria-label={`${scenario.name} ${label} 数量（${unit}）`} inputMode={resource.pricingKind === "HAFF_RATIO" ? "decimal" : "numeric"} value={line.quantity} onChange={(event) => updateLine(scenario.id, line.resourceId, event.target.value)} placeholder={resource.pricingKind === "HAFF_RATIO" ? "如 60" : "如 1"} className="h-8 w-28 bg-card text-right font-mono text-xs" />
+                                  <span className="w-6 text-[11px] text-muted-foreground">{unit}</span>
+                                </div>
+                                <Button type="button" size="sm" variant="ghost" className="h-8 px-2 text-[11px]" aria-label={`移除 ${scenario.name} 的 ${label}`} onClick={() => removeLine(scenario.id, line.resourceId)}><X className="size-3" aria-hidden /></Button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : <p className="rounded-lg border border-dashed border-border/70 p-3 text-[11px] text-muted-foreground">尚未添加物资；未选择物资不参与本场景。</p>}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Select value="" onValueChange={(value) => value && addLine(scenario.id, value)}>
+                          <SelectTrigger aria-label={`${scenario.name} 添加物资`} className="h-8 w-full max-w-60 bg-background text-xs"><SelectValue placeholder="添加物资" /></SelectTrigger>
+                          <SelectContent>
+                            {available.map((resource) => <SelectItem key={resource.itemId} value={resource.itemId}>{simulationResourceName(resource)}（{simulationUnit(resource)}）</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                        {available.length === 0 ? <span className="text-[11px] text-muted-foreground">可用物资已全部加入</span> : null}
+                      </div>
+                    </div>
+                  );
+                })}
+                {inputError ? <p className="text-xs text-destructive" role="alert">{inputError}</p> : null}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+                  <p className="text-[11px] text-muted-foreground">每个场景只发一次报价；折扣一次提交，原价作为基准。少量场景串行执行。</p>
+                  <Button type="button" className="h-9 px-4" onClick={() => void handleSimulate()} disabled={simulating || !context.resources.length}>{simulating ? "正在试算…" : "开始试算"}</Button>
+                </div>
+              </div>
+
+              {displayRows.length ? (
+                <div className="space-y-3">
+                  <div className="rounded-lg border bg-muted/20 p-3 text-xs space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-semibold text-foreground">{scenarios.length} 个场景 × {discountsWithOriginal.length} 个折扣</p>
+                      <Badge variant={riskyRows.length || openRows.length ? "warning" : "success"}>{riskyRows.length ? `${riskyRows.length} 行需注意` : openRows.length ? `${openRows.length} 行待核` : "保底均满足"}</Badge>
+                    </div>
+                    <p className="text-muted-foreground">三列金额均来自同一次判价响应；租客租赁费用 = 号主应得 + 平台租赁毛利（逐行核对）。{openRows.length ? ` ${openRows.length} 行缺少所需折扣点，未补 0。` : ""}</p>
+                  </div>
+                  <div className="min-w-0 w-full overflow-x-auto rounded-lg border">
+                    <Table className="min-w-[900px] text-xs">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>场景 / 物资</TableHead>
+                          <TableHead>折扣</TableHead>
+                          <TableHead className="text-right">租客租赁费用</TableHead>
+                          <TableHead className="text-right">号主应得</TableHead>
+                          <TableHead className="text-right">平台租赁毛利</TableHead>
+                          <TableHead className="text-right">毛利较原价</TableHead>
+                          <TableHead>号主保底</TableHead>
+                          <TableHead>金额核对</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {displayRows.map((row) => {
+                          const risky = row.platform !== null && (row.platform < 0n || row.floor === false);
+                          return (
+                            <TableRow key={row.key} className={risky ? "bg-destructive/5" : undefined}>
+                              <TableCell>
+                                <div className="font-medium text-foreground">{row.scene}</div>
+                                <div className="mt-0.5 max-w-72 text-[10px] text-muted-foreground">{row.summary}</div>
+                              </TableCell>
+                              <TableCell className="font-mono">{row.ratio}</TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">{row.renter !== null ? formatCents(row.renter.toString()) : "待核"}</TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">{row.owner !== null ? formatCents(row.owner.toString()) : "待核"}</TableCell>
+                              <TableCell className={`text-right font-mono tabular-nums ${risky ? "font-semibold text-destructive" : ""}`}>{row.platform !== null ? formatCents(row.platform.toString()) : "待核"}</TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">
+                                {row.ratio === "原价" ? "—" : row.reduction !== null ? `${row.reduction >= 0n ? "-" : "+"}${formatCents((row.reduction < 0n ? -row.reduction : row.reduction).toString())}${row.reductionTenths !== null ? `（${row.reductionTenths >= 0n ? "-" : "+"}${formatTenthsPercent(row.reductionTenths < 0n ? -row.reductionTenths : row.reductionTenths)}）` : ""}` : "待核"}
+                              </TableCell>
+                              <TableCell>
+                                {row.floor === null ? <span className="text-[11px] text-muted-foreground">待核</span> : row.floor ? <Badge variant="outline" className="border-emerald-300 text-emerald-600">满足</Badge> : <Badge variant="destructive">低于底线</Badge>}
+                              </TableCell>
+                              <TableCell className="text-[11px]">
+                                {row.missing ? <span className="text-destructive">{row.missing}</span> : row.closed === null ? <span className="text-muted-foreground">待核</span> : row.closed ? <span className="text-emerald-600 dark:text-emerald-400">闭合</span> : <span className="text-destructive">差额 {formatCents((row.renter! - row.owner! - row.platform!).toString())}</span>}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">租客租赁费用、号主应得、平台租赁毛利是本次封存价目的 what-if 合计，不是实际订单、结算利润或号主净利润；押金不计入。负毛利只表示试算结果，不能用于实际核价。</p>
                 </div>
               ) : simulating ? (
                 <p className="rounded-lg border border-border bg-muted/20 p-3 text-xs text-muted-foreground" role="status">正在按场景逐一试算，结果会随完成情况更新…</p>
               ) : (
                 <div className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">
-                  填写拟设折扣后点击「开始试算」，查看标准、重度和当前输入场景下的平台价差。
+                  添加场景与物资、填写数量和折扣后点击「开始试算」。原价会作为基准与每个折扣同表对照。
                 </div>
               )}
             </div>
@@ -1086,7 +1148,6 @@ export function MembershipGrowthAdminView({
   };
   const warnings = [...new Set([...validation.warnings, ...policyWarnings])];
   const draftExists = policy.status === "DRAFT";
-  const editVersion = draftExists ? policy.version : String(Number(policy.version) + 1);
   const changes = approvedPolicy && approvedUnified ? diffGrowthPolicies(approvedPolicy, approvedUnified, policy, unifiedDraft) : [];
   const approval = state.approval;
   const approvalId = approval.requestId;
@@ -1203,11 +1264,10 @@ export function MembershipGrowthAdminView({
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2.5">
               <h2 className="text-xl font-bold tracking-tight text-foreground">会员政策</h2>
-              <Badge variant={lifecycle.variant}>{lifecycle.label}{approvedVersion ? ` · v${approvedVersion}` : ""}</Badge>
-              {draftExists ? <Badge variant="warning">草稿 v{policy.version} · 未生效</Badge> : null}
+              <Badge variant={lifecycle.variant}>{lifecycle.label}</Badge>
             </div>
             <p className="text-xs text-muted-foreground leading-relaxed max-w-2xl">
-              当前显示已生效的统一折扣；编辑在弹窗中进行。
+              当前正在使用的权益只读展示；一次只处理一项变更。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1224,7 +1284,7 @@ export function MembershipGrowthAdminView({
             {editable ? (
               <Button size="sm" variant="default" onClick={() => { setEditStage(1); setIsEditOpen(true); }}>
                 <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                {draftExists ? "编辑草稿" : "编辑政策"}
+                调整会员政策
               </Button>
             ) : null}
           </div>
@@ -1242,7 +1302,6 @@ export function MembershipGrowthAdminView({
               <span className="text-[11px]">{state.subject.tier ?? "UNKNOWN"}</span>
             </div>
           ) : null}
-          {approvedPolicy ? <InfoHint label="价格依据说明">折扣按当前启用的价格方案计算；价格方案与审批单号可在变更记录中查看。</InfoHint> : null}
         </div>
 
         {draftExists ? (
@@ -1251,35 +1310,33 @@ export function MembershipGrowthAdminView({
               <div className="p-1.5 rounded-md bg-amber-500/20 text-amber-600 dark:text-amber-400"><FileEdit className="h-4 w-4" /></div>
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-semibold text-foreground">草稿 v{policy.version} 未生效</span>
-                  <Badge variant={dirty ? "warning" : approval.status === "REQUESTED" ? "info" : "secondary"} className="text-[10px] py-0">
-                    {dirty ? "有未保存修改" : approval.status === "REQUESTED" ? "已提交审批" : "已保存草稿"}
+                  <span className="font-semibold text-foreground">待处理变更</span>
+                  <Badge variant={dirty ? "warning" : approval.status === "REQUESTED" ? "info" : approval.status === "REJECTED" ? "destructive" : "secondary"} className="text-[10px] py-0">
+                    {dirty ? "未保存修改" : approval.status === "REQUESTED" ? "已提交审批" : approval.status === "REJECTED" ? "已退回" : approval.status === "UNKNOWN" ? "关联申请待核对" : "草稿已保存"}
                   </Badge>
-                  {!dirty ? <InfoHint label="草稿说明">草稿保存后不能删除；如需调整请继续编辑，保存后会覆盖当前草稿。</InfoHint> : null}
                   {!dirty && (!serverPublishable || warnings.length) ? (
                     <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-300">
                       待补齐
-                      <InfoHint label="待补齐项"><span>{[...allErrors, ...warnings].slice(0, 6).join("；") || "请打开编辑草稿查看待补齐项。"}</span></InfoHint>
+                      <InfoHint label="待补齐项"><span>{[...allErrors, ...warnings].slice(0, 6).join("；") || "请打开编辑窗口查看待补齐项。"}</span></InfoHint>
                     </span>
                   ) : null}
                 </div>
                 <p className="text-muted-foreground">
                   {dirty
-                    ? "有未保存修改，保存后可提交。"
+                    ? "本次修改尚未保存；保存后才会进入待提交状态。"
                     : approval.status === "REQUESTED"
-                      ? "已提交审批，等待审批中心处理。"
-                      : "草稿已保存，提交审批后生效。"}
+                      ? approval.message ?? "已提交审批，等待审批中心处理。"
+                      : approval.status === "REJECTED"
+                        ? approval.message ?? "审批已退回；可调整后重新提交。"
+                        : approval.status === "UNKNOWN"
+                          ? approval.message ?? "关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。"
+                          : "草稿已保存，尚未提交审批。"}
                 </p>
+                {approval.status === "UNKNOWN" ? <p className="text-[11px] text-amber-700 dark:text-amber-300">提交前请先到审批中心核对是否已有同一草稿的申请。</p> : null}
                 {approval.status === "REJECTED" ? <p className="text-destructive">{approval.message ?? "申请被驳回，可修改后重新提交。"}</p> : null}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {editable ? (
-                <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => { setEditStage(1); setIsEditOpen(true); }}>
-                  <Pencil className="h-3.5 w-3.5 mr-1" />
-                  继续编辑草稿
-                </Button>
-              ) : null}
               {onSavePolicyDraft && dirty ? (
                 <Button size="sm" variant="secondary" className="h-8 text-xs" title={allErrors.length ? "请先在编辑草稿中修正校验问题" : undefined} disabled={policySaving || allErrors.length > 0} onClick={onSavePolicyDraft}>
                   {policySaving ? "保存中…" : "保存草稿"}
@@ -1299,18 +1356,12 @@ export function MembershipGrowthAdminView({
             <div className="flex items-center gap-2.5">
               <div className="p-1.5 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"><CheckCircle2 className="h-4 w-4" /></div>
               <div>
-                <span className="font-medium text-foreground">{approvedPolicy ? `当前生效政策 v${approvedVersion}` : "尚未配置统一权益"}</span>
+                <span className="font-medium text-foreground">{approvedPolicy ? "当前生效权益" : "尚未配置统一权益"}</span>
                 <p className="text-muted-foreground text-[11px] mt-0.5">
                   {approvedPolicy ? "编辑会创建新草稿；审批通过并执行前不影响线上折扣。" : "创建首份草稿，提交审批后生效。"}
                 </p>
               </div>
             </div>
-            {editable ? (
-              <Button size="sm" variant="outline" className="h-7 text-xs bg-background" onClick={() => { setEditStage(1); setIsEditOpen(true); }}>
-                <Pencil className="h-3 w-3 mr-1" />
-                {approvedPolicy ? "编辑政策草稿" : "创建首份草稿"}
-              </Button>
-            ) : null}
           </div>
         )}
       </div>
@@ -1322,7 +1373,7 @@ export function MembershipGrowthAdminView({
             <p className="mt-0.5 text-xs text-muted-foreground">总价折扣作用于租金与物资费合计；所有已启用租赁方式统一；押金不参与。</p>
             <p className="mt-1 text-[10px] text-muted-foreground md:hidden">左右滑动表格查看押金权益。</p>
           </div>
-          <Badge variant={approvedPolicy ? "success" : "outline"}>{approvedPolicy ? `生效 v${approvedVersion}` : "尚无生效配置"}</Badge>
+          <Badge variant={approvedPolicy ? "success" : "outline"}>{approvedPolicy ? "当前生效" : "尚无生效配置"}</Badge>
         </div>
         {approvedPolicy && approvedUnified ? (
           <Table className="membership-admin-table">
@@ -1378,7 +1429,7 @@ export function MembershipGrowthAdminView({
             <h3 id="membership-admin-range-heading" className="flex items-center gap-1.5 text-sm font-semibold text-foreground">礼遇折扣范围<InfoHint label="礼遇范围说明">挚友与尊享各一份范围，与成长等级折扣独立；发放仍需逐单审批。</InfoHint></h3>
             <p className="mt-0.5 text-xs text-muted-foreground">两类礼遇各一份范围，适配全部已启用租赁方式；发放需逐单审批。</p>
           </div>
-          <Badge variant="outline">{approvedPolicy ? `只读 · 生效 v${approvedVersion}` : "尚无生效配置"}</Badge>
+          <Badge variant="outline">{approvedPolicy ? "只读 · 当前生效" : "尚无生效配置"}</Badge>
         </div>
         {approvedPolicy && approvedUnified ? (
           <Table className="membership-admin-table membership-admin-range-table">
@@ -1483,7 +1534,7 @@ export function MembershipGrowthAdminView({
               <div className="space-y-3 border-b pb-3.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <DialogTitle className="text-base font-semibold">编辑统一会员政策（草稿 v{editVersion}）</DialogTitle>
+                    <DialogTitle className="text-base font-semibold">调整会员政策</DialogTitle>
                     <DialogDescription className="text-xs text-muted-foreground mt-0.5">一份统一等级折扣、两类礼遇范围；审批通过并执行后生效。</DialogDescription>
                   </div>
                   <Badge variant={dirty ? "warning" : "secondary"}>{dirty ? "草稿有变动" : "未变动"}</Badge>

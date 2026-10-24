@@ -94,6 +94,25 @@ function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
   );
 }
 
+/** Policy publish has no entitlement target/user fields; only the frozen draft metadata is available today. */
+function PolicySummary({ summary }: { summary: Record<string, unknown> }) {
+  const draft = summary.policyDraft as Record<string, unknown> | undefined;
+  return (
+    <div className="space-y-3">
+      <FactGrid>
+        <Fact label="政策草稿" value={draft ? `${String(draft.id)}${typeof draft.version === "number" ? ` · v${draft.version}` : ""}` : null} mono />
+        <Fact label="草稿生效时间" value={formatDate(text(draft ?? {}, "effectiveAtUtc"))} />
+        <Fact label="规则发布" value={text(draft ?? {}, "ruleReleaseId")} mono />
+        <Fact label="价格版本" value={text(draft ?? {}, "priceVersionId")} mono />
+        <Fact label="申请理由" value={text(summary, "reason")} />
+      </FactGrid>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        政策各等级折扣、押金权益和两类礼遇范围的实际差异，需要服务端按申请引用的不可变草稿投影；当前摘要未提供这些经营字段，本页不以当前最新草稿替代申请快照，也不推断审批人或生效结果。
+      </p>
+    </div>
+  );
+}
+
 /** 被撤销 / 被替换的目标权益：申请时冻结的作用范围 vs 该对象当前状态。 */
 function FrozenTargets({ summary }: { summary: Record<string, unknown> }) {
   const rows = ([
@@ -328,17 +347,17 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
 
       {business.summaryAvailable !== false && summary ? (
         <Section title="申请时快照">
-          {business.businessType === "settlement" ? <SettlementSummary summary={summary} /> : <MembershipSummary summary={summary} />}
+          {business.businessType === "settlement" ? <SettlementSummary summary={summary} /> : operationCode === "membership.benefit.policy.publish" ? <PolicySummary summary={summary} /> : <MembershipSummary summary={summary} />}
           <FactGrid>
-            {business.game ? <Fact label="游戏" value={business.game.name ?? business.game.id} /> : null}
+            {operationCode !== "membership.benefit.policy.publish" && business.game ? <Fact label="游戏" value={business.game.name ?? business.game.id} /> : null}
             <Fact label="载荷版本" value={typeof summary.payloadVersion === "number" ? `v${summary.payloadVersion}` : null} />
             <Fact label="载荷哈希" value={text(summary, "payloadHash")} mono />
             <Fact label="申请理由" value={text(summary, "reason")} />
-            {pricing ? <Fact label="定价口径引用" value={[pricingScopeLabel(pricing), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
+            {pricing && operationCode !== "membership.benefit.policy.publish" ? <Fact label="定价口径引用" value={[pricingScopeLabel(pricing), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
             {costBasis ? <Fact label="成本依据" value={[text(costBasis, "priceVersionId"), text(costBasis, "ruleReleaseId")].filter(Boolean).join(" · ") || null} mono /> : null}
           </FactGrid>
           {business.businessType === "settlement" ? <SettlementCompare summary={summary} /> : null}
-          {business.businessType === "membership" ? <FrozenTargets summary={summary} /> : null}
+          {business.businessType === "membership" && operationCode !== "membership.benefit.policy.publish" ? <FrozenTargets summary={summary} /> : null}
         </Section>
       ) : null}
 
