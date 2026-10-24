@@ -1,4 +1,5 @@
 import { readOrderPaymentSummary, type ChannelPaymentReadOptions } from "./channel-payment-read";
+import { readAdminOrderRefundSummary } from '../finance/channel-finance-read';
 import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, type OrderRow } from "./order";
@@ -131,5 +132,6 @@ export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer
  const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${relation}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=ANY($1::text[]) AND ${gameScopeSql("x.game_id","$3","$2")}`,[[id],viewer.isBoss,viewer.adminId])).rows[0];
  if(!row)throw notFound();
  const paymentSummary=await readOrderPaymentSummary(client,{orderId:id,origin:row.origin==="NATIVE"?"NATIVE":"LEGACY",financeReadable:viewer.financeReadable===true},paymentReadOptions);
- return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey,paymentSummary};
+ const refundSummary=await readAdminOrderRefundSummary(client,{orderId:id,origin:row.origin==='NATIVE'?'NATIVE':'LEGACY',financeReadable:viewer.financeReadable===true});
+ return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey,paymentSummary,refundSummary};
 }

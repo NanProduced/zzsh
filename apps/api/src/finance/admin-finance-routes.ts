@@ -1,4 +1,5 @@
 import { authorizeAdminFinance } from "./admin-finance-access";
+import { readAdminJoinpayMerchantAccounts, type JoinpayAccountReadAccess } from './channel-finance-read';
 export { authorizeAdminFinance } from "./admin-finance-access";
 import type { INestApplication } from "@nestjs/common";
 
@@ -14,7 +15,7 @@ import type { ListingCursorKey } from "../supply/listing-cursor";
 import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, financePeriodProjection,readAdminFinancePeriodBalances,readAdminFinancePeriodBasis, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
 
-export type AdminFinanceOptions = AuthSecurityOptions & { listingCursorKey?: ListingCursorKey };
+export type AdminFinanceOptions = AuthSecurityOptions & { listingCursorKey?: ListingCursorKey; joinpayAccountRead?: JoinpayAccountReadAccess };
 function pageNumber(query: URLSearchParams, name: string, fallback: number, max: number): number {
   const value = query.get(name) ?? String(fallback);
   if (!/^[1-9]\d{0,5}$/.test(value) || Number(value) > max) throw invalid("Invalid finance page");
@@ -29,11 +30,12 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
-    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(lookup|period|export|subjects\/[^/]+|documents\/[^/]+)$/.exec(url.pathname);
+    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(lookup|period|export|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+)$/.exec(url.pathname);
     if ((request.method ?? "GET") !== "GET" || !match) throw notFound();
     const origin = request.headers.origin;
     if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || request.headers["sec-fetch-site"] === "cross-site") throw forbidden();
-    const route = match[1]!, complete = route === "period" || route === "export" || route.startsWith("subjects/");
+    const route = match[1]!, merchant = route.startsWith('merchant-accounts/'), complete = merchant || route === "period" || route === "export" || route.startsWith("subjects/");
+    if(merchant&&url.searchParams.size)throw invalid('Merchant account reads do not accept query parameters');
     const operation = complete ? "complete" : route.startsWith("documents/") ? "document" : "lookup";
     const filters = parseAdminFinanceFilters(url.searchParams, new Date(), route === "period" || route === "export");
     filters.q = resolveFinanceLookup(filters.q, [options.adminOrigin, options.userOrigin, options.apiOrigin]);
@@ -44,6 +46,7 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
     const result = await withTransaction(options.pool, async client => {
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const actor = await authorizeAdminFinance(client, context, operation);
+      if(merchant)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminJoinpayMerchantAccounts(client,{adminId:context.userId,merchantIdentityId:reference(route.slice('merchant-accounts/'.length))},options.joinpayAccountRead)}};
       if (route === "lookup" && !actor.complete && !filters.q) throw invalid("A document lookup reference is required");
       const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize},actor.relations), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);
       const common = { contractVersion: ADMIN_FINANCE_VERSION, currency: "CNY", amountUnit: "CENT", timezone: "Asia/Shanghai", applied: filters, snapshot: snapshot.token, asOf: snapshot.asOf, contextKey: actor.authorizationKey, snapshotVersion: facts.version };

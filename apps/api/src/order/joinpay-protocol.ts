@@ -208,6 +208,35 @@ export function decodeJoinpayJson(body: string | Uint8Array): Decoded {
   return i === text.length ? { ok: true, raw } : fail;
 }
 
+/** 委托付款的单层data信封；编码必须由已核规则给定，不自动猜字符串/对象。 */
+export function decodeJoinpayJsonEnvelope(body: string | Uint8Array, encoding: "OBJECT" | "JSON_STRING"):
+  { ok: true; top: Map<string, RawValue>; data: Map<string, RawValue> } | { ok: false; reason: string } {
+  const fail = { ok: false as const, reason: "PROTOCOL_ENVELOPE_REJECTED" };
+  if (encoding !== "OBJECT" && encoding !== "JSON_STRING") return fail;
+  const text = typeof body === "string" ? body : body instanceof Uint8Array ? utf8(body) : null;
+  if (text === null || !wellFormed(text) || Buffer.byteLength(text) > 65536) return fail;
+  let masked = text, inner: string | undefined;
+  if (encoding === "OBJECT") {
+    let quoted = false, escape = false, depth = 0, start = -1, end = -1;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) { if (escape) escape = false; else if (c === "\\") escape = true; else if (c === '"') quoted = false; continue; }
+      if (c === '"') quoted = true;
+      else if (c === "[" || c === "]") return fail;
+      else if (c === "{") { depth++; if (depth > 2 || depth === 2 && start !== -1) return fail; if (depth === 2) start = i; }
+      else if (c === "}") { if (depth === 2) end = i + 1; if (--depth < 0) return fail; }
+    }
+    if (depth !== 0 || start < 0 || end < start) return fail;
+    inner = text.slice(start, end); masked = text.slice(0, start) + '"__JOINPAY_JSON_DATA__"' + text.slice(end);
+  }
+  const top = decodeJoinpayJson(masked); if (!top.ok) return top;
+  const field = top.raw.get("data"); if (!field || field.numberToken || typeof field.value !== "string") return fail;
+  if (encoding === "OBJECT") {
+    if (field.value !== "__JOINPAY_JSON_DATA__" || [...top.raw.values()].filter(v => v.value === field.value).length !== 1) return fail;
+  } else inner = field.value;
+  const data = decodeJoinpayJson(inner!); return data.ok ? { ok: true, top: top.raw, data: data.raw } : data;
+}
+
 // ---------- schema（validationOrder 第 2–4 步，再查 hmac 与未知字段）----------
 type Schema = { ok: true; values: Record<string, string | undefined>; hmac: string; numberTokens: string[] } | { ok: false; reason: string; field?: string };
 

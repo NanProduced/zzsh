@@ -1,4 +1,10 @@
 import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
+import type {NativeWithdrawalOptions} from '../finance/native-withdrawal-store';
+import type {PayoutExecution} from '../finance/joinpay-payout-attempt';
+import {mountJoinpayPayoutNotifications} from '../finance/joinpay-payout-notification-routes';
+import type {RefundExecution} from '../order/joinpay-refund-attempt';
+import {mountJoinpayRefundNotifications} from '../order/joinpay-refund-notification-routes';
+import type {JoinpayAccountReadAccess} from '../finance/channel-finance-read';
 import type {DistributionEarningStore} from '../finance/distribution-earning-store';
 import { OrderDispatchLifecycle, type OrderDispatchOptions } from "../im/order-dispatch";
 import { OrderTeamLifecycle } from "../im/order-team";
@@ -98,6 +104,10 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   localControlledPayments?: LocalControlledPaymentOptions;
   /** Explicit trusted composition only; ordinary configuration leaves collection closed. */
   joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions };
+  /** Server-only composition. Read scope remains available when new reservations are disabled. */
+  joinpayWithdrawal?: { routes: NativeWithdrawalOptions; execution?: Omit<PayoutExecution,'pool'>; notifications?: boolean };
+  joinpayRefund?: Omit<RefundExecution,'pool'>;
+  joinpayAccountRead?: JoinpayAccountReadAccess;
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   legacyPublicAdmission?: LegacyPublicAdmission;
@@ -1115,7 +1125,12 @@ export async function mountAuthHandlers(
   mountUserDirectory(app,securityOptions);
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
-  mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope});
+  const payout=options.joinpayWithdrawal;
+  const payoutReady=Boolean(payout?.execution&&payout.notifications===true&&payout.execution.scope===payout.routes.scope);
+  if(options.joinpayRefund)mountJoinpayRefundNotifications(app,{...options.joinpayRefund,pool:options.pool});
+  if(payoutReady)mountJoinpayPayoutNotifications(app,{...payout!.execution!,pool:options.pool});
+  const joinpayWithdrawal=payout?{scope:payout.routes.scope,...(payoutReady?{initialProfile:payout.routes.initialProfile,loadAdmission:payout.routes.loadAdmission}:{})}:undefined;
+  mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope,joinpayWithdrawal});
   mountMembershipGrowthRoutes(app, securityOptions);
   const membershipGrowthReader = membershipGrowthEnabled()
     ? readMembershipGrowthQuoteCandidates

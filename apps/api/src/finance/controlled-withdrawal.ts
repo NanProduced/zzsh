@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { SecurityApiError } from '../auth/security-core';
 import { conflict, ensureOnlyFields, forbidden, invalid, notFound, requiredString } from '../supply/supply-util';
 import { canonicalize } from '../supply/content-hash';
-import { divideToScale } from '../supply/decimal';
 import { exactCents } from './personal-finance-read';
+import { calculateWithdrawalAmounts, planWithdrawalLedger, type WithdrawalLedgerPlan } from './withdrawal-ledger';
+export type { WithdrawalLedgerPlan } from './withdrawal-ledger';
 
 export type ControlledWithdrawalPolicy = {
   version: string;
@@ -51,10 +52,6 @@ export type ControlledPayoutEvidence = {
   | { outcome: 'SUCCEEDED'; reference: string; netCents: string; feeCents: string }
   | { outcome: 'FAILED'; reference: string; unpaidConfirmed: boolean; transferredCents: string; chargedFeeCents: string }
 );
-export type WithdrawalLedgerPlan = {
-  kind: 'RESERVE' | 'RELEASE' | 'PAYOUT'; intentId: string; subjectUserId: string;
-  lines: { accountCode: string; debitCents: string; creditCents: string; counterpartyUserId: string | null }[];
-};
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 /** One declared local test action per immutable admission/target revision. */
 export function localWithdrawalRequestKey(admissionId:string,admissionRevision:string,destinationId:string,destinationRevision:string){
@@ -73,15 +70,6 @@ function time(value: string): number {
 function revision(value: string): bigint {
   if (!/^(0|[1-9]\d*)$/.test(value)) throw invalid('Exact revision required');
   return BigInt(value);
-}
-function plan(intent: Pick<ControlledWithdrawalIntent, 'id' | 'userId' | 'grossCents' | 'netCents' | 'feeCents'>, kind: WithdrawalLedgerPlan['kind']): WithdrawalLedgerPlan {
-  const line = (accountCode: string, debitCents: string, creditCents: string, user = true) => ({ accountCode, debitCents, creditCents, counterpartyUserId: user ? intent.userId : null });
-  const lines = kind === 'RESERVE'
-    ? [line('WALLET_AVAILABLE', intent.grossCents, '0'), line('WALLET_RESERVED', '0', intent.grossCents)]
-    : kind === 'RELEASE'
-      ? [line('WALLET_RESERVED', intent.grossCents, '0'), line('WALLET_AVAILABLE', '0', intent.grossCents)]
-      : [line('WALLET_RESERVED', intent.grossCents, '0'), line('PAYOUT_CLEARING', '0', intent.netCents, false), ...(intent.feeCents === '0' ? [] : [line('WITHDRAW_FEE', '0', intent.feeCents, false)])];
-  return { kind, intentId: intent.id, subjectUserId: intent.userId, lines };
 }
 
 /** No runtime default policy and no real destination can enter this seam. */
@@ -107,18 +95,11 @@ export function quoteControlledWithdrawal(body: Record<string, unknown>, policy:
     if (facts.usage.start !== day.start || facts.usage.end !== day.end) throw unavailable('WITHDRAW_FREQUENCY_UNKNOWN');
   }
   if (amount < min || amount > max || facts.usage.quotaCount >= policy.maxAcceptedPerWindow) throw conflict('Withdrawal limit reached');
-  let fee: bigint;
-  if (policy.fee.kind === 'FIXED') fee = unsigned(policy.fee.cents);
-  else if (policy.fee.kind === 'RATIO') {
-    const numerator = unsigned(policy.fee.numerator), denominator = unsigned(policy.fee.denominator);
-    if (denominator === 0n || numerator > denominator || policy.fee.rounding !== 'HALF_UP_CENT') throw unavailable('WITHDRAW_POLICY_INVALID');
-    fee = divideToScale({ value: amount * numerator, scale: 0 }, { value: denominator, scale: 0 }, 0).value;
-  } else throw unavailable('WITHDRAW_POLICY_INVALID');
-  if (amount <= fee) throw conflict('Net payout must be positive');
+  const { netCents, feeCents } = calculateWithdrawalAmounts(amount.toString(), policy.fee);
   const available = BigInt(exactCents(facts.availableCents));
   if (available < 0n) throw unavailable('WALLET_RECONCILIATION_REQUIRED');
   if (amount > available) throw conflict('Insufficient available funds');
-  return { userId: facts.userId, destinationId, policyVersion, ledgerRevision: facts.ledgerRevision, acceptedAt: facts.now, currency: 'CNY', grossCents: amount.toString(), netCents: (amount - fee).toString(), feeCents: fee.toString(), mode: 'LOCAL_CONTROLLED' };
+  return { userId: facts.userId, destinationId, policyVersion, ledgerRevision: facts.ledgerRevision, acceptedAt: facts.now, currency: 'CNY', grossCents: amount.toString(), netCents, feeCents, mode: 'LOCAL_CONTROLLED' };
 }
 
 /** Owner selected these restored rules for this local round only. Admission
@@ -152,7 +133,7 @@ export function reserveControlledWithdrawal(id: string, quote: ControlledWithdra
   time(quote.acceptedAt);
   if (quote.mode !== 'LOCAL_CONTROLLED' || quote.currency !== 'CNY' || net === 0n || gross !== net + fee) throw invalid('Frozen payout amounts are invalid');
   const intent: ControlledWithdrawalIntent = { ...quote, id, payoutKey: 'controlled-withdrawal-' + sha(id), state: 'RESERVED', operationVersion: '1', fundsDisposition: 'RESERVED', terminal: null, conflictDigest: null, lease: null };
-  return { intent, ledgerPlan: plan(intent, 'RESERVE') };
+  return { intent, ledgerPlan: planWithdrawalLedger(intent, 'RESERVE') };
 }
 
 export function claimControlledWithdrawal(intent: ControlledWithdrawalIntent, expectedVersion: string, token: string, until: string, now: string) {
@@ -189,7 +170,7 @@ export function finishControlledWithdrawal(intent: ControlledWithdrawalIntent, e
         state = evidence.outcome; terminal = { state, evidenceDigest: digest, reference: evidence.reference };
         const kind = state === 'SUCCEEDED' ? 'PAYOUT' : 'RELEASE';
         fundsDisposition = state === 'SUCCEEDED' ? 'PAYOUT_POSTED' : 'RELEASE_POSTED';
-        ledgerPlan = plan(intent, kind);
+        ledgerPlan = planWithdrawalLedger(intent, kind);
       }
     }
   }

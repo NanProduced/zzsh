@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JOINPAY_REFUND_PROFILE, JOINPAY_REFUND_SIGNATURE_ORDER, buildJoinpayRefundQuery, buildJoinpayRefundRequest,
-  evaluateJoinpayRefundResponse, type JoinpayRefundBinding } from "../src/order/joinpay-refund-protocol";
+  evaluateJoinpayRefundResponse, computeJoinpayRefundResponse, computeJoinpayRefundRequest, validateJoinpayRefundRequestInput, type JoinpayRefundBinding } from "../src/order/joinpay-refund-protocol";
 
 const KEY = "SYNTHETIC_REFUND_KEY_0001", MER = "888000000000005", ORIGINAL = "ZZ20261019-000002", REFUND = "RF_SYNTH_0001", TRX = "SYNTH_RTX_0001";
 const binding: JoinpayRefundBinding = { merchantNo: MER, originalPaymentOrderNo: ORIGINAL, refundOrderNo: REFUND, amountCents: "125", currency: "CNY", fundsAccount: "SETTLED" };
@@ -30,6 +30,13 @@ function body(operation: "REFUND_SYNC" | "REFUND_QUERY" | "REFUND_NOTIFY", patch
 }
 const evaluate = (operation: "REFUND_SYNC" | "REFUND_QUERY" | "REFUND_NOTIFY", patch: Values = {}, bound: JoinpayRefundBinding | null = binding) =>
   evaluateJoinpayRefundResponse(operation, body(operation, patch), { binding: bound, key: KEY, leaseCurrent: true });
+test("中性协议计算去掉合成/正式标签，旧evaluate固定保留SYNTHETIC形状",()=>{
+  const raw=body("REFUND_QUERY"),neutral=computeJoinpayRefundResponse("REFUND_QUERY",raw,{binding,key:KEY,leaseCurrent:true}),old=evaluateJoinpayRefundResponse("REFUND_QUERY",raw,{binding,key:KEY,leaseCurrent:true});
+  assert.equal(neutral.signature,"MATCH");assert.equal(neutral.result,old.result);assert.equal("formalRefund" in neutral,false);assert.equal("officialVerified" in neutral,false);
+  assert.equal(old.signature,"SYNTHETIC_SELF_CONSISTENT");assert.equal(old.evidenceLevel,"SYNTHETIC_PROTOCOL");assert.equal(old.formalRefund,false);
+  const input={...binding,notifyUrl:"https://example.invalid/refund"};validateJoinpayRefundRequestInput(input);
+  assert.equal(computeJoinpayRefundRequest(input,KEY).hmac,buildJoinpayRefundRequest(input,KEY).hmac);assert.throws(()=>validateJoinpayRefundRequestInput({...input,notifyUrl:"http://invalid"}));
+});
 
 test("五个操作独立签名表来自 S64/S177，不混用收款2.6字段", () => {
   assert.deepEqual(JOINPAY_REFUND_SIGNATURE_ORDER, expected);

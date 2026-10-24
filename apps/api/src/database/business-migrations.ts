@@ -280,6 +280,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
   await configureContinuityFinancePrivileges(pool, runtimeRole);
   await configureChannelRefundPrivileges(pool, runtimeRole);
+  await configureJoinpayFinancialPrivileges(pool, runtimeRole);
 }
 
 /** Optional schema (ADM-SECURITY-BACKEND-1): command identity rows never need UPDATE/DELETE;
@@ -390,14 +391,14 @@ export async function configureCreditGuaranteePrivileges(pool: Pick<Pool, "query
   `);
 }
 
-async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: string, role: string): Promise<void> {
-    const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows;
+async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: string, role: string, options: { columns?: readonly string[]; select?: boolean } = {}): Promise<void> {
+    const columns = options.columns ?? (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows.map(row => row.attname as string);
     if (!columns.length) throw new Error("Table columns are unavailable");
-    const list = columns.map(row => quoteIdentifier(row.attname)).join(",");
+    const list = columns.map(quoteIdentifier).join(",");
     // Table revocation alone does not clear an old explicit column grant.
     await pool.query(`REVOKE ALL ON TABLE ${table} FROM ${role};
       REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table} FROM ${role};
-      GRANT SELECT ON TABLE ${table} TO ${role}`);
+      ${options.select === false ? "" : `GRANT SELECT ON TABLE ${table} TO ${role}`}`);
 }
 
 /** Optional membership schema; immutable policy/contribution rows never need runtime UPDATE. */
@@ -513,4 +514,70 @@ export async function configureChannelRefundPrivileges(pool: Pick<Pool, "query">
     GRANT INSERT(id,intent_id,event,failure_reason,lease_version,lease_owner,state_before,state_after,request_id)
       ON zzsh_order.channel_refund_observation TO ${role};
   `);
+}
+
+/** Optional G3/G4/G5 contracts only; all metadata is verified before this helper changes any ACL. */
+export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole), words = (value = "") => value.split(" ").filter(Boolean);
+  type Table = { name: string; insert: string; update?: string; metadata: string; select?: string };
+  const refund: Table[] = [
+    { name: "zzsh_order.channel_refund_intent", insert: "id posting_id order_id payment_confirmation_id renter_user_id payment_source merchant_identity_id original_payment_trx_no original_payment_order_no responsibility_version_hash refund_order_no amount_cents currency idempotency_key request_fingerprint due_at evidence_level initial_admission_ref initial_admission_sha256 initial_admission_canonical wire_merchant_no initial_profile_id initial_profile_sha256 initial_key_version_ref notify_url funds_account refund_reason", update: "state revision lease_version lease_owner lease_until updated_at budget_disposition requires_review terminal_evidence_id terminal_root_id terminal_event_id provider_refund_trx_no completed_at", metadata: "created_at" },
+    { name: "zzsh_order.joinpay_refund_attempt", insert: "id intent_id operation lease_version lease_owner profile_id profile_canonical profile_sha256 key_version_ref admission_sha256 request_body request_sha256", metadata: "created_xid created_at" },
+    { name: "zzsh_order.joinpay_refund_observation", insert: "id intent_id attempt_id operation lease_version lease_owner profile_id profile_canonical profile_sha256 key_version_ref raw_body raw_sha256 response_complete http_status received_bytes transport_failure event schema_status signature_status binding_status evidence_level state_before state_after request_id", metadata: "created_xid created_at" },
+    { name: "zzsh_order.joinpay_refund_evidence", insert: "id intent_id observation_id operation terminal refund_transaction_no completed_at_raw completed_at facts_canonical facts_digest", metadata: "created_xid created_at" },
+  ];
+  const payout: Table[] = [
+    { name: "zzsh_order.joinpay_withdrawal_intent", insert: "id user_id payout_key request_fingerprint policy_version destination_id destination_revision gross_cents net_cents fee_cents currency expected_ledger_revision coverage_canonical coverage_sha256 coverage_version covered_set_digest merchant_identity_id user_no trade_merchant_no merchant_order_no receiver_account_no_enc receiver_name_enc target_fingerprint admission_ref admission_sha256 admission_canonical scope_ref scope_sha256 scope_canonical initial_profile_id initial_profile_sha256 initial_profile_canonical initial_key_version_ref frozen_canonical frozen_digest economic_root_id reserve_event_id", update: "state operation_version funds_disposition lease_version lease_owner lease_until requires_review terminal_evidence_id terminal_event_id platform_serial_no provider_fee_raw provider_fee_cents", metadata: "accepted_at created_xid updated_at" },
+    { name: "zzsh_order.joinpay_payout_attempt", insert: "id intent_id operation lease_version lease_owner profile_id profile_canonical profile_sha256 key_version_ref scope_sha256 scope_canonical request_body request_sha256", metadata: "created_xid created_at" },
+    { name: "zzsh_order.joinpay_payout_observation", insert: "id intent_id attempt_id operation lease_version lease_owner profile_id profile_canonical profile_sha256 key_version_ref raw_body raw_sha256 response_complete http_status received_bytes transport_failure event schema_status signature_status binding_status evidence_level state_before state_after request_id", metadata: "created_xid created_at" },
+    { name: "zzsh_order.joinpay_payout_evidence", insert: "id intent_id observation_id operation terminal platform_serial_no provider_fee_raw provider_fee_cents facts_canonical facts_digest", metadata: "created_xid created_at" },
+  ];
+  const account: Table[] = [{ name: "zzsh_order.joinpay_account_observation", insert: "attempt_id merchant_identity_id operation profile_id profile_sha256 rules_sha256 key_version_ref review_ref review_sha256 request_sha256 requested_at received_at http_status response_complete received_bytes transport_failure raw_body raw_sha256 evidence_level decision schema_status signature_status binding_status reason status_code error_code amounts", metadata: "recorded_at", select: "attempt_id merchant_identity_id operation evidence_level decision reason requested_at received_at recorded_at response_complete http_status status_code error_code amounts" }];
+  const optional = [...refund.slice(1), ...payout, ...account].map(t => t.name);
+  const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial optional tables */", [optional])).rows;
+  const validInventory = (rows: typeof found, names: string[]) => rows.length === names.length && new Set(rows.map(r => r.name)).size === names.length && rows.every(r => names.includes(r.name) && typeof r.present === "boolean");
+  if (!validInventory(found, optional)) throw new Error("JoinPay financial inventory is incomplete");
+  const complete = (tables: Table[]) => { const rows = tables.map(t => found.find(r => r.name === t.name)!); if (rows.every(r => !r.present)) return false; if (rows.some(r => !r.present)) throw new Error("JoinPay financial group is partially deployed"); return true; };
+  const hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account);
+  if (!hasRefund && !hasPayout && !hasAccount) return;
+  if (hasPayout && !hasRefund) throw new Error("JoinPay payout requires the complete formal refund parent");
+  if (hasRefund) {
+    const parent = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [[refund[0]!.name]])).rows;
+    if (!validInventory(parent, [refund[0]!.name]) || parent[0]!.present !== true) throw new Error("JoinPay refund intent parent is incomplete");
+  }
+  const tables = [...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : [])];
+  const functions = [
+    ...(hasRefund ? ["zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)", "zzsh_order.native_refund_terminal_complete(text)"] : []),
+    ...(hasPayout ? ["zzsh_order.assert_joinpay_payout_scope(text,text,text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_payout_profile(text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_withdrawal_admission(zzsh_order.joinpay_withdrawal_intent,boolean)", "zzsh_order.joinpay_payout_raw_data(zzsh_order.joinpay_payout_observation)", "zzsh_order.joinpay_withdrawal_expected_lines(text)", "zzsh_order.joinpay_withdrawal_complete(text)"] : []),
+  ];
+  const identity = (await pool.query(`/* joinpay financial runtime role */ SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,r.rolbypassrls AS "bypassRls",r.rolcreaterole AS "createRole",r.rolcreatedb AS "createDb",r.rolreplication AS replication,
+    EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) AS "memberRights",
+    EXISTS(SELECT 1 FROM (SELECT c.relowner AS owner_id FROM pg_class c WHERE c.oid IN(SELECT to_regclass(name) FROM unnest($2::text[]) AS t(name))
+      UNION SELECT p.proowner FROM pg_proc p WHERE p.oid IN(SELECT to_regprocedure(name) FROM unnest($3::text[]) AS t(name))) owners
+      WHERE owners.owner_id=r.oid OR pg_has_role(r.oid,owners.owner_id,'MEMBER')) AS "ownerRights" FROM pg_roles r WHERE r.rolname=$1`, [runtimeRole, tables.map(t => t.name), functions])).rows[0];
+  if (!identity || typeof identity.roleOid !== "string" || !/^[1-9]\d*$/.test(identity.roleOid) || ["superuser", "bypassRls", "createRole", "createDb", "replication", "memberRights", "ownerRights"].some(k => identity[k] !== false)) throw new Error("JoinPay financial runtime role must be known, unprivileged and not an owner or member");
+  const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)
+    JOIN pg_attribute a ON a.attrelid=to_regclass(t.name) AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.name,a.attnum`, [tables.map(t => t.name)])).rows;
+  if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
+  const inventory = new Map<string, string[]>();
+  for (const table of tables) {
+    const actual = columns.filter(c => c.name === table.name).map(c => c.attname), expected = words(`${table.insert} ${table.update ?? ""} ${table.metadata}`);
+    if (actual.length !== expected.length || new Set(actual).size !== actual.length || expected.some(c => !actual.includes(c))) throw new Error("JoinPay financial column inventory differs: " + table.name);
+    inventory.set(table.name, actual);
+  }
+  if (functions.length) {
+    const fn = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regprocedure(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial functions */", [functions])).rows;
+    if (!validInventory(fn, functions) || fn.some(f => !f.present)) throw new Error("JoinPay financial function inventory is incomplete");
+  }
+  for (const table of tables) {
+    const all = inventory.get(table.name)!, list = all.map(quoteIdentifier).join(",");
+    await resetRuntimeTablePrivileges(pool, table.name, role, { columns: all, select: table.select === undefined });
+    await pool.query(`REVOKE ALL ON TABLE ${table.name} FROM PUBLIC;
+      REVOKE SELECT (${list}), INSERT (${list}), UPDATE (${list}), REFERENCES (${list}) ON TABLE ${table.name} FROM PUBLIC`);
+    const grants = [`GRANT INSERT (${words(table.insert).map(quoteIdentifier).join(",")}) ON TABLE ${table.name} TO ${role}`];
+    if (table.update) grants.push(`GRANT UPDATE (${words(table.update).map(quoteIdentifier).join(",")}) ON TABLE ${table.name} TO ${role}`);
+    if (table.select) grants.push(`GRANT SELECT (${words(table.select).map(quoteIdentifier).join(",")}) ON TABLE ${table.name} TO ${role}`);
+    await pool.query(grants.join(";\n") + ";");
+  }
+  if (functions.length) await pool.query(`REVOKE ALL ON FUNCTION ${functions.join(",")} FROM ${role}, PUBLIC; GRANT EXECUTE ON FUNCTION ${functions.join(",")} TO ${role}`);
 }

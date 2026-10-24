@@ -393,3 +393,24 @@ test("R1-03: 200000 字符 rm_SpecialInfo 返回过长拒绝，不抛引擎异�
   assert.equal(o?.reason, "PROTOCOL_FIELD_TOO_LONG");
   assert.equal(o?.field, "rm_SpecialInfo");
 });
+
+test("S84单层JSON信封：对象/字符串显式选型，保留数字原token与严格UTF8", () => {
+  const inner = '{"paidAmount":99999999999999.99,"name":"合成\\uD83D\\uDE00"}', object = '{"statusCode":"2001","data":' + inner + '}';
+  for (const [body, encoding] of [[object, "OBJECT"], [JSON.stringify({ statusCode: "2001", data: inner }), "JSON_STRING"]] as const) {
+    const decoded = jp.decodeJoinpayJsonEnvelope(body, encoding); assert.equal(decoded.ok, true);
+    if (decoded.ok) { assert.equal(decoded.data.get("paidAmount")?.value, "99999999999999.99"); assert.equal(decoded.data.get("paidAmount")?.numberToken, true); assert.equal(decoded.data.get("name")?.value, "合成😀"); }
+  }
+  assert.equal(jp.decodeJoinpayJsonEnvelope(object, "JSON_STRING").ok, false);
+  assert.equal(jp.decodeJoinpayJsonEnvelope(JSON.stringify({ data: inner }), "OBJECT").ok, false);
+  assert.equal(jp.decodeJoinpayJsonEnvelope(new Uint8Array([0xff]), "OBJECT").ok, false);
+});
+
+test("S84信封拒重复/转义同名/多层/数组/placeholder碰撞/超量及BOM", () => {
+  for (const body of [
+    '{"data":{},"data":{}}', '{"data":{"x":1,"\\u0078":2}}', '{"data":{"nested":{}}}', '{"data":[]}',
+    '{"wrong":{},"data":"__JOINPAY_JSON_DATA__"}', '{"data":{},"message":"__JOINPAY_JSON_DATA__"}',
+    '\ufeff{"data":{}}', '{"data":{"bad":"\\ud800"}}', '{"data":{}}false', '{"data":{"x":"' + '字'.repeat(22000) + '"}}',
+  ]) assert.equal(jp.decodeJoinpayJsonEnvelope(body, "OBJECT").ok, false);
+  assert.equal(jp.decodeJoinpayJsonEnvelope('{"data":"{\\"x\\":1,\\"x\\":2}"}', "JSON_STRING").ok, false);
+  assert.equal(jp.decodeJoinpayJsonEnvelope(null as any, "OBJECT").ok, false);
+});

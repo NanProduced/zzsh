@@ -6,8 +6,9 @@ import { join } from "node:path";
 import type { Pool, PoolClient } from "pg";
 import type { AppConfig } from "../src/config/config";
 import { withTransaction } from "../src/auth/security-core";
+import { fingerprintRequest } from "../src/supply/supply-util";
 import { createSyntheticChannelRequestCapability } from "../src/order/channel-payment-store";
-import { claimRefundIntent, createNativeRefundIntent, readRecoverableRefundIntent, recordRefundTransportFailure } from "../src/order/channel-refund-store";
+import { claimRefundIntent, createNativeRefundIntent, createFormalRefundIntent, readRecoverableRefundIntent, recordRefundTransportFailure } from "../src/order/channel-refund-store";
 
 const config = { profile: "test", provider: "fake", testOperationsEnabled: true,
   database: { target: "local-compose", host: "127.0.0.1", port: 55432, name: "zzsh_test_order_refund_synth", user: "zzsh_order_refund_synth_r" } } as AppConfig;
@@ -193,4 +194,21 @@ test("候选SQL保留来源/追加与不释放边界；本检查不执行DDL", (
   assert.match(sql, /BEFORE INSERT OR UPDATE OR DELETE/); assert.match(sql, /BEFORE UPDATE OR DELETE/);
   assert.ok(sql.indexOf("PERFORM pg_advisory_xact_lock") < sql.indexOf("SELECT COALESCE(sum(amount_cents)"));
   assert.doesNotMatch(sql, /GRANT|APPLIED_REFUND|SUCCEEDED|REFUNDED|RELEASED|009[0-9]_/);
+});
+test("旧CONTROLLED入口不能claim/read/record新JOINPAY行，原公共形状不升级",async()=>{
+  const db=fakeDb(),{intent}=await reserve(db); const row=db.s.intents.get(intent.intentId)!;row.payment_source="JOINPAY";row.evidence_level="JOINPAY_FORMAL";
+  const before=structuredClone(row); await assert.rejects(claim(db,intent.intentId)); await assert.rejects(failure(db,intent.intentId));
+  assert.equal(await readRecoverableRefundIntent(db.client,intent.intentId,cap()),null);assert.deepEqual(row,before);assert.equal(db.s.observations.length,0);
+});
+test("SYNTHETIC_COMPONENT_MODEL：formal原key重放先于当前能力；对象仍先核，NULL不补升",async()=>{
+  const db=fakeDb(),{intent}=await reserve(db,"150","original_key");db.s.basis!.source="JOINPAY";
+  const row=db.s.intents.get(intent.intentId)!;Object.assign(row,{payment_source:"JOINPAY",evidence_level:"JOINPAY_FORMAL",initial_admission_ref:"HYPOTHETICAL_OLD_REF",budget_disposition:"ALLOCATED"});
+  row.request_fingerprint=fingerprintRequest("rental.refund.intent","posting_1",{amountCents:"150",reason:null});
+  const input={postingId:"posting_1",renterUserId:"renter_1",amountCents:"150",idempotencyKey:"original_key",requestId:"restore_1"};
+  const before=structuredClone(row),restored=await createFormalRefundIntent(db.client,input);assert.equal(restored.replayed,true);assert.equal(restored.refundOrderNo,intent.refundOrderNo);assert.deepEqual(row,before);
+  await assert.rejects(createFormalRefundIntent(db.client,{...input,renterUserId:"foreign"}),/not found/i);
+  await assert.rejects(createFormalRefundIntent(db.client,{...input,amountCents:"149"}),(e:any)=>e.code==="IDEMPOTENCY_KEY_REUSED");
+  await assert.rejects(createFormalRefundIntent(db.client,{...input,reason:"different"}),(e:any)=>e.code==="IDEMPOTENCY_KEY_REUSED");
+  assert.equal((await createFormalRefundIntent(db.client,{...input,notifyUrl:"changed-current-config",profile:{} as any,admission:{} as any})).replayed,true);
+  row.initial_admission_ref=null;await assert.rejects(createFormalRefundIntent(db.client,input),/promoted/);assert.equal(row.initial_admission_ref,null);
 });

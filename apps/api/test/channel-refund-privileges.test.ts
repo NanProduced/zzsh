@@ -123,7 +123,9 @@ test("common path converges refund last after broad/default and other narrow hel
   const previousNarrow = f.seen.findIndex(q => q.sql.includes("assert_personal_growth_order_v4"));
   const refund = f.seen.findIndex(q => q.sql.startsWith("SELECT name,to_regclass") && (q.args[0] as string[]).includes(INTENT));
   assert(broad >= 0 && defaults > broad && previousNarrow > defaults && refund > previousNarrow);
-  assert(f.seen.at(-1)!.sql.includes("GRANT INSERT(id,intent_id,event"));
+  const exactGrant = f.seen.findIndex(q => q.sql.includes("GRANT INSERT(id,intent_id,event"));
+  assert(exactGrant > refund); assert(f.seen.at(-1)!.sql.includes("joinpay financial optional tables"));
+  assert(!f.seen.slice(exactGrant + 1).some(q => /^\s*(GRANT|REVOKE|ALTER DEFAULT)/.test(q.sql)));
   assert(!f.seen.slice(refund).some(q => q.sql.includes("ON ALL TABLES") || q.sql.includes("ALTER DEFAULT")));
   assert.deepEqual(sorted(f.rights.get(INTENT)!.table), ["SELECT"]);
   assert(!f.seen.some(q => /^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)));
@@ -131,6 +133,6 @@ test("common path converges refund last after broad/default and other narrow hel
 test("common caller stays compatible when the optional refund schema is absent", async () => {
   const f = fixture(false); await applyRuntimePrivileges(f.pool, "runtime_role");
   const refund = f.seen.findIndex(q => q.sql.startsWith("SELECT name,to_regclass") && (q.args[0] as string[]).includes(INTENT));
-  assert.equal(refund, f.seen.length - 1); assert.equal(f.seen.filter(q => q.sql.startsWith("REVOKE ALL ON TABLE zzsh_order.channel_refund_")).length, 0);
+  assert.equal(refund, f.seen.length - 2); assert(f.seen.at(-1)!.sql.includes("joinpay financial optional tables")); assert.equal(f.seen.filter(q => q.sql.startsWith("REVOKE ALL ON TABLE zzsh_order.channel_refund_")).length, 0);
   const first = f.seen.map(q => q.sql); f.seen.length = 0; await applyRuntimePrivileges(f.pool, "runtime_role"); assert.deepEqual(f.seen.map(q => q.sql), first);
 });

@@ -59,15 +59,22 @@ export type JoinpayRefundBinding = Readonly<{
   fundsAccount?: "SETTLED" | "ADVANCE"; providerRefundTrxNo?: string;
 }>;
 
-export function buildJoinpayRefundRequest(input: JoinpayRefundBinding & { notifyUrl: string; reason?: string }, key: string): JoinpaySignedForm {
+function refundValues(input: JoinpayRefundBinding & { notifyUrl: string; reason?: string }): Record<string,string|undefined> {
   if (input.currency !== "CNY") throw new JoinpayProtocolError("REFUND_CURRENCY_NOT_SUPPORTED");
   const url = typeof input.notifyUrl === "string" && URL.canParse(input.notifyUrl) ? new URL(input.notifyUrl) : null;
   if (!url || url.protocol !== "https:" || url.username || url.password || url.hash || Buffer.byteLength(input.notifyUrl, "utf8") > 300) throw new JoinpayProtocolError("REFUND_NOTIFY_URL_INVALID");
   if (input.reason !== undefined && typeof input.reason !== "string") throw new JoinpayProtocolError("REFUND_REASON_NOT_STRING");
   if (input.reason !== undefined && Buffer.byteLength(input.reason, "utf8") > 400) throw new JoinpayProtocolError("REFUND_REASON_UTF8_TOO_LONG");
-  return sign(REQUEST, { p0_Version: "2.3", p1_MerchantNo: input.merchantNo, p2_OrderNo: input.originalPaymentOrderNo,
+  return { p0_Version: "2.3", p1_MerchantNo: input.merchantNo, p2_OrderNo: input.originalPaymentOrderNo,
     p3_RefundOrderNo: input.refundOrderNo, p4_RefundAmount: centsToJoinpayYuan(input.amountCents), p5_RefundReason: input.reason,
-    p6_NotifyUrl: input.notifyUrl, pa_FundsAccount: input.fundsAccount }, key);
+    p6_NotifyUrl: input.notifyUrl, pa_FundsAccount: input.fundsAccount };
+}
+export function buildJoinpayRefundRequest(input: JoinpayRefundBinding & { notifyUrl: string; reason?: string }, key: string): JoinpaySignedForm { return sign(REQUEST,refundValues(input),key); }
+/** 仅schema校验；hmac占位不做签名计算、不获取商户key、不产出请求。 */
+export function validateJoinpayRefundRequestInput(input: JoinpayRefundBinding & { notifyUrl: string; reason?: string }): void {
+  const raw = new Map(Object.entries(refundValues(input)).filter((p):p is [string,string]=>p[1]!==undefined).map(([k,value])=>[k,{value,numberToken:false}]));
+  raw.set("hmac",{value:"0".repeat(32),numberToken:false}); const checked=validateJoinpaySignedFields(REQUEST,raw);
+  if(!checked.ok)throw new JoinpayProtocolError(checked.reason,checked.field);
 }
 
 export function buildJoinpayRefundQuery(input: Pick<JoinpayRefundBinding, "merchantNo" | "refundOrderNo">, key: string): JoinpaySignedForm {
@@ -83,23 +90,34 @@ export type RefundProtocolResult = {
   providerRefundTrxNo?: string; completedAtRaw?: string; refundWay?: string; numberTokens?: readonly string[];
   ack?: "success" | "fail"; evidenceLevel: "SYNTHETIC_PROTOCOL"; officialVerified: false; formalRefund: false;
 };
-function result(operation: RefundProtocolResult["operation"], value: RefundProtocolResult["result"], detail: Partial<RefundProtocolResult> = {}): RefundProtocolResult {
+export type RefundNeutralResult = Omit<RefundProtocolResult, "signature" | "evidenceLevel" | "officialVerified" | "formalRefund"> & { signature: "NOT_CHECKED" | "MISMATCH" | "MATCH" };
+function result(operation: RefundProtocolResult["operation"], value: RefundProtocolResult["result"], detail: Partial<RefundNeutralResult> = {}): RefundNeutralResult {
   return { operation, result: value, signature: "NOT_CHECKED", ...(operation === "REFUND_NOTIFY" ? { ack: "fail" as const } : {}),
-    ...detail, evidenceLevel: "SYNTHETIC_PROTOCOL", officialVerified: false, formalRefund: false };
+    ...detail };
 }
 const MUST_QUERY = new Set(["0", "4", "102", "110", "10080000", "10080002", "20090004", "20090012", "CR000007"]);
 const APPLICATION_REJECT = new Set(["10080015", "10080016", "20090001", "20090002", "20090020", "JS002012"]);
 const REFUND_WAYS = new Set(["ORIGINAL", "BALANCE", "OTHER_BALANCE", "OTHER_BANKCARD"]);
 
+function checkedRefundResponse(operation: RefundProtocolResult["operation"], body: string | Uint8Array): ReturnType<typeof validateJoinpaySignedFields> {
+  if (!["REFUND_SYNC", "REFUND_QUERY", "REFUND_NOTIFY"].includes(operation)) throw new JoinpayProtocolError("REFUND_OPERATION_INVALID");
+  const decoded = operation === "REFUND_NOTIFY" ? (typeof body === "string" ? decodeJoinpayQuery(body) : { ok: false as const, reason: "RAW_QUERY_REQUIRED" }) : decodeJoinpayJson(body);
+  if (!decoded.ok) return { ok: false, reason: decoded.reason };
+  return validateJoinpaySignedFields(operation === "REFUND_SYNC" ? SYNC : operation === "REFUND_NOTIFY" ? NOTIFY : QUERY, decoded.raw);
+}
+/** Reuses the full verifier's schema without computing a signature or accessing a key. */
+export function preflightJoinpayRefundResponse(operation: RefundProtocolResult["operation"], body: string | Uint8Array): { ok: true } | { ok: false; reason: string; field?: string } {
+  const checked = checkedRefundResponse(operation, body);
+  return checked.ok ? { ok: true } : { ok: false, reason: checked.reason, ...(checked.field ? { field: checked.field } : {}) };
+}
+
 /** 原退款号绑定；查单应答不含原支付号，只能通过持久退款意图找回原付款，不推造缺失字段。 */
-export function evaluateJoinpayRefundResponse(operation: RefundProtocolResult["operation"], body: string | Uint8Array,
-  context: { binding: JoinpayRefundBinding | null; key: string; leaseCurrent?: boolean }): RefundProtocolResult {
+export function computeJoinpayRefundResponse(operation: RefundProtocolResult["operation"], body: string | Uint8Array,
+  context: { binding: JoinpayRefundBinding | null; key: string; leaseCurrent?: boolean }): RefundNeutralResult {
   if (!["REFUND_SYNC", "REFUND_QUERY", "REFUND_NOTIFY"].includes(operation)) throw new JoinpayProtocolError("REFUND_OPERATION_INVALID");
   if (operation !== "REFUND_NOTIFY" && context.leaseCurrent !== true) return result(operation, "STALE", { reason: "STALE_LEASE" });
-  const decoded = operation === "REFUND_NOTIFY" ? (typeof body === "string" ? decodeJoinpayQuery(body) : { ok: false as const, reason: "RAW_QUERY_REQUIRED" }) : decodeJoinpayJson(body);
-  if (!decoded.ok) return result(operation, "UNVERIFIED", { reason: decoded.reason });
   const schema = operation === "REFUND_SYNC" ? SYNC : operation === "REFUND_NOTIFY" ? NOTIFY : QUERY;
-  const checked = validateJoinpaySignedFields(schema, decoded.raw);
+  const checked = checkedRefundResponse(operation, body);
   if (!checked.ok) return result(operation, "UNVERIFIED", { reason: checked.reason, field: checked.field });
   const expected = context.binding;
   if (!expected) return result(operation, "UNVERIFIED", { reason: "BINDING_NOT_FOUND" });
@@ -107,7 +125,7 @@ export function evaluateJoinpayRefundResponse(operation: RefundProtocolResult["o
   if (joinpayMd5Sign(schema.map(f => f.name), checked.values, context.key) !== checked.hmac.toLowerCase()) return result(operation, "UNVERIFIED", { reason: "SIGNATURE_INVALID", signature: "MISMATCH" });
   const v = checked.values, query = operation === "REFUND_QUERY";
   const way = query ? v.r8_RefundWay : v.r7_RefundWay;
-  const signed = { signature: "SYNTHETIC_SELF_CONSISTENT" as const, numberTokens: checked.numberTokens, channelCode: v.rb_Code, channelStatus: v.ra_Status, refundWay: way };
+  const signed = { signature: "MATCH" as const, numberTokens: checked.numberTokens, channelCode: v.rb_Code, channelStatus: v.ra_Status, refundWay: way };
   if (v.r1_MerchantNo !== expected.merchantNo || (query ? v.r2_RefundOrderNo : v.r3_RefundOrderNo) !== expected.refundOrderNo
     || (!query && v.r2_OrderNo !== expected.originalPaymentOrderNo) || (query ? v.r3_RefundAmount : v.r4_RefundAmount) !== centsToJoinpayYuan(expected.amountCents)
     || v.re_FundsAccount !== expected.fundsAccount) return result(operation, "REVIEW_REQUIRED", { ...signed, reason: "BINDING_MISMATCH" });
@@ -133,4 +151,19 @@ export function evaluateJoinpayRefundResponse(operation: RefundProtocolResult["o
   if (status === "100" && !completed) return result(operation, "UNVERIFIED", { ...signed, reason: "COMPLETION_TIME_MISSING" });
   return result(operation, status === "100" ? "CHANNEL_REPORTED_SUCCEEDED" : "CHANNEL_REPORTED_FAILED", { ...signed,
     providerRefundTrxNo: trx, completedAtRaw: completed, ...(operation === "REFUND_NOTIFY" ? { ack: "success" as const } : {}) });
+}
+
+/** 中性构造仅复用已校验字段/精度，不能创建出站或正式退款能力。 */
+export function computeJoinpayRefundRequest(input: JoinpayRefundBinding & { notifyUrl: string; reason?: string }, key: string) {
+  const v = buildJoinpayRefundRequest(input, key); return { fields: v.fields, hmac: v.hmac };
+}
+export function computeJoinpayRefundQuery(input: Pick<JoinpayRefundBinding, "merchantNo" | "refundOrderNo">, key: string) {
+  const v = buildJoinpayRefundQuery(input, key); return { fields: v.fields, hmac: v.hmac };
+}
+/** 旧合成API保持原公共形状；中性MATCH不能改名为官方验签。 */
+export function evaluateJoinpayRefundResponse(operation: RefundProtocolResult["operation"], body: string | Uint8Array,
+  context: { binding: JoinpayRefundBinding | null; key: string; leaseCurrent?: boolean }): RefundProtocolResult {
+  const computed = computeJoinpayRefundResponse(operation, body, context);
+  return { ...computed, signature: computed.signature === "MATCH" ? "SYNTHETIC_SELF_CONSISTENT" : computed.signature,
+    evidenceLevel: "SYNTHETIC_PROTOCOL", officialVerified: false, formalRefund: false };
 }

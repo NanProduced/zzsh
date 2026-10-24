@@ -9,9 +9,11 @@ import { sendJson, notFound, forbidden, invalid, type SupplyNodeRequest } from "
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { readPersonalWallet, readPersonalFinanceEntries, readPersonalFinanceEntry, parseFinanceQuery,parseFinanceProjectionVersion,decodeFinanceEntryId } from "./personal-finance-read";
-import { mountControlledWithdrawalRoutes } from "./controlled-withdrawal-routes";
+import { mountChannelWithdrawalRoutes, mountControlledWithdrawalRoutes } from "./controlled-withdrawal-routes";
+import type { NativeWithdrawalOptions } from './native-withdrawal-store';
 import {readOwnerGuaranteeHistory} from './owner-guarantee-history';
-export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey;nativeWithdrawalScope?:NativeWithdrawalScope}){
+export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey;nativeWithdrawalScope?:NativeWithdrawalScope;joinpayWithdrawal?:NativeWithdrawalOptions}){
+  mountChannelWithdrawalRoutes(app,options);
   mountControlledWithdrawalRoutes(app,options);
   app.getHttpAdapter().getInstance().use('/api/v1/users/me/wallet',(request:SupplyNodeRequest,response:SupplyResponse)=>{
     const requestId=ensureApiV1RequestId(request);return safely(response,requestId,async()=>{

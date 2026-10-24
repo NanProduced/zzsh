@@ -1,4 +1,7 @@
 import type {NativeWithdrawalScope} from './native-withdrawal-resource';
+import { SecurityApiError, withTransaction } from '../auth/security-core';
+import { validateIdempotencyKey } from '../contracts/api-v1';
+import { createNativeWithdrawal, quoteNativeWithdrawalInTransaction, readNativeWithdrawalRecovery, type NativeWithdrawalOptions } from './native-withdrawal-store';
 import type {ListingCursorKey} from '../supply/listing-cursor';
 import type {INestApplication} from '@nestjs/common';import type {AuthSecurityOptions} from '../auth/auth-security';import {readUserContext} from '../auth/user-identity';import {ensureApiV1RequestId} from '../contracts/api-v1';
 import {bodyOf,ensureOnlyFields,invalid,notFound,sendJson,type SupplyNodeRequest} from '../supply/supply-util';import {decodeId,requireOrigin,requestPath,safely,type SupplyResponse} from '../supply/supply-routes';
@@ -15,3 +18,33 @@ export function mountControlledWithdrawalRoutes(app:INestApplication,options:Aut
   if(path==='/quote'){sendJson(response,200,await readControlledWithdrawalQuote(options.pool,context,body,options.nativeWithdrawalScope),requestId);return;}
   if(path!=='/')throw notFound();const key=request.headers['idempotency-key'];if(typeof key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(key))throw invalid('Idempotency key required');const result=await createControlledWithdrawal(options.pool,context,body,key,options.nativeWithdrawalScope);sendJson(response,result.status,result.body,requestId);
  });});}
+
+/** New channel namespace; the existing LOCAL routes and receipts stay independent. */
+export function mountChannelWithdrawalRoutes(app:INestApplication,options:AuthSecurityOptions & {joinpayWithdrawal?:NativeWithdrawalOptions}){
+ for(const prefix of ['/api/v1/users/me/channel-withdrawals','/api/bff/user/channel-withdrawals']) app.getHttpAdapter().getInstance().use(prefix,(request:SupplyNodeRequest,response:SupplyResponse)=>{
+  const requestId=ensureApiV1RequestId(request);return safely(response,requestId,async()=>{
+   const {path,query}=requestPath(request,prefix),method=(request.method??'GET').toUpperCase();
+   if(!['GET','POST'].includes(method))throw notFound();
+   if(!requireOrigin(request,response,{...options,adminOrigin:options.userOrigin},requestId))return;
+   const actor={...await readUserContext(request,options),requestId};
+   let selector:{key:string}|{intentId:string}|undefined;
+   if(method==='GET'){
+    if(path==='/receipt'){
+     if(query.size!==1||query.getAll('key').length!==1)throw invalid('One recovery key required');
+     selector={key:validateIdempotencyKey(query.get('key'))};
+    }else{
+     const match=/^\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/.exec(path);
+     if(!match||query.size)throw notFound();selector={intentId:match[1]!};
+    }
+   }else if(query.size||!['/','/quote'].includes(path))throw notFound();
+   const body=method==='POST'?bodyOf(request):undefined;
+   if(body)ensureOnlyFields(body,path==='/quote'?['amountCents','destinationId','policyVersion']:['amountCents','destinationId','policyVersion','expectedWalletVersion']);
+   const key=method==='POST'&&path==='/'?validateIdempotencyKey(request.headers['idempotency-key']):undefined;
+   const channel=options.joinpayWithdrawal;
+   if(!channel)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Channel withdrawal is not integrated');
+   if(selector){sendJson(response,200,await withTransaction(options.pool,c=>readNativeWithdrawalRecovery(c,actor,channel.scope,selector)),requestId);return;}
+   if(path==='/quote'){sendJson(response,200,await withTransaction(options.pool,c=>quoteNativeWithdrawalInTransaction(c,actor,body!,channel)),requestId);return;}
+   const result=await createNativeWithdrawal(options.pool,actor,body!,key,channel);sendJson(response,result.status,result.body,requestId);
+  });
+ });
+}
