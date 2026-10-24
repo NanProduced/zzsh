@@ -69,6 +69,7 @@ import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, typ
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountJoinpayCollectionNotifications } from "../order/joinpay-collection-notification-routes";
 import type { FormalCollectionSourceOptions } from "../order/joinpay-collection-source";
+import { JoinpayCollectionRecoveryLifecycle, type JoinpayCollectionRecoveryOptions } from "../order/joinpay-collection-recovery";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
 import { mountDistributionPolicyRoutes } from "../finance/distribution-policy-routes";
 
@@ -103,7 +104,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
   localControlledPayments?: LocalControlledPaymentOptions;
   /** Explicit trusted composition only; ordinary configuration leaves collection closed. */
-  joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions };
+  joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions;
+    recovery?: Pick<JoinpayCollectionRecoveryOptions, "workerId" | "batchLimit" | "minimumIntervalSeconds"> };
   /** Server-only composition. Read scope remains available when new reservations are disabled. */
   joinpayWithdrawal?: { routes: NativeWithdrawalOptions; execution?: Omit<PayoutExecution,'pool'>; notifications?: boolean };
   joinpayRefund?: Omit<RefundExecution,'pool'>;
@@ -756,6 +758,15 @@ export async function mountAuthHandlers(
 ): Promise<AuthSecurityOptions> {
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
+  }
+  const recovery = options.joinpayCollection?.recovery;
+  if (recovery !== undefined) {
+    const collection = options.joinpayCollection, execution = collection?.routes?.execution;
+    if (!recovery || !execution?.formal || execution.formal.admission !== collection?.notifications?.admission) {
+      throw new ConfigurationError("Collection recovery requires matching explicit executor and notification admissions");
+    }
+    app.get(JoinpayCollectionRecoveryLifecycle).start({ ...recovery,
+      execution: { ...execution, pool: options.pool, formal: execution.formal } });
   }
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);

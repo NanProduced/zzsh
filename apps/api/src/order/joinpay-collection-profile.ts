@@ -12,15 +12,17 @@ const identifier = (value: unknown): value is string => typeof value === "string
 const A2_MERCHANT = "888100000002340";
 export const COLLECTION_REQUIRED_RULES = Object.freeze({
   SUBMIT: Object.freeze(["S62_TRADE_RT_2_6_ENDPOINT", "UTF8_FORM_SINGLE_ENCODING", "MD5_DOCUMENT_ORDER_SKIP_EMPTY",
-    "JSON_RESPONSE_RAW_NUMERIC_TOKENS", "REJECT_NONEMPTY_UNKNOWN_FIELDS", "REJECT_FIELD_EDGE_WHITESPACE", "MERCHANT_NATIVE_PRODUCTS",
-    "TRADE_MERCHANT_NO_SEMANTICS", "PRODUCT_NAME_CHARACTER_SET", "CHANNEL_TIMEZONE"]),
+    "JSON_RESPONSE_RAW_NUMERIC_TOKENS", "MERCHANT_NATIVE_PRODUCTS",
+    "TRADE_MERCHANT_NO_SEMANTICS", "PRODUCT_NAME_CHARACTER_SET"]),
   QUERY: Object.freeze(["S63_TRADE_RT_2_6_ENDPOINT", "UTF8_FORM_SINGLE_ENCODING", "MD5_DOCUMENT_ORDER_SKIP_EMPTY",
-    "JSON_RESPONSE_RAW_NUMERIC_TOKENS", "REJECT_NONEMPTY_UNKNOWN_FIELDS", "REJECT_FIELD_EDGE_WHITESPACE", "MERCHANT_NATIVE_PRODUCTS",
+    "JSON_RESPONSE_RAW_NUMERIC_TOKENS", "MERCHANT_NATIVE_PRODUCTS",
     "CHANNEL_TIMEZONE", "QUERY_FREQUENCY_LIMIT"]),
   NOTIFY: Object.freeze(["S62_TRADE_RT_2_6_GET_NOTIFY", "RAW_URI_FRAMEWORK_DECODE_BOUNDARY", "FIELD_TIME_DECODE_COUNTS",
-    "MD5_DOCUMENT_ORDER_SKIP_EMPTY", "REJECT_NONEMPTY_UNKNOWN_FIELDS", "REJECT_FIELD_EDGE_WHITESPACE", "MERCHANT_NATIVE_PRODUCTS",
+    "MD5_DOCUMENT_ORDER_SKIP_EMPTY", "MERCHANT_NATIVE_PRODUCTS",
     "CHANNEL_TIMEZONE", "NOTIFY_KEY_ROTATION_SELECTION"]),
 });
+// 本地拒绝策略不需供应商背书；旧证据字段仍可保留，下单也不使用渠道时间。
+const LOCAL_POLICY_RULES = ["REJECT_NONEMPTY_UNKNOWN_FIELDS", "REJECT_FIELD_EDGE_WHITESPACE"];
 export type CollectionRuleEvidence = { source: "JOINPAY_OFFICIAL" | "SYNTHETIC"; reference: string; sha256: string };
 export type CollectionKnownAnswer = CollectionRuleEvidence & { values: Readonly<Record<string, string>>; vectorKey: string; expectedHmac: string };
 export type CollectionOperationProfile = { keyVersionRef: string; rules: Readonly<Record<string, CollectionRuleEvidence | "NOT_OBTAINED">>;
@@ -72,7 +74,9 @@ function evidence(value: CollectionRuleEvidence | undefined | "NOT_OBTAINED", mo
     || typeof value.reference !== "string" || value.reference.length < 1 || value.reference.length > 256 || !SHA.test(value.sha256)) reject("COLLECTION_RULE_NOT_CONFIRMED");
 }
 function knownAnswer(value: CollectionKnownAnswer | "NOT_OBTAINED", order: readonly string[], mode: CollectionEvidenceMode): void {
-  if (!value || value === "NOT_OBTAINED") return reject("COLLECTION_KNOWN_ANSWER_NOT_OBTAINED");
+  // 供应商样例是附加验证证据；缺样例不代替真实回包的验签，也不阻止按正式文档联调。
+  if (value === "NOT_OBTAINED") return;
+  if (!value) return reject("COLLECTION_KNOWN_ANSWER_NOT_OBTAINED");
   evidence(value, mode, true);
   if (typeof value.vectorKey !== "string" || !value.vectorKey || !/^[0-9a-fA-F]{32}$/.test(value.expectedHmac)
     || !value.values || Object.values(value.values).some(v => typeof v !== "string")
@@ -85,9 +89,11 @@ export function assertCollectionProfile(profile: BoundCollectionProfile, operati
   if (descriptor.purpose !== "COLLECTION" || descriptor.wireMerchantNo === A2_MERCHANT) return reject("COLLECTION_A2_PURPOSE_FORBIDDEN");
   const op = descriptor.operations[operation];
   if (!op || !identifier(op.keyVersionRef) || !op.rules) return reject("COLLECTION_OPERATION_NOT_CONFIRMED");
+  const optionalRules = operation === "SUBMIT" ? [...LOCAL_POLICY_RULES, "CHANNEL_TIMEZONE"] : LOCAL_POLICY_RULES;
   if (Object.keys(op).some(name => !["keyVersionRef", "rules", "requestKnownAnswer", "responseKnownAnswer", "timeOffsetMinutes", "notificationDecoding"].includes(name))
-    || Object.keys(op.rules).some(name => !COLLECTION_REQUIRED_RULES[operation].includes(name))) return reject("COLLECTION_PROFILE_INVALID");
+    || Object.keys(op.rules).some(name => !COLLECTION_REQUIRED_RULES[operation].includes(name) && !optionalRules.includes(name))) return reject("COLLECTION_PROFILE_INVALID");
   for (const rule of COLLECTION_REQUIRED_RULES[operation]) evidence(op.rules[rule], descriptor.evidenceMode);
+  for (const rule of optionalRules) if (op.rules[rule] !== undefined && op.rules[rule] !== "NOT_OBTAINED") evidence(op.rules[rule], descriptor.evidenceMode);
   if (operation !== "NOTIFY") knownAnswer(op.requestKnownAnswer, operation === "SUBMIT" ? JOINPAY_SIGNATURE_ORDER.uniPayRequest : JOINPAY_SIGNATURE_ORDER.queryOrderRequest, descriptor.evidenceMode);
   knownAnswer(op.responseKnownAnswer, operation === "SUBMIT" ? JOINPAY_SIGNATURE_ORDER.uniPaySyncResponse : operation === "QUERY" ? JOINPAY_SIGNATURE_ORDER.queryOrderResponse : JOINPAY_SIGNATURE_ORDER.asyncNotify, descriptor.evidenceMode);
   if (operation === "NOTIFY" && (!op.notificationDecoding || Object.keys(op.notificationDecoding).some(n => n !== "ra_PayTime" && n !== "rb_DealTime")

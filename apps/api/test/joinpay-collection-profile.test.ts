@@ -42,7 +42,49 @@ test("profile运行时品牌不能经JSON或对象复制伪造，outbound同样�
   assert.throws(() => readCollectionOutboundRequest({ ...request }), { code: "COLLECTION_OUTBOUND_NOT_BOUND" });
   assert.equal(Object.isFrozen(request), true); assert.equal(Object.isFrozen(readCollectionOutboundRequest(request)), true);
 });
-test("逐操作任一官方规则尚未取得就拒绝，不从另一操作继承", () => {
+test("本地拒绝策略不需要官方证明，下单不要求未使用的渠道时区", () => {
+  const policies = ["REJECT_NONEMPTY_UNKNOWN_FIELDS", "REJECT_FIELD_EDGE_WHITESPACE"];
+  for (const operation of ["SUBMIT", "QUERY", "NOTIFY"] as const) {
+    for (const rule of policies) assert.equal(COLLECTION_REQUIRED_RULES[operation].includes(rule), false);
+  }
+  assert.equal(COLLECTION_REQUIRED_RULES.SUBMIT.includes("CHANNEL_TIMEZONE"), false);
+  for (const operation of ["SUBMIT", "QUERY"] as const) {
+    const input = modelProfile(), profile = bindJoinpayCollectionProfile(input);
+    assert.doesNotThrow(() => assertCollectionProfile(profile, operation));
+    const unknown = inspectJoinpayCollectionResponse(profile, operation, signed(operation, {
+      ...(operation === "SUBMIT" ? SYNC : QUERY), unrecognized: "not empty",
+    }), binding(input), KEY);
+    assert.equal(unknown.schema, "INVALID"); assert.equal(unknown.verified, false);
+    const padded = inspectJoinpayCollectionResponse(profile, operation, signed(operation, {
+      ...(operation === "SUBMIT" ? SYNC : QUERY), r2_OrderNo: ORDER + " ",
+    }), binding(input), KEY);
+    assert.equal(padded.schema, "INVALID"); assert.equal(padded.verified, false);
+  }
+});
+
+test("旧本地证据字段可缺失或未取得，已有合法证据继续兼容且禁止夹带秘密", () => {
+  for (const operation of ["SUBMIT", "QUERY"] as const) {
+    const optional = ["REJECT_NONEMPTY_UNKNOWN_FIELDS", "REJECT_FIELD_EDGE_WHITESPACE", ...(operation === "SUBMIT" ? ["CHANNEL_TIMEZONE"] : [])];
+    for (const rule of optional) {
+      for (const value of ["NOT_OBTAINED", { source: "JOINPAY_OFFICIAL", reference: "SYNTHETIC_OFFICIAL_CONFIGURATION_MODEL_NOT_REAL", sha256: "1".repeat(64) }] as const) {
+        const input = modelProfile(); input.operations[operation]!.rules = { ...input.operations[operation]!.rules, [rule]: value };
+        assert.doesNotThrow(() => readCollectionProfileEvidence(bindJoinpayCollectionProfile(input), operation));
+      }
+      const bad = modelProfile(); bad.operations[operation]!.rules = { ...bad.operations[operation]!.rules,
+        [rule]: { source: "JOINPAY_OFFICIAL", reference: "MODEL", sha256: "1".repeat(64), merchantKey: "NEVER_CAPTURE" } as never };
+      assert.throws(() => readCollectionProfileEvidence(bindJoinpayCollectionProfile(bad), operation), { code: "COLLECTION_RULE_NOT_CONFIRMED" });
+    }
+  }
+});
+
+test("查单仍须明确渠道时区，未知规则不能混入profile", () => {
+  const input = modelProfile(); input.operations.QUERY!.rules = { ...input.operations.QUERY!.rules, CHANNEL_TIMEZONE: "NOT_OBTAINED" };
+  assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(input), "QUERY"), { code: "COLLECTION_RULE_NOT_CONFIRMED" });
+  const unknown = modelProfile(); unknown.operations.SUBMIT!.rules = { ...unknown.operations.SUBMIT!.rules, UNSUPPORTED_RULE: "NOT_OBTAINED" };
+  assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(unknown), "SUBMIT"), { code: "COLLECTION_PROFILE_INVALID" });
+});
+
+test("逐操作任一必要官方规则尚未取得就拒绝，不从另一操作继承", () => {
   for (const operation of ["SUBMIT", "QUERY"] as const) for (const rule of COLLECTION_REQUIRED_RULES[operation]) {
     const input = modelProfile(); input.operations[operation]!.rules = { ...input.operations[operation]!.rules, [rule]: "NOT_OBTAINED" };
     const profile = bindJoinpayCollectionProfile(input); assert.throws(() => assertCollectionProfile(profile, operation), { code: "COLLECTION_RULE_NOT_CONFIRMED" });
@@ -51,14 +93,35 @@ test("逐操作任一官方规则尚未取得就拒绝，不从另一操作继�
   const missing = modelProfile(); delete missing.operations.QUERY;
   assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(missing), "QUERY"), { code: "COLLECTION_OPERATION_NOT_CONFIRMED" });
 });
-test("request/response官方向量任一未取得、来源错误或签名不符均关闭操作", () => {
+test("缺官方样例如实记未取得；已提供样例仍须来源、摘要和签名全部匹配", () => {
   for (const operation of ["SUBMIT", "QUERY"] as const) for (const field of ["requestKnownAnswer", "responseKnownAnswer"] as const) {
     const absent = modelProfile(); absent.operations[operation]![field] = "NOT_OBTAINED";
-    assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(absent), operation), { code: "COLLECTION_KNOWN_ANSWER_NOT_OBTAINED" });
+    const profile = bindJoinpayCollectionProfile(absent);
+    assert.doesNotThrow(() => assertCollectionProfile(profile, operation));
+    assert.equal(JSON.parse(readCollectionProfileEvidence(profile, operation)).operations[operation][field], "NOT_OBTAINED");
+    const omitted = modelProfile(); omitted.operations[operation]![field] = undefined as never;
+    assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(omitted), operation), { code: "COLLECTION_KNOWN_ANSWER_NOT_OBTAINED" });
     const bad = modelProfile(); (bad.operations[operation]![field] as CollectionKnownAnswer).expectedHmac = "0".repeat(32);
     assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(bad), operation), { code: "COLLECTION_KNOWN_ANSWER_MISMATCH" });
     const source = modelProfile(); (source.operations[operation]![field] as CollectionKnownAnswer).source = "SYNTHETIC";
     assert.throws(() => assertCollectionProfile(bindJoinpayCollectionProfile(source), operation), { code: "COLLECTION_RULE_NOT_CONFIRMED" });
+  }
+});
+
+test("没有官方样例也必须验真实回包签名和原单绑定，不会因配置准入直接成功", () => {
+  const input = modelProfile();
+  for (const operation of ["SUBMIT", "QUERY"] as const) {
+    input.operations[operation]!.requestKnownAnswer = "NOT_OBTAINED";
+    input.operations[operation]!.responseKnownAnswer = "NOT_OBTAINED";
+  }
+  const profile = bindJoinpayCollectionProfile(input), original = binding(input);
+  for (const operation of ["SUBMIT", "QUERY"] as const) {
+    const values = operation === "SUBMIT" ? SYNC : QUERY;
+    const invalidSignature = inspectJoinpayCollectionResponse(profile, operation, JSON.stringify({ ...values, hmac: "0".repeat(32) }), original, KEY);
+    assert.equal(invalidSignature.signature, "MISMATCH"); assert.equal(invalidSignature.verified, false);
+    const mismatch = inspectJoinpayCollectionResponse(profile, operation, signed(operation, { ...values, r3_Amount: "0.01" }), original, KEY);
+    assert.equal(mismatch.binding, "MISMATCH"); assert.equal(mismatch.verified, false);
+    assert.equal(JSON.parse(readCollectionProfileEvidence(profile, operation)).operations[operation].responseKnownAnswer, "NOT_OBTAINED");
   }
 });
 test("A2用途及已知A2账号都禁止正式SUBMIT/QUERY，不因完整模型配置放行", () => {

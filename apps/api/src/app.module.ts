@@ -7,6 +7,7 @@ import { MessageScopeRecoveryLifecycle } from "./im/consultation";
 import { OrderDispatchLifecycle } from "./im/order-dispatch";
 import { OrderImEventRecoveryLifecycle } from "./im/order-im-events";
 import { OrderTeamLifecycle } from "./im/order-team";
+import { JoinpayCollectionRecoveryLifecycle } from "./order/joinpay-collection-recovery";
 
 @Module({})
 export class AppModule {
@@ -20,7 +21,7 @@ export class AppModule {
         // the sweeper and awaiting the in-flight batch) fires before the pool ends.
         ...(orderSweep ? [OrderSweepModule.register(orderSweep)] : []),
       ],
-      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle],
+      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle],
     };
   }
 }

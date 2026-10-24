@@ -54,18 +54,23 @@ function db() {
       if (sql.startsWith("SELECT 1 FROM zzsh_order.payment_request WHERE channel=")) return one();
       if (sql.startsWith("INSERT INTO zzsh_order.payment_request")) { const names = ["id", "order_id", "channel", "merchant_identity_id", "config_profile_id", "protocol_version", "key_version_ref", "platform_order_no", "channel_order_no", "amount_cents", "wire_amount_yuan", "method", "evidence_level"];
         const r: Row = { ...Object.fromEntries(names.map((n, i) => [n, p[i]])), currency: "CNY", state: "SUBMITTING", revision: "1", lease_version: "0", lease_owner: null, lease_until: null,
-          created_at: "2026-10-23T00:00:00.000000Z", updated_at: "2026-10-23T00:00:00.000000Z" }; s.requests.set(r.id, r); return one(r); }
+          created_at: "2026-10-23T00:00:00.000000Z", created_at_ms: state.now, updated_at: "2026-10-23T00:00:00.000000Z" }; s.requests.set(r.id, r); return one(r); }
       if (sql.startsWith("SELECT request_id,") && sql.includes("FROM zzsh_order.joinpay_collection_binding")) return one(s.bindings.get(p[0]));
       if (sql.startsWith("INSERT INTO zzsh_order.joinpay_collection_binding")) { const names = ["request_id", "wire_merchant_no", "trade_merchant_no", "product_name", "notify_url", "initial_profile_sha256", "evidence_mode"];
         s.bindings.set(p[0], Object.fromEntries(names.map((n, i) => [n, p[i]]))); return one(); }
       if (sql.startsWith("SELECT r.id AS request_id")) { const r = s.requests.get(p[0]), b = s.bindings.get(p[0]); return one(r && b && { ...r, ...b, request_id: r.id }); }
+      if (sql.startsWith("SELECT COALESCE(max(a.created_at)")) {
+        const previous = s.attempts.filter(a => a.request_id === p[0]);
+        const latest = previous.length ? Math.max(...previous.map(a => a.created_at)) : s.requests.get(p[0])!.created_at_ms;
+        return one({ due: latest <= state.now - p[1] * 1000, within_budget: previous.filter(a => a.operation === "QUERY").length < p[2] });
+      }
       if (sql.startsWith("SELECT status,hold_until>clock_timestamp()")) return one({ status: "PENDING_PAYMENT", open: s.payable });
       if (sql.startsWith("UPDATE zzsh_order.payment_request\n      SET lease_version")) { const r = s.requests.get(p[0]);
         if (!r || !p[3].includes(r.state) || !p[4].includes(r.evidence_level) || (r.lease_until !== null && r.lease_until > state.now)) return one();
         Object.assign(r, { lease_version: String(BigInt(r.lease_version) + 1n), lease_owner: p[1], lease_until: state.now + p[2] * 1000, revision: String(BigInt(r.revision) + 1n) });
         txPhase = "CLAIM"; return one({ ...r, channel_order_no: s.claimOrderOverride ?? r.channel_order_no }); }
       if (sql.startsWith("INSERT INTO zzsh_order.joinpay_collection_attempt")) { const names = ["id", "request_id", "lease_version", "lease_owner", "operation", "profile_id", "profile_canonical", "profile_sha256", "key_version_ref", "evidence_mode", "request_body", "request_sha256"];
-        s.attempts.push(Object.fromEntries(names.map((n, i) => [n, p[i]]))); return one(); }
+        s.attempts.push({ ...Object.fromEntries(names.map((n, i) => [n, p[i]])), created_at: state.now }); return one(); }
       if (sql.startsWith("SELECT lease_version=$2::bigint")) { const r = s.requests.get(p[0]); return one({ current: !!r && r.lease_version === p[1] && r.lease_owner === p[2] && r.lease_until > state.now }); }
       if (sql.startsWith("UPDATE zzsh_order.payment_request SET state=")) { const r = s.requests.get(p[0]);
         if (r && expiresOn === "STATE_UPDATE") { state.now = r.lease_until + 1; expiresOn = null; }
@@ -102,6 +107,78 @@ function response(query = false, key = KEY, patch: Record<string, string> = {}) 
 }
 const execution = (model: ReturnType<typeof db>, profile: ReturnType<typeof bindJoinpayCollectionProfile>, fetch: typeof globalThis.fetch) => ({ pool: model.pool, profileFor: () => profile, keyFor: () => KEY, fetch });
 const fakeFetch = (body: string, callback?: (body: string) => void): typeof globalThis.fetch => (async (_url: unknown, init?: RequestInit) => { callback?.(String(init?.body)); return new Response(body, { status: 200 }); }) as typeof globalThis.fetch;
+
+test("恢复入口不做首次下单，未尝试的请求保持原状且不读钥", async () => {
+  const model = db(), first = await created(model); let reads = 0, sent = 0;
+  const result = await executeJoinpayCollectionAttempt({ ...execution(model, first.profile, fakeFetch(response(), () => sent++)), keyFor: () => { reads++; return KEY; } },
+    { requestId: first.id, workerId: "recovery_worker", recoveryMinimumIntervalSeconds: 60 });
+  assert.equal(result.kind, "SKIPPED"); assert.equal(reads, 0); assert.equal(sent, 0);
+  assert.equal(model.state.requests.get(first.id)!.lease_version, "0"); assert.equal(model.state.attempts.length, 0);
+});
+
+test("持久意图首次派发需显式授权、等候间隔和仍可付款；之后只查原号", async () => {
+  const model = db(), first = await created(model); let sent = 0;
+  const recovery = { requestId: first.id, workerId: "recovery_worker", recoveryMinimumIntervalSeconds: 60, allowFirstDispatch: true };
+  const options = execution(model, first.profile, fakeFetch(response(), () => sent++));
+  assert.equal((await executeJoinpayCollectionAttempt(options, recovery)).kind, "SKIPPED"); assert.equal(sent, 0);
+  model.state.now += 60000; model.state.payable = false;
+  assert.equal((await executeJoinpayCollectionAttempt(options, recovery)).kind, "SKIPPED"); assert.equal(sent, 0);
+  model.state.payable = true;
+  const firstDispatch = await executeJoinpayCollectionAttempt(options, recovery);
+  assert.equal(firstDispatch.kind, "OBSERVED"); if (firstDispatch.kind === "OBSERVED") assert.equal(firstDispatch.operation, "SUBMIT");
+  assert.equal(sent, 1); model.state.now += 60000;
+  const queried = await executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response(true), () => sent++)), recovery);
+  assert.equal(queried.kind, "OBSERVED"); if (queried.kind === "OBSERVED") assert.equal(queried.operation, "QUERY");
+  assert.equal(sent, 2); assert.deepEqual(model.state.attempts.map(a => a.operation), ["SUBMIT", "QUERY"]);
+});
+
+test("恢复频率在请求行锁内按PG时间重核，租约过期仍不能提前查，允许后只查原号", async () => {
+  const model = db(), first = await created(model);
+  await executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response())), { requestId: first.id, workerId: "initial_worker" });
+  model.state.now += 31000; let reads = 0, sent = 0;
+  const options = { ...execution(model, first.profile, fakeFetch(response(true), body => {
+    sent++; assert.equal(new URLSearchParams(body).get("p2_OrderNo"), "ZZMODEL_1");
+  })), keyFor: () => { reads++; return KEY; } };
+  const recovery = { requestId: first.id, workerId: "recovery_worker", recoveryMinimumIntervalSeconds: 60 };
+  assert.equal((await executeJoinpayCollectionAttempt(options, recovery)).kind, "SKIPPED");
+  assert.equal(reads, 0); assert.equal(sent, 0); assert.equal(model.state.attempts.length, 1);
+  model.state.now += 30000;
+  const result = await executeJoinpayCollectionAttempt(options, recovery);
+  assert.equal(result.kind, "OBSERVED"); if (result.kind === "OBSERVED") assert.equal(result.operation, "QUERY");
+  assert.equal(reads, 1); assert.equal(sent, 1); assert.equal(model.state.attempts.length, 2);
+  assert.equal(model.state.attempts[1]!.operation, "QUERY");
+  let dueAt = -1; model.trace.forEach((sql, index) => { if (sql.startsWith("SELECT COALESCE(max(a.created_at)")) dueAt = index; });
+  assert.ok(model.trace.slice(0, dueAt).at(-1)!.includes("FOR UPDATE OF r"));
+  assert.ok(model.trace[dueAt + 1]!.startsWith("UPDATE zzsh_order.payment_request"));
+});
+
+test("恢复间隔非法时在事务、读钥和发送之前拒绝", async () => {
+  const model = db(), first = await created(model), before = model.trace.length;
+  for (const invalid of [null, NaN, Infinity, 29, 30.5, 86401]) {
+    await assert.rejects(executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response())),
+      { requestId: first.id, workerId: "worker", recoveryMinimumIntervalSeconds: invalid as number }), { code: "INVALID_ARGUMENT" });
+  }
+  await assert.rejects(executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response())),
+    { requestId: first.id, workerId: "worker", allowFirstDispatch: true }), { code: "INVALID_ARGUMENT" });
+  assert.equal(model.trace.length, before); assert.equal(model.state.attempts.length, 0);
+});
+
+test("自动补查最多十次，耗尽后不读钥/外呼、不补失败或重置原单", async () => {
+  const model = db(), first = await created(model);
+  await executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response())), { requestId: first.id, workerId: "initial" });
+  const recovery = { requestId: first.id, workerId: "recovery", recoveryMinimumIntervalSeconds: 60, allowFirstDispatch: true };
+  for (let i = 0; i < 10; i++) {
+    model.state.now += 60000;
+    const result = await executeJoinpayCollectionAttempt(execution(model, first.profile, fakeFetch(response(true, KEY, { ra_Status: "102" }))), recovery);
+    assert.equal(result.kind, "OBSERVED"); if (result.kind === "OBSERVED") assert.equal(result.operation, "QUERY");
+  }
+  model.state.now += 60000; const before = structuredClone(model.state.requests.get(first.id)); let reads = 0, sent = 0;
+  const result = await executeJoinpayCollectionAttempt({ ...execution(model, first.profile, fakeFetch(response(true), () => sent++)),
+    keyFor: () => { reads++; return KEY; } }, recovery);
+  assert.equal(result.kind, "SKIPPED"); assert.equal(reads, 0); assert.equal(sent, 0);
+  assert.equal(model.state.attempts.filter(a => a.operation === "QUERY").length, 10);
+  assert.deepEqual(model.state.requests.get(first.id), before); assert.equal(before!.state, "ACTION_READY");
+});
 
 test("新入口复用对象/幂等/hold；重放保留原wire和初始profile，不依赖当前新配置", async () => {
   const model = db(), first = await created(model), bad = descriptor(); bad.operations = {};

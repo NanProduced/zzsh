@@ -13,6 +13,8 @@ import { createNativePaymentDistributionAdmission, createNativePaymentDistributi
 import { confirmOrderPayment } from "./payment-confirmation";
 
 const collectionLeaseConflict = Symbol("collection lease conflict");
+// 本地自动恢复预算；耗尽仍保留未知，不据此认定渠道失败或换号付款。
+export const JOINPAY_COLLECTION_MAX_AUTOMATIC_QUERIES = 10;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fresh = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
@@ -97,13 +99,22 @@ type Prepared = { attemptId: string; request: Original; profile: BoundCollection
   binding: CollectionPersistedBinding; key: string; operation: CollectionOperation; lease: { leaseVersion: string; leaseOwner: string };
   outbound: ReturnType<typeof produceJoinpayCollectionRequest> };
 
-async function prepare(options: JoinpayCollectionExecution, id: string, workerId: string): Promise<Prepared | null> {
+async function prepare(options: JoinpayCollectionExecution, id: string, workerId: string, recoveryMinimumIntervalSeconds?: number, allowFirstDispatch?: boolean): Promise<Prepared | null> {
   return confirmed(options.pool, id, "CLAIM", async client => {
     const row = (await client.query<OriginalRow>(`${ORIGINAL_SQL} FOR UPDATE OF r`, [id])).rows[0];
     if (!row) throw notFound();
     if (row.formal_admission_ref != null && !options.formal) throw conflict("Formal request requires explicit source admission");
     const request = original(row);
     const operation: CollectionOperation = row.lease_version === "0" && row.state === "SUBMITTING" ? "SUBMIT" : "QUERY";
+    if (recoveryMinimumIntervalSeconds !== undefined) {
+      if (operation === "SUBMIT" && allowFirstDispatch !== true) return null;
+      // 请求行锁内重核PG时间；不能仅信任批量扫描时已经过期的资格。
+      const due = (await client.query(`SELECT COALESCE(max(a.created_at),(SELECT created_at FROM zzsh_order.payment_request WHERE id=$1))
+        <=clock_timestamp()-make_interval(secs=>$2::integer) AS due,
+        count(*) FILTER (WHERE a.operation='QUERY')<$3::integer AS within_budget
+        FROM zzsh_order.joinpay_collection_attempt a WHERE a.request_id=$1`, [id, recoveryMinimumIntervalSeconds, JOINPAY_COLLECTION_MAX_AUTOMATIC_QUERIES])).rows[0];
+      if (due?.due !== true || operation === "QUERY" && due.within_budget !== true) return null;
+    }
     if (operation === "SUBMIT") {
       const payable = (await client.query(`SELECT status,hold_until>clock_timestamp() AS open FROM zzsh_order.rental_order WHERE id=$1`, [request.orderId])).rows[0];
       if (payable?.status !== "PENDING_PAYMENT" || payable.open !== true) return null;
@@ -216,10 +227,13 @@ async function record(options: JoinpayCollectionExecution, attempt: Prepared, re
 }
 
 /** 已提交attempt之后才发送一次；领取提交未知不发请求，结果提交未知不重发SUBMIT。 */
-export async function executeJoinpayCollectionAttempt(options: JoinpayCollectionExecution, input: { requestId: string; workerId: string }): Promise<
+export async function executeJoinpayCollectionAttempt(options: JoinpayCollectionExecution, input: { requestId: string; workerId: string; recoveryMinimumIntervalSeconds?: number; allowFirstDispatch?: boolean }): Promise<
   { kind: "SKIPPED" } | { kind: "OBSERVED"; operation: CollectionOperation; observation: Recorded }> {
   if (!ID.test(input.requestId) || !ID.test(input.workerId)) throw invalid();
-  const attempt = await prepare(options, input.requestId, input.workerId);
+  if (input.recoveryMinimumIntervalSeconds !== undefined && (!Number.isSafeInteger(input.recoveryMinimumIntervalSeconds)
+    || input.recoveryMinimumIntervalSeconds < 30 || input.recoveryMinimumIntervalSeconds > 86400)) throw invalid();
+  if (input.allowFirstDispatch !== undefined && (typeof input.allowFirstDispatch !== "boolean" || input.recoveryMinimumIntervalSeconds === undefined)) throw invalid();
+  const attempt = await prepare(options, input.requestId, input.workerId, input.recoveryMinimumIntervalSeconds, input.allowFirstDispatch);
   if (!attempt) return { kind: "SKIPPED" };
   const response = await exchangeJoinpayCollection(attempt.outbound, { fetch: options.fetch });
   if (response.requestSha256 !== attempt.outbound.requestSha256) throw conflict("Transport changed the committed request bytes");
