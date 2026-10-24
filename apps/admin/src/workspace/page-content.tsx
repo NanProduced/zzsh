@@ -146,10 +146,10 @@ export function WorkspacePageContent({
         key={tab.id}
         snapshot={snapshot}
         initialRequestId={tab.objectId}
-        initialTab={tab.query.tab === "pending" || tab.query.tab === "templates" || tab.query.tab === "audit" ? tab.query.tab : "mine"}
         initialQuery={tab.query}
         objectOnly={tab.kind === "approval-object"}
         onOpenObject={(requestId, title) => onOpenPath(`/approvals/${encodeURIComponent(requestId)}`, title)}
+        onOpenPath={onOpenPath}
         onTabChange={(value) => onQueryChange({ ...tab.query, tab: value })}
         onQueryChange={onQueryChange}
         refreshNonce={refreshNonce}

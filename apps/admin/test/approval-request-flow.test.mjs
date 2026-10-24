@@ -77,3 +77,42 @@ test("execution receipt and actual business result are separate facts", () => {
   const failed = requestPolicy(detail({ execution: { status: "FAILED", resultCode: "FAILED", resultDetail: "未执行变更", executor: person, createdAt: null, completedAt: null } }));
   assert.equal(step(failed, "execution").status, "failed");
 });
+
+
+test("usability shared nodes: node buttons select their id without bubbling into the parent pane", async () => {
+  const { createRequire } = await import("node:module");
+  const { fileURLToPath } = await import("node:url");
+  const native = createRequire(import.meta.url), { Window } = native("happy-dom");
+  const { act, createElement } = native("react"), { createRoot } = native("react-dom/client");
+  const { createOfflineAdminSource } = await import(new URL("./offline-admin-source.mjs", import.meta.url).href);
+  const browser = new Window({ url: "http://127.0.0.1:3101/approvals/fixture" });
+  globalThis.window = browser; globalThis.document = browser.document;
+  for (const key of ["HTMLElement", "Element", "Node", "Event", "CustomEvent", "ShadowRoot", "HTMLInputElement", "HTMLButtonElement", "ResizeObserver", "MutationObserver", "DOMMatrixReadOnly", "DOMRect"]) if (browser[key]) globalThis[key] = browser[key];
+  Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
+  globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
+  globalThis.requestAnimationFrame = browser.requestAnimationFrame.bind(browser);
+  globalThis.cancelAnimationFrame = browser.cancelAnimationFrame.bind(browser);
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const source = await createOfflineAdminSource({ root: fileURLToPath(new URL("..", import.meta.url)) });
+  const host = browser.document.createElement("div"); browser.document.body.append(host);
+  const root = createRoot(host), selected = []; let paneClicks = 0;
+  try {
+    const { WorkflowCanvas } = await source.ssrLoadModule("/src/components/approvals-ui/workflow-canvas.tsx");
+    await act(async () => root.render(createElement("div", { onClick: () => paneClicks++ },
+      createElement(WorkflowCanvas, { policy: requestPolicy(detail()), onSelectStep: id => selected.push(id) }))));
+    for (let i = 0; i < 6; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)); });
+    for (const label of ["提交申请：已提交", "批准：尚无批准决定"]) {
+      const node = [...host.querySelectorAll("button")].find(button => button.getAttribute("aria-label") === label);
+      assert.ok(node, label);
+      const wrapper = node.closest(".react-flow__node");
+      assert.ok(wrapper);
+      assert.equal(wrapper.style.pointerEvents, "all", "the real ReactFlow node wrapper must accept pointer events");
+      await act(async () => node.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })));
+    }
+    assert.deepEqual(selected, ["request", "approved"]);
+    console.log("APPROVAL_SHARED_NODE_EVENTS " + JSON.stringify({ selected, paneClicks }));
+    assert.equal(paneClicks, 0, "the two actual node callbacks must stop the click before the parent pane");
+  } finally {
+    await act(async () => root.unmount()); await source.close(); await browser.happyDOM.abort();
+  }
+});

@@ -201,6 +201,7 @@ export function ApprovalAuditView({
   const [reading, setReading] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState<{ kind: "template" } | null>(null);
   const [detailFresh, setDetailFresh] = useState(false);
+  const recoveryPanelElement = useRef<HTMLDivElement>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [lookup, setLookup] = useState<RecoveryLookup>({ state: "idle" });
   const [pageMeta, setPageMeta] = useState<Record<ListKey, ListPage>>(emptyPageMeta);
@@ -912,6 +913,7 @@ export function ApprovalAuditView({
   };
 
   const recoveryPanel = recovery ? (
+    <div ref={recoveryPanelElement} tabIndex={-1} aria-label="原结果核对" className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring">
     <RecoveryPanel
       kind={recovery.kind}
       lookup={lookup}
@@ -923,7 +925,13 @@ export function ApprovalAuditView({
       onDiscard={dismissRecovery}
       others={pendingOthers}
     />
+    </div>
   ) : null;
+
+  const locateRecovery = () => {
+    recoveryPanelElement.current?.scrollIntoView?.({ block: "nearest" });
+    recoveryPanelElement.current?.focus();
+  };
 
   const availableTabs = useMemo(() => TABS.filter((item) => (
     item === "pending" ? canApprove
@@ -957,6 +965,7 @@ export function ApprovalAuditView({
                 detail={detail}
                 busy={loading}
                 blocked={recovery !== null && recovery.kind !== "resolved"}
+                onLocateRecovery={locateRecovery}
                 onOpenRequest={selectRequest}
                 onOpenPath={onOpenPath}
                 onDecide={decide}
@@ -982,6 +991,11 @@ export function ApprovalAuditView({
     : [{ value: "", label: "新建触发条件标识" }];
   const eligibleCandidates = candidateOptions?.candidates ?? [];
   const excludedEntries = Object.entries(candidateOptions?.excludedByReason ?? {});
+  const tabGroups = [
+    { label: "日常处理", items: availableTabs.filter(item => item === "pending" || item === "mine") },
+    { label: "发起与记录", items: availableTabs.filter(item => item === "operations" || item === "audit") },
+    { label: "审批配置", items: availableTabs.filter(item => item === "templates") },
+  ].filter(group => group.items.length > 0);
 
   return (
     <TooltipProvider>
@@ -990,20 +1004,19 @@ export function ApprovalAuditView({
           <div className="panel-heading">
             <div>
               <h3>审批中心</h3>
-              <p>申请要改变什么、你能否处理、批准后还需做什么、结果去哪里确认，分别独立呈现。批准不等于执行，执行成功不等于业务生效或资金到账。</p>
+              <p>先核对申请事项，再办理当前允许的动作；审批、执行与业务结果分别确认。</p>
             </div>
             <Icons.ShieldCheck size={20} className="text-muted-foreground" />
           </div>
-          <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="审批工作区">
-            {availableTabs.map((item) => (
-              <Button
-                key={item} type="button" size="sm" role="tab" aria-selected={tab === item}
-                variant={tab === item ? "primary" : "secondary"}
-                onClick={() => { setTab(item); onTabChange?.(item); }}
-              >
+          <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3" role="tablist" aria-label="审批工作区">
+            {tabGroups.map(group => <div key={group.label} role="group" aria-label={group.label} className="flex flex-wrap items-center gap-2">
+              <span className="mr-1 text-xs text-muted-foreground">{group.label}</span>
+              {group.items.map(item => <Button key={item} type="button" size="sm" role="tab" aria-selected={tab === item}
+                variant={tab === item ? "primary" : group.label === "日常处理" ? "secondary" : "ghost"}
+                onClick={() => { setTab(item); onTabChange?.(item); }}>
                 {item === "pending" ? "待我处理" : item === "mine" ? "我的申请" : item === "operations" ? "审批业务" : item === "templates" ? "模板与规则" : "审计记录"}
-              </Button>
-            ))}
+              </Button>)}
+            </div>)}
           </div>
           <StatusMessage error={error} success={message} className="mt-4" />
           {recoveryPanel}
@@ -1038,6 +1051,7 @@ export function ApprovalAuditView({
                 detail={detail}
                 busy={loading}
                 blocked={recovery !== null && recovery.kind !== "resolved"}
+                onLocateRecovery={locateRecovery}
                 onOpenRequest={selectRequest}
                 onOpenPath={onOpenPath}
                 onDecide={decide}

@@ -441,7 +441,7 @@ test("expired requests keep their history and never read as an operable pending 
       assert.ok(button, `${label} 仍然列出以便解释为何不可办理`);
       assert.equal(button.disabled, true, `${label} 在过期申请上不可办理`);
     }
-    assert.ok(text(view).includes("当前没有你可办理的动作"), "一行汇总说明，不逐条堆噪音");
+    assert.ok(text(view).includes("当前不能批准、驳回或执行"), "一行汇总说明，不逐条堆噪音");
     assert.ok(text(view).includes("申请已过期，不再推进"), "原因码翻译成业务语言");
     // 事件记录用时间线且保持中性：过期不是「流程成功走完」。
     const timeline = view.rootNode.querySelector('[data-slot="timeline"]');
@@ -466,7 +466,7 @@ test("missing actions or an old DTO fails closed instead of inferring eligibilit
     await waitFor(() => text(view).includes("业务摘要未接入"));
     assert.ok(text(view).includes("受权摘要与领域结果暂未接入"), "缺摘要时明确说未接入而不是渲染空 JSON");
     assert.ok(text(view).includes("技术追溯"), "操作标识收进技术追溯");
-    assert.ok(text(view).includes("动作资格暂未接入"), "缺 actions 明确说明且不给办理入口");
+    assert.ok(text(view).includes("本次操作资格暂未确认"), "缺 actions 明确说明且不给办理入口");
     for (const label of ["批准", "驳回", "执行"]) {
       assert.equal(buttonByText(label), undefined, `缺 actions 时不得出现${label}按钮`);
     }
@@ -481,7 +481,9 @@ test("missing actions or an old DTO fails closed instead of inferring eligibilit
   try {
     await waitFor(() => text(second).includes("escalate"));
     assert.equal(buttonByText("escalate"), undefined, "未识别动作不渲染成可点按钮");
-    assert.ok(text(second).includes("本页未识别的动作"), "未识别动作被显式报告");
+    assert.ok(text(second).includes("本页暂不支持的动作"), "普通提示明确说明当前不能办理该项");
+    const trace = [...second.rootNode.querySelectorAll("details")].find(item => item.querySelector("summary")?.textContent === "载荷快照与模板标识");
+    assert.ok(trace && !trace.open && trace.textContent.includes("escalate"), "原动作标识保留在默认折叠的技术说明内");
   } finally {
     await second.cleanup();
   }
@@ -515,8 +517,9 @@ test("self-approval stays forbidden and a later eligibility change is re-explain
     refreshed.session = { ...refreshed.session, id: "session-2" };
     await view.render({ snapshot: refreshed });
     await waitFor(() => text(view).includes("你不在这张申请的候选审批人内"));
-    assert.ok(text(view).includes("当前没有你可办理的动作：批准（你不在这张申请的候选审批人内）"), "解释跟着服务端资格变");
-    assert.equal(text(view).includes("批准（不能审批自己发起的申请）"), false, "旧的动作解释不得残留");
+    const currentAction = view.rootNode.querySelector('[aria-label="当前办理"]');
+    assert.ok(currentAction.textContent.includes("批准、驳回：你不在这张申请的候选审批人内"), "合并后的解释跟着服务端资格变");
+    assert.equal(currentAction.textContent.includes("不能审批自己发起的申请"), false, "旧的动作解释不得残留");
     assert.equal(buttonByText("批准").disabled, true);
   } finally {
     await view.cleanup();
@@ -1532,5 +1535,126 @@ test("a rejected receipt whose readback keeps failing never borrows the success 
     assert.equal(writes.length, 1, "全程只有一次原始 POST，刷新只做 GET");
   } finally {
     await cleanup();
+  }
+});
+
+
+test("usability first package: self-blocker is visible before the flow and technical details start closed", async () => {
+  freshSession("usability-self");
+  const detail = baseDetail({
+    business: membershipBusiness(),
+    candidateAvailability: { total: 1, eligible: 0, blockingReasonCode: "SELF_REQUEST_NOT_ALLOWED" },
+    actions: [eligibility("approve", false, "SELF_REQUEST_NOT_ALLOWED"), eligibility("reject", false, "SELF_REQUEST_NOT_ALLOWED")],
+  });
+  const view = await renderDetail(detail);
+  try {
+    await waitFor(() => text(view).includes("发放会员礼遇权益"));
+    const current = view.rootNode.querySelector('[aria-label="当前办理"]');
+    assert.ok(current, "the original server blocker and action entry must be visible first");
+    assert.match(current.textContent, /不能审批自己发起的申请/);
+    const flow = view.rootNode.querySelector('[aria-label="审批流程"]');
+    const details = view.rootNode.querySelector("[data-approval-business-details]");
+    assert.ok(flow && details);
+    assert.equal(details.open, false, "snapshot hashes are available on demand");
+    assert.ok(current.compareDocumentPosition(flow) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.ok(flow.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.equal(buttonByText("批准", current).disabled, true);
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); }
+});
+
+test("usability first package: flow locates the original execute confirmation and never posts by itself", async () => {
+  freshSession("usability-flow");
+  const detail = baseDetail({
+    status: "APPROVED", business: membershipBusiness(),
+    decision: { decision: "APPROVED", approver: { username: "reviewer", name: "已决定人员" }, createdAt: "2026-10-12T10:00:00Z", reason: "核对通过" },
+    actions: [eligibility("execute", true, "OK")],
+  });
+  const view = await renderDetail(detail);
+  try {
+    await waitFor(() => text(view).includes("发放会员礼遇权益"));
+    await click(buttonByText("定位当前办理", view.rootNode));
+    const current = view.rootNode.querySelector('[aria-label="当前办理"]');
+    assert.equal(document.activeElement, current);
+    assert.equal(writes.length, 0);
+    await click(buttonByText("执行", current));
+    const confirm = buttonByText("确认执行");
+    assert.ok(confirm);
+    assert.equal(confirm.disabled, true, "the original eight-character confirmation still gates execution");
+    assert.equal(writes.length, 0);
+    await click(buttonByText("取消"));
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); }
+});
+
+test("usability first package: daily actions and configuration have separate entry groups", async () => {
+  freshSession("usability-navigation");
+  const view = await renderList({ requests: [] });
+  try {
+    const daily = view.rootNode.querySelector('[aria-label="日常处理"]');
+    const config = view.rootNode.querySelector('[aria-label="审批配置"]');
+    assert.ok(daily && config);
+    assert.ok(buttonByText("待我处理", daily));
+    assert.ok(buttonByText("我的申请", daily));
+    assert.equal(buttonByText("模板与规则", daily), undefined);
+    assert.ok(buttonByText("模板与规则", config));
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); }
+});
+
+test("usability first package: source-business next step navigates the existing object without generic execution", async () => {
+  freshSession("usability-source");
+  const business = settlementBusiness(), opened = [];
+  const detail = baseDetail({
+    status: "APPROVED", business,
+    operation: { ...baseDetail().operation, code: "order.settlement.adjust", executionMode: "SOURCE_BUSINESS" },
+    actions: [eligibility("execute", false, "EXECUTION_MODE_SOURCE_BUSINESS", { executionMode: "SOURCE_BUSINESS", nextStepCode: "SOURCE_BUSINESS_COMPLETION_REQUIRED" })],
+  });
+  const view = await renderDetail(detail, { view: { onOpenPath: (path, title) => opened.push({ path, title }) } });
+  try {
+    await waitFor(() => text(view).includes("人工调整订单结算"));
+    const current = view.rootNode.querySelector('[aria-label="当前办理"]');
+    assert.ok(current);
+    assert.equal(buttonByText("执行", current).disabled, true);
+    await click(buttonByText("前往来源业务", current));
+    const order = business.objectRefs.find(ref => ref.type === "rental_order");
+    assert.equal(opened.at(-1).path, "/orders/" + encodeURIComponent(order.id));
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); }
+});
+
+
+test("usability r1: primary refusal reasons stay visible beside an allowed navigation or repair entry", async () => {
+  for (const auxiliary of ["replace", "addCandidate"]) {
+    freshSession("usability-r1-" + auxiliary);
+    const opened = [], business = membershipBusiness();
+    const detail = baseDetail({
+      business, requester: baseDetail().candidates[0],
+      candidateAvailability: { total: 1, eligible: 0, blockingReasonCode: null },
+      actions: [
+        eligibility("approve", false, "SELF_REQUEST_NOT_ALLOWED"),
+        eligibility("reject", false, "SELF_REQUEST_NOT_ALLOWED"),
+        eligibility("execute", false, "STATUS_NOT_APPROVED", { nextStepCode: "APPROVAL_DECISION_REQUIRED" }),
+        eligibility(auxiliary, true, "OK"),
+      ],
+    });
+    const view = await renderDetail(detail, { view: { onOpenPath: (path, title) => opened.push({ path, title }) } });
+    try {
+      await waitFor(() => text(view).includes("发放会员礼遇权益"));
+      const current = view.rootNode.querySelector('[aria-label="当前办理"]');
+      assert.ok(current);
+      console.log("APPROVAL_R1_PRIMARY_REFUSALS " + JSON.stringify({ auxiliary, currentText: current.textContent, posts: writes.length }));
+      assert.match(current.textContent, /不能审批自己发起的申请/, auxiliary);
+      assert.match(current.textContent, /需要先有批准决定才能执行/, auxiliary);
+      assert.doesNotMatch(current.textContent, /服务端/, "ordinary guidance uses the actual human-readable reasons");
+      for (const label of ["批准", "驳回", "执行"]) assert.equal(buttonByText(label, current).disabled, true, label);
+      if (auxiliary === "replace") {
+        assert.equal(buttonByText("回到来源业务重新发起", current), undefined);
+        await click(buttonByText("返回来源业务", current));
+        assert.equal(opened.at(-1).path, "/membership-growth");
+        assert.equal(opened.at(-1).title, "重新发起（替代本申请）", "the existing navigation callback parameters remain unchanged");
+      }
+      assert.equal(writes.length, 0, "navigation and presentation do not issue a POST");
+    } finally { await view.cleanup(); }
   }
 });

@@ -25,7 +25,7 @@ export const TerminalNode = ({ data }: NodeProps<TerminalFlowNode>) => {
       type="button"
       aria-pressed={data.selected === true}
       aria-label={`${step.label}：${step.statusLabel}`}
-      onClick={() => data.onSelect?.(step.id)}
+      onClick={(event) => { event.stopPropagation(); data.onSelect?.(step.id); }}
       className={cn("nodrag nopan relative block h-auto w-52 whitespace-normal rounded-xl bg-card p-3 text-left text-card-foreground", stateRing(data))}
     >
       <Handle type="target" position={vertical ? Position.Top : Position.Left} className="!size-2 !border-none !bg-border" />

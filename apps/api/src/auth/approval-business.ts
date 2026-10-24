@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { ADMIN_PERMISSION, hasPermission, type EffectiveAdminAccess } from "./admin-authorization";
 import { isAllGamesScope, scopeAllowsGame, type AdminGameScope } from "./admin-scope";
-import { entitlementPricingSummary, isTotalDiscountContract } from "./membership-growth";
+import { entitlementPricingSummary, entitlementStateAt, isTotalDiscountContract } from "./membership-growth";
 
 export const APPROVAL_TEST_OPERATION = "approval.test.execute";
 export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
@@ -316,19 +316,25 @@ function settlementPendingConditions(row: SettlementRow): string[] {
   return pending;
 }
 
-function entitlementOutcome(row: EntitlementRow | undefined, startsInFuture: boolean): Record<string, unknown> {
+function entitlementOutcome(row: EntitlementRow | undefined, asOf: string): Record<string, unknown> {
   if (!row) return { resultAvailability: "UNRESOLVED", resultReasonCode: "ENTITLEMENT_RESULT_NOT_READ" };
+  const instant = (value: unknown): string | null => {
+    try { return value instanceof Date || typeof value === "string" ? iso(value) : null; }
+    catch { return null; }
+  };
+  const startsAt = instant(row.startsAt), endsAt = instant(row.endsAt);
+  let effectiveState = ["PENDING", "APPROVED_PENDING_EXECUTION", "REVOKED", "REPLACED"].includes(row.status) ? row.status : "UNKNOWN";
+  if (startsAt && endsAt && Date.parse(startsAt) < Date.parse(endsAt) && ["ACTIVE", "EXECUTED_PENDING_START", "EXPIRED"].includes(row.status)) {
+    // Stored ACTIVE is not proof that the declared interval is effective now.
+    const status = row.status === "EXPIRED" ? "EXPIRED" : "EXECUTED_PENDING_START";
+    try {
+      const state = entitlementStateAt({ status, startsAt, endsAt }, asOf);
+      effectiveState = state === "ACTIVE" ? "EFFECTIVE" : state === "EXECUTED_PENDING_START" ? "NOT_STARTED" : state;
+    } catch { /* Unreadable time facts stay unknown. */ }
+  }
   return {
     resultAvailability: "KNOWN",
-    entitlement: {
-      type: "membership_entitlement",
-      id: row.id,
-      status: row.status,
-      startsAt: iso(row.startsAt),
-      endsAt: iso(row.endsAt),
-      effectiveState: row.status === "ACTIVE" ? "EFFECTIVE" : row.status === "EXECUTED_PENDING_START" ? (startsInFuture ? "NOT_STARTED" : "STARTED") : row.status,
-      replacedById: row.replacedById,
-    },
+    entitlement: { type: "membership_entitlement", id: row.id, status: row.status, startsAt, endsAt, effectiveState, replacedById: row.replacedById },
   };
 }
 
@@ -339,6 +345,7 @@ function membershipView(
   entitlements: { byId: Map<string, EntitlementRow>; byRequestId: Map<string, EntitlementRow> },
   policies: { byId: Map<string, PolicyRow>; byRequestId: Map<string, PolicyRow> },
   executions: Map<string, { status: string; resultCode: string; resultDetail: string | null }>,
+  asOf: string,
 ): Record<string, unknown> {
   const payload = row.finalPayload ?? row.operationPayload;
   const base: Record<string, unknown> = {
@@ -435,27 +442,17 @@ function membershipView(
   } else {
     const created = entitlements.byRequestId.get(row.id);
     if (created) {
-      const startsAt = created.startsAt instanceof Date ? created.startsAt : new Date(created.startsAt);
-      Object.assign(result, entitlementOutcome(created, startsAt.getTime() > Date.now()));
+      Object.assign(result, entitlementOutcome(created, asOf));
       refs.push({ type: "membership_entitlement", id: created.id });
     } else {
       // 撤销只更新既有权益：结果来自本次执行记录指向的冻结目标，不改写原授予来源。
       const actedTargetId = textField(payload, "entitlementId");
       const acted = actedTargetId ? entitlements.byId.get(actedTargetId) : undefined;
       if (acted && receipt?.status === "SUCCEEDED") {
-        result.resultAvailability = "KNOWN";
-        result.entitlement = {
-          type: "membership_entitlement",
-          id: acted.id,
-          status: acted.status,
-          startsAt: iso(acted.startsAt),
-          endsAt: iso(acted.endsAt),
-          effectiveState: acted.status === "REVOKED" ? "REVOKED" : acted.status === "REPLACED" ? "REPLACED" : acted.status === "ACTIVE" ? "EFFECTIVE" : acted.status,
-          replacedById: acted.replacedById,
-        };
+        Object.assign(result, entitlementOutcome(acted, asOf));
         refs.push({ type: "membership_entitlement", id: acted.id });
       } else if (row.status === "EXECUTED") {
-        Object.assign(result, entitlementOutcome(undefined, false));
+        Object.assign(result, entitlementOutcome(undefined, asOf));
       }
     }
   }
@@ -579,6 +576,7 @@ export async function projectApprovalBusinesses(
   rows: readonly ApprovalRequestFacts[],
   viewer: ApprovalProjectionViewer,
 ): Promise<ApprovalProjection> {
+  const asOf = new Date().toISOString();
   const views = new Map<string, Record<string, unknown>>();
   const objectStates = new Map<string, ApprovalObjectState>();
   const membership = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "membership");
@@ -610,7 +608,7 @@ export async function projectApprovalBusinesses(
   }
   const games = await loadGames(client, gameIds);
 
-  for (const row of membership) views.set(row.id, membershipView(row, viewer, games, entitlements, policies, executions));
+  for (const row of membership) views.set(row.id, membershipView(row, viewer, games, entitlements, policies, executions, asOf));
   for (const row of settlements) views.set(row.id, settlementView(row, viewer, games, settlementRows));
   for (const row of unknown) {
     const registration = approvalRegistration(row.operationCode);

@@ -28,7 +28,7 @@ export function InfoHint({ label, children }: { label: string; children: ReactNo
 export function UnknownFact({ hint }: { hint: string }) {
   return (
     <Tooltip>
-      <TooltipTrigger render={<Badge variant="unknown">未接入</Badge>} />
+      <TooltipTrigger render={<Badge variant="unknown">未提供</Badge>} />
       <TooltipContent className="max-w-64">{hint}</TooltipContent>
     </Tooltip>
   );
@@ -62,7 +62,7 @@ export function Fact({ label, value, mono = false }: { label: string; value: Rea
     <div className="min-w-0">
       <FieldLabel>{label}</FieldLabel>
       {value === null || value === undefined || value === ""
-        ? <UnknownFact hint="服务端未提供该字段；不推断为 0、空或成功。" />
+        ? <UnknownFact hint="这项信息暂未提供；不按 0 或已完成显示。" />
         : <div className={`text-sm leading-relaxed break-words ${mono ? "font-mono text-xs" : ""}`}>{value}</div>}
     </div>
   );

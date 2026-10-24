@@ -4,7 +4,7 @@ import {
   Background, Controls, type Edge, type EdgeTypes, type Node, type NodeTypes,
   ReactFlow, ReactFlowProvider, useReactFlow,
 } from "@xyflow/react";
-import { useEffect, useMemo, type CSSProperties, type KeyboardEvent } from "react";
+import { useEffect, useMemo, type CSSProperties, type KeyboardEvent, type MouseEvent } from "react";
 import { AlignedStepEdge, useAutoLayout, withAlignedElbows } from "react-flow-auto-layout/react";
 import type { ApprovalPolicy } from "../../lib/approvals-ui/policy";
 import { cn } from "../../lib/utils";
@@ -80,6 +80,7 @@ function CanvasInner({ policy, direction = "LR", selectedId, onSelectStep }: Wor
         nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} fitView fitViewOptions={{ padding: 0.15, minZoom: 0.5, maxZoom: 1 }}
         minZoom={0.3} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false}
         nodesFocusable={false} edgesFocusable={false} elementsSelectable={false}
+        onNodeClick={(event: MouseEvent, node: Node) => { event.stopPropagation(); onSelectStep?.(node.id); }}
         onPaneClick={() => onSelectStep?.(null)} className="bg-background"
         ariaLabelConfig={{ "controls.zoomIn.ariaLabel": "放大流程图", "controls.zoomOut.ariaLabel": "缩小流程图", "controls.fitView.ariaLabel": "适应画布" }}
       >

@@ -1257,3 +1257,40 @@ test("F5 an unregistered request blocks every mutation entry", async () => {
   const registered = await call(view, BOSS.id, "GET", "/approvals/operations");
   assert.equal(registered.body.operations.every((item: { operationCode: string }) => item.operationCode !== "legacy.unknown.thing"), true, "unregistered codes stay outside the operation registry");
 });
+
+test("approval business effective state follows interval truth at one read time", async () => {
+  const at = new Date(), day = 86_400_000, instant = (offset: number) => new Date(at.getTime() + offset).toISOString();
+  const sample = entitlementAmendmentFixture();
+  type ResultCase = { id: string; status: string; startsAt: string | null; endsAt: string | null };
+  const read = async (cases: ResultCase[]) => {
+    const requests = cases.map((item) => {
+      const payload = { ...sample.row.operationPayload, startsAtUtc: item.startsAt ?? instant(-day), endsAtUtc: item.endsAt ?? instant(day) };
+      return requestFixture({ ...sample.row, id: item.id, requestedBy: BOSS.id, status: "EXECUTED", decidedBy: CANDIDATE.id, operationPayload: payload, operationPayloadHash: hashApprovalPayload(payload).hash, createdAt: instant(-3 * day), expiresAt: instant(-2 * day) });
+    });
+    const view = harness({ ...sample.fixture, requests,
+      requestCandidates: requests.map((row) => ({ requestId: row.id, adminUserId: CANDIDATE.id })),
+      entitlements: cases.map((item) => ({ ...item, id: "ent_" + item.id, userId: "member_1", gameId: "game_1", kind: "FRIEND", scopeKey: "game:delta", approvedPolicyId: "policy_1", approvalRequestId: item.id, replacedById: null })),
+      executions: requests.map((row) => ({ requestId: row.id, status: "SUCCEEDED", resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED", resultDetail: "ent_" + row.id })),
+    });
+    const result = await call(view, BOSS.id, "GET", "/approvals/requests/mine?limit=20");
+    assert.equal(result.status, 200, JSON.stringify(result));
+    assert.deepEqual([view.state.created, view.state.decisions, view.state.executions, view.state.audits], [0, 0, 0, 0]);
+    const byId = new Map<string, Record<string, any>>(result.body.requests.map((item: Record<string, any>) => [item.requestId, item]));
+    return cases.map((item) => byId.get(item.id)!.business.entitlement.effectiveState);
+  };
+  const states = await read([
+    { id: "expiry_active", status: "ACTIVE", startsAt: instant(-2 * day), endsAt: instant(-day) },
+    { id: "future_start", status: "EXECUTED_PENDING_START", startsAt: instant(day), endsAt: instant(2 * day) },
+    { id: "revoked", status: "REVOKED", startsAt: instant(-2 * day), endsAt: instant(-day) },
+    { id: "time_unknown", status: "ACTIVE", startsAt: null, endsAt: null },
+    { id: "active_now", status: "ACTIVE", startsAt: instant(-day), endsAt: instant(day) },
+  ]);
+  // Cross a start boundary between per-row clock reads; one projection must share its asOf.
+  const originalNow = Date.now; let reads = 0, batchStates: string[];
+  try {
+    Date.now = () => at.getTime() + reads++ * 2 * 3_600_000;
+    batchStates = await read([0, 1, 2].map((index) => ({ id: "same_asof_" + index, status: "EXECUTED_PENDING_START", startsAt: instant(3_600_000), endsAt: instant(day) })));
+  } finally { Date.now = originalNow; }
+  assert.deepEqual(states, ["EXPIRED", "NOT_STARTED", "REVOKED", "UNKNOWN", "EFFECTIVE"]);
+  assert.deepEqual(batchStates, ["NOT_STARTED", "NOT_STARTED", "NOT_STARTED"]);
+});
