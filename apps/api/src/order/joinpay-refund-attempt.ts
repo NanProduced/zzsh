@@ -10,6 +10,7 @@ import { assertFormalRefundProfile, describeRefundProfile, inspectRefundProfile,
 import { captureRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), fresh = (p: string) => `${p}_${randomUUID().replaceAll("-", "")}`;
+export const JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES = 10;
 const leaseExpired = Symbol("refund live lease changed");
 export class RefundAttemptCommitUnknown extends Error { readonly code = "REFUND_EXECUTION_UNKNOWN"; constructor(readonly intentId: string, readonly phase: "CLAIM" | "RESULT") { super("Recover the original refund before any new attempt"); } }
 async function confirmed<T>(pool: Pool, id: string, phase: "CLAIM" | "RESULT", callback: (c: PoolClient) => Promise<T>) {
@@ -50,11 +51,19 @@ export async function exchangeRefundRequest(request: RefundOutbound, dependencie
   return Object.freeze({ body: complete || kept ? Buffer.concat(chunks) : null, responseComplete: complete, receivedBytes: bytes, httpStatus: status, failure,
     evidenceLevel: suppliedFetch === undefined ? "PROVIDER_RESPONSE" : "SYNTHETIC_PROTOCOL" });
 }
-async function prepare(o: RefundExecution, intentId: string, owner: string): Promise<Prepared | null> {
+async function prepare(o: RefundExecution, intentId: string, owner: string, minimumIntervalSeconds?: number): Promise<Prepared | null> {
   return confirmed(o.pool, intentId, "CLAIM", async c => {
     const row = await lockFormalRefundContext(c, o.admission, intentId); if (["SUCCEEDED", "FAILED"].includes(row.state)) return null;
     const tables = (await c.query(`SELECT to_regclass('zzsh_order.joinpay_refund_attempt') IS NOT NULL AND to_regclass('zzsh_order.joinpay_refund_observation') IS NOT NULL AND to_regclass('zzsh_order.joinpay_refund_evidence') IS NOT NULL AS ready`)).rows[0];
     if (tables?.ready !== true) throw conflict("Native refund schema is not integrated");
+    // 与原请求行锁同事务重核，两个worker不能靠扫描时的旧快照绕过补查间隔/预算。
+    if (minimumIntervalSeconds !== undefined) {
+      const due = (await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')<$3::integer
+        AND COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS allowed
+        FROM zzsh_order.joinpay_refund_attempt WHERE intent_id=$1`, [intentId, minimumIntervalSeconds, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES])).rows[0]?.allowed;
+      if (typeof due !== "boolean") throw conflict("Refund recovery timing evidence unavailable");
+      if (!due) return null;
+    }
     const operation = row.state === "READY" && row.lease_version === "0" ? "SUBMIT" : "QUERY", binding = formalRefundBinding(row, o.admission);
     if (operation === "SUBMIT") { const review = (await c.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent WHERE payment_source='JOINPAY' AND merchant_identity_id=$1 AND original_payment_trx_no=$2 AND requires_review) AS blocked`, [row.merchant_identity_id, row.original_payment_trx_no])).rows[0]; if (review?.blocked !== false) return null; }
     const profile = o.profileFor(operation, Object.freeze({ ...binding })), p = describeRefundProfile(profile, operation); assertFormalRefundProfile(o.admission, profile, operation);
@@ -131,8 +140,9 @@ async function recordReceived(c: PoolClient, o: RefundSourceOptions, intentId: s
     const result = await persist(true); await c.query("RELEASE SAVEPOINT native_refund_result"); return result;
   }
 }
-export async function executeJoinpayRefund(o: RefundExecution, intentId: string, owner: string) {
-  if (!ID.test(intentId) || !ID.test(owner)) throw invalid(); readFormalRefundAdmission(o.admission); const a = await prepare(o, intentId, owner); if (!a) return null;
+export async function executeJoinpayRefund(o: RefundExecution, intentId: string, owner: string, minimumIntervalSeconds?: number) {
+  if (!ID.test(intentId) || !ID.test(owner) || minimumIntervalSeconds !== undefined && (!Number.isSafeInteger(minimumIntervalSeconds) || minimumIntervalSeconds < 30 || minimumIntervalSeconds > 86400)) throw invalid();
+  readFormalRefundAdmission(o.admission); const a = await prepare(o, intentId, owner, minimumIntervalSeconds); if (!a) return null;
   const exchange = await exchangeRefundRequest(a.request, { fetch: o.fetch });
   return confirmed(o.pool, intentId, "RESULT", c => recordReceived(c, o, intentId, { operation: a.operation, profile: a.profile, key: a.key, attemptId: a.attemptId, version: a.version, owner: a.owner, exchange }, a.attemptId));
 }

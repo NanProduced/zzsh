@@ -12,7 +12,7 @@ const unexpected = (): never => { throw Error("UNEXPECTED_IO"); };
 const flush = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
 type Row = { request_id: string; state: string; observation_id: string | null };
 function fixture(t: TestContext, rows: Row[] = []) {
-  const view = { reference: "component_admission", sha256: "1".repeat(64), canonical: JSON.stringify({ acceptedInitialAdmissions: [{ reference: "previous_admission", sha256: "2".repeat(64) }] }),
+  const view = { reference: "component_admission", sha256: "1".repeat(64), canonical: JSON.stringify({ acceptedProfiles: [{ operation: "SUBMIT" }, { operation: "QUERY" }, { operation: "NOTIFY" }], acceptedInitialAdmissions: [{ reference: "previous_admission", sha256: "2".repeat(64) }] }),
     appId: "component_app", database: "component_database", runtimeUser: "component_runtime", merchantIdentityId: "component_merchant", wireMerchantNo: "888000000000001" };
   t.mock.method(profiles, "readFormalCollectionAdmission", () => view);
   const trace: { sql: string; values?: readonly unknown[] }[] = []; let releases = 0, connects = 0, identity = true;
@@ -72,6 +72,25 @@ test("首次派发单独计数，只交已持久请求给原执行器，不创�
     return { kind: "OBSERVED", operation: "SUBMIT", observation: {} } as never;
   });
   assert.deepEqual(await recoverJoinpayCollectionBatch(f.options), { selected: 1, firstDispatched: 1, queried: 0, acceptanceRecovered: 0, skipped: 0 });
+});
+
+test("仅查单/通知准入过滤未首次派发原单，并以allowFirstDispatch=false调用原执行器", async t => {
+  const f = fixture(t, [{ request_id: "payreq_existing", state: "UNKNOWN", observation_id: null }]);
+  const canonical = JSON.parse(f.view.canonical); canonical.acceptedProfiles = [{ operation: "QUERY" }, { operation: "NOTIFY" }];
+  f.view.canonical = JSON.stringify(canonical);
+  t.mock.method(attempts, "executeJoinpayCollectionAttempt", async (...[_options, input]: Parameters<typeof attempts.executeJoinpayCollectionAttempt>) => {
+    assert.equal(input.allowFirstDispatch, false); return { kind: "OBSERVED", operation: "QUERY", observation: {} } as never;
+  });
+  assert.deepEqual(await recoverJoinpayCollectionBatch(f.options), { selected: 1, firstDispatched: 0, queried: 1, acceptanceRecovered: 0, skipped: 0 });
+  assert.equal(f.trace[1]!.values!.at(-1), false); assert.match(f.trace[1]!.sql, /\$8::boolean/);
+});
+
+test("查单型准入即使执行替身误回SUBMIT也拒绝，不把首次派发记成恢复通过", async t => {
+  const f = fixture(t, [{ request_id: "payreq_existing", state: "SUBMITTING", observation_id: null }]);
+  const canonical = JSON.parse(f.view.canonical); canonical.acceptedProfiles = [{ operation: "QUERY" }, { operation: "NOTIFY" }];
+  f.view.canonical = JSON.stringify(canonical);
+  t.mock.method(attempts, "executeJoinpayCollectionAttempt", async () => ({ kind: "OBSERVED", operation: "SUBMIT", observation: {} }) as never);
+  await assert.rejects(recoverJoinpayCollectionBatch(f.options), /COLLECTION_RECOVERY_SUBMIT_FORBIDDEN/);
 });
 
 test("缺付款观察或终态/坏枚举/超预算候选拒绝，不能从缺失依据补出成功", async t => {

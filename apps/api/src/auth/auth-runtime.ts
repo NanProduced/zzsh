@@ -68,6 +68,7 @@ import { initializeNativeWalletOrigin, type NativeOriginResource } from "../fina
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountJoinpayCollectionNotifications } from "../order/joinpay-collection-notification-routes";
+import { JoinpayFundsRecoveryLifecycle, type JoinpayFundsRecoverySettings } from "../finance/joinpay-funds-recovery";
 import type { FormalCollectionSourceOptions } from "../order/joinpay-collection-source";
 import { JoinpayCollectionRecoveryLifecycle, type JoinpayCollectionRecoveryOptions } from "../order/joinpay-collection-recovery";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
@@ -107,8 +108,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions;
     recovery?: Pick<JoinpayCollectionRecoveryOptions, "workerId" | "batchLimit" | "minimumIntervalSeconds"> };
   /** Server-only composition. Read scope remains available when new reservations are disabled. */
-  joinpayWithdrawal?: { routes: NativeWithdrawalOptions; execution?: Omit<PayoutExecution,'pool'>; notifications?: boolean };
-  joinpayRefund?: Omit<RefundExecution,'pool'>;
+  joinpayWithdrawal?: { routes: NativeWithdrawalOptions; execution?: Omit<PayoutExecution,'pool'>; notifications?: boolean; recovery?: JoinpayFundsRecoverySettings };
+  joinpayRefund?: Omit<RefundExecution,'pool'> & { recovery?: JoinpayFundsRecoverySettings };
   joinpayAccountRead?: JoinpayAccountReadAccess;
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
@@ -767,6 +768,17 @@ export async function mountAuthHandlers(
     }
     app.get(JoinpayCollectionRecoveryLifecycle).start({ ...recovery,
       execution: { ...execution, pool: options.pool, formal: execution.formal } });
+  }
+  const refundRecovery = options.joinpayRefund?.recovery, payoutRecovery = options.joinpayWithdrawal?.recovery;
+  if (refundRecovery !== undefined || payoutRecovery !== undefined) {
+    const refund = options.joinpayRefund, payout = options.joinpayWithdrawal;
+    if (payoutRecovery !== undefined && (!payout?.execution || payout.notifications !== true || payout.execution.scope !== payout.routes.scope)) {
+      throw new ConfigurationError("Payout recovery requires matching explicit executor and notification scope");
+    }
+    app.get(JoinpayFundsRecoveryLifecycle).start({
+      ...(refundRecovery !== undefined ? { refund: { ...refundRecovery, execution: { ...refund!, pool: options.pool } } } : {}),
+      ...(payoutRecovery !== undefined ? { payout: { ...payoutRecovery, execution: { ...payout!.execution!, pool: options.pool } } } : {}),
+    });
   }
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);

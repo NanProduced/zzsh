@@ -9,6 +9,7 @@ import {assertPayoutProfile,assertPayoutSubmitBinding,describePayoutProfile,elig
 import {reduceJoinpayPayoutObservation} from "./joinpay-payout-state";
 import {capturePayoutFact,type PayoutSourceOptions} from "./joinpay-payout-source";
 const sha=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex"),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/,fresh=(p:string)=>`${p}_${randomUUID().replaceAll("-","")}`,expiredLease=Symbol("native payout expired lease");
+export const JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES=10;
 export class PayoutCommitUnknown extends Error{readonly code="PAYOUT_EXECUTION_UNKNOWN";constructor(readonly intentId:string,readonly phase:"CLAIM"|"RESULT"){super("Recover the original payout; do not resubmit");}}
 async function confirmed<T>(pool:Pool,id:string,phase:"CLAIM"|"RESULT",callback:(c:PoolClient)=>Promise<T>){let done=false;try{return await withTransaction(pool,async c=>{const v=await callback(c);done=true;return v;});}catch(e){if(done)throw new PayoutCommitUnknown(id,phase);throw e;}}
 export type PayoutExecution=PayoutSourceOptions&NativeWithdrawalOptions&{pool:Pool;fetch?:typeof globalThis.fetch};
@@ -32,9 +33,14 @@ export async function exchangePayoutRequest(request:PayoutOutbound,dependencies:
  return Object.freeze({body:complete||kept?Buffer.concat(chunks):null,responseComplete:complete,receivedBytes:bytes,httpStatus:status,failure,evidenceLevel:supplied===undefined?"PROVIDER_RESPONSE":"SYNTHETIC_PROTOCOL"});
 }
 type Prepared={row:NativeWithdrawalRow;binding:PayoutBinding;profile:BoundPayoutProfile;operation:"SUBMIT"|"QUERY";attemptId:string;key:string;request:PayoutOutbound;owner:string;version:string};
-async function prepare(o:PayoutExecution,id:string,owner:string):Promise<Prepared|null>{return confirmed(o.pool,id,"CLAIM",async c=>{
+async function prepare(o:PayoutExecution,id:string,owner:string,minimumIntervalSeconds?:number):Promise<Prepared|null>{return confirmed(o.pool,id,"CLAIM",async c=>{
  const{row}=await lockNativeWithdrawal(c,o.scope,id);if(["SUCCEEDED","FAILED"].includes(row.state))return null;
  await assertNativePayoutExecutionReady(c);
+ // 原意图行锁内重核；到达本地补查预算只保留未知，不核销/释放或换号重发。
+ if(minimumIntervalSeconds!==undefined){const due=(await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')<$3::integer
+   AND COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS allowed
+   FROM zzsh_order.joinpay_payout_attempt WHERE intent_id=$1`,[id,minimumIntervalSeconds,JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES])).rows[0]?.allowed;
+   if(typeof due!=="boolean")throw conflict("Payout recovery timing evidence unavailable");if(!due)return null;}
  const operation=row.state==="RESERVED"&&row.lease_version==="0"?"SUBMIT":"QUERY",binding=nativePayoutBinding(row,o.scope),profile=o.profileFor(operation,Object.freeze({...binding})),p=describePayoutProfile(profile,operation);assertPayoutProfile(o.scope,profile,operation);
  if(operation==="SUBMIT"){if(row.requires_review)return null;await assertNativeWithdrawalExecution(c,row,{...o,initialProfile:profile});}
  const updated=(await c.query<NativeWithdrawalRow>(`UPDATE zzsh_order.joinpay_withdrawal_intent SET state=CASE WHEN state='RESERVED' THEN 'SUBMITTING' WHEN state='SUBMITTING' THEN 'UNKNOWN' ELSE state END,
@@ -85,7 +91,7 @@ async function recordReceived(c:PoolClient,o:PayoutSourceOptions,id:string,r:Rec
  catch(error){const e=error as{code?:string;constraint?:string;[expiredLease]?:boolean};if(r.operation==="NOTIFY"||!(e[expiredLease]===true||e.code==="23514"&&e.constraint==="joinpay_payout_live_lease"))throw error;
   await c.query("ROLLBACK TO SAVEPOINT native_payout_result");if((await c.query(liveSql,args)).rows[0]?.current!==false)throw error;const v=await persist(true);await c.query("RELEASE SAVEPOINT native_payout_result");return v;}
 }
-export async function executeJoinpayPayout(o:PayoutExecution,intentId:string,owner:string){if(!ID.test(intentId)||!ID.test(owner))throw invalid();readPayoutScope(o.scope);const fetch=o.fetch,a=await prepare(o,intentId,owner);if(!a)return null;const exchange=await exchangePayoutRequest(a.request,{fetch});return confirmed(o.pool,intentId,"RESULT",c=>recordReceived(c,o,intentId,{operation:a.operation,profile:a.profile,key:a.key,attemptId:a.attemptId,version:a.version,owner:a.owner,exchange},a.attemptId));}
+export async function executeJoinpayPayout(o:PayoutExecution,intentId:string,owner:string,minimumIntervalSeconds?:number){if(!ID.test(intentId)||!ID.test(owner)||minimumIntervalSeconds!==undefined&&(!Number.isSafeInteger(minimumIntervalSeconds)||minimumIntervalSeconds<30||minimumIntervalSeconds>86400))throw invalid();readPayoutScope(o.scope);const fetch=o.fetch,a=await prepare(o,intentId,owner,minimumIntervalSeconds);if(!a)return null;const exchange=await exchangePayoutRequest(a.request,{fetch});return confirmed(o.pool,intentId,"RESULT",c=>recordReceived(c,o,intentId,{operation:a.operation,profile:a.profile,key:a.key,attemptId:a.attemptId,version:a.version,owner:a.owner,exchange},a.attemptId));}
 /** 仅POST原始字节；定位已知对象由薄adapter先做，不重建JSON也不盲试key。 */
 export async function receiveJoinpayPayoutNotification(o:PayoutExecution,intentId:string,raw:Uint8Array,requestId:string){if(!ID.test(intentId)||!ID.test(requestId)||!(raw instanceof Uint8Array)||!raw.length||raw.length>65536)throw invalid();const bytes=new Uint8Array(raw);
  return confirmed(o.pool,intentId,"RESULT",async c=>{const{row}=await lockNativeWithdrawal(c,o.scope,intentId);await assertNativePayoutExecutionReady(c);const binding=nativePayoutBinding(row,o.scope),profile=o.profileFor("NOTIFY",Object.freeze({...binding})),p=describePayoutProfile(profile,"NOTIFY");assertPayoutProfile(o.scope,profile,"NOTIFY");let key:string|null=null;if(preflightPayoutProfile(profile,"NOTIFY",bytes,binding).ok){try{key=o.keyFor(p.keyVersionRef);}catch{throw new PayoutProfileError("PAYOUT_KEY_UNAVAILABLE");}}

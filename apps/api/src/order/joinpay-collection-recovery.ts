@@ -20,8 +20,10 @@ function checked(options: JoinpayCollectionRecoveryOptions) {
     throw new Error("COLLECTION_RECOVERY_OPTIONS_INVALID");
   }
   const admission = readFormalCollectionAdmission(options.execution?.formal?.admission);
-  const previous = JSON.parse(admission.canonical).acceptedInitialAdmissions as { reference: string; sha256: string }[];
-  return { ...options, execution: { ...options.execution, formal: { ...options.execution.formal } },
+  const canonical = JSON.parse(admission.canonical);
+  const previous = canonical.acceptedInitialAdmissions as { reference: string; sha256: string }[];
+  const allowFirstDispatch = Array.isArray(canonical.acceptedProfiles) && canonical.acceptedProfiles.some((p: { operation?: unknown }) => p?.operation === "SUBMIT");
+  return { ...options, allowFirstDispatch, execution: { ...options.execution, formal: { ...options.execution.formal } },
     admission, accepted: [{ reference: admission.reference, sha256: admission.sha256 }, ...previous] };
 }
 
@@ -48,7 +50,7 @@ export async function recoverJoinpayCollectionBatch(input: JoinpayCollectionReco
         WHERE allowed.reference=b.formal_admission_ref AND allowed.sha256=b.formal_admission_sha256)
       AND r.state=ANY($4::text[])
       AND (r.state='CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE' AND paid.observation_id IS NOT NULL
-        OR (r.lease_version>0 OR r.state='SUBMITTING' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order payable
+        OR (r.lease_version>0 OR $8::boolean AND r.state='SUBMITTING' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order payable
           WHERE payable.id=r.order_id AND payable.status='PENDING_PAYMENT' AND payable.hold_until>clock_timestamp()))
         AND r.state<>'CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE'
         AND (SELECT count(*) FROM zzsh_order.joinpay_collection_attempt counted WHERE counted.request_id=r.id AND counted.operation='QUERY')<$7::integer
@@ -57,7 +59,7 @@ export async function recoverJoinpayCollectionBatch(input: JoinpayCollectionReco
         AND NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_collection_attempt recent WHERE recent.request_id=r.id
           AND recent.created_at>clock_timestamp()-make_interval(secs=>$5::integer)))
     ORDER BY r.updated_at,r.id LIMIT $6`, [options.admission.merchantIdentityId, options.admission.wireMerchantNo,
-    JSON.stringify(options.accepted), RECOVERABLE, options.minimumIntervalSeconds, options.batchLimit, JOINPAY_COLLECTION_MAX_AUTOMATIC_QUERIES])).rows;
+    JSON.stringify(options.accepted), RECOVERABLE, options.minimumIntervalSeconds, options.batchLimit, JOINPAY_COLLECTION_MAX_AUTOMATIC_QUERIES, options.allowFirstDispatch])).rows;
   } finally { client.release(); }
   if (rows.length > options.batchLimit || rows.some(row => !ID.test(row.request_id) || !RECOVERABLE.includes(row.state)
     || row.state === "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE" && (!row.observation_id || !ID.test(row.observation_id)))) {
@@ -72,10 +74,10 @@ export async function recoverJoinpayCollectionBatch(input: JoinpayCollectionReco
       result.acceptanceRecovered++;
     } else {
       const observed = await executeJoinpayCollectionAttempt(options.execution, { requestId: row.request_id, workerId: options.workerId,
-        recoveryMinimumIntervalSeconds: options.minimumIntervalSeconds, allowFirstDispatch: true });
+        recoveryMinimumIntervalSeconds: options.minimumIntervalSeconds, allowFirstDispatch: options.allowFirstDispatch });
       if (observed.kind === "OBSERVED") {
         if (observed.operation === "QUERY") result.queried++;
-        else if (row.state === "SUBMITTING") result.firstDispatched++;
+        else if (options.allowFirstDispatch && row.state === "SUBMITTING") result.firstDispatched++;
         else throw new Error("COLLECTION_RECOVERY_SUBMIT_FORBIDDEN");
       } else result.skipped++;
     }

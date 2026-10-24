@@ -78,6 +78,20 @@ API 请求日志只记录方法、路由模板、状态、requestId和耗时，�
 
 Admin 免账号 mock 预览已移除。真实初始化使用独立测试账号，不重置他人正在使用的账号。tmp/ 保存本地过程资料，.impeccable/ 保存工具状态，二者不进入 Git。
 
+## 正式收款与恢复装配
+
+`JOINPAY_COLLECTION_ENABLED` 缺省或 `false` 时不额外读取支付配置/密钥，不配置支付恢复任务；非法布尔拒绝。启用沿原 `APP_PROFILE=provider-test`、`PROVIDER_MODE=real`、认证和准确 runtime 数据库身份限制；合法配置不代表渠道或真实资金授权。
+
+启动 JSON 经现有 `readSecret` 从 `JOINPAY_COLLECTION_CONFIG` 或 `JOINPAY_COLLECTION_CONFIG_FILE` 取得，文件引用相对工作目录且限于 `.secrets`，不新增 `.env` 加载行为。完整结构见 `apps/api/src/order/joinpay-collection-runtime.ts` 的 `JoinpayCollectionRuntimeDocument`：显式准入、最多32份profile、当前SUBMIT/QUERY、原key到单一通知profile映射、key变量引用、商品名、QR精确host名单、`newRequestsEnabled` 和可选 `recovery`。密钥不写入JSON/profile或交接件。
+
+`newRequestsEnabled=true` 要求完整SUBMIT/QUERY/NOTIFY准入、SUBMIT selector、商品名和非空QR精确host名单。为false时只关闭新创建，SUBMIT selector和商品名可省略，QUERY/NOTIFY仍完整校验，QR名单可空。保留完整profile仅切开关时准入canonical/hash不变，已持久化旧请求仍可依原授权首次派发；它不表示撤销全部旧单执行。
+
+确实退役SUBMIT、只保留QUERY/NOTIFY时，旧单须在 `acceptedInitialAdmissions` 显式保留原准入引用/摘要；通知映射可引用退役的初始key版本，但不读取旧下单钥，仍只选一份明确通知profile。后台从受信准入操作集合确定首派资格，QUERY/NOTIFY型在扫描和原执行器两处禁止首次SUBMIT，继续查已尝试原号及接纳已验观察。历史证据按原profileId/摘要/keyVersionRef三元复验，不轮试或猜钥；历史QUERY/NOTIFY自身三元所需的profile和旧钥仍须保留，不能一并当作退役下单钥删除。key引用限 `JOINPAY_COLLECTION_KEY_` 前缀，实际值或 `_FILE` 惰性读取，按版本在进程内缓存；A2不能进入正式收款装配。普通GET只读本地，不读取支付钥或调用商户。
+
+collection `recovery` 显式配置workerId、每批1–10、最小间隔30–86400秒；缺省不启动。退款/提现恢复分别由受信服务端 `AuthRuntimeOptions.joinpayRefund.recovery`、`joinpayWithdrawal.recovery` 配置，普通main不会从环境自动生成这两类资金装配。提现还须真实executor、通知和routes使用同一scope；不能用客户端参数或单独flag替代。未配置保持关闭，不创建或批准新意图。
+
+恢复任务在Nest启动后才派发，先释放扫描连接，再顺序调用原单执行器；自动QUERY在原行锁内按PG时间重核间隔，持久化计数最多10次，不靠重启清零。关闭先停止下一轮、排空在途，再结束原池；不承诺固定排空时长。提交未知保留原单/阶段并停止对应域，预算耗尽不标失败、不换号重发、不释放或核销。实际Schema/窄权、资源与商户资格、官方协议/KAT及资金链须独立验收，源码/合成测试不是到账证明。
+
 ## 供给发布验证
 
 发布模型需前向应用0018–0021；不修改0015–0017或M1/M2迁移。先在隔离目标检查旧接受记录/媒体归属是否满足新增外键，冲突时停止核对，不造版本或清共享表绕过。现有保留API未自动迁移或重启，不能据新的前端菜单认为旧API已支持发布。
