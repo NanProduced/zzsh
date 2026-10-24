@@ -139,6 +139,60 @@ function mediaCloseoutFixture(t: TestContext, selected = false) {
   return { ...f, asset, mediaControls: controls, token, formalReview, primeQuotedDraft };
 }
 
+test("takeover submits an empty submitted_at through the real review, while wrong bindings still reject", async t => {
+  for (const mode of ["valid", "wrong-media", "wrong-release"] as const) await t.test(mode, async t => {
+    const publishing: typeof import("../src/supply/publishing") = require("../src/supply/publishing");
+    const realReview = publishing.reviewListing, realRelease = publishing.assertCurrentRelease;
+    const f = mediaCloseoutFixture(t);
+    f.intake.media[0]!.accessClass = "PRIVATE_REVIEW";
+    const input = { batchId: "fixture_submitted_time", intake: f.intake };
+    const prepared = await prepareLegacyTradeTakeover(f.client, f.actor, input, f.gate);
+    await f.formalReview();
+    const final = { ...input, intake: structuredClone(input.intake), preparedDraft: (prepared.body as any).preparedDraft };
+    final.intake.media[0]!.accessClass = "PUBLIC_DISPLAY";
+    Object.assign(f.version, { title: f.getStored().title, submitted_at: null });
+    publishing.reviewListing = realReview;
+    publishing.assertCurrentRelease = realRelease;
+    let acceptance: unknown[] | undefined, decision: unknown[] | undefined, publications = 0;
+    const query = f.client.query.bind(f.client);
+    f.client.query = (async (sql: string, values: unknown[] = []) => {
+      const result = (rows: unknown[] = [], rowCount = rows.length) => { f.queries.push({ sql, values }); return { rows, rowCount }; };
+      if (sql.includes("SELECT * FROM zzsh_supply.listing_version WHERE id=$1")) return result(values[0] === f.version.id && values[1] === f.account.id ? [f.version] : []);
+      if (sql.includes("SELECT current_release_id,catalog_revision")) return result([{ current_release_id: mode === "wrong-release" ? "another_release" : f.version.rule_release_id, catalog_revision: "1" }]);
+      if (sql.includes("INSERT INTO zzsh_supply.rule_acceptance")) { acceptance = [values[2], values[3], values[4], values[5], values[1]]; return result([], 1); }
+      if (sql.includes("SELECT 1 FROM zzsh_supply.rule_acceptance")) return result(canonicalize(values) === canonicalize(acceptance) ? [{}] : []);
+      if (sql.startsWith("UPDATE zzsh_supply.listing_version SET review_state='SUBMITTED'")) {
+        const submittedAt = /submitted_at\s*=\s*clock_timestamp\(\)/.test(sql) ? new Date("2026-10-24T00:00:00Z") : f.version.submitted_at;
+        assert(f.version.payload && f.version.rule_release_id && submittedAt instanceof Date && !Number.isNaN(submittedAt.getTime()), "listing_version SUBMITTED check requires submitted_at");
+        Object.assign(f.version, { review_state: "SUBMITTED", submitted_at: submittedAt }); return result([], 1);
+      }
+      if (sql.includes("SELECT u.suspended")) return result([{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }]);
+      if (sql.includes("SELECT id,code,name,enabled,current_release_id")) return result([{ enabled: true, current_release_id: f.version.rule_release_id, catalog_revision: "1" }]);
+      if (sql.includes("game_service_operation")) return result([{ id: "fixture_service", gameCode: "delta", gameEnabled: true, enabled: true }]);
+      if (sql.includes("current-trade-resources")) return result(catalog().filter(item => (values[1] as string[]).includes(item.id)).map(item => ({ ...item, enabled: true })));
+      if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) return result([{ id: f.asset.id, purpose: f.asset.purpose, ownership_kind: "USER_SUPPLY", review_state: f.asset.reviewState, technical_state: "READY", public_storage_key: f.asset.publicStorageKey, access_class: f.asset.accessClass }]);
+      if (sql.startsWith("SELECT id,display_no FROM zzsh_supply.rental_account")) return result([{ id: f.account.id, display_no: "AC0000000001" }]);
+      if (sql.includes("INSERT INTO zzsh_supply.review_decision")) { decision = values; return result([], 1); }
+      if (sql.startsWith("UPDATE zzsh_supply.listing_version SET review_state='APPROVED'")) { assert(f.version.submitted_at instanceof Date); f.version.review_state = "APPROVED"; return result([], 1); }
+      if (sql.includes("INSERT INTO zzsh_supply.listing_publication")) {
+        assert.deepEqual(decision?.slice(1, 5), [f.version.id, f.version.rule_release_id, f.version.content_hash, "APPROVE"]);
+        publications++; return result([{ id: "fixture_publication" }]);
+      }
+      if (sql.startsWith("UPDATE zzsh_supply.rental_account SET revision")) return result([{ revision: String(Number(f.account.revision) + 1) }]);
+      return query(sql, values);
+    }) as any;
+    if (mode === "wrong-media") f.asset.contentHash = "c".repeat(64);
+    if (mode === "valid") {
+      const result = await takeoverLegacyTrade(f.client, f.actor, final, f.gate);
+      assert.equal((result.body as any).state, "PUBLISHED"); assert.equal(f.version.review_state, "APPROVED");
+      assert(f.version.submitted_at instanceof Date); assert.equal(publications, 1);
+    } else {
+      await assert.rejects(() => takeoverLegacyTrade(f.client, f.actor, final, f.gate));
+      assert.equal(f.version.review_state, "DRAFT"); assert.equal(f.version.submitted_at, null); assert.equal(publications, 0);
+    }
+  });
+});
+
 test("old reviewed tuple cannot authorize a takeover that clears and rebuilds the quote; forged prepared token is rejected", async t => {
   const f = mediaCloseoutFixture(t); await f.primeQuotedDraft(); await f.formalReview();
   const old = f.token(), writes = f.calls.length;

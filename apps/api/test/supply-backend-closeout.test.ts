@@ -7,6 +7,31 @@ import { sealVersion, updateFullPayoutTermsDraft } from "../src/supply/rules";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "../src/supply/supply-operation-results";
 import { fingerprintRequest } from "../src/supply/supply-util";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
+import { handleSupplyUserRoute } from "../src/supply/supply-routes";
+
+test("user media upload intent audit records the validated display or evidence purpose", async t => {
+  for (const purpose of ["ACCOUNT_DISPLAY", "ACCOUNT_EVIDENCE", undefined, "INVALID_PURPOSE", "OTHER_ACCOUNT"] as const) await t.test(purpose ?? "legacy default", async t => {
+    const identity: typeof import("../src/auth/user-identity") = require("../src/auth/user-identity");
+    t.mock.method(identity, "readUserContext", async () => ({ userId: "fixture_owner", sessionId: "fixture_session" }));
+    t.mock.method(identity, "assertUserContextInTransaction", async () => {});
+    const intents: string[] = [], auditPurposes: string[] = [];
+    const client = { release() {}, query: async (sql: string, values: unknown[] = []) => {
+      if (sql.startsWith("SELECT 1 FROM zzsh_supply.rental_account")) return { rows: purpose === "OTHER_ACCOUNT" ? [] : [{}], rowCount: purpose === "OTHER_ACCOUNT" ? 0 : 1 };
+      if (sql.includes('"owner_user_id" AS "ownerUserId"')) return { rows: [{ ownerUserId: "fixture_owner", gameId: "fixture_game" }], rowCount: 1 };
+      if (sql.includes('INSERT INTO "zzsh_supply"."media_upload_intent"')) intents.push(values[4] as string);
+      if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) auditPurposes.push(JSON.parse(values[10] as string).after.purpose);
+      return { rows: [], rowCount: 0 };
+    } };
+    const response = { statusCode: 0, headersSent: false, status(code: number) { this.statusCode = code; return this; }, setHeader() { return this; }, json() { this.headersSent = true; return this; } };
+    await handleSupplyUserRoute({ method: "POST", originalUrl: "/api/v1/supply/media/upload-intents", headers: { origin: "http://user.invalid", "idempotency-key": "idem_11111111111111111111111111111111", "x-request-id": "req_fixture_media_purpose" }, body: { accountId: "fixture_account", gameId: "fixture_game", mime: "image/png", size: 128, ...(purpose === undefined ? {} : { purpose }) } } as never, response as never,
+      { pool: { connect: async () => client }, apiOrigin: "http://api.invalid", userOrigin: "http://user.invalid", adminOrigin: "http://admin.invalid", mediaStorage: { available: true } } as never);
+    if (purpose === "INVALID_PURPOSE" || purpose === "OTHER_ACCOUNT") {
+      assert.equal(response.statusCode, purpose === "OTHER_ACCOUNT" ? 404 : 400); assert.deepEqual(intents, []); assert.deepEqual(auditPurposes, []);
+    } else {
+      assert.equal(response.statusCode, 200); assert.deepEqual(intents, [purpose ?? "ACCOUNT_EVIDENCE"]); assert.deepEqual(auditPurposes, intents);
+    }
+  });
+});
 
 const fields=fullPayoutDraftFields({policyRef:"g0-full-payout",policyVersion:"1",disclosureVersion:"g0-disclosure",title:"Offline terms",body:"Offline explicit full-payout disclosure."});
 const row={id:"payout-1",game_id:"game-1",policy_ref:fields.policyRef,policy_version:fields.policyVersion,disclosure_version:fields.disclosureVersion,title:fields.title,body:fields.body,digest:fields.digest,status:"SEALED",revision:"2"};

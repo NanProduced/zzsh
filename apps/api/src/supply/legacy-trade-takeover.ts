@@ -164,7 +164,7 @@ async function publishTakenOverDraft(client: PoolClient, a: PublishingAccount, a
     if (!accepted) throw conflict("TERMS_ACCEPTANCE_REQUIRED");
   }
   // 0052 requires a matching acceptance before SUBMITTED, then an exact review decision.
-  await client.query(`UPDATE zzsh_supply.listing_version SET review_state='SUBMITTED',revision=revision+1 WHERE id=$1 AND review_state='DRAFT'`, [v.id]);
+  await client.query(`UPDATE zzsh_supply.listing_version SET review_state='SUBMITTED',submitted_at=clock_timestamp(),revision=revision+1 WHERE id=$1 AND review_state='DRAFT'`, [v.id]);
   await reviewListing(client, a, actor.id, { expectedRevision: a.revision, versionId: v.id, contentHash: v.content_hash, releaseId: v.rule_release_id, decision: "APPROVE", reason: "LEGACY_APPROVED_TAKEOVER:" + batchId }, gate, grading);
   return { accountId: a.id, versionId: v.id, releaseId: v.rule_release_id, contentHash: v.content_hash, state: "PUBLISHED" as const };
 }

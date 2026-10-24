@@ -611,7 +611,8 @@ export async function handleSupplyUserRoute(
           if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND game_id = $2 AND owner_user_id = $3`, [accountId, gameId, context.userId])).rowCount) throw notFound();
         },
         async (client) => {
-          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose: String(body.purpose ?? "ACCOUNT_EVIDENCE"), mime, size });
+          const purpose = String(body.purpose ?? "ACCOUNT_EVIDENCE");
+          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose, mime, size });
           await recordAudit(client, {
             actorType: "user",
             actorId: context.userId,
@@ -622,7 +623,7 @@ export async function handleSupplyUserRoute(
             outcome: "SUCCESS",
             requestId,
             reason: "supply.media.upload_intent.create",
-            details: { gameId, before: null, after: { intentId: intent.intentId, accountId, purpose: "ACCOUNT_EVIDENCE" }, result: "CREATED" },
+            details: { gameId, before: null, after: { intentId: intent.intentId, accountId, purpose }, result: "CREATED" },
           });
           return { status: 200, body: { intentId: intent.intentId, uploadToken: intent.uploadToken, expiresAt: intent.expiresAt } };
         },
