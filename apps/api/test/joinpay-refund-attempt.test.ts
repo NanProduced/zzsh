@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { JOINPAY_REFUND_SIGNATURE_ORDER } from "../src/order/joinpay-refund-protocol";
 import { bindRefundProfile, createFormalRefundAdmission, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readRefundOutbound,
-  refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, type RefundBinding, type RefundOperation, type RefundServerProfile } from "../src/order/joinpay-refund-profile";
+  refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, readRefundProfileEvidence, type RefundBinding, type RefundOperation, type RefundServerProfile } from "../src/order/joinpay-refund-profile";
 import { exchangeRefundRequest, executeJoinpayRefund, RefundAttemptCommitUnknown } from "../src/order/joinpay-refund-attempt";
 import { handleJoinpayRefundNotification, JOINPAY_REFUND_NOTIFICATION_PATH } from "../src/order/joinpay-refund-notification-routes";
 const KEY = "SYNTHETIC_REFUND_KEY", md5 = (s: string) => createHash("md5").update(s).digest("hex"), sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -17,7 +17,7 @@ function model(operation: RefundOperation = "SUBMIT", purpose: RefundServerProfi
   const requestValues: Record<string, string> = operation === "SUBMIT" ? { p0_Version: "2.3", p1_MerchantNo: base.merchantNo, p2_OrderNo: base.originalPaymentOrderNo, p3_RefundOrderNo: base.refundOrderNo, p4_RefundAmount: "1.00", p6_NotifyUrl: "https://merchant.example.test/refund" }
     : { p0_Version: "2.3", p1_MerchantNo: base.merchantNo, p2_RefundOrderNo: base.refundOrderNo };
   const requestOrder = operation === "SUBMIT" ? JOINPAY_REFUND_SIGNATURE_ORDER.refundRequest : JOINPAY_REFUND_SIGNATURE_ORDER.queryRefundRequest;
-  const input: RefundServerProfile = { operation, purpose, profileId: "SYNTHETIC_REFUND_CONFIGURATION_MODEL_" + operation, merchantIdentityId: "synthetic_refund_merchant", merchantNo: base.merchantNo,
+  const input: Omit<RefundServerProfile,"knownAnswer"> & { knownAnswer: Exclude<RefundServerProfile["knownAnswer"],"NOT_OBTAINED"> } = { operation, purpose, profileId: "SYNTHETIC_REFUND_CONFIGURATION_MODEL_" + operation, merchantIdentityId: "synthetic_refund_merchant", merchantNo: base.merchantNo,
     database: "synthetic_refund_test", runtimeUser: "synthetic_refund_r", keyVersionRef: "synthetic_refund_key_v1", notifyUrl: "https://merchant.example.test/refund",
     reviewRef: "SYNTHETIC_BACKEND_CONFIGURATION_MODEL", reviewSha256: "a".repeat(64), permission: "REVIEWED_NATIVE_RENTAL_REFUND",
     rules: { reference: "SYNTHETIC_RULES_NOT_OFFICIAL", sha256: "b".repeat(64), signing: "MD5_UTF8_RAW_VALUES", rawQueryDecode: "ONCE", numberTokens: "RAW_JSON_TOKEN", fieldPolicy: "STRICT_TABLE_EMPTY_OPTIONAL", refundIdentifier: "EXACT_TEXT", notify102: "REVIEW", utcOffsetMinutes: 480, refundWay: "ORIGINAL_REQUIRED", failureNoExecution: { accepted: false, codes: [], reference: null, sha256: null } },
@@ -36,6 +36,21 @@ test("三操作独立KAT计算模型；副本/A2/缺证据/模型冒正式准入
     assert.throws(() => bindRefundProfile({ ...m.input, knownAnswer: { ...m.input.knownAnswer, rawSha256: "0".repeat(64) } }));
     assert.throws(() => produceRefundRequest(m.profile, "NOTIFY" as "QUERY", m.binding, KEY), /OUTBOUND_OPERATION/);
   }
+});
+
+test("样例显式未取得可绑定，canonical如实记录且不保存演示钥或响应", () => {
+  for(const operation of ["SUBMIT","QUERY","NOTIFY"] as const){const m=model(operation),profile=bindRefundProfile({...m.input,knownAnswer:"NOT_OBTAINED"} as any);
+    const evidence=readRefundProfileEvidence(profile);assert.equal(JSON.parse(evidence).knownAnswer,"NOT_OBTAINED");assert.equal(evidence.includes(KEY),false);assert.equal(evidence.includes("vectorKey"),false);
+    assert.throws(()=>createFormalRefundAdmission({reference:"SYNTHETIC_NOT_AUTHORITY",reviewSha256:"a".repeat(64),profiles:[profile]}));
+  }
+});
+
+test("没有样例不放松真实响应校验、商户边界或坏样例拒绝", () => {
+  const m=model("QUERY"),profile=bindRefundProfile({...m.input,knownAnswer:"NOT_OBTAINED"} as any),binding={...m.binding,initialProfileSha256:describeRefundProfile(profile).profileSha256};
+  const bad=JSON.stringify({...JSON.parse(m.responseBody),hmac:"0".repeat(32)});assert.notEqual(inspectRefundProfile(profile,"QUERY",bad,binding,KEY).signature,"MATCH");
+  assert.throws(()=>bindRefundProfile({...m.input,knownAnswer:"NOT_OBTAINED",merchantNo:"888100000002340"} as any));
+  assert.throws(()=>bindRefundProfile({...m.input,knownAnswer:undefined} as any));
+  assert.throws(()=>bindRefundProfile({...m.input,knownAnswer:{...m.input.knownAnswer,rawSha256:"0".repeat(64)}}));
 });
 test("原始请求固定2.3/原付款与退款号/精确分；QUERY轮换不改原初绑定", () => {
   const m = model(), request = produceRefundRequest(m.profile, "SUBMIT", m.binding, KEY), wire = readRefundOutbound(request), values = new URLSearchParams(wire.body);

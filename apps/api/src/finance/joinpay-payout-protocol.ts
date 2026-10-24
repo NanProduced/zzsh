@@ -19,7 +19,7 @@ const orderNo = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0
 const merchant = (v: unknown): v is string => typeof v === "string" && /^[0-9]{1,32}$/.test(v);
 const cents = (v: unknown): v is string => typeof v === "string" && /^[1-9][0-9]{0,15}$/.test(v) && BigInt(v) <= 9999999999999999n;
 export type PayoutWireRules = Readonly<{
-  dataEncoding: "OBJECT" | "JSON_STRING"; statusCodeToken: "STRING" | "NUMBER"; statusToken: "STRING" | "NUMBER";
+  dataEncoding: "OBJECT" | "JSON_STRING"; statusCodeToken: "STRING" | "NUMBER"; statusToken: "STRING" | "NUMBER" | "NUMBER_EXCEPT_QUERY_214_STRING";
   amountToken: "STRING" | "NUMBER"; feeToken: "STRING" | "NUMBER"; accountTypeToken: "STRING" | "NUMBER";
   optionalSigning: "ABSENT_EMPTY_NULL_EQUIVALENT"; numericSigning: "RAW_JSON_TOKEN";
   unknownFields: "REJECT"; notFoundShape: "IDENTITY_ONLY_214"; targetBinding: "EXACT_RECORDED_OPAQUE_VALUE";
@@ -34,7 +34,8 @@ function snapshot<T extends object>(value: T): T {
 }
 function rules(r: PayoutWireRules): PayoutWireRules {
   r = snapshot(r);
-  if (!r || !["OBJECT", "JSON_STRING"].includes(r.dataEncoding) || ![r.statusCodeToken, r.statusToken, r.amountToken, r.feeToken, r.accountTypeToken].every(v => v === "STRING" || v === "NUMBER")
+  if (!r || !["OBJECT", "JSON_STRING"].includes(r.dataEncoding) || ![r.statusCodeToken, r.amountToken, r.feeToken, r.accountTypeToken].every(v => v === "STRING" || v === "NUMBER")
+    || !["STRING", "NUMBER", "NUMBER_EXCEPT_QUERY_214_STRING"].includes(r.statusToken)
     || r.optionalSigning !== "ABSENT_EMPTY_NULL_EQUIVALENT" || r.numericSigning !== "RAW_JSON_TOKEN" || r.unknownFields !== "REJECT"
     || r.notFoundShape !== "IDENTITY_ONLY_214" || r.targetBinding !== "EXACT_RECORDED_OPAQUE_VALUE" || !["UNKNOWN", "CNY_YUAN"].includes(r.providerFeeUnit)) invalid("PAYOUT_RULES_REQUIRED");
   return r;
@@ -121,7 +122,9 @@ function readPayoutResponse(operation: PayoutOperation, body: string | Uint8Arra
   for (const name of order) {
     const field = (operation !== "NOTIFY" && ["statusCode", "message"].includes(name) ? outer : inner).get(name);
     if (!field || field.value === null || field.value === "") { values[name] = ""; continue; }
-    const token = name === "statusCode" ? r.statusCodeToken : name === "status" ? r.statusToken : name === "paidAmount" ? r.amountToken : name === "fee" ? r.feeToken : "STRING";
+    // S105的214示例为字符串；显式规则固定该分支类型，其余状态仍要求数字。
+    const statusToken = r.statusToken === "NUMBER_EXCEPT_QUERY_214_STRING" ? operation === "QUERY" && field.value === "214" ? "STRING" : "NUMBER" : r.statusToken;
+    const token = name === "statusCode" ? r.statusCodeToken : name === "status" ? statusToken : name === "paidAmount" ? r.amountToken : name === "fee" ? r.feeToken : "STRING";
     if (!text(field.value, name.startsWith("receiver") ? 8192 : name === "platformSerialNo" ? 128 : 2048) || field.numberToken !== (token === "NUMBER")
       || ["status", "statusCode"].includes(name) && !/^[0-9]{3,8}$/.test(field.value)) return responseFailure("UNVERIFIED", "FIELD_INVALID"); values[name] = field.value;
   }

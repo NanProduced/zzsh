@@ -171,3 +171,45 @@ test("旧lease仅STALE；合成包装永不获得正式证据/释放能力", () 
   }
   const result = evaluateSyntheticJoinpayPayoutResponse("QUERY", body, { ...ctx, leaseCurrent: true }); assert.equal(result.evidenceLevel, "SYNTHETIC_PROTOCOL"); assert.equal(result.officialVerified, false); assert.equal(result.mayAffectFunds, false);
 });
+
+// S105的正常示例为数字状态，查无单示例为字符串214；只有显式选择该规则才按分支固定类型。
+const documentedStatusRules = { ...R, statusToken: "NUMBER_EXCEPT_QUERY_214_STRING" } as unknown as PayoutWireRules;
+const missing214 = () => ({ status: "214", userNo: B.userNo, merchantOrderNo: B.merchantOrderNo,
+  platformSerialNo: "", receiverAccountNoEnc: "", receiverNameEnc: "", paidAmount: "", fee: "" });
+const documentedContext = () => ({ key: KEY, binding: B, rules: documentedStatusRules, leaseCurrent: true });
+
+test("S105显式状态规则同时处理数字处理中和字符串214，不把查无单变成资金释放", () => {
+  const pending = wire("QUERY", transaction("203")), absent = wire("QUERY", missing214(), { ...R, statusToken: "STRING" });
+  assert.deepEqual(preflightJoinpayPayoutResponse("QUERY", pending, { rules: documentedStatusRules }), { ok: true, reason: "SCHEMA_VALID" });
+  assert.equal(computeJoinpayPayoutResponse("QUERY", pending, documentedContext()).decision, "PROCESSING");
+  assert.deepEqual(preflightJoinpayPayoutResponse("QUERY", absent, { rules: documentedStatusRules }), { ok: true, reason: "SCHEMA_VALID" });
+  const result = computeJoinpayPayoutResponse("QUERY", absent, documentedContext());
+  assert.equal(result.decision, "PROVIDER_REPORTED_NOT_FOUND"); assert.equal(result.signature, "MATCH");
+  assert.equal(result.paidCents, null); assert.equal(result.providerFeeCents, null);
+  const next = reduceJoinpayPayoutObservation({ phase: "UNKNOWN", requiresReview: false, platformSerialNo: null }, result);
+  assert.equal(next.phase, "UNKNOWN"); assert.equal(next.reservationEffect, "UNCHANGED"); assert.equal(next.nextOperation, "QUERY_ORIGINAL");
+});
+
+test("显式分支固定类型，不猜数字214、字符串成功或通知字符串214，旧规则保持原行为", () => {
+  const numeric214 = wire("QUERY", missing214()), string205 = wire("QUERY", transaction(), { ...R, statusToken: "STRING" });
+  const notify214 = wire("NOTIFY", transaction("214"), { ...R, statusToken: "STRING" });
+  for (const [op, body] of [["QUERY", numeric214], ["QUERY", string205], ["NOTIFY", notify214]] as const) {
+    assert.equal(preflightJoinpayPayoutResponse(op, body, { rules: documentedStatusRules }).reason, "FIELD_INVALID");
+    assert.equal(computeJoinpayPayoutResponse(op, body, documentedContext()).decision, "UNVERIFIED");
+  }
+  assert.equal(computeJoinpayPayoutResponse("QUERY", numeric214, { ...documentedContext(), rules: R }).decision, "PROVIDER_REPORTED_NOT_FOUND");
+  assert.equal(computeJoinpayPayoutResponse("QUERY", string205, { ...documentedContext(), rules: { ...R, statusToken: "STRING" } }).decision, "CHANNEL_REPORTED_SUCCEEDED");
+  assert.equal(computeJoinpayPayoutResponse("QUERY", wire("QUERY", transaction()), documentedContext()).decision, "CHANNEL_REPORTED_SUCCEEDED");
+});
+
+test("字符串214仍逐字验签并绑定原商户原号，篡改、异单和非空金额冲突不能借分支放过", () => {
+  const make = (v: Values) => wire("QUERY", v, { ...R, statusToken: "STRING" });
+  for (const change of [{ userNo: "888000000000002" }, { merchantOrderNo: "OTHER202610240001" }, { paidAmount: "123.46" }]) {
+    const result = computeJoinpayPayoutResponse("QUERY", make({ ...missing214(), ...change }), documentedContext());
+    assert.equal(result.decision, "REVIEW_REQUIRED"); assert.equal(result.signature, "MATCH"); assert.equal(result.binding, "MISMATCH");
+  }
+  const tampered = make(missing214()).replace('"status":"214"', '"status":"205"');
+  assert.equal(computeJoinpayPayoutResponse("QUERY", tampered, documentedContext()).decision, "UNVERIFIED");
+  const badHmac = make(missing214()).replace(/"hmac":"[a-f0-9]{32}"/, '"hmac":"00000000000000000000000000000000"');
+  assert.equal(computeJoinpayPayoutResponse("QUERY", badHmac, documentedContext()).reason, "SIGNATURE_MISMATCH");
+});

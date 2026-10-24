@@ -27,7 +27,7 @@ export type JoinpayAccountServerProfile = Readonly<{
   resourceDatabase: string; resourceRuntimeUser: string;
   operation: JoinpayAccountOperation; profileId: string; merchantIdentityId: string; userNo: string; keyVersionRef: string;
   reviewRef: string; reviewSha256: string; permission: "REVIEWED_MERCHANT_BALANCE_READ"; rules: AccountRules;
-  knownAnswer: { reference: string; sha256: string; vectorKey: string; requestHmac: string; responseBody: string };
+  knownAnswer: "NOT_OBTAINED" | { reference: string; sha256: string; vectorKey: string; requestHmac: string; responseBody: string };
 }>;
 export type BoundJoinpayAccountProfile = Readonly<{ kind: "BOUND_JOINPAY_ACCOUNT_PROFILE" }>;
 type Profile = JoinpayAccountServerProfile & { profileSha256: string; rulesSha256: string };
@@ -66,17 +66,19 @@ export function bindJoinpayAccountProfile(input: JoinpayAccountServerProfile): B
   if (!r.amount || (r.amount.unit !== "UNKNOWN" && r.amount.unit !== "CNY_YUAN")) reject();
   if (r.amount.unit === "CNY_YUAN" && (![0, 1, 2].includes(r.amount.maximumScale) || typeof r.amount.allowNegative !== "boolean"
     || typeof r.amount.maximumAbsoluteCents !== "string" || !/^(0|[1-9][0-9]{0,39})$/.test(r.amount.maximumAbsoluteCents))) reject();
-  if (!k || typeof k.reference !== "string" || !k.reference.trim() || k.reference.length > 512 || typeof k.vectorKey !== "string" || !k.vectorKey
-    || typeof k.responseBody !== "string" || Buffer.byteLength(k.responseBody) > JOINPAY_ACCOUNT_LIMITS.maxBytes || !SHA.test(k.sha256) || sha(k.responseBody) !== k.sha256
-    || typeof k.requestHmac !== "string" || !/^[a-fA-F0-9]{32}$/.test(k.requestHmac)) reject("ACCOUNT_KAT_REQUIRED");
-  if (joinpayMd5Sign(["userNo"], { userNo: p.userNo }, k.vectorKey) !== k.requestHmac.toLowerCase()) reject("ACCOUNT_KAT_MISMATCH");
-  const kat = inspect(p, Buffer.from(k.responseBody), k.vectorKey);
-  if (kat.decision !== "SUCCESS") reject("ACCOUNT_KAT_MISMATCH");
+  if (k !== "NOT_OBTAINED") {
+    if (!k || typeof k.reference !== "string" || !k.reference.trim() || k.reference.length > 512 || typeof k.vectorKey !== "string" || !k.vectorKey
+      || typeof k.responseBody !== "string" || Buffer.byteLength(k.responseBody) > JOINPAY_ACCOUNT_LIMITS.maxBytes || !SHA.test(k.sha256) || sha(k.responseBody) !== k.sha256
+      || typeof k.requestHmac !== "string" || !/^[a-fA-F0-9]{32}$/.test(k.requestHmac)) reject("ACCOUNT_KAT_REQUIRED");
+    if (joinpayMd5Sign(["userNo"], { userNo: p.userNo }, k.vectorKey) !== k.requestHmac.toLowerCase()) reject("ACCOUNT_KAT_MISMATCH");
+    const kat = inspect(p, Buffer.from(k.responseBody), k.vectorKey);
+    if (kat.decision !== "SUCCESS") reject("ACCOUNT_KAT_MISMATCH");
+  }
   // 不持久化向量钥、商户钥或hmac；hash只绑定可公开评审的配置元数据。
   const canonical = JSON.stringify({ purpose: p.purpose, resourceDatabase: p.resourceDatabase, resourceRuntimeUser: p.resourceRuntimeUser,
     operation: p.operation, profileId: p.profileId, merchantIdentityId: p.merchantIdentityId, userNo: p.userNo,
     keyVersionRef: p.keyVersionRef, reviewRef: p.reviewRef, reviewSha256: p.reviewSha256, permission: p.permission, rules: p.rules,
-    knownAnswer: { reference: k.reference, sha256: k.sha256 } });
+    knownAnswer: k === "NOT_OBTAINED" ? k : { reference: k.reference, sha256: k.sha256 } });
   const bound = Object.freeze({ kind: "BOUND_JOINPAY_ACCOUNT_PROFILE" as const });
   profiles.set(bound, Object.freeze({ ...p, profileSha256: sha(canonical), rulesSha256: sha(JSON.stringify(p.rules)) }));
   return bound;

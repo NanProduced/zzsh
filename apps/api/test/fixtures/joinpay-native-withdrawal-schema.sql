@@ -11,7 +11,7 @@ BEGIN
  FOR x IN SELECT * FROM(VALUES
   ('zzsh_order.guard_controlled_channel_refund_intent_v1()','1214c9caa05138d90340c7936c607f8bd6f6396b4505d57cc245f0c43e96563d'),
   ('zzsh_order.guard_joinpay_refund_intent()','1d439d2eff9c7b39c6b06de380eb7161696f210f8afed9c2b959fe1fd450f1eb'),
-  ('zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)','20eb5637b082b5533581529701d090cf53cbf45db1385267fffd8b8c07f91762'),
+  ('zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)','e8e362a3e9cf4fae1a4f720dc1d2bf1cf0a990e774de0b873293bf3306ee5f25'),
   ('zzsh_order.guard_joinpay_refund_attempt()','bc519429a8f57490b4a5c4cc5f7ce3c1e492af09621e1435c205a0ddbf6b8713'),
   ('zzsh_order.guard_joinpay_refund_observation()','51e78865a41b09cb48003b27e316c0798a6594f57fe3eb64fd94392241fa86cf'),
   ('zzsh_order.guard_joinpay_refund_evidence()','3e83ad5b2696fb5684ebfc2afcfd9c938f4b61c7e086e4488b6b4d6bbcfeb83e'),
@@ -215,7 +215,9 @@ BEGIN
   OR p->>'database' IS DISTINCT FROM current_database() OR p->>'runtimeUser' IS DISTINCT FROM current_user
   OR p->>'merchantIdentityId' IS DISTINCT FROM i.merchant_identity_id OR p->>'userNo' IS DISTINCT FROM i.user_no
   OR p->>'tradeMerchantNo' IS DISTINCT FROM i.trade_merchant_no OR p->>'reviewRef' IS NULL OR p->>'reviewSha256'!~'^[a-f0-9]{64}$'
-  OR p#>>'{knownAnswer,reference}' IS NULL OR p#>>'{knownAnswer,rawSha256}'!~'^[a-f0-9]{64}$'
+  OR (p->'knownAnswer' IS DISTINCT FROM '"NOT_OBTAINED"'::jsonb AND
+   (jsonb_typeof(p->'knownAnswer') IS DISTINCT FROM 'object' OR NOT COALESCE(length(p#>>'{knownAnswer,reference}')>0,false)
+    OR NOT COALESCE(p#>>'{knownAnswer,rawSha256}'~'^[a-f0-9]{64}$',false)))
   OR t->>'binding' IS DISTINCT FROM 'EXACT_RECORDED_OPAQUE_VALUE'
   OR t->>'encodingRuleRef' IS DISTINCT FROM a#>>'{target,encodingRuleRef}'
   OR t->>'encodingRuleSha256' IS DISTINCT FROM a#>>'{target,encodingRuleSha256}'
@@ -226,7 +228,7 @@ BEGIN
   OR f->>'reference' IS NULL OR f->>'sha256'!~'^[a-f0-9]{64}$' OR f->>'providerUnit' IS DISTINCT FROM 'CNY_YUAN'
   OR f->>'merchantBearsFee' IS DISTINCT FROM 'true' OR f->>'maxProviderFeeCents'!~'^(0|[1-9][0-9]{0,23})$'
   OR r->>'dataEncoding' NOT IN('OBJECT','JSON_STRING') OR r->>'statusCodeToken' NOT IN('STRING','NUMBER')
-  OR r->>'statusToken' NOT IN('STRING','NUMBER') OR r->>'amountToken' NOT IN('STRING','NUMBER') OR r->>'feeToken' NOT IN('STRING','NUMBER')
+  OR r->>'statusToken' NOT IN('STRING','NUMBER','NUMBER_EXCEPT_QUERY_214_STRING') OR r->>'amountToken' NOT IN('STRING','NUMBER') OR r->>'feeToken' NOT IN('STRING','NUMBER')
   OR r->>'accountTypeToken' NOT IN('STRING','NUMBER') OR r->>'optionalSigning' IS DISTINCT FROM 'ABSENT_EMPTY_NULL_EQUIVALENT'
   OR r->>'numericSigning' IS DISTINCT FROM 'RAW_JSON_TOKEN' OR r->>'unknownFields' IS DISTINCT FROM 'REJECT'
   OR r->>'notFoundShape' IS DISTINCT FROM 'IDENTITY_ONLY_214' OR r->>'targetBinding' IS DISTINCT FROM 'EXACT_RECORDED_OPAQUE_VALUE'

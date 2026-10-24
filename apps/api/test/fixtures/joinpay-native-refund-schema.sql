@@ -235,7 +235,10 @@ BEGIN
   OR p->>'database' IS DISTINCT FROM current_database() OR p->>'runtimeUser' IS DISTINCT FROM current_user
   OR p->>'keyVersionRef' IS DISTINCT FROM key_ref OR p->>'permission' IS DISTINCT FROM 'REVIEWED_NATIVE_RENTAL_REFUND'
   OR p->>'reviewSha256'!~'^[a-f0-9]{64}$' OR r->>'sha256'!~'^[a-f0-9]{64}$'
-  OR p#>>'{knownAnswer,rawSha256}'!~'^[a-f0-9]{64}$' OR r->>'signing' IS DISTINCT FROM 'MD5_UTF8_RAW_VALUES'
+  OR (p->'knownAnswer' IS DISTINCT FROM '"NOT_OBTAINED"'::jsonb AND
+   (jsonb_typeof(p->'knownAnswer') IS DISTINCT FROM 'object' OR NOT COALESCE(length(p#>>'{knownAnswer,reference}')>0,false)
+    OR NOT COALESCE(p#>>'{knownAnswer,rawSha256}'~'^[a-f0-9]{64}$',false)))
+  OR r->>'signing' IS DISTINCT FROM 'MD5_UTF8_RAW_VALUES'
   OR r->>'rawQueryDecode' IS DISTINCT FROM 'ONCE' OR r->>'numberTokens' IS DISTINCT FROM 'RAW_JSON_TOKEN'
   OR r->>'fieldPolicy' IS DISTINCT FROM 'STRICT_TABLE_EMPTY_OPTIONAL' OR r->>'refundIdentifier' IS DISTINCT FROM 'EXACT_TEXT'
   OR r->>'notify102' IS DISTINCT FROM 'REVIEW' OR r->>'utcOffsetMinutes'!~'^-?[0-9]{1,3}$'

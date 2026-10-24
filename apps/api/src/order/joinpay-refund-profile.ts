@@ -31,7 +31,7 @@ export type RefundServerProfile = Readonly<{
     refundWay: "ORIGINAL_REQUIRED" | "ORIGINAL_OR_MISSING_REVIEWED";
     failureNoExecution: { accepted: boolean; codes: readonly string[]; reference: string | null; sha256: string | null } };
   knownAnswer: { reference: string; rawSha256: string; vectorKey: string; binding: JoinpayRefundBinding;
-    responseBody: string; expectedResult: RefundNeutralResult["result"]; requestHmac?: string };
+    responseBody: string; expectedResult: RefundNeutralResult["result"]; requestHmac?: string } | "NOT_OBTAINED";
 }>;
 export type BoundRefundProfile = Readonly<{ kind: "BOUND_JOINPAY_REFUND_PROFILE" }>;
 type Profile = RefundServerProfile & { canonical: string; sha256: string };
@@ -55,6 +55,8 @@ export function bindRefundProfile(input: RefundServerProfile): BoundRefundProfil
   if (f && Object.keys(f).some(k => !["accepted","codes","reference","sha256"].includes(k))) fail();
   if (!f || typeof f.accepted !== "boolean" || !Array.isArray(f.codes) || f.codes.some(c => !safeText(c, 20))
     || (f.accepted ? !f.codes.length || !safeText(f.reference) || !isSha(f.sha256) : f.codes.length !== 0 || f.reference !== null || f.sha256 !== null)) fail();
+  // 样例是附加计算证据；缺失不代替每次真实回包的验签与原款绑定。
+  if (k !== "NOT_OBTAINED") {
   if (!k || !safeText(k.reference) || !safeText(k.vectorKey, 4096) || typeof k.responseBody !== "string" || Buffer.byteLength(k.responseBody) > 65536
     || !isSha(k.rawSha256) || sha(k.responseBody) !== k.rawSha256 || k.binding.merchantNo !== p.merchantNo || k.binding.currency !== "CNY") fail("REFUND_KAT_REQUIRED");
   if (p.operation !== "NOTIFY") {
@@ -63,7 +65,8 @@ export function bindRefundProfile(input: RefundServerProfile): BoundRefundProfil
   }
   const result = computeJoinpayRefundResponse(p.operation === "SUBMIT" ? "REFUND_SYNC" : p.operation === "QUERY" ? "REFUND_QUERY" : "REFUND_NOTIFY", k.responseBody, { key: k.vectorKey, binding: k.binding, leaseCurrent: true });
   if (result.signature !== "MATCH" || result.result !== k.expectedResult) fail("REFUND_KAT_MISMATCH");
-  const canonical = JSON.stringify({ kind: "JOINPAY_REFUND_PROFILE_V1", ...p, knownAnswer: { reference: k.reference, rawSha256: k.rawSha256, expectedResult: k.expectedResult } });
+  }
+  const canonical = JSON.stringify({ kind: "JOINPAY_REFUND_PROFILE_V1", ...p, knownAnswer: k === "NOT_OBTAINED" ? k : { reference: k.reference, rawSha256: k.rawSha256, expectedResult: k.expectedResult } });
   const bound = Object.freeze({ kind: "BOUND_JOINPAY_REFUND_PROFILE" as const }); profiles.set(bound, Object.freeze({ ...p, canonical, sha256: sha(canonical) })); return bound;
 }
 export function describeRefundProfile(profile: BoundRefundProfile, operation?: RefundOperation) {
@@ -88,7 +91,7 @@ export function createFormalRefundAdmission(input: { reference: string; reviewSh
   const accepted: AdmissionView["acceptedProfiles"][number][] = []; let first: ReturnType<typeof describeRefundProfile> | undefined;
   for (let i = 0; i < supplied.length; i++) {
     const item = Object.getOwnPropertyDescriptor(supplied, String(i)); if (!item || !("value" in item)) return fail(); const profile = item.value as BoundRefundProfile, p = pget(profile), v = describeRefundProfile(profile);
-    if (v.purpose !== "MERCHANT_REFUND" || /SYNTHETIC|MODEL/i.test([p.profileId, p.reviewRef, p.rules.reference, p.knownAnswer.reference].join("|"))) fail("REFUND_FORMAL_SOURCE_NOT_ACCEPTED");
+    if (v.purpose !== "MERCHANT_REFUND" || /SYNTHETIC|MODEL/i.test([p.profileId, p.reviewRef, p.rules.reference, ...(p.knownAnswer === "NOT_OBTAINED" ? [] : [p.knownAnswer.reference])].join("|"))) fail("REFUND_FORMAL_SOURCE_NOT_ACCEPTED");
     first ??= v; if (v.database !== first.database || v.runtimeUser !== first.runtimeUser || v.merchantIdentityId !== first.merchantIdentityId || v.merchantNo !== first.merchantNo) fail();
     accepted.push(Object.freeze({ operation: p.operation, profileId: p.profileId, profileSha256: p.sha256, keyVersionRef: p.keyVersionRef }));
   }

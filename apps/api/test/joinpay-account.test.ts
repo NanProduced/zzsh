@@ -14,7 +14,8 @@ function response(op: JoinpayAccountOperation, changes: Record<string, string> =
   const data = "{" + order.slice(2).map(k => JSON.stringify(k) + ":" + (["currency", "useAbleSettAmount", "availableSettAmountFrozen", "useAbleAdvanceAmount", "currentAdvanceAmount", "usedAdvanceAmount", "advanceFrozenAmount"].includes(k) ? v[k] : JSON.stringify(v[k]))).join(",") + ',"hmac":"' + signed + '"}';
   return '{"statusCode":' + v.statusCode + ',"message":' + JSON.stringify(v.message) + ',"data":' + (encoding === "OBJECT" ? data : JSON.stringify(data)) + "}";
 }
-function config(op: JoinpayAccountOperation = "AVAILABLE", encoding: "OBJECT" | "JSON_STRING" = "OBJECT"): JoinpayAccountServerProfile {
+type SampleProfile = Omit<JoinpayAccountServerProfile, "knownAnswer"> & { knownAnswer: Exclude<JoinpayAccountServerProfile["knownAnswer"], "NOT_OBTAINED"> };
+function config(op: JoinpayAccountOperation = "AVAILABLE", encoding: "OBJECT" | "JSON_STRING" = "OBJECT"): SampleProfile {
   const raw = response(op, {}, encoding);
   return { purpose: "MERCHANT_READ", resourceDatabase: "synthetic_balance_test", resourceRuntimeUser: "synthetic_balance_r", operation: op, profileId: "SYNTHETIC_OFFICIAL_CONFIGURATION_MODEL", merchantIdentityId: "synthetic_merchant", userNo: USER, keyVersionRef: "synthetic_key_v1",
     reviewRef: "SYNTHETIC_BACKEND_REVIEW_NOT_OFFICIAL", reviewSha256: "a".repeat(64), permission: "REVIEWED_MERCHANT_BALANCE_READ",
@@ -115,4 +116,38 @@ test("fetch accessor只能读取一次，虚构transport不能因二次取值变
   const deps = { keyFor: () => KEY, get fetch() { reads++; return reads === 1 ? fake(response("AVAILABLE")) : undefined; } };
   const result = await queryJoinpayAccount(bindJoinpayAccountProfile(config()), deps);
   assert.equal(reads, 1); assert.equal(result.decision, "SUCCESS"); assert.equal(result.evidenceLevel, "SYNTHETIC_PROTOCOL");
+});
+
+test("显式未取得余额样例可绑定；两类响应仍须实际验签，未知单位不补余额0或正式证据",async()=>{
+ for(const op of ["AVAILABLE","COLLECTION"] as const){
+  const input={...config(op),knownAnswer:"NOT_OBTAINED"} as unknown as JoinpayAccountServerProfile;
+  const p=bindJoinpayAccountProfile(input),r=await queryJoinpayAccount(p,{keyFor:()=>KEY,fetch:fake(response(op))}),o=readJoinpayAccountObservation(r);
+  assert.equal(r.decision,"SUCCESS");assert.equal(r.evidenceLevel,"SYNTHETIC_PROTOCOL");assert.equal(o.inspection.signature,"MATCH");
+  for(const amount of Object.values(o.inspection.amounts!)){assert.equal(amount.unitKnowledge,"UNKNOWN");assert.equal(amount.cents,null);}
+  const bad=readJoinpayAccountObservation(await queryJoinpayAccount(p,{keyFor:()=>KEY,fetch:fake(response(op).replace(/"hmac":"[a-f0-9]{32}"/,'"hmac":"00000000000000000000000000000000"'))}));
+  assert.equal(bad.inspection.signature,"MISMATCH");assert.equal(bad.inspection.decision,"UNKNOWN");assert.equal(bad.inspection.amounts,null);
+ }
+});
+
+test("未取得标记产生独立profile摘要，原object canonical/hash不变，缺失或错误样例不降级",()=>{
+ const c=config(),expected=sha(JSON.stringify({purpose:c.purpose,resourceDatabase:c.resourceDatabase,resourceRuntimeUser:c.resourceRuntimeUser,operation:c.operation,profileId:c.profileId,merchantIdentityId:c.merchantIdentityId,userNo:c.userNo,
+  keyVersionRef:c.keyVersionRef,reviewRef:c.reviewRef,reviewSha256:c.reviewSha256,permission:c.permission,rules:c.rules,knownAnswer:{reference:c.knownAnswer.reference,sha256:c.knownAnswer.sha256}}));
+ assert.equal(describeJoinpayAccountProfile(bindJoinpayAccountProfile(c)).profileSha256,expected);
+ const marker=bindJoinpayAccountProfile({...c,knownAnswer:"NOT_OBTAINED"} as unknown as JoinpayAccountServerProfile);
+ assert.notEqual(describeJoinpayAccountProfile(marker).profileSha256,expected);
+ const missing={...c} as Record<string,unknown>;delete missing.knownAnswer;
+ for(const k of [undefined,null,1,"UNKNOWN",{}, {reference:"",sha256:"a".repeat(64)}, {...c.knownAnswer,requestHmac:"0".repeat(32)}])assert.throws(()=>bindJoinpayAccountProfile({...c,knownAnswer:k} as unknown as JoinpayAccountServerProfile));
+ assert.throws(()=>bindJoinpayAccountProfile(missing as unknown as JoinpayAccountServerProfile));
+ assert.equal(JSON.stringify(describeJoinpayAccountProfile(marker)).includes(KEY),false);
+});
+
+test("没有样例仍拒绝A2、缺命令权限和合成外呼；不能用finance只读或复制对象取代服务器配置",async()=>{
+ const c={...config(),knownAnswer:"NOT_OBTAINED"} as unknown as JoinpayAccountServerProfile;
+ const p=bindJoinpayAccountProfile(c);assert.throws(()=>describeJoinpayAccountProfile({...p}),/NOT_BOUND/);
+ assert.throws(()=>bindJoinpayAccountProfile({...c,userNo:"888100000002340"}),/MERCHANT_NOT_AUTHORIZED/);
+ assert.throws(()=>bindJoinpayAccountProfile({...c,permission:"NOT_OBTAINED"} as unknown as JoinpayAccountServerProfile));
+ let keys=0,sends=0;const synthetic=bindJoinpayAccountProfile({...c,purpose:"SYNTHETIC_PROTOCOL"});
+ await assert.rejects(queryJoinpayAccount(synthetic,{keyFor:()=>{keys++;return KEY;},fetch:async()=>{sends++;return new Response();}}),/SYNTHETIC_NETWORK_FORBIDDEN/);assert.equal(keys,0);assert.equal(sends,0);
+ const mismatch=readJoinpayAccountObservation(await queryJoinpayAccount(p,{keyFor:()=>KEY,fetch:fake(response("AVAILABLE",{userNo:"999900000000002"}))}));
+ assert.equal(mismatch.inspection.signature,"MATCH");assert.equal(mismatch.inspection.binding,"MISMATCH");assert.equal(mismatch.inspection.decision,"UNKNOWN");
 });

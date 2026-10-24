@@ -17,7 +17,7 @@ function response(op:"SUBMIT"|"QUERY"|"NOTIFY",status="205",fee:string|undefined
  const hmac=md5(op==="SUBMIT"?SYNC:op==="QUERY"?QUERY:NOTIFY,v),encode=(o:Record<string,unknown>)=>"{"+Object.entries(o).map(([k,x])=>JSON.stringify(k)+":"+(["status","paidAmount","fee"].includes(k)?String(x):JSON.stringify(x))).join(",")+"}";
  if(op==="NOTIFY")return encode({...v,hmac});const{statusCode,message,...data}=v;return '{"statusCode":'+JSON.stringify(statusCode)+',"message":'+JSON.stringify(message)+',"data":'+encode({...data,hmac})+'}';
 }
-function config(op:"SUBMIT"|"QUERY"|"NOTIFY",purpose:"MERCHANT_PAYOUT"|"SYNTHETIC_PROTOCOL"="MERCHANT_PAYOUT"):PayoutProfileInput{
+function config(op:"SUBMIT"|"QUERY"|"NOTIFY",purpose:"MERCHANT_PAYOUT"|"SYNTHETIC_PROTOCOL"="MERCHANT_PAYOUT"):Omit<PayoutProfileInput,"knownAnswer"> & {knownAnswer:Exclude<PayoutProfileInput["knownAnswer"],"NOT_OBTAINED">}{
  const request={...B,...W,requestTime:"2026-10-24 10:00:00",receiverAccountType:"201" as const},body=response(op);
  const requestHmac=op==="SUBMIT"?md5(SUBMIT,{...request,paidAmount:"99.00",currency:"201"}):op==="QUERY"?md5(["userNo","merchantOrderNo"],B):undefined;
  return{operation:op,purpose,profileId:`reviewed_${op}_fixture`,keyVersionRef:"key_fixture_v1",merchantIdentityId:B.merchantIdentityId,userNo:B.userNo,database:"zzsh_fixture",runtimeUser:"zzsh_fixture_r",reviewRef:"review://unit/provider",reviewSha256:H,
@@ -31,6 +31,16 @@ test("模型KAT只验证计算，canonical不持久vectorKey/raw响应/目标；
  for(const p of ps){const raw=readPayoutProfileEvidence(p);assert.equal(raw.includes(KEY),false);assert.equal(raw.includes("vectorKey"),false);assert.equal(raw.includes("responseBody"),false);assert.ok(Object.isFrozen(p));}
  const q=ps[1]!,calc=inspectPayoutProfile(q,"QUERY",response("QUERY"),binding(ps[0]!),KEY);assert.equal(calc.signature,"MATCH");assert.equal(calc.providerFeeCents,"50");assert.equal(eligiblePayoutTerminal(q,calc),"PAID");
  assert.equal(readPayoutScope(scope).acceptedProfiles.length,3); // 没有调用source capture，无正式事实或账务。
+});
+
+test("三操作可显式记录未取得样例，缺样例不自证官方校验或资金终态",()=>{
+ for(const op of ["SUBMIT","QUERY","NOTIFY"] as const){const profile=bindPayoutProfile({...config(op),knownAnswer:"NOT_OBTAINED"} as any),text=readPayoutProfileEvidence(profile);assert.equal(JSON.parse(text).knownAnswer,"NOT_OBTAINED");assert.equal(text.includes(KEY),false);assert.equal(text.includes("responseBody"),false);}
+});
+
+test("无样例仍须真实回包验签，A2/无目的地规则/错误已给样例继续拒绝",()=>{
+ const profile=bindPayoutProfile({...config("QUERY"),knownAnswer:"NOT_OBTAINED"} as any),b=binding(profile);
+ const bad=response("QUERY").replace(/"hmac":"[a-fA-F0-9]+"/,'"hmac":"'+"0".repeat(32)+'"');const calculation=inspectPayoutProfile(profile,"QUERY",bad,b,KEY);assert.notEqual(calculation.signature,"MATCH");assert.equal(eligiblePayoutTerminal(profile,calculation),null);
+ for(const patch of [{userNo:"888100000002340"},{targetRules:{}},{knownAnswer:undefined},{knownAnswer:{...config("QUERY").knownAnswer,rawSha256:"0".repeat(64)}}])assert.throws(()=>bindPayoutProfile({...config("QUERY"),knownAnswer:"NOT_OBTAINED",...patch} as any));
 });
 test("205费用缺失/超上限与204无未执行保证均不能成为资金终态",()=>{
  const p=bindPayoutProfile(config("QUERY")),b=binding(p);for(const [status,fee] of [["205","ABSENT"],["205","1.01"],["204","0.00"],["208","0.50"]] as const){const d=inspectPayoutProfile(p,"QUERY",response("QUERY",status,fee),b,KEY);assert.equal(eligiblePayoutTerminal(p,d),null);}
