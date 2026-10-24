@@ -214,11 +214,7 @@ export async function lockOrderPartiesInOrder(
  * account owner, locks both user rows in ascending id order, then re-checks
  * activity, session and fresh trade eligibility on the locked rows.
  */
-export async function assertFreshCreateAuthorization(
-  client: PoolClient,
-  context: OrderUserContext,
-  accountId: string,
-): Promise<{ ownerUserId: string; gameId: string }> {
+async function readOrderParties(client: PoolClient, context: OrderUserContext, accountId: string): Promise<{ ownerUserId: string; gameId: string }> {
   const account = (
     await client.query<{ ownerUserId: string; gameId: string }>(
       `SELECT owner_user_id AS "ownerUserId", game_id AS "gameId" FROM zzsh_supply.rental_account WHERE id = $1`,
@@ -227,7 +223,11 @@ export async function assertFreshCreateAuthorization(
   ).rows[0];
   if (!account) throw notFound();
   if (account.ownerUserId === context.userId) throw forbidden();
-  await lockOrderPartiesInOrder(client, context.userId, account.ownerUserId);
+
+  return account;
+}
+
+async function assertOrderPartiesAuthorized(client: PoolClient, context: OrderUserContext, account: { ownerUserId: string; gameId: string }): Promise<{ ownerUserId: string; gameId: string }> {
   const states = (
     await client.query<{
       id: string;
@@ -259,6 +259,19 @@ export async function assertFreshCreateAuthorization(
     throw forbidden("请先完成实名校验后再进行受保护交易");
   }
   return { ownerUserId: account.ownerUserId, gameId: account.gameId };
+
+}
+
+export async function assertFreshCreateAuthorization(client: PoolClient, context: OrderUserContext, accountId: string): Promise<{ ownerUserId: string; gameId: string }> {
+  const account = await readOrderParties(client, context, accountId);
+  await lockOrderPartiesInOrder(client, context.userId, account.ownerUserId);
+  return assertOrderPartiesAuthorized(client, context, account);
+}
+
+/** Same subject/session predicates on SELECT facts; never use the replay/WRITE identity helper here. */
+export async function assertReadCreateAuthorization(client: PoolClient, context: OrderUserContext, accountId: string): Promise<{ ownerUserId: string; gameId: string }> {
+  const account = await readOrderParties(client, context, accountId);
+  return assertOrderPartiesAuthorized(client, context, account);
 }
 
 /** Authorization for idempotent replays: current session and activity only. */

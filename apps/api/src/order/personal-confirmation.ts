@@ -1,3 +1,4 @@
+import { projectTenantPriceQuote } from "../supply/tenant-price-projection";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
@@ -9,9 +10,9 @@ import { canonicalize, computeContentHash, normalizeQuote } from "../supply/cont
 import { computeDeltaQuote, projectDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
-import { evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
+import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
 import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
-import { assertFinalConfirmationFunding, isProductionConfirmationFundingReader } from "../supply/funding-authority";
+import { assertFinalConfirmationFunding, isProductionConfirmationFundingReader, readProductionConfirmationFundingForPreview } from "../supply/funding-authority";
 import { EFFECTIVE_PUBLICATION_STATE_SQL, isEffectivePublicationState } from "../supply/listing-query";
 import { ensureOnlyFields, invalid, notFound } from "../supply/supply-util";
 import { assertFreshCreateAuthorization, type OrderUserContext } from "./order";
@@ -110,20 +111,17 @@ function fullPayoutDeclaration(value:unknown):{schema:"full-payout-declaration-v
   return {schema:"full-payout-declaration-v1",selected:declaration.selected};
 }
 
-export async function rebuildPersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,options:PersonalConfirmationOptions) {
-  // This authorization function locks both users in ID order and rechecks session/identity.
-  const parties=await assertFreshCreateAuthorization(client,context,input.accountId);
-  const game=(await client.query(`SELECT current_release_id,enabled FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`,[parties.gameId])).rows[0];
-  const account=(await client.query<PublishingAccount>(`SELECT * FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`,[input.accountId])).rows[0];
-  if(!account || account.owner_user_id!==parties.ownerUserId || account.game_id!==parties.gameId || !game?.enabled)throw notFound();
+async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,options:PersonalConfirmationOptions,account:PublishingAccount,game:{current_release_id:string|null;enabled:boolean},purpose:"READ"|"WRITE",readAsOfUtc?:string) {
   const version=(await client.query<ListingVersion>(`SELECT * FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2`,[input.versionId,account.id])).rows[0];
-  if(!version || account.current_version_id!==version.id || !version.payload || !version.content_hash)throw notFound();
+  if(!version || !version.payload || !version.content_hash)throw notFound();
+  if(account.current_version_id!==version.id) { if(purpose === "READ") throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing version changed"); throw notFound(); }
   if(version.rule_release_id!==input.releaseId || game.current_release_id!==input.releaseId)throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing rules changed");
   if(version.payload.accountId!==account.id || version.payload.gameId!==account.game_id || computeContentHash(version.payload)!==version.content_hash)unavailable("Listing snapshot cannot be verified");
-  const publication=(await client.query<{source:string}>(`SELECT source FROM zzsh_supply.listing_publication WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3 AND rule_release_id=$4 AND content_hash=$5 LIMIT 1`,[version.id,account.id,account.owner_user_id,version.rule_release_id,version.content_hash])).rows[0];
-  if(!isEffectivePublicationState(version.review_state, publication?.source))unavailable("Listing publication evidence cannot be verified");
-  const blockers=await evaluatePublication(client,account,version,options.gate);
+  const publication=purpose === "READ" ? await readListingPublication(client,account,version) : (await client.query<{source:string}>(`SELECT source FROM zzsh_supply.listing_publication WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3 AND rule_release_id=$4 AND content_hash=$5 LIMIT 1`,[version.id,account.id,account.owner_user_id,version.rule_release_id,version.content_hash])).rows[0];
+  if(!isEffectivePublicationState(version.review_state, publication?.source)) { if(purpose === "READ") throw notFound(); unavailable("Listing publication evidence cannot be verified"); }
+  const blockers=purpose === "READ" ? await evaluatePricePreviewPublication(client,account,version,options.gate) : await evaluatePublication(client,account,version,options.gate);
   if(blockers.includes("OCCUPIED"))throw new SecurityApiError(409,"OCCUPIED","Account is occupied");
+  if(purpose === "READ" && blockers.includes("RULE_CHANGED")) throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing rules changed");
   if(blockers.length)unavailable("Listing eligibility is unavailable");
   const membership=options.membershipGrowthReader?null:await readRentalMembership(client,context.userId);
   if(membership?.tier==="UNKNOWN")throw new SecurityApiError(503,"MEMBERSHIP_UNKNOWN","Rental membership is unknown");
@@ -132,7 +130,9 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   const ownerDeclaration=fullPayoutDeclaration(version.payload.declaration.attributes.full_payout_declaration);
   if(options.membershipGrowthReader && !ownerDeclaration)unavailable("Growth confirmation requires a versioned listing declaration");
   if(ownerDeclaration && (!options.fundingReader || (!isControlledConfirmationFundingReader(options.fundingReader) && !isProductionConfirmationFundingReader(options.fundingReader))))unavailable("Authoritative full-payout funding source is unavailable");
-  const funding=await options.fundingReader?.(client,account,version) ?? null;
+  const funding=purpose === "READ"
+    ? options.fundingReader && isControlledConfirmationFundingReader(options.fundingReader) ? await options.fundingReader(client,account,version) : await readProductionConfirmationFundingForPreview(client,account,version,options.fundingReader,readAsOfUtc!)
+    : await options.fundingReader?.(client,account,version) ?? null;
   if(!funding || (funding.schema!==undefined && funding.schema!=="personal-quote-v1" && funding.schema!=="personal-quote-v2")
     || typeof funding.version!=="string" || !funding.version.trim() || typeof funding.sourceRef!=="string" || !funding.sourceRef.trim()
     || typeof funding.fullPayoutPolicyRef!=="string" || !funding.fullPayoutPolicyRef.trim()
@@ -150,9 +150,9 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   }
   if(ownerDeclaration?.selected){
     if(!v2Funding?.fullPayoutTerms)unavailable("Full-payout terms body is unavailable");
-    assertFullPayoutTermsAccepted(v2Funding!.fullPayoutTerms!,input.fullPayoutTermsAcceptance);
-  }else if(input.fullPayoutTermsAcceptance!==undefined)throw invalid("Full-payout terms do not apply to this quote","fullPayoutTermsAcceptance");
-  const guarantee=await options.gate(client,account);
+    if(purpose === "WRITE") assertFullPayoutTermsAccepted(v2Funding!.fullPayoutTerms!,input.fullPayoutTermsAcceptance);
+  }else if(purpose === "WRITE" && input.fullPayoutTermsAcceptance!==undefined)throw invalid("Full-payout terms do not apply to this quote","fullPayoutTermsAcceptance");
+  const guarantee=await options.gate(client,account,purpose);
   if(typeof guarantee.reference!=="string" || !guarantee.reference.trim() || guarantee.occupancy!=="FREE" || !["SATISFIED","NOT_REQUIRED"].includes(guarantee.publisherBail) || (guarantee.publisherBail==="NOT_REQUIRED" && BigInt(f.publisherBailRequirementCents)>0n))unavailable("Account guarantee evidence is unavailable");
   const creditGuarantee=guarantee.creditGuarantee;
   if (creditGuarantee) {
@@ -194,7 +194,7 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   let selectedQuote = result.quote;
   let growthSelection:ReturnType<typeof selectPersonalGrowthOffer>|null=null;
   if (options.membershipGrowthReader) {
-    const asOfUtc=(await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at??unavailable("Growth confirmation clock is unavailable");
+    const asOfUtc=readAsOfUtc ?? (await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at??unavailable("Growth confirmation clock is unavailable");
     const growth = await options.membershipGrowthReader(client, {
       userId: context.userId, ownerUserId: account.owner_user_id, accountId: account.id, gameId: account.game_id,
       listingVersionId: version.id, listingHash: version.content_hash, ruleReleaseId: input.releaseId, priceVersionId: release.id,
@@ -214,6 +214,26 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
   if(Object.values(ruleRefs).some(value=>typeof value!=="string" || !value.trim())
     || !/^[0-9a-f]{64}$/.test(agreementDigest) || releaseId!==input.releaseId
     || priceVersionId!==release.id || termVersionId!==release.term_version_id)unavailable("Personal rule references cannot be verified");
+
+  const projection={quote:projectTenantPriceQuote(quote,original),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
+    ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion,...(v2Funding!.fullPayoutTerms?{terms:v2Funding!.fullPayoutTerms}:{})}}:{})};
+  return {account,version:{...version,payload:version.payload!,content_hash:version.content_hash!},membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,quote,ruleRefs,binding,projection};
+}
+
+/** A price view, not a confirmation: no lock wrapper, agreement acceptance, digest credential or signing. */
+export async function readPersonalPriceProjection(client:PoolClient,context:OrderUserContext,input:Pick<ReturnType<typeof confirmationInput>,"accountId"|"versionId"|"releaseId">,options:PersonalConfirmationOptions,prepared:{account:PublishingAccount;game:{current_release_id:string|null;enabled:boolean};asOfUtc:string}) {
+  const priced=await calculateBoundPersonalPrice(client,context,input,options,prepared.account,prepared.game,"READ",prepared.asOfUtc);
+  return {listingHash:priced.version.content_hash,projection:priced.projection};
+}
+
+export async function rebuildPersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,options:PersonalConfirmationOptions) {
+  // This authorization function locks both users in ID order and rechecks session/identity.
+  const parties=await assertFreshCreateAuthorization(client,context,input.accountId);
+  const game=(await client.query(`SELECT current_release_id,enabled FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`,[parties.gameId])).rows[0];
+  const account=(await client.query<PublishingAccount>(`SELECT * FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`,[input.accountId])).rows[0];
+  if(!account || account.owner_user_id!==parties.ownerUserId || account.game_id!==parties.gameId || !game?.enabled)throw notFound();
+
+  const {version,membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,quote,ruleRefs,binding,projection}=await calculateBoundPersonalPrice(client,context,input,options,account,game,"WRITE");
   const guaranteeSnapshot = { status: guarantee.publisherBail, reference: guarantee.reference };
   const baseSnapshot=ownerDeclaration
     ? {schema:"personal-quote-v2" as const,userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,
@@ -226,8 +246,8 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
     funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,disclosureVersion:v2Funding!.disclosureVersion},quote} : baseSnapshot;
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
-  return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection:{quote:projectDeltaQuote(quote,"public"),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
-    ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion,...(v2Funding!.fullPayoutTerms?{terms:v2Funding!.fullPayoutTerms}:{})}}:{})}};
+  return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection};
+
 }
 
 export async function issuePersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,options:PersonalConfirmationOptions) {

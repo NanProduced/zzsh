@@ -1,3 +1,4 @@
+import { projectTenantPriceQuote } from "./tenant-price-projection";
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
@@ -460,6 +461,29 @@ async function bumpAccount(
   ).rows[0]!;
   account.revision = row.revision;
 }
+async function currentTradeResourcesMatch(client: PoolClient, a: PublishingAccount, v: ListingVersion, lockResources: boolean): Promise<boolean> {
+  if (!v.payload) return false;
+  const lines = normalizeQuote(v.payload.quoteValues).lines;
+  const ids = [...new Set(lines.map(line => line.itemId))];
+  const items = ids.length ? (await client.query<{ id: string; code: string; unit: string; enabled: boolean }>(
+    `SELECT id,code,unit,enabled /* current-trade-resources */ FROM zzsh_supply.billable_item WHERE game_id=$1 AND id=ANY($2::text[]) ORDER BY id${lockResources ? " FOR SHARE" : ""}`,
+    [a.game_id, ids],
+  )).rows : [];
+  const byId = new Map(items.map(item => [item.id, item]));
+  let current = lines.length > 0 && byId.size === ids.length;
+  for (const line of lines) {
+    const item = byId.get(line.itemId);
+    if (!item?.enabled || item.unit !== line.unit) { current = false; continue; }
+    try { assertDeltaResourceUnit(item.code, item.unit); }
+    catch (error) { if (!(error instanceof SecurityApiError)) throw error; current = false; }
+  }
+  return current;
+}
+
+function listingTitleNeedsReview(v: ListingVersion): boolean {
+  return typeof v.title === "string" && (v.title.includes("历史资料待核实") || (!v.title.trim() && v.origin !== "NATIVE"));
+}
+
 export async function publicationBlockers(
   client: PoolClient,
   a: PublishingAccount,
@@ -499,23 +523,7 @@ export async function publicationBlockers(
   const unboundNativeDraft = v.origin === "NATIVE" && v.review_state === "DRAFT" && !v.rule_release_id;
   if (!unboundNativeDraft && (!v.rule_release_id || game?.current_release_id !== v.rule_release_id))
     reasons.push("RULE_CHANGED");
-  if (purpose === "WRITE" && v.payload && v.origin === "NATIVE") {
-    const lines = normalizeQuote(v.payload.quoteValues).lines;
-    const ids = [...new Set(lines.map(line => line.itemId))];
-    const items = ids.length ? (await client.query<{ id: string; code: string; unit: string; enabled: boolean }>(
-      `SELECT id,code,unit,enabled /* current-trade-resources */ FROM zzsh_supply.billable_item WHERE game_id=$1 AND id=ANY($2::text[]) ORDER BY id FOR SHARE`,
-      [a.game_id, ids],
-    )).rows : [];
-    const byId = new Map(items.map(item => [item.id, item]));
-    let current = lines.length > 0 && byId.size === ids.length;
-    for (const line of lines) {
-      const item = byId.get(line.itemId);
-      if (!item?.enabled || item.unit !== line.unit) { current = false; continue; }
-      try { assertDeltaResourceUnit(item.code, item.unit); }
-      catch (error) { if (!(error instanceof SecurityApiError)) throw error; current = false; }
-    }
-    if (!current) reasons.push("RULE_CHANGED");
-  }
+  if (purpose === "WRITE" && v.payload && v.origin === "NATIVE" && !(await currentTradeResourcesMatch(client, a, v, true))) reasons.push("RULE_CHANGED");
   if (v.rule_release_id && game?.current_release_id === v.rule_release_id) {
     try {
       const policy = shared
@@ -561,7 +569,7 @@ export async function publicationBlockers(
       external.occupancy === "OCCUPIED" ? "OCCUPIED" : "OCCUPANCY_UNKNOWN",
     );
   // Native titles may be empty. The migration placeholder still cannot publish on any origin.
-  if (purpose === "WRITE" && typeof v.title === "string" && (v.title.includes("历史资料待核实") || (!v.title.trim() && v.origin !== "NATIVE"))) {
+  if (purpose === "WRITE" && listingTitleNeedsReview(v)) {
     reasons.push("TITLE_REVIEW_REQUIRED");
   }
   return reasons;
@@ -1585,6 +1593,14 @@ export async function evaluatePublication(
   return blockers;
 }
 
+/** Transaction preview keeps WRITE qualification predicates, but uses ordinary SELECT facts and READ gates. */
+export async function evaluatePricePreviewPublication(client: PoolClient, a: PublishingAccount, v: ListingVersion, gate: SupplyGateReader): Promise<string[]> {
+  const blockers = await evaluatePublication(client, a, v, gate, "READ", true);
+  if (v.payload && v.origin === "NATIVE" && !(await currentTradeResourcesMatch(client, a, v, false))) blockers.push("RULE_CHANGED");
+  if (listingTitleNeedsReview(v)) blockers.push("TITLE_REVIEW_REQUIRED");
+  return [...new Set(blockers)];
+}
+
 export function publicationHasUnknownFacts(blockers:readonly string[]):boolean {
   return blockers.some(reason=>["FUNDING_UNKNOWN","OCCUPANCY_UNKNOWN","PUBLISHER_BAIL_UNCONFIRMED"].includes(reason));
 }
@@ -1842,13 +1858,9 @@ export async function listingDetail(
     ? observed.publication
     : await readListingPublication(client, publicAccount, v);
   const quote = v.payload
-    ? { ...projectDeltaQuote(
-        {
-          ...v.payload.quoteValues,
-          contentHash: v.content_hash,
-        } as unknown as InternalQuote,
-        quoteViewer,
-      ), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
+    ? { ...(viewer === "public" ? projectTenantPriceQuote({ ...v.payload.quoteValues, contentHash: v.content_hash } as unknown as InternalQuote, v.payload.quoteValues) : projectDeltaQuote(
+        { ...v.payload.quoteValues, contentHash: v.content_hash } as unknown as InternalQuote, quoteViewer,
+      )), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
     : null;
   if (viewer === "public") {
     if (!v.payload || v.payload.accountId !== a.id || v.payload.gameId !== a.game_id || computeContentHash(v.payload) !== v.content_hash) throw notFound();

@@ -23,6 +23,20 @@
 - 公开说明适用三角洲行动账号租赁：VIP/SVIP免租客押金，STANDARD/DISCOUNT_USER不免押，资源价格以本次个人报价为准。有效期、购买与授予方式尚未由现有模型提供，返回UNKNOWN；不据tier推断终身、折扣数字或最终交易资格。Web BFF白名单裁剪说明，未知/旧说明不影响独立的已核档位读取，页面保留未提供状态。
 - runtime仅SELECT/INSERT及必要更新列；禁止DELETE/TRUNCATE和直接更新user_id/updated_at。SQL单调版本守卫与API用户锁/CAS共同约束。
 
+## 只读本人价预览
+
+`GET /api/v2/rental-price-preview` 与 Web API 别名 `/api/bff/user/rental-price-preview` 只接受唯一的 `accountId/versionId/releaseId` 三个查询参数，沿既有用户 Cookie 与 Origin 校验。重复、缺失或额外参数拒绝；本人来自会话，不接受客户端档位、折扣、金额或条款同意。
+
+业务读取使用同一 `REPEATABLE READ READ ONLY` 事务及显式 READ 资金上下文，复用原计价、完整会员/礼遇方案选择和交易资格谓词，不调用完整确认入口。无交易显式行锁，不初始化资格/保证金依据，不写同意、订单、占用或资金，也不签发确认 ID/token；普通 SELECT 仍持有数据库表读锁。原有认证 SDK 的合法过期会话清理与业务只读分列，不宣称整个 HTTP 没有认证生命周期写入。
+
+成功体为 `rental-price-preview.v1`：`binding` 绑定账号/版本/release/listingHash，`quote` 提供本人净资源行、资源费、实际租客押金与总预付，另有基准押金、已核方案来源及适用包赔披露。选中包赔但未同意时可先看价；正式接受和签发仍由后续 POST 完成。缺必要资格、金额或资金依据保持不可用，不回退普通档或零；错误仅公开 code/message/requestId，不透内部依据与下游私有详情。
+
+`quote.baseRenterHaffRatioWanPerYuan` 是已验证发布版 STANDARD 基础租客兑换比例（万哈夫币/元），精确小数字符串或 null，已含发布价规则、未再计本人会员/礼遇优惠。公开列表/详情与本人预览口径相同；缺旧快照依据不反推、不默认、不重定价。行数量、计价基数、参考单价与实际金额分别读取，不能靠客户端乘法替代服务端结果。
+
+`asOfUtc` 和 `refreshAfterUtc` 提供读取时间与约30秒刷新提示，不预留账号、锁价或替代交易凭据。响应 private/no-store，客户端按身份和三引用去重、切人/换版本丢弃旧响应，不周期轮询。后续确认与建单仍重核；金额变化须重新让用户确认，旧 UNKNOWN 的 token/body/key 不得被新预览替换。
+
+实际押金为零不证明享有完全免押权益。新预览不提供 `depositWaived`，仅输出真实金额及所选方案来源；不从净差反推配置额度。旧确认的同名布尔仍保留其既有“本次净押金为零”兼容含义，不能作为权益形式的声明。
+
 ## 个人确认
 
 `POST /api/v2/order-confirmations`及同源`/api/bff/user/order-confirmations`，Web入口`/api/order-confirmations`。输入为`{accountId,versionId,releaseId}`，选择包赔时另需实际适用的`fullPayoutTermsAcceptance={termsVersionId,termsDigest,disclosureVersion}`；正式Cookie确定本人，拒绝客户端tier、金额或资格。响应no-store。

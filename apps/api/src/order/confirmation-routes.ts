@@ -1,3 +1,4 @@
+import { handleRentalPricePreview, RENTAL_PRICE_PREVIEW_PATHS } from "./rental-price-preview";
 import type { INestApplication } from "@nestjs/common";
 import type { AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
@@ -19,4 +20,5 @@ export function mountPersonalConfirmations(app:INestApplication,security:AuthSec
       sendJson(response,200,result,requestId);
     });
   });
+  for (const path of RENTAL_PRICE_PREVIEW_PATHS) app.getHttpAdapter().getInstance().use(path, (request: SupplyNodeRequest, response: SupplyResponse) => handleRentalPricePreview(request, response, security, options, path));
 }

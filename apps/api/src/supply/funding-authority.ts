@@ -142,7 +142,7 @@ type FormalFundingContext = {
   creditGuarantee?: CreditGuaranteeGateSnapshot;
 };
 
-async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string, options: ProductionFundingAuthorityOptions = {}, purpose: "READ" | "WRITE" = "WRITE"): Promise<FormalFundingContext | null> {
+async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string, options: ProductionFundingAuthorityOptions = {}, purpose: "READ" | "WRITE" = "WRITE", evaluatedAt?: string): Promise<FormalFundingContext | null> {
   const policyRow = versionId
     ? (await client.query<PolicyRow & { versionId: string; ownerUserId: string; accountId: string; contentHash: string | null; payload: ListingVersion["payload"]; currentVersionId: string | null; publicationSource: string | null }>(
       `SELECT p.id AS "priceVersionId",p.funding_policy AS policy,p.status,
@@ -189,7 +189,7 @@ async function readFormalContext(client: PoolClient, accountId: string, ownerUse
     // its own stable waiver basis; it must not require the new credit schema
     // or make a synthetic proof row.  An explicit historical revocation still
     // blocks closed-loop use until an operator appends a new accepted record.
-    const latest = await latestProof(client, accountId);
+    const latest = await (purpose === "READ" && evaluatedAt ? readLatestAccountGuaranteeProof(client, accountId, evaluatedAt) : latestProof(client, accountId));
     if (latest?.status === "REVOKED") return null;
     return {
       policy,
@@ -205,7 +205,7 @@ async function readFormalContext(client: PoolClient, accountId: string, ownerUse
       gameId: policyRow.gameId,
     };
   }
-  const latest = await latestProof(client, accountId);
+  const latest = await (purpose === "READ" && evaluatedAt ? readLatestAccountGuaranteeProof(client, accountId, evaluatedAt) : latestProof(client, accountId));
   const proof = effectiveProof(policy, policyRow.priceVersionId, accountId, ownerUserId, latest);
   if (proof) return { policy, proof, guaranteeReference: proof.id, guaranteeStatus: "SATISFIED", publisherBailRequirementCents: policy.guaranteeRequirement.requiredCents, priceVersionId: policyRow.priceVersionId, releaseId: policyRow.releaseId, gameId: policyRow.gameId };
   return null;
@@ -249,10 +249,9 @@ function fullPayout(value: unknown): { schema: "full-payout-declaration-v1"; sel
   return { schema: "full-payout-declaration-v1", selected: entry.selected };
 }
 
-export function createProductionConfirmationFundingReader(options: ProductionFundingAuthorityOptions = {}): ConfirmationFundingReader {
-  const reader: ConfirmationFundingReader = async (client, account, version) => {
+async function productionConfirmationFunding(client: PoolClient, account: PublishingAccount, version: ListingVersion, options: ProductionFundingAuthorityOptions, purpose: "READ" | "WRITE", evaluatedAt?: string): Promise<ConfirmationFunding | null> {
     try {
-    const context = await readFormalContext(client, account.id, account.owner_user_id, version.id, options);
+    const context = await readFormalContext(client, account.id, account.owner_user_id, version.id, options, purpose, evaluatedAt);
     if (!context || account.current_version_id !== version.id || !version.payload || !version.content_hash) return unavailable();
     if (options.creditGuaranteeEnabled && !["SATISFIED", "NOT_REQUIRED"].includes(context.guaranteeStatus)) return unavailable();
     const publication = (await client.query<{ source: string }>(
@@ -281,10 +280,20 @@ export function createProductionConfirmationFundingReader(options: ProductionFun
     } catch {
       return unavailable();
     }
-  };
+  }
+
+export function createProductionConfirmationFundingReader(options: ProductionFundingAuthorityOptions = {}): ConfirmationFundingReader {
+  const reader: ConfirmationFundingReader = (client, account, version) => productionConfirmationFunding(client, account, version, options, "WRITE");
   productionReaders.add(reader);
   productionReaderOptions.set(reader, options);
   return reader;
+}
+
+/** READ counterpart of an already configured production reader; unbranded callbacks are never invoked. */
+export async function readProductionConfirmationFundingForPreview(client: PoolClient, account: PublishingAccount, version: ListingVersion, reader: ConfirmationFundingReader | undefined, evaluatedAt: string): Promise<ConfirmationFunding | null> {
+  const options = reader ? productionReaderOptions.get(reader) : undefined;
+  if (!reader || !productionReaders.has(reader) || !options) return null;
+  return productionConfirmationFunding(client, account, version, options, "READ", evaluatedAt);
 }
 
 export const readFormalConfirmationFunding: ConfirmationFundingReader = createProductionConfirmationFundingReader();
