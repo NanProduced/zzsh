@@ -346,3 +346,63 @@ test("runtime identity treats a NULL content CREATE projection (absent schema) a
   const { pool } = runtimeIdentityPool({ identity: leastPrivilegeIdentityRow({ canCreateContentSchema: null }) });
   await assertBusinessRuntimeIdentity(pool, RUNTIME_IDENTITY_CONFIG);
 });
+
+
+// 真实pg/pg-pool在子进程内借出无socket Client，避免未捕获error杀死测试宿主。
+const businessClientErrorProbe = String.raw`
+  const assert=require('node:assert/strict'),{EventEmitter}=require('node:events'),net=require('node:net');
+  const {createBusinessPool}=require(BUSINESS_MODULE),{withTransaction}=require(SECURITY_MODULE);
+  let socketAttempts=0;const forbid=()=>{socketAttempts++;throw Error('OFFLINE_SOCKET_FORBIDDEN');};
+  net.Socket.prototype.connect=forbid;net.connect=forbid;net.createConnection=forbid;net.Server.prototype.listen=forbid;
+  const failure=Object.assign(Error('DO_NOT_LOG_SYNTHETIC_SECRET'),{code:'ECONNRESET'}),clients=[],queries=[],logs=[];
+  class Client extends EventEmitter{
+    constructor(config){super();this.config=config;this._queryable=true;this._ending=false;this.processID=700+clients.length;clients.push(this);}
+    connect(cb){process.nextTick(()=>cb(null));}
+    query(sql,values,cb){if(typeof values==='function')cb=values;queries.push(sql);
+      const result=new Promise((resolve,reject)=>{
+        if(!this._queryable){process.nextTick(()=>reject(Error('Connection is not queryable')));return;}
+        if(MODE==='active'&&sql==='COMMIT'){this._queryable=false;process.nextTick(()=>{process.nextTick(()=>reject(failure));this.emit('error',failure);});return;}
+        process.nextTick(()=>resolve({command:sql,rows:[]}));
+      });
+      if(cb){result.then(r=>cb(null,r),e=>cb(e));return;}return result;
+    }
+    end(cb){if(this._ending){if(cb)process.nextTick(cb);return Promise.resolve();}this._ending=true;return new Promise(resolve=>process.nextTick(()=>{this.emit('end');cb?.();resolve();}));}
+  }
+  const previousError=console.error;console.error=line=>logs.push(JSON.parse(String(line)));
+  const pool=createBusinessPool({database:{host:'127.0.0.1',port:1,name:'SYNTHETIC_OFFLINE',user:'SYNTHETIC_OFFLINE',password:'SYNTHETIC_NOT_A_CREDENTIAL'}});
+  Object.assign(pool,{Client});
+  (async()=>{let originalErrorPreserved=false,idleRemoved=false;
+    try{
+      if(MODE==='active'){
+        let caught;try{await withTransaction(pool,async()=>({mustNotReturn:true}));}catch(e){caught=e;}
+        assert.equal(caught,failure);originalErrorPreserved=true;await new Promise(resolve=>setImmediate(resolve));
+        assert.deepEqual(queries,['BEGIN','COMMIT','ROLLBACK']);assert.equal(pool.totalCount,0);
+        assert.equal(logs.filter(x=>x.event==='business_pool_client_error').length,1);
+      }else{
+        const client=await pool.connect();const listenerCount=client.listenerCount('error');client.release();assert.equal(listenerCount,1);client.emit('error',failure);
+        await new Promise(resolve=>setImmediate(resolve));assert.equal(pool.totalCount,0);idleRemoved=true;
+        assert.equal(logs.filter(x=>x.event==='business_pool_idle_client_error').length,1);
+        const replacement=await pool.connect();assert.notEqual(replacement,client);assert.equal(replacement.listenerCount('error'),1);replacement.release();
+      }
+      await pool.end();assert.equal(socketAttempts,0);assert(!JSON.stringify(logs).includes(failure.message));assert(!JSON.stringify(logs).includes('SYNTHETIC_NOT_A_CREDENTIAL'));
+      assert(logs.every(x=>Object.keys(x).sort().join(',')==='backendPid,code,event'));
+      console.error=previousError;process.stdout.write(JSON.stringify({mode:MODE,originalErrorPreserved,idleRemoved,logs,physicalClients:clients.length,socketAttempts})+'\n');
+    }finally{if(!pool.ended)await pool.end();console.error=previousError;}
+  })().catch(e=>{console.error(e);process.exitCode=2;});
+`;
+function probeBusinessClientError(mode: "active" | "idle") {
+  const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+  const source = "const MODE=" + JSON.stringify(mode) + ";const BUSINESS_MODULE=" + JSON.stringify(require.resolve("../src/database/business")) + ";const SECURITY_MODULE=" + JSON.stringify(require.resolve("../src/auth/security-core")) + ";" + businessClientErrorProbe;
+  return spawnSync(process.execPath, ["-e", source], { encoding: "utf8", env });
+}
+test("business pool keeps active client transport error observable without losing the original COMMIT error", () => {
+  const child = probeBusinessClientError("active"); assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout); assert.equal(result.originalErrorPreserved, true); assert.equal(result.socketAttempts, 0);
+  assert.equal(result.logs[0].event, "business_pool_client_error"); assert.equal(result.logs[0].code, "ECONNRESET");
+});
+test("business pool retains idle removal and one persistent listener per physical client", () => {
+  const child = probeBusinessClientError("idle"); assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout); assert.equal(result.idleRemoved, true); assert.equal(result.physicalClients, 2); assert.equal(result.socketAttempts, 0);
+  assert(result.logs.some((row: { event: string }) => row.event === "business_pool_idle_client_error"));
+});

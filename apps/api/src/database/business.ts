@@ -62,6 +62,16 @@ export function createBusinessPool(config: {
     max: limits.max ?? 10,
     maxUses: limits.maxUses,
   });
+  // pg-pool借出连接时移除idle监听；Client监听让传输错误仍交回查询与事务处理。
+  pool.on("connect", (client) => {
+    client.on("error", (error: Error) => {
+      console.error(JSON.stringify({
+        event: "business_pool_client_error",
+        code: (error as { code?: string }).code ?? error.name,
+        backendPid: (client as unknown as { processID?: number })?.processID ?? null,
+      }));
+    });
+  });
   /* An idle client whose backend died emits 'error' on the pool; without a listener the process
      would crash. The event is recorded in the API log stream; the driver removes the dead client. */
   pool.on("error", (error, client) => {

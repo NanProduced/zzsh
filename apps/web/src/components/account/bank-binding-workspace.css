@@ -1,0 +1,74 @@
+.bank-binding-workspace { display: grid; gap: 22px; min-width: 0; }
+.bank-withdrawal-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.bank-binding-workspace .account-module-card { min-width: 0; }
+.bank-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bank-section-heading h3,.bank-section-heading h4 { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: 17px; font-weight: 650; line-height: 1.5; }
+.bank-section-heading h4 { font-size: 15px; }
+.bank-section-heading h3>svg { flex: none; color: var(--account-accent, var(--color-accent-brand)); }
+.bank-binding-workspace .bank-action { min-height: 44px; padding: 9px 13px; border-radius: 8px; font-family: var(--font-sans); font-size: 14px; font-weight: 600; line-height: 1.5; white-space: normal; }
+.bank-binding-workspace .bank-action>svg { flex: none; }
+.bank-binding-workspace .bank-primary,.bank-withdrawal-confirm .ui-alert-dialog-confirm { background: var(--account-accent, var(--color-accent-brand)); color: var(--color-accent-brand-text); border-color: transparent; }
+.bank-binding-workspace .bank-action:focus-visible,.bank-withdrawal-confirm .ui-alert-dialog-confirm:focus-visible { outline: 2px solid var(--account-accent, var(--color-accent-brand)); outline-offset: 3px; }
+.bank-binding-workspace .bank-action[disabled],.bank-binding-workspace .bank-action[data-disabled] { opacity: .55; cursor: not-allowed; }
+.bank-help { margin: 9px 0 16px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.bank-meta { margin: 10px 0 16px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.bank-saved { display: flex; align-items: center; gap: 12px; padding: 18px 0 4px; }
+.bank-card-mark { display: grid; place-items: center; flex: none; width: 44px; height: 44px; border-radius: 10px; color: var(--account-accent, var(--color-accent-brand)); background: var(--account-accent-muted, var(--color-bg-elevated)); }
+.bank-saved>div { min-width: 0; flex: 1; }
+.bank-saved strong { display: block; font-size: 20px; font-weight: 650; line-height: 1.5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.bank-saved p { margin: 3px 0 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.6; }
+.bank-saved>.info-status-badge { flex: none; }
+.bank-empty { display: grid; gap: 8px; padding: 12px 0 4px; justify-items: start; }
+.bank-empty p,.bank-empty-text { margin: 0 0 10px; font-size: 14px; line-height: 1.65; color: var(--color-text-secondary); }
+.bank-binding-form,.bank-withdraw-form { display: grid; gap: 17px; margin-top: 20px; }
+.bank-binding-form { padding-top: 20px; border-top: 1px solid var(--color-border-subtle); }
+.bank-binding-workspace .form-input { width: 100%; min-height: 46px; font-size: 16px; line-height: 1.5; }
+.bank-binding-workspace .info-field-label { font-size: 14px; font-weight: 600; }
+.bank-binding-workspace .info-field-helper { margin-top: 7px; font-size: 12px; line-height: 1.6; }
+.bank-binding-form>.bank-help { margin: -4px 0 0; }
+.bank-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.bank-feedback { margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; }
+.bank-form-error { margin: 0; color: var(--color-status-error); font-size: 13px; line-height: 1.6; }
+.bank-policy { display: grid; gap: 7px; margin: 15px 0 0; padding: 12px 0; border-block: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.bank-quote { display: grid; gap: 16px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--color-border-subtle); }
+.bank-quote>.bank-primary { width: 100%; }
+.bank-facts { display: grid; gap: 0; margin: 0; font-size: 14px; line-height: 1.6; }
+.bank-facts>div { display: grid; grid-template-columns: minmax(96px, .8fr) minmax(0, 1.2fr); align-items: baseline; gap: 14px; padding: 9px 0; }
+.bank-facts>div+div { border-top: 1px solid var(--color-border-subtle); }
+.bank-facts dt { color: var(--color-text-secondary); }
+.bank-facts dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.bank-result { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--color-border-subtle); }
+.bank-result .bank-section-heading { margin-bottom: 12px; }
+.bank-history-heading { padding: 6px 0 0; }
+.bank-history-heading h2 { margin: 0; font-size: 20px; line-height: 1.45; font-weight: 650; }
+.bank-history-heading p { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 14px; line-height: 1.6; }
+.bank-history-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, auto) auto; gap: 14px; align-items: center; padding: 17px 0; border-top: 1px solid var(--color-border-subtle); }
+.bank-history-row>div { min-width: 0; }
+.bank-history-row p { margin: 7px 0 4px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.5; }
+.bank-history-row small { display: block; font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.bank-history-row>strong { font-size: 18px; line-height: 1.4; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.bank-history-section>.bank-action { margin-top: 14px; }
+.bank-history-detail { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--color-border-default); }
+.bank-history-detail>.bank-section-heading { margin-bottom: 10px; }
+.bank-binding-workspace .info-alert { margin-top: 15px; }
+.bank-binding-workspace .info-alert .bank-actions { margin-top: 4px; }
+.bank-withdrawal-confirm { max-width: 480px; }
+.bank-withdrawal-confirm .bank-facts { margin-top: 10px; }
+@media(max-width: 980px) {
+  .bank-withdrawal-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media(max-width: 600px) {
+  .bank-binding-workspace { gap: 16px; }
+  .bank-section-heading { align-items: flex-start; gap: 8px; }
+  .bank-section-heading h3 { padding-top: 9px; font-size: 16px; }
+  .bank-binding-workspace .bank-action { padding-inline: 10px; }
+  .bank-saved { flex-wrap: wrap; gap: 10px; }
+  .bank-saved>.info-status-badge { margin-left: 54px; }
+  .bank-saved strong { font-size: 19px; }
+  .bank-history-row { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .bank-history-row>div { grid-column: 1/-1; }
+  .bank-history-row>strong { text-align: left; font-size: 17px; }
+  .bank-history-row>.bank-action { justify-self: end; }
+  .bank-facts>div { grid-template-columns: minmax(88px,.85fr) minmax(0,1.15fr); gap: 10px; }
+  .bank-actions>.bank-primary { flex: 1 1 180px; }
+}

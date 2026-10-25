@@ -516,7 +516,7 @@ export async function configureChannelRefundPrivileges(pool: Pick<Pool, "query">
   `);
 }
 
-/** Optional collection/refund/payout/account groups; verify every metadata group before changing ACL. */
+/** Optional collection/refund/payout/account/bank groups; verify every metadata group before changing ACL. */
 export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole), words = (value = "") => value.split(" ").filter(Boolean);
   type Table = { name: string; insert: string; update?: string; metadata: string; select?: string };
@@ -543,13 +543,14 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
     { name: "zzsh_order.joinpay_payout_evidence", insert: "id intent_id observation_id operation terminal platform_serial_no provider_fee_raw provider_fee_cents facts_canonical facts_digest", metadata: "created_xid created_at" },
   ];
   const account: Table[] = [{ name: "zzsh_order.joinpay_account_observation", insert: "attempt_id merchant_identity_id operation profile_id profile_sha256 rules_sha256 key_version_ref review_ref review_sha256 request_sha256 requested_at received_at http_status response_complete received_bytes transport_failure raw_body raw_sha256 evidence_level decision schema_status signature_status binding_status reason status_code error_code amounts", metadata: "recorded_at", select: "attempt_id merchant_identity_id operation evidence_level decision reason requested_at received_at recorded_at response_complete http_status status_code error_code amounts" }];
-  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account].map(t => t.name);
+  const bank: Table[] = [{ name: "zzsh_order.withdrawal_bank_binding", insert: "id user_id revision sealed_details card_mask holder_mask", update: "revision sealed_details card_mask holder_mask", metadata: "created_at updated_at", select: "id user_id revision sealed_details card_mask holder_mask created_at updated_at" }];
+  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account, ...bank].map(t => t.name);
   const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial optional tables */", [optional])).rows;
   const validInventory = (rows: typeof found, names: string[]) => rows.length === names.length && new Set(rows.map(r => r.name)).size === names.length && rows.every(r => names.includes(r.name) && typeof r.present === "boolean");
   if (!validInventory(found, optional)) throw new Error("JoinPay financial inventory is incomplete");
   const complete = (tables: Table[]) => { const rows = tables.map(t => found.find(r => r.name === t.name)!); if (rows.every(r => !r.present)) return false; if (rows.some(r => !r.present)) throw new Error("JoinPay financial group is partially deployed"); return true; };
-  const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account);
-  if (!hasCollection && !hasRefund && !hasPayout && !hasAccount) return;
+  const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account), hasBank = complete(bank);
+  if (!hasCollection && !hasRefund && !hasPayout && !hasAccount && !hasBank) return;
   if (hasPayout && !hasRefund) throw new Error("JoinPay payout requires the complete formal refund parent");
   if (hasCollection) {
     const parentNames = [collection[7]!.name];
@@ -560,11 +561,12 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
     const parent = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [[refund[0]!.name]])).rows;
     if (!validInventory(parent, [refund[0]!.name]) || parent[0]!.present !== true) throw new Error("JoinPay refund intent parent is incomplete");
   }
-  const tables = [...(hasCollection ? collection : []), ...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : [])];
+  const tables = [...(hasCollection ? collection : []), ...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : []), ...(hasBank ? bank : [])];
   const functions = [
     ...(hasCollection ? ["zzsh_order.joinpay_formal_request_effect(text,text)"] : []),
     ...(hasRefund ? ["zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)", "zzsh_order.native_refund_terminal_complete(text)"] : []),
     ...(hasPayout ? ["zzsh_order.assert_joinpay_payout_scope(text,text,text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_payout_profile(text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_withdrawal_admission(zzsh_order.joinpay_withdrawal_intent,boolean)", "zzsh_order.joinpay_payout_raw_data(zzsh_order.joinpay_payout_observation)", "zzsh_order.joinpay_withdrawal_expected_lines(text)", "zzsh_order.joinpay_withdrawal_complete(text)"] : []),
+    ...(hasBank ? ["zzsh_order.withdrawal_bank_binding_guard()"] : []),
   ];
   const identity = (await pool.query(`/* joinpay financial runtime role */ SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,r.rolbypassrls AS "bypassRls",r.rolcreaterole AS "createRole",r.rolcreatedb AS "createDb",r.rolreplication AS replication,
     EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) AS "memberRights",
@@ -577,13 +579,22 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
   const inventory = new Map<string, string[]>();
   for (const table of tables) {
-    const actual = columns.filter(c => c.name === table.name).map(c => c.attname), expected = words(`${table.insert} ${table.update ?? ""} ${table.metadata}`);
+    const actual = columns.filter(c => c.name === table.name).map(c => c.attname), expected = [...new Set(words(`${table.insert} ${table.update ?? ""} ${table.metadata}`))];
     if (actual.length !== expected.length || new Set(actual).size !== actual.length || expected.some(c => !actual.includes(c))) throw new Error("JoinPay financial column inventory differs: " + table.name);
     inventory.set(table.name, actual);
   }
   if (functions.length) {
     const fn = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regprocedure(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial functions */", [functions])).rows;
     if (!validInventory(fn, functions) || fn.some(f => !f.present)) throw new Error("JoinPay financial function inventory is incomplete");
+  }
+  if (hasBank) {
+    // 只接受覆盖全部行写入的 BEFORE ROW INSERT/UPDATE 守卫，拒绝禁用、限列或带条件的触发器。
+    const guard = (await pool.query<{ ready: boolean }>(`/* withdrawal bank binding guard */ SELECT EXISTS (
+      SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.withdrawal_bank_binding')
+        AND t.tgname='withdrawal_bank_binding_guard' AND t.tgfoid=to_regprocedure('zzsh_order.withdrawal_bank_binding_guard()')
+        AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23 AND t.tgattr::text='' AND t.tgqual IS NULL
+    ) AS ready`)).rows;
+    if (guard.length !== 1 || guard[0]!.ready !== true) throw new Error("Withdrawal bank guard inventory is incomplete");
   }
   for (const table of tables) {
     const all = inventory.get(table.name)!, list = all.map(quoteIdentifier).join(",");

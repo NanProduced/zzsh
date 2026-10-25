@@ -16,19 +16,23 @@ const allColumns=new Map<string,string[]>([[intent,[...columns(old,intent),...[.
 const collectionColumns = new Map<string,string[]>([["zzsh_order.payment_request",["id","order_id","channel","merchant_identity_id","config_profile_id","protocol_version","key_version_ref","platform_order_no","channel_order_no","amount_cents","currency","wire_amount_yuan","method","evidence_level","idempotency_scope_key","idempotency_key","request_fingerprint","state","revision","lease_version","lease_owner","lease_until","created_at","updated_at"]],["zzsh_order.payment_channel_observation",["id","request_id","channel","merchant_identity_id","channel_order_no","channel_trx_no","config_profile_id","protocol_version","key_version_ref","operation","source","evidence_level","event","result","reason","channel_status","provider_paid_at_raw","raw_sha256","raw_ref","verify_outcome","lease_version","state_before","state_after","stale","late","conflict","observed_at"]],["zzsh_order.payment_channel_transaction",["id","channel","merchant_identity_id","channel_trx_no","order_origin","native_order_id","request_id","confirmation_id","evidence_level","created_at"]],["zzsh_order.joinpay_collection_binding",["request_id","wire_merchant_no","trade_merchant_no","product_name","notify_url","initial_profile_sha256","evidence_mode","created_at","formal_admission_ref","formal_admission_sha256","formal_admission_canonical"]],["zzsh_order.joinpay_collection_attempt",["id","request_id","lease_version","lease_owner","operation","profile_id","profile_canonical","profile_sha256","key_version_ref","evidence_mode","request_body","request_sha256","created_at"]],["zzsh_order.joinpay_collection_observation",["id","attempt_id","request_id","raw_body","raw_sha256","http_status","response_complete","received_bytes","transport_failure","event","result","schema_outcome","signature_outcome","binding_outcome","verified","state_before","state_after","channel_status","provider_paid_at_raw","channel_trx_no","created_at"]],["zzsh_order.joinpay_collection_evidence",["id","request_id","operation","origin_observation_id","raw_query","raw_sha256","profile_id","profile_sha256","profile_canonical","key_version_ref","initial_admission_ref","initial_admission_sha256","admission_ref","admission_sha256","admission_canonical","event","result","schema_outcome","signature_outcome","binding_outcome","channel_trx_no","provider_paid_at_raw","provider_paid_at","created_at"]],["zzsh_order.distribution_order_admission",["id","order_id","resource_oid","resource_name","resource_marker","approval_digest","native_creation_audit_id","revision","active","admitted_at","expires_at","created_by_admin_id","reason","mode","source_admission_ref"]]]);
 for(const [name,columns]of collectionColumns)allColumns.set(name,columns);
 const collection=[...collectionColumns.keys()],collectionEffect='zzsh_order.joinpay_formal_request_effect(text,text)';
+const bank='zzsh_order.withdrawal_bank_binding',bankGuard='zzsh_order.withdrawal_bank_binding_guard()';
+const bankColumns=columns(sql('withdrawal-bank-binding-schema.sql'),bank);
+allColumns.set(bank,bankColumns);
 type Rights={table:Set<string>;columns:Map<string,Set<string>>;grantOption:boolean};
 const ops=['SELECT','INSERT','UPDATE','REFERENCES'],sorted=(v:Iterable<string>)=>[...v].sort();
 function fixture(groups=['REFUND','PAYOUT','ACCOUNT']){
-  const present=new Set([intent,oldObservation,...(groups.includes('REFUND')?refund:[]),...(groups.includes('PAYOUT')?payout:[]),...(groups.includes('ACCOUNT')?[account]:[]),...(groups.includes('COLLECTION')?collection:[])]),catalog=new Map([...allColumns].map(([n,c])=>[n,[...c]]));
+  const present=new Set([intent,oldObservation,...(groups.includes('REFUND')?refund:[]),...(groups.includes('PAYOUT')?payout:[]),...(groups.includes('ACCOUNT')?[account]:[]),...(groups.includes('COLLECTION')?collection:[]),...(groups.includes('BANK')?[bank]:[])]),catalog=new Map([...allColumns].map(([n,c])=>[n,[...c]]));
   if(!groups.includes('REFUND'))catalog.set(intent,columns(old,intent));
   const seen:{sql:string;args:any[]}[]=[],rights=new Map<string,Rights>();for(const principal of ['runtime_role','PUBLIC'])for(const [name,cols]of catalog)rights.set(principal+':'+name,{table:new Set(['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']),columns:new Map(ops.map(op=>[op,new Set(cols)])),grantOption:true});
-  const state={present,catalog,functions:new Set([...functions,collectionEffect]),identity:{roleOid:'10001',superuser:false,bypassRls:false,createRole:false,createDb:false,replication:false,memberRights:false,ownerRights:false} as any,badInventory:false,badColumns:false,permissionError:null as Error|null};
+  const state={present,catalog,functions:new Set([...functions,collectionEffect,bankGuard]),bankGuard:true as unknown,identity:{roleOid:'10001',superuser:false,bypassRls:false,createRole:false,createDb:false,replication:false,memberRights:false,ownerRights:false} as any,badInventory:false,badColumns:false,permissionError:null as Error|null};
   function emitted(sql:string){for(const raw of sql.split(';')){const text=raw.replace(/\s+/g,' ').trim(),m=/^(GRANT|REVOKE) (.+?) ON (?:TABLE )?([a-z_]+\.[a-z_]+) (?:TO|FROM) (.+)$/.exec(text);if(!m)continue;const principals=m[4]!.split(',').map(p=>p.trim().replaceAll('"',''));for(const principal of principals){const r=rights.get(principal+':'+m[3]);if(!r)continue;if(m[2]==='ALL'){assert.equal(m[1],'REVOKE');r.table.clear();r.grantOption=false;continue;}const grants=[...m[2]!.matchAll(/(SELECT|INSERT|UPDATE|REFERENCES)\s*\(([^)]*)\)/g)];if(grants.length){for(const [,op,list]of grants)for(const col of list!.split(',').map(s=>s.trim().replaceAll('"',''))){if(m[1]==='GRANT')r.columns.get(op!)!.add(col);else r.columns.get(op!)!.delete(col);}}else for(const op of m[2]!.split(',').map(s=>s.trim()))if(m[1]==='GRANT')r.table.add(op);else r.table.delete(op);}}}
   const pool={query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
     if(sql.includes('joinpay financial optional tables')||sql.startsWith('SELECT name,to_regclass')){const rows=args[0].map((name:string)=>({name,present:present.has(name)}));return{rows:state.badInventory?rows.slice(1):rows};}
     if(sql.includes('joinpay financial runtime role'))return{rows:state.identity?[state.identity]:[]};
     if(sql.includes('joinpay financial columns')){const rows=args[0].flatMap((name:string)=>(catalog.get(name)??[]).map(attname=>({name,attname})));return{rows:state.badColumns?[...rows,{name:'zzsh_order.other',attname:'id'}]:rows};}
     if(sql.includes('joinpay financial functions'))return{rows:args[0].map((name:string)=>({name,present:state.functions.has(name)}))};
+    if(sql.includes('withdrawal bank binding guard'))return{rows:state.bankGuard===null?[]:[{ready:state.bankGuard}]};
     if(sql.startsWith('SELECT attname FROM pg_attribute'))return{rows:(catalog.get(args[0])??[]).map(attname=>({attname}))};
     if(/^\s*(REVOKE|GRANT)/.test(sql)){if(state.permissionError)throw state.permissionError;emitted(sql);return{rows:[]};}
     throw Error('UNEXPECTED_OFFLINE_CATALOG_SQL');
@@ -107,4 +111,54 @@ test('collection uses the same non-owner runtime identity guard',async()=>{
 test('all installed groups converge again after stale broad collection grants',async()=>{
  const f=fixture(['COLLECTION','REFUND','PAYOUT','ACCOUNT']);await configure(f.pool);const before=f.snapshot();for(const table of collection)for(const principal of ['runtime_role','PUBLIC']){const r=f.rights.get(principal+':'+table)!;r.table.add('INSERT');r.table.add('UPDATE');r.columns.get('UPDATE')!.add(collectionColumns.get(table)!.at(-1)!);r.grantOption=true;}
  await configure(f.pool);assert.deepEqual(f.snapshot(),before);
+});
+
+
+test('bank binding can narrow independently and grants only eight read, six insert and four update columns',async()=>{
+ const f=fixture(['BANK']);f.state.present.delete(intent);f.state.present.delete(oldObservation);await configure(f.pool);
+ const r=f.rights.get('runtime_role:'+bank)!,pub=f.rights.get('PUBLIC:'+bank)!;
+ assert.equal(r.table.size,0);assert.equal(r.grantOption,false);assert.equal(pub.table.size,0);assert([...pub.columns.values()].every(s=>s.size===0));
+ assert.deepEqual(sorted(r.columns.get('SELECT')!),sorted(bankColumns));
+ assert.deepEqual(sorted(r.columns.get('INSERT')!),sorted('id user_id revision sealed_details card_mask holder_mask'.split(' ')));
+ assert.deepEqual(sorted(r.columns.get('UPDATE')!),sorted('revision sealed_details card_mask holder_mask'.split(' ')));
+ for(const col of ['id','user_id','created_at','updated_at'])assert(!f.can(bank,'UPDATE',col),col);
+ for(const col of ['created_at','updated_at'])assert(!f.can(bank,'INSERT',col),col);
+ for(const op of ['DELETE','TRUNCATE','REFERENCES','TRIGGER'])for(const col of bankColumns)assert(!f.can(bank,op,col));
+ const emitted=mutations(f).map(x=>x.sql).join('\n');assert(emitted.includes('REVOKE ALL ON FUNCTION '+bankGuard+' FROM "runtime_role", PUBLIC'));
+ assert(emitted.includes('GRANT EXECUTE ON FUNCTION '+bankGuard+' TO "runtime_role"'));assert(!emitted.includes('WITH GRANT OPTION'));
+ assert(!mutations(f).some(x=>[intent,...refund,...payout,account,...collection].some(name=>x.sql.includes('ON TABLE '+name+' '))));
+});
+test('absent bank schema is a no-op without requiring its guard',async()=>{
+ const f=fixture([]);f.state.functions.delete(bankGuard);f.state.bankGuard=false;const before=f.snapshot();await configure(f.pool);
+ assert.deepEqual(f.snapshot(),before);assert.equal(mutations(f).length,0);assert.equal(f.seen.length,1);
+ const other=fixture(['ACCOUNT']);other.state.functions.delete(bankGuard);await configure(other.pool);assert(other.can(account,'SELECT','amounts'));
+ assert(!other.seen.some(x=>x.sql.includes('withdrawal bank binding guard')));
+});
+test('bank metadata rejects each missing, extra or duplicate column before changing privileges',async()=>{
+ for(const missing of bankColumns){const f=fixture(['BANK']);f.state.catalog.set(bank,bankColumns.filter(c=>c!==missing));await assert.rejects(configure(f.pool),/column inventory/);assert.equal(mutations(f).length,0);}
+ for(const extra of ['unreviewed_column',bankColumns[0]!]){const f=fixture(['BANK']);f.state.catalog.get(bank)!.push(extra);await assert.rejects(configure(f.pool),/column inventory/);assert.equal(mutations(f).length,0);}
+});
+test('bank guard function and its enabled unconditional row trigger are required before privileges',async()=>{
+ const missing=fixture(['BANK']);missing.state.functions.delete(bankGuard);await assert.rejects(configure(missing.pool),/function inventory/);assert.equal(mutations(missing).length,0);
+ for(const ready of [false,undefined,null,'true',1]){const f=fixture(['BANK']);f.state.bankGuard=ready;await assert.rejects(configure(f.pool),/guard inventory/);assert.equal(mutations(f).length,0);}
+ const f=fixture(['BANK']);await configure(f.pool);const guard=f.seen.find(x=>x.sql.includes('withdrawal bank binding guard'))!.sql;
+ for(const clause of ["t.tgenabled='O'",'t.tgtype=23',"t.tgattr::text=''",'t.tgqual IS NULL',"t.tgfoid=to_regprocedure('"+bankGuard+"')",'NOT t.tgisinternal'])assert(guard.includes(clause),clause);
+});
+test('bank-only schema preserves the exact unprivileged non-owner role boundary',async()=>{
+ for(const field of ['superuser','bypassRls','createRole','createDb','replication','memberRights','ownerRights'])for(const value of [true,undefined]){const f=fixture(['BANK']);f.state.identity[field]=value;await assert.rejects(configure(f.pool),/runtime role/);assert.equal(mutations(f).length,0);}
+ const missing=fixture(['BANK']);missing.state.identity=null;await assert.rejects(configure(missing.pool),/runtime role/);assert.equal(mutations(missing).length,0);
+});
+test('bank reapplies after stale table and column grants without restoring metadata writes',async()=>{
+ const f=fixture(['BANK']);await configure(f.pool);const expected=f.snapshot();
+ for(const principal of ['runtime_role','PUBLIC']){const r=f.rights.get(principal+':'+bank)!;for(const op of ['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'])r.table.add(op);for(const op of ops)for(const col of bankColumns)r.columns.get(op)!.add(col);r.grantOption=true;}
+ await configure(f.pool);assert.deepEqual(f.snapshot(),expected);
+});
+test('bank addition does not change the four existing groups effective privileges',async()=>{
+ const original=fixture(['COLLECTION','REFUND','PAYOUT','ACCOUNT']),combined=fixture(['COLLECTION','REFUND','PAYOUT','ACCOUNT','BANK']);await configure(original.pool);await configure(combined.pool);
+ const existing=(f:ReturnType<typeof fixture>)=>f.snapshot().filter(r=>!r.name.endsWith(':'+bank));assert.deepEqual(existing(combined),existing(original));
+ assert(combined.can(bank,'INSERT','revision'));assert(combined.can(bank,'UPDATE','revision'));
+ assert.equal(mutations(combined).filter(r=>r.sql.includes('GRANT EXECUTE')).length,1);
+});
+test('first bank-only authorization error propagates without retries',async()=>{
+ const f=fixture(['BANK']),error=Error('MODEL_BANK_ACL_FAILURE');f.state.permissionError=error;await assert.rejects(configure(f.pool),e=>e===error);assert.equal(mutations(f).length,1);
 });
