@@ -5,6 +5,7 @@ import { createCatalogEntry, updateCatalogEntry, parseSkinWrite, createSkinOwner
 import { configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 import { withIdempotency } from "../src/supply/supply-util";
 import { changeMediaVisibility, reviewMediaAsset } from "../src/supply/media";
+import { auditSnapshot } from "../src/supply/supply-audit";
 
 const evidence = { reason: "Reviewed relation", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "Offline fixture, not official evidence" }] };
 const rarityEvidence = { schema: "skin-rarity-evidence-v1", basis: "PLATFORM_REFERENCE", sourceName: "Offline platform fixture", references: evidence.evidenceRefs };
@@ -316,4 +317,122 @@ test("confirmed unclassified melee keeps its real entity without inventing a spe
   assert.equal(update.args[0], "赤枭");
   assert.equal(f.calls.some(call => call.sql.startsWith('SELECT name,enabled FROM')), false);
   for (const ownerKind of ["AGENT", "FIREARM"]) assert.throws(() => parseSkinWrite({ expectedCatalogRevision: "10", ownerKind, ownerRef: null, baseName: "外观", confirmIdentity: true, ...evidence }, true));
+});
+
+// The fixture returns only columns selected by the real audit reader, like pg.
+function skinAuditFixture(row: Record<string, unknown>) {
+  const calls: Array<{ sql: string; args: unknown[] }> = [];
+  const client = { query: async (sql: string, args: unknown[] = []) => {
+    calls.push({ sql, args });
+    if (sql.includes('FROM zzsh_supply."skin"')) {
+      const selected = /^SELECT (.+) FROM zzsh_supply\."skin" WHERE id = \$1 FOR UPDATE$/.exec(sql);
+      assert.ok(selected, "skin audit keeps its explicit columns and existing row lock");
+      const fields = [...selected[1]!.matchAll(/"([a-z_]+)"/g)].map(match => match[1]!);
+      assert.equal(selected[1], fields.map(field => `"${field}"`).join(", "));
+      assert.deepEqual(args, [row.id]);
+      return { rows: [Object.fromEntries(fields.map(field => [field, row[field] ?? null]))] };
+    }
+    assert.equal(sql, "SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id = $1");
+    assert.deepEqual(args, [row.game_id]);
+    return { rows: [{ revision: "10" }] };
+  } } as unknown as PoolClient;
+  return { client, calls };
+}
+
+test("skin audit selects all four metadata fields and preserves false, null and UNKNOWN", async () => {
+  for (const [collectible, state] of [[false, "UNKNOWN"], [null, "DEFAULT"], [true, "NON_DEFAULT"]] as const) {
+    const row = { ...legacy, rarity_evidence: null, is_collectible: collectible, default_state: state, media_source: null };
+    const f = skinAuditFixture(row), snapshot = await auditSnapshot(f.client, "skin", row.id);
+    assert.ok(snapshot);
+    assert.equal(snapshot.is_collectible, collectible);
+    assert.equal(snapshot.default_state, state);
+    assert.equal(snapshot.rarity_evidence, null);
+    assert.equal(snapshot.media_source, null);
+    for (const field of ["rarity_evidence", "is_collectible", "default_state", "media_source"]) assert.equal(Object.hasOwn(snapshot, field), true);
+    assert.equal(snapshot.catalogRevision, "10");
+    assert.equal(f.calls.length, 2, "metadata uses the same locked row read, not extra per-field queries");
+  }
+});
+
+test("skin audit before, updated and cleared snapshots retain the actual metadata values", async () => {
+  const before = { ...legacy, rarity_evidence: rarityEvidence, is_collectible: true, default_state: "DEFAULT", media_source: mediaSource };
+  const updated = { ...before, rarity_evidence: { ...rarityEvidence, sourceName: "Updated public fixture" }, is_collectible: false, default_state: "NON_DEFAULT", media_source: { ...mediaSource, url: "https://example.org/updated.png" } };
+  const cleared = { ...updated, rarity_evidence: null, is_collectible: null, default_state: "UNKNOWN", media_source: null };
+  for (const row of [before, updated, cleared]) {
+    const snapshot = await auditSnapshot(skinAuditFixture(row).client, "skin", row.id);
+    assert.ok(snapshot);
+    assert.deepEqual([snapshot.rarity_evidence, snapshot.is_collectible, snapshot.default_state, snapshot.media_source], [row.rarity_evidence, row.is_collectible, row.default_state, row.media_source]);
+    assert.equal(snapshot.id, legacy.id);
+    assert.equal(snapshot.source_token, legacy.source_token);
+  }
+});
+
+test("skin audit does not copy unselected upload tokens, private keys or raw evidence", async () => {
+  const row = { ...legacy, rarity_evidence: rarityEvidence, is_collectible: false, default_state: "UNKNOWN", media_source: mediaSource,
+    upload_token: "SYNTHETIC_PRIVATE_UPLOAD", signing_key: "SYNTHETIC_PRIVATE_SIGNING", provider_secret: "SYNTHETIC_PRIVATE_PROVIDER", original_evidence: "SYNTHETIC_PRIVATE_RAW", storage_key: "SYNTHETIC_PRIVATE_STORAGE" };
+  const f = skinAuditFixture(row), snapshot = await auditSnapshot(f.client, "skin", row.id);
+  assert.ok(snapshot);
+  for (const field of ["upload_token", "signing_key", "provider_secret", "original_evidence", "storage_key"]) {
+    assert.equal(Object.hasOwn(snapshot, field), false);
+    assert.equal(f.calls[0]!.sql.includes(`"${field}"`), false);
+  }
+  assert.equal(JSON.stringify(snapshot).includes("SYNTHETIC_PRIVATE_"), false);
+});
+
+test("skin audit masks credential-bearing URLs only at the two new metadata URL paths", async () => {
+  const urls = [
+    "https://SYNTHETIC_AUTH_USER:SYNTHETIC_AUTH_PASSWORD@example.org/image.png",
+    ...["token", "access_token", "refresh_token", "id_token", "signature", "x-amz-credential", "x-amz-signature", "x-amz-security-token", "api_key", "authorization", "session", "session_id", "password", "client_secret"].map(key => `https://example.org/image.png?${key}=SYNTHETIC_AUTH_VALUE`),
+    "https://example.org/image.png?%74oken=SYNTHETIC_AUTH_VALUE",
+    "https://example.org/image.png?API_KEY=SYNTHETIC_AUTH_VALUE",
+    "https://example.org/image.png#access_token=SYNTHETIC_AUTH_VALUE",
+    "https://example.org/image.png#access_token=SYNTHETIC_AUTH_VALUE?view=public",
+    "https://example.org/image.png#%73ession=SYNTHETIC_AUTH_VALUE",
+    "https://example.org/image.png#/callback?authorization=SYNTHETIC_AUTH_VALUE",
+  ];
+  for (const url of urls) {
+    const row = { ...legacy, rarity_evidence: { ...rarityEvidence, references: [{ ...evidence.evidenceRefs[0], url }] }, is_collectible: false, default_state: "UNKNOWN", media_source: { ...mediaSource, url } };
+    const snapshot = await auditSnapshot(skinAuditFixture(row).client, "skin", row.id);
+    assert.ok(snapshot);
+    assert.equal((snapshot.rarity_evidence as typeof rarityEvidence).references[0]!.url, "[REDACTED_URL]");
+    assert.equal((snapshot.media_source as typeof mediaSource).url, "[REDACTED_URL]");
+    assert.equal(JSON.stringify(snapshot).includes("SYNTHETIC_AUTH_"), false);
+    assert.equal(snapshot.is_collectible, false);
+    assert.equal(snapshot.default_state, "UNKNOWN");
+  }
+});
+
+test("skin audit preserves public URL spelling, harmless parameters and all other metadata", async () => {
+  for (const url of ["https://EXAMPLE.org:443/a%2Fb?version=1#details", "https://example.org/image.png?description=token&sessionName=summer#section=public", "https://example.org/image.png#/gallery?version=2"]) {
+    const row = { ...legacy, rarity_evidence: { ...rarityEvidence, references: [{ ...evidence.evidenceRefs[0], url }] }, is_collectible: null, default_state: "UNKNOWN", media_source: { ...mediaSource, url } };
+    const snapshot = await auditSnapshot(skinAuditFixture(row).client, "skin", row.id);
+    assert.ok(snapshot);
+    assert.deepEqual(snapshot.rarity_evidence, row.rarity_evidence);
+    assert.deepEqual(snapshot.media_source, row.media_source);
+    assert.equal(snapshot.is_collectible, null);
+  }
+});
+
+test("skin audit does not mutate a shared frozen pg row or its nested source objects", async () => {
+  const url = "https://example.org/image.png?token=SYNTHETIC_AUTH_VALUE";
+  const row = { ...legacy, rarity_evidence: { ...rarityEvidence, references: [{ ...evidence.evidenceRefs[0], url }] }, is_collectible: false, default_state: "UNKNOWN", media_source: { ...mediaSource, url } };
+  const before = JSON.parse(JSON.stringify(row));
+  Object.freeze(row.rarity_evidence.references[0]); Object.freeze(row.rarity_evidence.references); Object.freeze(row.rarity_evidence); Object.freeze(row.media_source); Object.freeze(row);
+  const client = { query: async (sql: string) => ({ rows: sql.includes('FROM zzsh_supply."skin"') ? [row] : [{ revision: "10" }] }) } as unknown as PoolClient;
+  const snapshot = await auditSnapshot(client, "skin", row.id);
+  assert.ok(snapshot);
+  assert.notEqual(snapshot, row);
+  assert.deepEqual(row, before);
+  assert.equal(Object.hasOwn(row, "catalogRevision"), false);
+  assert.equal(JSON.stringify(snapshot).includes("SYNTHETIC_AUTH_VALUE"), false);
+  assert.equal(snapshot.catalogRevision, "10");
+});
+
+test("skin audit masks an unparseable legacy source URL without failing the audit read", async () => {
+  const url = "invalid legacy URL?token=SYNTHETIC_AUTH_VALUE";
+  const row = { ...legacy, rarity_evidence: null, is_collectible: null, default_state: "UNKNOWN", media_source: { ...mediaSource, url } };
+  const snapshot = await auditSnapshot(skinAuditFixture(row).client, "skin", row.id);
+  assert.ok(snapshot);
+  assert.equal((snapshot.media_source as typeof mediaSource).url, "[REDACTED_URL]");
+  assert.equal(snapshot.rarity_evidence, null);
 });

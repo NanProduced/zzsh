@@ -5,7 +5,7 @@ const FIELDS: Record<string, string> = {
   billable_item: "id game_id code name unit quantity_scale required enabled sort_order media_id",
   skin_rarity: "id game_id code name enabled sort_order",
   skin_category: "id game_id code name parent_id sort_order enabled form_visible",
-  skin: "id game_id code name category_id rarity_code enabled form_visible media_id owner_kind owner_id firearm_id base_name aliases naming_state source_namespace source_field source_token",
+  skin: "id game_id code name category_id rarity_code enabled form_visible media_id owner_kind owner_id firearm_id base_name aliases naming_state source_namespace source_field source_token rarity_evidence is_collectible default_state media_source",
   skin_owner: "id game_id kind code name enabled",
   entitlement: "id game_id code name value_kind expiry_kind enabled",
   price_version: "id game_id mode status commission_rate haff_rule rounding_policy compensation_policy_ref funding_policy full_payout_terms_version_id full_payout_terms_digest full_payout_disclosure_version revision",
@@ -22,6 +22,24 @@ const FIELDS: Record<string, string> = {
   gunsmith_code: "id game_id firearm_id code note mode_code status last_reviewed_at revision source_namespace source_token source_note",
   account_guarantee_proof: "id account_id owner_user_id version_no price_version_id policy_version status required_cents covered_cents evidence_ref evidence_digest verified_by_admin_id valid_from valid_until supersedes_id reason created_at",
 };
+
+const SOURCE_AUTH_PARAMETER = /^(?:token|accesstoken|refreshtoken|idtoken|authtoken|sessiontoken|signature|sig|xamzcredential|xamzsignature|xamzsecuritytoken|xgoogcredential|xgoogsignature|awsaccesskeyid|apikey|authorization|auth|session|sessionid|password|passwd|secret|clientsecret|credential|credentials)$/i;
+
+/** Audit only: catalog metadata and its original public URL remain untouched. */
+function skinAuditSource(source: unknown): unknown {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return source;
+  const metadata = source as Record<string, unknown>;
+  if (typeof metadata.url !== "string") return source;
+  let redact: boolean;
+  try {
+    const url = new URL(metadata.url), fragment = url.hash.slice(1);
+    const keys = [...url.searchParams.keys(), ...new URLSearchParams(fragment).keys(), ...new URLSearchParams(fragment.slice(fragment.indexOf("?") + 1)).keys()];
+    redact = Boolean(url.username || url.password) || keys.some(key => SOURCE_AUTH_PARAMETER.test(key.replace(/[-_]/g, "")));
+  } catch {
+    redact = true;
+  }
+  return redact ? { ...metadata, url: "[REDACTED_URL]" } : source;
+}
 
 export function auditObjectType(operation: string): string {
   if (operation.startsWith("supply.game.")) return "game";
@@ -44,8 +62,16 @@ export async function auditSnapshot(client: PoolClient, table: string, id: strin
   // append, and the runtime role intentionally has no UPDATE privilege on the
   // proof table. Keep row locking for mutable audit objects.
   const lock = table === "account_guarantee_proof" || table === "rule_release" ? "" : " FOR UPDATE";
-  const row = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")} FROM zzsh_supply."${table}" WHERE id = $1${lock}`, [id])).rows[0];
-  if (!row) return null;
+  const stored = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")} FROM zzsh_supply."${table}" WHERE id = $1${lock}`, [id])).rows[0];
+  if (!stored) return null;
+  const row = table === "skin" ? { ...stored } : stored;
+  if (table === "skin") {
+    const evidence = row.rarity_evidence as Record<string, unknown> | null;
+    if (evidence && typeof evidence === "object" && !Array.isArray(evidence) && Array.isArray(evidence.references)) {
+      row.rarity_evidence = { ...evidence, references: evidence.references.map(skinAuditSource) };
+    }
+    row.media_source = skinAuditSource(row.media_source);
+  }
   if (table === "price_version") row.lines = (await client.query(`SELECT item_id, customer_tier, pricing_kind, unit_quantity, buyer_unit_amount, owner_unit_amount FROM zzsh_supply.price_line WHERE price_version_id = $1 ORDER BY item_id, customer_tier`, [id])).rows;
   if (table === "term_version") row.options = (await client.query(`SELECT code, name, daily_consumption, duration_rounding FROM zzsh_supply.term_option WHERE version_id = $1 ORDER BY code`, [id])).rows;
   if (["billable_item", "skin_rarity", "skin_category", "skin", "skin_owner", "entitlement"].includes(table)) row.catalogRevision = (await client.query(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id = $1`, [row.game_id])).rows[0]?.revision;
