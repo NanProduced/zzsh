@@ -23,6 +23,7 @@ import {
 import type { AdminContext, AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
 import { validateMembershipEntitlementPayload, validateUnifiedMembershipPolicySubmission } from "./membership-growth-approval";
 import { isUnifiedTotalDiscountContract } from "./membership-growth";
+import { normalizeGrowthInstant } from "./membership-growth-integration";
 
 const IDEMPOTENCY_KEY_PATTERN = new RegExp(API_V1_TOKEN_PATTERN);
 
@@ -239,8 +240,9 @@ export type ApprovalActionEligibility = {
 };
 
 /** 到期在申请仍活跃时形成虚拟 EXPIRED 读取，不改写历史状态。 */
-function virtualRequestStatus(row: Pick<RequestRow, "status" | "expiresAt">): ApprovalStatus {
-  const expired = new Date(row.expiresAt).getTime() <= Date.now();
+export function virtualRequestStatus(row: Pick<RequestRow, "status" | "expiresAt">, asOfUtc?: string): ApprovalStatus {
+  const expired = asOfUtc === undefined ? new Date(row.expiresAt).getTime() <= Date.now()
+    : normalizeGrowthInstant(row.expiresAt instanceof Date ? row.expiresAt.toISOString() : row.expiresAt, "expiresAt") <= normalizeGrowthInstant(asOfUtc, "asOf");
   return expired && (row.status === "PENDING" || row.status === "APPROVED") ? "EXPIRED" : row.status;
 }
 
@@ -495,7 +497,7 @@ function verifiedFinalPayload(row: RequestRow, decision: DecisionRow): ReturnTyp
   return final;
 }
 
-async function readDecisions(client: Pool | PoolClient, rows: readonly RequestRow[]): Promise<Map<string, DecisionRow>> {
+export async function readDecisions(client: Pool | PoolClient, rows: readonly RequestRow[]): Promise<Map<string, DecisionRow>> {
   if (!rows.length) return new Map();
   const decisions = await client.query<DecisionRow>(
     `SELECT "request_id" AS "requestId","decision","reason","created_at" AS "createdAt","approver_admin_id" AS "approverId","final_payload" AS "finalPayload","final_payload_hash" AS "finalPayloadHash"
@@ -718,7 +720,7 @@ async function configureTemplate(request: AuthSecurityNodeRequest, response: Aut
 
 const REQUEST_SELECT_COLUMNS = `"id", "template_id" AS "templateId", "template_version" AS "templateVersion", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "payload_version" AS "payloadVersion", "operation_payload" AS "operationPayload", "operation_payload_hash" AS "operationPayloadHash", "summary", "requested_by" AS "requestedBy", "status", "status_reason" AS "statusReason", "expires_at" AS "expiresAt", "created_at" AS "createdAt", "decided_at" AS "decidedAt", "decided_by" AS "decidedBy", "decision_reason" AS "decisionReason", "supersedes_request_id" AS "supersedesRequestId", "superseded_by_request_id" AS "supersededByRequestId"`;
 
-async function readRequestById(executor: Pool | PoolClient, requestId: string): Promise<RequestRow | undefined> {
+export async function readRequestById(executor: Pool | PoolClient, requestId: string): Promise<RequestRow | undefined> {
   const result = await executor.query<RequestRow>(
     `SELECT ${REQUEST_SELECT_COLUMNS} FROM "zzsh_iam"."approval_request" WHERE "id" = $1`,
     [requestId],
@@ -1408,7 +1410,7 @@ function auditView(row: AuditRow): Record<string, unknown> {
   };
 }
 
-async function requestScope(pool: Pool, userId: string, requestId: string, isBoss: boolean): Promise<boolean> {
+export async function requestScope(pool: Pool | PoolClient, userId: string, requestId: string, isBoss: boolean): Promise<boolean> {
   if (isBoss) return true;
   const result = await pool.query<{ allowed: boolean }>(
     `SELECT (r."requested_by" = $1 OR EXISTS (SELECT 1 FROM "zzsh_iam"."approval_request_candidate" c WHERE c."request_id" = r."id" AND c."admin_user_id" = $1)) AS allowed

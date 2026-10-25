@@ -15,7 +15,8 @@ import { parseGrowthConsumptionQuery, readMembershipGrowthConsumption } from "..
 import { handleMembershipGrowthPolicyAdmin, handleMembershipGrowthUser } from "../src/auth/membership-growth-routes";
 import { selectPersonalGrowthOffer, frozenPersonalGrowthV4Valid } from "../src/order/personal-growth-confirmation";
 import { computeSettlement, SETTLEMENT_ROUNDING_POLICY } from "../src/order/settlement";
-import { parseMembershipEntitlementQuery, readMembershipEntitlementContext, readMembershipEntitlements } from "../src/auth/membership-entitlement-read";
+import { parseMembershipEntitlementQuery, readMembershipPolicyChange, readMembershipEntitlementContext, readMembershipEntitlements } from "../src/auth/membership-entitlement-read";
+import { hashApprovalPayload } from "../src/auth/approval-audit";
 import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "../src/auth/membership-unified-pricing";
 import { signConfirmation, verifyConfirmation } from "../src/order/confirmation-token";
 
@@ -1189,7 +1190,9 @@ test("empty policy admin GET boots a first draft from the sealed release and sav
     };
     const client = {
       query: async (sql: string, args: unknown[] = []) => {
-        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK" || sql.startsWith("SET TRANSACTION")) return { rows: [] };
+        if (sql.includes("membership-policy-asof")) return { rows: [{ asOfUtc: "2026-10-25T00:00:00.123456Z" }] };
+        if (sql.includes("membership-policy-change-context")) return { rows: [{ blockingCount: "0", totalCount: "0", requestId: null }] };
         if (sql.includes('"zzsh_auth_admin"."session"')) return { rows: [{ locked: false, twoFactorEnabled: true, suspended: false }] };
         if (sql.includes('"zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
         if (sql.includes("WHERE pol.status='APPROVED'")) return { rows: state.policyRows.filter((row: any) => row.status === "APPROVED").map((row: any) => ({ ...row, policy: row.policyPayload })) };
@@ -1216,6 +1219,8 @@ test("empty policy admin GET boots a first draft from the sealed release and sav
     // Empty table: the first draft is bootstrapped from the real sealed release catalog, never from a fake price.
     const boot = await request("GET", "/api/v1/admin/membership-growth/policy");
     assert.equal(boot.status, 200, JSON.stringify(boot));
+    assert.equal(boot.body.policyChange.knowledge, "KNOWN");
+    assert.equal(boot.body.policyChange.request, null);
     assert.equal(boot.body.policy, null);
     assert.equal(boot.body.bootstrap.ruleReleaseId, "release-1");
     assert.deepEqual(boot.body.bootstrap.enabledModes, ["ordinary", "custom"]);
@@ -1284,4 +1289,140 @@ test("growth consumption route reuses active actor/session guards and never writ
   const good = await request({}); assert.equal(good.status, 200, JSON.stringify(good)); assert.equal(good.body.subjectId, "history-user");
   assert(good.queries.every((q) => !/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
   for (const bad of [{ anonymous: true }, { active: false }, { session: false }]) assert.equal((await request(bad)).status, 401);
+});
+
+const POLICY_CHANGE_ASOF = "2026-10-25T12:00:00.123456Z";
+function policyChangeFixture() {
+  const payload = { policyDraftId: "draft-context-1", policyDraftVersion: 2, policyDraftHash: "a".repeat(64), ruleReleaseId: "release-context", priceVersionId: "price-context", sourceRef: "PRIVATE_INTERNAL_SOURCE", effectiveAtUtc: "2026-10-26T12:00:00.123456Z" };
+  const row: any = { id: "request-context-1", templateId: "template-context", templateVersion: 1, operationCode: "membership.benefit.policy.publish", triggerCondition: "manual", payloadVersion: 1,
+    operationPayload: payload, operationPayloadHash: hashApprovalPayload(payload).hash, summary: "调整会员权益", requestedBy: "requester-context", status: "PENDING", statusReason: null,
+    expiresAt: "2026-10-27T12:00:00.123456Z", createdAt: "2026-10-24T12:00:00.123456Z", decidedAt: null, decidedBy: null, decisionReason: null, supersedesRequestId: null, supersededByRequestId: null };
+  const workspace = { id: payload.policyDraftId, version: "2", payloadHash: payload.policyDraftHash, status: "DRAFT", approvalRequestId: null as string | null };
+  const facts: any = { draft: { ...workspace, effectiveAtUtc: payload.effectiveAtUtc, ruleReleaseId: payload.ruleReleaseId, priceVersionId: payload.priceVersionId, sourceRef: payload.sourceRef,
+    policyPayload: { ...readerPolicy(), status: "DRAFT", sourceRef: "PRIVATE_INTERNAL_POLICY" } }, publishedCount: "0", published: null,
+    executionStatus: null, resultCode: null, resultDetail: null, executedBy: null, executedAtUtc: null, submittedAtUtc: row.createdAt, expiresAtUtc: row.expiresAt, decidedAtUtc: null,
+    requestedName: "申请经手人", decidedName: null, executedName: null };
+  const state = { context: { blockingCount: "1", totalCount: "1", requestId: row.id as string | null }, decision: null as any, scope: true, effectivePolicyId: null as string | null,
+    access: { status: "ACTIVE" as const, isBoss: true, passwordChangeRequired: false, permissions: new Set<string>([ADMIN_PERMISSION.approvalRequestRead, ADMIN_PERMISSION.membershipPolicyPublish]) }, throwContext: false };
+  const trace: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { async query(sql: string, values: unknown[] = []) {
+    trace.push({ sql, values }); assert.doesNotMatch(sql, /^\s*(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP)\b|\bFOR\s+(UPDATE|SHARE)\b/i, "policy change is strictly a read projection");
+    if (sql.includes("membership-policy-change-context")) { if (state.throwContext) throw Error("PRIVATE_DATABASE_DETAIL"); assert.equal(values[0], "membership.benefit.policy.publish"); assert.equal(values[1], POLICY_CHANGE_ASOF); assert.match(sql, /relevant AS MATERIALIZED/); assert.match(sql, /count\(\*\) FILTER/); assert.doesNotMatch(sql, /LIMIT 20/); return { rows: [state.context] }; }
+    if (sql.includes(" AS allowed")) return { rows: [{ allowed: state.scope }] };
+    if (sql.includes('FROM "zzsh_iam"."approval_request" WHERE "id"')) return { rows: values[0] === row.id ? [row] : [] };
+    if (sql.includes('FROM "zzsh_iam"."approval_decision"')) return { rows: state.decision ? [state.decision] : [] };
+    if (sql.includes("membership-policy-change-facts")) return { rows: [facts] };
+    throw Error("UNEXPECTED_POLICY_CHANGE_QUERY");
+  } } as unknown as import("pg").PoolClient;
+  const read = () => readMembershipPolicyChange(client, { userId: "viewer-context", access: state.access }, workspace, state.effectivePolicyId, POLICY_CHANGE_ASOF);
+  function decide(decision = "APPROVED") { row.status = decision; row.decidedBy = "decider-context"; facts.decidedAtUtc = "2026-10-25T10:00:00.000001Z"; facts.decidedName = "实际审批人";
+    state.decision = { requestId: row.id, decision, reason: "已核对", createdAt: facts.decidedAtUtc, approverId: row.decidedBy, finalPayload: null, finalPayloadHash: null }; }
+  function publish(effectiveAt = payload.effectiveAtUtc) { decide(); row.status = "EXECUTED"; state.context.blockingCount = "0"; workspace.status = "APPROVED"; workspace.approvalRequestId = row.id;
+    facts.executionStatus = "SUCCEEDED"; facts.resultCode = "MEMBERSHIP_POLICY_PUBLISHED"; facts.resultDetail = "published-context"; facts.executedBy = "executor-context"; facts.executedName = "实际执行人"; facts.executedAtUtc = "2026-10-25T11:00:00.000001Z";
+    payload.effectiveAtUtc = effectiveAt; row.operationPayloadHash = hashApprovalPayload(payload).hash; facts.draft.effectiveAtUtc = effectiveAt;
+    facts.publishedCount = "1"; facts.published = { ...facts.draft, id: "published-context", status: "APPROVED", payloadHash: "b".repeat(64), approvalRequestId: row.id, approvedByAdminId: facts.executedBy, policyPayload: { ...facts.draft.policyPayload, status: "APPROVED" } }; }
+  return { row, payload, workspace, facts, state, trace, read, decide, publish };
+}
+
+test("policy change discovers the exact global in-flight request across refreshes without history pages or private payload", async () => {
+  const f = policyChangeFixture(), first = await f.read(), again = await f.read();
+  assert.deepEqual(again, first); assert.equal(first.knowledge, "KNOWN"); assert.equal(first.request?.id, f.row.id); assert.deepEqual(first.draftReference, { id: f.payload.policyDraftId, version: "2", payloadHash: f.payload.policyDraftHash });
+  assert.equal(first.request?.approvalStatus, "PENDING"); assert.equal(first.request?.executionStatus, "NOT_STARTED"); assert.equal(first.immutableDiff, null);
+  assert.equal(first.request?.submittedBy?.name, "申请经手人"); assert.equal(first.request?.steps?.[1]?.actor, null); assert.equal(first.request?.steps?.[1]?.atUtc, null);
+  assert.doesNotMatch(JSON.stringify(first), /PRIVATE_|sourceRef|policyPayload|operationPayload|costBasis/); assert.equal(f.trace.length, 8, "four bounded reads per Boss projection, no per-tier/person calls");
+});
+
+test("policy change explicit absence differs from malformed counts, multiple in-flight requests and missing source links", async () => {
+  const none = policyChangeFixture(); none.state.context = { blockingCount: "0", totalCount: "0", requestId: null };
+  const empty = await none.read(); assert.equal(empty.knowledge, "KNOWN"); assert.equal(empty.request, null); assert.equal(none.trace.length, 1);
+  for (const count of ["2", "broken"]) { const f = policyChangeFixture(); f.state.context.blockingCount = count; f.state.context.totalCount = count; assert.equal((await f.read()).knowledge, "UNKNOWN"); assert.equal(f.trace.length, 1); }
+  const published = policyChangeFixture(); published.workspace.status = "APPROVED"; published.workspace.approvalRequestId = published.row.id; published.state.context = { blockingCount: "0", totalCount: "0", requestId: null }; assert.equal((await published.read()).knowledge, "UNKNOWN");
+});
+
+test("policy change uses current read permission and original request scope without leaking hidden actors or IDs", async () => {
+  const noPermission = policyChangeFixture(); noPermission.state.access.permissions.clear(); assert.equal((await noPermission.read()).knowledge, "FORBIDDEN"); assert.equal(noPermission.trace.length, 0);
+  const hidden = policyChangeFixture(); hidden.state.access.isBoss = false; hidden.state.scope = false; const result = await hidden.read(); assert.equal(result.knowledge, "FORBIDDEN"); assert.equal(result.request, null); assert.equal(hidden.trace.length, 2);
+  const restrictedBusiness = policyChangeFixture(); restrictedBusiness.state.access.isBoss = false; restrictedBusiness.state.access.permissions.delete(ADMIN_PERMISSION.membershipPolicyPublish); assert.equal((await restrictedBusiness.read()).knowledge, "FORBIDDEN");
+});
+
+test("policy change keeps a different draft linked but rejects incomplete or wrong original id/version/hash and payload snapshots", async () => {
+  const other = policyChangeFixture(); other.workspace.id = "newer-draft-context"; const linked = await other.read(); assert.equal(linked.knowledge, "KNOWN"); assert.equal(linked.draftReference?.id, "draft-context-1");
+  for (const field of ["policyDraftId", "policyDraftVersion", "policyDraftHash"] as const) { const f = policyChangeFixture(); (f.payload as any)[field] = field === "policyDraftVersion" ? 3 : field === "policyDraftHash" ? "c".repeat(64) : "different-draft"; f.row.operationPayloadHash = hashApprovalPayload(f.payload).hash; const read = await f.read(); assert.equal(read.knowledge, "UNKNOWN", field); assert.equal(read.request?.id, f.row.id); assert.equal(read.draftReference, null); }
+  const hash = policyChangeFixture(); hash.row.operationPayloadHash = "0".repeat(64); assert.equal((await hash.read()).knowledge, "UNKNOWN");
+  const operation = policyChangeFixture(); operation.row.operationCode = "membership.entitlement.grant"; assert.equal((await operation.read()).knowledge, "UNKNOWN");
+  for (const body of [null, [], "invalid"]) { const malformed = policyChangeFixture(); malformed.row.operationPayload = body; const unknown = await malformed.read(); assert.equal(unknown.knowledge, "UNKNOWN"); assert.equal(unknown.request?.id, malformed.row.id); }
+});
+
+test("policy change separates approval, execution and microsecond effective facts and does not invent a current draft", async () => {
+  const approved = policyChangeFixture(); approved.decide(); const waiting = await approved.read(); assert.equal(waiting.request?.approvalStatus, "APPROVED"); assert.equal(waiting.request?.executionStatus, "NOT_STARTED"); assert.equal(waiting.effectiveState?.executed, false);
+  const future = policyChangeFixture(); future.publish("2026-10-25T12:00:00.123457Z"); const pending = await future.read(); assert.equal(pending.knowledge, "KNOWN"); assert.equal(pending.request?.approvalStatus, "APPROVED"); assert.equal(pending.request?.executionStatus, "SUCCEEDED"); assert.equal(pending.effectiveState?.status, "PENDING_EFFECTIVE"); assert.equal(pending.request?.steps?.[2]?.actor?.name, "实际执行人"); assert.equal(pending.request?.steps?.[3]?.actor, null); assert.equal(pending.request?.steps?.[3]?.atUtc, null);
+  const current = policyChangeFixture(); current.publish(POLICY_CHANGE_ASOF); current.state.effectivePolicyId = "published-context"; const effective = await current.read(); assert.equal(effective.effectiveState?.status, "EFFECTIVE"); assert.equal(effective.request?.steps?.[3]?.atUtc, POLICY_CHANGE_ASOF);
+  const old = policyChangeFixture(); old.publish("2026-10-24T12:00:00.123456Z"); old.state.effectivePolicyId = "later-policy"; assert.notEqual((await old.read()).effectiveState?.status, "EFFECTIVE");
+});
+
+test("policy change missing decisions, changed approvers, lost or duplicate published rows remain UNKNOWN", async () => {
+  for (const kind of ["decision", "approver", "execution", "published", "duplicate", "result", "payload"] as const) { const f = policyChangeFixture(); f.publish(); if (kind === "decision") f.state.decision = null; if (kind === "approver") f.state.decision.approverId = "other-decider"; if (kind === "execution") f.facts.executionStatus = null; if (kind === "published") f.facts.publishedCount = "0"; if (kind === "duplicate") f.facts.publishedCount = "2"; if (kind === "result") f.facts.resultDetail = "another-policy"; if (kind === "payload") f.facts.published.policyPayload = { invalid: true }; const read = await f.read(); assert.equal(read.knowledge, "UNKNOWN", kind); assert.equal(read.immutableDiff, null); }
+});
+
+test("policy change rejected, failed and expired requests preserve real axes at one asOf", async () => {
+  const rejected = policyChangeFixture(); rejected.decide("REJECTED"); rejected.state.context.blockingCount = "0"; assert.equal((await rejected.read()).request?.approvalStatus, "REJECTED");
+  const failed = policyChangeFixture(); failed.decide(); failed.row.status = "EXECUTION_FAILED"; failed.facts.executionStatus = "FAILED"; failed.facts.executedBy = "executor-context"; failed.facts.executedAtUtc = POLICY_CHANGE_ASOF; const failure = await failed.read(); assert.equal(failure.request?.approvalStatus, "APPROVED"); assert.equal(failure.request?.executionStatus, "FAILED"); assert.equal(failure.effectiveState?.status, "UNKNOWN");
+  for (const status of ["PENDING", "APPROVED"] as const) { const f = policyChangeFixture(); if (status === "APPROVED") f.decide(); f.facts.expiresAtUtc = POLICY_CHANGE_ASOF; f.state.context.blockingCount = "0"; assert.equal((await f.read()).request?.approvalStatus, "EXPIRED"); }
+  const justBefore = policyChangeFixture(); justBefore.facts.expiresAtUtc = "2026-10-25T12:00:00.123457Z"; assert.equal((await justBefore.read()).request?.approvalStatus, "PENDING");
+});
+
+test("policy change database failures cannot become absence or leak internal messages", async () => {
+  const f = policyChangeFixture(); f.state.throwContext = true; await assert.rejects(f.read, (error: unknown) => { const value = error as { status?: number; message?: string; details?: unknown }; assert.equal(value.status, 503); assert.equal(value.message, "Policy change is temporarily unavailable"); assert.equal(value.details, undefined); return true; });
+});
+
+function requestedValuesFixture() {
+  const f = policyChangeFixture(), modes = ["ordinary", "custom"] as const;
+  const tiers = ["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND"] as const;
+  f.facts.draft.policyPayload = normalizeUnifiedMembershipPolicy({ ...discountPolicyPayload(), status: "DRAFT" }, {
+    schema: "membership-unified-pricing.v1", scope: "ALL_ENABLED_RENTAL_MODES",
+    tiers: Object.fromEntries(tiers.map((tier, index) => [tier, { payableRatio: ["1", "0.95", "0.9", "0.85", "0.8"][index] }])),
+    entitlementRanges: { FRIEND: { minPayableRatio: "0.8", maxPayableRatio: "0.95" }, PRESTIGE: { minPayableRatio: "0.7", maxPayableRatio: "0.9" } },
+  }, { enabledModes: modes, priceVersionId: f.payload.priceVersionId });
+  for (const [index, tier] of tiers.entries()) { const config = f.facts.draft.policyPayload.tiers[tier]; config.tenantDeposit = tier === "DIAMOND" ? "WAIVED" : "ACCOUNT_BASE"; config.depositAllowanceCents = String(index < 4 ? index * 10000 : 0); }
+  f.facts.draftHaffRule = compatRule(); f.facts.draftHaffRule.compatibility.modes.fast = { enabled: false };
+  const digest = createHash("sha256").update(canonicalize({ schema: "membership-growth-draft-v1", policy: f.facts.draft.policyPayload, versionNo: f.payload.policyDraftVersion,
+    ruleReleaseId: f.payload.ruleReleaseId, priceVersionId: f.payload.priceVersionId, sourceRef: f.payload.sourceRef, effectiveAtUtc: f.payload.effectiveAtUtc })).digest("hex");
+  f.payload.policyDraftHash = digest; f.workspace.payloadHash = digest; f.facts.draft.payloadHash = digest; f.row.operationPayloadHash = hashApprovalPayload(f.payload).hash;
+  return f;
+}
+
+test("requested values expose safe configuration from the verified original request without inventing an immutable diff", async () => {
+  const f = requestedValuesFixture(), result = await f.read(); assert.equal(result.knowledge, "KNOWN"); assert.equal(result.immutableDiff, null);
+  assert(Array.isArray(result.requestedValues)); assert(result.requestedValues.length > 10);
+  assert(result.requestedValues.some(row => row.label === "金卡会员 · 应付比例" && row.format === "DISCOUNT" && row.value === "0.9"));
+  assert(result.requestedValues.some(row => row.label === "金卡会员 · 每单押金减免额度" && row.format === "CENTS" && row.value === "20000"));
+  assert(result.requestedValues.some(row => row.label === "钻石会员 · 押金规则" && row.value === "完全免押"));
+  assert(result.requestedValues.some(row => row.label === "挚友礼遇 · 最低应付比例" && row.value === "0.8"));
+  assert(result.requestedValues.every(row => Object.keys(row).sort().join(",") === "format,label,value"));
+  assert(result.requestedValues.length <= 19); assert(!result.requestedValues.some(row => /时间|生效/.test(row.label)), "planned time stays in the existing request field, not the configuration table");
+  assert.doesNotMatch(JSON.stringify(result.requestedValues), /PRIVATE_|costBasis|sourceRef|priceVersion|release|draft|payload|owner|schema|reasonCode/i);
+  assert.equal(f.trace.length, 4, "the existing facts SELECT is extended without another query");
+});
+
+test("requested values use the original sealed rule and remain available for an already published request", async () => {
+  const f = requestedValuesFixture(); f.facts.currentGameHaffRule = { privateCurrentRule: true }; const pending = await f.read();
+  const factRead = f.trace.find(row => row.sql.includes("membership-policy-change-facts"))!; assert.match(factRead.sql, /draft_price\.status='SEALED'/); assert.match(factRead.sql, /draft_release\.price_version_id=draft\."priceVersionId"/); assert.doesNotMatch(factRead.sql, /current_release_id/);
+  f.publish(); const published = await f.read(); assert.equal(published.knowledge, "KNOWN"); assert.deepEqual(published.requestedValues, pending.requestedValues); assert.equal(published.immutableDiff, null);
+  const differentCurrentDraft = requestedValuesFixture(); differentCurrentDraft.workspace.id = "new-current-draft"; assert.deepEqual((await differentCurrentDraft.read()).requestedValues, pending.requestedValues);
+});
+
+test("requested values keep missing sealed-mode evidence null while preserving the original deposit configuration", async () => {
+  const f = requestedValuesFixture(); f.facts.draftHaffRule = null; const result = await f.read();
+  assert.equal(result.knowledge, "KNOWN"); assert(result.requestedValues); assert(result.requestedValues.filter(row => row.format === "DISCOUNT").every(row => row.value === null));
+  assert(result.requestedValues.some(row => row.label === "金卡会员 · 每单押金减免额度" && row.value === "20000"));
+});
+
+test("requested values are null for changed original bindings, lost permission, unknown snapshots and explicit no request", async () => {
+  for (const mode of ["hash", "body", "version", "permission", "scope", "none"] as const) { const f = requestedValuesFixture();
+    if (mode === "hash") f.facts.draft.payloadHash = "0".repeat(64); if (mode === "version") f.facts.draft.version = "3";
+    if (mode === "body") f.facts.draft.policyPayload.tiers.GOLD.depositAllowanceCents = "999999";
+    if (mode === "permission") f.state.access.permissions.clear(); if (mode === "scope") { f.state.access.isBoss = false; f.state.scope = false; }
+    if (mode === "none") f.state.context = { blockingCount: "0", totalCount: "0", requestId: null };
+    const result = await f.read(); assert.equal(result.requestedValues, null, mode); assert.equal(result.immutableDiff, null);
+  }
 });

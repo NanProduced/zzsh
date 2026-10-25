@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { Pool, PoolClient } from "pg";
 
-import { handleAdminApprovalRoute, evaluateApprovalActions, assertApprovalAction, hashApprovalPayload } from "../src/auth/approval-audit";
+import { handleAdminApprovalRoute, evaluateApprovalActions, assertApprovalAction, hashApprovalPayload, requestScope, virtualRequestStatus } from "../src/auth/approval-audit";
 import { projectApprovalBusinesses, approvalRegistration, APPROVAL_EXECUTION_MODE } from "../src/auth/approval-business";
 
 const unifiedPricingFixture = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price_fixture", payableRatio: "1", costBasisRef: "price_fixture" };
@@ -1293,4 +1293,21 @@ test("approval business effective state follows interval truth at one read time"
   } finally { Date.now = originalNow; }
   assert.deepEqual(states, ["EXPIRED", "NOT_STARTED", "REVOKED", "UNKNOWN", "EFFECTIVE"]);
   assert.deepEqual(batchStates, ["NOT_STARTED", "NOT_STARTED", "NOT_STARTED"]);
+});
+
+test("policy context explicit asOf preserves expiry microseconds while original approval callers retain the default clock", () => {
+  const row = { status: "APPROVED" as const, expiresAt: "2026-10-25T12:00:00.123457Z" };
+  assert.equal(virtualRequestStatus(row, "2026-10-25T12:00:00.123456Z"), "APPROVED");
+  assert.equal(virtualRequestStatus(row, row.expiresAt), "EXPIRED");
+  assert.equal(virtualRequestStatus({ ...row, status: "PENDING" }, row.expiresAt), "EXPIRED");
+  assert.equal(virtualRequestStatus({ ...row, status: "EXECUTED" }, row.expiresAt), "EXECUTED");
+  const originalNow = Date.now;
+  try { Date.now = () => Date.parse(row.expiresAt); assert.equal(virtualRequestStatus(row), "EXPIRED", "the original writer's default millisecond behavior is unchanged"); }
+  finally { Date.now = originalNow; }
+});
+
+test("policy context can reuse the original request scope with the same transaction client and no locks", async () => {
+  const calls: unknown[][] = [], client = { query: async (sql: string, values: unknown[]) => { assert.match(sql, /requested_by/); assert.match(sql, /approval_request_candidate/); assert.doesNotMatch(sql, /FOR UPDATE|FOR SHARE|INSERT|UPDATE|DELETE/); calls.push(values); return { rows: [{ allowed: true }] }; } } as unknown as PoolClient;
+  assert.equal(await requestScope(client, "policy_viewer", "policy_request", false), true); assert.deepEqual(calls, [["policy_viewer", "policy_request"]]);
+  assert.equal(await requestScope(client, "boss_viewer", "policy_request", true), true); assert.equal(calls.length, 1, "existing Boss scope does not invent another role or query");
 });

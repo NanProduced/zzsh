@@ -12,11 +12,11 @@ import { assertReplayAuthorization } from "../order/order";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { decodeId, safely, type SupplyResponse } from "../supply/supply-routes";
 import { forbidden, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
-import { backfillAcceptedSettlementAfterPosting, membershipGrowthEnabled, parseGrowthConsumptionQuery, readMembershipGrowth, readMembershipGrowthConsumption, readMembershipGrowthScopeDetail } from "./membership-growth-integration";
+import { backfillAcceptedSettlementAfterPosting, membershipGrowthEnabled, normalizeGrowthInstant, parseGrowthConsumptionQuery, readMembershipGrowth, readMembershipGrowthConsumption, readMembershipGrowthScopeDetail } from "./membership-growth-integration";
 import { canonicalize } from "../supply/content-hash";
 import { GROWTH_THRESHOLDS, NORMAL_GROWTH_TIERS, sealedEnabledRentalModes, validateBenefitPolicy, type GrowthBenefitPolicy } from "./membership-growth";
 import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "./membership-unified-pricing";
-import { parseMembershipEntitlementQuery, readApprovedMembershipPolicy, readMembershipEntitlementContext, readMembershipEntitlementOptions, readMembershipEntitlements } from "./membership-entitlement-read";
+import { parseMembershipEntitlementQuery, readApprovedMembershipPolicy, readMembershipPolicyChange, readMembershipEntitlementContext, readMembershipEntitlementOptions, readMembershipEntitlements } from "./membership-entitlement-read";
 import { canSimulateMembershipProfit, readMembershipProfitSimulation, readMembershipProfitSimulationContext } from "./membership-profit-simulation";
 
 function originAllowed(request: SupplyNodeRequest, options: AuthSecurityOptions, admin: boolean): boolean {
@@ -124,10 +124,15 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
     }
     if (request.method === "GET" && path === "/api/v1/admin/membership-growth/policy") {
       const result = await withTransaction(options.pool, async (client) => {
+        await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
         await assertAdminContextInTransaction(client, context);
         const access = await loadEffectiveAdminAccess(client, context.userId);
         if (!hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft) && !hasPermission(access, ADMIN_PERMISSION.membershipPolicyPublish) && !hasPermission(access, ADMIN_PERMISSION.membershipGrowthSummaryRead)) throw forbidden();
-        const approved = await readApprovedMembershipPolicy(client);
+        const clock = (await client.query<{ asOfUtc: string }>(`SELECT /* membership-policy-asof */ to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "asOfUtc"`)).rows[0];
+        let asOfUtc: string;
+        try { asOfUtc = normalizeGrowthInstant(clock?.asOfUtc, "asOf"); }
+        catch { throw new SecurityApiError(503, "MEMBERSHIP_UNKNOWN", "Policy state is temporarily unavailable"); }
+        const approved = await readApprovedMembershipPolicy(client, asOfUtc);
         const approvedFields = {
           approvedPolicy: approved?.policy ?? null,
           approvedUnifiedPricing: projectUnifiedMembershipPricing(approved?.policy ?? null, approved ? sealedEnabledRentalModes(approved.haffRule) : null),
@@ -135,10 +140,12 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
           capability: { canDraft: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canChangeEntitlementRanges: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.membershipPolicyDraft), canRequestEntitlement: access?.isBoss === true || hasPermission(access, ADMIN_PERMISSION.approvalRequestCreate) && hasPermission(access, ADMIN_PERMISSION.membershipEntitlementRequest), depositAllowanceSupported: true, unifiedPricingSupported: true, canSimulateProfit: canSimulateMembershipProfit(access) },
         };
         const thresholds = Object.fromEntries(NORMAL_GROWTH_TIERS.map((tier) => [tier, GROWTH_THRESHOLDS[tier].toString()]));
-        const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string; policyPayload: GrowthBenefitPolicy }>(
-          `SELECT id, version::text AS version, status, effective_at AS "effectiveAt", rule_release_id AS "ruleReleaseId", price_version_id AS "priceVersionId", source_ref AS "sourceRef", payload_hash AS "payloadHash", policy_payload AS "policyPayload"
+        const row = (await client.query<{ id: string; version: string; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; payloadHash: string; approvalRequestId: string | null; policyPayload: GrowthBenefitPolicy }>(
+          `SELECT id, version::text AS version, status, effective_at AS "effectiveAt", rule_release_id AS "ruleReleaseId", price_version_id AS "priceVersionId", source_ref AS "sourceRef", payload_hash AS "payloadHash", approval_request_id AS "approvalRequestId", policy_payload AS "policyPayload"
              FROM zzsh_iam.membership_growth_policy ORDER BY version DESC, created_at DESC LIMIT 1`,
         )).rows[0];
+        const policyChange = await readMembershipPolicyChange(client, { userId: context.userId, access: access! }, row ?? null, approved?.id ?? null, asOfUtc);
+        const workspaceFields = { ...approvedFields, policyChange };
         if (row) {
           // R1-03: an existing draft keeps the bound sealed catalog for editing; a pending payload must
           // never collapse the editor to 0 boxes / 0 resources. An unreadable release is labelled, not faked.
@@ -146,7 +153,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
           const catalog = sealed
             ? { ...bootstrapCatalog(sealed, row.priceVersionId), enabledModes: sealed.enabledModes, haffSchema: sealed.haffSchema, releaseMode: sealed.releaseMode, catalogSource: "SEALED" as const }
             : { ...policyCatalog(row.policyPayload, row.priceVersionId), releaseMode: null, catalogSource: "POLICY_PAYLOAD" as const };
-          return { ...approvedFields, policy: row.policyPayload, unifiedPricing: projectUnifiedMembershipPricing(row.policyPayload, sealed?.enabledModes ?? null), meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog, thresholds, bootstrap: null };
+          return { ...workspaceFields, policy: row.policyPayload, unifiedPricing: projectUnifiedMembershipPricing(row.policyPayload, sealed?.enabledModes ?? null), meta: { id: row.id, version: row.version, status: row.status, effectiveAtUtc: row.effectiveAt, ruleReleaseId: row.ruleReleaseId, priceVersionId: row.priceVersionId, sourceRef: row.sourceRef, payloadHash: row.payloadHash }, catalog, thresholds, bootstrap: null };
         }
         const sealedRelease = (await client.query<{ releaseId: string; priceVersionId: string }>(
           `SELECT r.id AS "releaseId", r.price_version_id AS "priceVersionId"
@@ -156,9 +163,9 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
             LIMIT 1`,
         )).rows[0];
         const sealed = sealedRelease ? await sealedFactsOrNull(client, sealedRelease.releaseId, sealedRelease.priceVersionId) : null;
-        if (!sealed) return { ...approvedFields, policy: null, unifiedPricing: projectUnifiedMembershipPricing(null, null), meta: null, catalog: { ...policyCatalog(null, null), releaseMode: null, catalogSource: null }, thresholds, bootstrap: null };
+        if (!sealed) return { ...workspaceFields, policy: null, unifiedPricing: projectUnifiedMembershipPricing(null, null), meta: null, catalog: { ...policyCatalog(null, null), releaseMode: null, catalogSource: null }, thresholds, bootstrap: null };
         return {
-          ...approvedFields,
+          ...workspaceFields,
           policy: null,
           unifiedPricing: projectUnifiedMembershipPricing(null, sealed.enabledModes),
           meta: null,
