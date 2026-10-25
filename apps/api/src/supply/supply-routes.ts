@@ -36,6 +36,7 @@ import {
   listGames,
   readAdminCatalog,
   readPublicCatalog,
+  parseCatalogQuery,
   updateCatalogEntry,
   updateGame,
 } from "./catalog";
@@ -500,22 +501,15 @@ export async function handleSupplyUserRoute(
       const catalogMatch = /^\/games\/([^/]+)\/(catalog|publishing-catalog)$/.exec(path);
       if (catalogMatch) {
         const gameId = decodeId(catalogMatch[1]!);
-        const limitRaw = query.get("limit");
-        const limit = limitRaw === null ? 20 : Number(limitRaw);
-        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid");
+        const catalogQuery = parseCatalogQuery(query);
         const result = await withPublicListingSnapshot(options.pool, async (client) => {
           await requirePublicGameService(client, gameId, GAME_SERVICE.ACCOUNT_RENTAL);
           return readPublicCatalog(
             client,
             gameId,
-            {
-              ...(query.get("q") ? { q: query.get("q")! } : {}),
-              ...(query.get("categoryId") ? { categoryId: query.get("categoryId")! } : {}),
-              ...(query.get("rarityCode") ? { rarityCode: query.get("rarityCode")! } : {}),
-              ...(query.get("ownerId") ? { ownerId: decodeId(query.get("ownerId")!) } : {}),
-            },
-            limit,
-            query.get("cursor") ?? undefined,
+            catalogQuery.filters,
+            catalogQuery.limit,
+            catalogQuery.cursor,
             catalogMatch[2] === "publishing-catalog" ? "publishing" : "browse",
           );
         });

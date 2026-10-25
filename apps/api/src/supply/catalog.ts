@@ -781,7 +781,43 @@ export async function assertPlatformMediaBinding(
   if (asset.reviewState !== "APPROVED" || asset.accessClass !== "PUBLIC_DISPLAY") throw invalid("Media is not approved for public display");
 }
 
-export type CatalogFilters = { q?: string; categoryId?: string; rarityCode?: string; ownerId?: string };
+export type CatalogFilters = {
+  q?: string; categoryId?: string; rarityCode?: string; ownerId?: string;
+  ownerKind?: SkinOwnerRef["kind"]; firearmClassificationId?: string;
+  isCollectible?: boolean | null; rarityState?: "UNKNOWN";
+};
+const CATALOG_OWNER_KINDS = ["AGENT", "FIREARM", "MELEE_TYPE"] as const;
+const CATALOG_NEW_FILTERS = ["ownerKind", "firearmClassificationId", "isCollectible", "rarityState"] as const;
+const CATALOG_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function validateCatalogFilters(filters: CatalogFilters): void {
+  for (const key of ["categoryId", "rarityCode", "ownerId", "firearmClassificationId"] as const)
+    if (filters[key] !== undefined && !CATALOG_ID.test(filters[key]!)) throw invalid("Catalog reference is invalid", key);
+  if (filters.ownerKind !== undefined && !CATALOG_OWNER_KINDS.includes(filters.ownerKind)) throw invalid("Owner kind is invalid", "ownerKind");
+  if (filters.isCollectible !== undefined && filters.isCollectible !== null && typeof filters.isCollectible !== "boolean") throw invalid("Collectible filter is invalid", "isCollectible");
+  if (filters.rarityState !== undefined && filters.rarityState !== "UNKNOWN") throw invalid("Rarity state is invalid", "rarityState");
+  if (filters.rarityState !== undefined && filters.rarityCode !== undefined) throw invalid("Rarity state and code are mutually exclusive", "rarityState");
+}
+
+export function parseCatalogQuery(query: URLSearchParams): { filters: CatalogFilters; limit: number; cursor?: string } {
+  const allowed = ["q", "categoryId", "rarityCode", "ownerId", "limit", "cursor", ...CATALOG_NEW_FILTERS];
+  for (const key of query.keys()) if (!allowed.includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported or duplicate catalog query", key);
+  if (query.has("rarityState") && query.has("rarityCode")) throw invalid("Rarity state and code are mutually exclusive", "rarityState");
+  const limit = query.has("limit") ? Number(query.get("limit")) : 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid", "limit");
+  const filters: CatalogFilters = {};
+  for (const key of ["q", "categoryId", "rarityCode", "ownerId"] as const) if (query.get(key)) filters[key] = query.get(key)!;
+  if (query.has("ownerKind")) filters.ownerKind = query.get("ownerKind") as SkinOwnerRef["kind"];
+  if (query.has("firearmClassificationId")) filters.firearmClassificationId = query.get("firearmClassificationId")!;
+  if (query.has("rarityState")) filters.rarityState = query.get("rarityState") as "UNKNOWN";
+  if (query.has("isCollectible")) {
+    const value = query.get("isCollectible");
+    if (!["true", "false", "null"].includes(value!)) throw invalid("Collectible filter is invalid", "isCollectible");
+    filters.isCollectible = value === "null" ? null : value === "true";
+  }
+  validateCatalogFilters(filters);
+  return { filters, limit, ...(query.has("cursor") ? { cursor: query.get("cursor")! } : {}) };
+}
 
 /**
  * Shared public skin projection. Catalog pages, publish snapshots and legacy
@@ -835,12 +871,19 @@ export function escapeLike(value: string): string {
 export function parseCursor(cursor: string, binding: { gameId: string; revision: string; filters: CatalogFilters }): string {
   let decoded: unknown;
   try {
+    if (!/^[A-Za-z0-9_-]+$/.test(cursor) || Buffer.from(cursor, "base64url").toString("base64url") !== cursor) throw Error();
     decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
   } catch {
     throw invalid("Cursor is invalid");
   }
   if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw invalid("Cursor is invalid");
   const record = decoded as Record<string, unknown>;
+  if (record.v !== 1 || typeof record.gameId !== "string" || !CATALOG_ID.test(record.gameId) || typeof record.revision !== "string" || !/^[1-9]\d*$/.test(record.revision) || typeof record.lastSkinId !== "string" || !CATALOG_ID.test(record.lastSkinId)
+    || ["q", "categoryId", "rarityCode", "ownerId"].some(key => record[key] != null && typeof record[key] !== "string")
+    || Object.hasOwn(record, "ownerKind") && !CATALOG_OWNER_KINDS.includes(record.ownerKind as SkinOwnerRef["kind"])
+    || Object.hasOwn(record, "firearmClassificationId") && (typeof record.firearmClassificationId !== "string" || !CATALOG_ID.test(record.firearmClassificationId))
+    || Object.hasOwn(record, "isCollectible") && record.isCollectible !== null && typeof record.isCollectible !== "boolean"
+    || Object.hasOwn(record, "rarityState") && record.rarityState !== "UNKNOWN") throw invalid("Cursor is invalid");
   if (
     record.v !== 1 ||
     record.gameId !== binding.gameId ||
@@ -849,6 +892,7 @@ export function parseCursor(cursor: string, binding: { gameId: string; revision:
     (record.categoryId ?? null) !== (binding.filters.categoryId ?? null) ||
     (record.rarityCode ?? null) !== (binding.filters.rarityCode ?? null) ||
     (record.ownerId ?? null) !== (binding.filters.ownerId ?? null) ||
+    CATALOG_NEW_FILTERS.some(key => (binding.filters[key] !== undefined) !== Object.hasOwn(record, key) || binding.filters[key] !== undefined && record[key] !== binding.filters[key]) ||
     typeof record.lastSkinId !== "string"
   ) {
     throw conflict("Catalog changed or cursor does not match the current filters; refresh and retry");
@@ -857,7 +901,8 @@ export function parseCursor(cursor: string, binding: { gameId: string; revision:
 }
 
 export function encodeCursor(binding: { gameId: string; revision: string; filters: CatalogFilters }, lastSkinId: string): string {
-  return Buffer.from(JSON.stringify({ v: 1, gameId: binding.gameId, revision: binding.revision, q: binding.filters.q ?? null, categoryId: binding.filters.categoryId ?? null, rarityCode: binding.filters.rarityCode ?? null, ownerId: binding.filters.ownerId ?? null, lastSkinId })).toString("base64url");
+  const added = Object.fromEntries(CATALOG_NEW_FILTERS.filter(key => binding.filters[key] !== undefined).map(key => [key, binding.filters[key]]));
+  return Buffer.from(JSON.stringify({ v: 1, gameId: binding.gameId, revision: binding.revision, q: binding.filters.q ?? null, categoryId: binding.filters.categoryId ?? null, rarityCode: binding.filters.rarityCode ?? null, ownerId: binding.filters.ownerId ?? null, ...added, lastSkinId })).toString("base64url");
 }
 
 export async function readPublicCatalog(
@@ -868,6 +913,8 @@ export async function readPublicCatalog(
   cursor?: string,
   scope: "browse" | "publishing" = "browse",
 ): Promise<Record<string, unknown>> {
+  validateCatalogFilters(filters);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalid("Limit is invalid", "limit");
   const game = await client.query<{
     id: string;
     code: string;
@@ -886,6 +933,18 @@ export async function readPublicCatalog(
   if (!gameRow) throw notFound();
   let lastSkinId: string | undefined;
   if (cursor !== undefined) lastSkinId = parseCursor(cursor, { gameId, revision: gameRow.catalogRevision, filters });
+  if (filters.categoryId || filters.rarityCode || filters.ownerId || filters.firearmClassificationId) {
+    const refs = (await client.query<{ categoryOk: boolean; rarityOk: boolean; ownerOk: boolean; classificationOk: boolean }>(
+      `SELECT /* catalog-reference-check */
+        ($2::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.skin_category WHERE game_id=$1 AND id=$2)) AS "categoryOk",
+        ($3::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.skin_rarity WHERE game_id=$1 AND code=$3)) AS "rarityOk",
+        ($4::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.skin_owner WHERE game_id=$1 AND id=$4) OR EXISTS(SELECT 1 FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$4)) AS "ownerOk",
+        ($5::text IS NULL OR EXISTS(SELECT 1 FROM zzsh_supply.firearm_classification WHERE game_id=$1 AND id=$5)) AS "classificationOk"`,
+      [gameId, filters.categoryId ?? null, filters.rarityCode ?? null, filters.ownerId ?? null, filters.firearmClassificationId ?? null],
+    )).rows[0];
+    for (const [field, ok] of [["categoryId", refs?.categoryOk], ["rarityCode", refs?.rarityOk], ["ownerId", refs?.ownerOk], ["firearmClassificationId", refs?.classificationOk]] as const)
+      if (ok !== true) throw invalid("Catalog reference is unavailable for this game", field);
+  }
 
   const itemSearch = scope === "browse" ? filters.q : undefined;
   const items = await client.query(
@@ -903,10 +962,13 @@ export async function readPublicCatalog(
      SELECT * FROM visible ORDER BY "sortOrder", "code", "id"`,
     [gameId],
   );
-  const visibleRefs = await client.query<{ categoryId: string; kind: SkinOwnerRef["kind"] | null; id: string | null; name: string | null }>(
+  const visibleRefs = await client.query<{ categoryId: string; kind: SkinOwnerRef["kind"] | null; id: string | null; name: string | null; firearmClassificationId: string | null; firearmClassificationName: string | null }>(
     `SELECT DISTINCT s.category_id AS "categoryId", s.owner_kind AS kind,
-            COALESCE(s.owner_id,s.firearm_id) AS id, ${publicSkinOwnerNameSql("s")} AS name
+            COALESCE(s.owner_id,s.firearm_id) AS id, ${publicSkinOwnerNameSql("s")} AS name,
+            f.classification_id AS "firearmClassificationId", fc.name AS "firearmClassificationName"
        FROM "zzsh_supply"."skin" s
+       LEFT JOIN zzsh_supply.firearm f ON s.owner_kind='FIREARM' AND f.id=s.firearm_id AND f.game_id=s.game_id
+       LEFT JOIN zzsh_supply.firearm_classification fc ON fc.id=f.classification_id AND fc.game_id=f.game_id
       WHERE s.game_id=$1 AND s.enabled=true AND s.form_visible=true AND s.category_id=ANY($2::text[])`,
     [gameId, categories.rows.map(category => category.id)],
   );
@@ -922,7 +984,7 @@ export async function readPublicCatalog(
     }
   }
   const owners = [...new Map(visibleRefs.rows.filter(reference => reference.id && reference.kind && reference.name)
-    .map(({ id, kind, name }) => [`${kind}:${id}`, { id, kind, name }])).values()]
+    .map(({ id, kind, name, firearmClassificationId, firearmClassificationName }) => [`${kind}:${id}`, { id, kind, name, ...(kind === "FIREARM" ? { firearmClassificationId: firearmClassificationId ?? null, firearmClassificationName: firearmClassificationName ?? null } : {}) }])).values()]
     .sort((a, b) => a.kind!.localeCompare(b.kind!) || a.name!.localeCompare(b.name!, "zh-CN") || a.id!.localeCompare(b.id!));
 
   const rarities = await client.query(
@@ -930,6 +992,9 @@ export async function readPublicCatalog(
       WHERE "game_id" = $1 AND "enabled" = true ORDER BY "sort_order", "code"`,
     [gameId],
   );
+  const classifications = (await client.query<{ id: string; code: string; name: string; sortOrder: number }>(
+    `SELECT id,code,name,sort_order AS "sortOrder" FROM zzsh_supply.firearm_classification WHERE game_id=$1 AND enabled ORDER BY sort_order,code,id`, [gameId],
+  )).rows;
 
   const entitlements = await client.query(
     `SELECT "id", "code", "name", "value_kind" AS "valueKind", "expiry_kind" AS "expiryKind", "sort_order" AS "sortOrder"
@@ -961,6 +1026,19 @@ export async function readPublicCatalog(
     parameters.push(filters.ownerId);
     conditions.push(`COALESCE(s."owner_id",s."firearm_id") = $${parameters.length}`);
   }
+  if (filters.ownerKind !== undefined) {
+    parameters.push(filters.ownerKind);
+    conditions.push(`s."owner_kind" = $${parameters.length}`);
+  }
+  if (filters.firearmClassificationId !== undefined) {
+    parameters.push(filters.firearmClassificationId);
+    conditions.push(`s."owner_kind" = 'FIREARM' AND f."classification_id" = $${parameters.length}`);
+  }
+  if (filters.isCollectible !== undefined) {
+    if (filters.isCollectible === null) conditions.push(`s."is_collectible" IS NULL`);
+    else { parameters.push(filters.isCollectible); conditions.push(`s."is_collectible" = $${parameters.length}`); }
+  }
+  if (filters.rarityState === "UNKNOWN") conditions.push(`s."rarity_code" IS NULL`);
   if (filters.q) {
     parameters.push(`%${escapeLike(filters.q)}%`);
     conditions.push(`(s."name" ILIKE $${parameters.length} ESCAPE '\\' OR (${publicSkinOwnerNameSql("s")}) ILIKE $${parameters.length} ESCAPE '\\' OR EXISTS (
@@ -975,10 +1053,13 @@ export async function readPublicCatalog(
   parameters.push(limit + 1);
   const skins = await client.query(
     `SELECT s."id", s."code", s."name", s."category_id" AS "categoryId", s."rarity_code" AS "rarityCode",
-            s."base_name" AS "baseName", s."owner_kind" AS "ownerKind",
+            s."base_name" AS "baseName", s."owner_kind" AS "ownerKind", CASE WHEN s.owner_kind='FIREARM' THEN f.id ELSE (SELECT o.id FROM zzsh_supply.skin_owner o WHERE o.game_id=s.game_id AND o.id=s.owner_id AND o.kind=s.owner_kind) END AS "ownerId",
+            f.classification_id AS "firearmClassificationId", fc.name AS "firearmClassificationName",
             ${publicSkinOwnerNameSql("s")} AS "ownerName", ${publicSkinRarityNameSql("s")} AS "rarityName", ${publicSkinMetadataSql("s")},
             ${publicSkinMediaIdSql("s")} AS "mediaId", s."sort_order" AS "sortOrder"
        FROM "zzsh_supply"."skin" s
+       LEFT JOIN zzsh_supply.firearm f ON s.owner_kind='FIREARM' AND f.id=s.firearm_id AND f.game_id=s.game_id
+       LEFT JOIN zzsh_supply.firearm_classification fc ON fc.id=f.classification_id AND fc.game_id=f.game_id
       WHERE ${conditions.join(" AND ")}
       ORDER BY s."id"
       LIMIT $${parameters.length}`,
@@ -998,6 +1079,7 @@ export async function readPublicCatalog(
       return { ...category, ownerKind: kinds?.size === 1 ? [...kinds][0] : null };
     }),
     owners,
+    skinFilters: { version: 1, ownerKinds: [...CATALOG_OWNER_KINDS], firearmClassifications: classifications.map(({ id, code, name, sortOrder }) => ({ id, code, name, sortOrder })), collectibleValues: ["true", "false", "null"], rarityStates: ["UNKNOWN"] },
     rarities: rarities.rows,
     entitlements: entitlements.rows,
     skins: page,

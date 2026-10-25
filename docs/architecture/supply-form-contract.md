@@ -40,12 +40,16 @@ Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:
 |---|---|---|
 | basics | 不要求号主输入标题或游戏内ID；description为可选公开备注，受控attributes与安全箱/等级按目录申报 | title保留内部兼容，允许为空；展示端为空时从当前版本资源和状态派生摘要。未知保留null，不默认0 |
 | inventory | publishing-catalog.items的稳定itemId及HAFF_BASE/ROUND/PIECE/DAY数量文本 | inputScale=0；必填填数量或0，空值留草稿且不发送为库存行；未定价blockers阻止提交，不补价格 |
-| skins | 可见分类树、q/categoryId/rarityCode/ownerId、分页多选skinId | 发布目录q只筛皮肤名称/别名/所属，不过滤物资；分类、搜索和翻页保留已选ID，不自动增加租赁费 |
+| skins | 可见分类树、q/categoryId/rarityCode/ownerId及类型/枪种/典藏/未标注过滤、分页多选skinId | 发布目录q只筛皮肤名称/别名/所属，不过滤物资；分类、搜索和翻页保留已选ID，不自动增加租赁费 |
 | entitlements | 目录valueKind/expiryKind、声明值及已知到期时间 | 限时未知不形成承诺；报价失败定位entitlements |
 | media | 账号展示图及处罚公示图均使用ACCOUNT_DISPLAY；其他已有ACCOUNT_EVIDENCE继续私有 | 绑定带assetId/position及可选category（SHOWCASE/PENALTY）。分类保存于当前版本attributes.media_categories并参与已有内容哈希，不改素材source_note；省略该键不改变旧声明的字节合同。公开媒体集合以封存payload为准，处罚图不能作为封面或替代必需展示图。SavedDeclaration附带用途/byteHash及只读公开状态；公开路由仍检查归属、版本、暂停/隔离及衍生文件 |
 | rules | 当前租期/计价选项、权威OwnerQuote、对应封存协议正文 | quote→accept-rules→submit，确认绑定versionId/releaseId/contentHash和expectedRevision |
 
-皮肤公开摘要包含 `ownerKind/rarityCode/rarityName/rarityBasis/isCollectible/defaultState/mediaId`；`rarityBasis`区分OFFICIAL与PLATFORM_REFERENCE，品质及典藏未知为null，默认状态为UNKNOWN/DEFAULT/NON_DEFAULT。同游戏完整可见目录提供 `owners:[{id,kind,name}]`；分类的ownerKind由含子分类的全部可见引用推导，混合/未知/空为null，不由当前分页猜测。管理端另有完整品质证据和图片来源，见[API合同](api-v1-contract.md)。
+皮肤公开摘要包含 `ownerKind/rarityCode/rarityName/rarityBasis/isCollectible/defaultState/mediaId`；目录皮肤行额外包含目录对象`ownerId`及同游戏FIREARM的`firearmClassificationId/firearmClassificationName`，不要求旧冻结快照补出这些字段。`rarityBasis`区分OFFICIAL与PLATFORM_REFERENCE，品质及典藏未知为null，默认状态为UNKNOWN/DEFAULT/NON_DEFAULT。同游戏完整可见目录提供 `owners:[{id,kind,name}]`；分类的ownerKind由含子分类的全部可见引用推导，混合/未知/空为null，不由当前分页猜测。管理端另有完整品质证据和图片来源，见[API合同](api-v1-contract.md)。
+
+`catalog`与`publishing-catalog`共用唯一查询参数：旧`q/categoryId/rarityCode/ownerId/limit/cursor`，以及`ownerKind=AGENT|FIREARM|MELEE_TYPE`、`firearmClassificationId`、`isCollectible=true|false|null`、`rarityState=UNKNOWN`。省略不筛；false仅匹配实际false，字面null仅匹配NULL。UNKNOWN仅指rarity_code为空，与rarityCode互斥，不是第六档品质。所有维度AND；合法空交集为空页，未知/重复/非法或跨游戏引用400。旧空q及旧无新条件cursor兼容，cursor绑定游戏、catalogRevision、所有条件与ID位置；畸形400，条件/修订不匹配409，显式null不与省略混用。
+
+`skinFilters.version=1`提供ownerKinds、完整同游戏启用firearmClassifications、collectibleValues及rarityStates；客户端只在能力与部署准入均就绪时发新参数。空枪种字典返回[]，不猜分组或阻断按所属对象筛选。owners继续使用id/kind/name，FIREARM可带分类ID/名称；字典停用不抹去旧绑定名称，不允许借筛选重新绑定。元数据不由当前页或q推断，不公开完整来源证据/URL。目录过滤只决定可选择skinId，市场账号仍用原ANY/ALL组合；不据分类改金额政策或旧冻结快照。
 
 上架/编辑、市场皮肤筛选及公开/本人账号详情可显示经平台媒体门禁的皮肤图片；干员竖卡、枪械/近战横图等比显示，缺图或失败保持明确状态。账号列表/卡片、首页和收藏仅显示名称、品质等文字摘要及余量，不显示皮肤图片。目录有图不证明持有；新报价冻结本次皮肤摘要，旧冻结快照缺失的新增字段继续缺省，不补写历史。
 
