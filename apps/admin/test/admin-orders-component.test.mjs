@@ -471,6 +471,17 @@ test('FLOW02 visual: cancelled compact progress omits inapplicable stages and ke
   assert(!text.includes('开租不适用')&&!text.includes('结算不适用'));
 });
 
+test('FLOW02 hover: account and party links preserve Base UI trigger properties on their real buttons', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  globalThis.fetch=async()=>response(chainPage());
+  const props={...chainProps('hover-props'),snapshot:{...snapshotFor('hover-props'),permissions:['order.read','user.directory.read','supply.rental_account.read']}};
+  await act(async()=>root.render(createElement(AdminOrderChainView,props)));
+  await until(()=>node.querySelector('.oc-table tbody tr'));
+  const links=[...node.querySelector('.oc-table tbody tr').querySelectorAll('button.oc-link')];
+  assert.equal(links.length,3);
+  for(const link of links) assert.equal(link.getAttribute('data-slot'),'hover-card-trigger','the rendered navigation button must receive the hover trigger props');
+});
+
 test('FLOW02 visual: progress timestamps use the same display formatter as order dates', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   const instant='2026-10-25T01:02:03.000000Z';

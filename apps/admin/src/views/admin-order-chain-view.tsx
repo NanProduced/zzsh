@@ -67,7 +67,7 @@ function orderUrlQuery(filters:Filters,page:number,size:number){const query:Reco
 function orderUrlKey(query:Record<string,string>){return JSON.stringify([query.status??"",query.from??"",query.to??"",query.page??"",query.size??""]);}
 function orderUrlMatches(filters:Filters,page:number,size:number,query:Record<string,string>){const next=orderUrlFilters(query);return next.status===filters.status&&next.from===filters.from&&next.to===filters.to&&page===Math.max(1,Number(query.page)||1)&&size===parseOrderSize(query.size);}
 function pageScroller(){const page=document.querySelector<HTMLElement>(".workspace-page");return page&&page.scrollHeight>page.clientHeight?page:document.scrollingElement;}
-function Link({children,onClick}:{children:React.ReactNode;onClick:()=>void}){return <button type="button" className="oc-link" onClick={onClick}>{children}<ArrowUpRight size={13}/></button>;}
+function Link({children,className,...props}:React.ComponentProps<"button">){return <button type="button" className={className ? `oc-link ${className}` : "oc-link"} {...props}>{children}<ArrowUpRight size={13}/></button>;}
 function resourcePublicBasis(data: Record<string, any>, snapshot: Snapshot, accountId: string, onOpenPath: (path: string, title?: string) => void) {
   const basis = data.publicBasis, canHandle = snapshot.security.isBoss || snapshot.permissions.includes("supply.review.read");
   const jump = canHandle ? <Link onClick={() => onOpenPath(`/supply/accounts/${accountId}`, accountNumberLabel(data.displayNo))}>处理此账号</Link> : <span>处理账号需要供给复核权限</span>;
