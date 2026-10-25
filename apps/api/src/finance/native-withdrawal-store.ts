@@ -15,7 +15,7 @@ const unavailable=(message:string)=>new SecurityApiError(503,"EVIDENCE_UNAVAILAB
 export type NativeWithdrawalActor=UserContext&{requestId:string};
 export type NativeWithdrawalBody={amountCents:string;destinationId:string;policyVersion:string;expectedWalletVersion:string};
 export type NativeWithdrawalQuoteBody=Pick<NativeWithdrawalBody,"amountCents"|"destinationId"|"policyVersion">;
-export type NativeWithdrawalOptions={scope:PayoutScope;initialProfile?:BoundPayoutProfile;loadAdmission?:(c:PoolClient,userId:string,body:{destinationId:string;policyVersion:string})=>WithdrawalAdmission|Promise<WithdrawalAdmission>};
+export type NativeWithdrawalOptions={scope:PayoutScope;readContext?:(c:PoolClient,actor:NativeWithdrawalActor)=>Promise<unknown>;initialProfile?:BoundPayoutProfile;loadAdmission?:(c:PoolClient,userId:string,body:{destinationId:string;policyVersion:string})=>WithdrawalAdmission|Promise<WithdrawalAdmission>};
 export type NativeWithdrawalRow={id:string;user_id:string;payout_key:string;request_fingerprint:string;policy_version:string;destination_id:string;destination_revision:string;
  gross_cents:string;net_cents:string;fee_cents:string;currency:"CNY";expected_ledger_revision:string;coverage_canonical:string;coverage_sha256:string;coverage_version:string;covered_set_digest:string;
  merchant_identity_id:string;user_no:string;trade_merchant_no:string|null;merchant_order_no:string;receiver_account_no_enc:string;receiver_name_enc:string;target_fingerprint:string;
@@ -30,7 +30,14 @@ export const NATIVE_WITHDRAWAL_COLUMNS=`id,user_id,payout_key,request_fingerprin
 export async function assertNativePayoutResource(c:PoolClient,scope:PayoutScope){const s=readPayoutScope(scope),r=(await c.query(`SELECT current_database() AS db,current_user AS actor,pg_current_xact_id()::text AS xid,current_setting('transaction_isolation') AS isolation`)).rows[0];if(r?.db!==s.database||r?.actor!==s.runtimeUser||r?.isolation!=="read committed"||!/^[1-9][0-9]*$/.test(r?.xid??""))throw unavailable("Native payout resource or transaction differs");return r.xid as string;}
 const publicIntent=(r:NativeWithdrawalRow)=>Object.freeze({contractVersion:"native-withdrawal.v1" as const,id:r.id,source:"JOINPAY" as const,userId:r.user_id,amountCents:r.gross_cents,netCents:r.net_cents,feeCents:r.fee_cents,currency:r.currency,
  state:r.state,operationVersion:r.operation_version,fundsDisposition:r.funds_disposition,requiresReview:r.requires_review,merchantOrderNo:r.merchant_order_no,policyVersion:r.policy_version,destinationId:r.destination_id,
- acceptedAt:r.accepted_at,bankArrival:"UNKNOWN" as const,globalWithdrawable:"UNKNOWN" as const});
+ acceptedAt:r.accepted_at,bankArrival:"UNKNOWN" as const,globalWithdrawable:"UNKNOWN" as const,originalDestination:originalDestination(r)});
+function originalDestination(r:NativeWithdrawalRow){
+ let cardMask:string|null=null;
+ try{const a=JSON.parse(r.admission_canonical);if(sha(r.admission_canonical)===r.admission_sha256&&a.userId===r.user_id&&a.target?.userId===r.user_id
+  &&a.target.destinationId===r.destination_id&&a.target.revision===r.destination_revision&&typeof a.target.mask==="string"&&/^\*{4} \*{4} [0-9]{4}$/.test(a.target.mask))cardMask=a.target.mask;}catch{/* 未知旧格式不回查当前卡，也不输出原件。 */}
+ return Object.freeze({id:r.destination_id,revision:r.destination_revision,cardMask,basis:"ORIGINAL_INTENT" as const,bankOwnershipVerification:"UNKNOWN" as const});
+}
+export {originalDestination as projectOriginalWithdrawalBankDestination};
 function parseBody(body:Record<string,unknown>,action:"QUOTE"|"RESERVE"){const keys=action==="QUOTE"?["amountCents","destinationId","policyVersion"]:["amountCents","destinationId","expectedWalletVersion","policyVersion"];if(!body||Object.keys(body).sort().join(",")!==keys.sort().join(","))throw invalid("Unsupported native withdrawal body");for(const k of Object.keys(body))if(typeof body[k]!=="string"||!body[k]||String(body[k]).trim()!==body[k]||Buffer.byteLength(body[k] as string)>512)throw invalid("Invalid native withdrawal field");return Object.fromEntries(keys.map(k=>[k,body[k]])) as NativeWithdrawalBody;}
 function parse(text:string):any{try{return JSON.parse(text);}catch{throw unavailable("Original native withdrawal proof is malformed");}}
 export function nativePayoutBinding(r:NativeWithdrawalRow,scope:PayoutScope):PayoutBinding{

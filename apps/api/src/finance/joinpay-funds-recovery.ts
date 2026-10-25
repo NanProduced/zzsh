@@ -72,18 +72,20 @@ export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: A
 export async function recoverJoinpayPayoutBatch(input: PayoutOptions, signal?: AbortSignal) {
   const o = payoutOptions(input), a = readPayoutScope(o.execution.scope);
   const accepted = [{ reference: a.reference, sha256: a.sha256 }, ...a.historicalScopes];
+  const canSubmit = a.acceptedProfiles.some(profile => profile.operation === "SUBMIT");
   const rows = await scan(o.execution.pool, a, `SELECT i.id,i.state FROM zzsh_order.joinpay_withdrawal_intent i
     WHERE i.merchant_identity_id=$1 AND i.user_no=$2 AND i.trade_merchant_no IS NOT DISTINCT FROM $3::text
       AND i.funds_disposition='RESERVED' AND i.state=ANY($5::text[])
       AND EXISTS(SELECT 1 FROM jsonb_to_recordset($4::jsonb) AS accepted(reference text,sha256 text)
         WHERE accepted.reference=i.scope_ref AND accepted.sha256=i.scope_sha256)
       AND (i.state<>'RESERVED' OR i.lease_version>0 OR NOT i.requires_review)
+      AND (i.lease_version>0 OR $9::boolean)
       AND (i.lease_until IS NULL OR i.lease_until<=clock_timestamp())
       AND (SELECT count(*) FROM zzsh_order.joinpay_payout_attempt counted WHERE counted.intent_id=i.id AND counted.operation='QUERY')<$8::integer
       AND NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_payout_attempt recent WHERE recent.intent_id=i.id
         AND recent.created_at>clock_timestamp()-make_interval(secs=>$6::integer))
     ORDER BY i.updated_at,i.id LIMIT $7`, [a.merchantIdentityId, a.userNo, a.tradeMerchantNo ?? null, JSON.stringify(accepted), PAYOUT_STATES,
-    o.minimumIntervalSeconds, o.batchLimit, JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES], PAYOUT_STATES, o.batchLimit, "PAYOUT", signal);
+    o.minimumIntervalSeconds, o.batchLimit, JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES, canSubmit], PAYOUT_STATES, o.batchLimit, "PAYOUT", signal);
   const result = { selected: rows.length, recorded: 0, skipped: 0 };
   for (const row of rows) {
     if (signal?.aborted) break;

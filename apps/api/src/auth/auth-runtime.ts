@@ -12,6 +12,9 @@ import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { mountRentalMembership } from "./rental-membership-routes";
+import { mountWithdrawalBankBinding } from "../finance/withdrawal-bank-binding-routes";
+import { mountPersonalWithdrawalHistory } from "../finance/withdrawal-history-routes";
+import type { WithdrawalBankBindingOptions } from "../finance/withdrawal-bank-binding";
 import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
 import { executeMembershipGrowthOperation } from "./membership-growth-approval";
 import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
@@ -69,6 +72,7 @@ import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, typ
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountJoinpayCollectionNotifications } from "../order/joinpay-collection-notification-routes";
 import { JoinpayFundsRecoveryLifecycle, type JoinpayFundsRecoverySettings } from "../finance/joinpay-funds-recovery";
+import { JoinpayAccountObservationLifecycle, type JoinpayAccountObservationOptions } from "../finance/joinpay-account-observer";
 import type { FormalCollectionSourceOptions } from "../order/joinpay-collection-source";
 import { JoinpayCollectionRecoveryLifecycle, type JoinpayCollectionRecoveryOptions } from "../order/joinpay-collection-recovery";
 import { mountInvitationRoutes } from "../finance/invitation-routes";
@@ -108,9 +112,11 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions;
     recovery?: Pick<JoinpayCollectionRecoveryOptions, "workerId" | "batchLimit" | "minimumIntervalSeconds"> };
   /** Server-only composition. Read scope remains available when new reservations are disabled. */
+  withdrawalBankBinding?: WithdrawalBankBindingOptions;
   joinpayWithdrawal?: { routes: NativeWithdrawalOptions; execution?: Omit<PayoutExecution,'pool'>; notifications?: boolean; recovery?: JoinpayFundsRecoverySettings };
   joinpayRefund?: Omit<RefundExecution,'pool'> & { recovery?: JoinpayFundsRecoverySettings };
   joinpayAccountRead?: JoinpayAccountReadAccess;
+  joinpayAccountObservation?: Omit<JoinpayAccountObservationOptions, "pool">;
   confirmationKey?: ConfirmationKey;
   listingCursorKey?: ListingCursorKey;
   legacyPublicAdmission?: LegacyPublicAdmission;
@@ -769,6 +775,7 @@ export async function mountAuthHandlers(
     app.get(JoinpayCollectionRecoveryLifecycle).start({ ...recovery,
       execution: { ...execution, pool: options.pool, formal: execution.formal } });
   }
+  if (options.joinpayAccountObservation) app.get(JoinpayAccountObservationLifecycle).start({ ...options.joinpayAccountObservation, pool: options.pool });
   const refundRecovery = options.joinpayRefund?.recovery, payoutRecovery = options.joinpayWithdrawal?.recovery;
   if (refundRecovery !== undefined || payoutRecovery !== undefined) {
     const refund = options.joinpayRefund, payout = options.joinpayWithdrawal;
@@ -1152,7 +1159,9 @@ export async function mountAuthHandlers(
   const payoutReady=Boolean(payout?.execution&&payout.notifications===true&&payout.execution.scope===payout.routes.scope);
   if(options.joinpayRefund)mountJoinpayRefundNotifications(app,{...options.joinpayRefund,pool:options.pool});
   if(payoutReady)mountJoinpayPayoutNotifications(app,{...payout!.execution!,pool:options.pool});
-  const joinpayWithdrawal=payout?{scope:payout.routes.scope,...(payoutReady?{initialProfile:payout.routes.initialProfile,loadAdmission:payout.routes.loadAdmission}:{})}:undefined;
+  const joinpayWithdrawal=payout?{scope:payout.routes.scope,...(payoutReady?{readContext:payout.routes.readContext,initialProfile:payout.routes.initialProfile,loadAdmission:payout.routes.loadAdmission}:{})}:undefined;
+  mountWithdrawalBankBinding(app, { ...securityOptions, withdrawalBankBinding: options.withdrawalBankBinding });
+  mountPersonalWithdrawalHistory(app, { ...securityOptions, listingCursorKey: options.listingCursorKey, nativeWithdrawalScope: options.nativeWithdrawalScope });
   mountRentalMembership(app,{...securityOptions,listingCursorKey:options.listingCursorKey,nativeWithdrawalScope:options.nativeWithdrawalScope,joinpayWithdrawal});
   mountMembershipGrowthRoutes(app, securityOptions);
   const membershipGrowthReader = membershipGrowthEnabled()

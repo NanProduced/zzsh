@@ -76,7 +76,7 @@ test("只消费原退款/提现意图，按商户及已接受历史绑定扫描�
   assert.equal(refundScan.values![6], refunds.JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES); assert.equal(refundScan.values!.at(-1), false);
   assert.deepEqual(payoutScan.values!.slice(0, 3), [f.view.merchantIdentityId, f.view.userNo, null]);
   assert.deepEqual(JSON.parse(payoutScan.values![3] as string), [{ reference: f.view.reference, sha256: f.view.sha256 }, ...f.view.historicalScopes]);
-  assert.equal(payoutScan.values!.at(-1), payouts.JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES);
+  assert.equal(payoutScan.values![7], payouts.JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES); assert.equal(payoutScan.values!.at(-1), false);
 });
 
 test("坏枚举/重复ID/超批量/终态不交执行器；不把本地查询结果补成到账", async t => {
@@ -90,6 +90,14 @@ test("坏枚举/重复ID/超批量/终态不交执行器；不把本地查询结
     await assert.rejects(recoverJoinpayPayoutBatch(f.payout), /FUNDS_RECOVERY_CANDIDATES_INVALID/);
   }
   assert.equal(called, 0);
+});
+
+test("仅查询scope以绑定参数排除lease0首派；明确SUBMIT配置才给扫描开关", async t => {
+  const f = fixture(t, []);
+  await recoverJoinpayPayoutBatch(f.payout);
+  assert(f.trace[1]!.sql.includes("AND (i.lease_version>0 OR $9::boolean)")); assert.equal(f.trace[1]!.values![8], false);
+  f.view.acceptedProfiles.push({ operation: "SUBMIT" } as never);
+  await recoverJoinpayPayoutBatch(f.payout); assert.equal(f.trace[3]!.values![8], true);
 });
 
 test("任一域提交未知原样抛出并停止本批，不重发或开始下一单", async t => {

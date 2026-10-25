@@ -52,6 +52,12 @@ export function describeJoinpayAccountProfile(p: BoundJoinpayAccountProfile) {
     rulesSha256: v.rulesSha256, keyVersionRef: v.keyVersionRef, reviewRef: v.reviewRef, reviewSha256: v.reviewSha256,
     resourceDatabase: v.resourceDatabase, resourceRuntimeUser: v.resourceRuntimeUser });
 }
+/** 后台读取只接受绑定的商户查询配置；不把合成用途升级为出网许可。 */
+export function assertJoinpayAccountReadProfile(profile: BoundJoinpayAccountProfile) {
+  const p = getProfile(profile);
+  if (p.purpose !== "MERCHANT_READ") return reject("ACCOUNT_SYNTHETIC_NETWORK_FORBIDDEN");
+  return Object.freeze({ ...describeJoinpayAccountProfile(profile), userNo: p.userNo });
+}
 export function bindJoinpayAccountProfile(input: JoinpayAccountServerProfile): BoundJoinpayAccountProfile {
   const p = snapshot(input) as JoinpayAccountServerProfile;
   operation(p.operation);

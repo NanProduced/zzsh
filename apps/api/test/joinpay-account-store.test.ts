@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { bindJoinpayAccountProfile, readJoinpayAccountObservation, type JoinpayAccountServerProfile } from "../src/finance/joinpay-account";
-import { refreshJoinpayAccount, recoverJoinpayAccountObservation, readJoinpayAccountSummary, AccountObservationWriteError } from "../src/finance/joinpay-account-store";
+import { refreshJoinpayAccount, refreshJoinpayAccountBySystem, recoverJoinpayAccountObservation, readJoinpayAccountSummary, AccountObservationWriteError } from "../src/finance/joinpay-account-store";
 
 // 虚构后台配置/KAT模型；不是已取得的官方原件。所有响应由fake fetch返回。
 const KEY = "SYNTHETIC_ACCOUNT_KEY", USER = "999900000000005", md5 = (s: string) => createHash("md5").update(s).digest("hex");
@@ -11,15 +11,40 @@ function raw(code = "2001") {
   const sig = md5(code + "ok" + USER + "fictional" + "201" + "12.00" + "1.00" + KEY);
   return `{"statusCode":${code},"message":"ok","data":{"userNo":"${USER}","userName":"fictional","currency":201,"useAbleSettAmount":12.00,"availableSettAmountFrozen":1.00,"errorCode":"","errorDesc":"","hmac":"${sig}"}}`;
 }
-function profile() {
+function profile(purpose: "MERCHANT_READ" | "SYNTHETIC_PROTOCOL" = "MERCHANT_READ") {
   const responseBody = raw();
-  const c: JoinpayAccountServerProfile = { purpose: "MERCHANT_READ", resourceDatabase: "synthetic_balance_test", resourceRuntimeUser: "synthetic_balance_r", operation: "AVAILABLE", profileId: "SYNTHETIC_OFFICIAL_CONFIGURATION_MODEL", merchantIdentityId: "synthetic_account_store", userNo: USER, keyVersionRef: "synthetic_store_key",
+  const c: JoinpayAccountServerProfile = { purpose, resourceDatabase: "synthetic_balance_test", resourceRuntimeUser: "synthetic_balance_r", operation: "AVAILABLE", profileId: "SYNTHETIC_OFFICIAL_CONFIGURATION_MODEL", merchantIdentityId: "synthetic_account_store", userNo: USER, keyVersionRef: "synthetic_store_key",
     reviewRef: "SYNTHETIC_REVIEW_NOT_OFFICIAL", reviewSha256: "b".repeat(64), permission: "REVIEWED_MERCHANT_BALANCE_READ",
     rules: { dataEncoding: "OBJECT", statusCodeToken: "NUMBER", amountToken: "NUMBER", currencyToken: "NUMBER", numericSigning: "RAW_JSON_TOKEN", optionalSigning: "ABSENT_EMPTY_NULL_EQUIVALENT", unknownFields: "REJECT", amount: { unit: "UNKNOWN" } },
     knownAnswer: { reference: "SYNTHETIC_NOT_OFFICIAL", sha256: createHash("sha256").update(responseBody).digest("hex"), vectorKey: KEY, requestHmac: md5(USER + KEY), responseBody } };
   return bindJoinpayAccountProfile(c);
 }
 const actor = { adminId: "synthetic_admin", sessionId: "synthetic_session", requestId: "synthetic_request" };
+
+test("系统刷新沿原存储事务记system审计，不伪造admin/session；合成响应仍为合成", async () => {
+  const m = memory();
+  const r = await refreshJoinpayAccountBySystem(m.pool, profile(), { keyFor: () => KEY, fetch: async () => new Response(raw()) }, "system_request");
+  assert.equal(r.integration, "INTEGRATED"); assert.equal(r.result!.evidenceLevel, "SYNTHETIC_PROTOCOL");
+  const audit = m.state.audit[0]!; assert.equal(audit[1], "system"); assert.equal(audit[2], "joinpay-account-observer");
+  assert.equal(audit[3], null); assert.equal(audit[8], "system_request"); assert.equal(m.state.rows.length, 1);
+});
+test("系统刷新在PG/key之前拒绝合成用途与非法requestId", async () => {
+  const m = memory(); let keys = 0;
+  const deps = { keyFor: () => { keys++; return KEY; }, fetch: async () => new Response(raw()) };
+  await assert.rejects(refreshJoinpayAccountBySystem(m.pool, profile("SYNTHETIC_PROTOCOL"), deps, "system_request"), /SYNTHETIC_NETWORK_FORBIDDEN/);
+  await assert.rejects(refreshJoinpayAccountBySystem(m.pool, profile(), deps, " "), /ACCOUNT_ACTOR_INVALID/);
+  assert.equal(keys, 0); assert.equal(m.state.connectCount, 0);
+});
+test("系统观察审计故障回滚；COMMIT未知保留原attempt且不再次查渠道", async () => {
+  for (const unknown of [false, true]) {
+    const m = memory(); m.state.failAudit = !unknown; m.state.commitUnknown = unknown; let sends = 0;
+    await assert.rejects(refreshJoinpayAccountBySystem(m.pool, profile(), { keyFor: () => KEY, fetch: async () => { sends++; return new Response(raw()); } }, "system_request"), e => {
+      assert.ok(e instanceof AccountObservationWriteError); assert.equal(e.code, unknown ? "ACCOUNT_OBSERVATION_COMMIT_UNKNOWN" : "ACCOUNT_OBSERVATION_WRITE_FAILED");
+      assert(e.attemptId); return true;
+    });
+    assert.equal(sends, 1); assert.equal(m.state.rows.length, unknown ? 1 : 0);
+  }
+});
 function memory() {
   const state = { integrated: true, rows: [] as Record<string, any>[], staged: [] as Record<string, any>[], audit: [] as unknown[][], stagedAudit: [] as unknown[][],
     queries: [] as string[], releases: 0, failAudit: false, missingReturning: false, commitUnknown: false, connectCount: 0, database: "synthetic_balance_test", runtimeUser: "synthetic_balance_r" };

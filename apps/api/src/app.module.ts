@@ -9,6 +9,7 @@ import { OrderImEventRecoveryLifecycle } from "./im/order-im-events";
 import { OrderTeamLifecycle } from "./im/order-team";
 import { JoinpayCollectionRecoveryLifecycle } from "./order/joinpay-collection-recovery";
 import { JoinpayFundsRecoveryLifecycle } from "./finance/joinpay-funds-recovery";
+import { JoinpayAccountObservationLifecycle } from "./finance/joinpay-account-observer";
 
 @Module({})
 export class AppModule {
@@ -22,7 +23,7 @@ export class AppModule {
         // the sweeper and awaiting the in-flight batch) fires before the pool ends.
         ...(orderSweep ? [OrderSweepModule.register(orderSweep)] : []),
       ],
-      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle, JoinpayFundsRecoveryLifecycle],
+      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle, JoinpayFundsRecoveryLifecycle, JoinpayAccountObservationLifecycle],
     };
   }
 }

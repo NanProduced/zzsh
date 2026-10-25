@@ -27,6 +27,11 @@ export function mountChannelWithdrawalRoutes(app:INestApplication,options:AuthSe
    if(!['GET','POST'].includes(method))throw notFound();
    if(!requireOrigin(request,response,{...options,adminOrigin:options.userOrigin},requestId))return;
    const actor={...await readUserContext(request,options),requestId};
+   if(method==='GET'&&path==='/options'){
+    if(query.size)throw invalid('Unexpected withdrawal context query');const channel=options.joinpayWithdrawal;
+    if(!channel?.readContext)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Withdrawal context is not integrated');
+    sendJson(response,200,await withTransaction(options.pool,c=>channel.readContext!(c,actor)),requestId);return;
+   }
    let selector:{key:string}|{intentId:string}|undefined;
    if(method==='GET'){
     if(path==='/receipt'){

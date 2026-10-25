@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
-import { describeJoinpayAccountProfile, queryJoinpayAccount, readJoinpayAccountObservation, JoinpayAccountError,
+import { assertJoinpayAccountReadProfile, describeJoinpayAccountProfile, queryJoinpayAccount, readJoinpayAccountObservation, JoinpayAccountError,
   type AccountQueryDependencies, type AccountQueryResult, type BoundJoinpayAccountProfile, type JoinpayAccountOperation } from "./joinpay-account";
 
 type Reader = Pick<PoolClient, "query">;
@@ -22,6 +22,16 @@ export type AccountRefreshActor = Readonly<{ adminId: string; sessionId: string;
 /** 身份/专用命令授权/商户对象范围由Admin装配先核；这里不从finance.read推导刷新权限。 */
 export async function refreshJoinpayAccount(pool: Pool, profile: BoundJoinpayAccountProfile, deps: AccountQueryDependencies, actor: AccountRefreshActor) {
   if (![actor.adminId, actor.sessionId, actor.requestId].every(v => typeof v === "string" && ID.test(v))) throw new JoinpayAccountError("ACCOUNT_ACTOR_INVALID");
+  return refreshAccount(pool, profile, deps, { actorType: "admin", actorId: actor.adminId, sessionId: actor.sessionId, requestId: actor.requestId });
+}
+/** 服务端定时任务独立入口；不伪造管理员或把finance.read解释成刷新命令。 */
+export async function refreshJoinpayAccountBySystem(pool: Pool, profile: BoundJoinpayAccountProfile, deps: AccountQueryDependencies, requestId: string) {
+  if (typeof requestId !== "string" || !ID.test(requestId)) throw new JoinpayAccountError("ACCOUNT_ACTOR_INVALID");
+  assertJoinpayAccountReadProfile(profile);
+  return refreshAccount(pool, profile, deps, { actorType: "system", actorId: "joinpay-account-observer", requestId });
+}
+async function refreshAccount(pool: Pool, profile: BoundJoinpayAccountProfile, deps: AccountQueryDependencies,
+  actor: Pick<Parameters<typeof recordAudit>[1], "actorType" | "actorId" | "sessionId" | "requestId">) {
   const expected = describeJoinpayAccountProfile(profile);
   const probe = await pool.connect(); let integrated: boolean;
   try { integrated = await ready(probe, expected); } finally { probe.release(); }
@@ -43,7 +53,7 @@ export async function refreshJoinpayAccount(pool: Pool, profile: BoundJoinpayAcc
         i.decision, i.schema, i.signature, i.binding, i.reason, i.statusCode, i.errorCode, i.amounts === null ? null : JSON.stringify(i.amounts)])).rows[0];
       const recordedAt: unknown = row?.recorded_at;
       if (typeof recordedAt !== "string" || !recordedAt) throw new JoinpayAccountError("ACCOUNT_OBSERVATION_RECEIPT_INVALID");
-      await recordAudit(c, { actorType: "admin", actorId: actor.adminId, sessionId: actor.sessionId, requestId: actor.requestId,
+      await recordAudit(c, { ...actor,
         action: "finance.joinpay.account.observed", objectType: "joinpay_account_observation", objectId: result.attemptId,
         outcome: i.decision === "SUCCESS" ? "SUCCESS" : "FAILURE", reason: i.reason,
         details: { operation: result.operation, evidenceLevel: result.evidenceLevel, decision: result.decision, requestSha256: observation.requestSha256,

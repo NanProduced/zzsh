@@ -1,6 +1,9 @@
 import { createApp } from "./app";
 import { loadJoinpayCollectionRuntime } from "./order/joinpay-collection-runtime";
 import { loadJoinpayRefundRuntime } from "./order/joinpay-refund-runtime";
+import { loadJoinpayAccountRuntime } from "./finance/joinpay-account-runtime";
+import { loadWithdrawalBankBindingRuntime } from "./finance/withdrawal-bank-binding-runtime";
+import { loadJoinpayPayoutRuntime } from "./finance/joinpay-payout-runtime";
 import { ConfigurationError, loadConfig } from "./config/config";
 import {
   createFakeHealthDependencies,
@@ -18,8 +21,11 @@ export async function bootstrap() {
   if (authEnabledValue !== "true" && authEnabledValue !== "false") {
     throw new ConfigurationError("AUTH_ENABLED must be true or false");
   }
+  const withdrawalBankBinding = loadWithdrawalBankBindingRuntime({ database: config.database, authEnabled: authEnabledValue === "true" });
+  const joinpayWithdrawal = loadJoinpayPayoutRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }, withdrawalBankBinding);
   const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
+  const joinpayAccounts = loadJoinpayAccountRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const readinessMode = process.env.READINESS_MODE?.trim() || "real";
   if (readinessMode !== "real" && readinessMode !== "fake") {
     throw new ConfigurationError("READINESS_MODE is invalid");
@@ -44,8 +50,11 @@ export async function bootstrap() {
             auth: {
               ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
               pool: businessPool,
+              ...(withdrawalBankBinding ? { withdrawalBankBinding } : {}),
+              ...(joinpayWithdrawal ? { joinpayWithdrawal } : {}),
               ...(joinpayCollection ? { joinpayCollection } : {}),
               ...(joinpayRefund ? { joinpayRefund } : {}),
+              ...(joinpayAccounts ? { joinpayAccountRead: joinpayAccounts.read, joinpayAccountObservation: joinpayAccounts.observation } : {}),
               directoryReadPool,
               ...(config.database.name===milestoneDistributionReceipt.database?{distributionReadScope:createLocalDistributionReadScope(config,milestoneDistributionReceipt)}:{}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
